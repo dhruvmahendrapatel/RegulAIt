@@ -11,3 +11,4 @@ superseding a decision means a new ADR plus a status flip on the old one.
 | [0003](0003-terraform-over-cloudformation.md) | Terraform as the authoritative IaC tool | Accepted | 2026-07-21 |
 | [0004](0004-iam-identity-center-no-long-lived-keys.md) | IAM Identity Center only, no long-lived IAM keys | Accepted | 2026-07-21 |
 | [0005](0005-token-optimization-tooling.md) | Adopt caveman + graphify, graphify restricted to `--code-only` | Accepted | 2026-07-22 |
+| [0006](0006-token-optimization-default-in-future-scaffolds.md) | Token-optimization tooling is a default in every future RegulAIt-built scaffold | Accepted | 2026-07-22 |
