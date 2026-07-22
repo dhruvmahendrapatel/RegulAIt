@@ -1,0 +1,5 @@
+bucket         = "regulait-terraform-state-<management-account-id>"
+key            = "regulait-dev/terraform.tfstate"
+dynamodb_table = "regulait-terraform-locks"
+kms_key_id     = "<kms-key-id-from-bootstrap-output>"
+region         = "<aws-region>"

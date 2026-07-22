@@ -1,0 +1,13 @@
+aws_region              = "us-east-1"
+management_sso_profile  = "regulait-management"
+workload_sso_profile    = "regulait-deploy"
+management_account_id   = "111111111111"
+workload_account_id     = "222222222222"
+organization_id         = "o-xxxxxxxxxx"
+organization_root_id    = "r-xxxx"
+allowed_regions         = ["us-east-1", "us-east-2"]
+monthly_budget_usd       = 100
+budget_notification_emails = ["you@example.com"]
+user_principal_id        = "<identity-center-user-id>"
+github_org               = "dhruvmahendrapatel"
+github_repo              = "RegulAIt"
