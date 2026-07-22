@@ -58,7 +58,7 @@ resource "aws_ssoadmin_account_assignment" "admin_break_glass_management" {
 resource "aws_ssoadmin_permission_set" "deploy_builder" {
   provider         = aws.management
   name             = "Deploy-Builder"
-  description      = "Day-to-day CLI/Terraform work — used by the human and the agent."
+  description      = "Day-to-day CLI/Terraform work, used by the human and the agent."
   instance_arn     = local.sso_instance_arn
   session_duration = "PT10H"
 }

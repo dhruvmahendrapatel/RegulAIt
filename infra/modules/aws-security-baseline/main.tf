@@ -146,6 +146,18 @@ resource "aws_cloudtrail" "org" {
 }
 
 ### GuardDuty — org-wide, auto-enable member accounts ###
+# Both aws_guardduty_organization_configuration and
+# aws_securityhub_organization_configuration below require the calling
+# account to first be registered as that service's Organizations delegated
+# admin — without this they fail (or, worse, hang retrying against AWS's
+# eventual-consistency backoff) since the precondition can never become true
+# on its own. Management self-registers as admin for both, keeping this a
+# 2-account setup rather than adding a dedicated security-tooling account.
+
+resource "aws_guardduty_organization_admin_account" "this" {
+  provider         = aws.management
+  admin_account_id = var.management_account_id
+}
 
 resource "aws_guardduty_detector" "management" {
   provider = aws.management
@@ -157,26 +169,27 @@ resource "aws_guardduty_organization_configuration" "org" {
   detector_id = aws_guardduty_detector.management.id
 
   auto_enable_organization_members = "ALL"
+
+  depends_on = [aws_guardduty_organization_admin_account.this]
 }
 
 ### Security Hub — org-wide, Foundational Security Best Practices standard ###
 
+resource "aws_securityhub_organization_admin_account" "this" {
+  provider         = aws.management
+  admin_account_id = var.management_account_id
+}
+
 resource "aws_securityhub_account" "management" {
-  provider = aws.management
+  provider                 = aws.management
+  enable_default_standards = true # already includes AWS Foundational Security Best Practices
 }
 
 resource "aws_securityhub_organization_configuration" "org" {
   provider    = aws.management
   auto_enable = true
 
-  depends_on = [aws_securityhub_account.management]
-}
-
-resource "aws_securityhub_standards_subscription" "fsbp" {
-  provider      = aws.management
-  standards_arn = "arn:aws:securityhub:::ruleset/finding-format/aws-foundational-security-best-practices/v/1.0.0"
-
-  depends_on = [aws_securityhub_account.management]
+  depends_on = [aws_securityhub_account.management, aws_securityhub_organization_admin_account.this]
 }
 
 ### AWS Config — recorder + delivery channel in both accounts, aggregator in Management ###
@@ -313,6 +326,15 @@ resource "aws_config_configuration_recorder_status" "workload" {
   depends_on = [aws_config_delivery_channel.workload]
 }
 
+# Account-based aggregation requires the source account to explicitly
+# authorize the aggregator account first — without this, the aggregator
+# is created but silently never receives the workload account's data.
+resource "aws_config_aggregate_authorization" "workload_to_management" {
+  provider              = aws.workload
+  account_id            = var.management_account_id
+  authorized_aws_region = var.aws_region
+}
+
 resource "aws_config_configuration_aggregator" "org" {
   provider = aws.management
   name     = "${var.project}-aggregator"
@@ -321,6 +343,8 @@ resource "aws_config_configuration_aggregator" "org" {
     account_ids = [var.management_account_id, var.workload_account_id]
     all_regions = true
   }
+
+  depends_on = [aws_config_aggregate_authorization.workload_to_management]
 }
 
 ### S3 account-level Block Public Access — both accounts ###

@@ -24,6 +24,12 @@ variable "organization_root_id" {
   type        = string
 }
 
+variable "aws_region" {
+  description = "Region the Config aggregate authorization is scoped to."
+  type        = string
+  default     = "us-east-1"
+}
+
 variable "allowed_regions" {
   description = "Regions permitted by the region-allowlist SCP. Keep short to shrink both attack surface and accidental cross-region spend."
   type        = list(string)

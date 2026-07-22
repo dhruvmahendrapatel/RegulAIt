@@ -10,6 +10,7 @@ module "security_baseline" {
   organization_id            = var.organization_id
   organization_root_id       = var.organization_root_id
   allowed_regions            = var.allowed_regions
+  aws_region                 = var.aws_region
   monthly_budget_usd         = var.monthly_budget_usd
   budget_notification_emails = var.budget_notification_emails
 }

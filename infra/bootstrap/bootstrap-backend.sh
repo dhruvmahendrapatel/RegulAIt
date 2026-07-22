@@ -11,6 +11,12 @@ set -euo pipefail
 : "${AWS_PROFILE:?Set AWS_PROFILE to the SSO profile authenticated against the Management account}"
 : "${AWS_REGION:?Set AWS_REGION, e.g. us-east-1}"
 
+# Org-level trusted access toggles that have no narrow, safe-to-import
+# Terraform resource (the alternative is Terraform owning the whole
+# aws_organizations_organization resource, which is riskier than a one-time
+# CLI call here, same rationale as the state backend below).
+aws organizations enable-aws-service-access --service-principal cloudtrail.amazonaws.com
+
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 BUCKET_NAME="regulait-terraform-state-${ACCOUNT_ID}"
 TABLE_NAME="regulait-terraform-locks"
@@ -49,7 +55,9 @@ aws s3api put-bucket-encryption --bucket "${BUCKET_NAME}" \
 aws s3api put-public-access-block --bucket "${BUCKET_NAME}" \
   --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
 
-POLICY_FILE=$(mktemp)
+# Written next to this script (not /tmp) — on Git Bash, /tmp lives in a
+# separate filesystem namespace the native Windows aws.exe can't see.
+POLICY_FILE="$(dirname "$0")/.state-bucket-policy.json"
 cat > "${POLICY_FILE}" <<POLICY
 {
   "Version": "2012-10-17",
