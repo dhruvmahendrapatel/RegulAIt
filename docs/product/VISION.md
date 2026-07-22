@@ -236,6 +236,11 @@ Free (5 daily credits), Pro (from $25/mo/100 credits), Business (~2x Pro), Enter
 - PII/sensitive-data detection with configurable block/warn/log enforcement at chat entry and at rest.
 - Full audit logging with SIEM export, SSO/SAML, SCIM, granular per-user access control across agents/connectors/MCP servers.
 
+**Token & cost optimization** *(standard feature area, not a third P0 pillar — full spec in [TOKEN_OPTIMIZATION_SPEC.md](TOKEN_OPTIMIZATION_SPEC.md))*
+- Native prompt caching and cost/token analytics dashboards, on by default.
+- Governance-integrated model routing (never exceeds a user's existing entitlement ceiling) and a workflow-level cost-sensitivity tag mirroring the existing data-sensitivity tag.
+- Opt-in semantic caching, context-graph tooling, and output-compression preferences — context-graph tooling defaults to local/code-only, per the exfiltration-risk finding in ADR-0005.
+
 **Commercial model**
 - A free tier generous enough for habitual use.
 - Usage/complexity-based credit pricing rather than flat seats, with roll-over rules and team spend caps.

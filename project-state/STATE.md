@@ -45,13 +45,17 @@ next phase, per the specs in `docs/product/`.
 | COMPONENT-09 | graphify (code knowledge graph, Claude Code skill) | **installed**, project scope, restricted to `--code-only` (verified) | ADR-0005 |
 
 ## Decisions
-See [docs/decisions/README.md](../docs/decisions/README.md) for the full ADR index. All five
-seed ADRs (0001–0005) are Accepted.
+See [docs/decisions/README.md](../docs/decisions/README.md) for the full ADR index. All six
+seed ADRs (0001–0006) are Accepted.
 
 ## Open Questions
-| ID | Question | Status | Related |
-|---|---|---|---|
-| OQ-004 | Token-optimization tooling: (a) install for use while building RegulAIt — **done**, see ADR-0005. (b) Bake into the scaffold/template for every future tool RegulAIt builds — still open, revisit once EPIC-02/03 produce a first real template. (c) Add "token optimization" as a first-class RegulAIt *product* feature — still open, natural fit alongside the governance layer's cost/model-routing themes; not scoped yet. | partially resolved | EPIC-02 or new EPIC-04 |
+None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
+(b) standing policy for future scaffolds recorded (ADR-0006, no implementation yet — nothing to
+apply it to until EPIC-02/03 produce a first template); (c) full product-feature spec written —
+[docs/product/TOKEN_OPTIMIZATION_SPEC.md](../docs/product/TOKEN_OPTIMIZATION_SPEC.md), explicitly
+scoped as a standard feature area (not a third P0 pillar), reusing the governance layer's
+per-user entitlement system for model routing and the workflow engine's tag mechanism for a new
+cost-sensitivity tag — cross-referenced from VISION.md §5.
 
 OQ-001 (region allowlist) defaulted to `["us-east-1", "us-east-2"]` and is applied as the
 region-allowlist SCP; OQ-002 (budget cap) resolved to $5/month; OQ-003 (GitHub account) resolved
