@@ -48,7 +48,7 @@ seed ADRs (0001–0004) are Accepted as of this session.
 | ID | Question | Status | Related |
 |---|---|---|---|
 | OQ-001 | Region allowlist for the SCP in the security baseline — which AWS region(s) should be permitted? | open | COMPONENT-01 |
-| OQ-002 | Monthly AWS budget cap/thresholds for the cost-alert stack — what number? | open | COMPONENT-01 |
+| OQ-002 | Monthly AWS budget cap/thresholds for the cost-alert stack — what number? | resolved: $5/month | COMPONENT-01 |
 | OQ-003 | GitHub org vs. personal account for the repo — confirmed personal (`dhruvmahendrapatel`); revisit only if this becomes a team effort | resolved | COMPONENT-04 |
 
 ## Standing guardrail
