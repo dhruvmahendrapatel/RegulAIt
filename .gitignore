@@ -23,6 +23,9 @@ credentials
 .env
 .env.*
 
+# graphify (regenerable build artifact — local AST, zero cost to rebuild)
+graphify-out/
+
 # OS / editor
 .DS_Store
 Thumbs.db

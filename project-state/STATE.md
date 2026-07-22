@@ -41,15 +41,17 @@ next phase, per the specs in `docs/product/`.
 | COMPONENT-05 | Admin portal | not started | EPIC-02 |
 | COMPONENT-06 | Policy/allow-list engine | not started | EPIC-02 |
 | COMPONENT-07 | Workflow orchestrator | not started | EPIC-03 |
+| COMPONENT-08 | caveman (output token compression, Claude Code plugin) | **installed**, user scope, no restrictions (verified fully local) | ADR-0005 |
+| COMPONENT-09 | graphify (code knowledge graph, Claude Code skill) | **installed**, project scope, restricted to `--code-only` (verified) | ADR-0005 |
 
 ## Decisions
-See [docs/decisions/README.md](../docs/decisions/README.md) for the full ADR index. All four
-seed ADRs (0001–0004) are Accepted.
+See [docs/decisions/README.md](../docs/decisions/README.md) for the full ADR index. All five
+seed ADRs (0001–0005) are Accepted.
 
 ## Open Questions
 | ID | Question | Status | Related |
 |---|---|---|---|
-| OQ-004 | User wants "caveman", "graphify", and other token-optimization tooling (a) installed for use while building RegulAIt itself, (b) baked into the scaffold/template for every future tool RegulAIt builds, and (c) added as a first-class RegulAIt *product* feature. Names unverified — researching before installing anything, per the no-compromises security posture (ADR-0004). | open | EPIC-02 or new EPIC-04 |
+| OQ-004 | Token-optimization tooling: (a) install for use while building RegulAIt — **done**, see ADR-0005. (b) Bake into the scaffold/template for every future tool RegulAIt builds — still open, revisit once EPIC-02/03 produce a first real template. (c) Add "token optimization" as a first-class RegulAIt *product* feature — still open, natural fit alongside the governance layer's cost/model-routing themes; not scoped yet. | partially resolved | EPIC-02 or new EPIC-04 |
 
 OQ-001 (region allowlist) defaulted to `["us-east-1", "us-east-2"]` and is applied as the
 region-allowlist SCP; OQ-002 (budget cap) resolved to $5/month; OQ-003 (GitHub account) resolved

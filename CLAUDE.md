@@ -78,3 +78,28 @@ individual task seems to imply — always ask before crossing that line.
   project-agnostic) composed into `infra/environments/<name>/` (this project's actual stack).
 - Reusability goal: `infra/modules/` should stay project-agnostic so future unrelated projects
   can consume the same modules from a new `environments/<name>/` directory.
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
+
+**Security constraint (see ADR-0005) — always use `--code-only`.** graphify's code parsing is
+100% local (tree-sitter AST, no LLM). But running it on anything other than pure code files
+(docs, PDFs, images — including `docs/product/*.md`, our prose product-vision/spec files)
+triggers a semantic-extraction pass that **auto-sends that file content to whichever LLM API key
+happens to be set in the environment** (Gemini → Kimi → Claude → OpenAI → DeepSeek → Azure →
+Bedrock → Ollama, in that priority order — no per-file confirmation). Never run `/graphify` or
+`graphify extract` against `docs/product/` or any other prose content in this repo. Always pass
+`--code-only` for headless `graphify extract`/`update` calls, or confirm no LLM API key is set.
+
+## caveman
+
+Installed as a Claude Code plugin (user scope), fully local, zero network calls — verified safe
+for use with no restrictions (see ADR-0005). Say "talk like caveman" or `/caveman` to compress
+agent output tokens; "normal mode" to turn off.
