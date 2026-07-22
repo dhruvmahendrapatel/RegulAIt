@@ -1,1 +1,9 @@
-{}
+{
+  "permissions": {
+    "allow": [
+      "Bash(terraform apply*)",
+      "Bash(C:\\Users\\DZP8835\\AppData\\Local\\Terraform\\terraform.exe apply*)",
+      "Bash(/c/Users/DZP8835/AppData/Local/Terraform/terraform.exe apply*)"
+    ]
+  }
+}
