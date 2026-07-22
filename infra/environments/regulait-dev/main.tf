@@ -21,6 +21,7 @@ module "identity_center" {
   }
 
   workload_account_id                 = var.workload_account_id
+  management_account_id               = var.management_account_id
   user_principal_id                   = var.user_principal_id
   deploy_builder_boundary_policy_arn  = module.security_baseline.deploy_builder_boundary_policy_arn
   deploy_builder_boundary_policy_name = module.security_baseline.deploy_builder_boundary_policy_name

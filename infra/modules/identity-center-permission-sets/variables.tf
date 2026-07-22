@@ -4,7 +4,12 @@ variable "project" {
 }
 
 variable "workload_account_id" {
-  description = "Account the three permission sets get assigned against."
+  description = "Account Deploy-Builder is assigned against, and where Admin-BreakGlass/ReadOnly-Audit are also assigned."
+  type        = string
+}
+
+variable "management_account_id" {
+  description = "Admin-BreakGlass and ReadOnly-Audit are also assigned here — org-wide resources (CloudTrail org trail, GuardDuty/SecurityHub org config, SCPs, Budgets) live in Management, so the foundation role needs access to both accounts. Deploy-Builder intentionally stays workload-only."
   type        = string
 }
 

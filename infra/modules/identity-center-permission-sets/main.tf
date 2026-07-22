@@ -29,13 +29,23 @@ resource "aws_ssoadmin_managed_policy_attachment" "admin_break_glass" {
   managed_policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
 }
 
-resource "aws_ssoadmin_account_assignment" "admin_break_glass" {
+resource "aws_ssoadmin_account_assignment" "admin_break_glass_workload" {
   provider           = aws.management
   instance_arn       = local.sso_instance_arn
   permission_set_arn = aws_ssoadmin_permission_set.admin_break_glass.arn
   principal_id       = var.user_principal_id
   principal_type     = "USER"
   target_id          = var.workload_account_id
+  target_type        = "AWS_ACCOUNT"
+}
+
+resource "aws_ssoadmin_account_assignment" "admin_break_glass_management" {
+  provider           = aws.management
+  instance_arn       = local.sso_instance_arn
+  permission_set_arn = aws_ssoadmin_permission_set.admin_break_glass.arn
+  principal_id       = var.user_principal_id
+  principal_type     = "USER"
+  target_id          = var.management_account_id
   target_type        = "AWS_ACCOUNT"
 }
 
@@ -147,12 +157,22 @@ resource "aws_ssoadmin_managed_policy_attachment" "readonly_audit" {
   managed_policy_arn = "arn:aws:iam::aws:policy/ReadOnlyAccess"
 }
 
-resource "aws_ssoadmin_account_assignment" "readonly_audit" {
+resource "aws_ssoadmin_account_assignment" "readonly_audit_workload" {
   provider           = aws.management
   instance_arn       = local.sso_instance_arn
   permission_set_arn = aws_ssoadmin_permission_set.readonly_audit.arn
   principal_id       = var.user_principal_id
   principal_type     = "USER"
   target_id          = var.workload_account_id
+  target_type        = "AWS_ACCOUNT"
+}
+
+resource "aws_ssoadmin_account_assignment" "readonly_audit_management" {
+  provider           = aws.management
+  instance_arn       = local.sso_instance_arn
+  permission_set_arn = aws_ssoadmin_permission_set.readonly_audit.arn
+  principal_id       = var.user_principal_id
+  principal_type     = "USER"
+  target_id          = var.management_account_id
   target_type        = "AWS_ACCOUNT"
 }
