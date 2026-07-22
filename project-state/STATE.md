@@ -47,9 +47,13 @@ See [docs/decisions/README.md](../docs/decisions/README.md) for the full ADR ind
 seed ADRs (0001–0004) are Accepted.
 
 ## Open Questions
-None open. OQ-001 (region allowlist) defaulted to `["us-east-1", "us-east-2"]` and is applied as
-the region-allowlist SCP; OQ-002 (budget cap) resolved to $5/month; OQ-003 (GitHub account)
-resolved to personal `dhruvmahendrapatel`.
+| ID | Question | Status | Related |
+|---|---|---|---|
+| OQ-004 | User wants "caveman", "graphify", and other token-optimization tooling (a) installed for use while building RegulAIt itself, (b) baked into the scaffold/template for every future tool RegulAIt builds, and (c) added as a first-class RegulAIt *product* feature. Names unverified — researching before installing anything, per the no-compromises security posture (ADR-0004). | open | EPIC-02 or new EPIC-04 |
+
+OQ-001 (region allowlist) defaulted to `["us-east-1", "us-east-2"]` and is applied as the
+region-allowlist SCP; OQ-002 (budget cap) resolved to $5/month; OQ-003 (GitHub account) resolved
+to personal `dhruvmahendrapatel`.
 
 ## Known follow-ups (not urgent, not blocking)
 - Security Hub's default standards enabled **both** AWS Foundational Security Best Practices and
