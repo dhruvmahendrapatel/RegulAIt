@@ -30,6 +30,22 @@ export interface ApprovalRule {
 }
 
 /**
+ * §3 data-scope restriction: constrains a granted tool's effective reach by
+ * allow-listing the values a call-argument field may take (e.g. only certain
+ * schemas for a generic query tool). argPath is a dot-path into the call
+ * arguments. Every matching rule must be satisfied; a missing or non-scalar
+ * value at the path fails closed.
+ */
+export interface DataScopeRule {
+  id: string;
+  userId: string;
+  serverId: string;
+  toolName: string | null;
+  argPath: string;
+  allowedValues: string[];
+}
+
+/**
  * §3 rate/volume limit. The kernel is zero-I/O, so the caller supplies
  * currentCount — the number of already-executed (allowed) calls inside the
  * limit's window. toolName null = counts all calls on the server.
@@ -58,6 +74,9 @@ export interface EvaluationInput {
   serverGrants: readonly ServerGrant[];
   approvalRules?: readonly ApprovalRule[];
   rateLimits?: readonly RateLimit[];
+  dataScopeRules?: readonly DataScopeRule[];
+  /** the call's arguments — required for data-scope rules to be checkable */
+  args?: Record<string, unknown>;
   /**
    * An approved, unconsumed Approvals-Queue entry for exactly this
    * user/server/tool call, if the gateway found one. Satisfies a matching
@@ -90,6 +109,7 @@ export interface RuleTrace {
 export type RuleName =
   | "tool-allow-list"
   | "server-read-only-all"
+  | "data-scope"
   | "rate-limit"
   | "approval-required"
   | "default-deny";
@@ -98,6 +118,15 @@ export const DEFAULT_DENY_RULE_ID = "default-deny";
 
 function matchesScope(ruleToolName: string | null, toolName: string): boolean {
   return ruleToolName === null || ruleToolName === toolName;
+}
+
+function argAtPath(args: Record<string, unknown> | undefined, path: string): unknown {
+  let cur: unknown = args;
+  for (const seg of path.split(".")) {
+    if (cur === null || typeof cur !== "object" || Array.isArray(cur)) return undefined;
+    cur = (cur as Record<string, unknown>)[seg];
+  }
+  return cur;
 }
 
 /**
@@ -150,6 +179,32 @@ export function evaluate(input: EvaluationInput): Decision {
       ruleChain: chain,
       reason: `no grant matches user '${userId}', server '${serverId}', tool '${tool.name}' — default-deny`,
     };
+  }
+
+  const scopeRules = (input.dataScopeRules ?? []).filter(
+    (r) =>
+      r.userId === userId && r.serverId === serverId && matchesScope(r.toolName, tool.name),
+  );
+  if (scopeRules.length > 0) {
+    for (const rule of scopeRules) {
+      const value = argAtPath(input.args, rule.argPath);
+      const scalar =
+        typeof value === "string" || typeof value === "number" || typeof value === "boolean";
+      if (!scalar || !rule.allowedValues.includes(String(value))) {
+        chain.push({ rule: "data-scope", outcome: "deny", grantId: rule.id });
+        return {
+          effect: "deny",
+          ruleId: rule.id,
+          ruleChain: chain,
+          reason: scalar
+            ? `argument '${rule.argPath}' value '${String(value)}' is outside the allowed data scope`
+            : `argument '${rule.argPath}' is missing or not a scalar — data-scope rule fails closed`,
+        };
+      }
+    }
+    chain.push({ rule: "data-scope", outcome: "allow" });
+  } else {
+    chain.push({ rule: "data-scope", outcome: "no-match" });
   }
 
   const exhaustedLimit = (input.rateLimits ?? []).find(

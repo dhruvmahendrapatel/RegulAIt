@@ -127,11 +127,13 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
         kind = toolKind(found);
       }
 
-      const { decision, approvedApprovalId } = await governedEvaluate(db, userId, serverId, {
+      const { decision, approvedApprovalId } = await governedEvaluate(
+        db,
+        userId,
         serverId,
-        name: toolName,
-        kind,
-      });
+        { serverId, name: toolName, kind },
+        request.params.arguments,
+      );
 
       await db.insert(auditLog).values({
         userId,
