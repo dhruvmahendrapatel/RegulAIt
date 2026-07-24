@@ -1,9 +1,9 @@
 ---
-phase: bootstrap-complete
+phase: governance-mvp-in-progress
 last_updated: 2026-07-24
 active_epics: [EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-07-21-session-01.md
+last_session: sessions/2026-07-24-session-02.md
 ---
 
 # RegulAIt — Project State
@@ -36,6 +36,19 @@ Azure DevOps/Jira/etc. as the system of record, not a shadow copy). `CLAUDE.md` 
 updated to list all eight. **No AWS/Terraform infrastructure change was needed for either
 escalation** — nothing is deployed yet (EPIC-02 through EPIC-06 haven't started), so both were
 spec-only updates.
+
+**EPIC-02 started, 2026-07-24 (session 02).** Stack chosen and recorded as ADR-0009 (TypeScript
+end-to-end: Fastify + official MCP SDK planned, hand-rolled pure policy kernel, Postgres +
+Drizzle, pnpm monorepo). First vertical slice of MCP-server governance is **built and green**
+(21 tests: 13 kernel unit, 8 gateway integration against Postgres 16): `packages/policy-kernel`
+(default-deny, per-user×server×tool allow-lists, read-only-all server grants, typed
+`Decision {effect, ruleId, ruleChain, reason}`), `packages/db` (schema + first migration:
+users/mcp_servers/mcp_tools/tool_grants/server_grants/audit_log — audit rows deliberately have
+no FKs so they survive deletions), `packages/shared` (zod schemas), `apps/gateway` (Fastify:
+admin CRUD, `/v1/evaluate` writes an audit row for every decision, visible-tools endpoint
+implements §3's visibility filtering). Work is on branch `claude/status-check-2gbrwf` (draft PR).
+**Not yet in the slice**: actual MCP proxying via the SDK (evaluate endpoint only), approvals,
+rate limits, data-scope rules, roles, agents/connectors/initiatives object types, admin portal.
 
 ## Epics
 | ID | Name | Status | Related |
