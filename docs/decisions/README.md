@@ -13,3 +13,4 @@ superseding a decision means a new ADR plus a status flip on the old one.
 | [0005](0005-token-optimization-tooling.md) | Adopt caveman + graphify, graphify restricted to `--code-only` | Accepted | 2026-07-22 |
 | [0006](0006-token-optimization-default-in-future-scaffolds.md) | Token-optimization tooling is a default in every future RegulAIt-built scaffold | Accepted | 2026-07-22 |
 | [0007](0007-six-p0-pillars.md) | Escalate to six co-equal P0 pillars (supersedes token-opt "standard feature" framing) | Accepted | 2026-07-22 |
+| [0008](0008-eight-p0-pillars.md) | Escalate to eight co-equal P0 pillars (multi-agent orchestration, PM-tool integration) | Accepted | 2026-07-24 |
