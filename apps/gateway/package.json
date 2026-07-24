@@ -1,0 +1,23 @@
+{
+  "name": "@regulait/gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "node --loader ts-node/esm src/main.ts",
+    "start": "node dist/main.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@regulait/db": "workspace:*",
+    "@regulait/policy-kernel": "workspace:*",
+    "@regulait/shared": "workspace:*",
+    "fastify": "^5.4.0",
+    "zod": "^3.25.67"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.4"
+  }
+}

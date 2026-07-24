@@ -26,6 +26,11 @@ credentials
 # graphify (regenerable build artifact — local AST, zero cost to rebuild)
 graphify-out/
 
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
 # OS / editor
 .DS_Store
 Thumbs.db

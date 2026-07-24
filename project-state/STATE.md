@@ -1,9 +1,9 @@
 ---
-phase: bootstrap-complete
+phase: governance-mvp-in-progress
 last_updated: 2026-07-24
 active_epics: [EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-07-21-session-01.md
+last_session: sessions/2026-07-24-session-02.md
 ---
 
 # RegulAIt — Project State
@@ -37,11 +37,24 @@ updated to list all eight. **No AWS/Terraform infrastructure change was needed f
 escalation** — nothing is deployed yet (EPIC-02 through EPIC-06 haven't started), so both were
 spec-only updates.
 
+**EPIC-02 started, 2026-07-24 (session 02).** Stack chosen and recorded as ADR-0009 (TypeScript
+end-to-end: Fastify + official MCP SDK planned, hand-rolled pure policy kernel, Postgres +
+Drizzle, pnpm monorepo). First vertical slice of MCP-server governance is **built and green**
+(21 tests: 13 kernel unit, 8 gateway integration against Postgres 16): `packages/policy-kernel`
+(default-deny, per-user×server×tool allow-lists, read-only-all server grants, typed
+`Decision {effect, ruleId, ruleChain, reason}`), `packages/db` (schema + first migration:
+users/mcp_servers/mcp_tools/tool_grants/server_grants/audit_log — audit rows deliberately have
+no FKs so they survive deletions), `packages/shared` (zod schemas), `apps/gateway` (Fastify:
+admin CRUD, `/v1/evaluate` writes an audit row for every decision, visible-tools endpoint
+implements §3's visibility filtering). Work is on branch `claude/status-check-2gbrwf` (draft PR).
+**Not yet in the slice**: actual MCP proxying via the SDK (evaluate endpoint only), approvals,
+rate limits, data-scope rules, roles, agents/connectors/initiatives object types, admin portal.
+
 ## Epics
 | ID | Name | Status | Related |
 |---|---|---|---|
 | EPIC-01 | Bootstrap: AWS foundation + GitHub repo + session-continuity scaffold | **done** | ADR-0001–0004 |
-| EPIC-02 | Governance layer MVP (now includes infra-ops/compliance-cascade/deploy-model, Shared Projects, cost dashboard — §1–§10) | not started | GOVERNANCE_LAYER_SPEC.md, ADR-0007 |
+| EPIC-02 | Governance layer MVP (now includes infra-ops/compliance-cascade/deploy-model, Shared Projects, cost dashboard — §1–§10) | **in progress** — stack chosen (ADR-0009), first slice = MCP-server governance vertical | GOVERNANCE_LAYER_SPEC.md, ADR-0007, ADR-0009 |
 | EPIC-03 | Workflow engine MVP (now includes optional Design/Architecture sign-off stage type) | not started | WORKFLOW_ENGINE_SPEC.md, ADR-0007 |
 | EPIC-04 | Token/cost optimization MVP (escalated to P0) | not started | TOKEN_OPTIMIZATION_SPEC.md, ADR-0007 |
 | EPIC-05 | Multi-agent orchestration MVP (PM/Team-Lead/Worker delegation) | not started | MULTI_AGENT_ORCHESTRATION_SPEC.md, ADR-0008 |
@@ -61,8 +74,11 @@ spec-only updates.
 | COMPONENT-09 | graphify (code knowledge graph, Claude Code skill) | **installed**, project scope, restricted to `--code-only` (verified) | ADR-0005 |
 
 ## Decisions
-See [docs/decisions/README.md](../docs/decisions/README.md) for the full ADR index. All eight
-ADRs (0001–0008) are Accepted.
+See [docs/decisions/README.md](../docs/decisions/README.md) for the full ADR index. All nine
+ADRs (0001–0009) are Accepted. ADR-0009 (2026-07-24) chose the product stack: TypeScript
+end-to-end — Fastify gateway + official MCP SDK, hand-rolled pure policy kernel (typed
+`Decision` object, no OPA/Cedar), Postgres + Drizzle, pnpm-workspace monorepo
+(`apps/gateway`, `packages/policy-kernel`, `packages/db`, `packages/shared`).
 
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
