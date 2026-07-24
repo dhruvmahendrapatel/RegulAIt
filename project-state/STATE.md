@@ -41,7 +41,7 @@ spec-only updates.
 | ID | Name | Status | Related |
 |---|---|---|---|
 | EPIC-01 | Bootstrap: AWS foundation + GitHub repo + session-continuity scaffold | **done** | ADR-0001–0004 |
-| EPIC-02 | Governance layer MVP (now includes infra-ops/compliance-cascade/deploy-model, Shared Projects, cost dashboard — §1–§10) | not started | GOVERNANCE_LAYER_SPEC.md, ADR-0007 |
+| EPIC-02 | Governance layer MVP (now includes infra-ops/compliance-cascade/deploy-model, Shared Projects, cost dashboard — §1–§10) | **in progress** — stack chosen (ADR-0009), first slice = MCP-server governance vertical | GOVERNANCE_LAYER_SPEC.md, ADR-0007, ADR-0009 |
 | EPIC-03 | Workflow engine MVP (now includes optional Design/Architecture sign-off stage type) | not started | WORKFLOW_ENGINE_SPEC.md, ADR-0007 |
 | EPIC-04 | Token/cost optimization MVP (escalated to P0) | not started | TOKEN_OPTIMIZATION_SPEC.md, ADR-0007 |
 | EPIC-05 | Multi-agent orchestration MVP (PM/Team-Lead/Worker delegation) | not started | MULTI_AGENT_ORCHESTRATION_SPEC.md, ADR-0008 |
@@ -61,8 +61,11 @@ spec-only updates.
 | COMPONENT-09 | graphify (code knowledge graph, Claude Code skill) | **installed**, project scope, restricted to `--code-only` (verified) | ADR-0005 |
 
 ## Decisions
-See [docs/decisions/README.md](../docs/decisions/README.md) for the full ADR index. All eight
-ADRs (0001–0008) are Accepted.
+See [docs/decisions/README.md](../docs/decisions/README.md) for the full ADR index. All nine
+ADRs (0001–0009) are Accepted. ADR-0009 (2026-07-24) chose the product stack: TypeScript
+end-to-end — Fastify gateway + official MCP SDK, hand-rolled pure policy kernel (typed
+`Decision` object, no OPA/Cedar), Postgres + Drizzle, pnpm-workspace monorepo
+(`apps/gateway`, `packages/policy-kernel`, `packages/db`, `packages/shared`).
 
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);
