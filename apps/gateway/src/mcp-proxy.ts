@@ -12,6 +12,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   and,
+  approvals,
   auditLog,
   eq,
   mcpServers,
@@ -20,7 +21,8 @@ import {
   toolGrants,
   type Db,
 } from "@regulait/db";
-import { evaluate, visibleTools, type ToolRef } from "@regulait/policy-kernel";
+import { visibleTools, type ToolRef } from "@regulait/policy-kernel";
+import { governedEvaluate } from "./governed-evaluate.js";
 import { z } from "zod";
 
 const proxyParams = z.object({ serverId: z.string().uuid() });
@@ -125,13 +127,10 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
         kind = toolKind(found);
       }
 
-      const { tGrants, sGrants } = await loadGrants(db, userId, serverId);
-      const decision = evaluate({
-        userId,
+      const { decision, approvedApprovalId } = await governedEvaluate(db, userId, serverId, {
         serverId,
-        tool: { serverId, name: toolName, kind },
-        toolGrants: tGrants,
-        serverGrants: sGrants,
+        name: toolName,
+        kind,
       });
 
       await db.insert(auditLog).values({
@@ -146,6 +145,57 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
 
       if (decision.effect === "deny") {
         throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${decision.reason}`);
+      }
+
+      if (decision.effect === "require_approval") {
+        // Reuse an existing pending entry rather than piling up duplicates.
+        const [pending] = await db
+          .select({ id: approvals.id })
+          .from(approvals)
+          .where(
+            and(
+              eq(approvals.userId, userId),
+              eq(approvals.serverId, serverId),
+              eq(approvals.toolName, toolName),
+              eq(approvals.status, "pending"),
+            ),
+          )
+          .limit(1);
+        const approvalId =
+          pending?.id ??
+          (
+            await db
+              .insert(approvals)
+              .values({
+                userId,
+                serverId,
+                toolName,
+                ruleId: decision.ruleId,
+                approverUserId: decision.approverUserId!,
+              })
+              .returning({ id: approvals.id })
+          )[0]!.id;
+        throw new McpError(
+          ErrorCode.InvalidRequest,
+          `Approval required: approval '${approvalId}' is pending sign-off by ` +
+            `approver '${decision.approverUserId}'. Retry after approval.`,
+        );
+      }
+
+      if (approvedApprovalId) {
+        // Atomically consume the approval; losing the race means another call
+        // already spent it, so this call must go back through the queue.
+        const consumed = await db
+          .update(approvals)
+          .set({ status: "consumed" })
+          .where(and(eq(approvals.id, approvedApprovalId), eq(approvals.status, "approved")))
+          .returning({ id: approvals.id });
+        if (consumed.length === 0) {
+          throw new McpError(
+            ErrorCode.InvalidRequest,
+            `Approval '${approvedApprovalId}' was already consumed — retry to request a new approval.`,
+          );
+        }
       }
 
       return upstream.callTool({

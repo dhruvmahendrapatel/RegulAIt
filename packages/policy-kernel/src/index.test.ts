@@ -44,7 +44,11 @@ describe("evaluate", () => {
     const d = evaluate({ userId: USER, serverId: SERVER, tool: readTool, toolGrants: [g], serverGrants: [] });
     expect(d.effect).toBe("allow");
     expect(d.ruleId).toBe(g.id);
-    expect(d.ruleChain).toEqual([{ rule: "tool-allow-list", outcome: "allow", grantId: g.id }]);
+    expect(d.ruleChain).toEqual([
+      { rule: "tool-allow-list", outcome: "allow", grantId: g.id },
+      { rule: "rate-limit", outcome: "no-match" },
+      { rule: "approval-required", outcome: "no-match" },
+    ]);
   });
 
   it("explicit allow-list works for write tools too", () => {
@@ -70,7 +74,11 @@ describe("evaluate", () => {
     const d = evaluate({ userId: USER, serverId: SERVER, tool: readTool, toolGrants: [], serverGrants: [g] });
     expect(d.effect).toBe("allow");
     expect(d.ruleId).toBe(g.id);
-    expect(d.ruleChain.at(-1)).toEqual({ rule: "server-read-only-all", outcome: "allow", grantId: g.id });
+    expect(d.ruleChain).toContainEqual({
+      rule: "server-read-only-all",
+      outcome: "allow",
+      grantId: g.id,
+    });
   });
 
   it("read-only-all server grant denies write tools", () => {
@@ -91,7 +99,13 @@ describe("evaluate", () => {
     const sg = serverGrant();
     const d = evaluate({ userId: USER, serverId: SERVER, tool: readTool, toolGrants: [tg], serverGrants: [sg] });
     expect(d.ruleId).toBe(tg.id);
-    expect(d.ruleChain).toHaveLength(1);
+    // grant phase short-circuits: no server-read-only-all trace when the
+    // explicit tool grant already matched
+    expect(d.ruleChain.map((t) => t.rule)).toEqual([
+      "tool-allow-list",
+      "rate-limit",
+      "approval-required",
+    ]);
   });
 
   it("every decision carries a human-readable reason", () => {
@@ -122,5 +136,159 @@ describe("visibleTools", () => {
     const visible = visibleTools(USER, SERVER, tools, [], [g]);
     expect(visible.map((t) => t.name).sort()).toEqual(["list_schemas", "query_database"]);
     expect(visible.every((t) => t.serverId === SERVER)).toBe(true);
+  });
+});
+
+// --- §3 approvals + rate limits ---
+
+import type { ApprovalRule, RateLimit } from "./index.js";
+
+const APPROVER = "user-approver";
+
+function approvalRule(overrides: Partial<ApprovalRule> = {}): ApprovalRule {
+  return {
+    id: "ar-1",
+    userId: USER,
+    serverId: SERVER,
+    toolName: null,
+    writeOnly: false,
+    approverUserId: APPROVER,
+    ...overrides,
+  };
+}
+
+function rateLimit(overrides: Partial<RateLimit> = {}): RateLimit {
+  return {
+    id: "rl-1",
+    userId: USER,
+    serverId: SERVER,
+    toolName: null,
+    maxCalls: 3,
+    windowSeconds: 60,
+    currentCount: 0,
+    ...overrides,
+  };
+}
+
+describe("approval rules", () => {
+  it("granted call matching an approval rule returns require_approval with the named approver", () => {
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [toolGrant()], serverGrants: [],
+      approvalRules: [approvalRule()],
+    });
+    expect(d.effect).toBe("require_approval");
+    expect(d.ruleId).toBe("ar-1");
+    expect(d.approverUserId).toBe(APPROVER);
+    expect(d.ruleChain.at(-1)).toEqual({
+      rule: "approval-required", outcome: "require-approval", grantId: "ar-1",
+    });
+  });
+
+  it("an approval rule never rescues an ungranted call — default-deny still wins", () => {
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [], serverGrants: [],
+      approvalRules: [approvalRule()],
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe(DEFAULT_DENY_RULE_ID);
+  });
+
+  it("writeOnly approval rule skips read tools but pauses write tools", () => {
+    const rule = approvalRule({ writeOnly: true });
+    const read = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [toolGrant()], serverGrants: [], approvalRules: [rule],
+    });
+    expect(read.effect).toBe("allow");
+
+    const write = evaluate({
+      userId: USER, serverId: SERVER, tool: writeTool,
+      toolGrants: [toolGrant({ toolName: "drop_table" })], serverGrants: [], approvalRules: [rule],
+    });
+    expect(write.effect).toBe("require_approval");
+  });
+
+  it("tool-scoped approval rule only pauses that tool", () => {
+    const rule = approvalRule({ toolName: "drop_table" });
+    const other = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [toolGrant()], serverGrants: [], approvalRules: [rule],
+    });
+    expect(other.effect).toBe("allow");
+  });
+
+  it("an approved approval satisfies the rule for that evaluation and is traced", () => {
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [toolGrant()], serverGrants: [],
+      approvalRules: [approvalRule()],
+      approvedApprovalId: "appr-42",
+    });
+    expect(d.effect).toBe("allow");
+    expect(d.ruleId).toBe("tg-1");
+    expect(d.ruleChain).toContainEqual({
+      rule: "approval-required", outcome: "satisfied-by-approval", grantId: "appr-42",
+    });
+  });
+});
+
+describe("rate limits", () => {
+  it("allows under the cap and denies at the cap", () => {
+    const under = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [toolGrant()], serverGrants: [],
+      rateLimits: [rateLimit({ currentCount: 2 })],
+    });
+    expect(under.effect).toBe("allow");
+
+    const at = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [toolGrant()], serverGrants: [],
+      rateLimits: [rateLimit({ currentCount: 3 })],
+    });
+    expect(at.effect).toBe("deny");
+    expect(at.ruleId).toBe("rl-1");
+    expect(at.ruleChain.at(-1)).toEqual({ rule: "rate-limit", outcome: "deny", grantId: "rl-1" });
+  });
+
+  it("tool-scoped limit does not throttle other tools", () => {
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [toolGrant()], serverGrants: [],
+      rateLimits: [rateLimit({ toolName: "drop_table", currentCount: 99 })],
+    });
+    expect(d.effect).toBe("allow");
+  });
+
+  it("an exhausted rate limit denies even when an approved approval is in hand", () => {
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [toolGrant()], serverGrants: [],
+      approvalRules: [approvalRule()],
+      rateLimits: [rateLimit({ currentCount: 3 })],
+      approvedApprovalId: "appr-42",
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe("rl-1");
+  });
+
+  it("another user's rate limit does not apply", () => {
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [toolGrant()], serverGrants: [],
+      rateLimits: [rateLimit({ userId: OTHER_USER, currentCount: 99 })],
+    });
+    expect(d.effect).toBe("allow");
+  });
+});
+
+describe("visibility with approvals", () => {
+  it("approval-required tools remain visible (they pause, they are not hidden)", () => {
+    // visibleTools evaluates without approval rules by design — but even a
+    // require_approval effect must not hide the tool.
+    const tools = visibleTools(USER, SERVER, [readTool], [toolGrant()], []);
+    expect(tools.map((t) => t.name)).toEqual(["query_database"]);
   });
 });
