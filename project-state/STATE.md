@@ -47,8 +47,19 @@ users/mcp_servers/mcp_tools/tool_grants/server_grants/audit_log — audit rows d
 no FKs so they survive deletions), `packages/shared` (zod schemas), `apps/gateway` (Fastify:
 admin CRUD, `/v1/evaluate` writes an audit row for every decision, visible-tools endpoint
 implements §3's visibility filtering). Work is on branch `claude/status-check-2gbrwf` (draft PR).
-**Not yet in the slice**: approvals, rate limits, data-scope rules, roles,
-agents/connectors/initiatives object types, admin portal.
+**Not yet in the slice**: data-scope rules, roles, agents/connectors/initiatives object types,
+admin portal.
+
+**Approvals + rate limits landed (PR #4)**: the kernel now returns a third effect,
+`require_approval`, and takes approval rules (per-user×server, optional tool scope, optional
+write-only, named approver) and rate limits (per-user×server, optional tool scope, caller-supplied
+usage counts — kernel stays zero-I/O) as inputs. Rule order: grants → default-deny (nothing
+rescues an ungranted call) → rate limits (exhausted limit denies even with an approval in hand) →
+approval rules → allow. Gateway: `approval_rules`/`rate_limits`/`approvals` tables (migration
+0001), §6 Approvals Queue endpoints (`GET /v1/approvals`, `POST /v1/approvals/:id/decide` —
+named-approver-only, 403 otherwise), rule CRUD, and proxy `tools/call` enforcement: paused calls
+create/reuse one pending queue entry; approved entries are consumed atomically by exactly one
+retried call (single-use); usage counting = audit-log allow rows in the limit's window.
 
 **Session 02 continued**: CI added (`.github/workflows/ci.yml` — build + all tests on every
 PR/main push against a Postgres 16 service container; PR #2, merged). Then the **real MCP proxy

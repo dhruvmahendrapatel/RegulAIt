@@ -8,6 +8,13 @@
       "when": 1784931718262,
       "tag": "0000_organic_thanos",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1784932700000,
+      "tag": "0001_approvals_rate_limits",
+      "breakpoints": true
     }
   ]
 }

@@ -201,3 +201,159 @@ describe("MCP proxy path", () => {
     expect(res.status).toBe(401);
   });
 });
+
+describe("approvals through the proxy (§3 + §6 queue)", () => {
+  let daveId: string;
+  let carolId: string;
+
+  it("pauses a write call behind an approval rule and queues exactly one pending entry", async () => {
+    const dave = await app.inject({
+      method: "POST",
+      url: "/v1/users",
+      payload: { email: "proxy-dave@example.com", displayName: "Proxy Dave" },
+    });
+    daveId = dave.json().id;
+    const carol = await app.inject({
+      method: "POST",
+      url: "/v1/users",
+      payload: { email: "proxy-carol@example.com", displayName: "Proxy Carol" },
+    });
+    carolId = carol.json().id;
+
+    await app.inject({
+      method: "POST",
+      url: "/v1/grants/tools",
+      payload: { userId: daveId, serverId, toolName: "write_note" },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/v1/rules/approvals",
+      payload: { userId: daveId, serverId, writeOnly: true, approverUserId: carolId },
+    });
+
+    const client = await mcpClientFor(daveId);
+    await expect(
+      client.callTool({ name: "write_note", arguments: { text: "hi" } }),
+    ).rejects.toThrow(/Approval required/);
+    // second attempt while pending reuses the same queue entry
+    await expect(
+      client.callTool({ name: "write_note", arguments: { text: "hi" } }),
+    ).rejects.toThrow(/Approval required/);
+    await client.close();
+
+    const queue = await app.inject({ method: "GET", url: "/v1/approvals?status=pending" });
+    const pending = queue
+      .json()
+      .approvals.filter((a: { userId: string }) => a.userId === daveId);
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({
+      toolName: "write_note",
+      approverUserId: carolId,
+      status: "pending",
+    });
+  });
+
+  it("only the named approver may decide", async () => {
+    const queue = await app.inject({ method: "GET", url: "/v1/approvals?status=pending" });
+    const approvalId = queue
+      .json()
+      .approvals.find((a: { userId: string }) => a.userId === daveId).id;
+
+    const wrongDecider = await app.inject({
+      method: "POST",
+      url: `/v1/approvals/${approvalId}/decide`,
+      payload: { deciderUserId: daveId, decision: "approved" },
+    });
+    expect(wrongDecider.statusCode).toBe(403);
+  });
+
+  it("an approved call goes through once, consumes the approval, and audits the full journey", async () => {
+    const queue = await app.inject({ method: "GET", url: "/v1/approvals?status=pending" });
+    const approvalId = queue
+      .json()
+      .approvals.find((a: { userId: string }) => a.userId === daveId).id;
+
+    const decide = await app.inject({
+      method: "POST",
+      url: `/v1/approvals/${approvalId}/decide`,
+      payload: { deciderUserId: carolId, decision: "approved", reason: "looks safe" },
+    });
+    expect(decide.json().status).toBe("approved");
+
+    const client = await mcpClientFor(daveId);
+    const result = await client.callTool({ name: "write_note", arguments: { text: "hi" } });
+    expect(result.content).toEqual([{ type: "text", text: "wrote: hi" }]);
+
+    // approval is single-use: the next call pauses again
+    await expect(
+      client.callTool({ name: "write_note", arguments: { text: "again" } }),
+    ).rejects.toThrow(/Approval required/);
+    await client.close();
+
+    const consumed = await app.inject({ method: "GET", url: "/v1/approvals?status=consumed" });
+    expect(
+      consumed.json().approvals.some((a: { id: string }) => a.id === approvalId),
+    ).toBe(true);
+
+    const audit = await app.inject({ method: "GET", url: `/v1/audit?userId=${daveId}` });
+    const effects = audit
+      .json()
+      .entries.map((e: { effect: string }) => e.effect)
+      .reverse();
+    expect(effects).toEqual(["require_approval", "require_approval", "allow", "require_approval"]);
+  });
+
+  it("a denied approval does not let the call through", async () => {
+    const queue = await app.inject({ method: "GET", url: "/v1/approvals?status=pending" });
+    const approvalId = queue
+      .json()
+      .approvals.find((a: { userId: string }) => a.userId === daveId).id;
+    await app.inject({
+      method: "POST",
+      url: `/v1/approvals/${approvalId}/decide`,
+      payload: { deciderUserId: carolId, decision: "denied", reason: "not now" },
+    });
+
+    const client = await mcpClientFor(daveId);
+    await expect(
+      client.callTool({ name: "write_note", arguments: { text: "please" } }),
+    ).rejects.toThrow(/Approval required/);
+    await client.close();
+  });
+});
+
+describe("rate limits through the proxy (§3)", () => {
+  it("denies the call that exceeds the window cap and audits the deny", async () => {
+    const erin = await app.inject({
+      method: "POST",
+      url: "/v1/users",
+      payload: { email: "proxy-erin@example.com", displayName: "Proxy Erin" },
+    });
+    const erinId = erin.json().id;
+    await app.inject({
+      method: "POST",
+      url: "/v1/grants/tools",
+      payload: { userId: erinId, serverId, toolName: "get_time" },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/v1/rules/rate-limits",
+      payload: { userId: erinId, serverId, toolName: "get_time", maxCalls: 2, windowSeconds: 3600 },
+    });
+
+    const client = await mcpClientFor(erinId);
+    await client.callTool({ name: "get_time", arguments: {} });
+    await client.callTool({ name: "get_time", arguments: {} });
+    await expect(client.callTool({ name: "get_time", arguments: {} })).rejects.toThrow(
+      /rate limit exhausted/,
+    );
+    await client.close();
+
+    const audit = await app.inject({ method: "GET", url: `/v1/audit?userId=${erinId}` });
+    const effects = audit
+      .json()
+      .entries.map((e: { effect: string }) => e.effect)
+      .reverse();
+    expect(effects).toEqual(["allow", "allow", "deny"]);
+  });
+});

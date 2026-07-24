@@ -40,3 +40,25 @@ export const createServerGrantSchema = z.object({
   serverId: z.string().uuid(),
   readOnlyAll: z.boolean(),
 });
+
+export const createApprovalRuleSchema = z.object({
+  userId: z.string().uuid(),
+  serverId: z.string().uuid(),
+  toolName: z.string().min(1).nullable().optional(),
+  writeOnly: z.boolean().optional(),
+  approverUserId: z.string().uuid(),
+});
+
+export const createRateLimitSchema = z.object({
+  userId: z.string().uuid(),
+  serverId: z.string().uuid(),
+  toolName: z.string().min(1).nullable().optional(),
+  maxCalls: z.number().int().positive(),
+  windowSeconds: z.number().int().positive(),
+});
+
+export const decideApprovalSchema = z.object({
+  deciderUserId: z.string().uuid(),
+  decision: z.enum(["approved", "denied"]),
+  reason: z.string().optional(),
+});

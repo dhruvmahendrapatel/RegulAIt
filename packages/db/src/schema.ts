@@ -1,4 +1,5 @@
 import {
+  integer,
   boolean,
   index,
   jsonb,
@@ -82,10 +83,82 @@ export const auditLog = pgTable(
     userId: uuid("user_id").notNull(),
     serverId: uuid("server_id").notNull(),
     toolName: text("tool_name").notNull(),
-    effect: text("effect", { enum: ["allow", "deny"] }).notNull(),
+    effect: text("effect", { enum: ["allow", "deny", "require_approval"] }).notNull(),
     ruleId: text("rule_id").notNull(),
     ruleChain: jsonb("rule_chain").notNull(),
     reason: text("reason").notNull(),
   },
   (t) => [index("audit_log_user_at_idx").on(t.userId, t.at)],
+);
+
+// §3 approval requirement rules: a granted call matching a rule pauses for
+// the named approver. toolName null = any tool on the server.
+export const approvalRules = pgTable(
+  "approval_rules",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    serverId: uuid("server_id")
+      .notNull()
+      .references(() => mcpServers.id, { onDelete: "cascade" }),
+    toolName: text("tool_name"),
+    writeOnly: boolean("write_only").notNull().default(false),
+    approverUserId: uuid("approver_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("approval_rules_user_server_idx").on(t.userId, t.serverId)],
+);
+
+// §3 rate/volume limits. toolName null = server-wide cap. Usage is counted
+// from audit_log allow rows at evaluation time, not stored here.
+export const rateLimits = pgTable(
+  "rate_limits",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    serverId: uuid("server_id")
+      .notNull()
+      .references(() => mcpServers.id, { onDelete: "cascade" }),
+    toolName: text("tool_name"),
+    maxCalls: integer("max_calls").notNull(),
+    windowSeconds: integer("window_seconds").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("rate_limits_user_server_idx").on(t.userId, t.serverId)],
+);
+
+// §6 Approvals Queue: one pending entry per paused call. Approved entries are
+// consumed by exactly one retried call. The audit log remains the permanent
+// record; queue rows may cascade away with their user/server.
+export const approvals = pgTable(
+  "approvals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    serverId: uuid("server_id")
+      .notNull()
+      .references(() => mcpServers.id, { onDelete: "cascade" }),
+    toolName: text("tool_name").notNull(),
+    ruleId: uuid("rule_id").notNull(),
+    approverUserId: uuid("approver_user_id").notNull(),
+    status: text("status", { enum: ["pending", "approved", "denied", "consumed"] })
+      .notNull()
+      .default("pending"),
+    requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+    decidedBy: uuid("decided_by"),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    decisionReason: text("decision_reason"),
+  },
+  (t) => [
+    index("approvals_status_idx").on(t.status),
+    index("approvals_user_server_tool_idx").on(t.userId, t.serverId, t.toolName),
+  ],
 );
