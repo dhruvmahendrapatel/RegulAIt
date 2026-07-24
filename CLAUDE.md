@@ -3,8 +3,9 @@
 ## What this project is
 
 RegulAIt is a from-scratch build of an AI-native agent/development platform in the spirit of
-Atlas (atlasapp.ai), Cursor, and Lovable, with **six co-equal, non-negotiable P0 pillars**
-(escalated from two per [ADR-0007](docs/decisions/0007-six-p0-pillars.md)):
+Atlas (atlasapp.ai), Cursor, and Lovable, with **eight co-equal, non-negotiable P0 pillars**
+(escalated from two → six per [ADR-0007](docs/decisions/0007-six-p0-pillars.md), then six → eight
+per [ADR-0008](docs/decisions/0008-eight-p0-pillars.md)):
 
 1. A **per-user governance/access-control layer** gating every agent/model, connector, and
    MCP-server-tool call (default-deny, per-user tool-level allow-lists, approvals, rate limits,
@@ -35,9 +36,19 @@ Atlas (atlasapp.ai), Cursor, and Lovable, with **six co-equal, non-negotiable P0
    cached/deduplicated reference content, applied transparently on every user's behalf at the
    same interception point that enforces governance and attributes cost, with savings reported
    back through pillar 5's dashboard.
+7. **Dynamic multi-agent orchestration with a Project-Manager/Team-Lead delegation model** —
+   spin up specialized worker agents on demand, decompose work into a task graph (DAG), and run
+   independent subtasks in parallel like a well-run team, with every worker/lead agent inheriting
+   — and never exceeding — the entitlements and per-run budget of the initiating user (pillars 1
+   and 5).
+8. **Native, bi-directional integration with Azure DevOps, Jira, and other PM tools** — the
+   task graph and workflow stages map directly onto the customer's own work items rather than a
+   shadow copy; the PM tool is the source of truth for priority/description/acceptance-criteria,
+   decisions and approvals are tracked as first-class linked records, and everything feeds the
+   same single audit trail as pillar 1.
 
-**Provider-agnostic by design — standing principle, applies to all six pillars.** RegulAIt never
-hard-locks to one vendor at any layer:
+**Provider-agnostic by design — standing principle, applies to all eight pillars.** RegulAIt
+never hard-locks to one vendor at any layer:
 - **Model/agent layer**: pillar 1's registry routes to any publicly available agent/model
   (Claude, GPT, Gemini, Grok, open-weight, in-house) — per-user entitlement is independent of
   vendor.
@@ -45,6 +56,8 @@ hard-locks to one vendor at any layer:
   customer's own IAM, plus on-prem/air-gapped — never assumes a single cloud.
 - **Git-provider layer**: pillar 2's workflow engine works across GitHub, GitLab, Bitbucket, and
   Azure DevOps.
+- **PM-tool layer**: pillar 8's adapters cover Azure DevOps, Jira, Linear, Asana, monday.com, plus
+  a generic webhook/API adapter — never assumes a single PM tool.
 - **Scope note**: this principle governs the *product* RegulAIt ships. It does not apply to our
   own bootstrap dev-infra (ADR-0002/0003), which is deliberately AWS-only — that's a build-tooling
   choice for building RegulAIt itself, not a constraint on what RegulAIt supports for its users.
@@ -52,7 +65,10 @@ hard-locks to one vendor at any layer:
 Full specs: [docs/product/VISION.md](docs/product/VISION.md),
 [docs/product/GOVERNANCE_LAYER_SPEC.md](docs/product/GOVERNANCE_LAYER_SPEC.md) (pillars 1, 3, 4,
 5), [docs/product/WORKFLOW_ENGINE_SPEC.md](docs/product/WORKFLOW_ENGINE_SPEC.md) (pillar 2),
-[docs/product/TOKEN_OPTIMIZATION_SPEC.md](docs/product/TOKEN_OPTIMIZATION_SPEC.md) (pillar 6).
+[docs/product/TOKEN_OPTIMIZATION_SPEC.md](docs/product/TOKEN_OPTIMIZATION_SPEC.md) (pillar 6),
+[docs/product/MULTI_AGENT_ORCHESTRATION_SPEC.md](docs/product/MULTI_AGENT_ORCHESTRATION_SPEC.md)
+(pillar 7),
+[docs/product/PM_TOOL_INTEGRATION_SPEC.md](docs/product/PM_TOOL_INTEGRATION_SPEC.md) (pillar 8).
 
 This is a multi-month, multi-session build. **No session should assume it remembers the last
 one — this file plus `project-state/STATE.md` are the only things guaranteed to persist.**

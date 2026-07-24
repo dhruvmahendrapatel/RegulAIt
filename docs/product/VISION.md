@@ -1,15 +1,18 @@
 # RegulAIt — Product Vision
 
 > Source: feature research brief on Atlas, Cursor, and Lovable, provided by the user during
-> bootstrap planning (2026-07-21), later expanded with a second research pass (2026-07-24) that
-> escalated two pillars to six — see [ADR-0007](../decisions/0007-six-p0-pillars.md). Reproduced
-> here verbatim so it is never lost to session memory. The six P0 core requirements synthesized
-> from this research are broken out into their own full specs:
+> bootstrap planning (2026-07-21), expanded twice more (2026-07-24): a second pass escalated two
+> pillars to six ([ADR-0007](../decisions/0007-six-p0-pillars.md)), a third escalated six to eight
+> ([ADR-0008](../decisions/0008-eight-p0-pillars.md)). Reproduced here verbatim so it is never
+> lost to session memory. The eight P0 core requirements synthesized from this research are
+> broken out into their own full specs:
 > [GOVERNANCE_LAYER_SPEC.md](GOVERNANCE_LAYER_SPEC.md) (pillars 1, 3, 4, 5),
-> [WORKFLOW_ENGINE_SPEC.md](WORKFLOW_ENGINE_SPEC.md) (pillar 2), and
-> [TOKEN_OPTIMIZATION_SPEC.md](TOKEN_OPTIMIZATION_SPEC.md) (pillar 6). Everything in this document
-> should be read as sitting *on top of* those six pillars, not alongside them as equal-priority
-> items.
+> [WORKFLOW_ENGINE_SPEC.md](WORKFLOW_ENGINE_SPEC.md) (pillar 2),
+> [TOKEN_OPTIMIZATION_SPEC.md](TOKEN_OPTIMIZATION_SPEC.md) (pillar 6),
+> [MULTI_AGENT_ORCHESTRATION_SPEC.md](MULTI_AGENT_ORCHESTRATION_SPEC.md) (pillar 7), and
+> [PM_TOOL_INTEGRATION_SPEC.md](PM_TOOL_INTEGRATION_SPEC.md) (pillar 8). Everything in this
+> document should be read as sitting *on top of* those eight pillars, not alongside them as
+> equal-priority items.
 
 **Purpose:** This document is a consolidated feature inventory of three AI-native software
 platforms — Atlas (atlasapp.ai), Cursor (cursor.com), and Lovable (lovable.dev) — intended as a
@@ -17,7 +20,7 @@ reference brief for building a similar product. Each section documents what the 
 how it's structured, and features not obvious from the marketing homepage alone.
 
 > **⭐ TOP-PRIORITY CORE REQUIREMENTS:** Beyond replicating the features of Atlas, Cursor, and
-> Lovable, RegulAIt must have six first-class, non-optional architectural pillars — not bolt-on
+> Lovable, RegulAIt must have eight first-class, non-optional architectural pillars — not bolt-on
 > Enterprise upsells:
 > 1. **A unified governance and access-control layer** — every connector, every agent/model
 >    (including any publicly available third-party agent), and every MCP server must be
@@ -42,10 +45,19 @@ how it's structured, and features not obvious from the marketing homepage alone.
 >    rewrites, automatic context compaction, lazy tool-loading, cached reference content, etc.)
 >    transparently, on every user's behalf, without requiring the end user to know or follow those
 >    practices themselves.
+> 7. **Dynamic multi-agent orchestration with a Project-Manager/Team-Lead delegation model** —
+>    the ability to spin up specialized agents on demand, decompose work into a task graph, and
+>    run independent subtasks in parallel like a well-run team, all while staying inside the
+>    entitlements and budget of the initiating user.
+> 8. **Native, bi-directional integration with Azure DevOps, Jira, and other PM tools** — so end
+>    users can document, prioritize, and track decisions/approvals in the tool they already use,
+>    with our workflow/task engine treating that tool as the system of record rather than a
+>    shadow copy.
 >
-> All six are P0 requirements for any build plan, not phase-2 additions, and every feature
-> described below should be understood as running *through* these six layers. Escalated from two
-> to six pillars per [ADR-0007](../decisions/0007-six-p0-pillars.md) (2026-07-24).
+> All eight are P0 requirements for any build plan, not phase-2 additions, and every feature
+> described below should be understood as running *through* these eight layers. Escalated from
+> two → six per [ADR-0007](../decisions/0007-six-p0-pillars.md), then six → eight per
+> [ADR-0008](../decisions/0008-eight-p0-pillars.md) (2026-07-24).
 
 **Sources:** Official websites, product docs, changelogs, and pricing/FAQ pages (accessed July
 2026).
@@ -260,6 +272,16 @@ Free (5 daily credits), Pro (from $25/mo/100 credits), Business (~2x Pro), Enter
 - Native prompt caching and cost/token analytics dashboards, on by default.
 - Governance-integrated model routing (never exceeds a user's existing entitlement ceiling) and a workflow-level cost-sensitivity tag mirroring the existing data-sensitivity tag.
 - Opt-in semantic caching, context-graph tooling, and output-compression preferences — context-graph tooling defaults to local/code-only, per the exfiltration-risk finding in ADR-0005.
+
+**Multi-agent orchestration** *(P0 pillar 7, per [ADR-0008](../decisions/0008-eight-p0-pillars.md) — full spec in [MULTI_AGENT_ORCHESTRATION_SPEC.md](MULTI_AGENT_ORCHESTRATION_SPEC.md))*
+- Project Manager → Team Lead → Worker Agent delegation hierarchy; task decomposed into a DAG, not a flat list, with explicit serialization detection for non-parallelizable work.
+- Every worker/lead agent inherits and never exceeds the initiating user's entitlements (pillar 1) or per-run budget cap (pillar 5) — re-plan to a cheaper decomposition or require approval before a cap is breached, never silently exceed it.
+- A "team dashboard" extending the workflow-instance dashboard, with one unified audit trail — delegation is never a way to launder an action around governance.
+
+**PM-tool integration** *(P0 pillar 8, per [ADR-0008](../decisions/0008-eight-p0-pillars.md) — full spec in [PM_TOOL_INTEGRATION_SPEC.md](PM_TOOL_INTEGRATION_SPEC.md))*
+- Adapters for Azure DevOps, Jira, Linear, Asana, monday.com, plus a generic webhook/API adapter, with admin-configurable field mapping (no hardcoded schema).
+- The PM tool is the source of truth for priority/description/acceptance-criteria; decisions and approvals sync as first-class linked records, bi-directionally.
+- Full traceability (PR/deployment/decision/approval ↔ work item, both directions) feeding the same single audit trail as every other governed action.
 
 **Commercial model**
 - A free tier generous enough for habitual use.
