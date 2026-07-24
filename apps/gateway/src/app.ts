@@ -21,6 +21,7 @@ import {
   evaluateRequestSchema,
 } from "@regulait/shared";
 import { z } from "zod";
+import { registerMcpProxy } from "./mcp-proxy.js";
 
 const uuidParam = z.object({ serverId: z.string().uuid() });
 const visibleToolsParams = z.object({
@@ -136,6 +137,8 @@ export function buildApp(db: Db) {
 
     return decision;
   });
+
+  registerMcpProxy(app, db);
 
   app.get("/v1/audit", async (req) => {
     const { userId } = auditQuery.parse(req.query);

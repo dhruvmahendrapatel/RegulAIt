@@ -40,7 +40,7 @@ export interface Decision {
 
 export interface RuleTrace {
   rule: RuleName;
-  outcome: "allow" | "no-match";
+  outcome: "allow" | "deny" | "no-match";
   grantId?: string;
 }
 
@@ -87,7 +87,7 @@ export function evaluate(input: EvaluationInput): Decision {
   }
   chain.push({ rule: "server-read-only-all", outcome: "no-match" });
 
-  chain.push({ rule: "default-deny", outcome: "allow" });
+  chain.push({ rule: "default-deny", outcome: "deny" });
   return {
     effect: "deny",
     ruleId: DEFAULT_DENY_RULE_ID,
