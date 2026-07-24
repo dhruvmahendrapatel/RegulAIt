@@ -11,6 +11,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@regulait/db": "workspace:*",
     "@regulait/policy-kernel": "workspace:*",
     "@regulait/shared": "workspace:*",

@@ -47,8 +47,18 @@ users/mcp_servers/mcp_tools/tool_grants/server_grants/audit_log — audit rows d
 no FKs so they survive deletions), `packages/shared` (zod schemas), `apps/gateway` (Fastify:
 admin CRUD, `/v1/evaluate` writes an audit row for every decision, visible-tools endpoint
 implements §3's visibility filtering). Work is on branch `claude/status-check-2gbrwf` (draft PR).
-**Not yet in the slice**: actual MCP proxying via the SDK (evaluate endpoint only), approvals,
-rate limits, data-scope rules, roles, agents/connectors/initiatives object types, admin portal.
+**Not yet in the slice**: approvals, rate limits, data-scope rules, roles,
+agents/connectors/initiatives object types, admin portal.
+
+**Session 02 continued**: CI added (`.github/workflows/ci.yml` — build + all tests on every
+PR/main push against a Postgres 16 service container; PR #2, merged). Then the **real MCP proxy
+path** landed (PR #3): `POST /mcp/:serverId` speaks streamable-HTTP MCP on both sides via
+`@modelcontextprotocol/sdk` v1.29 (gateway = MCP server to clients, MCP client to upstream) —
+`tools/list` auto-syncs the upstream tool manifest into `mcp_tools` (kind inferred from
+`annotations.readOnlyHint`, defaulting to write) and filters through `visibleTools()`;
+`tools/call` runs the kernel, audits every decision, and only forwards allows upstream. User
+identity is an interim trusted header (`x-regulait-user-id`) until real authn lands. E2E-tested
+with a real in-process upstream MCP server and real MCP client (26 tests total).
 
 ## Epics
 | ID | Name | Status | Related |
