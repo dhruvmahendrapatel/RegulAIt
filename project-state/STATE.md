@@ -1,7 +1,7 @@
 ---
 phase: bootstrap-complete
-last_updated: 2026-07-22
-active_epics: [EPIC-02, EPIC-03]
+last_updated: 2026-07-24
+active_epics: [EPIC-02, EPIC-03, EPIC-04]
 open_questions_open: []
 last_session: sessions/2026-07-21-session-01.md
 ---
@@ -21,15 +21,22 @@ authored but intentionally not wired into `main.tf` yet — no workload exists t
 Full narrative, including two real incidents worth reading before touching this infra again, is
 in `sessions/2026-07-21-session-01.md`.
 
-**No product code exists yet.** EPIC-02 (governance layer) and EPIC-03 (workflow engine) are the
-next phase, per the specs in `docs/product/`.
+**Product scope escalated 2026-07-24 (ADR-0007): six co-equal P0 pillars, not two.** A second
+research pass added infra-ops/compliance-cascade/deployment-model, Shared Projects, and a
+cost-per-project dashboard to [GOVERNANCE_LAYER_SPEC.md](../docs/product/GOVERNANCE_LAYER_SPEC.md)
+(now §8–§10), and escalated token/cost optimization from "standard feature" to full P0 pillar in
+[TOKEN_OPTIMIZATION_SPEC.md](../docs/product/TOKEN_OPTIMIZATION_SPEC.md) (superseding that doc's
+prior "not a third pillar" framing). `CLAUDE.md` and `VISION.md` updated to list all six.
+**No AWS/Terraform infrastructure change was needed for this escalation** — nothing is deployed
+yet (EPIC-02/03/04 haven't started), so this was a spec-only update.
 
 ## Epics
 | ID | Name | Status | Related |
 |---|---|---|---|
 | EPIC-01 | Bootstrap: AWS foundation + GitHub repo + session-continuity scaffold | **done** | ADR-0001–0004 |
-| EPIC-02 | Governance layer MVP | not started | GOVERNANCE_LAYER_SPEC.md |
-| EPIC-03 | Workflow engine MVP | not started | WORKFLOW_ENGINE_SPEC.md |
+| EPIC-02 | Governance layer MVP (now includes infra-ops/compliance-cascade/deploy-model, Shared Projects, cost dashboard — §1–§10) | not started | GOVERNANCE_LAYER_SPEC.md, ADR-0007 |
+| EPIC-03 | Workflow engine MVP (now includes optional Design/Architecture sign-off stage type) | not started | WORKFLOW_ENGINE_SPEC.md, ADR-0007 |
+| EPIC-04 | Token/cost optimization MVP (escalated to P0) | not started | TOKEN_OPTIMIZATION_SPEC.md, ADR-0007 |
 
 ## Components
 | ID | Name | Status | Related |
@@ -45,8 +52,8 @@ next phase, per the specs in `docs/product/`.
 | COMPONENT-09 | graphify (code knowledge graph, Claude Code skill) | **installed**, project scope, restricted to `--code-only` (verified) | ADR-0005 |
 
 ## Decisions
-See [docs/decisions/README.md](../docs/decisions/README.md) for the full ADR index. All six
-seed ADRs (0001–0006) are Accepted.
+See [docs/decisions/README.md](../docs/decisions/README.md) for the full ADR index. All seven
+ADRs (0001–0007) are Accepted.
 
 ## Open Questions
 None open. OQ-004 fully resolved: (a) caveman + graphify installed and documented (ADR-0005);

@@ -1,11 +1,15 @@
 # RegulAIt — Product Vision
 
 > Source: feature research brief on Atlas, Cursor, and Lovable, provided by the user during
-> bootstrap planning (2026-07-21). Reproduced here verbatim so it is never lost to session
-> memory. The two P0 core requirements synthesized from this research are broken out into their
-> own full specs: [GOVERNANCE_LAYER_SPEC.md](GOVERNANCE_LAYER_SPEC.md) and
-> [WORKFLOW_ENGINE_SPEC.md](WORKFLOW_ENGINE_SPEC.md). Everything in this document should be read
-> as sitting *on top of* those two pillars, not alongside them as equal-priority items.
+> bootstrap planning (2026-07-21), later expanded with a second research pass (2026-07-24) that
+> escalated two pillars to six — see [ADR-0007](../decisions/0007-six-p0-pillars.md). Reproduced
+> here verbatim so it is never lost to session memory. The six P0 core requirements synthesized
+> from this research are broken out into their own full specs:
+> [GOVERNANCE_LAYER_SPEC.md](GOVERNANCE_LAYER_SPEC.md) (pillars 1, 3, 4, 5),
+> [WORKFLOW_ENGINE_SPEC.md](WORKFLOW_ENGINE_SPEC.md) (pillar 2), and
+> [TOKEN_OPTIMIZATION_SPEC.md](TOKEN_OPTIMIZATION_SPEC.md) (pillar 6). Everything in this document
+> should be read as sitting *on top of* those six pillars, not alongside them as equal-priority
+> items.
 
 **Purpose:** This document is a consolidated feature inventory of three AI-native software
 platforms — Atlas (atlasapp.ai), Cursor (cursor.com), and Lovable (lovable.dev) — intended as a
@@ -13,7 +17,7 @@ reference brief for building a similar product. Each section documents what the 
 how it's structured, and features not obvious from the marketing homepage alone.
 
 > **⭐ TOP-PRIORITY CORE REQUIREMENTS:** Beyond replicating the features of Atlas, Cursor, and
-> Lovable, RegulAIt must have two first-class, non-optional architectural pillars — not bolt-on
+> Lovable, RegulAIt must have six first-class, non-optional architectural pillars — not bolt-on
 > Enterprise upsells:
 > 1. **A unified governance and access-control layer** — every connector, every agent/model
 >    (including any publicly available third-party agent), and every MCP server must be
@@ -23,9 +27,25 @@ how it's structured, and features not obvious from the marketing homepage alone.
 >    approval → conditional auto-deploy), with support for **multiple named workflows** that can
 >    be assigned — individually or in combination — based on the tool, system, or type of code
 >    being changed.
+> 3. **Infrastructure operations, compliance-classification cascade, and a BYOC/air-gapped-capable
+>    deployment model** — matching the operational depth of the most mature infra-governance
+>    platforms' "Operate" pillar, so our governance layer is itself deployable and operable the
+>    way the workloads it governs need to be.
+> 4. **Shared Projects with cross-team context retention** — a first-class object that lets
+>    multiple teams collaborate on and reuse the same governed context (knowledge, plans,
+>    artifacts) without losing per-team access control.
+> 5. **A native cost-per-project dashboard for budget allocation** — real-time, per-project AI
+>    spend attribution built into the gateway itself, so business teams can budget and allocate
+>    cost without bolting on a third-party FinOps tool.
+> 6. **An automatic, backend-enforced token/cost optimization layer** — the platform applies
+>    token-saving best practices (right-sized model routing, targeted edits instead of full
+>    rewrites, automatic context compaction, lazy tool-loading, cached reference content, etc.)
+>    transparently, on every user's behalf, without requiring the end user to know or follow those
+>    practices themselves.
 >
-> Both are P0 requirements for any build plan, not phase-2 additions, and every feature described
-> below should be understood as running *through* these two layers.
+> All six are P0 requirements for any build plan, not phase-2 additions, and every feature
+> described below should be understood as running *through* these six layers. Escalated from two
+> to six pillars per [ADR-0007](../decisions/0007-six-p0-pillars.md) (2026-07-24).
 
 **Sources:** Official websites, product docs, changelogs, and pricing/FAQ pages (accessed July
 2026).
@@ -236,7 +256,7 @@ Free (5 daily credits), Pro (from $25/mo/100 credits), Business (~2x Pro), Enter
 - PII/sensitive-data detection with configurable block/warn/log enforcement at chat entry and at rest.
 - Full audit logging with SIEM export, SSO/SAML, SCIM, granular per-user access control across agents/connectors/MCP servers.
 
-**Token & cost optimization** *(standard feature area, not a third P0 pillar — full spec in [TOKEN_OPTIMIZATION_SPEC.md](TOKEN_OPTIMIZATION_SPEC.md))*
+**Token & cost optimization** *(P0 pillar 6, escalated per [ADR-0007](../decisions/0007-six-p0-pillars.md) — full spec in [TOKEN_OPTIMIZATION_SPEC.md](TOKEN_OPTIMIZATION_SPEC.md))*
 - Native prompt caching and cost/token analytics dashboards, on by default.
 - Governance-integrated model routing (never exceeds a user's existing entitlement ceiling) and a workflow-level cost-sensitivity tag mirroring the existing data-sensitivity tag.
 - Opt-in semantic caching, context-graph tooling, and output-compression preferences — context-graph tooling defaults to local/code-only, per the exfiltration-risk finding in ADR-0005.

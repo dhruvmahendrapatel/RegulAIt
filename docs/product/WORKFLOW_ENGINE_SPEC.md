@@ -55,6 +55,7 @@ number** of workflow templates, composed from a shared library of reusable stage
 - **Planning** — forced planning-only reasoning stage (no mutation).
 - **Artifact generation** — produces a structured document (requirements file, design doc, migration plan, rollback plan).
 - **Human sign-off / approval** — named approver(s), single or multi-approver (all-must-approve / any-one-approves).
+- **Design/Architecture sign-off** *(optional variant of the above, added 2026-07-24)* — a dedicated human-approval stage, distinct from Requirements sign-off, optionally fed by multiple specialist-agent outputs (e.g. an Architect Agent and an Integration Agent each proposing a design) that a named review-board group must approve before Build starts. Offered as an available stage type for a richer template (e.g. a "Standard Change Workflow + Design Review" variant) for changes where architectural risk warrants a dedicated gate, sitting between Artifact-generation/Requirements-sign-off and Build — it does not replace or modify the simpler default Standard Change Workflow in §2, which keeps a single combined Requirements-sign-off stage.
 - **Automated build/execution** — the agent implements a scoped change.
 - **Git operation** — branch, commit, PR/MR creation, merge, tag.
 - **Automated check** — CI/tests, automated code review, security scan, dependency audit, PII scan.

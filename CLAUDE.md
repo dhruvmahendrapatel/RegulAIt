@@ -3,7 +3,8 @@
 ## What this project is
 
 RegulAIt is a from-scratch build of an AI-native agent/development platform in the spirit of
-Atlas (atlasapp.ai), Cursor, and Lovable, with two non-negotiable P0 pillars:
+Atlas (atlasapp.ai), Cursor, and Lovable, with **six co-equal, non-negotiable P0 pillars**
+(escalated from two per [ADR-0007](docs/decisions/0007-six-p0-pillars.md)):
 
 1. A **per-user governance/access-control layer** gating every agent/model, connector, and
    MCP-server-tool call (default-deny, per-user tool-level allow-lists, approvals, rate limits,
@@ -13,10 +14,32 @@ Atlas (atlasapp.ai), Cursor, and Lovable, with two non-negotiable P0 pillars:
    approval → conditional governed deploy → post-deploy verification/rollback), expressed as
    declarative YAML/JSON templates, admin-assignable by target system/repo-path/change-type/
    data-sensitivity/role/environment.
+3. **Infrastructure operations, a compliance-classification cascade, and a BYOC/air-gapped
+   deployment model** — drift detection, automated CVE patching/certificate rotation, and backup
+   policy for our own control plane and any customer-hosted agent runtime; a single compliance
+   tag on an Initiative/Shared Project that cascades into required workflow stages, MCP/connector
+   data-scope defaults, audit-log retention, and PII handling mode; and three deployment modes
+   (hosted fast-start, BYOC, air-gapped) with a disclosed control-plane/agent-execution-plane data
+   boundary.
+4. **Shared Projects with cross-team context retention** — a governed, multi-team object with its
+   own membership, a shared context store with provenance tracking and versioned conflict
+   resolution, and opt-in partial sharing from a team's private project, all still gated by
+   pillar 1's per-user entitlement model.
+5. **A native cost-per-project dashboard** — real-time, per-project AI spend attribution applied
+   at the point of every gateway call (agent/model, connector, MCP tool), with budget-vs-actual,
+   forecast, alerting/enforcement via the existing Approvals Queue, chargeback/showback, and
+   cost-center mapping, built into the gateway rather than bolted on from a third-party FinOps
+   tool.
+6. **An automatic, backend-enforced token/cost optimization layer** — right-sized model routing,
+   edit-vs-rewrite detection, context compaction, lazy tool-loading, request batching, and
+   cached/deduplicated reference content, applied transparently on every user's behalf at the
+   same interception point that enforces governance and attributes cost, with savings reported
+   back through pillar 5's dashboard.
 
 Full specs: [docs/product/VISION.md](docs/product/VISION.md),
-[docs/product/GOVERNANCE_LAYER_SPEC.md](docs/product/GOVERNANCE_LAYER_SPEC.md),
-[docs/product/WORKFLOW_ENGINE_SPEC.md](docs/product/WORKFLOW_ENGINE_SPEC.md).
+[docs/product/GOVERNANCE_LAYER_SPEC.md](docs/product/GOVERNANCE_LAYER_SPEC.md) (pillars 1, 3, 4,
+5), [docs/product/WORKFLOW_ENGINE_SPEC.md](docs/product/WORKFLOW_ENGINE_SPEC.md) (pillar 2),
+[docs/product/TOKEN_OPTIMIZATION_SPEC.md](docs/product/TOKEN_OPTIMIZATION_SPEC.md) (pillar 6).
 
 This is a multi-month, multi-session build. **No session should assume it remembers the last
 one — this file plus `project-state/STATE.md` are the only things guaranteed to persist.**
