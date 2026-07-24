@@ -4,6 +4,7 @@ import {
   approvals,
   auditLog,
   count,
+  dataScopeRules,
   eq,
   gte,
   rateLimits,
@@ -30,8 +31,9 @@ export async function governedEvaluate(
   userId: string,
   serverId: string,
   tool: ToolRef,
+  args?: Record<string, unknown>,
 ): Promise<GovernedEvaluation> {
-  const [tGrants, sGrants, aRules, limits, approvedRows] = await Promise.all([
+  const [tGrants, sGrants, aRules, limits, scopeRules, approvedRows] = await Promise.all([
     db
       .select()
       .from(toolGrants)
@@ -48,6 +50,10 @@ export async function governedEvaluate(
       .select()
       .from(rateLimits)
       .where(and(eq(rateLimits.userId, userId), eq(rateLimits.serverId, serverId))),
+    db
+      .select()
+      .from(dataScopeRules)
+      .where(and(eq(dataScopeRules.userId, userId), eq(dataScopeRules.serverId, serverId))),
     db
       .select({ id: approvals.id })
       .from(approvals)
@@ -90,6 +96,8 @@ export async function governedEvaluate(
     serverGrants: sGrants,
     approvalRules: aRules,
     rateLimits: limitsWithCounts,
+    dataScopeRules: scopeRules,
+    args,
     approvedApprovalId,
   });
 

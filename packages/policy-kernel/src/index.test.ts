@@ -46,6 +46,7 @@ describe("evaluate", () => {
     expect(d.ruleId).toBe(g.id);
     expect(d.ruleChain).toEqual([
       { rule: "tool-allow-list", outcome: "allow", grantId: g.id },
+      { rule: "data-scope", outcome: "no-match" },
       { rule: "rate-limit", outcome: "no-match" },
       { rule: "approval-required", outcome: "no-match" },
     ]);
@@ -103,6 +104,7 @@ describe("evaluate", () => {
     // explicit tool grant already matched
     expect(d.ruleChain.map((t) => t.rule)).toEqual([
       "tool-allow-list",
+      "data-scope",
       "rate-limit",
       "approval-required",
     ]);
@@ -290,5 +292,112 @@ describe("visibility with approvals", () => {
     // require_approval effect must not hide the tool.
     const tools = visibleTools(USER, SERVER, [readTool], [toolGrant()], []);
     expect(tools.map((t) => t.name)).toEqual(["query_database"]);
+  });
+});
+
+// --- §3 data-scope rules ---
+
+import type { DataScopeRule } from "./index.js";
+
+function dataScopeRule(overrides: Partial<DataScopeRule> = {}): DataScopeRule {
+  return {
+    id: "ds-1",
+    userId: USER,
+    serverId: SERVER,
+    toolName: "query_database",
+    argPath: "schema",
+    allowedValues: ["analytics", "public"],
+    ...overrides,
+  };
+}
+
+describe("data-scope rules", () => {
+  const base = {
+    userId: USER,
+    serverId: SERVER,
+    tool: readTool,
+    toolGrants: [toolGrant()],
+    serverGrants: [],
+  };
+
+  it("allows an in-scope argument value and traces the check", () => {
+    const d = evaluate({
+      ...base,
+      dataScopeRules: [dataScopeRule()],
+      args: { schema: "analytics" },
+    });
+    expect(d.effect).toBe("allow");
+    expect(d.ruleChain).toContainEqual({ rule: "data-scope", outcome: "allow" });
+  });
+
+  it("denies an out-of-scope value with the violated rule id", () => {
+    const d = evaluate({
+      ...base,
+      dataScopeRules: [dataScopeRule()],
+      args: { schema: "payroll" },
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe("ds-1");
+    expect(d.reason).toMatch(/outside the allowed data scope/);
+    expect(d.ruleChain.at(-1)).toEqual({ rule: "data-scope", outcome: "deny", grantId: "ds-1" });
+  });
+
+  it("fails closed when the argument is missing or not a scalar", () => {
+    const missing = evaluate({ ...base, dataScopeRules: [dataScopeRule()], args: {} });
+    expect(missing.effect).toBe("deny");
+    expect(missing.reason).toMatch(/fails closed/);
+
+    const nonScalar = evaluate({
+      ...base,
+      dataScopeRules: [dataScopeRule()],
+      args: { schema: ["analytics"] },
+    });
+    expect(nonScalar.effect).toBe("deny");
+  });
+
+  it("supports nested dot-paths", () => {
+    const d = evaluate({
+      ...base,
+      dataScopeRules: [dataScopeRule({ argPath: "target.schema" })],
+      args: { target: { schema: "public" } },
+    });
+    expect(d.effect).toBe("allow");
+  });
+
+  it("all matching rules must pass (AND across paths)", () => {
+    const d = evaluate({
+      ...base,
+      dataScopeRules: [
+        dataScopeRule(),
+        dataScopeRule({ id: "ds-2", argPath: "table", allowedValues: ["events"] }),
+      ],
+      args: { schema: "analytics", table: "users" },
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe("ds-2");
+  });
+
+  it("tool-scoped rule leaves other tools unconstrained", () => {
+    const d = evaluate({
+      ...base,
+      tool: writeTool,
+      toolGrants: [toolGrant({ toolName: "drop_table" })],
+      dataScopeRules: [dataScopeRule()],
+      args: {},
+    });
+    expect(d.effect).toBe("allow");
+  });
+
+  it("a scope violation denies before rate limits and approvals are consulted", () => {
+    const d = evaluate({
+      ...base,
+      dataScopeRules: [dataScopeRule()],
+      approvalRules: [approvalRule()],
+      rateLimits: [rateLimit({ currentCount: 99 })],
+      args: { schema: "payroll" },
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe("ds-1");
+    expect(d.ruleChain.some((t) => t.rule === "rate-limit")).toBe(false);
   });
 });

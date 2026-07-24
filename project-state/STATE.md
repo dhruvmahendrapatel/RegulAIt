@@ -47,8 +47,15 @@ users/mcp_servers/mcp_tools/tool_grants/server_grants/audit_log — audit rows d
 no FKs so they survive deletions), `packages/shared` (zod schemas), `apps/gateway` (Fastify:
 admin CRUD, `/v1/evaluate` writes an audit row for every decision, visible-tools endpoint
 implements §3's visibility filtering). Work is on branch `claude/status-check-2gbrwf` (draft PR).
-**Not yet in the slice**: data-scope rules, roles, agents/connectors/initiatives object types,
-admin portal.
+**Not yet in the slice**: roles, agents/connectors/initiatives object types, admin portal.
+
+**Data-scope rules landed (PR #5) — §3 feature-complete for the MCP object type.** Kernel:
+`DataScopeRule` input (per-user×server, optional tool scope, dot-path into call arguments,
+allowed-values list) — all matching rules must pass (AND), missing/non-scalar values fail
+closed, violations deny before rate limits or approvals are consulted (order: grants →
+default-deny → data-scope → rate-limit → approval → allow). Gateway: `data_scope_rules` table
+(migration 0002), `POST /v1/rules/data-scopes`, and the proxy now passes each call's arguments
+into `governedEvaluate` so scope is enforced on real MCP traffic.
 
 **Approvals + rate limits landed (PR #4)**: the kernel now returns a third effect,
 `require_approval`, and takes approval rules (per-user×server, optional tool scope, optional

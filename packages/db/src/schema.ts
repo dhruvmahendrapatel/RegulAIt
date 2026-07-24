@@ -162,3 +162,24 @@ export const approvals = pgTable(
     index("approvals_user_server_tool_idx").on(t.userId, t.serverId, t.toolName),
   ],
 );
+
+// §3 data-scope rules: allow-list the values a call-argument field may take
+// for a granted tool. argPath is a dot-path into the call arguments;
+// allowedValues is a jsonb string array. Missing/non-scalar values fail closed.
+export const dataScopeRules = pgTable(
+  "data_scope_rules",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    serverId: uuid("server_id")
+      .notNull()
+      .references(() => mcpServers.id, { onDelete: "cascade" }),
+    toolName: text("tool_name"),
+    argPath: text("arg_path").notNull(),
+    allowedValues: jsonb("allowed_values").$type<string[]>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("data_scope_rules_user_server_idx").on(t.userId, t.serverId)],
+);

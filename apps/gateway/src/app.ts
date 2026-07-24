@@ -6,6 +6,7 @@ import {
   approvalRules,
   approvals,
   auditLog,
+  dataScopeRules,
   mcpServers,
   mcpTools,
   rateLimits,
@@ -17,6 +18,7 @@ import {
 import { visibleTools, type ToolRef } from "@regulait/policy-kernel";
 import {
   createApprovalRuleSchema,
+  createDataScopeRuleSchema,
   createRateLimitSchema,
   createServerGrantSchema,
   createServerSchema,
@@ -144,6 +146,21 @@ export function buildApp(db: Db) {
         toolName: body.toolName ?? null,
         writeOnly: body.writeOnly ?? false,
         approverUserId: body.approverUserId,
+      })
+      .returning();
+    return reply.status(201).send(row);
+  });
+
+  app.post("/v1/rules/data-scopes", async (req, reply) => {
+    const body = createDataScopeRuleSchema.parse(req.body);
+    const [row] = await db
+      .insert(dataScopeRules)
+      .values({
+        userId: body.userId,
+        serverId: body.serverId,
+        toolName: body.toolName ?? null,
+        argPath: body.argPath,
+        allowedValues: body.allowedValues,
       })
       .returning();
     return reply.status(201).send(row);

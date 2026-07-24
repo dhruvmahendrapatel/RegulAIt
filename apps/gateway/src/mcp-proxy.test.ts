@@ -357,3 +357,51 @@ describe("rate limits through the proxy (§3)", () => {
     expect(effects).toEqual(["allow", "allow", "deny"]);
   });
 });
+
+describe("data-scope rules through the proxy (§3)", () => {
+  it("allows in-scope argument values and denies out-of-scope ones, fail-closed on missing", async () => {
+    const frank = await app.inject({
+      method: "POST",
+      url: "/v1/users",
+      payload: { email: "proxy-frank@example.com", displayName: "Proxy Frank" },
+    });
+    const frankId = frank.json().id;
+    await app.inject({
+      method: "POST",
+      url: "/v1/grants/tools",
+      payload: { userId: frankId, serverId, toolName: "write_note" },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/v1/rules/data-scopes",
+      payload: {
+        userId: frankId,
+        serverId,
+        toolName: "write_note",
+        argPath: "text",
+        allowedValues: ["hello", "hi"],
+      },
+    });
+
+    const client = await mcpClientFor(frankId);
+
+    const ok = await client.callTool({ name: "write_note", arguments: { text: "hi" } });
+    expect(ok.content).toEqual([{ type: "text", text: "wrote: hi" }]);
+
+    await expect(
+      client.callTool({ name: "write_note", arguments: { text: "exfiltrate" } }),
+    ).rejects.toThrow(/outside the allowed data scope/);
+
+    await expect(client.callTool({ name: "write_note", arguments: {} })).rejects.toThrow(
+      /fails closed/,
+    );
+    await client.close();
+
+    const audit = await app.inject({ method: "GET", url: `/v1/audit?userId=${frankId}` });
+    const effects = audit
+      .json()
+      .entries.map((e: { effect: string }) => e.effect)
+      .reverse();
+    expect(effects).toEqual(["allow", "deny", "deny"]);
+  });
+});

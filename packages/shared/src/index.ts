@@ -62,3 +62,11 @@ export const decideApprovalSchema = z.object({
   decision: z.enum(["approved", "denied"]),
   reason: z.string().optional(),
 });
+
+export const createDataScopeRuleSchema = z.object({
+  userId: z.string().uuid(),
+  serverId: z.string().uuid(),
+  toolName: z.string().min(1).nullable().optional(),
+  argPath: z.string().min(1),
+  allowedValues: z.array(z.string()).min(1),
+});
