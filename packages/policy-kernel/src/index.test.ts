@@ -34,6 +34,9 @@ describe("evaluate", () => {
       "server-read-only-all",
       "default-deny",
     ]);
+    // The trace outcome must match the effect: a denying rule must never be
+    // recorded as "allow" in the persisted audit ruleChain.
+    expect(d.ruleChain.map((t) => t.outcome)).toEqual(["no-match", "no-match", "deny"]);
   });
 
   it("allows a tool on the user's explicit allow-list", () => {
