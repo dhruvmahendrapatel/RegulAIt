@@ -36,6 +36,19 @@ Atlas (atlasapp.ai), Cursor, and Lovable, with **six co-equal, non-negotiable P0
    same interception point that enforces governance and attributes cost, with savings reported
    back through pillar 5's dashboard.
 
+**Provider-agnostic by design — standing principle, applies to all six pillars.** RegulAIt never
+hard-locks to one vendor at any layer:
+- **Model/agent layer**: pillar 1's registry routes to any publicly available agent/model
+  (Claude, GPT, Gemini, Grok, open-weight, in-house) — per-user entitlement is independent of
+  vendor.
+- **Cloud/deployment layer**: pillar 3's BYOC mode deploys into AWS, Azure, or GCP under the
+  customer's own IAM, plus on-prem/air-gapped — never assumes a single cloud.
+- **Git-provider layer**: pillar 2's workflow engine works across GitHub, GitLab, Bitbucket, and
+  Azure DevOps.
+- **Scope note**: this principle governs the *product* RegulAIt ships. It does not apply to our
+  own bootstrap dev-infra (ADR-0002/0003), which is deliberately AWS-only — that's a build-tooling
+  choice for building RegulAIt itself, not a constraint on what RegulAIt supports for its users.
+
 Full specs: [docs/product/VISION.md](docs/product/VISION.md),
 [docs/product/GOVERNANCE_LAYER_SPEC.md](docs/product/GOVERNANCE_LAYER_SPEC.md) (pillars 1, 3, 4,
 5), [docs/product/WORKFLOW_ENGINE_SPEC.md](docs/product/WORKFLOW_ENGINE_SPEC.md) (pillar 2),
