@@ -15,7 +15,12 @@ import {
   type Db,
 } from "@regulait/db";
 import { evaluateAgent, evaluateConnector } from "@regulait/policy-kernel";
-import { classifyComplexity, estimateTokens, routeModel } from "@regulait/optimizer-kernel";
+import {
+  classifyComplexity,
+  estimateTokens,
+  routeModel,
+  type RoutingDecision,
+} from "@regulait/optimizer-kernel";
 import {
   isModelProviderKind,
   ModelProviderError,
@@ -41,6 +46,15 @@ const agentIdParam = z.object({ agentId: z.string().uuid() });
 const connectorIdParam = z.object({ connectorId: z.string().uuid() });
 
 export type AgentRow = typeof agents.$inferSelect;
+
+/** An entitled agent routing was not allowed to consider, and why. Reported
+ * alongside the routing decision so a downroute that did NOT happen is as
+ * explainable as one that did (§8). */
+export interface SkippedCandidate {
+  agentId: string;
+  name: string;
+  reason: "no_model_credential" | "no_model_id" | "unknown_provider";
+}
 
 export type DispatchOutcome =
   | {
@@ -249,6 +263,33 @@ async function performDispatch(
   });
 }
 
+/** Providers this user could actually dispatch to right now: "mock" needs no
+ * key at all, everything else needs a stored credential — the caller's own
+ * (BYO key) or the platform's — and a data key to decrypt it with. Exported
+ * so orchestration's re-plan routing filters candidates exactly like the
+ * invoke path does — routing anywhere may only land on a servable agent. */
+export async function configuredProviders(
+  db: Db,
+  dataKey: string | undefined,
+  userId: string,
+): Promise<Set<string>> {
+  // Without REGULAIT_DATA_KEY no stored credential can be decrypted, so mock
+  // is the only thing that can be served (executeGovernedDispatch agrees).
+  if (!dataKey) return new Set(["mock"]);
+  const [userCreds, platformCreds] = await Promise.all([
+    db
+      .select({ provider: userModelCredentials.provider })
+      .from(userModelCredentials)
+      .where(eq(userModelCredentials.userId, userId)),
+    db.select({ provider: modelCredentials.provider }).from(modelCredentials),
+  ]);
+  return new Set([
+    "mock",
+    ...userCreds.map((c) => c.provider),
+    ...platformCreds.map((c) => c.provider),
+  ]);
+}
+
 /** §2/§4: agent registry + entitlements, connector catalog + grants, and the
  * governed invoke endpoints — decision, routing, and (dispatch=true) real
  * model execution. */
@@ -312,6 +353,19 @@ export function registerAgentConnectorRoutes(
       })
       .from(modelCredentials),
   }));
+
+  // Rotation is the POST above (upsert on provider); this is the way OUT — a
+  // platform key that must stop being used has to be removable without a
+  // psql session, and there is no other route that can do it.
+  app.delete("/v1/model-credentials/:provider", async (req, reply) => {
+    const { provider } = z.object({ provider: z.string().min(1) }).parse(req.params);
+    const deleted = await db
+      .delete(modelCredentials)
+      .where(eq(modelCredentials.provider, provider))
+      .returning({ id: modelCredentials.id });
+    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_credential" });
+    return { removed: true };
+  });
 
   // --- per-user model credentials (BYO key; self-service or admin) ---
   // Same write-only discipline as the platform surface: the key is accepted,
@@ -485,10 +539,15 @@ export function registerAgentConnectorRoutes(
         .where(eq(agentGrants.userId, userId)),
       db.select().from(userAgentPolicies).where(eq(userAgentPolicies.userId, userId)),
     ]);
+    // The whole policy, not half of it: an editor that can set a run budget
+    // but never read the current one makes every edit a guess.
     return {
       agents: grants,
       defaultAgentId: policy?.defaultAgentId ?? null,
       ceilingAgentId: policy?.ceilingAgentId ?? null,
+      routingMode: policy?.routingMode ?? null,
+      runBudgetUsd: policy?.runBudgetUsd ?? null,
+      runBudgetBreachAction: policy?.runBudgetBreachAction ?? null,
     };
   });
 
@@ -527,36 +586,72 @@ export function registerAgentConnectorRoutes(
 
     const decision = evaluateAgent({
       userId,
-      agent: { id: agent.id, tier: agent.tier, enabled: agent.enabled, modes: agent.modes ?? null },
+      // the display name rides along so denial prose says "premium-mock
+      // (c8d62183…)" instead of a bare UUID (the id stays in the trace)
+      agent: {
+        id: agent.id,
+        name: agent.name,
+        tier: agent.tier,
+        enabled: agent.enabled,
+        modes: agent.modes ?? null,
+      },
       mode: body.mode,
       agentGrants: grants,
       ceilingTier,
     });
 
     // OPTIMIZATION §8: routing runs strictly after — and inside — governance.
-    // The candidate set is exactly the agents evaluateAgent would allow for
-    // this user+mode, so the optimizer can never widen entitlement (§12).
-    let routing = null;
+    // The candidate set starts as exactly the agents evaluateAgent would allow
+    // for this user+mode, and is only ever narrowed from there, so the
+    // optimizer can never widen entitlement (§12).
+    let routing: (RoutingDecision & { skippedCandidates?: SkippedCandidate[] }) | null = null;
     let dispatchOutcome: DispatchOutcome | null = null;
     if (decision.effect === "allow") {
       const registry = await db.select().from(agents).where(eq(agents.enabled, true));
-      const candidates = registry
-        .filter(
-          (a) =>
-            evaluateAgent({
-              userId,
-              agent: { id: a.id, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
-              mode: body.mode,
-              agentGrants: grants,
-              ceilingTier,
-            }).effect === "allow",
-        )
-        .map((a) => ({
-          id: a.id,
-          tier: a.tier,
-          costPerMTokIn: a.costPerMTokIn ?? null,
-          costPerMTokOut: a.costPerMTokOut ?? null,
-        }));
+      const entitled = registry.filter(
+        (a) =>
+          evaluateAgent({
+            userId,
+            agent: { id: a.id, name: a.name, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
+            mode: body.mode,
+            agentGrants: grants,
+            ceilingTier,
+          }).effect === "allow",
+      );
+
+      // A request that will really execute may only be routed onto an agent
+      // that can really be served: downrouting onto a provider with no stored
+      // credential turns a working request into a `no_model_credential`
+      // failure. A decision-only invoke executes nothing, so it stays a
+      // preview over the whole entitled set. The REQUESTED agent is never
+      // filtered out — routeModel fails safe without its baseline, and an
+      // unconfigured requested agent must fail explicitly rather than be
+      // quietly substituted away.
+      let skippedCandidates: SkippedCandidate[] = [];
+      let candidateRows = entitled;
+      if (body.dispatch) {
+        const configured = await configuredProviders(db, opts.dataKey, userId);
+        const skipReason = (a: AgentRow): SkippedCandidate["reason"] | null => {
+          if (a.id === agent.id) return null;
+          if (!a.model) return "no_model_id";
+          if (!isModelProviderKind(a.provider)) return "unknown_provider";
+          if (!configured.has(a.provider)) return "no_model_credential";
+          return null;
+        };
+        skippedCandidates = entitled.flatMap((a) => {
+          const reason = skipReason(a);
+          return reason ? [{ agentId: a.id, name: a.name, reason }] : [];
+        });
+        const skippedIds = new Set(skippedCandidates.map((s) => s.agentId));
+        candidateRows = entitled.filter((a) => !skippedIds.has(a.id));
+      }
+
+      const candidates = candidateRows.map((a) => ({
+        id: a.id,
+        tier: a.tier,
+        costPerMTokIn: a.costPerMTokIn ?? null,
+        costPerMTokOut: a.costPerMTokOut ?? null,
+      }));
       const complexity = classifyComplexity(body.input);
       const estimate = estimateTokens(body.input, complexity);
       routing = routeModel({
@@ -568,6 +663,10 @@ export function registerAgentConnectorRoutes(
         ceilingTier,
         estimate,
       });
+      // Purely additive to the trace: the kernel's own fields keep meaning
+      // exactly what they meant, and the agents it never got to weigh are
+      // listed beside them with the reason each was withheld.
+      if (skippedCandidates.length > 0) routing = { ...routing, skippedCandidates };
       await db.insert(costEvents).values({
         userId,
         objectType: "agent",
@@ -618,6 +717,7 @@ export function registerAgentConnectorRoutes(
           detail: {
             mode: body.mode,
             servedAgentId: routing.selectedAgentId,
+            ...(routing.skippedCandidates ? { routingSkippedCandidates: routing.skippedCandidates } : {}),
             stream: true,
             dispatch: outcome.ok
               ? {
@@ -664,6 +764,7 @@ export function registerAgentConnectorRoutes(
       detail: {
         mode: body.mode,
         ...(routing ? { servedAgentId: routing.selectedAgentId } : {}),
+        ...(routing?.skippedCandidates ? { routingSkippedCandidates: routing.skippedCandidates } : {}),
         ...(dispatchOutcome
           ? {
               dispatch: dispatchOutcome.ok
@@ -759,6 +860,7 @@ export function registerAgentConnectorRoutes(
     const decision = evaluateConnector({
       userId,
       connectorId,
+      connectorName: connector.name,
       operation: body.operation,
       object: body.object ?? null,
       connectorGrants: grants,

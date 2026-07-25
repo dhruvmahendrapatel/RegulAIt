@@ -6,6 +6,7 @@ import {
   roleAssignments,
   roleServerGrants,
   roleToolGrants,
+  roles,
   serverGrants,
   toolGrants,
   type Db,
@@ -40,9 +41,9 @@ export async function loadEntitlements(
   ]);
 
   const roleIds = assignments.map((a) => a.roleId);
-  const [rtGrants, rsGrants] =
+  const [rtGrants, rsGrants, roleRows] =
     roleIds.length === 0
-      ? [[], []]
+      ? [[], [], []]
       : await Promise.all([
           db
             .select()
@@ -59,13 +60,20 @@ export async function loadEntitlements(
                 eq(roleServerGrants.serverId, serverId),
               ),
             ),
+          db
+            .select({ id: roles.id, name: roles.name })
+            .from(roles)
+            .where(inArray(roles.id, roleIds)),
         ]);
 
+  // Role display names ride along for the kernel's reason prose — ids stay
+  // authoritative in ruleId/ruleChain, but a matched role reads by name.
+  const roleName = new Map(roleRows.map((r) => [r.id, r.name]));
   return {
     toolGrants: tGrants,
     serverGrants: sGrants,
-    roleToolGrants: rtGrants,
-    roleServerGrants: rsGrants,
+    roleToolGrants: rtGrants.map((g) => ({ ...g, roleName: roleName.get(g.roleId) ?? null })),
+    roleServerGrants: rsGrants.map((g) => ({ ...g, roleName: roleName.get(g.roleId) ?? null })),
     revocations: revs,
   };
 }

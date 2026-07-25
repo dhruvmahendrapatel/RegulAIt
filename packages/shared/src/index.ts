@@ -160,6 +160,23 @@ export const createProjectSchema = z
     message: "a project budget requires a budgetApproverUserId",
   });
 
+/** Post-creation project edits (admin-only). Classifications are deliberately
+ * absent — reclassification has its own diff-then-approve endpoint (§8.3) and
+ * must never ride a plain PATCH. The budget-requires-approver invariant is
+ * re-checked in the route against the MERGED row, since a patch may supply
+ * either half. */
+export const updateProjectSchema = z
+  .object({
+    name: z.string().min(1).max(200).optional(),
+    costCenter: z.string().min(1).max(100).nullable().optional(),
+    budgetUsd: z.number().positive().nullable().optional(),
+    budgetApproverUserId: z.string().uuid().nullable().optional(),
+    arbiterUserId: z.string().uuid().nullable().optional(),
+  })
+  .refine((p) => Object.values(p).some((v) => v !== undefined), {
+    message: "nothing to update — provide at least one field",
+  });
+
 export const createModelCredentialSchema = z.object({
   provider: z.enum(["anthropic", "openai", "google", "xai"]),
   apiKey: z.string().min(1),

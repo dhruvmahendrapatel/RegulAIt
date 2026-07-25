@@ -23,6 +23,8 @@ export interface ServerGrant {
 export interface RoleToolGrant {
   id: string;
   roleId: string;
+  /** optional display name for the role — reason prose only */
+  roleName?: string | null;
   serverId: string;
   toolName: string;
 }
@@ -30,6 +32,8 @@ export interface RoleToolGrant {
 export interface RoleServerGrant {
   id: string;
   roleId: string;
+  /** optional display name for the role — reason prose only */
+  roleName?: string | null;
   serverId: string;
   readOnlyAll: boolean;
 }
@@ -61,6 +65,8 @@ export interface ApprovalRule {
   toolName: string | null;
   writeOnly: boolean;
   approverUserId: string;
+  /** optional display name for the approver — used in reason prose only */
+  approverName?: string | null;
 }
 
 /**
@@ -103,6 +109,9 @@ export interface ToolRef {
 export interface EvaluationInput {
   userId: string;
   serverId: string;
+  /** optional display names for reason prose; ids stay authoritative */
+  userName?: string | null;
+  serverName?: string | null;
   tool: ToolRef;
   toolGrants: readonly ToolGrant[];
   serverGrants: readonly ServerGrant[];
@@ -136,6 +145,8 @@ export interface Decision {
   reason: string;
   /** set when effect is require_approval: who must sign off */
   approverUserId?: string;
+  /** the approver's display name, when the rule carried one */
+  approverName?: string | null;
 }
 
 export interface RuleTrace {
@@ -156,6 +167,17 @@ export type RuleName =
   | "default-deny";
 
 export const DEFAULT_DENY_RULE_ID = "default-deny";
+
+/**
+ * Reference label for reason strings: "'name' (id8…)" when the caller passed
+ * a display name in, otherwise the bare quoted id (exactly the old format).
+ * Display names are INPUTS — the kernel stays pure and does no lookups — and
+ * they only touch prose: ruleId, ruleChain, and every stored id field keep
+ * full ids for auditability.
+ */
+function refLabel(id: string, name?: string | null): string {
+  return name ? `'${name}' (${id.slice(0, 8)}…)` : `'${id}'`;
+}
 
 function matchesScope(ruleToolName: string | null, toolName: string): boolean {
   return ruleToolName === null || ruleToolName === toolName;
@@ -182,6 +204,9 @@ function argAtPath(args: Record<string, unknown> | undefined, path: string): unk
  */
 export function evaluate(input: EvaluationInput): Decision {
   const { userId, serverId, tool } = input;
+  // prose labels only — every id field below still carries the full id
+  const serverRef = refLabel(serverId, input.serverName);
+  const userRef = refLabel(userId, input.userName);
   const chain: RuleTrace[] = [];
 
   let grantId: string | undefined;
@@ -208,7 +233,7 @@ export function evaluate(input: EvaluationInput): Decision {
   if (toolGrant) {
     chain.push({ rule: "tool-allow-list", outcome: "allow", grantId: toolGrant.id });
     grantId = toolGrant.id;
-    grantReason = `tool '${tool.name}' on server '${serverId}' is on user's allow-list`;
+    grantReason = `tool '${tool.name}' on server ${serverRef} is on user's allow-list`;
   } else {
     chain.push({ rule: "tool-allow-list", outcome: "no-match" });
 
@@ -223,8 +248,8 @@ export function evaluate(input: EvaluationInput): Decision {
         chain.push({ rule: "role-tool-allow-list", outcome: "allow", grantId: roleToolGrant.id });
         grantId = roleToolGrant.id;
         grantReason =
-          `tool '${tool.name}' on server '${serverId}' is on the allow-list of ` +
-          `assigned role '${roleToolGrant.roleId}'`;
+          `tool '${tool.name}' on server ${serverRef} is on the allow-list of ` +
+          `assigned role ${refLabel(roleToolGrant.roleId, roleToolGrant.roleName)}`;
       }
     } else {
       chain.push({ rule: "role-tool-allow-list", outcome: "no-match" });
@@ -238,7 +263,7 @@ export function evaluate(input: EvaluationInput): Decision {
     if (serverGrant && tool.kind === "read") {
       chain.push({ rule: "server-read-only-all", outcome: "allow", grantId: serverGrant.id });
       grantId = serverGrant.id;
-      grantReason = `read-only tool '${tool.name}' allowed by user's read-all grant on server '${serverId}'`;
+      grantReason = `read-only tool '${tool.name}' allowed by user's read-all grant on server ${serverRef}`;
     } else {
       chain.push({ rule: "server-read-only-all", outcome: "no-match" });
 
@@ -262,7 +287,7 @@ export function evaluate(input: EvaluationInput): Decision {
           grantId = roleServerGrant.id;
           grantReason =
             `read-only tool '${tool.name}' allowed by read-all grant of assigned role ` +
-            `'${roleServerGrant.roleId}' on server '${serverId}'`;
+            `${refLabel(roleServerGrant.roleId, roleServerGrant.roleName)} on server ${serverRef}`;
         }
       } else {
         chain.push({ rule: "role-server-read-only-all", outcome: "no-match" });
@@ -276,7 +301,7 @@ export function evaluate(input: EvaluationInput): Decision {
       effect: "deny",
       ruleId: DEFAULT_DENY_RULE_ID,
       ruleChain: chain,
-      reason: `no grant matches user '${userId}', server '${serverId}', tool '${tool.name}' — default-deny`,
+      reason: `no grant matches user ${userRef}, server ${serverRef}, tool '${tool.name}' — default-deny`,
     };
   }
 
@@ -348,9 +373,10 @@ export function evaluate(input: EvaluationInput): Decision {
         ruleId: approvalRule.id,
         ruleChain: chain,
         reason:
-          `call to '${tool.name}' on server '${serverId}' requires sign-off by ` +
-          `approver '${approvalRule.approverUserId}'`,
+          `call to '${tool.name}' on server ${serverRef} requires sign-off by ` +
+          `approver ${refLabel(approvalRule.approverUserId, approvalRule.approverName)}`,
         approverUserId: approvalRule.approverUserId,
+        ...(approvalRule.approverName ? { approverName: approvalRule.approverName } : {}),
       };
     }
   } else {
@@ -400,6 +426,8 @@ export function visibleTools(
 /** a registry entry: platform-wide catalog, decoupled from per-user entitlement (§4) */
 export interface AgentRef {
   id: string;
+  /** optional display name — used in reason prose only, the id stays authoritative */
+  name?: string | null;
   /** capability/cost rank; higher = more capable/expensive. Basis of the §4 ceiling. */
   tier: number;
   enabled: boolean;
@@ -417,6 +445,8 @@ export interface AgentGrant {
 
 export interface EvaluateAgentInput {
   userId: string;
+  /** optional display name for the user — reason prose only */
+  userName?: string | null;
   agent: AgentRef;
   /** the mode being invoked (e.g. "plan", "execute") */
   mode: string;
@@ -451,6 +481,7 @@ export interface AgentDecision {
  */
 export function evaluateAgent(input: EvaluateAgentInput): AgentDecision {
   const { userId, agent, mode } = input;
+  const agentRef = refLabel(agent.id, agent.name);
   const chain: AgentRuleTrace[] = [];
 
   if (!agent.enabled) {
@@ -459,7 +490,7 @@ export function evaluateAgent(input: EvaluateAgentInput): AgentDecision {
       effect: "deny",
       ruleId: "agent-registry-enabled",
       ruleChain: chain,
-      reason: `agent '${agent.id}' is disabled platform-wide in the registry`,
+      reason: `agent ${agentRef} is disabled platform-wide in the registry`,
     };
   }
   chain.push({ rule: "agent-registry-enabled", outcome: "allow" });
@@ -472,7 +503,7 @@ export function evaluateAgent(input: EvaluateAgentInput): AgentDecision {
       effect: "deny",
       ruleId: "agent-mode",
       ruleChain: chain,
-      reason: `mode '${mode}' is not a declared mode of agent '${agent.id}'`,
+      reason: `mode '${mode}' is not a declared mode of agent ${agentRef}`,
     };
   }
 
@@ -484,7 +515,7 @@ export function evaluateAgent(input: EvaluateAgentInput): AgentDecision {
       effect: "deny",
       ruleId: DEFAULT_DENY_RULE_ID,
       ruleChain: chain,
-      reason: `agent '${agent.id}' is not on user '${userId}'s allow-list — default-deny`,
+      reason: `agent ${agentRef} is not on user ${refLabel(userId, input.userName)}'s allow-list — default-deny`,
     };
   }
   chain.push({ rule: "agent-allow-list", outcome: "allow", grantId: grant.id });
@@ -495,7 +526,7 @@ export function evaluateAgent(input: EvaluateAgentInput): AgentDecision {
       effect: "deny",
       ruleId: grant.id,
       ruleChain: chain,
-      reason: `mode '${mode}' of agent '${agent.id}' is not in the grant's allowed modes`,
+      reason: `mode '${mode}' of agent ${agentRef} is not in the grant's allowed modes`,
     };
   }
   chain.push({ rule: "agent-mode", outcome: grant.allowedModes === null ? "no-match" : "allow" });
@@ -507,7 +538,7 @@ export function evaluateAgent(input: EvaluateAgentInput): AgentDecision {
       ruleId: "agent-ceiling",
       ruleChain: chain,
       reason:
-        `agent '${agent.id}' (tier ${agent.tier}) exceeds user's ceiling ` +
+        `agent ${agentRef} (tier ${agent.tier}) exceeds user's ceiling ` +
         `(tier ${input.ceilingTier})`,
     };
   }
@@ -517,7 +548,7 @@ export function evaluateAgent(input: EvaluateAgentInput): AgentDecision {
     effect: "allow",
     ruleId: grant.id,
     ruleChain: chain,
-    reason: `agent '${agent.id}' mode '${mode}' allowed by user's agent grant`,
+    reason: `agent ${agentRef} mode '${mode}' allowed by user's agent grant`,
   };
 }
 
@@ -538,6 +569,9 @@ export interface ConnectorGrant {
 
 export interface EvaluateConnectorInput {
   userId: string;
+  /** optional display names — reason prose only */
+  userName?: string | null;
+  connectorName?: string | null;
   connectorId: string;
   operation: "read" | "write";
   /** the object/table/folder the call targets, when the caller specifies one */
@@ -570,6 +604,7 @@ export interface ConnectorDecision {
  */
 export function evaluateConnector(input: EvaluateConnectorInput): ConnectorDecision {
   const { userId, connectorId, operation } = input;
+  const connectorRef = refLabel(connectorId, input.connectorName);
   const chain: ConnectorRuleTrace[] = [];
 
   const grant = input.connectorGrants.find(
@@ -582,7 +617,7 @@ export function evaluateConnector(input: EvaluateConnectorInput): ConnectorDecis
       effect: "deny",
       ruleId: DEFAULT_DENY_RULE_ID,
       ruleChain: chain,
-      reason: `connector '${connectorId}' is not on user '${userId}'s allow-list — default-deny`,
+      reason: `connector ${connectorRef} is not on user ${refLabel(userId, input.userName)}'s allow-list — default-deny`,
     };
   }
   chain.push({ rule: "connector-allow-list", outcome: "allow", grantId: grant.id });
@@ -593,7 +628,7 @@ export function evaluateConnector(input: EvaluateConnectorInput): ConnectorDecis
       effect: "deny",
       ruleId: grant.id,
       ruleChain: chain,
-      reason: `write to connector '${connectorId}' denied: grant is read-only`,
+      reason: `write to connector ${connectorRef} denied: grant is read-only`,
     };
   }
   chain.push({ rule: "connector-mode", outcome: operation === "write" ? "allow" : "no-match" });
@@ -608,8 +643,8 @@ export function evaluateConnector(input: EvaluateConnectorInput): ConnectorDecis
         ruleChain: chain,
         reason:
           object === null
-            ? `connector '${connectorId}' grant is object-scoped and no object was named — fails closed`
-            : `object '${object}' is outside the grant's allowed objects for connector '${connectorId}'`,
+            ? `connector ${connectorRef} grant is object-scoped and no object was named — fails closed`
+            : `object '${object}' is outside the grant's allowed objects for connector ${connectorRef}`,
       };
     }
     chain.push({ rule: "connector-object-scope", outcome: "allow", grantId: grant.id });
@@ -621,6 +656,6 @@ export function evaluateConnector(input: EvaluateConnectorInput): ConnectorDecis
     effect: "allow",
     ruleId: grant.id,
     ruleChain: chain,
-    reason: `${operation} on connector '${connectorId}' allowed by user's connector grant`,
+    reason: `${operation} on connector ${connectorRef} allowed by user's connector grant`,
   };
 }

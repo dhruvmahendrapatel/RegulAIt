@@ -154,6 +154,44 @@ export function validateMapping(raw: unknown): PmMapping {
 }
 
 export const DEFAULT_MAPPINGS: Partial<Record<PmProviderKind, PmMapping>> = {
+  linear: {
+    task: {
+      workItemType: "Issue",
+      fields: {
+        title: "title",
+        status: "state",
+        description: "description",
+        priority: "priority",
+      },
+      // Linear's default workflow has no Blocked state — 'blocked' is
+      // deliberately unmapped (skip, never invent).
+      statusMap: {
+        not_started: "Todo",
+        in_progress: "In Progress",
+        in_review: "In Review",
+        done: "Done",
+      },
+    },
+  },
+  jira: {
+    task: {
+      workItemType: "Task",
+      fields: {
+        title: "summary",
+        status: "status",
+        description: "description",
+        priority: "priority",
+      },
+      // Jira's default workflow has no Blocked state — 'blocked' is
+      // deliberately unmapped (skip, never invent).
+      statusMap: {
+        not_started: "To Do",
+        in_progress: "In Progress",
+        in_review: "In Progress",
+        done: "Done",
+      },
+    },
+  },
   azure_devops: {
     task: {
       workItemType: "Task",
@@ -325,6 +363,267 @@ export class AzureDevOpsProvider implements PmProvider {
 }
 
 // ---------------------------------------------------------------------------
+// Jira adapter — REST v2 (plain-string fields; v3 would force ADF rich text),
+// Basic auth with an "email:api-token" credential (Jira Cloud convention),
+// injectable fetch. Jira states are NOT settable fields: transitionState
+// looks up the issue's available transitions and executes the matching one,
+// failing explicit when the workflow offers no path to the target state.
+// ---------------------------------------------------------------------------
+
+export interface JiraAdapterOptions {
+  /** "email:api-token" (Jira Cloud Basic auth) */
+  token: string;
+  /** e.g. https://<site>.atlassian.net */
+  baseUrl: string;
+  fetchImpl?: FetchLike;
+}
+
+export class JiraProvider implements PmProvider {
+  readonly kind = "jira" as const;
+  private readonly base: string;
+  private readonly auth: string;
+  private readonly fetchImpl: FetchLike;
+
+  constructor(opts: JiraAdapterOptions) {
+    this.base = opts.baseUrl.replace(/\/$/, "");
+    this.auth = `Basic ${Buffer.from(opts.token).toString("base64")}`;
+    this.fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
+  }
+
+  private async request(method: string, path: string, body?: unknown): Promise<unknown> {
+    const res = await this.fetchImpl(`${this.base}${path}`, {
+      method,
+      headers: {
+        authorization: this.auth,
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    if (res.status >= 400) {
+      throw new PmProviderError(`jira ${method} ${path} failed: ${await res.text()}`, res.status);
+    }
+    const text = await res.text();
+    return text ? JSON.parse(text) : null; // Jira returns 204/empty on updates
+  }
+
+  async createWorkItem(
+    project: string,
+    type: string,
+    fields: Record<string, unknown>,
+  ): Promise<WorkItemRef> {
+    const created = (await this.request("POST", "/rest/api/2/issue", {
+      fields: { project: { key: project }, issuetype: { name: type }, ...fields },
+    })) as { id: string; key: string };
+    return { id: String(created.id), url: `${this.base}/browse/${created.key}` };
+  }
+
+  async updateFields(_project: string, id: string, fields: Record<string, unknown>): Promise<void> {
+    await this.request("PUT", `/rest/api/2/issue/${id}`, { fields });
+  }
+
+  async transitionState(_project: string, id: string, state: string): Promise<void> {
+    const available = (await this.request("GET", `/rest/api/2/issue/${id}/transitions`)) as {
+      transitions?: Array<{ id: string; name: string; to?: { name?: string } }>;
+    };
+    const match = available.transitions?.find((t) => t.to?.name === state || t.name === state);
+    if (!match) {
+      const names = available.transitions?.map((t) => t.to?.name ?? t.name).join(", ") ?? "none";
+      throw new PmProviderError(
+        `jira workflow offers no transition to '${state}' (available: ${names})`,
+      );
+    }
+    await this.request("POST", `/rest/api/2/issue/${id}/transitions`, {
+      transition: { id: match.id },
+    });
+  }
+
+  async addComment(_project: string, id: string, text: string): Promise<void> {
+    await this.request("POST", `/rest/api/2/issue/${id}/comment`, { body: text });
+  }
+
+  async getWorkItem(_project: string, id: string): Promise<WorkItem> {
+    const issue = (await this.request("GET", `/rest/api/2/issue/${id}`)) as {
+      id: string;
+      key: string;
+      fields: Record<string, unknown> & {
+        issuetype?: { name?: string };
+        status?: { name?: string };
+        comment?: { comments?: Array<{ body?: string }> };
+      };
+    };
+    return {
+      id: String(issue.id),
+      url: `${this.base}/browse/${issue.key}`,
+      type: issue.fields.issuetype?.name ?? "",
+      state: issue.fields.status?.name ?? null,
+      fields: issue.fields,
+      comments: issue.fields.comment?.comments?.map((c) => c.body ?? "") ?? [],
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Linear adapter — GraphQL-only API (api.linear.app/graphql), raw api-key
+// Authorization header, injectable fetch. The interface's `project` is a
+// Linear TEAM KEY (resolved to an id once and cached); states are per-team
+// workflow states resolved by name, failing explicit with the available list.
+// The `type` argument is accepted but Linear issues carry no native type —
+// documented, ignored.
+// ---------------------------------------------------------------------------
+
+export interface LinearAdapterOptions {
+  /** a Linear API key, sent verbatim in the Authorization header */
+  token: string;
+  /** override for testing/bridges; default https://api.linear.app */
+  baseUrl?: string | null;
+  fetchImpl?: FetchLike;
+}
+
+const LINEAR_DEFAULT_BASE = "https://api.linear.app";
+
+export class LinearProvider implements PmProvider {
+  readonly kind = "linear" as const;
+  private readonly base: string;
+  private readonly token: string;
+  private readonly fetchImpl: FetchLike;
+  private readonly teamIds = new Map<string, string>();
+
+  constructor(opts: LinearAdapterOptions) {
+    this.base = (opts.baseUrl ?? LINEAR_DEFAULT_BASE).replace(/\/$/, "");
+    this.token = opts.token;
+    this.fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
+  }
+
+  private async gql<T>(query: string, variables: Record<string, unknown>): Promise<T> {
+    const res = await this.fetchImpl(`${this.base}/graphql`, {
+      method: "POST",
+      headers: {
+        authorization: this.token,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ query, variables }),
+    });
+    if (res.status >= 400) {
+      throw new PmProviderError(`linear graphql failed: ${await res.text()}`, res.status);
+    }
+    const payload = (await res.json()) as { data?: T; errors?: Array<{ message?: string }> };
+    if (payload.errors?.length) {
+      throw new PmProviderError(
+        `linear graphql failed: ${payload.errors.map((e) => e.message).join("; ")}`,
+      );
+    }
+    return payload.data as T;
+  }
+
+  private async teamId(key: string): Promise<string> {
+    const cached = this.teamIds.get(key);
+    if (cached) return cached;
+    const data = await this.gql<{ teams: { nodes: Array<{ id: string }> } }>(
+      `query TeamByKey($key: String!) { teams(filter: { key: { eq: $key } }) { nodes { id } } }`,
+      { key },
+    );
+    const id = data.teams.nodes[0]?.id;
+    if (!id) throw new PmProviderError(`linear team with key '${key}' not found`, 404);
+    this.teamIds.set(key, id);
+    return id;
+  }
+
+  async createWorkItem(
+    project: string,
+    _type: string,
+    fields: Record<string, unknown>,
+  ): Promise<WorkItemRef> {
+    const teamId = await this.teamId(project);
+    const data = await this.gql<{
+      issueCreate: { success: boolean; issue: { id: string; url: string } };
+    }>(
+      `mutation CreateIssue($input: IssueCreateInput!) {
+        issueCreate(input: $input) { success issue { id url } }
+      }`,
+      { input: { teamId, ...fields } },
+    );
+    if (!data.issueCreate.success) throw new PmProviderError("linear issueCreate reported failure");
+    return { id: data.issueCreate.issue.id, url: data.issueCreate.issue.url };
+  }
+
+  async updateFields(_project: string, id: string, fields: Record<string, unknown>): Promise<void> {
+    await this.gql(
+      `mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
+        issueUpdate(id: $id, input: $input) { success }
+      }`,
+      { id, input: fields },
+    );
+  }
+
+  async transitionState(project: string, id: string, state: string): Promise<void> {
+    const teamId = await this.teamId(project);
+    const data = await this.gql<{ team: { states: { nodes: Array<{ id: string; name: string }> } } }>(
+      `query TeamStates($teamId: String!) { team(id: $teamId) { states { nodes { id name } } } }`,
+      { teamId },
+    );
+    const match = data.team.states.nodes.find((st) => st.name === state);
+    if (!match) {
+      const names = data.team.states.nodes.map((st) => st.name).join(", ") || "none";
+      throw new PmProviderError(
+        `linear team has no workflow state '${state}' (available: ${names})`,
+      );
+    }
+    await this.gql(
+      `mutation MoveIssue($id: String!, $input: IssueUpdateInput!) {
+        issueUpdate(id: $id, input: $input) { success }
+      }`,
+      { id, input: { stateId: match.id } },
+    );
+  }
+
+  async addComment(_project: string, id: string, text: string): Promise<void> {
+    await this.gql(
+      `mutation AddComment($input: CommentCreateInput!) {
+        commentCreate(input: $input) { success }
+      }`,
+      { input: { issueId: id, body: text } },
+    );
+  }
+
+  async getWorkItem(_project: string, id: string): Promise<WorkItem> {
+    const data = await this.gql<{
+      issue: {
+        id: string;
+        url: string;
+        title: string;
+        description: string | null;
+        priority: number | null;
+        state: { name: string } | null;
+        comments: { nodes: Array<{ body: string }> };
+      };
+    }>(
+      `query Issue($id: String!) {
+        issue(id: $id) {
+          id url title description priority
+          state { name }
+          comments { nodes { body } }
+        }
+      }`,
+      { id },
+    );
+    return {
+      id: data.issue.id,
+      url: data.issue.url,
+      type: "Issue",
+      state: data.issue.state?.name ?? null,
+      fields: {
+        title: data.issue.title,
+        description: data.issue.description,
+        priority: data.issue.priority,
+        state: data.issue.state?.name ?? null,
+      },
+      comments: data.issue.comments.nodes.map((c) => c.body),
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Mock adapter — in-memory, for tests and air-gapped development.
 // ---------------------------------------------------------------------------
 
@@ -339,6 +638,8 @@ interface MockItem {
 export class MockPmProvider implements PmProvider {
   readonly kind = "mock" as const;
   readonly projects = new Map<string, Map<string, MockItem>>();
+  /** ids explicitly deleted via deleteWorkItem — upsert never resurrects them */
+  readonly tombstones = new Map<string, Set<string>>();
   private nextId = 1;
 
   private project(name: string): Map<string, MockItem> {
@@ -350,13 +651,27 @@ export class MockPmProvider implements PmProvider {
     return p;
   }
 
+  private assertInput(project: string, id?: string): void {
+    if (!project.trim()) throw new PmProviderError("project is required", 400);
+    if (id !== undefined && !id.trim()) throw new PmProviderError("work item id is required", 400);
+  }
+
+  private tombstoned(project: string, id: string): boolean {
+    return this.tombstones.get(project)?.has(id) ?? false;
+  }
+
   async createWorkItem(
     project: string,
     type: string,
     fields: Record<string, unknown>,
   ): Promise<WorkItemRef> {
-    const id = String(this.nextId++);
-    this.project(project).set(id, {
+    this.assertInput(project);
+    if (!type.trim()) throw new PmProviderError("work item type is required", 400);
+    const p = this.project(project);
+    let id = String(this.nextId++);
+    // never silently overwrite an item another path already holds this id for
+    while (p.has(id) || this.tombstoned(project, id)) id = String(this.nextId++);
+    p.set(id, {
       id,
       type,
       state: (fields.state as string) ?? "To Do",
@@ -366,27 +681,70 @@ export class MockPmProvider implements PmProvider {
     return { id, url: `mock-pm://${project}/items/${id}` };
   }
 
-  private itemOrThrow(project: string, id: string): MockItem {
-    const item = this.project(project).get(id);
-    if (!item) throw new PmProviderError(`unknown work item '${id}'`, 404);
+  /** The mock stands in for a DURABLE external tool while living in process
+   * memory, so writes are upserts: an unknown id is auto-created rather than
+   * rejected — links minted by another process (the seeder, a previous
+   * gateway) keep working across restarts. Explicitly deleted items stay
+   * dead; genuinely invalid input still fails loudly. */
+  private upsert(project: string, id: string): MockItem {
+    this.assertInput(project, id);
+    if (this.tombstoned(project, id)) {
+      throw new PmProviderError(`work item '${id}' was deleted`, 410);
+    }
+    const p = this.project(project);
+    let item = p.get(id);
+    if (!item) {
+      item = { id, type: "Task", state: "To Do", fields: {}, comments: [] };
+      p.set(id, item);
+      const n = Number(id);
+      if (Number.isInteger(n) && n >= this.nextId) this.nextId = n + 1;
+    }
     return item;
   }
 
   async updateFields(project: string, id: string, fields: Record<string, unknown>): Promise<void> {
-    Object.assign(this.itemOrThrow(project, id).fields, fields);
+    Object.assign(this.upsert(project, id).fields, fields);
   }
 
   async transitionState(project: string, id: string, state: string): Promise<void> {
-    this.itemOrThrow(project, id).state = state;
+    if (!state.trim()) throw new PmProviderError("state is required", 400);
+    this.upsert(project, id).state = state;
   }
 
   async addComment(project: string, id: string, text: string): Promise<void> {
-    this.itemOrThrow(project, id).comments.push(text);
+    this.upsert(project, id).comments.push(text);
   }
 
+  /** Reads stay strict — link verification (the gateway's honest 'Sync now')
+   * depends on a missing item actually reading as missing. */
   async getWorkItem(project: string, id: string): Promise<WorkItem> {
-    const item = this.itemOrThrow(project, id);
+    this.assertInput(project, id);
+    if (this.tombstoned(project, id)) {
+      throw new PmProviderError(`work item '${id}' was deleted`, 410);
+    }
+    const item = this.project(project).get(id);
+    if (!item) throw new PmProviderError(`unknown work item '${id}'`, 404);
     return { ...item, url: `mock-pm://${project}/items/${item.id}` };
+  }
+
+  /** Mock-only capability: simulate the customer deleting the item in their
+   * tool. The id is tombstoned so no upsert quietly resurrects it. */
+  async deleteWorkItem(project: string, id: string): Promise<void> {
+    this.assertInput(project, id);
+    this.project(project).delete(id);
+    let t = this.tombstones.get(project);
+    if (!t) {
+      t = new Set();
+      this.tombstones.set(project, t);
+    }
+    t.add(id);
+  }
+
+  /** Mock-only capability: simulate a process restart (fresh in-memory store). */
+  reset(): void {
+    this.projects.clear();
+    this.tombstones.clear();
+    this.nextId = 1;
   }
 }
 
@@ -414,10 +772,23 @@ export function resolvePmProvider(config: PmConnectionConfig, fetchImpl?: FetchL
         baseUrl: config.baseUrl,
         ...(fetchImpl ? { fetchImpl } : {}),
       });
+    case "jira":
+      if (!config.baseUrl) {
+        throw new PmProviderError("jira requires a baseUrl (https://<site>.atlassian.net)");
+      }
+      return new JiraProvider({
+        token: config.token,
+        baseUrl: config.baseUrl,
+        ...(fetchImpl ? { fetchImpl } : {}),
+      });
+    case "linear":
+      return new LinearProvider({
+        token: config.token,
+        baseUrl: config.baseUrl ?? null,
+        ...(fetchImpl ? { fetchImpl } : {}),
+      });
     case "mock":
       return sharedMock;
-    case "jira":
-    case "linear":
     case "asana":
     case "monday":
     case "generic_webhook":

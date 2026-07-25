@@ -17,15 +17,24 @@ function anthropicJson(body: unknown, status = 200): Response {
 }
 
 describe("MockModelProvider", () => {
-  it("echoes deterministically and measures usage", async () => {
+  it("answers deterministically with a canned reply — never an echo — and measures usage", async () => {
     const mock = new MockModelProvider();
-    const result = await mock.dispatch({ model: "mock-1", input: "hello world" });
-    expect(result.outputText).toBe("mock(mock-1): hello world");
+    const input = "hello world, tell me something interesting about governance layers today";
+    const result = await mock.dispatch({ model: "mock-1", input });
+    // responsive, not a restatement: references the request without repeating it
+    expect(result.outputText).not.toContain(input);
+    expect(result.outputText).toContain("hello world");
     expect(result.stopReason).toBe("end_turn");
     expect(result.refusal).toBe(false);
-    expect(result.usage.inputTokens).toBeGreaterThan(0);
-    expect(result.usage.outputTokens).toBeGreaterThan(0);
+    // token accounting stays derived from text length, exactly as before
+    expect(result.usage.inputTokens).toBe(Math.ceil(input.length / 4));
+    expect(result.usage.outputTokens).toBe(Math.ceil(result.outputText.length / 4));
+    expect(result.providerMessageId).toBe("mock-msg-1");
     expect(mock.dispatches).toHaveLength(1);
+
+    // pure function of (model, input, system): a fresh instance answers identically
+    const again = await new MockModelProvider().dispatch({ model: "mock-1", input });
+    expect(again.outputText).toBe(result.outputText);
   });
 
   it("<<refuse>> produces a refusal with empty output", async () => {
@@ -35,6 +44,135 @@ describe("MockModelProvider", () => {
     expect(result.stopReason).toBe("refusal");
     expect(result.outputText).toBe("");
     expect(result.usage.outputTokens).toBe(0);
+  });
+});
+
+describe("MockModelProvider canned intent shapes", () => {
+  const mock = new MockModelProvider();
+
+  it("a plan request yields numbered steps", async () => {
+    const r = await mock.dispatch({ model: "mock-balanced", input: "plan the payments migration" });
+    expect(r.outputText).toContain("payments migration");
+    expect(r.outputText).toMatch(/^1\./m);
+    expect(r.outputText).toMatch(/^2\./m);
+    expect(r.outputText).not.toContain("plan the payments migration"); // no echo
+  });
+
+  it("an implement/draft request yields a fenced code block with an explanation", async () => {
+    const r = await mock.dispatch({ model: "mock-balanced", input: "please draft the api endpoints" });
+    expect(r.outputText).toContain("api endpoints");
+    // an opened AND closed fence, with prose around it
+    expect(r.outputText.split("```").length).toBeGreaterThanOrEqual(3);
+    expect(r.outputText).toContain("apiEndpoints"); // topic-derived identifier
+  });
+
+  it("a summarize request yields a crisp summary paragraph", async () => {
+    const r = await mock.dispatch({ model: "mock-balanced", input: "summarize this short note" });
+    expect(r.outputText).toContain("Summary");
+    expect(r.outputText).toContain("short note");
+    expect(r.outputText).not.toContain("summarize this short note"); // no echo
+  });
+
+  it("a review request yields bulleted findings", async () => {
+    const r = await mock.dispatch({ model: "mock-balanced", input: "review this change for release risk" });
+    expect(r.outputText).toContain("change for release risk");
+    expect(r.outputText).toMatch(/^- \[major\]/m);
+    expect(r.outputText).toMatch(/^- \[minor\]/m);
+  });
+
+  it("a test request yields a test plan", async () => {
+    const r = await mock.dispatch({ model: "mock-balanced", input: "test the export endpoint" });
+    expect(r.outputText).toContain("Test plan");
+    expect(r.outputText).toContain("export endpoint");
+  });
+
+  it("an explain request yields an explanation referencing the topic", async () => {
+    const r = await mock.dispatch({ model: "mock-balanced", input: "explain why the cache invalidates" });
+    expect(r.outputText).toContain("why the cache invalidates");
+  });
+
+  it("anything else falls back to a generic reply that references key phrases", async () => {
+    const r = await mock.dispatch({ model: "mock-balanced", input: "stream this back" });
+    expect(r.outputText).toContain("stream this back");
+    expect(r.outputText.length).toBeGreaterThan("stream this back".length * 3);
+  });
+});
+
+describe("MockModelProvider tier differentiation", () => {
+  const words = (s: string) => s.split(/\s+/).filter(Boolean).length;
+  const INTENT_SAMPLES = [
+    "summarize this short note",
+    "review this change for release risk",
+    "test the export endpoint",
+    "plan the rollout of the new gateway",
+    "please draft the api endpoints",
+    "explain why the cache invalidates",
+    "stream this back",
+  ];
+
+  it("fast is terse, balanced solid, premium structured — same intent, visibly better up-tier", async () => {
+    const mock = new MockModelProvider();
+    const input = "plan the rollout of the new gateway";
+    const fast = await mock.dispatch({ model: "mock-fast", input });
+    const balanced = await mock.dispatch({ model: "mock-balanced", input });
+    const premium = await mock.dispatch({ model: "mock-premium", input });
+    expect(words(fast.outputText)).toBeLessThan(words(balanced.outputText));
+    expect(words(balanced.outputText)).toBeLessThan(words(premium.outputText));
+    // premium is structured with headings; fast never is
+    expect(premium.outputText).toContain("## ");
+    expect(fast.outputText).not.toContain("## ");
+    expect(balanced.outputText).not.toContain("## ");
+  });
+
+  it("every intent stays inside its tier's compact word budget", async () => {
+    const mock = new MockModelProvider();
+    for (const input of INTENT_SAMPLES) {
+      const fast = words((await mock.dispatch({ model: "mock-fast", input })).outputText);
+      const balanced = words((await mock.dispatch({ model: "mock-balanced", input })).outputText);
+      const premium = words((await mock.dispatch({ model: "mock-premium", input })).outputText);
+      expect(fast).toBeGreaterThanOrEqual(35);
+      expect(fast).toBeLessThanOrEqual(85);
+      expect(balanced).toBeGreaterThanOrEqual(85);
+      expect(balanced).toBeLessThanOrEqual(155);
+      expect(premium).toBeGreaterThanOrEqual(145);
+      expect(premium).toBeLessThanOrEqual(260);
+      expect(fast).toBeLessThan(balanced);
+      expect(balanced).toBeLessThan(premium);
+    }
+  });
+
+  it("an unlabelled model id gets the balanced middle tier", async () => {
+    const mock = new MockModelProvider();
+    const input = "plan the rollout of the new gateway";
+    const unlabelled = await mock.dispatch({ model: "mock-1", input });
+    const balanced = await mock.dispatch({ model: "mock-balanced", input });
+    expect(unlabelled.outputText).toBe(balanced.outputText);
+  });
+});
+
+describe("MockModelProvider system-prompt acknowledgement", () => {
+  it("acknowledges a present system prompt in one opening line, then answers", async () => {
+    const mock = new MockModelProvider();
+    const system =
+      "You are the worker agent for node 'impl' of run 'demo', executing the build stage.\n\n" +
+      "--- signed-off artifact 'requirements_file' v1 ---\nDETAILS";
+    const r = await mock.dispatch({
+      model: "mock-fast",
+      input: "please draft the api endpoints",
+      system,
+    });
+    expect(r.outputText.startsWith("Working within the signed-off scope: ")).toBe(true);
+    // the opening line carries the system context, proving it flowed through
+    const opening = r.outputText.split("\n", 1)[0]!;
+    expect(opening).toContain("the worker agent for node 'impl' of run 'demo'");
+    // the canned answer still follows
+    expect(r.outputText).toContain("api endpoints");
+  });
+
+  it("no system prompt, no acknowledgement line", async () => {
+    const mock = new MockModelProvider();
+    const r = await mock.dispatch({ model: "mock-fast", input: "please draft the api endpoints" });
+    expect(r.outputText).not.toContain("Working within the signed-off scope");
   });
 });
 

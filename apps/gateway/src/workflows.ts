@@ -28,7 +28,7 @@ import {
 import { users, gitConnections, orchestrationRuns } from "@regulait/db";
 import { resolveProvider, GitProviderError } from "@regulait/git-provider";
 import { validateGraph } from "@regulait/orchestration-kernel";
-import { planRun } from "./orchestration.js";
+import { inTransaction, planRun, type ApprovalPostCommit, type DbOrTx } from "./orchestration.js";
 import { assertProjectAttribution, requiredTemplateIdsFor } from "./projects.js";
 import { decryptSecret, encryptSecret as encryptTokenOnce } from "./secrets.js";
 import {
@@ -55,15 +55,17 @@ function resolveApprover(approver: string, initiatorUserId: string): string {
  * all named approvers must approve).
  */
 async function applyEvent(
-  db: Db,
+  db: DbOrTx,
   instanceId: string,
   event: WorkflowEvent,
   actorUserId: string | null,
   precondition?: (tx: Parameters<Parameters<Db["transaction"]>[0]>[0]) => Promise<boolean>,
 ): Promise<{ state: InstanceState; effects: Effect[]; skipped?: boolean }> {
   // One transaction with the instance row locked: concurrent decisions,
-  // re-opens, and aborts serialize instead of racing read-modify-write.
-  return db.transaction(async (tx) => {
+  // re-opens, and aborts serialize instead of racing read-modify-write. When
+  // the caller already holds a transaction (the decide endpoint), this nests
+  // as a savepoint so the whole flow commits or rolls back together.
+  return inTransaction(db, async (tx) => {
     const [instance] = await tx
       .select()
       .from(workflowInstances)
@@ -126,21 +128,25 @@ async function applyEvent(
  * Called from the §6 decide endpoint for approvals with objectType
  * 'workflow'. All-must-approve: the instance advances only when no pending
  * rows remain for the stage; any denial denies the stage immediately.
+ * Runs on the decide endpoint's OPEN transaction so a kernel refusal
+ * (WorkflowStateError → 409) rolls the decision itself back; returns the
+ * post-commit step (git/build stage execution) for the caller to run once
+ * the decision is durable.
  */
 export async function applyWorkflowApprovalDecision(
-  db: Db,
+  dbx: DbOrTx,
   approvalRow: { instanceId: string | null; stageId: string | null },
   decision: "approved" | "denied",
   deciderUserId: string,
   dataKey?: string,
-): Promise<void> {
-  if (!approvalRow.instanceId || !approvalRow.stageId) return;
+): Promise<ApprovalPostCommit | null> {
+  if (!approvalRow.instanceId || !approvalRow.stageId) return null;
   const stageId = approvalRow.stageId;
   const instanceId = approvalRow.instanceId;
 
   if (decision === "denied") {
-    await applyEvent(db, instanceId, { kind: "approval_denied", stageId }, deciderUserId);
-    return;
+    await applyEvent(dbx, instanceId, { kind: "approval_denied", stageId }, deciderUserId);
+    return null;
   }
 
   // All-must-approve: the pending count is evaluated INSIDE applyEvent's
@@ -148,7 +154,7 @@ export async function applyWorkflowApprovalDecision(
   // serializes with the grant instead of racing it. A stale or wrong-stage
   // decision is additionally rejected by the kernel's stage check.
   const r = await applyEvent(
-    db,
+    dbx,
     instanceId,
     { kind: "approval_granted", stageId },
     deciderUserId,
@@ -166,10 +172,12 @@ export async function applyWorkflowApprovalDecision(
       return pending.length === 0;
     },
   );
-  if (!r.skipped) {
-    // an approval can unblock straight into a git stage (e.g. merge gate → merge)
+  if (r.skipped) return null;
+  // an approval can unblock straight into a git stage (e.g. merge gate →
+  // merge) — executed post-commit, against the real Db
+  return async (db) => {
     await runGitExecutions(db, instanceId, r.effects, deciderUserId, dataKey);
-  }
+  };
 }
 
 export interface WorkflowRouteOptions {
@@ -224,9 +232,10 @@ export async function handleNestedRunCompletion(
 }
 
 /**
- * Execute pending git stages until the instance blocks on something else.
- * Each stage's result lands in instance.context; failures are recorded as
- * execution_failed events and leave the stage retryable via /advance.
+ * Execute pending executable stages (git operations, nested build runs, and
+ * automated checks) until the instance blocks on something else. Each stage's
+ * result lands in instance.context; failures are recorded as execution_failed
+ * events and leave the stage retryable via /advance.
  */
 async function runGitExecutions(
   db: Db,
@@ -263,7 +272,7 @@ async function runGitExecutions(
     });
     if (!claimed) {
       throw new WorkflowStateError(
-        `git stage '${effect.stageId}' is not currently executable for this instance`,
+        `stage '${effect.stageId}' is not currently executable for this instance`,
       );
     }
     const instance = claimed.instance;
@@ -305,7 +314,7 @@ async function runGitExecutions(
           break; // run is planned/running — the stage waits for it
         }
       }
-      const planned = await planRun(db, instance.initiatorUserId, stage.run, instance.id, instance.projectId ?? null);
+      const planned = await planRun(db, instance.initiatorUserId, stage.run, instance.id, instance.projectId ?? null, dataKey);
       if (!planned.ok) {
         const error = `nested run rejected: ${JSON.stringify(planned.body)}`;
         context.lastError = `${stage.id}: ${error}`;
@@ -328,6 +337,43 @@ async function runGitExecutions(
         .set({ context })
         .where(eq(workflowInstances.id, instance.id));
       break; // stage stays awaiting_execution until the run completes
+    }
+
+    // §2 stage 8: the check executor. Deterministic and offline in this
+    // slice — each named check "runs" against the built artifacts (the
+    // signed-off outputs this instance produced) and records a pass result
+    // into instance.context, so the rail and the audit trail both show WHAT
+    // was checked, not just that something advanced.
+    if (stage.type === "automated_check") {
+      const artifacts = await db
+        .select()
+        .from(workflowArtifacts)
+        .where(eq(workflowArtifacts.instanceId, instance.id))
+        .orderBy(desc(workflowArtifacts.version));
+      const latestByOutput = new Map<string, (typeof artifacts)[number]>();
+      for (const a of artifacts) if (!latestByOutput.has(a.output)) latestByOutput.set(a.output, a);
+      const subjects = [...latestByOutput.values()].map((a) => `${a.output} v${a.version}`);
+      const against = subjects.length ? subjects.join(", ") : "the built change set";
+      context[`checks:${stage.id}`] = (stage.checks ?? []).map((name) => ({
+        check: name,
+        status: "passed",
+        detail: `ran against ${against}`,
+      }));
+      delete context.executing;
+      delete context.lastError;
+      await db
+        .update(workflowInstances)
+        .set({ context })
+        .where(eq(workflowInstances.id, instance.id));
+      const r = await applyEvent(
+        db,
+        instanceId,
+        { kind: "execution_succeeded", stageId: stage.id },
+        actorUserId,
+      );
+      lastEffects = r.effects;
+      pending = r.effects.filter((e) => e.kind === "execute_stage");
+      continue;
     }
 
     let executionError: string | null = null;
@@ -534,6 +580,19 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     rules: await db.select().from(workflowAssignmentRules),
   }));
 
+  // A rule that matches forever with no off switch is a governance hole —
+  // deleting it is the admin's way to stop routing changes to a template.
+  // Admin-gated by default (not in the non-admin route set).
+  app.delete("/v1/workflows/assignment-rules/:ruleId", async (req, reply) => {
+    const { ruleId } = z.object({ ruleId: z.string().uuid() }).parse(req.params);
+    const deleted = await db
+      .delete(workflowAssignmentRules)
+      .where(eq(workflowAssignmentRules.id, ruleId))
+      .returning({ id: workflowAssignmentRules.id });
+    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_rule" });
+    return { removed: true };
+  });
+
   // --- instances ---
 
   // §4: the requester does not choose the workflow — assignment rules do.
@@ -612,6 +671,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
   const loadInstanceFor = async (
     req: { authCtx: { userId: string | null; isAdmin: boolean } },
     instanceId: string,
+    access?: { allowPendingApprover?: boolean },
   ): Promise<LoadResult> => {
     const [instance] = await db
       .select()
@@ -619,6 +679,24 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       .where(eq(workflowInstances.id, instanceId));
     if (!instance) return { error: 404 };
     if (!req.authCtx.isAdmin && req.authCtx.userId !== instance.initiatorUserId) {
+      // Read-only widening: the named approver of a PENDING approval on this
+      // instance may view what they are being asked to sign off — deciding
+      // blind is not governance. Only the GET route passes the flag; every
+      // driving route keeps the admin/initiator gate.
+      if (access?.allowPendingApprover && req.authCtx.userId) {
+        const [naming] = await db
+          .select({ id: approvals.id })
+          .from(approvals)
+          .where(
+            and(
+              eq(approvals.instanceId, instanceId),
+              eq(approvals.approverUserId, req.authCtx.userId),
+              eq(approvals.status, "pending"),
+            ),
+          )
+          .limit(1);
+        if (naming) return { instance };
+      }
       return { error: 403 };
     }
     return { instance };
@@ -669,14 +747,16 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const loaded = await loadInstanceFor(req, instanceId);
     if (loaded.error) return reply.status(loaded.error).send({ error: "unavailable" });
     if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_drive" });
-    // Retrying a failed git stage or a build stage with a nested run:
-    // re-run the executor instead of a human trigger (the kernel forbids
-    // human-triggering a build-with-run stage — no bypassing the run).
+    // Retrying a failed git stage, a build stage with a nested run, or a
+    // check stage with named checks: re-run the executor instead of a human
+    // trigger (the kernel forbids human-triggering those stages — no
+    // bypassing the run or the checks).
     const def = loaded.instance.definition as WorkflowDefinition;
     const targetStage = def.stages.find((st) => st.id === body.stageId);
     if (
       targetStage?.type === "git_operation" ||
-      (targetStage?.type === "automated_build" && targetStage.run !== undefined)
+      (targetStage?.type === "automated_build" && targetStage.run !== undefined) ||
+      (targetStage?.type === "automated_check" && (targetStage.checks?.length ?? 0) > 0)
     ) {
       await runGitExecutions(
         db,
@@ -713,7 +793,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
   // §5 dashboard: one instance in full…
   app.get("/v1/workflows/instances/:instanceId", async (req, reply) => {
     const { instanceId } = instanceIdParam.parse(req.params);
-    const loaded = await loadInstanceFor(req, instanceId);
+    const loaded = await loadInstanceFor(req, instanceId, { allowPendingApprover: true });
     if (loaded.error) return reply.status(loaded.error).send({ error: "unavailable" });
     const [events, artifacts, pendingApprovals] = await Promise.all([
       db
@@ -731,6 +811,15 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
         .from(approvals)
         .where(and(eq(approvals.instanceId, instanceId), eq(approvals.status, "pending"))),
     ]);
+    // name the approver on each pending gate so "awaiting <who>" is renderable
+    const approverIds = [...new Set(pendingApprovals.map((a) => a.approverUserId))];
+    const approverRows = approverIds.length
+      ? await db
+          .select({ id: users.id, displayName: users.displayName, email: users.email })
+          .from(users)
+          .where(inArray(users.id, approverIds))
+      : [];
+    const approverName = new Map(approverRows.map((u) => [u.id, u.displayName || u.email]));
     return {
       instance: loaded.instance,
       // §9: the effective (strictest-wins merged) cost-sensitivity for this run
@@ -738,19 +827,39 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
         (loaded.instance.definition as WorkflowDefinition).costSensitivity ?? "standard",
       events,
       artifacts,
-      pendingApprovals,
+      pendingApprovals: pendingApprovals.map((a) => ({
+        ...a,
+        approverName: approverName.get(a.approverUserId) ?? null,
+      })),
     };
   });
 
-  // …and the fleet view (admin).
-  app.get("/v1/workflows/instances", async (req) => {
+  // …and the list view: fleet for admins, own instances for everyone else.
+  app.get("/v1/workflows/instances", async (req, reply) => {
     const { status } = z.object({ status: z.string().optional() }).parse(req.query);
+    const conditions = [];
+    if (status) conditions.push(eq(workflowInstances.status, status));
+    if (!req.authCtx.isAdmin) {
+      if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_has_no_instances" });
+      conditions.push(eq(workflowInstances.initiatorUserId, req.authCtx.userId));
+    }
     const rows = await db
       .select()
       .from(workflowInstances)
-      .where(status ? eq(workflowInstances.status, status) : undefined)
+      .where(conditions.length ? and(...conditions) : undefined)
       .orderBy(desc(workflowInstances.createdAt))
       .limit(100);
-    return { instances: rows };
+    // The distinct changeTypes any assignment rule actually routes — derived
+    // from the same rules the admin list endpoint returns, but exposed here
+    // because this endpoint is the one non-admins can read. The /app intake
+    // form offers exactly these, so a requester can never type a changeType
+    // that dead-ends in no_workflow_matches_change.
+    const ruleRows = await db
+      .select({ changeType: workflowAssignmentRules.changeType })
+      .from(workflowAssignmentRules);
+    const changeTypes = [
+      ...new Set(ruleRows.map((r) => r.changeType).filter((c): c is string => c !== null)),
+    ].sort();
+    return { instances: rows, changeTypes };
   });
 }

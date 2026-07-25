@@ -13,6 +13,45 @@ cold.
 - **Infrastructure:** [infra/](infra/) — Terraform, organized as reusable `modules/` composed
   into per-project `environments/`.
 
+## Quickstart — run it and click around
+
+The fastest path (Docker):
+
+```bash
+docker compose up --build
+# demo API keys are printed once in the gateway log:
+docker compose logs gateway | grep rgl_
+```
+
+Then open **http://localhost:3000/app** and sign in:
+
+- **dana** (requester) — start in the **Playground**: the mock agents reply instantly with
+  streamed output and a full governance/routing/cost trace, no external API keys needed.
+  Then check **Runs** (auto-advance the seeded multi-agent run) and **Workflows**.
+- **avery** (approver) — the **Inbox** has a real sign-off waiting.
+- **admin** — **http://localhost:3000/admin** for the governance console and the
+  Cost & Projects dashboard. Add a model credential there (anthropic/openai/google/xai)
+  and the corresponding seeded agents start doing real dispatches.
+
+Without Docker:
+
+```bash
+pnpm install && pnpm -r build
+# any Postgres 16 works:
+export DATABASE_URL=postgres://user:pass@localhost:5432/regulait
+export REGULAIT_DATA_KEY=$(openssl rand -hex 32)
+export REGULAIT_BOOTSTRAP_TOKEN=dev-bootstrap
+pnpm --filter @regulait/gateway seed    # idempotent demo data, prints keys once
+pnpm --filter @regulait/gateway start   # migrations run on boot
+```
+
+Tests (`pnpm -r test`) need `DATABASE_URL` pointing at a scratch database.
+
+> Deployment note: the compose file is dev-grade (fixed demo secrets — override them
+> anywhere shared). Nothing here deploys to AWS; that step is deliberately gated on an
+> explicit decision (see CLAUDE.md's standing guardrail).
+
 ## Status
 
-Bootstrap phase — see [project-state/STATE.md](project-state/STATE.md) for the live picture.
+Governance MVP — all eight P0 pillars have working, tested cores; see
+[project-state/STATE.md](project-state/STATE.md) for the live picture.

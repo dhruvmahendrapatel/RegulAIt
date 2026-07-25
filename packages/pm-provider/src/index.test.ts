@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   AzureDevOpsProvider,
+  JiraProvider,
+  LinearProvider,
   MockPmProvider,
   PmProviderError,
   mappingFor,
@@ -35,7 +37,7 @@ describe("field mapping (§6/§7)", () => {
     });
     expect(resolveTaskFields(mapping, { title: "x" })).toEqual({ "Custom.Title": "x" });
     expect(() => mappingFor("azure_devops", { task: { fields: {} } })).toThrow();
-    expect(() => mappingFor("jira")).toThrow(PmProviderError); // no default shipped yet
+    expect(() => mappingFor("asana")).toThrow(PmProviderError); // no default shipped yet
   });
 });
 
@@ -49,7 +51,41 @@ describe("mock adapter", () => {
     expect(item.state).toBe("Doing");
     expect(item.fields.title).toBe("n1");
     expect(item.comments).toEqual(["approved by lena"]);
-    await expect(pm.transitionState("proj", "999", "Done")).rejects.toThrow(PmProviderError);
+  });
+
+  it("writes against an unknown id auto-create the item (upsert across restarts); reads stay strict", async () => {
+    const pm = new MockPmProvider();
+    // a link minted by a previous process still mirrors after a "restart"
+    await pm.transitionState("proj", "7", "Done");
+    await pm.addComment("proj", "7", "mirrored after restart");
+    const revived = await pm.getWorkItem("proj", "7");
+    expect(revived.state).toBe("Done");
+    expect(revived.comments).toEqual(["mirrored after restart"]);
+    // upsert bumped the id counter — a fresh create never collides with "7"
+    const fresh = await pm.createWorkItem("proj", "Task", { title: "n2" });
+    expect(fresh.id).not.toBe("7");
+    // reads on a genuinely unknown id still 404 (link verification depends on it)
+    await expect(pm.getWorkItem("proj", "999")).rejects.toThrow(PmProviderError);
+    // genuinely invalid input still fails loudly
+    await expect(pm.transitionState("proj", "  ", "Done")).rejects.toThrow(PmProviderError);
+    await expect(pm.transitionState("proj", "7", " ")).rejects.toThrow(PmProviderError);
+    await expect(pm.updateFields(" ", "7", {})).rejects.toThrow(PmProviderError);
+  });
+
+  it("deleteWorkItem tombstones the id — no upsert resurrects it; reset() simulates a restart", async () => {
+    const pm = new MockPmProvider();
+    const ref = await pm.createWorkItem("proj", "Task", { title: "doomed" });
+    await pm.deleteWorkItem("proj", ref.id);
+    await expect(pm.getWorkItem("proj", ref.id)).rejects.toThrow(/deleted/);
+    await expect(pm.addComment("proj", ref.id, "zombie")).rejects.toThrow(/deleted/);
+    await expect(pm.updateFields("proj", ref.id, { title: "back?" })).rejects.toThrow(/deleted/);
+    // new creates skip the tombstoned id
+    const next = await pm.createWorkItem("proj", "Task", { title: "next" });
+    expect(next.id).not.toBe(ref.id);
+    // reset wipes items AND tombstones — a fresh process starts clean
+    pm.reset();
+    await pm.addComment("proj", ref.id, "new life in a new process");
+    expect((await pm.getWorkItem("proj", ref.id)).comments).toEqual(["new life in a new process"]);
   });
 });
 
@@ -95,7 +131,7 @@ describe("registry", () => {
     const b = resolvePmProvider({ provider: "mock", token: "" });
     expect(a).toBe(b);
     expect(() => resolvePmProvider({ provider: "azure_devops", token: "t" })).toThrow(/baseUrl/);
-    for (const provider of ["jira", "linear", "asana", "monday", "generic_webhook"] as const) {
+    for (const provider of ["asana", "monday", "generic_webhook"] as const) {
       expect(() => resolvePmProvider({ provider, token: "t" })).toThrow(/not implemented/);
     }
   });
@@ -167,5 +203,230 @@ describe("decision record resolution (§4)", () => {
     expect(resolveDecisionAction(bare, { decision: "d", rationale: null, decisionMaker: "m" })).toEqual({
       kind: "comment",
     });
+  });
+});
+
+describe("JiraProvider (REST v2, injectable fetch, no network)", () => {
+  const json = (body: unknown, status = 200) => ({
+    status,
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  });
+
+  it("creates an issue with project/issuetype wrappers, Basic email:token auth, and a browse url", async () => {
+    let captured: { url: string; headers: Record<string, string>; body: Record<string, unknown> } | null = null;
+    const jira = new JiraProvider({
+      token: "bot@example.com:api-token",
+      baseUrl: "https://acme.atlassian.net",
+      fetchImpl: async (url, init) => {
+        captured = {
+          url,
+          headers: init?.headers ?? {},
+          body: JSON.parse(String(init?.body)),
+        };
+        return json({ id: "10042", key: "REG-7", self: "..." });
+      },
+    });
+    const ref = await jira.createWorkItem("REG", "Task", { summary: "Build API", description: "initial" });
+    expect(captured!.url).toBe("https://acme.atlassian.net/rest/api/2/issue");
+    expect(captured!.headers.authorization).toBe(
+      "Basic " + Buffer.from("bot@example.com:api-token").toString("base64"),
+    );
+    expect(captured!.body).toEqual({
+      fields: {
+        project: { key: "REG" },
+        issuetype: { name: "Task" },
+        summary: "Build API",
+        description: "initial",
+      },
+    });
+    expect(ref).toEqual({ id: "10042", url: "https://acme.atlassian.net/browse/REG-7" });
+  });
+
+  it("transitions by looking up the workflow's available transitions — explicit failure when none match", async () => {
+    const calls: Array<{ method: string; url: string; body?: unknown }> = [];
+    const jira = new JiraProvider({
+      token: "b:t",
+      baseUrl: "https://acme.atlassian.net",
+      fetchImpl: async (url, init) => {
+        calls.push({ method: init?.method ?? "GET", url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+        if (url.endsWith("/transitions") && init?.method === "GET") {
+          return json({ transitions: [
+            { id: "11", name: "Start progress", to: { name: "In Progress" } },
+            { id: "31", name: "Done", to: { name: "Done" } },
+          ] });
+        }
+        return { status: 204, json: async () => null, text: async () => "" };
+      },
+    });
+    await jira.transitionState("REG", "10042", "In Progress");
+    expect(calls[1]).toMatchObject({
+      method: "POST",
+      url: "https://acme.atlassian.net/rest/api/2/issue/10042/transitions",
+      body: { transition: { id: "11" } },
+    });
+
+    await expect(jira.transitionState("REG", "10042", "Blocked")).rejects.toThrowError(
+      /no transition to 'Blocked'.*In Progress, Done/,
+    );
+  });
+
+  it("updates (204-empty tolerated), comments, and maps getWorkItem", async () => {
+    const jira = new JiraProvider({
+      token: "b:t",
+      baseUrl: "https://acme.atlassian.net",
+      fetchImpl: async (url, init) => {
+        if (init?.method === "PUT") return { status: 204, json: async () => null, text: async () => "" };
+        if (url.endsWith("/comment")) return json({ id: "c1" });
+        return json({
+          id: "10042",
+          key: "REG-7",
+          fields: {
+            summary: "Build API",
+            issuetype: { name: "Task" },
+            status: { name: "In Progress" },
+            priority: { name: "High" },
+            comment: { comments: [{ body: "first" }, { body: "second" }] },
+          },
+        });
+      },
+    });
+    await jira.updateFields("REG", "10042", { summary: "Renamed" });
+    await jira.addComment("REG", "10042", "note");
+    const item = await jira.getWorkItem("REG", "10042");
+    expect(item.type).toBe("Task");
+    expect(item.state).toBe("In Progress");
+    expect(item.url).toBe("https://acme.atlassian.net/browse/REG-7");
+    expect(item.comments).toEqual(["first", "second"]);
+  });
+
+  it("default mapping exists and the registry resolves jira (baseUrl required)", () => {
+    const mapping = mappingFor("jira");
+    expect(resolveTaskFields(mapping, { title: "T", description: "D" })).toEqual({
+      summary: "T",
+      description: "D",
+    });
+    expect(resolveStatus(mapping, "in_progress")).toBe("In Progress");
+    // Jira's default workflow has no Blocked state — skipped, never invented
+    expect(resolveStatus(mapping, "blocked")).toBeNull();
+
+    expect(
+      resolvePmProvider({ provider: "jira", token: "b:t", baseUrl: "https://a.atlassian.net" }).kind,
+    ).toBe("jira");
+    expect(() => resolvePmProvider({ provider: "jira", token: "b:t" })).toThrowError(/baseUrl/);
+    for (const provider of ["asana", "monday", "generic_webhook"] as const) {
+      expect(() => resolvePmProvider({ provider, token: "t" })).toThrowError(/not implemented/);
+    }
+  });
+});
+
+describe("LinearProvider (GraphQL, injectable fetch, no network)", () => {
+  type Call = { query: string; variables: Record<string, unknown>; auth: string };
+  function fakeLinear(handler: (call: Call) => unknown) {
+    const calls: Call[] = [];
+    const fetchImpl = async (url: string, init?: { headers?: Record<string, string>; body?: string }) => {
+      const parsed = JSON.parse(String(init?.body));
+      const call: Call = {
+        query: parsed.query,
+        variables: parsed.variables,
+        auth: init?.headers?.authorization ?? "",
+      };
+      calls.push(call);
+      return {
+        status: 200,
+        json: async () => ({ data: handler(call) }),
+        text: async () => "",
+      };
+    };
+    return { calls, fetchImpl };
+  }
+
+  it("resolves the team key once, creates issues, and returns the Linear url", async () => {
+    const { calls, fetchImpl } = fakeLinear((call) => {
+      if (call.query.includes("teams(filter")) return { teams: { nodes: [{ id: "team-uuid-1" }] } };
+      return { issueCreate: { success: true, issue: { id: "issue-1", url: "https://linear.app/acme/issue/REG-1" } } };
+    });
+    const linear = new LinearProvider({ token: "lin_api_secret", fetchImpl });
+    const ref = await linear.createWorkItem("REG", "Issue", { title: "Build API", description: "initial" });
+    expect(calls[0]!.auth).toBe("lin_api_secret");
+    expect(calls[0]!.variables).toEqual({ key: "REG" });
+    expect(calls[1]!.variables).toEqual({
+      input: { teamId: "team-uuid-1", title: "Build API", description: "initial" },
+    });
+    expect(ref).toEqual({ id: "issue-1", url: "https://linear.app/acme/issue/REG-1" });
+
+    // the team id is cached — a second create resolves no team again
+    await linear.createWorkItem("REG", "Issue", { title: "Second" });
+    expect(calls.filter((c) => c.query.includes("teams(filter"))).toHaveLength(1);
+  });
+
+  it("transitions via the team's workflow states — explicit failure when the state is missing", async () => {
+    const { calls, fetchImpl } = fakeLinear((call) => {
+      if (call.query.includes("teams(filter")) return { teams: { nodes: [{ id: "team-uuid-1" }] } };
+      if (call.query.includes("states")) {
+        return { team: { states: { nodes: [
+          { id: "st-1", name: "Todo" },
+          { id: "st-2", name: "In Progress" },
+          { id: "st-3", name: "Done" },
+        ] } } };
+      }
+      return { issueUpdate: { success: true } };
+    });
+    const linear = new LinearProvider({ token: "t", fetchImpl });
+    await linear.transitionState("REG", "issue-1", "In Progress");
+    const update = calls.find((c) => c.query.includes("issueUpdate"))!;
+    expect(update.variables).toEqual({ id: "issue-1", input: { stateId: "st-2" } });
+
+    await expect(linear.transitionState("REG", "issue-1", "Blocked")).rejects.toThrowError(
+      /no workflow state 'Blocked'.*Todo, In Progress, Done/,
+    );
+  });
+
+  it("comments, reads issues into the neutral shape, and surfaces GraphQL errors", async () => {
+    const { fetchImpl } = fakeLinear((call) => {
+      if (call.query.includes("commentCreate")) return { commentCreate: { success: true } };
+      return {
+        issue: {
+          id: "issue-1",
+          url: "https://linear.app/acme/issue/REG-1",
+          title: "Build API",
+          description: "initial",
+          priority: 2,
+          state: { name: "In Progress" },
+          comments: { nodes: [{ body: "first" }] },
+        },
+      };
+    });
+    const linear = new LinearProvider({ token: "t", fetchImpl });
+    await linear.addComment("REG", "issue-1", "note");
+    const item = await linear.getWorkItem("REG", "issue-1");
+    expect(item).toMatchObject({
+      id: "issue-1",
+      type: "Issue",
+      state: "In Progress",
+      comments: ["first"],
+    });
+    expect(item.fields.title).toBe("Build API");
+
+    const failing = new LinearProvider({
+      token: "t",
+      fetchImpl: async () => ({
+        status: 200,
+        json: async () => ({ errors: [{ message: "not authorized" }] }),
+        text: async () => "",
+      }),
+    });
+    await expect(failing.getWorkItem("REG", "x")).rejects.toThrowError(/not authorized/);
+  });
+
+  it("default mapping exists and the registry resolves linear", () => {
+    const mapping = mappingFor("linear");
+    expect(resolveTaskFields(mapping, { title: "T", description: "D" })).toEqual({
+      title: "T",
+      description: "D",
+    });
+    expect(resolveStatus(mapping, "in_review")).toBe("In Review");
+    expect(resolveStatus(mapping, "blocked")).toBeNull();
+    expect(resolvePmProvider({ provider: "linear", token: "lin_api_x" }).kind).toBe("linear");
   });
 });

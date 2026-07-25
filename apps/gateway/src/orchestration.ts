@@ -8,6 +8,7 @@ import {
   costEvents,
   desc,
   eq,
+  inArray,
   orchestrationRunEvents,
   orchestrationRuns,
   userAgentPolicies,
@@ -33,13 +34,18 @@ import {
   type TaskNode,
 } from "@regulait/orchestration-kernel";
 import { classifyComplexity, estimateTokens, routeModel } from "@regulait/optimizer-kernel";
+import { isModelProviderKind } from "@regulait/model-provider";
 import {
   autoAdvanceSchema,
   createRunSchema,
   dispatchNodeSchema,
   runEventSchema,
 } from "@regulait/shared";
-import { executeGovernedDispatch } from "./agents-connectors.js";
+import {
+  configuredProviders,
+  executeGovernedDispatch,
+  type SkippedCandidate,
+} from "./agents-connectors.js";
 import { assertProjectAttribution } from "./projects.js";
 import { mirrorNodeStatus } from "./pm.js";
 import { handleNestedRunCompletion } from "./workflows.js";
@@ -75,7 +81,55 @@ function tokensFor(node: TaskNode): NodeTokenEstimate {
 
 const runIdParam = z.object({ runId: z.string().uuid() });
 
+/** Gateway-level node enrichment (same pattern as RunBudget living beside the
+ * kernel's state): a node may carry a multi-sentence `instruction` — the
+ * actual work order its worker is prompted with, where the ≤200-char title
+ * stays a label. The kernel's node schema strips unknown keys on validation,
+ * so instructions are lifted from the RAW graph payload and re-attached to
+ * the stored graph; dispatch falls back title-ward when absent. */
+function nodeInstruction(node: TaskNode): string | undefined {
+  const instruction = (node as TaskNode & { instruction?: unknown }).instruction;
+  return typeof instruction === "string" && instruction.trim() ? instruction : undefined;
+}
+
+function attachInstructions(graph: TaskGraph, graphRaw: unknown): void {
+  const rawNodes = (graphRaw as { nodes?: unknown } | null)?.nodes;
+  if (!Array.isArray(rawNodes)) return;
+  const byId = new Map<string, string>();
+  for (const raw of rawNodes) {
+    if (raw === null || typeof raw !== "object") continue;
+    const { id, instruction } = raw as { id?: unknown; instruction?: unknown };
+    if (typeof id !== "string" || typeof instruction !== "string") continue;
+    const text = instruction.trim();
+    // same ceiling as an explicit dispatch-time input override
+    if (text) byId.set(id, text.slice(0, 100_000));
+  }
+  for (const node of graph.nodes) {
+    const instruction = byId.get(node.id);
+    if (instruction) (node as TaskNode & { instruction?: string }).instruction = instruction;
+  }
+}
+
 type RunRow = typeof orchestrationRuns.$inferSelect;
+
+/** The open-transaction type the codebase's db.transaction callbacks receive. */
+export type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+/** Route-level flows (the decide endpoint) thread their open transaction down
+ * so the decision write and the event it causes commit or roll back together;
+ * standalone callers pass the Db itself. */
+export type DbOrTx = Db | Tx;
+
+/** Run `fn` inside a transaction on `dbx`. On a Db this opens a real
+ * transaction; on an already-open transaction it opens a savepoint, so the
+ * whole flow stays atomic from the outermost caller's perspective. */
+export function inTransaction<T>(dbx: DbOrTx, fn: (tx: Tx) => Promise<T>): Promise<T> {
+  return (dbx as Db).transaction(fn);
+}
+
+/** A step that must run only after the decision transaction has committed
+ * (git executions, nested-run completion): the decision is durable first, and
+ * a failure here can never be mistaken for a failed decision. */
+export type ApprovalPostCommit = (db: Db) => Promise<void>;
 
 /** §5.2 estimate-based node-start gate. Returns the node's estimated cost
  * under its CURRENT owner, or a blocked payload — in which case the
@@ -302,7 +356,7 @@ async function dispatchRunNode(
     served: servedAgent,
     requestedAgentId: node.ownerAgentId,
     baseline: null,
-    input: args.input ?? node.title,
+    input: args.input ?? nodeInstruction(node) ?? node.title,
     system: nested?.system,
     maxTokens: args.maxTokens,
     projectId: run.projectId ?? null,
@@ -463,18 +517,19 @@ async function evaluateNodeOwner(
 }
 
 /** Transactionally apply one run event: kernel transition under FOR UPDATE,
- * append-only event history, one audit trail (§5.3), and §3 escalations
- * materialized into the ONE approvals queue. This is the single funnel for
- * ALL run events, so §8 nesting hooks here: a run reaching a terminal state
- * notifies its parent workflow instance (after the transaction commits). */
-async function applyRunEvent(
-  db: Db,
+ * append-only event history, one audit trail (§5.3), §3 escalations
+ * materialized into the ONE approvals queue, and — the other side of the same
+ * coin — approvals mooted by the event (a reassigned/retried node, a run
+ * turning terminal) superseded in the SAME transaction, so the queue never
+ * shows a decidable gate for work that has moved on. Accepts an open
+ * transaction (decide-endpoint atomicity) or the Db. */
+async function applyRunEventTx(
+  dbx: DbOrTx,
   runId: string,
   event: RunEvent,
   actorUserId: string,
-  dataKey?: string,
 ): Promise<{ run: RunRow; effects: RunEffect[] }> {
-  const applied = await db.transaction(async (tx) => {
+  return inTransaction(dbx, async (tx) => {
     const [run] = await tx
       .select()
       .from(orchestrationRuns)
@@ -522,64 +577,111 @@ async function applyRunEvent(
         });
       }
     }
+    // A reassigned or retried node moots its open escalation AND its
+    // node-scoped budget gate: the situation the approver was asked about no
+    // longer exists. Superseded, never silently left decidable.
+    if (event.kind === "reassign_node" || event.kind === "retry_node") {
+      await tx
+        .update(approvals)
+        .set({ status: "superseded" })
+        .where(
+          and(
+            eq(approvals.runId, runId),
+            eq(approvals.status, "pending"),
+            inArray(approvals.stageId, [event.nodeId, `__budget__:${event.nodeId}`]),
+          ),
+        );
+    }
+    // A terminal run moots EVERY approval still pending against it.
+    if (state.status === "completed" || state.status === "aborted") {
+      await tx
+        .update(approvals)
+        .set({ status: "superseded" })
+        .where(and(eq(approvals.runId, runId), eq(approvals.status, "pending")));
+    }
     return { run: updated!, effects };
   });
-  // §8 nesting: a terminal nested run advances (or fails) its parent
-  // workflow's build stage. applyRunEvent throws on already-terminal runs,
-  // so a terminal status here is always a fresh transition.
-  if (
-    applied.run.workflowInstanceId &&
-    (applied.run.status === "completed" || applied.run.status === "aborted")
-  ) {
-    await handleNestedRunCompletion(db, dataKey, applied.run, actorUserId);
+}
+
+/** §8 nesting: a terminal nested run advances (or fails) its parent
+ * workflow's build stage — as a post-commit step, since it drives its own
+ * transactions and git executions. transitionRun throws on already-terminal
+ * runs, so a terminal status here is always a fresh transition. */
+function nestedCompletionPostCommit(
+  run: RunRow,
+  actorUserId: string,
+  dataKey?: string,
+): ApprovalPostCommit | null {
+  if (run.workflowInstanceId && (run.status === "completed" || run.status === "aborted")) {
+    return (db) => handleNestedRunCompletion(db, dataKey, run, actorUserId);
   }
+  return null;
+}
+
+/** The single funnel for ALL standalone run-event applications: transition +
+ * bookkeeping in one transaction, then the §8 parent-workflow notification. */
+async function applyRunEvent(
+  db: Db,
+  runId: string,
+  event: RunEvent,
+  actorUserId: string,
+  dataKey?: string,
+): Promise<{ run: RunRow; effects: RunEffect[] }> {
+  const applied = await applyRunEventTx(db, runId, event, actorUserId);
+  const postCommit = nestedCompletionPostCommit(applied.run, actorUserId, dataKey);
+  if (postCommit) await postCommit(db);
   return applied;
 }
 
 /** Decide-endpoint hook (§3): approving an escalated node re-opens it for
- * another attempt; denying it aborts the whole run. */
+ * another attempt; denying it aborts the whole run. Runs on the decide
+ * endpoint's OPEN transaction so a kernel refusal (RunStateError → 409) rolls
+ * the decision itself back; returns the post-commit step (§8 parent-workflow
+ * notification) for the caller to run once the decision is durable. */
 export async function applyRunApprovalDecision(
-  db: Db,
+  dbx: DbOrTx,
   approvalRow: { runId: string | null; stageId: string | null },
   decision: "approved" | "denied",
   deciderUserId: string,
   dataKey?: string,
-): Promise<void> {
-  if (!approvalRow.runId || !approvalRow.stageId) return;
+): Promise<ApprovalPostCommit | null> {
+  if (!approvalRow.runId || !approvalRow.stageId) return null;
+  const runId = approvalRow.runId;
   // §5.2 budget approvals: approving lifts cap enforcement for this run
   // (the overage is now sanctioned); denying aborts it. Never a silent path.
   if (approvalRow.stageId.startsWith("__budget__")) {
     if (decision === "approved") {
-      const [run] = await db
+      const [run] = await dbx
         .select()
         .from(orchestrationRuns)
-        .where(eq(orchestrationRuns.id, approvalRow.runId));
-      if (!run) return;
+        .where(eq(orchestrationRuns.id, runId));
+      if (!run) return null;
       const budget = (run.budget ?? {}) as Record<string, unknown>;
-      await db
+      await dbx
         .update(orchestrationRuns)
         .set({ budget: { ...budget, overageApproved: true } })
-        .where(eq(orchestrationRuns.id, approvalRow.runId));
-      await db.insert(auditLog).values({
+        .where(eq(orchestrationRuns.id, runId));
+      await dbx.insert(auditLog).values({
         userId: deciderUserId,
         objectType: "run",
-        objectId: approvalRow.runId,
+        objectId: runId,
         detail: { phase: "budget-decision", stageId: approvalRow.stageId },
         effect: "allow",
         ruleId: "run-budget-overage-approved",
         ruleChain: [],
         reason: "budget overage approved by the named approver; cap enforcement lifted for this run",
       });
-    } else {
-      await applyRunEvent(db, approvalRow.runId, { kind: "abort" }, deciderUserId, dataKey);
+      return null;
     }
-    return;
+    const aborted = await applyRunEventTx(dbx, runId, { kind: "abort" }, deciderUserId);
+    return nestedCompletionPostCommit(aborted.run, deciderUserId, dataKey);
   }
   const event: RunEvent =
     decision === "approved"
       ? { kind: "retry_node", nodeId: approvalRow.stageId }
       : { kind: "abort" };
-  await applyRunEvent(db, approvalRow.runId, event, deciderUserId, dataKey);
+  const applied = await applyRunEventTx(dbx, runId, event, deciderUserId);
+  return nestedCompletionPostCommit(applied.run, deciderUserId, dataKey);
 }
 
 export type PlanRunResult =
@@ -596,13 +698,16 @@ export type PlanRunResult =
  * validates and stores it; nothing executes until an explicit start event.
  * Shared by POST /v1/runs and the workflow build-stage executor (§8 nesting) —
  * the nested case runs under the WORKFLOW INITIATOR's entitlements, so a
- * workflow can never launch a run its human couldn't. */
+ * workflow can never launch a run its human couldn't. `dataKey` lets the
+ * budget re-plan check which providers hold a decryptable credential, so a
+ * substitution never lands a node on an agent that cannot dispatch. */
 export async function planRun(
   db: Db,
   userId: string,
   graphRaw: unknown,
   workflowInstanceId: string | null,
   projectId: string | null = null,
+  dataKey?: string,
 ): Promise<PlanRunResult> {
   let graph: TaskGraph;
   try {
@@ -613,6 +718,7 @@ export async function planRun(
     }
     throw err;
   }
+  attachInstructions(graph, graphRaw);
 
   const [approver] = await db
     .select({ id: users.id })
@@ -700,33 +806,68 @@ export async function planRun(
     const substitutions: Array<{
       node: TaskNode;
       from: string;
-      routing: ReturnType<typeof routeModel>;
+      routing: ReturnType<typeof routeModel> & { skippedCandidates?: SkippedCandidate[] };
     }> = [];
+    const replanSkipped: Array<{ nodeId: string; skipped: SkippedCandidate[] }> = [];
     if (capUsd !== null && cost.totalUsd !== null && cost.totalUsd > capUsd && breachAction === "replan") {
       // §5.2 auto re-plan: substitute cheaper owners per node via the same
       // governed routing pillar 6 uses — candidates are entitlement-filtered,
       // so a re-plan can never escalate (§5.1). Same graph shape, cheaper team.
+      // Candidates must also be DISPATCHABLE (the same filter the invoke path
+      // applies): a substitution onto a provider with no stored credential
+      // would turn the node's later dispatch into a `no_model_credential`
+      // failure. The node's CURRENT owner is never filtered out — routeModel
+      // fails safe without its baseline, and an undispatchable owner the graph
+      // author chose must fail explicitly at dispatch rather than be quietly
+      // substituted away.
+      const configured = await configuredProviders(db, dataKey, userId);
+      const skipReason = (
+        a: (typeof agentRows)[number],
+        ownerId: string,
+      ): SkippedCandidate["reason"] | null => {
+        if (a.id === ownerId) return null;
+        if (!a.model) return "no_model_id";
+        if (!isModelProviderKind(a.provider)) return "unknown_provider";
+        if (!configured.has(a.provider)) return "no_model_credential";
+        return null;
+      };
       for (const node of graph.nodes) {
-        const candidates = agentRows
+        const ownerId = state.owners[node.id]!;
+        const entitled = agentRows
           .filter((a) => a.enabled)
-          .filter((a) => evalOwner(a.id, node.mode)?.effect === "allow")
+          .filter((a) => evalOwner(a.id, node.mode)?.effect === "allow");
+        const skippedCandidates: SkippedCandidate[] = entitled.flatMap((a) => {
+          const reason = skipReason(a, ownerId);
+          return reason ? [{ agentId: a.id, name: a.name, reason }] : [];
+        });
+        const skippedIds = new Set(skippedCandidates.map((s) => s.agentId));
+        const candidates = entitled
+          .filter((a) => !skippedIds.has(a.id))
           .map((a) => ({
             id: a.id,
             tier: a.tier,
             costPerMTokIn: a.costPerMTokIn ?? null,
             costPerMTokOut: a.costPerMTokOut ?? null,
           }));
-        const routing = routeModel({
-          requestedAgentId: state.owners[node.id]!,
-          candidates,
-          routingMode: policy?.routingMode ?? "automatic",
-          complexity: classifyComplexity(node.title),
-          costSensitivity: "cost-sensitive",
-          ceilingTier,
-          estimate: tokensFor(node),
-        });
+        let routing: ReturnType<typeof routeModel> & { skippedCandidates?: SkippedCandidate[] } =
+          routeModel({
+            requestedAgentId: ownerId,
+            candidates,
+            routingMode: policy?.routingMode ?? "automatic",
+            complexity: classifyComplexity(node.title),
+            costSensitivity: "cost-sensitive",
+            ceilingTier,
+            estimate: tokensFor(node),
+          });
+        // Purely additive to the trace, exactly like the invoke path: the
+        // agents routing never got to weigh are listed with the reason each
+        // was withheld.
+        if (skippedCandidates.length > 0) {
+          routing = { ...routing, skippedCandidates };
+          replanSkipped.push({ nodeId: node.id, skipped: skippedCandidates });
+        }
         if (routing.effect === "routed") {
-          substitutions.push({ node, from: state.owners[node.id]!, routing });
+          substitutions.push({ node, from: ownerId, routing });
           state.owners[node.id] = routing.selectedAgentId;
           replanned = true;
         }
@@ -779,7 +920,13 @@ export async function planRun(
         estimationBasis: sub.routing.estimationBasis,
         ruleId: sub.routing.ruleId,
         projectId,
-        detail: { nodeId: sub.node.id, phase: "budget-replan" },
+        detail: {
+          nodeId: sub.node.id,
+          phase: "budget-replan",
+          ...(sub.routing.skippedCandidates
+            ? { routingSkippedCandidates: sub.routing.skippedCandidates }
+            : {}),
+        },
       });
     }
     if (overCap) {
@@ -808,7 +955,13 @@ export async function planRun(
       userId,
       objectType: "run",
       objectId: run!.id,
-      detail: { runName: graph.run, nodes: graph.nodes.length, phase: "plan", replanned },
+      detail: {
+        runName: graph.run,
+        nodes: graph.nodes.length,
+        phase: "plan",
+        replanned,
+        ...(replanSkipped.length > 0 ? { replanSkippedCandidates: replanSkipped } : {}),
+      },
       effect: "allow",
       ruleId: "run-planned",
       ruleChain: [],
@@ -822,10 +975,32 @@ export function registerOrchestrationRoutes(
   db: Db,
   opts: { dataKey?: string } = {},
 ) {
-  async function loadRunFor(req: { authCtx: { userId: string | null; isAdmin: boolean } }, runId: string) {
+  async function loadRunFor(
+    req: { authCtx: { userId: string | null; isAdmin: boolean } },
+    runId: string,
+    access?: { allowPendingApprover?: boolean },
+  ) {
     const [run] = await db.select().from(orchestrationRuns).where(eq(orchestrationRuns.id, runId));
     if (!run) return { error: 404 as const };
     if (!req.authCtx.isAdmin && req.authCtx.userId !== run.initiatingUserId) {
+      // Read-only widening (mirrors the workflow-instance read): the named
+      // approver of a PENDING approval on this run may view what they are
+      // deciding. Only the GET route passes the flag; every driving/dispatch
+      // route keeps the admin/initiator gate.
+      if (access?.allowPendingApprover && req.authCtx.userId) {
+        const [naming] = await db
+          .select({ id: approvals.id })
+          .from(approvals)
+          .where(
+            and(
+              eq(approvals.runId, runId),
+              eq(approvals.approverUserId, req.authCtx.userId),
+              eq(approvals.status, "pending"),
+            ),
+          )
+          .limit(1);
+        if (naming) return { run };
+      }
       return { error: 404 as const }; // existence is not disclosed to non-participants
     }
     return { run };
@@ -835,7 +1010,14 @@ export function registerOrchestrationRoutes(
     const body = createRunSchema.parse(req.body);
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_initiate" });
-    const planned = await planRun(db, userId, body.graph, body.workflowInstanceId ?? null, body.projectId ?? null);
+    const planned = await planRun(
+      db,
+      userId,
+      body.graph,
+      body.workflowInstanceId ?? null,
+      body.projectId ?? null,
+      opts.dataKey,
+    );
     if (!planned.ok) return reply.status(planned.status).send(planned.body);
     return reply.status(201).send({
       id: planned.run.id,
@@ -983,14 +1165,19 @@ export function registerOrchestrationRoutes(
 
   // AUTO-ADVANCE: a self-driving pass over the run — same gates, zero new
   // authority. One synchronous call (no scheduler/queue infrastructure, same
-  // bias as ADR-0010) starts the run if needed, then repeatedly takes the
-  // first ready node through start → governed dispatch → submit. Review
-  // stays a human gate by DEFAULT: nodes land in_review and dependents wait;
-  // only an explicit acceptReviews=true also accepts each submission.
-  // Node-level problems (entitlement, config, refusal) mark that node failed
-  // and the loop continues on independent branches; run-level problems
-  // (budget) stop the whole pass. Every step is the same audited event/
-  // dispatch machinery the manual endpoints use.
+  // bias as ADR-0010) starts the run if needed, then drives the FULL ready
+  // set as a wave (§4 parallelism made real): every wave node is started —
+  // each through its own budget gates — and dispatched before any of them is
+  // submitted, so independent branches are genuinely concurrent in the run's
+  // recorded state rather than a one-at-a-time march; dependents become the
+  // next wave. Review stays a human gate by DEFAULT: nodes land in_review
+  // and dependents wait; only an explicit acceptReviews=true also accepts
+  // each submission. Node-level problems (entitlement, config, refusal) mark
+  // that node failed and the wave continues on independent branches;
+  // run-level problems (budget) stop the whole pass — with everything
+  // already dispatched still submitted, so nothing strands in_progress.
+  // Every step is the same audited event/dispatch machinery the manual
+  // endpoints use.
   app.post("/v1/runs/:runId/auto", async (req, reply) => {
     const { runId } = runIdParam.parse(req.params);
     const body = autoAdvanceSchema.parse(req.body ?? {});
@@ -1048,100 +1235,139 @@ export function registerOrchestrationRoutes(
               : "no_ready_nodes";
         break;
       }
-      const nodeId = ready[0]!;
+      // One WAVE = the whole ready set (capped by the pass budget). Each wave
+      // node is started (through its own §5.2 gates) and dispatched before
+      // any submission lands, so independent branches overlap in the recorded
+      // state — the events history shows node B starting while node A is
+      // still in_progress. Submissions close the wave; dependents surface as
+      // the next wave's ready set.
+      const wave = ready.slice(0, Math.max(1, body.maxNodes - dispatched));
+      const toSubmit: string[] = [];
+      let waveStop: string | null = null;
 
-      // run-level measured-budget stop BEFORE starting the node, so a blocked
-      // pass never strands a node in_progress.
-      const budget = (run.budget ?? null) as RunBudget | null;
-      const measuredSpent = budget?.measuredSpentUsd ?? 0;
-      if (budget && budget.capUsd !== null && !budget.overageApproved && measuredSpent >= budget.capUsd) {
-        stoppedReason = "budget_exceeded_measured";
-        steps.push({ nodeId, action: "blocked_budget_measured", measuredSpentUsd: measuredSpent });
-        break;
-      }
+      for (const nodeId of wave) {
+        run = await reload();
+        // Serialization honesty: a non-parallelizable wave member (or a wave
+        // member invalidated by an earlier wave failure) is skipped, not
+        // forced — the next iteration re-evaluates readiness from scratch.
+        if (!readyNodes(run.graph as TaskGraph, run.state as RunState).includes(nodeId)) continue;
 
-      // §5.2 estimate gate, then the same node_started event the manual path uses
-      const gate = await gateNodeStartBudget(db, run, nodeId, actor);
-      if (gate.blocked) {
-        stoppedReason = "budget_exceeded";
-        steps.push({ nodeId, action: "start_blocked_budget", ...gate.blocked });
-        break;
-      }
-      await applyRunEvent(db, runId, { kind: "node_started", nodeId }, actor, opts.dataKey);
-      if (budget && gate.nodeCost !== null) {
-        await db
-          .update(orchestrationRuns)
-          .set({
-            budget: { ...budget, spentUsd: Number((budget.spentUsd + gate.nodeCost).toFixed(6)) },
-          })
-          .where(eq(orchestrationRuns.id, runId));
-      }
-
-      const out = await dispatchRunNode(
-        db,
-        opts.dataKey,
-        await reload(),
-        nodeId,
-        { input: body.inputs?.[nodeId], maxTokens: body.maxTokens },
-        actor,
-      );
-
-      if (out.kind === "budget_blocked_measured") {
-        stoppedReason = "budget_exceeded_measured";
-        steps.push({ nodeId, action: "blocked_budget_measured", measuredSpentUsd: out.measuredSpentUsd });
-        break;
-      }
-      if (out.kind === "entitlement_denied" || out.kind === "dispatch_failed" || out.kind === "unknown_agent") {
-        // node-level problem: fail THIS node (blocked, §3 retry/reassign/
-        // escalate applies), keep driving independent branches
-        const error =
-          out.kind === "entitlement_denied"
-            ? `entitlement denied: ${out.decision.reason}`
-            : out.kind === "unknown_agent"
-              ? "owner agent no longer exists"
-              : `dispatch failed: ${out.error}`;
-        await applyRunEvent(db, runId, { kind: "node_failed", nodeId, error }, actor, opts.dataKey);
-        await mirrorNodeStatus(db, opts.dataKey, runId, nodeId, "blocked", actor);
-        steps.push({ nodeId, action: "failed", error });
-        continue;
-      }
-      if (out.kind !== "ok") {
-        // unknown_node / not_in_progress cannot happen for a node we just
-        // started — defensive stop rather than a silent loop
-        stoppedReason = out.kind;
-        break;
-      }
-
-      dispatched++;
-      if (out.result.refusal) {
-        await applyRunEvent(
-          db,
-          runId,
-          { kind: "node_failed", nodeId, error: "worker refused the task" },
-          actor,
-          opts.dataKey,
-        );
-        await mirrorNodeStatus(db, opts.dataKey, runId, nodeId, "blocked", actor);
-        steps.push({ nodeId, action: "refused" });
-        if (out.budgetBreached) {
-          stoppedReason = "budget_exceeded_measured";
+        // run-level measured-budget stop BEFORE starting the node, so a
+        // blocked pass never strands a node in_progress.
+        const budget = (run.budget ?? null) as RunBudget | null;
+        const measuredSpent = budget?.measuredSpentUsd ?? 0;
+        if (budget && budget.capUsd !== null && !budget.overageApproved && measuredSpent >= budget.capUsd) {
+          waveStop = "budget_exceeded_measured";
+          steps.push({ nodeId, action: "blocked_budget_measured", measuredSpentUsd: measuredSpent });
           break;
         }
-        continue;
+
+        // §5.2 estimate gate, then the same node_started event the manual path uses
+        const gate = await gateNodeStartBudget(db, run, nodeId, actor);
+        if (gate.blocked) {
+          waveStop = "budget_exceeded";
+          steps.push({ nodeId, action: "start_blocked_budget", ...gate.blocked });
+          break;
+        }
+        await applyRunEvent(db, runId, { kind: "node_started", nodeId }, actor, opts.dataKey);
+        if (budget && gate.nodeCost !== null) {
+          await db
+            .update(orchestrationRuns)
+            .set({
+              budget: { ...budget, spentUsd: Number((budget.spentUsd + gate.nodeCost).toFixed(6)) },
+            })
+            .where(eq(orchestrationRuns.id, runId));
+        }
+
+        const out = await dispatchRunNode(
+          db,
+          opts.dataKey,
+          await reload(),
+          nodeId,
+          { input: body.inputs?.[nodeId], maxTokens: body.maxTokens },
+          actor,
+        );
+
+        if (out.kind === "budget_blocked_measured") {
+          // started this wave but the cap arrived first — fail it (blocked,
+          // retryable once the overage is approved) rather than strand it
+          waveStop = "budget_exceeded_measured";
+          steps.push({ nodeId, action: "blocked_budget_measured", measuredSpentUsd: out.measuredSpentUsd });
+          await applyRunEvent(
+            db,
+            runId,
+            { kind: "node_failed", nodeId, error: "budget cap reached before this node could dispatch" },
+            actor,
+            opts.dataKey,
+          );
+          break;
+        }
+        if (out.kind === "entitlement_denied" || out.kind === "dispatch_failed" || out.kind === "unknown_agent") {
+          // node-level problem: fail THIS node (blocked, §3 retry/reassign/
+          // escalate applies), keep driving independent branches
+          const error =
+            out.kind === "entitlement_denied"
+              ? `entitlement denied: ${out.decision.reason}`
+              : out.kind === "unknown_agent"
+                ? "owner agent no longer exists"
+                : `dispatch failed: ${out.error}`;
+          await applyRunEvent(db, runId, { kind: "node_failed", nodeId, error }, actor, opts.dataKey);
+          await mirrorNodeStatus(db, opts.dataKey, runId, nodeId, "blocked", actor);
+          steps.push({ nodeId, action: "failed", error });
+          continue;
+        }
+        if (out.kind !== "ok") {
+          // unknown_node / not_in_progress cannot happen for a node we just
+          // started — defensive stop rather than a silent loop
+          waveStop = out.kind;
+          break;
+        }
+
+        dispatched++;
+        if (out.result.refusal) {
+          await applyRunEvent(
+            db,
+            runId,
+            { kind: "node_failed", nodeId, error: "worker refused the task" },
+            actor,
+            opts.dataKey,
+          );
+          await mirrorNodeStatus(db, opts.dataKey, runId, nodeId, "blocked", actor);
+          steps.push({ nodeId, action: "refused" });
+          if (out.budgetBreached) {
+            waveStop = "budget_exceeded_measured";
+            break;
+          }
+          continue;
+        }
+
+        toSubmit.push(nodeId);
+        steps.push({
+          nodeId,
+          action: body.acceptReviews ? "accepted" : "submitted",
+          costUsd: out.result.costUsd,
+        });
+        if (out.budgetBreached) {
+          waveStop = "budget_exceeded_measured";
+          break;
+        }
       }
 
-      await applyRunEvent(db, runId, { kind: "node_submitted", nodeId }, actor, opts.dataKey);
-      let action = "submitted";
-      let finalStatus: "in_review" | "done" = "in_review";
-      if (body.acceptReviews) {
-        await applyRunEvent(db, runId, { kind: "node_accepted", nodeId }, actor, opts.dataKey);
-        action = "accepted";
-        finalStatus = "done";
+      // Close the wave: everything that dispatched cleanly is submitted (and
+      // optionally accepted) — even when the wave stopped early, so a budget
+      // stop never leaves finished work stranded in_progress.
+      for (const nodeId of toSubmit) {
+        await applyRunEvent(db, runId, { kind: "node_submitted", nodeId }, actor, opts.dataKey);
+        let finalStatus: "in_review" | "done" = "in_review";
+        if (body.acceptReviews) {
+          await applyRunEvent(db, runId, { kind: "node_accepted", nodeId }, actor, opts.dataKey);
+          finalStatus = "done";
+        }
+        await mirrorNodeStatus(db, opts.dataKey, runId, nodeId, finalStatus, actor);
       }
-      await mirrorNodeStatus(db, opts.dataKey, runId, nodeId, finalStatus, actor);
-      steps.push({ nodeId, action, costUsd: out.result.costUsd });
-      if (out.budgetBreached) {
-        stoppedReason = "budget_exceeded_measured";
+
+      if (waveStop) {
+        stoppedReason = waveStop;
         break;
       }
     }
@@ -1175,7 +1401,7 @@ export function registerOrchestrationRoutes(
 
   app.get("/v1/runs/:runId", async (req, reply) => {
     const { runId } = runIdParam.parse(req.params);
-    const loaded = await loadRunFor(req, runId);
+    const loaded = await loadRunFor(req, runId, { allowPendingApprover: true });
     if (loaded.error) return reply.status(loaded.error).send({ error: "unavailable" });
     const [events, pendingApprovals] = await Promise.all([
       db
@@ -1188,23 +1414,41 @@ export function registerOrchestrationRoutes(
         .from(approvals)
         .where(and(eq(approvals.runId, runId), eq(approvals.status, "pending"))),
     ]);
+    // name the approver on each pending gate so "awaiting <who>" is renderable
+    const approverIds = [...new Set(pendingApprovals.map((a) => a.approverUserId))];
+    const approverRows = approverIds.length
+      ? await db
+          .select({ id: users.id, displayName: users.displayName, email: users.email })
+          .from(users)
+          .where(inArray(users.id, approverIds))
+      : [];
+    const approverName = new Map(approverRows.map((u) => [u.id, u.displayName || u.email]));
     return {
       run: loaded.run,
       readyNodes: readyNodes(loaded.run.graph as TaskGraph, loaded.run.state as RunState),
       events,
-      pendingApprovals,
+      pendingApprovals: pendingApprovals.map((a) => ({
+        ...a,
+        approverName: approverName.get(a.approverUserId) ?? null,
+      })),
     };
   });
 
-  // admin fleet view (§6 dashboard data source)
-  app.get("/v1/runs", async (req) => {
+  // fleet view for admins; non-admins see exactly their own initiated runs
+  app.get("/v1/runs", async (req, reply) => {
     const { status } = z
       .object({ status: z.enum(["planned", "running", "completed", "aborted"]).optional() })
       .parse(req.query);
+    const conditions = [];
+    if (status) conditions.push(eq(orchestrationRuns.status, status));
+    if (!req.authCtx.isAdmin) {
+      if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_has_no_runs" });
+      conditions.push(eq(orchestrationRuns.initiatingUserId, req.authCtx.userId));
+    }
     const rows = await db
       .select()
       .from(orchestrationRuns)
-      .where(status ? eq(orchestrationRuns.status, status) : undefined)
+      .where(conditions.length ? and(...conditions) : undefined)
       .orderBy(desc(orchestrationRuns.createdAt));
     return { runs: rows };
   });

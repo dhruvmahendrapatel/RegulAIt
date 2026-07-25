@@ -206,10 +206,15 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
               })
               .returning({ id: approvals.id })
           )[0]!.id;
+        // name the approver by display name when the kernel carried one — the
+        // approval id keeps the full UUID (a caller retries with it)
+        const approverLabel = decision.approverName
+          ? `'${decision.approverName}' (${decision.approverUserId!.slice(0, 8)}…)`
+          : `'${decision.approverUserId}'`;
         throw new McpError(
           ErrorCode.InvalidRequest,
           `Approval required: approval '${approvalId}' is pending sign-off by ` +
-            `approver '${decision.approverUserId}'. Retry after approval.`,
+            `approver ${approverLabel}. Retry after approval.`,
         );
       }
 

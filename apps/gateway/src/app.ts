@@ -8,9 +8,13 @@ import {
   approvals,
   auditLog,
   dataScopeRules,
+  inArray,
   isNull,
   mcpServers,
   mcpTools,
+  orchestrationRuns,
+  projectContextItems,
+  projects,
   rateLimits,
   revocations,
   roleAssignments,
@@ -18,8 +22,12 @@ import {
   roleToolGrants,
   roles,
   serverGrants,
+  sql,
+  teamMembers,
+  teams,
   toolGrants,
   users,
+  workflowInstances,
   type Db,
 } from "@regulait/db";
 import { visibleTools, type ToolRef } from "@regulait/policy-kernel";
@@ -62,6 +70,7 @@ import { registerMcpProxy } from "./mcp-proxy.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
 import { applyProjectApprovalDecision, registerProjectRoutes } from "./projects.js";
 import { ADMIN_PORTAL_HTML } from "./admin-portal.js";
+import { APP_HTML } from "./app-ui.js";
 import { registerOptimizationRoutes } from "./optimization.js";
 import { applyRunApprovalDecision, registerOrchestrationRoutes } from "./orchestration.js";
 import { mirrorApprovalDecision, registerPmRoutes } from "./pm.js";
@@ -106,9 +115,18 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   // Every route requires a valid Bearer token (bootstrap or API key) — except
   // the inbound PM webhook (ADR-0010), which is called by external systems and
-  // authenticates with its per-connection secret inside the route handler.
+  // authenticates with its per-connection secret inside the route handler, the
+  // two UI shells, and the two unauthenticated entry points a browser or a
+  // load balancer hits before it has any credential (/ and /health).
+  const AUTH_EXEMPT_ROUTES = new Set([
+    "/v1/pm/webhooks/:connectionName",
+    "/admin",
+    "/app",
+    "/",
+    "/health",
+  ]);
   app.addHook("preHandler", async (req, reply) => {
-    if (req.routeOptions.url === "/v1/pm/webhooks/:connectionName" || req.routeOptions.url === "/admin") {
+    if (AUTH_EXEMPT_ROUTES.has(req.routeOptions.url ?? "")) {
       req.authCtx = { userId: null, isAdmin: false, via: "api-key" };
       return;
     }
@@ -145,6 +163,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "GET /v1/projects/:projectId/context",
     "POST /v1/projects/:projectId/context/promote",
     "GET /v1/projects/:projectId/compliance",
+    "GET /v1/projects/:projectId/costs",
     "POST /v1/runs",
     "POST /v1/runs/:runId/events",
     "POST /v1/runs/:runId/nodes/:nodeId/dispatch",
@@ -157,12 +176,34 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "GET /v1/decisions",
     "POST /v1/pm/webhooks/:connectionName",
     "GET /admin",
+    "GET /app",
+    "GET /",
+    "GET /health",
+    "GET /v1/me",
+    "GET /v1/runs",
+    "GET /v1/workflows/instances",
+    "GET /v1/projects",
+    "GET /v1/users/directory",
   ]);
   app.addHook("preHandler", async (req, reply) => {
     const route = `${req.method} ${req.routeOptions.url ?? ""}`;
     if (!NON_ADMIN_ROUTES.has(route) && !req.authCtx.isAdmin) {
       return reply.status(403).send({ error: "admin_only" });
     }
+  });
+
+  // identity echo for UI clients — who am I, what may I see
+  app.get("/v1/me", async (req) => {
+    const userId = req.authCtx.userId;
+    let user = null;
+    if (userId) {
+      const [row] = await db
+        .select({ id: users.id, email: users.email, displayName: users.displayName })
+        .from(users)
+        .where(eq(users.id, userId));
+      user = row ?? null;
+    }
+    return { userId, isAdmin: req.authCtx.isAdmin, user };
   });
 
   app.post("/v1/users", async (req, reply) => {
@@ -187,6 +228,34 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       })
       .from(users),
   }));
+
+  // Names-only directory for the /app pickers (add a project member, name an
+  // approver) — the gap slices 3–4 kept hitting: non-admins cannot read the
+  // admin-only GET /v1/users, so their forms had no one to offer. This
+  // exposes ids, display names, and team names ONLY — no emails, no roles,
+  // no admin flags, no keys, no grants.
+  app.get("/v1/users/directory", async () => {
+    const [userRows, memberRows] = await Promise.all([
+      db.select({ id: users.id, displayName: users.displayName }).from(users),
+      db
+        .select({ userId: teamMembers.userId, teamId: teamMembers.teamId, teamName: teams.name })
+        .from(teamMembers)
+        .innerJoin(teams, eq(teams.id, teamMembers.teamId)),
+    ]);
+    const teamsByUser = new Map<string, Array<{ id: string; name: string }>>();
+    for (const m of memberRows) {
+      const list = teamsByUser.get(m.userId) ?? [];
+      list.push({ id: m.teamId, name: m.teamName });
+      teamsByUser.set(m.userId, list);
+    }
+    return {
+      users: userRows.map((u) => ({
+        id: u.id,
+        name: u.displayName,
+        teams: teamsByUser.get(u.id) ?? [],
+      })),
+    };
+  });
 
   app.post("/v1/users/:userId/keys", async (req, reply) => {
     const { userId } = z.object({ userId: z.string().uuid() }).parse(req.params);
@@ -555,7 +624,126 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       .where(conditions.length > 0 ? and(...conditions) : undefined)
       .orderBy(desc(approvals.requestedAt))
       .limit(100);
-    return { approvals: rows };
+    // Display enrichment — purely additive to the row shape: names for the
+    // requester/approver/decider and a label for the governed object, so the
+    // inbox and queue can say WHO asked and WHAT is governed without the
+    // admin-only user list.
+    const ids = (xs: Array<string | null>) => [...new Set(xs.filter((x): x is string => x !== null))];
+    // §9 context conflicts: the arbiter decides between two TEXTS, so their
+    // inbox row must carry both sides — the retained conflicting revision and
+    // the currently accepted one — not just an object label.
+    const CONFLICT_PREFIX = "__context_conflict__:";
+    const conflictItemIds = ids(
+      rows.map((r) =>
+        r.stageId?.startsWith(CONFLICT_PREFIX) ? r.stageId.slice(CONFLICT_PREFIX.length) : null,
+      ),
+    );
+    const conflictItems = conflictItemIds.length
+      ? await db
+          .select()
+          .from(projectContextItems)
+          .where(inArray(projectContextItems.id, conflictItemIds))
+      : [];
+    const acceptedCounterparts = conflictItems.length
+      ? await db
+          .select()
+          .from(projectContextItems)
+          .where(
+            and(
+              inArray(projectContextItems.projectId, ids(conflictItems.map((i) => i.projectId))),
+              inArray(projectContextItems.key, [...new Set(conflictItems.map((i) => i.key))]),
+              eq(projectContextItems.accepted, true),
+            ),
+          )
+      : [];
+    const currentFor = (item: (typeof conflictItems)[number]) =>
+      acceptedCounterparts
+        .filter((c) => c.projectId === item.projectId && c.key === item.key && c.id !== item.id)
+        .reduce<(typeof acceptedCounterparts)[number] | null>(
+          (m, c) => (m === null || c.revision > m.revision ? c : m),
+          null,
+        );
+    const conflictByItemId = new Map(conflictItems.map((i) => [i.id, i]));
+    const userIds = ids(
+      rows
+        .flatMap((r) => [r.userId, r.approverUserId, r.decidedBy])
+        .concat(conflictItems.map((i) => i.contributedByUserId))
+        .concat(acceptedCounterparts.map((c) => c.contributedByUserId)),
+    );
+    const instanceIds = ids(rows.map((r) => r.instanceId));
+    const runIds = ids(rows.map((r) => r.runId));
+    const projectIds = ids(rows.map((r) => r.projectId));
+    const [userRows, instanceRows, runRows, projectRows] = await Promise.all([
+      userIds.length
+        ? db
+            .select({ id: users.id, displayName: users.displayName, email: users.email })
+            .from(users)
+            .where(inArray(users.id, userIds))
+        : [],
+      instanceIds.length
+        ? db
+            .select({ id: workflowInstances.id, change: workflowInstances.change })
+            .from(workflowInstances)
+            .where(inArray(workflowInstances.id, instanceIds))
+        : [],
+      runIds.length
+        ? db
+            .select({ id: orchestrationRuns.id, name: orchestrationRuns.name })
+            .from(orchestrationRuns)
+            .where(inArray(orchestrationRuns.id, runIds))
+        : [],
+      projectIds.length
+        ? db
+            .select({ id: projects.id, name: projects.name })
+            .from(projects)
+            .where(inArray(projects.id, projectIds))
+        : [],
+    ]);
+    const nameOf = new Map(userRows.map((u) => [u.id, u.displayName || u.email]));
+    const instanceLabel = new Map(
+      instanceRows.map((i) => [i.id, (i.change as { description?: string } | null)?.description ?? null]),
+    );
+    const runLabel = new Map(runRows.map((r) => [r.id, r.name]));
+    const projectLabel = new Map(projectRows.map((p) => [p.id, p.name]));
+    const contextConflictFor = (r: (typeof rows)[number]) => {
+      if (!r.stageId?.startsWith(CONFLICT_PREFIX)) return {};
+      const item = conflictByItemId.get(r.stageId.slice(CONFLICT_PREFIX.length));
+      if (!item) return {};
+      const current = currentFor(item);
+      const side = (i: NonNullable<typeof current>) => ({
+        revision: i.revision,
+        baseRevision: i.baseRevision,
+        content: i.content,
+        byName: nameOf.get(i.contributedByUserId) ?? null,
+        at: i.createdAt,
+      });
+      return {
+        contextConflict: {
+          key: item.key,
+          conflicting: side(item),
+          current: current ? side(current) : null,
+        },
+      };
+    };
+    return {
+      approvals: rows.map((r) => ({
+        ...r,
+        // Finding-6 separation-of-duties surface: the approver IS the user
+        // who triggered the governed action — the UI badges it, deciding it
+        // requires a recorded reason.
+        selfReview: r.userId === r.approverUserId,
+        requestedByName: nameOf.get(r.userId) ?? null,
+        approverName: nameOf.get(r.approverUserId) ?? null,
+        decidedByName: r.decidedBy ? (nameOf.get(r.decidedBy) ?? null) : null,
+        objectLabel:
+          (r.instanceId ? instanceLabel.get(r.instanceId) : null) ??
+          (r.runId ? runLabel.get(r.runId) : null) ??
+          (r.projectId ? projectLabel.get(r.projectId) : null) ??
+          r.toolName ??
+          null,
+        ...contextConflictFor(r),
+      })),
+    };
   });
 
   app.post("/v1/approvals/:approvalId/decide", async (req, reply) => {
@@ -569,44 +757,170 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
     const [row] = await db.select().from(approvals).where(eq(approvals.id, approvalId));
     if (!row) return reply.status(404).send({ error: "unknown_approval" });
-    // Only the rule's named approver may decide (§3).
-    if (row.approverUserId !== deciderUserId) {
-      return reply.status(403).send({ error: "not_the_named_approver" });
+    // A superseded gate is dead, not decidable: its node was reassigned or
+    // retried, its run turned terminal, or a newer artifact re-opened the
+    // stage. Refuse loudly instead of accepting a decision about nothing.
+    if (row.status === "superseded") {
+      return reply.status(409).send({
+        error: "approval_superseded",
+        detail: "this approval was superseded (its node, run, or stage moved on) and can no longer be decided",
+      });
+    }
+    // Only the rule's named approver may decide (§3) — with one escape hatch:
+    // an org ADMIN may decide in the approver's place to unblock a stuck
+    // queue, but only with a recorded reason, and the override is written to
+    // the one audit trail as exactly what it is.
+    const adminOverride = row.approverUserId !== deciderUserId;
+    if (adminOverride) {
+      if (!req.authCtx.isAdmin) {
+        return reply.status(403).send({ error: "not_the_named_approver" });
+      }
+      if (!body.reason?.trim()) {
+        return reply.status(422).send({
+          error: "override_reason_required",
+          detail: "an admin deciding in place of the named approver must record a reason",
+        });
+      }
+    }
+    // Separation-of-duties guard: the named approver IS the user who
+    // triggered the governed action. Still decidable (alternate-approver
+    // routing is deliberately out of scope) but never silently — a recorded
+    // reason is required and the audit row is stamped selfReview.
+    const selfReview = row.userId === row.approverUserId;
+    if (selfReview && !body.reason?.trim()) {
+      return reply.status(400).send({
+        error: "self_review_reason_required",
+        detail: "this is a self-review (the approver is the requesting user); deciding it requires a recorded reason",
+      });
     }
 
-    const [updated] = await db
-      .update(approvals)
-      .set({
-        status: body.decision,
-        decidedBy: deciderUserId,
-        decidedAt: new Date(),
-        decisionReason: body.reason ?? null,
-      })
-      .where(and(eq(approvals.id, approvalId), eq(approvals.status, "pending")))
-      .returning();
-    if (!updated) return reply.status(409).send({ error: "already_decided" });
-    // Workflow sign-offs advance their instance through the same one inbox (§5).
-    if (updated.objectType === "workflow") {
-      await applyWorkflowApprovalDecision(db, updated, body.decision, deciderUserId, opts.dataKey);
+    // ONE transaction: the decision write and the run/workflow/project event
+    // it causes commit or roll back together — a downstream invalid-state 409
+    // can never leave a silently persisted decision behind. Post-commit
+    // execution (git stages, nested-run completion) and the PM mirror run
+    // only after the decision is durable.
+    const outcome = await db.transaction(async (tx) => {
+      const [updated] = await tx
+        .update(approvals)
+        .set({
+          status: body.decision,
+          decidedBy: deciderUserId,
+          decidedAt: new Date(),
+          decisionReason: body.reason ?? null,
+        })
+        .where(and(eq(approvals.id, approvalId), eq(approvals.status, "pending")))
+        .returning();
+      if (!updated) return { updated: null, postCommit: null };
+      if (adminOverride) {
+        await tx.insert(auditLog).values({
+          userId: deciderUserId,
+          objectType: updated.objectType,
+          objectId: updated.instanceId ?? updated.runId ?? updated.projectId ?? null,
+          serverId: updated.serverId,
+          toolName: updated.toolName,
+          detail: {
+            approvalId: updated.id,
+            adminOverride: true,
+            namedApproverUserId: row.approverUserId,
+            decision: body.decision,
+            stageId: updated.stageId,
+          },
+          effect: body.decision === "approved" ? "allow" : "deny",
+          ruleId: "approval-admin-override",
+          ruleChain: [],
+          reason: `admin decided in place of the named approver: ${body.reason}`,
+        });
+      }
+      if (selfReview) {
+        await tx.insert(auditLog).values({
+          userId: deciderUserId,
+          objectType: updated.objectType,
+          objectId: updated.instanceId ?? updated.runId ?? updated.projectId ?? null,
+          serverId: updated.serverId,
+          toolName: updated.toolName,
+          detail: {
+            approvalId: updated.id,
+            selfReview: true,
+            decision: body.decision,
+            stageId: updated.stageId,
+          },
+          effect: body.decision === "approved" ? "allow" : "deny",
+          ruleId: "approval-self-review",
+          ruleChain: [],
+          reason: `self-review: the approver is the requesting user; decided with recorded reason: ${body.reason}`,
+        });
+      }
+      let postCommit: ((d: Db) => Promise<void>) | null = null;
+      // Workflow sign-offs advance their instance through the same one inbox (§5).
+      if (updated.objectType === "workflow") {
+        postCommit = await applyWorkflowApprovalDecision(tx, updated, body.decision, deciderUserId, opts.dataKey);
+      }
+      // Orchestration escalations (§3): approve = another attempt, deny = abort.
+      if (updated.objectType === "run") {
+        postCommit = await applyRunApprovalDecision(tx, updated, body.decision, deciderUserId, opts.dataKey);
+      }
+      // Pillar 5 budget escalations + §9 context-conflict resolutions.
+      if (updated.objectType === "project") {
+        await applyProjectApprovalDecision(tx as unknown as Db, updated, body.decision, deciderUserId);
+      }
+      return { updated, postCommit };
+    });
+    if (!outcome.updated) {
+      // raced: re-read so the refusal names what actually happened
+      const [current] = await db
+        .select({ status: approvals.status })
+        .from(approvals)
+        .where(eq(approvals.id, approvalId));
+      return reply.status(409).send(
+        current?.status === "superseded"
+          ? {
+              error: "approval_superseded",
+              detail: "this approval was superseded (its node, run, or stage moved on) and can no longer be decided",
+            }
+          : { error: "already_decided" },
+      );
     }
-    // Orchestration escalations (§3): approve = another attempt, deny = abort.
-    if (updated.objectType === "run") {
-      await applyRunApprovalDecision(db, updated, body.decision, deciderUserId, opts.dataKey);
-    }
-    // Pillar 5 budget escalations + §9 context-conflict resolutions.
-    if (updated.objectType === "project") {
-      await applyProjectApprovalDecision(db, updated, body.decision, deciderUserId);
+    // The decision is durable from here on: an execution hiccup surfaces in
+    // the response (and the execution machinery's own failure events), never
+    // as a failed decide.
+    let executionError: string | null = null;
+    if (outcome.postCommit) {
+      try {
+        await outcome.postCommit(db);
+      } catch (err) {
+        executionError = err instanceof Error ? err.message : String(err);
+      }
     }
     // EPIC-06 §5: sign-offs mirror to the linked work item — display only,
     // never a second decision point; a mirror failure never unwinds the
     // decision, it is surfaced in the response.
-    const pmMirror = await mirrorApprovalDecision(db, opts.dataKey, updated, deciderUserId);
-    return pmMirror ? { ...updated, pmMirror } : updated;
+    const pmMirror = await mirrorApprovalDecision(db, opts.dataKey, outcome.updated, deciderUserId);
+    return {
+      ...outcome.updated,
+      ...(adminOverride ? { adminOverride: true } : {}),
+      ...(selfReview ? { selfReview: true } : {}),
+      ...(pmMirror ? { pmMirror } : {}),
+      ...(executionError ? { executionError } : {}),
+    };
   });
 
   // ADR-0012: the portal is a static shell (zero data, zero secrets) that
   // talks to the same REST API as any script — policy-as-code by construction.
   app.get("/admin", async (_req, reply) => reply.type("text/html").send(ADMIN_PORTAL_HTML));
+  app.get("/app", async (_req, reply) => reply.type("text/html").send(APP_HTML));
+
+  // The two things anything pointed at the bare origin expects to find: a
+  // human landing on / gets the app, a load balancer or uptime check gets a
+  // status. Both are auth-exempt — neither reveals anything.
+  app.get("/", async (_req, reply) => reply.redirect("/app", 302));
+  app.get("/health", async (_req, reply) => {
+    try {
+      await db.execute(sql`select 1`);
+    } catch {
+      return reply.status(503).send({ status: "degraded", database: "unreachable" });
+    }
+    return { status: "ok", database: "ok" };
+  });
 
   registerAgentConnectorRoutes(app, db, { dataKey: opts.dataKey });
   registerProjectRoutes(app, db);

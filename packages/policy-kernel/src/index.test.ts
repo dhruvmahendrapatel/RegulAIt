@@ -724,3 +724,86 @@ describe("agent declared modes (review fix)", () => {
     expect(undeclared.reason).toContain("not a declared mode");
   });
 });
+
+describe("display names in reason prose (demo finding 5)", () => {
+  it("evaluateAgent's ceiling denial names the agent, id truncated in parentheses", () => {
+    const named = {
+      id: "c8d62183-0000-4000-8000-000000000000",
+      name: "premium-mock",
+      tier: 2,
+      enabled: true,
+      modes: null,
+    } satisfies AgentRef;
+    const d = evaluateAgent({
+      userId: USER,
+      agent: named,
+      mode: "plan",
+      agentGrants: [agentGrant({ agentId: named.id })],
+      ceilingTier: 1,
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe("agent-ceiling");
+    expect(d.reason).toContain("'premium-mock' (c8d62183…)");
+    expect(d.reason).toContain("(tier 2) exceeds user's ceiling (tier 1)");
+    expect(d.reason).not.toContain("c8d62183-0000"); // never the raw UUID in prose
+  });
+
+  it("without a display name the old id-quoting format is unchanged", () => {
+    const d = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "plan", agentGrants: [agentGrant()], ceilingTier: 2,
+    });
+    expect(d.reason).toContain(`agent '${AGENT.id}' (tier 3) exceeds user's ceiling (tier 2)`);
+  });
+
+  it("evaluate() names server, user, and approver when the caller passes names in", () => {
+    const d = evaluate({
+      userId: USER,
+      userName: "Dana Developer",
+      serverId: SERVER,
+      serverName: "repo-tools",
+      tool: writeTool,
+      toolGrants: [toolGrant({ toolName: "drop_table" })],
+      serverGrants: [],
+      approvalRules: [
+        {
+          id: "apr-1",
+          userId: USER,
+          serverId: SERVER,
+          toolName: null,
+          writeOnly: true,
+          approverUserId: "6f0a1b2c-0000-4000-8000-000000000000",
+          approverName: "Avery Approver",
+        },
+      ],
+    });
+    expect(d.effect).toBe("require_approval");
+    expect(d.reason).toContain(`server 'repo-tools' (${SERVER.slice(0, 8)}…)`);
+    expect(d.reason).toContain("approver 'Avery Approver' (6f0a1b2c…)");
+    expect(d.approverUserId).toBe("6f0a1b2c-0000-4000-8000-000000000000"); // full id preserved
+    expect(d.approverName).toBe("Avery Approver");
+
+    const deny = evaluate({
+      userId: USER,
+      userName: "Dana Developer",
+      serverId: SERVER,
+      serverName: "repo-tools",
+      tool: readTool,
+      toolGrants: [],
+      serverGrants: [],
+    });
+    expect(deny.reason).toContain("user 'Dana Developer'");
+    expect(deny.reason).toContain("server 'repo-tools'");
+  });
+
+  it("evaluateConnector names the connector when a display name is passed", () => {
+    const d = evaluateConnector({
+      userId: USER,
+      connectorId: CONNECTOR,
+      connectorName: "salesforce",
+      operation: "write",
+      connectorGrants: [connectorGrant()],
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.reason).toContain(`'salesforce' (${CONNECTOR.slice(0, 8)}…)`);
+  });
+});

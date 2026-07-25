@@ -8,7 +8,7 @@ export class MergeConflictError extends Error {}
 // ---------------------------------------------------------------------------
 // Template definition (§3): declarative, version-controllable, validated here.
 // Executable stage types in this slice: trigger, planning, artifact_generation,
-// human_approval, automated_build, automated_check. git_operation/deployment/
+// human_approval, automated_build, automated_check, git_operation. deployment/
 // rollback are declared for forward-compat but rejected until integrations
 // exist — a template must never promise a stage the engine can't run.
 // ---------------------------------------------------------------------------
@@ -43,7 +43,9 @@ const stageSchema = z.object({
    * engine can't run). Present = the stage completes via its nested run, never
    * via a human trigger. */
   run: z.unknown().optional(),
-  /** automated_check: named checks (informational in this slice) */
+  /** automated_check: named checks. Present (non-empty) = the stage completes
+   * via the gateway's check executor, never via a human trigger; absent = the
+   * stage awaits an explicit human trigger (nothing to run). */
   checks: z.array(z.string().min(1)).optional(),
   /** git_operation: which operation this stage performs */
   action: z.enum(GIT_ACTIONS).optional(),
@@ -311,9 +313,11 @@ function stageAt(def: WorkflowDefinition, index: number): Stage | undefined {
  * blocking stage (approval / artifact / human trigger) or the end.
  *
  * Blocking semantics per §2: artifact_generation waits for a submitted
- * artifact; human_approval waits for the named approver; automated_build and
- * automated_check wait for an explicit human trigger in this slice (no real
- * executors yet) — "decide" and "execute" stay separate user actions.
+ * artifact; human_approval waits for the named approver; git_operation, an
+ * automated_build with a nested run, and an automated_check with named checks
+ * are executed by the gateway; a build without a run or a check without named
+ * checks waits for an explicit human trigger — "decide" and "execute" stay
+ * separate user actions.
  */
 function runForward(def: WorkflowDefinition, state: InstanceState): TransitionResult {
   const effects: Effect[] = [];
@@ -358,14 +362,19 @@ function runForward(def: WorkflowDefinition, state: InstanceState): TransitionRe
       });
       return { state: s, effects };
     }
-    if (stage.type === "git_operation" || (stage.type === "automated_build" && stage.run !== undefined)) {
-      // executed by the gateway (git executor / nested orchestration run);
-      // retryable on failure
+    if (
+      stage.type === "git_operation" ||
+      (stage.type === "automated_build" && stage.run !== undefined) ||
+      (stage.type === "automated_check" && (stage.checks?.length ?? 0) > 0)
+    ) {
+      // executed by the gateway (git executor / nested orchestration run /
+      // check executor); retryable on failure
       s.status = "awaiting_execution";
       effects.push({ kind: "execute_stage", stageId: stage.id });
       return { state: s, effects };
     }
-    // automated_build without a run / automated_check: await explicit trigger
+    // automated_build without a run / automated_check without named checks:
+    // await explicit trigger
     s.status = "awaiting_trigger";
     effects.push({ kind: "await_human_trigger", stageId: stage.id });
     return { state: s, effects };
@@ -452,7 +461,8 @@ export function transition(
   if (event.kind === "execution_succeeded" || event.kind === "execution_failed") {
     const executable =
       current?.type === "git_operation" ||
-      (current?.type === "automated_build" && current.run !== undefined);
+      (current?.type === "automated_build" && current.run !== undefined) ||
+      (current?.type === "automated_check" && (current.checks?.length ?? 0) > 0);
     if (!current || current.id !== event.stageId || !executable) {
       throw new WorkflowStateError(`instance is not executing stage '${event.stageId}'`);
     }
@@ -483,6 +493,13 @@ export function transition(
       // — a human trigger must never bypass the governed execution.
       throw new WorkflowStateError(
         `stage '${event.stageId}' executes a nested run and cannot be human-triggered`,
+      );
+    }
+    if (current.type === "automated_check" && (current.checks?.length ?? 0) > 0) {
+      // same rule for checks: named checks complete via the executor's
+      // recorded results — a human trigger must never skip them.
+      throw new WorkflowStateError(
+        `stage '${event.stageId}' runs named checks and cannot be human-triggered`,
       );
     }
     const s: InstanceState = {

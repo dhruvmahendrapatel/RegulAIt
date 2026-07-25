@@ -964,11 +964,12 @@ describe("workflow engine (EPIC-03 slice)", () => {
       .approvals.find((a: { instanceId: string | null }) => a.instanceId === instanceId);
     expect(signoff).toMatchObject({ objectType: "workflow", stageId: "requirements_signoff", approverUserId: leoId });
 
+    // requesting_user sign-offs are self-reviews — a reason is mandatory
     const approve = await app.inject({
       method: "POST",
       headers: leoAuth,
       url: `/v1/approvals/${signoff.id}/decide`,
-      payload: { decision: "approved" },
+      payload: { decision: "approved", reason: "self-review: solo demo flow" },
     });
     expect(approve.statusCode).toBe(200);
 
@@ -993,7 +994,7 @@ describe("workflow engine (EPIC-03 slice)", () => {
       method: "POST",
       headers: leoAuth,
       url: `/v1/approvals/${signoff2.id}/decide`,
-      payload: { decision: "approved" },
+      payload: { decision: "approved", reason: "self-review: v2 re-approval" },
     });
 
     for (const stageId of ["build", "checks"]) {
@@ -1073,7 +1074,7 @@ describe("workflow engine (EPIC-03 slice)", () => {
       method: "POST",
       headers: leoAuth,
       url: `/v1/approvals/${s1.id}/decide`,
-      payload: { decision: "approved" },
+      payload: { decision: "approved", reason: "self-review: own requirements gate" },
     });
     for (const stageId of ["build", "checks"]) {
       await app.inject({
@@ -1209,7 +1210,7 @@ describe("workflow review-fix regressions", () => {
     );
     await app.inject({
       method: "POST", headers: ninaAuth, url: `/v1/approvals/${gate1Row.id}/decide`,
-      payload: { decision: "approved" },
+      payload: { decision: "approved", reason: "self-review: gate1 is mine" },
     });
 
     // now blocked on gate2 with a live pending row — re-open by editing the artifact
@@ -1392,7 +1393,7 @@ describe("git-provider workflow stages (EPIC-03)", () => {
       method: "POST",
       headers: quinnAuth,
       url: `/v1/approvals/${signoff.id}/decide`,
-      payload: { decision: "approved" },
+      payload: { decision: "approved", reason: "self-review: git chain demo" },
     });
 
     let view = await app.inject({ method: "GET", headers: quinnAuth, url: `/v1/workflows/instances/${instanceId}` });
@@ -1411,7 +1412,7 @@ describe("git-provider workflow stages (EPIC-03)", () => {
       method: "POST",
       headers: quinnAuth,
       url: `/v1/approvals/${mergeGate.id}/decide`,
-      payload: { decision: "approved" },
+      payload: { decision: "approved", reason: "self-review: merging my own gate" },
     });
 
     view = await app.inject({ method: "GET", headers: quinnAuth, url: `/v1/workflows/instances/${instanceId}` });
@@ -1584,7 +1585,7 @@ describe("git executor hardening (review follow-ups)", () => {
       );
       return app.inject({
         method: "POST", headers: umaAuth, url: `/v1/approvals/${row.id}/decide`,
-        payload: { decision: "approved" },
+        payload: { decision: "approved", reason: "self-review: reopen replay test" },
       });
     };
 
@@ -1634,7 +1635,7 @@ describe("git executor hardening (review follow-ups)", () => {
     );
     await app.inject({
       method: "POST", headers: umaAuth, url: `/v1/approvals/${signoff.id}/decide`,
-      payload: { decision: "denied" },
+      payload: { decision: "denied", reason: "self-review: denying my own gate" },
     });
 
     const bypass = await app.inject({
@@ -2342,8 +2343,12 @@ describe("multi-agent orchestration runs (EPIC-05 slice)", () => {
     });
     expect(otherDrive.statusCode).toBe(404);
 
+    // non-admins get their OWN runs from the list view, never the fleet
     const fleetAsNonAdmin = await app.inject({ method: "GET", headers: patAuth, url: "/v1/runs" });
-    expect(fleetAsNonAdmin.statusCode).toBe(403);
+    expect(fleetAsNonAdmin.statusCode).toBe(200);
+    expect(
+      fleetAsNonAdmin.json().runs.every((r: { initiatingUserId: string }) => r.initiatingUserId === patId),
+    ).toBe(true);
     const fleet = await app.inject({ method: "GET", headers: AUTH, url: "/v1/runs" });
     expect(fleet.json().runs.length).toBeGreaterThanOrEqual(3);
   });
@@ -2381,6 +2386,9 @@ describe("per-run budget caps (EPIC-05 §5.2)", () => {
     benAuth = await authFor(benId);
     approverAuth = await authFor(approverId);
 
+    // dispatchable workers (mock provider + model id): the budget re-plan
+    // only substitutes agents that could really be served, so undispatchable
+    // fixtures would silently opt out of the replan test below
     const mkAgent = async (name: string, tier: number, inC: number, outC: number) => {
       const r = await app.inject({
         method: "POST",
@@ -2388,11 +2396,12 @@ describe("per-run budget caps (EPIC-05 §5.2)", () => {
         url: "/v1/agents",
         payload: {
           name,
-          provider: "anthropic",
+          provider: "mock",
           tier,
           modes: ["execute"],
           costPerMTokIn: inC,
           costPerMTokOut: outC,
+          model: name,
         },
       });
       return r.json().id as string;
@@ -2566,6 +2575,103 @@ describe("per-run budget caps (EPIC-05 §5.2)", () => {
     expect(row.servedAgentId).toBe(cheapWorkerId);
     expect(row.requestedAgentId).toBe(priceyWorkerId);
     expect(row.estimatedCostSavedUsd).toBeGreaterThan(0);
+  });
+
+  it("replan respects dispatchability: an unconfigured provider priced below mock is skipped, ledgered, and the node still executes", async () => {
+    // Carryover bug reproduced by the gate: a google-provider agent with NO
+    // stored credential, priced BELOW the dispatchable workers. The old
+    // replan handed it the node and the later dispatch 409'd
+    // `no_model_credential` mid-run; now it must be skipped exactly like the
+    // invoke path skips it, with the skip visible in the trace.
+    const bargain = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/agents",
+      payload: {
+        name: "budget-bargain-google",
+        provider: "google",
+        tier: 0,
+        modes: ["execute"],
+        costPerMTokIn: 0.5,
+        costPerMTokOut: 2.5,
+        model: "gemini-cheap",
+      },
+    });
+    const bargainId = bargain.json().id as string;
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/grants/agents",
+      payload: { userId: benId, agentId: bargainId },
+    });
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: `/v1/users/${benId}/agent-policy`,
+      payload: { runBudgetBreachAction: "replan" },
+    });
+
+    const created = await app.inject({
+      method: "POST",
+      headers: benAuth,
+      url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "replan-dispatchable",
+          escalationApproverUserId: approverId,
+          nodes: [mkNode("big", priceyWorkerId)],
+        },
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json().budgetApprovalPending).toBe(false);
+    expect(created.json().budget.replanned).toBe(true);
+    // cheapest DISPATCHABLE agent, not the credential-less bargain ($0.30)
+    expect(created.json().budget.estimatedTotalUsd).toBeCloseTo(0.6, 6);
+    const runId = created.json().id;
+    const view = await app.inject({ method: "GET", headers: benAuth, url: `/v1/runs/${runId}` });
+    expect(view.json().run.state.owners.big).toBe(cheapWorkerId);
+
+    // the trace says WHY the cheaper agent was not chosen (§8 honesty)
+    const ledger = await app.inject({
+      method: "GET",
+      headers: AUTH,
+      url: `/v1/cost-events?userId=${benId}`,
+    });
+    const sub = ledger.json().events.find(
+      (e: { objectType: string; objectId: string | null }) =>
+        e.objectType === "run" && e.objectId === runId,
+    );
+    expect(sub).toBeDefined();
+    expect(sub.servedAgentId).toBe(cheapWorkerId);
+    expect(sub.detail.routingSkippedCandidates).toEqual([
+      { agentId: bargainId, name: "budget-bargain-google", reason: "no_model_credential" },
+    ]);
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit?userId=${benId}` });
+    const planned = audit.json().entries.find(
+      (e: { ruleId: string; detail: { runName?: string } | null }) =>
+        e.ruleId === "run-planned" && e.detail?.runName === "replan-dispatchable",
+    );
+    expect(planned).toBeDefined();
+    expect(planned.detail.replanSkippedCandidates).toEqual([
+      { nodeId: "big", skipped: [{ agentId: bargainId, name: "budget-bargain-google", reason: "no_model_credential" }] },
+    ]);
+
+    // end-to-end: the replanned node really dispatches instead of 409ing
+    const ev = (payload: Record<string, unknown>) =>
+      app.inject({ method: "POST", headers: benAuth, url: `/v1/runs/${runId}/events`, payload });
+    await ev({ kind: "start" });
+    const startedNode = await ev({ kind: "node_started", nodeId: "big" });
+    expect(startedNode.statusCode).toBe(200);
+    const dispatched = await app.inject({
+      method: "POST",
+      headers: benAuth,
+      url: `/v1/runs/${runId}/nodes/big/dispatch`,
+      payload: { input: "execute the big task" },
+    });
+    expect(dispatched.statusCode).toBe(200);
+    expect(dispatched.json().dispatch.servedAgentId).toBe(cheapWorkerId);
+    expect(dispatched.json().dispatch.refusal).toBe(false);
   });
 
   it("in-flight breach: reassigning to a pricier agent trips the cap at node start, never silently", async () => {
@@ -3441,7 +3547,9 @@ describe("governed model dispatch (measured usage, pillar 5 actuals)", () => {
     // the dispatch executed exactly what routing chose — never the requested model
     expect(dispatch.servedAgentId).toBe(cheapId);
     expect(dispatch.model).toBe("mock-small");
-    expect(dispatch.outputText).toBe("mock(mock-small): summarize this short note");
+    // the mock answers the ask (a summary referencing the note), not an echo
+    expect(dispatch.outputText).toContain("Summary");
+    expect(dispatch.outputText).toContain("short note");
     expect(dispatch.refusal).toBe(false);
     expect(dispatch.stopReason).toBe("end_turn");
     expect(dispatch.usage.inputTokens).toBeGreaterThan(0);
@@ -3667,7 +3775,9 @@ describe("worker-node dispatch (EPIC-05 × real dispatch)", () => {
     const { dispatch, measuredSpentUsd } = res.json();
     expect(dispatch.servedAgentId).toBe(workerId);
     expect(dispatch.model).toBe("mock-worker");
-    expect(dispatch.outputText).toBe("mock(mock-worker): please draft the api endpoints");
+    // the mock drafts (a code block referencing the topic), not an echo
+    expect(dispatch.outputText).toContain("api endpoints");
+    expect(dispatch.outputText).toContain("```");
     expect(dispatch.refusal).toBe(false);
     expect(dispatch.costUsd).toBeGreaterThan(0);
     expect(measuredSpentUsd).toBeCloseTo(dispatch.costUsd, 10);
@@ -5320,9 +5430,11 @@ describe("compliance classification cascade (§8.3)", () => {
     expect(during.json().pendingClassifications).toEqual(["soc2"]);
 
     const reviewerAuth = await authFor(reviewerId);
+    // proposed via the identityless bootstrap token, so the row's requester
+    // fell back to the reviewer — reads as a self-review, reason required
     await app.inject({
       method: "POST", headers: reviewerAuth, url: `/v1/approvals/${approvalId}/decide`,
-      payload: { decision: "approved" },
+      payload: { decision: "approved", reason: "reviewed diff; soc2-only is correct" },
     });
     const after = await app.inject({
       method: "GET", headers: AUTH, url: `/v1/projects/${ccProjId}/compliance`,
@@ -5338,7 +5450,7 @@ describe("compliance classification cascade (§8.3)", () => {
     });
     await app.inject({
       method: "POST", headers: reviewerAuth, url: `/v1/approvals/${again.json().approvalId}/decide`,
-      payload: { decision: "denied" },
+      payload: { decision: "denied", reason: "keep soc2-only" },
     });
     const final = await app.inject({
       method: "GET", headers: AUTH, url: `/v1/projects/${ccProjId}/compliance`,
@@ -5465,7 +5577,7 @@ describe("streaming dispatch (SSE): same gates, same ledger, delivered as deltas
     expect(results).toHaveLength(1);
     const result = results[0]!.data;
     expect(result.decision.effect).toBe("allow");
-    expect(result.dispatch.outputText).toBe("mock(mock-stream): stream this back");
+    expect(result.dispatch.outputText).toContain("stream this back");
     // the deltas ARE the output — concatenation matches the final result
     expect(deltas.map((d) => d.data.text).join("")).toBe(result.dispatch.outputText);
 
@@ -5711,5 +5823,543 @@ describe("xai model adapter: all four real providers ride the same governed pipe
       srv.closeAllConnections();
       await new Promise<void>((r) => srv.close(() => r()));
     }
+  });
+});
+
+describe("jira pm adapter: run sync + status mirror against a live-shaped server", () => {
+  it("pm-sync creates Jira issues and node events mirror through workflow transitions", async () => {
+    let issueSeq = 0;
+    const creations: Array<{ auth: string | null; body: Record<string, unknown> }> = [];
+    const transitionPosts: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const srv = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        const parsed = body ? JSON.parse(body) : {};
+        const send = (status: number, payload: unknown) => {
+          res.writeHead(status, { "content-type": "application/json" });
+          res.end(payload === null ? "" : JSON.stringify(payload));
+        };
+        if (req.method === "POST" && req.url === "/rest/api/2/issue") {
+          creations.push({ auth: (req.headers.authorization as string) ?? null, body: parsed });
+          issueSeq += 1;
+          return send(201, { id: String(10000 + issueSeq), key: `REG-${issueSeq}`, self: "..." });
+        }
+        if (req.method === "GET" && /\/transitions$/.test(req.url ?? "")) {
+          return send(200, { transitions: [
+            { id: "11", name: "Start progress", to: { name: "In Progress" } },
+            { id: "31", name: "Finish", to: { name: "Done" } },
+          ] });
+        }
+        if (req.method === "POST" && /\/transitions$/.test(req.url ?? "")) {
+          transitionPosts.push({ url: req.url ?? "", body: parsed });
+          return send(204, null);
+        }
+        return send(200, {});
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    const port = (srv.address() as { port: number }).port;
+
+    try {
+      const juno = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email: "jira-juno@example.com", displayName: "Jira Juno" },
+      });
+      const junoAuth = await authFor(juno.json().id);
+      const approver = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email: "jira-approver@example.com", displayName: "Jira Approver" },
+      });
+      const agentRes = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/agents",
+        payload: {
+          name: "jira-worker", provider: "mock", tier: 0, modes: ["execute"],
+          costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-jira",
+        },
+      });
+      await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/grants/agents",
+        payload: { userId: juno.json().id, agentId: agentRes.json().id },
+      });
+      const conn = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/pm/connections",
+        payload: {
+          name: "jira-e2e", provider: "jira", project: "REG",
+          baseUrl: `http://127.0.0.1:${port}`, token: "bot@example.com:api-token",
+        },
+      });
+      expect(conn.statusCode).toBe(201);
+
+      const run = await app.inject({
+        method: "POST", headers: junoAuth, url: "/v1/runs",
+        payload: {
+          graph: {
+            run: "jira-sync-run",
+            escalationApproverUserId: approver.json().id,
+            nodes: [{ id: "a", title: "implement api", ownerAgentId: agentRes.json().id, mode: "execute", estimate: { in: 1, out: 1 } }],
+          },
+        },
+      });
+      const runId = run.json().id;
+
+      const synced = await app.inject({
+        method: "POST", headers: junoAuth, url: `/v1/runs/${runId}/pm-sync`,
+        payload: { connectionName: "jira-e2e" },
+      });
+      expect(synced.statusCode).toBe(201);
+      // run-level parent + one node item, created with the mapped fields
+      expect(creations.length).toBe(2);
+      expect(creations[0]!.auth).toBe(
+        "Basic " + Buffer.from("bot@example.com:api-token").toString("base64"),
+      );
+      const nodeIssue = creations.find(
+        (c) => (c.body.fields as Record<string, unknown>).summary === "implement api",
+      );
+      expect(nodeIssue).toBeDefined();
+      expect((nodeIssue!.body.fields as Record<string, unknown>).project).toEqual({ key: "REG" });
+      expect((nodeIssue!.body.fields as Record<string, unknown>).issuetype).toEqual({ name: "Task" });
+
+      // a node event mirrors outbound through a Jira workflow transition
+      await app.inject({ method: "POST", headers: junoAuth, url: `/v1/runs/${runId}/events`, payload: { kind: "start" } });
+      const started = await app.inject({
+        method: "POST", headers: junoAuth, url: `/v1/runs/${runId}/events`,
+        payload: { kind: "node_started", nodeId: "a" },
+      });
+      expect(started.statusCode).toBe(200);
+      expect(transitionPosts.length).toBe(1);
+      expect(transitionPosts[0]!.body).toEqual({ transition: { id: "11" } }); // → In Progress
+    } finally {
+      srv.closeAllConnections();
+      await new Promise<void>((r) => srv.close(() => r()));
+    }
+  });
+});
+
+describe("linear pm adapter: GraphQL run sync + state mirror end-to-end", () => {
+  it("pm-sync creates Linear issues via issueCreate and node events mirror via workflow states", async () => {
+    let issueSeq = 0;
+    const gqlCalls: Array<{ auth: string | null; query: string; variables: Record<string, unknown> }> = [];
+    const srv = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        const parsed = JSON.parse(body || "{}");
+        gqlCalls.push({
+          auth: (req.headers.authorization as string) ?? null,
+          query: parsed.query ?? "",
+          variables: parsed.variables ?? {},
+        });
+        let data: unknown = {};
+        if (String(parsed.query).includes("teams(filter")) {
+          data = { teams: { nodes: [{ id: "team-uuid-9" }] } };
+        } else if (String(parsed.query).includes("issueCreate")) {
+          issueSeq += 1;
+          data = { issueCreate: { success: true, issue: { id: `lin-issue-${issueSeq}`, url: `https://linear.app/acme/issue/REG-${issueSeq}` } } };
+        } else if (String(parsed.query).includes("states")) {
+          data = { team: { states: { nodes: [
+            { id: "st-todo", name: "Todo" },
+            { id: "st-prog", name: "In Progress" },
+            { id: "st-done", name: "Done" },
+          ] } } };
+        } else if (String(parsed.query).includes("issueUpdate")) {
+          data = { issueUpdate: { success: true } };
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ data }));
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    const port = (srv.address() as { port: number }).port;
+
+    try {
+      const lena = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email: "linear-lena@example.com", displayName: "Linear Lena" },
+      });
+      const lenaAuth = await authFor(lena.json().id);
+      const approver = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email: "linear-approver@example.com", displayName: "Linear Approver" },
+      });
+      const agentRes = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/agents",
+        payload: {
+          name: "linear-worker", provider: "mock", tier: 0, modes: ["execute"],
+          costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-linear",
+        },
+      });
+      await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/grants/agents",
+        payload: { userId: lena.json().id, agentId: agentRes.json().id },
+      });
+      const conn = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/pm/connections",
+        payload: {
+          name: "linear-e2e", provider: "linear", project: "REG",
+          baseUrl: `http://127.0.0.1:${port}`, token: "lin_api_e2e_secret",
+        },
+      });
+      expect(conn.statusCode).toBe(201);
+
+      const run = await app.inject({
+        method: "POST", headers: lenaAuth, url: "/v1/runs",
+        payload: {
+          graph: {
+            run: "linear-sync-run",
+            escalationApproverUserId: approver.json().id,
+            nodes: [{ id: "a", title: "ship feature", ownerAgentId: agentRes.json().id, mode: "execute", estimate: { in: 1, out: 1 } }],
+          },
+        },
+      });
+      const runId = run.json().id;
+
+      const synced = await app.inject({
+        method: "POST", headers: lenaAuth, url: `/v1/runs/${runId}/pm-sync`,
+        payload: { connectionName: "linear-e2e" },
+      });
+      expect(synced.statusCode).toBe(201);
+      const creations = gqlCalls.filter((c) => c.query.includes("issueCreate"));
+      expect(creations).toHaveLength(2); // run parent + node
+      expect(creations[0]!.auth).toBe("lin_api_e2e_secret");
+      const nodeCreate = creations.find(
+        (c) => (c.variables.input as Record<string, unknown>).title === "ship feature",
+      );
+      expect(nodeCreate).toBeDefined();
+      expect((nodeCreate!.variables.input as Record<string, unknown>).teamId).toBe("team-uuid-9");
+
+      await app.inject({ method: "POST", headers: lenaAuth, url: `/v1/runs/${runId}/events`, payload: { kind: "start" } });
+      const started = await app.inject({
+        method: "POST", headers: lenaAuth, url: `/v1/runs/${runId}/events`,
+        payload: { kind: "node_started", nodeId: "a" },
+      });
+      expect(started.statusCode).toBe(200);
+      const stateMove = gqlCalls.find(
+        (c) => c.query.includes("issueUpdate") && (c.variables.input as Record<string, unknown>)?.stateId,
+      );
+      expect(stateMove).toBeDefined();
+      expect((stateMove!.variables.input as Record<string, unknown>).stateId).toBe("st-prog"); // → In Progress
+    } finally {
+      srv.closeAllConnections();
+      await new Promise<void>((r) => srv.close(() => r()));
+    }
+  });
+});
+
+describe("UI plumbing: /v1/me and own-scoped list views", () => {
+  it("identity echo works and non-admins see exactly their own runs/instances/projects", async () => {
+    const mia = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email: "ui-mia@example.com", displayName: "UI Mia" },
+    });
+    const miaId = mia.json().id;
+    const miaAuth = await authFor(miaId);
+
+    const me = await app.inject({ method: "GET", headers: miaAuth, url: "/v1/me" });
+    expect(me.statusCode).toBe(200);
+    expect(me.json()).toMatchObject({ userId: miaId, isAdmin: false });
+    expect(me.json().user.email).toBe("ui-mia@example.com");
+
+    // mia initiates one run; the fleet holds many others from earlier tests
+    const agentRes = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/agents",
+      payload: { name: "ui-worker", provider: "mock", tier: 0, modes: ["execute"], costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-ui" },
+    });
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/grants/agents",
+      payload: { userId: miaId, agentId: agentRes.json().id },
+    });
+    await app.inject({
+      method: "POST", headers: miaAuth, url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "ui-own-run",
+          escalationApproverUserId: miaId,
+          nodes: [{ id: "a", title: "t", ownerAgentId: agentRes.json().id, mode: "execute" }],
+        },
+      },
+    });
+    const myRuns = await app.inject({ method: "GET", headers: miaAuth, url: "/v1/runs" });
+    expect(myRuns.statusCode).toBe(200);
+    expect(myRuns.json().runs.length).toBe(1);
+    expect(myRuns.json().runs[0].name).toBe("ui-own-run");
+    const fleet = await app.inject({ method: "GET", headers: AUTH, url: "/v1/runs" });
+    expect(fleet.json().runs.length).toBeGreaterThan(1);
+
+    // instances: mia has none; the admin fleet is non-empty from earlier tests
+    const myInstances = await app.inject({ method: "GET", headers: miaAuth, url: "/v1/workflows/instances" });
+    expect(myInstances.json().instances).toHaveLength(0);
+
+    // projects: only memberships are visible to a non-admin
+    const proj = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/projects",
+      payload: { name: "ui-mia-project" },
+    });
+    await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/projects/${proj.json().id}/members`,
+      payload: { userId: miaId, role: "viewer" },
+    });
+    const myProjects = await app.inject({ method: "GET", headers: miaAuth, url: "/v1/projects" });
+    expect(myProjects.json().projects).toHaveLength(1);
+    expect(myProjects.json().projects[0].name).toBe("ui-mia-project");
+  });
+});
+
+describe("end-user app shell (/app)", () => {
+  it("serves without auth — zero data, zero secrets — with all workspace pages", async () => {
+    const res = await app.inject({ method: "GET", url: "/app" });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toContain("text/html");
+    for (const page of ["Playground", "Runs", "Workflows", "Inbox", "Projects"]) {
+      expect(res.body).toContain(page);
+    }
+    expect(res.body).not.toContain("@example.com");
+  });
+});
+
+describe("slice 3: the approval loop closes — approver reads, reasons, admin override", () => {
+  let adminId: string;
+  let adminAuth: { authorization: string };
+  let ivyId: string; // initiator
+  let ivyAuth: { authorization: string };
+  let oleId: string; // named approver
+  let oleAuth: { authorization: string };
+  let zedAuth: { authorization: string }; // uninvolved third user
+  let instanceId: string;
+  let signoffId: string;
+  let runId: string;
+  let runApprovalId: string;
+
+  beforeAll(async () => {
+    const mkUser = async (email: string, name: string, isAdmin = false) => {
+      const r = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email, displayName: name, isAdmin },
+      });
+      return r.json().id as string;
+    };
+    adminId = await mkUser("loop-admin@example.com", "Loop Admin", true);
+    ivyId = await mkUser("loop-ivy@example.com", "Loop Ivy");
+    oleId = await mkUser("loop-ole@example.com", "Loop Ole");
+    const zedId = await mkUser("loop-zed@example.com", "Loop Zed");
+    adminAuth = await authFor(adminId);
+    ivyAuth = await authFor(ivyId);
+    oleAuth = await authFor(oleId);
+    zedAuth = await authFor(zedId);
+
+    // a workflow whose sign-off names Ole (NOT the requesting user)
+    const tpl = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/templates",
+      payload: {
+        name: "loop-closure-change",
+        definition: {
+          workflow: "loop-closure-change",
+          stages: [
+            { id: "intake", type: "trigger" },
+            { id: "requirements", type: "artifact_generation", output: "requirements_file" },
+            { id: "signoff", type: "human_approval", approvers: [oleId] },
+          ],
+        },
+      },
+    });
+    expect(tpl.statusCode).toBe(201);
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/assignment-rules",
+      payload: { templateId: tpl.json().id, changeType: "loop-closure" },
+    });
+    const started = await app.inject({
+      method: "POST", headers: ivyAuth, url: "/v1/workflows/instances",
+      payload: {
+        change: { description: "close the approval loop", paths: ["src/a.ts"], changeType: "loop-closure", environment: "staging" },
+      },
+    });
+    expect(started.statusCode).toBe(201);
+    instanceId = started.json().id;
+    const art = await app.inject({
+      method: "POST", headers: ivyAuth, url: `/v1/workflows/instances/${instanceId}/artifacts`,
+      payload: { stageId: "requirements", content: "# Loop-closure requirements\n\n1. Approvers see what they sign." },
+    });
+    expect(art.json().status).toBe("blocked_on_approval");
+    const q = await app.inject({ method: "GET", headers: AUTH, url: "/v1/approvals?status=pending" });
+    signoffId = q.json().approvals.find((a: { instanceId: string | null }) => a.instanceId === instanceId).id;
+
+    // a run whose escalation approver is Ole, with one escalated node
+    const agent = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/agents",
+      payload: { name: "loop-worker", provider: "mock", tier: 0, modes: ["execute"], costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-loop" },
+    });
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/grants/agents",
+      payload: { userId: ivyId, agentId: agent.json().id },
+    });
+    const run = await app.inject({
+      method: "POST", headers: ivyAuth, url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "loop-closure-run",
+          escalationApproverUserId: oleId,
+          nodes: [{ id: "solo", title: "do the work", ownerAgentId: agent.json().id, mode: "execute" }],
+        },
+      },
+    });
+    expect(run.statusCode).toBe(201);
+    runId = run.json().id;
+    for (const payload of [
+      { kind: "start" },
+      { kind: "node_started", nodeId: "solo" },
+      { kind: "node_failed", nodeId: "solo", error: "worker crashed" },
+      { kind: "escalate_node", nodeId: "solo" },
+    ]) {
+      const r = await app.inject({ method: "POST", headers: ivyAuth, url: `/v1/runs/${runId}/events`, payload });
+      expect(r.statusCode).toBe(200);
+    }
+    const q2 = await app.inject({ method: "GET", headers: AUTH, url: "/v1/approvals?status=pending" });
+    runApprovalId = q2.json().approvals.find((a: { runId: string | null }) => a.runId === runId).id;
+  });
+
+  it("the inbox names the requester, the approver, and the governed object", async () => {
+    const inbox = await app.inject({ method: "GET", headers: oleAuth, url: "/v1/approvals?status=pending" });
+    const signoff = inbox.json().approvals.find((a: { id: string }) => a.id === signoffId);
+    expect(signoff).toMatchObject({
+      requestedByName: "Loop Ivy",
+      approverName: "Loop Ole",
+      objectLabel: "close the approval loop",
+    });
+    const escalation = inbox.json().approvals.find((a: { id: string }) => a.id === runApprovalId);
+    expect(escalation).toMatchObject({ requestedByName: "Loop Ivy", objectLabel: "loop-closure-run" });
+  });
+
+  it("the named approver can READ the governed instance and run; an uninvolved user cannot", async () => {
+    const inst = await app.inject({ method: "GET", headers: oleAuth, url: `/v1/workflows/instances/${instanceId}` });
+    expect(inst.statusCode).toBe(200);
+    expect(inst.json().artifacts[0].content).toContain("Loop-closure requirements");
+    expect(inst.json().pendingApprovals[0].approverName).toBe("Loop Ole");
+
+    const run = await app.inject({ method: "GET", headers: oleAuth, url: `/v1/runs/${runId}` });
+    expect(run.statusCode).toBe(200);
+    expect(run.json().run.name).toBe("loop-closure-run");
+
+    const instDenied = await app.inject({ method: "GET", headers: zedAuth, url: `/v1/workflows/instances/${instanceId}` });
+    expect(instDenied.statusCode).toBe(403);
+    const runDenied = await app.inject({ method: "GET", headers: zedAuth, url: `/v1/runs/${runId}` });
+    expect(runDenied.statusCode).toBe(404);
+
+    // the widening is READ-only: the approver still cannot drive the objects
+    const drive = await app.inject({
+      method: "POST", headers: oleAuth, url: `/v1/workflows/instances/${instanceId}/abort`,
+    });
+    expect(drive.statusCode).toBe(403);
+    const driveRun = await app.inject({
+      method: "POST", headers: oleAuth, url: `/v1/runs/${runId}/events`, payload: { kind: "abort" },
+    });
+    expect(driveRun.statusCode).toBe(404);
+  });
+
+  it("the named approver's PM-strip reads return 200 [] instead of guaranteed 404s", async () => {
+    // finding 4: the approver cross-read fired GET /v1/pm/links and
+    // GET /v1/decisions that 404'd for non-initiators — the same
+    // named-pending-approver widening as the instance/run GETs now admits
+    // them, answering 200 with [] where nothing exists.
+    const runLinks = await app.inject({ method: "GET", headers: oleAuth, url: `/v1/pm/links?runId=${runId}` });
+    expect(runLinks.statusCode).toBe(200);
+    expect(runLinks.json().links).toEqual([]);
+    const runDecisions = await app.inject({
+      method: "GET", headers: oleAuth, url: `/v1/decisions?objectType=run&objectId=${runId}`,
+    });
+    expect(runDecisions.statusCode).toBe(200);
+    expect(runDecisions.json().decisions).toEqual([]);
+
+    const instLinks = await app.inject({
+      method: "GET", headers: oleAuth, url: `/v1/pm/links?instanceId=${instanceId}`,
+    });
+    expect(instLinks.statusCode).toBe(200);
+    expect(instLinks.json().links).toEqual([]);
+    const instDecisions = await app.inject({
+      method: "GET", headers: oleAuth, url: `/v1/decisions?objectType=workflow_instance&objectId=${instanceId}`,
+    });
+    expect(instDecisions.statusCode).toBe(200);
+    expect(instDecisions.json().decisions).toEqual([]);
+
+    // an uninvolved user still gets existence-hiding 404s
+    const zedLinks = await app.inject({ method: "GET", headers: zedAuth, url: `/v1/pm/links?runId=${runId}` });
+    expect(zedLinks.statusCode).toBe(404);
+    const zedDecisions = await app.inject({
+      method: "GET", headers: zedAuth, url: `/v1/decisions?objectType=run&objectId=${runId}`,
+    });
+    expect(zedDecisions.statusCode).toBe(404);
+  });
+
+  it("deciding with a reason records it; the read window closes once nothing is pending", async () => {
+    const decided = await app.inject({
+      method: "POST", headers: oleAuth, url: `/v1/approvals/${runApprovalId}/decide`,
+      payload: { decision: "approved", reason: "transient failure — retry it" },
+    });
+    expect(decided.statusCode).toBe(200);
+    expect(decided.json()).toMatchObject({
+      status: "approved",
+      decidedBy: oleId,
+      decisionReason: "transient failure — retry it",
+    });
+    expect(decided.json().adminOverride).toBeUndefined();
+
+    const listed = await app.inject({ method: "GET", headers: oleAuth, url: "/v1/approvals" });
+    const row = listed.json().approvals.find((a: { id: string }) => a.id === runApprovalId);
+    expect(row.decisionReason).toBe("transient failure — retry it");
+    expect(row.decidedByName).toBe("Loop Ole");
+
+    // no pending approval on the run names Ole anymore → the read closes again
+    const runView = await app.inject({ method: "GET", headers: oleAuth, url: `/v1/runs/${runId}` });
+    expect(runView.statusCode).toBe(404);
+    // …and so does the widened PM strip
+    const runLinks = await app.inject({ method: "GET", headers: oleAuth, url: `/v1/pm/links?runId=${runId}` });
+    expect(runLinks.statusCode).toBe(404);
+    const runDecisions = await app.inject({
+      method: "GET", headers: oleAuth, url: `/v1/decisions?objectType=run&objectId=${runId}`,
+    });
+    expect(runDecisions.statusCode).toBe(404);
+  });
+
+  it("admin override: 403 for a third user, mandatory reason, audit-marked", async () => {
+    const zed = await app.inject({
+      method: "POST", headers: zedAuth, url: `/v1/approvals/${signoffId}/decide`,
+      payload: { decision: "approved", reason: "I want this through" },
+    });
+    expect(zed.statusCode).toBe(403);
+    expect(zed.json().error).toBe("not_the_named_approver");
+
+    const noReason = await app.inject({
+      method: "POST", headers: adminAuth, url: `/v1/approvals/${signoffId}/decide`,
+      payload: { decision: "approved" },
+    });
+    expect(noReason.statusCode).toBe(422);
+    expect(noReason.json().error).toBe("override_reason_required");
+
+    const overridden = await app.inject({
+      method: "POST", headers: adminAuth, url: `/v1/approvals/${signoffId}/decide`,
+      payload: { decision: "approved", reason: "Ole is on leave; unblocking per policy" },
+    });
+    expect(overridden.statusCode).toBe(200);
+    expect(overridden.json()).toMatchObject({
+      status: "approved",
+      adminOverride: true,
+      decidedBy: adminId,
+      decisionReason: "Ole is on leave; unblocking per policy",
+    });
+
+    // the decision took real effect: the sign-off stage advanced (last stage → completed)
+    const inst = await app.inject({ method: "GET", headers: ivyAuth, url: `/v1/workflows/instances/${instanceId}` });
+    expect(inst.json().instance.status).toBe("completed");
+
+    // the audit trail marks the override as exactly what it is
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit?userId=${adminId}` });
+    const entry = audit.json().entries.find((e: { ruleId: string }) => e.ruleId === "approval-admin-override");
+    expect(entry).toBeDefined();
+    expect(entry.detail).toMatchObject({
+      adminOverride: true,
+      approvalId: signoffId,
+      namedApproverUserId: oleId,
+      decision: "approved",
+    });
+    expect(entry.reason).toContain("Ole is on leave");
   });
 });

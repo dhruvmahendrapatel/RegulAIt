@@ -212,6 +212,66 @@ mcp-default/retention/pii (detector + pruning jobs), reapply-to-in-flight on rec
 (diff covers the policy; in-flight instances keep their merged definitions), per-framework
 cost-governance policies (§8.6→§10.3).
 
+**Demo-readiness sweep — the product becomes CLIENT-PRESENTABLE, 2026-07-25.** After the user
+tested the deployed stack ("UI looks okay, functionality still looks incomplete"), a 15-agent
+audit produced 126 verified gaps with one diagnosis: ~98 REST routes behind eight working
+kernels, but the UIs called only 11/22 of them, the seed created no integrations, and nothing
+could be *created* from a browser. Seven slices fixed this (commits 94bfb5f, d012f01, 198704e,
+plus the fix pass): (1) the seed now populates every object type with real dispatched spend;
+(2) credential/key layer — platform + BYO model credentials, one-time API-key reveal, agent-
+policy editor, zero raw-UUID inputs; (3) closed approval loop — approver reads, inline
+artifact previews, decision reasons, audited admin override; (4) New Run form (canned DAG
+templates + advanced JSON), per-node instructions, project create/PATCH, teams; (5) full
+pillar-4 write surface — context editor with baseRevision contract, history, promote,
+conflict arbitration with both texts; (6) pillar-2 admin home + seeded 10-stage pipeline
+(intake→…→sign-off→nested build→checks→branch→mock PR→merge gate→merge) drivable end-to-end;
+(7) pillars 5/6/8 in /app — spend page, DAG SVG with elapsed/abort/reassign/escalate, honest
+stop reasons, true parallel waves, PM strip + connections tab. The mock provider now returns
+intent-shaped tier-differentiated replies (echo bot dead); orchestration routing respects
+credential dispatchability. A three-persona headless-Chromium drive (~50 screenshots) and a
+fresh-eyes judge returned "demo-ready-with-caveats" with 6 must-fixes — all fixed and
+re-verified live (atomic decide + superseded stale approvals, PM mirror upsert + honest sync
++ orphan handling, compact approvals queue with friendly labels, zero console errors on
+approver cross-reads, names instead of UUIDs in human-facing strings, self-review guard with
+mandatory reason). Suite: 293 → **365 tests**, all green.
+
+**First AWS deployment — the dev demo stack is LIVE, 2026-07-25 (ADR-0013).** The user
+explicitly requested an AWS deployment for hands-on testing (cannot run locally); explicit
+sign-off obtained in-session via an IAM Identity Center device-code login (Admin-BreakGlass,
+workload account). New reusable module `infra/modules/app-instance` (single AL2023 EC2 box,
+IMDSv2-only, SSM Session Manager access with NO ssh keypair, pulls a source tarball from a
+module-owned private S3 bucket, `docker compose up -d --build` with per-deploy random
+runtime config) composed into `infra/environments/regulait-dev-app` — its own state key
+(`regulait-dev-app/terraform.tfstate`) so app deploys can never re-plan the org/security
+baseline. Applied: instance `i-013c62adc887c76bb`, `http://3.237.199.248:3000` (/app +
+/admin verified 200 through the public IP; seed keys handed to the user in-chat, never
+committed). Dev-grade by declaration: HTTP only, port open to the world but everything
+key-gated, demo data, ~$15–30/mo (will trip the $5 foundation budget alert — expected).
+Teardown = `terraform destroy` in `regulait-dev-app`. NOT production; anything beyond demo
+use needs a new decision + explicit sign-off. Operational notes: registry.terraform.io is
+blocked from the remote dev container — providers install via a filesystem mirror fed from
+releases.hashicorp.com (see session log); Terraform runs with the `regulait-admin` SSO
+profile, state backend via `regulait-management`.
+
+**The product becomes USABLE, 2026-07-25 — four slices in one push.** (1) Quickstart
+plumbing: the gateway converges its schema on boot; `GET /v1/me`; own-scoped list views for
+non-admins (runs/instances = own, projects = memberships); an idempotent demo seed driven
+through the real HTTP API (three users with keys printed once, seven agents — three mock ones
+usable with zero external keys — templates, hipaa profile, budgeted + classified projects, a
+planned run, and an instance already awaiting sign-off). (2) `/app`, the end-user workspace:
+one dependency-free file on a new shared design system (`ui-theme.ts` — warm dark, terracotta
+accent, mono-for-data): a streaming Playground where every exchange shows routing, measured
+cost, model, BYO-key, budget alerts, refusals + a collapsible governance trace; Runs with live
+node states, per-node outputs, auto-advance, budget bars; Workflows with the stage rail,
+artifact submission, and nested-run links; the approver Inbox (all approval kinds, one-click
+decide); member Projects with shared context. (3) `/admin` rebuilt on the same system with a
+real Cost & Projects dashboard (stat tiles, budget gauge, hand-rolled SVG showback/savings
+charts). (4) Docker quickstart: Dockerfile + compose (Postgres + gateway + auto-migrate +
+demo seed; keys in the container log) + README for both paths. The whole surface was driven
+in a REAL headless-Chromium pass (sign-in, streamed reply, run auto-advanced to completion,
+workflow rail, inbox approve, admin charts — zero page errors). (AWS deployment followed
+the same day at the user's explicit request — see the entry above / ADR-0013.)
+
 **Admin portal MVP, 2026-07-25 (ADR-0012).** One dependency-free HTML+JS file served by the
 gateway at `GET /admin` — an auth-exempt STATIC SHELL (zero data, zero secrets; the admin
 pastes an API key held in memory only) that is strictly a client of the public REST API, so
@@ -272,6 +332,32 @@ openai, google, xai) + mock now resolve**; the "interface-ready but not implemen
 rejection era is over, and pillar 1's any-vendor routing claim is demonstrated across four
 live adapters with zero gateway changes each time. Deferred: OpenAI Responses-API surface,
 per-provider tool-use.
+
+**Jira PM adapter, 2026-07-25 — pillar 8 grows its second real tool.** `JiraProvider` in
+pm-provider: REST v2 deliberately (v3 forces ADF rich text; plain strings match the mapping
+layer), Basic auth with the Jira Cloud `email:api-token` credential convention, injectable
+fetch. The Jira-specific insight honored: **states are not settable fields** —
+`transitionState` looks up the issue's available workflow transitions and executes the
+matching one (by target-state or transition name), failing EXPLICIT with the available list
+when the workflow offers no path (mirror failures surface, never fail the run event — the
+established rule). `DEFAULT_MAPPINGS.jira` maps title→summary etc.; `blocked` is deliberately
+unmapped (Jira's default workflow has no Blocked state — skip, never invent). Registry
+resolves azure_devops + jira + mock; linear/asana/monday/generic_webhook stay rejected.
+E2e: a run pm-syncs against a live-shaped fake Jira server (run parent + node issues created
+with project/issuetype wrappers and Basic auth asserted on the wire) and a node_started event
+mirrors through a real GET-transitions → POST-transition sequence. **Linear adapter, same day**: GraphQL-only API
+handled natively — `LinearProvider` speaks `api.linear.app/graphql` (overridable) with the
+raw api-key Authorization header, resolves the connection's `project` as a Linear TEAM KEY to
+an id once (cached), and drives `issueCreate`/`issueUpdate`/`commentCreate`/`issue` queries;
+GraphQL `errors` arrays surface as explicit PmProviderErrors. Transitions resolve the TEAM's
+workflow states by name (explicit failure listing available states); Linear issues carry no
+native type, so the interface's `type` is accepted-and-ignored (documented). Default mapping
+maps title/description/priority with Linear's default state names; `blocked` unmapped again.
+Registry: azure_devops + jira + linear + mock; asana/monday/generic_webhook stay rejected.
+E2e: pm-sync + node_started mirror against a fake Linear GraphQL server (team resolution,
+issueCreate inputs, raw-token auth, and the stateId move all asserted). Deferred: remaining
+PM adapters, ADF descriptions, provider-native webhooks → the ADR-0010 normalized inbound
+shape.
 
 **EPIC-06 started — PM-tool integration first slice, 2026-07-25.** New
 `packages/pm-provider` on the git-provider playbook (pillar 8, PM_TOOL_INTEGRATION_SPEC
@@ -490,6 +576,7 @@ with a real in-process upstream MCP server and real MCP client (26 tests total).
 | COMPONENT-04 | RegulAIt GitHub repo | **live and private**: https://github.com/dhruvmahendrapatel/RegulAIt | EPIC-01 |
 | COMPONENT-05 | Admin portal | **MVP shipped** — single-file API-client portal at /admin (ADR-0012), §6's eight panels + §10.4 cost surface | EPIC-02, ADR-0012 |
 | COMPONENT-06 | Policy/allow-list engine | not started | EPIC-02 |
+| COMPONENT-07 | Dev demo stack on AWS (`regulait-dev-app`) | **live** — EC2 `i-013c62adc887c76bb`, http://3.237.199.248:3000, dev-grade only; teardown = `terraform destroy` | ADR-0013 |
 | COMPONENT-07 | Workflow orchestrator | not started | EPIC-03 |
 | COMPONENT-08 | caveman (output token compression, Claude Code plugin) | **installed**, user scope, no restrictions (verified fully local) | ADR-0005 |
 | COMPONENT-09 | graphify (code knowledge graph, Claude Code skill) | **installed**, project scope, restricted to `--code-only` (verified) | ADR-0005 |
