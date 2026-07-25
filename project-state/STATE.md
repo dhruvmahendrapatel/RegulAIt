@@ -163,7 +163,31 @@ surface) — measured totals + tokens + measured savings, showback breakdowns by
 agent/model, estimated-savings-by-technique from cost_events, budget-vs-actual
 (remaining/overBudget/overageApproved), and a labeled last-7-days run-rate forecast to end of
 month; `GET /v1/projects` lists per-project spend fleet-wide. Not yet: MCP-proxy cost-event
-attribution, per-project (rather than global) overage windows, membership-gated attribution.
+attribution, per-project (rather than global) overage windows.
+
+**Pillar 4 lands — Shared Projects MVP, 2026-07-25 (ADR-0011).** Shared-Project semantics
+extend the ONE `projects` entity (no second container): migration 0019 adds `teams` +
+`team_members`, `project_members` (per-user Owner/Contributor/Viewer, decoupled from
+home-team role, optional contributing team validated against real team membership), an
+append-only `project_context_items` store, and `projects.arbiter_user_id`. **The context
+store is §9.2 literally**: every write is a new revision with provenance (user, team,
+timestamp, optional source artifact); the current value of a key is its highest ACCEPTED
+revision; once a key exists a write must name the accepted `baseRevision` it is based on
+(409 otherwise — read-before-write is explicit, never a silent overwrite); a stale-base
+write is RETAINED but not accepted and routes to the project's named arbiter through the ONE
+approvals queue (`__context_conflict__:<itemId>`); approve makes it the new current value,
+deny keeps it retained-but-never-current — every side of every conflict is a permanent row.
+An arbiter-less project rejects conflicting writes explicitly (422). **Promotion (§9.4)**:
+`POST .../context/promote` copies a workflow artifact into shared context (key = output,
+`sourceArtifactId` provenance) — only the artifact's own instance initiator may promote.
+**§9.3 honored precisely**: membership widens context visibility and attribution ONLY — a
+contributor with no agent grant still hits default-deny (tested); and per ADR-0011, once a
+project has members, only members/admins may attribute spend/runs/instances to it (memberless
+projects stay open pillar-5 buckets). Everything audited as objectType "project". Deferred:
+classification precedence at member-team add (§9.3/§8.3), cross-team cost rollup views
+(§9.5), §9.4's suggested UI, SCIM team sync.
+
+**EPIC-06 started — PM-tool integration first slice, 2026-07-25.** New
 `packages/pm-provider` on the git-provider playbook (pillar 8, PM_TOOL_INTEGRATION_SPEC
 §2/§3/§6): neutral `PmProvider` interface (create/update/transition/comment/getWorkItem), the
 load-bearing FIELD MAPPING layer as pure zod-validated config with per-adapter defaults an

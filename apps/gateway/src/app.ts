@@ -60,7 +60,7 @@ export interface BuildAppOptions {
 import { z } from "zod";
 import { registerMcpProxy } from "./mcp-proxy.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
-import { applyProjectBudgetDecision, registerProjectRoutes } from "./projects.js";
+import { applyProjectApprovalDecision, registerProjectRoutes } from "./projects.js";
 import { registerOptimizationRoutes } from "./optimization.js";
 import { applyRunApprovalDecision, registerOrchestrationRoutes } from "./orchestration.js";
 import { mirrorApprovalDecision, registerPmRoutes } from "./pm.js";
@@ -138,6 +138,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "POST /v1/users/:userId/model-credentials",
     "GET /v1/users/:userId/model-credentials",
     "DELETE /v1/users/:userId/model-credentials/:provider",
+    "POST /v1/projects/:projectId/members",
+    "GET /v1/projects/:projectId/members",
+    "POST /v1/projects/:projectId/context",
+    "GET /v1/projects/:projectId/context",
+    "POST /v1/projects/:projectId/context/promote",
     "POST /v1/runs",
     "POST /v1/runs/:runId/events",
     "POST /v1/runs/:runId/nodes/:nodeId/dispatch",
@@ -554,9 +559,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     if (updated.objectType === "run") {
       await applyRunApprovalDecision(db, updated, body.decision, deciderUserId, opts.dataKey);
     }
-    // Pillar 5 project-budget escalations: approve lifts enforcement.
+    // Pillar 5 budget escalations + §9 context-conflict resolutions.
     if (updated.objectType === "project") {
-      await applyProjectBudgetDecision(db, updated, body.decision, deciderUserId);
+      await applyProjectApprovalDecision(db, updated, body.decision, deciderUserId);
     }
     // EPIC-06 §5: sign-offs mirror to the linked work item — display only,
     // never a second decision point; a mirror failure never unwinds the

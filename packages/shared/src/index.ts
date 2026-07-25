@@ -148,6 +148,8 @@ export const createProjectSchema = z
     costCenter: z.string().min(1).max(100).nullable().optional(),
     budgetUsd: z.number().positive().nullable().optional(),
     budgetApproverUserId: z.string().uuid().nullable().optional(),
+    /** §9 named arbiter for shared-context conflicts */
+    arbiterUserId: z.string().uuid().nullable().optional(),
   })
   .refine((p) => p.budgetUsd == null || p.budgetApproverUserId != null, {
     message: "a project budget requires a budgetApproverUserId",
@@ -295,4 +297,30 @@ export const pmWebhookSchema = z.object({
   event: z.enum(["updated", "deleted", "commented"]),
   state: z.string().min(1).max(128).optional(),
   fields: z.record(z.unknown()).optional(),
+});
+
+// PILLAR 4 (§9, ADR-0011): teams + Shared-Project membership + context store.
+export const createTeamSchema = z.object({ name: z.string().min(1).max(200) });
+
+export const addTeamMemberSchema = z.object({ userId: z.string().uuid() });
+
+export const addProjectMemberSchema = z.object({
+  userId: z.string().uuid(),
+  role: z.enum(["owner", "contributor", "viewer"]),
+  /** the member's contributing team for provenance; must be one of their teams */
+  teamId: z.string().uuid().nullable().optional(),
+});
+
+export const contributeContextSchema = z.object({
+  key: z.string().min(1).max(128),
+  content: z.string().min(1).max(200_000),
+  /** the accepted revision this write is based on; required once the key exists */
+  baseRevision: z.number().int().positive().optional(),
+  /** contributing team for provenance; must be one of the writer's teams */
+  teamId: z.string().uuid().nullable().optional(),
+});
+
+export const promoteContextSchema = z.object({
+  /** the team-local workflow artifact to promote into shared context */
+  artifactId: z.string().uuid(),
 });

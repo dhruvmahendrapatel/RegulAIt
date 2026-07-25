@@ -16,3 +16,4 @@ superseding a decision means a new ADR plus a status flip on the old one.
 | [0008](0008-eight-p0-pillars.md) | Escalate to eight co-equal P0 pillars (multi-agent orchestration, PM-tool integration) | Accepted | 2026-07-24 |
 | [0009](0009-typescript-fastify-stack.md) | TypeScript/Fastify stack with a hand-rolled policy kernel for the governance MVP | Accepted | 2026-07-24 |
 | [0010](0010-pm-inbound-sync-webhooks-plus-read-through.md) | PM-tool inbound sync: webhooks + live read-through, no polling | Accepted | 2026-07-25 |
+| [0011](0011-shared-projects-on-one-project-entity.md) | Shared Projects extend the one `projects` entity; conflicts ride the one approvals queue | Accepted | 2026-07-25 |

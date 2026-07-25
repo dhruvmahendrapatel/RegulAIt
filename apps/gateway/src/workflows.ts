@@ -25,10 +25,11 @@ import {
   type WorkflowDefinition,
   type WorkflowEvent,
 } from "@regulait/workflow-kernel";
-import { users, gitConnections, orchestrationRuns, projects } from "@regulait/db";
+import { users, gitConnections, orchestrationRuns } from "@regulait/db";
 import { resolveProvider, GitProviderError } from "@regulait/git-provider";
 import { validateGraph } from "@regulait/orchestration-kernel";
 import { planRun } from "./orchestration.js";
+import { assertProjectAttribution } from "./projects.js";
 import { decryptSecret, encryptSecret as encryptTokenOnce } from "./secrets.js";
 import {
   advanceStageSchema,
@@ -571,8 +572,9 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const merged = mergeDefinitions(ordered.map((t) => t.definition as WorkflowDefinition));
 
     if (body.projectId) {
-      const [project] = await db.select().from(projects).where(eq(projects.id, body.projectId));
-      if (!project) return reply.status(400).send({ error: "invalid_reference" });
+      // ADR-0011: the initiator must be allowed to bill this project
+      const attribution = await assertProjectAttribution(db, body.projectId, userId, req.authCtx.isAdmin);
+      if (!attribution.ok) return reply.status(attribution.status).send({ error: attribution.error });
     }
     const [instance] = await db
       .insert(workflowInstances)

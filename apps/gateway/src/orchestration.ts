@@ -12,7 +12,6 @@ import {
   orchestrationRuns,
   userAgentPolicies,
   users,
-  projects,
   workflowArtifacts,
   workflowInstances,
   type Db,
@@ -41,6 +40,7 @@ import {
   runEventSchema,
 } from "@regulait/shared";
 import { executeGovernedDispatch } from "./agents-connectors.js";
+import { assertProjectAttribution } from "./projects.js";
 import { mirrorNodeStatus } from "./pm.js";
 import { handleNestedRunCompletion } from "./workflows.js";
 import { z } from "zod";
@@ -620,8 +620,11 @@ export async function planRun(
     .where(eq(users.id, graph.escalationApproverUserId));
   if (!approver) return { ok: false, status: 422, body: { error: "unknown_escalation_approver" } };
   if (projectId) {
-    const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
-    if (!project) return { ok: false, status: 422, body: { error: "unknown_project" } };
+    // ADR-0011: the initiating user must be allowed to bill this project
+    const attribution = await assertProjectAttribution(db, projectId, userId, false);
+    if (!attribution.ok) {
+      return { ok: false, status: attribution.status as 400 | 422, body: { error: attribution.error } };
+    }
   }
 
   const [grants, [policy], agentRows] = await Promise.all([

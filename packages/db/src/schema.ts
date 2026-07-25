@@ -729,5 +729,80 @@ export const projects = pgTable("projects", {
   }),
   /** a decided __project_budget__ approval lifts enforcement for this project */
   overageApproved: boolean("overage_approved").notNull().default(false),
+  /** §9 named arbiter for shared-context conflicts; absent = conflicting
+   * writes are rejected explicitly (never silently) */
+  arbiterUserId: uuid("arbiter_user_id").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+// PILLAR 4 (§9, ADR-0011): teams and Shared-Project membership. Membership
+// roles are per-user and DECOUPLED from home-team role; membership widens
+// what context a member sees, never what tools/agents they may call.
+export const teams = pgTable("teams", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull().unique(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const teamMembers = pgTable(
+  "team_members",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    teamId: uuid("team_id")
+      .notNull()
+      .references(() => teams.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("team_members_team_user_uq").on(t.teamId, t.userId)],
+);
+
+export const projectMembers = pgTable(
+  "project_members",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    /** the member's contributing team, for provenance defaults; optional */
+    teamId: uuid("team_id").references(() => teams.id, { onDelete: "set null" }),
+    role: text("role", { enum: ["owner", "contributor", "viewer"] }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("project_members_project_user_uq").on(t.projectId, t.userId)],
+);
+
+// §9.2 shared context store: APPEND-ONLY revisions. The current value of a
+// key is its highest ACCEPTED revision; a write based on a stale revision is
+// retained but not accepted (a conflict for the named arbiter). Contributor
+// ids are FK-free — provenance is a governance record that must survive
+// user/team deletion.
+export const projectContextItems = pgTable(
+  "project_context_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    key: text("key").notNull(),
+    revision: integer("revision").notNull(),
+    content: text("content").notNull(),
+    /** the accepted revision the writer based this on; null = first write */
+    baseRevision: integer("base_revision"),
+    accepted: boolean("accepted").notNull().default(true),
+    contributedByUserId: uuid("contributed_by_user_id").notNull(),
+    contributedByTeamId: uuid("contributed_by_team_id"),
+    /** §9.4 promotion provenance: the team-local artifact this came from */
+    sourceArtifactId: uuid("source_artifact_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("project_context_project_key_rev_uq").on(t.projectId, t.key, t.revision),
+    index("project_context_project_key_idx").on(t.projectId, t.key),
+  ],
+);

@@ -9,7 +9,6 @@ import {
   and,
   eq,
   modelCredentials,
-  projects,
   usageEvents,
   userModelCredentials,
   userAgentPolicies,
@@ -35,7 +34,7 @@ import {
 } from "@regulait/shared";
 import { z } from "zod";
 import { decryptSecret, encryptSecret } from "./secrets.js";
-import { postDispatchProjectAlert, preDispatchProjectGate } from "./projects.js";
+import { assertProjectAttribution, postDispatchProjectAlert, preDispatchProjectGate } from "./projects.js";
 
 const userIdParam = z.object({ userId: z.string().uuid() });
 const agentIdParam = z.object({ agentId: z.string().uuid() });
@@ -500,11 +499,12 @@ export function registerAgentConnectorRoutes(
     const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
     if (!agent) return reply.status(404).send({ error: "unknown_agent" });
 
-    // pillar 5: attribution must point at a real project — the ledgers are
-    // FK-free, so the gate is here at the entry point.
+    // pillar 5 + ADR-0011: attribution must point at a real project the
+    // caller may bill to — the ledgers are FK-free, so the gate is here at
+    // the entry point.
     if (body.projectId) {
-      const [project] = await db.select().from(projects).where(eq(projects.id, body.projectId));
-      if (!project) return reply.status(400).send({ error: "invalid_reference" });
+      const attribution = await assertProjectAttribution(db, body.projectId, userId, req.authCtx.isAdmin);
+      if (!attribution.ok) return reply.status(attribution.status).send({ error: attribution.error });
     }
 
     const [grants, [policy]] = await Promise.all([

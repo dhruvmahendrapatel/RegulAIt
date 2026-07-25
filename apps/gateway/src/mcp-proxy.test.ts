@@ -4868,3 +4868,298 @@ describe("per-project cost rollup (pillar 5): attribution, dashboard, budget enf
     expect(missing.statusCode).toBe(404);
   });
 });
+
+describe("shared projects (pillar 4, ADR-0011): membership, context, conflicts, promotion", () => {
+  let teamAId: string;
+  let teamBId: string;
+  let veraId: string;
+  let veraAuth: { authorization: string };
+  let wesId: string;
+  let wesAuth: { authorization: string };
+  let vickyAuth: { authorization: string };
+  let xenaId: string;
+  let xenaAuth: { authorization: string };
+  let uriId: string;
+  let sharedId: string;
+  let sharedAgentId: string;
+
+  const mkUser = async (email: string, name: string) => {
+    const r = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email, displayName: name },
+    });
+    return r.json().id as string;
+  };
+
+  it("membership roles gate context access — and grant zero tool/agent capability", async () => {
+    veraId = await mkUser("sp-vera@example.com", "SP Vera");
+    veraAuth = await authFor(veraId);
+    wesId = await mkUser("sp-wes@example.com", "SP Wes");
+    wesAuth = await authFor(wesId);
+    const vickyId = await mkUser("sp-vicky@example.com", "SP Vicky");
+    vickyAuth = await authFor(vickyId);
+    xenaId = await mkUser("sp-xena@example.com", "SP Xena");
+    xenaAuth = await authFor(xenaId);
+    uriId = await mkUser("sp-uri@example.com", "SP Uri");
+
+    const teamA = await app.inject({ method: "POST", headers: AUTH, url: "/v1/teams", payload: { name: "team-a" } });
+    teamAId = teamA.json().id;
+    const teamB = await app.inject({ method: "POST", headers: AUTH, url: "/v1/teams", payload: { name: "team-b" } });
+    teamBId = teamB.json().id;
+    await app.inject({ method: "POST", headers: AUTH, url: `/v1/teams/${teamAId}/members`, payload: { userId: veraId } });
+    await app.inject({ method: "POST", headers: AUTH, url: `/v1/teams/${teamBId}/members`, payload: { userId: wesId } });
+
+    const shared = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/projects",
+      payload: { name: "platform-shared", arbiterUserId: uriId },
+    });
+    sharedId = shared.json().id;
+
+    // provenance team must really be one of the member's teams
+    const wrongTeam = await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/projects/${sharedId}/members`,
+      payload: { userId: veraId, role: "contributor", teamId: teamBId },
+    });
+    expect(wrongTeam.statusCode).toBe(422);
+
+    for (const [userId, role, teamId] of [
+      [veraId, "contributor", teamAId],
+      [wesId, "contributor", teamBId],
+      [vickyId, "viewer", null],
+    ] as const) {
+      const r = await app.inject({
+        method: "POST", headers: AUTH, url: `/v1/projects/${sharedId}/members`,
+        payload: { userId, role, teamId },
+      });
+      expect(r.statusCode).toBe(201);
+    }
+
+    // members can list membership; outsiders cannot even see it
+    expect((await app.inject({ method: "GET", headers: veraAuth, url: `/v1/projects/${sharedId}/members` })).statusCode).toBe(200);
+    expect((await app.inject({ method: "GET", headers: xenaAuth, url: `/v1/projects/${sharedId}/members` })).statusCode).toBe(403);
+
+    // a viewer reads but cannot write; an outsider cannot read
+    const write = await app.inject({
+      method: "POST", headers: veraAuth, url: `/v1/projects/${sharedId}/context`,
+      payload: { key: "coding-standards", content: "tabs are banned (v1)" },
+    });
+    expect(write.statusCode).toBe(201);
+    expect(write.json()).toMatchObject({ revision: 1, accepted: true });
+    expect((await app.inject({
+      method: "POST", headers: vickyAuth, url: `/v1/projects/${sharedId}/context`,
+      payload: { key: "coding-standards", content: "nope", baseRevision: 1 },
+    })).statusCode).toBe(403);
+    expect((await app.inject({ method: "GET", headers: xenaAuth, url: `/v1/projects/${sharedId}/context` })).statusCode).toBe(403);
+
+    // §9.3: membership is NEVER a capability grant — vera has no agent grant,
+    // and being a shared-project contributor changes nothing about that
+    const agentRes = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/agents",
+      payload: {
+        name: "sp-agent", provider: "mock", tier: 0, modes: ["execute"],
+        costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-sp",
+      },
+    });
+    sharedAgentId = agentRes.json().id;
+    const invoke = await app.inject({
+      method: "POST", headers: veraAuth, url: `/v1/agents/${sharedAgentId}/invoke`,
+      payload: { mode: "execute", input: "hi" },
+    });
+    expect(invoke.statusCode).toBe(403);
+    expect(invoke.json().decision.ruleId).toBe("default-deny");
+  });
+
+  it("context is append-only with provenance; writes must name their base revision", async () => {
+    const view = await app.inject({ method: "GET", headers: vickyAuth, url: `/v1/projects/${sharedId}/context` });
+    const item = view.json().context.find((c: { key: string }) => c.key === "coding-standards");
+    expect(item.revision).toBe(1);
+    expect(item.provenance).toMatchObject({ userId: veraId, teamId: teamAId });
+
+    // read-before-write is explicit — no silent overwrites
+    const blind = await app.inject({
+      method: "POST", headers: veraAuth, url: `/v1/projects/${sharedId}/context`,
+      payload: { key: "coding-standards", content: "blind write" },
+    });
+    expect(blind.statusCode).toBe(409);
+    expect(blind.json()).toMatchObject({ error: "base_revision_required", latestAccepted: 1 });
+
+    const update = await app.inject({
+      method: "POST", headers: veraAuth, url: `/v1/projects/${sharedId}/context`,
+      payload: { key: "coding-standards", content: "tabs banned; semicolons required (v2)", baseRevision: 1 },
+    });
+    expect(update.json()).toMatchObject({ revision: 2, accepted: true });
+
+    const history = await app.inject({
+      method: "GET", headers: vickyAuth, url: `/v1/projects/${sharedId}/context?key=coding-standards&history=true`,
+    });
+    expect(history.json().history).toHaveLength(2);
+  });
+
+  it("a stale-base write becomes a conflict for the named arbiter — both sides retained forever", async () => {
+    // vera lands revision 3 on top of 2
+    await app.inject({
+      method: "POST", headers: veraAuth, url: `/v1/projects/${sharedId}/context`,
+      payload: { key: "coding-standards", content: "team-a's v3", baseRevision: 2 },
+    });
+    // wes edits from the SAME base — a real cross-team disagreement
+    const conflicted = await app.inject({
+      method: "POST", headers: wesAuth, url: `/v1/projects/${sharedId}/context`,
+      payload: { key: "coding-standards", content: "team-b's competing v3", baseRevision: 2, teamId: teamBId },
+    });
+    expect(conflicted.statusCode).toBe(201);
+    expect(conflicted.json()).toMatchObject({ revision: 4, accepted: false, conflict: true });
+    const approvalId = conflicted.json().approvalId;
+    expect(approvalId).toBeTruthy();
+
+    // nothing overwritten: the current value is still vera's revision 3
+    const before = await app.inject({ method: "GET", headers: wesAuth, url: `/v1/projects/${sharedId}/context?key=coding-standards` });
+    expect(before.json().context[0].revision).toBe(3);
+    expect(before.json().context[0].content).toBe("team-a's v3");
+
+    // the named arbiter accepts team-b's side through the ONE approvals queue
+    const uriAuth = await authFor(uriId);
+    const decided = await app.inject({
+      method: "POST", headers: uriAuth, url: `/v1/approvals/${approvalId}/decide`,
+      payload: { decision: "approved" },
+    });
+    expect(decided.statusCode).toBe(200);
+    const after = await app.inject({ method: "GET", headers: wesAuth, url: `/v1/projects/${sharedId}/context?key=coding-standards` });
+    expect(after.json().context[0]).toMatchObject({ revision: 4, content: "team-b's competing v3" });
+
+    // a denied conflict stays retained but never current
+    const denied = await app.inject({
+      method: "POST", headers: veraAuth, url: `/v1/projects/${sharedId}/context`,
+      payload: { key: "coding-standards", content: "stale counter-proposal", baseRevision: 3 },
+    });
+    expect(denied.json().conflict).toBe(true);
+    await app.inject({
+      method: "POST", headers: uriAuth, url: `/v1/approvals/${denied.json().approvalId}/decide`,
+      payload: { decision: "denied" },
+    });
+    const final = await app.inject({ method: "GET", headers: wesAuth, url: `/v1/projects/${sharedId}/context?key=coding-standards` });
+    expect(final.json().context[0].revision).toBe(4);
+    const history = await app.inject({
+      method: "GET", headers: wesAuth, url: `/v1/projects/${sharedId}/context?key=coding-standards&history=true`,
+    });
+    expect(history.json().history).toHaveLength(5); // every side of every conflict retained
+    expect(history.json().history.filter((h: { accepted: boolean }) => h.accepted)).toHaveLength(4);
+
+    // conflicts on an arbiter-less project are rejected explicitly
+    const noArb = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/projects",
+      payload: { name: "no-arbiter-project" },
+    });
+    await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/projects/${noArb.json().id}/members`,
+      payload: { userId: veraId, role: "contributor" },
+    });
+    await app.inject({
+      method: "POST", headers: veraAuth, url: `/v1/projects/${noArb.json().id}/context`,
+      payload: { key: "k", content: "v1" },
+    });
+    const rejected = await app.inject({
+      method: "POST", headers: veraAuth, url: `/v1/projects/${noArb.json().id}/context`,
+      payload: { key: "k", content: "conflicting", baseRevision: 99 },
+    });
+    expect(rejected.statusCode).toBe(422);
+    expect(rejected.json().error).toBe("no_arbiter");
+  });
+
+  it("promote-to-shared copies a team-local artifact with source provenance; only its owner may promote", async () => {
+    const tpl = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/templates",
+      payload: {
+        name: "sp-promote",
+        definition: {
+          workflow: "sp-promote",
+          stages: [
+            { id: "intake", type: "trigger" },
+            { id: "plan-doc", type: "artifact_generation", output: "shared-plan" },
+          ],
+        },
+      },
+    });
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/assignment-rules",
+      payload: { templateId: tpl.json().id, changeType: "sp-promote-test" },
+    });
+    const started = await app.inject({
+      method: "POST", headers: veraAuth, url: "/v1/workflows/instances",
+      payload: {
+        change: { description: "plan", paths: ["a.ts"], changeType: "sp-promote-test", environment: "staging" },
+      },
+    });
+    const instanceId = started.json().id;
+    await app.inject({
+      method: "POST", headers: veraAuth, url: `/v1/workflows/instances/${instanceId}/artifacts`,
+      payload: { stageId: "plan-doc", content: "PROMOTED-CONTENT-55" },
+    });
+    const view = await app.inject({ method: "GET", headers: veraAuth, url: `/v1/workflows/instances/${instanceId}` });
+    const artifactId = view.json().artifacts[0].id;
+
+    // wes did not author this artifact — partial sharing is opt-in by the owner
+    const stolen = await app.inject({
+      method: "POST", headers: wesAuth, url: `/v1/projects/${sharedId}/context/promote`,
+      payload: { artifactId },
+    });
+    expect(stolen.statusCode).toBe(403);
+
+    const promoted = await app.inject({
+      method: "POST", headers: veraAuth, url: `/v1/projects/${sharedId}/context/promote`,
+      payload: { artifactId },
+    });
+    expect(promoted.statusCode).toBe(201);
+    expect(promoted.json().accepted).toBe(true);
+    const ctx = await app.inject({
+      method: "GET", headers: wesAuth, url: `/v1/projects/${sharedId}/context?key=shared-plan`,
+    });
+    expect(ctx.json().context[0].content).toBe("PROMOTED-CONTENT-55");
+    expect(ctx.json().context[0].provenance.sourceArtifactId).toBe(artifactId);
+  });
+
+  it("membership gates attribution on member-bearing projects; memberless buckets stay open", async () => {
+    for (const userId of [veraId, xenaId]) {
+      await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/grants/agents",
+        payload: { userId, agentId: sharedAgentId },
+      });
+    }
+    // a non-member cannot bill the shared project — spend pollution blocked
+    const outsider = await app.inject({
+      method: "POST", headers: xenaAuth, url: `/v1/agents/${sharedAgentId}/invoke`,
+      payload: { mode: "execute", input: "bill it", dispatch: true, projectId: sharedId },
+    });
+    expect(outsider.statusCode).toBe(403);
+    expect(outsider.json().error).toBe("not_a_project_member");
+    const outsiderRun = await app.inject({
+      method: "POST", headers: xenaAuth, url: "/v1/runs",
+      payload: {
+        projectId: sharedId,
+        graph: {
+          run: "sp-outsider",
+          escalationApproverUserId: uriId,
+          nodes: [{ id: "a", title: "task a", ownerAgentId: sharedAgentId, mode: "execute" }],
+        },
+      },
+    });
+    expect(outsiderRun.statusCode).toBe(403);
+
+    // a member bills normally
+    const member = await app.inject({
+      method: "POST", headers: veraAuth, url: `/v1/agents/${sharedAgentId}/invoke`,
+      payload: { mode: "execute", input: "member spend", dispatch: true, projectId: sharedId },
+    });
+    expect(member.statusCode).toBe(200);
+
+    // memberless projects remain open cost buckets (pillar-5 back-compat)
+    const bucket = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/projects",
+      payload: { name: "open-bucket" },
+    });
+    const open = await app.inject({
+      method: "POST", headers: xenaAuth, url: `/v1/agents/${sharedAgentId}/invoke`,
+      payload: { mode: "execute", input: "open spend", dispatch: true, projectId: bucket.json().id },
+    });
+    expect(open.statusCode).toBe(200);
+  });
+});
