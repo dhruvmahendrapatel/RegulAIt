@@ -12,6 +12,11 @@ import {
   mcpServers,
   mcpTools,
   rateLimits,
+  revocations,
+  roleAssignments,
+  roleServerGrants,
+  roleToolGrants,
+  roles,
   serverGrants,
   toolGrants,
   users,
@@ -19,10 +24,15 @@ import {
 } from "@regulait/db";
 import { visibleTools, type ToolRef } from "@regulait/policy-kernel";
 import {
+  assignRoleSchema,
   createApiKeySchema,
   createApprovalRuleSchema,
   createDataScopeRuleSchema,
   createRateLimitSchema,
+  createRevocationSchema,
+  createRoleSchema,
+  createRoleServerGrantSchema,
+  createRoleToolGrantSchema,
   createServerGrantSchema,
   createServerSchema,
   createToolGrantSchema,
@@ -32,6 +42,7 @@ import {
   evaluateRequestSchema,
 } from "@regulait/shared";
 import { governedEvaluate } from "./governed-evaluate.js";
+import { loadEntitlements } from "./entitlements.js";
 import { authenticate, generateToken, type AuthContext } from "./auth.js";
 
 declare module "fastify" {
@@ -172,19 +183,149 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     if (!req.authCtx.isAdmin && req.authCtx.userId !== userId) {
       return reply.status(403).send({ error: "forbidden" });
     }
-    const [tools, tGrants, sGrants] = await Promise.all([
+    const [tools, entitlements] = await Promise.all([
       db.select().from(mcpTools).where(eq(mcpTools.serverId, serverId)),
-      db
-        .select()
-        .from(toolGrants)
-        .where(and(eq(toolGrants.userId, userId), eq(toolGrants.serverId, serverId))),
-      db
-        .select()
-        .from(serverGrants)
-        .where(and(eq(serverGrants.userId, userId), eq(serverGrants.serverId, serverId))),
+      loadEntitlements(db, userId, serverId),
     ]);
     const refs: ToolRef[] = tools.map((t) => ({ serverId: t.serverId, name: t.name, kind: t.kind }));
-    return { tools: visibleTools(userId, serverId, refs, tGrants, sGrants) };
+    return { tools: visibleTools(userId, serverId, refs, entitlements) };
+  });
+
+  // §5 roles: named entitlement bundles, admin-assignable as a user's baseline.
+  app.post("/v1/roles", async (req, reply) => {
+    const body = createRoleSchema.parse(req.body);
+    const [row] = await db
+      .insert(roles)
+      .values({ name: body.name, description: body.description ?? null })
+      .returning();
+    return reply.status(201).send(row);
+  });
+
+  app.get("/v1/roles", async () => {
+    return { roles: await db.select().from(roles) };
+  });
+
+  app.post("/v1/roles/:roleId/grants/tools", async (req, reply) => {
+    const { roleId } = z.object({ roleId: z.string().uuid() }).parse(req.params);
+    const body = createRoleToolGrantSchema.parse(req.body);
+    const [row] = await db
+      .insert(roleToolGrants)
+      .values({ roleId, serverId: body.serverId, toolName: body.toolName })
+      .returning();
+    return reply.status(201).send(row);
+  });
+
+  app.post("/v1/roles/:roleId/grants/servers", async (req, reply) => {
+    const { roleId } = z.object({ roleId: z.string().uuid() }).parse(req.params);
+    const body = createRoleServerGrantSchema.parse(req.body);
+    const [row] = await db
+      .insert(roleServerGrants)
+      .values({ roleId, serverId: body.serverId, readOnlyAll: body.readOnlyAll })
+      .returning();
+    return reply.status(201).send(row);
+  });
+
+  app.post("/v1/users/:userId/roles", async (req, reply) => {
+    const { userId } = z.object({ userId: z.string().uuid() }).parse(req.params);
+    const body = assignRoleSchema.parse(req.body);
+    const [row] = await db
+      .insert(roleAssignments)
+      .values({ userId, roleId: body.roleId })
+      .returning();
+    return reply.status(201).send(row);
+  });
+
+  app.delete("/v1/users/:userId/roles/:roleId", async (req, reply) => {
+    const params = z
+      .object({ userId: z.string().uuid(), roleId: z.string().uuid() })
+      .parse(req.params);
+    const deleted = await db
+      .delete(roleAssignments)
+      .where(
+        and(eq(roleAssignments.userId, params.userId), eq(roleAssignments.roleId, params.roleId)),
+      )
+      .returning({ id: roleAssignments.id });
+    if (deleted.length === 0) return reply.status(404).send({ error: "not_assigned" });
+    return { removed: true };
+  });
+
+  // §5 subtractive override: revoke a role-derived entitlement for one user.
+  // Deleting the revocation reverses it — overrides are independently reversible.
+  app.post("/v1/revocations", async (req, reply) => {
+    const body = createRevocationSchema.parse(req.body);
+    const [row] = await db
+      .insert(revocations)
+      .values({ userId: body.userId, serverId: body.serverId, toolName: body.toolName ?? null })
+      .returning();
+    return reply.status(201).send(row);
+  });
+
+  app.delete("/v1/revocations/:revocationId", async (req, reply) => {
+    const { revocationId } = z.object({ revocationId: z.string().uuid() }).parse(req.params);
+    const deleted = await db
+      .delete(revocations)
+      .where(eq(revocations.id, revocationId))
+      .returning({ id: revocations.id });
+    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_revocation" });
+    return { removed: true };
+  });
+
+  // §5 override-visibility view: every entitlement with its source (direct
+  // vs role) and any revocation flagged — deviations from role defaults are
+  // visible, not silent.
+  app.get("/v1/users/:userId/servers/:serverId/entitlements", async (req) => {
+    const { userId, serverId } = visibleToolsParams.parse(req.params);
+    const [entitlements, roleRows] = await Promise.all([
+      loadEntitlements(db, userId, serverId),
+      db.select().from(roles),
+    ]);
+    const roleName = (roleId: string) => roleRows.find((r) => r.id === roleId)?.name ?? roleId;
+    const revocationFor = (toolName: string | null) =>
+      entitlements.revocations?.find((r) => r.toolName === null || r.toolName === toolName);
+
+    const entries = [
+      ...entitlements.toolGrants.map((g) => ({
+        kind: "tool" as const,
+        toolName: g.toolName,
+        source: "direct" as const,
+        grantId: g.id,
+      })),
+      ...entitlements.serverGrants
+        .filter((g) => g.readOnlyAll)
+        .map((g) => ({
+          kind: "server-read-only" as const,
+          toolName: null,
+          source: "direct" as const,
+          grantId: g.id,
+        })),
+      ...(entitlements.roleToolGrants ?? []).map((g) => {
+        const rev = revocationFor(g.toolName);
+        return {
+          kind: "tool" as const,
+          toolName: g.toolName,
+          source: "role" as const,
+          role: roleName(g.roleId),
+          grantId: g.id,
+          revoked: Boolean(rev),
+          ...(rev ? { revocationId: rev.id } : {}),
+        };
+      }),
+      ...(entitlements.roleServerGrants ?? [])
+        .filter((g) => g.readOnlyAll)
+        .map((g) => {
+          const rev = revocationFor(null);
+          return {
+            kind: "server-read-only" as const,
+            toolName: null,
+            source: "role" as const,
+            role: roleName(g.roleId),
+            grantId: g.id,
+            revoked: Boolean(rev),
+            ...(rev ? { revocationId: rev.id } : {}),
+          };
+        }),
+    ];
+    return { entitlements: entries };
   });
 
   app.post("/v1/evaluate", async (req, reply) => {

@@ -31,12 +31,20 @@ describe("evaluate", () => {
     expect(d.ruleId).toBe(DEFAULT_DENY_RULE_ID);
     expect(d.ruleChain.map((t) => t.rule)).toEqual([
       "tool-allow-list",
+      "role-tool-allow-list",
       "server-read-only-all",
+      "role-server-read-only-all",
       "default-deny",
     ]);
     // The trace outcome must match the effect: a denying rule must never be
     // recorded as "allow" in the persisted audit ruleChain.
-    expect(d.ruleChain.map((t) => t.outcome)).toEqual(["no-match", "no-match", "deny"]);
+    expect(d.ruleChain.map((t) => t.outcome)).toEqual([
+      "no-match",
+      "no-match",
+      "no-match",
+      "no-match",
+      "deny",
+    ]);
   });
 
   it("allows a tool on the user's explicit allow-list", () => {
@@ -125,17 +133,17 @@ describe("visibleTools", () => {
   ];
 
   it("returns nothing with no grants (default-deny visibility)", () => {
-    expect(visibleTools(USER, SERVER, tools, [], [])).toEqual([]);
+    expect(visibleTools(USER, SERVER, tools, { toolGrants: [], serverGrants: [] })).toEqual([]);
   });
 
   it("returns only explicitly granted tools", () => {
     const g = toolGrant();
-    expect(visibleTools(USER, SERVER, tools, [g], [])).toEqual([readTool]);
+    expect(visibleTools(USER, SERVER, tools, { toolGrants: [g], serverGrants: [] })).toEqual([readTool]);
   });
 
   it("read-only-all shows all read tools on that server only", () => {
     const g = serverGrant();
-    const visible = visibleTools(USER, SERVER, tools, [], [g]);
+    const visible = visibleTools(USER, SERVER, tools, { toolGrants: [], serverGrants: [g] });
     expect(visible.map((t) => t.name).sort()).toEqual(["list_schemas", "query_database"]);
     expect(visible.every((t) => t.serverId === SERVER)).toBe(true);
   });
@@ -290,7 +298,7 @@ describe("visibility with approvals", () => {
   it("approval-required tools remain visible (they pause, they are not hidden)", () => {
     // visibleTools evaluates without approval rules by design — but even a
     // require_approval effect must not hide the tool.
-    const tools = visibleTools(USER, SERVER, [readTool], [toolGrant()], []);
+    const tools = visibleTools(USER, SERVER, [readTool], { toolGrants: [toolGrant()], serverGrants: [] });
     expect(tools.map((t) => t.name)).toEqual(["query_database"]);
   });
 });
@@ -399,5 +407,150 @@ describe("data-scope rules", () => {
     expect(d.effect).toBe("deny");
     expect(d.ruleId).toBe("ds-1");
     expect(d.ruleChain.some((t) => t.rule === "rate-limit")).toBe(false);
+  });
+});
+
+// --- §5 roles + per-user overrides ---
+
+import type { RoleToolGrant, RoleServerGrant, Revocation } from "./index.js";
+
+const ROLE = "role-analyst";
+
+function roleToolGrant(overrides: Partial<RoleToolGrant> = {}): RoleToolGrant {
+  return { id: "rtg-1", roleId: ROLE, serverId: SERVER, toolName: "query_database", ...overrides };
+}
+
+function roleServerGrant(overrides: Partial<RoleServerGrant> = {}): RoleServerGrant {
+  return { id: "rsg-1", roleId: ROLE, serverId: SERVER, readOnlyAll: true, ...overrides };
+}
+
+function revocation(overrides: Partial<Revocation> = {}): Revocation {
+  return { id: "rev-1", userId: USER, serverId: SERVER, toolName: "query_database", ...overrides };
+}
+
+describe("role-derived entitlements (§5)", () => {
+  const none = { toolGrants: [], serverGrants: [] };
+
+  it("a role tool grant allows and is traced with the role grant id", () => {
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool, ...none,
+      roleToolGrants: [roleToolGrant()],
+    });
+    expect(d.effect).toBe("allow");
+    expect(d.ruleId).toBe("rtg-1");
+    expect(d.reason).toContain(ROLE);
+    expect(d.ruleChain).toContainEqual({
+      rule: "role-tool-allow-list", outcome: "allow", grantId: "rtg-1",
+    });
+  });
+
+  it("a direct user grant wins before the role grant (chain shows the short-circuit)", () => {
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [toolGrant()], serverGrants: [],
+      roleToolGrants: [roleToolGrant()],
+    });
+    expect(d.ruleId).toBe("tg-1");
+    expect(d.ruleChain.some((t) => t.rule === "role-tool-allow-list")).toBe(false);
+  });
+
+  it("a revocation suppresses a role tool grant and is traced with the revocation id", () => {
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool, ...none,
+      roleToolGrants: [roleToolGrant()],
+      revocations: [revocation()],
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe(DEFAULT_DENY_RULE_ID);
+    expect(d.ruleChain).toContainEqual({
+      rule: "role-tool-allow-list", outcome: "revoked", grantId: "rev-1",
+    });
+  });
+
+  it("a direct user grant survives a revocation of the same tool", () => {
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [toolGrant()], serverGrants: [],
+      roleToolGrants: [roleToolGrant()],
+      revocations: [revocation()],
+    });
+    expect(d.effect).toBe("allow");
+    expect(d.ruleId).toBe("tg-1");
+  });
+
+  it("role read-only-all allows read tools, never write tools", () => {
+    const read = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool, ...none,
+      roleServerGrants: [roleServerGrant()],
+    });
+    expect(read.effect).toBe("allow");
+    expect(read.ruleId).toBe("rsg-1");
+
+    const write = evaluate({
+      userId: USER, serverId: SERVER, tool: writeTool, ...none,
+      roleServerGrants: [roleServerGrant()],
+    });
+    expect(write.effect).toBe("deny");
+  });
+
+  it("a server-wide revocation (toolName null) suppresses all role-derived access", () => {
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool, ...none,
+      roleToolGrants: [roleToolGrant()],
+      roleServerGrants: [roleServerGrant()],
+      revocations: [revocation({ toolName: null })],
+    });
+    expect(d.effect).toBe("deny");
+  });
+
+  it("a tool-scoped revocation also suppresses role read-only-all for that tool only", () => {
+    const revoked = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool, ...none,
+      roleServerGrants: [roleServerGrant()],
+      revocations: [revocation()],
+    });
+    expect(revoked.effect).toBe("deny");
+
+    const other = evaluate({
+      userId: USER, serverId: SERVER,
+      tool: { serverId: SERVER, name: "list_schemas", kind: "read" }, ...none,
+      roleServerGrants: [roleServerGrant()],
+      revocations: [revocation()],
+    });
+    expect(other.effect).toBe("allow");
+  });
+
+  it("another user's revocation does not suppress this user's role grants", () => {
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool, ...none,
+      roleToolGrants: [roleToolGrant()],
+      revocations: [revocation({ userId: OTHER_USER })],
+    });
+    expect(d.effect).toBe("allow");
+  });
+
+  it("grants from multiple roles union together", () => {
+    const d1 = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool, ...none,
+      roleToolGrants: [roleToolGrant(), roleToolGrant({ id: "rtg-2", roleId: "role-other", toolName: "drop_table" })],
+    });
+    expect(d1.effect).toBe("allow");
+
+    const d2 = evaluate({
+      userId: USER, serverId: SERVER, tool: writeTool, ...none,
+      roleToolGrants: [roleToolGrant(), roleToolGrant({ id: "rtg-2", roleId: "role-other", toolName: "drop_table" })],
+    });
+    expect(d2.effect).toBe("allow");
+    expect(d2.ruleId).toBe("rtg-2");
+  });
+
+  it("visibleTools reflects role grants minus revocations", () => {
+    const tools: ToolRef[] = [readTool, writeTool];
+    const visible = visibleTools(USER, SERVER, tools, {
+      toolGrants: [], serverGrants: [],
+      roleToolGrants: [roleToolGrant(), roleToolGrant({ id: "rtg-2", toolName: "drop_table" })],
+      revocations: [revocation({ toolName: "drop_table" })],
+    });
+    expect(visible.map((t) => t.name)).toEqual(["query_database"]);
   });
 });

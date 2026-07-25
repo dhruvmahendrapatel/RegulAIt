@@ -16,6 +16,40 @@ export interface ServerGrant {
 }
 
 /**
+ * §5 role-derived entitlements. The gateway pre-filters these to the roles
+ * actually assigned to the evaluated user; the kernel only needs the grants
+ * themselves.
+ */
+export interface RoleToolGrant {
+  id: string;
+  roleId: string;
+  serverId: string;
+  toolName: string;
+}
+
+export interface RoleServerGrant {
+  id: string;
+  roleId: string;
+  serverId: string;
+  readOnlyAll: boolean;
+}
+
+/**
+ * §5 subtractive per-user override: suppresses ROLE-DERIVED entitlements
+ * only — a direct user grant always survives a revocation (a direct grant is
+ * itself an explicit per-user override, and the two shouldn't fight).
+ * toolName set = suppress role-derived access to that one tool (via role
+ * tool grants or role read-only-all); toolName null = suppress all
+ * role-derived access on the server.
+ */
+export interface Revocation {
+  id: string;
+  userId: string;
+  serverId: string;
+  toolName: string | null;
+}
+
+/**
  * §3 approval requirement: a matching, granted call pauses for a named
  * approver's sign-off instead of executing. toolName null = any tool on the
  * server; writeOnly narrows the rule to write-kind tools.
@@ -72,6 +106,10 @@ export interface EvaluationInput {
   tool: ToolRef;
   toolGrants: readonly ToolGrant[];
   serverGrants: readonly ServerGrant[];
+  /** role-derived grants, pre-filtered by the gateway to the user's assigned roles */
+  roleToolGrants?: readonly RoleToolGrant[];
+  roleServerGrants?: readonly RoleServerGrant[];
+  revocations?: readonly Revocation[];
   approvalRules?: readonly ApprovalRule[];
   rateLimits?: readonly RateLimit[];
   dataScopeRules?: readonly DataScopeRule[];
@@ -102,13 +140,16 @@ export interface Decision {
 
 export interface RuleTrace {
   rule: RuleName;
-  outcome: "allow" | "deny" | "no-match" | "require-approval" | "satisfied-by-approval";
+  outcome: "allow" | "deny" | "no-match" | "revoked" | "require-approval" | "satisfied-by-approval";
+  /** the matched grant/limit/rule id — or, for a "revoked" outcome, the revocation id */
   grantId?: string;
 }
 
 export type RuleName =
   | "tool-allow-list"
+  | "role-tool-allow-list"
   | "server-read-only-all"
+  | "role-server-read-only-all"
   | "data-scope"
   | "rate-limit"
   | "approval-required"
@@ -146,6 +187,18 @@ export function evaluate(input: EvaluationInput): Decision {
   let grantId: string | undefined;
   let grantReason = "";
 
+  // A revocation only ever suppresses ROLE-DERIVED entitlements (§5): direct
+  // user grants are themselves per-user overrides and always survive.
+  const revocationFor = (toolName: string | null): Revocation | undefined =>
+    (input.revocations ?? []).find(
+      (r) =>
+        r.userId === userId &&
+        r.serverId === serverId &&
+        (r.toolName === null || r.toolName === toolName),
+    );
+
+  // Grant precedence: direct tool grant → role tool grant (minus revocations)
+  // → direct read-only-all → role read-only-all (minus revocations) → deny.
   const toolGrant = input.toolGrants.find(
     (g) =>
       g.userId === userId &&
@@ -159,6 +212,26 @@ export function evaluate(input: EvaluationInput): Decision {
   } else {
     chain.push({ rule: "tool-allow-list", outcome: "no-match" });
 
+    const roleToolGrant = (input.roleToolGrants ?? []).find(
+      (g) => g.serverId === serverId && g.toolName === tool.name,
+    );
+    if (roleToolGrant) {
+      const revocation = revocationFor(tool.name);
+      if (revocation) {
+        chain.push({ rule: "role-tool-allow-list", outcome: "revoked", grantId: revocation.id });
+      } else {
+        chain.push({ rule: "role-tool-allow-list", outcome: "allow", grantId: roleToolGrant.id });
+        grantId = roleToolGrant.id;
+        grantReason =
+          `tool '${tool.name}' on server '${serverId}' is on the allow-list of ` +
+          `assigned role '${roleToolGrant.roleId}'`;
+      }
+    } else {
+      chain.push({ rule: "role-tool-allow-list", outcome: "no-match" });
+    }
+  }
+
+  if (!grantId) {
     const serverGrant = input.serverGrants.find(
       (g) => g.userId === userId && g.serverId === serverId && g.readOnlyAll,
     );
@@ -168,6 +241,32 @@ export function evaluate(input: EvaluationInput): Decision {
       grantReason = `read-only tool '${tool.name}' allowed by user's read-all grant on server '${serverId}'`;
     } else {
       chain.push({ rule: "server-read-only-all", outcome: "no-match" });
+
+      const roleServerGrant = (input.roleServerGrants ?? []).find(
+        (g) => g.serverId === serverId && g.readOnlyAll,
+      );
+      if (roleServerGrant && tool.kind === "read") {
+        const revocation = revocationFor(tool.name);
+        if (revocation) {
+          chain.push({
+            rule: "role-server-read-only-all",
+            outcome: "revoked",
+            grantId: revocation.id,
+          });
+        } else {
+          chain.push({
+            rule: "role-server-read-only-all",
+            outcome: "allow",
+            grantId: roleServerGrant.id,
+          });
+          grantId = roleServerGrant.id;
+          grantReason =
+            `read-only tool '${tool.name}' allowed by read-all grant of assigned role ` +
+            `'${roleServerGrant.roleId}' on server '${serverId}'`;
+        }
+      } else {
+        chain.push({ rule: "role-server-read-only-all", outcome: "no-match" });
+      }
     }
   }
 
@@ -266,6 +365,15 @@ export function evaluate(input: EvaluationInput): Decision {
   };
 }
 
+/** everything that determines what a user is entitled to on a server */
+export interface Entitlements {
+  toolGrants: readonly ToolGrant[];
+  serverGrants: readonly ServerGrant[];
+  roleToolGrants?: readonly RoleToolGrant[];
+  roleServerGrants?: readonly RoleServerGrant[];
+  revocations?: readonly Revocation[];
+}
+
 /**
  * Visibility filter (§3): tools not on the user's allow-list are not even
  * visible to the user's agent, not just blocked at execution time.
@@ -276,12 +384,11 @@ export function visibleTools(
   userId: string,
   serverId: string,
   tools: readonly ToolRef[],
-  toolGrants: readonly ToolGrant[],
-  serverGrants: readonly ServerGrant[],
+  entitlements: Entitlements,
 ): ToolRef[] {
   return tools.filter(
     (tool) =>
       tool.serverId === serverId &&
-      evaluate({ userId, serverId, tool, toolGrants, serverGrants }).effect !== "deny",
+      evaluate({ userId, serverId, tool, ...entitlements }).effect !== "deny",
   );
 }

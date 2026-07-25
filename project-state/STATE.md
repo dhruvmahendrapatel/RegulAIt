@@ -47,7 +47,18 @@ users/mcp_servers/mcp_tools/tool_grants/server_grants/audit_log — audit rows d
 no FKs so they survive deletions), `packages/shared` (zod schemas), `apps/gateway` (Fastify:
 admin CRUD, `/v1/evaluate` writes an audit row for every decision, visible-tools endpoint
 implements §3's visibility filtering). Work is on branch `claude/status-check-2gbrwf` (draft PR).
-**Not yet in the slice**: roles, agents/connectors/initiatives object types, admin portal.
+**Not yet in the slice**: agents/connectors/initiatives object types, admin portal.
+
+**Roles + per-user overrides landed (PR #7) — §5 for the MCP object type.** Kernel: role-derived
+grants (`RoleToolGrant`/`RoleServerGrant`, pre-filtered by the gateway to assigned roles) and
+`Revocation` (subtractive per-user override; toolName null = all role-derived access on the
+server). Precedence: direct grants > revocations > role-derived > default-deny — a revocation
+never suppresses a direct grant, and revoked role grants trace as `revoked` (with the revocation
+id) in the audit ruleChain. Gateway: migration 0004 (`roles`, `role_tool_grants`,
+`role_server_grants`, `role_assignments`, `revocations`), role CRUD + assignment endpoints,
+revocation create/delete (independently reversible per spec), and a per-user×server
+**entitlements view** flagging every entitlement's source (direct vs role name) and any
+revocation — §5's "override visibly flagged as a deviation", API-level.
 
 **Real authn landed (PR #6) — the pre-ship blocker is closed.** Per-user API keys (`rgl_` +
 24 random bytes, only the sha256 hash stored, shown once at creation, revocable, lastUsedAt

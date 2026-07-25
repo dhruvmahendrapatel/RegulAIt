@@ -29,6 +29,13 @@
       "when": 1784937000000,
       "tag": "0003_authn",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1784938800000,
+      "tag": "0004_roles_overrides",
+      "breakpoints": true
     }
   ]
 }

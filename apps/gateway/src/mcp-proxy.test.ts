@@ -441,3 +441,129 @@ describe("data-scope rules through the proxy (§3)", () => {
     expect(effects).toEqual(["allow", "deny", "deny"]);
   });
 });
+
+describe("roles + per-user overrides through the proxy (§5)", () => {
+  let graceId: string;
+  let roleId: string;
+  let revocationId: string;
+
+  it("a role assignment grants its bundled tools end-to-end", async () => {
+    const grace = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "proxy-grace@example.com", displayName: "Proxy Grace" },
+    });
+    graceId = grace.json().id;
+
+    const role = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/roles",
+      payload: { name: "note-taker", description: "can read time and write notes" },
+    });
+    roleId = role.json().id;
+
+    for (const toolName of ["get_time", "write_note"]) {
+      await app.inject({
+        method: "POST",
+        headers: AUTH,
+        url: `/v1/roles/${roleId}/grants/tools`,
+        payload: { serverId, toolName },
+      });
+    }
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: `/v1/users/${graceId}/roles`,
+      payload: { roleId },
+    });
+
+    const client = await mcpClientFor(graceId);
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name).sort()).toEqual(["get_time", "write_note"]);
+
+    const result = await client.callTool({ name: "get_time", arguments: {} });
+    expect(result.content).toEqual([{ type: "text", text: "12:00" }]);
+    await client.close();
+
+    const audit = await app.inject({
+      method: "GET",
+      headers: AUTH,
+      url: `/v1/audit?userId=${graceId}`,
+    });
+    const allowRow = audit.json().entries.find((e: { effect: string }) => e.effect === "allow");
+    expect(
+      allowRow.ruleChain.some(
+        (t: { rule: string; outcome: string }) =>
+          t.rule === "role-tool-allow-list" && t.outcome === "allow",
+      ),
+    ).toBe(true);
+  });
+
+  it("a revocation hides and blocks one role tool without touching the rest", async () => {
+    const rev = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/revocations",
+      payload: { userId: graceId, serverId, toolName: "write_note" },
+    });
+    revocationId = rev.json().id;
+
+    const client = await mcpClientFor(graceId);
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name)).toEqual(["get_time"]);
+    await expect(
+      client.callTool({ name: "write_note", arguments: { text: "hi" } }),
+    ).rejects.toThrow(/Denied by policy/);
+    await client.close();
+  });
+
+  it("the entitlements view flags the revoked role grant as a visible deviation", async () => {
+    const view = await app.inject({
+      method: "GET",
+      headers: AUTH,
+      url: `/v1/users/${graceId}/servers/${serverId}/entitlements`,
+    });
+    const entries = view.json().entitlements;
+    const writeNote = entries.find((e: { toolName: string }) => e.toolName === "write_note");
+    expect(writeNote).toMatchObject({
+      source: "role",
+      role: "note-taker",
+      revoked: true,
+      revocationId,
+    });
+    const getTime = entries.find((e: { toolName: string }) => e.toolName === "get_time");
+    expect(getTime).toMatchObject({ source: "role", role: "note-taker", revoked: false });
+  });
+
+  it("deleting the revocation restores the entitlement (independently reversible)", async () => {
+    const del = await app.inject({
+      method: "DELETE",
+      headers: AUTH,
+      url: `/v1/revocations/${revocationId}`,
+    });
+    expect(del.statusCode).toBe(200);
+
+    const client = await mcpClientFor(graceId);
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name).sort()).toEqual(["get_time", "write_note"]);
+    const ok = await client.callTool({ name: "write_note", arguments: { text: "back" } });
+    expect(ok.content).toEqual([{ type: "text", text: "wrote: back" }]);
+    await client.close();
+  });
+
+  it("unassigning the role removes all role-derived access", async () => {
+    const del = await app.inject({
+      method: "DELETE",
+      headers: AUTH,
+      url: `/v1/users/${graceId}/roles/${roleId}`,
+    });
+    expect(del.statusCode).toBe(200);
+
+    const client = await mcpClientFor(graceId);
+    const { tools } = await client.listTools();
+    expect(tools).toEqual([]);
+    await client.close();
+  });
+});
