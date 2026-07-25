@@ -305,7 +305,7 @@ async function runGitExecutions(
           break; // run is planned/running — the stage waits for it
         }
       }
-      const planned = await planRun(db, instance.initiatorUserId, stage.run, instance.id, instance.projectId ?? null);
+      const planned = await planRun(db, instance.initiatorUserId, stage.run, instance.id, instance.projectId ?? null, dataKey);
       if (!planned.ok) {
         const error = `nested run rejected: ${JSON.stringify(planned.body)}`;
         context.lastError = `${stage.id}: ${error}`;
@@ -612,6 +612,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
   const loadInstanceFor = async (
     req: { authCtx: { userId: string | null; isAdmin: boolean } },
     instanceId: string,
+    access?: { allowPendingApprover?: boolean },
   ): Promise<LoadResult> => {
     const [instance] = await db
       .select()
@@ -619,6 +620,24 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       .where(eq(workflowInstances.id, instanceId));
     if (!instance) return { error: 404 };
     if (!req.authCtx.isAdmin && req.authCtx.userId !== instance.initiatorUserId) {
+      // Read-only widening: the named approver of a PENDING approval on this
+      // instance may view what they are being asked to sign off — deciding
+      // blind is not governance. Only the GET route passes the flag; every
+      // driving route keeps the admin/initiator gate.
+      if (access?.allowPendingApprover && req.authCtx.userId) {
+        const [naming] = await db
+          .select({ id: approvals.id })
+          .from(approvals)
+          .where(
+            and(
+              eq(approvals.instanceId, instanceId),
+              eq(approvals.approverUserId, req.authCtx.userId),
+              eq(approvals.status, "pending"),
+            ),
+          )
+          .limit(1);
+        if (naming) return { instance };
+      }
       return { error: 403 };
     }
     return { instance };
@@ -713,7 +732,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
   // §5 dashboard: one instance in full…
   app.get("/v1/workflows/instances/:instanceId", async (req, reply) => {
     const { instanceId } = instanceIdParam.parse(req.params);
-    const loaded = await loadInstanceFor(req, instanceId);
+    const loaded = await loadInstanceFor(req, instanceId, { allowPendingApprover: true });
     if (loaded.error) return reply.status(loaded.error).send({ error: "unavailable" });
     const [events, artifacts, pendingApprovals] = await Promise.all([
       db
@@ -731,6 +750,15 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
         .from(approvals)
         .where(and(eq(approvals.instanceId, instanceId), eq(approvals.status, "pending"))),
     ]);
+    // name the approver on each pending gate so "awaiting <who>" is renderable
+    const approverIds = [...new Set(pendingApprovals.map((a) => a.approverUserId))];
+    const approverRows = approverIds.length
+      ? await db
+          .select({ id: users.id, displayName: users.displayName, email: users.email })
+          .from(users)
+          .where(inArray(users.id, approverIds))
+      : [];
+    const approverName = new Map(approverRows.map((u) => [u.id, u.displayName || u.email]));
     return {
       instance: loaded.instance,
       // §9: the effective (strictest-wins merged) cost-sensitivity for this run
@@ -738,7 +766,10 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
         (loaded.instance.definition as WorkflowDefinition).costSensitivity ?? "standard",
       events,
       artifacts,
-      pendingApprovals,
+      pendingApprovals: pendingApprovals.map((a) => ({
+        ...a,
+        approverName: approverName.get(a.approverUserId) ?? null,
+      })),
     };
   });
 

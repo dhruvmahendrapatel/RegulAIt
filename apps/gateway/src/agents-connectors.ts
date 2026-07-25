@@ -265,8 +265,10 @@ async function performDispatch(
 
 /** Providers this user could actually dispatch to right now: "mock" needs no
  * key at all, everything else needs a stored credential — the caller's own
- * (BYO key) or the platform's — and a data key to decrypt it with. */
-async function configuredProviders(
+ * (BYO key) or the platform's — and a data key to decrypt it with. Exported
+ * so orchestration's re-plan routing filters candidates exactly like the
+ * invoke path does — routing anywhere may only land on a servable agent. */
+export async function configuredProviders(
   db: Db,
   dataKey: string | undefined,
   userId: string,

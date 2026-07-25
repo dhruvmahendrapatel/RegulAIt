@@ -288,6 +288,65 @@ async function sendPrompt() {
 }
 
 // ------------------------------------------------------------------ runs --
+// Canned graph shapes for the New Run form. Every node carries a real
+// multi-sentence instruction — the worker's actual work order — so a run
+// planned straight from a template prompts its workers with more than a
+// one-line title. The advanced JSON view exposes the same payload for
+// hand-editing (ids, dependsOn, modes, estimates, the escalation approver).
+const RUN_TEMPLATES = [
+  { id: "feature", label: "Feature (design → implement → document)", nodes: [
+    { id: "design", title: "Design the change", dependsOn: [], instruction:
+      "Draft the technical design for the feature named in the run title. Cover the API surface or interfaces it adds or changes, the data it touches, and every error case you can foresee. Call out anything that needs a migration or a staged rollout, and end with a short list of open questions a reviewer should settle." },
+    { id: "implement", title: "Implement the change", dependsOn: ["design"], instruction:
+      "Implement the feature following the design produced by the design node. Describe the change file by file, keep it minimal and consistent with the surrounding code, and state explicitly how each error case from the design is handled. Flag any place where you had to deviate from the design and why." },
+    { id: "document", title: "Document the change", dependsOn: ["implement"], instruction:
+      "Write the user-facing documentation for the implemented feature: what it does, how to use it, and any limits or defaults worth knowing. Include a short changelog entry, and note anything an operator must do when rolling the change out." },
+  ]},
+  { id: "bugfix", label: "Bug fix (reproduce → fix → verify)", nodes: [
+    { id: "reproduce", title: "Reproduce the bug", dependsOn: [], instruction:
+      "Reproduce the bug named in the run title. State the exact steps, inputs, and environment that trigger it, the observed behavior versus the expected behavior, and your best hypothesis for the root cause with the evidence supporting it." },
+    { id: "fix", title: "Fix the root cause", dependsOn: ["reproduce"], instruction:
+      "Fix the root cause identified by the reproduce node — not just the symptom. Describe the change precisely, explain why it is the minimal correct fix, and list any related code paths that share the same flaw and should be checked while you are here." },
+    { id: "verify", title: "Verify the fix", dependsOn: ["fix"], instruction:
+      "Verify the fix: re-run the reproduction steps and confirm the expected behavior, then look for regressions in the surrounding behavior. List every check performed with its result, and state clearly whether the fix is safe to ship." },
+  ]},
+  { id: "analysis", label: "Analysis (gather → analyze → report)", nodes: [
+    { id: "gather", title: "Gather the source material", dependsOn: [], instruction:
+      "Gather the raw material needed for the analysis named in the run title. List every source consulted, quote or summarize the relevant parts, and flag the gaps where the available material is thin or contradictory." },
+    { id: "analyze", title: "Analyze the findings", dependsOn: ["gather"], instruction:
+      "Analyze the gathered material. Identify the patterns, trade-offs, and risks that matter for the question in the run title, compare the plausible options against each other, and rank them with an explicit rationale for the ordering." },
+    { id: "report", title: "Write the report", dependsOn: ["analyze"], instruction:
+      "Write the final report for a reader who has seen none of the earlier nodes: the question, the short answer up front, the supporting analysis, and a concrete recommendation with its main risks and mitigations. Keep it under a page." },
+  ]},
+];
+// mock agents run with no external credential, so they are the default owner
+const nrDefaultAgent = () => (AGENTS.find((a) => a.provider === "mock") ?? AGENTS[0])?.agentId ?? "";
+const nrAgentSel = (nid) => '<select data-nagent="' + nid + '">' + AGENTS.map((a) =>
+  '<option value="' + a.agentId + '"' + (a.agentId === nrDefaultAgent() ? " selected" : "") + '>' + esc(a.name) + " · " + esc(a.provider) + "</option>").join("") + "</select>";
+const nrNodeRowsHtml = (t) => t.nodes.map((n) => \`<div class="node-row">
+  <span class="node-dot not_started"></span>
+  <div class="grow"><label class="f">\${esc(n.id)}\${n.dependsOn.length ? " · after " + n.dependsOn.join(", ") : ""}</label>
+    <input data-ntitle="\${n.id}" value="\${esc(n.title)}" style="width:100%" title="\${esc(n.instruction)}"></div>
+  <div><label class="f">Agent</label>\${nrAgentSel(n.id)}</div>
+</div>\`).join("");
+// the exact JSON the form POSTs — also what the advanced textarea pre-fills
+function nrGraph() {
+  const t = RUN_TEMPLATES.find((x) => x.id === $("#nr-template")?.value) ?? RUN_TEMPLATES[0];
+  return {
+    run: ($("#nr-title")?.value ?? "").trim() || "untitled run",
+    // escalations land in the planner's own inbox unless the JSON names someone else
+    escalationApproverUserId: ME.userId,
+    nodes: t.nodes.map((n) => ({
+      id: n.id,
+      title: ($('[data-ntitle="' + n.id + '"]')?.value ?? n.title).trim() || n.title,
+      instruction: n.instruction,
+      ownerAgentId: $('[data-nagent="' + n.id + '"]')?.value ?? nrDefaultAgent(),
+      mode: "execute",
+      dependsOn: n.dependsOn,
+    })),
+  };
+}
+
 async function runsPage() {
   const { runs } = await get("/v1/runs");
   const rows = runs.map((r) => {
@@ -301,13 +360,64 @@ async function runsPage() {
       <td class="num dim">\${fmtUsd(r.budget?.measuredSpentUsd ?? 0)} spent</td>
       <td class="dim">\${ago(r.createdAt)}</td></tr>\`;
   }).join("");
+  const projectOpts = ['<option value="">no project</option>']
+    .concat(PROJECTS.map((p) => \`<option value="\${p.id}">\${esc(p.name)}</option>\`)).join("");
+  const tplOpts = RUN_TEMPLATES.map((t) => \`<option value="\${t.id}">\${esc(t.label)}</option>\`).join("");
+  const newRun = AGENTS.length === 0
+    ? '<div class="empty">No agents are granted to your account — ask an admin to grant you one before planning a run.</div>'
+    : \`
+    <div class="row">
+      <div class="grow"><label class="f">Title</label><input id="nr-title" placeholder="What is this run for?" style="width:100%"></div>
+      <div><label class="f">Bill to</label><select id="nr-project">\${projectOpts}</select></div>
+      <div><label class="f">Template</label><select id="nr-template">\${tplOpts}</select></div>
+    </div>
+    <div id="nr-nodes" style="margin-top:6px">\${nrNodeRowsHtml(RUN_TEMPLATES[0])}</div>
+    <details id="nr-adv" style="margin-top:10px">
+      <summary class="faint" style="cursor:pointer;font-size:11.5px">Advanced — edit the graph JSON directly (authoritative while open)</summary>
+      <textarea id="nr-json" rows="16" style="width:100%;margin-top:8px" spellcheck="false"></textarea>
+      <div class="faint" style="font-size:11.5px;margin-top:4px">Pre-filled from the form above; hand-edit ids, dependsOn, modes, per-node instructions, estimates, or escalationApproverUserId. Picking another template refills it.</div>
+    </details>
+    <div class="row" style="margin-top:10px"><button class="primary" id="nr-create">Plan run</button><span class="err-line" id="nr-err"></span></div>\`;
   return \`
   <h1>Runs</h1>
   <p class="sub">Multi-agent task graphs — planned, governed, metered.</p>
+  <h2>New run</h2>
+  <div class="card">\${newRun}</div>
+  <h2>Your runs</h2>
   <div class="card" style="padding:0 18px">
     <table><tr><th>Run</th><th>Status</th><th>Progress</th><th>Measured spend</th><th>Created</th></tr>
-    \${rows || '<tr><td colspan="5"><div class="empty">No runs yet — seed data includes one, or create runs via the API.</div></td></tr>'}</table>
+    \${rows || '<tr><td colspan="5"><div class="empty">No runs yet — plan one above.</div></td></tr>'}</table>
   </div>\`;
+}
+
+function wireRuns() {
+  $("#nr-template")?.addEventListener("change", () => {
+    const t = RUN_TEMPLATES.find((x) => x.id === $("#nr-template").value) ?? RUN_TEMPLATES[0];
+    $("#nr-nodes").innerHTML = nrNodeRowsHtml(t);
+    // a new template is a new base — refill the JSON even if it was edited
+    if ($("#nr-adv").open) $("#nr-json").value = JSON.stringify(nrGraph(), null, 2);
+  });
+  $("#nr-adv")?.addEventListener("toggle", () => {
+    const ta = $("#nr-json");
+    if ($("#nr-adv").open && !ta.value.trim()) ta.value = JSON.stringify(nrGraph(), null, 2);
+  });
+  $("#nr-create")?.addEventListener("click", async () => {
+    const err = $("#nr-err"); err.textContent = "";
+    let graph;
+    if ($("#nr-adv").open && $("#nr-json").value.trim()) {
+      // client-side parse check first — a JSON typo never reaches the server
+      try { graph = JSON.parse($("#nr-json").value); }
+      catch (e) { err.textContent = "graph JSON does not parse — " + e.message; return; }
+    } else {
+      graph = nrGraph();
+    }
+    const projectId = $("#nr-project").value || undefined;
+    try {
+      const r = await post("/v1/runs", { graph, ...(projectId ? { projectId } : {}) });
+      toast(r.budgetApprovalPending ? "Run planned — over your budget cap, approval requested" : "Run planned");
+      location.hash = "#/runs/" + r.id;
+    } catch (e) { err.textContent = e.message; } // zod issues arrive via errMessage
+  });
 }
 
 async function runDetailPage(id) {
@@ -318,6 +428,14 @@ async function runDetailPage(id) {
   const nodes = graph.nodes.map((n) => {
     const st = state.nodeStatuses[n.id];
     const out = outputs[n.id];
+    // instruction edits only matter for a node that can still dispatch
+    const editable = st === "not_started" || st === "in_progress" || st === "blocked";
+    const instr = n.instruction ?? n.title;
+    const editor = editable ? \`<div data-nedbox="\${n.id}" style="display:none;margin-top:6px">
+        <textarea data-ninput="\${n.id}" data-def="\${esc(instr)}" rows="4" style="width:100%" spellcheck="false">\${esc(instr)}</textarea>
+        <div class="faint" style="font-size:11.5px;margin-top:2px">Sent to this node's worker as its instructions on the next dispatch\${st === "in_progress" ? "" : " (auto-advance picks edits up)"}.</div>
+        \${st === "in_progress" ? '<button class="small" data-dispatch="' + n.id + '" style="margin-top:6px">Dispatch with these instructions</button>' : ""}
+      </div>\` : "";
     return \`<div class="node-row">
       <span class="node-dot \${st}"></span>
       <div class="grow">
@@ -325,7 +443,9 @@ async function runDetailPage(id) {
         <div class="dim" style="font-size:12px">\${esc(AGENT_NAMES[state.owners[n.id]] ?? "agent")}\${n.dependsOn?.length ? " · after " + n.dependsOn.join(", ") : ""}</div>
         \${out ? \`<details style="margin-top:4px"><summary class="faint" style="cursor:pointer;font-size:11.5px">output · \${fmtUsd(out.costUsd)} · \${esc(out.model)}</summary><pre style="margin-top:6px">\${esc(out.outputText)}</pre></details>\` : ""}
         \${state.lastError?.[n.id] ? '<div class="err-line">' + esc(state.lastError[n.id]) + "</div>" : ""}
+        \${editor}
       </div>
+      \${editable ? '<button class="ghost small" data-nedit="' + n.id + '" title="adjust the instructions sent to this node&#39;s worker">✎</button>' : ""}
       <div>\${statusBadge(st)}</div>
       \${st === "in_review" ? '<button class="small" data-accept="' + n.id + '">Accept</button>' : ""}
       \${st === "blocked" ? '<button class="small" data-retry="' + n.id + '">Retry</button>' : ""}
@@ -348,7 +468,7 @@ async function runDetailPage(id) {
     \${budget.overageApproved ? '<span class="badge warn">overage approved</span>' : ""}</div>
     <div class="bar" style="margin-top:8px"><i class="\${spent > cap ? "over" : ""}" style="width:\${pct}%"></i></div>
   </div>\` : ""}
-  \${v.pendingApprovals?.length ? '<h2>Waiting on approvals</h2><div class="card">' + v.pendingApprovals.map((a) => '<div class="row"><span class="mono">' + esc(a.stageId) + "</span>" + statusBadge(a.status) + "</div>").join("") + "</div>" : ""}\`;
+  \${v.pendingApprovals?.length ? '<h2>Waiting on approvals</h2><div class="card">' + v.pendingApprovals.map((a) => '<div class="row"><span class="mono">' + esc(a.stageId) + '</span><span class="dim" style="font-size:12px">awaiting ' + esc(a.approverName ?? "the named approver") + "</span>" + statusBadge(a.status) + "</div>").join("") + "</div>" : ""}\`;
 }
 
 async function wireRunDetail(id) {
@@ -360,9 +480,35 @@ async function wireRunDetail(id) {
     act(() => post("/v1/runs/" + id + "/events", { kind: "start" }), "Run started"));
   $("#run-auto")?.addEventListener("click", () =>
     act(async () => {
-      const r = await post("/v1/runs/" + id + "/auto", { acceptReviews: $("#run-accept")?.checked ?? true });
+      // any edited per-node instruction rides along as that node's input
+      const inputs = {};
+      document.querySelectorAll("[data-ninput]").forEach((t) => {
+        const v = t.value.trim();
+        if (v && v !== t.dataset.def) inputs[t.dataset.ninput] = v;
+      });
+      const r = await post("/v1/runs/" + id + "/auto", {
+        acceptReviews: $("#run-accept")?.checked ?? true,
+        ...(Object.keys(inputs).length ? { inputs } : {}),
+      });
       return r;
     }, "Auto-advance pass complete"));
+  document.querySelectorAll("[data-nedit]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const box = $('[data-nedbox="' + b.dataset.nedit + '"]');
+      if (box) box.style.display = box.style.display === "none" ? "" : "none";
+    }));
+  // manual dispatch of an in_progress node (e.g. one a failed pass stranded):
+  // dispatch with the adjusted instructions, then submit the output for
+  // review — the same two steps an auto-advance pass takes.
+  document.querySelectorAll("[data-dispatch]").forEach((b) =>
+    b.addEventListener("click", () =>
+      act(async () => {
+        const t = $('[data-ninput="' + b.dataset.dispatch + '"]');
+        const v = (t?.value ?? "").trim();
+        await post("/v1/runs/" + id + "/nodes/" + b.dataset.dispatch + "/dispatch",
+          v && v !== t.dataset.def ? { input: v } : {});
+        await post("/v1/runs/" + id + "/events", { kind: "node_submitted", nodeId: b.dataset.dispatch });
+      }, "Node dispatched — output submitted for review")));
   document.querySelectorAll("[data-accept]").forEach((b) =>
     b.addEventListener("click", () =>
       act(() => post("/v1/runs/" + id + "/events", { kind: "node_accepted", nodeId: b.dataset.accept }), "Accepted")));
@@ -415,14 +561,23 @@ async function workflowDetailPage(id) {
       <div class="row" style="margin-top:10px"><button class="primary" id="wf-submit">Submit for sign-off</button><span class="err-line" id="wf-derr"></span></div>
     </div>\`;
   } else if (inst.status === "blocked_on_approval") {
-    action = '<div class="card"><span class="badge warn">waiting for sign-off</span> <span class="dim">the named approver has this in their inbox</span></div>';
+    const awaiting = [...new Set((v.pendingApprovals ?? []).map((a) => a.approverName ?? "the named approver"))];
+    action = '<div class="card"><span class="badge warn">waiting for sign-off</span> <span class="dim">awaiting ' + esc(awaiting.join(", ") || "the named approver") + " — it is in their inbox</span></div>";
   } else if (inst.status === "awaiting_trigger" && current) {
     action = \`<div class="card"><div class="row"><button class="primary" id="wf-advance">Run \${esc(current.id)}</button><span class="err-line" id="wf-derr"></span></div></div>\`;
   } else if (inst.status === "awaiting_execution") {
     action = '<div class="card"><span class="badge info">executing</span> <span class="dim">a nested run or git operation is in flight' + (inst.context?.["runId:" + (current?.id ?? "")] ? ' — <a href="#/runs/' + inst.context["runId:" + current.id] + '">watch the run</a>' : "") + "</span>" + (inst.context?.lastError ? '<div class="err-line" style="margin-top:6px">' + esc(inst.context.lastError) + "</div>" : "") + "</div>";
   }
+  // §9.4: an artifact of a project-billed instance can be promoted into that
+  // project's shared context — opt-in, by the artifact's own initiator only
+  // (the server rejects anyone else; the click handler says so gracefully).
+  const projName = inst.projectId
+    ? ((PROJECTS.find((p) => p.id === inst.projectId) || {}).name ?? "the project")
+    : null;
   const artifacts = (v.artifacts ?? []).map((a) =>
-    \`<details style="margin-bottom:8px"><summary class="dim" style="cursor:pointer">\${esc(a.output)} v\${a.version}</summary><pre style="margin-top:6px">\${esc(a.content)}</pre></details>\`).join("");
+    \`<details style="margin-bottom:8px"><summary class="dim" style="cursor:pointer">\${esc(a.output)} v\${a.version}</summary><pre style="margin-top:6px">\${esc(a.content)}</pre>
+      \${inst.projectId ? \`<div class="row" style="margin-top:6px"><button class="small" data-promote="\${a.id}" data-pid="\${inst.projectId}">Promote to shared context</button><span class="faint" style="font-size:11.5px">copies this version into \${esc(projName)}’s shared context with provenance — initiator only</span></div>\` : ""}
+    </details>\`).join("");
   return \`
   <button class="ghost small" data-go="workflows">← All workflows</button>
   <h1 style="margin-top:8px">\${esc(inst.change?.description ?? "")}</h1>
@@ -467,39 +622,102 @@ function wireWorkflowDetail(id, inst) {
       toast("Stage advanced"); render();
     } catch (e) { $("#wf-derr").textContent = e.message; }
   });
+  document.querySelectorAll("[data-promote]").forEach((b) =>
+    b.addEventListener("click", () => promoteArtifact(b.dataset.pid, b.dataset.promote)));
 }
 
 // ------------------------------------------------------------------ inbox --
+const approvalLabel = (a) => {
+  if (a.stageId === "__project_budget__") return "Project budget overage";
+  if (a.stageId === "__reclassification__") return "Compliance reclassification";
+  if (a.stageId?.startsWith("__context_conflict__"))
+    return "Shared-context conflict" + (a.contextConflict ? " · '" + a.contextConflict.key + "'" : "");
+  if (a.stageId?.startsWith("__budget__")) return "Run budget overage";
+  return (a.objectType === "workflow" ? "Sign-off · " : a.objectType === "run" ? "Run escalation · " : "") + (a.stageId ?? "");
+};
+// where the governed object lives in this app — the row must let the
+// approver walk to the thing itself, not just name it
+const approvalTarget = (a) => {
+  if (a.instanceId) return "workflows/" + a.instanceId;
+  if (a.runId) return "runs/" + a.runId;
+  if (a.projectId) return "projects";
+  return null;
+};
 async function inboxPage() {
   const { approvals } = await get("/v1/approvals");
   const pending = approvals.filter((a) => a.status === "pending");
   const decided = approvals.filter((a) => a.status !== "pending").slice(0, 12);
-  const label = (a) => {
-    if (a.stageId === "__project_budget__") return "Project budget overage";
-    if (a.stageId === "__reclassification__") return "Compliance reclassification";
-    if (a.stageId?.startsWith("__context_conflict__")) return "Shared-context conflict";
-    if (a.stageId?.startsWith("__budget__")) return "Run budget overage";
-    return (a.objectType === "workflow" ? "Sign-off · " : a.objectType === "run" ? "Run escalation · " : "") + (a.stageId ?? "");
+  // Workflow sign-offs decide on an ARTIFACT — fetch each governed instance
+  // once (the read endpoint admits the named approver) so the submitted
+  // requirements sit inside the row, collapsed until wanted.
+  const instances = {};
+  await Promise.all([...new Set(pending.filter((a) => a.objectType === "workflow" && a.instanceId).map((a) => a.instanceId))]
+    .map(async (id) => { try { instances[id] = await get("/v1/workflows/instances/" + id); } catch {} }));
+  const preview = (a) => {
+    const v = a.instanceId && instances[a.instanceId];
+    if (!v || !(v.artifacts ?? []).length) return "";
+    const latest = {};
+    for (const art of v.artifacts) if (!latest[art.output] || art.version > latest[art.output].version) latest[art.output] = art;
+    return Object.values(latest).map((art) =>
+      \`<details style="margin-top:6px"><summary class="faint" style="cursor:pointer;font-size:11.5px">submitted \${esc(art.output)} v\${art.version}</summary><pre style="margin-top:6px">\${esc(art.content)}</pre></details>\`).join("");
   };
-  const row = (a, actions) => \`<div class="node-row">
-    <div class="grow">
-      <div>\${esc(label(a))}</div>
-      <div class="dim" style="font-size:12px">\${esc(a.objectType)} · requested \${ago(a.requestedAt)}</div>
+  // §9 arbitration is a choice between two TEXTS — both sides sit in the row,
+  // visible, so the arbiter never decides blind.
+  const conflictPreview = (a) => {
+    const c = a.contextConflict;
+    if (!c) return "";
+    const side = (label, s) => \`<div><label class="f">\${label}</label><pre>\${esc(s ? s.content : "(none)")}</pre></div>\`;
+    return \`<div class="grid2" style="margin-top:8px">
+      \${side("currently accepted · rev " + (c.current ? c.current.revision : "—") + (c.current && c.current.byName ? " · " + esc(c.current.byName) : ""), c.current)}
+      \${side("proposed · rev " + c.conflicting.revision + (c.conflicting.baseRevision != null ? " (based on rev " + c.conflicting.baseRevision + ")" : "") + (c.conflicting.byName ? " · " + esc(c.conflicting.byName) : ""), c.conflicting)}
     </div>
-    \${actions ? \`<button class="small primary" data-decide="approved" data-id="\${a.id}">Approve</button>
-    <button class="small danger" data-decide="denied" data-id="\${a.id}">Deny</button>\` : statusBadge(a.status)}
+    <div class="faint" style="font-size:11.5px;margin-top:4px">Approve makes the proposed revision the current value; deny keeps it retained in history, never current.</div>\`;
+  };
+  // decide controls: the named approver decides; an admin may override with a
+  // MANDATORY reason (recorded + audit-marked server-side); anyone else sees
+  // who the decision is waiting on.
+  const controls = (a) => {
+    const named = ME.userId === a.approverUserId;
+    if (!named && !ME.isAdmin) return '<span class="dim" style="font-size:12px">awaiting ' + esc(a.approverName ?? "the named approver") + "</span>";
+    return (named ? "" : '<span class="badge warn" title="you are not the named approver — a reason is required">override</span>')
+      + \`<input data-reason="\${a.id}" placeholder="\${named ? "reason (optional)" : "reason (required — admin override)"}" style="font-size:12px;max-width:\${named ? 170 : 210}px">
+      <button class="small primary" data-decide="approved" data-id="\${a.id}">Approve</button>
+      <button class="small danger" data-decide="denied" data-id="\${a.id}">Deny</button>\`;
+  };
+  const pendingRow = (a) => {
+    const target = approvalTarget(a);
+    const what = a.objectLabel
+      ? (target ? \`<a href="#/\${target}">\${esc(a.objectLabel)}</a>\` : esc(a.objectLabel))
+      : (target ? \`<a href="#/\${target}">view \${esc(a.objectType)}</a>\` : "");
+    return \`<div class="node-row">
+    <div class="grow">
+      <div>\${esc(approvalLabel(a))}\${what ? " · " + what : ""}</div>
+      <div class="dim" style="font-size:12px">\${esc(a.objectType)} · requested by \${esc(a.requestedByName ?? "unknown")} · \${ago(a.requestedAt)}</div>
+      \${preview(a)}\${conflictPreview(a)}
+    </div>
+    \${controls(a)}
+  </div>\`;
+  };
+  const decidedRow = (a) => \`<div class="node-row">
+    <div class="grow">
+      <div>\${esc(approvalLabel(a))}\${a.objectLabel ? ' · <span class="dim">' + esc(a.objectLabel) + "</span>" : ""}</div>
+      <div class="dim" style="font-size:12px">requested by \${esc(a.requestedByName ?? "unknown")} · decided by \${esc(a.decidedByName ?? "—")}\${a.decidedAt ? " " + ago(a.decidedAt) : ""}</div>
+      \${a.decisionReason ? '<div class="faint" style="font-size:12px">“' + esc(a.decisionReason) + '”</div>' : ""}
+    </div>
+    \${statusBadge(a.status)}
   </div>\`;
   return \`
   <h1>Inbox</h1>
   <p class="sub">Everything that pauses for you: sign-offs, escalations, budget overages, context conflicts.</p>
-  <div class="card">\${pending.map((a) => row(a, true)).join("") || '<div class="empty">Nothing waiting on you.</div>'}</div>
-  \${decided.length ? "<h2>Recently decided</h2><div class=card>" + decided.map((a) => row(a, false)).join("") + "</div>" : ""}\`;
+  <div class="card">\${pending.map(pendingRow).join("") || '<div class="empty">Nothing waiting on you.</div>'}</div>
+  \${decided.length ? "<h2>Recently decided</h2><div class=card>" + decided.map(decidedRow).join("") + "</div>" : ""}\`;
 }
 function wireInbox() {
   document.querySelectorAll("[data-decide]").forEach((b) =>
     b.addEventListener("click", async () => {
+      const reason = ($('[data-reason="' + b.dataset.id + '"]')?.value ?? "").trim();
       try {
-        await post("/v1/approvals/" + b.dataset.id + "/decide", { decision: b.dataset.decide });
+        await post("/v1/approvals/" + b.dataset.id + "/decide", { decision: b.dataset.decide, ...(reason ? { reason } : {}) });
         toast(b.dataset.decide === "approved" ? "Approved" : "Denied");
         const inbox = await get("/v1/approvals");
         INBOX_COUNT = inbox.approvals.filter((a) => a.status === "pending").length;
@@ -509,26 +727,304 @@ function wireInbox() {
 }
 
 // --------------------------------------------------------------- projects --
+// The pillar-4 write surface. The context editor follows §9.2's
+// read-before-write contract to the letter: it fetches the current accepted
+// revision when it opens, re-checks it before submitting, and when the key
+// moved underneath the edit it never submits silently — the member sees both
+// texts and chooses a fresh base or a deliberate stale-base submit that goes
+// to the named arbiter.
+let CTXED = null;            // the one open context editor
+const HIST_OPEN = new Set(); // open history drawers, "projectId\\u0000key"
+let DIRECTORY = [];          // names-only user directory (never emails/keys)
+
+async function openCtxEditor(projectId, key) {
+  if (key) {
+    // (a) fetch the current revision FIRST — the edit is based on something real
+    try {
+      const cur = await get("/v1/projects/" + projectId + "/context?key=" + encodeURIComponent(key));
+      const item = (cur.context ?? [])[0];
+      CTXED = { projectId, key, base: item ? item.revision : undefined, draft: item ? item.content : "", conflict: null };
+    } catch (e) { toast("✗ " + e.message); return; }
+  } else {
+    CTXED = { projectId, key: null, newKey: "", base: undefined, draft: "", conflict: null };
+  }
+  render();
+}
+
+async function submitCtx(mode) { // "auto" | "fresh" (rebase) | "stale" (to arbiter)
+  const c = CTXED; if (!c) return;
+  const key = c.key ?? ($("#ctx-newkey")?.value ?? c.newKey ?? "").trim();
+  const draft = $("#ctx-draft") ? $("#ctx-draft").value : c.draft;
+  c.draft = draft; if (c.key === null) c.newKey = key;
+  const err = $("#ctx-err");
+  if (err) err.textContent = "";
+  if (!key) { if (err) err.textContent = "key: a key is required"; return; }
+  if (!draft.trim()) { if (err) err.textContent = "content: nothing to save"; return; }
+  const payload = { key, content: draft };
+  if (mode === "stale" && c.base !== undefined) {
+    payload.baseRevision = c.base; // deliberately against the stale base → arbiter
+  } else if (mode === "fresh" && c.conflict) {
+    payload.baseRevision = c.conflict.revision; // rebase on what is accepted now
+  } else {
+    // (b) read-before-write: re-check the accepted revision at submit time
+    let latest = null;
+    try {
+      const cur = await get("/v1/projects/" + c.projectId + "/context?key=" + encodeURIComponent(key));
+      latest = (cur.context ?? [])[0] ?? null;
+    } catch (e) { if (err) err.textContent = e.message; return; }
+    if (latest && c.base !== undefined && latest.revision === c.base) {
+      payload.baseRevision = c.base;
+    } else if (latest) {
+      // (c) it moved while editing — show both texts, never submit silently
+      c.conflict = { revision: latest.revision, content: latest.content, byName: latest.provenance?.userName ?? null };
+      render(); return;
+    }
+    // no accepted revision at all → genuinely new key, no baseRevision
+  }
+  try {
+    const r = await post("/v1/projects/" + c.projectId + "/context", payload);
+    CTXED = null;
+    toast(r.conflict
+      ? "Saved as revision " + r.revision + " — the conflict was sent to the arbiter to resolve"
+      : "Revision " + r.revision + " accepted");
+    render();
+  } catch (e) {
+    if (e.status === 409 && e.payload && e.payload.error === "base_revision_required") {
+      // the key existed after all (e.g. someone created it first) — same conflict UI
+      try {
+        const cur = await get("/v1/projects/" + c.projectId + "/context?key=" + encodeURIComponent(key));
+        const latest = (cur.context ?? [])[0];
+        if (latest) {
+          c.key = key;
+          c.conflict = { revision: latest.revision, content: latest.content, byName: latest.provenance?.userName ?? null };
+          render(); return;
+        }
+      } catch {}
+    }
+    if ($("#ctx-err")) $("#ctx-err").textContent = e.message; else toast("✗ " + e.message);
+  }
+}
+
+async function promoteArtifact(projectId, artifactId) {
+  try {
+    const r = await post("/v1/projects/" + projectId + "/context/promote", { artifactId });
+    toast(r.conflict
+      ? "Promoted as revision " + r.revision + " — the conflict was sent to the arbiter"
+      : "Promoted into shared context as '" + r.key + "' revision " + r.revision);
+    render();
+  } catch (e) {
+    if (e.status === 403 && e.payload && e.payload.error === "not_the_artifact_owner") {
+      toast("Only the workflow's initiator can promote its artifacts — this one isn't yours to share.");
+    } else { toast("✗ " + e.message); }
+  }
+}
+
+function ctxEditorHtml(ctx) {
+  const c = CTXED;
+  const arbName = ctx.arbiter?.name ?? "the project arbiter";
+  if (c.conflict) {
+    const k = c.key ?? c.newKey;
+    return \`<div class="card" style="margin:8px 0 4px;border-color:#d9a44166">
+      <div class="row"><span class="badge warn">changed while you were editing</span>
+        <span class="dim" style="font-size:12.5px">'\${esc(k)}' is now at rev \${c.conflict.revision}\${c.conflict.byName ? " by " + esc(c.conflict.byName) : ""}\${c.base !== undefined ? " — your edit was based on rev " + c.base : ""}.</span></div>
+      <div class="grid2" style="margin-top:10px">
+        <div><label class="f">Now accepted · rev \${c.conflict.revision}</label><pre>\${esc(c.conflict.content)}</pre></div>
+        <div><label class="f">Your text</label><pre>\${esc(c.draft)}</pre></div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="primary small" data-ctxfresh>Rebase on rev \${c.conflict.revision} and submit</button>
+        \${c.base !== undefined ? '<button class="small" data-ctxstale>Submit against my stale base</button>' : ""}
+        <button class="ghost small" data-ctxcancel>Cancel</button>
+      </div>
+      \${c.base !== undefined ? '<div class="faint" style="font-size:11.5px;margin-top:6px">Submitting against the stale base keeps your text as a retained revision — this will be sent to ' + esc(arbName) + " to resolve. Nothing is overwritten either way.</div>" : ""}
+    </div>\`;
+  }
+  return \`<div style="margin:8px 0 4px">
+    \${c.key === null ? \`<div><label class="f">Key</label><input id="ctx-newkey" value="\${esc(c.newKey ?? "")}" placeholder="e.g. coding-standards"></div>\` : ""}
+    <textarea id="ctx-draft" rows="5" style="width:100%;margin-top:6px" spellcheck="false">\${esc(c.draft)}</textarea>
+    <div class="faint" style="font-size:11.5px;margin-top:4px">\${c.base !== undefined
+      ? "Editing from accepted rev " + c.base + " — the write names its base revision, so nothing is silently overwritten. A write against a stale base would be sent to " + esc(arbName) + " to resolve."
+      : "First revision of a new key."}</div>
+    <div class="row" style="margin-top:8px">
+      <button class="primary small" data-ctxsave>Save revision</button>
+      <button class="ghost small" data-ctxcancel>Cancel</button>
+      <span class="err-line" id="ctx-err"></span>
+    </div>
+  </div>\`;
+}
+
+const ctxHistHtml = (rows) => \`<div style="margin-top:8px;border-left:2px solid var(--border-strong);padding-left:10px">\` +
+  rows.slice().reverse().map((r) => {
+    const state = r.accepted ? '<span class="badge ok">accepted</span>'
+      : r.pendingApprovalId ? '<span class="badge warn">awaiting arbiter</span>'
+      : '<span class="badge bad">rejected</span>';
+    return \`<div style="padding:4px 0">
+      <span class="mono" style="font-size:11.5px">rev \${r.revision}</span> \${state}
+      \${r.sourceArtifactId ? '<span class="badge info">from artifact</span>' : ""}
+      <span class="dim" style="font-size:12px">by \${esc(r.byName ?? "unknown")}\${r.teamName ? " · " + esc(r.teamName) : ""}\${r.baseRevision ? " · based on rev " + r.baseRevision : ""} · \${ago(r.createdAt)}</span>
+      <details><summary class="faint" style="cursor:pointer;font-size:11px">text</summary><pre style="margin-top:4px">\${esc(r.content)}</pre></details>
+    </div>\`;
+  }).join("") + "</div>";
+
+const teamOptsFor = (u) => '<option value="">no team</option>' +
+  ((u && u.teams) ?? []).map((t) => \`<option value="\${t.id}">\${esc(t.name)}</option>\`).join("");
+
+async function projectCard(p, instances) {
+  const [ctx, membersRes] = await Promise.all([
+    get("/v1/projects/" + p.id + "/context").catch(() => ({ context: [], pending: [], arbiter: null })),
+    get("/v1/projects/" + p.id + "/members").catch(() => ({ members: [] })),
+  ]);
+  const members = membersRes.members ?? [];
+  const myRole = ME.isAdmin ? "owner" : ((members.find((m) => m.userId === ME.userId) || {}).role ?? "viewer");
+  const canWrite = myRole === "owner" || myRole === "contributor";
+  const pending = ctx.pending ?? [];
+  const pendingByKey = {};
+  for (const pd of pending) (pendingByKey[pd.key] = pendingByKey[pd.key] ?? []).push(pd);
+
+  // open history drawers fetch on render — the drawer always shows the truth
+  const histFor = {};
+  for (const c of ctx.context ?? []) {
+    if (HIST_OPEN.has(p.id + "\\u0000" + c.key)) {
+      histFor[c.key] = (await get("/v1/projects/" + p.id + "/context?key=" + encodeURIComponent(c.key) + "&history=true").catch(() => ({ history: [] }))).history ?? [];
+    }
+  }
+
+  const itemHtml = (c) => {
+    const prov = c.provenance ?? {};
+    const pk = pendingByKey[c.key] ?? [];
+    const editing = CTXED && CTXED.projectId === p.id && CTXED.key === c.key;
+    const histOpen = HIST_OPEN.has(p.id + "\\u0000" + c.key);
+    return \`<div class="node-row" style="align-items:flex-start">
+      <div class="grow">
+        <div><span class="mono">\${esc(c.key)}</span> <span class="badge">rev \${c.revision}</span>
+          \${prov.sourceArtifactId ? '<span class="badge info" title="promoted from a signed-off workflow artifact">from artifact</span>' : ""}
+          \${pk.length ? '<span class="badge warn" title="a conflicting revision is with the arbiter">' + pk.length + " awaiting arbiter</span>" : ""}</div>
+        <div class="dim" style="font-size:12px">by \${esc(prov.userName ?? "unknown")}\${prov.teamName ? " · " + esc(prov.teamName) : ""} · \${ago(prov.at)}</div>
+        <details style="margin-top:4px"><summary class="faint" style="cursor:pointer;font-size:11.5px">current text</summary><pre style="margin-top:6px">\${esc(c.content)}</pre></details>
+        \${histOpen && histFor[c.key] ? ctxHistHtml(histFor[c.key]) : ""}
+        \${editing ? ctxEditorHtml(ctx) : ""}
+      </div>
+      <button class="ghost small" data-hist="\${esc(c.key)}" data-pid="\${p.id}">\${histOpen ? "hide history" : "history"}</button>
+      \${canWrite && !editing ? \`<button class="ghost small" data-ctxedit="\${esc(c.key)}" data-pid="\${p.id}" title="edit — fetches the current revision first">✎</button>\` : ""}
+    </div>\`;
+  };
+  const addingNew = CTXED && CTXED.projectId === p.id && CTXED.key === null;
+  const arbLine = ctx.arbiter
+    ? \`<span class="dim" style="font-size:12.5px">\${esc(ctx.arbiter.name ?? "the arbiter")} decides in \${ctx.arbiter.userId === ME.userId ? '<a href="#/inbox">your Inbox</a>' : "their Inbox"}</span>\`
+    : "";
+  const pendingBanner = pending.length
+    ? \`<div class="row" style="margin-top:10px"><span class="badge warn">\${pending.length} revision\${pending.length > 1 ? "s" : ""} awaiting arbiter</span>\${arbLine}</div>\`
+    : "";
+
+  const memberRows = members.map((m) => \`<div class="node-row">
+    <div class="grow">
+      <div>\${esc(m.userName ?? "unknown")}\${m.userId === ME.userId ? ' <span class="faint">(you)</span>' : ""}</div>
+      <div class="dim" style="font-size:12px">\${m.teamName ? esc(m.teamName) : "no team"} · joined \${ago(m.createdAt)}</div>
+    </div>
+    <span class="badge \${m.role === "owner" ? "accent" : m.role === "contributor" ? "info" : ""}">\${m.role}</span>
+  </div>\`).join("");
+  const nonMembers = DIRECTORY.filter((u) => !members.some((m) => m.userId === u.id));
+  const addMemberForm = myRole !== "owner" ? "" : nonMembers.length === 0
+    ? '<div class="faint" style="font-size:12px;margin-top:8px">everyone in the directory is already a member</div>'
+    : \`<div class="row" style="margin-top:10px">
+        <div><label class="f">User</label><select data-pmuser="\${p.id}">\${nonMembers.map((u) => \`<option value="\${u.id}">\${esc(u.name)}</option>\`).join("")}</select></div>
+        <div><label class="f">Role</label><select data-pmrole="\${p.id}"><option value="viewer">viewer</option><option value="contributor" selected>contributor</option><option value="owner">owner</option></select></div>
+        <div><label class="f">Team (provenance)</label><select data-pmteam="\${p.id}">\${teamOptsFor(nonMembers[0])}</select></div>
+        <div style="align-self:flex-end"><button class="small" data-pmadd="\${p.id}">Add member</button></div>
+      </div>
+      <div class="err-line" data-pmerr="\${p.id}" style="margin-top:4px"></div>\`;
+
+  // signed-off (completed) workflow instances of THIS project the caller can
+  // see — their artifacts are promotable into the shared store (§9.4)
+  const done = instances.filter((i) => i.projectId === p.id && i.status === "completed").slice(0, 5);
+  const promotable = [];
+  for (const i of done) {
+    try {
+      const v = await get("/v1/workflows/instances/" + i.id);
+      const latest = {};
+      for (const a of v.artifacts ?? []) if (!latest[a.output] || a.version > latest[a.output].version) latest[a.output] = a;
+      for (const a of Object.values(latest)) promotable.push({ ...a, desc: v.instance.change?.description ?? "" });
+    } catch {}
+  }
+  const promoteRows = promotable.map((a) => \`<div class="node-row">
+    <div class="grow">
+      <div><span class="mono">\${esc(a.output)}</span> <span class="badge">v\${a.version}</span></div>
+      <div class="dim" style="font-size:12px">signed-off artifact of “\${esc(a.desc)}”</div>
+    </div>
+    <button class="small" data-promote="\${a.id}" data-pid="\${p.id}">Promote to shared context</button>
+  </div>\`).join("");
+
+  const cap = p.budgetUsd, spent = p.spentUsd ?? 0;
+  const pct = cap ? Math.min(100, (spent / cap) * 100) : 0;
+  return \`<div class="card">
+    <div class="row"><strong>\${esc(p.name)}</strong>
+      \${(p.classifications ?? []).map((c) => '<span class="badge info">' + esc(c) + "</span>").join("")}
+      <span class="badge">\${myRole}</span>
+      <span class="grow"></span>
+      <span class="num dim">\${fmtUsd(spent)}\${cap ? " / " + fmtUsd(cap) : ""}</span></div>
+    \${cap ? '<div class="bar" style="margin-top:8px"><i class="' + (spent > cap ? "over" : "") + '" style="width:' + pct + '%"></i></div>' : ""}
+    \${pendingBanner}
+    <h2 style="margin-top:14px">Shared context</h2>
+    \${(ctx.context ?? []).map(itemHtml).join("") || '<div class="faint" style="font-size:12.5px">no shared context yet</div>'}
+    \${addingNew ? ctxEditorHtml(ctx) : canWrite ? \`<div style="margin-top:8px"><button class="ghost small" data-ctxnew="\${p.id}">+ add context</button></div>\` : ""}
+    \${promotable.length ? '<h2 style="margin-top:14px">Promote a signed-off artifact</h2>' + promoteRows : ""}
+    <h2 style="margin-top:14px">Members</h2>
+    \${memberRows || '<div class="faint" style="font-size:12.5px">no members — this project is an open cost bucket</div>'}
+    \${addMemberForm}
+  </div>\`;
+}
+
 async function projectsPage() {
   if (!PROJECTS.length) return '<h1>Projects</h1><p class="sub">Shared, governed workspaces.</p><div class="empty">You are not a member of any project yet.</div>';
-  const cards = await Promise.all(PROJECTS.map(async (p) => {
-    const ctx = await get("/v1/projects/" + p.id + "/context").catch(() => ({ context: [] }));
-    const items = (ctx.context ?? []).map((c) =>
-      \`<details style="margin-top:6px"><summary class="dim" style="cursor:pointer">\${esc(c.key)} <span class="faint">rev \${c.revision}</span></summary>
-        <pre style="margin-top:6px">\${esc(c.content)}</pre></details>\`).join("");
-    const cap = p.budgetUsd, spent = p.spentUsd ?? 0;
-    const pct = cap ? Math.min(100, (spent / cap) * 100) : 0;
-    return \`<div class="card">
-      <div class="row"><strong>\${esc(p.name)}</strong>
-        \${(p.classifications ?? []).map((c) => '<span class="badge info">' + esc(c) + "</span>").join("")}
-        <span class="grow"></span>
-        <span class="num dim">\${fmtUsd(spent)}\${cap ? " / " + fmtUsd(cap) : ""}</span></div>
-      \${cap ? '<div class="bar" style="margin-top:8px"><i class="' + (spent > cap ? "over" : "") + '" style="width:' + pct + '%"></i></div>' : ""}
-      <h2 style="margin-top:14px">Shared context</h2>
-      \${items || '<div class="faint" style="font-size:12.5px">no shared context yet</div>'}
-    </div>\`;
-  }));
+  const [dirRes, instRes] = await Promise.all([
+    get("/v1/users/directory").catch(() => ({ users: [] })),
+    get("/v1/workflows/instances").catch(() => ({ instances: [] })),
+  ]);
+  DIRECTORY = dirRes.users ?? [];
+  const instances = instRes.instances ?? [];
+  const cards = await Promise.all(PROJECTS.map((p) => projectCard(p, instances)));
   return \`<h1>Projects</h1><p class="sub">Shared, governed workspaces — context every member sees, spend every member shares.</p>\${cards.join("")}\`;
+}
+
+function wireProjects() {
+  document.querySelectorAll("[data-hist]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const k = b.dataset.pid + "\\u0000" + b.dataset.hist;
+      if (HIST_OPEN.has(k)) HIST_OPEN.delete(k); else HIST_OPEN.add(k);
+      render();
+    }));
+  document.querySelectorAll("[data-ctxedit]").forEach((b) =>
+    b.addEventListener("click", () => openCtxEditor(b.dataset.pid, b.dataset.ctxedit)));
+  document.querySelectorAll("[data-ctxnew]").forEach((b) =>
+    b.addEventListener("click", () => openCtxEditor(b.dataset.ctxnew, null)));
+  $("[data-ctxsave]")?.addEventListener("click", () => submitCtx("auto"));
+  $("[data-ctxfresh]")?.addEventListener("click", () => submitCtx("fresh"));
+  $("[data-ctxstale]")?.addEventListener("click", () => submitCtx("stale"));
+  $("[data-ctxcancel]")?.addEventListener("click", () => { CTXED = null; render(); });
+  // keep the draft across re-renders without re-rendering per keystroke
+  $("#ctx-draft")?.addEventListener("input", (e) => { if (CTXED) CTXED.draft = e.target.value; });
+  $("#ctx-newkey")?.addEventListener("input", (e) => { if (CTXED) CTXED.newKey = e.target.value; });
+  document.querySelectorAll("[data-pmuser]").forEach((sel) =>
+    sel.addEventListener("change", () => {
+      const u = DIRECTORY.find((x) => x.id === sel.value);
+      const teamSel = $('[data-pmteam="' + sel.dataset.pmuser + '"]');
+      if (teamSel) teamSel.innerHTML = teamOptsFor(u);
+    }));
+  document.querySelectorAll("[data-pmadd]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const pid = b.dataset.pmadd;
+      const userId = $('[data-pmuser="' + pid + '"]')?.value;
+      const role = $('[data-pmrole="' + pid + '"]')?.value;
+      const teamId = $('[data-pmteam="' + pid + '"]')?.value;
+      const err = $('[data-pmerr="' + pid + '"]');
+      if (!userId) return;
+      try {
+        await post("/v1/projects/" + pid + "/members", { userId, role, ...(teamId ? { teamId } : {}) });
+        toast("Member added"); render();
+      } catch (e) { if (err) err.textContent = e.message; }
+    }));
+  document.querySelectorAll("[data-promote]").forEach((b) =>
+    b.addEventListener("click", () => promoteArtifact(b.dataset.pid, b.dataset.promote)));
 }
 
 // --------------------------------------------------------------- settings --
@@ -654,10 +1150,12 @@ async function render() {
     });
   }
   if (page === "settings") wireSettings();
+  if (page === "runs" && !id) wireRuns();
   if (page === "runs" && id) wireRunDetail(id);
   if (page === "workflows" && !id) wireWorkflows();
   if (page === "workflows" && id) wireWorkflowDetail(id);
   if (page === "inbox") wireInbox();
+  if (page === "projects") wireProjects();
 }
 render();
 </script>

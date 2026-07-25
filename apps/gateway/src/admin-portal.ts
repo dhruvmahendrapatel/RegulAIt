@@ -45,6 +45,7 @@ async function api(method, path, body) {
 }
 const get = (p) => api("GET", p);
 const post = (p, b) => api("POST", p, b);
+const patch = (p, b) => api("PATCH", p, b);
 const del = (p) => api("DELETE", p);
 
 function table(rows, actions) {
@@ -69,16 +70,20 @@ function table(rows, actions) {
 function field(f) {
   const lbl = "<label class='f'>" + esc(f.label ?? f.name) + "</label>";
   if (f.options) {
-    const opts = (f.req === false ? [{ v: "", l: f.ph ?? "— none —" }] : [])
+    // multi:true renders a multiple select; leaving it empty just omits the
+    // field, so it never needs the "— none —" placeholder row
+    const opts = (f.req === false && !f.multi ? [{ v: "", l: f.ph ?? "— none —" }] : [])
       .concat(f.options.map((o) => (typeof o === "object" ? o : { v: o, l: o })));
     if (opts.length === 0) opts.push({ v: "", l: "— none available —" });
     return "<div>" + lbl + "<select name='" + f.name + "'"
+      + (f.multi ? " multiple size='" + Math.min(4, Math.max(2, opts.length)) + "'" : "")
       + (f.req === false ? " data-optional='true'" : " required")
       + ">" + opts.map((o) => "<option value='" + esc(o.v) + "'>" + esc(o.l) + "</option>").join("")
       + "</select></div>";
   }
   return "<div" + (f.grow ? " class='grow'" : "") + ">" + lbl
     + "<input name='" + f.name + "' type='" + esc(f.type ?? "text") + "'"
+    + (f.type === "number" ? " step='any'" : "")
     + " placeholder='" + esc(f.ph ?? f.name) + "'" + (f.req === false ? "" : " required") + "></div>";
 }
 function form(id, fields, label) {
@@ -138,8 +143,13 @@ function wire(id, fn, keep) {
   $("#" + id)?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const err = e.target.querySelector(".err-line"); err.textContent = "";
-    const data = Object.fromEntries(new FormData(e.target).entries());
-    for (const k of Object.keys(data)) if (data[k] === "") delete data[k];
+    // duplicate names (a multiple select) accumulate into an array; empty
+    // values are dropped, exactly as the fromEntries version dropped them
+    const data = {};
+    for (const [k, v] of new FormData(e.target).entries()) {
+      if (v === "") continue;
+      data[k] = k in data ? [].concat(data[k], v) : v;
+    }
     try { await fn(data); if (!keep) render(); } catch (ex) { err.textContent = ex.message; }
   });
 }
@@ -390,17 +400,27 @@ const TABS = [
   await load("");
 }],
 ["Approvals Queue", async (el) => {
-  const a = await get("/v1/approvals");
-  el.innerHTML = "<p class='sub'>The one inbox: MCP pauses, workflow sign-offs, run escalations, budget overages, context conflicts, reclassifications.</p><div class='card'>"
-    + table(a.approvals.map((r) => ({ id: r.id, type: r.objectType, stage: r.stageId, status: r.status, approver: r.approverUserId, requestedAt: r.requestedAt })),
+  // /v1/me names the signed-in admin: on rows naming someone else the decide
+  // is an OVERRIDE — the endpoint requires a reason and audit-marks it.
+  const [a, me] = await Promise.all([get("/v1/approvals"), get("/v1/me").catch(() => ({ userId: null }))]);
+  el.innerHTML = "<p class='sub'>The one inbox: MCP pauses, workflow sign-offs, run escalations, budget overages, context conflicts, reclassifications. The named approver decides; an admin may decide in their place only with a recorded reason (audit-marked as an override).</p><div class='card'>"
+    + table(a.approvals.map((r) => ({
+        id: r.id, type: r.objectType, stage: r.stageId, governs: r.objectLabel,
+        requestedBy: r.requestedByName, approver: r.approverName ?? r.approverUserId,
+        status: r.status, reason: r.decisionReason, requestedAt: r.requestedAt,
+      })),
       (r) => {
         const row = a.approvals.find((x) => x.id === r.id);
-        return row.status === "pending"
-          ? "<button class='small primary' data-dec='approved' data-id='" + r.id + "'>approve</button> <button class='small danger' data-dec='denied' data-id='" + r.id + "'>deny</button>"
-          : "";
+        if (row.status !== "pending") return "";
+        const override = me.userId !== row.approverUserId;
+        return "<input data-reason='" + row.id + "' placeholder='" + (override ? "reason (required — override)" : "reason (optional)") + "' style='font-size:12px;max-width:170px'> "
+          + "<button class='small primary' data-dec='approved' data-id='" + row.id + "'>approve</button> "
+          + "<button class='small danger' data-dec='denied' data-id='" + row.id + "'>deny</button>"
+          + (override ? " <span class='badge warn'>override</span>" : "");
       }) + "</div>";
   el.querySelectorAll("[data-dec]").forEach((b) => b.addEventListener("click", async () => {
-    try { await post("/v1/approvals/" + b.dataset.id + "/decide", { decision: b.dataset.dec }); render(); }
+    const reason = (el.querySelector("[data-reason='" + b.dataset.id + "']")?.value ?? "").trim();
+    try { await post("/v1/approvals/" + b.dataset.id + "/decide", { decision: b.dataset.dec, ...(reason ? { reason } : {}) }); render(); }
     catch (ex) { alert(ex.message); }
   }));
 }],
@@ -416,11 +436,89 @@ const TABS = [
   }, true);
 }],
 ["Cost & Projects", async (el) => {
-  const p = await get("/v1/projects");
-  el.innerHTML = "<h2>Projects — fleet spend</h2><div class='card'>"
+  const [p, u, cp, t] = await Promise.all([
+    get("/v1/projects"), get("/v1/users"), get("/v1/compliance/profiles"), get("/v1/teams"),
+  ]);
+  const uOpts = userOpts(u.users);
+  const tagOpts = cp.profiles.map((x) => x.tag);
+  const pOpts = p.projects.map((x) => ({ v: x.id, l: x.name }));
+  const teamOpts = t.teams.map((x) => ({ v: x.id, l: x.name }));
+  const KEEP = { v: "", l: "— leave unchanged —" }, CLEAR = { v: "__clear__", l: "— clear —" };
+  el.innerHTML = "<h2>Create a project</h2><div class='card'>"
+    + form("f-proj", [
+        {name:"name"},
+        {name:"costCenter",label:"cost center",req:false,ph:"e.g. CC-0042"},
+        {name:"budgetUsd",label:"budget usd",type:"number",req:false,ph:"e.g. 25"},
+        {name:"budgetApproverUserId",label:"budget approver",options:uOpts,req:false,ph:"— none —"},
+        {name:"arbiterUserId",label:"context arbiter",options:uOpts,req:false,ph:"— none —"},
+        {name:"classifications",label:"classifications",options:tagOpts,req:false,multi:true},
+      ], "Create project")
+    + "<p class='dim' style='font-size:12px'>A budget only exists together with its named budget approver — set both or neither; the API refuses one without the other. Classifications (ctrl/cmd-click for several) come from the compliance profiles and cascade that framework's required workflows, PII mode and retention onto everything the project governs — changing them later goes through the reclassification review, never a plain edit.</p></div>"
+    + "<h2>Projects — fleet spend</h2><div class='card'>"
     + table(p.projects.map((r) => ({ name: r.name, costCenter: r.costCenter, spent: fmtUsd(r.spentUsd), budget: fmtUsd(r.budgetUsd), classifications: (r.classifications ?? []).join(", ") })),
-      (r) => "<button class='small' data-proj='" + p.projects.find((x) => x.name === r.name).id + "'>rollup</button>")
-    + "</div><div id='projout'></div>";
+      (r) => {
+        const id = p.projects.find((x) => x.name === r.name).id;
+        return "<button class='small' data-proj='" + id + "'>rollup</button> <button class='small' data-pedit='" + id + "'>edit</button>";
+      })
+    + "</div><div id='projout'></div>"
+    + "<h2>Edit a project — budget, approver, arbiter, cost center, name</h2><div class='card'>"
+    + form("f-pedit", [
+        {name:"projectId",label:"project",options:pOpts},
+        {name:"name",label:"new name",req:false,ph:"leave unchanged"},
+        {name:"costCenter",label:"cost center",req:false,ph:"leave unchanged"},
+        {name:"budgetUsd",label:"budget usd",type:"number",req:false,ph:"leave unchanged"},
+        {name:"budgetApproverUserId",label:"budget approver",options:[CLEAR].concat(uOpts),req:false,ph:KEEP.l},
+        {name:"arbiterUserId",label:"arbiter",options:[CLEAR].concat(uOpts),req:false,ph:KEEP.l},
+      ], "Save changes")
+    + "<p class='dim' style='font-size:12px'>Only the fields you fill in change. A budget still requires a named approver after the edit — the API holds the invariant against the merged result. Classifications are absent on purpose: reclassification is a governed diff-then-approve change with its own flow.</p></div>"
+    + "<h2>Teams</h2><div class='card'>"
+    + form("f-team", [
+        {name:"name",ph:"team name"},
+        {name:"defaultClassifications",label:"default classifications",options:tagOpts,req:false,multi:true},
+      ], "Create team")
+    + form("f-tmadd", [
+        {name:"teamId",label:"team",options:teamOpts},
+        {name:"userId",label:"user",options:uOpts},
+      ], "Add member")
+    + table(t.teams.map((x) => ({
+        name: x.name,
+        members: (x.members ?? []).map((m) => m.name).join(", ") || "—",
+        defaultClassifications: (x.defaultClassifications ?? []).join(", "),
+        created: x.createdAt,
+      })))
+    + "<p class='dim' style='font-size:12px'>Team membership is flat — per-user roles (owner/contributor/viewer) live on Shared-Project membership, not here. A team's default classifications are surfaced (never silently resolved) when a member joins a project whose tags don't cover them.</p></div>";
+  el.querySelectorAll("[data-pedit]").forEach((b) => b.addEventListener("click", () => {
+    const f = $("#f-pedit");
+    f.querySelector("[name=projectId]").value = b.dataset.pedit;
+    f.scrollIntoView({ block: "center" });
+  }));
+  wire("f-proj", (d) => {
+    // the schema's budget-requires-approver rule, surfaced before the POST
+    if (d.budgetUsd && !d.budgetApproverUserId) {
+      throw new Error("a project budget requires a named budget approver — pick one or clear the budget");
+    }
+    return post("/v1/projects", {
+      name: d.name,
+      ...(d.costCenter ? { costCenter: d.costCenter } : {}),
+      ...(d.budgetUsd ? { budgetUsd: Number(d.budgetUsd) } : {}),
+      ...(d.budgetApproverUserId ? { budgetApproverUserId: d.budgetApproverUserId } : {}),
+      ...(d.arbiterUserId ? { arbiterUserId: d.arbiterUserId } : {}),
+      ...(d.classifications ? { classifications: [].concat(d.classifications) } : {}),
+    });
+  });
+  wire("f-pedit", (d) => {
+    const body = {};
+    if (d.name) body.name = d.name;
+    if (d.costCenter) body.costCenter = d.costCenter;
+    if ("budgetUsd" in d) body.budgetUsd = Number(d.budgetUsd);
+    for (const k of ["budgetApproverUserId", "arbiterUserId"]) if (k in d) body[k] = d[k] === "__clear__" ? null : d[k];
+    return patch("/v1/projects/" + d.projectId, body);
+  });
+  wire("f-team", (d) => post("/v1/teams", {
+    name: d.name,
+    ...(d.defaultClassifications ? { defaultClassifications: [].concat(d.defaultClassifications) } : {}),
+  }));
+  wire("f-tmadd", (d) => post("/v1/teams/" + d.teamId + "/members", { userId: d.userId }));
   el.querySelectorAll("[data-proj]").forEach((b) => b.addEventListener("click", async () => {
     const [costs, compliance] = await Promise.all([
       get("/v1/projects/" + b.dataset.proj + "/costs"),

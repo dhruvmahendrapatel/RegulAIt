@@ -429,7 +429,13 @@ export class GoogleProvider implements ModelProvider {
 // ---------------------------------------------------------------------------
 // Mock adapter — deterministic, in-memory, for tests and air-gapped
 // development. An input containing "<<refuse>>" produces a refusal so the
-// refusal path is testable end-to-end without a live model.
+// refusal path is testable end-to-end without a live model. The reply is
+// canned assistant behaviour, NOT an echo: intent keywords in the input pick
+// a plausible shape (summary / review / plan / code / explanation / test
+// plan / general), the model id's tier (fast / balanced / premium) controls
+// depth, and a present system prompt is acknowledged in the opening line so
+// demos visibly prove context flowed through. Everything is a pure function
+// of (model, input, system) — no randomness, no network.
 // ---------------------------------------------------------------------------
 
 export interface MockDispatch extends ModelDispatchRequest {
@@ -439,6 +445,392 @@ export interface MockDispatch extends ModelDispatchRequest {
 /** deterministic stand-in for provider-side token accounting */
 function mockTokens(text: string): number {
   return Math.max(1, Math.ceil(text.length / 4));
+}
+
+type MockTier = "fast" | "balanced" | "premium";
+type MockIntent = "summarize" | "review" | "test" | "plan" | "implement" | "explain" | "general";
+
+/** the model id names its tier (mock-fast/-balanced/-premium); anything
+ * unlabelled gets the middle answer */
+function mockTier(model: string): MockTier {
+  if (model.includes("fast")) return "fast";
+  if (model.includes("premium")) return "premium";
+  return "balanced";
+}
+
+/** first matching keyword family wins — the specific asks (summarize/review/
+ * test) are checked ahead of the broad build/explain verbs */
+const MOCK_INTENT_PATTERNS: ReadonlyArray<readonly [MockIntent, RegExp]> = [
+  ["summarize", /\b(summar|tl;?dr|recap|condense|digest)/i],
+  ["review", /\b(review|critique|feedback|audit|assess)/i],
+  ["test", /\b(test|verif|validat|coverage)/i],
+  ["plan", /\b(plan|roadmap|milestone|approach|architect|design)/i],
+  ["implement", /\b(implement|build|write|code|draft|create|add|fix|refactor)/i],
+  ["explain", /\b(explain|why\b|how\b|what\s+is|describe|clarif)/i],
+];
+
+function mockIntent(input: string): MockIntent {
+  for (const [intent, pattern] of MOCK_INTENT_PATTERNS) {
+    if (pattern.test(input)) return intent;
+  }
+  return "general";
+}
+
+/** lift the request's subject (first line, minus politeness/intent verbs) so
+ * canned replies read as responsive — never a restatement of the input */
+function mockTopic(input: string): string {
+  let t = (input.trim().split("\n", 1)[0] ?? "").replace(/\s+/g, " ").trim();
+  t = t.replace(/^(please|kindly)[,\s]+/i, "");
+  t = t.replace(/^(can|could|would|will)\s+you\s+(please\s+)?/i, "");
+  t = t.replace(
+    /^(summarize|summarise|review|critique|plan|implement|explain|test|draft|write|build|create|describe|outline|fix|refactor|add)\b[:,\s]*/i,
+    "",
+  );
+  t = t.replace(/^(the|a|an|this|these|that|those|my|our)\s+/i, "");
+  t = t.replace(/[.?!,;:\s]+$/, "");
+  const words = t.split(" ").filter(Boolean).slice(0, 8).join(" ");
+  const capped = words.length > 60 ? `${words.slice(0, 60)}…` : words;
+  return capped || "the request";
+}
+
+/** a plausible identifier for canned code blocks, derived from the topic */
+function mockIdent(topic: string): string {
+  const words = topic
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, " ")
+    .split(" ")
+    .filter(Boolean)
+    .slice(0, 3);
+  if (words.length === 0) return "handleRequest";
+  return words.map((w, i) => (i === 0 ? w : w[0]!.toUpperCase() + w.slice(1))).join("");
+}
+
+/** one visible opening line proving the system context flowed through — the
+ * workflow-nesting demo (signed-off artifacts as worker context) relies on
+ * this being present in the worker's answer */
+function mockSystemAck(system: string): string {
+  const firstLine = (system.split("\n", 1)[0] ?? "").trim().replace(/^you are\s+/i, "");
+  const snippet = firstLine.length > 100 ? `${firstLine.slice(0, 100)}…` : firstLine;
+  return `Working within the signed-off scope: ${snippet}`;
+}
+
+function mockReplyBody(intent: MockIntent, tier: MockTier, topic: string): string {
+  const ident = mockIdent(topic);
+  switch (intent) {
+    case "summarize": {
+      if (tier === "fast") {
+        return (
+          `Summary — ${topic}: the material makes one central claim and supports it adequately. ` +
+          `Key takeaway: the approach described is sound and can proceed as written, with scope ` +
+          `the only watch item. No contradictions or blockers surfaced. Recommended next step: ` +
+          `accept this summary and move to the follow-on action.`
+        );
+      }
+      if (tier === "premium") {
+        return (
+          `## Summary: ${topic}\n\n` +
+          `The material presents a well-scoped argument. The objective is explicit, the ` +
+          `constraints are named rather than implied, and the recommended direction follows ` +
+          `logically from both. Read end to end it is internally consistent, and nothing in the ` +
+          `supporting detail undercuts the headline claim.\n\n` +
+          `## Key points\n\n` +
+          `1. The objective and its success criteria are stated up front and are measurable.\n` +
+          `2. The proposed approach fits the stated constraints without stretching them.\n` +
+          `3. Dependencies are acknowledged, though one assumption — that current scope holds — ` +
+          `is left implicit and is quietly load-bearing.\n` +
+          `4. The level of detail is even throughout; no section is under-specified.\n\n` +
+          `## Implications\n\n` +
+          `Confirm the scope assumption with its owner before build begins; it is the only item ` +
+          `that could invalidate the plan. Everything else can proceed exactly as written, and ` +
+          `this summary only needs revisiting if that assumption breaks. A one-line ` +
+          `confirmation in the tracking record is enough to close it out.`
+        );
+      }
+      return (
+        `Summary — ${topic}.\n\n` +
+        `The material makes a focused argument: the goal is well defined, the constraints are ` +
+        `explicit, and the proposed direction follows from both. The supporting detail is ` +
+        `consistent with the headline claim, though one assumption — that current scope holds — ` +
+        `is doing quiet load-bearing work and deserves an explicit check before build.\n\n` +
+        `Key points:\n` +
+        `- The objective and its success criteria are stated clearly and are measurable.\n` +
+        `- The chosen approach matches the constraints given, with no stretch.\n` +
+        `- One open assumption on scope should be confirmed with its owner first.\n\n` +
+        `Net: solid and actionable as written once that assumption is confirmed.`
+      );
+    }
+    case "review": {
+      if (tier === "fast") {
+        return (
+          `Review — ${topic}. Two findings:\n` +
+          `- The core approach is sound and the main flow is easy to follow; keep it as shaped.\n` +
+          `- One gap: the failure path is under-specified — decide explicitly what happens on ` +
+          `error rather than leaving it implicit.\n` +
+          `Verdict: approve once the gap is addressed; nothing here forces a redesign.`
+        );
+      }
+      if (tier === "premium") {
+        return (
+          `## Review: ${topic}\n\n` +
+          `Overall this is a solid change: the direction is right, the structure is clean, and ` +
+          `the scope is appropriately narrow. One finding needs resolving before sign-off; the ` +
+          `rest can ride along in the same change.\n\n` +
+          `### Findings\n\n` +
+          `1. **[major] Failure path under-specified.** The success path is well covered, but ` +
+          `error handling is left implicit. Decide and document what happens on failure — ` +
+          `retry, surface, or abort — before this ships, since callers will otherwise guess.\n` +
+          `2. **[minor] Terminology drift.** Two sections use different names for the same ` +
+          `concept, which will read as two different things in the audit trail. Align on one term.\n` +
+          `3. **[positive] Clean core structure.** The main flow is small, composable, and easy ` +
+          `to verify — keep it exactly as shaped.\n\n` +
+          `### Recommendation\n\n` +
+          `Approve once the major finding is resolved. No re-review is needed unless the ` +
+          `failure-path decision changes the interface.`
+        );
+      }
+      return (
+        `Review — ${topic}. Overall: solid direction, one issue to fix before sign-off.\n\n` +
+        `- [major] The failure path is under-specified — decide explicitly what happens on ` +
+        `error (retry, surface, or abort) rather than leaving callers to guess.\n` +
+        `- [minor] Naming drifts between sections; two names for the same concept will read as ` +
+        `two different things later, so align on one term now.\n` +
+        `- [positive] The happy path is clean, narrow, and well structured; no changes needed there.\n\n` +
+        `Recommendation: address the major finding, fold the minor one into the same change, ` +
+        `and this is ready to sign off. No re-review needed unless the interface shifts.`
+      );
+    }
+    case "test": {
+      if (tier === "fast") {
+        return (
+          `Test checklist — ${topic}:\n` +
+          `- Happy path: a typical input produces exactly the expected result.\n` +
+          `- Edges: empty and oversized inputs are handled without surprises.\n` +
+          `- Failure: an induced error is surfaced to the caller, never swallowed.\n` +
+          `Three focused cases give the highest confidence per test here; start with the ` +
+          `failure case since it is the one most often missed.`
+        );
+      }
+      if (tier === "premium") {
+        return (
+          `## Test plan: ${topic}\n\n` +
+          `The aim is a small suite that proves behaviour, not line coverage for its own sake. ` +
+          `Each case below pins one property the change must keep.\n\n` +
+          `### Cases\n\n` +
+          `1. **Happy path.** A representative input produces exactly the expected output; ` +
+          `assert the full result, not a fragment, so regressions cannot hide.\n` +
+          `2. **Boundary inputs.** Empty, minimal, and oversized inputs each get a defined ` +
+          `outcome — accepted, trimmed, or rejected, but never undefined behaviour.\n` +
+          `3. **Failure surfacing.** An induced downstream error reaches the caller with its ` +
+          `context intact; nothing is swallowed or replaced by a generic message.\n` +
+          `4. **Idempotence.** Running the same operation twice leaves the same state as ` +
+          `running it once.\n\n` +
+          `### Coverage note\n\n` +
+          `The failure and idempotence cases are the ones most often skipped and the ones that ` +
+          `catch real incidents; write them first while the happy path is still fresh. ` +
+          `Everything else in the suite is optional polish once these four hold.`
+        );
+      }
+      return (
+        `Test plan — ${topic}. Four focused cases:\n\n` +
+        `1. Happy path: a representative input produces exactly the expected output — assert ` +
+        `the full result so regressions cannot hide in fragments.\n` +
+        `2. Boundaries: empty and oversized inputs each get a defined outcome, never ` +
+        `undefined behaviour.\n` +
+        `3. Failure surfacing: an induced error reaches the caller with context intact, ` +
+        `not swallowed.\n` +
+        `4. Idempotence: running the operation twice leaves the same state as once.\n\n` +
+        `Start with the failure case — it is the one most often skipped and the one that ` +
+        `catches real incidents.`
+      );
+    }
+    case "plan": {
+      if (tier === "fast") {
+        return (
+          `Plan — ${topic}:\n` +
+          `1. Pin down the current state and the exact desired outcome.\n` +
+          `2. Make the smallest change that achieves it behind the existing interfaces.\n` +
+          `3. Verify with one focused check, then roll forward.\n` +
+          `The effort is small and step 1 can start immediately; the only real risk is hidden ` +
+          `coupling, which step 1's baseline makes visible.`
+        );
+      }
+      if (tier === "premium") {
+        return (
+          `## Objective\n\n` +
+          `Deliver ${topic} with a verifiable result and no scope creep.\n\n` +
+          `## Plan\n\n` +
+          `1. **Baseline.** Record current behaviour and agree the acceptance criteria; every ` +
+          `later step is judged against this, not against memory.\n` +
+          `2. **Design.** Choose the smallest viable change that meets the criteria without ` +
+          `touching unrelated surfaces.\n` +
+          `3. **Build.** Implement behind the existing interfaces, keeping each edit ` +
+          `reviewable on its own.\n` +
+          `4. **Verify.** Run the focused checks from step 1 and compare against the baseline ` +
+          `before anything rolls forward.\n` +
+          `5. **Roll forward.** Ship once the checks pass, with the baseline kept as the ` +
+          `rollback reference.\n\n` +
+          `## Risks and mitigations\n\n` +
+          `- Hidden coupling discovered mid-build — mitigated by the baseline in step 1, which ` +
+          `makes any surprise visible immediately.\n` +
+          `- Scope creep — mitigated by the acceptance criteria agreed up front; anything ` +
+          `outside them is a new request, not this plan.\n\n` +
+          `## Next step\n\n` +
+          `Confirm the acceptance criteria in step 1 and the build can begin immediately.`
+        );
+      }
+      return (
+        `Plan — ${topic}. Four steps:\n\n` +
+        `1. Baseline: capture current behaviour and the acceptance criteria so success is ` +
+        `checkable, not assumed.\n` +
+        `2. Design: choose the smallest change that meets the criteria without touching ` +
+        `unrelated surfaces.\n` +
+        `3. Build: implement behind the existing interfaces, keeping each edit reviewable ` +
+        `on its own.\n` +
+        `4. Verify: run the focused checks from step 1 against the baseline before rollout.\n\n` +
+        `The main risk is hidden coupling discovered mid-build; the mitigation is the baseline ` +
+        `in step 1, which makes any surprise visible immediately. Ready to start on your ` +
+        `go-ahead.`
+      );
+    }
+    case "implement": {
+      if (tier === "fast") {
+        return (
+          `Minimal implementation — ${topic}:\n\n` +
+          "```ts\n" +
+          `export function ${ident}(input: Request): Response {\n` +
+          `  const checked = validate(input);\n` +
+          `  return respond(process(checked));\n` +
+          `}\n` +
+          "```\n\n" +
+          `Validate first, process once, respond — the smallest shape that does the job for ` +
+          `${topic} and stays independently testable.`
+        );
+      }
+      if (tier === "premium") {
+        return (
+          `## Implementation: ${topic}\n\n` +
+          `The sketch below keeps validation, processing, and response as separate seams so ` +
+          `each is testable on its own and the failure path is explicit rather than implied.\n\n` +
+          "```ts\n" +
+          `export function ${ident}(input: Request): Response {\n` +
+          `  const checked = validate(input); // reject early, with the reason attached\n` +
+          `  const result = process(checked); // the one place business logic lives\n` +
+          `  return respond(result); // shape the outcome for the caller\n` +
+          `}\n\n` +
+          `export function ${ident}Fallback(err: Error): Response {\n` +
+          `  return respondError(err); // failures surface with context, never swallowed\n` +
+          `}\n` +
+          "```\n\n" +
+          `### How it works\n\n` +
+          `Input is checked once at the boundary, the core transformation happens in exactly ` +
+          `one place, and every failure routes through the fallback with its context intact.\n\n` +
+          `### Notes\n\n` +
+          `- Each seam (validate, process, respond) can be unit-tested in isolation.\n` +
+          `- The error path is a first-class function, so refusals and faults are visible in ` +
+          `review rather than buried in a catch block.\n` +
+          `- Nothing outside these functions needs to change to adopt this.`
+        );
+      }
+      return (
+        `Implementation sketch — ${topic}:\n\n` +
+        "```ts\n" +
+        `export function ${ident}(input: Request): Response {\n` +
+        `  const checked = validate(input); // reject early, reason attached\n` +
+        `  const result = process(checked); // business logic lives here only\n` +
+        `  return respond(result);\n` +
+        `}\n` +
+        "```\n\n" +
+        `One line of intent per seam: validate at the boundary, transform in one place, shape ` +
+        `the response last. Failures reject early with the reason attached instead of ` +
+        `surfacing halfway through processing.\n\n` +
+        `- Each seam is unit-testable in isolation.\n` +
+        `- The failure path stays explicit: reject early rather than patching results downstream.\n` +
+        `- Nothing outside this function needs to change to adopt it.`
+      );
+    }
+    case "explain": {
+      if (tier === "fast") {
+        return (
+          `Briefly, on ${topic}: it works the way it does because each part has exactly one ` +
+          `job — input is checked once, handled once, and answered once. The practical ` +
+          `consequence is that behaviour stays predictable under change, and any failure ` +
+          `points at exactly one place. That single-responsibility shape is the whole story.`
+        );
+      }
+      if (tier === "premium") {
+        return (
+          `## Explanation: ${topic}\n\n` +
+          `The behaviour comes from three deliberate properties rather than accident.\n\n` +
+          `**Single responsibility.** Each part has exactly one job: input is checked once at ` +
+          `the boundary, transformed in one place, and answered once. When something fails, ` +
+          `the failure points at exactly one seam instead of smearing across the flow.\n\n` +
+          `**Explicit boundaries.** The seams between the parts are named interfaces, so a ` +
+          `change on one side cannot silently reshape the other. This is what keeps behaviour ` +
+          `predictable as the system grows.\n\n` +
+          `**Failures as first-class outcomes.** Errors are surfaced with their context ` +
+          `attached rather than swallowed, which is why the observable behaviour under fault ` +
+          `matches the documented behaviour.\n\n` +
+          `## In short\n\n` +
+          `Predictability here is a designed property: one job per part, hard boundaries ` +
+          `between parts, and honest failures. Change any one of the three and the guarantees ` +
+          `above weaken accordingly. That is also the order in which to check things when the ` +
+          `behaviour surprises you.`
+        );
+      }
+      return (
+        `On ${topic}: the behaviour follows from each part having exactly one job. Input is ` +
+        `checked once at the boundary, transformed in exactly one place, and answered once — ` +
+        `so when something fails, the failure points at a single seam instead of smearing ` +
+        `across the flow.\n\n` +
+        `The seams between parts are explicit interfaces, which is why a change on one side ` +
+        `cannot silently reshape the other, and why behaviour stays predictable as things ` +
+        `grow.\n\n` +
+        `In short: predictability here is designed, not accidental — one job per part, hard ` +
+        `boundaries between parts, and failures surfaced with context rather than swallowed.`
+      );
+    }
+    case "general": {
+      if (tier === "fast") {
+        return (
+          `On ${topic}: understood, and it is actionable as stated. The intent is clear, the ` +
+          `scope is bounded, and nothing blocks starting now. I would take the direct route ` +
+          `first and only add structure if a complication actually appears — that keeps the ` +
+          `feedback loop short. Say the word and I will proceed.`
+        );
+      }
+      if (tier === "premium") {
+        return (
+          `## On ${topic}\n\n` +
+          `Understood. The request is clear and self-contained: the intent is unambiguous, ` +
+          `the scope is bounded, and it can be acted on without further clarification. The ` +
+          `direct route is the right first move here — structure can be added later if a ` +
+          `complication actually appears, and starting simple keeps the feedback loop short.\n\n` +
+          `## What I would do\n\n` +
+          `1. Confirm the one detail that shapes everything else — the expected outcome — so ` +
+          `effort lands where it counts.\n` +
+          `2. Take the direct implementation route first; it is reversible and produces ` +
+          `evidence quickly.\n` +
+          `3. Close with a quick verification against the stated intent before calling it ` +
+          `done, so the result is checked rather than assumed.\n\n` +
+          `## Next step\n\n` +
+          `Point one is the only open question; answer it and the rest proceeds without ` +
+          `further input. If the outcome is already documented somewhere, a pointer to it is ` +
+          `all I need. Happy to expand any step into a full plan on request.`
+        );
+      }
+      return (
+        `Understood — here is my take on ${topic}.\n\n` +
+        `The request is clear and self-contained: the intent is unambiguous, the scope is ` +
+        `bounded, and it can be acted on without further clarification. The direct route is ` +
+        `the right first move; structure can be added later if a complication appears.\n\n` +
+        `What I would do next:\n` +
+        `- Confirm the expected outcome, since that one detail shapes everything else.\n` +
+        `- Take the direct implementation route first — it is reversible and fast to verify.\n` +
+        `- Close with a quick check against the stated intent before calling it done.\n\n` +
+        `Happy to expand any of these into a concrete plan, or to start immediately.`
+      );
+    }
+  }
 }
 
 export class MockModelProvider implements ModelProvider {
@@ -458,12 +850,14 @@ export class MockModelProvider implements ModelProvider {
         providerMessageId: `mock-msg-${seq}`,
       };
     }
-    const outputText = `mock(${req.model}): ${req.input}`;
+    const body = mockReplyBody(mockIntent(req.input), mockTier(req.model), mockTopic(req.input));
+    const outputText = req.system ? `${mockSystemAck(req.system)}\n\n${body}` : body;
     if (req.onText) {
       // deterministic chunking so the streaming path is testable end-to-end
-      const mid = Math.ceil(outputText.length / 2);
-      req.onText(outputText.slice(0, mid));
-      req.onText(outputText.slice(mid));
+      const chunkSize = 40;
+      for (let i = 0; i < outputText.length; i += chunkSize) {
+        req.onText(outputText.slice(i, i + chunkSize));
+      }
     }
     return {
       outputText,

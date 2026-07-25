@@ -8,6 +8,7 @@ import {
   costEvents,
   desc,
   eq,
+  inArray,
   orchestrationRunEvents,
   orchestrationRuns,
   userAgentPolicies,
@@ -33,13 +34,18 @@ import {
   type TaskNode,
 } from "@regulait/orchestration-kernel";
 import { classifyComplexity, estimateTokens, routeModel } from "@regulait/optimizer-kernel";
+import { isModelProviderKind } from "@regulait/model-provider";
 import {
   autoAdvanceSchema,
   createRunSchema,
   dispatchNodeSchema,
   runEventSchema,
 } from "@regulait/shared";
-import { executeGovernedDispatch } from "./agents-connectors.js";
+import {
+  configuredProviders,
+  executeGovernedDispatch,
+  type SkippedCandidate,
+} from "./agents-connectors.js";
 import { assertProjectAttribution } from "./projects.js";
 import { mirrorNodeStatus } from "./pm.js";
 import { handleNestedRunCompletion } from "./workflows.js";
@@ -74,6 +80,35 @@ function tokensFor(node: TaskNode): NodeTokenEstimate {
 }
 
 const runIdParam = z.object({ runId: z.string().uuid() });
+
+/** Gateway-level node enrichment (same pattern as RunBudget living beside the
+ * kernel's state): a node may carry a multi-sentence `instruction` — the
+ * actual work order its worker is prompted with, where the ≤200-char title
+ * stays a label. The kernel's node schema strips unknown keys on validation,
+ * so instructions are lifted from the RAW graph payload and re-attached to
+ * the stored graph; dispatch falls back title-ward when absent. */
+function nodeInstruction(node: TaskNode): string | undefined {
+  const instruction = (node as TaskNode & { instruction?: unknown }).instruction;
+  return typeof instruction === "string" && instruction.trim() ? instruction : undefined;
+}
+
+function attachInstructions(graph: TaskGraph, graphRaw: unknown): void {
+  const rawNodes = (graphRaw as { nodes?: unknown } | null)?.nodes;
+  if (!Array.isArray(rawNodes)) return;
+  const byId = new Map<string, string>();
+  for (const raw of rawNodes) {
+    if (raw === null || typeof raw !== "object") continue;
+    const { id, instruction } = raw as { id?: unknown; instruction?: unknown };
+    if (typeof id !== "string" || typeof instruction !== "string") continue;
+    const text = instruction.trim();
+    // same ceiling as an explicit dispatch-time input override
+    if (text) byId.set(id, text.slice(0, 100_000));
+  }
+  for (const node of graph.nodes) {
+    const instruction = byId.get(node.id);
+    if (instruction) (node as TaskNode & { instruction?: string }).instruction = instruction;
+  }
+}
 
 type RunRow = typeof orchestrationRuns.$inferSelect;
 
@@ -302,7 +337,7 @@ async function dispatchRunNode(
     served: servedAgent,
     requestedAgentId: node.ownerAgentId,
     baseline: null,
-    input: args.input ?? node.title,
+    input: args.input ?? nodeInstruction(node) ?? node.title,
     system: nested?.system,
     maxTokens: args.maxTokens,
     projectId: run.projectId ?? null,
@@ -596,13 +631,16 @@ export type PlanRunResult =
  * validates and stores it; nothing executes until an explicit start event.
  * Shared by POST /v1/runs and the workflow build-stage executor (§8 nesting) —
  * the nested case runs under the WORKFLOW INITIATOR's entitlements, so a
- * workflow can never launch a run its human couldn't. */
+ * workflow can never launch a run its human couldn't. `dataKey` lets the
+ * budget re-plan check which providers hold a decryptable credential, so a
+ * substitution never lands a node on an agent that cannot dispatch. */
 export async function planRun(
   db: Db,
   userId: string,
   graphRaw: unknown,
   workflowInstanceId: string | null,
   projectId: string | null = null,
+  dataKey?: string,
 ): Promise<PlanRunResult> {
   let graph: TaskGraph;
   try {
@@ -613,6 +651,7 @@ export async function planRun(
     }
     throw err;
   }
+  attachInstructions(graph, graphRaw);
 
   const [approver] = await db
     .select({ id: users.id })
@@ -700,33 +739,68 @@ export async function planRun(
     const substitutions: Array<{
       node: TaskNode;
       from: string;
-      routing: ReturnType<typeof routeModel>;
+      routing: ReturnType<typeof routeModel> & { skippedCandidates?: SkippedCandidate[] };
     }> = [];
+    const replanSkipped: Array<{ nodeId: string; skipped: SkippedCandidate[] }> = [];
     if (capUsd !== null && cost.totalUsd !== null && cost.totalUsd > capUsd && breachAction === "replan") {
       // §5.2 auto re-plan: substitute cheaper owners per node via the same
       // governed routing pillar 6 uses — candidates are entitlement-filtered,
       // so a re-plan can never escalate (§5.1). Same graph shape, cheaper team.
+      // Candidates must also be DISPATCHABLE (the same filter the invoke path
+      // applies): a substitution onto a provider with no stored credential
+      // would turn the node's later dispatch into a `no_model_credential`
+      // failure. The node's CURRENT owner is never filtered out — routeModel
+      // fails safe without its baseline, and an undispatchable owner the graph
+      // author chose must fail explicitly at dispatch rather than be quietly
+      // substituted away.
+      const configured = await configuredProviders(db, dataKey, userId);
+      const skipReason = (
+        a: (typeof agentRows)[number],
+        ownerId: string,
+      ): SkippedCandidate["reason"] | null => {
+        if (a.id === ownerId) return null;
+        if (!a.model) return "no_model_id";
+        if (!isModelProviderKind(a.provider)) return "unknown_provider";
+        if (!configured.has(a.provider)) return "no_model_credential";
+        return null;
+      };
       for (const node of graph.nodes) {
-        const candidates = agentRows
+        const ownerId = state.owners[node.id]!;
+        const entitled = agentRows
           .filter((a) => a.enabled)
-          .filter((a) => evalOwner(a.id, node.mode)?.effect === "allow")
+          .filter((a) => evalOwner(a.id, node.mode)?.effect === "allow");
+        const skippedCandidates: SkippedCandidate[] = entitled.flatMap((a) => {
+          const reason = skipReason(a, ownerId);
+          return reason ? [{ agentId: a.id, name: a.name, reason }] : [];
+        });
+        const skippedIds = new Set(skippedCandidates.map((s) => s.agentId));
+        const candidates = entitled
+          .filter((a) => !skippedIds.has(a.id))
           .map((a) => ({
             id: a.id,
             tier: a.tier,
             costPerMTokIn: a.costPerMTokIn ?? null,
             costPerMTokOut: a.costPerMTokOut ?? null,
           }));
-        const routing = routeModel({
-          requestedAgentId: state.owners[node.id]!,
-          candidates,
-          routingMode: policy?.routingMode ?? "automatic",
-          complexity: classifyComplexity(node.title),
-          costSensitivity: "cost-sensitive",
-          ceilingTier,
-          estimate: tokensFor(node),
-        });
+        let routing: ReturnType<typeof routeModel> & { skippedCandidates?: SkippedCandidate[] } =
+          routeModel({
+            requestedAgentId: ownerId,
+            candidates,
+            routingMode: policy?.routingMode ?? "automatic",
+            complexity: classifyComplexity(node.title),
+            costSensitivity: "cost-sensitive",
+            ceilingTier,
+            estimate: tokensFor(node),
+          });
+        // Purely additive to the trace, exactly like the invoke path: the
+        // agents routing never got to weigh are listed with the reason each
+        // was withheld.
+        if (skippedCandidates.length > 0) {
+          routing = { ...routing, skippedCandidates };
+          replanSkipped.push({ nodeId: node.id, skipped: skippedCandidates });
+        }
         if (routing.effect === "routed") {
-          substitutions.push({ node, from: state.owners[node.id]!, routing });
+          substitutions.push({ node, from: ownerId, routing });
           state.owners[node.id] = routing.selectedAgentId;
           replanned = true;
         }
@@ -779,7 +853,13 @@ export async function planRun(
         estimationBasis: sub.routing.estimationBasis,
         ruleId: sub.routing.ruleId,
         projectId,
-        detail: { nodeId: sub.node.id, phase: "budget-replan" },
+        detail: {
+          nodeId: sub.node.id,
+          phase: "budget-replan",
+          ...(sub.routing.skippedCandidates
+            ? { routingSkippedCandidates: sub.routing.skippedCandidates }
+            : {}),
+        },
       });
     }
     if (overCap) {
@@ -808,7 +888,13 @@ export async function planRun(
       userId,
       objectType: "run",
       objectId: run!.id,
-      detail: { runName: graph.run, nodes: graph.nodes.length, phase: "plan", replanned },
+      detail: {
+        runName: graph.run,
+        nodes: graph.nodes.length,
+        phase: "plan",
+        replanned,
+        ...(replanSkipped.length > 0 ? { replanSkippedCandidates: replanSkipped } : {}),
+      },
       effect: "allow",
       ruleId: "run-planned",
       ruleChain: [],
@@ -822,10 +908,32 @@ export function registerOrchestrationRoutes(
   db: Db,
   opts: { dataKey?: string } = {},
 ) {
-  async function loadRunFor(req: { authCtx: { userId: string | null; isAdmin: boolean } }, runId: string) {
+  async function loadRunFor(
+    req: { authCtx: { userId: string | null; isAdmin: boolean } },
+    runId: string,
+    access?: { allowPendingApprover?: boolean },
+  ) {
     const [run] = await db.select().from(orchestrationRuns).where(eq(orchestrationRuns.id, runId));
     if (!run) return { error: 404 as const };
     if (!req.authCtx.isAdmin && req.authCtx.userId !== run.initiatingUserId) {
+      // Read-only widening (mirrors the workflow-instance read): the named
+      // approver of a PENDING approval on this run may view what they are
+      // deciding. Only the GET route passes the flag; every driving/dispatch
+      // route keeps the admin/initiator gate.
+      if (access?.allowPendingApprover && req.authCtx.userId) {
+        const [naming] = await db
+          .select({ id: approvals.id })
+          .from(approvals)
+          .where(
+            and(
+              eq(approvals.runId, runId),
+              eq(approvals.approverUserId, req.authCtx.userId),
+              eq(approvals.status, "pending"),
+            ),
+          )
+          .limit(1);
+        if (naming) return { run };
+      }
       return { error: 404 as const }; // existence is not disclosed to non-participants
     }
     return { run };
@@ -835,7 +943,14 @@ export function registerOrchestrationRoutes(
     const body = createRunSchema.parse(req.body);
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_initiate" });
-    const planned = await planRun(db, userId, body.graph, body.workflowInstanceId ?? null, body.projectId ?? null);
+    const planned = await planRun(
+      db,
+      userId,
+      body.graph,
+      body.workflowInstanceId ?? null,
+      body.projectId ?? null,
+      opts.dataKey,
+    );
     if (!planned.ok) return reply.status(planned.status).send(planned.body);
     return reply.status(201).send({
       id: planned.run.id,
@@ -1175,7 +1290,7 @@ export function registerOrchestrationRoutes(
 
   app.get("/v1/runs/:runId", async (req, reply) => {
     const { runId } = runIdParam.parse(req.params);
-    const loaded = await loadRunFor(req, runId);
+    const loaded = await loadRunFor(req, runId, { allowPendingApprover: true });
     if (loaded.error) return reply.status(loaded.error).send({ error: "unavailable" });
     const [events, pendingApprovals] = await Promise.all([
       db
@@ -1188,11 +1303,23 @@ export function registerOrchestrationRoutes(
         .from(approvals)
         .where(and(eq(approvals.runId, runId), eq(approvals.status, "pending"))),
     ]);
+    // name the approver on each pending gate so "awaiting <who>" is renderable
+    const approverIds = [...new Set(pendingApprovals.map((a) => a.approverUserId))];
+    const approverRows = approverIds.length
+      ? await db
+          .select({ id: users.id, displayName: users.displayName, email: users.email })
+          .from(users)
+          .where(inArray(users.id, approverIds))
+      : [];
+    const approverName = new Map(approverRows.map((u) => [u.id, u.displayName || u.email]));
     return {
       run: loaded.run,
       readyNodes: readyNodes(loaded.run.graph as TaskGraph, loaded.run.state as RunState),
       events,
-      pendingApprovals,
+      pendingApprovals: pendingApprovals.map((a) => ({
+        ...a,
+        approverName: approverName.get(a.approverUserId) ?? null,
+      })),
     };
   });
 

@@ -17,6 +17,7 @@ import {
   teamMembers,
   teams,
   usageEvents,
+  users,
   workflowTemplates,
   workflowArtifacts,
   workflowInstances,
@@ -30,6 +31,7 @@ import {
   createTeamSchema,
   promoteContextSchema,
   reclassifySchema,
+  updateProjectSchema,
   upsertComplianceProfileSchema,
 } from "@regulait/shared";
 import { z } from "zod";
@@ -37,6 +39,9 @@ import { z } from "zod";
 type ProjectRow = typeof projects.$inferSelect;
 
 const projectIdParam = z.object({ projectId: z.string().uuid() });
+
+/** §9 conflict approvals: stageId = this prefix + the retained item's id. */
+const CONTEXT_CONFLICT_PREFIX = "__context_conflict__:";
 
 /** Measured spend attributed to a project so far (pillar 5 actuals). */
 async function projectSpendUsd(db: Db, projectId: string): Promise<number> {
@@ -259,8 +264,8 @@ export async function applyProjectApprovalDecision(
   }
   // §9 conflict resolution: approve = the retained conflicting revision
   // becomes the accepted latest; deny = it stays retained, never current.
-  if (approvalRow.stageId?.startsWith("__context_conflict__:")) {
-    const itemId = approvalRow.stageId.slice("__context_conflict__:".length);
+  if (approvalRow.stageId?.startsWith(CONTEXT_CONFLICT_PREFIX)) {
+    const itemId = approvalRow.stageId.slice(CONTEXT_CONFLICT_PREFIX.length);
     if (decision === "approved") {
       await db
         .update(projectContextItems)
@@ -339,6 +344,56 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     return { ok: true, membership };
   }
 
+  /** Display enrichment (same discipline as the approvals list): resolve user
+   * and team ids to names in one pass. Provenance ids are FK-free by design,
+   * so a deleted contributor simply resolves to null — never an error. */
+  async function nameMaps(
+    userIds: Array<string | null | undefined>,
+    teamIds: Array<string | null | undefined>,
+  ) {
+    const uids = [...new Set(userIds.filter((x): x is string => Boolean(x)))];
+    const tids = [...new Set(teamIds.filter((x): x is string => Boolean(x)))];
+    const [userRows, teamRows] = await Promise.all([
+      uids.length
+        ? db
+            .select({ id: users.id, displayName: users.displayName, email: users.email })
+            .from(users)
+            .where(inArray(users.id, uids))
+        : [],
+      tids.length
+        ? db.select({ id: teams.id, name: teams.name }).from(teams).where(inArray(teams.id, tids))
+        : [],
+    ]);
+    return {
+      userName: new Map(userRows.map((u) => [u.id, u.displayName || u.email])),
+      teamName: new Map(teamRows.map((t) => [t.id, t.name])),
+    };
+  }
+
+  /** Which retained (accepted=false) context items still have their conflict
+   * PENDING with the arbiter — itemId -> approvalId. A retained item with no
+   * pending approval was denied: historical, never current. */
+  async function pendingConflictApprovals(
+    projectId: string,
+    itemIds: string[],
+  ): Promise<Map<string, string>> {
+    if (itemIds.length === 0) return new Map();
+    const rows = await db
+      .select({ id: approvals.id, stageId: approvals.stageId })
+      .from(approvals)
+      .where(
+        and(
+          eq(approvals.projectId, projectId),
+          eq(approvals.status, "pending"),
+          inArray(
+            approvals.stageId,
+            itemIds.map((id) => `${CONTEXT_CONFLICT_PREFIX}${id}`),
+          ),
+        ),
+      );
+    return new Map(rows.map((r) => [r.stageId!.slice(CONTEXT_CONFLICT_PREFIX.length), r.id]));
+  }
+
   app.post("/v1/projects", async (req, reply) => {
     const body = createProjectSchema.parse(req.body);
     const [row] = await db
@@ -353,6 +408,49 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       })
       .returning();
     return reply.status(201).send(row);
+  });
+
+  // Post-creation edits (admin-only by the default gate): budget, approver,
+  // arbiter, cost center, name. Classifications never ride this route — a
+  // reclassification is a governed diff-then-approve change (§8.3), and a
+  // PATCH that could slip one through would bypass that review.
+  app.patch("/v1/projects/:projectId", async (req, reply) => {
+    const { projectId } = projectIdParam.parse(req.params);
+    const body = updateProjectSchema.parse(req.body);
+    const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
+    if (!project) return reply.status(404).send({ error: "unknown_project" });
+    const merged = {
+      name: body.name ?? project.name,
+      costCenter: body.costCenter === undefined ? project.costCenter : body.costCenter,
+      budgetUsd: body.budgetUsd === undefined ? project.budgetUsd : body.budgetUsd,
+      budgetApproverUserId:
+        body.budgetApproverUserId === undefined
+          ? project.budgetApproverUserId
+          : body.budgetApproverUserId,
+      arbiterUserId: body.arbiterUserId === undefined ? project.arbiterUserId : body.arbiterUserId,
+    };
+    // the create-time invariant, held against the row this patch would leave
+    if (merged.budgetUsd != null && merged.budgetApproverUserId == null) {
+      return reply.status(422).send({
+        error: "budget_requires_approver",
+        detail: "a project budget requires a budgetApproverUserId",
+      });
+    }
+    const [row] = await db.update(projects).set(merged).where(eq(projects.id, projectId)).returning();
+    const changed = Object.fromEntries(
+      Object.entries(body).filter(([, v]) => v !== undefined),
+    ) as Record<string, unknown>;
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? project.budgetApproverUserId ?? projectId,
+      objectType: "project",
+      objectId: projectId,
+      detail: { phase: "update", changed },
+      effect: "allow",
+      ruleId: "project-updated",
+      ruleChain: [],
+      reason: `project '${project.name}' updated: ${Object.keys(changed).join(", ")}`,
+    });
+    return row;
   });
 
   // fleet for admins; non-admins see the projects they are members of
@@ -402,7 +500,30 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     return reply.status(201).send(row);
   });
 
-  app.get("/v1/teams", async () => ({ teams: await db.select().from(teams) }));
+  // Purely additive enrichment (same discipline as the approvals list): each
+  // team carries its members with names, so the /admin Teams table can show
+  // who is on a team without a second endpoint or the raw user-id table.
+  app.get("/v1/teams", async () => {
+    const [rows, memberRows] = await Promise.all([
+      db.select().from(teams),
+      db
+        .select({
+          teamId: teamMembers.teamId,
+          userId: teamMembers.userId,
+          displayName: users.displayName,
+          email: users.email,
+        })
+        .from(teamMembers)
+        .innerJoin(users, eq(users.id, teamMembers.userId)),
+    ]);
+    const byTeam = new Map<string, Array<{ userId: string; name: string }>>();
+    for (const m of memberRows) {
+      const list = byTeam.get(m.teamId) ?? [];
+      list.push({ userId: m.userId, name: m.displayName || m.email });
+      byTeam.set(m.teamId, list);
+    }
+    return { teams: rows.map((t) => ({ ...t, members: byTeam.get(t.id) ?? [] })) };
+  });
 
   app.post("/v1/teams/:teamId/members", async (req, reply) => {
     const { teamId } = z.object({ teamId: z.string().uuid() }).parse(req.params);
@@ -483,11 +604,22 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     const { projectId } = projectIdParam.parse(req.params);
     const gate = await requireRole(req, projectId, "viewer");
     if (!gate.ok) return reply.status(gate.status).send({ error: gate.error });
+    const rows = await db
+      .select()
+      .from(projectMembers)
+      .where(eq(projectMembers.projectId, projectId));
+    // additive: names, so the /app Members surface can say who — a member has
+    // no access to the admin-only user list
+    const names = await nameMaps(
+      rows.map((r) => r.userId),
+      rows.map((r) => r.teamId),
+    );
     return {
-      members: await db
-        .select()
-        .from(projectMembers)
-        .where(eq(projectMembers.projectId, projectId)),
+      members: rows.map((r) => ({
+        ...r,
+        userName: names.userName.get(r.userId) ?? null,
+        teamName: r.teamId ? (names.teamName.get(r.teamId) ?? null) : null,
+      })),
     };
   });
 
@@ -562,7 +694,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
           userId,
           objectType: "project",
           projectId,
-          stageId: `__context_conflict__:${item!.id}`,
+          stageId: `${CONTEXT_CONFLICT_PREFIX}${item!.id}`,
           approverUserId: project.arbiterUserId!,
         })
         .returning({ id: approvals.id });
@@ -654,29 +786,74 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     if (!gate.ok) return reply.status(gate.status).send({ error: gate.error });
 
     if (q.key && q.history) {
-      // full retained history for one key — every side of every conflict
+      // full retained history for one key — every side of every conflict.
+      // Each row additively carries its author/team names and, for a retained
+      // row, whether its conflict is still pending with the arbiter — so the
+      // /app history drawer can say accepted / awaiting arbiter / rejected.
+      const rows = await db
+        .select()
+        .from(projectContextItems)
+        .where(and(eq(projectContextItems.projectId, projectId), eq(projectContextItems.key, q.key)))
+        .orderBy(projectContextItems.revision);
+      const [names, pendingMap] = await Promise.all([
+        nameMaps(
+          rows.map((r) => r.contributedByUserId),
+          rows.map((r) => r.contributedByTeamId),
+        ),
+        pendingConflictApprovals(
+          projectId,
+          rows.filter((r) => !r.accepted).map((r) => r.id),
+        ),
+      ]);
       return {
-        history: await db
-          .select()
-          .from(projectContextItems)
-          .where(and(eq(projectContextItems.projectId, projectId), eq(projectContextItems.key, q.key)))
-          .orderBy(projectContextItems.revision),
+        history: rows.map((r) => ({
+          ...r,
+          byName: names.userName.get(r.contributedByUserId) ?? null,
+          teamName: r.contributedByTeamId ? (names.teamName.get(r.contributedByTeamId) ?? null) : null,
+          pendingApprovalId: pendingMap.get(r.id) ?? null,
+        })),
       };
     }
     // current value per key = highest ACCEPTED revision, with provenance
-    const rows = await db
-      .select()
-      .from(projectContextItems)
-      .where(
-        and(
-          eq(projectContextItems.projectId, projectId),
-          eq(projectContextItems.accepted, true),
-          ...(q.key ? [eq(projectContextItems.key, q.key)] : []),
-        ),
-      )
-      .orderBy(projectContextItems.revision);
+    const [rows, retained] = await Promise.all([
+      db
+        .select()
+        .from(projectContextItems)
+        .where(
+          and(
+            eq(projectContextItems.projectId, projectId),
+            eq(projectContextItems.accepted, true),
+            ...(q.key ? [eq(projectContextItems.key, q.key)] : []),
+          ),
+        )
+        .orderBy(projectContextItems.revision),
+      // retained-not-accepted revisions whose conflict still awaits the
+      // arbiter — the card's "N revisions awaiting arbiter" marker
+      db
+        .select()
+        .from(projectContextItems)
+        .where(
+          and(
+            eq(projectContextItems.projectId, projectId),
+            eq(projectContextItems.accepted, false),
+            ...(q.key ? [eq(projectContextItems.key, q.key)] : []),
+          ),
+        )
+        .orderBy(projectContextItems.revision),
+    ]);
     const latest = new Map<string, (typeof rows)[number]>();
     for (const row of rows) latest.set(row.key, row);
+    const pendingMap = await pendingConflictApprovals(
+      projectId,
+      retained.map((r) => r.id),
+    );
+    const pendingItems = retained.filter((r) => pendingMap.has(r.id));
+    const names = await nameMaps(
+      [...latest.values(), ...pendingItems]
+        .map((r) => r.contributedByUserId)
+        .concat(project.arbiterUserId ? [project.arbiterUserId] : []),
+      [...latest.values(), ...pendingItems].map((r) => r.contributedByTeamId),
+    );
     return {
       context: [...latest.values()].map((r) => ({
         key: r.key,
@@ -684,11 +861,28 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         content: r.content,
         provenance: {
           userId: r.contributedByUserId,
+          userName: names.userName.get(r.contributedByUserId) ?? null,
           teamId: r.contributedByTeamId,
+          teamName: r.contributedByTeamId ? (names.teamName.get(r.contributedByTeamId) ?? null) : null,
           sourceArtifactId: r.sourceArtifactId,
           at: r.createdAt,
         },
       })),
+      pending: pendingItems.map((r) => ({
+        itemId: r.id,
+        key: r.key,
+        revision: r.revision,
+        baseRevision: r.baseRevision,
+        content: r.content,
+        byName: names.userName.get(r.contributedByUserId) ?? null,
+        teamName: r.contributedByTeamId ? (names.teamName.get(r.contributedByTeamId) ?? null) : null,
+        at: r.createdAt,
+        approvalId: pendingMap.get(r.id)!,
+      })),
+      // for the editor's "this will be sent to <arbiter>" copy
+      arbiter: project.arbiterUserId
+        ? { userId: project.arbiterUserId, name: names.userName.get(project.arbiterUserId) ?? null }
+        : null,
     };
   });
 

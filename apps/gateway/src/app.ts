@@ -8,9 +8,13 @@ import {
   approvals,
   auditLog,
   dataScopeRules,
+  inArray,
   isNull,
   mcpServers,
   mcpTools,
+  orchestrationRuns,
+  projectContextItems,
+  projects,
   rateLimits,
   revocations,
   roleAssignments,
@@ -19,8 +23,11 @@ import {
   roles,
   serverGrants,
   sql,
+  teamMembers,
+  teams,
   toolGrants,
   users,
+  workflowInstances,
   type Db,
 } from "@regulait/db";
 import { visibleTools, type ToolRef } from "@regulait/policy-kernel";
@@ -175,6 +182,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "GET /v1/runs",
     "GET /v1/workflows/instances",
     "GET /v1/projects",
+    "GET /v1/users/directory",
   ]);
   app.addHook("preHandler", async (req, reply) => {
     const route = `${req.method} ${req.routeOptions.url ?? ""}`;
@@ -219,6 +227,34 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       })
       .from(users),
   }));
+
+  // Names-only directory for the /app pickers (add a project member, name an
+  // approver) — the gap slices 3–4 kept hitting: non-admins cannot read the
+  // admin-only GET /v1/users, so their forms had no one to offer. This
+  // exposes ids, display names, and team names ONLY — no emails, no roles,
+  // no admin flags, no keys, no grants.
+  app.get("/v1/users/directory", async () => {
+    const [userRows, memberRows] = await Promise.all([
+      db.select({ id: users.id, displayName: users.displayName }).from(users),
+      db
+        .select({ userId: teamMembers.userId, teamId: teamMembers.teamId, teamName: teams.name })
+        .from(teamMembers)
+        .innerJoin(teams, eq(teams.id, teamMembers.teamId)),
+    ]);
+    const teamsByUser = new Map<string, Array<{ id: string; name: string }>>();
+    for (const m of memberRows) {
+      const list = teamsByUser.get(m.userId) ?? [];
+      list.push({ id: m.teamId, name: m.teamName });
+      teamsByUser.set(m.userId, list);
+    }
+    return {
+      users: userRows.map((u) => ({
+        id: u.id,
+        name: u.displayName,
+        teams: teamsByUser.get(u.id) ?? [],
+      })),
+    };
+  });
 
   app.post("/v1/users/:userId/keys", async (req, reply) => {
     const { userId } = z.object({ userId: z.string().uuid() }).parse(req.params);
@@ -587,7 +623,122 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       .where(conditions.length > 0 ? and(...conditions) : undefined)
       .orderBy(desc(approvals.requestedAt))
       .limit(100);
-    return { approvals: rows };
+    // Display enrichment — purely additive to the row shape: names for the
+    // requester/approver/decider and a label for the governed object, so the
+    // inbox and queue can say WHO asked and WHAT is governed without the
+    // admin-only user list.
+    const ids = (xs: Array<string | null>) => [...new Set(xs.filter((x): x is string => x !== null))];
+    // §9 context conflicts: the arbiter decides between two TEXTS, so their
+    // inbox row must carry both sides — the retained conflicting revision and
+    // the currently accepted one — not just an object label.
+    const CONFLICT_PREFIX = "__context_conflict__:";
+    const conflictItemIds = ids(
+      rows.map((r) =>
+        r.stageId?.startsWith(CONFLICT_PREFIX) ? r.stageId.slice(CONFLICT_PREFIX.length) : null,
+      ),
+    );
+    const conflictItems = conflictItemIds.length
+      ? await db
+          .select()
+          .from(projectContextItems)
+          .where(inArray(projectContextItems.id, conflictItemIds))
+      : [];
+    const acceptedCounterparts = conflictItems.length
+      ? await db
+          .select()
+          .from(projectContextItems)
+          .where(
+            and(
+              inArray(projectContextItems.projectId, ids(conflictItems.map((i) => i.projectId))),
+              inArray(projectContextItems.key, [...new Set(conflictItems.map((i) => i.key))]),
+              eq(projectContextItems.accepted, true),
+            ),
+          )
+      : [];
+    const currentFor = (item: (typeof conflictItems)[number]) =>
+      acceptedCounterparts
+        .filter((c) => c.projectId === item.projectId && c.key === item.key && c.id !== item.id)
+        .reduce<(typeof acceptedCounterparts)[number] | null>(
+          (m, c) => (m === null || c.revision > m.revision ? c : m),
+          null,
+        );
+    const conflictByItemId = new Map(conflictItems.map((i) => [i.id, i]));
+    const userIds = ids(
+      rows
+        .flatMap((r) => [r.userId, r.approverUserId, r.decidedBy])
+        .concat(conflictItems.map((i) => i.contributedByUserId))
+        .concat(acceptedCounterparts.map((c) => c.contributedByUserId)),
+    );
+    const instanceIds = ids(rows.map((r) => r.instanceId));
+    const runIds = ids(rows.map((r) => r.runId));
+    const projectIds = ids(rows.map((r) => r.projectId));
+    const [userRows, instanceRows, runRows, projectRows] = await Promise.all([
+      userIds.length
+        ? db
+            .select({ id: users.id, displayName: users.displayName, email: users.email })
+            .from(users)
+            .where(inArray(users.id, userIds))
+        : [],
+      instanceIds.length
+        ? db
+            .select({ id: workflowInstances.id, change: workflowInstances.change })
+            .from(workflowInstances)
+            .where(inArray(workflowInstances.id, instanceIds))
+        : [],
+      runIds.length
+        ? db
+            .select({ id: orchestrationRuns.id, name: orchestrationRuns.name })
+            .from(orchestrationRuns)
+            .where(inArray(orchestrationRuns.id, runIds))
+        : [],
+      projectIds.length
+        ? db
+            .select({ id: projects.id, name: projects.name })
+            .from(projects)
+            .where(inArray(projects.id, projectIds))
+        : [],
+    ]);
+    const nameOf = new Map(userRows.map((u) => [u.id, u.displayName || u.email]));
+    const instanceLabel = new Map(
+      instanceRows.map((i) => [i.id, (i.change as { description?: string } | null)?.description ?? null]),
+    );
+    const runLabel = new Map(runRows.map((r) => [r.id, r.name]));
+    const projectLabel = new Map(projectRows.map((p) => [p.id, p.name]));
+    const contextConflictFor = (r: (typeof rows)[number]) => {
+      if (!r.stageId?.startsWith(CONFLICT_PREFIX)) return {};
+      const item = conflictByItemId.get(r.stageId.slice(CONFLICT_PREFIX.length));
+      if (!item) return {};
+      const current = currentFor(item);
+      const side = (i: NonNullable<typeof current>) => ({
+        revision: i.revision,
+        baseRevision: i.baseRevision,
+        content: i.content,
+        byName: nameOf.get(i.contributedByUserId) ?? null,
+        at: i.createdAt,
+      });
+      return {
+        contextConflict: {
+          key: item.key,
+          conflicting: side(item),
+          current: current ? side(current) : null,
+        },
+      };
+    };
+    return {
+      approvals: rows.map((r) => ({
+        ...r,
+        requestedByName: nameOf.get(r.userId) ?? null,
+        approverName: nameOf.get(r.approverUserId) ?? null,
+        decidedByName: r.decidedBy ? (nameOf.get(r.decidedBy) ?? null) : null,
+        objectLabel:
+          (r.instanceId ? instanceLabel.get(r.instanceId) : null) ??
+          (r.runId ? runLabel.get(r.runId) : null) ??
+          (r.projectId ? projectLabel.get(r.projectId) : null) ??
+          r.toolName ??
+          null,
+        ...contextConflictFor(r),
+      })),
+    };
   });
 
   app.post("/v1/approvals/:approvalId/decide", async (req, reply) => {
@@ -601,9 +752,21 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
     const [row] = await db.select().from(approvals).where(eq(approvals.id, approvalId));
     if (!row) return reply.status(404).send({ error: "unknown_approval" });
-    // Only the rule's named approver may decide (§3).
-    if (row.approverUserId !== deciderUserId) {
-      return reply.status(403).send({ error: "not_the_named_approver" });
+    // Only the rule's named approver may decide (§3) — with one escape hatch:
+    // an org ADMIN may decide in the approver's place to unblock a stuck
+    // queue, but only with a recorded reason, and the override is written to
+    // the one audit trail as exactly what it is.
+    const adminOverride = row.approverUserId !== deciderUserId;
+    if (adminOverride) {
+      if (!req.authCtx.isAdmin) {
+        return reply.status(403).send({ error: "not_the_named_approver" });
+      }
+      if (!body.reason?.trim()) {
+        return reply.status(422).send({
+          error: "override_reason_required",
+          detail: "an admin deciding in place of the named approver must record a reason",
+        });
+      }
     }
 
     const [updated] = await db
@@ -617,6 +780,26 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       .where(and(eq(approvals.id, approvalId), eq(approvals.status, "pending")))
       .returning();
     if (!updated) return reply.status(409).send({ error: "already_decided" });
+    if (adminOverride) {
+      await db.insert(auditLog).values({
+        userId: deciderUserId,
+        objectType: updated.objectType,
+        objectId: updated.instanceId ?? updated.runId ?? updated.projectId ?? null,
+        serverId: updated.serverId,
+        toolName: updated.toolName,
+        detail: {
+          approvalId: updated.id,
+          adminOverride: true,
+          namedApproverUserId: row.approverUserId,
+          decision: body.decision,
+          stageId: updated.stageId,
+        },
+        effect: body.decision === "approved" ? "allow" : "deny",
+        ruleId: "approval-admin-override",
+        ruleChain: [],
+        reason: `admin decided in place of the named approver: ${body.reason}`,
+      });
+    }
     // Workflow sign-offs advance their instance through the same one inbox (§5).
     if (updated.objectType === "workflow") {
       await applyWorkflowApprovalDecision(db, updated, body.decision, deciderUserId, opts.dataKey);
@@ -633,7 +816,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // never a second decision point; a mirror failure never unwinds the
     // decision, it is surfaced in the response.
     const pmMirror = await mirrorApprovalDecision(db, opts.dataKey, updated, deciderUserId);
-    return pmMirror ? { ...updated, pmMirror } : updated;
+    const decided = adminOverride ? { ...updated, adminOverride: true } : updated;
+    return pmMirror ? { ...decided, pmMirror } : decided;
   });
 
   // ADR-0012: the portal is a static shell (zero data, zero secrets) that
