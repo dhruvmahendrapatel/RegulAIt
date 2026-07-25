@@ -54,11 +54,14 @@ declare module "fastify" {
 export interface BuildAppOptions {
   /** deploy-time admin token used to create the first real user + key */
   bootstrapToken?: string;
+  /** hex AES-256 key for encrypting stored git tokens (REGULAIT_DATA_KEY) */
+  dataKey?: string;
 }
 import { z } from "zod";
 import { registerMcpProxy } from "./mcp-proxy.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
 import { applyWorkflowApprovalDecision, registerWorkflowRoutes } from "./workflows.js";
+import { MergeConflictError, WorkflowStateError } from "@regulait/workflow-kernel";
 
 const uuidParam = z.object({ serverId: z.string().uuid() });
 const visibleToolsParams = z.object({
@@ -76,6 +79,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     }
     // Postgres constraint violations surface as DrizzleQueryError wrapping the
     // pg error; map them to client errors instead of a generic 500.
+    if (err instanceof WorkflowStateError) {
+      return reply.status(409).send({ error: "invalid_workflow_state", detail: err.message });
+    }
+    if (err instanceof MergeConflictError) {
+      return reply.status(422).send({ error: "template_merge_conflict", detail: err.message });
+    }
     const pgCode = (err as { cause?: { code?: string } }).cause?.code;
     if (pgCode === "23505") return reply.status(409).send({ error: "conflict" });
     if (pgCode === "23503") return reply.status(400).send({ error: "invalid_reference" });
@@ -334,8 +343,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           // Tool-scoped revocations also carve tools out of a role
           // read-only-all grant (the kernel enforces this); flag them here so
           // the deviation is visible, not silent (§5).
+          const roleToolNames = new Set(
+            (entitlements.roleToolGrants ?? []).map((g) => g.toolName),
+          );
           const carveOuts = (entitlements.revocations ?? [])
-            .filter((r) => r.toolName !== null)
+            .filter((r) => r.toolName !== null && !roleToolNames.has(r.toolName))
             .map((r) => ({ toolName: r.toolName, revocationId: r.id }));
           return {
             kind: "server-read-only" as const,
@@ -450,7 +462,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // §6 Approvals Queue — one inbox for every paused call.
   app.get("/v1/approvals", async (req) => {
     const { status } = z
-      .object({ status: z.enum(["pending", "approved", "denied", "consumed"]).optional() })
+      .object({ status: z.enum(["pending", "approved", "denied", "consumed", "superseded"]).optional() })
       .parse(req.query);
     const rows = await db
       .select()
@@ -490,14 +502,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     if (!updated) return reply.status(409).send({ error: "already_decided" });
     // Workflow sign-offs advance their instance through the same one inbox (§5).
     if (updated.objectType === "workflow") {
-      await applyWorkflowApprovalDecision(db, updated, body.decision, deciderUserId);
+      await applyWorkflowApprovalDecision(db, updated, body.decision, deciderUserId, opts.dataKey);
     }
     return updated;
   });
 
   registerAgentConnectorRoutes(app, db);
 
-  registerWorkflowRoutes(app, db);
+  registerWorkflowRoutes(app, db, { dataKey: opts.dataKey });
 
   registerMcpProxy(app, db);
 

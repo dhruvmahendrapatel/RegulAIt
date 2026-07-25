@@ -391,6 +391,8 @@ export const workflowInstances = pgTable(
       .references(() => users.id, { onDelete: "cascade" }),
     change: jsonb("change").notNull(),
     state: jsonb("state").notNull(),
+    /** outputs of executed stages (branch, prId, prUrl, mergeSha, lastError) */
+    context: jsonb("context").$type<Record<string, unknown>>().notNull().default({}),
     status: text("status").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -430,3 +432,16 @@ export const workflowArtifacts = pgTable(
   },
   (t) => [uniqueIndex("workflow_artifacts_instance_output_version_uq").on(t.instanceId, t.output, t.version)],
 );
+
+// Git connections for workflow git_operation stages. The token is stored
+// AES-256-GCM-encrypted with the gateway's data key — never plaintext.
+export const gitConnections = pgTable("git_connections", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull().unique(),
+  provider: text("provider", {
+    enum: ["github", "gitlab", "bitbucket", "azure_devops", "mock"],
+  }).notNull(),
+  baseUrl: text("base_url"),
+  tokenCiphertext: text("token_ciphertext").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});

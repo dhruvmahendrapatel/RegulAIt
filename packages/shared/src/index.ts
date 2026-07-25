@@ -177,3 +177,10 @@ export const submitArtifactSchema = z.object({
 export const advanceStageSchema = z.object({
   stageId: z.string().min(1),
 });
+
+export const createGitConnectionSchema = z.object({
+  name: z.string().min(1),
+  provider: z.enum(["github", "gitlab", "bitbucket", "azure_devops", "mock"]),
+  baseUrl: z.string().url().optional(),
+  token: z.string(),
+});

@@ -138,7 +138,7 @@ describe("instance state machine", () => {
     });
     expect(r.state.artifactVersions.requirements_file).toBe(1);
 
-    r = transition(standard, r.state, { kind: "approval_granted" });
+    r = transition(standard, r.state, { kind: "approval_granted", stageId: "requirements_signoff" });
     expect(r.state.status).toBe("awaiting_trigger");
     expect(r.effects).toContainEqual({ kind: "await_human_trigger", stageId: "build" });
   });
@@ -146,7 +146,7 @@ describe("instance state machine", () => {
   it("editing the artifact after sign-off re-opens the sign-off (versioned re-approval, §2)", () => {
     let r = transition(standard, initialState(standard), { kind: "start" });
     r = transition(standard, r.state, { kind: "artifact_submitted", stageId: "requirements" });
-    r = transition(standard, r.state, { kind: "approval_granted" });
+    r = transition(standard, r.state, { kind: "approval_granted", stageId: "requirements_signoff" });
     expect(r.state.status).toBe("awaiting_trigger");
 
     r = transition(standard, r.state, { kind: "artifact_submitted", stageId: "requirements" });
@@ -162,15 +162,15 @@ describe("instance state machine", () => {
   it("denied approval terminates the instance", () => {
     let r = transition(standard, initialState(standard), { kind: "start" });
     r = transition(standard, r.state, { kind: "artifact_submitted", stageId: "requirements" });
-    r = transition(standard, r.state, { kind: "approval_denied" });
+    r = transition(standard, r.state, { kind: "approval_denied", stageId: "requirements_signoff" });
     expect(r.state.status).toBe("denied");
-    expect(() => transition(standard, r.state, { kind: "approval_granted" })).toThrow(/terminal/);
+    expect(() => transition(standard, r.state, { kind: "approval_granted", stageId: "requirements_signoff" })).toThrow(/terminal/);
   });
 
   it("human triggers walk build and checks to completion", () => {
     let r = transition(standard, initialState(standard), { kind: "start" });
     r = transition(standard, r.state, { kind: "artifact_submitted", stageId: "requirements" });
-    r = transition(standard, r.state, { kind: "approval_granted" });
+    r = transition(standard, r.state, { kind: "approval_granted", stageId: "requirements_signoff" });
     r = transition(standard, r.state, { kind: "human_trigger", stageId: "build" });
     expect(r.state.status).toBe("awaiting_trigger");
     r = transition(standard, r.state, { kind: "human_trigger", stageId: "checks" });
@@ -180,8 +180,8 @@ describe("instance state machine", () => {
 
   it("rejects out-of-order events", () => {
     const r = transition(standard, initialState(standard), { kind: "start" });
-    expect(() => transition(standard, r.state, { kind: "approval_granted" })).toThrow(
-      /not blocked on an approval/,
+    expect(() => transition(standard, r.state, { kind: "approval_granted", stageId: "requirements_signoff" })).toThrow(
+      /not blocked on approval stage/,
     );
     expect(() =>
       transition(standard, r.state, { kind: "human_trigger", stageId: "build" }),
@@ -193,5 +193,97 @@ describe("instance state machine", () => {
     const aborted = transition(standard, r.state, { kind: "abort" });
     expect(aborted.state.status).toBe("aborted");
     expect(() => transition(standard, aborted.state, { kind: "abort" })).toThrow(/terminal/);
+  });
+});
+
+describe("review-fix regressions", () => {
+  it("an approval event for the wrong stage is rejected (cross-stage forgery)", () => {
+    let r = transition(standard, initialState(standard), { kind: "start" });
+    r = transition(standard, r.state, { kind: "artifact_submitted", stageId: "requirements" });
+    expect(() =>
+      transition(standard, r.state, { kind: "approval_granted", stageId: "some_other_stage" }),
+    ).toThrow(/not blocked on approval stage 'some_other_stage'/);
+  });
+
+  it("merging templates with conflicting same-id stages throws instead of dropping one", () => {
+    const a = validateDefinition({
+      workflow: "a",
+      stages: [
+        { id: "intake", type: "trigger" },
+        { id: "signoff", type: "human_approval", approvers: ["u1"] },
+      ],
+    });
+    const b = validateDefinition({
+      workflow: "b",
+      stages: [
+        { id: "intake", type: "trigger" },
+        { id: "signoff", type: "human_approval", approvers: ["u1", "u2"] },
+      ],
+    });
+    expect(() => mergeDefinitions([a, b])).toThrow(/conflicting configs/);
+    // identical duplicates still dedupe fine
+    expect(mergeDefinitions([a, a]).stages.filter((s) => s.id === "signoff")).toHaveLength(1);
+  });
+});
+
+describe("git_operation stages", () => {
+  const gitFlow = validateDefinition({
+    workflow: "git-flow",
+    stages: [
+      { id: "intake", type: "trigger" },
+      { id: "branch", type: "git_operation", action: "create_branch", connection: "gh", repo: "o/r" },
+      { id: "pr", type: "git_operation", action: "open_pr", connection: "gh", repo: "o/r" },
+      { id: "merge_gate", type: "human_approval", approvers: ["requesting_user"] },
+      { id: "merge", type: "git_operation", action: "merge", connection: "gh", repo: "o/r", strategy: "squash" },
+    ],
+  });
+
+  it("validates ordering and required config", () => {
+    expect(() =>
+      validateDefinition({
+        workflow: "bad",
+        stages: [
+          { id: "t", type: "trigger" },
+          { id: "g", type: "git_operation", action: "open_pr", connection: "gh", repo: "o/r" },
+        ],
+      }),
+    ).toThrow(/needs an earlier create_branch/);
+    expect(() =>
+      validateDefinition({
+        workflow: "bad",
+        stages: [
+          { id: "t", type: "trigger" },
+          { id: "g", type: "git_operation" },
+        ],
+      }),
+    ).toThrow(/needs action, connection, and repo/);
+  });
+
+  it("git stages block on execution; success advances, failure stays retryable", () => {
+    let r = transition(gitFlow, initialState(gitFlow), { kind: "start" });
+    expect(r.state.status).toBe("awaiting_execution");
+    expect(r.effects).toContainEqual({ kind: "execute_stage", stageId: "branch" });
+
+    r = transition(gitFlow, r.state, { kind: "execution_failed", stageId: "branch", error: "boom" });
+    expect(r.state.status).toBe("awaiting_execution");
+
+    r = transition(gitFlow, r.state, { kind: "execution_succeeded", stageId: "branch" });
+    expect(r.state.status).toBe("awaiting_execution");
+    expect(r.effects).toContainEqual({ kind: "execute_stage", stageId: "pr" });
+
+    r = transition(gitFlow, r.state, { kind: "execution_succeeded", stageId: "pr" });
+    expect(r.state.status).toBe("blocked_on_approval");
+
+    r = transition(gitFlow, r.state, { kind: "approval_granted", stageId: "merge_gate" });
+    expect(r.state.status).toBe("awaiting_execution");
+    r = transition(gitFlow, r.state, { kind: "execution_succeeded", stageId: "merge" });
+    expect(r.state.status).toBe("completed");
+  });
+
+  it("rejects execution events for the wrong stage", () => {
+    const r = transition(gitFlow, initialState(gitFlow), { kind: "start" });
+    expect(() =>
+      transition(gitFlow, r.state, { kind: "execution_succeeded", stageId: "merge" }),
+    ).toThrow(/not executing git stage/);
   });
 });

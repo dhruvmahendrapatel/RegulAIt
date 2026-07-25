@@ -1,5 +1,10 @@
 import { z } from "zod";
 
+/** invalid event for the instance's current state — a client error, not a crash */
+export class WorkflowStateError extends Error {}
+/** templates cannot be merged (same stage id, conflicting config) */
+export class MergeConflictError extends Error {}
+
 // ---------------------------------------------------------------------------
 // Template definition (§3): declarative, version-controllable, validated here.
 // Executable stage types in this slice: trigger, planning, artifact_generation,
@@ -15,7 +20,11 @@ export const EXECUTABLE_STAGE_TYPES = [
   "human_approval",
   "automated_build",
   "automated_check",
+  "git_operation",
 ] as const;
+
+export const GIT_ACTIONS = ["create_branch", "open_pr", "merge"] as const;
+export type GitAction = (typeof GIT_ACTIONS)[number];
 
 export type StageType = (typeof EXECUTABLE_STAGE_TYPES)[number];
 
@@ -30,6 +39,18 @@ const stageSchema = z.object({
   scope: z.string().min(1).optional(),
   /** automated_check: named checks (informational in this slice) */
   checks: z.array(z.string().min(1)).optional(),
+  /** git_operation: which operation this stage performs */
+  action: z.enum(GIT_ACTIONS).optional(),
+  /** git_operation: name of the registered git connection to use */
+  connection: z.string().min(1).optional(),
+  /** git_operation: owner/repo the operation targets */
+  repo: z.string().min(1).optional(),
+  /** git_operation open_pr/create_branch: base branch (default main) */
+  base: z.string().min(1).optional(),
+  /** git_operation create_branch: branch name prefix (default regulait) */
+  branchPrefix: z.string().min(1).optional(),
+  /** git_operation merge: merge strategy (default merge) */
+  strategy: z.enum(["merge", "squash", "rebase"]).optional(),
 });
 export type Stage = z.infer<typeof stageSchema>;
 
@@ -67,6 +88,36 @@ export const workflowDefinitionSchema = z
             message: `build stage '${s.id}' is scoped to artifact '${s.scope}' no stage produces`,
           });
         }
+      }
+    }
+    for (const s of def.stages) {
+      if (s.type !== "git_operation") continue;
+      if (!s.action || !s.connection || !s.repo) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `git_operation stage '${s.id}' needs action, connection, and repo`,
+        });
+        continue;
+      }
+      const index = def.stages.indexOf(s);
+      const earlier = def.stages.slice(0, index);
+      if (
+        s.action === "open_pr" &&
+        !earlier.some((o) => o.type === "git_operation" && o.action === "create_branch")
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `open_pr stage '${s.id}' needs an earlier create_branch stage`,
+        });
+      }
+      if (
+        s.action === "merge" &&
+        !earlier.some((o) => o.type === "git_operation" && o.action === "open_pr")
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `merge stage '${s.id}' needs an earlier open_pr stage`,
+        });
       }
     }
     if (def.stages[0]!.type !== "trigger") {
@@ -146,13 +197,23 @@ export function matchTemplates(
 export function mergeDefinitions(defs: readonly WorkflowDefinition[]): WorkflowDefinition {
   if (defs.length === 0) throw new Error("mergeDefinitions requires at least one definition");
   if (defs.length === 1) return defs[0]!;
-  const seen = new Set<string>();
+  const byId = new Map<string, Stage>();
   const stages: Stage[] = [];
   for (const def of defs) {
     for (const stage of def.stages) {
-      if (seen.has(stage.id)) continue;
+      const existing = byId.get(stage.id);
+      if (existing) {
+        // identical duplicates dedupe; conflicting configs must not silently
+        // drop a (possibly stricter) template's stage
+        if (JSON.stringify(existing) !== JSON.stringify(stage)) {
+          throw new MergeConflictError(
+            `stage id '${stage.id}' appears in multiple templates with conflicting configs`,
+          );
+        }
+        continue;
+      }
       if (stage.type === "trigger" && stages.some((s) => s.type === "trigger")) continue;
-      seen.add(stage.id);
+      byId.set(stage.id, stage);
       stages.push(stage);
     }
   }
@@ -170,6 +231,7 @@ export type InstanceStatus =
   | "blocked_on_approval"
   | "blocked_on_artifact"
   | "awaiting_trigger"
+  | "awaiting_execution"
   | "completed"
   | "aborted"
   | "denied";
@@ -185,10 +247,12 @@ export interface InstanceState {
 export type WorkflowEvent =
   | { kind: "start" }
   | { kind: "artifact_submitted"; stageId: string }
-  | { kind: "approval_granted" }
-  | { kind: "approval_denied" }
+  | { kind: "approval_granted"; stageId: string }
+  | { kind: "approval_denied"; stageId: string }
   | { kind: "human_trigger"; stageId: string }
   | { kind: "stage_completed"; stageId: string }
+  | { kind: "execution_succeeded"; stageId: string }
+  | { kind: "execution_failed"; stageId: string; error: string }
   | { kind: "abort" };
 
 /** side effects the caller (gateway) must perform after a transition */
@@ -196,6 +260,7 @@ export type Effect =
   | { kind: "request_approval"; stageId: string; approvers: string[] }
   | { kind: "await_artifact"; stageId: string; output: string }
   | { kind: "await_human_trigger"; stageId: string }
+  | { kind: "execute_stage"; stageId: string }
   | { kind: "instance_completed" }
   | { kind: "instance_denied" }
   | { kind: "instance_aborted" };
@@ -270,6 +335,12 @@ function runForward(def: WorkflowDefinition, state: InstanceState): TransitionRe
       });
       return { state: s, effects };
     }
+    if (stage.type === "git_operation") {
+      // executed by the gateway's git executor; retryable on failure
+      s.status = "awaiting_execution";
+      effects.push({ kind: "execute_stage", stageId: stage.id });
+      return { state: s, effects };
+    }
     // automated_build / automated_check: await explicit trigger in this slice
     s.status = "awaiting_trigger";
     effects.push({ kind: "await_human_trigger", stageId: stage.id });
@@ -283,7 +354,7 @@ export function transition(
   event: WorkflowEvent,
 ): TransitionResult {
   if (state.status === "completed" || state.status === "aborted" || state.status === "denied") {
-    throw new Error(`instance is terminal (${state.status}) and accepts no events`);
+    throw new WorkflowStateError(`instance is terminal (${state.status}) and accepts no events`);
   }
 
   if (event.kind === "abort") {
@@ -301,7 +372,7 @@ export function transition(
     const producer = def.stages.find(
       (st) => st.id === event.stageId && st.type === "artifact_generation",
     );
-    if (!producer) throw new Error(`no artifact_generation stage '${event.stageId}'`);
+    if (!producer) throw new WorkflowStateError(`no artifact_generation stage '${event.stageId}'`);
     const producerIndex = def.stages.findIndex((st) => st.id === event.stageId);
     const version = (state.artifactVersions[producer.output!] ?? 0) + 1;
     const s: InstanceState = {
@@ -321,15 +392,17 @@ export function transition(
       return runForward(def, s);
     }
     if (current?.id !== event.stageId) {
-      throw new Error(`instance is not waiting on artifact stage '${event.stageId}'`);
+      throw new WorkflowStateError(`instance is not waiting on artifact stage '${event.stageId}'`);
     }
     s.status = "running";
     return runForward(def, s);
   }
 
   if (event.kind === "approval_granted") {
-    if (current?.type !== "human_approval") {
-      throw new Error("instance is not blocked on an approval");
+    if (current?.type !== "human_approval" || current.id !== event.stageId) {
+      throw new WorkflowStateError(
+        `instance is not blocked on approval stage '${event.stageId}'`,
+      );
     }
     const s: InstanceState = {
       ...state,
@@ -343,19 +416,22 @@ export function transition(
   }
 
   if (event.kind === "approval_denied") {
-    if (current?.type !== "human_approval") {
-      throw new Error("instance is not blocked on an approval");
+    if (current?.type !== "human_approval" || current.id !== event.stageId) {
+      throw new WorkflowStateError(
+        `instance is not blocked on approval stage '${event.stageId}'`,
+      );
     }
     const s = { ...state, status: "denied" as const };
     return { state: s, effects: [{ kind: "instance_denied" }] };
   }
 
-  if (event.kind === "human_trigger" || event.kind === "stage_completed") {
-    if (!current || current.id !== event.stageId) {
-      throw new Error(`instance is not waiting on stage '${event.stageId}'`);
+  if (event.kind === "execution_succeeded" || event.kind === "execution_failed") {
+    if (!current || current.id !== event.stageId || current.type !== "git_operation") {
+      throw new WorkflowStateError(`instance is not executing git stage '${event.stageId}'`);
     }
-    if (current.type !== "automated_build" && current.type !== "automated_check") {
-      throw new Error(`stage '${event.stageId}' is not triggerable`);
+    if (event.kind === "execution_failed") {
+      // stays awaiting_execution — the event log records the error; retry re-executes
+      return { state: { ...state }, effects: [] };
     }
     const s: InstanceState = {
       ...state,
@@ -368,5 +444,23 @@ export function transition(
     return runForward(def, s);
   }
 
-  throw new Error(`unhandled event`);
+  if (event.kind === "human_trigger" || event.kind === "stage_completed") {
+    if (!current || current.id !== event.stageId) {
+      throw new WorkflowStateError(`instance is not waiting on stage '${event.stageId}'`);
+    }
+    if (current.type !== "automated_build" && current.type !== "automated_check") {
+      throw new WorkflowStateError(`stage '${event.stageId}' is not triggerable`);
+    }
+    const s: InstanceState = {
+      ...state,
+      status: "running",
+      stageStatuses: [...state.stageStatuses],
+      artifactVersions: { ...state.artifactVersions },
+    };
+    s.stageStatuses[s.currentStageIndex] = "completed";
+    s.currentStageIndex += 1;
+    return runForward(def, s);
+  }
+
+  throw new WorkflowStateError(`unhandled event`);
 }

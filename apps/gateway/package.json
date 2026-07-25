@@ -17,7 +17,8 @@
     "@regulait/shared": "workspace:*",
     "fastify": "^5.4.0",
     "zod": "^3.25.67",
-    "@regulait/workflow-kernel": "workspace:*"
+    "@regulait/workflow-kernel": "workspace:*",
+    "@regulait/git-provider": "workspace:*"
   },
   "devDependencies": {
     "vitest": "^3.2.4"
