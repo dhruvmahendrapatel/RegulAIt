@@ -40,6 +40,7 @@ import {
   runEventSchema,
 } from "@regulait/shared";
 import { executeGovernedDispatch } from "./agents-connectors.js";
+import { assertProjectAttribution } from "./projects.js";
 import { mirrorNodeStatus } from "./pm.js";
 import { handleNestedRunCompletion } from "./workflows.js";
 import { z } from "zod";
@@ -304,6 +305,7 @@ async function dispatchRunNode(
     input: args.input ?? node.title,
     system: nested?.system,
     maxTokens: args.maxTokens,
+    projectId: run.projectId ?? null,
     detail: {
       runId: run.id,
       nodeId,
@@ -600,6 +602,7 @@ export async function planRun(
   userId: string,
   graphRaw: unknown,
   workflowInstanceId: string | null,
+  projectId: string | null = null,
 ): Promise<PlanRunResult> {
   let graph: TaskGraph;
   try {
@@ -616,6 +619,13 @@ export async function planRun(
     .from(users)
     .where(eq(users.id, graph.escalationApproverUserId));
   if (!approver) return { ok: false, status: 422, body: { error: "unknown_escalation_approver" } };
+  if (projectId) {
+    // ADR-0011: the initiating user must be allowed to bill this project
+    const attribution = await assertProjectAttribution(db, projectId, userId, false);
+    if (!attribution.ok) {
+      return { ok: false, status: attribution.status as 400 | 422, body: { error: attribution.error } };
+    }
+  }
 
   const [grants, [policy], agentRows] = await Promise.all([
     db.select().from(agentGrants).where(eq(agentGrants.userId, userId)),
@@ -743,6 +753,7 @@ export async function planRun(
         name: graph.run,
         initiatingUserId: userId,
         workflowInstanceId,
+        projectId,
         graph,
         state,
         budget,
@@ -767,6 +778,7 @@ export async function planRun(
         estimatedCostSavedUsd: sub.routing.estimatedCostSavedUsd,
         estimationBasis: sub.routing.estimationBasis,
         ruleId: sub.routing.ruleId,
+        projectId,
         detail: { nodeId: sub.node.id, phase: "budget-replan" },
       });
     }
@@ -823,7 +835,7 @@ export function registerOrchestrationRoutes(
     const body = createRunSchema.parse(req.body);
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_initiate" });
-    const planned = await planRun(db, userId, body.graph, body.workflowInstanceId ?? null);
+    const planned = await planRun(db, userId, body.graph, body.workflowInstanceId ?? null, body.projectId ?? null);
     if (!planned.ok) return reply.status(planned.status).send(planned.body);
     return reply.status(201).send({
       id: planned.run.id,

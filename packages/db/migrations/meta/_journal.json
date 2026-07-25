@@ -127,6 +127,27 @@
       "when": 1784952000000,
       "tag": "0017_user_model_credentials",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1784954000000,
+      "tag": "0018_projects_cost_rollup",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1784955000000,
+      "tag": "0019_shared_projects",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1784956000000,
+      "tag": "0020_compliance_cascade",
+      "breakpoints": true
     }
   ]
 }

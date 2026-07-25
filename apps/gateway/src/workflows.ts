@@ -29,6 +29,7 @@ import { users, gitConnections, orchestrationRuns } from "@regulait/db";
 import { resolveProvider, GitProviderError } from "@regulait/git-provider";
 import { validateGraph } from "@regulait/orchestration-kernel";
 import { planRun } from "./orchestration.js";
+import { assertProjectAttribution, requiredTemplateIdsFor } from "./projects.js";
 import { decryptSecret, encryptSecret as encryptTokenOnce } from "./secrets.js";
 import {
   advanceStageSchema,
@@ -304,7 +305,7 @@ async function runGitExecutions(
           break; // run is planned/running — the stage waits for it
         }
       }
-      const planned = await planRun(db, instance.initiatorUserId, stage.run, instance.id);
+      const planned = await planRun(db, instance.initiatorUserId, stage.run, instance.id, instance.projectId ?? null);
       if (!planned.ok) {
         const error = `nested run rejected: ${JSON.stringify(planned.body)}`;
         context.lastError = `${stage.id}: ${error}`;
@@ -554,9 +555,17 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
         .from(workflowAssignmentRules)
         .orderBy(workflowAssignmentRules.createdAt);
       templateIds = matchTemplates(body.change, rules);
-      if (templateIds.length === 0) {
-        return reply.status(422).send({ error: "no_workflow_matches_change" });
-      }
+    }
+    // §8.3 cascade — the ENFORCED consumer: a classified project's required
+    // templates are unioned in with no manual per-control setup (and can
+    // force a workflow even when no assignment rule matches). The existing
+    // §4 union/strictest merge keeps every added sign-off stage.
+    if (body.projectId) {
+      const required = await requiredTemplateIdsFor(db, body.projectId);
+      for (const id of required) if (!templateIds.includes(id)) templateIds.push(id);
+    }
+    if (templateIds.length === 0) {
+      return reply.status(422).send({ error: "no_workflow_matches_change" });
     }
 
     const templates = await db
@@ -570,6 +579,11 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const ordered = templateIds.map((id) => templates.find((t) => t.id === id)!);
     const merged = mergeDefinitions(ordered.map((t) => t.definition as WorkflowDefinition));
 
+    if (body.projectId) {
+      // ADR-0011: the initiator must be allowed to bill this project
+      const attribution = await assertProjectAttribution(db, body.projectId, userId, req.authCtx.isAdmin);
+      if (!attribution.ok) return reply.status(attribution.status).send({ error: attribution.error });
+    }
     const [instance] = await db
       .insert(workflowInstances)
       .values({
@@ -577,6 +591,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
         definition: merged,
         initiatorUserId: userId,
         change: body.change,
+        projectId: body.projectId ?? null,
         state: initialState(merged),
         status: "running",
       })

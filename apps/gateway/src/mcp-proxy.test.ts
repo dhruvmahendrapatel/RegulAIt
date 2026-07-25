@@ -4619,3 +4619,803 @@ describe("per-user model credentials (BYO key): user key wins, platform is the f
     expect(platformSrv.hits).toHaveLength(1); // untouched
   });
 });
+
+describe("per-project cost rollup (pillar 5): attribution, dashboard, budget enforcement", () => {
+  const mkNode = (id: string, agentId: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    title: `task ${id}`,
+    ownerAgentId: agentId,
+    mode: "execute",
+    estimate: { in: 1, out: 1 },
+    ...extra,
+  });
+
+  let tessaId: string;
+  let tessaAuth: { authorization: string };
+  let finnId: string;
+  let projWorkerId: string;
+  let atlasId: string;
+  let cappedId: string;
+
+  it("projects are created with chargeback fields; a budget requires a named approver", async () => {
+    const tessa = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email: "proj-tessa@example.com", displayName: "Proj Tessa" },
+    });
+    tessaId = tessa.json().id;
+    tessaAuth = await authFor(tessaId);
+    const finn = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email: "proj-finn@example.com", displayName: "Proj Finn" },
+    });
+    finnId = finn.json().id;
+
+    const noApprover = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/projects",
+      payload: { name: "bad-budget", budgetUsd: 100 },
+    });
+    expect(noApprover.statusCode).toBe(400);
+
+    const atlas = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/projects",
+      payload: { name: "atlas-migration", costCenter: "CC-1234" },
+    });
+    expect(atlas.statusCode).toBe(201);
+    atlasId = atlas.json().id;
+    expect(atlas.json().costCenter).toBe("CC-1234");
+
+    const capped = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/projects",
+      payload: { name: "capped-project", budgetUsd: 10, budgetApproverUserId: finnId },
+    });
+    expect(capped.statusCode).toBe(201);
+    cappedId = capped.json().id;
+  });
+
+  it("spend is attributed at every entry point: invoke, run, and workflow-nested run", async () => {
+    const agentRes = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/agents",
+      payload: {
+        name: "proj-worker", provider: "mock", tier: 0, modes: ["execute"],
+        costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-proj",
+      },
+    });
+    projWorkerId = agentRes.json().id;
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/grants/agents",
+      payload: { userId: tessaId, agentId: projWorkerId },
+    });
+
+    // unknown project is rejected at the entry point
+    const ghost = await app.inject({
+      method: "POST", headers: tessaAuth, url: `/v1/agents/${projWorkerId}/invoke`,
+      payload: { mode: "execute", input: "x", dispatch: true, projectId: "00000000-0000-0000-0000-000000000000" },
+    });
+    expect(ghost.statusCode).toBe(400);
+
+    // 1) direct invoke
+    const invoked = await app.inject({
+      method: "POST", headers: tessaAuth, url: `/v1/agents/${projWorkerId}/invoke`,
+      payload: { mode: "execute", input: "direct spend", dispatch: true, projectId: atlasId },
+    });
+    expect(invoked.statusCode).toBe(200);
+
+    // 2) standalone run
+    const run = await app.inject({
+      method: "POST", headers: tessaAuth, url: "/v1/runs",
+      payload: {
+        projectId: atlasId,
+        graph: {
+          run: "proj-run",
+          escalationApproverUserId: finnId,
+          nodes: [mkNode("a", projWorkerId)],
+        },
+      },
+    });
+    expect(run.statusCode).toBe(201);
+    await app.inject({
+      method: "POST", headers: tessaAuth, url: `/v1/runs/${run.json().id}/auto`,
+      payload: { acceptReviews: true },
+    });
+
+    // 3) workflow instance whose nested run inherits the project
+    const tpl = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/templates",
+      payload: {
+        name: "proj-nested",
+        definition: {
+          workflow: "proj-nested",
+          stages: [
+            { id: "intake", type: "trigger" },
+            {
+              id: "build", type: "automated_build",
+              run: {
+                run: "proj-nested-run",
+                escalationApproverUserId: finnId,
+                nodes: [mkNode("impl", projWorkerId)],
+              },
+            },
+          ],
+        },
+      },
+    });
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/assignment-rules",
+      payload: { templateId: tpl.json().id, changeType: "proj-nested-test" },
+    });
+    const started = await app.inject({
+      method: "POST", headers: tessaAuth, url: "/v1/workflows/instances",
+      payload: {
+        projectId: atlasId,
+        change: { description: "proj", paths: ["p.ts"], changeType: "proj-nested-test", environment: "staging" },
+      },
+    });
+    const instanceId = started.json().id;
+    const view = await app.inject({
+      method: "GET", headers: tessaAuth, url: `/v1/workflows/instances/${instanceId}`,
+    });
+    const nestedRunId = view.json().instance.context["runId:build"];
+    const nestedRun = await app.inject({ method: "GET", headers: tessaAuth, url: `/v1/runs/${nestedRunId}` });
+    expect(nestedRun.json().run.projectId).toBe(atlasId); // inheritance
+    await app.inject({
+      method: "POST", headers: tessaAuth, url: `/v1/runs/${nestedRunId}/auto`,
+      payload: { acceptReviews: true },
+    });
+
+    // the rollup sees all three, broken down for showback
+    const rollup = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/projects/${atlasId}/costs`,
+    });
+    expect(rollup.statusCode).toBe(200);
+    const body = rollup.json();
+    expect(body.measured.events).toBe(3);
+    expect(body.measured.costUsd).toBeGreaterThan(0);
+    expect(body.byUser).toHaveLength(1);
+    expect(body.byUser[0].userId).toBe(tessaId);
+    expect(body.byAgent[0]).toMatchObject({ agentId: projWorkerId, model: "mock-proj" });
+    // routing decisions carried attribution into the estimates ledger too
+    expect(
+      body.estimatedSavings.some((t: { technique: string }) => t.technique === "model_routing"),
+    ).toBe(true);
+    expect(body.budget.budgetUsd).toBeNull();
+    expect(body.forecast.projectedEomUsd).toBeGreaterThanOrEqual(body.budget.spentUsd);
+    expect(body.forecast.dailyRateUsd).toBeGreaterThan(0);
+
+    // the fleet list shows per-project spend
+    const list = await app.inject({ method: "GET", headers: AUTH, url: "/v1/projects" });
+    const atlasRow = list.json().projects.find((p: { id: string }) => p.id === atlasId);
+    expect(atlasRow.spentUsd).toBeCloseTo(body.measured.costUsd, 10);
+    expect(atlasRow.usageEvents).toBe(3);
+  });
+
+  it("crossing the project budget alerts once, blocks after, and resumes when the approver sanctions it", async () => {
+    const priceyRes = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/agents",
+      payload: {
+        name: "proj-pricey", provider: "mock", tier: 0, modes: ["execute"],
+        costPerMTokIn: 1_000_000, costPerMTokOut: 1_000_000, model: "mock-proj-pricey",
+      },
+    });
+    const priceyId = priceyRes.json().id;
+    // uma is granted ONLY the pricey agent, so routing cannot downgrade the
+    // request to a cheaper model and dodge the budget crossing
+    const uma = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email: "proj-uma@example.com", displayName: "Proj Uma" },
+    });
+    const umaId = uma.json().id;
+    const umaAuth = await authFor(umaId);
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/grants/agents",
+      payload: { userId: umaId, agentId: priceyId },
+    });
+
+    // first crossing: allowed, alerted into the one approvals queue
+    const first = await app.inject({
+      method: "POST", headers: umaAuth, url: `/v1/agents/${priceyId}/invoke`,
+      payload: { mode: "execute", input: "x".repeat(100), dispatch: true, projectId: cappedId },
+    });
+    expect(first.statusCode).toBe(200);
+    expect(first.json().dispatch.projectBudgetAlerted).toBe(true);
+
+    // everything after the crossing is blocked
+    const second = await app.inject({
+      method: "POST", headers: umaAuth, url: `/v1/agents/${priceyId}/invoke`,
+      payload: { mode: "execute", input: "small", dispatch: true, projectId: cappedId },
+    });
+    expect(second.statusCode).toBe(409);
+    expect(second.json().error).toBe("project_budget_exceeded");
+
+    const rollup = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/projects/${cappedId}/costs`,
+    });
+    expect(rollup.json().budget.overBudget).toBe(true);
+    expect(rollup.json().budget.remainingUsd).toBeLessThan(0);
+
+    // the named approver sanctions the overage → dispatch resumes
+    const finnAuth = await authFor(finnId);
+    const inbox = await app.inject({ method: "GET", headers: finnAuth, url: "/v1/approvals" });
+    const pending = inbox.json().approvals.find(
+      (a: { objectType: string; projectId: string | null; status: string }) =>
+        a.objectType === "project" && a.projectId === cappedId && a.status === "pending",
+    );
+    expect(pending).toBeDefined();
+    const decided = await app.inject({
+      method: "POST", headers: finnAuth, url: `/v1/approvals/${pending.id}/decide`,
+      payload: { decision: "approved" },
+    });
+    expect(decided.statusCode).toBe(200);
+
+    const third = await app.inject({
+      method: "POST", headers: umaAuth, url: `/v1/agents/${priceyId}/invoke`,
+      payload: { mode: "execute", input: "resumed", dispatch: true, projectId: cappedId },
+    });
+    expect(third.statusCode).toBe(200);
+    const after = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/projects/${cappedId}/costs`,
+    });
+    expect(after.json().budget.overageApproved).toBe(true);
+  });
+
+  it("the dashboard surface is admin-only and 404s on unknown projects", async () => {
+    const denied = await app.inject({
+      method: "GET", headers: tessaAuth, url: `/v1/projects/${atlasId}/costs`,
+    });
+    expect(denied.statusCode).toBe(403);
+    const missing = await app.inject({
+      method: "GET", headers: AUTH, url: "/v1/projects/00000000-0000-0000-0000-000000000000/costs",
+    });
+    expect(missing.statusCode).toBe(404);
+  });
+});
+
+describe("shared projects (pillar 4, ADR-0011): membership, context, conflicts, promotion", () => {
+  let teamAId: string;
+  let teamBId: string;
+  let veraId: string;
+  let veraAuth: { authorization: string };
+  let wesId: string;
+  let wesAuth: { authorization: string };
+  let vickyAuth: { authorization: string };
+  let xenaId: string;
+  let xenaAuth: { authorization: string };
+  let uriId: string;
+  let sharedId: string;
+  let sharedAgentId: string;
+
+  const mkUser = async (email: string, name: string) => {
+    const r = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email, displayName: name },
+    });
+    return r.json().id as string;
+  };
+
+  it("membership roles gate context access — and grant zero tool/agent capability", async () => {
+    veraId = await mkUser("sp-vera@example.com", "SP Vera");
+    veraAuth = await authFor(veraId);
+    wesId = await mkUser("sp-wes@example.com", "SP Wes");
+    wesAuth = await authFor(wesId);
+    const vickyId = await mkUser("sp-vicky@example.com", "SP Vicky");
+    vickyAuth = await authFor(vickyId);
+    xenaId = await mkUser("sp-xena@example.com", "SP Xena");
+    xenaAuth = await authFor(xenaId);
+    uriId = await mkUser("sp-uri@example.com", "SP Uri");
+
+    const teamA = await app.inject({ method: "POST", headers: AUTH, url: "/v1/teams", payload: { name: "team-a" } });
+    teamAId = teamA.json().id;
+    const teamB = await app.inject({ method: "POST", headers: AUTH, url: "/v1/teams", payload: { name: "team-b" } });
+    teamBId = teamB.json().id;
+    await app.inject({ method: "POST", headers: AUTH, url: `/v1/teams/${teamAId}/members`, payload: { userId: veraId } });
+    await app.inject({ method: "POST", headers: AUTH, url: `/v1/teams/${teamBId}/members`, payload: { userId: wesId } });
+
+    const shared = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/projects",
+      payload: { name: "platform-shared", arbiterUserId: uriId },
+    });
+    sharedId = shared.json().id;
+
+    // provenance team must really be one of the member's teams
+    const wrongTeam = await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/projects/${sharedId}/members`,
+      payload: { userId: veraId, role: "contributor", teamId: teamBId },
+    });
+    expect(wrongTeam.statusCode).toBe(422);
+
+    for (const [userId, role, teamId] of [
+      [veraId, "contributor", teamAId],
+      [wesId, "contributor", teamBId],
+      [vickyId, "viewer", null],
+    ] as const) {
+      const r = await app.inject({
+        method: "POST", headers: AUTH, url: `/v1/projects/${sharedId}/members`,
+        payload: { userId, role, teamId },
+      });
+      expect(r.statusCode).toBe(201);
+    }
+
+    // members can list membership; outsiders cannot even see it
+    expect((await app.inject({ method: "GET", headers: veraAuth, url: `/v1/projects/${sharedId}/members` })).statusCode).toBe(200);
+    expect((await app.inject({ method: "GET", headers: xenaAuth, url: `/v1/projects/${sharedId}/members` })).statusCode).toBe(403);
+
+    // a viewer reads but cannot write; an outsider cannot read
+    const write = await app.inject({
+      method: "POST", headers: veraAuth, url: `/v1/projects/${sharedId}/context`,
+      payload: { key: "coding-standards", content: "tabs are banned (v1)" },
+    });
+    expect(write.statusCode).toBe(201);
+    expect(write.json()).toMatchObject({ revision: 1, accepted: true });
+    expect((await app.inject({
+      method: "POST", headers: vickyAuth, url: `/v1/projects/${sharedId}/context`,
+      payload: { key: "coding-standards", content: "nope", baseRevision: 1 },
+    })).statusCode).toBe(403);
+    expect((await app.inject({ method: "GET", headers: xenaAuth, url: `/v1/projects/${sharedId}/context` })).statusCode).toBe(403);
+
+    // §9.3: membership is NEVER a capability grant — vera has no agent grant,
+    // and being a shared-project contributor changes nothing about that
+    const agentRes = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/agents",
+      payload: {
+        name: "sp-agent", provider: "mock", tier: 0, modes: ["execute"],
+        costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-sp",
+      },
+    });
+    sharedAgentId = agentRes.json().id;
+    const invoke = await app.inject({
+      method: "POST", headers: veraAuth, url: `/v1/agents/${sharedAgentId}/invoke`,
+      payload: { mode: "execute", input: "hi" },
+    });
+    expect(invoke.statusCode).toBe(403);
+    expect(invoke.json().decision.ruleId).toBe("default-deny");
+  });
+
+  it("context is append-only with provenance; writes must name their base revision", async () => {
+    const view = await app.inject({ method: "GET", headers: vickyAuth, url: `/v1/projects/${sharedId}/context` });
+    const item = view.json().context.find((c: { key: string }) => c.key === "coding-standards");
+    expect(item.revision).toBe(1);
+    expect(item.provenance).toMatchObject({ userId: veraId, teamId: teamAId });
+
+    // read-before-write is explicit — no silent overwrites
+    const blind = await app.inject({
+      method: "POST", headers: veraAuth, url: `/v1/projects/${sharedId}/context`,
+      payload: { key: "coding-standards", content: "blind write" },
+    });
+    expect(blind.statusCode).toBe(409);
+    expect(blind.json()).toMatchObject({ error: "base_revision_required", latestAccepted: 1 });
+
+    const update = await app.inject({
+      method: "POST", headers: veraAuth, url: `/v1/projects/${sharedId}/context`,
+      payload: { key: "coding-standards", content: "tabs banned; semicolons required (v2)", baseRevision: 1 },
+    });
+    expect(update.json()).toMatchObject({ revision: 2, accepted: true });
+
+    const history = await app.inject({
+      method: "GET", headers: vickyAuth, url: `/v1/projects/${sharedId}/context?key=coding-standards&history=true`,
+    });
+    expect(history.json().history).toHaveLength(2);
+  });
+
+  it("a stale-base write becomes a conflict for the named arbiter — both sides retained forever", async () => {
+    // vera lands revision 3 on top of 2
+    await app.inject({
+      method: "POST", headers: veraAuth, url: `/v1/projects/${sharedId}/context`,
+      payload: { key: "coding-standards", content: "team-a's v3", baseRevision: 2 },
+    });
+    // wes edits from the SAME base — a real cross-team disagreement
+    const conflicted = await app.inject({
+      method: "POST", headers: wesAuth, url: `/v1/projects/${sharedId}/context`,
+      payload: { key: "coding-standards", content: "team-b's competing v3", baseRevision: 2, teamId: teamBId },
+    });
+    expect(conflicted.statusCode).toBe(201);
+    expect(conflicted.json()).toMatchObject({ revision: 4, accepted: false, conflict: true });
+    const approvalId = conflicted.json().approvalId;
+    expect(approvalId).toBeTruthy();
+
+    // nothing overwritten: the current value is still vera's revision 3
+    const before = await app.inject({ method: "GET", headers: wesAuth, url: `/v1/projects/${sharedId}/context?key=coding-standards` });
+    expect(before.json().context[0].revision).toBe(3);
+    expect(before.json().context[0].content).toBe("team-a's v3");
+
+    // the named arbiter accepts team-b's side through the ONE approvals queue
+    const uriAuth = await authFor(uriId);
+    const decided = await app.inject({
+      method: "POST", headers: uriAuth, url: `/v1/approvals/${approvalId}/decide`,
+      payload: { decision: "approved" },
+    });
+    expect(decided.statusCode).toBe(200);
+    const after = await app.inject({ method: "GET", headers: wesAuth, url: `/v1/projects/${sharedId}/context?key=coding-standards` });
+    expect(after.json().context[0]).toMatchObject({ revision: 4, content: "team-b's competing v3" });
+
+    // a denied conflict stays retained but never current
+    const denied = await app.inject({
+      method: "POST", headers: veraAuth, url: `/v1/projects/${sharedId}/context`,
+      payload: { key: "coding-standards", content: "stale counter-proposal", baseRevision: 3 },
+    });
+    expect(denied.json().conflict).toBe(true);
+    await app.inject({
+      method: "POST", headers: uriAuth, url: `/v1/approvals/${denied.json().approvalId}/decide`,
+      payload: { decision: "denied" },
+    });
+    const final = await app.inject({ method: "GET", headers: wesAuth, url: `/v1/projects/${sharedId}/context?key=coding-standards` });
+    expect(final.json().context[0].revision).toBe(4);
+    const history = await app.inject({
+      method: "GET", headers: wesAuth, url: `/v1/projects/${sharedId}/context?key=coding-standards&history=true`,
+    });
+    expect(history.json().history).toHaveLength(5); // every side of every conflict retained
+    expect(history.json().history.filter((h: { accepted: boolean }) => h.accepted)).toHaveLength(4);
+
+    // conflicts on an arbiter-less project are rejected explicitly
+    const noArb = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/projects",
+      payload: { name: "no-arbiter-project" },
+    });
+    await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/projects/${noArb.json().id}/members`,
+      payload: { userId: veraId, role: "contributor" },
+    });
+    await app.inject({
+      method: "POST", headers: veraAuth, url: `/v1/projects/${noArb.json().id}/context`,
+      payload: { key: "k", content: "v1" },
+    });
+    const rejected = await app.inject({
+      method: "POST", headers: veraAuth, url: `/v1/projects/${noArb.json().id}/context`,
+      payload: { key: "k", content: "conflicting", baseRevision: 99 },
+    });
+    expect(rejected.statusCode).toBe(422);
+    expect(rejected.json().error).toBe("no_arbiter");
+  });
+
+  it("promote-to-shared copies a team-local artifact with source provenance; only its owner may promote", async () => {
+    const tpl = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/templates",
+      payload: {
+        name: "sp-promote",
+        definition: {
+          workflow: "sp-promote",
+          stages: [
+            { id: "intake", type: "trigger" },
+            { id: "plan-doc", type: "artifact_generation", output: "shared-plan" },
+          ],
+        },
+      },
+    });
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/assignment-rules",
+      payload: { templateId: tpl.json().id, changeType: "sp-promote-test" },
+    });
+    const started = await app.inject({
+      method: "POST", headers: veraAuth, url: "/v1/workflows/instances",
+      payload: {
+        change: { description: "plan", paths: ["a.ts"], changeType: "sp-promote-test", environment: "staging" },
+      },
+    });
+    const instanceId = started.json().id;
+    await app.inject({
+      method: "POST", headers: veraAuth, url: `/v1/workflows/instances/${instanceId}/artifacts`,
+      payload: { stageId: "plan-doc", content: "PROMOTED-CONTENT-55" },
+    });
+    const view = await app.inject({ method: "GET", headers: veraAuth, url: `/v1/workflows/instances/${instanceId}` });
+    const artifactId = view.json().artifacts[0].id;
+
+    // wes did not author this artifact — partial sharing is opt-in by the owner
+    const stolen = await app.inject({
+      method: "POST", headers: wesAuth, url: `/v1/projects/${sharedId}/context/promote`,
+      payload: { artifactId },
+    });
+    expect(stolen.statusCode).toBe(403);
+
+    const promoted = await app.inject({
+      method: "POST", headers: veraAuth, url: `/v1/projects/${sharedId}/context/promote`,
+      payload: { artifactId },
+    });
+    expect(promoted.statusCode).toBe(201);
+    expect(promoted.json().accepted).toBe(true);
+    const ctx = await app.inject({
+      method: "GET", headers: wesAuth, url: `/v1/projects/${sharedId}/context?key=shared-plan`,
+    });
+    expect(ctx.json().context[0].content).toBe("PROMOTED-CONTENT-55");
+    expect(ctx.json().context[0].provenance.sourceArtifactId).toBe(artifactId);
+  });
+
+  it("membership gates attribution on member-bearing projects; memberless buckets stay open", async () => {
+    for (const userId of [veraId, xenaId]) {
+      await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/grants/agents",
+        payload: { userId, agentId: sharedAgentId },
+      });
+    }
+    // a non-member cannot bill the shared project — spend pollution blocked
+    const outsider = await app.inject({
+      method: "POST", headers: xenaAuth, url: `/v1/agents/${sharedAgentId}/invoke`,
+      payload: { mode: "execute", input: "bill it", dispatch: true, projectId: sharedId },
+    });
+    expect(outsider.statusCode).toBe(403);
+    expect(outsider.json().error).toBe("not_a_project_member");
+    const outsiderRun = await app.inject({
+      method: "POST", headers: xenaAuth, url: "/v1/runs",
+      payload: {
+        projectId: sharedId,
+        graph: {
+          run: "sp-outsider",
+          escalationApproverUserId: uriId,
+          nodes: [{ id: "a", title: "task a", ownerAgentId: sharedAgentId, mode: "execute" }],
+        },
+      },
+    });
+    expect(outsiderRun.statusCode).toBe(403);
+
+    // a member bills normally
+    const member = await app.inject({
+      method: "POST", headers: veraAuth, url: `/v1/agents/${sharedAgentId}/invoke`,
+      payload: { mode: "execute", input: "member spend", dispatch: true, projectId: sharedId },
+    });
+    expect(member.statusCode).toBe(200);
+
+    // memberless projects remain open cost buckets (pillar-5 back-compat)
+    const bucket = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/projects",
+      payload: { name: "open-bucket" },
+    });
+    const open = await app.inject({
+      method: "POST", headers: xenaAuth, url: `/v1/agents/${sharedAgentId}/invoke`,
+      payload: { mode: "execute", input: "open spend", dispatch: true, projectId: bucket.json().id },
+    });
+    expect(open.statusCode).toBe(200);
+  });
+});
+
+describe("compliance classification cascade (§8.3)", () => {
+  let officerId: string;
+  let reviewerId: string;
+  let chloeAuth: { authorization: string };
+  let sensitiveTplId: string;
+  let standardTplId: string;
+  let ccProjId: string;
+
+  const mkUser = async (email: string, name: string) => {
+    const r = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email, displayName: name },
+    });
+    return r.json().id as string;
+  };
+
+  it("profiles compose additively into an effective policy with honest enforcement labels", async () => {
+    officerId = await mkUser("cc-officer@example.com", "CC Officer");
+    reviewerId = await mkUser("cc-reviewer@example.com", "CC Reviewer");
+    const chloeId = await mkUser("cc-chloe@example.com", "CC Chloe");
+    chloeAuth = await authFor(chloeId);
+
+    const sensitive = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/templates",
+      payload: {
+        name: "sensitive-data",
+        definition: {
+          workflow: "sensitive-data",
+          stages: [
+            { id: "cc-intake", type: "trigger" },
+            { id: "compliance-signoff", type: "human_approval", approvers: [officerId] },
+          ],
+        },
+      },
+    });
+    sensitiveTplId = sensitive.json().id;
+    const standard = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/templates",
+      payload: {
+        name: "cc-standard",
+        definition: { workflow: "cc-standard", stages: [{ id: "cc-std-intake", type: "trigger" }] },
+      },
+    });
+    standardTplId = standard.json().id;
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/assignment-rules",
+      payload: { templateId: standardTplId, changeType: "cc-standard-change" },
+    });
+
+    // a profile may only require templates that exist
+    const ghost = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/compliance/profiles",
+      payload: { tag: "bad", requiredTemplateIds: ["00000000-0000-0000-0000-000000000000"] },
+    });
+    expect(ghost.statusCode).toBe(422);
+
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/compliance/profiles",
+      payload: {
+        tag: "hipaa", requiredTemplateIds: [sensitiveTplId],
+        piiMode: "block", auditRetentionDays: 2555, mcpDefaultMode: "read_only",
+      },
+    });
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/compliance/profiles",
+      payload: { tag: "soc2", piiMode: "warn", auditRetentionDays: 365 },
+    });
+
+    const proj = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/projects",
+      payload: { name: "cc-proj", classifications: ["hipaa", "soc2"] },
+    });
+    ccProjId = proj.json().id;
+
+    const view = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/projects/${ccProjId}/compliance`,
+    });
+    expect(view.statusCode).toBe(200);
+    expect(view.json().classifications).toEqual(["hipaa", "soc2"]);
+    expect(view.json().effective).toMatchObject({
+      piiMode: "block",           // strictest of block/warn
+      auditRetentionDays: 2555,   // max
+      mcpDefaultMode: "read_only",
+      requiredTemplateIds: [sensitiveTplId],
+    });
+    expect(view.json().enforcement.requiredWorkflowTemplates).toBe("enforced-at-instance-creation");
+    expect(view.json().enforcement.piiMode).toBe("declared-not-enforced");
+  });
+
+  it("classification forces required workflow stages with no manual per-control setup", async () => {
+    // matched rule + classified project → the union carries the sign-off stage
+    const started = await app.inject({
+      method: "POST", headers: chloeAuth, url: "/v1/workflows/instances",
+      payload: {
+        projectId: ccProjId,
+        change: { description: "cc", paths: ["c.ts"], changeType: "cc-standard-change", environment: "staging" },
+      },
+    });
+    expect(started.statusCode).toBe(201);
+    expect(started.json().status).toBe("blocked_on_approval");
+    const view = await app.inject({
+      method: "GET", headers: chloeAuth, url: `/v1/workflows/instances/${started.json().id}`,
+    });
+    const stageIds = view.json().instance.definition.stages.map((s: { id: string }) => s.id);
+    expect(stageIds).toContain("compliance-signoff");
+    expect(view.json().pendingApprovals.some(
+      (a: { approverUserId: string }) => a.approverUserId === officerId,
+    )).toBe(true);
+
+    // no matching rule at all: the classification alone FORCES the workflow…
+    const forced = await app.inject({
+      method: "POST", headers: chloeAuth, url: "/v1/workflows/instances",
+      payload: {
+        projectId: ccProjId,
+        change: { description: "cc", paths: ["c.ts"], changeType: "cc-unmatched", environment: "staging" },
+      },
+    });
+    expect(forced.statusCode).toBe(201);
+    expect(forced.json().status).toBe("blocked_on_approval");
+
+    // …whereas the same change without the project finds no workflow
+    const bare = await app.inject({
+      method: "POST", headers: chloeAuth, url: "/v1/workflows/instances",
+      payload: {
+        change: { description: "cc", paths: ["c.ts"], changeType: "cc-unmatched", environment: "staging" },
+      },
+    });
+    expect(bare.statusCode).toBe(422);
+  });
+
+  it("reclassification is diff-then-approve — never applied silently", async () => {
+    // a change to existing tags needs a named reviewer
+    const noReviewer = await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/projects/${ccProjId}/classifications`,
+      payload: { classifications: ["soc2"] },
+    });
+    expect(noReviewer.statusCode).toBe(422);
+    expect(noReviewer.json().error).toBe("reviewer_required");
+
+    const proposed = await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/projects/${ccProjId}/classifications`,
+      payload: { classifications: ["soc2"], reviewerUserId: reviewerId },
+    });
+    expect(proposed.statusCode).toBe(202);
+    expect(proposed.json().diff.effectiveBefore.piiMode).toBe("block");
+    expect(proposed.json().diff.effectiveAfter.piiMode).toBe("warn");
+    const approvalId = proposed.json().approvalId;
+
+    // nothing changed yet — the old cascade stays in force
+    const during = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/projects/${ccProjId}/compliance`,
+    });
+    expect(during.json().classifications).toEqual(["hipaa", "soc2"]);
+    expect(during.json().pendingClassifications).toEqual(["soc2"]);
+
+    const reviewerAuth = await authFor(reviewerId);
+    await app.inject({
+      method: "POST", headers: reviewerAuth, url: `/v1/approvals/${approvalId}/decide`,
+      payload: { decision: "approved" },
+    });
+    const after = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/projects/${ccProjId}/compliance`,
+    });
+    expect(after.json().classifications).toEqual(["soc2"]);
+    expect(after.json().pendingClassifications).toBeNull();
+    expect(after.json().effective.piiMode).toBe("warn");
+
+    // a denied proposal leaves everything untouched
+    const again = await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/projects/${ccProjId}/classifications`,
+      payload: { classifications: ["hipaa"], reviewerUserId: reviewerId },
+    });
+    await app.inject({
+      method: "POST", headers: reviewerAuth, url: `/v1/approvals/${again.json().approvalId}/decide`,
+      payload: { decision: "denied" },
+    });
+    const final = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/projects/${ccProjId}/compliance`,
+    });
+    expect(final.json().classifications).toEqual(["soc2"]);
+    expect(final.json().pendingClassifications).toBeNull();
+  });
+
+  it("a member team's conflicting defaults are surfaced at member-add — the project governs", async () => {
+    const doraId = await mkUser("cc-dora@example.com", "CC Dora");
+    const pciTeam = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/teams",
+      payload: { name: "cc-pci-team", defaultClassifications: ["pci-dss"] },
+    });
+    await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/teams/${pciTeam.json().id}/members`,
+      payload: { userId: doraId },
+    });
+    const added = await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/projects/${ccProjId}/members`,
+      payload: { userId: doraId, role: "contributor", teamId: pciTeam.json().id },
+    });
+    expect(added.statusCode).toBe(201);
+    expect(added.json().classificationConflict).toMatchObject({
+      notCoveredByProject: ["pci-dss"],
+      governing: "project",
+    });
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: "/v1/audit" });
+    expect(
+      audit.json().entries.some(
+        (e: { ruleId: string }) => e.ruleId === "team-classification-conflict-surfaced",
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("admin portal (ADR-0012): static shell + API-parity gap endpoints", () => {
+  it("GET /admin serves the shell without auth — zero data, zero secrets inside", async () => {
+    const res = await app.inject({ method: "GET", url: "/admin" });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toContain("text/html");
+    // §6 panel names verbatim
+    for (const panel of [
+      "Users & Roles", "Agent Governance", "Connector Governance",
+      "MCP Server Governance", "Policy & Rules Engine", "Audit & Activity Log",
+      "Approvals Queue", "Simulation / Access preview", "Cost & Projects",
+    ]) {
+      expect(res.body).toContain(panel);
+    }
+    // the shell holds no data: nothing it serves varies with DB state
+    expect(res.body).not.toContain("@example.com");
+  });
+
+  it("the gap list endpoints exist and stay admin-only", async () => {
+    const usersList = await app.inject({ method: "GET", headers: AUTH, url: "/v1/users" });
+    expect(usersList.statusCode).toBe(200);
+    expect(usersList.json().users.length).toBeGreaterThan(0);
+    expect(usersList.json().users[0]).toHaveProperty("email");
+
+    const servers = await app.inject({ method: "GET", headers: AUTH, url: "/v1/servers" });
+    expect(servers.statusCode).toBe(200);
+    expect(servers.json().servers.length).toBeGreaterThan(0);
+    const tools = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/servers/${serverId}/tools`,
+    });
+    expect(tools.statusCode).toBe(200);
+
+    for (const path of ["/v1/rules/approvals", "/v1/rules/data-scopes", "/v1/rules/rate-limits"]) {
+      const r = await app.inject({ method: "GET", headers: AUTH, url: path });
+      expect(r.statusCode).toBe(200);
+      expect(Array.isArray(r.json().rules)).toBe(true);
+    }
+
+    // non-admins get none of this
+    const bob = await app.inject({
+      method: "GET", headers: await authFor(bobId), url: "/v1/users",
+    });
+    expect(bob.statusCode).toBe(403);
+  });
+});

@@ -138,7 +138,24 @@ export const invokeAgentSchema = z.object({
    * keeps the decision-only behavior */
   dispatch: z.boolean().optional(),
   maxTokens: z.number().int().min(1).max(64_000).optional(),
+  /** pillar 5: attribute this call's cost to a project */
+  projectId: z.string().uuid().optional(),
 });
+
+export const createProjectSchema = z
+  .object({
+    name: z.string().min(1).max(200),
+    costCenter: z.string().min(1).max(100).nullable().optional(),
+    budgetUsd: z.number().positive().nullable().optional(),
+    budgetApproverUserId: z.string().uuid().nullable().optional(),
+    /** §9 named arbiter for shared-context conflicts */
+    arbiterUserId: z.string().uuid().nullable().optional(),
+    /** §8.3 compliance framework tags, applied directly at creation */
+    classifications: z.array(z.string().min(1).max(64)).max(16).optional(),
+  })
+  .refine((p) => p.budgetUsd == null || p.budgetApproverUserId != null, {
+    message: "a project budget requires a budgetApproverUserId",
+  });
 
 export const createModelCredentialSchema = z.object({
   provider: z.enum(["anthropic", "openai", "google", "xai"]),
@@ -187,6 +204,8 @@ export const createAssignmentRuleSchema = z
   });
 
 export const startInstanceSchema = z.object({
+  /** pillar 5: the instance and any nested runs bill to this project */
+  projectId: z.string().uuid().optional(),
   change: changeDescriptorSchema,
   /** admin-only explicit template pick, bypassing assignment rules */
   templateId: z.string().uuid().optional(),
@@ -213,6 +232,8 @@ export const createGitConnectionSchema = z.object({
 export const createRunSchema = z.object({
   graph: z.unknown(),
   workflowInstanceId: z.string().uuid().optional(),
+  /** pillar 5: every node dispatch of this run bills to this project */
+  projectId: z.string().uuid().optional(),
 });
 
 export const autoAdvanceSchema = z.object({
@@ -278,4 +299,51 @@ export const pmWebhookSchema = z.object({
   event: z.enum(["updated", "deleted", "commented"]),
   state: z.string().min(1).max(128).optional(),
   fields: z.record(z.unknown()).optional(),
+});
+
+// PILLAR 4 (§9, ADR-0011): teams + Shared-Project membership + context store.
+export const createTeamSchema = z.object({
+  name: z.string().min(1).max(200),
+  /** §9.3 team default classifications (surfaced on conflict, never silently resolved) */
+  defaultClassifications: z.array(z.string().min(1).max(64)).max(16).optional(),
+});
+
+// §8.3: one cascade profile per framework tag (upsert by tag).
+export const upsertComplianceProfileSchema = z.object({
+  tag: z.string().min(1).max(64),
+  requiredTemplateIds: z.array(z.string().uuid()).max(16).optional(),
+  mcpDefaultMode: z.enum(["read_only", "read_write"]).optional(),
+  auditRetentionDays: z.number().int().positive().nullable().optional(),
+  piiMode: z.enum(["block", "warn", "log"]).optional(),
+});
+
+// §8.3 reclassification: a diff-then-approve change to a project's tags.
+export const reclassifySchema = z.object({
+  classifications: z.array(z.string().min(1).max(64)).max(16),
+  /** required when the project already has classifications: the named admin
+   * who reviews the cascade diff before it commits */
+  reviewerUserId: z.string().uuid().optional(),
+});
+
+export const addTeamMemberSchema = z.object({ userId: z.string().uuid() });
+
+export const addProjectMemberSchema = z.object({
+  userId: z.string().uuid(),
+  role: z.enum(["owner", "contributor", "viewer"]),
+  /** the member's contributing team for provenance; must be one of their teams */
+  teamId: z.string().uuid().nullable().optional(),
+});
+
+export const contributeContextSchema = z.object({
+  key: z.string().min(1).max(128),
+  content: z.string().min(1).max(200_000),
+  /** the accepted revision this write is based on; required once the key exists */
+  baseRevision: z.number().int().positive().optional(),
+  /** contributing team for provenance; must be one of the writer's teams */
+  teamId: z.string().uuid().nullable().optional(),
+});
+
+export const promoteContextSchema = z.object({
+  /** the team-local workflow artifact to promote into shared context */
+  artifactId: z.string().uuid(),
 });

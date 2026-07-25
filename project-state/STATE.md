@@ -146,6 +146,87 @@ Anthropic Messages server: the real adapter's actual `x-api-key` header carries 
 key when one exists, falls back to the platform key when deleted, and precedence is restored
 on re-add. Not yet: streaming, multi-turn dispatch, openai/google/xai adapters.
 
+**Pillar 5 lands — per-project cost dashboard rollup, 2026-07-25.** Migration 0018: a minimal
+`projects` entity (name, cost-center for chargeback, budget + named budget approver, overage
+flag — membership/sharing semantics deliberately deferred to pillar 4's Shared Projects; until
+then any authenticated caller may attribute, noted) plus FK-free `project_id` attribution
+columns on BOTH ledgers (cost_events estimates, usage_events actuals) and on
+runs/instances/approvals. **Attribution at the point of every gateway call**, exactly as the
+pillar demands: `projectId` on direct invokes (validated at entry), on run creation (every
+node dispatch bills to the run's project), and on workflow instances (nested runs inherit it —
+the whole Intake→build chain bills to one project). **Budget enforcement in the dispatch
+core**: measured spend at/over budget blocks further attributed dispatches (409) with the
+first crossing allowed-but-escalated into the ONE approvals queue (objectType "project",
+`__project_budget__`, named budget approver); the decide endpoint's approve lifts enforcement
+(audited), deny keeps it. **The dashboard**: `GET /v1/projects/:id/costs` (admin FinOps
+surface) — measured totals + tokens + measured savings, showback breakdowns by user and by
+agent/model, estimated-savings-by-technique from cost_events, budget-vs-actual
+(remaining/overBudget/overageApproved), and a labeled last-7-days run-rate forecast to end of
+month; `GET /v1/projects` lists per-project spend fleet-wide. Not yet: MCP-proxy cost-event
+attribution, per-project (rather than global) overage windows.
+
+**Pillar 4 lands — Shared Projects MVP, 2026-07-25 (ADR-0011).** Shared-Project semantics
+extend the ONE `projects` entity (no second container): migration 0019 adds `teams` +
+`team_members`, `project_members` (per-user Owner/Contributor/Viewer, decoupled from
+home-team role, optional contributing team validated against real team membership), an
+append-only `project_context_items` store, and `projects.arbiter_user_id`. **The context
+store is §9.2 literally**: every write is a new revision with provenance (user, team,
+timestamp, optional source artifact); the current value of a key is its highest ACCEPTED
+revision; once a key exists a write must name the accepted `baseRevision` it is based on
+(409 otherwise — read-before-write is explicit, never a silent overwrite); a stale-base
+write is RETAINED but not accepted and routes to the project's named arbiter through the ONE
+approvals queue (`__context_conflict__:<itemId>`); approve makes it the new current value,
+deny keeps it retained-but-never-current — every side of every conflict is a permanent row.
+An arbiter-less project rejects conflicting writes explicitly (422). **Promotion (§9.4)**:
+`POST .../context/promote` copies a workflow artifact into shared context (key = output,
+`sourceArtifactId` provenance) — only the artifact's own instance initiator may promote.
+**§9.3 honored precisely**: membership widens context visibility and attribution ONLY — a
+contributor with no agent grant still hits default-deny (tested); and per ADR-0011, once a
+project has members, only members/admins may attribute spend/runs/instances to it (memberless
+projects stay open pillar-5 buckets). Everything audited as objectType "project". Deferred:
+cross-team cost rollup views (§9.5), §9.4's suggested UI, SCIM team sync.
+
+**Pillar 3's centerpiece lands — the §8.3 compliance-classification cascade, 2026-07-25.**
+Classifications are multi-valued FRAMEWORK tags (hipaa/pci-dss/soc2/custom — the spec defines
+no strictness ordering among frameworks, so nothing invents one) on the one `projects` entity
+(migration 0020, plus `teams.default_classifications` and admin-editable
+`compliance_profiles` — the entire cascade expressed as data, per-tag: required workflow
+templates, MCP default mode, audit-retention days, PII mode; policy-as-code via API, §5/§8.5).
+Profiles compose ADDITIVELY: template unions, mcp tightens to read_only if any says so,
+retention takes the max, pii takes the strictest of the three defined modes (block>warn>log —
+an ordering the spec does define). **The workflow dimension is ENFORCED**: at instance
+creation a classified project's required templates union into the matched set ("no manual
+per-control setup") and can FORCE a workflow when no assignment rule matches — the §4
+strictest-wins merge carries every added sign-off stage; the admin explicit-template escape
+hatch cannot skip it. **The other three dimensions are declared, honestly**:
+`GET /v1/projects/:id/compliance` returns the effective policy with per-dimension enforcement
+labels (`enforced-at-instance-creation` vs `declared-not-enforced`) — the estimationBasis
+discipline applied to compliance. **Reclassification is diff-then-approve** (the spec's most
+concrete behavior): first classification applies directly (audited); any CHANGE computes the
+before/after effective-policy diff, pends in `pending_classifications`, and opens a
+`__reclassification__` approval for a named reviewer through the ONE queue — approve commits,
+deny discards, never silent. **§9.3 precedence**: a member team whose default classifications
+aren't covered by the project's is surfaced at member-add (response + audit row,
+`governing: "project"`), never silently resolved. Deferred: enforcement points for
+mcp-default/retention/pii (detector + pruning jobs), reapply-to-in-flight on reclassification
+(diff covers the policy; in-flight instances keep their merged definitions), per-framework
+cost-governance policies (§8.6→§10.3).
+
+**Admin portal MVP, 2026-07-25 (ADR-0012).** One dependency-free HTML+JS file served by the
+gateway at `GET /admin` — an auth-exempt STATIC SHELL (zero data, zero secrets; the admin
+pastes an API key held in memory only) that is strictly a client of the public REST API, so
+§5's policy-as-code parity holds by construction: the portal can be deleted without losing
+any capability, and no state is UI-only. Tabs are §6's eight functional surfaces VERBATIM
+(Users & Roles with the revocation/override layer, Agent Governance with enable toggles +
+per-user entitlement views, Connector Governance, MCP Server Governance with the
+auto-discovered tool inventory, Policy & Rules Engine over all three rule types, Audit &
+Activity Log, the ONE Approvals Queue with inline decide, Simulation / Access preview over
+/v1/evaluate) plus the §10.4-mandated Cost & Projects surface (budget-vs-actual + forecast +
+showback + savings + compliance view per project). Gaps found while building were fixed as
+API endpoints first (GET /v1/users, /v1/servers, /v1/servers/:id/tools, and the three
+/v1/rules/* lists — all admin-gated). Deferred (per ADR-0012): SPA rewrite, SCIM/SSO status,
+SIEM export, dry-run of UNSAVED policy, bulk actions, CSV export.
+
 **EPIC-06 started — PM-tool integration first slice, 2026-07-25.** New
 `packages/pm-provider` on the git-provider playbook (pillar 8, PM_TOOL_INTEGRATION_SPEC
 §2/§3/§6): neutral `PmProvider` interface (create/update/transition/comment/getWorkItem), the
@@ -361,7 +442,7 @@ with a real in-process upstream MCP server and real MCP client (26 tests total).
 | COMPONENT-02 | Identity Center permission sets (Admin-BreakGlass/Deploy-Builder/ReadOnly-Audit) | **applied** (Admin-BreakGlass imported from its manual bootstrap creation, other two created by Terraform) | EPIC-01, ADR-0004 |
 | COMPONENT-03 | GitHub OIDC CI role | Terraform authored, intentionally not wired into main.tf/applied (no workload to deploy yet) | EPIC-01 |
 | COMPONENT-04 | RegulAIt GitHub repo | **live and private**: https://github.com/dhruvmahendrapatel/RegulAIt | EPIC-01 |
-| COMPONENT-05 | Admin portal | not started | EPIC-02 |
+| COMPONENT-05 | Admin portal | **MVP shipped** — single-file API-client portal at /admin (ADR-0012), §6's eight panels + §10.4 cost surface | EPIC-02, ADR-0012 |
 | COMPONENT-06 | Policy/allow-list engine | not started | EPIC-02 |
 | COMPONENT-07 | Workflow orchestrator | not started | EPIC-03 |
 | COMPONENT-08 | caveman (output token compression, Claude Code plugin) | **installed**, user scope, no restrictions (verified fully local) | ADR-0005 |
