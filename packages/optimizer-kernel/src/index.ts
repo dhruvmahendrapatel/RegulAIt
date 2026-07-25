@@ -79,6 +79,7 @@ export interface RoutingDecision {
 }
 
 const BASIS = "estimated-tokens-x-list-price-vs-baseline-model";
+const TOOL_BASIS = "serialized-manifest-chars-of-withheld-tools/4";
 
 /**
  * §8's "lightweight complexity classifier" — a deterministic heuristic, never
@@ -205,5 +206,131 @@ export function routeModel(input: RouteModelInput): RoutingDecision {
     estimatedTokensSaved: 0,
     estimatedCostSavedUsd: Number(saved.toFixed(6)),
     estimationBasis: BASIS,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// §8 lazy tool-loading: expose only the entitled tools relevant to the
+// caller's declared intent. Withheld tools remain fully callable — this trims
+// the manifest a model has to read, never the entitlement (§12). No intent =
+// no signal = the full entitled manifest, mirroring routeModel's no-downgrade
+// rule.
+// ---------------------------------------------------------------------------
+
+export interface SelectableTool {
+  name: string;
+  description: string | null;
+  /** length in characters of the tool's full serialized manifest entry (schema included) */
+  manifestChars: number;
+}
+
+export interface SelectToolsInput {
+  /** the caller's declared intent for this session/request; null = no signal */
+  intent: string | null | undefined;
+  /** entitlement-filtered by the caller; selection never adds to this set */
+  tools: readonly SelectableTool[];
+  /** the same §12 per-user off switch used for model routing */
+  routingMode: RoutingMode;
+  /** cap on how many matched tools to keep (default 20) */
+  maxTools?: number;
+}
+
+export type ToolSelectionRuleName = "routing-mode" | "intent-signal" | "relevance-match";
+
+export interface ToolSelectionRuleTrace {
+  rule: ToolSelectionRuleName;
+  outcome: "passthrough" | "applied" | "no-match" | "narrowed";
+}
+
+export interface ToolSelectionDecision {
+  effect: "narrowed" | "passthrough";
+  /** tool names to expose in the manifest; always ⊆ input tools */
+  selected: string[];
+  /** tool names trimmed from the manifest — still callable, never blocked */
+  withheld: string[];
+  ruleId: ToolSelectionRuleName;
+  ruleChain: ToolSelectionRuleTrace[];
+  reason: string;
+  estimatedTokensSaved: number;
+  estimationBasis: string;
+}
+
+const STOPWORDS = new Set([
+  "the", "a", "an", "and", "or", "for", "to", "of", "in", "on", "with",
+  "is", "it", "this", "that", "my", "me", "i", "please", "what", "how",
+  "do", "does", "can", "you", "get", "use",
+]);
+
+function terms(text: string): string[] {
+  return text
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((w) => w.length >= 2 && !STOPWORDS.has(w));
+}
+
+function allTools(input: SelectToolsInput, chain: ToolSelectionRuleTrace[], ruleId: ToolSelectionRuleName, reason: string): ToolSelectionDecision {
+  return {
+    effect: "passthrough",
+    selected: input.tools.map((t) => t.name),
+    withheld: [],
+    ruleId,
+    ruleChain: chain,
+    reason,
+    estimatedTokensSaved: 0,
+    estimationBasis: TOOL_BASIS,
+  };
+}
+
+export function selectTools(input: SelectToolsInput): ToolSelectionDecision {
+  const chain: ToolSelectionRuleTrace[] = [];
+
+  if (input.routingMode === "passthrough") {
+    chain.push({ rule: "routing-mode", outcome: "passthrough" });
+    return allTools(input, chain, "routing-mode", "optimization disabled for this user (passthrough mode)");
+  }
+  chain.push({ rule: "routing-mode", outcome: "applied" });
+
+  const intentTerms = terms(input.intent ?? "");
+  if (intentTerms.length === 0) {
+    chain.push({ rule: "intent-signal", outcome: "no-match" });
+    return allTools(input, chain, "intent-signal", "no intent declared; full entitled manifest");
+  }
+  chain.push({ rule: "intent-signal", outcome: "applied" });
+
+  const scored = input.tools.map((tool) => {
+    const toolTerms = new Set(terms(`${tool.name} ${tool.description ?? ""}`));
+    const score = intentTerms.filter((t) => toolTerms.has(t)).length;
+    return { tool, score };
+  });
+
+  const maxTools = input.maxTools ?? 20;
+  const matched = scored
+    .filter((s) => s.score > 0)
+    .sort((a, b) => b.score - a.score || a.tool.name.localeCompare(b.tool.name))
+    .slice(0, maxTools);
+
+  if (matched.length === 0) {
+    // Fail open: a bad intent match must never hide the whole toolbox.
+    chain.push({ rule: "relevance-match", outcome: "no-match" });
+    return allTools(input, chain, "relevance-match", "no tool matched the intent; failing open to the full entitled manifest");
+  }
+  if (matched.length === input.tools.length) {
+    chain.push({ rule: "relevance-match", outcome: "no-match" });
+    return allTools(input, chain, "relevance-match", "every entitled tool matches the intent");
+  }
+
+  chain.push({ rule: "relevance-match", outcome: "narrowed" });
+  const selectedNames = new Set(matched.map((m) => m.tool.name));
+  const withheld = input.tools.filter((t) => !selectedNames.has(t.name));
+  const savedChars = withheld.reduce((sum, t) => sum + t.manifestChars, 0);
+  return {
+    effect: "narrowed",
+    selected: matched.map((m) => m.tool.name),
+    withheld: withheld.map((t) => t.name),
+    ruleId: "relevance-match",
+    ruleChain: chain,
+    reason: `manifest narrowed to ${matched.length} of ${input.tools.length} entitled tools relevant to the declared intent`,
+    estimatedTokensSaved: Math.ceil(savedChars / 4),
+    estimationBasis: TOOL_BASIS,
   };
 }

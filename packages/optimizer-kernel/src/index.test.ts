@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyComplexity,
+  selectTools,
   estimateTokens,
   routeModel,
   type CandidateAgent,
@@ -152,5 +153,74 @@ describe("routeModel", () => {
     const twin: CandidateAgent = { id: "a-twin", tier: 1, costPerMTokIn: 1, costPerMTokOut: 5 };
     const d = routeModel(base({ candidates: [cheap, twin, big] }));
     expect(d.selectedAgentId).toBe("a-twin");
+  });
+});
+
+describe("selectTools (lazy tool-loading §8)", () => {
+  const tools = [
+    { name: "get_time", description: "Returns the current time", manifestChars: 400 },
+    { name: "write_note", description: "Writes a note to storage", manifestChars: 600 },
+    { name: "search_issues", description: "Search project issues", manifestChars: 1000 },
+  ];
+  const base = { intent: "what time is it now", tools, routingMode: "automatic" as const };
+
+  it("narrows the manifest to intent-relevant tools and prices the withheld chars", () => {
+    const d = selectTools(base);
+    expect(d.effect).toBe("narrowed");
+    expect(d.selected).toEqual(["get_time"]);
+    expect(d.withheld.sort()).toEqual(["search_issues", "write_note"]);
+    expect(d.estimatedTokensSaved).toBe(400); // (600 + 1000) / 4
+    expect(d.estimationBasis).toContain("withheld-tools");
+    expect(d.ruleChain.map((t) => t.rule)).toEqual(["routing-mode", "intent-signal", "relevance-match"]);
+  });
+
+  it("no intent means the full entitled manifest (no signal, no narrowing)", () => {
+    for (const intent of [null, undefined, "", "   ", "is it the a"]) {
+      const d = selectTools({ ...base, intent });
+      expect(d.effect).toBe("passthrough");
+      expect(d.selected).toHaveLength(3);
+      expect(d.estimatedTokensSaved).toBe(0);
+    }
+  });
+
+  it("passthrough mode disables narrowing (§12 off switch)", () => {
+    const d = selectTools({ ...base, routingMode: "passthrough" });
+    expect(d.effect).toBe("passthrough");
+    expect(d.ruleId).toBe("routing-mode");
+    expect(d.selected).toHaveLength(3);
+  });
+
+  it("fails open to the full manifest when nothing matches the intent", () => {
+    const d = selectTools({ ...base, intent: "deploy the kubernetes cluster" });
+    expect(d.effect).toBe("passthrough");
+    expect(d.ruleId).toBe("relevance-match");
+    expect(d.selected).toHaveLength(3);
+    expect(d.withheld).toHaveLength(0);
+  });
+
+  it("reports passthrough when every tool is relevant", () => {
+    const d = selectTools({ ...base, intent: "time note issues" });
+    expect(d.effect).toBe("passthrough");
+    expect(d.selected).toHaveLength(3);
+    expect(d.estimatedTokensSaved).toBe(0);
+  });
+
+  it("selection and withheld partition the input set — nothing invented, nothing lost", () => {
+    const d = selectTools({ ...base, intent: "write a note" });
+    const union = [...d.selected, ...d.withheld].sort();
+    expect(union).toEqual(tools.map((t) => t.name).sort());
+    expect(d.selected.every((n) => tools.some((t) => t.name === n))).toBe(true);
+  });
+
+  it("caps the matched set at maxTools, keeping the highest scorers", () => {
+    const many = Array.from({ length: 5 }, (_, i) => ({
+      name: `time_tool_${i}`,
+      description: "time related",
+      manifestChars: 100,
+    }));
+    const d = selectTools({ intent: "time", tools: [...many, tools[1]!], routingMode: "automatic", maxTools: 2 });
+    expect(d.effect).toBe("narrowed");
+    expect(d.selected).toHaveLength(2);
+    expect(d.withheld).toHaveLength(4);
   });
 });

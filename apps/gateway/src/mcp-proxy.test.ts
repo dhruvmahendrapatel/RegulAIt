@@ -97,9 +97,11 @@ async function authFor(userId: string): Promise<{ authorization: string }> {
   return { authorization: `Bearer ${await apiKeyFor(userId)}` };
 }
 
-async function mcpClientFor(userId: string): Promise<Client> {
+async function mcpClientFor(userId: string, intent?: string): Promise<Client> {
   const client = new Client({ name: "test-client", version: "0.0.1" });
-  const transport = new StreamableHTTPClientTransport(new URL(`${gatewayUrl}/mcp/${serverId}`), {
+  const url = new URL(`${gatewayUrl}/mcp/${serverId}`);
+  if (intent) url.searchParams.set("intent", intent);
+  const transport = new StreamableHTTPClientTransport(url, {
     requestInit: { headers: { authorization: `Bearer ${await apiKeyFor(userId)}` } },
   });
   await client.connect(transport);
@@ -1886,5 +1888,72 @@ describe("token/cost optimization (EPIC-04 §7/§8)", () => {
     // admin sees the fleet
     const all = await app.inject({ method: "GET", headers: AUTH, url: "/v1/cost-events" });
     expect(all.json().events.length).toBeGreaterThanOrEqual(3);
+  });
+});
+
+describe("lazy tool-loading in the MCP proxy (EPIC-04 §8)", () => {
+  let laraId: string;
+
+  it("a declared intent narrows tools/list to relevant tools and ledgers the withheld chars", async () => {
+    const lara = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "opt-lara@example.com", displayName: "Opt Lara" },
+    });
+    laraId = lara.json().id;
+    for (const toolName of ["get_time", "write_note"]) {
+      await app.inject({
+        method: "POST",
+        headers: AUTH,
+        url: "/v1/grants/tools",
+        payload: { userId: laraId, serverId, toolName },
+      });
+    }
+
+    const client = await mcpClientFor(laraId, "what time is it now");
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name)).toEqual(["get_time"]);
+    await client.close();
+
+    const ledger = await app.inject({
+      method: "GET",
+      headers: AUTH,
+      url: `/v1/cost-events?userId=${laraId}`,
+    });
+    const row = ledger.json().events.find(
+      (e: { technique: string }) => e.technique === "lazy_tool_loading",
+    );
+    expect(row).toBeDefined();
+    expect(row.estimatedTokensSaved).toBeGreaterThan(0);
+    expect(row.objectId).toBe(serverId);
+    expect(row.detail).toMatchObject({ effect: "narrowed", selectedCount: 1, withheldCount: 1 });
+  });
+
+  it("withheld tools stay fully callable — the manifest shrinks, the entitlement never does (§12)", async () => {
+    const client = await mcpClientFor(laraId, "what time is it now");
+    const result = await client.callTool({ name: "write_note", arguments: { text: "hi" } });
+    expect((result.content as Array<{ text: string }>)[0]!.text).toBe("wrote: hi");
+    await client.close();
+  });
+
+  it("no intent means the full entitled manifest", async () => {
+    const client = await mcpClientFor(laraId);
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name).sort()).toEqual(["get_time", "write_note"]);
+    await client.close();
+  });
+
+  it("the per-user passthrough switch disables narrowing even with an intent", async () => {
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: `/v1/users/${laraId}/agent-policy`,
+      payload: { routingMode: "passthrough" },
+    });
+    const client = await mcpClientFor(laraId, "what time is it now");
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name).sort()).toEqual(["get_time", "write_note"]);
+    await client.close();
   });
 });
