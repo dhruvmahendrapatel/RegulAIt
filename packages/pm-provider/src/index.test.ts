@@ -5,6 +5,7 @@ import {
   JiraProvider,
   LinearProvider,
   MockPmProvider,
+  MondayProvider,
   PmProviderError,
   mappingFor,
   resolveApprovalAction,
@@ -38,7 +39,7 @@ describe("field mapping (§6/§7)", () => {
     });
     expect(resolveTaskFields(mapping, { title: "x" })).toEqual({ "Custom.Title": "x" });
     expect(() => mappingFor("azure_devops", { task: { fields: {} } })).toThrow();
-    expect(() => mappingFor("monday")).toThrow(PmProviderError); // no default shipped yet
+    expect(() => mappingFor("generic_webhook")).toThrow(PmProviderError); // no default shipped yet
   });
 });
 
@@ -132,7 +133,7 @@ describe("registry", () => {
     const b = resolvePmProvider({ provider: "mock", token: "" });
     expect(a).toBe(b);
     expect(() => resolvePmProvider({ provider: "azure_devops", token: "t" })).toThrow(/baseUrl/);
-    for (const provider of ["monday", "generic_webhook"] as const) {
+    for (const provider of ["generic_webhook"] as const) {
       expect(() => resolvePmProvider({ provider, token: "t" })).toThrow(/not implemented/);
     }
   });
@@ -315,7 +316,7 @@ describe("JiraProvider (REST v2, injectable fetch, no network)", () => {
       resolvePmProvider({ provider: "jira", token: "b:t", baseUrl: "https://a.atlassian.net" }).kind,
     ).toBe("jira");
     expect(() => resolvePmProvider({ provider: "jira", token: "b:t" })).toThrowError(/baseUrl/);
-    for (const provider of ["monday", "generic_webhook"] as const) {
+    for (const provider of ["generic_webhook"] as const) {
       expect(() => resolvePmProvider({ provider, token: "t" })).toThrowError(/not implemented/);
     }
   });
@@ -546,5 +547,142 @@ describe("AsanaProvider (REST + data envelope, injectable fetch, no network)", (
     expect(resolveStatus(mapping, "blocked")).toBeNull();
     // baseUrl is optional like linear's — the default is app.asana.com
     expect(resolvePmProvider({ provider: "asana", token: "pat" }).kind).toBe("asana");
+  });
+});
+
+describe("MondayProvider (GraphQL, injectable fetch, no network)", () => {
+  type Call = { query: string; variables: Record<string, unknown>; auth: string };
+  function fakeMonday(handler: (call: Call) => unknown) {
+    const calls: Call[] = [];
+    const fetchImpl = async (url: string, init?: { headers?: Record<string, string>; body?: string }) => {
+      const parsed = JSON.parse(String(init?.body));
+      const call: Call = {
+        query: parsed.query,
+        variables: parsed.variables,
+        auth: init?.headers?.authorization ?? "",
+      };
+      calls.push(call);
+      return {
+        status: 200,
+        json: async () => ({ data: handler(call) }),
+        text: async () => "",
+      };
+    };
+    return { calls, fetchImpl };
+  }
+
+  it("creates items with raw-token auth and builds pulse urls from the board url, resolved once", async () => {
+    let itemSeq = 0;
+    const { calls, fetchImpl } = fakeMonday((call) => {
+      if (call.query.includes("create_item")) {
+        itemSeq += 1;
+        return { create_item: { id: String(100 + itemSeq) } };
+      }
+      return { boards: [{ url: "https://acme.monday.com/boards/777" }] };
+    });
+    const monday = new MondayProvider({ token: "monday-api-token", fetchImpl });
+    const ref = await monday.createWorkItem("777", "Item", { name: "Build API" });
+    expect(calls[0]!.auth).toBe("monday-api-token");
+    expect(calls[0]!.query).toContain("create_item(board_id: $board, item_name: $name)");
+    expect(calls[0]!.variables).toEqual({ board: "777", name: "Build API" });
+    // no permalink in the create response — the board url makes the pulse link
+    expect(ref).toEqual({ id: "101", url: "https://acme.monday.com/boards/777/pulses/101" });
+
+    // the board url is cached — a second create resolves no board again
+    await monday.createWorkItem("777", "Item", { name: "Second" });
+    expect(calls.filter((c) => c.query.includes("boards(ids"))).toHaveLength(1);
+  });
+
+  it("transitions via the Status column's settings_str labels — explicit failure when the label is missing", async () => {
+    const { calls, fetchImpl } = fakeMonday((call) => {
+      if (call.query.includes("columns")) {
+        return { boards: [{ columns: [
+          { id: "name", type: "name", settings_str: "{}" },
+          { id: "status", type: "status", settings_str: JSON.stringify({ labels: { "0": "Working on it", "1": "Done", "2": "Stuck" } }) },
+        ] }] };
+      }
+      return { change_simple_column_value: { id: "101" } };
+    });
+    const monday = new MondayProvider({ token: "t", fetchImpl });
+    await monday.transitionState("777", "101", "Working on it");
+    const move = calls.find((c) => c.query.includes("change_simple_column_value"))!;
+    expect(move.variables).toEqual({ board: "777", item: "101", column: "status", value: "Working on it" });
+
+    await expect(monday.transitionState("777", "101", "Blocked")).rejects.toThrowError(
+      /no label 'Blocked'.*Working on it, Done, Stuck/,
+    );
+  });
+
+  it("updates via stringified column_values, comments via create_update, and reads status text as state", async () => {
+    const { calls, fetchImpl } = fakeMonday((call) => {
+      if (call.query.includes("change_multiple_column_values")) {
+        return { change_multiple_column_values: { id: "101" } };
+      }
+      if (call.query.includes("create_update")) return { create_update: { id: "u1" } };
+      return { items: [{
+        name: "Build API",
+        url: "https://acme.monday.com/boards/777/pulses/101",
+        column_values: [
+          { id: "status", type: "status", text: "Working on it" },
+          { id: "person", type: "people", text: "Mia" },
+        ],
+        updates: [{ text_body: "first" }, { text_body: "second" }],
+      }] };
+    });
+    const monday = new MondayProvider({ token: "t", fetchImpl });
+    await monday.updateFields("777", "101", { name: "Renamed" });
+    expect(calls[0]!.variables).toEqual({
+      board: "777", item: "101", values: JSON.stringify({ name: "Renamed" }),
+    });
+    await monday.addComment("777", "101", "note");
+    expect(calls[1]!.variables).toEqual({ item: "101", body: "note" });
+    const item = await monday.getWorkItem("777", "101");
+    expect(item).toMatchObject({
+      id: "101",
+      type: "Item",
+      state: "Working on it",
+      comments: ["first", "second"],
+    });
+    // the item's own url is used — no board lookup happened on read
+    expect(item.url).toBe("https://acme.monday.com/boards/777/pulses/101");
+    expect(calls.some((c) => c.query.includes("boards(ids"))).toBe(false);
+    expect(item.fields).toEqual({ name: "Build API", status: "Working on it", person: "Mia" });
+
+    // failures surface from errors[] AND monday's top-level error_message
+    const erroring = new MondayProvider({
+      token: "t",
+      fetchImpl: async () => ({
+        status: 200,
+        json: async () => ({ errors: [{ message: "not authorized" }] }),
+        text: async () => "",
+      }),
+    });
+    await expect(erroring.getWorkItem("777", "x")).rejects.toThrowError(/not authorized/);
+    const topLevel = new MondayProvider({
+      token: "t",
+      fetchImpl: async () => ({
+        status: 200,
+        json: async () => ({ error_message: "Invalid token" }),
+        text: async () => "",
+      }),
+    });
+    await expect(topLevel.getWorkItem("777", "x")).rejects.toThrowError(/Invalid token/);
+  });
+
+  it("default mapping exists (blocked → Stuck; no not_started/in_review/description/priority) and the registry resolves monday", () => {
+    const mapping = mappingFor("monday");
+    // no native description field — only the title maps
+    expect(resolveTaskFields(mapping, { title: "T", description: "D" })).toEqual({ name: "T" });
+    expect(resolveStatus(mapping, "in_progress")).toBe("Working on it");
+    expect(resolveStatus(mapping, "done")).toBe("Done");
+    // monday's default Status column ships a "Stuck" label — blocked IS mapped
+    expect(resolveStatus(mapping, "blocked")).toBe("Stuck");
+    // no default labels for these — skipped, never invented
+    expect(resolveStatus(mapping, "not_started")).toBeNull();
+    expect(resolveStatus(mapping, "in_review")).toBeNull();
+    expect(mapping.task.fields.description).toBeUndefined();
+    expect(mapping.task.fields.priority).toBeUndefined();
+    // baseUrl is optional like linear's — the default is api.monday.com
+    expect(resolvePmProvider({ provider: "monday", token: "tok" }).kind).toBe("monday");
   });
 });

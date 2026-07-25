@@ -207,6 +207,22 @@ export const DEFAULT_MAPPINGS: Partial<Record<PmProviderKind, PmMapping>> = {
       },
     },
   },
+  monday: {
+    task: {
+      workItemType: "Item",
+      fields: { title: "name", status: "status" },
+      // monday's default Status column ships exactly "Working on it" / "Done" /
+      // "Stuck", so 'blocked' IS mapped here; 'not_started' and 'in_review'
+      // have no default labels, and monday has no native description/priority
+      // fields (long-text columns are per-board custom) — all deliberately
+      // unmapped (skip, never invent).
+      statusMap: {
+        in_progress: "Working on it",
+        done: "Done",
+        blocked: "Stuck",
+      },
+    },
+  },
   azure_devops: {
     task: {
       workItemType: "Task",
@@ -762,6 +778,189 @@ export class AsanaProvider implements PmProvider {
 }
 
 // ---------------------------------------------------------------------------
+// monday.com adapter — GraphQL-only API ({base}/v2), raw api-token
+// Authorization header (like Linear, no Bearer prefix), injectable fetch. The
+// interface's `project` is a monday BOARD ID; states live in the board's
+// default Status column labels, resolved from the column's settings_str and
+// set by label text, failing explicit with the available list. The `type`
+// argument is accepted but monday items carry no native work-item type —
+// documented, ignored.
+// ---------------------------------------------------------------------------
+
+export interface MondayAdapterOptions {
+  /** a monday.com API token, sent verbatim in the Authorization header */
+  token: string;
+  /** override for testing/bridges; default https://api.monday.com */
+  baseUrl?: string | null;
+  fetchImpl?: FetchLike;
+}
+
+const MONDAY_DEFAULT_BASE = "https://api.monday.com";
+
+export class MondayProvider implements PmProvider {
+  readonly kind = "monday" as const;
+  private readonly base: string;
+  private readonly token: string;
+  private readonly fetchImpl: FetchLike;
+  private readonly boardUrls = new Map<string, string>();
+  private readonly statusColumns = new Map<string, { id: string; labels: string[] }>();
+
+  constructor(opts: MondayAdapterOptions) {
+    this.base = (opts.baseUrl ?? MONDAY_DEFAULT_BASE).replace(/\/$/, "");
+    this.token = opts.token;
+    this.fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
+  }
+
+  private async gql<T>(query: string, variables: Record<string, unknown>): Promise<T> {
+    const res = await this.fetchImpl(`${this.base}/v2`, {
+      method: "POST",
+      headers: {
+        authorization: this.token,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ query, variables }),
+    });
+    if (res.status >= 400) {
+      throw new PmProviderError(`monday graphql failed: ${await res.text()}`, res.status);
+    }
+    const payload = (await res.json()) as {
+      data?: T;
+      errors?: Array<{ message?: string }>;
+      /** monday reports some failures (e.g. bad token) top-level, not in errors[] */
+      error_message?: string;
+    };
+    if (payload.errors?.length) {
+      throw new PmProviderError(
+        `monday graphql failed: ${payload.errors.map((e) => e.message).join("; ")}`,
+      );
+    }
+    if (payload.error_message) {
+      throw new PmProviderError(`monday graphql failed: ${payload.error_message}`);
+    }
+    return payload.data as T;
+  }
+
+  /** monday's create_item response has no permalink — item links are built
+   * from the board's url, resolved once per board and cached. */
+  private async boardUrl(board: string): Promise<string> {
+    const cached = this.boardUrls.get(board);
+    if (cached) return cached;
+    const data = await this.gql<{ boards: Array<{ url: string }> }>(
+      `query BoardUrl($board: ID!) { boards(ids: [$board]) { url } }`,
+      { board },
+    );
+    const url = data.boards?.[0]?.url;
+    if (!url) throw new PmProviderError(`monday board '${board}' not found`, 404);
+    this.boardUrls.set(board, url);
+    return url;
+  }
+
+  /** The board's status labels live in the first status-type column's
+   * settings_str JSON ({ labels: { index: label } }); parsed once per board
+   * and cached. */
+  private async statusColumn(board: string): Promise<{ id: string; labels: string[] }> {
+    const cached = this.statusColumns.get(board);
+    if (cached) return cached;
+    const data = await this.gql<{
+      boards: Array<{ columns: Array<{ id: string; type: string; settings_str: string }> }>;
+    }>(
+      `query BoardColumns($board: ID!) { boards(ids: [$board]) { columns { id type settings_str } } }`,
+      { board },
+    );
+    const column = data.boards?.[0]?.columns.find((c) => c.type === "status");
+    if (!column) throw new PmProviderError(`monday board '${board}' has no status column`);
+    const settings = JSON.parse(column.settings_str || "{}") as {
+      labels?: Record<string, string>;
+    };
+    const parsed = { id: column.id, labels: Object.values(settings.labels ?? {}) };
+    this.statusColumns.set(board, parsed);
+    return parsed;
+  }
+
+  async createWorkItem(
+    project: string,
+    _type: string,
+    fields: Record<string, unknown>,
+  ): Promise<WorkItemRef> {
+    const data = await this.gql<{ create_item: { id: string } }>(
+      `mutation CreateItem($board: ID!, $name: String!) {
+        create_item(board_id: $board, item_name: $name) { id }
+      }`,
+      { board: project, name: String(fields.name ?? "") },
+    );
+    const id = String(data.create_item.id);
+    return { id, url: `${await this.boardUrl(project)}/pulses/${id}` };
+  }
+
+  async updateFields(project: string, id: string, fields: Record<string, unknown>): Promise<void> {
+    await this.gql(
+      `mutation UpdateItem($board: ID!, $item: ID!, $values: JSON!) {
+        change_multiple_column_values(board_id: $board, item_id: $item, column_values: $values) { id }
+      }`,
+      { board: project, item: id, values: JSON.stringify(fields) },
+    );
+  }
+
+  async transitionState(project: string, id: string, state: string): Promise<void> {
+    const column = await this.statusColumn(project);
+    const match =
+      column.labels.find((l) => l === state) ??
+      column.labels.find((l) => l.toLowerCase() === state.toLowerCase());
+    if (!match) {
+      const names = column.labels.join(", ") || "none";
+      throw new PmProviderError(
+        `monday status column has no label '${state}' (available: ${names})`,
+      );
+    }
+    await this.gql(
+      `mutation SetStatus($board: ID!, $item: ID!, $column: String!, $value: String!) {
+        change_simple_column_value(board_id: $board, item_id: $item, column_id: $column, value: $value) { id }
+      }`,
+      { board: project, item: id, column: column.id, value: match },
+    );
+  }
+
+  async addComment(_project: string, id: string, text: string): Promise<void> {
+    await this.gql(
+      `mutation AddUpdate($item: ID!, $body: String!) {
+        create_update(item_id: $item, body: $body) { id }
+      }`,
+      { item: id, body: text },
+    );
+  }
+
+  async getWorkItem(project: string, id: string): Promise<WorkItem> {
+    const data = await this.gql<{
+      items: Array<{
+        name: string;
+        url: string | null;
+        column_values: Array<{ id: string; type: string; text: string | null }>;
+        updates: Array<{ text_body: string | null }>;
+      }>;
+    }>(
+      `query Item($id: ID!) {
+        items(ids: [$id]) { name url column_values { id type text } updates { text_body } }
+      }`,
+      { id },
+    );
+    const item = data.items?.[0];
+    if (!item) throw new PmProviderError(`monday item '${id}' not found`, 404);
+    const status = item.column_values.find((c) => c.type === "status");
+    const fields: Record<string, unknown> = { name: item.name };
+    for (const c of item.column_values) fields[c.id] = c.text;
+    return {
+      id,
+      // items DO expose url on read; fall back to the board-url construction
+      url: item.url ?? `${await this.boardUrl(project)}/pulses/${id}`,
+      type: "Item",
+      state: status?.text || null,
+      fields,
+      comments: item.updates.map((u) => u.text_body ?? ""),
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Mock adapter — in-memory, for tests and air-gapped development.
 // ---------------------------------------------------------------------------
 
@@ -931,9 +1130,14 @@ export function resolvePmProvider(config: PmConnectionConfig, fetchImpl?: FetchL
         baseUrl: config.baseUrl ?? null,
         ...(fetchImpl ? { fetchImpl } : {}),
       });
+    case "monday":
+      return new MondayProvider({
+        token: config.token,
+        baseUrl: config.baseUrl ?? null,
+        ...(fetchImpl ? { fetchImpl } : {}),
+      });
     case "mock":
       return sharedMock;
-    case "monday":
     case "generic_webhook":
       throw new PmProviderError(
         `provider '${config.provider}' is interface-ready but its adapter is not implemented yet`,

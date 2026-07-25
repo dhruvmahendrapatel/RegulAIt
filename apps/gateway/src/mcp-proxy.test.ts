@@ -6161,6 +6161,127 @@ describe("asana pm adapter: run sync + section mirror against a live-shaped serv
   });
 });
 
+describe("monday pm adapter: GraphQL run sync + status-label mirror end-to-end", () => {
+  it("pm-sync creates monday items via create_item and node events mirror via Status column labels", async () => {
+    let itemSeq = 0;
+    const gqlCalls: Array<{ auth: string | null; query: string; variables: Record<string, unknown> }> = [];
+    const creations: Array<{ auth: string | null; variables: Record<string, unknown>; id: string }> = [];
+    const srv = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        const parsed = JSON.parse(body || "{}");
+        const call = {
+          auth: (req.headers.authorization as string) ?? null,
+          query: String(parsed.query ?? ""),
+          variables: (parsed.variables ?? {}) as Record<string, unknown>,
+        };
+        gqlCalls.push(call);
+        let data: unknown = {};
+        if (call.query.includes("create_item")) {
+          itemSeq += 1;
+          const id = String(500 + itemSeq);
+          creations.push({ auth: call.auth, variables: call.variables, id });
+          data = { create_item: { id } };
+        } else if (call.query.includes("columns")) {
+          data = { boards: [{ columns: [
+            { id: "name", type: "name", settings_str: "{}" },
+            { id: "status", type: "status", settings_str: JSON.stringify({ labels: { "0": "Working on it", "1": "Done", "2": "Stuck" } }) },
+          ] }] };
+        } else if (call.query.includes("boards(ids")) {
+          data = { boards: [{ url: "https://acme.monday.com/boards/777" }] };
+        } else if (call.query.includes("change_simple_column_value")) {
+          data = { change_simple_column_value: { id: "x" } };
+        } else if (call.query.includes("change_multiple_column_values")) {
+          data = { change_multiple_column_values: { id: "x" } };
+        } else if (call.query.includes("create_update")) {
+          data = { create_update: { id: "u" } };
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ data }));
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    const port = (srv.address() as { port: number }).port;
+
+    try {
+      const mona = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email: "monday-mona@example.com", displayName: "Monday Mona" },
+      });
+      const monaAuth = await authFor(mona.json().id);
+      const approver = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email: "monday-approver@example.com", displayName: "Monday Approver" },
+      });
+      const agentRes = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/agents",
+        payload: {
+          name: "monday-worker", provider: "mock", tier: 0, modes: ["execute"],
+          costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-monday",
+        },
+      });
+      await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/grants/agents",
+        payload: { userId: mona.json().id, agentId: agentRes.json().id },
+      });
+      const conn = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/pm/connections",
+        payload: {
+          name: "monday-e2e", provider: "monday", project: "777",
+          baseUrl: `http://127.0.0.1:${port}`, token: "monday-e2e-token",
+        },
+      });
+      expect(conn.statusCode).toBe(201);
+
+      const run = await app.inject({
+        method: "POST", headers: monaAuth, url: "/v1/runs",
+        payload: {
+          graph: {
+            run: "monday-sync-run",
+            escalationApproverUserId: approver.json().id,
+            nodes: [{ id: "a", title: "roll out board", ownerAgentId: agentRes.json().id, mode: "execute", estimate: { in: 1, out: 1 } }],
+          },
+        },
+      });
+      const runId = run.json().id;
+
+      const synced = await app.inject({
+        method: "POST", headers: monaAuth, url: `/v1/runs/${runId}/pm-sync`,
+        payload: { connectionName: "monday-e2e" },
+      });
+      expect(synced.statusCode).toBe(201);
+      // run-level parent + one node item, created via create_item with the
+      // raw api token, the board id, and the mapped `name` as item_name
+      expect(creations.length).toBe(2);
+      expect(creations[0]!.auth).toBe("monday-e2e-token");
+      const nodeItem = creations.find((c) => c.variables.name === "roll out board");
+      expect(nodeItem).toBeDefined();
+      expect(nodeItem!.variables.board).toBe("777");
+      const createCall = gqlCalls.find((c) => c.query.includes("create_item"))!;
+      expect(createCall.query).toContain("create_item(board_id: $board, item_name: $name)");
+
+      // a node event mirrors outbound as a status-label change: the board's
+      // columns are looked up for the Status column, then the label is set
+      await app.inject({ method: "POST", headers: monaAuth, url: `/v1/runs/${runId}/events`, payload: { kind: "start" } });
+      const started = await app.inject({
+        method: "POST", headers: monaAuth, url: `/v1/runs/${runId}/events`,
+        payload: { kind: "node_started", nodeId: "a" },
+      });
+      expect(started.statusCode).toBe(200);
+      expect(gqlCalls.some((c) => c.query.includes("columns { id type settings_str }"))).toBe(true);
+      const labelMove = gqlCalls.find((c) => c.query.includes("change_simple_column_value"));
+      expect(labelMove).toBeDefined();
+      expect(labelMove!.variables).toEqual({
+        board: "777", item: nodeItem!.id, column: "status", value: "Working on it",
+      });
+    } finally {
+      srv.closeAllConnections();
+      await new Promise<void>((r) => srv.close(() => r()));
+    }
+  });
+});
+
 describe("UI plumbing: /v1/me and own-scoped list views", () => {
   it("identity echo works and non-admins see exactly their own runs/instances/projects", async () => {
     const mia = await app.inject({

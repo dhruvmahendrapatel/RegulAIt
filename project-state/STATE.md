@@ -365,11 +365,22 @@ untouched (a section move is the literal board behaviour). `DEFAULT_MAPPINGS.asa
 title→name, status→section, description→notes; `priority` AND `blocked` both unmapped (no
 native priority field, no default Blocked section — skip, never invent). getWorkItem reads
 section-as-state for the matching project membership and filters stories to real comments.
-Registry: azure_devops + jira + linear + asana + mock; monday/generic_webhook stay rejected.
 E2e: pm-sync + node_started against a live-shaped fake Asana server (data envelopes, bearer
-token, projects array, section lookup + addTask all asserted on the wire). Deferred: monday +
-generic-webhook adapters, ADF descriptions, provider-native webhooks → the ADR-0010
-normalized inbound shape.
+token, projects array, section lookup + addTask all asserted on the wire). **monday.com
+adapter, same day**: GraphQL-only `MondayProvider` (`api.monday.com/v2`, overridable, raw
+API token) surfacing HTTP errors, `errors[]`, AND monday's top-level `error_message` as
+PmProviderErrors; `project` is a BOARD id, `type` accepted-and-ignored. Item URLs built as
+`${boardUrl}/pulses/${id}` from a once-per-board cached board-url lookup. Transitions live
+in the board's default Status COLUMN: settings_str labels parsed (cached per board), matched
+exact-then-case-insensitive, applied via change_simple_column_value — explicit failure
+listing available labels. `DEFAULT_MAPPINGS.monday` maps title→name, status→status with
+statusMap in_progress→"Working on it", done→"Done", and — per-provider reality — blocked→
+"Stuck" IS mapped (the default label ships); not_started/in_review/description/priority
+deliberately unmapped. Registry: azure_devops + jira + linear + asana + monday + mock;
+generic_webhook is now the SOLE rejected kind. E2e: pm-sync + node_started against a fake
+monday GraphQL server (raw token, board_id/item_name, columns lookup + change_simple_column_
+value with "Working on it" all asserted). Deferred: generic-webhook adapter, ADF
+descriptions, provider-native webhooks → the ADR-0010 normalized inbound shape.
 
 **EPIC-06 started — PM-tool integration first slice, 2026-07-25.** New
 `packages/pm-provider` on the git-provider playbook (pillar 8, PM_TOOL_INTEGRATION_SPEC

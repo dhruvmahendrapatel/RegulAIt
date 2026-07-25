@@ -532,12 +532,12 @@ const TABS = [
     + "<h2>Add a connection</h2><div class='card'>"
     + form("f-pmconn", [
         {name:"name",ph:"e.g. demo-pm"},
-        {name:"provider",options:["mock","jira","azure_devops","linear","asana"]},
+        {name:"provider",options:["mock","jira","azure_devops","linear","asana","monday"]},
         {name:"project",ph:"e.g. REGULAIT-DEMO"},
         {name:"baseUrl",label:"base url",req:false,ph:"required for jira / azure_devops"},
         {name:"token",type:"password",ph:"never shown again",grow:true},
       ], "Add connection")
-    + "<p class='dim' style='font-size:12px'>The select offers exactly the providers the registry can dispatch today — monday and the generic webhook adapter are interface-ready but not yet implemented, so they are deliberately not offered. jira and azure_devops need their base URL (e.g. https://&lt;site&gt;.atlassian.net, https://dev.azure.com/&lt;org&gt;). The demo runs entirely on the mock provider — no external service is touched.</p></div>"
+    + "<p class='dim' style='font-size:12px'>The select offers exactly the providers the registry can dispatch today — the generic webhook adapter is interface-ready but not yet implemented, so it is deliberately not offered. jira and azure_devops need their base URL (e.g. https://&lt;site&gt;.atlassian.net, https://dev.azure.com/&lt;org&gt;). The demo runs entirely on the mock provider — no external service is touched.</p></div>"
     + "<div id='pmreveal'></div>";
   wire("f-pmconn", async (d) => {
     const created = await post("/v1/pm/connections", d);
