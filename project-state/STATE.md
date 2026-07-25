@@ -212,6 +212,25 @@ mcp-default/retention/pii (detector + pruning jobs), reapply-to-in-flight on rec
 (diff covers the policy; in-flight instances keep their merged definitions), per-framework
 cost-governance policies (§8.6→§10.3).
 
+**The product becomes USABLE, 2026-07-25 — four slices in one push.** (1) Quickstart
+plumbing: the gateway converges its schema on boot; `GET /v1/me`; own-scoped list views for
+non-admins (runs/instances = own, projects = memberships); an idempotent demo seed driven
+through the real HTTP API (three users with keys printed once, seven agents — three mock ones
+usable with zero external keys — templates, hipaa profile, budgeted + classified projects, a
+planned run, and an instance already awaiting sign-off). (2) `/app`, the end-user workspace:
+one dependency-free file on a new shared design system (`ui-theme.ts` — warm dark, terracotta
+accent, mono-for-data): a streaming Playground where every exchange shows routing, measured
+cost, model, BYO-key, budget alerts, refusals + a collapsible governance trace; Runs with live
+node states, per-node outputs, auto-advance, budget bars; Workflows with the stage rail,
+artifact submission, and nested-run links; the approver Inbox (all approval kinds, one-click
+decide); member Projects with shared context. (3) `/admin` rebuilt on the same system with a
+real Cost & Projects dashboard (stat tiles, budget gauge, hand-rolled SVG showback/savings
+charts). (4) Docker quickstart: Dockerfile + compose (Postgres + gateway + auto-migrate +
+demo seed; keys in the container log) + README for both paths. The whole surface was driven
+in a REAL headless-Chromium pass (sign-in, streamed reply, run auto-advanced to completion,
+workflow rail, inbox approve, admin charts — zero page errors). AWS deployment remains
+deliberately not started (standing guardrail: explicit decision required).
+
 **Admin portal MVP, 2026-07-25 (ADR-0012).** One dependency-free HTML+JS file served by the
 gateway at `GET /admin` — an auth-exempt STATIC SHELL (zero data, zero secrets; the admin
 pastes an API key held in memory only) that is strictly a client of the public REST API, so
