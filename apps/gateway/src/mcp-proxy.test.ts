@@ -5996,3 +5996,15 @@ describe("UI plumbing: /v1/me and own-scoped list views", () => {
     expect(myProjects.json().projects[0].name).toBe("ui-mia-project");
   });
 });
+
+describe("end-user app shell (/app)", () => {
+  it("serves without auth — zero data, zero secrets — with all workspace pages", async () => {
+    const res = await app.inject({ method: "GET", url: "/app" });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toContain("text/html");
+    for (const page of ["Playground", "Runs", "Workflows", "Inbox", "Projects"]) {
+      expect(res.body).toContain(page);
+    }
+    expect(res.body).not.toContain("@example.com");
+  });
+});

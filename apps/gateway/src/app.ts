@@ -62,6 +62,7 @@ import { registerMcpProxy } from "./mcp-proxy.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
 import { applyProjectApprovalDecision, registerProjectRoutes } from "./projects.js";
 import { ADMIN_PORTAL_HTML } from "./admin-portal.js";
+import { APP_HTML } from "./app-ui.js";
 import { registerOptimizationRoutes } from "./optimization.js";
 import { applyRunApprovalDecision, registerOrchestrationRoutes } from "./orchestration.js";
 import { mirrorApprovalDecision, registerPmRoutes } from "./pm.js";
@@ -626,6 +627,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0012: the portal is a static shell (zero data, zero secrets) that
   // talks to the same REST API as any script — policy-as-code by construction.
   app.get("/admin", async (_req, reply) => reply.type("text/html").send(ADMIN_PORTAL_HTML));
+  app.get("/app", async (_req, reply) => reply.type("text/html").send(APP_HTML));
 
   registerAgentConnectorRoutes(app, db, { dataKey: opts.dataKey });
   registerProjectRoutes(app, db);
