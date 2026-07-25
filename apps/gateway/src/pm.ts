@@ -2,6 +2,8 @@ import type { FastifyInstance } from "fastify";
 import {
   and,
   auditLog,
+  decisions,
+  desc,
   eq,
   isNull,
   orchestrationRuns,
@@ -15,13 +17,14 @@ import {
   PmProviderError,
   mappingFor,
   resolveApprovalAction,
+  resolveDecisionAction,
   resolvePmProvider,
   resolveStatus,
   resolveTaskFields,
 } from "@regulait/pm-provider";
 import type { TaskGraph } from "@regulait/orchestration-kernel";
 import type { WorkflowDefinition } from "@regulait/workflow-kernel";
-import { createPmConnectionSchema, pmSyncSchema } from "@regulait/shared";
+import { createDecisionSchema, createPmConnectionSchema, pmSyncSchema } from "@regulait/shared";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { z } from "zod";
 
@@ -247,6 +250,29 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
       .where(and(eq(pmLinks.objectType, "run_node"), eq(pmLinks.objectId, runId)));
     const linked = new Set(existing.map((l) => l.nodeId));
 
+    // Run-level parent item (idempotent): the anchor for run-scoped records —
+    // §4 decisions and, later, budget approvals — that no single node owns.
+    const [runLink] = await db
+      .select()
+      .from(pmLinks)
+      .where(and(eq(pmLinks.objectType, "run"), eq(pmLinks.objectId, runId), isNull(pmLinks.nodeId)));
+    if (!runLink) {
+      const ref = await provider.createWorkItem(
+        conn.project,
+        mapping.task.workItemType,
+        resolveTaskFields(mapping, { title: `run: ${graph.run}` }),
+      );
+      await db.insert(pmLinks).values({
+        connectionId: conn.id,
+        objectType: "run",
+        objectId: runId,
+        nodeId: null,
+        externalId: ref.id,
+        externalUrl: ref.url,
+        lastSyncedAt: new Date(),
+      });
+    }
+
     const created: Array<{ nodeId: string; externalId: string; externalUrl: string }> = [];
     for (const node of graph.nodes) {
       if (linked.has(node.id)) continue;
@@ -358,6 +384,157 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
     return reply
       .status(201)
       .send({ created: true, externalId: ref.id, externalUrl: ref.url });
+  });
+
+  // §4: first-class decision records. Recorded locally ALWAYS; mirrored to
+  // the PM tool as a linked work item of the mapped Decision-like type, or a
+  // tagged comment on the parent item when no type is mapped — never dropped.
+  app.post("/v1/decisions", async (req, reply) => {
+    const body = createDecisionSchema.parse(req.body);
+    const userId = req.authCtx.userId;
+    if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_decide" });
+
+    // access: the parent object's initiator (or admin)
+    let ownerUserId: string | null = null;
+    if (body.objectType === "run") {
+      const [run] = await db
+        .select({ owner: orchestrationRuns.initiatingUserId })
+        .from(orchestrationRuns)
+        .where(eq(orchestrationRuns.id, body.objectId));
+      ownerUserId = run?.owner ?? null;
+    } else {
+      const [instance] = await db
+        .select({ owner: workflowInstances.initiatorUserId })
+        .from(workflowInstances)
+        .where(eq(workflowInstances.id, body.objectId));
+      ownerUserId = instance?.owner ?? null;
+    }
+    if (!ownerUserId) return reply.status(404).send({ error: "unavailable" });
+    if (!req.authCtx.isAdmin && userId !== ownerUserId) {
+      return reply.status(404).send({ error: "unavailable" });
+    }
+
+    const [row] = await db
+      .insert(decisions)
+      .values({
+        objectType: body.objectType,
+        objectId: body.objectId,
+        decision: body.decision,
+        rationale: body.rationale ?? null,
+        decisionMakerUserId: userId,
+      })
+      .returning();
+    await db.insert(auditLog).values({
+      userId,
+      objectType: "decision",
+      objectId: row!.id,
+      detail: { parentType: body.objectType, parentId: body.objectId },
+      effect: "allow",
+      ruleId: "decision-recorded",
+      ruleChain: [],
+      reason: `decision recorded on ${body.objectType} '${body.objectId}'`,
+    });
+
+    // §4 mirror — best-effort, surfaced, never blocking the local record.
+    let pmMirror: { ok: boolean; action?: string; externalId?: string; error?: string } | null = null;
+    const [parentLink] = await db
+      .select()
+      .from(pmLinks)
+      .where(
+        and(
+          eq(pmLinks.objectType, body.objectType === "run" ? "run" : "workflow_instance"),
+          eq(pmLinks.objectId, body.objectId),
+          isNull(pmLinks.nodeId),
+        ),
+      );
+    if (parentLink && opts.dataKey) {
+      const [conn] = await db
+        .select()
+        .from(pmConnections)
+        .where(eq(pmConnections.id, parentLink.connectionId));
+      if (conn) {
+        try {
+          const provider = providerFor(conn, opts.dataKey);
+          const mapping = mappingFor(conn.provider, conn.mapping ?? undefined);
+          const [maker] = await db.select({ email: users.email }).from(users).where(eq(users.id, userId));
+          const action = resolveDecisionAction(mapping, {
+            decision: body.decision,
+            rationale: body.rationale ?? null,
+            decisionMaker: maker?.email ?? userId,
+          });
+          if (action.kind === "work_item") {
+            const ref = await provider.createWorkItem(conn.project, action.type, action.fields);
+            await db.insert(pmLinks).values({
+              connectionId: conn.id,
+              objectType: "decision",
+              objectId: row!.id,
+              nodeId: null,
+              externalId: ref.id,
+              externalUrl: ref.url,
+              lastSyncedAt: new Date(),
+            });
+            // §6 traceability: the parent item points at the decision record
+            await provider.addComment(
+              conn.project,
+              parentLink.externalId,
+              `[RegulAIt] decision recorded as ${action.type} '${ref.id}': ${body.decision}`,
+            );
+            pmMirror = { ok: true, action: "work_item", externalId: ref.id };
+          } else {
+            await provider.addComment(
+              conn.project,
+              parentLink.externalId,
+              `[RegulAIt] decision by ${maker?.email ?? userId}: ${body.decision}` +
+                (body.rationale ? ` — rationale: ${body.rationale}` : ""),
+            );
+            pmMirror = { ok: true, action: "comment" };
+          }
+          await db.insert(auditLog).values({
+            userId,
+            objectType: "pm_work_item",
+            objectId: row!.id,
+            detail: { parentExternalId: parentLink.externalId, action: pmMirror.action },
+            effect: "allow",
+            ruleId: "pm-decision-mirrored",
+            ruleChain: [],
+            reason: `decision mirrored as ${pmMirror.action}`,
+          });
+        } catch (err) {
+          pmMirror = { ok: false, error: err instanceof Error ? err.message : String(err) };
+        }
+      }
+    }
+    return reply.status(201).send({ ...row, ...(pmMirror ? { pmMirror } : {}) });
+  });
+
+  app.get("/v1/decisions", async (req, reply) => {
+    const q = z
+      .object({ objectType: z.enum(["run", "workflow_instance"]), objectId: z.string().uuid() })
+      .parse(req.query);
+    let ownerUserId: string | null = null;
+    if (q.objectType === "run") {
+      const [run] = await db
+        .select({ owner: orchestrationRuns.initiatingUserId })
+        .from(orchestrationRuns)
+        .where(eq(orchestrationRuns.id, q.objectId));
+      ownerUserId = run?.owner ?? null;
+    } else {
+      const [instance] = await db
+        .select({ owner: workflowInstances.initiatorUserId })
+        .from(workflowInstances)
+        .where(eq(workflowInstances.id, q.objectId));
+      ownerUserId = instance?.owner ?? null;
+    }
+    if (!ownerUserId) return reply.status(404).send({ error: "unavailable" });
+    if (!req.authCtx.isAdmin && req.authCtx.userId !== ownerUserId) {
+      return reply.status(404).send({ error: "unavailable" });
+    }
+    const rows = await db
+      .select()
+      .from(decisions)
+      .where(and(eq(decisions.objectType, q.objectType), eq(decisions.objectId, q.objectId)))
+      .orderBy(desc(decisions.createdAt));
+    return { decisions: rows };
   });
 
   // §3 read-through: RegulAIt stores only the linkage. live=true resolves the

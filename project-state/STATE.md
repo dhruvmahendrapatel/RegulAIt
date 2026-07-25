@@ -89,9 +89,18 @@ entered on approve). Workflow instances now link to ONE work item
 decided workflow sign-off and run escalation onto its linked item (transition and/or
 `[RegulAIt] sign-off …` comment with decider + reason) — strictly display, never a second
 decision point; a mirror failure is surfaced in the decide response and never unwinds the
-decision. All mirrors audited (pm_work_item). Not in EPIC-06 yet: inbound sync
-(webhooks/polling — transport deliberately unchosen, needs an ADR), §4 decision records,
-budget-approval mirroring (no run-level link yet), Jira + remaining adapters.
+decision. All mirrors audited (pm_work_item). **Third slice: §4 decision
+records.** First-class `decisions` table (FK-free — governance records survive deletion;
+decision-maker is ALWAYS the authenticated identity, never a body field) with
+`POST/GET /v1/decisions` scoped to the parent run/instance initiator. Mapping gains a
+`decision` section (customer's Decision-like work-item type + field paths for
+title/rationale/decisionMaker); pure `resolveDecisionAction` mirrors a recorded decision as a
+real linked work item of that type — with a §6 traceability comment on the parent item — or
+degrades to a tagged comment when no type is mapped; no PM link at all = recorded locally with
+no mirror. Never dropped, never blocking the local record. Run pm-sync now also creates a
+run-LEVEL parent item (anchor for run-scoped records; unblocks budget-approval mirroring
+later). Not in EPIC-06 yet: inbound sync (webhooks/polling — transport deliberately unchosen,
+needs an ADR), budget-approval mirroring, Jira + remaining adapters.
 
 **EPIC-05 started — multi-agent orchestration first slice, 2026-07-25.** New pure
 `packages/orchestration-kernel` (pillar 7, MULTI_AGENT_ORCHESTRATION_SPEC §2–§5): task-graph
@@ -248,7 +257,7 @@ with a real in-process upstream MCP server and real MCP client (26 tests total).
 | EPIC-03 | Workflow engine MVP (now includes optional Design/Architecture sign-off stage type) | **in progress** — first slice merged (PR #9) | WORKFLOW_ENGINE_SPEC.md, ADR-0007 |
 | EPIC-04 | Token/cost optimization MVP (escalated to P0) | **in progress** — routing kernel + cost_events ledger (PR #12), lazy tool-loading (PR #13) merged; §9 workflow cost-sensitivity tag built | TOKEN_OPTIMIZATION_SPEC.md, ADR-0007 |
 | EPIC-05 | Multi-agent orchestration MVP (PM/Team-Lead/Worker delegation) | **in progress** — slice 1 merged (PR #14: kernel + runs + escalations); slice 2 built (§5.2 per-run budget caps: estimate, re-plan, approval gates) | MULTI_AGENT_ORCHESTRATION_SPEC.md, ADR-0008 |
-| EPIC-06 | PM-tool integration MVP (Azure DevOps/Jira/etc.) | **in progress** — slice 1 merged (PR #15: mapping layer, links, status mirror); slice 2 built (§5 approval mirroring: stage transitions/comments on linked items) | PM_TOOL_INTEGRATION_SPEC.md, ADR-0008 |
+| EPIC-06 | PM-tool integration MVP (Azure DevOps/Jira/etc.) | **in progress** — slice 1 merged (PR #15); slices 2+3 built (§5 approval mirroring; §4 decision records with linked-work-item mirror + comment fallback) | PM_TOOL_INTEGRATION_SPEC.md, ADR-0008 |
 
 ## Components
 | ID | Name | Status | Related |

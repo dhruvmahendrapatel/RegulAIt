@@ -86,7 +86,7 @@ export const auditLog = pgTable(
     at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
     userId: uuid("user_id").notNull(),
     objectType: text("object_type", {
-      enum: ["mcp_tool", "agent", "connector", "workflow", "run", "pm_work_item"],
+      enum: ["mcp_tool", "agent", "connector", "workflow", "run", "pm_work_item", "decision"],
     })
       .notNull()
       .default("mcp_tool"),
@@ -577,7 +577,7 @@ export const pmLinks = pgTable(
     connectionId: uuid("connection_id")
       .notNull()
       .references(() => pmConnections.id, { onDelete: "cascade" }),
-    objectType: text("object_type", { enum: ["run_node", "run", "workflow_instance"] }).notNull(),
+    objectType: text("object_type", { enum: ["run_node", "run", "workflow_instance", "decision"] }).notNull(),
     objectId: uuid("object_id").notNull(),
     /** task-graph node id when objectType is run_node */
     nodeId: text("node_id"),
@@ -591,4 +591,22 @@ export const pmLinks = pgTable(
     uniqueIndex("pm_links_conn_obj_node_uq").on(t.connectionId, t.objectType, t.objectId, t.nodeId),
     index("pm_links_object_idx").on(t.objectType, t.objectId),
   ],
+);
+
+// PM-TOOL INTEGRATION §4: first-class Decision records. FK-free like
+// audit_log — a decision is a governance record that must survive the
+// deletion of the run/instance/user it describes.
+export const decisions = pgTable(
+  "decisions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    objectType: text("object_type", { enum: ["run", "workflow_instance"] }).notNull(),
+    objectId: uuid("object_id").notNull(),
+    decision: text("decision").notNull(),
+    rationale: text("rationale"),
+    /** always the authenticated identity — never a body field */
+    decisionMakerUserId: uuid("decision_maker_user_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("decisions_object_idx").on(t.objectType, t.objectId)],
 );

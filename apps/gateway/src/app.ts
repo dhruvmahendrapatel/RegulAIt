@@ -133,6 +133,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "POST /v1/runs/:runId/pm-sync",
     "POST /v1/workflows/instances/:instanceId/pm-sync",
     "GET /v1/pm/links",
+    "POST /v1/decisions",
+    "GET /v1/decisions",
   ]);
   app.addHook("preHandler", async (req, reply) => {
     const route = `${req.method} ${req.routeOptions.url ?? ""}`;

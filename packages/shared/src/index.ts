@@ -231,3 +231,12 @@ export const createPmConnectionSchema = z.object({
 });
 
 export const pmSyncSchema = z.object({ connectionName: z.string().min(1) });
+
+// EPIC-06 §4 decision records. The decision maker is the authenticated
+// caller — never a body field.
+export const createDecisionSchema = z.object({
+  objectType: z.enum(["run", "workflow_instance"]),
+  objectId: z.string().uuid(),
+  decision: z.string().min(1).max(2000),
+  rationale: z.string().min(1).max(8000).optional(),
+});

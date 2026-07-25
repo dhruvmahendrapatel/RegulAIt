@@ -3033,3 +3033,194 @@ describe("PM approval mirroring (EPIC-06 §5)", () => {
     expect(item.comments.some((c) => c.includes("risky") && c.includes("approved"))).toBe(true);
   });
 });
+
+describe("PM decision records (EPIC-06 §4)", () => {
+  let danaId: string;
+  let danaAuth: { authorization: string };
+  let danaRunId: string;
+
+  it("a decision on a mapped connection becomes a real linked work item with the minimum fields", async () => {
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/pm/connections",
+      payload: {
+        name: "mock-decisions",
+        provider: "mock",
+        project: "decisions-proj",
+        token: "tok3",
+        mapping: {
+          task: { workItemType: "Task", fields: { title: "title", status: "state" } },
+          decision: {
+            workItemType: "Risk",
+            fields: { title: "title", rationale: "rationale", decisionMaker: "maker" },
+          },
+        },
+      },
+    });
+
+    const dana = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "pm-dana@example.com", displayName: "PM Dana" },
+    });
+    danaId = dana.json().id;
+    danaAuth = await authFor(danaId);
+    const approver = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "pm-dec-approver@example.com", displayName: "Dec Approver" },
+    });
+    const agent = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/agents",
+      payload: { name: "pm-dec-worker", provider: "anthropic", tier: 1, modes: ["execute"] },
+    });
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/grants/agents",
+      payload: { userId: danaId, agentId: agent.json().id },
+    });
+    const run = await app.inject({
+      method: "POST",
+      headers: danaAuth,
+      url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "decided-run",
+          escalationApproverUserId: approver.json().id,
+          nodes: [{ id: "n1", title: "the work", ownerAgentId: agent.json().id, mode: "execute" }],
+        },
+      },
+    });
+    danaRunId = run.json().id;
+    await app.inject({
+      method: "POST",
+      headers: danaAuth,
+      url: `/v1/runs/${danaRunId}/pm-sync`,
+      payload: { connectionName: "mock-decisions" },
+    });
+
+    const recorded = await app.inject({
+      method: "POST",
+      headers: danaAuth,
+      url: "/v1/decisions",
+      payload: {
+        objectType: "run",
+        objectId: danaRunId,
+        decision: "use Postgres over DynamoDB",
+        rationale: "operational familiarity",
+      },
+    });
+    expect(recorded.statusCode).toBe(201);
+    expect(recorded.json().decisionMakerUserId).toBe(danaId); // authenticated identity, never a body field
+    expect(recorded.json().pmMirror.ok).toBe(true);
+    expect(recorded.json().pmMirror.action).toBe("work_item");
+
+    const { resolvePmProvider } = await import("@regulait/pm-provider");
+    const mock = resolvePmProvider({ provider: "mock", token: "" });
+    const item = await mock.getWorkItem("decisions-proj", recorded.json().pmMirror.externalId);
+    expect(item.type).toBe("Risk");
+    expect(item.fields.title).toBe("use Postgres over DynamoDB");
+    expect(item.fields.rationale).toBe("operational familiarity");
+    expect(item.fields.maker).toBe("pm-dana@example.com");
+
+    // §6 traceability: the run's parent item points at the decision record
+    const links = await app.inject({
+      method: "GET",
+      headers: danaAuth,
+      url: `/v1/pm/links?runId=${danaRunId}`,
+    });
+    expect(links.statusCode).toBe(200);
+    const listed = await app.inject({
+      method: "GET",
+      headers: danaAuth,
+      url: `/v1/decisions?objectType=run&objectId=${danaRunId}`,
+    });
+    expect(listed.json().decisions).toHaveLength(1);
+  });
+
+  it("no decision mapping degrades to a tagged comment on the parent item", async () => {
+    const started = await app.inject({
+      method: "POST",
+      headers: await authFor(danaId),
+      url: "/v1/workflows/instances",
+      payload: {
+        change: {
+          description: "decided change",
+          paths: ["svc/c.ts"],
+          changeType: "pm-mirror-e2e",
+          environment: "staging",
+        },
+      },
+    });
+    const instanceId = started.json().id;
+    const sync = await app.inject({
+      method: "POST",
+      headers: danaAuth,
+      url: `/v1/workflows/instances/${instanceId}/pm-sync`,
+      payload: { connectionName: "mock-signoff" }, // §5 connection: no decision mapping
+    });
+    const recorded = await app.inject({
+      method: "POST",
+      headers: danaAuth,
+      url: "/v1/decisions",
+      payload: {
+        objectType: "workflow_instance",
+        objectId: instanceId,
+        decision: "ship behind a feature flag",
+      },
+    });
+    expect(recorded.json().pmMirror).toMatchObject({ ok: true, action: "comment" });
+
+    const { resolvePmProvider } = await import("@regulait/pm-provider");
+    const mock = resolvePmProvider({ provider: "mock", token: "" });
+    const item = await mock.getWorkItem("signoff-proj", sync.json().externalId);
+    expect(
+      item.comments.some((c) => c.includes("decision") && c.includes("ship behind a feature flag")),
+    ).toBe(true);
+  });
+
+  it("decisions record locally without a PM link, and strangers get 404", async () => {
+    const approver2 = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "pm-dec-approver2@example.com", displayName: "Dec Approver 2" },
+    });
+    const agent2 = await app.inject({ method: "GET", headers: AUTH, url: "/v1/agents" });
+    const workerId = agent2.json().agents.find((a: { name: string }) => a.name === "pm-dec-worker").id;
+    const unlinked = await app.inject({
+      method: "POST",
+      headers: danaAuth,
+      url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "unlinked-run",
+          escalationApproverUserId: approver2.json().id,
+          nodes: [{ id: "n1", title: "solo work", ownerAgentId: workerId, mode: "execute" }],
+        },
+      },
+    });
+    const recorded = await app.inject({
+      method: "POST",
+      headers: danaAuth,
+      url: "/v1/decisions",
+      payload: { objectType: "run", objectId: unlinked.json().id, decision: "local only" },
+    });
+    expect(recorded.statusCode).toBe(201);
+    expect(recorded.json().pmMirror).toBeUndefined();
+
+    const stranger = await app.inject({
+      method: "POST",
+      headers: await authFor(approver2.json().id),
+      url: "/v1/decisions",
+      payload: { objectType: "run", objectId: danaRunId, decision: "not my run" },
+    });
+    expect(stranger.statusCode).toBe(404);
+  });
+});
