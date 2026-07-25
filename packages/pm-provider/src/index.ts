@@ -89,8 +89,65 @@ export const pmMappingSchema = z.object({
     /** RegulAIt node status → provider state name; unmapped = skip, never invent */
     statusMap: z.record(z.string().min(1)).optional(),
   }),
+  /** §5: how sign-off decisions appear on the linked item. Absent config or an
+   * unmapped stage falls back to a comment — a decision is never silently
+   * dropped (§4's fallback rule applied to approvals). */
+  approval: z
+    .object({
+      target: z.enum(["status_transition", "comment"]).default("comment"),
+      /** sign-off stage id → provider state (used when target=status_transition) */
+      stageMap: z.record(z.string().min(1)).optional(),
+    })
+    .optional(),
+  /** §4: Decision records mirror as a linked work item of the customer's
+   * Decision-like type (e.g. "Risk"). Absent = fallback to a tagged comment
+   * on the parent item — never a silent drop. */
+  decision: z
+    .object({
+      workItemType: z.string().min(1),
+      fields: z.object({
+        title: z.string().min(1),
+        rationale: z.string().min(1).optional(),
+        decisionMaker: z.string().min(1).optional(),
+      }),
+    })
+    .optional(),
 });
 export type PmMapping = z.infer<typeof pmMappingSchema>;
+
+export type ApprovalMirrorAction = { kind: "transition"; state: string } | { kind: "comment" };
+
+export type DecisionMirrorAction =
+  | { kind: "work_item"; type: string; fields: Record<string, unknown> }
+  | { kind: "comment" };
+
+/** Pure §4 resolution: a mapped Decision-like type becomes a real linked work
+ * item with the minimum fields (decision/rationale/decision-maker); no mapping
+ * degrades to a tagged comment on the parent item — never a silent drop. */
+export function resolveDecisionAction(
+  mapping: PmMapping,
+  record: { decision: string; rationale: string | null; decisionMaker: string },
+): DecisionMirrorAction {
+  const cfg = mapping.decision;
+  if (!cfg) return { kind: "comment" };
+  const fields: Record<string, unknown> = { [cfg.fields.title]: record.decision };
+  if (cfg.fields.rationale && record.rationale !== null) {
+    fields[cfg.fields.rationale] = record.rationale;
+  }
+  if (cfg.fields.decisionMaker) fields[cfg.fields.decisionMaker] = record.decisionMaker;
+  return { kind: "work_item", type: cfg.workItemType, fields };
+}
+
+/** Pure §5 resolution: a mapped stage under status_transition transitions the
+ * item; everything else degrades to a comment — never a silent drop. */
+export function resolveApprovalAction(mapping: PmMapping, stageId: string): ApprovalMirrorAction {
+  const cfg = mapping.approval;
+  if (cfg?.target === "status_transition") {
+    const state = cfg.stageMap?.[stageId];
+    if (state) return { kind: "transition", state };
+  }
+  return { kind: "comment" };
+}
 
 export function validateMapping(raw: unknown): PmMapping {
   return pmMappingSchema.parse(raw);

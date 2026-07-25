@@ -4,6 +4,8 @@ import {
   MockPmProvider,
   PmProviderError,
   mappingFor,
+  resolveApprovalAction,
+  resolveDecisionAction,
   resolvePmProvider,
   resolveStatus,
   resolveTaskFields,
@@ -96,5 +98,74 @@ describe("registry", () => {
     for (const provider of ["jira", "linear", "asana", "monday", "generic_webhook"] as const) {
       expect(() => resolvePmProvider({ provider, token: "t" })).toThrow(/not implemented/);
     }
+  });
+});
+
+describe("approval mirroring resolution (§5)", () => {
+  it("a mapped stage under status_transition transitions; everything else comments", () => {
+    const mapping = validateMapping({
+      task: { workItemType: "Task", fields: { title: "t" } },
+      approval: {
+        target: "status_transition",
+        stageMap: { requirements_signoff: "Approved" },
+      },
+    });
+    expect(resolveApprovalAction(mapping, "requirements_signoff")).toEqual({
+      kind: "transition",
+      state: "Approved",
+    });
+    // unmapped stage → comment fallback, never a silent drop
+    expect(resolveApprovalAction(mapping, "deploy_approval")).toEqual({ kind: "comment" });
+  });
+
+  it("absent approval config or comment target always degrades to a comment", () => {
+    const bare = validateMapping({ task: { workItemType: "Task", fields: { title: "t" } } });
+    expect(resolveApprovalAction(bare, "any")).toEqual({ kind: "comment" });
+    const commentCfg = validateMapping({
+      task: { workItemType: "Task", fields: { title: "t" } },
+      approval: { target: "comment", stageMap: { x: "Done" } },
+    });
+    expect(resolveApprovalAction(commentCfg, "x")).toEqual({ kind: "comment" });
+  });
+});
+
+describe("decision record resolution (§4)", () => {
+  it("a mapped Decision-like type yields a real work item with the minimum fields", () => {
+    const mapping = validateMapping({
+      task: { workItemType: "Task", fields: { title: "t" } },
+      decision: {
+        workItemType: "Risk",
+        fields: { title: "System.Title", rationale: "Custom.Rationale", decisionMaker: "Custom.Maker" },
+      },
+    });
+    const action = resolveDecisionAction(mapping, {
+      decision: "use Postgres",
+      rationale: "operational familiarity",
+      decisionMaker: "mia@example.com",
+    });
+    expect(action).toEqual({
+      kind: "work_item",
+      type: "Risk",
+      fields: {
+        "System.Title": "use Postgres",
+        "Custom.Rationale": "operational familiarity",
+        "Custom.Maker": "mia@example.com",
+      },
+    });
+    // a null rationale simply omits the mapped field
+    const noRationale = resolveDecisionAction(mapping, {
+      decision: "d",
+      rationale: null,
+      decisionMaker: "m",
+    });
+    expect(noRationale.kind).toBe("work_item");
+    expect((noRationale as { fields: Record<string, unknown> }).fields["Custom.Rationale"]).toBeUndefined();
+  });
+
+  it("no decision mapping degrades to a comment — never a silent drop", () => {
+    const bare = validateMapping({ task: { workItemType: "Task", fields: { title: "t" } } });
+    expect(resolveDecisionAction(bare, { decision: "d", rationale: null, decisionMaker: "m" })).toEqual({
+      kind: "comment",
+    });
   });
 });

@@ -62,7 +62,7 @@ import { registerMcpProxy } from "./mcp-proxy.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
 import { registerOptimizationRoutes } from "./optimization.js";
 import { applyRunApprovalDecision, registerOrchestrationRoutes } from "./orchestration.js";
-import { registerPmRoutes } from "./pm.js";
+import { mirrorApprovalDecision, registerPmRoutes } from "./pm.js";
 import { RunStateError } from "@regulait/orchestration-kernel";
 import { applyWorkflowApprovalDecision, registerWorkflowRoutes } from "./workflows.js";
 import { MergeConflictError, WorkflowStateError } from "@regulait/workflow-kernel";
@@ -102,8 +102,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   app.decorateRequest("authCtx");
 
-  // Every route requires a valid Bearer token (bootstrap or API key).
+  // Every route requires a valid Bearer token (bootstrap or API key) — except
+  // the inbound PM webhook (ADR-0010), which is called by external systems and
+  // authenticates with its per-connection secret inside the route handler.
   app.addHook("preHandler", async (req, reply) => {
+    if (req.routeOptions.url === "/v1/pm/webhooks/:connectionName") {
+      req.authCtx = { userId: null, isAdmin: false, via: "api-key" };
+      return;
+    }
     const ctx = await authenticate(db, opts.bootstrapToken, req.headers.authorization);
     if (!ctx) return reply.status(401).send({ error: "unauthenticated" });
     req.authCtx = ctx;
@@ -131,7 +137,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "POST /v1/runs/:runId/events",
     "GET /v1/runs/:runId",
     "POST /v1/runs/:runId/pm-sync",
+    "POST /v1/workflows/instances/:instanceId/pm-sync",
     "GET /v1/pm/links",
+    "POST /v1/decisions",
+    "GET /v1/decisions",
+    "POST /v1/pm/webhooks/:connectionName",
   ]);
   app.addHook("preHandler", async (req, reply) => {
     const route = `${req.method} ${req.routeOptions.url ?? ""}`;
@@ -537,7 +547,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     if (updated.objectType === "run") {
       await applyRunApprovalDecision(db, updated, body.decision, deciderUserId);
     }
-    return updated;
+    // EPIC-06 §5: sign-offs mirror to the linked work item — display only,
+    // never a second decision point; a mirror failure never unwinds the
+    // decision, it is surfaced in the response.
+    const pmMirror = await mirrorApprovalDecision(db, opts.dataKey, updated, deciderUserId);
+    return pmMirror ? { ...updated, pmMirror } : updated;
   });
 
   registerAgentConnectorRoutes(app, db);

@@ -86,7 +86,7 @@ export const auditLog = pgTable(
     at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
     userId: uuid("user_id").notNull(),
     objectType: text("object_type", {
-      enum: ["mcp_tool", "agent", "connector", "workflow", "run", "pm_work_item"],
+      enum: ["mcp_tool", "agent", "connector", "workflow", "run", "pm_work_item", "decision"],
     })
       .notNull()
       .default("mcp_tool"),
@@ -563,6 +563,8 @@ export const pmConnections = pgTable("pm_connections", {
   project: text("project").notNull(),
   tokenCiphertext: text("token_ciphertext").notNull(),
   mapping: jsonb("mapping"),
+  /** ADR-0010: sha256 of the per-connection webhook secret (plaintext shown once) */
+  webhookSecretHash: text("webhook_secret_hash"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -577,13 +579,19 @@ export const pmLinks = pgTable(
     connectionId: uuid("connection_id")
       .notNull()
       .references(() => pmConnections.id, { onDelete: "cascade" }),
-    objectType: text("object_type", { enum: ["run_node", "run", "workflow_instance"] }).notNull(),
+    objectType: text("object_type", { enum: ["run_node", "run", "workflow_instance", "decision"] }).notNull(),
     objectId: uuid("object_id").notNull(),
     /** task-graph node id when objectType is run_node */
     nodeId: text("node_id"),
     externalId: text("external_id").notNull(),
     externalUrl: text("external_url").notNull(),
     lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
+    /** ADR-0010 inbound: last state reported BY the PM tool — recorded, never
+     * applied to the state machine; divergence surfaces as drift */
+    inboundState: text("inbound_state"),
+    inboundAt: timestamp("inbound_at", { withTimezone: true }),
+    /** set when the PM tool reports the item deleted */
+    orphanedAt: timestamp("orphaned_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -591,4 +599,40 @@ export const pmLinks = pgTable(
     uniqueIndex("pm_links_conn_obj_node_uq").on(t.connectionId, t.objectType, t.objectId, t.nodeId),
     index("pm_links_object_idx").on(t.objectType, t.objectId),
   ],
+);
+
+// PM-TOOL INTEGRATION §4: first-class Decision records. FK-free like
+// audit_log — a decision is a governance record that must survive the
+// deletion of the run/instance/user it describes.
+export const decisions = pgTable(
+  "decisions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    objectType: text("object_type", { enum: ["run", "workflow_instance"] }).notNull(),
+    objectId: uuid("object_id").notNull(),
+    decision: text("decision").notNull(),
+    rationale: text("rationale"),
+    /** always the authenticated identity — never a body field */
+    decisionMakerUserId: uuid("decision_maker_user_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("decisions_object_idx").on(t.objectType, t.objectId)],
+);
+
+// ADR-0010: append-only inbound webhook event log — every signal the PM tool
+// sends is retained, matched or not.
+export const pmSyncEvents = pgTable(
+  "pm_sync_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => pmConnections.id, { onDelete: "cascade" }),
+    linkId: uuid("link_id"),
+    externalId: text("external_id").notNull(),
+    kind: text("kind", { enum: ["updated", "deleted", "commented"] }).notNull(),
+    payload: jsonb("payload"),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("pm_sync_events_conn_idx").on(t.connectionId, t.receivedAt)],
 );

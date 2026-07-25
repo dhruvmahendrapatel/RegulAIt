@@ -79,9 +79,40 @@ OUTBOUND via the mapping's statusMap on every node event; unmapped statuses are 
 invented; mirror failures are surfaced in the response, never fail the run event, never hidden.
 Every creation/mirror writes the one audit trail (objectType "pm_work_item"). Endpoints:
 PM connection CRUD (admin), `POST /v1/runs/:id/pm-sync` (idempotent node→work-item linking),
-`GET /v1/pm/links` (+live read-through). Not in the slice: inbound sync (webhooks/polling —
-transport deliberately unchosen, needs an ADR), decision records (§4), approval mirroring
-(§5 — natural next slice), Jira + remaining adapters, workflow-instance linking.
+`GET /v1/pm/links` (+live read-through). **Second slice: §5 approval
+mirroring.** Mapping gains an `approval` section (`target: status_transition|comment` +
+per-stage `stageMap`); pure `resolveApprovalAction` degrades everything unmapped to a comment —
+a sign-off decision is never silently dropped (§4's fallback rule applied to approvals), and a
+DENIAL never enters a mapped state (always a comment — a customer's "Approved" state is only
+entered on approve). Workflow instances now link to ONE work item
+(`POST /v1/workflows/instances/:id/pm-sync`, idempotent), and the decide endpoint mirrors every
+decided workflow sign-off and run escalation onto its linked item (transition and/or
+`[RegulAIt] sign-off …` comment with decider + reason) — strictly display, never a second
+decision point; a mirror failure is surfaced in the decide response and never unwinds the
+decision. All mirrors audited (pm_work_item). **Third slice: §4 decision
+records.** First-class `decisions` table (FK-free — governance records survive deletion;
+decision-maker is ALWAYS the authenticated identity, never a body field) with
+`POST/GET /v1/decisions` scoped to the parent run/instance initiator. Mapping gains a
+`decision` section (customer's Decision-like work-item type + field paths for
+title/rationale/decisionMaker); pure `resolveDecisionAction` mirrors a recorded decision as a
+real linked work item of that type — with a §6 traceability comment on the parent item — or
+degrades to a tagged comment when no type is mapped; no PM link at all = recorded locally with
+no mirror. Never dropped, never blocking the local record. Run pm-sync now also creates a
+run-LEVEL parent item (anchor for run-scoped records; unblocks budget-approval mirroring
+later). **Fourth slice: inbound sync
+(ADR-0010 — webhooks + live read-through, no polling).** Per-connection webhook secret minted
+at creation (plaintext once, sha256 at rest, constant-time verify — API-key discipline);
+`POST /v1/pm/webhooks/:connectionName` accepts the normalized
+`{externalId, event: updated|deleted|commented, state?, fields?}` shape (provider-specific
+payload translation is a later adapter concern; this shape doubles as the start of the generic
+webhook adapter) and is the ONLY route exempt from bearer auth. Every signal lands in
+append-only `pm_sync_events`, matched or not. Inbound state is recorded on the link
+(`inboundState`/`inboundAt`) and NEVER applied to the state machine — divergence from the
+mapped state of the node's current status surfaces as `drift` in the links view plus a
+`pm-drift-detected` audit row ("never drift silently" = detect-and-surface, not
+auto-overwrite); `deleted` events orphan the link, audited. Not in EPIC-06 yet:
+budget-approval mirroring, provider-specific webhook payload adapters + HMAC signatures,
+automated drift resolution (human today), Jira + remaining adapters.
 
 **EPIC-05 started — multi-agent orchestration first slice, 2026-07-25.** New pure
 `packages/orchestration-kernel` (pillar 7, MULTI_AGENT_ORCHESTRATION_SPEC §2–§5): task-graph
@@ -238,7 +269,7 @@ with a real in-process upstream MCP server and real MCP client (26 tests total).
 | EPIC-03 | Workflow engine MVP (now includes optional Design/Architecture sign-off stage type) | **in progress** — first slice merged (PR #9) | WORKFLOW_ENGINE_SPEC.md, ADR-0007 |
 | EPIC-04 | Token/cost optimization MVP (escalated to P0) | **in progress** — routing kernel + cost_events ledger (PR #12), lazy tool-loading (PR #13) merged; §9 workflow cost-sensitivity tag built | TOKEN_OPTIMIZATION_SPEC.md, ADR-0007 |
 | EPIC-05 | Multi-agent orchestration MVP (PM/Team-Lead/Worker delegation) | **in progress** — slice 1 merged (PR #14: kernel + runs + escalations); slice 2 built (§5.2 per-run budget caps: estimate, re-plan, approval gates) | MULTI_AGENT_ORCHESTRATION_SPEC.md, ADR-0008 |
-| EPIC-06 | PM-tool integration MVP (Azure DevOps/Jira/etc.) | **in progress** — first slice built (pm-provider package: mapping layer + ADO/mock adapters; node↔work-item links; outbound status mirror; live read-through) | PM_TOOL_INTEGRATION_SPEC.md, ADR-0008 |
+| EPIC-06 | PM-tool integration MVP (Azure DevOps/Jira/etc.) | **in progress** — slice 1 merged (PR #15); slices 2–4 built (§5 approval mirroring; §4 decision records; ADR-0010 inbound sync with drift detection) | PM_TOOL_INTEGRATION_SPEC.md, ADR-0008, ADR-0010 |
 
 ## Components
 | ID | Name | Status | Related |

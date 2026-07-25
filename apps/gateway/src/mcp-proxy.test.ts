@@ -2799,3 +2799,595 @@ describe("PM-tool integration (EPIC-06 slice)", () => {
     expect(stranger.statusCode).toBe(404);
   });
 });
+
+describe("PM approval mirroring (EPIC-06 §5)", () => {
+  let miaId: string;
+  let miaAuth: { authorization: string };
+
+  it("an approved sign-off transitions the linked item when the stage is mapped", async () => {
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/pm/connections",
+      payload: {
+        name: "mock-signoff",
+        provider: "mock",
+        project: "signoff-proj",
+        token: "tok2",
+        mapping: {
+          task: { workItemType: "Task", fields: { title: "title", status: "state" } },
+          approval: { target: "status_transition", stageMap: { signoff: "Signed Off" } },
+        },
+      },
+    });
+
+    const tpl = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/workflows/templates",
+      payload: {
+        name: "pm-mirror-wf",
+        definition: {
+          workflow: "pm-mirror-wf",
+          stages: [
+            { id: "intake", type: "trigger" },
+            { id: "spec", type: "artifact_generation", output: "spec_doc" },
+            { id: "signoff", type: "human_approval", approvers: ["requesting_user"] },
+          ],
+        },
+      },
+    });
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/workflows/assignment-rules",
+      payload: { templateId: tpl.json().id, changeType: "pm-mirror-e2e" },
+    });
+
+    const mia = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "pm-mia@example.com", displayName: "PM Mia" },
+    });
+    miaId = mia.json().id;
+    miaAuth = await authFor(miaId);
+
+    const started = await app.inject({
+      method: "POST",
+      headers: miaAuth,
+      url: "/v1/workflows/instances",
+      payload: {
+        change: {
+          description: "mirrored change",
+          paths: ["svc/a.ts"],
+          changeType: "pm-mirror-e2e",
+          environment: "staging",
+        },
+      },
+    });
+    const instanceId = started.json().id;
+
+    const sync = await app.inject({
+      method: "POST",
+      headers: miaAuth,
+      url: `/v1/workflows/instances/${instanceId}/pm-sync`,
+      payload: { connectionName: "mock-signoff" },
+    });
+    expect(sync.statusCode).toBe(201);
+    const externalId = sync.json().externalId;
+    // idempotent
+    const again = await app.inject({
+      method: "POST",
+      headers: miaAuth,
+      url: `/v1/workflows/instances/${instanceId}/pm-sync`,
+      payload: { connectionName: "mock-signoff" },
+    });
+    expect(again.statusCode).toBe(200);
+    expect(again.json().created).toBe(false);
+
+    await app.inject({
+      method: "POST",
+      headers: miaAuth,
+      url: `/v1/workflows/instances/${instanceId}/artifacts`,
+      payload: { stageId: "spec", content: "the spec" },
+    });
+    const inbox = await app.inject({ method: "GET", headers: miaAuth, url: "/v1/approvals?status=pending" });
+    const entry = inbox.json().approvals.find(
+      (a: { instanceId: string | null }) => a.instanceId === instanceId,
+    );
+    const decided = await app.inject({
+      method: "POST",
+      headers: miaAuth,
+      url: `/v1/approvals/${entry.id}/decide`,
+      payload: { decision: "approved", reason: "looks good" },
+    });
+    expect(decided.statusCode).toBe(200);
+    expect(decided.json().pmMirror).toEqual({ ok: true, action: "transition" });
+
+    const { resolvePmProvider } = await import("@regulait/pm-provider");
+    const mock = resolvePmProvider({ provider: "mock", token: "" });
+    const item = await mock.getWorkItem("signoff-proj", externalId);
+    expect(item.state).toBe("Signed Off");
+    expect(item.comments.some((c) => c.includes("signoff") && c.includes("approved"))).toBe(true);
+    expect(item.comments.some((c) => c.includes("looks good"))).toBe(true);
+  });
+
+  it("a denial never enters the mapped state — it degrades to a comment", async () => {
+    const started = await app.inject({
+      method: "POST",
+      headers: miaAuth,
+      url: "/v1/workflows/instances",
+      payload: {
+        change: {
+          description: "denied change",
+          paths: ["svc/b.ts"],
+          changeType: "pm-mirror-e2e",
+          environment: "staging",
+        },
+      },
+    });
+    const instanceId = started.json().id;
+    const sync = await app.inject({
+      method: "POST",
+      headers: miaAuth,
+      url: `/v1/workflows/instances/${instanceId}/pm-sync`,
+      payload: { connectionName: "mock-signoff" },
+    });
+    const externalId = sync.json().externalId;
+    await app.inject({
+      method: "POST",
+      headers: miaAuth,
+      url: `/v1/workflows/instances/${instanceId}/artifacts`,
+      payload: { stageId: "spec", content: "risky spec" },
+    });
+    const inbox = await app.inject({ method: "GET", headers: miaAuth, url: "/v1/approvals?status=pending" });
+    const entry = inbox.json().approvals.find(
+      (a: { instanceId: string | null }) => a.instanceId === instanceId,
+    );
+    const decided = await app.inject({
+      method: "POST",
+      headers: miaAuth,
+      url: `/v1/approvals/${entry.id}/decide`,
+      payload: { decision: "denied", reason: "too risky" },
+    });
+    expect(decided.json().pmMirror).toEqual({ ok: true, action: "comment" });
+
+    const { resolvePmProvider } = await import("@regulait/pm-provider");
+    const mock = resolvePmProvider({ provider: "mock", token: "" });
+    const item = await mock.getWorkItem("signoff-proj", externalId);
+    expect(item.state).not.toBe("Signed Off");
+    expect(item.comments.some((c) => c.includes("denied") && c.includes("too risky"))).toBe(true);
+  });
+
+  it("run escalation decisions mirror as comments on the node's linked item", async () => {
+    const approver = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "pm-run-approver@example.com", displayName: "Run Approver" },
+    });
+    const approverId = approver.json().id;
+    const agent = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/agents",
+      payload: { name: "pm-mirror-worker", provider: "anthropic", tier: 1, modes: ["execute"] },
+    });
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/grants/agents",
+      payload: { userId: miaId, agentId: agent.json().id },
+    });
+    const run = await app.inject({
+      method: "POST",
+      headers: miaAuth,
+      url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "mirror-escalation",
+          escalationApproverUserId: approverId,
+          nodes: [{ id: "risky", title: "Risky task", ownerAgentId: agent.json().id, mode: "execute" }],
+        },
+      },
+    });
+    const runId = run.json().id;
+    await app.inject({
+      method: "POST",
+      headers: miaAuth,
+      url: `/v1/runs/${runId}/pm-sync`,
+      payload: { connectionName: "mock-signoff" },
+    });
+    const ev = (payload: Record<string, unknown>) =>
+      app.inject({ method: "POST", headers: miaAuth, url: `/v1/runs/${runId}/events`, payload });
+    await ev({ kind: "start" });
+    await ev({ kind: "node_started", nodeId: "risky" });
+    await ev({ kind: "node_failed", nodeId: "risky", error: "worker crashed" });
+    await ev({ kind: "escalate_node", nodeId: "risky" });
+
+    const approverAuth = await authFor(approverId);
+    const inbox = await app.inject({
+      method: "GET",
+      headers: approverAuth,
+      url: "/v1/approvals?status=pending",
+    });
+    const entry = inbox.json().approvals.find((a: { runId: string | null }) => a.runId === runId);
+    const decided = await app.inject({
+      method: "POST",
+      headers: approverAuth,
+      url: `/v1/approvals/${entry.id}/decide`,
+      payload: { decision: "approved" },
+    });
+    expect(decided.json().pmMirror).toEqual({ ok: true, action: "comment" });
+
+    const links = await app.inject({
+      method: "GET",
+      headers: miaAuth,
+      url: `/v1/pm/links?runId=${runId}`,
+    });
+    const nodeLink = links.json().links.find((l: { nodeId: string }) => l.nodeId === "risky");
+    const { resolvePmProvider } = await import("@regulait/pm-provider");
+    const mock = resolvePmProvider({ provider: "mock", token: "" });
+    const item = await mock.getWorkItem("signoff-proj", nodeLink.externalId);
+    expect(item.comments.some((c) => c.includes("risky") && c.includes("approved"))).toBe(true);
+  });
+});
+
+describe("PM decision records (EPIC-06 §4)", () => {
+  let danaId: string;
+  let danaAuth: { authorization: string };
+  let danaRunId: string;
+
+  it("a decision on a mapped connection becomes a real linked work item with the minimum fields", async () => {
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/pm/connections",
+      payload: {
+        name: "mock-decisions",
+        provider: "mock",
+        project: "decisions-proj",
+        token: "tok3",
+        mapping: {
+          task: { workItemType: "Task", fields: { title: "title", status: "state" } },
+          decision: {
+            workItemType: "Risk",
+            fields: { title: "title", rationale: "rationale", decisionMaker: "maker" },
+          },
+        },
+      },
+    });
+
+    const dana = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "pm-dana@example.com", displayName: "PM Dana" },
+    });
+    danaId = dana.json().id;
+    danaAuth = await authFor(danaId);
+    const approver = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "pm-dec-approver@example.com", displayName: "Dec Approver" },
+    });
+    const agent = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/agents",
+      payload: { name: "pm-dec-worker", provider: "anthropic", tier: 1, modes: ["execute"] },
+    });
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/grants/agents",
+      payload: { userId: danaId, agentId: agent.json().id },
+    });
+    const run = await app.inject({
+      method: "POST",
+      headers: danaAuth,
+      url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "decided-run",
+          escalationApproverUserId: approver.json().id,
+          nodes: [{ id: "n1", title: "the work", ownerAgentId: agent.json().id, mode: "execute" }],
+        },
+      },
+    });
+    danaRunId = run.json().id;
+    await app.inject({
+      method: "POST",
+      headers: danaAuth,
+      url: `/v1/runs/${danaRunId}/pm-sync`,
+      payload: { connectionName: "mock-decisions" },
+    });
+
+    const recorded = await app.inject({
+      method: "POST",
+      headers: danaAuth,
+      url: "/v1/decisions",
+      payload: {
+        objectType: "run",
+        objectId: danaRunId,
+        decision: "use Postgres over DynamoDB",
+        rationale: "operational familiarity",
+      },
+    });
+    expect(recorded.statusCode).toBe(201);
+    expect(recorded.json().decisionMakerUserId).toBe(danaId); // authenticated identity, never a body field
+    expect(recorded.json().pmMirror.ok).toBe(true);
+    expect(recorded.json().pmMirror.action).toBe("work_item");
+
+    const { resolvePmProvider } = await import("@regulait/pm-provider");
+    const mock = resolvePmProvider({ provider: "mock", token: "" });
+    const item = await mock.getWorkItem("decisions-proj", recorded.json().pmMirror.externalId);
+    expect(item.type).toBe("Risk");
+    expect(item.fields.title).toBe("use Postgres over DynamoDB");
+    expect(item.fields.rationale).toBe("operational familiarity");
+    expect(item.fields.maker).toBe("pm-dana@example.com");
+
+    // §6 traceability: the run's parent item points at the decision record
+    const links = await app.inject({
+      method: "GET",
+      headers: danaAuth,
+      url: `/v1/pm/links?runId=${danaRunId}`,
+    });
+    expect(links.statusCode).toBe(200);
+    const listed = await app.inject({
+      method: "GET",
+      headers: danaAuth,
+      url: `/v1/decisions?objectType=run&objectId=${danaRunId}`,
+    });
+    expect(listed.json().decisions).toHaveLength(1);
+  });
+
+  it("no decision mapping degrades to a tagged comment on the parent item", async () => {
+    const started = await app.inject({
+      method: "POST",
+      headers: await authFor(danaId),
+      url: "/v1/workflows/instances",
+      payload: {
+        change: {
+          description: "decided change",
+          paths: ["svc/c.ts"],
+          changeType: "pm-mirror-e2e",
+          environment: "staging",
+        },
+      },
+    });
+    const instanceId = started.json().id;
+    const sync = await app.inject({
+      method: "POST",
+      headers: danaAuth,
+      url: `/v1/workflows/instances/${instanceId}/pm-sync`,
+      payload: { connectionName: "mock-signoff" }, // §5 connection: no decision mapping
+    });
+    const recorded = await app.inject({
+      method: "POST",
+      headers: danaAuth,
+      url: "/v1/decisions",
+      payload: {
+        objectType: "workflow_instance",
+        objectId: instanceId,
+        decision: "ship behind a feature flag",
+      },
+    });
+    expect(recorded.json().pmMirror).toMatchObject({ ok: true, action: "comment" });
+
+    const { resolvePmProvider } = await import("@regulait/pm-provider");
+    const mock = resolvePmProvider({ provider: "mock", token: "" });
+    const item = await mock.getWorkItem("signoff-proj", sync.json().externalId);
+    expect(
+      item.comments.some((c) => c.includes("decision") && c.includes("ship behind a feature flag")),
+    ).toBe(true);
+  });
+
+  it("decisions record locally without a PM link, and strangers get 404", async () => {
+    const approver2 = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "pm-dec-approver2@example.com", displayName: "Dec Approver 2" },
+    });
+    const agent2 = await app.inject({ method: "GET", headers: AUTH, url: "/v1/agents" });
+    const workerId = agent2.json().agents.find((a: { name: string }) => a.name === "pm-dec-worker").id;
+    const unlinked = await app.inject({
+      method: "POST",
+      headers: danaAuth,
+      url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "unlinked-run",
+          escalationApproverUserId: approver2.json().id,
+          nodes: [{ id: "n1", title: "solo work", ownerAgentId: workerId, mode: "execute" }],
+        },
+      },
+    });
+    const recorded = await app.inject({
+      method: "POST",
+      headers: danaAuth,
+      url: "/v1/decisions",
+      payload: { objectType: "run", objectId: unlinked.json().id, decision: "local only" },
+    });
+    expect(recorded.statusCode).toBe(201);
+    expect(recorded.json().pmMirror).toBeUndefined();
+
+    const stranger = await app.inject({
+      method: "POST",
+      headers: await authFor(approver2.json().id),
+      url: "/v1/decisions",
+      payload: { objectType: "run", objectId: danaRunId, decision: "not my run" },
+    });
+    expect(stranger.statusCode).toBe(404);
+  });
+});
+
+describe("PM inbound sync (EPIC-06, ADR-0010)", () => {
+  let webhookSecret: string;
+  let inboundRunId: string;
+  let inboundAuth: { authorization: string };
+  let nodeExternalId: string;
+
+  it("connections mint a webhook secret exactly once; bad secrets are rejected", async () => {
+    const conn = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/pm/connections",
+      payload: { name: "mock-inbound", provider: "mock", project: "inbound-proj", token: "tok4" },
+    });
+    expect(conn.statusCode).toBe(201);
+    webhookSecret = conn.json().webhookSecret;
+    expect(webhookSecret).toMatch(/^rglwh_/);
+    const listing = await app.inject({ method: "GET", headers: AUTH, url: "/v1/pm/connections" });
+    expect(JSON.stringify(listing.json())).not.toContain(webhookSecret);
+
+    // no bearer token needed — but the per-connection secret is mandatory
+    const noSecret = await app.inject({
+      method: "POST",
+      url: "/v1/pm/webhooks/mock-inbound",
+      payload: { externalId: "1", event: "updated" },
+    });
+    expect(noSecret.statusCode).toBe(401);
+    const wrongSecret = await app.inject({
+      method: "POST",
+      url: "/v1/pm/webhooks/mock-inbound",
+      headers: { "x-regulait-webhook-secret": "rglwh_wrong" },
+      payload: { externalId: "1", event: "updated" },
+    });
+    expect(wrongSecret.statusCode).toBe(401);
+  });
+
+  it("inbound events record without touching the state machine; unmatched items are logged", async () => {
+    const user = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "pm-ines@example.com", displayName: "PM Ines" },
+    });
+    inboundAuth = await authFor(user.json().id);
+    const approver = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "pm-in-approver@example.com", displayName: "In Approver" },
+    });
+    const agent = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/agents",
+      payload: { name: "pm-in-worker", provider: "anthropic", tier: 1, modes: ["execute"] },
+    });
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/grants/agents",
+      payload: { userId: user.json().id, agentId: agent.json().id },
+    });
+    const run = await app.inject({
+      method: "POST",
+      headers: inboundAuth,
+      url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "inbound-run",
+          escalationApproverUserId: approver.json().id,
+          nodes: [{ id: "n1", title: "watched work", ownerAgentId: agent.json().id, mode: "execute" }],
+        },
+      },
+    });
+    inboundRunId = run.json().id;
+    const sync = await app.inject({
+      method: "POST",
+      headers: inboundAuth,
+      url: `/v1/runs/${inboundRunId}/pm-sync`,
+      payload: { connectionName: "mock-inbound" },
+    });
+    nodeExternalId = sync.json().created.find((c: { nodeId: string }) => c.nodeId === "n1").externalId;
+
+    const unmatched = await app.inject({
+      method: "POST",
+      url: "/v1/pm/webhooks/mock-inbound",
+      headers: { "x-regulait-webhook-secret": webhookSecret },
+      payload: { externalId: "does-not-exist", event: "updated", state: "Done" },
+    });
+    expect(unmatched.statusCode).toBe(202);
+    expect(unmatched.json().matched).toBe(false);
+
+    // start the node so RegulAIt's status is in_progress (maps to "Doing")
+    const ev = (payload: Record<string, unknown>) =>
+      app.inject({ method: "POST", headers: inboundAuth, url: `/v1/runs/${inboundRunId}/events`, payload });
+    await ev({ kind: "start" });
+    await ev({ kind: "node_started", nodeId: "n1" });
+
+    const agreeing = await app.inject({
+      method: "POST",
+      url: "/v1/pm/webhooks/mock-inbound",
+      headers: { "x-regulait-webhook-secret": webhookSecret },
+      payload: { externalId: nodeExternalId, event: "updated", state: "Doing" },
+    });
+    expect(agreeing.json()).toEqual({ matched: true, drift: false });
+
+    const links = await app.inject({
+      method: "GET",
+      headers: inboundAuth,
+      url: `/v1/pm/links?runId=${inboundRunId}`,
+    });
+    const link = links.json().links.find((l: { nodeId: string }) => l.nodeId === "n1");
+    expect(link.inboundState).toBe("Doing");
+    expect(link.drift).toBe(false);
+    // the state machine was never touched
+    const view = await app.inject({ method: "GET", headers: inboundAuth, url: `/v1/runs/${inboundRunId}` });
+    expect(view.json().run.state.nodeStatuses.n1).toBe("in_progress");
+  });
+
+  it("a disagreeing inbound state surfaces as drift — audited, never auto-applied", async () => {
+    const drifting = await app.inject({
+      method: "POST",
+      url: "/v1/pm/webhooks/mock-inbound",
+      headers: { "x-regulait-webhook-secret": webhookSecret },
+      payload: { externalId: nodeExternalId, event: "updated", state: "Done" },
+    });
+    expect(drifting.json()).toEqual({ matched: true, drift: true });
+
+    const links = await app.inject({
+      method: "GET",
+      headers: inboundAuth,
+      url: `/v1/pm/links?runId=${inboundRunId}`,
+    });
+    const link = links.json().links.find((l: { nodeId: string }) => l.nodeId === "n1");
+    expect(link.drift).toBe(true);
+    expect(link.inboundState).toBe("Done");
+
+    const view = await app.inject({ method: "GET", headers: inboundAuth, url: `/v1/runs/${inboundRunId}` });
+    expect(view.json().run.state.nodeStatuses.n1).toBe("in_progress"); // untouched
+
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: "/v1/audit" });
+    expect(
+      audit.json().entries.some((e: { ruleId: string }) => e.ruleId === "pm-drift-detected"),
+    ).toBe(true);
+  });
+
+  it("a deleted work item orphans the link, audited", async () => {
+    const deleted = await app.inject({
+      method: "POST",
+      url: "/v1/pm/webhooks/mock-inbound",
+      headers: { "x-regulait-webhook-secret": webhookSecret },
+      payload: { externalId: nodeExternalId, event: "deleted" },
+    });
+    expect(deleted.json().matched).toBe(true);
+    const links = await app.inject({
+      method: "GET",
+      headers: inboundAuth,
+      url: `/v1/pm/links?runId=${inboundRunId}`,
+    });
+    const link = links.json().links.find((l: { nodeId: string }) => l.nodeId === "n1");
+    expect(link.orphanedAt).not.toBeNull();
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: "/v1/audit" });
+    expect(
+      audit.json().entries.some((e: { ruleId: string }) => e.ruleId === "pm-link-orphaned"),
+    ).toBe(true);
+  });
+});
