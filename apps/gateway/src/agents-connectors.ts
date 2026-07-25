@@ -9,6 +9,7 @@ import {
   and,
   eq,
   modelCredentials,
+  projects,
   usageEvents,
   userModelCredentials,
   userAgentPolicies,
@@ -34,6 +35,7 @@ import {
 } from "@regulait/shared";
 import { z } from "zod";
 import { decryptSecret, encryptSecret } from "./secrets.js";
+import { postDispatchProjectAlert, preDispatchProjectGate } from "./projects.js";
 
 const userIdParam = z.object({ userId: z.string().uuid() });
 const agentIdParam = z.object({ agentId: z.string().uuid() });
@@ -54,6 +56,7 @@ export type DispatchOutcome =
         costUsd: number | null;
         measuredCostSavedUsd: number | null;
         credentialSource: "user" | "platform" | "none";
+        projectBudgetAlerted: boolean;
       };
     }
   | { ok: false; status: number; error: string; detail?: string };
@@ -78,6 +81,8 @@ export async function executeGovernedDispatch(
     /** system context (e.g. a nested run's signed-off workflow artifacts) */
     system?: string | undefined;
     maxTokens?: number | undefined;
+    /** pillar 5 attribution: the project this call bills to */
+    projectId?: string | null | undefined;
     detail?: Record<string, unknown>;
   },
 ): Promise<DispatchOutcome> {
@@ -90,6 +95,18 @@ export async function executeGovernedDispatch(
       detail: served
         ? `agent '${served.name}' needs a model id and a known provider (got provider '${served.provider}', model '${served.model ?? "none"}')`
         : "served agent not found in registry",
+    };
+  }
+
+  // PILLAR 5 enforcement: an attributed dispatch is gated on the project's
+  // measured budget BEFORE any provider work happens.
+  const projectGate = await preDispatchProjectGate(db, args.projectId ?? null, userId);
+  if (!projectGate.ok) {
+    return {
+      ok: false,
+      status: projectGate.status,
+      error: projectGate.error,
+      ...(projectGate.detail ? { detail: projectGate.detail } : {}),
     };
   }
 
@@ -178,8 +195,12 @@ export async function executeGovernedDispatch(
     stopReason: result.stopReason,
     refusal: result.refusal,
     providerMessageId: result.providerMessageId,
+    projectId: args.projectId ?? null,
     detail: { credentialSource, ...(args.detail ?? {}) },
   });
+  // first budget crossing is allowed (measured cost arrives after the call)
+  // but alerts immediately; the pre-gate blocks everything after it
+  const projectBudgetAlerted = await postDispatchProjectAlert(db, projectGate, userId, costUsd);
 
   return {
     ok: true,
@@ -193,6 +214,7 @@ export async function executeGovernedDispatch(
       costUsd,
       measuredCostSavedUsd,
       credentialSource,
+      projectBudgetAlerted,
     },
   };
 }
@@ -218,6 +240,7 @@ async function performDispatch(
     baseline: registry.find((a) => a.id === routing.baselineAgentId) ?? null,
     input: body.input ?? "",
     maxTokens: body.maxTokens,
+    projectId: body.projectId ?? null,
     detail: { mode: body.mode },
   });
 }
@@ -477,6 +500,13 @@ export function registerAgentConnectorRoutes(
     const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
     if (!agent) return reply.status(404).send({ error: "unknown_agent" });
 
+    // pillar 5: attribution must point at a real project — the ledgers are
+    // FK-free, so the gate is here at the entry point.
+    if (body.projectId) {
+      const [project] = await db.select().from(projects).where(eq(projects.id, body.projectId));
+      if (!project) return reply.status(400).send({ error: "invalid_reference" });
+    }
+
     const [grants, [policy]] = await Promise.all([
       db.select().from(agentGrants).where(eq(agentGrants.userId, userId)),
       db.select().from(userAgentPolicies).where(eq(userAgentPolicies.userId, userId)),
@@ -547,6 +577,7 @@ export function registerAgentConnectorRoutes(
         estimatedCostSavedUsd: routing.estimatedCostSavedUsd,
         estimationBasis: routing.estimationBasis,
         ruleId: routing.ruleId,
+        projectId: body.projectId ?? null,
         detail: { effect: routing.effect, complexity, mode: body.mode },
       });
 

@@ -60,6 +60,7 @@ export interface BuildAppOptions {
 import { z } from "zod";
 import { registerMcpProxy } from "./mcp-proxy.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
+import { applyProjectBudgetDecision, registerProjectRoutes } from "./projects.js";
 import { registerOptimizationRoutes } from "./optimization.js";
 import { applyRunApprovalDecision, registerOrchestrationRoutes } from "./orchestration.js";
 import { mirrorApprovalDecision, registerPmRoutes } from "./pm.js";
@@ -553,6 +554,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     if (updated.objectType === "run") {
       await applyRunApprovalDecision(db, updated, body.decision, deciderUserId, opts.dataKey);
     }
+    // Pillar 5 project-budget escalations: approve lifts enforcement.
+    if (updated.objectType === "project") {
+      await applyProjectBudgetDecision(db, updated, body.decision, deciderUserId);
+    }
     // EPIC-06 §5: sign-offs mirror to the linked work item — display only,
     // never a second decision point; a mirror failure never unwinds the
     // decision, it is surfaced in the response.
@@ -561,6 +566,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   });
 
   registerAgentConnectorRoutes(app, db, { dataKey: opts.dataKey });
+  registerProjectRoutes(app, db);
   registerOptimizationRoutes(app, db);
   registerOrchestrationRoutes(app, db, { dataKey: opts.dataKey });
   registerPmRoutes(app, db, { dataKey: opts.dataKey });

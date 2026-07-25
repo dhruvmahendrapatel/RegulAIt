@@ -86,7 +86,7 @@ export const auditLog = pgTable(
     at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
     userId: uuid("user_id").notNull(),
     objectType: text("object_type", {
-      enum: ["mcp_tool", "agent", "connector", "workflow", "run", "pm_work_item", "decision"],
+      enum: ["mcp_tool", "agent", "connector", "workflow", "run", "pm_work_item", "decision", "project"],
     })
       .notNull()
       .default("mcp_tool"),
@@ -154,7 +154,7 @@ export const approvals = pgTable(
     userId: uuid("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
-    objectType: text("object_type", { enum: ["mcp_tool", "workflow", "run"] })
+    objectType: text("object_type", { enum: ["mcp_tool", "workflow", "run", "project"] })
       .notNull()
       .default("mcp_tool"),
     serverId: uuid("server_id").references(() => mcpServers.id, { onDelete: "cascade" }),
@@ -163,6 +163,8 @@ export const approvals = pgTable(
     instanceId: uuid("instance_id"),
     /** orchestration-run escalations (§3): the run this approval gates; stageId carries the node id */
     runId: uuid("run_id"),
+    /** pillar 5 project-budget escalations */
+    projectId: uuid("project_id"),
     stageId: text("stage_id"),
     approverUserId: uuid("approver_user_id").notNull(),
     status: text("status", {
@@ -416,6 +418,8 @@ export const workflowInstances = pgTable(
       .references(() => users.id, { onDelete: "cascade" }),
     change: jsonb("change").notNull(),
     state: jsonb("state").notNull(),
+    /** PILLAR 5 attribution: nested runs and their dispatches inherit this */
+    projectId: uuid("project_id"),
     /** outputs of executed stages (branch, prId, prUrl, mergeSha, lastError) */
     context: jsonb("context").$type<Record<string, unknown>>().notNull().default({}),
     status: text("status").notNull(),
@@ -504,6 +508,8 @@ export const costEvents = pgTable(
     estimatedCostSavedUsd: doublePrecision("estimated_cost_saved_usd"),
     estimationBasis: text("estimation_basis").notNull(),
     ruleId: text("rule_id").notNull(),
+    /** PILLAR 5 attribution; FK-free like the rest of the ledger */
+    projectId: uuid("project_id"),
     detail: jsonb("detail"),
   },
   (t) => [
@@ -529,6 +535,8 @@ export const orchestrationRuns = pgTable(
     }),
     graph: jsonb("graph").notNull(),
     state: jsonb("state").notNull(),
+    /** PILLAR 5 attribution: every node dispatch of this run bills here */
+    projectId: uuid("project_id"),
     /** §5.2 budget envelope: cap, estimates, live estimated spend, overage approval */
     budget: jsonb("budget"),
     status: text("status", { enum: ["planned", "running", "completed", "aborted"] })
@@ -679,6 +687,8 @@ export const usageEvents = pgTable(
     stopReason: text("stop_reason").notNull(),
     refusal: boolean("refusal").notNull().default(false),
     providerMessageId: text("provider_message_id"),
+    /** PILLAR 5 attribution; FK-free like the rest of the ledger */
+    projectId: uuid("project_id"),
     detail: jsonb("detail"),
   },
   (t) => [index("usage_events_user_idx").on(t.userId, t.at)],
@@ -702,3 +712,22 @@ export const userModelCredentials = pgTable(
   },
   (t) => [uniqueIndex("user_model_credentials_user_provider_uq").on(t.userId, t.provider)],
 );
+
+// PILLAR 5: the cost-attribution object. Minimal on purpose — membership and
+// sharing semantics arrive with Shared Projects (pillar 4); until then any
+// authenticated caller may attribute spend to a project (noted, deferred).
+// A budget requires a named approver: enforcement escalates into the ONE
+// approvals queue and only that approver can sanction the overage.
+export const projects = pgTable("projects", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull().unique(),
+  /** chargeback/showback: the customer's own cost-center code */
+  costCenter: text("cost_center"),
+  budgetUsd: doublePrecision("budget_usd"),
+  budgetApproverUserId: uuid("budget_approver_user_id").references(() => users.id, {
+    onDelete: "set null",
+  }),
+  /** a decided __project_budget__ approval lifts enforcement for this project */
+  overageApproved: boolean("overage_approved").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});

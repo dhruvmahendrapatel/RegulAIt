@@ -25,7 +25,7 @@ import {
   type WorkflowDefinition,
   type WorkflowEvent,
 } from "@regulait/workflow-kernel";
-import { users, gitConnections, orchestrationRuns } from "@regulait/db";
+import { users, gitConnections, orchestrationRuns, projects } from "@regulait/db";
 import { resolveProvider, GitProviderError } from "@regulait/git-provider";
 import { validateGraph } from "@regulait/orchestration-kernel";
 import { planRun } from "./orchestration.js";
@@ -304,7 +304,7 @@ async function runGitExecutions(
           break; // run is planned/running — the stage waits for it
         }
       }
-      const planned = await planRun(db, instance.initiatorUserId, stage.run, instance.id);
+      const planned = await planRun(db, instance.initiatorUserId, stage.run, instance.id, instance.projectId ?? null);
       if (!planned.ok) {
         const error = `nested run rejected: ${JSON.stringify(planned.body)}`;
         context.lastError = `${stage.id}: ${error}`;
@@ -570,6 +570,10 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const ordered = templateIds.map((id) => templates.find((t) => t.id === id)!);
     const merged = mergeDefinitions(ordered.map((t) => t.definition as WorkflowDefinition));
 
+    if (body.projectId) {
+      const [project] = await db.select().from(projects).where(eq(projects.id, body.projectId));
+      if (!project) return reply.status(400).send({ error: "invalid_reference" });
+    }
     const [instance] = await db
       .insert(workflowInstances)
       .values({
@@ -577,6 +581,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
         definition: merged,
         initiatorUserId: userId,
         change: body.change,
+        projectId: body.projectId ?? null,
         state: initialState(merged),
         status: "running",
       })

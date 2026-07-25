@@ -4619,3 +4619,252 @@ describe("per-user model credentials (BYO key): user key wins, platform is the f
     expect(platformSrv.hits).toHaveLength(1); // untouched
   });
 });
+
+describe("per-project cost rollup (pillar 5): attribution, dashboard, budget enforcement", () => {
+  const mkNode = (id: string, agentId: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    title: `task ${id}`,
+    ownerAgentId: agentId,
+    mode: "execute",
+    estimate: { in: 1, out: 1 },
+    ...extra,
+  });
+
+  let tessaId: string;
+  let tessaAuth: { authorization: string };
+  let finnId: string;
+  let projWorkerId: string;
+  let atlasId: string;
+  let cappedId: string;
+
+  it("projects are created with chargeback fields; a budget requires a named approver", async () => {
+    const tessa = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email: "proj-tessa@example.com", displayName: "Proj Tessa" },
+    });
+    tessaId = tessa.json().id;
+    tessaAuth = await authFor(tessaId);
+    const finn = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email: "proj-finn@example.com", displayName: "Proj Finn" },
+    });
+    finnId = finn.json().id;
+
+    const noApprover = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/projects",
+      payload: { name: "bad-budget", budgetUsd: 100 },
+    });
+    expect(noApprover.statusCode).toBe(400);
+
+    const atlas = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/projects",
+      payload: { name: "atlas-migration", costCenter: "CC-1234" },
+    });
+    expect(atlas.statusCode).toBe(201);
+    atlasId = atlas.json().id;
+    expect(atlas.json().costCenter).toBe("CC-1234");
+
+    const capped = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/projects",
+      payload: { name: "capped-project", budgetUsd: 10, budgetApproverUserId: finnId },
+    });
+    expect(capped.statusCode).toBe(201);
+    cappedId = capped.json().id;
+  });
+
+  it("spend is attributed at every entry point: invoke, run, and workflow-nested run", async () => {
+    const agentRes = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/agents",
+      payload: {
+        name: "proj-worker", provider: "mock", tier: 0, modes: ["execute"],
+        costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-proj",
+      },
+    });
+    projWorkerId = agentRes.json().id;
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/grants/agents",
+      payload: { userId: tessaId, agentId: projWorkerId },
+    });
+
+    // unknown project is rejected at the entry point
+    const ghost = await app.inject({
+      method: "POST", headers: tessaAuth, url: `/v1/agents/${projWorkerId}/invoke`,
+      payload: { mode: "execute", input: "x", dispatch: true, projectId: "00000000-0000-0000-0000-000000000000" },
+    });
+    expect(ghost.statusCode).toBe(400);
+
+    // 1) direct invoke
+    const invoked = await app.inject({
+      method: "POST", headers: tessaAuth, url: `/v1/agents/${projWorkerId}/invoke`,
+      payload: { mode: "execute", input: "direct spend", dispatch: true, projectId: atlasId },
+    });
+    expect(invoked.statusCode).toBe(200);
+
+    // 2) standalone run
+    const run = await app.inject({
+      method: "POST", headers: tessaAuth, url: "/v1/runs",
+      payload: {
+        projectId: atlasId,
+        graph: {
+          run: "proj-run",
+          escalationApproverUserId: finnId,
+          nodes: [mkNode("a", projWorkerId)],
+        },
+      },
+    });
+    expect(run.statusCode).toBe(201);
+    await app.inject({
+      method: "POST", headers: tessaAuth, url: `/v1/runs/${run.json().id}/auto`,
+      payload: { acceptReviews: true },
+    });
+
+    // 3) workflow instance whose nested run inherits the project
+    const tpl = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/templates",
+      payload: {
+        name: "proj-nested",
+        definition: {
+          workflow: "proj-nested",
+          stages: [
+            { id: "intake", type: "trigger" },
+            {
+              id: "build", type: "automated_build",
+              run: {
+                run: "proj-nested-run",
+                escalationApproverUserId: finnId,
+                nodes: [mkNode("impl", projWorkerId)],
+              },
+            },
+          ],
+        },
+      },
+    });
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/assignment-rules",
+      payload: { templateId: tpl.json().id, changeType: "proj-nested-test" },
+    });
+    const started = await app.inject({
+      method: "POST", headers: tessaAuth, url: "/v1/workflows/instances",
+      payload: {
+        projectId: atlasId,
+        change: { description: "proj", paths: ["p.ts"], changeType: "proj-nested-test", environment: "staging" },
+      },
+    });
+    const instanceId = started.json().id;
+    const view = await app.inject({
+      method: "GET", headers: tessaAuth, url: `/v1/workflows/instances/${instanceId}`,
+    });
+    const nestedRunId = view.json().instance.context["runId:build"];
+    const nestedRun = await app.inject({ method: "GET", headers: tessaAuth, url: `/v1/runs/${nestedRunId}` });
+    expect(nestedRun.json().run.projectId).toBe(atlasId); // inheritance
+    await app.inject({
+      method: "POST", headers: tessaAuth, url: `/v1/runs/${nestedRunId}/auto`,
+      payload: { acceptReviews: true },
+    });
+
+    // the rollup sees all three, broken down for showback
+    const rollup = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/projects/${atlasId}/costs`,
+    });
+    expect(rollup.statusCode).toBe(200);
+    const body = rollup.json();
+    expect(body.measured.events).toBe(3);
+    expect(body.measured.costUsd).toBeGreaterThan(0);
+    expect(body.byUser).toHaveLength(1);
+    expect(body.byUser[0].userId).toBe(tessaId);
+    expect(body.byAgent[0]).toMatchObject({ agentId: projWorkerId, model: "mock-proj" });
+    // routing decisions carried attribution into the estimates ledger too
+    expect(
+      body.estimatedSavings.some((t: { technique: string }) => t.technique === "model_routing"),
+    ).toBe(true);
+    expect(body.budget.budgetUsd).toBeNull();
+    expect(body.forecast.projectedEomUsd).toBeGreaterThanOrEqual(body.budget.spentUsd);
+    expect(body.forecast.dailyRateUsd).toBeGreaterThan(0);
+
+    // the fleet list shows per-project spend
+    const list = await app.inject({ method: "GET", headers: AUTH, url: "/v1/projects" });
+    const atlasRow = list.json().projects.find((p: { id: string }) => p.id === atlasId);
+    expect(atlasRow.spentUsd).toBeCloseTo(body.measured.costUsd, 10);
+    expect(atlasRow.usageEvents).toBe(3);
+  });
+
+  it("crossing the project budget alerts once, blocks after, and resumes when the approver sanctions it", async () => {
+    const priceyRes = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/agents",
+      payload: {
+        name: "proj-pricey", provider: "mock", tier: 0, modes: ["execute"],
+        costPerMTokIn: 1_000_000, costPerMTokOut: 1_000_000, model: "mock-proj-pricey",
+      },
+    });
+    const priceyId = priceyRes.json().id;
+    // uma is granted ONLY the pricey agent, so routing cannot downgrade the
+    // request to a cheaper model and dodge the budget crossing
+    const uma = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email: "proj-uma@example.com", displayName: "Proj Uma" },
+    });
+    const umaId = uma.json().id;
+    const umaAuth = await authFor(umaId);
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/grants/agents",
+      payload: { userId: umaId, agentId: priceyId },
+    });
+
+    // first crossing: allowed, alerted into the one approvals queue
+    const first = await app.inject({
+      method: "POST", headers: umaAuth, url: `/v1/agents/${priceyId}/invoke`,
+      payload: { mode: "execute", input: "x".repeat(100), dispatch: true, projectId: cappedId },
+    });
+    expect(first.statusCode).toBe(200);
+    expect(first.json().dispatch.projectBudgetAlerted).toBe(true);
+
+    // everything after the crossing is blocked
+    const second = await app.inject({
+      method: "POST", headers: umaAuth, url: `/v1/agents/${priceyId}/invoke`,
+      payload: { mode: "execute", input: "small", dispatch: true, projectId: cappedId },
+    });
+    expect(second.statusCode).toBe(409);
+    expect(second.json().error).toBe("project_budget_exceeded");
+
+    const rollup = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/projects/${cappedId}/costs`,
+    });
+    expect(rollup.json().budget.overBudget).toBe(true);
+    expect(rollup.json().budget.remainingUsd).toBeLessThan(0);
+
+    // the named approver sanctions the overage → dispatch resumes
+    const finnAuth = await authFor(finnId);
+    const inbox = await app.inject({ method: "GET", headers: finnAuth, url: "/v1/approvals" });
+    const pending = inbox.json().approvals.find(
+      (a: { objectType: string; projectId: string | null; status: string }) =>
+        a.objectType === "project" && a.projectId === cappedId && a.status === "pending",
+    );
+    expect(pending).toBeDefined();
+    const decided = await app.inject({
+      method: "POST", headers: finnAuth, url: `/v1/approvals/${pending.id}/decide`,
+      payload: { decision: "approved" },
+    });
+    expect(decided.statusCode).toBe(200);
+
+    const third = await app.inject({
+      method: "POST", headers: umaAuth, url: `/v1/agents/${priceyId}/invoke`,
+      payload: { mode: "execute", input: "resumed", dispatch: true, projectId: cappedId },
+    });
+    expect(third.statusCode).toBe(200);
+    const after = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/projects/${cappedId}/costs`,
+    });
+    expect(after.json().budget.overageApproved).toBe(true);
+  });
+
+  it("the dashboard surface is admin-only and 404s on unknown projects", async () => {
+    const denied = await app.inject({
+      method: "GET", headers: tessaAuth, url: `/v1/projects/${atlasId}/costs`,
+    });
+    expect(denied.statusCode).toBe(403);
+    const missing = await app.inject({
+      method: "GET", headers: AUTH, url: "/v1/projects/00000000-0000-0000-0000-000000000000/costs",
+    });
+    expect(missing.statusCode).toBe(404);
+  });
+});

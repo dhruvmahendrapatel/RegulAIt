@@ -146,7 +146,24 @@ Anthropic Messages server: the real adapter's actual `x-api-key` header carries 
 key when one exists, falls back to the platform key when deleted, and precedence is restored
 on re-add. Not yet: streaming, multi-turn dispatch, openai/google/xai adapters.
 
-**EPIC-06 started — PM-tool integration first slice, 2026-07-25.** New
+**Pillar 5 lands — per-project cost dashboard rollup, 2026-07-25.** Migration 0018: a minimal
+`projects` entity (name, cost-center for chargeback, budget + named budget approver, overage
+flag — membership/sharing semantics deliberately deferred to pillar 4's Shared Projects; until
+then any authenticated caller may attribute, noted) plus FK-free `project_id` attribution
+columns on BOTH ledgers (cost_events estimates, usage_events actuals) and on
+runs/instances/approvals. **Attribution at the point of every gateway call**, exactly as the
+pillar demands: `projectId` on direct invokes (validated at entry), on run creation (every
+node dispatch bills to the run's project), and on workflow instances (nested runs inherit it —
+the whole Intake→build chain bills to one project). **Budget enforcement in the dispatch
+core**: measured spend at/over budget blocks further attributed dispatches (409) with the
+first crossing allowed-but-escalated into the ONE approvals queue (objectType "project",
+`__project_budget__`, named budget approver); the decide endpoint's approve lifts enforcement
+(audited), deny keeps it. **The dashboard**: `GET /v1/projects/:id/costs` (admin FinOps
+surface) — measured totals + tokens + measured savings, showback breakdowns by user and by
+agent/model, estimated-savings-by-technique from cost_events, budget-vs-actual
+(remaining/overBudget/overageApproved), and a labeled last-7-days run-rate forecast to end of
+month; `GET /v1/projects` lists per-project spend fleet-wide. Not yet: MCP-proxy cost-event
+attribution, per-project (rather than global) overage windows, membership-gated attribution.
 `packages/pm-provider` on the git-provider playbook (pillar 8, PM_TOOL_INTEGRATION_SPEC
 §2/§3/§6): neutral `PmProvider` interface (create/update/transition/comment/getWorkItem), the
 load-bearing FIELD MAPPING layer as pure zod-validated config with per-adapter defaults an

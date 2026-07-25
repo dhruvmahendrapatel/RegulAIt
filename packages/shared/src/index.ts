@@ -138,7 +138,20 @@ export const invokeAgentSchema = z.object({
    * keeps the decision-only behavior */
   dispatch: z.boolean().optional(),
   maxTokens: z.number().int().min(1).max(64_000).optional(),
+  /** pillar 5: attribute this call's cost to a project */
+  projectId: z.string().uuid().optional(),
 });
+
+export const createProjectSchema = z
+  .object({
+    name: z.string().min(1).max(200),
+    costCenter: z.string().min(1).max(100).nullable().optional(),
+    budgetUsd: z.number().positive().nullable().optional(),
+    budgetApproverUserId: z.string().uuid().nullable().optional(),
+  })
+  .refine((p) => p.budgetUsd == null || p.budgetApproverUserId != null, {
+    message: "a project budget requires a budgetApproverUserId",
+  });
 
 export const createModelCredentialSchema = z.object({
   provider: z.enum(["anthropic", "openai", "google", "xai"]),
@@ -187,6 +200,8 @@ export const createAssignmentRuleSchema = z
   });
 
 export const startInstanceSchema = z.object({
+  /** pillar 5: the instance and any nested runs bill to this project */
+  projectId: z.string().uuid().optional(),
   change: changeDescriptorSchema,
   /** admin-only explicit template pick, bypassing assignment rules */
   templateId: z.string().uuid().optional(),
@@ -213,6 +228,8 @@ export const createGitConnectionSchema = z.object({
 export const createRunSchema = z.object({
   graph: z.unknown(),
   workflowInstanceId: z.string().uuid().optional(),
+  /** pillar 5: every node dispatch of this run bills to this project */
+  projectId: z.string().uuid().optional(),
 });
 
 export const autoAdvanceSchema = z.object({
