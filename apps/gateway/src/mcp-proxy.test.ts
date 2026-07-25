@@ -5579,3 +5579,69 @@ describe("openai model adapter: the full governed pipeline over a second provide
     }
   });
 });
+
+describe("google model adapter: the full governed pipeline over a third provider", () => {
+  it("dispatch rides a google-provider agent end-to-end with measured usage", async () => {
+    const hits: Array<{ key: string | null; path: string }> = [];
+    const srv = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        hits.push({ key: (req.headers["x-goog-api-key"] as string) ?? null, path: req.url ?? "" });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          responseId: "resp-e2e",
+          candidates: [{ content: { role: "model", parts: [{ text: "gemini says hi" }] }, finishReason: "STOP" }],
+          usageMetadata: { promptTokenCount: 6, candidatesTokenCount: 3, totalTokenCount: 9 },
+        }));
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    const port = (srv.address() as { port: number }).port;
+
+    try {
+      const gia = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email: "goog-gia@example.com", displayName: "Goog Gia" },
+      });
+      const giaAuth = await authFor(gia.json().id);
+      const agentRes = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/agents",
+        payload: {
+          name: "goog-agent", provider: "google", tier: 1, modes: ["execute"],
+          costPerMTokIn: 1.25, costPerMTokOut: 10, model: "gemini-2.5-pro",
+        },
+      });
+      await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/grants/agents",
+        payload: { userId: gia.json().id, agentId: agentRes.json().id },
+      });
+      await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/model-credentials",
+        payload: { provider: "google", apiKey: "goog-platform-key", baseUrl: `http://127.0.0.1:${port}/v1beta` },
+      });
+
+      const res = await app.inject({
+        method: "POST", headers: giaAuth, url: `/v1/agents/${agentRes.json().id}/invoke`,
+        payload: { mode: "execute", input: "hello gemini", dispatch: true },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().dispatch.outputText).toBe("gemini says hi");
+      expect(res.json().dispatch.usage).toEqual({ inputTokens: 6, outputTokens: 3 });
+      expect(res.json().dispatch.credentialSource).toBe("platform");
+      expect(hits).toHaveLength(1);
+      expect(hits[0]!.key).toBe("goog-platform-key");
+      expect(hits[0]!.path).toContain("/models/gemini-2.5-pro:generateContent");
+
+      const ledger = await app.inject({
+        method: "GET", headers: AUTH, url: `/v1/usage-events?userId=${gia.json().id}`,
+      });
+      expect(ledger.json().events[0]).toMatchObject({
+        provider: "google", model: "gemini-2.5-pro", inputTokens: 6, outputTokens: 3,
+      });
+    } finally {
+      srv.closeAllConnections();
+      await new Promise<void>((r) => srv.close(() => r()));
+    }
+  });
+});

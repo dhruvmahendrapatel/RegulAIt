@@ -3,6 +3,7 @@ import {
   AnthropicProvider,
   MockModelProvider,
   ModelProviderError,
+  GoogleProvider,
   OpenAiProvider,
   resolveModelProvider,
 } from "./index.js";
@@ -114,14 +115,13 @@ describe("AnthropicProvider (injectable fetch, no network)", () => {
 
 describe("resolveModelProvider registry", () => {
   it("rejects interface-ready but unimplemented providers", () => {
-    for (const provider of ["google", "xai"] as const) {
-      expect(() => resolveModelProvider({ provider })).toThrowError(/not implemented/);
-    }
+    expect(() => resolveModelProvider({ provider: "xai" })).toThrowError(/not implemented/);
   });
 
-  it("anthropic and openai without an apiKey are rejected", () => {
-    expect(() => resolveModelProvider({ provider: "anthropic" })).toThrowError(/apiKey/);
-    expect(() => resolveModelProvider({ provider: "openai" })).toThrowError(/apiKey/);
+  it("real providers without an apiKey are rejected", () => {
+    for (const provider of ["anthropic", "openai", "google"] as const) {
+      expect(() => resolveModelProvider({ provider })).toThrowError(/apiKey/);
+    }
   });
 
   it("mock resolves to a shared instance and needs no key", () => {
@@ -289,5 +289,120 @@ describe("OpenAiProvider (injectable fetch, no network)", () => {
         }),
     });
     await expect(provider.dispatch({ model: "gpt-5", input: "x" })).rejects.toMatchObject({ status: 401 });
+  });
+});
+
+describe("GoogleProvider (raw injectable fetch, no network)", () => {
+  const geminiResponse = {
+    responseId: "resp-g1",
+    candidates: [
+      { content: { role: "model", parts: [{ text: "42" }] }, finishReason: "STOP" },
+    ],
+    usageMetadata: { promptTokenCount: 7, candidatesTokenCount: 2, totalTokenCount: 9 },
+  };
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+
+  it("sends a generateContent request and normalizes the response", async () => {
+    let captured: { url: string; headers: Record<string, string>; body: Record<string, unknown> } | null = null;
+    const provider = new GoogleProvider({
+      apiKey: "goog-key",
+      fetchImpl: async (url, init) => {
+        captured = {
+          url: String(url),
+          headers: (init?.headers ?? {}) as Record<string, string>,
+          body: JSON.parse(String(init?.body)),
+        };
+        return json(geminiResponse);
+      },
+    });
+    const result = await provider.dispatch({
+      model: "gemini-2.5-pro",
+      input: "what is 6*7?",
+      system: "answer tersely",
+      maxTokens: 64,
+    });
+    expect(captured!.url).toContain("/models/gemini-2.5-pro:generateContent");
+    expect(captured!.headers["x-goog-api-key"]).toBe("goog-key");
+    expect(captured!.body).toMatchObject({
+      contents: [{ role: "user", parts: [{ text: "what is 6*7?" }] }],
+      systemInstruction: { parts: [{ text: "answer tersely" }] },
+      generationConfig: { maxOutputTokens: 64 },
+    });
+    expect(result.outputText).toBe("42");
+    expect(result.stopReason).toBe("end_turn");
+    expect(result.usage).toEqual({ inputTokens: 7, outputTokens: 2 });
+    expect(result.providerMessageId).toBe("resp-g1");
+  });
+
+  it("SAFETY finishes and prompt blocks are refusals with suppressed content", async () => {
+    const safety = new GoogleProvider({
+      apiKey: "k",
+      fetchImpl: async () =>
+        json({
+          ...geminiResponse,
+          candidates: [{ content: { parts: [{ text: "partial" }] }, finishReason: "SAFETY" }],
+        }),
+    });
+    const refused = await safety.dispatch({ model: "gemini-2.5-pro", input: "x" });
+    expect(refused.refusal).toBe(true);
+    expect(refused.outputText).toBe("");
+
+    const blocked = new GoogleProvider({
+      apiKey: "k",
+      fetchImpl: async () =>
+        json({ promptFeedback: { blockReason: "SAFETY" }, usageMetadata: { promptTokenCount: 5 } }),
+    });
+    const b = await blocked.dispatch({ model: "gemini-2.5-pro", input: "x" });
+    expect(b.refusal).toBe(true);
+    expect(b.outputText).toBe("");
+
+    const truncated = new GoogleProvider({
+      apiKey: "k",
+      fetchImpl: async () =>
+        json({
+          ...geminiResponse,
+          candidates: [{ content: { parts: [{ text: "cut" }] }, finishReason: "MAX_TOKENS" }],
+        }),
+    });
+    expect((await truncated.dispatch({ model: "gemini-2.5-pro", input: "x" })).stopReason).toBe("max_tokens");
+  });
+
+  it("streams SSE chunks through onText and returns the complete result", async () => {
+    const chunk = (c: unknown) => "data: " + JSON.stringify(c) + "\n\n";
+    const sse =
+      chunk({ responseId: "resp-s1", candidates: [{ content: { parts: [{ text: "Hello " }] } }] }) +
+      chunk({ candidates: [{ content: { parts: [{ text: "world" }] }, finishReason: "STOP" }], usageMetadata: { promptTokenCount: 12, candidatesTokenCount: 5 } });
+    let streamUrl = "";
+    const provider = new GoogleProvider({
+      apiKey: "k",
+      fetchImpl: async (url) => {
+        streamUrl = String(url);
+        return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+      },
+    });
+    const deltas: string[] = [];
+    const result = await provider.dispatch({
+      model: "gemini-2.5-pro",
+      input: "greet",
+      onText: (d) => deltas.push(d),
+    });
+    expect(streamUrl).toContain(":streamGenerateContent?alt=sse");
+    expect(deltas).toEqual(["Hello ", "world"]);
+    expect(result.outputText).toBe("Hello world");
+    expect(result.stopReason).toBe("end_turn");
+    expect(result.usage).toEqual({ inputTokens: 12, outputTokens: 5 });
+    expect(result.providerMessageId).toBe("resp-s1");
+  });
+
+  it("wraps API errors as ModelProviderError with status", async () => {
+    const provider = new GoogleProvider({
+      apiKey: "bad",
+      fetchImpl: async () =>
+        json({ error: { code: 403, message: "API key not valid", status: "PERMISSION_DENIED" } }, 403),
+    });
+    await expect(provider.dispatch({ model: "gemini-2.5-pro", input: "x" })).rejects.toMatchObject({
+      status: 403,
+    });
   });
 });

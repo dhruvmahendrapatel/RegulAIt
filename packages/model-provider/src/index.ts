@@ -261,6 +261,136 @@ export class OpenAiProvider implements ModelProvider {
 }
 
 // ---------------------------------------------------------------------------
+// Google (Gemini) adapter — RAW fetch, deliberately: the unified
+// @google/genai SDK does not expose injectable fetch, and untestable network
+// code loses to plain REST (the git/pm adapters set this precedent). Same
+// neutral contract and refusal discipline as the SDK-based adapters.
+// ---------------------------------------------------------------------------
+
+export interface GoogleAdapterOptions {
+  apiKey: string;
+  /** override for BYOC/air-gapped bridges; default is the Gemini API */
+  baseUrl?: string | null;
+  fetchImpl?: typeof fetch;
+}
+
+const GOOGLE_DEFAULT_BASE = "https://generativelanguage.googleapis.com/v1beta";
+const GOOGLE_REFUSAL_REASONS = new Set(["SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII"]);
+
+interface GeminiChunk {
+  responseId?: string;
+  candidates?: Array<{
+    content?: { parts?: Array<{ text?: string }> };
+    finishReason?: string;
+  }>;
+  promptFeedback?: { blockReason?: string };
+  usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
+}
+
+function mapGoogleStop(finishReason: string | null | undefined): ModelDispatchResult["stopReason"] {
+  if (finishReason === "STOP") return "end_turn";
+  if (finishReason === "MAX_TOKENS") return "max_tokens";
+  if (finishReason && GOOGLE_REFUSAL_REASONS.has(finishReason)) return "refusal";
+  return "other";
+}
+
+export class GoogleProvider implements ModelProvider {
+  readonly kind = "google" as const;
+  private readonly apiKey: string;
+  private readonly base: string;
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(opts: GoogleAdapterOptions) {
+    this.apiKey = opts.apiKey;
+    this.base = (opts.baseUrl ?? GOOGLE_DEFAULT_BASE).replace(/\/$/, "");
+    this.fetchImpl = opts.fetchImpl ?? fetch;
+  }
+
+  async dispatch(req: ModelDispatchRequest): Promise<ModelDispatchResult> {
+    const maxTokens = req.maxTokens ?? DEFAULT_MAX_TOKENS;
+    const useStream = req.onText !== undefined || maxTokens > STREAM_THRESHOLD_TOKENS;
+    const method = useStream ? "streamGenerateContent?alt=sse" : "generateContent";
+    const res = await this.fetchImpl(
+      `${this.base}/models/${encodeURIComponent(req.model)}:${method}`,
+      {
+        method: "POST",
+        headers: { "x-goog-api-key": this.apiKey, "content-type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: req.input }] }],
+          ...(req.system ? { systemInstruction: { parts: [{ text: req.system }] } } : {}),
+          generationConfig: { maxOutputTokens: maxTokens },
+        }),
+      },
+    );
+    if (!res.ok) {
+      let message = res.statusText;
+      try {
+        const j = (await res.json()) as { error?: { message?: string } };
+        message = j.error?.message ?? message;
+      } catch {
+        /* non-JSON error body */
+      }
+      throw new ModelProviderError(`google dispatch failed: ${message}`, res.status);
+    }
+
+    let text = "";
+    let finishReason: string | null = null;
+    let blockReason: string | null = null;
+    let id: string | null = null;
+    let usage = { inputTokens: 0, outputTokens: 0 };
+    const absorb = (chunk: GeminiChunk) => {
+      id = id ?? chunk.responseId ?? null;
+      blockReason = blockReason ?? chunk.promptFeedback?.blockReason ?? null;
+      const candidate = chunk.candidates?.[0];
+      const delta = candidate?.content?.parts?.map((p) => p.text ?? "").join("") ?? "";
+      if (delta) {
+        text += delta;
+        req.onText?.(delta);
+      }
+      if (candidate?.finishReason) finishReason = candidate.finishReason;
+      if (chunk.usageMetadata) {
+        usage = {
+          inputTokens: chunk.usageMetadata.promptTokenCount ?? 0,
+          outputTokens: chunk.usageMetadata.candidatesTokenCount ?? 0,
+        };
+      }
+    };
+
+    if (useStream) {
+      // incremental SSE parse so onText fires as chunks arrive
+      const reader = res.body?.getReader();
+      if (!reader) throw new ModelProviderError("google dispatch failed: empty stream body");
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        for (;;) {
+          const nl = buffer.indexOf("\n");
+          if (nl === -1) break;
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (line.startsWith("data: ")) absorb(JSON.parse(line.slice(6)) as GeminiChunk);
+        }
+      }
+    } else {
+      absorb((await res.json()) as GeminiChunk);
+    }
+
+    const refusal = blockReason !== null || mapGoogleStop(finishReason) === "refusal";
+    return {
+      // a refusal's content must never be surfaced as an answer
+      outputText: refusal ? "" : text,
+      stopReason: refusal ? "refusal" : mapGoogleStop(finishReason),
+      refusal,
+      usage,
+      providerMessageId: id,
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Mock adapter — deterministic, in-memory, for tests and air-gapped
 // development. An input containing "<<refuse>>" produces a refusal so the
 // refusal path is testable end-to-end without a live model.
@@ -346,9 +476,17 @@ export function resolveModelProvider(
         baseUrl: config.baseUrl ?? null,
         ...(fetchImpl ? { fetchImpl } : {}),
       });
+    case "google":
+      if (!config.apiKey) {
+        throw new ModelProviderError("google requires an apiKey");
+      }
+      return new GoogleProvider({
+        apiKey: config.apiKey,
+        baseUrl: config.baseUrl ?? null,
+        ...(fetchImpl ? { fetchImpl } : {}),
+      });
     case "mock":
       return sharedMock;
-    case "google":
     case "xai":
       throw new ModelProviderError(
         `provider '${config.provider}' is interface-ready but its adapter is not implemented yet`,

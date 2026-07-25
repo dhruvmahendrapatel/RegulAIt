@@ -254,8 +254,17 @@ stay explicitly rejected. ZERO gateway changes were needed: credentials (platfor
 routing, budgets, attribution, and streaming all already key off the provider string — the
 e2e proves a `provider: "openai"` agent rides the whole governed pipeline against a local
 fake chat.completions server (real adapter, correct Bearer key on the wire, measured usage
-ledgered). Deferred: google/xai adapters, OpenAI Responses-API surface, per-provider
-tool-use.
+ledgered). **Google (Gemini) adapter, same day**: raw injectable
+fetch — DELIBERATELY not the unified `@google/genai` SDK, which exposes no fetch injection
+(untestable network code loses to plain REST; the git/pm adapters set the precedent) —
+`generateContent`/`streamGenerateContent?alt=sse` with `x-goog-api-key` auth, incremental SSE
+parsing feeding the same `onText` contract, finishReason mapping (STOP/MAX_TOKENS/SAFETY
+family → end_turn/max_tokens/refusal) plus `promptFeedback.blockReason` → refusal (input
+blocks and output filters both suppress content — same discipline). Registry now resolves
+anthropic + openai + google; only xai stays rejected. Zero gateway changes again — e2e rides
+a `provider: "google"` agent through the full pipeline against a local fake Gemini server
+(correct header key + path on the wire, measured usage ledgered). Deferred: xai adapter,
+OpenAI Responses-API surface, per-provider tool-use.
 
 **EPIC-06 started — PM-tool integration first slice, 2026-07-25.** New
 `packages/pm-provider` on the git-provider playbook (pillar 8, PM_TOOL_INTEGRATION_SPEC
