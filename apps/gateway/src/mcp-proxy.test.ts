@@ -5645,3 +5645,71 @@ describe("google model adapter: the full governed pipeline over a third provider
     }
   });
 });
+
+describe("xai model adapter: all four real providers ride the same governed pipeline", () => {
+  it("dispatch rides an xai-provider agent end-to-end with measured usage", async () => {
+    const hits: Array<{ auth: string | null }> = [];
+    const srv = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        hits.push({ auth: (req.headers.authorization as string) ?? null });
+        const parsed = JSON.parse(body || "{}");
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          id: "chatcmpl-xai-e2e",
+          object: "chat.completion",
+          created: 1,
+          model: parsed.model,
+          choices: [{ index: 0, message: { role: "assistant", content: "grok says hi", refusal: null }, finish_reason: "stop", logprobs: null }],
+          usage: { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 },
+        }));
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    const port = (srv.address() as { port: number }).port;
+
+    try {
+      const xen = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email: "xai-xen@example.com", displayName: "Xai Xen" },
+      });
+      const xenAuth = await authFor(xen.json().id);
+      const agentRes = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/agents",
+        payload: {
+          name: "xai-agent", provider: "xai", tier: 1, modes: ["execute"],
+          costPerMTokIn: 3, costPerMTokOut: 15, model: "grok-4",
+        },
+      });
+      await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/grants/agents",
+        payload: { userId: xen.json().id, agentId: agentRes.json().id },
+      });
+      await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/model-credentials",
+        payload: { provider: "xai", apiKey: "xai-platform-key", baseUrl: `http://127.0.0.1:${port}/v1` },
+      });
+
+      const res = await app.inject({
+        method: "POST", headers: xenAuth, url: `/v1/agents/${agentRes.json().id}/invoke`,
+        payload: { mode: "execute", input: "hello grok", dispatch: true },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().dispatch.outputText).toBe("grok says hi");
+      expect(res.json().dispatch.usage).toEqual({ inputTokens: 7, outputTokens: 3 });
+      expect(hits).toHaveLength(1);
+      expect(hits[0]!.auth).toBe("Bearer xai-platform-key");
+
+      const ledger = await app.inject({
+        method: "GET", headers: AUTH, url: `/v1/usage-events?userId=${xen.json().id}`,
+      });
+      expect(ledger.json().events[0]).toMatchObject({
+        provider: "xai", model: "grok-4", inputTokens: 7, outputTokens: 3,
+      });
+    } finally {
+      srv.closeAllConnections();
+      await new Promise<void>((r) => srv.close(() => r()));
+    }
+  });
+});

@@ -170,28 +170,21 @@ function mapOpenAiStop(finishReason: string | null | undefined): ModelDispatchRe
   return "other";
 }
 
-export class OpenAiProvider implements ModelProvider {
-  readonly kind = "openai" as const;
-  private readonly client: OpenAI;
-
-  constructor(opts: OpenAiAdapterOptions) {
-    this.client = new OpenAI({
-      apiKey: opts.apiKey,
-      ...(opts.baseUrl ? { baseURL: opts.baseUrl } : {}),
-      ...(opts.fetchImpl ? { fetch: opts.fetchImpl } : {}),
-      maxRetries: 2,
-    });
-  }
-
-  async dispatch(req: ModelDispatchRequest): Promise<ModelDispatchResult> {
-    const messages = [
+/** The chat-completions dispatch core, shared by every OpenAI-compatible
+ * provider (OpenAI itself, xAI). `label` only flavors error messages. */
+async function dispatchChatCompletions(
+  client: OpenAI,
+  req: ModelDispatchRequest,
+  label: string,
+): Promise<ModelDispatchResult> {
+  const messages = [
       ...(req.system ? [{ role: "system" as const, content: req.system }] : []),
       { role: "user" as const, content: req.input },
     ];
     const maxTokens = req.maxTokens ?? DEFAULT_MAX_TOKENS;
     try {
       if (req.onText !== undefined || maxTokens > STREAM_THRESHOLD_TOKENS) {
-        const stream = await this.client.chat.completions.create({
+        const stream = await client.chat.completions.create({
           model: req.model,
           max_completion_tokens: maxTokens,
           messages,
@@ -229,7 +222,7 @@ export class OpenAiProvider implements ModelProvider {
         };
       }
 
-      const res = await this.client.chat.completions.create({
+      const res = await client.chat.completions.create({
         model: req.model,
         max_completion_tokens: maxTokens,
         messages,
@@ -248,15 +241,58 @@ export class OpenAiProvider implements ModelProvider {
         },
         providerMessageId: res.id ?? null,
       };
-    } catch (err) {
-      if (err instanceof OpenAI.APIError) {
-        throw new ModelProviderError(
-          `openai dispatch failed: ${err.message}`,
-          typeof err.status === "number" ? err.status : undefined,
-        );
-      }
-      throw err;
+  } catch (err) {
+    if (err instanceof OpenAI.APIError) {
+      throw new ModelProviderError(
+        `${label} dispatch failed: ${err.message}`,
+        typeof err.status === "number" ? err.status : undefined,
+      );
     }
+    throw err;
+  }
+}
+
+export class OpenAiProvider implements ModelProvider {
+  readonly kind = "openai" as const;
+  private readonly client: OpenAI;
+
+  constructor(opts: OpenAiAdapterOptions) {
+    this.client = new OpenAI({
+      apiKey: opts.apiKey,
+      ...(opts.baseUrl ? { baseURL: opts.baseUrl } : {}),
+      ...(opts.fetchImpl ? { fetch: opts.fetchImpl } : {}),
+      maxRetries: 2,
+    });
+  }
+
+  dispatch(req: ModelDispatchRequest): Promise<ModelDispatchResult> {
+    return dispatchChatCompletions(this.client, req, "openai");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// xAI adapter — Grok speaks OpenAI-compatible chat completions, so this is
+// the shared core pointed at api.x.ai. Same contract, same refusal
+// discipline, same streaming accounting.
+// ---------------------------------------------------------------------------
+
+const XAI_DEFAULT_BASE = "https://api.x.ai/v1";
+
+export class XaiProvider implements ModelProvider {
+  readonly kind = "xai" as const;
+  private readonly client: OpenAI;
+
+  constructor(opts: OpenAiAdapterOptions) {
+    this.client = new OpenAI({
+      apiKey: opts.apiKey,
+      baseURL: opts.baseUrl ?? XAI_DEFAULT_BASE,
+      ...(opts.fetchImpl ? { fetch: opts.fetchImpl } : {}),
+      maxRetries: 2,
+    });
+  }
+
+  dispatch(req: ModelDispatchRequest): Promise<ModelDispatchResult> {
+    return dispatchChatCompletions(this.client, req, "xai");
   }
 }
 
@@ -485,11 +521,16 @@ export function resolveModelProvider(
         baseUrl: config.baseUrl ?? null,
         ...(fetchImpl ? { fetchImpl } : {}),
       });
+    case "xai":
+      if (!config.apiKey) {
+        throw new ModelProviderError("xai requires an apiKey");
+      }
+      return new XaiProvider({
+        apiKey: config.apiKey,
+        baseUrl: config.baseUrl ?? null,
+        ...(fetchImpl ? { fetchImpl } : {}),
+      });
     case "mock":
       return sharedMock;
-    case "xai":
-      throw new ModelProviderError(
-        `provider '${config.provider}' is interface-ready but its adapter is not implemented yet`,
-      );
   }
 }
