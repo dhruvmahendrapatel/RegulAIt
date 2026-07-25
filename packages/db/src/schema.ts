@@ -1,6 +1,7 @@
 import {
   integer,
   boolean,
+  doublePrecision,
   index,
   jsonb,
   pgTable,
@@ -304,6 +305,10 @@ export const agents = pgTable("agents", {
   tier: integer("tier").notNull(),
   modes: jsonb("modes").$type<string[]>(),
   enabled: boolean("enabled").notNull().default(true),
+  // OPTIMIZATION §7/§8: list price per million tokens; null = unpriced, the
+  // optimizer will never route toward (or estimate savings against) it.
+  costPerMTokIn: doublePrecision("cost_per_mtok_in"),
+  costPerMTokOut: doublePrecision("cost_per_mtok_out"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -330,6 +335,11 @@ export const userAgentPolicies = pgTable("user_agent_policies", {
     .references(() => users.id, { onDelete: "cascade" }),
   defaultAgentId: uuid("default_agent_id").references(() => agents.id, { onDelete: "set null" }),
   ceilingAgentId: uuid("ceiling_agent_id").references(() => agents.id, { onDelete: "set null" }),
+  // OPTIMIZATION §12: per-user off switch for model routing, admin-set on the
+  // existing agent-policy surface (no new admin object, per §13).
+  routingMode: text("routing_mode", { enum: ["automatic", "passthrough"] })
+    .notNull()
+    .default("automatic"),
 });
 
 // §2 connector catalog + per-user grants (mode + object-level data scope).
@@ -445,3 +455,44 @@ export const gitConnections = pgTable("git_connections", {
   tokenCiphertext: text("token_ciphertext").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+// OPTIMIZATION §7: the savings ledger — one row per optimization decision at
+// the interception point, per technique, dashboard-ready for pillar 5's
+// rollup. Like audit_log it carries no FKs: cost history must survive
+// user/agent deletion.
+export const costEvents = pgTable(
+  "cost_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+    userId: uuid("user_id").notNull(),
+    objectType: text("object_type", { enum: ["agent", "mcp_tool", "connector", "workflow"] })
+      .notNull()
+      .default("agent"),
+    objectId: uuid("object_id"),
+    technique: text("technique", {
+      enum: [
+        "model_routing",
+        "edit_vs_rewrite",
+        "context_compaction",
+        "file_preprocessing",
+        "prompt_caching",
+        "lazy_tool_loading",
+      ],
+    }).notNull(),
+    requestedAgentId: uuid("requested_agent_id"),
+    servedAgentId: uuid("served_agent_id"),
+    baselineAgentId: uuid("baseline_agent_id"),
+    estimatedTokensIn: integer("estimated_tokens_in").notNull().default(0),
+    estimatedTokensOut: integer("estimated_tokens_out").notNull().default(0),
+    estimatedTokensSaved: integer("estimated_tokens_saved").notNull().default(0),
+    estimatedCostSavedUsd: doublePrecision("estimated_cost_saved_usd"),
+    estimationBasis: text("estimation_basis").notNull(),
+    ruleId: text("rule_id").notNull(),
+    detail: jsonb("detail"),
+  },
+  (t) => [
+    index("cost_events_user_at_idx").on(t.userId, t.at),
+    index("cost_events_technique_idx").on(t.technique),
+  ],
+);

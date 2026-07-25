@@ -19,6 +19,7 @@ import {
   mergeDefinitions,
   transition,
   validateDefinition,
+  WorkflowStateError,
   type Effect,
   type InstanceState,
   type WorkflowDefinition,
@@ -55,7 +56,8 @@ async function applyEvent(
   instanceId: string,
   event: WorkflowEvent,
   actorUserId: string | null,
-): Promise<{ state: InstanceState; effects: Effect[] }> {
+  precondition?: (tx: Parameters<Parameters<Db["transaction"]>[0]>[0]) => Promise<boolean>,
+): Promise<{ state: InstanceState; effects: Effect[]; skipped?: boolean }> {
   // One transaction with the instance row locked: concurrent decisions,
   // re-opens, and aborts serialize instead of racing read-modify-write.
   return db.transaction(async (tx) => {
@@ -65,6 +67,9 @@ async function applyEvent(
       .where(eq(workflowInstances.id, instanceId))
       .for("update");
     if (!instance) throw new Error("instance disappeared");
+    if (precondition && !(await precondition(tx))) {
+      return { state: instance.state as InstanceState, effects: [], skipped: true };
+    }
 
     const def = instance.definition as WorkflowDefinition;
     const { state, effects } = transition(def, instance.state as InstanceState, event);
@@ -135,20 +140,30 @@ export async function applyWorkflowApprovalDecision(
     return;
   }
 
-  // All-must-approve: advance only when no pending rows remain for the stage.
-  // A stale or wrong-stage decision is rejected by the kernel's stage check.
-  const pending = await db
-    .select({ id: approvals.id })
-    .from(approvals)
-    .where(
-      and(
-        eq(approvals.instanceId, instanceId),
-        eq(approvals.stageId, stageId),
-        eq(approvals.status, "pending"),
-      ),
-    );
-  if (pending.length === 0) {
-    const r = await applyEvent(db, instanceId, { kind: "approval_granted", stageId }, deciderUserId);
+  // All-must-approve: the pending count is evaluated INSIDE applyEvent's
+  // instance lock, so a re-open that inserts fresh rows (or another approver)
+  // serializes with the grant instead of racing it. A stale or wrong-stage
+  // decision is additionally rejected by the kernel's stage check.
+  const r = await applyEvent(
+    db,
+    instanceId,
+    { kind: "approval_granted", stageId },
+    deciderUserId,
+    async (tx) => {
+      const pending = await tx
+        .select({ id: approvals.id })
+        .from(approvals)
+        .where(
+          and(
+            eq(approvals.instanceId, instanceId),
+            eq(approvals.stageId, stageId),
+            eq(approvals.status, "pending"),
+          ),
+        );
+      return pending.length === 0;
+    },
+  );
+  if (!r.skipped) {
     // an approval can unblock straight into a git stage (e.g. merge gate → merge)
     await runGitExecutions(db, instanceId, r.effects, deciderUserId, dataKey);
   }
@@ -175,15 +190,39 @@ async function runGitExecutions(
   let lastEffects = effects;
   while (pending.length > 0) {
     const effect = pending[0]! as Extract<Effect, { kind: "execute_stage" }>;
-    const [instance] = await db
-      .select()
-      .from(workflowInstances)
-      .where(eq(workflowInstances.id, instanceId));
-    if (!instance) break;
+
+    // Validate state and CLAIM the stage before any provider side effect: the
+    // instance must actually be awaiting execution of exactly this stage, and
+    // only one executor may hold the claim. A denied/aborted/completed
+    // instance or a stale/concurrent /advance never reaches the provider.
+    const claimed = await db.transaction(async (tx) => {
+      const [row] = await tx
+        .select()
+        .from(workflowInstances)
+        .where(eq(workflowInstances.id, instanceId))
+        .for("update");
+      if (!row || row.status !== "awaiting_execution") return null;
+      const rowDef = row.definition as WorkflowDefinition;
+      const rowState = row.state as InstanceState;
+      const current = rowDef.stages[rowState.currentStageIndex];
+      if (!current || current.id !== effect.stageId) return null;
+      const ctx = { ...(row.context as Record<string, unknown>) };
+      if (ctx.executing === effect.stageId) return null; // another executor holds it
+      ctx.executing = effect.stageId;
+      await tx.update(workflowInstances).set({ context: ctx }).where(eq(workflowInstances.id, row.id));
+      return { instance: { ...row, context: ctx } };
+    });
+    if (!claimed) {
+      throw new WorkflowStateError(
+        `git stage '${effect.stageId}' is not currently executable for this instance`,
+      );
+    }
+    const instance = claimed.instance;
     const def = instance.definition as WorkflowDefinition;
     const stage = def.stages.find((st) => st.id === effect.stageId)!;
     const context = { ...(instance.context as Record<string, unknown>) };
 
+    let executionError: string | null = null;
     try {
       if (!dataKey) throw new GitProviderError("gateway has no data key configured");
       const [conn] = await db
@@ -200,8 +239,14 @@ async function runGitExecutions(
       const change = instance.change as { description: string };
       if (stage.action === "create_branch") {
         const branch = `${stage.branchPrefix ?? "regulait"}/${instance.id.slice(0, 8)}`;
-        await provider.createBranch(stage.repo!, branch, stage.base ?? "main");
-        context.branch = branch;
+        // Idempotent replay (§2 re-open): if we already created this branch,
+        // re-execution succeeds without a provider call instead of 422ing forever.
+        if (context.branch !== branch) {
+          await provider.createBranch(stage.repo!, branch, stage.base ?? "main");
+          context.branch = branch;
+        }
+      } else if (stage.action === "open_pr" && context.prId !== undefined) {
+        // idempotent replay: PR already open for this instance
       } else if (stage.action === "open_pr") {
         // §2 stage 7: PR description auto-linked to the requirements artifact
         const [latestArtifact] = await db
@@ -226,7 +271,7 @@ ${latestArtifact.content}`
         });
         context.prId = pr.id;
         context.prUrl = pr.url;
-      } else if (stage.action === "merge") {
+      } else if (stage.action === "merge" && context.mergeSha === undefined) {
         const result = await provider.mergePullRequest(
           stage.repo!,
           String(context.prId ?? ""),
@@ -234,34 +279,38 @@ ${latestArtifact.content}`
         );
         context.mergeSha = result.sha;
       }
-      delete context.lastError;
-      await db
-        .update(workflowInstances)
-        .set({ context })
-        .where(eq(workflowInstances.id, instance.id));
-      const r = await applyEvent(
-        db,
-        instanceId,
-        { kind: "execution_succeeded", stageId: stage.id },
-        actorUserId,
-      );
-      lastEffects = r.effects;
-      pending = r.effects.filter((e) => e.kind === "execute_stage");
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      context.lastError = `${stage.id}: ${message}`;
-      await db
-        .update(workflowInstances)
-        .set({ context })
-        .where(eq(workflowInstances.id, instance.id));
+      executionError = err instanceof Error ? err.message : String(err);
+    }
+
+    // Release the claim; record outcome. The kernel event application sits
+    // OUTSIDE the provider try so a post-success DB hiccup is never recorded
+    // as a failed (and re-runnable) git operation.
+    delete context.executing;
+    if (executionError === null) delete context.lastError;
+    else context.lastError = `${stage.id}: ${executionError}`;
+    await db
+      .update(workflowInstances)
+      .set({ context })
+      .where(eq(workflowInstances.id, instance.id));
+
+    if (executionError !== null) {
       await applyEvent(
         db,
         instanceId,
-        { kind: "execution_failed", stageId: stage.id, error: message },
+        { kind: "execution_failed", stageId: stage.id, error: executionError },
         actorUserId,
       );
       break;
     }
+    const r = await applyEvent(
+      db,
+      instanceId,
+      { kind: "execution_succeeded", stageId: stage.id },
+      actorUserId,
+    );
+    lastEffects = r.effects;
+    pending = r.effects.filter((e) => e.kind === "execute_stage");
   }
   return lastEffects;
 }
@@ -447,8 +496,9 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       { kind: "artifact_submitted", stageId: body.stageId },
       req.authCtx.userId,
     );
-    await runGitExecutions(db, instance.id, effects, req.authCtx.userId, opts.dataKey);
     const version = state.artifactVersions[stage.output!]!;
+    // The artifact row must exist BEFORE any git stage runs — an open_pr
+    // directly downstream links this very version into the PR body.
     await db.insert(workflowArtifacts).values({
       instanceId,
       stageId: stage.id,
@@ -457,7 +507,12 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       content: body.content,
       createdBy: req.authCtx.userId!,
     });
-    return reply.status(201).send({ version, status: state.status });
+    await runGitExecutions(db, instance.id, effects, req.authCtx.userId, opts.dataKey);
+    const [fresh] = await db
+      .select({ status: workflowInstances.status })
+      .from(workflowInstances)
+      .where(eq(workflowInstances.id, instance.id));
+    return reply.status(201).send({ version, status: fresh!.status });
   });
 
   app.post("/v1/workflows/instances/:instanceId/advance", async (req, reply) => {

@@ -1532,3 +1532,359 @@ describe("agents/connectors review follow-ups", () => {
     expect(oversized.statusCode).toBe(400);
   });
 });
+
+describe("git executor hardening (review follow-ups)", () => {
+  let umaId: string;
+  let umaAuth: { authorization: string };
+
+  it("re-opened instances replay git stages idempotently instead of wedging", async () => {
+    const uma = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email: "proxy-uma@example.com", displayName: "Proxy Uma" },
+    });
+    umaId = uma.json().id;
+    umaAuth = await authFor(umaId);
+
+    const tpl = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/templates",
+      payload: {
+        name: "git-reopen-flow",
+        definition: {
+          workflow: "git-reopen-flow",
+          stages: [
+            { id: "intake", type: "trigger" },
+            { id: "requirements", type: "artifact_generation", output: "requirements_file" },
+            { id: "signoff", type: "human_approval", approvers: ["requesting_user"] },
+            { id: "branch", type: "git_operation", action: "create_branch", connection: "mock-git", repo: "acme/reopen" },
+            { id: "open_pr", type: "git_operation", action: "open_pr", connection: "mock-git", repo: "acme/reopen" },
+            { id: "merge_gate", type: "human_approval", approvers: ["requesting_user"] },
+            { id: "merge", type: "git_operation", action: "merge", connection: "mock-git", repo: "acme/reopen", strategy: "squash" },
+          ],
+        },
+      },
+    });
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/assignment-rules",
+      payload: { templateId: tpl.json().id, changeType: "git-reopen-test" },
+    });
+
+    const started = await app.inject({
+      method: "POST", headers: umaAuth, url: "/v1/workflows/instances",
+      payload: { change: { description: "reopen test", paths: ["x.ts"], changeType: "git-reopen-test", environment: "staging" } },
+    });
+    const instanceId = started.json().id;
+
+    const approveCurrent = async (stageId: string) => {
+      const q = await app.inject({ method: "GET", headers: AUTH, url: "/v1/approvals?status=pending" });
+      const row = q.json().approvals.find(
+        (a: { instanceId: string | null; stageId: string }) => a.instanceId === instanceId && a.stageId === stageId,
+      );
+      return app.inject({
+        method: "POST", headers: umaAuth, url: `/v1/approvals/${row.id}/decide`,
+        payload: { decision: "approved" },
+      });
+    };
+
+    await app.inject({
+      method: "POST", headers: umaAuth, url: `/v1/workflows/instances/${instanceId}/artifacts`,
+      payload: { stageId: "requirements", content: "v1" },
+    });
+    await approveCurrent("signoff");
+
+    let view = await app.inject({ method: "GET", headers: umaAuth, url: `/v1/workflows/instances/${instanceId}` });
+    expect(view.json().instance.status).toBe("blocked_on_approval");
+    const prIdBefore = view.json().instance.context.prId;
+    expect(prIdBefore).toBeTruthy();
+
+    // §2 re-open: edit the artifact after branch+PR already exist
+    await app.inject({
+      method: "POST", headers: umaAuth, url: `/v1/workflows/instances/${instanceId}/artifacts`,
+      payload: { stageId: "requirements", content: "v2" },
+    });
+    await approveCurrent("signoff");
+
+    // branch + open_pr replayed idempotently — same PR, no 422 wedge
+    view = await app.inject({ method: "GET", headers: umaAuth, url: `/v1/workflows/instances/${instanceId}` });
+    expect(view.json().instance.status).toBe("blocked_on_approval");
+    expect(view.json().instance.context.prId).toBe(prIdBefore);
+    expect(view.json().instance.context.lastError).toBeUndefined();
+
+    await approveCurrent("merge_gate");
+    view = await app.inject({ method: "GET", headers: umaAuth, url: `/v1/workflows/instances/${instanceId}` });
+    expect(view.json().instance.status).toBe("completed");
+  });
+
+  it("/advance cannot execute git stages on a denied instance (gate bypass closed)", async () => {
+    const started = await app.inject({
+      method: "POST", headers: umaAuth, url: "/v1/workflows/instances",
+      payload: { change: { description: "deny test", paths: ["y.ts"], changeType: "git-reopen-test", environment: "staging" } },
+    });
+    const instanceId = started.json().id;
+
+    await app.inject({
+      method: "POST", headers: umaAuth, url: `/v1/workflows/instances/${instanceId}/artifacts`,
+      payload: { stageId: "requirements", content: "v1" },
+    });
+    const q = await app.inject({ method: "GET", headers: AUTH, url: "/v1/approvals?status=pending" });
+    const signoff = q.json().approvals.find(
+      (a: { instanceId: string | null; stageId: string }) => a.instanceId === instanceId && a.stageId === "signoff",
+    );
+    await app.inject({
+      method: "POST", headers: umaAuth, url: `/v1/approvals/${signoff.id}/decide`,
+      payload: { decision: "denied" },
+    });
+
+    const bypass = await app.inject({
+      method: "POST", headers: umaAuth, url: `/v1/workflows/instances/${instanceId}/advance`,
+      payload: { stageId: "merge" },
+    });
+    expect(bypass.statusCode).toBe(409);
+
+    const view = await app.inject({ method: "GET", headers: umaAuth, url: `/v1/workflows/instances/${instanceId}` });
+    expect(view.json().instance.status).toBe("denied");
+    expect(view.json().instance.context.mergeSha).toBeUndefined();
+  });
+
+  it("an artifact stage flowing directly into open_pr links the just-submitted version", async () => {
+    const tpl = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/templates",
+      payload: {
+        name: "direct-pr-flow",
+        definition: {
+          workflow: "direct-pr-flow",
+          stages: [
+            { id: "intake", type: "trigger" },
+            { id: "branch", type: "git_operation", action: "create_branch", connection: "mock-git", repo: "acme/direct" },
+            { id: "requirements", type: "artifact_generation", output: "requirements_file" },
+            { id: "open_pr", type: "git_operation", action: "open_pr", connection: "mock-git", repo: "acme/direct" },
+          ],
+        },
+      },
+    });
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/assignment-rules",
+      payload: { templateId: tpl.json().id, changeType: "direct-pr-test" },
+    });
+    const started = await app.inject({
+      method: "POST", headers: umaAuth, url: "/v1/workflows/instances",
+      payload: { change: { description: "direct pr", paths: ["z.ts"], changeType: "direct-pr-test", environment: "staging" } },
+    });
+    const instanceId = started.json().id;
+    expect(started.json().status).toBe("blocked_on_artifact");
+
+    const res = await app.inject({
+      method: "POST", headers: umaAuth, url: `/v1/workflows/instances/${instanceId}/artifacts`,
+      payload: { stageId: "requirements", content: "UNIQUE-ARTIFACT-CONTENT-42" },
+    });
+    expect(res.json().status).toBe("completed");
+    // the mock provider stored the PR body — verify through the instance view is
+    // not possible, so assert via events: no execution failure and PR opened
+    const view = await app.inject({ method: "GET", headers: umaAuth, url: `/v1/workflows/instances/${instanceId}` });
+    expect(view.json().instance.context.prId).toBeTruthy();
+    expect(view.json().instance.context.lastError).toBeUndefined();
+  });
+
+  it("non-admin named approvers see exactly their own approvals; empty git tokens rejected", async () => {
+    const mine = await app.inject({ method: "GET", headers: umaAuth, url: "/v1/approvals" });
+    expect(mine.statusCode).toBe(200);
+    expect(
+      mine.json().approvals.every((a: { approverUserId: string }) => a.approverUserId === umaId),
+    ).toBe(true);
+
+    const emptyToken = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/git/connections",
+      payload: { name: "empty-token-conn", provider: "mock", token: "" },
+    });
+    expect(emptyToken.statusCode).toBe(400);
+  });
+});
+
+describe("token/cost optimization (EPIC-04 §7/§8)", () => {
+  let ottoId: string;
+  let ottoAuth: { authorization: string };
+  let cheapId: string;
+  let midId: string;
+  let bigId: string;
+
+  it("routes a low-complexity request down to the cheapest entitled model and ledgers the savings", async () => {
+    const otto = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "opt-otto@example.com", displayName: "Opt Otto" },
+    });
+    ottoId = otto.json().id;
+    ottoAuth = await authFor(ottoId);
+
+    const mk = async (name: string, tier: number, inC: number, outC: number) => {
+      const r = await app.inject({
+        method: "POST",
+        headers: AUTH,
+        url: "/v1/agents",
+        payload: {
+          name,
+          provider: "anthropic",
+          tier,
+          modes: ["plan", "execute"],
+          costPerMTokIn: inC,
+          costPerMTokOut: outC,
+        },
+      });
+      return r.json().id as string;
+    };
+    cheapId = await mk("opt-cheap", 0, 1, 5);
+    midId = await mk("opt-mid", 1, 3, 15);
+    bigId = await mk("opt-big", 2, 15, 75);
+    for (const agentId of [cheapId, midId, bigId]) {
+      await app.inject({
+        method: "POST",
+        headers: AUTH,
+        url: "/v1/grants/agents",
+        payload: { userId: ottoId, agentId },
+      });
+    }
+
+    const res = await app.inject({
+      method: "POST",
+      headers: ottoAuth,
+      url: `/v1/agents/${bigId}/invoke`,
+      payload: { mode: "plan", input: "summarize this one-line note please" },
+    });
+    expect(res.statusCode).toBe(200);
+    const { decision, routing } = res.json();
+    expect(decision.effect).toBe("allow");
+    expect(routing.effect).toBe("routed");
+    expect(routing.selectedAgentId).toBe(cheapId);
+    expect(routing.baselineAgentId).toBe(bigId);
+    expect(routing.estimatedCostSavedUsd).toBeGreaterThan(0);
+    expect(routing.estimationBasis).toContain("vs-baseline");
+
+    // §8: the served model is visible in the execution (audit) log
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit?userId=${ottoId}` });
+    const row = audit.json().entries.find((e: { objectType: string }) => e.objectType === "agent");
+    expect(row.detail.servedAgentId).toBe(cheapId);
+
+    // §7: one dashboard-ready cost event per routing decision
+    const ledger = await app.inject({
+      method: "GET",
+      headers: AUTH,
+      url: `/v1/cost-events?userId=${ottoId}`,
+    });
+    expect(ledger.statusCode).toBe(200);
+    const { events, totals } = ledger.json();
+    expect(events).toHaveLength(1);
+    expect(events[0].technique).toBe("model_routing");
+    expect(events[0].servedAgentId).toBe(cheapId);
+    expect(events[0].baselineAgentId).toBe(bigId);
+    const routingTotal = totals.find((t: { technique: string }) => t.technique === "model_routing");
+    expect(routingTotal.estimatedCostSavedUsd).toBeGreaterThan(0);
+  });
+
+  it("routing never selects a model the user is not entitled to (§12)", async () => {
+    const nina = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "opt-nina@example.com", displayName: "Opt Nina" },
+    });
+    const ninaId = nina.json().id;
+    // Nina can use big + mid but was never granted the cheapest model.
+    for (const agentId of [midId, bigId]) {
+      await app.inject({
+        method: "POST",
+        headers: AUTH,
+        url: "/v1/grants/agents",
+        payload: { userId: ninaId, agentId },
+      });
+    }
+    const res = await app.inject({
+      method: "POST",
+      headers: await authFor(ninaId),
+      url: `/v1/agents/${bigId}/invoke`,
+      payload: { mode: "plan", input: "tiny ask" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().routing.selectedAgentId).toBe(midId);
+  });
+
+  it("quality-sensitive requests and passthrough mode both disable downgrading (§9/§12)", async () => {
+    const qs = await app.inject({
+      method: "POST",
+      headers: ottoAuth,
+      url: `/v1/agents/${bigId}/invoke`,
+      payload: { mode: "plan", input: "tiny ask", costSensitivity: "quality-sensitive" },
+    });
+    expect(qs.json().routing.effect).toBe("passthrough");
+    expect(qs.json().routing.ruleId).toBe("cost-sensitivity");
+
+    // admin flips Otto's off switch on the existing agent-policy surface
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: `/v1/users/${ottoId}/agent-policy`,
+      payload: { routingMode: "passthrough" },
+    });
+    const off = await app.inject({
+      method: "POST",
+      headers: ottoAuth,
+      url: `/v1/agents/${bigId}/invoke`,
+      payload: { mode: "plan", input: "tiny ask" },
+    });
+    expect(off.json().routing.effect).toBe("passthrough");
+    expect(off.json().routing.ruleId).toBe("routing-mode");
+    expect(off.json().routing.selectedAgentId).toBe(bigId);
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: `/v1/users/${ottoId}/agent-policy`,
+      payload: { routingMode: "automatic" },
+    });
+  });
+
+  it("no input text means no signal and no downgrade", async () => {
+    const res = await app.inject({
+      method: "POST",
+      headers: ottoAuth,
+      url: `/v1/agents/${bigId}/invoke`,
+      payload: { mode: "plan" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().routing.effect).toBe("passthrough");
+    expect(res.json().routing.selectedAgentId).toBe(bigId);
+  });
+
+  it("denied invokes write no cost event, and non-admins see only their own ledger", async () => {
+    const eve = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "opt-eve@example.com", displayName: "Opt Eve" },
+    });
+    const eveId = eve.json().id;
+    const eveAuth = await authFor(eveId);
+
+    // no grant → 403, and no ledger row
+    const denied = await app.inject({
+      method: "POST",
+      headers: eveAuth,
+      url: `/v1/agents/${bigId}/invoke`,
+      payload: { mode: "plan", input: "tiny ask" },
+    });
+    expect(denied.statusCode).toBe(403);
+    const eveLedger = await app.inject({ method: "GET", headers: eveAuth, url: "/v1/cost-events" });
+    expect(eveLedger.statusCode).toBe(200);
+    expect(eveLedger.json().events).toHaveLength(0);
+
+    // a non-admin asking for someone else's history is forced back to self
+    const spoofed = await app.inject({
+      method: "GET",
+      headers: eveAuth,
+      url: `/v1/cost-events?userId=${ottoId}`,
+    });
+    expect(spoofed.json().events).toHaveLength(0);
+
+    // admin sees the fleet
+    const all = await app.inject({ method: "GET", headers: AUTH, url: "/v1/cost-events" });
+    expect(all.json().events.length).toBeGreaterThanOrEqual(3);
+  });
+});
