@@ -532,12 +532,12 @@ const TABS = [
     + "<h2>Add a connection</h2><div class='card'>"
     + form("f-pmconn", [
         {name:"name",ph:"e.g. demo-pm"},
-        {name:"provider",options:["mock","jira","azure_devops","linear"]},
+        {name:"provider",options:["mock","jira","azure_devops","linear","asana","monday","generic_webhook"]},
         {name:"project",ph:"e.g. REGULAIT-DEMO"},
-        {name:"baseUrl",label:"base url",req:false,ph:"required for jira / azure_devops"},
+        {name:"baseUrl",label:"base url",req:false,ph:"required for jira / azure_devops / generic_webhook"},
         {name:"token",type:"password",ph:"never shown again",grow:true},
       ], "Add connection")
-    + "<p class='dim' style='font-size:12px'>The select offers exactly the providers the registry can dispatch today — asana, monday and the generic webhook adapter are interface-ready but not yet implemented, so they are deliberately not offered. jira and azure_devops need their base URL (e.g. https://&lt;site&gt;.atlassian.net, https://dev.azure.com/&lt;org&gt;). The demo runs entirely on the mock provider — no external service is touched.</p></div>"
+    + "<p class='dim' style='font-size:12px'>Every provider kind is implemented — generic_webhook speaks RegulAIt's signed normalized event contract (HMAC-SHA256 of the body in <span class='mono'>x-regulait-signature</span>, under the connection token) to any HTTP receiver at its base URL. jira, azure_devops and generic_webhook need their base URL (e.g. https://&lt;site&gt;.atlassian.net, https://dev.azure.com/&lt;org&gt;, your receiver endpoint). The demo runs entirely on the mock provider — no external service is touched.</p></div>"
     + "<div id='pmreveal'></div>";
   wire("f-pmconn", async (d) => {
     const created = await post("/v1/pm/connections", d);

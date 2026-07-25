@@ -353,10 +353,47 @@ GraphQL `errors` arrays surface as explicit PmProviderErrors. Transitions resolv
 workflow states by name (explicit failure listing available states); Linear issues carry no
 native type, so the interface's `type` is accepted-and-ignored (documented). Default mapping
 maps title/description/priority with Linear's default state names; `blocked` unmapped again.
-Registry: azure_devops + jira + linear + mock; asana/monday/generic_webhook stay rejected.
 E2e: pm-sync + node_started mirror against a fake Linear GraphQL server (team resolution,
-issueCreate inputs, raw-token auth, and the stateId move all asserted). Deferred: remaining
-PM adapters, ADF descriptions, provider-native webhooks → the ADR-0010 normalized inbound
+issueCreate inputs, raw-token auth, and the stateId move all asserted). **Asana adapter,
+2026-07-25**: `AsanaProvider` speaks the REST API (`app.asana.com/api/1.0`, overridable,
+Bearer PAT auth) with Asana's `{data: ...}` envelope on every request/response; `project` is
+an Asana project GID and `type` is accepted-and-ignored (no native work-item types). Asana
+has no workflow states — `transitionState` resolves the PROJECT's board sections by name
+(exact then case-insensitive) and moves the task via `POST /sections/:gid/addTask`, failing
+explicit with the available section list; the separate `completed` flag is deliberately
+untouched (a section move is the literal board behaviour). `DEFAULT_MAPPINGS.asana` maps
+title→name, status→section, description→notes; `priority` AND `blocked` both unmapped (no
+native priority field, no default Blocked section — skip, never invent). getWorkItem reads
+section-as-state for the matching project membership and filters stories to real comments.
+E2e: pm-sync + node_started against a live-shaped fake Asana server (data envelopes, bearer
+token, projects array, section lookup + addTask all asserted on the wire). **monday.com
+adapter, same day**: GraphQL-only `MondayProvider` (`api.monday.com/v2`, overridable, raw
+API token) surfacing HTTP errors, `errors[]`, AND monday's top-level `error_message` as
+PmProviderErrors; `project` is a BOARD id, `type` accepted-and-ignored. Item URLs built as
+`${boardUrl}/pulses/${id}` from a once-per-board cached board-url lookup. Transitions live
+in the board's default Status COLUMN: settings_str labels parsed (cached per board), matched
+exact-then-case-insensitive, applied via change_simple_column_value — explicit failure
+listing available labels. `DEFAULT_MAPPINGS.monday` maps title→name, status→status with
+statusMap in_progress→"Working on it", done→"Done", and — per-provider reality — blocked→
+"Stuck" IS mapped (the default label ships); not_started/in_review/description/priority
+deliberately unmapped. Registry: azure_devops + jira + linear + asana + monday + mock;
+generic_webhook is now the SOLE rejected kind. E2e: pm-sync + node_started against a fake
+monday GraphQL server (raw token, board_id/item_name, columns lookup + change_simple_column_
+value with "Working on it" all asserted). **Generic webhook adapter, same day — the
+pillar-8 matrix is COMPLETE; no provider kind is rejected anymore** (the registry switch
+stays exhaustive so a future kind still forces a compile error). `GenericWebhookProvider`
+inverts the vendor pattern: it POSTs RegulAIt's OWN normalized envelope `{event, timestamp,
+project, payload}` (work_item.create/update/transition, comment.add, work_item.get — the
+outbound mirror of ADR-0010's inbound shape) to a single customer-defined baseUrl (required,
+used verbatim). The connection token is a shared secret used ONLY for signing —
+`x-regulait-signature: sha256=<hex HMAC-SHA256 of the exact body>`; the token never travels.
+Receiver contract: 2xx or explicit provider error; create must return a real {id, url}
+(missing id fails explicit, links are never invented); work_item.get returns the item so
+Sync-now verification works, and receivers without read-back fail loudly into the existing
+orphan flow. `DEFAULT_MAPPINGS.generic_webhook` is the IDENTITY map over all five canonical
+states including blocked — nothing invented because the vocabulary is ours. E2e: the fake
+receiver verifies the HMAC on every request and asserts the token never travels raw.
+Deferred: ADF descriptions, provider-native webhooks → the ADR-0010 normalized inbound
 shape.
 
 **EPIC-06 started — PM-tool integration first slice, 2026-07-25.** New

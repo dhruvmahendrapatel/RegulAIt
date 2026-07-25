@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createHmac } from "node:crypto";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6039,6 +6040,369 @@ describe("linear pm adapter: GraphQL run sync + state mirror end-to-end", () => 
       );
       expect(stateMove).toBeDefined();
       expect((stateMove!.variables.input as Record<string, unknown>).stateId).toBe("st-prog"); // → In Progress
+    } finally {
+      srv.closeAllConnections();
+      await new Promise<void>((r) => srv.close(() => r()));
+    }
+  });
+});
+
+describe("asana pm adapter: run sync + section mirror against a live-shaped server", () => {
+  it("pm-sync creates Asana tasks in the {data} envelope and node events mirror via section moves", async () => {
+    let taskSeq = 0;
+    const creations: Array<{ auth: string | null; body: Record<string, unknown>; gid: string }> = [];
+    const sectionLookups: string[] = [];
+    const sectionMoves: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const srv = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        const parsed = body ? JSON.parse(body) : {};
+        const send = (status: number, payload: unknown) => {
+          res.writeHead(status, { "content-type": "application/json" });
+          res.end(JSON.stringify(payload));
+        };
+        if (req.method === "POST" && req.url === "/tasks") {
+          taskSeq += 1;
+          const gid = String(1200 + taskSeq);
+          creations.push({ auth: (req.headers.authorization as string) ?? null, body: parsed, gid });
+          return send(201, { data: { gid, permalink_url: `https://app.asana.com/0/999/${gid}` } });
+        }
+        if (req.method === "GET" && /\/sections$/.test(req.url ?? "")) {
+          sectionLookups.push(req.url ?? "");
+          return send(200, { data: [
+            { gid: "sec-todo", name: "To do" },
+            { gid: "sec-prog", name: "In progress" },
+            { gid: "sec-done", name: "Done" },
+          ] });
+        }
+        if (req.method === "POST" && /\/addTask$/.test(req.url ?? "")) {
+          sectionMoves.push({ url: req.url ?? "", body: parsed });
+          return send(200, { data: {} });
+        }
+        return send(200, { data: {} });
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    const port = (srv.address() as { port: number }).port;
+
+    try {
+      const aria = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email: "asana-aria@example.com", displayName: "Asana Aria" },
+      });
+      const ariaAuth = await authFor(aria.json().id);
+      const approver = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email: "asana-approver@example.com", displayName: "Asana Approver" },
+      });
+      const agentRes = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/agents",
+        payload: {
+          name: "asana-worker", provider: "mock", tier: 0, modes: ["execute"],
+          costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-asana",
+        },
+      });
+      await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/grants/agents",
+        payload: { userId: aria.json().id, agentId: agentRes.json().id },
+      });
+      const conn = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/pm/connections",
+        payload: {
+          name: "asana-e2e", provider: "asana", project: "999",
+          baseUrl: `http://127.0.0.1:${port}`, token: "asana-pat-e2e",
+        },
+      });
+      expect(conn.statusCode).toBe(201);
+
+      const run = await app.inject({
+        method: "POST", headers: ariaAuth, url: "/v1/runs",
+        payload: {
+          graph: {
+            run: "asana-sync-run",
+            escalationApproverUserId: approver.json().id,
+            nodes: [{ id: "a", title: "wire adapter", ownerAgentId: agentRes.json().id, mode: "execute", estimate: { in: 1, out: 1 } }],
+          },
+        },
+      });
+      const runId = run.json().id;
+
+      const synced = await app.inject({
+        method: "POST", headers: ariaAuth, url: `/v1/runs/${runId}/pm-sync`,
+        payload: { connectionName: "asana-e2e" },
+      });
+      expect(synced.statusCode).toBe(201);
+      // run-level parent + one node item, created with the mapped `name` field
+      // inside Asana's {data} envelope and the project GID in `projects`
+      expect(creations.length).toBe(2);
+      expect(creations[0]!.auth).toBe("Bearer asana-pat-e2e");
+      const nodeTask = creations.find(
+        (c) => (c.body.data as Record<string, unknown>).name === "wire adapter",
+      );
+      expect(nodeTask).toBeDefined();
+      expect((nodeTask!.body.data as Record<string, unknown>).projects).toEqual(["999"]);
+
+      // a node event mirrors outbound as a board-section move: sections are
+      // looked up on the project, then the task is added to the matching one
+      await app.inject({ method: "POST", headers: ariaAuth, url: `/v1/runs/${runId}/events`, payload: { kind: "start" } });
+      const started = await app.inject({
+        method: "POST", headers: ariaAuth, url: `/v1/runs/${runId}/events`,
+        payload: { kind: "node_started", nodeId: "a" },
+      });
+      expect(started.statusCode).toBe(200);
+      expect(sectionLookups).toContain("/projects/999/sections");
+      expect(sectionMoves.length).toBe(1);
+      expect(sectionMoves[0]!.url).toBe("/sections/sec-prog/addTask"); // → In progress
+      expect(sectionMoves[0]!.body).toEqual({ data: { task: nodeTask!.gid } });
+    } finally {
+      srv.closeAllConnections();
+      await new Promise<void>((r) => srv.close(() => r()));
+    }
+  });
+});
+
+describe("monday pm adapter: GraphQL run sync + status-label mirror end-to-end", () => {
+  it("pm-sync creates monday items via create_item and node events mirror via Status column labels", async () => {
+    let itemSeq = 0;
+    const gqlCalls: Array<{ auth: string | null; query: string; variables: Record<string, unknown> }> = [];
+    const creations: Array<{ auth: string | null; variables: Record<string, unknown>; id: string }> = [];
+    const srv = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        const parsed = JSON.parse(body || "{}");
+        const call = {
+          auth: (req.headers.authorization as string) ?? null,
+          query: String(parsed.query ?? ""),
+          variables: (parsed.variables ?? {}) as Record<string, unknown>,
+        };
+        gqlCalls.push(call);
+        let data: unknown = {};
+        if (call.query.includes("create_item")) {
+          itemSeq += 1;
+          const id = String(500 + itemSeq);
+          creations.push({ auth: call.auth, variables: call.variables, id });
+          data = { create_item: { id } };
+        } else if (call.query.includes("columns")) {
+          data = { boards: [{ columns: [
+            { id: "name", type: "name", settings_str: "{}" },
+            { id: "status", type: "status", settings_str: JSON.stringify({ labels: { "0": "Working on it", "1": "Done", "2": "Stuck" } }) },
+          ] }] };
+        } else if (call.query.includes("boards(ids")) {
+          data = { boards: [{ url: "https://acme.monday.com/boards/777" }] };
+        } else if (call.query.includes("change_simple_column_value")) {
+          data = { change_simple_column_value: { id: "x" } };
+        } else if (call.query.includes("change_multiple_column_values")) {
+          data = { change_multiple_column_values: { id: "x" } };
+        } else if (call.query.includes("create_update")) {
+          data = { create_update: { id: "u" } };
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ data }));
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    const port = (srv.address() as { port: number }).port;
+
+    try {
+      const mona = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email: "monday-mona@example.com", displayName: "Monday Mona" },
+      });
+      const monaAuth = await authFor(mona.json().id);
+      const approver = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email: "monday-approver@example.com", displayName: "Monday Approver" },
+      });
+      const agentRes = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/agents",
+        payload: {
+          name: "monday-worker", provider: "mock", tier: 0, modes: ["execute"],
+          costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-monday",
+        },
+      });
+      await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/grants/agents",
+        payload: { userId: mona.json().id, agentId: agentRes.json().id },
+      });
+      const conn = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/pm/connections",
+        payload: {
+          name: "monday-e2e", provider: "monday", project: "777",
+          baseUrl: `http://127.0.0.1:${port}`, token: "monday-e2e-token",
+        },
+      });
+      expect(conn.statusCode).toBe(201);
+
+      const run = await app.inject({
+        method: "POST", headers: monaAuth, url: "/v1/runs",
+        payload: {
+          graph: {
+            run: "monday-sync-run",
+            escalationApproverUserId: approver.json().id,
+            nodes: [{ id: "a", title: "roll out board", ownerAgentId: agentRes.json().id, mode: "execute", estimate: { in: 1, out: 1 } }],
+          },
+        },
+      });
+      const runId = run.json().id;
+
+      const synced = await app.inject({
+        method: "POST", headers: monaAuth, url: `/v1/runs/${runId}/pm-sync`,
+        payload: { connectionName: "monday-e2e" },
+      });
+      expect(synced.statusCode).toBe(201);
+      // run-level parent + one node item, created via create_item with the
+      // raw api token, the board id, and the mapped `name` as item_name
+      expect(creations.length).toBe(2);
+      expect(creations[0]!.auth).toBe("monday-e2e-token");
+      const nodeItem = creations.find((c) => c.variables.name === "roll out board");
+      expect(nodeItem).toBeDefined();
+      expect(nodeItem!.variables.board).toBe("777");
+      const createCall = gqlCalls.find((c) => c.query.includes("create_item"))!;
+      expect(createCall.query).toContain("create_item(board_id: $board, item_name: $name)");
+
+      // a node event mirrors outbound as a status-label change: the board's
+      // columns are looked up for the Status column, then the label is set
+      await app.inject({ method: "POST", headers: monaAuth, url: `/v1/runs/${runId}/events`, payload: { kind: "start" } });
+      const started = await app.inject({
+        method: "POST", headers: monaAuth, url: `/v1/runs/${runId}/events`,
+        payload: { kind: "node_started", nodeId: "a" },
+      });
+      expect(started.statusCode).toBe(200);
+      expect(gqlCalls.some((c) => c.query.includes("columns { id type settings_str }"))).toBe(true);
+      const labelMove = gqlCalls.find((c) => c.query.includes("change_simple_column_value"));
+      expect(labelMove).toBeDefined();
+      expect(labelMove!.variables).toEqual({
+        board: "777", item: nodeItem!.id, column: "status", value: "Working on it",
+      });
+    } finally {
+      srv.closeAllConnections();
+      await new Promise<void>((r) => srv.close(() => r()));
+    }
+  });
+});
+
+describe("generic webhook pm adapter: signed normalized events end-to-end", () => {
+  it("pm-sync creates items via signed work_item.create envelopes and node events mirror as work_item.transition", async () => {
+    const TOKEN = "generic-e2e-token";
+    let itemSeq = 0;
+    // the fake receiver VERIFIES the HMAC signature of every request body
+    // under the connection token before recording the event
+    const events: Array<{
+      event: string;
+      project: string;
+      payload: Record<string, unknown>;
+      signatureValid: boolean;
+      rawTokenPresent: boolean;
+    }> = [];
+    const creations: Array<{ payload: Record<string, unknown>; id: string }> = [];
+    const srv = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        const parsed = JSON.parse(body || "{}") as {
+          event?: string;
+          project?: string;
+          payload?: Record<string, unknown>;
+        };
+        const expected = "sha256=" + createHmac("sha256", TOKEN).update(body).digest("hex");
+        events.push({
+          event: String(parsed.event ?? ""),
+          project: String(parsed.project ?? ""),
+          payload: parsed.payload ?? {},
+          signatureValid: req.headers["x-regulait-signature"] === expected,
+          // the token is a signing secret — it must never travel raw
+          rawTokenPresent: req.headers.authorization !== undefined || body.includes(TOKEN),
+        });
+        let out: unknown = {};
+        if (parsed.event === "work_item.create") {
+          itemSeq += 1;
+          const id = String(900 + itemSeq);
+          creations.push({ payload: parsed.payload ?? {}, id });
+          out = { id, url: `https://pm-bridge.example/items/${id}` };
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(out));
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    const port = (srv.address() as { port: number }).port;
+
+    try {
+      const gina = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email: "webhook-gina@example.com", displayName: "Webhook Gina" },
+      });
+      const ginaAuth = await authFor(gina.json().id);
+      const approver = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email: "webhook-approver@example.com", displayName: "Webhook Approver" },
+      });
+      const agentRes = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/agents",
+        payload: {
+          name: "webhook-worker", provider: "mock", tier: 0, modes: ["execute"],
+          costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-webhook",
+        },
+      });
+      await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/grants/agents",
+        payload: { userId: gina.json().id, agentId: agentRes.json().id },
+      });
+      const conn = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/pm/connections",
+        payload: {
+          name: "webhook-e2e", provider: "generic_webhook", project: "bridge-proj",
+          baseUrl: `http://127.0.0.1:${port}/regulait`, token: TOKEN,
+        },
+      });
+      expect(conn.statusCode).toBe(201);
+
+      const run = await app.inject({
+        method: "POST", headers: ginaAuth, url: "/v1/runs",
+        payload: {
+          graph: {
+            run: "webhook-sync-run",
+            escalationApproverUserId: approver.json().id,
+            nodes: [{ id: "a", title: "wire the bridge", ownerAgentId: agentRes.json().id, mode: "execute", estimate: { in: 1, out: 1 } }],
+          },
+        },
+      });
+      const runId = run.json().id;
+
+      const synced = await app.inject({
+        method: "POST", headers: ginaAuth, url: `/v1/runs/${runId}/pm-sync`,
+        payload: { connectionName: "webhook-e2e" },
+      });
+      expect(synced.statusCode).toBe(201);
+      // run-level parent + one node item, each a signed work_item.create
+      // envelope carrying the identity mapping's own vocabulary
+      expect(creations.length).toBe(2);
+      expect(events.filter((e) => e.event === "work_item.create")).toHaveLength(2);
+      const nodeItem = creations.find(
+        (c) => (c.payload.fields as Record<string, unknown> | undefined)?.title === "wire the bridge",
+      );
+      expect(nodeItem).toBeDefined();
+      expect(nodeItem!.payload.type).toBe("task");
+      expect(events[0]!.project).toBe("bridge-proj");
+
+      // a node event mirrors outbound as a work_item.transition envelope with
+      // RegulAIt's own status — the identity map at work, no translation
+      await app.inject({ method: "POST", headers: ginaAuth, url: `/v1/runs/${runId}/events`, payload: { kind: "start" } });
+      const started = await app.inject({
+        method: "POST", headers: ginaAuth, url: `/v1/runs/${runId}/events`,
+        payload: { kind: "node_started", nodeId: "a" },
+      });
+      expect(started.statusCode).toBe(200);
+      const transition = events.find((e) => e.event === "work_item.transition");
+      expect(transition).toBeDefined();
+      expect(transition!.payload).toEqual({ id: nodeItem!.id, state: "in_progress" });
+
+      // every request that arrived was correctly signed and never leaked the token
+      expect(events.length).toBeGreaterThanOrEqual(3);
+      expect(events.every((e) => e.signatureValid)).toBe(true);
+      expect(events.some((e) => e.rawTokenPresent)).toBe(false);
     } finally {
       srv.closeAllConnections();
       await new Promise<void>((r) => srv.close(() => r()));

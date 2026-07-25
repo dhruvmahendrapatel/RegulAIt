@@ -2,10 +2,12 @@
  * @regulait/pm-provider — pillar 8's provider abstraction (EPIC-06,
  * PM_TOOL_INTEGRATION_SPEC §2/§3/§6).
  *
- * Follows the git-provider playbook: a neutral interface, one real adapter
- * (Azure DevOps, REST with injectable fetch), an in-memory mock for tests and
- * air-gapped development, and a registry that explicitly rejects adapters
- * that are interface-ready but not implemented — no silent promises.
+ * Follows the git-provider playbook: a neutral interface, real adapters for
+ * every declared kind (Azure DevOps, Jira, Linear, Asana, monday.com, and a
+ * generic webhook receiver — all with injectable fetch), an in-memory mock
+ * for tests and air-gapped development, and a registry whose switch stays
+ * exhaustive over the kind union — a future new kind forces a compile error
+ * instead of a silent promise.
  *
  * The load-bearing part (per §1/§7) is the FIELD MAPPING layer: every adapter
  * ships a default mapping an admin can override, and the resolver that turns
@@ -20,6 +22,7 @@
  * never invented.
  */
 
+import { createHmac } from "node:crypto";
 import { z } from "zod";
 
 export const PM_PROVIDER_KINDS = [
@@ -189,6 +192,60 @@ export const DEFAULT_MAPPINGS: Partial<Record<PmProviderKind, PmMapping>> = {
         in_progress: "In Progress",
         in_review: "In Progress",
         done: "Done",
+      },
+    },
+  },
+  asana: {
+    task: {
+      workItemType: "Task",
+      fields: { title: "name", status: "section", description: "notes" },
+      // Asana has no built-in priority field (custom fields only) and default
+      // boards have no Blocked section — 'priority' and 'blocked' are
+      // deliberately unmapped (skip, never invent).
+      statusMap: {
+        not_started: "To do",
+        in_progress: "In progress",
+        in_review: "In progress",
+        done: "Done",
+      },
+    },
+  },
+  monday: {
+    task: {
+      workItemType: "Item",
+      fields: { title: "name", status: "status" },
+      // monday's default Status column ships exactly "Working on it" / "Done" /
+      // "Stuck", so 'blocked' IS mapped here; 'not_started' and 'in_review'
+      // have no default labels, and monday has no native description/priority
+      // fields (long-text columns are per-board custom) — all deliberately
+      // unmapped (skip, never invent).
+      statusMap: {
+        in_progress: "Working on it",
+        done: "Done",
+        blocked: "Stuck",
+      },
+    },
+  },
+  generic_webhook: {
+    task: {
+      workItemType: "task",
+      fields: {
+        title: "title",
+        status: "status",
+        description: "description",
+        priority: "priority",
+      },
+      // The generic receiver speaks RegulAIt's OWN canonical vocabulary, so
+      // the default mapping is the identity: every field keeps its name and
+      // ALL five node statuses — blocked included — map to themselves.
+      // Nothing is skipped and nothing is invented, because the vocabulary
+      // is ours to begin with.
+      statusMap: {
+        not_started: "not_started",
+        in_progress: "in_progress",
+        in_review: "in_review",
+        blocked: "blocked",
+        done: "done",
       },
     },
   },
@@ -624,6 +681,443 @@ export class LinearProvider implements PmProvider {
 }
 
 // ---------------------------------------------------------------------------
+// Asana adapter — REST 1.0, Bearer PAT auth, injectable fetch. Every request
+// and response body travels in Asana's { data: ... } envelope. The
+// interface's `project` is an Asana PROJECT GID; board columns are sections
+// within that project, so transitionState resolves the section by name and
+// moves the task, failing explicit with the available list. The `type`
+// argument is accepted but Asana tasks carry no native work-item type —
+// documented, ignored.
+// ---------------------------------------------------------------------------
+
+export interface AsanaAdapterOptions {
+  /** an Asana personal access token, sent as a Bearer Authorization header */
+  token: string;
+  /** override for testing/bridges; default https://app.asana.com/api/1.0 */
+  baseUrl?: string | null;
+  fetchImpl?: FetchLike;
+}
+
+const ASANA_DEFAULT_BASE = "https://app.asana.com/api/1.0";
+
+export class AsanaProvider implements PmProvider {
+  readonly kind = "asana" as const;
+  private readonly base: string;
+  private readonly auth: string;
+  private readonly fetchImpl: FetchLike;
+
+  constructor(opts: AsanaAdapterOptions) {
+    this.base = (opts.baseUrl ?? ASANA_DEFAULT_BASE).replace(/\/$/, "");
+    this.auth = `Bearer ${opts.token}`;
+    this.fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
+  }
+
+  private async request(method: string, path: string, body?: unknown): Promise<unknown> {
+    const res = await this.fetchImpl(`${this.base}${path}`, {
+      method,
+      headers: {
+        authorization: this.auth,
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify({ data: body }) }),
+    });
+    if (res.status >= 400) {
+      throw new PmProviderError(`asana ${method} ${path} failed: ${await res.text()}`, res.status);
+    }
+    const text = await res.text();
+    if (!text) return null;
+    return (JSON.parse(text) as { data?: unknown }).data ?? null;
+  }
+
+  async createWorkItem(
+    project: string,
+    _type: string,
+    fields: Record<string, unknown>,
+  ): Promise<WorkItemRef> {
+    const task = (await this.request("POST", "/tasks", {
+      ...fields,
+      projects: [project],
+    })) as { gid: string; permalink_url?: string };
+    return {
+      id: String(task.gid),
+      url: task.permalink_url ?? `https://app.asana.com/0/${project}/${task.gid}`,
+    };
+  }
+
+  async updateFields(_project: string, id: string, fields: Record<string, unknown>): Promise<void> {
+    await this.request("PUT", `/tasks/${id}`, fields);
+  }
+
+  /** Board columns are sections within the project: resolve the section by
+   * name (exact, then case-insensitive) and move the task there. The separate
+   * `completed` flag is a different axis — a section move is the literal
+   * board behaviour, so completion is deliberately left untouched. */
+  async transitionState(project: string, id: string, state: string): Promise<void> {
+    const sections = (await this.request("GET", `/projects/${project}/sections`)) as Array<{
+      gid: string;
+      name: string;
+    }>;
+    const match =
+      sections.find((s) => s.name === state) ??
+      sections.find((s) => s.name.toLowerCase() === state.toLowerCase());
+    if (!match) {
+      const names = sections.map((s) => s.name).join(", ") || "none";
+      throw new PmProviderError(`asana project has no section '${state}' (available: ${names})`);
+    }
+    await this.request("POST", `/sections/${match.gid}/addTask`, { task: id });
+  }
+
+  async addComment(_project: string, id: string, text: string): Promise<void> {
+    await this.request("POST", `/tasks/${id}/stories`, { text });
+  }
+
+  async getWorkItem(project: string, id: string): Promise<WorkItem> {
+    const task = (await this.request(
+      "GET",
+      `/tasks/${id}?opt_fields=name,notes,completed,permalink_url,memberships.section.name,memberships.project.gid`,
+    )) as {
+      gid: string;
+      name?: string;
+      notes?: string;
+      completed?: boolean;
+      permalink_url?: string;
+      memberships?: Array<{ project?: { gid?: string }; section?: { name?: string } }>;
+    };
+    const membership = task.memberships?.find((m) => m.project?.gid === project);
+    const stories = (await this.request("GET", `/tasks/${id}/stories`)) as Array<{
+      resource_subtype?: string;
+      type?: string;
+      text?: string;
+    }>;
+    return {
+      id: String(task.gid),
+      url: task.permalink_url ?? `https://app.asana.com/0/${project}/${task.gid}`,
+      type: "Task",
+      state: membership?.section?.name ?? null,
+      fields: { name: task.name, notes: task.notes, completed: task.completed },
+      comments: stories
+        .filter((s) => s.resource_subtype === "comment_added" || s.type === "comment")
+        .map((s) => s.text ?? ""),
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// monday.com adapter — GraphQL-only API ({base}/v2), raw api-token
+// Authorization header (like Linear, no Bearer prefix), injectable fetch. The
+// interface's `project` is a monday BOARD ID; states live in the board's
+// default Status column labels, resolved from the column's settings_str and
+// set by label text, failing explicit with the available list. The `type`
+// argument is accepted but monday items carry no native work-item type —
+// documented, ignored.
+// ---------------------------------------------------------------------------
+
+export interface MondayAdapterOptions {
+  /** a monday.com API token, sent verbatim in the Authorization header */
+  token: string;
+  /** override for testing/bridges; default https://api.monday.com */
+  baseUrl?: string | null;
+  fetchImpl?: FetchLike;
+}
+
+const MONDAY_DEFAULT_BASE = "https://api.monday.com";
+
+export class MondayProvider implements PmProvider {
+  readonly kind = "monday" as const;
+  private readonly base: string;
+  private readonly token: string;
+  private readonly fetchImpl: FetchLike;
+  private readonly boardUrls = new Map<string, string>();
+  private readonly statusColumns = new Map<string, { id: string; labels: string[] }>();
+
+  constructor(opts: MondayAdapterOptions) {
+    this.base = (opts.baseUrl ?? MONDAY_DEFAULT_BASE).replace(/\/$/, "");
+    this.token = opts.token;
+    this.fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
+  }
+
+  private async gql<T>(query: string, variables: Record<string, unknown>): Promise<T> {
+    const res = await this.fetchImpl(`${this.base}/v2`, {
+      method: "POST",
+      headers: {
+        authorization: this.token,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ query, variables }),
+    });
+    if (res.status >= 400) {
+      throw new PmProviderError(`monday graphql failed: ${await res.text()}`, res.status);
+    }
+    const payload = (await res.json()) as {
+      data?: T;
+      errors?: Array<{ message?: string }>;
+      /** monday reports some failures (e.g. bad token) top-level, not in errors[] */
+      error_message?: string;
+    };
+    if (payload.errors?.length) {
+      throw new PmProviderError(
+        `monday graphql failed: ${payload.errors.map((e) => e.message).join("; ")}`,
+      );
+    }
+    if (payload.error_message) {
+      throw new PmProviderError(`monday graphql failed: ${payload.error_message}`);
+    }
+    return payload.data as T;
+  }
+
+  /** monday's create_item response has no permalink — item links are built
+   * from the board's url, resolved once per board and cached. */
+  private async boardUrl(board: string): Promise<string> {
+    const cached = this.boardUrls.get(board);
+    if (cached) return cached;
+    const data = await this.gql<{ boards: Array<{ url: string }> }>(
+      `query BoardUrl($board: ID!) { boards(ids: [$board]) { url } }`,
+      { board },
+    );
+    const url = data.boards?.[0]?.url;
+    if (!url) throw new PmProviderError(`monday board '${board}' not found`, 404);
+    this.boardUrls.set(board, url);
+    return url;
+  }
+
+  /** The board's status labels live in the first status-type column's
+   * settings_str JSON ({ labels: { index: label } }); parsed once per board
+   * and cached. */
+  private async statusColumn(board: string): Promise<{ id: string; labels: string[] }> {
+    const cached = this.statusColumns.get(board);
+    if (cached) return cached;
+    const data = await this.gql<{
+      boards: Array<{ columns: Array<{ id: string; type: string; settings_str: string }> }>;
+    }>(
+      `query BoardColumns($board: ID!) { boards(ids: [$board]) { columns { id type settings_str } } }`,
+      { board },
+    );
+    const column = data.boards?.[0]?.columns.find((c) => c.type === "status");
+    if (!column) throw new PmProviderError(`monday board '${board}' has no status column`);
+    const settings = JSON.parse(column.settings_str || "{}") as {
+      labels?: Record<string, string>;
+    };
+    const parsed = { id: column.id, labels: Object.values(settings.labels ?? {}) };
+    this.statusColumns.set(board, parsed);
+    return parsed;
+  }
+
+  async createWorkItem(
+    project: string,
+    _type: string,
+    fields: Record<string, unknown>,
+  ): Promise<WorkItemRef> {
+    const data = await this.gql<{ create_item: { id: string } }>(
+      `mutation CreateItem($board: ID!, $name: String!) {
+        create_item(board_id: $board, item_name: $name) { id }
+      }`,
+      { board: project, name: String(fields.name ?? "") },
+    );
+    const id = String(data.create_item.id);
+    return { id, url: `${await this.boardUrl(project)}/pulses/${id}` };
+  }
+
+  async updateFields(project: string, id: string, fields: Record<string, unknown>): Promise<void> {
+    await this.gql(
+      `mutation UpdateItem($board: ID!, $item: ID!, $values: JSON!) {
+        change_multiple_column_values(board_id: $board, item_id: $item, column_values: $values) { id }
+      }`,
+      { board: project, item: id, values: JSON.stringify(fields) },
+    );
+  }
+
+  async transitionState(project: string, id: string, state: string): Promise<void> {
+    const column = await this.statusColumn(project);
+    const match =
+      column.labels.find((l) => l === state) ??
+      column.labels.find((l) => l.toLowerCase() === state.toLowerCase());
+    if (!match) {
+      const names = column.labels.join(", ") || "none";
+      throw new PmProviderError(
+        `monday status column has no label '${state}' (available: ${names})`,
+      );
+    }
+    await this.gql(
+      `mutation SetStatus($board: ID!, $item: ID!, $column: String!, $value: String!) {
+        change_simple_column_value(board_id: $board, item_id: $item, column_id: $column, value: $value) { id }
+      }`,
+      { board: project, item: id, column: column.id, value: match },
+    );
+  }
+
+  async addComment(_project: string, id: string, text: string): Promise<void> {
+    await this.gql(
+      `mutation AddUpdate($item: ID!, $body: String!) {
+        create_update(item_id: $item, body: $body) { id }
+      }`,
+      { item: id, body: text },
+    );
+  }
+
+  async getWorkItem(project: string, id: string): Promise<WorkItem> {
+    const data = await this.gql<{
+      items: Array<{
+        name: string;
+        url: string | null;
+        column_values: Array<{ id: string; type: string; text: string | null }>;
+        updates: Array<{ text_body: string | null }>;
+      }>;
+    }>(
+      `query Item($id: ID!) {
+        items(ids: [$id]) { name url column_values { id type text } updates { text_body } }
+      }`,
+      { id },
+    );
+    const item = data.items?.[0];
+    if (!item) throw new PmProviderError(`monday item '${id}' not found`, 404);
+    const status = item.column_values.find((c) => c.type === "status");
+    const fields: Record<string, unknown> = { name: item.name };
+    for (const c of item.column_values) fields[c.id] = c.text;
+    return {
+      id,
+      // items DO expose url on read; fall back to the board-url construction
+      url: item.url ?? `${await this.boardUrl(project)}/pulses/${id}`,
+      type: "Item",
+      state: status?.text || null,
+      fields,
+      comments: item.updates.map((u) => u.text_body ?? ""),
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Generic webhook adapter — §6's "anything else" escape hatch. Unlike the
+// vendor adapters, this one speaks RegulAIt's OWN normalized contract to a
+// customer-defined HTTP receiver: every method POSTs one JSON envelope
+// { event, timestamp, project, payload } to the connection's baseUrl, with
+// events work_item.create / work_item.update / work_item.transition /
+// comment.add / work_item.get — the outbound mirror of ADR-0010's normalized
+// inbound webhook shape. The connection token is a shared secret used ONLY
+// to sign the exact request body (HMAC-SHA256, sent as
+// `x-regulait-signature: sha256=<hex>`) — it never travels raw.
+//
+// Response contract: the receiver must answer 2xx; any non-2xx surfaces as a
+// PmProviderError carrying the status. work_item.create should answer
+// { id, url } — a missing id fails explicit rather than inventing one, links
+// must be real. work_item.get must answer the item as { id, url, type,
+// state, fields, comments } (missing/malformed → PmProviderError): receivers
+// that implement read-back keep the gateway's 'Sync now' verification fully
+// working; receivers that don't will surface an explicit error there and the
+// existing orphan flow handles the link — a deliberate trade-off, loud
+// failure over fake verification. The `type` argument is passed through, not
+// ignored — the receiver defines its own vocabulary.
+// ---------------------------------------------------------------------------
+
+export interface GenericWebhookAdapterOptions {
+  /** shared secret used ONLY to HMAC-sign request bodies — never sent raw */
+  token: string;
+  /** the customer receiver endpoint; every event POSTs here verbatim */
+  baseUrl: string;
+  fetchImpl?: FetchLike;
+}
+
+/** work_item.get read-back shape: id is mandatory (a link must point at a
+ * real item), everything else defaults so minimal receivers stay valid. */
+const webhookWorkItemSchema = z.object({
+  id: z.union([z.string().min(1), z.number()]).transform(String),
+  url: z.string().default(""),
+  type: z.string().default("task"),
+  state: z.string().nullable().default(null),
+  fields: z.record(z.unknown()).default({}),
+  comments: z.array(z.string()).default([]),
+});
+
+export class GenericWebhookProvider implements PmProvider {
+  readonly kind = "generic_webhook" as const;
+  private readonly url: string;
+  private readonly token: string;
+  private readonly fetchImpl: FetchLike;
+
+  constructor(opts: GenericWebhookAdapterOptions) {
+    // the baseUrl IS the endpoint (nothing is appended), so it is used verbatim
+    this.url = opts.baseUrl;
+    this.token = opts.token;
+    this.fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
+  }
+
+  private async post(
+    event: string,
+    project: string,
+    payload: Record<string, unknown>,
+  ): Promise<unknown> {
+    const body = JSON.stringify({
+      event,
+      timestamp: new Date().toISOString(),
+      project,
+      payload,
+    });
+    const res = await this.fetchImpl(this.url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-regulait-signature": `sha256=${createHmac("sha256", this.token).update(body).digest("hex")}`,
+      },
+      body,
+    });
+    if (res.status < 200 || res.status >= 300) {
+      throw new PmProviderError(
+        `generic_webhook POST ${event} failed: ${await res.text()}`,
+        res.status,
+      );
+    }
+    const text = await res.text();
+    if (!text) return null;
+    try {
+      return JSON.parse(text);
+    } catch {
+      return null; // a non-JSON 2xx body carries no usable data
+    }
+  }
+
+  async createWorkItem(
+    project: string,
+    type: string,
+    fields: Record<string, unknown>,
+  ): Promise<WorkItemRef> {
+    const created = (await this.post("work_item.create", project, { type, fields }) ?? {}) as {
+      id?: unknown;
+      url?: unknown;
+    };
+    const id = created.id === undefined || created.id === null ? "" : String(created.id);
+    if (!id) {
+      throw new PmProviderError("webhook receiver did not return an id for work_item.create");
+    }
+    return { id, url: typeof created.url === "string" ? created.url : "" };
+  }
+
+  async updateFields(project: string, id: string, fields: Record<string, unknown>): Promise<void> {
+    await this.post("work_item.update", project, { id, fields });
+  }
+
+  /** No state/label enumeration exists to check against — the receiver owns
+   * its vocabulary, so the only failure mode is a non-2xx response. */
+  async transitionState(project: string, id: string, state: string): Promise<void> {
+    await this.post("work_item.transition", project, { id, state });
+  }
+
+  async addComment(project: string, id: string, text: string): Promise<void> {
+    await this.post("comment.add", project, { id, text });
+  }
+
+  async getWorkItem(project: string, id: string): Promise<WorkItem> {
+    const res = await this.post("work_item.get", project, { id });
+    const parsed = webhookWorkItemSchema.safeParse(res);
+    if (!parsed.success) {
+      throw new PmProviderError(
+        `generic_webhook receiver returned a malformed work item for '${id}' (expected { id, url, type, state, fields, comments })`,
+      );
+    }
+    return parsed.data;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Mock adapter — in-memory, for tests and air-gapped development.
 // ---------------------------------------------------------------------------
 
@@ -787,13 +1281,30 @@ export function resolvePmProvider(config: PmConnectionConfig, fetchImpl?: FetchL
         baseUrl: config.baseUrl ?? null,
         ...(fetchImpl ? { fetchImpl } : {}),
       });
+    case "asana":
+      return new AsanaProvider({
+        token: config.token,
+        baseUrl: config.baseUrl ?? null,
+        ...(fetchImpl ? { fetchImpl } : {}),
+      });
+    case "monday":
+      return new MondayProvider({
+        token: config.token,
+        baseUrl: config.baseUrl ?? null,
+        ...(fetchImpl ? { fetchImpl } : {}),
+      });
+    case "generic_webhook":
+      if (!config.baseUrl) {
+        throw new PmProviderError(
+          "generic_webhook requires a baseUrl (the customer's receiver endpoint URL)",
+        );
+      }
+      return new GenericWebhookProvider({
+        token: config.token,
+        baseUrl: config.baseUrl,
+        ...(fetchImpl ? { fetchImpl } : {}),
+      });
     case "mock":
       return sharedMock;
-    case "asana":
-    case "monday":
-    case "generic_webhook":
-      throw new PmProviderError(
-        `provider '${config.provider}' is interface-ready but its adapter is not implemented yet`,
-      );
   }
 }
