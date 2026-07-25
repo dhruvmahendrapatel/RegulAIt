@@ -215,6 +215,17 @@ export const createRunSchema = z.object({
   workflowInstanceId: z.string().uuid().optional(),
 });
 
+export const autoAdvanceSchema = z.object({
+  /** cap on successful dispatches in one pass */
+  maxNodes: z.number().int().min(1).max(100).default(20),
+  /** explicit opt-in: also accept each submission, letting dependents run.
+   * Default false — review stays a human gate. */
+  acceptReviews: z.boolean().optional(),
+  /** per-node work instructions; a node absent here uses its title */
+  inputs: z.record(z.string().max(100_000)).optional(),
+  maxTokens: z.number().int().min(1).max(64_000).optional(),
+});
+
 export const dispatchNodeSchema = z.object({
   /** work instructions for the node's worker; defaults to the node title */
   input: z.string().max(100_000).optional(),

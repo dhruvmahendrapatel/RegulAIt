@@ -3817,3 +3817,229 @@ describe("worker-node dispatch (EPIC-05 × real dispatch)", () => {
     expect(third.json().budgetBreached).toBeUndefined();
   });
 });
+
+describe("auto-dispatch of ready nodes (self-driving runs, same gates)", () => {
+  const mkNode = (id: string, agentId: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    title: `task ${id}`,
+    ownerAgentId: agentId,
+    mode: "execute",
+    estimate: { in: 1, out: 1 },
+    ...extra,
+  });
+  const mkUser = async (email: string, name: string) => {
+    const r = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email, displayName: name },
+    });
+    return r.json().id as string;
+  };
+
+  let junoId: string;
+  let junoAuth: { authorization: string };
+  let approverId: string;
+  let autoWorkerId: string;
+
+  it("acceptReviews=true drives a DAG to completion in one call, dependency-ordered", async () => {
+    junoId = await mkUser("auto-juno@example.com", "Auto Juno");
+    junoAuth = await authFor(junoId);
+    approverId = await mkUser("auto-approver@example.com", "Auto Approver");
+    const agentRes = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/agents",
+      payload: {
+        name: "auto-worker", provider: "mock", tier: 0, modes: ["execute"],
+        costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-auto",
+      },
+    });
+    autoWorkerId = agentRes.json().id;
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/grants/agents",
+      payload: { userId: junoId, agentId: autoWorkerId },
+    });
+
+    const created = await app.inject({
+      method: "POST", headers: junoAuth, url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "auto-full",
+          escalationApproverUserId: approverId,
+          nodes: [
+            mkNode("a", autoWorkerId),
+            mkNode("b", autoWorkerId, { dependsOn: ["a"] }),
+            mkNode("c", autoWorkerId),
+          ],
+        },
+      },
+    });
+    const runId = created.json().id;
+
+    const res = await app.inject({
+      method: "POST", headers: junoAuth, url: `/v1/runs/${runId}/auto`,
+      payload: { acceptReviews: true, inputs: { a: "draft the api", b: "review the api" } },
+    });
+    expect(res.statusCode).toBe(200);
+    const { status, steps, stoppedReason } = res.json();
+    expect(status).toBe("completed");
+    expect(stoppedReason).toBe("completed");
+    expect(steps).toHaveLength(3);
+    expect(steps.every((s: { action: string }) => s.action === "accepted")).toBe(true);
+    // b never runs before a
+    const order = steps.map((s: { nodeId: string }) => s.nodeId);
+    expect(order.indexOf("b")).toBeGreaterThan(order.indexOf("a"));
+
+    // three measured usage rows attributed to this run
+    const ledger = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/usage-events?userId=${junoId}`,
+    });
+    const rows = ledger.json().events.filter(
+      (e: { detail: { runId?: string } | null }) => e.detail?.runId === runId,
+    );
+    expect(rows).toHaveLength(3);
+
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit?userId=${junoId}` });
+    expect(
+      audit.json().entries.some((e: { ruleId: string }) => e.ruleId === "run-auto-advance"),
+    ).toBe(true);
+  });
+
+  it("by default review stays a human gate: the pass stops at in_review and resumes after acceptance", async () => {
+    const created = await app.inject({
+      method: "POST", headers: junoAuth, url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "auto-review-gate",
+          escalationApproverUserId: approverId,
+          nodes: [mkNode("a", autoWorkerId), mkNode("b", autoWorkerId, { dependsOn: ["a"] })],
+        },
+      },
+    });
+    const runId = created.json().id;
+
+    const first = await app.inject({
+      method: "POST", headers: junoAuth, url: `/v1/runs/${runId}/auto`, payload: {},
+    });
+    expect(first.statusCode).toBe(200);
+    expect(first.json().stoppedReason).toBe("awaiting_review");
+    expect(first.json().steps).toHaveLength(1);
+    expect(first.json().steps[0]).toMatchObject({ nodeId: "a", action: "submitted" });
+    expect(first.json().state.nodeStatuses).toMatchObject({ a: "in_review", b: "not_started" });
+
+    // the human accepts; the next pass picks up the dependent node
+    await app.inject({
+      method: "POST", headers: junoAuth, url: `/v1/runs/${runId}/events`,
+      payload: { kind: "node_accepted", nodeId: "a" },
+    });
+    const second = await app.inject({
+      method: "POST", headers: junoAuth, url: `/v1/runs/${runId}/auto`, payload: {},
+    });
+    expect(second.json().steps[0]).toMatchObject({ nodeId: "b", action: "submitted" });
+    expect(second.json().stoppedReason).toBe("awaiting_review");
+
+    await app.inject({
+      method: "POST", headers: junoAuth, url: `/v1/runs/${runId}/events`,
+      payload: { kind: "node_accepted", nodeId: "b" },
+    });
+    const view = await app.inject({ method: "GET", headers: junoAuth, url: `/v1/runs/${runId}` });
+    expect(view.json().run.status).toBe("completed");
+  });
+
+  it("a refusal blocks that node and the pass keeps driving independent branches", async () => {
+    const created = await app.inject({
+      method: "POST", headers: junoAuth, url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "auto-refusal",
+          escalationApproverUserId: approverId,
+          nodes: [mkNode("a", autoWorkerId), mkNode("b", autoWorkerId)],
+        },
+      },
+    });
+    const runId = created.json().id;
+
+    const res = await app.inject({
+      method: "POST", headers: junoAuth, url: `/v1/runs/${runId}/auto`,
+      payload: { acceptReviews: true, inputs: { a: "please <<refuse>> this" } },
+    });
+    expect(res.statusCode).toBe(200);
+    const byNode = Object.fromEntries(
+      res.json().steps.map((s: { nodeId: string; action: string }) => [s.nodeId, s.action]),
+    );
+    expect(byNode.a).toBe("refused");
+    expect(byNode.b).toBe("accepted");
+    expect(res.json().stoppedReason).toBe("blocked");
+    expect(res.json().state.nodeStatuses).toMatchObject({ a: "blocked", b: "done" });
+    expect(res.json().state.lastError.a).toBe("worker refused the task");
+  });
+
+  it("a measured budget breach stops the pass and leaves the rest of the graph untouched", async () => {
+    const kaiId = await mkUser("auto-kai@example.com", "Auto Kai");
+    const kaiAuth = await authFor(kaiId);
+    const priceyRes = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/agents",
+      payload: {
+        name: "auto-pricey", provider: "mock", tier: 0, modes: ["execute"],
+        costPerMTokIn: 1_000_000, costPerMTokOut: 1_000_000, model: "mock-auto-pricey",
+      },
+    });
+    const priceyId = priceyRes.json().id;
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/grants/agents",
+      payload: { userId: kaiId, agentId: priceyId },
+    });
+    await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/users/${kaiId}/agent-policy`,
+      payload: { runBudgetUsd: 10, runBudgetBreachAction: "approve" },
+    });
+
+    const created = await app.inject({
+      method: "POST", headers: kaiAuth, url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "auto-budget",
+          escalationApproverUserId: approverId,
+          nodes: [mkNode("a", priceyId), mkNode("b", priceyId), mkNode("c", priceyId)],
+        },
+      },
+    });
+    const runId = created.json().id;
+
+    const res = await app.inject({
+      method: "POST", headers: kaiAuth, url: `/v1/runs/${runId}/auto`,
+      payload: { acceptReviews: true, inputs: { a: "x".repeat(100) } },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().stoppedReason).toBe("budget_exceeded_measured");
+    expect(res.json().measuredSpentUsd).toBeGreaterThan(10);
+    // only the breaching node ran; nothing was stranded mid-flight
+    expect(res.json().state.nodeStatuses).toMatchObject({
+      a: "done", b: "not_started", c: "not_started",
+    });
+    const view = await app.inject({ method: "GET", headers: kaiAuth, url: `/v1/runs/${runId}` });
+    expect(
+      view.json().pendingApprovals.some((a: { stageId: string }) => a.stageId === "__budget__:a"),
+    ).toBe(true);
+  });
+
+  it("a terminal run cannot auto-advance", async () => {
+    const created = await app.inject({
+      method: "POST", headers: junoAuth, url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "auto-terminal",
+          escalationApproverUserId: approverId,
+          nodes: [mkNode("a", autoWorkerId)],
+        },
+      },
+    });
+    const runId = created.json().id;
+    await app.inject({
+      method: "POST", headers: junoAuth, url: `/v1/runs/${runId}/events`,
+      payload: { kind: "abort" },
+    });
+    const res = await app.inject({
+      method: "POST", headers: junoAuth, url: `/v1/runs/${runId}/auto`, payload: {},
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("run_terminal");
+  });
+});

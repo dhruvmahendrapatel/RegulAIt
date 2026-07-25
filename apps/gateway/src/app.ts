@@ -137,6 +137,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "POST /v1/runs",
     "POST /v1/runs/:runId/events",
     "POST /v1/runs/:runId/nodes/:nodeId/dispatch",
+    "POST /v1/runs/:runId/auto",
     "GET /v1/runs/:runId",
     "POST /v1/runs/:runId/pm-sync",
     "POST /v1/workflows/instances/:instanceId/pm-sync",

@@ -97,9 +97,21 @@ estimate-based node-start gate: `budget.measuredSpentUsd` accumulates real dispa
 first cap crossing is allowed (measured cost is only knowable after the call) but escalates
 immediately into the one approvals queue (`__budget__:<node>`, audited require_approval), and
 every dispatch after it is blocked (409) until the named approver sanctions the overage.
-usage_events rows carry `{runId, nodeId}` attribution. Not yet: streaming, multi-turn/system
-prompts from workflow context, auto-dispatch of ready nodes (execution is caller-driven per
-node), per-user credentials, openai/google/xai adapters.
+usage_events rows carry `{runId, nodeId}` attribution. **Third slice: auto-dispatch of ready
+nodes.** `POST /v1/runs/:id/auto` is a self-driving pass with the same gates and zero new
+authority — one synchronous call (no scheduler/queue, ADR-0010's bias), starting the run if
+needed then repeatedly taking the first ready node through the SAME machinery the manual
+endpoints use: estimate gate → node_started → governed dispatch (§5.1 re-check per node) →
+node_submitted. Review stays a human gate BY DEFAULT — nodes land in_review and dependents
+wait; only an explicit `acceptReviews: true` also accepts each submission (audited in the
+event history like any acceptance). Node-level problems (entitlement denial, config gap,
+worker refusal) mark that node failed/blocked — §3's retry/reassign/escalate applies — and
+the pass keeps driving independent branches; run-level problems (estimate or measured budget)
+stop the whole pass, with the measured-budget check running BEFORE node start so a blocked
+pass never strands a node in_progress. Per-node inputs via `inputs` map (title fallback),
+`maxNodes` cap per pass, every pass summarized in one `run-auto-advance` audit row. Not yet:
+streaming, multi-turn/system prompts from workflow context, per-user credentials,
+openai/google/xai adapters, workflow build-stage nesting of runs.
 
 **EPIC-06 started — PM-tool integration first slice, 2026-07-25.** New
 `packages/pm-provider` on the git-provider playbook (pillar 8, PM_TOOL_INTEGRATION_SPEC
@@ -306,7 +318,7 @@ with a real in-process upstream MCP server and real MCP client (26 tests total).
 | EPIC-02 | Governance layer MVP (now includes infra-ops/compliance-cascade/deploy-model, Shared Projects, cost dashboard — §1–§10) | **in progress** — stack chosen (ADR-0009), first slice = MCP-server governance vertical | GOVERNANCE_LAYER_SPEC.md, ADR-0007, ADR-0009 |
 | EPIC-03 | Workflow engine MVP (now includes optional Design/Architecture sign-off stage type) | **in progress** — first slice merged (PR #9) | WORKFLOW_ENGINE_SPEC.md, ADR-0007 |
 | EPIC-04 | Token/cost optimization MVP (escalated to P0) | **in progress** — routing kernel + cost_events ledger (PR #12), lazy tool-loading (PR #13), §9 workflow cost-sensitivity tag merged; real model dispatch built (model-provider + measured usage_events ledger — savings now measured, not just estimated) | TOKEN_OPTIMIZATION_SPEC.md, ADR-0007 |
-| EPIC-05 | Multi-agent orchestration MVP (PM/Team-Lead/Worker delegation) | **in progress** — slice 1 merged (PR #14: kernel + runs + escalations); slice 2 merged (§5.2 budget caps); worker-node dispatch built (real execution via governed dispatch core, measured budget enforcement) | MULTI_AGENT_ORCHESTRATION_SPEC.md, ADR-0008 |
+| EPIC-05 | Multi-agent orchestration MVP (PM/Team-Lead/Worker delegation) | **in progress** — slices 1–2 merged (kernel/runs/escalations, §5.2 budget caps); worker-node dispatch merged (PR #18); auto-dispatch of ready nodes built (self-driving pass, review gate by default) | MULTI_AGENT_ORCHESTRATION_SPEC.md, ADR-0008 |
 | EPIC-06 | PM-tool integration MVP (Azure DevOps/Jira/etc.) | **in progress** — slice 1 merged (PR #15); slices 2–4 built (§5 approval mirroring; §4 decision records; ADR-0010 inbound sync with drift detection) | PM_TOOL_INTEGRATION_SPEC.md, ADR-0008, ADR-0010 |
 
 ## Components

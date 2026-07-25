@@ -30,7 +30,12 @@ import {
   type TaskNode,
 } from "@regulait/orchestration-kernel";
 import { classifyComplexity, estimateTokens, routeModel } from "@regulait/optimizer-kernel";
-import { createRunSchema, dispatchNodeSchema, runEventSchema } from "@regulait/shared";
+import {
+  autoAdvanceSchema,
+  createRunSchema,
+  dispatchNodeSchema,
+  runEventSchema,
+} from "@regulait/shared";
 import { executeGovernedDispatch } from "./agents-connectors.js";
 import { mirrorNodeStatus } from "./pm.js";
 import { z } from "zod";
@@ -66,6 +71,288 @@ function tokensFor(node: TaskNode): NodeTokenEstimate {
 const runIdParam = z.object({ runId: z.string().uuid() });
 
 type RunRow = typeof orchestrationRuns.$inferSelect;
+
+/** §5.2 estimate-based node-start gate. Returns the node's estimated cost
+ * under its CURRENT owner, or a blocked payload — in which case the
+ * `__budget__:<node>` approval and require_approval audit row have already
+ * been written (deduped). */
+async function gateNodeStartBudget(
+  db: Db,
+  run: RunRow,
+  nodeId: string,
+  actorUserId: string,
+): Promise<{ blocked: Record<string, unknown> | null; nodeCost: number | null }> {
+  const budget = (run.budget ?? null) as RunBudget | null;
+  if (!budget) return { blocked: null, nodeCost: null };
+  const graph = run.graph as TaskGraph;
+  const state = run.state as RunState;
+  const node = graph.nodes.find((n) => n.id === nodeId);
+  if (!node) return { blocked: null, nodeCost: null };
+  // live tracking: cost of THIS node under its CURRENT owner — reassignment
+  // may have made it pricier than the plan-time estimate.
+  const owner = state.owners[node.id] ?? node.ownerAgentId;
+  const [agent] = await db.select().from(agents).where(eq(agents.id, owner));
+  const nodeCost = estimateNodeCost(
+    agent
+      ? { costPerMTokIn: agent.costPerMTokIn ?? null, costPerMTokOut: agent.costPerMTokOut ?? null }
+      : undefined,
+    tokensFor(node),
+  );
+  if (
+    budget.capUsd !== null &&
+    !budget.overageApproved &&
+    (nodeCost === null || budget.spentUsd + nodeCost > budget.capUsd)
+  ) {
+    // pause at the breaching node and escalate into the one queue
+    const [pending] = await db
+      .select({ id: approvals.id })
+      .from(approvals)
+      .where(
+        and(
+          eq(approvals.runId, run.id),
+          eq(approvals.stageId, `__budget__:${node.id}`),
+          eq(approvals.status, "pending"),
+        ),
+      )
+      .limit(1);
+    if (!pending) {
+      await db.insert(approvals).values({
+        userId: run.initiatingUserId,
+        objectType: "run",
+        runId: run.id,
+        stageId: `__budget__:${node.id}`,
+        approverUserId: graph.escalationApproverUserId,
+      });
+    }
+    await db.insert(auditLog).values({
+      userId: actorUserId,
+      objectType: "run",
+      objectId: run.id,
+      detail: {
+        phase: "budget-breach",
+        nodeId: node.id,
+        spentUsd: budget.spentUsd,
+        estimatedNodeUsd: nodeCost,
+        capUsd: budget.capUsd,
+      },
+      effect: "require_approval",
+      ruleId: "run-budget-cap",
+      ruleChain: [],
+      reason:
+        nodeCost === null
+          ? `node '${node.id}' has an unpriced owner under a budget cap; approval required`
+          : `starting node '${node.id}' would take estimated spend to $${(budget.spentUsd + nodeCost).toFixed(6)}, over the $${budget.capUsd} cap`,
+    });
+    return {
+      blocked: {
+        error: "budget_exceeded",
+        nodeId: node.id,
+        spentUsd: budget.spentUsd,
+        estimatedNodeUsd: nodeCost,
+        capUsd: budget.capUsd,
+      },
+      nodeCost,
+    };
+  }
+  return { blocked: null, nodeCost };
+}
+
+type NodeDispatchOutcome =
+  | { kind: "unknown_node" }
+  | { kind: "unknown_agent" }
+  | { kind: "not_in_progress"; status: string | null }
+  | { kind: "entitlement_denied"; decision: AgentDecision }
+  | { kind: "budget_blocked_measured"; measuredSpentUsd: number; capUsd: number }
+  | { kind: "dispatch_failed"; status: number; error: string; detail?: string }
+  | {
+      kind: "ok";
+      result: {
+        servedAgentId: string;
+        model: string;
+        outputText: string;
+        stopReason: string;
+        refusal: boolean;
+        usage: { inputTokens: number; outputTokens: number };
+        costUsd: number | null;
+        measuredCostSavedUsd: number | null;
+      };
+      measuredSpentUsd: number;
+      budgetBreached: boolean;
+    };
+
+/** Execute one in_progress node's work through the shared governed-dispatch
+ * core: §5.1 re-checked under the INITIATING user at execution time, §5.2
+ * measured-spend accounting, node_dispatched history, audit trail. Callers
+ * (the per-node route and the auto-advance loop) map outcomes to HTTP or to
+ * loop decisions. */
+async function dispatchRunNode(
+  db: Db,
+  dataKey: string | undefined,
+  run: RunRow,
+  nodeId: string,
+  args: { input?: string | undefined; maxTokens?: number | undefined },
+  actorUserId: string,
+): Promise<NodeDispatchOutcome> {
+  const graph = run.graph as TaskGraph;
+  const state = run.state as RunState;
+  const node = graph.nodes.find((n) => n.id === nodeId);
+  if (!node) return { kind: "unknown_node" };
+  if (state.nodeStatuses[nodeId] !== "in_progress") {
+    return { kind: "not_in_progress", status: state.nodeStatuses[nodeId] ?? null };
+  }
+
+  // §5.1 at execution time: grants may have changed since plan/start — the
+  // CURRENT owner is re-checked under the INITIATING user right before the
+  // model call. A revoked grant stops the worker cold.
+  const ownerId = state.owners[nodeId] ?? node.ownerAgentId;
+  const { decision, unknownAgent } = await evaluateNodeOwner(
+    db,
+    run.initiatingUserId,
+    ownerId,
+    node.mode,
+  );
+  if (unknownAgent) return { kind: "unknown_agent" };
+  if (decision!.effect !== "allow") {
+    await db.insert(auditLog).values({
+      userId: actorUserId,
+      objectType: "run",
+      objectId: run.id,
+      detail: { nodeId, ownerAgentId: ownerId, phase: "dispatch" },
+      effect: "deny",
+      ruleId: decision!.ruleId,
+      ruleChain: decision!.ruleChain,
+      reason: decision!.reason,
+    });
+    return { kind: "entitlement_denied", decision: decision! };
+  }
+
+  // §5.2 on MEASURED dollars: once measured spend reaches the cap, further
+  // dispatches are blocked until the overage is approved.
+  const budget = (run.budget ?? null) as RunBudget | null;
+  const measuredSpent = budget?.measuredSpentUsd ?? 0;
+  if (budget && budget.capUsd !== null && !budget.overageApproved && measuredSpent >= budget.capUsd) {
+    return { kind: "budget_blocked_measured", measuredSpentUsd: measuredSpent, capUsd: budget.capUsd };
+  }
+
+  const [servedAgent] = await db.select().from(agents).where(eq(agents.id, ownerId));
+  const outcome = await executeGovernedDispatch(db, dataKey, {
+    userId: run.initiatingUserId,
+    served: servedAgent,
+    requestedAgentId: node.ownerAgentId,
+    baseline: null,
+    input: args.input ?? node.title,
+    maxTokens: args.maxTokens,
+    detail: { runId: run.id, nodeId, mode: node.mode },
+  });
+
+  if (!outcome.ok) {
+    await db.insert(auditLog).values({
+      userId: actorUserId,
+      objectType: "run",
+      objectId: run.id,
+      detail: { nodeId, ownerAgentId: ownerId, phase: "dispatch", error: outcome.error },
+      effect: "allow",
+      ruleId: "run-node-dispatch-failed",
+      ruleChain: [],
+      reason: `node '${nodeId}' dispatch failed before execution: ${outcome.error}`,
+    });
+    return {
+      kind: "dispatch_failed",
+      status: outcome.status,
+      error: outcome.error,
+      ...(outcome.detail ? { detail: outcome.detail } : {}),
+    };
+  }
+
+  // Measured spend accumulates on the run. The FIRST cap crossing is
+  // allowed (measured cost is only known after the call) but escalates
+  // immediately into the one approvals queue; the pre-check above blocks
+  // everything after it. Never silently exceeded (§7).
+  let newMeasured = measuredSpent;
+  let budgetBreached = false;
+  if (budget) {
+    newMeasured = Number((measuredSpent + (outcome.result.costUsd ?? 0)).toFixed(6));
+    await db
+      .update(orchestrationRuns)
+      .set({ budget: { ...budget, measuredSpentUsd: newMeasured } })
+      .where(eq(orchestrationRuns.id, run.id));
+    if (budget.capUsd !== null && !budget.overageApproved && newMeasured > budget.capUsd) {
+      budgetBreached = true;
+      const [pending] = await db
+        .select({ id: approvals.id })
+        .from(approvals)
+        .where(
+          and(
+            eq(approvals.runId, run.id),
+            eq(approvals.stageId, `__budget__:${nodeId}`),
+            eq(approvals.status, "pending"),
+          ),
+        )
+        .limit(1);
+      if (!pending) {
+        await db.insert(approvals).values({
+          userId: run.initiatingUserId,
+          objectType: "run",
+          runId: run.id,
+          stageId: `__budget__:${nodeId}`,
+          approverUserId: graph.escalationApproverUserId,
+        });
+      }
+      await db.insert(auditLog).values({
+        userId: actorUserId,
+        objectType: "run",
+        objectId: run.id,
+        detail: {
+          phase: "budget-breach-measured",
+          nodeId,
+          measuredSpentUsd: newMeasured,
+          capUsd: budget.capUsd,
+        },
+        effect: "require_approval",
+        ruleId: "run-budget-cap",
+        ruleChain: [],
+        reason: `measured spend $${newMeasured} exceeds the $${budget.capUsd} cap after node '${nodeId}' dispatched; approval required to continue`,
+      });
+    }
+  }
+
+  // Append-only history: the dispatch is part of the run's record.
+  await db.insert(orchestrationRunEvents).values({
+    runId: run.id,
+    event: {
+      kind: "node_dispatched",
+      nodeId,
+      agentId: outcome.result.servedAgentId,
+      model: outcome.result.model,
+      stopReason: outcome.result.stopReason,
+      refusal: outcome.result.refusal,
+      usage: outcome.result.usage,
+      costUsd: outcome.result.costUsd,
+      outputText: outcome.result.outputText.slice(0, 20_000),
+    },
+    actorUserId,
+  });
+  await db.insert(auditLog).values({
+    userId: actorUserId,
+    objectType: "run",
+    objectId: run.id,
+    detail: {
+      nodeId,
+      agentId: outcome.result.servedAgentId,
+      model: outcome.result.model,
+      stopReason: outcome.result.stopReason,
+      refusal: outcome.result.refusal,
+      costUsd: outcome.result.costUsd,
+      phase: "dispatch",
+    },
+    effect: "allow",
+    ruleId: "run-node-dispatched",
+    ruleChain: [],
+    reason: `node '${nodeId}' executed by its assigned owner under the initiating user's entitlements`,
+  });
+
+  return { kind: "ok", result: outcome.result, measuredSpentUsd: newMeasured, budgetBreached };
+}
 
 /** §5.1: a node's worker runs strictly inside the INITIATING user's
  * entitlements — the same evaluateAgent the human's own invokes go through,
@@ -484,74 +771,9 @@ export function registerOrchestrationRoutes(
     }
     let nodeCost: number | null = null;
     if (event.kind === "node_started" && budget) {
-      // live tracking: cost of THIS node under its CURRENT owner —
-      // reassignment may have made it pricier than the plan-time estimate.
-      const graph = loaded.run.graph as TaskGraph;
-      const state = loaded.run.state as RunState;
-      const node = graph.nodes.find((n) => n.id === event.nodeId);
-      if (node) {
-        const owner = state.owners[node.id] ?? node.ownerAgentId;
-        const [agent] = await db.select().from(agents).where(eq(agents.id, owner));
-        nodeCost = estimateNodeCost(
-          agent
-            ? { costPerMTokIn: agent.costPerMTokIn ?? null, costPerMTokOut: agent.costPerMTokOut ?? null }
-            : undefined,
-          tokensFor(node),
-        );
-        if (
-          budget.capUsd !== null &&
-          !budget.overageApproved &&
-          (nodeCost === null || budget.spentUsd + nodeCost > budget.capUsd)
-        ) {
-          // pause at the breaching node and escalate into the one queue
-          const [pending] = await db
-            .select({ id: approvals.id })
-            .from(approvals)
-            .where(
-              and(
-                eq(approvals.runId, runId),
-                eq(approvals.stageId, `__budget__:${node.id}`),
-                eq(approvals.status, "pending"),
-              ),
-            )
-            .limit(1);
-          if (!pending) {
-            await db.insert(approvals).values({
-              userId: loaded.run.initiatingUserId,
-              objectType: "run",
-              runId,
-              stageId: `__budget__:${node.id}`,
-              approverUserId: (loaded.run.graph as TaskGraph).escalationApproverUserId,
-            });
-          }
-          await db.insert(auditLog).values({
-            userId: req.authCtx.userId,
-            objectType: "run",
-            objectId: runId,
-            detail: {
-              phase: "budget-breach",
-              nodeId: node.id,
-              spentUsd: budget.spentUsd,
-              estimatedNodeUsd: nodeCost,
-              capUsd: budget.capUsd,
-            },
-            effect: "require_approval",
-            ruleId: "run-budget-cap",
-            ruleChain: [],
-            reason:
-              nodeCost === null
-                ? `node '${node.id}' has an unpriced owner under a budget cap; approval required`
-                : `starting node '${node.id}' would take estimated spend to $${(budget.spentUsd + nodeCost).toFixed(6)}, over the $${budget.capUsd} cap`,
-          });
-          return reply.status(409).send({
-            error: "budget_exceeded",
-            nodeId: node.id,
-            spentUsd: budget.spentUsd,
-            estimatedNodeUsd: nodeCost,
-            capUsd: budget.capUsd,
-          });
-        }
-      }
+      const gate = await gateNodeStartBudget(db, loaded.run, event.nodeId, req.authCtx.userId);
+      if (gate.blocked) return reply.status(409).send(gate.blocked);
+      nodeCost = gate.nodeCost;
     }
 
     const { run, effects } = await applyRunEvent(db, runId, event, req.authCtx.userId);
@@ -594,175 +816,224 @@ export function registerOrchestrationRoutes(
     if (loaded.error) return reply.status(loaded.error).send({ error: "unavailable" });
     if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_drive" });
 
-    const graph = loaded.run.graph as TaskGraph;
-    const state = loaded.run.state as RunState;
-    const node = graph.nodes.find((n) => n.id === nodeId);
-    if (!node) return reply.status(400).send({ error: "unknown_node" });
-    if (state.nodeStatuses[nodeId] !== "in_progress") {
-      return reply
-        .status(409)
-        .send({ error: "node_not_in_progress", status: state.nodeStatuses[nodeId] ?? null });
-    }
-
-    // §5.1 at execution time: grants may have changed since plan/start — the
-    // CURRENT owner is re-checked under the INITIATING user right before the
-    // model call. A revoked grant stops the worker cold.
-    const ownerId = state.owners[nodeId] ?? node.ownerAgentId;
-    const { decision, unknownAgent } = await evaluateNodeOwner(
-      db,
-      loaded.run.initiatingUserId,
-      ownerId,
-      node.mode,
-    );
-    if (unknownAgent) return reply.status(422).send({ error: "unknown_agent" });
-    if (decision!.effect !== "allow") {
-      await db.insert(auditLog).values({
-        userId: req.authCtx.userId,
-        objectType: "run",
-        objectId: runId,
-        detail: { nodeId, ownerAgentId: ownerId, phase: "dispatch" },
-        effect: "deny",
-        ruleId: decision!.ruleId,
-        ruleChain: decision!.ruleChain,
-        reason: decision!.reason,
-      });
-      return reply.status(403).send({ error: "entitlement_exceeded", decision });
-    }
-
-    // §5.2 on MEASURED dollars: once measured spend reaches the cap, further
-    // dispatches are blocked until the overage is approved. (Estimates gate
-    // node START; this gates actual EXECUTION on real spend.)
-    const budget = (loaded.run.budget ?? null) as RunBudget | null;
-    const measuredSpent = budget?.measuredSpentUsd ?? 0;
-    if (budget && budget.capUsd !== null && !budget.overageApproved && measuredSpent >= budget.capUsd) {
-      return reply.status(409).send({
-        error: "budget_exceeded_measured",
-        measuredSpentUsd: measuredSpent,
-        capUsd: budget.capUsd,
-      });
-    }
-
-    const [servedAgent] = await db.select().from(agents).where(eq(agents.id, ownerId));
-    const outcome = await executeGovernedDispatch(db, opts.dataKey, {
-      userId: loaded.run.initiatingUserId,
-      served: servedAgent,
-      requestedAgentId: node.ownerAgentId,
-      baseline: null,
-      input: body.input ?? node.title,
-      maxTokens: body.maxTokens,
-      detail: { runId, nodeId, mode: node.mode },
-    });
-
-    if (!outcome.ok) {
-      await db.insert(auditLog).values({
-        userId: req.authCtx.userId,
-        objectType: "run",
-        objectId: runId,
-        detail: { nodeId, ownerAgentId: ownerId, phase: "dispatch", error: outcome.error },
-        effect: "allow",
-        ruleId: "run-node-dispatch-failed",
-        ruleChain: [],
-        reason: `node '${nodeId}' dispatch failed before execution: ${outcome.error}`,
-      });
-      return reply.status(outcome.status).send({
-        error: outcome.error,
-        ...(outcome.detail ? { detail: outcome.detail } : {}),
-      });
-    }
-
-    // Measured spend accumulates on the run. The FIRST cap crossing is
-    // allowed (measured cost is only known after the call) but escalates
-    // immediately into the one approvals queue; the pre-check above blocks
-    // everything after it. Never silently exceeded (§7).
-    let newMeasured = measuredSpent;
-    let budgetBreached = false;
-    if (budget) {
-      newMeasured = Number((measuredSpent + (outcome.result.costUsd ?? 0)).toFixed(6));
-      await db
-        .update(orchestrationRuns)
-        .set({ budget: { ...budget, measuredSpentUsd: newMeasured } })
-        .where(eq(orchestrationRuns.id, runId));
-      if (budget.capUsd !== null && !budget.overageApproved && newMeasured > budget.capUsd) {
-        budgetBreached = true;
-        const [pending] = await db
-          .select({ id: approvals.id })
-          .from(approvals)
-          .where(
-            and(
-              eq(approvals.runId, runId),
-              eq(approvals.stageId, `__budget__:${nodeId}`),
-              eq(approvals.status, "pending"),
-            ),
-          )
-          .limit(1);
-        if (!pending) {
-          await db.insert(approvals).values({
-            userId: loaded.run.initiatingUserId,
-            objectType: "run",
-            runId,
-            stageId: `__budget__:${nodeId}`,
-            approverUserId: graph.escalationApproverUserId,
-          });
-        }
-        await db.insert(auditLog).values({
-          userId: req.authCtx.userId,
-          objectType: "run",
-          objectId: runId,
-          detail: {
-            phase: "budget-breach-measured",
-            nodeId,
-            measuredSpentUsd: newMeasured,
-            capUsd: budget.capUsd,
-          },
-          effect: "require_approval",
-          ruleId: "run-budget-cap",
-          ruleChain: [],
-          reason: `measured spend $${newMeasured} exceeds the $${budget.capUsd} cap after node '${nodeId}' dispatched; approval required to continue`,
+    const out = await dispatchRunNode(db, opts.dataKey, loaded.run, nodeId, body, req.authCtx.userId);
+    switch (out.kind) {
+      case "unknown_node":
+        return reply.status(400).send({ error: "unknown_node" });
+      case "unknown_agent":
+        return reply.status(422).send({ error: "unknown_agent" });
+      case "not_in_progress":
+        return reply.status(409).send({ error: "node_not_in_progress", status: out.status });
+      case "entitlement_denied":
+        return reply.status(403).send({ error: "entitlement_exceeded", decision: out.decision });
+      case "budget_blocked_measured":
+        return reply.status(409).send({
+          error: "budget_exceeded_measured",
+          measuredSpentUsd: out.measuredSpentUsd,
+          capUsd: out.capUsd,
         });
+      case "dispatch_failed":
+        return reply.status(out.status).send({
+          error: out.error,
+          ...(out.detail ? { detail: out.detail } : {}),
+        });
+      case "ok":
+        return {
+          dispatch: out.result,
+          measuredSpentUsd: out.measuredSpentUsd,
+          ...(out.budgetBreached ? { budgetBreached: true } : {}),
+        };
+    }
+  });
+
+  // AUTO-ADVANCE: a self-driving pass over the run — same gates, zero new
+  // authority. One synchronous call (no scheduler/queue infrastructure, same
+  // bias as ADR-0010) starts the run if needed, then repeatedly takes the
+  // first ready node through start → governed dispatch → submit. Review
+  // stays a human gate by DEFAULT: nodes land in_review and dependents wait;
+  // only an explicit acceptReviews=true also accepts each submission.
+  // Node-level problems (entitlement, config, refusal) mark that node failed
+  // and the loop continues on independent branches; run-level problems
+  // (budget) stop the whole pass. Every step is the same audited event/
+  // dispatch machinery the manual endpoints use.
+  app.post("/v1/runs/:runId/auto", async (req, reply) => {
+    const { runId } = runIdParam.parse(req.params);
+    const body = autoAdvanceSchema.parse(req.body ?? {});
+    const loaded = await loadRunFor(req, runId);
+    if (loaded.error) return reply.status(loaded.error).send({ error: "unavailable" });
+    if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_drive" });
+    const actor = req.authCtx.userId;
+
+    const reload = async (): Promise<RunRow> =>
+      (await db.select().from(orchestrationRuns).where(eq(orchestrationRuns.id, runId)))[0]!;
+
+    let run = loaded.run;
+    if (run.status === "completed" || run.status === "aborted") {
+      return reply.status(409).send({ error: "run_terminal", status: run.status });
+    }
+    if (run.status === "planned") {
+      const budget = (run.budget ?? null) as RunBudget | null;
+      if (
+        budget &&
+        budget.capUsd !== null &&
+        !budget.overageApproved &&
+        (budget.estimatedTotalUsd === null || budget.estimatedTotalUsd > budget.capUsd)
+      ) {
+        return reply.status(409).send({ error: "budget_approval_pending", budget });
+      }
+      await applyRunEvent(db, runId, { kind: "start" }, actor);
+    }
+
+    const steps: Array<Record<string, unknown>> = [];
+    let stoppedReason = "max_nodes_reached";
+    let dispatched = 0;
+    let iterations = 0;
+
+    while (dispatched < body.maxNodes) {
+      if (++iterations > body.maxNodes * 3 + 10) {
+        stoppedReason = "iteration_cap";
+        break;
+      }
+      run = await reload();
+      if (run.status !== "running") {
+        stoppedReason = run.status === "completed" ? "completed" : "terminal";
+        break;
+      }
+      const graph = run.graph as TaskGraph;
+      const state = run.state as RunState;
+      const ready = readyNodes(graph, state);
+      if (ready.length === 0) {
+        const statuses = Object.values(state.nodeStatuses);
+        stoppedReason = statuses.includes("in_review")
+          ? "awaiting_review"
+          : statuses.includes("blocked")
+            ? "blocked"
+            : statuses.includes("in_progress")
+              ? "in_progress_elsewhere"
+              : "no_ready_nodes";
+        break;
+      }
+      const nodeId = ready[0]!;
+
+      // run-level measured-budget stop BEFORE starting the node, so a blocked
+      // pass never strands a node in_progress.
+      const budget = (run.budget ?? null) as RunBudget | null;
+      const measuredSpent = budget?.measuredSpentUsd ?? 0;
+      if (budget && budget.capUsd !== null && !budget.overageApproved && measuredSpent >= budget.capUsd) {
+        stoppedReason = "budget_exceeded_measured";
+        steps.push({ nodeId, action: "blocked_budget_measured", measuredSpentUsd: measuredSpent });
+        break;
+      }
+
+      // §5.2 estimate gate, then the same node_started event the manual path uses
+      const gate = await gateNodeStartBudget(db, run, nodeId, actor);
+      if (gate.blocked) {
+        stoppedReason = "budget_exceeded";
+        steps.push({ nodeId, action: "start_blocked_budget", ...gate.blocked });
+        break;
+      }
+      await applyRunEvent(db, runId, { kind: "node_started", nodeId }, actor);
+      if (budget && gate.nodeCost !== null) {
+        await db
+          .update(orchestrationRuns)
+          .set({
+            budget: { ...budget, spentUsd: Number((budget.spentUsd + gate.nodeCost).toFixed(6)) },
+          })
+          .where(eq(orchestrationRuns.id, runId));
+      }
+
+      const out = await dispatchRunNode(
+        db,
+        opts.dataKey,
+        await reload(),
+        nodeId,
+        { input: body.inputs?.[nodeId], maxTokens: body.maxTokens },
+        actor,
+      );
+
+      if (out.kind === "budget_blocked_measured") {
+        stoppedReason = "budget_exceeded_measured";
+        steps.push({ nodeId, action: "blocked_budget_measured", measuredSpentUsd: out.measuredSpentUsd });
+        break;
+      }
+      if (out.kind === "entitlement_denied" || out.kind === "dispatch_failed" || out.kind === "unknown_agent") {
+        // node-level problem: fail THIS node (blocked, §3 retry/reassign/
+        // escalate applies), keep driving independent branches
+        const error =
+          out.kind === "entitlement_denied"
+            ? `entitlement denied: ${out.decision.reason}`
+            : out.kind === "unknown_agent"
+              ? "owner agent no longer exists"
+              : `dispatch failed: ${out.error}`;
+        await applyRunEvent(db, runId, { kind: "node_failed", nodeId, error }, actor);
+        await mirrorNodeStatus(db, opts.dataKey, runId, nodeId, "blocked", actor);
+        steps.push({ nodeId, action: "failed", error });
+        continue;
+      }
+      if (out.kind !== "ok") {
+        // unknown_node / not_in_progress cannot happen for a node we just
+        // started — defensive stop rather than a silent loop
+        stoppedReason = out.kind;
+        break;
+      }
+
+      dispatched++;
+      if (out.result.refusal) {
+        await applyRunEvent(
+          db,
+          runId,
+          { kind: "node_failed", nodeId, error: "worker refused the task" },
+          actor,
+        );
+        await mirrorNodeStatus(db, opts.dataKey, runId, nodeId, "blocked", actor);
+        steps.push({ nodeId, action: "refused" });
+        if (out.budgetBreached) {
+          stoppedReason = "budget_exceeded_measured";
+          break;
+        }
+        continue;
+      }
+
+      await applyRunEvent(db, runId, { kind: "node_submitted", nodeId }, actor);
+      let action = "submitted";
+      let finalStatus: "in_review" | "done" = "in_review";
+      if (body.acceptReviews) {
+        await applyRunEvent(db, runId, { kind: "node_accepted", nodeId }, actor);
+        action = "accepted";
+        finalStatus = "done";
+      }
+      await mirrorNodeStatus(db, opts.dataKey, runId, nodeId, finalStatus, actor);
+      steps.push({ nodeId, action, costUsd: out.result.costUsd });
+      if (out.budgetBreached) {
+        stoppedReason = "budget_exceeded_measured";
+        break;
       }
     }
 
-    // Append-only history: the dispatch is part of the run's record (output
-    // truncated; the full text is in this response and the audit/usage trail
-    // carries the accounting).
-    await db.insert(orchestrationRunEvents).values({
-      runId,
-      event: {
-        kind: "node_dispatched",
-        nodeId,
-        agentId: outcome.result.servedAgentId,
-        model: outcome.result.model,
-        stopReason: outcome.result.stopReason,
-        refusal: outcome.result.refusal,
-        usage: outcome.result.usage,
-        costUsd: outcome.result.costUsd,
-        outputText: outcome.result.outputText.slice(0, 20_000),
-      },
-      actorUserId: req.authCtx.userId,
-    });
+    run = await reload();
     await db.insert(auditLog).values({
-      userId: req.authCtx.userId,
+      userId: actor,
       objectType: "run",
       objectId: runId,
       detail: {
-        nodeId,
-        agentId: outcome.result.servedAgentId,
-        model: outcome.result.model,
-        stopReason: outcome.result.stopReason,
-        refusal: outcome.result.refusal,
-        costUsd: outcome.result.costUsd,
-        phase: "dispatch",
+        phase: "auto-advance",
+        steps: steps.length,
+        dispatched,
+        stoppedReason,
+        acceptReviews: body.acceptReviews ?? false,
       },
       effect: "allow",
-      ruleId: "run-node-dispatched",
+      ruleId: "run-auto-advance",
       ruleChain: [],
-      reason: `node '${nodeId}' executed by its assigned owner under the initiating user's entitlements`,
+      reason: `auto-advance pass took ${steps.length} step(s), stopped: ${stoppedReason}`,
     });
-
     return {
-      dispatch: outcome.result,
-      measuredSpentUsd: newMeasured,
-      ...(budgetBreached ? { budgetBreached: true } : {}),
+      status: run.status,
+      state: run.state,
+      readyNodes: readyNodes(run.graph as TaskGraph, run.state as RunState),
+      steps,
+      stoppedReason,
+      measuredSpentUsd: ((run.budget ?? null) as RunBudget | null)?.measuredSpentUsd ?? 0,
     };
   });
 
