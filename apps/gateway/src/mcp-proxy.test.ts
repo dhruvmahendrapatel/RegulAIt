@@ -6046,6 +6046,121 @@ describe("linear pm adapter: GraphQL run sync + state mirror end-to-end", () => 
   });
 });
 
+describe("asana pm adapter: run sync + section mirror against a live-shaped server", () => {
+  it("pm-sync creates Asana tasks in the {data} envelope and node events mirror via section moves", async () => {
+    let taskSeq = 0;
+    const creations: Array<{ auth: string | null; body: Record<string, unknown>; gid: string }> = [];
+    const sectionLookups: string[] = [];
+    const sectionMoves: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const srv = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        const parsed = body ? JSON.parse(body) : {};
+        const send = (status: number, payload: unknown) => {
+          res.writeHead(status, { "content-type": "application/json" });
+          res.end(JSON.stringify(payload));
+        };
+        if (req.method === "POST" && req.url === "/tasks") {
+          taskSeq += 1;
+          const gid = String(1200 + taskSeq);
+          creations.push({ auth: (req.headers.authorization as string) ?? null, body: parsed, gid });
+          return send(201, { data: { gid, permalink_url: `https://app.asana.com/0/999/${gid}` } });
+        }
+        if (req.method === "GET" && /\/sections$/.test(req.url ?? "")) {
+          sectionLookups.push(req.url ?? "");
+          return send(200, { data: [
+            { gid: "sec-todo", name: "To do" },
+            { gid: "sec-prog", name: "In progress" },
+            { gid: "sec-done", name: "Done" },
+          ] });
+        }
+        if (req.method === "POST" && /\/addTask$/.test(req.url ?? "")) {
+          sectionMoves.push({ url: req.url ?? "", body: parsed });
+          return send(200, { data: {} });
+        }
+        return send(200, { data: {} });
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    const port = (srv.address() as { port: number }).port;
+
+    try {
+      const aria = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email: "asana-aria@example.com", displayName: "Asana Aria" },
+      });
+      const ariaAuth = await authFor(aria.json().id);
+      const approver = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email: "asana-approver@example.com", displayName: "Asana Approver" },
+      });
+      const agentRes = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/agents",
+        payload: {
+          name: "asana-worker", provider: "mock", tier: 0, modes: ["execute"],
+          costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-asana",
+        },
+      });
+      await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/grants/agents",
+        payload: { userId: aria.json().id, agentId: agentRes.json().id },
+      });
+      const conn = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/pm/connections",
+        payload: {
+          name: "asana-e2e", provider: "asana", project: "999",
+          baseUrl: `http://127.0.0.1:${port}`, token: "asana-pat-e2e",
+        },
+      });
+      expect(conn.statusCode).toBe(201);
+
+      const run = await app.inject({
+        method: "POST", headers: ariaAuth, url: "/v1/runs",
+        payload: {
+          graph: {
+            run: "asana-sync-run",
+            escalationApproverUserId: approver.json().id,
+            nodes: [{ id: "a", title: "wire adapter", ownerAgentId: agentRes.json().id, mode: "execute", estimate: { in: 1, out: 1 } }],
+          },
+        },
+      });
+      const runId = run.json().id;
+
+      const synced = await app.inject({
+        method: "POST", headers: ariaAuth, url: `/v1/runs/${runId}/pm-sync`,
+        payload: { connectionName: "asana-e2e" },
+      });
+      expect(synced.statusCode).toBe(201);
+      // run-level parent + one node item, created with the mapped `name` field
+      // inside Asana's {data} envelope and the project GID in `projects`
+      expect(creations.length).toBe(2);
+      expect(creations[0]!.auth).toBe("Bearer asana-pat-e2e");
+      const nodeTask = creations.find(
+        (c) => (c.body.data as Record<string, unknown>).name === "wire adapter",
+      );
+      expect(nodeTask).toBeDefined();
+      expect((nodeTask!.body.data as Record<string, unknown>).projects).toEqual(["999"]);
+
+      // a node event mirrors outbound as a board-section move: sections are
+      // looked up on the project, then the task is added to the matching one
+      await app.inject({ method: "POST", headers: ariaAuth, url: `/v1/runs/${runId}/events`, payload: { kind: "start" } });
+      const started = await app.inject({
+        method: "POST", headers: ariaAuth, url: `/v1/runs/${runId}/events`,
+        payload: { kind: "node_started", nodeId: "a" },
+      });
+      expect(started.statusCode).toBe(200);
+      expect(sectionLookups).toContain("/projects/999/sections");
+      expect(sectionMoves.length).toBe(1);
+      expect(sectionMoves[0]!.url).toBe("/sections/sec-prog/addTask"); // → In progress
+      expect(sectionMoves[0]!.body).toEqual({ data: { task: nodeTask!.gid } });
+    } finally {
+      srv.closeAllConnections();
+      await new Promise<void>((r) => srv.close(() => r()));
+    }
+  });
+});
+
 describe("UI plumbing: /v1/me and own-scoped list views", () => {
   it("identity echo works and non-admins see exactly their own runs/instances/projects", async () => {
     const mia = await app.inject({

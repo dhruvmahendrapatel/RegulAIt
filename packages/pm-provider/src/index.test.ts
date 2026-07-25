@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  AsanaProvider,
   AzureDevOpsProvider,
   JiraProvider,
   LinearProvider,
@@ -37,7 +38,7 @@ describe("field mapping (§6/§7)", () => {
     });
     expect(resolveTaskFields(mapping, { title: "x" })).toEqual({ "Custom.Title": "x" });
     expect(() => mappingFor("azure_devops", { task: { fields: {} } })).toThrow();
-    expect(() => mappingFor("asana")).toThrow(PmProviderError); // no default shipped yet
+    expect(() => mappingFor("monday")).toThrow(PmProviderError); // no default shipped yet
   });
 });
 
@@ -131,7 +132,7 @@ describe("registry", () => {
     const b = resolvePmProvider({ provider: "mock", token: "" });
     expect(a).toBe(b);
     expect(() => resolvePmProvider({ provider: "azure_devops", token: "t" })).toThrow(/baseUrl/);
-    for (const provider of ["asana", "monday", "generic_webhook"] as const) {
+    for (const provider of ["monday", "generic_webhook"] as const) {
       expect(() => resolvePmProvider({ provider, token: "t" })).toThrow(/not implemented/);
     }
   });
@@ -314,7 +315,7 @@ describe("JiraProvider (REST v2, injectable fetch, no network)", () => {
       resolvePmProvider({ provider: "jira", token: "b:t", baseUrl: "https://a.atlassian.net" }).kind,
     ).toBe("jira");
     expect(() => resolvePmProvider({ provider: "jira", token: "b:t" })).toThrowError(/baseUrl/);
-    for (const provider of ["asana", "monday", "generic_webhook"] as const) {
+    for (const provider of ["monday", "generic_webhook"] as const) {
       expect(() => resolvePmProvider({ provider, token: "t" })).toThrowError(/not implemented/);
     }
   });
@@ -428,5 +429,122 @@ describe("LinearProvider (GraphQL, injectable fetch, no network)", () => {
     expect(resolveStatus(mapping, "in_review")).toBe("In Review");
     expect(resolveStatus(mapping, "blocked")).toBeNull();
     expect(resolvePmProvider({ provider: "linear", token: "lin_api_x" }).kind).toBe("linear");
+  });
+});
+
+describe("AsanaProvider (REST + data envelope, injectable fetch, no network)", () => {
+  const envelope = (data: unknown, status = 200) => ({
+    status,
+    json: async () => ({ data }),
+    text: async () => JSON.stringify({ data }),
+  });
+
+  it("creates tasks with Bearer auth, the {data} envelope, and the project in `projects`", async () => {
+    let captured: { url: string; headers: Record<string, string>; body: Record<string, unknown> } | null = null;
+    const asana = new AsanaProvider({
+      token: "asana-pat",
+      fetchImpl: async (url, init) => {
+        captured = { url, headers: init?.headers ?? {}, body: JSON.parse(String(init?.body)) };
+        return envelope({ gid: "1201", permalink_url: "https://app.asana.com/0/999/1201" });
+      },
+    });
+    const ref = await asana.createWorkItem("999", "Task", { name: "Build API", notes: "initial" });
+    expect(captured!.url).toBe("https://app.asana.com/api/1.0/tasks");
+    expect(captured!.headers.authorization).toBe("Bearer asana-pat");
+    expect(captured!.body).toEqual({
+      data: { name: "Build API", notes: "initial", projects: ["999"] },
+    });
+    expect(ref).toEqual({ id: "1201", url: "https://app.asana.com/0/999/1201" });
+  });
+
+  it("transitions by moving the task into the section named like the state — explicit failure otherwise", async () => {
+    const calls: Array<{ method: string; url: string; body?: unknown }> = [];
+    const asana = new AsanaProvider({
+      token: "t",
+      baseUrl: "https://fake.asana.local",
+      fetchImpl: async (url, init) => {
+        calls.push({ method: init?.method ?? "GET", url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+        if (/\/sections$/.test(url)) {
+          return envelope([
+            { gid: "sec-1", name: "To do" },
+            { gid: "sec-2", name: "In progress" },
+            { gid: "sec-3", name: "Done" },
+          ]);
+        }
+        return envelope({});
+      },
+    });
+    await asana.transitionState("999", "1201", "In progress");
+    expect(calls[0]!.url).toBe("https://fake.asana.local/projects/999/sections");
+    expect(calls[1]).toMatchObject({
+      method: "POST",
+      url: "https://fake.asana.local/sections/sec-2/addTask",
+      body: { data: { task: "1201" } },
+    });
+
+    await expect(asana.transitionState("999", "1201", "Blocked")).rejects.toThrowError(
+      /no section 'Blocked'.*To do, In progress, Done/,
+    );
+  });
+
+  it("updates (data envelope), comments via stories, and reads section-as-state with filtered comments", async () => {
+    const calls: Array<{ method: string; url: string; body?: unknown }> = [];
+    const asana = new AsanaProvider({
+      token: "t",
+      fetchImpl: async (url, init) => {
+        calls.push({ method: init?.method ?? "GET", url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+        if (/\/stories$/.test(url) && init?.method === "POST") return envelope({ gid: "story-1" });
+        if (/\/stories$/.test(url)) {
+          return envelope([
+            { resource_subtype: "comment_added", text: "first" },
+            { resource_subtype: "added_to_project", text: "system noise" },
+            { type: "comment", text: "second" },
+          ]);
+        }
+        return envelope({
+          gid: "1201",
+          name: "Build API",
+          notes: "initial",
+          completed: false,
+          permalink_url: "https://app.asana.com/0/999/1201",
+          memberships: [
+            { project: { gid: "888" }, section: { name: "Elsewhere" } },
+            { project: { gid: "999" }, section: { name: "In progress" } },
+          ],
+        });
+      },
+    });
+    await asana.updateFields("999", "1201", { name: "Renamed" });
+    expect(calls[0]).toMatchObject({
+      method: "PUT",
+      url: "https://app.asana.com/api/1.0/tasks/1201",
+      body: { data: { name: "Renamed" } },
+    });
+    await asana.addComment("999", "1201", "note");
+    expect(calls[1]).toMatchObject({
+      method: "POST",
+      url: "https://app.asana.com/api/1.0/tasks/1201/stories",
+      body: { data: { text: "note" } },
+    });
+    const item = await asana.getWorkItem("999", "1201");
+    // state is the section of the membership matching THIS project, not the first
+    expect(item.state).toBe("In progress");
+    expect(item.fields).toEqual({ name: "Build API", notes: "initial", completed: false });
+    expect(item.comments).toEqual(["first", "second"]); // system stories filtered out
+    expect(item.url).toBe("https://app.asana.com/0/999/1201");
+  });
+
+  it("default mapping exists (no priority/blocked — Asana has neither) and the registry resolves asana", () => {
+    const mapping = mappingFor("asana");
+    expect(resolveTaskFields(mapping, { title: "T", description: "D" })).toEqual({
+      name: "T",
+      notes: "D",
+    });
+    expect(resolveStatus(mapping, "in_progress")).toBe("In progress");
+    // no built-in priority field and no Blocked section — skipped, never invented
+    expect(mapping.task.fields.priority).toBeUndefined();
+    expect(resolveStatus(mapping, "blocked")).toBeNull();
+    // baseUrl is optional like linear's — the default is app.asana.com
+    expect(resolvePmProvider({ provider: "asana", token: "pat" }).kind).toBe("asana");
   });
 });

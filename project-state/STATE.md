@@ -353,11 +353,23 @@ GraphQL `errors` arrays surface as explicit PmProviderErrors. Transitions resolv
 workflow states by name (explicit failure listing available states); Linear issues carry no
 native type, so the interface's `type` is accepted-and-ignored (documented). Default mapping
 maps title/description/priority with Linear's default state names; `blocked` unmapped again.
-Registry: azure_devops + jira + linear + mock; asana/monday/generic_webhook stay rejected.
 E2e: pm-sync + node_started mirror against a fake Linear GraphQL server (team resolution,
-issueCreate inputs, raw-token auth, and the stateId move all asserted). Deferred: remaining
-PM adapters, ADF descriptions, provider-native webhooks → the ADR-0010 normalized inbound
-shape.
+issueCreate inputs, raw-token auth, and the stateId move all asserted). **Asana adapter,
+2026-07-25**: `AsanaProvider` speaks the REST API (`app.asana.com/api/1.0`, overridable,
+Bearer PAT auth) with Asana's `{data: ...}` envelope on every request/response; `project` is
+an Asana project GID and `type` is accepted-and-ignored (no native work-item types). Asana
+has no workflow states — `transitionState` resolves the PROJECT's board sections by name
+(exact then case-insensitive) and moves the task via `POST /sections/:gid/addTask`, failing
+explicit with the available section list; the separate `completed` flag is deliberately
+untouched (a section move is the literal board behaviour). `DEFAULT_MAPPINGS.asana` maps
+title→name, status→section, description→notes; `priority` AND `blocked` both unmapped (no
+native priority field, no default Blocked section — skip, never invent). getWorkItem reads
+section-as-state for the matching project membership and filters stories to real comments.
+Registry: azure_devops + jira + linear + asana + mock; monday/generic_webhook stay rejected.
+E2e: pm-sync + node_started against a live-shaped fake Asana server (data envelopes, bearer
+token, projects array, section lookup + addTask all asserted on the wire). Deferred: monday +
+generic-webhook adapters, ADF descriptions, provider-native webhooks → the ADR-0010
+normalized inbound shape.
 
 **EPIC-06 started — PM-tool integration first slice, 2026-07-25.** New
 `packages/pm-provider` on the git-provider playbook (pillar 8, PM_TOOL_INTEGRATION_SPEC

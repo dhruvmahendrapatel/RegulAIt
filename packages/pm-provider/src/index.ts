@@ -192,6 +192,21 @@ export const DEFAULT_MAPPINGS: Partial<Record<PmProviderKind, PmMapping>> = {
       },
     },
   },
+  asana: {
+    task: {
+      workItemType: "Task",
+      fields: { title: "name", status: "section", description: "notes" },
+      // Asana has no built-in priority field (custom fields only) and default
+      // boards have no Blocked section — 'priority' and 'blocked' are
+      // deliberately unmapped (skip, never invent).
+      statusMap: {
+        not_started: "To do",
+        in_progress: "In progress",
+        in_review: "In progress",
+        done: "Done",
+      },
+    },
+  },
   azure_devops: {
     task: {
       workItemType: "Task",
@@ -624,6 +639,129 @@ export class LinearProvider implements PmProvider {
 }
 
 // ---------------------------------------------------------------------------
+// Asana adapter — REST 1.0, Bearer PAT auth, injectable fetch. Every request
+// and response body travels in Asana's { data: ... } envelope. The
+// interface's `project` is an Asana PROJECT GID; board columns are sections
+// within that project, so transitionState resolves the section by name and
+// moves the task, failing explicit with the available list. The `type`
+// argument is accepted but Asana tasks carry no native work-item type —
+// documented, ignored.
+// ---------------------------------------------------------------------------
+
+export interface AsanaAdapterOptions {
+  /** an Asana personal access token, sent as a Bearer Authorization header */
+  token: string;
+  /** override for testing/bridges; default https://app.asana.com/api/1.0 */
+  baseUrl?: string | null;
+  fetchImpl?: FetchLike;
+}
+
+const ASANA_DEFAULT_BASE = "https://app.asana.com/api/1.0";
+
+export class AsanaProvider implements PmProvider {
+  readonly kind = "asana" as const;
+  private readonly base: string;
+  private readonly auth: string;
+  private readonly fetchImpl: FetchLike;
+
+  constructor(opts: AsanaAdapterOptions) {
+    this.base = (opts.baseUrl ?? ASANA_DEFAULT_BASE).replace(/\/$/, "");
+    this.auth = `Bearer ${opts.token}`;
+    this.fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
+  }
+
+  private async request(method: string, path: string, body?: unknown): Promise<unknown> {
+    const res = await this.fetchImpl(`${this.base}${path}`, {
+      method,
+      headers: {
+        authorization: this.auth,
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify({ data: body }) }),
+    });
+    if (res.status >= 400) {
+      throw new PmProviderError(`asana ${method} ${path} failed: ${await res.text()}`, res.status);
+    }
+    const text = await res.text();
+    if (!text) return null;
+    return (JSON.parse(text) as { data?: unknown }).data ?? null;
+  }
+
+  async createWorkItem(
+    project: string,
+    _type: string,
+    fields: Record<string, unknown>,
+  ): Promise<WorkItemRef> {
+    const task = (await this.request("POST", "/tasks", {
+      ...fields,
+      projects: [project],
+    })) as { gid: string; permalink_url?: string };
+    return {
+      id: String(task.gid),
+      url: task.permalink_url ?? `https://app.asana.com/0/${project}/${task.gid}`,
+    };
+  }
+
+  async updateFields(_project: string, id: string, fields: Record<string, unknown>): Promise<void> {
+    await this.request("PUT", `/tasks/${id}`, fields);
+  }
+
+  /** Board columns are sections within the project: resolve the section by
+   * name (exact, then case-insensitive) and move the task there. The separate
+   * `completed` flag is a different axis — a section move is the literal
+   * board behaviour, so completion is deliberately left untouched. */
+  async transitionState(project: string, id: string, state: string): Promise<void> {
+    const sections = (await this.request("GET", `/projects/${project}/sections`)) as Array<{
+      gid: string;
+      name: string;
+    }>;
+    const match =
+      sections.find((s) => s.name === state) ??
+      sections.find((s) => s.name.toLowerCase() === state.toLowerCase());
+    if (!match) {
+      const names = sections.map((s) => s.name).join(", ") || "none";
+      throw new PmProviderError(`asana project has no section '${state}' (available: ${names})`);
+    }
+    await this.request("POST", `/sections/${match.gid}/addTask`, { task: id });
+  }
+
+  async addComment(_project: string, id: string, text: string): Promise<void> {
+    await this.request("POST", `/tasks/${id}/stories`, { text });
+  }
+
+  async getWorkItem(project: string, id: string): Promise<WorkItem> {
+    const task = (await this.request(
+      "GET",
+      `/tasks/${id}?opt_fields=name,notes,completed,permalink_url,memberships.section.name,memberships.project.gid`,
+    )) as {
+      gid: string;
+      name?: string;
+      notes?: string;
+      completed?: boolean;
+      permalink_url?: string;
+      memberships?: Array<{ project?: { gid?: string }; section?: { name?: string } }>;
+    };
+    const membership = task.memberships?.find((m) => m.project?.gid === project);
+    const stories = (await this.request("GET", `/tasks/${id}/stories`)) as Array<{
+      resource_subtype?: string;
+      type?: string;
+      text?: string;
+    }>;
+    return {
+      id: String(task.gid),
+      url: task.permalink_url ?? `https://app.asana.com/0/${project}/${task.gid}`,
+      type: "Task",
+      state: membership?.section?.name ?? null,
+      fields: { name: task.name, notes: task.notes, completed: task.completed },
+      comments: stories
+        .filter((s) => s.resource_subtype === "comment_added" || s.type === "comment")
+        .map((s) => s.text ?? ""),
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Mock adapter — in-memory, for tests and air-gapped development.
 // ---------------------------------------------------------------------------
 
@@ -787,9 +925,14 @@ export function resolvePmProvider(config: PmConnectionConfig, fetchImpl?: FetchL
         baseUrl: config.baseUrl ?? null,
         ...(fetchImpl ? { fetchImpl } : {}),
       });
+    case "asana":
+      return new AsanaProvider({
+        token: config.token,
+        baseUrl: config.baseUrl ?? null,
+        ...(fetchImpl ? { fetchImpl } : {}),
+      });
     case "mock":
       return sharedMock;
-    case "asana":
     case "monday":
     case "generic_webhook":
       throw new PmProviderError(
