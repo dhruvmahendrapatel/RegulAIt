@@ -50,6 +50,13 @@
       "when": 1784941000000,
       "tag": "0006_agents_connectors",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1784942000000,
+      "tag": "0007_workflow_engine",
+      "breakpoints": true
     }
   ]
 }

@@ -869,3 +869,287 @@ describe("connector governance (§2)", () => {
     expect(effects).toEqual(["allow", "deny", "deny"]);
   });
 });
+
+describe("workflow engine (EPIC-03 slice)", () => {
+  let leoId: string;
+  let leoAuth: { authorization: string };
+  let stdTemplateId: string;
+  let complianceApproverId: string;
+
+  const standardDef = {
+    workflow: "standard-change-workflow",
+    stages: [
+      { id: "intake", type: "trigger" },
+      { id: "plan", type: "planning" },
+      { id: "requirements", type: "artifact_generation", output: "requirements_file" },
+      { id: "requirements_signoff", type: "human_approval", approvers: ["requesting_user"] },
+      { id: "build", type: "automated_build", scope: "requirements_file" },
+      { id: "checks", type: "automated_check", checks: ["ci_tests"] },
+    ],
+  };
+
+  it("templates validate on creation and assignment rules route changes", async () => {
+    const bad = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/workflows/templates",
+      payload: { name: "bad", definition: { workflow: "bad", stages: [{ id: "x", type: "planning" }] } },
+    });
+    expect(bad.statusCode).toBe(400);
+
+    const tpl = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/workflows/templates",
+      payload: { name: "standard-change", definition: standardDef },
+    });
+    expect(tpl.statusCode).toBe(201);
+    stdTemplateId = tpl.json().id;
+
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/workflows/assignment-rules",
+      payload: { templateId: stdTemplateId, changeType: "backend" },
+    });
+
+    const leo = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "proxy-leo@example.com", displayName: "Proxy Leo" },
+    });
+    leoId = leo.json().id;
+    leoAuth = await authFor(leoId);
+
+    const miss = await app.inject({
+      method: "POST",
+      headers: leoAuth,
+      url: "/v1/workflows/instances",
+      payload: {
+        change: { description: "copy fix", paths: ["web/home.tsx"], changeType: "frontend", environment: "staging" },
+      },
+    });
+    expect(miss.statusCode).toBe(422);
+  });
+
+  it("runs the full journey: artifact → sign-off → versioned re-approval → build → done", async () => {
+    const started = await app.inject({
+      method: "POST",
+      headers: leoAuth,
+      url: "/v1/workflows/instances",
+      payload: {
+        change: { description: "add endpoint", paths: ["api/x.ts"], changeType: "backend", environment: "staging" },
+      },
+    });
+    expect(started.statusCode).toBe(201);
+    const instanceId = started.json().id;
+    expect(started.json().status).toBe("blocked_on_artifact");
+
+    const v1 = await app.inject({
+      method: "POST",
+      headers: leoAuth,
+      url: `/v1/workflows/instances/${instanceId}/artifacts`,
+      payload: { stageId: "requirements", content: "# Requirements v1" },
+    });
+    expect(v1.json()).toMatchObject({ version: 1, status: "blocked_on_approval" });
+
+    // sign-off posts into the ONE approvals queue, approver = requesting user
+    const queue = await app.inject({ method: "GET", headers: AUTH, url: "/v1/approvals?status=pending" });
+    const signoff = queue
+      .json()
+      .approvals.find((a: { instanceId: string | null }) => a.instanceId === instanceId);
+    expect(signoff).toMatchObject({ objectType: "workflow", stageId: "requirements_signoff", approverUserId: leoId });
+
+    const approve = await app.inject({
+      method: "POST",
+      headers: leoAuth,
+      url: `/v1/approvals/${signoff.id}/decide`,
+      payload: { decision: "approved" },
+    });
+    expect(approve.statusCode).toBe(200);
+
+    let view = await app.inject({ method: "GET", headers: leoAuth, url: `/v1/workflows/instances/${instanceId}` });
+    expect(view.json().instance.status).toBe("awaiting_trigger");
+
+    // §2 stage 4: editing after sign-off re-opens the gate at version 2
+    const v2 = await app.inject({
+      method: "POST",
+      headers: leoAuth,
+      url: `/v1/workflows/instances/${instanceId}/artifacts`,
+      payload: { stageId: "requirements", content: "# Requirements v2" },
+    });
+    expect(v2.json()).toMatchObject({ version: 2, status: "blocked_on_approval" });
+
+    const queue2 = await app.inject({ method: "GET", headers: AUTH, url: "/v1/approvals?status=pending" });
+    const signoff2 = queue2
+      .json()
+      .approvals.find((a: { instanceId: string | null }) => a.instanceId === instanceId);
+    expect(signoff2.id).not.toBe(signoff.id);
+    await app.inject({
+      method: "POST",
+      headers: leoAuth,
+      url: `/v1/approvals/${signoff2.id}/decide`,
+      payload: { decision: "approved" },
+    });
+
+    for (const stageId of ["build", "checks"]) {
+      await app.inject({
+        method: "POST",
+        headers: leoAuth,
+        url: `/v1/workflows/instances/${instanceId}/advance`,
+        payload: { stageId },
+      });
+    }
+
+    view = await app.inject({ method: "GET", headers: leoAuth, url: `/v1/workflows/instances/${instanceId}` });
+    expect(view.json().instance.status).toBe("completed");
+    expect(view.json().artifacts.map((a: { version: number }) => a.version)).toEqual([1, 2]);
+    expect(view.json().events.length).toBeGreaterThanOrEqual(6);
+  });
+
+  it("merges multiple matching templates and honors named approvers (§4 composability)", async () => {
+    const approver = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "proxy-compliance@example.com", displayName: "Compliance Officer" },
+    });
+    complianceApproverId = approver.json().id;
+
+    const tpl = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/workflows/templates",
+      payload: {
+        name: "prod-compliance",
+        definition: {
+          workflow: "prod-compliance",
+          stages: [
+            { id: "intake", type: "trigger" },
+            { id: "compliance_signoff", type: "human_approval", approvers: [complianceApproverId] },
+          ],
+        },
+      },
+    });
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/workflows/assignment-rules",
+      payload: { templateId: tpl.json().id, environment: "production" },
+    });
+
+    const started = await app.inject({
+      method: "POST",
+      headers: leoAuth,
+      url: "/v1/workflows/instances",
+      payload: {
+        change: { description: "prod change", paths: ["api/y.ts"], changeType: "backend", environment: "production" },
+      },
+    });
+    const instanceId = started.json().id;
+
+    const view = await app.inject({ method: "GET", headers: leoAuth, url: `/v1/workflows/instances/${instanceId}` });
+    const stageIds = view.json().instance.definition.stages.map((s: { id: string }) => s.id);
+    expect(stageIds).toContain("requirements_signoff");
+    expect(stageIds).toContain("compliance_signoff");
+
+    // walk to the compliance gate: artifact → own sign-off → build/checks
+    await app.inject({
+      method: "POST",
+      headers: leoAuth,
+      url: `/v1/workflows/instances/${instanceId}/artifacts`,
+      payload: { stageId: "requirements", content: "# prod req" },
+    });
+    const q1 = await app.inject({ method: "GET", headers: AUTH, url: "/v1/approvals?status=pending" });
+    const s1 = q1.json().approvals.find(
+      (a: { instanceId: string | null; stageId: string }) =>
+        a.instanceId === instanceId && a.stageId === "requirements_signoff",
+    );
+    await app.inject({
+      method: "POST",
+      headers: leoAuth,
+      url: `/v1/approvals/${s1.id}/decide`,
+      payload: { decision: "approved" },
+    });
+    for (const stageId of ["build", "checks"]) {
+      await app.inject({
+        method: "POST",
+        headers: leoAuth,
+        url: `/v1/workflows/instances/${instanceId}/advance`,
+        payload: { stageId },
+      });
+    }
+
+    const q2 = await app.inject({ method: "GET", headers: AUTH, url: "/v1/approvals?status=pending" });
+    const s2 = q2.json().approvals.find(
+      (a: { instanceId: string | null; stageId: string }) =>
+        a.instanceId === instanceId && a.stageId === "compliance_signoff",
+    );
+    expect(s2.approverUserId).toBe(complianceApproverId);
+
+    // initiator cannot decide the compliance gate — only the named approver
+    const wrong = await app.inject({
+      method: "POST",
+      headers: leoAuth,
+      url: `/v1/approvals/${s2.id}/decide`,
+      payload: { decision: "approved" },
+    });
+    expect(wrong.statusCode).toBe(403);
+
+    const denied = await app.inject({
+      method: "POST",
+      headers: await authFor(complianceApproverId),
+      url: `/v1/approvals/${s2.id}/decide`,
+      payload: { decision: "denied", reason: "missing rollback plan" },
+    });
+    expect(denied.statusCode).toBe(200);
+
+    const after = await app.inject({ method: "GET", headers: leoAuth, url: `/v1/workflows/instances/${instanceId}` });
+    expect(after.json().instance.status).toBe("denied");
+  });
+
+  it("non-initiators cannot see or drive an instance; abort is terminal and audited", async () => {
+    const started = await app.inject({
+      method: "POST",
+      headers: leoAuth,
+      url: "/v1/workflows/instances",
+      payload: {
+        change: { description: "another", paths: ["api/z.ts"], changeType: "backend", environment: "staging" },
+      },
+    });
+    const instanceId = started.json().id;
+
+    const mallory = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "proxy-mallory@example.com", displayName: "Proxy Mallory" },
+    });
+    const malloryAuth = await authFor(mallory.json().id);
+    const stranger = await app.inject({
+      method: "GET",
+      headers: malloryAuth,
+      url: `/v1/workflows/instances/${instanceId}`,
+    });
+    expect(stranger.statusCode).toBe(403);
+
+    await app.inject({
+      method: "POST",
+      headers: leoAuth,
+      url: `/v1/workflows/instances/${instanceId}/abort`,
+      payload: {},
+    });
+    const view = await app.inject({ method: "GET", headers: leoAuth, url: `/v1/workflows/instances/${instanceId}` });
+    expect(view.json().instance.status).toBe("aborted");
+
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit?userId=${leoId}` });
+    const wfRows = audit
+      .json()
+      .entries.filter(
+        (e: { objectType: string; objectId: string | null }) =>
+          e.objectType === "workflow" && e.objectId === instanceId,
+      );
+    expect(wfRows.some((e: { effect: string }) => e.effect === "deny")).toBe(true);
+  });
+});

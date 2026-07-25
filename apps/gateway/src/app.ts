@@ -58,6 +58,7 @@ export interface BuildAppOptions {
 import { z } from "zod";
 import { registerMcpProxy } from "./mcp-proxy.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
+import { applyWorkflowApprovalDecision, registerWorkflowRoutes } from "./workflows.js";
 
 const uuidParam = z.object({ serverId: z.string().uuid() });
 const visibleToolsParams = z.object({
@@ -103,6 +104,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "POST /v1/connectors/:connectorId/invoke",
     "GET /v1/users/:userId/agents",
     "GET /v1/users/:userId/connectors",
+    "POST /v1/workflows/instances",
+    "POST /v1/workflows/instances/:instanceId/artifacts",
+    "POST /v1/workflows/instances/:instanceId/advance",
+    "POST /v1/workflows/instances/:instanceId/abort",
+    "GET /v1/workflows/instances/:instanceId",
   ]);
   app.addHook("preHandler", async (req, reply) => {
     const route = `${req.method} ${req.routeOptions.url ?? ""}`;
@@ -482,10 +488,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       .where(and(eq(approvals.id, approvalId), eq(approvals.status, "pending")))
       .returning();
     if (!updated) return reply.status(409).send({ error: "already_decided" });
+    // Workflow sign-offs advance their instance through the same one inbox (§5).
+    if (updated.objectType === "workflow") {
+      await applyWorkflowApprovalDecision(db, updated, body.decision, deciderUserId);
+    }
     return updated;
   });
 
   registerAgentConnectorRoutes(app, db);
+
+  registerWorkflowRoutes(app, db);
 
   registerMcpProxy(app, db);
 

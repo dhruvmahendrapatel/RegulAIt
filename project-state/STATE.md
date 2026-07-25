@@ -49,6 +49,23 @@ admin CRUD, `/v1/evaluate` writes an audit row for every decision, visible-tools
 implements §3's visibility filtering). Work is on branch `claude/status-check-2gbrwf` (draft PR).
 **Not yet in the slice**: initiatives object type, admin portal.
 
+**EPIC-03 started — workflow engine first slice (PR #9).** New pure `packages/workflow-kernel`:
+declarative template validation (§3 — executable stage types trigger/planning/
+artifact_generation/human_approval/automated_build/automated_check; git_operation/deployment/
+rollback rejected until integrations exist), §4 assignment-rule matching (path glob/changeType/
+environment, ANDed; multi-template union-merge keeping every approval stage, single trigger),
+and a pure instance state machine: versioned sign-off (§2 stage 4 — artifact edits after
+approval re-open the gate and supersede stale pending approvals), decide≠execute (build/check
+stages await an explicit human trigger), denial/abort terminal states. Gateway: migration 0007
+widens `approvals` into the ONE §6 inbox (workflow sign-offs are approvals rows with
+object_type/instance_id/stage_id; deciding one advances the instance, all-named-approvers-must-
+approve), plus `workflow_templates`/`workflow_assignment_rules`/`workflow_instances` (merged
+definition snapshotted at start)/`workflow_events` (append-only history)/`workflow_artifacts`
+(every version retained). Endpoints: template/rule CRUD (admin), instance start (auto-advances
+to first block; §4: requester doesn't pick the workflow — rules do; explicit template =
+admin-only), artifact submit/edit, advance, abort, per-instance dashboard view + admin fleet
+view. Everything audits into the one trail (objectType `workflow`).
+
 **§5 review fixes + agents/connectors governance (PR #8).** The PR #7 adversarial-review
 findings are fixed: revocations are unique per (user, server, tool) with NULLS NOT DISTINCT
 (migration 0005, duplicates deduped), Postgres constraint violations map to 409/400 instead of
@@ -117,7 +134,7 @@ with a real in-process upstream MCP server and real MCP client (26 tests total).
 |---|---|---|---|
 | EPIC-01 | Bootstrap: AWS foundation + GitHub repo + session-continuity scaffold | **done** | ADR-0001–0004 |
 | EPIC-02 | Governance layer MVP (now includes infra-ops/compliance-cascade/deploy-model, Shared Projects, cost dashboard — §1–§10) | **in progress** — stack chosen (ADR-0009), first slice = MCP-server governance vertical | GOVERNANCE_LAYER_SPEC.md, ADR-0007, ADR-0009 |
-| EPIC-03 | Workflow engine MVP (now includes optional Design/Architecture sign-off stage type) | not started | WORKFLOW_ENGINE_SPEC.md, ADR-0007 |
+| EPIC-03 | Workflow engine MVP (now includes optional Design/Architecture sign-off stage type) | **in progress** — first slice merged (PR #9) | WORKFLOW_ENGINE_SPEC.md, ADR-0007 |
 | EPIC-04 | Token/cost optimization MVP (escalated to P0) | not started | TOKEN_OPTIMIZATION_SPEC.md, ADR-0007 |
 | EPIC-05 | Multi-agent orchestration MVP (PM/Team-Lead/Worker delegation) | not started | MULTI_AGENT_ORCHESTRATION_SPEC.md, ADR-0008 |
 | EPIC-06 | PM-tool integration MVP (Azure DevOps/Jira/etc.) | not started | PM_TOOL_INTEGRATION_SPEC.md, ADR-0008 |
