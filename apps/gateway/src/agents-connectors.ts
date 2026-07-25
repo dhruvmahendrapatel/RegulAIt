@@ -37,9 +37,9 @@ const userIdParam = z.object({ userId: z.string().uuid() });
 const agentIdParam = z.object({ agentId: z.string().uuid() });
 const connectorIdParam = z.object({ connectorId: z.string().uuid() });
 
-type AgentRow = typeof agents.$inferSelect;
+export type AgentRow = typeof agents.$inferSelect;
 
-type DispatchOutcome =
+export type DispatchOutcome =
   | {
       ok: true;
       result: {
@@ -55,23 +55,28 @@ type DispatchOutcome =
     }
   | { ok: false; status: number; error: string; detail?: string };
 
-/** Real model execution for an already-governed, already-routed invoke. The
- * served agent is an INPUT here — this function never picks a model. Config
- * problems (no model id, unknown provider, missing credential) fail explicit,
- * never fall back to a different model. */
-async function performDispatch(
+/** The one governed-dispatch core, shared by the direct invoke path and the
+ * orchestration worker-node path. The served agent is an INPUT — this
+ * function never picks a model; governance and (where applicable) routing
+ * have already happened upstream. Config problems (no model id, unknown
+ * provider, missing credential) fail explicit, never fall back to a
+ * different model. Every execution lands one MEASURED row in usage_events. */
+export async function executeGovernedDispatch(
   db: Db,
   dataKey: string | undefined,
   args: {
     userId: string;
+    /** the agent to execute — caller has already governance-checked it */
+    served: AgentRow | undefined;
     requestedAgentId: string;
-    registry: AgentRow[];
-    routing: ReturnType<typeof routeModel>;
-    body: z.infer<typeof invokeAgentSchema>;
+    /** routing counterfactual for measured savings; null = no routing happened */
+    baseline?: AgentRow | null;
+    input: string;
+    maxTokens?: number | undefined;
+    detail?: Record<string, unknown>;
   },
 ): Promise<DispatchOutcome> {
-  const { userId, requestedAgentId, registry, routing, body } = args;
-  const served = registry.find((a) => a.id === routing.selectedAgentId);
+  const { userId, served, requestedAgentId, baseline } = args;
   if (!served || !served.model || !isModelProviderKind(served.provider)) {
     return {
       ok: false,
@@ -110,8 +115,8 @@ async function performDispatch(
     const provider = resolveModelProvider({ provider: served.provider, apiKey, baseUrl });
     result = await provider.dispatch({
       model: served.model,
-      input: body.input ?? "",
-      ...(body.maxTokens ? { maxTokens: body.maxTokens } : {}),
+      input: args.input,
+      ...(args.maxTokens ? { maxTokens: args.maxTokens } : {}),
     });
   } catch (err) {
     if (err instanceof ModelProviderError) {
@@ -130,7 +135,6 @@ async function performDispatch(
       : null;
   // The measured version of routing's savings claim: what the baseline agent
   // would have cost at the SAME measured token volumes, minus what we paid.
-  const baseline = registry.find((a) => a.id === routing.baselineAgentId);
   const measuredCostSavedUsd =
     costUsd != null &&
     baseline &&
@@ -145,7 +149,7 @@ async function performDispatch(
     userId,
     agentId: served.id,
     requestedAgentId,
-    baselineAgentId: routing.baselineAgentId,
+    baselineAgentId: baseline?.id ?? null,
     provider: served.provider,
     model: served.model,
     inputTokens: result.usage.inputTokens,
@@ -155,7 +159,7 @@ async function performDispatch(
     stopReason: result.stopReason,
     refusal: result.refusal,
     providerMessageId: result.providerMessageId,
-    detail: { mode: body.mode },
+    detail: args.detail ?? {},
   });
 
   return {
@@ -171,6 +175,31 @@ async function performDispatch(
       measuredCostSavedUsd,
     },
   };
+}
+
+/** Direct-invoke dispatch: resolve routing's choice against the registry and
+ * hand it to the shared core. */
+async function performDispatch(
+  db: Db,
+  dataKey: string | undefined,
+  args: {
+    userId: string;
+    requestedAgentId: string;
+    registry: AgentRow[];
+    routing: ReturnType<typeof routeModel>;
+    body: z.infer<typeof invokeAgentSchema>;
+  },
+): Promise<DispatchOutcome> {
+  const { userId, requestedAgentId, registry, routing, body } = args;
+  return executeGovernedDispatch(db, dataKey, {
+    userId,
+    served: registry.find((a) => a.id === routing.selectedAgentId),
+    requestedAgentId,
+    baseline: registry.find((a) => a.id === routing.baselineAgentId) ?? null,
+    input: body.input ?? "",
+    maxTokens: body.maxTokens,
+    detail: { mode: body.mode },
+  });
 }
 
 /** §2/§4: agent registry + entitlements, connector catalog + grants, and the
