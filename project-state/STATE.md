@@ -408,7 +408,17 @@ Migration 0021 adds `pm_connections.webhook_secret_ciphertext` (AES-256-GCM, sam
 as tokens) because HMAC needs the secret itself — the sha256 hash stays and still gates
 legacy traffic. Raw-body capture is scoped to the webhook route only (encapsulated Fastify
 scope; global JSON parsing untouched). Downstream normalized processing (pm_sync_events,
-drift, orphans) unchanged. Suite 380 → 405 (20 unit + 5 e2e). Deferred: ADF descriptions.
+drift, orphans) unchanged. Suite 380 → 405 (20 unit + 5 e2e). **ADF descriptions for Jira, 2026-07-25 —
+pillar 8's deferred list is now EMPTY.** New dependency-free `packages/pm-provider/src/adf.ts`:
+`textToAdf` (paragraphs w/ hardBreak round-tripping, #-headings capped at 6, bullet/ordered
+lists, code fences w/ language; total — never throws) and `adfToText` (inverse walk,
+unknown nodes descended never dropped). `JiraAdapterOptions.apiVersion?: 2|3` (default 2,
+zero behaviour change): v3 uses `/rest/api/3/`, converts the native description field and
+comment bodies through ADF both ways. Migration 0022 adds nullable
+`pm_connections.api_version` (null = v2; jira-only, superRefine-rejected loudly elsewhere);
+admin form gains the v2/v3+ADF select. Adjacent fix: run pm-sync now seeds the mapped
+description from the node's instruction at creation (initial value only — the PM tool owns
+it thereafter per §3). Suite 405 → 416.
 
 **EPIC-06 started — PM-tool integration first slice, 2026-07-25.** New
 `packages/pm-provider` on the git-provider playbook (pillar 8, PM_TOOL_INTEGRATION_SPEC

@@ -49,17 +49,24 @@ const CONNECTION_COLUMNS = {
   baseUrl: pmConnections.baseUrl,
   project: pmConnections.project,
   mapping: pmConnections.mapping,
+  apiVersion: pmConnections.apiVersion,
   createdAt: pmConnections.createdAt,
 };
 
 function providerFor(
-  conn: { provider: (typeof pmConnections.$inferSelect)["provider"]; baseUrl: string | null; tokenCiphertext: string },
+  conn: {
+    provider: (typeof pmConnections.$inferSelect)["provider"];
+    baseUrl: string | null;
+    apiVersion: number | null;
+    tokenCiphertext: string;
+  },
   dataKey: string,
 ) {
   return resolvePmProvider({
     provider: conn.provider,
     token: decryptSecret(dataKey, conn.tokenCiphertext),
     baseUrl: conn.baseUrl,
+    apiVersion: conn.apiVersion,
   });
 }
 
@@ -235,7 +242,12 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
     // not a surprise at sync time.
     try {
       mappingFor(body.provider, body.mapping);
-      resolvePmProvider({ provider: body.provider, token: body.token, baseUrl: body.baseUrl ?? null });
+      resolvePmProvider({
+        provider: body.provider,
+        token: body.token,
+        baseUrl: body.baseUrl ?? null,
+        apiVersion: body.apiVersion ?? null,
+      });
     } catch (err) {
       if (err instanceof PmProviderError) {
         return reply.status(422).send({ error: "unsupported_pm_provider", detail: err.message });
@@ -257,6 +269,7 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
         project: body.project,
         tokenCiphertext: encryptSecret(opts.dataKey, body.token),
         mapping: body.mapping ?? null,
+        apiVersion: body.apiVersion ?? null,
         webhookSecretHash: sha256(webhookSecret),
         webhookSecretCiphertext: encryptSecret(opts.dataKey, webhookSecret),
       })
@@ -385,10 +398,20 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
     const created: Array<{ nodeId: string; externalId: string; externalUrl: string }> = [];
     for (const node of graph.nodes) {
       if (linked.has(node.id)) continue;
+      // The node's multi-sentence instruction (gateway-level enrichment, see
+      // orchestration.ts) seeds the work item's description — an INITIAL
+      // value the PM tool owns from then on (§3), so it is set at creation
+      // and never re-written by later syncs.
+      const instruction = (node as { instruction?: unknown }).instruction;
       const ref = await provider.createWorkItem(
         conn.project,
         mapping.task.workItemType,
-        resolveTaskFields(mapping, { title: node.title }),
+        resolveTaskFields(mapping, {
+          title: node.title,
+          ...(typeof instruction === "string" && instruction.trim()
+            ? { description: instruction }
+            : {}),
+        }),
       );
       await db.insert(pmLinks).values({
         connectionId: conn.id,

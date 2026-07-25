@@ -574,6 +574,10 @@ export const pmConnections = pgTable("pm_connections", {
   project: text("project").notNull(),
   tokenCiphertext: text("token_ciphertext").notNull(),
   mapping: jsonb("mapping"),
+  /** jira only: REST API version (2 = legacy plain text, 3 = ADF rich text);
+   * null = the provider default (v2) — connections minted before this column
+   * existed keep behaving exactly as they did. */
+  apiVersion: integer("api_version"),
   /** ADR-0010: sha256 of the per-connection webhook secret (plaintext shown once) */
   webhookSecretHash: text("webhook_secret_hash"),
   /** Provider-native inbound verification (pillar 8 depth): HMAC signature

@@ -6220,6 +6220,105 @@ describe("jira pm adapter: run sync + status mirror against a live-shaped server
   });
 });
 
+describe("jira pm adapter v3: ADF descriptions ride pm-sync end-to-end", () => {
+  // The v2 describe above stays untouched — it IS the regression proving the
+  // default (apiVersion omitted) still speaks /rest/api/2 with plain strings.
+  it("a connection with apiVersion 3 creates issues on /rest/api/3 with an ADF description carrying the node instruction", async () => {
+    let issueSeq = 0;
+    const creations: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const srv = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        const parsed = body ? JSON.parse(body) : {};
+        if (req.method === "POST" && req.url === "/rest/api/3/issue") {
+          creations.push({ url: req.url, body: parsed });
+          issueSeq += 1;
+          res.writeHead(201, { "content-type": "application/json" });
+          return res.end(JSON.stringify({ id: String(20000 + issueSeq), key: `REG-${issueSeq}`, self: "..." }));
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end("{}");
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    const port = (srv.address() as { port: number }).port;
+
+    try {
+      const vera = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email: "jira-v3-vera@example.com", displayName: "Jira V3 Vera" },
+      });
+      const veraAuth = await authFor(vera.json().id);
+      const approver = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email: "jira-v3-approver@example.com", displayName: "Jira V3 Approver" },
+      });
+      const agentRes = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/agents",
+        payload: {
+          name: "jira-v3-worker", provider: "mock", tier: 0, modes: ["execute"],
+          costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-jira-v3",
+        },
+      });
+      await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/grants/agents",
+        payload: { userId: vera.json().id, agentId: agentRes.json().id },
+      });
+      const conn = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/pm/connections",
+        payload: {
+          name: "jira-v3-e2e", provider: "jira", project: "REG", apiVersion: 3,
+          baseUrl: `http://127.0.0.1:${port}`, token: "bot@example.com:api-token",
+        },
+      });
+      expect(conn.statusCode).toBe(201);
+      expect(conn.json().apiVersion).toBe(3);
+
+      const instruction =
+        "Implement the governed endpoint.\n\n- wire the gateway route\n- add audit logging";
+      const run = await app.inject({
+        method: "POST", headers: veraAuth, url: "/v1/runs",
+        payload: {
+          graph: {
+            run: "jira-v3-sync-run",
+            escalationApproverUserId: approver.json().id,
+            nodes: [{
+              id: "a", title: "implement api", ownerAgentId: agentRes.json().id, mode: "execute",
+              instruction, estimate: { in: 1, out: 1 },
+            }],
+          },
+        },
+      });
+      const runId = run.json().id;
+
+      const synced = await app.inject({
+        method: "POST", headers: veraAuth, url: `/v1/runs/${runId}/pm-sync`,
+        payload: { connectionName: "jira-v3-e2e" },
+      });
+      expect(synced.statusCode).toBe(201);
+      // run-level parent + one node item, all on the v3 endpoint
+      expect(creations.length).toBe(2);
+      const nodeIssue = creations.find(
+        (c) => (c.body.fields as Record<string, unknown>).summary === "implement api",
+      );
+      expect(nodeIssue).toBeDefined();
+      const desc = (nodeIssue!.body.fields as Record<string, unknown>).description as {
+        version: number; type: string; content: unknown[];
+      };
+      expect(desc.version).toBe(1);
+      expect(desc.type).toBe("doc");
+      expect(desc.content.length).toBeGreaterThanOrEqual(2); // paragraph + bulletList
+      expect(JSON.stringify(desc)).toContain("Implement the governed endpoint.");
+      expect(JSON.stringify(desc)).toContain("bulletList");
+      expect(JSON.stringify(desc)).toContain("wire the gateway route");
+    } finally {
+      srv.closeAllConnections();
+      await new Promise<void>((r) => srv.close(() => r()));
+    }
+  });
+});
+
 describe("linear pm adapter: GraphQL run sync + state mirror end-to-end", () => {
   it("pm-sync creates Linear issues via issueCreate and node events mirror via workflow states", async () => {
     let issueSeq = 0;

@@ -155,6 +155,13 @@
       "when": 1784957000000,
       "tag": "0021_pm_native_webhooks",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1784958000000,
+      "tag": "0022_pm_jira_api_version",
+      "breakpoints": true
     }
   ]
 }
