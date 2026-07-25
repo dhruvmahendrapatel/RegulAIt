@@ -379,8 +379,22 @@ statusMap in_progress→"Working on it", done→"Done", and — per-provider rea
 deliberately unmapped. Registry: azure_devops + jira + linear + asana + monday + mock;
 generic_webhook is now the SOLE rejected kind. E2e: pm-sync + node_started against a fake
 monday GraphQL server (raw token, board_id/item_name, columns lookup + change_simple_column_
-value with "Working on it" all asserted). Deferred: generic-webhook adapter, ADF
-descriptions, provider-native webhooks → the ADR-0010 normalized inbound shape.
+value with "Working on it" all asserted). **Generic webhook adapter, same day — the
+pillar-8 matrix is COMPLETE; no provider kind is rejected anymore** (the registry switch
+stays exhaustive so a future kind still forces a compile error). `GenericWebhookProvider`
+inverts the vendor pattern: it POSTs RegulAIt's OWN normalized envelope `{event, timestamp,
+project, payload}` (work_item.create/update/transition, comment.add, work_item.get — the
+outbound mirror of ADR-0010's inbound shape) to a single customer-defined baseUrl (required,
+used verbatim). The connection token is a shared secret used ONLY for signing —
+`x-regulait-signature: sha256=<hex HMAC-SHA256 of the exact body>`; the token never travels.
+Receiver contract: 2xx or explicit provider error; create must return a real {id, url}
+(missing id fails explicit, links are never invented); work_item.get returns the item so
+Sync-now verification works, and receivers without read-back fail loudly into the existing
+orphan flow. `DEFAULT_MAPPINGS.generic_webhook` is the IDENTITY map over all five canonical
+states including blocked — nothing invented because the vocabulary is ours. E2e: the fake
+receiver verifies the HMAC on every request and asserts the token never travels raw.
+Deferred: ADF descriptions, provider-native webhooks → the ADR-0010 normalized inbound
+shape.
 
 **EPIC-06 started — PM-tool integration first slice, 2026-07-25.** New
 `packages/pm-provider` on the git-provider playbook (pillar 8, PM_TOOL_INTEGRATION_SPEC

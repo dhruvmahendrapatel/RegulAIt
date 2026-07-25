@@ -2,10 +2,12 @@
  * @regulait/pm-provider — pillar 8's provider abstraction (EPIC-06,
  * PM_TOOL_INTEGRATION_SPEC §2/§3/§6).
  *
- * Follows the git-provider playbook: a neutral interface, one real adapter
- * (Azure DevOps, REST with injectable fetch), an in-memory mock for tests and
- * air-gapped development, and a registry that explicitly rejects adapters
- * that are interface-ready but not implemented — no silent promises.
+ * Follows the git-provider playbook: a neutral interface, real adapters for
+ * every declared kind (Azure DevOps, Jira, Linear, Asana, monday.com, and a
+ * generic webhook receiver — all with injectable fetch), an in-memory mock
+ * for tests and air-gapped development, and a registry whose switch stays
+ * exhaustive over the kind union — a future new kind forces a compile error
+ * instead of a silent promise.
  *
  * The load-bearing part (per §1/§7) is the FIELD MAPPING layer: every adapter
  * ships a default mapping an admin can override, and the resolver that turns
@@ -20,6 +22,7 @@
  * never invented.
  */
 
+import { createHmac } from "node:crypto";
 import { z } from "zod";
 
 export const PM_PROVIDER_KINDS = [
@@ -220,6 +223,29 @@ export const DEFAULT_MAPPINGS: Partial<Record<PmProviderKind, PmMapping>> = {
         in_progress: "Working on it",
         done: "Done",
         blocked: "Stuck",
+      },
+    },
+  },
+  generic_webhook: {
+    task: {
+      workItemType: "task",
+      fields: {
+        title: "title",
+        status: "status",
+        description: "description",
+        priority: "priority",
+      },
+      // The generic receiver speaks RegulAIt's OWN canonical vocabulary, so
+      // the default mapping is the identity: every field keeps its name and
+      // ALL five node statuses — blocked included — map to themselves.
+      // Nothing is skipped and nothing is invented, because the vocabulary
+      // is ours to begin with.
+      statusMap: {
+        not_started: "not_started",
+        in_progress: "in_progress",
+        in_review: "in_review",
+        blocked: "blocked",
+        done: "done",
       },
     },
   },
@@ -961,6 +987,137 @@ export class MondayProvider implements PmProvider {
 }
 
 // ---------------------------------------------------------------------------
+// Generic webhook adapter — §6's "anything else" escape hatch. Unlike the
+// vendor adapters, this one speaks RegulAIt's OWN normalized contract to a
+// customer-defined HTTP receiver: every method POSTs one JSON envelope
+// { event, timestamp, project, payload } to the connection's baseUrl, with
+// events work_item.create / work_item.update / work_item.transition /
+// comment.add / work_item.get — the outbound mirror of ADR-0010's normalized
+// inbound webhook shape. The connection token is a shared secret used ONLY
+// to sign the exact request body (HMAC-SHA256, sent as
+// `x-regulait-signature: sha256=<hex>`) — it never travels raw.
+//
+// Response contract: the receiver must answer 2xx; any non-2xx surfaces as a
+// PmProviderError carrying the status. work_item.create should answer
+// { id, url } — a missing id fails explicit rather than inventing one, links
+// must be real. work_item.get must answer the item as { id, url, type,
+// state, fields, comments } (missing/malformed → PmProviderError): receivers
+// that implement read-back keep the gateway's 'Sync now' verification fully
+// working; receivers that don't will surface an explicit error there and the
+// existing orphan flow handles the link — a deliberate trade-off, loud
+// failure over fake verification. The `type` argument is passed through, not
+// ignored — the receiver defines its own vocabulary.
+// ---------------------------------------------------------------------------
+
+export interface GenericWebhookAdapterOptions {
+  /** shared secret used ONLY to HMAC-sign request bodies — never sent raw */
+  token: string;
+  /** the customer receiver endpoint; every event POSTs here verbatim */
+  baseUrl: string;
+  fetchImpl?: FetchLike;
+}
+
+/** work_item.get read-back shape: id is mandatory (a link must point at a
+ * real item), everything else defaults so minimal receivers stay valid. */
+const webhookWorkItemSchema = z.object({
+  id: z.union([z.string().min(1), z.number()]).transform(String),
+  url: z.string().default(""),
+  type: z.string().default("task"),
+  state: z.string().nullable().default(null),
+  fields: z.record(z.unknown()).default({}),
+  comments: z.array(z.string()).default([]),
+});
+
+export class GenericWebhookProvider implements PmProvider {
+  readonly kind = "generic_webhook" as const;
+  private readonly url: string;
+  private readonly token: string;
+  private readonly fetchImpl: FetchLike;
+
+  constructor(opts: GenericWebhookAdapterOptions) {
+    // the baseUrl IS the endpoint (nothing is appended), so it is used verbatim
+    this.url = opts.baseUrl;
+    this.token = opts.token;
+    this.fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
+  }
+
+  private async post(
+    event: string,
+    project: string,
+    payload: Record<string, unknown>,
+  ): Promise<unknown> {
+    const body = JSON.stringify({
+      event,
+      timestamp: new Date().toISOString(),
+      project,
+      payload,
+    });
+    const res = await this.fetchImpl(this.url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-regulait-signature": `sha256=${createHmac("sha256", this.token).update(body).digest("hex")}`,
+      },
+      body,
+    });
+    if (res.status < 200 || res.status >= 300) {
+      throw new PmProviderError(
+        `generic_webhook POST ${event} failed: ${await res.text()}`,
+        res.status,
+      );
+    }
+    const text = await res.text();
+    if (!text) return null;
+    try {
+      return JSON.parse(text);
+    } catch {
+      return null; // a non-JSON 2xx body carries no usable data
+    }
+  }
+
+  async createWorkItem(
+    project: string,
+    type: string,
+    fields: Record<string, unknown>,
+  ): Promise<WorkItemRef> {
+    const created = (await this.post("work_item.create", project, { type, fields }) ?? {}) as {
+      id?: unknown;
+      url?: unknown;
+    };
+    const id = created.id === undefined || created.id === null ? "" : String(created.id);
+    if (!id) {
+      throw new PmProviderError("webhook receiver did not return an id for work_item.create");
+    }
+    return { id, url: typeof created.url === "string" ? created.url : "" };
+  }
+
+  async updateFields(project: string, id: string, fields: Record<string, unknown>): Promise<void> {
+    await this.post("work_item.update", project, { id, fields });
+  }
+
+  /** No state/label enumeration exists to check against — the receiver owns
+   * its vocabulary, so the only failure mode is a non-2xx response. */
+  async transitionState(project: string, id: string, state: string): Promise<void> {
+    await this.post("work_item.transition", project, { id, state });
+  }
+
+  async addComment(project: string, id: string, text: string): Promise<void> {
+    await this.post("comment.add", project, { id, text });
+  }
+
+  async getWorkItem(project: string, id: string): Promise<WorkItem> {
+    const res = await this.post("work_item.get", project, { id });
+    const parsed = webhookWorkItemSchema.safeParse(res);
+    if (!parsed.success) {
+      throw new PmProviderError(
+        `generic_webhook receiver returned a malformed work item for '${id}' (expected { id, url, type, state, fields, comments })`,
+      );
+    }
+    return parsed.data;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Mock adapter — in-memory, for tests and air-gapped development.
 // ---------------------------------------------------------------------------
 
@@ -1136,11 +1293,18 @@ export function resolvePmProvider(config: PmConnectionConfig, fetchImpl?: FetchL
         baseUrl: config.baseUrl ?? null,
         ...(fetchImpl ? { fetchImpl } : {}),
       });
+    case "generic_webhook":
+      if (!config.baseUrl) {
+        throw new PmProviderError(
+          "generic_webhook requires a baseUrl (the customer's receiver endpoint URL)",
+        );
+      }
+      return new GenericWebhookProvider({
+        token: config.token,
+        baseUrl: config.baseUrl,
+        ...(fetchImpl ? { fetchImpl } : {}),
+      });
     case "mock":
       return sharedMock;
-    case "generic_webhook":
-      throw new PmProviderError(
-        `provider '${config.provider}' is interface-ready but its adapter is not implemented yet`,
-      );
   }
 }

@@ -1,7 +1,9 @@
+import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   AsanaProvider,
   AzureDevOpsProvider,
+  GenericWebhookProvider,
   JiraProvider,
   LinearProvider,
   MockPmProvider,
@@ -39,7 +41,8 @@ describe("field mapping (§6/§7)", () => {
     });
     expect(resolveTaskFields(mapping, { title: "x" })).toEqual({ "Custom.Title": "x" });
     expect(() => mappingFor("azure_devops", { task: { fields: {} } })).toThrow();
-    expect(() => mappingFor("generic_webhook")).toThrow(PmProviderError); // no default shipped yet
+    // every kind ships a default now — generic_webhook's is the identity mapping
+    expect(mappingFor("generic_webhook").task.statusMap?.blocked).toBe("blocked");
   });
 });
 
@@ -128,14 +131,17 @@ describe("azure devops adapter (stubbed fetch)", () => {
 });
 
 describe("registry", () => {
-  it("returns a shared mock, requires baseUrl for ado, rejects unimplemented adapters", () => {
+  it("returns a shared mock and requires baseUrl for ado and generic_webhook", () => {
     const a = resolvePmProvider({ provider: "mock", token: "" });
     const b = resolvePmProvider({ provider: "mock", token: "" });
     expect(a).toBe(b);
     expect(() => resolvePmProvider({ provider: "azure_devops", token: "t" })).toThrow(/baseUrl/);
-    for (const provider of ["generic_webhook"] as const) {
-      expect(() => resolvePmProvider({ provider, token: "t" })).toThrow(/not implemented/);
-    }
+    // the adapter matrix is complete — the last kind resolves with a baseUrl
+    // and only ever fails without one, never as "not implemented"
+    expect(() => resolvePmProvider({ provider: "generic_webhook", token: "t" })).toThrow(/baseUrl/);
+    expect(
+      resolvePmProvider({ provider: "generic_webhook", token: "t", baseUrl: "https://recv.example" }).kind,
+    ).toBe("generic_webhook");
   });
 });
 
@@ -316,9 +322,8 @@ describe("JiraProvider (REST v2, injectable fetch, no network)", () => {
       resolvePmProvider({ provider: "jira", token: "b:t", baseUrl: "https://a.atlassian.net" }).kind,
     ).toBe("jira");
     expect(() => resolvePmProvider({ provider: "jira", token: "b:t" })).toThrowError(/baseUrl/);
-    for (const provider of ["generic_webhook"] as const) {
-      expect(() => resolvePmProvider({ provider, token: "t" })).toThrowError(/not implemented/);
-    }
+    // generic_webhook needs its baseUrl the same way — no kind is rejected anymore
+    expect(() => resolvePmProvider({ provider: "generic_webhook", token: "t" })).toThrowError(/baseUrl/);
   });
 });
 
@@ -684,5 +689,145 @@ describe("MondayProvider (GraphQL, injectable fetch, no network)", () => {
     expect(mapping.task.fields.priority).toBeUndefined();
     // baseUrl is optional like linear's — the default is api.monday.com
     expect(resolvePmProvider({ provider: "monday", token: "tok" }).kind).toBe("monday");
+  });
+});
+
+describe("GenericWebhookProvider (signed normalized envelopes, injectable fetch, no network)", () => {
+  type Envelope = {
+    event?: string;
+    timestamp?: unknown;
+    project?: string;
+    payload?: Record<string, unknown>;
+  };
+  type Captured = { url: string; headers: Record<string, string>; raw: string; body: Envelope };
+  function fakeReceiver(handler: (body: Envelope) => { status?: number; body?: unknown }) {
+    const calls: Captured[] = [];
+    const fetchImpl = async (url: string, init?: { headers?: Record<string, string>; body?: string }) => {
+      const raw = String(init?.body);
+      const body = JSON.parse(raw) as Envelope;
+      calls.push({ url, headers: init?.headers ?? {}, raw, body });
+      const out = handler(body);
+      return {
+        status: out.status ?? 200,
+        json: async () => out.body,
+        text: async () => (out.body === undefined ? "" : JSON.stringify(out.body)),
+      };
+    };
+    return { calls, fetchImpl };
+  }
+
+  it("create POSTs the envelope with a valid HMAC signature and uses the receiver's {id,url}; no id fails explicit", async () => {
+    const { calls, fetchImpl } = fakeReceiver(() => ({
+      body: { id: 7, url: "https://pm-bridge.example/items/7" },
+    }));
+    const hook = new GenericWebhookProvider({
+      token: "shared-secret",
+      baseUrl: "https://recv.example/regulait",
+      fetchImpl,
+    });
+    const ref = await hook.createWorkItem("proj-1", "task", { title: "Build API", description: "initial" });
+    expect(calls[0]!.url).toBe("https://recv.example/regulait");
+    expect(calls[0]!.headers["content-type"]).toBe("application/json");
+    // the signature is a deterministic HMAC-SHA256 of the EXACT body under the
+    // connection token — recomputed here from the captured body
+    expect(calls[0]!.headers["x-regulait-signature"]).toBe(
+      "sha256=" + createHmac("sha256", "shared-secret").update(calls[0]!.raw).digest("hex"),
+    );
+    expect(calls[0]!.body).toMatchObject({
+      event: "work_item.create",
+      project: "proj-1",
+      payload: { type: "task", fields: { title: "Build API", description: "initial" } },
+    });
+    expect(typeof calls[0]!.body.timestamp).toBe("string"); // ISO timestamp present; value not asserted
+    expect(ref).toEqual({ id: "7", url: "https://pm-bridge.example/items/7" });
+
+    // a receiver answering without an id fails explicit — links must be real, never invented
+    const { fetchImpl: noId } = fakeReceiver(() => ({ body: { ok: true } }));
+    const bad = new GenericWebhookProvider({ token: "s", baseUrl: "https://recv.example", fetchImpl: noId });
+    await expect(bad.createWorkItem("p", "task", { title: "x" })).rejects.toThrowError(
+      /did not return an id for work_item\.create/,
+    );
+  });
+
+  it("update/transition/comment send the right events and payloads; non-2xx surfaces with status", async () => {
+    const { calls, fetchImpl } = fakeReceiver(() => ({ body: {} }));
+    const hook = new GenericWebhookProvider({ token: "s", baseUrl: "https://recv.example", fetchImpl });
+    await hook.updateFields("p", "7", { title: "Renamed" });
+    await hook.transitionState("p", "7", "in_progress");
+    await hook.addComment("p", "7", "note");
+    expect(calls.map((c) => c.body.event)).toEqual([
+      "work_item.update",
+      "work_item.transition",
+      "comment.add",
+    ]);
+    expect(calls[0]!.body.payload).toEqual({ id: "7", fields: { title: "Renamed" } });
+    expect(calls[1]!.body.payload).toEqual({ id: "7", state: "in_progress" });
+    expect(calls[2]!.body.payload).toEqual({ id: "7", text: "note" });
+
+    const failing = new GenericWebhookProvider({
+      token: "s",
+      baseUrl: "https://recv.example",
+      fetchImpl: async () => ({ status: 503, json: async () => ({}), text: async () => "receiver down" }),
+    });
+    await expect(failing.transitionState("p", "7", "done")).rejects.toThrowError(
+      /generic_webhook POST work_item\.transition failed: receiver down/,
+    );
+    const err = (await failing.addComment("p", "7", "x").catch((e: unknown) => e)) as PmProviderError;
+    expect(err).toBeInstanceOf(PmProviderError);
+    expect(err.status).toBe(503);
+  });
+
+  it("getWorkItem round-trips the receiver's work item; malformed responses fail explicit", async () => {
+    const { calls, fetchImpl } = fakeReceiver(() => ({
+      body: {
+        id: "7",
+        url: "https://pm-bridge.example/items/7",
+        type: "task",
+        state: "in_review",
+        fields: { title: "Build API" },
+        comments: ["first"],
+      },
+    }));
+    const hook = new GenericWebhookProvider({ token: "s", baseUrl: "https://recv.example", fetchImpl });
+    const item = await hook.getWorkItem("p", "7");
+    expect(calls[0]!.body).toMatchObject({ event: "work_item.get", project: "p", payload: { id: "7" } });
+    expect(item).toEqual({
+      id: "7",
+      url: "https://pm-bridge.example/items/7",
+      type: "task",
+      state: "in_review",
+      fields: { title: "Build API" },
+      comments: ["first"],
+    });
+
+    // a receiver without read-back (or a broken one) fails loud, never fakes an item
+    const { fetchImpl: malformed } = fakeReceiver(() => ({ body: { nothing: "useful" } }));
+    const broken = new GenericWebhookProvider({ token: "s", baseUrl: "https://recv.example", fetchImpl: malformed });
+    await expect(broken.getWorkItem("p", "7")).rejects.toThrowError(/malformed work item/);
+  });
+
+  it("default mapping is the full identity map (all five states incl. blocked) and the registry needs a baseUrl", () => {
+    const mapping = mappingFor("generic_webhook");
+    expect(mapping.task.workItemType).toBe("task");
+    expect(mapping.task.fields).toEqual({
+      title: "title",
+      status: "status",
+      description: "description",
+      priority: "priority",
+    });
+    expect(resolveTaskFields(mapping, { title: "T", description: "D" })).toEqual({ title: "T", description: "D" });
+    // identity over ALL five statuses — blocked included; the receiver speaks
+    // OUR vocabulary, so nothing is skipped and nothing is invented
+    expect(mapping.task.statusMap).toEqual({
+      not_started: "not_started",
+      in_progress: "in_progress",
+      in_review: "in_review",
+      blocked: "blocked",
+      done: "done",
+    });
+    expect(
+      resolvePmProvider({ provider: "generic_webhook", token: "s", baseUrl: "https://recv.example" }).kind,
+    ).toBe("generic_webhook");
+    expect(() => resolvePmProvider({ provider: "generic_webhook", token: "s" })).toThrowError(/baseUrl/);
   });
 });

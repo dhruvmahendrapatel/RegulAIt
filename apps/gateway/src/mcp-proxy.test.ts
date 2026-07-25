@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createHmac } from "node:crypto";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6275,6 +6276,133 @@ describe("monday pm adapter: GraphQL run sync + status-label mirror end-to-end",
       expect(labelMove!.variables).toEqual({
         board: "777", item: nodeItem!.id, column: "status", value: "Working on it",
       });
+    } finally {
+      srv.closeAllConnections();
+      await new Promise<void>((r) => srv.close(() => r()));
+    }
+  });
+});
+
+describe("generic webhook pm adapter: signed normalized events end-to-end", () => {
+  it("pm-sync creates items via signed work_item.create envelopes and node events mirror as work_item.transition", async () => {
+    const TOKEN = "generic-e2e-token";
+    let itemSeq = 0;
+    // the fake receiver VERIFIES the HMAC signature of every request body
+    // under the connection token before recording the event
+    const events: Array<{
+      event: string;
+      project: string;
+      payload: Record<string, unknown>;
+      signatureValid: boolean;
+      rawTokenPresent: boolean;
+    }> = [];
+    const creations: Array<{ payload: Record<string, unknown>; id: string }> = [];
+    const srv = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        const parsed = JSON.parse(body || "{}") as {
+          event?: string;
+          project?: string;
+          payload?: Record<string, unknown>;
+        };
+        const expected = "sha256=" + createHmac("sha256", TOKEN).update(body).digest("hex");
+        events.push({
+          event: String(parsed.event ?? ""),
+          project: String(parsed.project ?? ""),
+          payload: parsed.payload ?? {},
+          signatureValid: req.headers["x-regulait-signature"] === expected,
+          // the token is a signing secret — it must never travel raw
+          rawTokenPresent: req.headers.authorization !== undefined || body.includes(TOKEN),
+        });
+        let out: unknown = {};
+        if (parsed.event === "work_item.create") {
+          itemSeq += 1;
+          const id = String(900 + itemSeq);
+          creations.push({ payload: parsed.payload ?? {}, id });
+          out = { id, url: `https://pm-bridge.example/items/${id}` };
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(out));
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    const port = (srv.address() as { port: number }).port;
+
+    try {
+      const gina = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email: "webhook-gina@example.com", displayName: "Webhook Gina" },
+      });
+      const ginaAuth = await authFor(gina.json().id);
+      const approver = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email: "webhook-approver@example.com", displayName: "Webhook Approver" },
+      });
+      const agentRes = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/agents",
+        payload: {
+          name: "webhook-worker", provider: "mock", tier: 0, modes: ["execute"],
+          costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-webhook",
+        },
+      });
+      await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/grants/agents",
+        payload: { userId: gina.json().id, agentId: agentRes.json().id },
+      });
+      const conn = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/pm/connections",
+        payload: {
+          name: "webhook-e2e", provider: "generic_webhook", project: "bridge-proj",
+          baseUrl: `http://127.0.0.1:${port}/regulait`, token: TOKEN,
+        },
+      });
+      expect(conn.statusCode).toBe(201);
+
+      const run = await app.inject({
+        method: "POST", headers: ginaAuth, url: "/v1/runs",
+        payload: {
+          graph: {
+            run: "webhook-sync-run",
+            escalationApproverUserId: approver.json().id,
+            nodes: [{ id: "a", title: "wire the bridge", ownerAgentId: agentRes.json().id, mode: "execute", estimate: { in: 1, out: 1 } }],
+          },
+        },
+      });
+      const runId = run.json().id;
+
+      const synced = await app.inject({
+        method: "POST", headers: ginaAuth, url: `/v1/runs/${runId}/pm-sync`,
+        payload: { connectionName: "webhook-e2e" },
+      });
+      expect(synced.statusCode).toBe(201);
+      // run-level parent + one node item, each a signed work_item.create
+      // envelope carrying the identity mapping's own vocabulary
+      expect(creations.length).toBe(2);
+      expect(events.filter((e) => e.event === "work_item.create")).toHaveLength(2);
+      const nodeItem = creations.find(
+        (c) => (c.payload.fields as Record<string, unknown> | undefined)?.title === "wire the bridge",
+      );
+      expect(nodeItem).toBeDefined();
+      expect(nodeItem!.payload.type).toBe("task");
+      expect(events[0]!.project).toBe("bridge-proj");
+
+      // a node event mirrors outbound as a work_item.transition envelope with
+      // RegulAIt's own status — the identity map at work, no translation
+      await app.inject({ method: "POST", headers: ginaAuth, url: `/v1/runs/${runId}/events`, payload: { kind: "start" } });
+      const started = await app.inject({
+        method: "POST", headers: ginaAuth, url: `/v1/runs/${runId}/events`,
+        payload: { kind: "node_started", nodeId: "a" },
+      });
+      expect(started.statusCode).toBe(200);
+      const transition = events.find((e) => e.event === "work_item.transition");
+      expect(transition).toBeDefined();
+      expect(transition!.payload).toEqual({ id: nodeItem!.id, state: "in_progress" });
+
+      // every request that arrived was correctly signed and never leaked the token
+      expect(events.length).toBeGreaterThanOrEqual(3);
+      expect(events.every((e) => e.signatureValid)).toBe(true);
+      expect(events.some((e) => e.rawTokenPresent)).toBe(false);
     } finally {
       srv.closeAllConnections();
       await new Promise<void>((r) => srv.close(() => r()));
