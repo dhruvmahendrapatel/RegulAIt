@@ -38,6 +38,7 @@ import {
 } from "@regulait/shared";
 import { executeGovernedDispatch } from "./agents-connectors.js";
 import { mirrorNodeStatus } from "./pm.js";
+import { handleNestedRunCompletion } from "./workflows.js";
 import { z } from "zod";
 
 /** §5.2 budget envelope persisted on the run. Plan/start numbers are
@@ -392,14 +393,17 @@ async function evaluateNodeOwner(
 
 /** Transactionally apply one run event: kernel transition under FOR UPDATE,
  * append-only event history, one audit trail (§5.3), and §3 escalations
- * materialized into the ONE approvals queue. */
+ * materialized into the ONE approvals queue. This is the single funnel for
+ * ALL run events, so §8 nesting hooks here: a run reaching a terminal state
+ * notifies its parent workflow instance (after the transaction commits). */
 async function applyRunEvent(
   db: Db,
   runId: string,
   event: RunEvent,
   actorUserId: string,
+  dataKey?: string,
 ): Promise<{ run: RunRow; effects: RunEffect[] }> {
-  return db.transaction(async (tx) => {
+  const applied = await db.transaction(async (tx) => {
     const [run] = await tx
       .select()
       .from(orchestrationRuns)
@@ -449,6 +453,16 @@ async function applyRunEvent(
     }
     return { run: updated!, effects };
   });
+  // §8 nesting: a terminal nested run advances (or fails) its parent
+  // workflow's build stage. applyRunEvent throws on already-terminal runs,
+  // so a terminal status here is always a fresh transition.
+  if (
+    applied.run.workflowInstanceId &&
+    (applied.run.status === "completed" || applied.run.status === "aborted")
+  ) {
+    await handleNestedRunCompletion(db, dataKey, applied.run, actorUserId);
+  }
+  return applied;
 }
 
 /** Decide-endpoint hook (§3): approving an escalated node re-opens it for
@@ -458,6 +472,7 @@ export async function applyRunApprovalDecision(
   approvalRow: { runId: string | null; stageId: string | null },
   decision: "approved" | "denied",
   deciderUserId: string,
+  dataKey?: string,
 ): Promise<void> {
   if (!approvalRow.runId || !approvalRow.stageId) return;
   // §5.2 budget approvals: approving lifts cap enforcement for this run
@@ -485,7 +500,7 @@ export async function applyRunApprovalDecision(
         reason: "budget overage approved by the named approver; cap enforcement lifted for this run",
       });
     } else {
-      await applyRunEvent(db, approvalRow.runId, { kind: "abort" }, deciderUserId);
+      await applyRunEvent(db, approvalRow.runId, { kind: "abort" }, deciderUserId, dataKey);
     }
     return;
   }
@@ -493,43 +508,51 @@ export async function applyRunApprovalDecision(
     decision === "approved"
       ? { kind: "retry_node", nodeId: approvalRow.stageId }
       : { kind: "abort" };
-  await applyRunEvent(db, approvalRow.runId, event, deciderUserId);
+  await applyRunEvent(db, approvalRow.runId, event, deciderUserId, dataKey);
 }
 
-export function registerOrchestrationRoutes(
-  app: FastifyInstance,
+export type PlanRunResult =
+  | { ok: false; status: 400 | 422; body: Record<string, unknown> }
+  | {
+      ok: true;
+      run: RunRow;
+      envelope: Array<{ nodeId: string; decision: AgentDecision }>;
+      budget: RunBudget;
+      overCap: boolean;
+    };
+
+/** §3: the task graph arrives as a distinct, reviewable plan — planning
+ * validates and stores it; nothing executes until an explicit start event.
+ * Shared by POST /v1/runs and the workflow build-stage executor (§8 nesting) —
+ * the nested case runs under the WORKFLOW INITIATOR's entitlements, so a
+ * workflow can never launch a run its human couldn't. */
+export async function planRun(
   db: Db,
-  opts: { dataKey?: string } = {},
-) {
-  async function loadRunFor(req: { authCtx: { userId: string | null; isAdmin: boolean } }, runId: string) {
-    const [run] = await db.select().from(orchestrationRuns).where(eq(orchestrationRuns.id, runId));
-    if (!run) return { error: 404 as const };
-    if (!req.authCtx.isAdmin && req.authCtx.userId !== run.initiatingUserId) {
-      return { error: 404 as const }; // existence is not disclosed to non-participants
+  userId: string,
+  graphRaw: unknown,
+  workflowInstanceId: string | null,
+): Promise<PlanRunResult> {
+  let graph: TaskGraph;
+  try {
+    graph = validateGraph(graphRaw);
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      return { ok: false, status: 400, body: { error: "invalid_graph", issues: err.issues } };
     }
-    return { run };
+    throw err;
   }
 
-  // §3: the task graph arrives as a distinct, reviewable plan — creation
-  // validates and stores it; nothing executes until an explicit start event.
-  app.post("/v1/runs", async (req, reply) => {
-    const body = createRunSchema.parse(req.body);
-    const userId = req.authCtx.userId;
-    if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_initiate" });
+  const [approver] = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(eq(users.id, graph.escalationApproverUserId));
+  if (!approver) return { ok: false, status: 422, body: { error: "unknown_escalation_approver" } };
 
-    const graph = validateGraph(body.graph);
-
-    const [approver] = await db
-      .select({ id: users.id })
-      .from(users)
-      .where(eq(users.id, graph.escalationApproverUserId));
-    if (!approver) return reply.status(422).send({ error: "unknown_escalation_approver" });
-
-    const [grants, [policy], agentRows] = await Promise.all([
-      db.select().from(agentGrants).where(eq(agentGrants.userId, userId)),
-      db.select().from(userAgentPolicies).where(eq(userAgentPolicies.userId, userId)),
-      db.select().from(agents),
-    ]);
+  const [grants, [policy], agentRows] = await Promise.all([
+    db.select().from(agentGrants).where(eq(agentGrants.userId, userId)),
+    db.select().from(userAgentPolicies).where(eq(userAgentPolicies.userId, userId)),
+    db.select().from(agents),
+  ]);
     const agentById = new Map(agentRows.map((a) => [a.id, a]));
     let ceilingTier: number | null = null;
     if (policy?.ceilingAgentId) {
@@ -552,7 +575,7 @@ export function registerOrchestrationRoutes(
     for (const node of graph.nodes) {
       const decision = evalOwner(node.ownerAgentId, node.mode);
       if (!decision) {
-        return reply.status(422).send({ error: "unknown_agent", nodeId: node.id });
+        return { ok: false, status: 422, body: { error: "unknown_agent", nodeId: node.id } };
       }
       envelope.push({ nodeId: node.id, decision });
     }
@@ -570,10 +593,14 @@ export function registerOrchestrationRoutes(
       });
     }
     if (denied.length > 0) {
-      return reply.status(422).send({
-        error: "entitlement_exceeded",
-        nodes: denied.map((e) => ({ nodeId: e.nodeId, decision: e.decision })),
-      });
+      return {
+        ok: false,
+        status: 422,
+        body: {
+          error: "entitlement_exceeded",
+          nodes: denied.map((e) => ({ nodeId: e.nodeId, decision: e.decision })),
+        },
+      };
     }
 
     // §5.2 pre-execution budget check: estimate the whole graph before
@@ -646,7 +673,7 @@ export function registerOrchestrationRoutes(
       .values({
         name: graph.run,
         initiatingUserId: userId,
-        workflowInstanceId: body.workflowInstanceId ?? null,
+        workflowInstanceId,
         graph,
         state,
         budget,
@@ -706,9 +733,36 @@ export function registerOrchestrationRoutes(
       ruleChain: [],
       reason: `task graph validated; ${graph.nodes.length} nodes within the initiating user's entitlements`,
     });
-    return reply
-      .status(201)
-      .send({ id: run!.id, status: run!.status, envelope, budget, budgetApprovalPending: overCap });
+    return { ok: true, run: run!, envelope, budget, overCap };
+}
+
+export function registerOrchestrationRoutes(
+  app: FastifyInstance,
+  db: Db,
+  opts: { dataKey?: string } = {},
+) {
+  async function loadRunFor(req: { authCtx: { userId: string | null; isAdmin: boolean } }, runId: string) {
+    const [run] = await db.select().from(orchestrationRuns).where(eq(orchestrationRuns.id, runId));
+    if (!run) return { error: 404 as const };
+    if (!req.authCtx.isAdmin && req.authCtx.userId !== run.initiatingUserId) {
+      return { error: 404 as const }; // existence is not disclosed to non-participants
+    }
+    return { run };
+  }
+
+  app.post("/v1/runs", async (req, reply) => {
+    const body = createRunSchema.parse(req.body);
+    const userId = req.authCtx.userId;
+    if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_initiate" });
+    const planned = await planRun(db, userId, body.graph, body.workflowInstanceId ?? null);
+    if (!planned.ok) return reply.status(planned.status).send(planned.body);
+    return reply.status(201).send({
+      id: planned.run.id,
+      status: planned.run.status,
+      envelope: planned.envelope,
+      budget: planned.budget,
+      budgetApprovalPending: planned.overCap,
+    });
   });
 
   app.post("/v1/runs/:runId/events", async (req, reply) => {
@@ -776,7 +830,7 @@ export function registerOrchestrationRoutes(
       nodeCost = gate.nodeCost;
     }
 
-    const { run, effects } = await applyRunEvent(db, runId, event, req.authCtx.userId);
+    const { run, effects } = await applyRunEvent(db, runId, event, req.authCtx.userId, opts.dataKey);
     if (event.kind === "node_started" && budget && nodeCost !== null) {
       await db
         .update(orchestrationRuns)
@@ -881,7 +935,7 @@ export function registerOrchestrationRoutes(
       ) {
         return reply.status(409).send({ error: "budget_approval_pending", budget });
       }
-      await applyRunEvent(db, runId, { kind: "start" }, actor);
+      await applyRunEvent(db, runId, { kind: "start" }, actor, opts.dataKey);
     }
 
     const steps: Array<Record<string, unknown>> = [];
@@ -932,7 +986,7 @@ export function registerOrchestrationRoutes(
         steps.push({ nodeId, action: "start_blocked_budget", ...gate.blocked });
         break;
       }
-      await applyRunEvent(db, runId, { kind: "node_started", nodeId }, actor);
+      await applyRunEvent(db, runId, { kind: "node_started", nodeId }, actor, opts.dataKey);
       if (budget && gate.nodeCost !== null) {
         await db
           .update(orchestrationRuns)
@@ -965,7 +1019,7 @@ export function registerOrchestrationRoutes(
             : out.kind === "unknown_agent"
               ? "owner agent no longer exists"
               : `dispatch failed: ${out.error}`;
-        await applyRunEvent(db, runId, { kind: "node_failed", nodeId, error }, actor);
+        await applyRunEvent(db, runId, { kind: "node_failed", nodeId, error }, actor, opts.dataKey);
         await mirrorNodeStatus(db, opts.dataKey, runId, nodeId, "blocked", actor);
         steps.push({ nodeId, action: "failed", error });
         continue;
@@ -984,6 +1038,7 @@ export function registerOrchestrationRoutes(
           runId,
           { kind: "node_failed", nodeId, error: "worker refused the task" },
           actor,
+          opts.dataKey,
         );
         await mirrorNodeStatus(db, opts.dataKey, runId, nodeId, "blocked", actor);
         steps.push({ nodeId, action: "refused" });
@@ -994,11 +1049,11 @@ export function registerOrchestrationRoutes(
         continue;
       }
 
-      await applyRunEvent(db, runId, { kind: "node_submitted", nodeId }, actor);
+      await applyRunEvent(db, runId, { kind: "node_submitted", nodeId }, actor, opts.dataKey);
       let action = "submitted";
       let finalStatus: "in_review" | "done" = "in_review";
       if (body.acceptReviews) {
-        await applyRunEvent(db, runId, { kind: "node_accepted", nodeId }, actor);
+        await applyRunEvent(db, runId, { kind: "node_accepted", nodeId }, actor, opts.dataKey);
         action = "accepted";
         finalStatus = "done";
       }

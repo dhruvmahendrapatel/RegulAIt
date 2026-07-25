@@ -548,7 +548,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     }
     // Orchestration escalations (§3): approve = another attempt, deny = abort.
     if (updated.objectType === "run") {
-      await applyRunApprovalDecision(db, updated, body.decision, deciderUserId);
+      await applyRunApprovalDecision(db, updated, body.decision, deciderUserId, opts.dataKey);
     }
     // EPIC-06 §5: sign-offs mirror to the linked work item — display only,
     // never a second decision point; a mirror failure never unwinds the

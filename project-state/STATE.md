@@ -109,9 +109,24 @@ worker refusal) mark that node failed/blocked — §3's retry/reassign/escalate 
 the pass keeps driving independent branches; run-level problems (estimate or measured budget)
 stop the whole pass, with the measured-budget check running BEFORE node start so a blocked
 pass never strands a node in_progress. Per-node inputs via `inputs` map (title fallback),
-`maxNodes` cap per pass, every pass summarized in one `run-auto-advance` audit row. Not yet:
-streaming, multi-turn/system prompts from workflow context, per-user credentials,
-openai/google/xai adapters, workflow build-stage nesting of runs.
+`maxNodes` cap per pass, every pass summarized in one `run-auto-advance` audit row. **Fourth
+slice: workflow build-stage nesting (§8 of both EPIC-03 and EPIC-05).** An `automated_build`
+stage may carry a `run` config — an orchestration task graph, opaque to the workflow kernel
+(the GATEWAY validates it with the orchestration kernel at template creation, plus the graph's
+escalation approver — fail-fast, a template never promises a graph the engine can't run). The
+stage then executes via the same `awaiting_execution`/`execute_stage` machinery as git stages:
+the executor spawns a nested run through the same `planRun` the runs API uses, planned under
+the **workflow initiator's** entitlements (a workflow can never launch a run its human
+couldn't; an unentitled graph fails the stage explicitly with the plan rejection in
+`context.lastError`, retryable via /advance once granted). The nested run is a first-class
+run — visible at `/v1/runs/:id`, bound via `workflow_instance_id` (waiting since migration
+0011), driven manually or by `/auto` — and the run-event funnel notifies the parent when it
+turns terminal: completed → `execution_succeeded` (flowing straight into downstream stages),
+aborted → `execution_failed` with the stage retryable (retry spawns a FRESH run; a live or
+completed run is never duplicated — idempotent like branch creation). The kernel forbids
+human-triggering a build-with-run stage — no bypassing the governed execution. Not yet:
+streaming, multi-turn/system prompts (nested-run workers still get node titles/inputs, not
+workflow artifacts), per-user credentials, openai/google/xai adapters.
 
 **EPIC-06 started — PM-tool integration first slice, 2026-07-25.** New
 `packages/pm-provider` on the git-provider playbook (pillar 8, PM_TOOL_INTEGRATION_SPEC
@@ -318,7 +333,7 @@ with a real in-process upstream MCP server and real MCP client (26 tests total).
 | EPIC-02 | Governance layer MVP (now includes infra-ops/compliance-cascade/deploy-model, Shared Projects, cost dashboard — §1–§10) | **in progress** — stack chosen (ADR-0009), first slice = MCP-server governance vertical | GOVERNANCE_LAYER_SPEC.md, ADR-0007, ADR-0009 |
 | EPIC-03 | Workflow engine MVP (now includes optional Design/Architecture sign-off stage type) | **in progress** — first slice merged (PR #9) | WORKFLOW_ENGINE_SPEC.md, ADR-0007 |
 | EPIC-04 | Token/cost optimization MVP (escalated to P0) | **in progress** — routing kernel + cost_events ledger (PR #12), lazy tool-loading (PR #13), §9 workflow cost-sensitivity tag merged; real model dispatch built (model-provider + measured usage_events ledger — savings now measured, not just estimated) | TOKEN_OPTIMIZATION_SPEC.md, ADR-0007 |
-| EPIC-05 | Multi-agent orchestration MVP (PM/Team-Lead/Worker delegation) | **in progress** — slices 1–2 merged (kernel/runs/escalations, §5.2 budget caps); worker-node dispatch merged (PR #18); auto-dispatch of ready nodes built (self-driving pass, review gate by default) | MULTI_AGENT_ORCHESTRATION_SPEC.md, ADR-0008 |
+| EPIC-05 | Multi-agent orchestration MVP (PM/Team-Lead/Worker delegation) | **in progress** — slices 1–2 merged (kernel/runs/escalations, §5.2 budget caps); worker-node dispatch merged (PR #18); auto-dispatch merged (PR #19); workflow build-stage nesting built (§8: automated_build spawns a governed nested run) | MULTI_AGENT_ORCHESTRATION_SPEC.md, ADR-0008 |
 | EPIC-06 | PM-tool integration MVP (Azure DevOps/Jira/etc.) | **in progress** — slice 1 merged (PR #15); slices 2–4 built (§5 approval mirroring; §4 decision records; ADR-0010 inbound sync with drift detection) | PM_TOOL_INTEGRATION_SPEC.md, ADR-0008, ADR-0010 |
 
 ## Components

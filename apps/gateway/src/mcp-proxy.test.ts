@@ -4043,3 +4043,286 @@ describe("auto-dispatch of ready nodes (self-driving runs, same gates)", () => {
     expect(res.json().error).toBe("run_terminal");
   });
 });
+
+describe("workflow build-stage nesting (§8): a build stage executes as an orchestration run", () => {
+  const mkNode = (id: string, agentId: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    title: `task ${id}`,
+    ownerAgentId: agentId,
+    mode: "execute",
+    estimate: { in: 1, out: 1 },
+    ...extra,
+  });
+  const mkUser = async (email: string, name: string) => {
+    const r = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email, displayName: name },
+    });
+    return r.json().id as string;
+  };
+  const mkTemplate = async (name: string, changeType: string, definition: Record<string, unknown>) => {
+    const t = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/templates",
+      payload: { name, definition },
+    });
+    expect(t.statusCode).toBe(201);
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/assignment-rules",
+      payload: { templateId: t.json().id, changeType },
+    });
+    return t.json().id as string;
+  };
+  const startInstance = (auth: { authorization: string }, changeType: string) =>
+    app.inject({
+      method: "POST", headers: auth, url: "/v1/workflows/instances",
+      payload: {
+        change: { description: `${changeType} change`, paths: ["x.ts"], changeType, environment: "staging" },
+      },
+    });
+
+  let nitaId: string;
+  let nitaAuth: { authorization: string };
+  let nestApproverId: string;
+  let nestWorkerId: string;
+
+  it("start → nested run spawned under the initiator; completing the run completes the instance", async () => {
+    nitaId = await mkUser("nest-nita@example.com", "Nest Nita");
+    nitaAuth = await authFor(nitaId);
+    nestApproverId = await mkUser("nest-approver@example.com", "Nest Approver");
+    const agentRes = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/agents",
+      payload: {
+        name: "nest-worker", provider: "mock", tier: 0, modes: ["execute"],
+        costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-nest",
+      },
+    });
+    nestWorkerId = agentRes.json().id;
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/grants/agents",
+      payload: { userId: nitaId, agentId: nestWorkerId },
+    });
+
+    await mkTemplate("nested-build", "nest-happy", {
+      workflow: "nested-build",
+      stages: [
+        { id: "intake", type: "trigger" },
+        {
+          id: "build",
+          type: "automated_build",
+          run: {
+            run: "nested-build-run",
+            escalationApproverUserId: nestApproverId,
+            nodes: [mkNode("a", nestWorkerId), mkNode("b", nestWorkerId, { dependsOn: ["a"] })],
+          },
+        },
+      ],
+    });
+
+    const started = await startInstance(nitaAuth, "nest-happy");
+    expect(started.statusCode).toBe(201);
+    const instanceId = started.json().id;
+    expect(started.json().status).toBe("awaiting_execution");
+
+    const view = await app.inject({
+      method: "GET", headers: nitaAuth, url: `/v1/workflows/instances/${instanceId}`,
+    });
+    const runId = view.json().instance.context["runId:build"];
+    expect(runId).toBeTruthy();
+
+    // the nested run is a real, visible run bound to the instance, planned
+    // under the INITIATOR's entitlements and not yet started
+    const runView = await app.inject({ method: "GET", headers: nitaAuth, url: `/v1/runs/${runId}` });
+    expect(runView.statusCode).toBe(200);
+    expect(runView.json().run.workflowInstanceId).toBe(instanceId);
+    expect(runView.json().run.status).toBe("planned");
+    expect(runView.json().run.initiatingUserId).toBe(nitaId);
+
+    // retrying the stage while the run is live never spawns a second run
+    await app.inject({
+      method: "POST", headers: nitaAuth, url: `/v1/workflows/instances/${instanceId}/advance`,
+      payload: { stageId: "build" },
+    });
+    const runs = await app.inject({ method: "GET", headers: AUTH, url: "/v1/runs" });
+    expect(
+      runs.json().runs.filter((r: { workflowInstanceId: string | null }) => r.workflowInstanceId === instanceId),
+    ).toHaveLength(1);
+
+    // driving the nested run to completion advances the workflow automatically
+    const auto = await app.inject({
+      method: "POST", headers: nitaAuth, url: `/v1/runs/${runId}/auto`,
+      payload: { acceptReviews: true },
+    });
+    expect(auto.statusCode).toBe(200);
+    expect(auto.json().status).toBe("completed");
+
+    const after = await app.inject({
+      method: "GET", headers: nitaAuth, url: `/v1/workflows/instances/${instanceId}`,
+    });
+    expect(after.json().instance.status).toBe("completed");
+  });
+
+  it("template creation validates nested graphs and their approvers fail-fast", async () => {
+    const cyclic = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/templates",
+      payload: {
+        name: "nested-cyclic",
+        definition: {
+          workflow: "nested-cyclic",
+          stages: [
+            { id: "intake", type: "trigger" },
+            {
+              id: "build",
+              type: "automated_build",
+              run: {
+                run: "cyclic",
+                escalationApproverUserId: nestApproverId,
+                nodes: [
+                  mkNode("a", nestWorkerId, { dependsOn: ["b"] }),
+                  mkNode("b", nestWorkerId, { dependsOn: ["a"] }),
+                ],
+              },
+            },
+          ],
+        },
+      },
+    });
+    expect(cyclic.statusCode).toBe(422);
+    expect(cyclic.json().error).toBe("invalid_run_graph");
+
+    const ghostApprover = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/templates",
+      payload: {
+        name: "nested-ghost",
+        definition: {
+          workflow: "nested-ghost",
+          stages: [
+            { id: "intake", type: "trigger" },
+            {
+              id: "build",
+              type: "automated_build",
+              run: {
+                run: "ghost",
+                escalationApproverUserId: "00000000-0000-0000-0000-000000000000",
+                nodes: [mkNode("a", nestWorkerId)],
+              },
+            },
+          ],
+        },
+      },
+    });
+    expect(ghostApprover.statusCode).toBe(422);
+    expect(ghostApprover.json().error).toBe("invalid_approver");
+  });
+
+  it("a nested run the initiator is not entitled to fails the stage explicitly and is retryable after a grant", async () => {
+    const olafId = await mkUser("nest-olaf@example.com", "Nest Olaf");
+    const olafAuth = await authFor(olafId);
+
+    await mkTemplate("nested-entitlement", "nest-entitlement", {
+      workflow: "nested-entitlement",
+      stages: [
+        { id: "intake", type: "trigger" },
+        {
+          id: "build",
+          type: "automated_build",
+          run: {
+            run: "entitlement-run",
+            escalationApproverUserId: nestApproverId,
+            nodes: [mkNode("a", nestWorkerId)],
+          },
+        },
+      ],
+    });
+
+    // olaf has NO grant for nest-worker — the spawn is rejected, audited, retryable
+    const started = await startInstance(olafAuth, "nest-entitlement");
+    expect(started.statusCode).toBe(201);
+    const instanceId = started.json().id;
+    expect(started.json().status).toBe("awaiting_execution");
+    const view = await app.inject({
+      method: "GET", headers: olafAuth, url: `/v1/workflows/instances/${instanceId}`,
+    });
+    expect(String(view.json().instance.context.lastError)).toContain("entitlement_exceeded");
+    expect(view.json().instance.context["runId:build"]).toBeUndefined();
+
+    // grant arrives; retry via /advance spawns the run for real
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/grants/agents",
+      payload: { userId: olafId, agentId: nestWorkerId },
+    });
+    await app.inject({
+      method: "POST", headers: olafAuth, url: `/v1/workflows/instances/${instanceId}/advance`,
+      payload: { stageId: "build" },
+    });
+    const retried = await app.inject({
+      method: "GET", headers: olafAuth, url: `/v1/workflows/instances/${instanceId}`,
+    });
+    const runId = retried.json().instance.context["runId:build"];
+    expect(runId).toBeTruthy();
+
+    const auto = await app.inject({
+      method: "POST", headers: olafAuth, url: `/v1/runs/${runId}/auto`,
+      payload: { acceptReviews: true },
+    });
+    expect(auto.json().status).toBe("completed");
+    const after = await app.inject({
+      method: "GET", headers: olafAuth, url: `/v1/workflows/instances/${instanceId}`,
+    });
+    expect(after.json().instance.status).toBe("completed");
+  });
+
+  it("an aborted nested run fails the stage; retry spawns a fresh run", async () => {
+    await mkTemplate("nested-abort", "nest-abort", {
+      workflow: "nested-abort",
+      stages: [
+        { id: "intake", type: "trigger" },
+        {
+          id: "build",
+          type: "automated_build",
+          run: {
+            run: "abortable-run",
+            escalationApproverUserId: nestApproverId,
+            nodes: [mkNode("a", nestWorkerId)],
+          },
+        },
+      ],
+    });
+    const started = await startInstance(nitaAuth, "nest-abort");
+    const instanceId = started.json().id;
+    const view = await app.inject({
+      method: "GET", headers: nitaAuth, url: `/v1/workflows/instances/${instanceId}`,
+    });
+    const firstRunId = view.json().instance.context["runId:build"];
+
+    await app.inject({
+      method: "POST", headers: nitaAuth, url: `/v1/runs/${firstRunId}/events`,
+      payload: { kind: "abort" },
+    });
+    const failed = await app.inject({
+      method: "GET", headers: nitaAuth, url: `/v1/workflows/instances/${instanceId}`,
+    });
+    expect(failed.json().instance.status).toBe("awaiting_execution");
+    expect(String(failed.json().instance.context.lastError)).toContain("aborted");
+
+    await app.inject({
+      method: "POST", headers: nitaAuth, url: `/v1/workflows/instances/${instanceId}/advance`,
+      payload: { stageId: "build" },
+    });
+    const retried = await app.inject({
+      method: "GET", headers: nitaAuth, url: `/v1/workflows/instances/${instanceId}`,
+    });
+    const secondRunId = retried.json().instance.context["runId:build"];
+    expect(secondRunId).toBeTruthy();
+    expect(secondRunId).not.toBe(firstRunId);
+
+    const auto = await app.inject({
+      method: "POST", headers: nitaAuth, url: `/v1/runs/${secondRunId}/auto`,
+      payload: { acceptReviews: true },
+    });
+    expect(auto.json().status).toBe("completed");
+    const after = await app.inject({
+      method: "GET", headers: nitaAuth, url: `/v1/workflows/instances/${instanceId}`,
+    });
+    expect(after.json().instance.status).toBe("completed");
+  });
+});
