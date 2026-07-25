@@ -5,6 +5,7 @@ import {
   ModelProviderError,
   GoogleProvider,
   OpenAiProvider,
+  XaiProvider,
   resolveModelProvider,
 } from "./index.js";
 
@@ -114,13 +115,10 @@ describe("AnthropicProvider (injectable fetch, no network)", () => {
 });
 
 describe("resolveModelProvider registry", () => {
-  it("rejects interface-ready but unimplemented providers", () => {
-    expect(() => resolveModelProvider({ provider: "xai" })).toThrowError(/not implemented/);
-  });
-
-  it("real providers without an apiKey are rejected", () => {
-    for (const provider of ["anthropic", "openai", "google"] as const) {
+  it("every real provider resolves with a key and is rejected without one", () => {
+    for (const provider of ["anthropic", "openai", "google", "xai"] as const) {
       expect(() => resolveModelProvider({ provider })).toThrowError(/apiKey/);
+      expect(resolveModelProvider({ provider, apiKey: "k" }).kind).toBe(provider);
     }
   });
 
@@ -404,5 +402,65 @@ describe("GoogleProvider (raw injectable fetch, no network)", () => {
     await expect(provider.dispatch({ model: "gemini-2.5-pro", input: "x" })).rejects.toMatchObject({
       status: 403,
     });
+  });
+});
+
+describe("XaiProvider (OpenAI-compatible core pointed at api.x.ai)", () => {
+  it("defaults to the xAI base URL and normalizes like the shared core", async () => {
+    let captured: { url: string; body: Record<string, unknown> } | null = null;
+    const provider = new XaiProvider({
+      apiKey: "xai-key",
+      fetchImpl: async (url, init) => {
+        captured = { url: String(url), body: JSON.parse(String(init?.body)) };
+        return new Response(
+          JSON.stringify({
+            id: "chatcmpl-xai1",
+            object: "chat.completion",
+            created: 1,
+            model: "grok-4",
+            choices: [{ index: 0, message: { role: "assistant", content: "grok says 42", refusal: null }, finish_reason: "stop", logprobs: null }],
+            usage: { prompt_tokens: 5, completion_tokens: 4, total_tokens: 9 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+    const result = await provider.dispatch({ model: "grok-4", input: "meaning of life?" });
+    expect(captured!.url.startsWith("https://api.x.ai/v1")).toBe(true);
+    expect(captured!.url).toContain("/chat/completions");
+    expect(captured!.body).toMatchObject({ model: "grok-4" });
+    expect(result.outputText).toBe("grok says 42");
+    expect(result.stopReason).toBe("end_turn");
+    expect(result.usage).toEqual({ inputTokens: 5, outputTokens: 4 });
+    expect(result.providerMessageId).toBe("chatcmpl-xai1");
+  });
+
+  it("streams through the shared core with xai-labeled errors", async () => {
+    const chunk = (c: unknown) => "data: " + JSON.stringify(c) + "\n\n";
+    const sse =
+      chunk({ id: "chatcmpl-xs1", object: "chat.completion.chunk", created: 1, model: "grok-4", choices: [{ index: 0, delta: { content: "grok " }, finish_reason: null }] }) +
+      chunk({ id: "chatcmpl-xs1", object: "chat.completion.chunk", created: 1, model: "grok-4", choices: [{ index: 0, delta: { content: "streams" }, finish_reason: "stop" }] }) +
+      chunk({ id: "chatcmpl-xs1", object: "chat.completion.chunk", created: 1, model: "grok-4", choices: [], usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } }) +
+      "data: [DONE]\n\n";
+    const provider = new XaiProvider({
+      apiKey: "xai-key",
+      fetchImpl: async () =>
+        new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+    });
+    const deltas: string[] = [];
+    const result = await provider.dispatch({ model: "grok-4", input: "go", onText: (d) => deltas.push(d) });
+    expect(deltas).toEqual(["grok ", "streams"]);
+    expect(result.outputText).toBe("grok streams");
+    expect(result.usage).toEqual({ inputTokens: 3, outputTokens: 2 });
+
+    const failing = new XaiProvider({
+      apiKey: "bad",
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ error: { message: "invalid key" } }), {
+          status: 401,
+          headers: { "content-type": "application/json" },
+        }),
+    });
+    await expect(failing.dispatch({ model: "grok-4", input: "x" })).rejects.toThrowError(/xai dispatch failed/);
   });
 });

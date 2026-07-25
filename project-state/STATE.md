@@ -263,8 +263,15 @@ family → end_turn/max_tokens/refusal) plus `promptFeedback.blockReason` → re
 blocks and output filters both suppress content — same discipline). Registry now resolves
 anthropic + openai + google; only xai stays rejected. Zero gateway changes again — e2e rides
 a `provider: "google"` agent through the full pipeline against a local fake Gemini server
-(correct header key + path on the wire, measured usage ledgered). Deferred: xai adapter,
-OpenAI Responses-API surface, per-provider tool-use.
+(correct header key + path on the wire, measured usage ledgered). **xAI adapter, same day — the registry is
+complete.** Grok speaks OpenAI-compatible chat completions, so the chat-completions dispatch
+core was extracted as a shared function (`dispatchChatCompletions`) and `XaiProvider` is that
+core pointed at `https://api.x.ai/v1` by default — same contract, same refusal discipline,
+same streaming accounting, provider-labeled errors. **All four real providers (anthropic,
+openai, google, xai) + mock now resolve**; the "interface-ready but not implemented"
+rejection era is over, and pillar 1's any-vendor routing claim is demonstrated across four
+live adapters with zero gateway changes each time. Deferred: OpenAI Responses-API surface,
+per-provider tool-use.
 
 **EPIC-06 started — PM-tool integration first slice, 2026-07-25.** New
 `packages/pm-provider` on the git-provider playbook (pillar 8, PM_TOOL_INTEGRATION_SPEC
