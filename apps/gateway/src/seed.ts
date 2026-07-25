@@ -598,6 +598,37 @@ controls a reviewer would check before sign-off.`;
   }
 }
 
+// --- demo conversation (multi-turn Playground memory) ---------------------
+// One short thread for Dana on the mock agents, driven through the REAL
+// invoke API: a summarize turn, then a terse follow-up whose reply visibly
+// inherits the earlier topic — proof on first open that the stored history
+// rides every dispatch. Guarded like the other append-only seeds: the
+// thread's auto-title is the first ~60 chars of its opening turn, so a
+// re-run matches on that prefix instead of creating a duplicate.
+const CONVO_OPENER =
+  "Summarize the saved-payment-methods checkout plan for the release notes.";
+// Terse (< 8 words) so the mock's reply inherits the opener's topic — and
+// still topic-bearing itself, so ANOTHER terse turn typed live in the demo
+// ("now make it shorter") inherits a topic from THIS turn in its turn.
+const CONVO_FOLLOW_UP = "Shorter — just the payment-methods bullets.";
+const danaConvos = (await call("GET", "/v1/conversations", undefined, danaAuth)).conversations ?? [];
+if (!danaConvos.some((c: Json) => c.title && CONVO_OPENER.startsWith(c.title))) {
+  const convo = await call(
+    "POST",
+    "/v1/conversations",
+    { agentId: agentIds["balanced-mock"], projectId: demoProjectId },
+    danaAuth,
+  );
+  for (const input of [CONVO_OPENER, CONVO_FOLLOW_UP]) {
+    await call(
+      "POST",
+      `/v1/agents/${agentIds["balanced-mock"]}/invoke`,
+      { mode: "execute", input, dispatch: true, conversationId: convo.id },
+      danaAuth,
+    );
+  }
+}
+
 // --- demo runs (one per persona) -----------------------------------------
 const danaRuns = (await call("GET", "/v1/runs", undefined, danaAuth)).runs ?? [];
 if (!danaRuns.some((r: Json) => r.name === "checkout-refactor")) {
@@ -842,6 +873,12 @@ ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecre
   Projects: demo-project and hipaa-project (classification-forced sign-off),
   both with members, team provenance, shared context, a budget and real
   measured spend from 12 seeded mock dispatches.
+
+  Playground (multi-turn): dana opens on a seeded 2-turn conversation billed
+  to demo-project — the terse follow-up's reply visibly continues the first
+  turn's topic, proof the stored history rides every dispatch. The rail's
+  'New conversation' starts a fresh thread; every turn stays governed,
+  routed and metered exactly like a single-turn invoke.
 
   Spend & savings (pillars 5+6, /app): every user has a personal cost page —
   measured spend, tokens, savings by technique, spend by agent, recent

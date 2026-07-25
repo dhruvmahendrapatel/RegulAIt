@@ -169,6 +169,17 @@ pre, .codeblock {
 .gate p { color: var(--text-dim); font-size: 13px; }
 
 /* ---- chat ---------------------------------------------------------- */
+.pg-split { display: flex; gap: 14px; align-items: flex-start; }
+.convo-rail { width: 232px; flex: none; padding: 10px; position: sticky; top: 20px; max-height: calc(100vh - 40px); overflow-y: auto; }
+.convo-item { display: flex; align-items: flex-start; gap: 6px; padding: 7px 6px 7px 9px; border-radius: 7px; color: var(--text-dim); cursor: pointer; }
+.convo-item:hover { background: #ffffff08; color: var(--text); }
+.convo-item.active { background: var(--accent-soft); color: var(--text); }
+.convo-item .t { font-size: 12.5px; line-height: 1.35; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+.convo-item .m { font-size: 10.5px; color: var(--text-faint); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.convo-item .x { flex: none; background: none; border: none; color: var(--text-faint); cursor: pointer; font: inherit; font-size: 14px; line-height: 1; padding: 2px 4px; border-radius: 4px; visibility: hidden; }
+.convo-item:hover .x { visibility: visible; }
+.convo-item .x:hover { color: var(--bad); background: #cd5b5214; }
+@media (max-width: 900px) { .pg-split { flex-direction: column; } .convo-rail { width: 100%; position: static; max-height: none; } }
 .chat-log { display: flex; flex-direction: column; gap: 14px; min-height: 120px; }
 .msg { max-width: 88%; }
 .msg.user { align-self: flex-end; }

@@ -393,6 +393,25 @@ Sync-now verification works, and receivers without read-back fail loudly into th
 orphan flow. `DEFAULT_MAPPINGS.generic_webhook` is the IDENTITY map over all five canonical
 states including blocked — nothing invented because the vocabulary is ours. E2e: the fake
 receiver verifies the HMAC on every request and asserts the token never travels raw.
+**Multi-turn conversations, 2026-07-25 — the Playground stops being amnesiac (pillar 6
+prerequisite unlocked).** `ModelDispatchRequest.messages` (full ordered history; `input`
+ignored when present, byte-identical single-turn otherwise) threaded through all five
+providers (google maps assistant→"model"; mock opens with a continuation line and terse
+follow-ups inherit the previous turn's topic — demo-provable). Migration 0023:
+`conversations` + `conversation_messages` (FK-free subject ids like the ledgers, cascade on
+messages, assistant detail jsonb = stopReason/refusal/servedAgentId/modelUsed/costUsd/
+credentialSource). Invoke accepts `conversationId`: ownership checked before anything bills;
+EVERY turn is the unchanged governed pipeline (policy → routing → budget → audit → ledgers,
+history growth added to cost estimates so budget gates stay truthful); transactional
+persistence — success both turns, refusal flagged, denial user-turn-only (excluded from
+future model-bound history), dispatch failure nothing. Own-scoped CRUD. /app Playground is
+now two-pane: conversations rail (new/delete/active restore via sessionStorage), history
+replayed through the SAME badge renderers as live turns (incl. denial pills), auto-create +
+auto-title on first send, mid-thread agent/project switching. Seeded 2-exchange demo
+conversation (idempotent, real-API-driven) + new seed.test.ts double-run suite. Suite
+416 → 443. Browser-verified: continuation reply on-topic, reload restores thread, zero
+console errors.
+
 **Provider-native inbound webhooks, 2026-07-25 — the deferred ADR-0010 depth item.** New
 `packages/pm-provider/src/inbound.ts`: per-provider `parseInboundWebhook` (exhaustive
 registry) verifying each tool's REAL mechanism and translating its REAL payloads into the

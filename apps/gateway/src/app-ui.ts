@@ -170,8 +170,51 @@ function shell(content, active) {
 }
 
 // ------------------------------------------------------------ playground --
-const chatHistory = []; // persists across renders within the session
+// The Playground is a real multi-turn surface: threads live server-side
+// (/v1/conversations, personal, admins included), the open thread's id lives
+// in sessionStorage (tab-scoped, like the key), and chatHistory below is only
+// the OPEN thread's render model — rebuilt from the server when a thread is
+// opened, appended to live while one streams. Runs/workflows keep their
+// single-turn invoke semantics untouched.
+const chatHistory = []; // the open thread's exchanges — persists across renders within the tab
 let PG_ABORT = null;    // AbortController while a stream is open — one at a time
+let CONVO_ID = sessionStorage.getItem("regulait.convo") || null; // active thread — tab-scoped
+let CONVOS = [];            // conversations rail cache (newest-updated first, from the server)
+let CHAT_LOADED_FOR = null; // which conversation chatHistory mirrors (null = fresh unsaved chat)
+let PG_PREFILL = null;      // agent/project selects to apply right after opening a thread
+
+function setConvo(id) {
+  CONVO_ID = id;
+  if (id) sessionStorage.setItem("regulait.convo", id);
+  else sessionStorage.removeItem("regulait.convo");
+}
+
+// Server history -> the exact exchange shape renderExchange draws live, so a
+// replayed thread wears the same bubbles and badges a live one does: the
+// assistant detail carries the dispatch facts (modelUsed/costUsd/refusal/
+// credentialSource), and a denied user turn carries detail.denied and gets
+// its denial pill with no assistant bubble.
+function exchangesFromMessages(v) {
+  const out = [];
+  for (const m of v.messages ?? []) {
+    if (m.role === "user") {
+      const x = { prompt: m.content, agentName: v.agentName ?? "agent", text: "", streaming: false };
+      if (m.detail && m.detail.denied) { x.denied = m.detail; x.text = m.detail.reason ?? ""; }
+      out.push(x);
+    } else if (m.role === "assistant") {
+      const x = out[out.length - 1];
+      if (!x || x.denied || x.result) continue; // history is strict user/assistant pairs — be defensive anyway
+      const d = m.detail ?? {};
+      x.text = m.content;
+      x.agentName = AGENT_NAMES[d.servedAgentId] ?? x.agentName;
+      x.result = { dispatch: {
+        model: d.modelUsed, costUsd: d.costUsd, refusal: d.refusal,
+        credentialSource: d.credentialSource, stopReason: d.stopReason,
+      } };
+    }
+  }
+  return out;
+}
 
 // Whose key pays for this agent, said before the request rather than only
 // after it. Routing can still move the request to another agent, so the
@@ -184,7 +227,76 @@ function keyHint(agent) {
     : "No " + esc(agent.provider) + " key of your own — this uses the platform credential if an admin has configured one. <a href='#/settings'>Add your key</a>";
 }
 
-function playgroundPage() {
+// The conversations rail: newest-updated first, active highlight, delete
+// affordance. Rendered into #convo-rail so refreshRail() can update it after
+// a turn lands without re-rendering the whole page (a stream may be open).
+function railHtml() {
+  const items = CONVOS.map((c) => {
+    const n = c.messageCount ?? 0;
+    return \`<div class="convo-item \${c.id === CONVO_ID ? "active" : ""}" data-convo="\${esc(c.id)}" title="\${esc(c.title ?? "Untitled")}">
+      <div class="grow" style="min-width:0">
+        <div class="t">\${esc(c.title ?? "Untitled")}</div>
+        <div class="m">\${esc(c.agentName ?? "agent")} · \${ago(c.updatedAt)} · \${n} msg\${n === 1 ? "" : "s"}</div>
+      </div>
+      <button class="x" data-delconvo="\${esc(c.id)}" title="delete this conversation — its history is removed for good">×</button>
+    </div>\`;
+  }).join("");
+  return \`
+    <button class="small" id="convo-new" style="width:100%">+ New conversation</button>
+    <div style="margin-top:8px">\${items || '<div class="faint" style="font-size:12px;padding:12px 4px;text-align:center">No conversations yet — send a message and a thread starts itself.</div>'}</div>\`;
+}
+
+async function refreshRail() {
+  // called after a turn lands: title/updatedAt/messageCount move without a
+  // full re-render (which would tear down an open stream's DOM)
+  try { CONVOS = (await get("/v1/conversations")).conversations ?? []; } catch { return; }
+  const rail = $("#convo-rail");
+  if (!rail) return;
+  rail.innerHTML = railHtml();
+  wireRail();
+}
+
+function wireRail() {
+  $("#convo-new")?.addEventListener("click", () => {
+    if (PG_ABORT) { toast("A reply is still streaming — Stop it or let it finish first."); return; }
+    setConvo(null); chatHistory.length = 0; CHAT_LOADED_FOR = null; render();
+  });
+  document.querySelectorAll("[data-convo]").forEach((el) =>
+    el.addEventListener("click", () => {
+      if (PG_ABORT) { toast("A reply is still streaming — Stop it or let it finish first."); return; }
+      if (el.dataset.convo === CONVO_ID) return;
+      setConvo(el.dataset.convo); CHAT_LOADED_FOR = null; render();
+    }));
+  document.querySelectorAll("[data-delconvo]").forEach((b) =>
+    b.addEventListener("click", async (e) => {
+      e.stopPropagation(); // the row click underneath would open the thread
+      if (!confirm("Delete this conversation? Its full history is removed — this cannot be undone.")) return;
+      try {
+        await del("/v1/conversations/" + b.dataset.delconvo);
+        if (CONVO_ID === b.dataset.delconvo) { setConvo(null); chatHistory.length = 0; CHAT_LOADED_FOR = null; }
+        toast("Conversation deleted");
+        render();
+      } catch (err) { toast("✗ " + err.message); }
+    }));
+}
+
+async function playgroundPage() {
+  try { CONVOS = (await get("/v1/conversations")).conversations ?? []; } catch { CONVOS = []; }
+  // Restore the open thread (sessionStorage) or load a just-clicked one.
+  // A stale id — deleted elsewhere, another account's — clears silently
+  // instead of erroring the page. Never reload under an open stream.
+  if (CONVO_ID && !PG_ABORT && CHAT_LOADED_FOR !== CONVO_ID) {
+    try {
+      const v = await get("/v1/conversations/" + CONVO_ID);
+      chatHistory.length = 0;
+      chatHistory.push(...exchangesFromMessages(v));
+      CHAT_LOADED_FOR = CONVO_ID;
+      // reflect the thread's own agent + bill-to defaults in the selects
+      // (applied post-render); both stay fully switchable mid-conversation
+      PG_PREFILL = { agentId: v.agentId, projectId: v.projectId };
+    } catch { setConvo(null); chatHistory.length = 0; CHAT_LOADED_FOR = null; }
+  }
+  if (!CONVO_ID && CHAT_LOADED_FOR !== null && !PG_ABORT) { chatHistory.length = 0; CHAT_LOADED_FOR = null; }
   // No grants means no agent to invoke — without this guard the select is
   // empty, Send POSTs to /v1/agents//invoke, and the user gets Fastify's 404.
   const noAgents = AGENTS.length === 0;
@@ -197,32 +309,37 @@ function playgroundPage() {
     .concat(PROJECTS.map((p) => \`<option value="\${p.id}">\${esc(p.name)}</option>\`)).join("");
   return \`
   <h1>Playground</h1>
-  <p class="sub">Every message goes through governance, routing, and metered dispatch — the trace shows what actually happened.</p>
-  <div class="card">
-    <div class="row">
-      \${agentField}
-      <div><label class="f">Bill to</label><select id="pg-project">\${projectOpts}</select></div>
-      <div><label class="f">Priority</label>
-        <select id="pg-sens">
-          <option value="standard">standard</option>
-          <option value="cost-sensitive">cost-sensitive</option>
-          <option value="quality-sensitive">quality-sensitive</option>
-        </select>
+  <p class="sub">Every message goes through governance, routing, and metered dispatch — the trace shows what actually happened. Conversations remember: each turn carries the whole thread.</p>
+  <div class="pg-split">
+    <aside class="card convo-rail" id="convo-rail">\${railHtml()}</aside>
+    <div class="grow" style="min-width:0">
+      <div class="card">
+        <div class="row">
+          \${agentField}
+          <div><label class="f">Bill to</label><select id="pg-project">\${projectOpts}</select></div>
+          <div><label class="f">Priority</label>
+            <select id="pg-sens">
+              <option value="standard">standard</option>
+              <option value="cost-sensitive">cost-sensitive</option>
+              <option value="quality-sensitive">quality-sensitive</option>
+            </select>
+          </div>
+        </div>
+        \${noAgents ? "" : '<hr class="hr"><div class="faint" style="font-size:11.5px" id="pg-key">' + keyHint(AGENTS[0]) + "</div>"}
       </div>
-    </div>
-    \${noAgents ? "" : '<hr class="hr"><div class="faint" style="font-size:11.5px" id="pg-key">' + keyHint(AGENTS[0]) + "</div>"}
-  </div>
-  <div class="card" style="margin-top:12px">
-    <div class="chat-log" id="chat-log">
-      \${chatHistory.length ? "" : (noAgents
-        ? '<div class="empty">Nothing to send to yet — an admin has to grant your account an agent first.</div>'
-        : '<div class="empty">Pick an agent and say something. Mock agents reply instantly with no external keys; type «&lt;&lt;refuse&gt;&gt;» to see refusal handling.</div>')}
-    </div>
-    <hr class="hr">
-    <div class="row">
-      <textarea id="pg-input" class="grow" rows="2" placeholder="\${noAgents ? "No agent granted to your account yet…" : "Ask the agent to do something…"}"\${noAgents ? " disabled" : ""}></textarea>
-      <button class="primary" id="pg-send"\${noAgents ? " disabled" : ""}>Send</button>
-      <button id="pg-stop" style="display:none" title="close the stream — the dispatch already ran, anything streamed stays">Stop</button>
+      <div class="card" style="margin-top:12px">
+        <div class="chat-log" id="chat-log">
+          \${chatHistory.length ? "" : (noAgents
+            ? '<div class="empty">Nothing to send to yet — an admin has to grant your account an agent first.</div>'
+            : '<div class="empty">Pick an agent and say something — the first message starts a conversation. Mock agents reply instantly with no external keys; type «&lt;&lt;refuse&gt;&gt;» to see refusal handling.</div>')}
+        </div>
+        <hr class="hr">
+        <div class="row">
+          <textarea id="pg-input" class="grow" rows="2" placeholder="\${noAgents ? "No agent granted to your account yet…" : (CONVO_ID ? "Continue the conversation…" : "Ask the agent to do something…")}"\${noAgents ? " disabled" : ""}></textarea>
+          <button class="primary" id="pg-send"\${noAgents ? " disabled" : ""}>Send</button>
+          <button id="pg-stop" style="display:none" title="close the stream — the dispatch already ran, anything streamed stays">Stop</button>
+        </div>
+      </div>
     </div>
   </div>\`;
 }
@@ -237,8 +354,10 @@ function renderExchange(x, i) {
     }
     if (r.dispatch) {
       if (r.dispatch.refusal) meta.push('<span class="badge bad">refused</span>');
-      if (r.dispatch.costUsd != null) meta.push('<span class="badge">' + fmtUsd(r.dispatch.costUsd) + " · " + r.dispatch.usage.inputTokens + "→" + r.dispatch.usage.outputTokens + " tok</span>");
-      meta.push('<span class="badge">' + esc(r.dispatch.model) + "</span>");
+      // replayed history carries cost/model but not token counts (the usage
+      // detail stays in the ledgers) — the badge degrades instead of dying
+      if (r.dispatch.costUsd != null) meta.push('<span class="badge">' + fmtUsd(r.dispatch.costUsd) + (r.dispatch.usage ? " · " + r.dispatch.usage.inputTokens + "→" + r.dispatch.usage.outputTokens + " tok" : "") + "</span>");
+      if (r.dispatch.model) meta.push('<span class="badge">' + esc(r.dispatch.model) + "</span>");
       // whose credential actually paid for this call — the one thing a BYO-key
       // user cannot verify any other way
       if (r.dispatch.credentialSource === "user") meta.push('<span class="badge info">your key</span>');
@@ -252,7 +371,8 @@ function renderExchange(x, i) {
     meta.push('<span class="badge bad" title="' + esc(x.denied.ruleId) + '">denied · ' + esc(rid) + "</span>");
   }
   if (x.error) meta.push('<span class="badge bad">' + esc(x.error) + "</span>");
-  const trace = x.result || x.denied
+  // replayed exchanges carry no decision/routing payload — no empty expander
+  const trace = x.denied || (x.result && (x.result.decision || x.result.routing))
     ? \`<details style="margin-top:6px"><summary class="faint" style="cursor:pointer;font-size:11.5px">governance trace</summary>
        <pre style="margin-top:6px">\${esc(JSON.stringify(x.denied ?? { decision: x.result.decision, routing: x.result.routing }, null, 2))}</pre></details>\`
     : "";
@@ -306,6 +426,19 @@ async function sendPrompt() {
   if (!agentId) { toast("No agents granted to your account — ask an admin."); return; }
   const projectId = $("#pg-project").value || undefined;
   const costSensitivity = $("#pg-sens").value;
+  // MULTI-TURN: the first Send with no open thread creates one (with the
+  // selected agent + bill-to as the thread's defaults), then every send
+  // dispatches inside it. The invoke URL's agent stays the CURRENTLY selected
+  // one — switching agents mid-thread just points later turns at the new
+  // agent, which the backend allows.
+  if (!CONVO_ID) {
+    try {
+      const row = await post("/v1/conversations", { agentId, ...(projectId ? { projectId } : {}) });
+      setConvo(row.id);
+      CHAT_LOADED_FOR = row.id; // what's on screen (nothing yet) IS this thread
+    } catch (e) { toast("✗ couldn’t start a conversation — " + e.message); return; }
+  }
+  const conversationId = CONVO_ID;
   input.value = "";
   const x = { prompt, agentName: AGENT_NAMES[agentId] ?? "agent", text: "", streaming: true };
   chatHistory.push(x); drawChat();
@@ -317,7 +450,7 @@ async function sendPrompt() {
     const res = await fetch("/v1/agents/" + agentId + "/invoke", {
       method: "POST",
       headers: { authorization: "Bearer " + KEY, "content-type": "application/json" },
-      body: JSON.stringify({ mode: "execute", input: prompt, dispatch: true, stream: true, costSensitivity, ...(projectId ? { projectId } : {}) }),
+      body: JSON.stringify({ mode: "execute", input: prompt, dispatch: true, stream: true, costSensitivity, conversationId, ...(projectId ? { projectId } : {}) }),
       signal: ctrl.signal,
     });
     if (!res.ok || !res.headers.get("content-type")?.includes("event-stream")) {
@@ -376,6 +509,9 @@ async function sendPrompt() {
   } finally {
     PG_ABORT = null;
     pgStreamUi(false);
+    // the turn (or denial) just changed this thread's title/updatedAt/count —
+    // move its rail entry without re-rendering the page
+    refreshRail();
   }
 }
 
@@ -1534,7 +1670,7 @@ async function render() {
   const { page, id } = route();
   let content = "";
   try {
-    if (page === "playground") content = playgroundPage();
+    if (page === "playground") content = await playgroundPage();
     else if (page === "runs" && id) content = await runDetailPage(id);
     else if (page === "runs") content = await runsPage();
     else if (page === "workflows" && id) content = await workflowDetailPage(id);
@@ -1543,7 +1679,7 @@ async function render() {
     else if (page === "projects") content = await projectsPage();
     else if (page === "spend") content = await spendPage();
     else if (page === "settings") content = await settingsPage();
-    else content = playgroundPage();
+    else content = await playgroundPage();
   } catch (e) {
     content = '<div class="empty">Couldn’t load this view — ' + esc(e.message) + "</div>";
   }
@@ -1556,6 +1692,18 @@ async function render() {
   $("#signout")?.addEventListener("click", signOut);
 
   if (page === "playground") {
+    // a thread was just opened — reflect its own defaults in the selects once
+    if (PG_PREFILL) {
+      const ag = $("#pg-agent");
+      if (ag && PG_PREFILL.agentId && AGENTS.some((a) => a.agentId === PG_PREFILL.agentId)) {
+        ag.value = PG_PREFILL.agentId;
+        if ($("#pg-key")) $("#pg-key").innerHTML = keyHint(AGENTS.find((a) => a.agentId === PG_PREFILL.agentId));
+      }
+      const pr = $("#pg-project");
+      if (pr) pr.value = PG_PREFILL.projectId && PROJECTS.some((p) => p.id === PG_PREFILL.projectId) ? PG_PREFILL.projectId : "";
+      PG_PREFILL = null;
+    }
+    wireRail();
     drawChat();
     pgStreamUi(Boolean(PG_ABORT)); // a stream may still be open across renders
     $("#pg-send")?.addEventListener("click", sendPrompt);
