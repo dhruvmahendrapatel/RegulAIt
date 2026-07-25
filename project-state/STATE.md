@@ -393,8 +393,22 @@ Sync-now verification works, and receivers without read-back fail loudly into th
 orphan flow. `DEFAULT_MAPPINGS.generic_webhook` is the IDENTITY map over all five canonical
 states including blocked — nothing invented because the vocabulary is ours. E2e: the fake
 receiver verifies the HMAC on every request and asserts the token never travels raw.
-Deferred: ADF descriptions, provider-native webhooks → the ADR-0010 normalized inbound
-shape.
+**Provider-native inbound webhooks, 2026-07-25 — the deferred ADR-0010 depth item.** New
+`packages/pm-provider/src/inbound.ts`: per-provider `parseInboundWebhook` (exhaustive
+registry) verifying each tool's REAL mechanism and translating its REAL payloads into the
+one existing normalized shape — handshakes answered without processing, valid-but-irrelevant
+payloads 200-and-dropped, verification failures → 401 with no secret material. Mechanisms:
+linear `linear-signature` HMAC; asana two-phase (`x-hook-secret` echo handshake, then
+`x-hook-signature` HMAC over thin state-less events resolved by read-through); monday
+`{challenge}` echo + URL-token (monday sends no signature — documented limitation); jira
+URL-token (Jira Cloud manual webhooks can't sign or set headers); azure_devops basic-auth
+password; generic/mock `x-regulait-signature` HMAC (outbound symmetry) with the legacy
+secret header still accepted, signature taking precedence. All comparisons constant-time.
+Migration 0021 adds `pm_connections.webhook_secret_ciphertext` (AES-256-GCM, same envelope
+as tokens) because HMAC needs the secret itself — the sha256 hash stays and still gates
+legacy traffic. Raw-body capture is scoped to the webhook route only (encapsulated Fastify
+scope; global JSON parsing untouched). Downstream normalized processing (pm_sync_events,
+drift, orphans) unchanged. Suite 380 → 405 (20 unit + 5 e2e). Deferred: ADF descriptions.
 
 **EPIC-06 started — PM-tool integration first slice, 2026-07-25.** New
 `packages/pm-provider` on the git-provider playbook (pillar 8, PM_TOOL_INTEGRATION_SPEC

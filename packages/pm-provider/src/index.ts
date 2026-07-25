@@ -1243,6 +1243,25 @@ export class MockPmProvider implements PmProvider {
 }
 
 // ---------------------------------------------------------------------------
+// Inbound webhook translation (provider-native payloads → the ADR-0010
+// normalized shape) lives in inbound.ts and is re-exported here.
+// ---------------------------------------------------------------------------
+
+export {
+  constantTimeEqual,
+  parseAsanaInboundWebhook,
+  parseAzureDevOpsInboundWebhook,
+  parseGenericInboundWebhook,
+  parseInboundWebhook,
+  parseJiraInboundWebhook,
+  parseLinearInboundWebhook,
+  parseMondayInboundWebhook,
+  type InboundWebhookInput,
+  type InboundWebhookResult,
+  type NormalizedInboundEvent,
+} from "./inbound.js";
+
+// ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
 

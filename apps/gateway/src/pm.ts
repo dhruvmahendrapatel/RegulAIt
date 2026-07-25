@@ -19,11 +19,13 @@ import {
 import {
   PmProviderError,
   mappingFor,
+  parseInboundWebhook,
   resolveApprovalAction,
   resolveDecisionAction,
   resolvePmProvider,
   resolveStatus,
   resolveTaskFields,
+  type NormalizedInboundEvent,
 } from "@regulait/pm-provider";
 import type { RunState, TaskGraph } from "@regulait/orchestration-kernel";
 import type { WorkflowDefinition } from "@regulait/workflow-kernel";
@@ -31,7 +33,6 @@ import {
   createDecisionSchema,
   createPmConnectionSchema,
   pmSyncSchema,
-  pmWebhookSchema,
 } from "@regulait/shared";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
@@ -242,7 +243,10 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
       throw err; // zod mapping errors → 400 via the app error handler
     }
     // ADR-0010: per-connection webhook secret — plaintext returned exactly
-    // once, only the hash is stored (same discipline as API keys).
+    // once. The hash is stored for the legacy shared-secret-header check;
+    // an AES-256-GCM ciphertext is stored alongside because provider-native
+    // verification (linear/asana HMAC signatures, generic's signed envelope)
+    // must re-derive MACs from the secret itself — a hash cannot key an HMAC.
     const webhookSecret = `rglwh_${randomBytes(24).toString("hex")}`;
     const [row] = await db
       .insert(pmConnections)
@@ -254,6 +258,7 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
         tokenCiphertext: encryptSecret(opts.dataKey, body.token),
         mapping: body.mapping ?? null,
         webhookSecretHash: sha256(webhookSecret),
+        webhookSecretCiphertext: encryptSecret(opts.dataKey, webhookSecret),
       })
       .returning(CONNECTION_COLUMNS);
     return reply.status(201).send({ ...row, webhookSecret });
@@ -538,30 +543,15 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
       .send({ created: true, externalId: ref.id, externalUrl: ref.url });
   });
 
-  // ADR-0010 inbound: the normalized webhook. Authenticated by the
-  // per-connection secret (constant-time compare against the stored hash) —
-  // NOT by a bearer token; the global auth hook exempts exactly this route.
-  // Inbound state is recorded, never applied to the state machine; divergence
-  // surfaces as drift in the links view and the one audit trail.
-  app.post("/v1/pm/webhooks/:connectionName", async (req, reply) => {
-    const { connectionName } = z
-      .object({ connectionName: z.string().min(1) })
-      .parse(req.params);
-    const [conn] = await db
-      .select()
-      .from(pmConnections)
-      .where(eq(pmConnections.name, connectionName));
-    const presented = req.headers["x-regulait-webhook-secret"];
-    if (!conn || !conn.webhookSecretHash || typeof presented !== "string") {
-      return reply.status(401).send({ error: "unauthenticated" });
-    }
-    const presentedHash = Buffer.from(sha256(presented), "hex");
-    const storedHash = Buffer.from(conn.webhookSecretHash, "hex");
-    if (presentedHash.length !== storedHash.length || !timingSafeEqual(presentedHash, storedHash)) {
-      return reply.status(401).send({ error: "unauthenticated" });
-    }
-
-    const body = pmWebhookSchema.parse(req.body);
+  // ADR-0010 inbound processing for ONE normalized event — unchanged
+  // semantics: every event lands in the append-only pm_sync_events log;
+  // inbound state is recorded, never applied to the state machine; divergence
+  // surfaces as drift in the links view and the one audit trail. The
+  // provider-native translation layer (below) feeds this path.
+  const processInboundEvent = async (
+    conn: typeof pmConnections.$inferSelect,
+    body: NormalizedInboundEvent,
+  ): Promise<{ matched: false } | { matched: true; drift: boolean }> => {
     const [link] = await db
       .select()
       .from(pmLinks)
@@ -571,9 +561,13 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
       linkId: link?.id ?? null,
       externalId: body.externalId,
       kind: body.event,
-      payload: { ...(body.state ? { state: body.state } : {}), ...(body.fields ? { fields: body.fields } : {}) },
+      payload: {
+        provider: conn.provider,
+        ...(body.state ? { state: body.state } : {}),
+        ...(body.fields ? { fields: body.fields } : {}),
+      },
     });
-    if (!link) return reply.status(202).send({ matched: false });
+    if (!link) return { matched: false };
 
     // attribute inbound audit rows to the parent object's initiator
     const ownerOf = async (): Promise<string | null> => {
@@ -603,7 +597,12 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
           userId: owner,
           objectType: "pm_work_item",
           objectId: link.objectId,
-          detail: { externalId: link.externalId, linkType: link.objectType, event: "deleted" },
+          detail: {
+            externalId: link.externalId,
+            linkType: link.objectType,
+            event: "deleted",
+            provider: conn.provider,
+          },
           effect: "allow",
           ruleId: "pm-link-orphaned",
           ruleChain: [],
@@ -637,6 +636,7 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
                 externalId: link.externalId,
                 reportedState: body.state,
                 expectedState: expected,
+                provider: conn.provider,
               },
               effect: "allow",
               ruleId: "pm-drift-detected",
@@ -647,7 +647,110 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
         }
       }
     }
-    return reply.status(202).send({ matched: true, drift });
+    return { matched: true, drift };
+  };
+
+  // ADR-0010 inbound + pillar-8 depth: PROVIDER-NATIVE webhooks. The route is
+  // authenticated by the per-connection secret using whatever mechanism the
+  // tool can actually send (HMAC signature, URL token, basic auth, or the
+  // legacy shared-secret header) — NOT by a bearer token; the global auth
+  // hook exempts exactly this route. Translation to the normalized shape is
+  // @regulait/pm-provider's parseInboundWebhook; the downstream processing
+  // above is unchanged.
+  //
+  // Encapsulated scope: HMAC verification needs the EXACT raw body bytes, so
+  // this route — and only this route — swaps the JSON body parser for a
+  // raw-string capture (plus a catch-all for handshakes that arrive with an
+  // empty or unlabelled body). Global JSON parsing is untouched.
+  app.register(async (scope) => {
+    const keepRaw = (
+      _req: unknown,
+      body: string,
+      done: (err: Error | null, result?: unknown) => void,
+    ) => done(null, body);
+    scope.addContentTypeParser("application/json", { parseAs: "string" }, keepRaw);
+    scope.addContentTypeParser("*", { parseAs: "string" }, keepRaw);
+
+    scope.post("/v1/pm/webhooks/:connectionName", async (req, reply) => {
+      const { connectionName } = z
+        .object({ connectionName: z.string().min(1) })
+        .parse(req.params);
+      const [conn] = await db
+        .select()
+        .from(pmConnections)
+        .where(eq(pmConnections.name, connectionName));
+      // ADR-0010: a connection with no secret rejects all webhook traffic
+      if (!conn || !conn.webhookSecretHash) {
+        return reply.status(401).send({ error: "unauthenticated" });
+      }
+
+      const rawBody = typeof req.body === "string" ? req.body : "";
+      const headers: Record<string, string | undefined> = {};
+      for (const [k, v] of Object.entries(req.headers)) {
+        headers[k] = Array.isArray(v) ? v[0] : v;
+      }
+      const query = (req.query ?? {}) as Record<string, string | undefined>;
+
+      // The parsers verify against the PLAINTEXT secret (HMACs cannot be
+      // keyed by a hash): decrypt the stored ciphertext. Connections minted
+      // before the ciphertext column can still authenticate legacy-header
+      // traffic — a presented value whose sha256 matches the stored hash IS
+      // the secret.
+      let secret: string | null = null;
+      if (conn.webhookSecretCiphertext && opts.dataKey) {
+        secret = decryptSecret(opts.dataKey, conn.webhookSecretCiphertext);
+      } else {
+        const presented = headers["x-regulait-webhook-secret"];
+        if (typeof presented === "string") {
+          const presentedHash = Buffer.from(sha256(presented), "hex");
+          const storedHash = Buffer.from(conn.webhookSecretHash, "hex");
+          if (presentedHash.length === storedHash.length && timingSafeEqual(presentedHash, storedHash)) {
+            secret = presented;
+          }
+        }
+      }
+      if (secret === null) return reply.status(401).send({ error: "unauthenticated" });
+
+      let result;
+      try {
+        result = parseInboundWebhook(conn.provider, {
+          headers,
+          query,
+          rawBody,
+          secret,
+          connectionProject: conn.project,
+        });
+      } catch (err) {
+        if (err instanceof PmProviderError) {
+          // 400 = verified but malformed; anything else = verification
+          // failure. Neither response carries secret material.
+          return err.status === 400
+            ? reply.status(400).send({ error: "invalid_payload", detail: err.message })
+            : reply.status(401).send({ error: "unauthenticated" });
+        }
+        throw err; // zod normalized-shape errors → 400 via the app error handler
+      }
+
+      if (result.kind === "handshake") {
+        // provider verification challenge — answered, never processed
+        if (result.headers) void reply.headers(result.headers);
+        return reply.status(result.statusCode ?? 200).send(result.response);
+      }
+      if (result.kind === "ignored") {
+        // valid-but-irrelevant traffic must 200: senders auto-disable
+        // webhooks that error on payloads they legitimately deliver
+        return reply.status(200).send({ ok: true, ignored: result.reason });
+      }
+      const results: Array<{ matched: false } | { matched: true; drift: boolean }> = [];
+      for (const event of result.events) {
+        results.push(await processInboundEvent(conn, event));
+      }
+      // single-event payloads keep the original ADR-0010 response shape;
+      // multi-event payloads (asana batches) report per-event outcomes
+      return reply
+        .status(202)
+        .send(results.length === 1 ? results[0] : { received: results.length, results });
+    });
   });
 
   // §4: first-class decision records. Recorded locally ALWAYS; mirrored to

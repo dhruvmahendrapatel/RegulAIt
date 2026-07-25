@@ -3500,6 +3500,289 @@ describe("PM inbound sync (EPIC-06, ADR-0010)", () => {
   });
 });
 
+describe("provider-native inbound webhooks (pillar 8 depth)", () => {
+  it("linear: a signed NATIVE Issue payload records inbound state + drift end-to-end; a bad signature is 401 and processes nothing", async () => {
+    // fake Linear GraphQL vendor for the outbound half (link creation + mirror)
+    let issueSeq = 0;
+    const srv = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        const parsed = JSON.parse(body || "{}");
+        let data: unknown = {};
+        if (String(parsed.query).includes("teams(filter")) {
+          data = { teams: { nodes: [{ id: "team-uuid-in" }] } };
+        } else if (String(parsed.query).includes("issueCreate")) {
+          issueSeq += 1;
+          data = { issueCreate: { success: true, issue: { id: `lin-in-${issueSeq}`, url: `https://linear.app/acme/issue/INB-${issueSeq}` } } };
+        } else if (String(parsed.query).includes("states")) {
+          data = { team: { states: { nodes: [
+            { id: "st-todo", name: "Todo" },
+            { id: "st-prog", name: "In Progress" },
+            { id: "st-done", name: "Done" },
+          ] } } };
+        } else if (String(parsed.query).includes("issueUpdate")) {
+          data = { issueUpdate: { success: true } };
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ data }));
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    const port = (srv.address() as { port: number }).port;
+
+    try {
+      const conn = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/pm/connections",
+        payload: {
+          name: "linear-inbound", provider: "linear", project: "REG",
+          baseUrl: `http://127.0.0.1:${port}`, token: "lin_api_inbound",
+        },
+      });
+      expect(conn.statusCode).toBe(201);
+      const linWebhookSecret = conn.json().webhookSecret as string;
+
+      const nia = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email: "native-nia@example.com", displayName: "Native Nia" },
+      });
+      const niaAuth = await authFor(nia.json().id);
+      const approver = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email: "native-approver@example.com", displayName: "Native Approver" },
+      });
+      const agentRes = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/agents",
+        payload: {
+          name: "native-worker", provider: "mock", tier: 0, modes: ["execute"],
+          costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-native",
+        },
+      });
+      await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/grants/agents",
+        payload: { userId: nia.json().id, agentId: agentRes.json().id },
+      });
+      const run = await app.inject({
+        method: "POST", headers: niaAuth, url: "/v1/runs",
+        payload: {
+          graph: {
+            run: "native-inbound-run",
+            escalationApproverUserId: approver.json().id,
+            nodes: [{ id: "a", title: "watched natively", ownerAgentId: agentRes.json().id, mode: "execute", estimate: { in: 1, out: 1 } }],
+          },
+        },
+      });
+      const runId = run.json().id;
+      const synced = await app.inject({
+        method: "POST", headers: niaAuth, url: `/v1/runs/${runId}/pm-sync`,
+        payload: { connectionName: "linear-inbound" },
+      });
+      expect(synced.statusCode).toBe(201);
+      const externalId = synced.json().created.find((c: { nodeId: string }) => c.nodeId === "a").externalId;
+
+      // start the node: RegulAIt says in_progress → Linear-mapped "In Progress"
+      await app.inject({ method: "POST", headers: niaAuth, url: `/v1/runs/${runId}/events`, payload: { kind: "start" } });
+      await app.inject({
+        method: "POST", headers: niaAuth, url: `/v1/runs/${runId}/events`,
+        payload: { kind: "node_started", nodeId: "a" },
+      });
+
+      // Linear's REAL payload shape, signed the way Linear signs: hex
+      // HMAC-SHA256 of the exact raw body in `linear-signature`.
+      const payload = JSON.stringify({
+        action: "update",
+        type: "Issue",
+        data: { id: externalId, identifier: "INB-1", title: "watched natively", state: { name: "Done" } },
+        updatedFrom: { stateId: "st-prog" },
+      });
+      const good = await app.inject({
+        method: "POST", url: "/v1/pm/webhooks/linear-inbound",
+        headers: {
+          "content-type": "application/json",
+          "linear-signature": createHmac("sha256", linWebhookSecret).update(payload).digest("hex"),
+        },
+        payload,
+      });
+      expect(good.statusCode).toBe(202);
+      expect(good.json()).toEqual({ matched: true, drift: true }); // reports Done, RegulAIt maps In Progress
+
+      const links = await app.inject({ method: "GET", headers: niaAuth, url: `/v1/pm/links?runId=${runId}` });
+      const link = links.json().links.find((l: { nodeId: string }) => l.nodeId === "a");
+      expect(link.inboundState).toBe("Done");
+      expect(link.drift).toBe(true);
+      // the state machine was never touched
+      const view = await app.inject({ method: "GET", headers: niaAuth, url: `/v1/runs/${runId}` });
+      expect(view.json().run.state.nodeStatuses.a).toBe("in_progress");
+
+      // a BAD signature (right shape, wrong key) is 401 and processes nothing
+      const tamper = JSON.stringify({
+        action: "update", type: "Issue",
+        data: { id: externalId, state: { name: "In Progress" } },
+      });
+      const bad = await app.inject({
+        method: "POST", url: "/v1/pm/webhooks/linear-inbound",
+        headers: {
+          "content-type": "application/json",
+          "linear-signature": createHmac("sha256", "not-the-secret").update(tamper).digest("hex"),
+        },
+        payload: tamper,
+      });
+      expect(bad.statusCode).toBe(401);
+      const after = await app.inject({ method: "GET", headers: niaAuth, url: `/v1/pm/links?runId=${runId}` });
+      expect(after.json().links.find((l: { nodeId: string }) => l.nodeId === "a").inboundState).toBe("Done");
+    } finally {
+      srv.closeAllConnections();
+      await new Promise<void>((r) => srv.close(() => r()));
+    }
+  });
+
+  it("asana: the x-hook-secret handshake echoes the header back; signed thin events land, unsigned are 401", async () => {
+    const conn = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/pm/connections",
+      payload: { name: "asana-inbound", provider: "asana", project: "999", token: "asana-pat-inbound" },
+    });
+    expect(conn.statusCode).toBe(201);
+    const secret = conn.json().webhookSecret as string;
+
+    // phase 1: establishment handshake — 200 echoing the SAME x-hook-secret
+    const handshake = await app.inject({
+      method: "POST", url: "/v1/pm/webhooks/asana-inbound",
+      headers: { "content-type": "application/json", "x-hook-secret": "asana-issued-hs-1" },
+      payload: "{}",
+    });
+    expect(handshake.statusCode).toBe(200);
+    expect(handshake.headers["x-hook-secret"]).toBe("asana-issued-hs-1");
+
+    // phase 2: a signed thin event batch — accepted (202), unlinked gid → matched:false
+    const events = JSON.stringify({
+      events: [{ action: "changed", resource: { gid: "asana-task-1", resource_type: "task" } }],
+    });
+    const signed = await app.inject({
+      method: "POST", url: "/v1/pm/webhooks/asana-inbound",
+      headers: {
+        "content-type": "application/json",
+        "x-hook-signature": createHmac("sha256", secret).update(events).digest("hex"),
+      },
+      payload: events,
+    });
+    expect(signed.statusCode).toBe(202);
+    expect(signed.json()).toEqual({ matched: false });
+
+    // no handshake header and no signature → 401
+    const unsigned = await app.inject({
+      method: "POST", url: "/v1/pm/webhooks/asana-inbound",
+      headers: { "content-type": "application/json" },
+      payload: events,
+    });
+    expect(unsigned.statusCode).toBe(401);
+  });
+
+  it("monday: the challenge is echoed verbatim under URL-token auth; a status-column event lands normalized", async () => {
+    const conn = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/pm/connections",
+      payload: { name: "monday-inbound", provider: "monday", project: "777", token: "monday-tok-inbound" },
+    });
+    expect(conn.statusCode).toBe(201);
+    const secret = conn.json().webhookSecret as string;
+
+    const challenge = await app.inject({
+      method: "POST", url: `/v1/pm/webhooks/monday-inbound?token=${secret}`,
+      payload: { challenge: "mon-uuid-echo-1" },
+    });
+    expect(challenge.statusCode).toBe(200);
+    expect(challenge.json()).toEqual({ challenge: "mon-uuid-echo-1" });
+
+    // without the token even the challenge is refused — fail-closed
+    const noToken = await app.inject({
+      method: "POST", url: "/v1/pm/webhooks/monday-inbound",
+      payload: { challenge: "mon-uuid-echo-2" },
+    });
+    expect(noToken.statusCode).toBe(401);
+
+    const event = await app.inject({
+      method: "POST", url: `/v1/pm/webhooks/monday-inbound?token=${secret}`,
+      payload: {
+        event: { type: "update_column_value", pulseId: 4321, boardId: 777, columnId: "status", value: { label: { text: "Done" } } },
+      },
+    });
+    expect(event.statusCode).toBe(202);
+    expect(event.json()).toEqual({ matched: false }); // no linked item — recorded, not errored
+  });
+
+  it("jira: URL-token auth accepts native issue payloads; a wrong token is 401; unconsumed events are 200-ignored", async () => {
+    const conn = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/pm/connections",
+      payload: {
+        name: "jira-inbound", provider: "jira", project: "REG",
+        baseUrl: "https://acme.atlassian.net", token: "bot@example.com:api-token",
+      },
+    });
+    expect(conn.statusCode).toBe(201);
+    const secret = conn.json().webhookSecret as string;
+
+    const native = await app.inject({
+      method: "POST", url: `/v1/pm/webhooks/jira-inbound?token=${secret}`,
+      payload: {
+        webhookEvent: "jira:issue_updated",
+        issue: { id: "10042", key: "REG-7", fields: { summary: "Build API", status: { name: "Done" } } },
+      },
+    });
+    expect(native.statusCode).toBe(202);
+    expect(native.json()).toEqual({ matched: false });
+
+    const wrongToken = await app.inject({
+      method: "POST", url: "/v1/pm/webhooks/jira-inbound?token=rglwh_wrong",
+      payload: { webhookEvent: "jira:issue_updated", issue: { id: "10042" } },
+    });
+    expect(wrongToken.statusCode).toBe(401);
+
+    // valid but irrelevant traffic must 200 — Jira disables erroring webhooks
+    const irrelevant = await app.inject({
+      method: "POST", url: `/v1/pm/webhooks/jira-inbound?token=${secret}`,
+      payload: { webhookEvent: "sprint_started" },
+    });
+    expect(irrelevant.statusCode).toBe(200);
+    expect(irrelevant.json().ok).toBe(true);
+    expect(irrelevant.json().ignored).toContain("sprint_started");
+  });
+
+  it("generic_webhook: the outbound-symmetric x-regulait-signature now verifies inbound traffic too", async () => {
+    const conn = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/pm/connections",
+      payload: {
+        name: "generic-inbound", provider: "generic_webhook", project: "bridge",
+        baseUrl: "https://recv.example/regulait", token: "bridge-token",
+      },
+    });
+    expect(conn.statusCode).toBe(201);
+    const secret = conn.json().webhookSecret as string;
+
+    const body = JSON.stringify({ externalId: "no-such-item", event: "updated", state: "done" });
+    const signed = await app.inject({
+      method: "POST", url: "/v1/pm/webhooks/generic-inbound",
+      headers: {
+        "content-type": "application/json",
+        "x-regulait-signature": `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`,
+      },
+      payload: body,
+    });
+    expect(signed.statusCode).toBe(202);
+    expect(signed.json()).toEqual({ matched: false });
+
+    // a bad signature loses even when the legacy header is valid — precedence
+    const both = await app.inject({
+      method: "POST", url: "/v1/pm/webhooks/generic-inbound",
+      headers: {
+        "content-type": "application/json",
+        "x-regulait-signature": "sha256=deadbeef",
+        "x-regulait-webhook-secret": secret,
+      },
+      payload: body,
+    });
+    expect(both.statusCode).toBe(401);
+  });
+});
+
 describe("governed model dispatch (measured usage, pillar 5 actuals)", () => {
   let danaId: string;
   let danaAuth: { authorization: string };

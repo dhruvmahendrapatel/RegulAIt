@@ -576,6 +576,11 @@ export const pmConnections = pgTable("pm_connections", {
   mapping: jsonb("mapping"),
   /** ADR-0010: sha256 of the per-connection webhook secret (plaintext shown once) */
   webhookSecretHash: text("webhook_secret_hash"),
+  /** Provider-native inbound verification (pillar 8 depth): HMAC signature
+   * checks (linear/asana/generic) need the secret itself, which a hash cannot
+   * key — stored AES-256-GCM-encrypted like the connection token. Null on
+   * connections minted before this column existed (legacy-header flows only). */
+  webhookSecretCiphertext: text("webhook_secret_ciphertext"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
