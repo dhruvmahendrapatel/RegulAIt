@@ -133,6 +133,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "GET /v1/workflows/instances/:instanceId",
     "GET /v1/approvals",
     "GET /v1/cost-events",
+    "GET /v1/usage-events",
     "POST /v1/runs",
     "POST /v1/runs/:runId/events",
     "GET /v1/runs/:runId",
@@ -554,7 +555,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     return pmMirror ? { ...updated, pmMirror } : updated;
   });
 
-  registerAgentConnectorRoutes(app, db);
+  registerAgentConnectorRoutes(app, db, { dataKey: opts.dataKey });
   registerOptimizationRoutes(app, db);
   registerOrchestrationRoutes(app, db, { dataKey: opts.dataKey });
   registerPmRoutes(app, db, { dataKey: opts.dataKey });

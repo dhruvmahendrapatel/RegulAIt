@@ -7,30 +7,180 @@ import {
   connectors,
   costEvents,
   eq,
+  modelCredentials,
+  usageEvents,
   userAgentPolicies,
   type Db,
 } from "@regulait/db";
 import { evaluateAgent, evaluateConnector } from "@regulait/policy-kernel";
 import { classifyComplexity, estimateTokens, routeModel } from "@regulait/optimizer-kernel";
 import {
+  isModelProviderKind,
+  ModelProviderError,
+  resolveModelProvider,
+} from "@regulait/model-provider";
+import {
   createAgentGrantSchema,
   createAgentSchema,
   createConnectorGrantSchema,
   createConnectorSchema,
+  createModelCredentialSchema,
   invokeAgentSchema,
   invokeConnectorSchema,
   setAgentEnabledSchema,
   setAgentPolicySchema,
 } from "@regulait/shared";
 import { z } from "zod";
+import { decryptSecret, encryptSecret } from "./secrets.js";
 
 const userIdParam = z.object({ userId: z.string().uuid() });
 const agentIdParam = z.object({ agentId: z.string().uuid() });
 const connectorIdParam = z.object({ connectorId: z.string().uuid() });
 
+type AgentRow = typeof agents.$inferSelect;
+
+type DispatchOutcome =
+  | {
+      ok: true;
+      result: {
+        servedAgentId: string;
+        model: string;
+        outputText: string;
+        stopReason: string;
+        refusal: boolean;
+        usage: { inputTokens: number; outputTokens: number };
+        costUsd: number | null;
+        measuredCostSavedUsd: number | null;
+      };
+    }
+  | { ok: false; status: number; error: string; detail?: string };
+
+/** Real model execution for an already-governed, already-routed invoke. The
+ * served agent is an INPUT here — this function never picks a model. Config
+ * problems (no model id, unknown provider, missing credential) fail explicit,
+ * never fall back to a different model. */
+async function performDispatch(
+  db: Db,
+  dataKey: string | undefined,
+  args: {
+    userId: string;
+    requestedAgentId: string;
+    registry: AgentRow[];
+    routing: ReturnType<typeof routeModel>;
+    body: z.infer<typeof invokeAgentSchema>;
+  },
+): Promise<DispatchOutcome> {
+  const { userId, requestedAgentId, registry, routing, body } = args;
+  const served = registry.find((a) => a.id === routing.selectedAgentId);
+  if (!served || !served.model || !isModelProviderKind(served.provider)) {
+    return {
+      ok: false,
+      status: 409,
+      error: "agent_not_dispatchable",
+      detail: served
+        ? `agent '${served.name}' needs a model id and a known provider (got provider '${served.provider}', model '${served.model ?? "none"}')`
+        : "served agent not found in registry",
+    };
+  }
+
+  let apiKey: string | null = null;
+  let baseUrl: string | null = null;
+  if (served.provider !== "mock") {
+    if (!dataKey) {
+      return { ok: false, status: 503, error: "no_data_key", detail: "set REGULAIT_DATA_KEY" };
+    }
+    const [cred] = await db
+      .select()
+      .from(modelCredentials)
+      .where(eq(modelCredentials.provider, served.provider));
+    if (!cred) {
+      return {
+        ok: false,
+        status: 409,
+        error: "no_model_credential",
+        detail: `no stored credential for provider '${served.provider}'`,
+      };
+    }
+    apiKey = decryptSecret(dataKey, cred.keyCiphertext);
+    baseUrl = cred.baseUrl;
+  }
+
+  let result;
+  try {
+    const provider = resolveModelProvider({ provider: served.provider, apiKey, baseUrl });
+    result = await provider.dispatch({
+      model: served.model,
+      input: body.input ?? "",
+      ...(body.maxTokens ? { maxTokens: body.maxTokens } : {}),
+    });
+  } catch (err) {
+    if (err instanceof ModelProviderError) {
+      return { ok: false, status: 502, error: "model_dispatch_failed", detail: err.message };
+    }
+    throw err;
+  }
+
+  // Pillar 5 actuals: measured tokens × the served agent's list price. An
+  // unpriced agent yields null — a measured token count never becomes an
+  // invented dollar figure.
+  const costUsd =
+    served.costPerMTokIn != null && served.costPerMTokOut != null
+      ? (result.usage.inputTokens / 1e6) * served.costPerMTokIn +
+        (result.usage.outputTokens / 1e6) * served.costPerMTokOut
+      : null;
+  // The measured version of routing's savings claim: what the baseline agent
+  // would have cost at the SAME measured token volumes, minus what we paid.
+  const baseline = registry.find((a) => a.id === routing.baselineAgentId);
+  const measuredCostSavedUsd =
+    costUsd != null &&
+    baseline &&
+    baseline.costPerMTokIn != null &&
+    baseline.costPerMTokOut != null
+      ? (result.usage.inputTokens / 1e6) * baseline.costPerMTokIn +
+        (result.usage.outputTokens / 1e6) * baseline.costPerMTokOut -
+        costUsd
+      : null;
+
+  await db.insert(usageEvents).values({
+    userId,
+    agentId: served.id,
+    requestedAgentId,
+    baselineAgentId: routing.baselineAgentId,
+    provider: served.provider,
+    model: served.model,
+    inputTokens: result.usage.inputTokens,
+    outputTokens: result.usage.outputTokens,
+    costUsd,
+    measuredCostSavedUsd,
+    stopReason: result.stopReason,
+    refusal: result.refusal,
+    providerMessageId: result.providerMessageId,
+    detail: { mode: body.mode },
+  });
+
+  return {
+    ok: true,
+    result: {
+      servedAgentId: served.id,
+      model: served.model,
+      outputText: result.outputText,
+      stopReason: result.stopReason,
+      refusal: result.refusal,
+      usage: result.usage,
+      costUsd,
+      measuredCostSavedUsd,
+    },
+  };
+}
+
 /** §2/§4: agent registry + entitlements, connector catalog + grants, and the
- * governed invoke endpoints that will anchor actual routing later. */
-export function registerAgentConnectorRoutes(app: FastifyInstance, db: Db) {
+ * governed invoke endpoints — decision, routing, and (dispatch=true) real
+ * model execution. */
+export function registerAgentConnectorRoutes(
+  app: FastifyInstance,
+  db: Db,
+  opts: { dataKey?: string } = {},
+) {
   // --- agent registry (§4: global catalog, decoupled from entitlement) ---
 
   app.post("/v1/agents", async (req, reply) => {
@@ -44,10 +194,48 @@ export function registerAgentConnectorRoutes(app: FastifyInstance, db: Db) {
         modes: body.modes ?? null,
         costPerMTokIn: body.costPerMTokIn ?? null,
         costPerMTokOut: body.costPerMTokOut ?? null,
+        model: body.model ?? null,
       })
       .returning();
     return reply.status(201).send(row);
   });
+
+  // --- model credentials (admin-only via the global gate) ---
+  // One platform credential per provider, encrypted at rest, never returned.
+
+  app.post("/v1/model-credentials", async (req, reply) => {
+    const body = createModelCredentialSchema.parse(req.body);
+    if (!opts.dataKey) {
+      return reply.status(503).send({ error: "no_data_key", detail: "set REGULAIT_DATA_KEY" });
+    }
+    const values = {
+      provider: body.provider,
+      keyCiphertext: encryptSecret(opts.dataKey, body.apiKey),
+      baseUrl: body.baseUrl ?? null,
+    };
+    const [row] = await db
+      .insert(modelCredentials)
+      .values(values)
+      .onConflictDoUpdate({ target: modelCredentials.provider, set: values })
+      .returning({
+        id: modelCredentials.id,
+        provider: modelCredentials.provider,
+        baseUrl: modelCredentials.baseUrl,
+        createdAt: modelCredentials.createdAt,
+      });
+    return reply.status(201).send(row);
+  });
+
+  app.get("/v1/model-credentials", async () => ({
+    credentials: await db
+      .select({
+        id: modelCredentials.id,
+        provider: modelCredentials.provider,
+        baseUrl: modelCredentials.baseUrl,
+        createdAt: modelCredentials.createdAt,
+      })
+      .from(modelCredentials),
+  }));
 
   app.get("/v1/agents", async () => ({ agents: await db.select().from(agents) }));
 
@@ -197,6 +385,7 @@ export function registerAgentConnectorRoutes(app: FastifyInstance, db: Db) {
     // The candidate set is exactly the agents evaluateAgent would allow for
     // this user+mode, so the optimizer can never widen entitlement (§12).
     let routing = null;
+    let dispatchOutcome: DispatchOutcome | null = null;
     if (decision.effect === "allow") {
       const registry = await db.select().from(agents).where(eq(agents.enabled, true));
       const candidates = registry
@@ -243,6 +432,19 @@ export function registerAgentConnectorRoutes(app: FastifyInstance, db: Db) {
         ruleId: routing.ruleId,
         detail: { effect: routing.effect, complexity, mode: body.mode },
       });
+
+      // MODEL DISPATCH: real execution, strictly after governance + routing —
+      // the served agent is routing's choice, so dispatch can never widen
+      // entitlement. Measured usage lands in usage_events (pillar 5 actuals).
+      if (body.dispatch) {
+        dispatchOutcome = await performDispatch(db, opts.dataKey, {
+          userId,
+          requestedAgentId: agent.id,
+          registry,
+          routing,
+          body,
+        });
+      }
     }
 
     await db.insert(auditLog).values({
@@ -250,16 +452,41 @@ export function registerAgentConnectorRoutes(app: FastifyInstance, db: Db) {
       objectType: "agent",
       objectId: agent.id,
       // §8: the served model is always visible in the execution log
-      detail: { mode: body.mode, ...(routing ? { servedAgentId: routing.selectedAgentId } : {}) },
+      detail: {
+        mode: body.mode,
+        ...(routing ? { servedAgentId: routing.selectedAgentId } : {}),
+        ...(dispatchOutcome
+          ? {
+              dispatch: dispatchOutcome.ok
+                ? {
+                    model: dispatchOutcome.result.model,
+                    stopReason: dispatchOutcome.result.stopReason,
+                    refusal: dispatchOutcome.result.refusal,
+                  }
+                : { error: dispatchOutcome.error },
+            }
+          : {}),
+      },
       effect: decision.effect,
       ruleId: decision.ruleId,
       ruleChain: decision.ruleChain,
       reason: decision.reason,
     });
 
-    return reply
-      .status(decision.effect === "allow" ? 200 : 403)
-      .send(routing ? { decision, routing } : { decision });
+    if (decision.effect !== "allow") return reply.status(403).send({ decision });
+    if (dispatchOutcome && !dispatchOutcome.ok) {
+      return reply.status(dispatchOutcome.status).send({
+        decision,
+        routing,
+        error: dispatchOutcome.error,
+        ...(dispatchOutcome.detail ? { detail: dispatchOutcome.detail } : {}),
+      });
+    }
+    return reply.send({
+      decision,
+      routing,
+      ...(dispatchOutcome ? { dispatch: dispatchOutcome.result } : {}),
+    });
   });
 
   // --- connectors (§2) ---

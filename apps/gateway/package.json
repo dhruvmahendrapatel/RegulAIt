@@ -21,7 +21,8 @@
     "@regulait/git-provider": "workspace:*",
     "@regulait/optimizer-kernel": "workspace:*",
     "@regulait/orchestration-kernel": "workspace:*",
-    "@regulait/pm-provider": "workspace:*"
+    "@regulait/pm-provider": "workspace:*",
+    "@regulait/model-provider": "workspace:*"
   },
   "devDependencies": {
     "vitest": "^3.2.4"

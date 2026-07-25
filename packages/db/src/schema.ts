@@ -313,6 +313,9 @@ export const agents = pgTable("agents", {
   // optimizer will never route toward (or estimate savings against) it.
   costPerMTokIn: doublePrecision("cost_per_mtok_in"),
   costPerMTokOut: doublePrecision("cost_per_mtok_out"),
+  // MODEL DISPATCH: provider-native model id this registry entry executes as
+  // (e.g. claude-opus-5). null = decision/routing-only, not dispatchable.
+  model: text("model"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -635,4 +638,48 @@ export const pmSyncEvents = pgTable(
     receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("pm_sync_events_conn_idx").on(t.connectionId, t.receivedAt)],
+);
+
+// MODEL DISPATCH: one platform credential per model provider, AES-256-GCM
+// encrypted with REGULAIT_DATA_KEY (same discipline as git/PM connection
+// tokens — never plaintext at rest, never returned by any endpoint).
+export const modelCredentials = pgTable("model_credentials", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  provider: text("provider").notNull().unique(),
+  keyCiphertext: text("key_ciphertext").notNull(),
+  /** override for BYOC/air-gapped bridges; null = provider default endpoint */
+  baseUrl: text("base_url"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// PILLAR 5: the MEASURED actual-spend ledger. Distinct from cost_events on
+// purpose — cost_events rows are estimates (estimationBasis says so); rows
+// here carry the provider's own token accounting for a dispatch that really
+// happened. FK-free like audit_log: spend records outlive their subjects.
+export const usageEvents = pgTable(
+  "usage_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+    userId: uuid("user_id").notNull(),
+    /** the agent that actually served (post-routing) */
+    agentId: uuid("agent_id").notNull(),
+    requestedAgentId: uuid("requested_agent_id"),
+    baselineAgentId: uuid("baseline_agent_id"),
+    provider: text("provider").notNull(),
+    model: text("model").notNull(),
+    inputTokens: integer("input_tokens").notNull(),
+    outputTokens: integer("output_tokens").notNull(),
+    /** measured tokens × the served agent's list price; null = unpriced, never invented */
+    costUsd: doublePrecision("cost_usd"),
+    /** what the routing baseline would have cost at the SAME measured token
+     * volumes, minus costUsd — the honest, measured version of the routing
+     * savings that cost_events could only estimate */
+    measuredCostSavedUsd: doublePrecision("measured_cost_saved_usd"),
+    stopReason: text("stop_reason").notNull(),
+    refusal: boolean("refusal").notNull().default(false),
+    providerMessageId: text("provider_message_id"),
+    detail: jsonb("detail"),
+  },
+  (t) => [index("usage_events_user_idx").on(t.userId, t.at)],
 );
