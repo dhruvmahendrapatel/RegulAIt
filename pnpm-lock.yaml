@@ -29,6 +29,9 @@ importers:
       '@regulait/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@regulait/workflow-kernel':
+        specifier: workspace:*
+        version: link:../../packages/workflow-kernel
       fastify:
         specifier: ^5.4.0
         version: 5.10.0
@@ -67,6 +70,16 @@ importers:
       zod:
         specifier: ^3.25.67
         version: 3.25.76
+
+  packages/workflow-kernel:
+    dependencies:
+      zod:
+        specifier: ^3.25.67
+        version: 3.25.76
+    devDependencies:
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/node@26.1.1)(tsx@4.23.1)
 
 packages:
 

@@ -84,7 +84,7 @@ export const auditLog = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
     userId: uuid("user_id").notNull(),
-    objectType: text("object_type", { enum: ["mcp_tool", "agent", "connector"] })
+    objectType: text("object_type", { enum: ["mcp_tool", "agent", "connector", "workflow"] })
       .notNull()
       .default("mcp_tool"),
     objectId: uuid("object_id"),
@@ -151,13 +151,18 @@ export const approvals = pgTable(
     userId: uuid("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
-    serverId: uuid("server_id")
+    objectType: text("object_type", { enum: ["mcp_tool", "workflow"] })
       .notNull()
-      .references(() => mcpServers.id, { onDelete: "cascade" }),
-    toolName: text("tool_name").notNull(),
-    ruleId: uuid("rule_id").notNull(),
+      .default("mcp_tool"),
+    serverId: uuid("server_id").references(() => mcpServers.id, { onDelete: "cascade" }),
+    toolName: text("tool_name"),
+    ruleId: uuid("rule_id"),
+    instanceId: uuid("instance_id"),
+    stageId: text("stage_id"),
     approverUserId: uuid("approver_user_id").notNull(),
-    status: text("status", { enum: ["pending", "approved", "denied", "consumed"] })
+    status: text("status", {
+      enum: ["pending", "approved", "denied", "consumed", "superseded"],
+    })
       .notNull()
       .default("pending"),
     requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
@@ -350,4 +355,78 @@ export const connectorGrants = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex("connector_grants_user_connector_uq").on(t.userId, t.connectorId)],
+);
+
+// EPIC-03 workflow engine (WORKFLOW_ENGINE_SPEC.md). Templates are the
+// declarative §3 definitions; instances snapshot their merged definition at
+// start so a template edit never mutates an in-flight run.
+export const workflowTemplates = pgTable("workflow_templates", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull().unique(),
+  definition: jsonb("definition").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// §4 assignment rules: conditions AND together; a rule with no conditions
+// matches nothing (kernel-enforced).
+export const workflowAssignmentRules = pgTable("workflow_assignment_rules", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  templateId: uuid("template_id")
+    .notNull()
+    .references(() => workflowTemplates.id, { onDelete: "cascade" }),
+  pathPattern: text("path_pattern"),
+  changeType: text("change_type"),
+  environment: text("environment"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const workflowInstances = pgTable(
+  "workflow_instances",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    templateIds: jsonb("template_ids").$type<string[]>().notNull(),
+    definition: jsonb("definition").notNull(),
+    initiatorUserId: uuid("initiator_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    change: jsonb("change").notNull(),
+    state: jsonb("state").notNull(),
+    status: text("status").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("workflow_instances_status_idx").on(t.status)],
+);
+
+// Append-only per-instance history (§5 dashboard: full history, who, when).
+export const workflowEvents = pgTable(
+  "workflow_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    instanceId: uuid("instance_id")
+      .notNull()
+      .references(() => workflowInstances.id, { onDelete: "cascade" }),
+    event: jsonb("event").notNull(),
+    actorUserId: uuid("actor_user_id"),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("workflow_events_instance_idx").on(t.instanceId)],
+);
+
+// Versioned artifacts (§2 stage 3): every submitted version retained.
+export const workflowArtifacts = pgTable(
+  "workflow_artifacts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    instanceId: uuid("instance_id")
+      .notNull()
+      .references(() => workflowInstances.id, { onDelete: "cascade" }),
+    stageId: text("stage_id").notNull(),
+    output: text("output").notNull(),
+    version: integer("version").notNull(),
+    content: text("content").notNull(),
+    createdBy: uuid("created_by").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("workflow_artifacts_instance_output_version_uq").on(t.instanceId, t.output, t.version)],
 );

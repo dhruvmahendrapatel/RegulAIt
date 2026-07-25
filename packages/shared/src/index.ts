@@ -139,3 +139,41 @@ export const invokeConnectorSchema = z.object({
   operation: z.enum(["read", "write"]),
   object: z.string().min(1).optional(),
 });
+
+export const changeDescriptorSchema = z.object({
+  description: z.string().min(1),
+  paths: z.array(z.string().min(1)),
+  changeType: z.string().min(1),
+  environment: z.string().min(1),
+});
+
+export const createWorkflowTemplateSchema = z.object({
+  name: z.string().min(1),
+  definition: z.unknown(),
+});
+
+export const createAssignmentRuleSchema = z
+  .object({
+    templateId: z.string().uuid(),
+    pathPattern: z.string().min(1).nullable().optional(),
+    changeType: z.string().min(1).nullable().optional(),
+    environment: z.string().min(1).nullable().optional(),
+  })
+  .refine((r) => r.pathPattern || r.changeType || r.environment, {
+    message: "an assignment rule needs at least one condition",
+  });
+
+export const startInstanceSchema = z.object({
+  change: changeDescriptorSchema,
+  /** admin-only explicit template pick, bypassing assignment rules */
+  templateId: z.string().uuid().optional(),
+});
+
+export const submitArtifactSchema = z.object({
+  stageId: z.string().min(1),
+  content: z.string().min(1),
+});
+
+export const advanceStageSchema = z.object({
+  stageId: z.string().min(1),
+});
