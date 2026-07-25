@@ -1,0 +1,52 @@
+#!/bin/bash
+# Boot script: docker + compose plugin, optional swap, pull the source bundle
+# from S3 (waiting for it if the upload hasn't happened yet), generate fresh
+# runtime secrets, compose up. Progress + errors land in /var/log/app-boot.log.
+set -uxo pipefail
+exec >> /var/log/app-boot.log 2>&1
+
+dnf install -y docker
+systemctl enable --now docker
+
+mkdir -p /usr/local/lib/docker/cli-plugins
+curl -sSL https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64 \
+  -o /usr/local/lib/docker/cli-plugins/docker-compose
+chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+
+if [ "${swap_gb}" -gt 0 ]; then
+  fallocate -l "${swap_gb}G" /swapfile
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+fi
+
+mkdir -p /opt/app
+cd /opt/app
+
+# The tarball is uploaded right after `terraform apply` — poll for up to 30 min.
+for i in $(seq 1 180); do
+  if aws s3 cp "s3://${bucket}/${object_key}" /opt/app/source.tar.gz; then
+    break
+  fi
+  sleep 10
+done
+[ -f /opt/app/source.tar.gz ] || { echo "source bundle never arrived"; exit 1; }
+
+tar xzf source.tar.gz
+
+# Fresh secrets per deployment — never the dev defaults from the compose file.
+DATA_KEY=$(openssl rand -hex 32)
+BOOT_TOKEN=$(openssl rand -hex 24)
+cat > docker-compose.override.yml <<EOF
+services:
+  gateway:
+    environment:
+      REGULAIT_DATA_KEY: $${DATA_KEY}
+      REGULAIT_BOOTSTRAP_TOKEN: $${BOOT_TOKEN}
+    restart: unless-stopped
+  db:
+    restart: unless-stopped
+EOF
+
+docker compose up -d --build
+echo "app-boot: compose up returned $?"
