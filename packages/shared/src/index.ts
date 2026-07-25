@@ -16,6 +16,7 @@ export type EvaluateRequest = z.infer<typeof evaluateRequestSchema>;
 export const createUserSchema = z.object({
   email: z.string().email(),
   displayName: z.string().min(1),
+  isAdmin: z.boolean().optional(),
 });
 
 export const createServerSchema = z.object({
@@ -57,10 +58,14 @@ export const createRateLimitSchema = z.object({
   windowSeconds: z.number().int().positive(),
 });
 
+// The decider is the authenticated caller — never a body field.
 export const decideApprovalSchema = z.object({
-  deciderUserId: z.string().uuid(),
   decision: z.enum(["approved", "denied"]),
   reason: z.string().optional(),
+});
+
+export const createApiKeySchema = z.object({
+  name: z.string().min(1),
 });
 
 export const createDataScopeRuleSchema = z.object({
