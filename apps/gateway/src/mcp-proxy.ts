@@ -14,17 +14,23 @@ import {
   and,
   approvals,
   auditLog,
+  costEvents,
   eq,
   mcpServers,
   mcpTools,
+  userAgentPolicies,
   type Db,
 } from "@regulait/db";
 import { visibleTools, type ToolRef } from "@regulait/policy-kernel";
+import { selectTools } from "@regulait/optimizer-kernel";
 import { governedEvaluate } from "./governed-evaluate.js";
 import { loadEntitlements } from "./entitlements.js";
 import { z } from "zod";
 
 const proxyParams = z.object({ serverId: z.string().uuid() });
+// OPTIMIZATION §8: an optional declared intent for lazy tool-loading. MCP's
+// tools/list carries no request text, so the signal rides on the proxy URL.
+const proxyQuery = z.object({ intent: z.string().max(2000).optional() });
 
 // Tools without an explicit readOnlyHint are treated as writes — the
 // conservative default under §3's read/write distinction.
@@ -62,6 +68,7 @@ async function syncUpstreamTools(db: Db, serverId: string, client: Client): Prom
 export function registerMcpProxy(app: FastifyInstance, db: Db) {
   app.post("/mcp/:serverId", async (req, reply) => {
     const { serverId } = proxyParams.parse(req.params);
+    const { intent } = proxyQuery.parse(req.query);
 
     // Identity comes from the app-level auth hook (API key). The bootstrap
     // token has no user identity, so it cannot call tools.
@@ -93,7 +100,42 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
       const visible = new Set(
         visibleTools(userId, serverId, refs, entitlements).map((t) => t.name),
       );
-      return { tools: upstreamTools.filter((t) => visible.has(t.name)) };
+      const entitled = upstreamTools.filter((t) => visible.has(t.name));
+
+      // OPTIMIZATION §8: lazy tool-loading. Governance filtering above decides
+      // what the user MAY see; this decides what is WORTH sending for the
+      // declared intent. Withheld tools remain fully callable — tools/call
+      // never consults this selection (§12: entitlements never shrink).
+      const [policy] = await db
+        .select({ routingMode: userAgentPolicies.routingMode })
+        .from(userAgentPolicies)
+        .where(eq(userAgentPolicies.userId, userId));
+      const selection = selectTools({
+        intent: intent ?? null,
+        tools: entitled.map((t) => ({
+          name: t.name,
+          description: t.description ?? null,
+          manifestChars: JSON.stringify(t).length,
+        })),
+        routingMode: policy?.routingMode ?? "automatic",
+      });
+      await db.insert(costEvents).values({
+        userId,
+        objectType: "mcp_tool",
+        objectId: serverId,
+        technique: "lazy_tool_loading",
+        estimatedTokensSaved: selection.estimatedTokensSaved,
+        estimatedCostSavedUsd: null,
+        estimationBasis: selection.estimationBasis,
+        ruleId: selection.ruleId,
+        detail: {
+          effect: selection.effect,
+          selectedCount: selection.selected.length,
+          withheldCount: selection.withheld.length,
+        },
+      });
+      const exposed = new Set(selection.selected);
+      return { tools: entitled.filter((t) => exposed.has(t.name)) };
     });
 
     proxy.setRequestHandler(CallToolRequestSchema, async (request) => {
