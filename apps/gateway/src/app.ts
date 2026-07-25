@@ -18,6 +18,7 @@ import {
   roleToolGrants,
   roles,
   serverGrants,
+  sql,
   toolGrants,
   users,
   type Db,
@@ -107,9 +108,18 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   // Every route requires a valid Bearer token (bootstrap or API key) — except
   // the inbound PM webhook (ADR-0010), which is called by external systems and
-  // authenticates with its per-connection secret inside the route handler.
+  // authenticates with its per-connection secret inside the route handler, the
+  // two UI shells, and the two unauthenticated entry points a browser or a
+  // load balancer hits before it has any credential (/ and /health).
+  const AUTH_EXEMPT_ROUTES = new Set([
+    "/v1/pm/webhooks/:connectionName",
+    "/admin",
+    "/app",
+    "/",
+    "/health",
+  ]);
   app.addHook("preHandler", async (req, reply) => {
-    if (req.routeOptions.url === "/v1/pm/webhooks/:connectionName" || req.routeOptions.url === "/admin" || req.routeOptions.url === "/app") {
+    if (AUTH_EXEMPT_ROUTES.has(req.routeOptions.url ?? "")) {
       req.authCtx = { userId: null, isAdmin: false, via: "api-key" };
       return;
     }
@@ -159,6 +169,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "POST /v1/pm/webhooks/:connectionName",
     "GET /admin",
     "GET /app",
+    "GET /",
+    "GET /health",
     "GET /v1/me",
     "GET /v1/runs",
     "GET /v1/workflows/instances",
@@ -628,6 +640,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // talks to the same REST API as any script — policy-as-code by construction.
   app.get("/admin", async (_req, reply) => reply.type("text/html").send(ADMIN_PORTAL_HTML));
   app.get("/app", async (_req, reply) => reply.type("text/html").send(APP_HTML));
+
+  // The two things anything pointed at the bare origin expects to find: a
+  // human landing on / gets the app, a load balancer or uptime check gets a
+  // status. Both are auth-exempt — neither reveals anything.
+  app.get("/", async (_req, reply) => reply.redirect("/app", 302));
+  app.get("/health", async (_req, reply) => {
+    try {
+      await db.execute(sql`select 1`);
+    } catch {
+      return reply.status(503).send({ status: "degraded", database: "unreachable" });
+    }
+    return { status: "ok", database: "ok" };
+  });
 
   registerAgentConnectorRoutes(app, db, { dataKey: opts.dataKey });
   registerProjectRoutes(app, db);

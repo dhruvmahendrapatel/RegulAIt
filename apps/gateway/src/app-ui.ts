@@ -6,7 +6,7 @@
  * would make.
  */
 
-import { UI_CSS } from "./ui-theme.js";
+import { UI_CSS, UI_ERRORS_JS } from "./ui-theme.js";
 
 export const APP_HTML = `<!doctype html>
 <html lang="en">
@@ -20,6 +20,7 @@ export const APP_HTML = `<!doctype html>
 <div id="root"></div>
 <script>
 "use strict";
+${UI_ERRORS_JS}
 const $ = (s, el) => (el ?? document).querySelector(s);
 const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const fmtUsd = (v) => v == null ? "—" : "$" + Number(v).toFixed(4).replace(/0+$/,"").replace(/\\.$/,"");
@@ -37,6 +38,7 @@ let AGENTS = [];        // my granted agents
 let AGENT_NAMES = {};   // id -> name
 let PROJECTS = [];      // my member projects
 let INBOX_COUNT = 0;
+let MY_PROVIDERS = []; // providers I hold my own key for (never the key itself)
 
 async function api(method, path, body) {
   const res = await fetch(path, {
@@ -47,11 +49,12 @@ async function api(method, path, body) {
   if (res.status === 401) { signOut(); throw new Error("unauthenticated"); }
   const text = await res.text();
   let json; try { json = JSON.parse(text); } catch { json = { raw: text }; }
-  if (!res.ok) { const e = new Error(json.error ?? ("HTTP " + res.status)); e.payload = json; e.status = res.status; throw e; }
+  if (!res.ok) { const e = new Error(errMessage(res.status, json)); e.payload = json; e.status = res.status; throw e; }
   return json;
 }
 const get = (p) => api("GET", p);
 const post = (p, b) => api("POST", p, b ?? {});
+const del = (p) => api("DELETE", p);
 
 function toast(msg, ms) {
   const el = document.createElement("div");
@@ -78,6 +81,7 @@ const PAGES = [
   { id: "workflows", label: "Workflows" },
   { id: "inbox", label: "Inbox" },
   { id: "projects", label: "Projects" },
+  { id: "settings", label: "Settings" },
 ];
 
 function route() {
@@ -90,13 +94,15 @@ window.addEventListener("hashchange", () => render());
 async function bootstrap() {
   ME = await get("/v1/me");
   if (!ME.userId) throw new Error("this key has no user identity");
-  const [mine, projects] = await Promise.all([
+  const [mine, projects, creds] = await Promise.all([
     get("/v1/users/" + ME.userId + "/agents"),
     get("/v1/projects").catch(() => ({ projects: [] })),
+    get("/v1/users/" + ME.userId + "/model-credentials").catch(() => ({ credentials: [] })),
   ]);
   AGENTS = mine.agents ?? [];
   AGENT_NAMES = Object.fromEntries(AGENTS.map((a) => [a.agentId, a.name]));
   PROJECTS = projects.projects ?? [];
+  MY_PROVIDERS = (creds.credentials ?? []).map((c) => c.provider);
   const inbox = await get("/v1/approvals").catch(() => ({ approvals: [] }));
   INBOX_COUNT = (inbox.approvals ?? []).filter((a) => a.status === "pending").length;
 }
@@ -125,9 +131,26 @@ function shell(content, active) {
 // ------------------------------------------------------------ playground --
 const chatHistory = []; // persists across renders within the session
 
+// Whose key pays for this agent, said before the request rather than only
+// after it. Routing can still move the request to another agent, so the
+// dispatch badge on the reply stays the authoritative answer.
+function keyHint(agent) {
+  if (!agent) return "";
+  if (agent.provider === "mock") return "Mock provider — runs with no credential at all.";
+  return MY_PROVIDERS.includes(agent.provider)
+    ? "Runs on your own " + esc(agent.provider) + " key. <a href='#/settings'>Manage keys</a>"
+    : "No " + esc(agent.provider) + " key of your own — this uses the platform credential if an admin has configured one. <a href='#/settings'>Add your key</a>";
+}
+
 function playgroundPage() {
+  // No grants means no agent to invoke — without this guard the select is
+  // empty, Send POSTs to /v1/agents//invoke, and the user gets Fastify's 404.
+  const noAgents = AGENTS.length === 0;
   const agentOpts = AGENTS.map((a) =>
     \`<option value="\${a.agentId}">\${esc(a.name)} · \${esc(a.provider)} · tier \${a.tier}</option>\`).join("");
+  const agentField = noAgents
+    ? '<div class="grow"><label class="f">Agent</label><div class="dim" style="font-size:12.5px">No agents are granted to your account — ask an admin to grant you one.</div></div>'
+    : \`<div><label class="f">Agent</label><select id="pg-agent">\${agentOpts}</select></div>\`;
   const projectOpts = ['<option value="">no project</option>']
     .concat(PROJECTS.map((p) => \`<option value="\${p.id}">\${esc(p.name)}</option>\`)).join("");
   return \`
@@ -135,7 +158,7 @@ function playgroundPage() {
   <p class="sub">Every message goes through governance, routing, and metered dispatch — the trace shows what actually happened.</p>
   <div class="card">
     <div class="row">
-      <div><label class="f">Agent</label><select id="pg-agent">\${agentOpts}</select></div>
+      \${agentField}
       <div><label class="f">Bill to</label><select id="pg-project">\${projectOpts}</select></div>
       <div><label class="f">Priority</label>
         <select id="pg-sens">
@@ -145,15 +168,18 @@ function playgroundPage() {
         </select>
       </div>
     </div>
+    \${noAgents ? "" : '<hr class="hr"><div class="faint" style="font-size:11.5px" id="pg-key">' + keyHint(AGENTS[0]) + "</div>"}
   </div>
   <div class="card" style="margin-top:12px">
     <div class="chat-log" id="chat-log">
-      \${chatHistory.length ? "" : '<div class="empty">Pick an agent and say something. Mock agents reply instantly with no external keys; type «&lt;&lt;refuse&gt;&gt;» to see refusal handling.</div>'}
+      \${chatHistory.length ? "" : (noAgents
+        ? '<div class="empty">Nothing to send to yet — an admin has to grant your account an agent first.</div>'
+        : '<div class="empty">Pick an agent and say something. Mock agents reply instantly with no external keys; type «&lt;&lt;refuse&gt;&gt;» to see refusal handling.</div>')}
     </div>
     <hr class="hr">
     <div class="row">
-      <textarea id="pg-input" class="grow" rows="2" placeholder="Ask the agent to do something…"></textarea>
-      <button class="primary" id="pg-send">Send</button>
+      <textarea id="pg-input" class="grow" rows="2" placeholder="\${noAgents ? "No agent granted to your account yet…" : "Ask the agent to do something…"}"\${noAgents ? " disabled" : ""}></textarea>
+      <button class="primary" id="pg-send"\${noAgents ? " disabled" : ""}>Send</button>
     </div>
   </div>\`;
 }
@@ -170,7 +196,10 @@ function renderExchange(x) {
       if (r.dispatch.refusal) meta.push('<span class="badge bad">refused</span>');
       if (r.dispatch.costUsd != null) meta.push('<span class="badge">' + fmtUsd(r.dispatch.costUsd) + " · " + r.dispatch.usage.inputTokens + "→" + r.dispatch.usage.outputTokens + " tok</span>");
       meta.push('<span class="badge">' + esc(r.dispatch.model) + "</span>");
+      // whose credential actually paid for this call — the one thing a BYO-key
+      // user cannot verify any other way
       if (r.dispatch.credentialSource === "user") meta.push('<span class="badge info">your key</span>');
+      if (r.dispatch.credentialSource === "platform") meta.push('<span class="badge">platform key</span>');
       if (r.dispatch.projectBudgetAlerted) meta.push('<span class="badge warn">budget alert</span>');
     }
   }
@@ -201,7 +230,8 @@ async function sendPrompt() {
   const input = $("#pg-input");
   const prompt = input.value.trim();
   if (!prompt) return;
-  const agentId = $("#pg-agent").value;
+  const agentId = $("#pg-agent")?.value;
+  if (!agentId) { toast("No agents granted to your account — ask an admin."); return; }
   const projectId = $("#pg-project").value || undefined;
   const costSensitivity = $("#pg-sens").value;
   input.value = "";
@@ -218,7 +248,7 @@ async function sendPrompt() {
       const j = await res.json();
       x.streaming = false;
       if (j.decision && j.decision.effect !== "allow") { x.denied = j.decision; x.text = j.decision.reason; }
-      else { x.error = j.error ?? ("HTTP " + res.status); x.text = j.detail ?? ""; }
+      else { x.error = j.error ?? ("HTTP " + res.status); x.text = errMessage(res.status, j); }
       drawChat(); return;
     }
     const reader = res.body.getReader();
@@ -237,12 +267,23 @@ async function sendPrompt() {
         const payload = JSON.parse(data);
         if (ev === "delta") { x.text += payload.text; drawChat(); }
         if (ev === "result") { x.result = payload; x.streaming = false; if (payload.dispatch?.refusal) x.text = "The model declined this request."; drawChat(); }
-        if (ev === "error") { x.error = payload.error; x.streaming = false; drawChat(); }
+        // the error event carries the same detail the JSON path does — losing
+        // it leaves an empty bubble under a bare red slug. Anything already
+        // streamed stays; the explanation is appended to it.
+        if (ev === "error") {
+          const msg = errMessage(res.status, payload);
+          x.error = payload.error;
+          x.text = x.text ? x.text + "\\n\\n" + msg : msg;
+          // a failed dispatch still had a governance + routing decision — keep
+          // it so the trace explains which agent was chosen and why
+          if (payload.decision) x.result = { decision: payload.decision, routing: payload.routing };
+          x.streaming = false; drawChat();
+        }
       }
     }
     x.streaming = false; drawChat();
   } catch (e) {
-    x.streaming = false; x.error = e.message; drawChat();
+    x.streaming = false; x.error = "request_failed"; x.text = e.message; drawChat();
   }
 }
 
@@ -490,6 +531,71 @@ async function projectsPage() {
   return \`<h1>Projects</h1><p class="sub">Shared, governed workspaces — context every member sees, spend every member shares.</p>\${cards.join("")}\`;
 }
 
+// --------------------------------------------------------------- settings --
+// BYO keys, self-service. The write is the same POST an admin would make on
+// your behalf; the read never returns a key, only which providers you have
+// one for — so nothing on this page can leak a secret back out.
+const PROVIDERS = ["anthropic", "openai", "google", "xai"];
+
+async function settingsPage() {
+  const { credentials } = await get("/v1/users/" + ME.userId + "/model-credentials");
+  const rows = credentials.map((c) => \`<div class="node-row">
+    <div class="grow">
+      <div>\${esc(c.provider)} <span class="badge info">your key</span></div>
+      <div class="dim" style="font-size:12px">\${esc(c.baseUrl ?? "provider default endpoint")} · added \${ago(c.createdAt)}</div>
+    </div>
+    <button class="small danger" data-rmcred="\${esc(c.provider)}">Remove</button>
+  </div>\`).join("");
+  const providerOpts = PROVIDERS.map((p) => \`<option value="\${p}">\${p}</option>\`).join("");
+  return \`
+  <h1>Settings</h1>
+  <p class="sub">Your identity, and the provider keys your own requests run on.</p>
+  <h2>My model keys</h2>
+  <div class="card">\${rows || '<div class="empty">No keys of your own yet — your requests use the platform credential when one is configured.</div>'}</div>
+  <div class="card" style="margin-top:12px">
+    <div class="row">
+      <div><label class="f">Provider</label><select id="sk-provider">\${providerOpts}</select></div>
+      <div class="grow"><label class="f">API key</label><input id="sk-key" type="password" placeholder="sk-…" style="width:100%"></div>
+      <div><label class="f">Base URL</label><input id="sk-base" placeholder="optional override"></div>
+      <div style="align-self:flex-end"><button class="primary" id="sk-add">Save key</button></div>
+    </div>
+    <div class="err-line" id="sk-err" style="margin-top:6px"></div>
+    <p class="faint" style="font-size:11.5px;margin:8px 0 0">Encrypted at rest and never shown again — not to you, not to an admin. Saving the same provider twice replaces the stored key. Your own key takes precedence over the platform's for every request you make.</p>
+  </div>
+  <h2>Identity</h2>
+  <div class="card"><div class="kv">
+    <span class="k">name</span><span>\${esc(ME.user?.displayName ?? "")}</span>
+    <span class="k">email</span><span>\${esc(ME.user?.email ?? "")}</span>
+    <span class="k">user id</span><span class="mono">\${esc(ME.userId)}</span>
+    <span class="k">role</span><span>\${ME.isAdmin ? '<span class="badge accent">admin</span>' : "member"}</span>
+  </div></div>\`;
+}
+
+function wireSettings() {
+  $("#sk-add")?.addEventListener("click", async () => {
+    const key = $("#sk-key").value.trim();
+    if (!key) { $("#sk-err").textContent = "apiKey: a key is required"; return; }
+    const baseUrl = $("#sk-base").value.trim();
+    try {
+      await post("/v1/users/" + ME.userId + "/model-credentials", {
+        provider: $("#sk-provider").value, apiKey: key, ...(baseUrl ? { baseUrl } : {}),
+      });
+      $("#sk-key").value = "";
+      MY_PROVIDERS = [...new Set([...MY_PROVIDERS, $("#sk-provider").value])];
+      toast("Key saved — stored encrypted, never shown again");
+      render();
+    } catch (e) { $("#sk-err").textContent = e.message; }
+  });
+  document.querySelectorAll("[data-rmcred]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      try {
+        await del("/v1/users/" + ME.userId + "/model-credentials/" + encodeURIComponent(b.dataset.rmcred));
+        MY_PROVIDERS = MY_PROVIDERS.filter((p) => p !== b.dataset.rmcred);
+        toast("Key removed"); render();
+      } catch (e) { toast("✗ " + e.message); }
+    }));
+}
+
 // ----------------------------------------------------------------- render --
 async function render() {
   const root = $("#root");
@@ -523,6 +629,7 @@ async function render() {
     else if (page === "workflows") content = await workflowsPage();
     else if (page === "inbox") content = await inboxPage();
     else if (page === "projects") content = await projectsPage();
+    else if (page === "settings") content = await settingsPage();
     else content = playgroundPage();
   } catch (e) {
     content = '<div class="empty">Couldn’t load this view — ' + esc(e.message) + "</div>";
@@ -538,10 +645,15 @@ async function render() {
   if (page === "playground") {
     drawChat();
     $("#pg-send")?.addEventListener("click", sendPrompt);
+    $("#pg-agent")?.addEventListener("change", (e) => {
+      const a = AGENTS.find((x) => x.agentId === e.target.value);
+      if ($("#pg-key")) $("#pg-key").innerHTML = keyHint(a);
+    });
     $("#pg-input")?.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendPrompt(); }
     });
   }
+  if (page === "settings") wireSettings();
   if (page === "runs" && id) wireRunDetail(id);
   if (page === "workflows" && !id) wireWorkflows();
   if (page === "workflows" && id) wireWorkflowDetail(id);

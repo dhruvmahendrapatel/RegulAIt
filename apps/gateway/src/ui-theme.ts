@@ -1,5 +1,6 @@
 /**
- * The shared design system for both single-file UIs (/app, /admin).
+ * What both single-file UIs (/app, /admin) share: the design system, and the
+ * one client-side error formatter.
  * Direction: warm dark, terracotta accent, monospace for data, generous
  * whitespace, hairline borders — closer to a well-made terminal tool than a
  * dashboard template. No external assets (strict self-containment).
@@ -132,6 +133,16 @@ pre, .codeblock {
   border-radius: 8px; padding: 10px 16px; font-size: 13px; max-width: 380px;
   box-shadow: 0 8px 30px #00000066; z-index: 50;
 }
+/* ---- one-time secret reveal ---------------------------------------- */
+/* A plaintext API key exists for exactly one response — the panel that shows
+   it should look like the one chance it is. */
+.reveal { border-color: #d9775766; box-shadow: 0 0 0 1px #d9775722; margin-top: 12px; }
+.secret { display: flex; gap: 10px; align-items: center; }
+.secret code {
+  flex: 1; min-width: 0; font-family: var(--mono); font-size: 12.5px;
+  background: var(--bg-inset); border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px; overflow-wrap: anywhere; user-select: all;
+}
 .stat { padding: 14px 16px; }
 .stat .v { font-family: var(--mono); font-size: 21px; font-weight: 600; }
 .stat .l { font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-faint); margin-top: 2px; }
@@ -178,4 +189,34 @@ pre, .codeblock {
 .stage.active { color: var(--text); border-color: var(--accent); background: var(--accent-soft); }
 .stage.reopened { color: var(--warn); border-color: #d9a44144; }
 .chart svg { display: block; width: 100%; }
+`;
+
+/**
+ * The one error formatter both UIs interpolate into their script. Every
+ * gateway failure body carries the sentence that actually explains it —
+ * zod's `issues`, an explicit `detail`, a governance `decision.reason`, or
+ * Fastify's own `message` — and dropping it leaves a bare slug like
+ * "validation" on screen with nothing actionable in it. One implementation,
+ * two pages.
+ */
+export const UI_ERRORS_JS = `
+// every reason the server volunteered, most specific first
+function errDetails(json) {
+  if (!json || typeof json !== "object") return [];
+  const out = [];
+  if (Array.isArray(json.issues)) {
+    for (const i of json.issues) out.push(((i.path ?? []).join(".") || "body") + ": " + i.message);
+  }
+  if (typeof json.detail === "string") out.push(json.detail);
+  if (json.decision && json.decision.reason) out.push(json.decision.reason);
+  if (typeof json.message === "string" && json.message !== json.error) out.push(json.message);
+  if (typeof json.raw === "string" && json.raw.trim()) out.push(json.raw.trim().slice(0, 200));
+  return out;
+}
+// the slug plus the explanation, e.g. "validation — email: Invalid email"
+function errMessage(status, json) {
+  const head = (json && json.error) || ("HTTP " + status);
+  const details = errDetails(json);
+  return details.length ? head + " — " + details.join("; ") : head;
+}
 `;

@@ -1,13 +1,20 @@
 /**
  * Demo-dataset seeder. Idempotent: safe to re-run — existing objects are
- * found by name/email and reused; only API keys are always minted fresh
- * (and printed exactly once, like every key in the product).
+ * found by name/email and reused; only API keys (and the PM webhook secret)
+ * are always minted fresh and printed exactly once, like every secret in the
+ * product.
  *
  * Deliberately drives the REAL HTTP API via app.inject rather than raw
  * inserts, so seeding exercises exactly the validation and governance the
- * product enforces. Mock-provider agents make the playground fully usable
- * with ZERO external API keys; the real-provider agents become dispatchable
- * the moment a credential is added in the admin portal.
+ * product enforces. Mock-provider agents and the mock PM provider make the
+ * playground fully usable with ZERO external credentials; the real-provider
+ * agents become dispatchable the moment a credential is added in the admin
+ * portal.
+ *
+ * The dataset is sized so every admin panel and every /app page has something
+ * true to show on first open, and so the demo still has work left to DO:
+ * Avery has a sign-off waiting, Dana has a node awaiting review and a
+ * context conflict to arbitrate, and both have a run they can drive further.
  */
 
 import path from "node:path";
@@ -19,6 +26,7 @@ const connectionString =
   process.env.DATABASE_URL ?? "postgres://regulait:regulait@localhost:5432/regulait";
 const BOOT = process.env.REGULAIT_BOOTSTRAP_TOKEN ?? "seed-bootstrap";
 const AUTH = { authorization: `Bearer ${BOOT}` };
+const DATA_KEY = process.env.REGULAIT_DATA_KEY;
 
 const db = createDb(connectionString);
 await runMigrations(
@@ -27,7 +35,7 @@ await runMigrations(
 );
 const app = buildApp(db, {
   bootstrapToken: BOOT,
-  dataKey: process.env.REGULAIT_DATA_KEY,
+  dataKey: DATA_KEY,
 });
 
 type Json = Record<string, any>;
@@ -63,6 +71,7 @@ for (const [name, id] of [
   keys[name] = (await call("POST", `/v1/users/${id}/keys`, { name: "seed" })).token;
 }
 const danaAuth = { authorization: `Bearer ${keys.dana}` };
+const averyAuth = { authorization: `Bearer ${keys.avery}` };
 
 // --- agent catalog -------------------------------------------------------
 const AGENTS = [
@@ -84,6 +93,173 @@ for (const userId of [adminId, danaId, averyId]) {
   for (const agentId of Object.values(agentIds)) {
     await call("POST", "/v1/grants/agents", { userId, agentId }); // 409 dup = fine
   }
+}
+
+// --- per-user agent policy (§4 default + ceiling, §5.2 run budget) -------
+// Upsert, so re-running converges rather than duplicating. The ceilings are
+// real: Avery is capped at tier 1, so the premium/frontier agents are denied
+// for him even though he holds a grant for every one of them.
+await call("POST", `/v1/users/${danaId}/agent-policy`, {
+  defaultAgentId: agentIds["balanced-mock"],
+  ceilingAgentId: agentIds["premium-mock"],
+  routingMode: "automatic",
+  runBudgetUsd: 0.25,
+  runBudgetBreachAction: "approve",
+});
+await call("POST", `/v1/users/${averyId}/agent-policy`, {
+  defaultAgentId: agentIds["fast-mock"],
+  ceilingAgentId: agentIds["balanced-mock"],
+  routingMode: "automatic",
+  runBudgetUsd: 0.1,
+  runBudgetBreachAction: "replan",
+});
+
+// --- MCP servers + tool inventory ----------------------------------------
+// Hostnames are deliberately unreachable (RFC 2606 `.invalid`): registering a
+// server and its tool inventory is a governance act and needs no live
+// upstream — nothing here proxies anywhere.
+const serverList = (await call("GET", "/v1/servers")).servers ?? [];
+async function ensureServer(name: string, url: string): Promise<string> {
+  const existing = serverList.find((s: Json) => s.name === name);
+  if (existing) return existing.id;
+  return (await call("POST", "/v1/servers", { name, url })).id;
+}
+const repoServerId = await ensureServer("repo-tools", "https://repo-tools.mcp.invalid/mcp");
+const warehouseServerId = await ensureServer("data-warehouse", "https://data-warehouse.mcp.invalid/mcp");
+
+async function ensureTools(
+  serverId: string,
+  tools: Array<{ name: string; kind: "read" | "write"; description: string }>,
+): Promise<void> {
+  const have = new Set(
+    ((await call("GET", `/v1/servers/${serverId}/tools`)).tools ?? []).map((t: Json) => t.name),
+  );
+  for (const tool of tools) {
+    if (!have.has(tool.name)) await call("POST", `/v1/servers/${serverId}/tools`, tool);
+  }
+}
+await ensureTools(repoServerId, [
+  { name: "read_file", kind: "read", description: "read one file at a ref" },
+  { name: "search_code", kind: "read", description: "regex search across the repository" },
+  { name: "list_branches", kind: "read", description: "list branches and their heads" },
+  { name: "write_file", kind: "write", description: "commit a file change to a branch" },
+  { name: "delete_branch", kind: "write", description: "delete a branch (destructive)" },
+]);
+await ensureTools(warehouseServerId, [
+  { name: "list_schemas", kind: "read", description: "list schemas visible to the connection" },
+  { name: "query", kind: "read", description: "run a read-only SQL query against a schema" },
+  { name: "export_table", kind: "write", description: "materialize a table to object storage" },
+]);
+
+// --- roles, per-user tool grants, per-user revocations (§5) ---------------
+// The precedence story, visible in one table: a role hands out a read-only
+// baseline, a direct per-user grant adds one write tool on top, and a
+// revocation subtracts a role-derived tool for one person only. Direct grants
+// survive a revocation by design — a direct grant IS an explicit override.
+const roleList = (await call("GET", "/v1/roles")).roles ?? [];
+async function ensureRole(name: string, description: string): Promise<string> {
+  const existing = roleList.find((r: Json) => r.name === name);
+  if (existing) return existing.id;
+  return (await call("POST", "/v1/roles", { name, description })).id;
+}
+const analystRoleId = await ensureRole(
+  "repo-analyst",
+  "read-only across repo-tools, plus warehouse query",
+);
+await call("POST", `/v1/roles/${analystRoleId}/grants/servers`, {
+  serverId: repoServerId,
+  readOnlyAll: true,
+}); // 409 dup = fine
+await call("POST", `/v1/roles/${analystRoleId}/grants/tools`, {
+  serverId: warehouseServerId,
+  toolName: "query",
+});
+for (const userId of [danaId, averyId]) {
+  await call("POST", `/v1/users/${userId}/roles`, { roleId: analystRoleId });
+}
+
+for (const [userId, serverId, toolName] of [
+  [danaId, repoServerId, "write_file"],
+  [danaId, warehouseServerId, "export_table"],
+  [averyId, repoServerId, "read_file"],
+] as const) {
+  await call("POST", "/v1/grants/tools", { userId, serverId, toolName });
+}
+// Dana loses one tool out of the role's read-only-all; Avery loses the role's
+// warehouse tool grant. Both deviations stay flagged, never silent.
+await call("POST", "/v1/revocations", { userId: danaId, serverId: repoServerId, toolName: "search_code" });
+await call("POST", "/v1/revocations", { userId: averyId, serverId: warehouseServerId, toolName: "query" });
+
+// --- policy rules: approvals, data scopes, rate limits (§3) --------------
+// None of the three rule tables has a natural unique key, so each rule is
+// matched on its scope before it is written.
+const scopeMatches = (r: Json, userId: string, serverId: string, toolName: string | null) =>
+  r.userId === userId && r.serverId === serverId && (r.toolName ?? null) === toolName;
+
+const existingApprovalRules = (await call("GET", "/v1/rules/approvals")).rules ?? [];
+if (!existingApprovalRules.some((r: Json) => scopeMatches(r, danaId, repoServerId, "write_file"))) {
+  // a governed write_file call by Dana pauses for Avery's sign-off
+  await call("POST", "/v1/rules/approvals", {
+    userId: danaId,
+    serverId: repoServerId,
+    toolName: "write_file",
+    approverUserId: averyId,
+  });
+}
+if (!existingApprovalRules.some((r: Json) => scopeMatches(r, averyId, warehouseServerId, null))) {
+  await call("POST", "/v1/rules/approvals", {
+    userId: averyId,
+    serverId: warehouseServerId,
+    writeOnly: true,
+    approverUserId: adminId,
+  });
+}
+
+const existingScopeRules = (await call("GET", "/v1/rules/data-scopes")).rules ?? [];
+if (!existingScopeRules.some((r: Json) => scopeMatches(r, danaId, warehouseServerId, "query"))) {
+  await call("POST", "/v1/rules/data-scopes", {
+    userId: danaId,
+    serverId: warehouseServerId,
+    toolName: "query",
+    argPath: "schema",
+    allowedValues: ["analytics", "reporting"],
+  });
+}
+
+const existingRateLimits = (await call("GET", "/v1/rules/rate-limits")).rules ?? [];
+if (!existingRateLimits.some((r: Json) => scopeMatches(r, danaId, repoServerId, null))) {
+  await call("POST", "/v1/rules/rate-limits", {
+    userId: danaId,
+    serverId: repoServerId,
+    maxCalls: 120,
+    windowSeconds: 3600,
+  });
+}
+if (!existingRateLimits.some((r: Json) => scopeMatches(r, averyId, warehouseServerId, "query"))) {
+  await call("POST", "/v1/rules/rate-limits", {
+    userId: averyId,
+    serverId: warehouseServerId,
+    toolName: "query",
+    maxCalls: 30,
+    windowSeconds: 3600,
+  });
+}
+
+// --- connectors (§2) -----------------------------------------------------
+const connectorList = (await call("GET", "/v1/connectors")).connectors ?? [];
+async function ensureConnector(name: string, kind: string): Promise<string> {
+  const existing = connectorList.find((c: Json) => c.name === name);
+  if (existing) return existing.id;
+  return (await call("POST", "/v1/connectors", { name, kind })).id;
+}
+const jiraConnectorId = await ensureConnector("jira-cloud", "issue-tracker");
+const warehouseConnectorId = await ensureConnector("snowflake-analytics", "data-warehouse");
+for (const grant of [
+  { userId: danaId, connectorId: jiraConnectorId, mode: "readwrite", allowedObjects: ["issue", "comment"] },
+  { userId: danaId, connectorId: warehouseConnectorId, mode: "read" },
+  { userId: averyId, connectorId: jiraConnectorId, mode: "read" },
+]) {
+  await call("POST", "/v1/grants/connectors", grant); // 409 dup = fine
 }
 
 // --- workflow templates + assignment + compliance ------------------------
@@ -121,7 +297,30 @@ await call("POST", "/v1/compliance/profiles", {
   mcpDefaultMode: "read_only",
 });
 
+// --- teams (§9 provenance) -----------------------------------------------
+const teamList = (await call("GET", "/v1/teams")).teams ?? [];
+async function ensureTeam(name: string, defaultClassifications?: string[]): Promise<string> {
+  const existing = teamList.find((t: Json) => t.name === name);
+  if (existing) return existing.id;
+  return (await call("POST", "/v1/teams", {
+    name,
+    ...(defaultClassifications ? { defaultClassifications } : {}),
+  })).id;
+}
+const platformTeamId = await ensureTeam("platform-eng");
+const clinicalTeamId = await ensureTeam("clinical-data", ["hipaa"]);
+for (const [teamId, userId] of [
+  [platformTeamId, danaId],
+  [platformTeamId, adminId],
+  [clinicalTeamId, averyId],
+  [clinicalTeamId, adminId],
+] as const) {
+  await call("POST", `/v1/teams/${teamId}/members`, { userId }); // 409 dup = fine
+}
+
 // --- projects ------------------------------------------------------------
+// Budgets are scaled to the seeded demo spend below, so budget-vs-actual is a
+// real reading rather than a rounding error against a placeholder cap.
 const projectList = (await call("GET", "/v1/projects")).projects ?? [];
 async function ensureProject(payload: Json): Promise<string> {
   const existing = projectList.find((p: Json) => p.name === payload.name);
@@ -131,39 +330,230 @@ async function ensureProject(payload: Json): Promise<string> {
 const demoProjectId = await ensureProject({
   name: "demo-project",
   costCenter: "CC-0001",
-  budgetUsd: 25,
+  budgetUsd: 0.2,
   budgetApproverUserId: averyId,
-  arbiterUserId: averyId,
+  // §9 arbiter: Dana owns the domain, so shared-context conflicts land on her
+  arbiterUserId: danaId,
 });
 const hipaaProjectId = await ensureProject({
   name: "hipaa-project",
   costCenter: "CC-0002",
+  budgetUsd: 0.1,
+  budgetApproverUserId: averyId,
   arbiterUserId: averyId,
   classifications: ["hipaa"],
 });
-for (const projectId of [demoProjectId, hipaaProjectId]) {
-  for (const [userId, role] of [
-    [danaId, "contributor"],
-    [averyId, "contributor"],
-    [adminId, "owner"],
-  ] as const) {
-    await call("POST", `/v1/projects/${projectId}/members`, { userId, role }); // 409 dup = fine
-  }
-}
-const ctx = (await call("GET", `/v1/projects/${demoProjectId}/context`)).context ?? [];
-if (!ctx.some((c: Json) => c.key === "coding-standards")) {
-  await call("POST", `/v1/projects/${demoProjectId}/context`, {
-    key: "coding-standards",
-    content:
-      "TypeScript strict mode everywhere. No default exports. Errors are values at boundaries; " +
-      "every external call is wrapped and surfaced, never swallowed.",
-  });
+// Membership carries the contributing team, so every context write inherits
+// provenance without anyone having to state it.
+for (const [projectId, userId, role, teamId] of [
+  [demoProjectId, danaId, "contributor", platformTeamId],
+  [demoProjectId, averyId, "contributor", null],
+  [demoProjectId, adminId, "owner", platformTeamId],
+  [hipaaProjectId, danaId, "contributor", platformTeamId],
+  [hipaaProjectId, averyId, "contributor", clinicalTeamId],
+  [hipaaProjectId, adminId, "owner", clinicalTeamId],
+] as const) {
+  await call("POST", `/v1/projects/${projectId}/members`, { userId, role, teamId }); // 409 dup = fine
 }
 
-// --- demo run + workflow instance for Dana -------------------------------
-const danaRuns = (await call("GET", "/v1/runs", undefined, danaAuth)).runs ?? [];
-if (danaRuns.length === 0) {
+// --- shared context (§9.2): accepted revisions + one live conflict --------
+const demoCtx = (await call("GET", `/v1/projects/${demoProjectId}/context`)).context ?? [];
+if (!demoCtx.some((c: Json) => c.key === "coding-standards")) {
   await call(
+    "POST",
+    `/v1/projects/${demoProjectId}/context`,
+    {
+      key: "coding-standards",
+      teamId: platformTeamId,
+      content:
+        "TypeScript strict mode everywhere. No default exports. Errors are values at boundaries; " +
+        "every external call is wrapped and surfaced, never swallowed.",
+    },
+    danaAuth,
+  );
+}
+if (!demoCtx.some((c: Json) => c.key === "checkout-domain-notes")) {
+  // rev 1 and rev 2 stack cleanly; rev 3 is written against the stale rev 1,
+  // so it is RETAINED but not current and routed to the project's arbiter.
+  await call(
+    "POST",
+    `/v1/projects/${demoProjectId}/context`,
+    {
+      key: "checkout-domain-notes",
+      content:
+        "Checkout owns the order total; the payment vault owns card data. " +
+        "Nothing downstream of checkout may see a PAN.",
+    },
+    averyAuth,
+  );
+  await call(
+    "POST",
+    `/v1/projects/${demoProjectId}/context`,
+    {
+      key: "checkout-domain-notes",
+      baseRevision: 1,
+      teamId: platformTeamId,
+      content:
+        "Checkout owns the order total; the payment vault owns card data. " +
+        "Nothing downstream of checkout may see a PAN. Stored methods are vault tokens only, " +
+        "scoped per customer and soft-deleted with the customer record.",
+    },
+    danaAuth,
+  );
+  await call(
+    "POST",
+    `/v1/projects/${demoProjectId}/context`,
+    {
+      key: "checkout-domain-notes",
+      baseRevision: 1,
+      content:
+        "Checkout owns the order total; the payment vault owns card data. " +
+        "Nothing downstream of checkout may see a PAN. Compliance additionally requires that " +
+        "stored-method identifiers never appear in application logs.",
+    },
+    averyAuth,
+  );
+}
+const hipaaCtx = (await call("GET", `/v1/projects/${hipaaProjectId}/context`)).context ?? [];
+if (!hipaaCtx.some((c: Json) => c.key === "phi-handling")) {
+  await call(
+    "POST",
+    `/v1/projects/${hipaaProjectId}/context`,
+    {
+      key: "phi-handling",
+      teamId: clinicalTeamId,
+      content:
+        "PHI never leaves the clinical boundary. Exports carry identifiers, timestamps, " +
+        "purpose-of-use codes and the requesting principal — never clinical content. " +
+        "Every export is itself an audited event with a named requester.",
+    },
+    averyAuth,
+  );
+}
+
+// --- PM connection (mock provider) ---------------------------------------
+// EPIC-06 against the in-memory MOCK provider: no external service, no real
+// credential. The token below is an obvious dummy and is encrypted at rest
+// like any other; the webhook secret is returned exactly once, here.
+let pmWebhookSecret: string | null = null;
+if (DATA_KEY) {
+  const pmList = (await call("GET", "/v1/pm/connections")).connections ?? [];
+  if (!pmList.some((c: Json) => c.name === "demo-pm")) {
+    const created = await call("POST", "/v1/pm/connections", {
+      name: "demo-pm",
+      provider: "mock",
+      project: "REGULAIT-DEMO",
+      token: "mock-token-not-a-real-credential",
+    });
+    pmWebhookSecret = created.webhookSecret ?? null;
+  }
+}
+
+// --- demo activity: governed evaluations + real metered spend ------------
+// Unlike every object above, activity is append-only by nature (audit rows
+// and ledger rows are events, not entities), so it cannot be de-duplicated by
+// name. It runs exactly once: on a database with no usage history yet.
+const alreadyActive = ((await call("GET", "/v1/usage-events?limit=1")).events ?? []).length > 0;
+if (!alreadyActive) {
+  // Decision-only evaluations — no queue entries, no execution — so the audit
+  // log opens on the full spread of outcomes the entitlement model produces.
+  for (const [userId, serverId, toolName] of [
+    [danaId, repoServerId, "read_file"], // allow — role read-only-all
+    [danaId, repoServerId, "search_code"], // deny — per-user revocation beats the role
+    [danaId, repoServerId, "write_file"], // require_approval — direct grant + approval rule
+    [averyId, repoServerId, "delete_branch"], // deny — nothing grants a write here
+    [averyId, warehouseServerId, "query"], // deny — the role's grant is revoked for Avery
+  ] as const) {
+    await call("POST", "/v1/evaluate", { userId, serverId, toolName });
+  }
+
+  // Real, metered mock dispatches attributed to a project — this is what puts
+  // numbers on the Cost & Projects dashboard. quality-sensitive requests are
+  // never downgraded (they serve the requested agent); the rest are short
+  // enough to classify as low-complexity and route down to the cheapest
+  // entitled agent, which is what produces the savings ledger.
+  const BRIEF_CHECKOUT = `Plan the saved-payment-methods work for checkout.
+
+Context: the checkout service re-collects card details on every order. Returning
+customers should be able to pick a stored method in one tap, with no PCI scope
+moving into our own systems.
+
+Constraints:
+- Only provider-vault tokens are stored on our side; never a PAN, never a CVV.
+- The stored-method list is per customer and must respect the existing
+  soft-delete semantics on the customer record.
+- Checkout stays usable when the vault is unreachable: fall back to the one-off
+  card form and surface a non-blocking notice.
+
+Deliverables: a stage-by-stage plan, the API surface to add to
+src/checkout/payments.ts, the migration required, and the rollout order across
+staging and the canary cohort.`;
+
+  const BRIEF_REVIEW = `Review this change for release risk.
+
+The diff adds a stored-payment-method selector to checkout, a new
+POST /checkout/payment-methods endpoint, and a migration adding a vault_token
+column with a partial unique index.
+
+Call out anything that could double-charge, anything that widens the data we
+retain, any migration step that is not safely re-runnable, and any code path
+that fails open when the payment vault is unavailable.`;
+
+  const BRIEF_PHI = `Plan an audit-export endpoint for PHI access logs.
+
+Context: compliance needs a signed, time-bounded export of every read against a
+patient record, grouped by requesting user and purpose-of-use.
+
+Constraints:
+- The export never contains clinical content — identifiers, timestamps, purpose
+  codes and the requesting principal only.
+- Retention is seven years, and any window inside it must be reproducible.
+- Every export is itself an auditable event with a named requester.
+
+Deliverables: the endpoint contract, the storage and retention plan, and the
+controls a reviewer would check before sign-off.`;
+
+  const INVOCATIONS: Array<{
+    auth: typeof danaAuth;
+    projectId: string;
+    agent: string;
+    mode: string;
+    costSensitivity: "standard" | "cost-sensitive" | "quality-sensitive";
+    input: string;
+  }> = [
+    { auth: danaAuth, projectId: demoProjectId, agent: "premium-mock", mode: "plan", costSensitivity: "quality-sensitive", input: BRIEF_CHECKOUT },
+    { auth: danaAuth, projectId: demoProjectId, agent: "premium-mock", mode: "review", costSensitivity: "quality-sensitive", input: BRIEF_REVIEW },
+    { auth: danaAuth, projectId: demoProjectId, agent: "balanced-mock", mode: "execute", costSensitivity: "quality-sensitive", input: BRIEF_REVIEW },
+    { auth: danaAuth, projectId: demoProjectId, agent: "premium-mock", mode: "review", costSensitivity: "cost-sensitive", input: "Summarize the open TODOs in the checkout module and rank them by release risk." },
+    { auth: danaAuth, projectId: demoProjectId, agent: "balanced-mock", mode: "execute", costSensitivity: "standard", input: "Write a one-paragraph release note for the saved-payment-methods change." },
+    { auth: danaAuth, projectId: demoProjectId, agent: "fast-mock", mode: "execute", costSensitivity: "standard", input: "Draft the commit message for the vault_token migration." },
+    { auth: averyAuth, projectId: demoProjectId, agent: "balanced-mock", mode: "review", costSensitivity: "quality-sensitive", input: BRIEF_REVIEW },
+    { auth: averyAuth, projectId: demoProjectId, agent: "balanced-mock", mode: "review", costSensitivity: "standard", input: "List the checks a release reviewer should run before approving a payments change." },
+    { auth: danaAuth, projectId: hipaaProjectId, agent: "premium-mock", mode: "plan", costSensitivity: "quality-sensitive", input: BRIEF_PHI },
+    { auth: danaAuth, projectId: hipaaProjectId, agent: "balanced-mock", mode: "execute", costSensitivity: "standard", input: "Draft a short changelog entry for the PHI audit-export endpoint." },
+    { auth: averyAuth, projectId: hipaaProjectId, agent: "balanced-mock", mode: "plan", costSensitivity: "quality-sensitive", input: BRIEF_PHI },
+    { auth: averyAuth, projectId: hipaaProjectId, agent: "fast-mock", mode: "execute", costSensitivity: "standard", input: "List the fields the PHI access-log export must never include." },
+  ];
+  for (const inv of INVOCATIONS) {
+    await call(
+      "POST",
+      `/v1/agents/${agentIds[inv.agent]}/invoke`,
+      {
+        mode: inv.mode,
+        input: inv.input,
+        costSensitivity: inv.costSensitivity,
+        dispatch: true,
+        projectId: inv.projectId,
+      },
+      inv.auth,
+    );
+  }
+}
+
+// --- demo runs (one per persona) -----------------------------------------
+const danaRuns = (await call("GET", "/v1/runs", undefined, danaAuth)).runs ?? [];
+if (!danaRuns.some((r: Json) => r.name === "checkout-refactor")) {
+  const run = await call(
     "POST",
     "/v1/runs",
     {
@@ -180,16 +570,46 @@ if (danaRuns.length === 0) {
     },
     danaAuth,
   );
+  // Drive it far enough to be real — one node taken all the way to done, the
+  // next left in review — so the run has MEASURED spend against its budget
+  // and still has something for a human to accept.
+  await call("POST", `/v1/runs/${run.id}/auto`, { maxNodes: 1, acceptReviews: true }, danaAuth);
+  await call("POST", `/v1/runs/${run.id}/auto`, { maxNodes: 1 }, danaAuth);
 }
+
+const averyRuns = (await call("GET", "/v1/runs", undefined, averyAuth)).runs ?? [];
+if (!averyRuns.some((r: Json) => r.name === "phi-access-review")) {
+  // Left PLANNED on purpose: Avery's Runs page opens on a run he can start.
+  // Both owners are tier 1 or below, inside his ceiling.
+  await call(
+    "POST",
+    "/v1/runs",
+    {
+      projectId: hipaaProjectId,
+      graph: {
+        run: "phi-access-review",
+        escalationApproverUserId: adminId,
+        nodes: [
+          { id: "inventory", title: "Inventory every code path that reads a patient record", ownerAgentId: agentIds["balanced-mock"], mode: "execute", estimate: { in: 600, out: 1200 } },
+          { id: "gaps", title: "List the access paths missing an audit-log write", ownerAgentId: agentIds["fast-mock"], mode: "execute", dependsOn: ["inventory"], estimate: { in: 300, out: 600 } },
+        ],
+      },
+    },
+    averyAuth,
+  );
+}
+
+// --- workflow instances (one per persona) --------------------------------
+const DANA_CHANGE = "Add saved-payment-methods to checkout";
 const danaInstances = (await call("GET", "/v1/workflows/instances", undefined, danaAuth)).instances ?? [];
-if (danaInstances.length === 0) {
+if (!danaInstances.some((i: Json) => i.change?.description === DANA_CHANGE)) {
   const inst = await call(
     "POST",
     "/v1/workflows/instances",
     {
       projectId: demoProjectId,
       change: {
-        description: "Add saved-payment-methods to checkout",
+        description: DANA_CHANGE,
         paths: ["src/checkout/payments.ts"],
         changeType: "feature",
         environment: "staging",
@@ -211,6 +631,29 @@ if (danaInstances.length === 0) {
   );
 }
 
+const AVERY_CHANGE = "Add an audit export for PHI access logs";
+const averyInstances = (await call("GET", "/v1/workflows/instances", undefined, averyAuth)).instances ?? [];
+if (!averyInstances.some((i: Json) => i.change?.description === AVERY_CHANGE)) {
+  // hipaa-project's classification cascades in the sensitive-data template on
+  // top of the rule-matched one, so this instance carries an extra compliance
+  // sign-off nobody configured by hand. Left at the artifact stage: Avery's
+  // Workflows page opens on something he can fill in.
+  await call(
+    "POST",
+    "/v1/workflows/instances",
+    {
+      projectId: hipaaProjectId,
+      change: {
+        description: AVERY_CHANGE,
+        paths: ["src/phi/audit-export.ts"],
+        changeType: "feature",
+        environment: "staging",
+      },
+    },
+    averyAuth,
+  );
+}
+
 await app.close();
 
 console.log(`
@@ -219,12 +662,39 @@ RegulAIt demo data ready.
   Sign in at /app (or /admin with the admin key). Keys are shown ONCE:
 
     admin  admin@regulait.local   ${keys.admin}
-    dana   dana@regulait.local    ${keys.dana}    (requester — start in the Playground)
-    avery  avery@regulait.local   ${keys.avery}   (approver — check the Inbox)
+    dana   dana@regulait.local    ${keys.dana}    (requester — Playground, Runs, Workflows)
+    avery  avery@regulait.local   ${keys.avery}   (approver — Inbox has a sign-off waiting)
+${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecret}\n` : ""}
+  Governance: 2 MCP servers with 8 tools (read + write), a 'repo-analyst' role
+  granting read-only-all, per-user tool grants layered on top, 2 revocations,
+  2 approval rules, 1 data-scope rule, 2 rate limits, 2 connectors, 7 agents
+  (3 mock = usable with no external keys; anthropic/openai/google/xai go live
+  once you add a model credential in /admin → Model Credentials, which also
+  lists exactly which agents are still waiting on one), and per-user agent
+  policies with a per-run budget cap (/admin → Agent Governance).
 
-  Seeded: 7 agents (3 mock = usable with no external keys; anthropic/openai/
-  google/xai become live once you add a model credential in /admin),
-  2 workflow templates + hipaa compliance profile, demo-project ($25 budget)
-  and hipaa-project (classification-forced sign-off), one planned run and one
-  workflow instance awaiting Avery's approval.
+  No provider credential is seeded, deliberately — a placeholder key would
+  make routing believe those four providers work and turn a clean 409 into a
+  failed dispatch. Add a real one, or stay on the mock agents.
+
+  Keys: every user above already has one. To onboard anyone else, create them
+  in /admin → Users & Roles and hit 'issue key' on their row — the plaintext
+  is shown once there and never again. Users bring their own provider keys in
+  /app → Settings.
+
+  Projects: demo-project and hipaa-project (classification-forced sign-off),
+  both with members, team provenance, shared context, a budget and real
+  measured spend from 12 seeded mock dispatches.
+
+  Still to do in the demo — nothing is seeded finished:
+    · avery  Inbox: a workflow sign-off; Workflows: an instance awaiting its
+             requirements artifact; Runs: a planned run to start.
+    · dana   Inbox: a shared-context conflict to arbitrate; Runs: a node
+             awaiting review, then auto-advance the rest.
+
+  Simulation / Access preview — pick Dana + the repo server from the selects
+  and step through the precedence chain:
+    read_file    allow (role grants read-only-all)
+    search_code  deny (her per-user revocation beats the role)
+    write_file   require_approval (named approver: Avery)
 `);
