@@ -4468,3 +4468,154 @@ describe("nested-run workers receive signed-off workflow artifacts (§2 scope-lo
     expect(dispatch!.system).toBeUndefined();
   });
 });
+
+describe("per-user model credentials (BYO key): user key wins, platform is the fallback", () => {
+  async function startFakeAnthropic(marker: string) {
+    const hits: Array<{ apiKey: string | null }> = [];
+    const server = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        hits.push({ apiKey: (req.headers["x-api-key"] as string) ?? null });
+        const parsed = JSON.parse(body || "{}");
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            id: `msg_${marker}_${hits.length}`,
+            type: "message",
+            role: "assistant",
+            model: parsed.model,
+            content: [{ type: "text", text: `${marker}-reply` }],
+            stop_reason: "end_turn",
+            stop_sequence: null,
+            usage: { input_tokens: 10, output_tokens: 5 },
+          }),
+        );
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const addr = server.address() as { port: number };
+    return {
+      url: `http://127.0.0.1:${addr.port}`,
+      hits,
+      close: () =>
+        new Promise<void>((r) => {
+          server.closeAllConnections();
+          server.close(() => r());
+        }),
+    };
+  }
+
+  let userSrv: Awaited<ReturnType<typeof startFakeAnthropic>>;
+  let platformSrv: Awaited<ReturnType<typeof startFakeAnthropic>>;
+  let rheaId: string;
+  let rheaAuth: { authorization: string };
+  let byokAgentId: string;
+
+  afterAll(async () => {
+    await userSrv?.close();
+    await platformSrv?.close();
+  });
+
+  it("credentials are self-service, write-only, and private to their user", async () => {
+    userSrv = await startFakeAnthropic("USERKEY");
+    platformSrv = await startFakeAnthropic("PLATFORM");
+    const rhea = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email: "byok-rhea@example.com", displayName: "Byok Rhea" },
+    });
+    rheaId = rhea.json().id;
+    rheaAuth = await authFor(rheaId);
+    const agentRes = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/agents",
+      payload: {
+        name: "byok-agent", provider: "anthropic", tier: 1, modes: ["execute"],
+        costPerMTokIn: 5, costPerMTokOut: 25, model: "claude-opus-5",
+      },
+    });
+    byokAgentId = agentRes.json().id;
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/grants/agents",
+      payload: { userId: rheaId, agentId: byokAgentId },
+    });
+
+    const created = await app.inject({
+      method: "POST", headers: rheaAuth, url: `/v1/users/${rheaId}/model-credentials`,
+      payload: { provider: "anthropic", apiKey: "sk-user-rhea-key", baseUrl: userSrv.url },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(JSON.stringify(created.json())).not.toContain("sk-user-rhea-key");
+
+    const listed = await app.inject({
+      method: "GET", headers: rheaAuth, url: `/v1/users/${rheaId}/model-credentials`,
+    });
+    expect(listed.json().credentials).toHaveLength(1);
+    expect(JSON.stringify(listed.json())).not.toContain("sk-user-rhea-key");
+
+    // another non-admin cannot touch rhea's credentials
+    const sven = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email: "byok-sven@example.com", displayName: "Byok Sven" },
+    });
+    const svenAuth = await authFor(sven.json().id);
+    const denied = await app.inject({
+      method: "GET", headers: svenAuth, url: `/v1/users/${rheaId}/model-credentials`,
+    });
+    expect(denied.statusCode).toBe(403);
+  });
+
+  it("a dispatch rides the user's own key when one exists", async () => {
+    const res = await app.inject({
+      method: "POST", headers: rheaAuth, url: `/v1/agents/${byokAgentId}/invoke`,
+      payload: { mode: "execute", input: "hello from byok", dispatch: true },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().dispatch.outputText).toBe("USERKEY-reply");
+    expect(res.json().dispatch.credentialSource).toBe("user");
+    expect(userSrv.hits).toHaveLength(1);
+    expect(userSrv.hits[0]!.apiKey).toBe("sk-user-rhea-key");
+    expect(platformSrv.hits).toHaveLength(0);
+
+    const ledger = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/usage-events?userId=${rheaId}`,
+    });
+    expect(ledger.json().events[0].detail.credentialSource).toBe("user");
+  });
+
+  it("without a user key the platform credential is the fallback", async () => {
+    const removed = await app.inject({
+      method: "DELETE", headers: rheaAuth, url: `/v1/users/${rheaId}/model-credentials/anthropic`,
+    });
+    expect(removed.json().removed).toBe(true);
+    // point the platform credential at the platform fake (upsert)
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/model-credentials",
+      payload: { provider: "anthropic", apiKey: "sk-platform-key", baseUrl: platformSrv.url },
+    });
+
+    const res = await app.inject({
+      method: "POST", headers: rheaAuth, url: `/v1/agents/${byokAgentId}/invoke`,
+      payload: { mode: "execute", input: "fallback please", dispatch: true },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().dispatch.outputText).toBe("PLATFORM-reply");
+    expect(res.json().dispatch.credentialSource).toBe("platform");
+    expect(platformSrv.hits).toHaveLength(1);
+    expect(platformSrv.hits[0]!.apiKey).toBe("sk-platform-key");
+  });
+
+  it("re-adding the user key restores precedence over the platform credential", async () => {
+    await app.inject({
+      method: "POST", headers: rheaAuth, url: `/v1/users/${rheaId}/model-credentials`,
+      payload: { provider: "anthropic", apiKey: "sk-user-rhea-key-2", baseUrl: userSrv.url },
+    });
+    const res = await app.inject({
+      method: "POST", headers: rheaAuth, url: `/v1/agents/${byokAgentId}/invoke`,
+      payload: { mode: "execute", input: "precedence check", dispatch: true },
+    });
+    expect(res.json().dispatch.credentialSource).toBe("user");
+    expect(userSrv.hits).toHaveLength(2);
+    expect(userSrv.hits[1]!.apiKey).toBe("sk-user-rhea-key-2");
+    expect(platformSrv.hits).toHaveLength(1); // untouched
+  });
+});

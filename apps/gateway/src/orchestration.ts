@@ -179,6 +179,7 @@ type NodeDispatchOutcome =
         usage: { inputTokens: number; outputTokens: number };
         costUsd: number | null;
         measuredCostSavedUsd: number | null;
+        credentialSource: "user" | "platform" | "none";
       };
       measuredSpentUsd: number;
       budgetBreached: boolean;

@@ -6,9 +6,11 @@ import {
   connectorGrants,
   connectors,
   costEvents,
+  and,
   eq,
   modelCredentials,
   usageEvents,
+  userModelCredentials,
   userAgentPolicies,
   type Db,
 } from "@regulait/db";
@@ -51,6 +53,7 @@ export type DispatchOutcome =
         usage: { inputTokens: number; outputTokens: number };
         costUsd: number | null;
         measuredCostSavedUsd: number | null;
+        credentialSource: "user" | "platform" | "none";
       };
     }
   | { ok: false; status: number; error: string; detail?: string };
@@ -92,22 +95,35 @@ export async function executeGovernedDispatch(
 
   let apiKey: string | null = null;
   let baseUrl: string | null = null;
+  let credentialSource: "user" | "platform" | "none" = "none";
   if (served.provider !== "mock") {
     if (!dataKey) {
       return { ok: false, status: 503, error: "no_data_key", detail: "set REGULAIT_DATA_KEY" };
     }
-    const [cred] = await db
+    // BYO key: the BILLING user's own credential wins over the platform one —
+    // their spend rides their key, and the ledger records which was used.
+    const [userCred] = await db
       .select()
-      .from(modelCredentials)
-      .where(eq(modelCredentials.provider, served.provider));
+      .from(userModelCredentials)
+      .where(
+        and(
+          eq(userModelCredentials.userId, userId),
+          eq(userModelCredentials.provider, served.provider),
+        ),
+      );
+    const [platformCred] = userCred
+      ? [undefined]
+      : await db.select().from(modelCredentials).where(eq(modelCredentials.provider, served.provider));
+    const cred = userCred ?? platformCred;
     if (!cred) {
       return {
         ok: false,
         status: 409,
         error: "no_model_credential",
-        detail: `no stored credential for provider '${served.provider}'`,
+        detail: `no stored credential (user or platform) for provider '${served.provider}'`,
       };
     }
+    credentialSource = userCred ? "user" : "platform";
     apiKey = decryptSecret(dataKey, cred.keyCiphertext);
     baseUrl = cred.baseUrl;
   }
@@ -162,7 +178,7 @@ export async function executeGovernedDispatch(
     stopReason: result.stopReason,
     refusal: result.refusal,
     providerMessageId: result.providerMessageId,
-    detail: args.detail ?? {},
+    detail: { credentialSource, ...(args.detail ?? {}) },
   });
 
   return {
@@ -176,6 +192,7 @@ export async function executeGovernedDispatch(
       usage: result.usage,
       costUsd,
       measuredCostSavedUsd,
+      credentialSource,
     },
   };
 }
@@ -268,6 +285,74 @@ export function registerAgentConnectorRoutes(
       })
       .from(modelCredentials),
   }));
+
+  // --- per-user model credentials (BYO key; self-service or admin) ---
+  // Same write-only discipline as the platform surface: the key is accepted,
+  // encrypted, and never returned.
+
+  const userCredCols = {
+    id: userModelCredentials.id,
+    userId: userModelCredentials.userId,
+    provider: userModelCredentials.provider,
+    baseUrl: userModelCredentials.baseUrl,
+    createdAt: userModelCredentials.createdAt,
+  };
+
+  app.post("/v1/users/:userId/model-credentials", async (req, reply) => {
+    const { userId } = userIdParam.parse(req.params);
+    if (!req.authCtx.isAdmin && req.authCtx.userId !== userId) {
+      return reply.status(403).send({ error: "forbidden" });
+    }
+    const body = createModelCredentialSchema.parse(req.body);
+    if (!opts.dataKey) {
+      return reply.status(503).send({ error: "no_data_key", detail: "set REGULAIT_DATA_KEY" });
+    }
+    const values = {
+      userId,
+      provider: body.provider,
+      keyCiphertext: encryptSecret(opts.dataKey, body.apiKey),
+      baseUrl: body.baseUrl ?? null,
+    };
+    const [row] = await db
+      .insert(userModelCredentials)
+      .values(values)
+      .onConflictDoUpdate({
+        target: [userModelCredentials.userId, userModelCredentials.provider],
+        set: values,
+      })
+      .returning(userCredCols);
+    return reply.status(201).send(row);
+  });
+
+  app.get("/v1/users/:userId/model-credentials", async (req, reply) => {
+    const { userId } = userIdParam.parse(req.params);
+    if (!req.authCtx.isAdmin && req.authCtx.userId !== userId) {
+      return reply.status(403).send({ error: "forbidden" });
+    }
+    return {
+      credentials: await db
+        .select(userCredCols)
+        .from(userModelCredentials)
+        .where(eq(userModelCredentials.userId, userId)),
+    };
+  });
+
+  app.delete("/v1/users/:userId/model-credentials/:provider", async (req, reply) => {
+    const { userId, provider } = z
+      .object({ userId: z.string().uuid(), provider: z.string().min(1) })
+      .parse(req.params);
+    if (!req.authCtx.isAdmin && req.authCtx.userId !== userId) {
+      return reply.status(403).send({ error: "forbidden" });
+    }
+    const deleted = await db
+      .delete(userModelCredentials)
+      .where(
+        and(eq(userModelCredentials.userId, userId), eq(userModelCredentials.provider, provider)),
+      )
+      .returning({ id: userModelCredentials.id });
+    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_credential" });
+    return { removed: true };
+  });
 
   app.get("/v1/agents", async () => ({ agents: await db.select().from(agents) }));
 

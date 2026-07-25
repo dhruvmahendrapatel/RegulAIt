@@ -134,8 +134,17 @@ to that one artifact; without it, the latest version of every artifact is includ
 edits re-open the workflow upstream, so a re-run always carries the re-signed version. §6
 traceability: the exact `{output, version}` list that framed each execution is recorded in
 the `node_dispatched` history entry. Standalone (non-workflow) runs stay system-free —
-verified down to the provider call via the shared mock's dispatch log. Not yet: streaming,
-multi-turn dispatch, per-user credentials, openai/google/xai adapters.
+verified down to the provider call via the shared mock's dispatch log. **Sixth slice:
+per-user model credentials (BYO key).** Migration 0017: `user_model_credentials` (unique per
+user×provider, AES-256-GCM, write-only like every credential surface). Self-service
+`POST/GET/DELETE /v1/users/:id/model-credentials` (self or admin; other users' credentials
+are 403-invisible). Dispatch resolution order: the BILLING user's own credential → platform
+`model_credentials` → explicit `no_model_credential` failure; the ledger records
+`credentialSource` (user|platform|none) on every usage event and in the dispatch response —
+spend on a user's key is visibly not platform spend. Verified end-to-end against a local fake
+Anthropic Messages server: the real adapter's actual `x-api-key` header carries the user's
+key when one exists, falls back to the platform key when deleted, and precedence is restored
+on re-add. Not yet: streaming, multi-turn dispatch, openai/google/xai adapters.
 
 **EPIC-06 started — PM-tool integration first slice, 2026-07-25.** New
 `packages/pm-provider` on the git-provider playbook (pillar 8, PM_TOOL_INTEGRATION_SPEC
