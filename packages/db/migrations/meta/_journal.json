@@ -57,6 +57,13 @@
       "when": 1784942000000,
       "tag": "0007_workflow_engine",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1784943000000,
+      "tag": "0008_approvals_instance_fk",
+      "breakpoints": true
     }
   ]
 }

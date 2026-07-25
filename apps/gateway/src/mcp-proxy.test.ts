@@ -1153,3 +1153,163 @@ describe("workflow engine (EPIC-03 slice)", () => {
     expect(wfRows.some((e: { effect: string }) => e.effect === "deny")).toBe(true);
   });
 });
+
+describe("workflow review-fix regressions", () => {
+  it("a stale downstream approval cannot advance a re-opened upstream sign-off", async () => {
+    const nina = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email: "proxy-nina@example.com", displayName: "Proxy Nina" },
+    });
+    const ninaId = nina.json().id;
+    const gate2Approver = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email: "proxy-gate2@example.com", displayName: "Gate2 Approver" },
+    });
+    const gate2Id = gate2Approver.json().id;
+
+    const tpl = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/templates",
+      payload: {
+        name: "two-gates",
+        definition: {
+          workflow: "two-gates",
+          stages: [
+            { id: "intake", type: "trigger" },
+            { id: "req", type: "artifact_generation", output: "req_file" },
+            { id: "gate1", type: "human_approval", approvers: ["requesting_user"] },
+            { id: "gate2", type: "human_approval", approvers: [gate2Id] },
+            { id: "build2", type: "automated_build" },
+          ],
+        },
+      },
+    });
+    expect(tpl.statusCode).toBe(201);
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/assignment-rules",
+      payload: { templateId: tpl.json().id, changeType: "two-gates-test" },
+    });
+
+    const ninaAuth = await authFor(ninaId);
+    const started = await app.inject({
+      method: "POST", headers: ninaAuth, url: "/v1/workflows/instances",
+      payload: { change: { description: "x", paths: ["a.ts"], changeType: "two-gates-test", environment: "staging" } },
+    });
+    const instanceId = started.json().id;
+
+    await app.inject({
+      method: "POST", headers: ninaAuth, url: `/v1/workflows/instances/${instanceId}/artifacts`,
+      payload: { stageId: "req", content: "v1" },
+    });
+    const q1 = await app.inject({ method: "GET", headers: AUTH, url: "/v1/approvals?status=pending" });
+    const gate1Row = q1.json().approvals.find(
+      (a: { instanceId: string | null; stageId: string }) => a.instanceId === instanceId && a.stageId === "gate1",
+    );
+    await app.inject({
+      method: "POST", headers: ninaAuth, url: `/v1/approvals/${gate1Row.id}/decide`,
+      payload: { decision: "approved" },
+    });
+
+    // now blocked on gate2 with a live pending row — re-open by editing the artifact
+    const q2 = await app.inject({ method: "GET", headers: AUTH, url: "/v1/approvals?status=pending" });
+    const gate2Row = q2.json().approvals.find(
+      (a: { instanceId: string | null; stageId: string }) => a.instanceId === instanceId && a.stageId === "gate2",
+    );
+    expect(gate2Row).toBeTruthy();
+
+    await app.inject({
+      method: "POST", headers: ninaAuth, url: `/v1/workflows/instances/${instanceId}/artifacts`,
+      payload: { stageId: "req", content: "v2" },
+    });
+
+    // the stale gate2 row was superseded — deciding it must not advance gate1
+    const decideStale = await app.inject({
+      method: "POST", headers: await authFor(gate2Id), url: `/v1/approvals/${gate2Row.id}/decide`,
+      payload: { decision: "approved" },
+    });
+    expect(decideStale.statusCode).toBe(409);
+
+    const view = await app.inject({ method: "GET", headers: ninaAuth, url: `/v1/workflows/instances/${instanceId}` });
+    expect(view.json().instance.status).toBe("blocked_on_approval");
+    expect(view.json().pendingApprovals.map((a: { stageId: string }) => a.stageId)).toEqual(["gate1"]);
+  });
+
+  it("abort supersedes every outstanding pending approval (no dead rows in the inbox)", async () => {
+    const omar = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email: "proxy-omar@example.com", displayName: "Proxy Omar" },
+    });
+    const omarId = omar.json().id;
+    const omarAuth = await authFor(omarId);
+    const started = await app.inject({
+      method: "POST", headers: omarAuth, url: "/v1/workflows/instances",
+      payload: { change: { description: "y", paths: ["b.ts"], changeType: "two-gates-test", environment: "staging" } },
+    });
+    const instanceId = started.json().id;
+    await app.inject({
+      method: "POST", headers: omarAuth, url: `/v1/workflows/instances/${instanceId}/artifacts`,
+      payload: { stageId: "req", content: "v1" },
+    });
+
+    await app.inject({
+      method: "POST", headers: omarAuth, url: `/v1/workflows/instances/${instanceId}/abort`, payload: {},
+    });
+    const q = await app.inject({ method: "GET", headers: AUTH, url: "/v1/approvals?status=pending" });
+    expect(
+      q.json().approvals.filter((a: { instanceId: string | null }) => a.instanceId === instanceId),
+    ).toHaveLength(0);
+  });
+
+  it("templates with unknown approver ids are rejected at creation", async () => {
+    const res = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/templates",
+      payload: {
+        name: "bad-approver",
+        definition: {
+          workflow: "bad-approver",
+          stages: [
+            { id: "intake", type: "trigger" },
+            { id: "gate", type: "human_approval", approvers: ["designated_reviewer_role"] },
+          ],
+        },
+      },
+    });
+    expect(res.statusCode).toBe(422);
+  });
+
+  it("agent-policy partial update preserves the ceiling; grants are revocable", async () => {
+    const pia = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email: "proxy-pia@example.com", displayName: "Proxy Pia" },
+    });
+    const piaId = pia.json().id;
+    const a1 = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/agents",
+      payload: { name: "tiny-agent", provider: "test", tier: 1 },
+    });
+    const a2 = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/agents",
+      payload: { name: "big-agent", provider: "test", tier: 9 },
+    });
+    await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/users/${piaId}/agent-policy`,
+      payload: { ceilingAgentId: a1.json().id },
+    });
+    // partial update touching only the default must NOT lift the ceiling
+    const updated = await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/users/${piaId}/agent-policy`,
+      payload: { defaultAgentId: a1.json().id },
+    });
+    expect(updated.json().ceilingAgentId).toBe(a1.json().id);
+
+    const grant = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/grants/agents",
+      payload: { userId: piaId, agentId: a2.json().id },
+    });
+    const del = await app.inject({
+      method: "DELETE", headers: AUTH, url: `/v1/grants/agents/${grant.json().id}`,
+    });
+    expect(del.statusCode).toBe(200);
+    const listing = await app.inject({ method: "GET", headers: AUTH, url: `/v1/users/${piaId}/agents` });
+    expect(listing.json().agents).toHaveLength(0);
+  });
+});

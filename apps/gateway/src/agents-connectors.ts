@@ -61,6 +61,26 @@ export function registerAgentConnectorRoutes(app: FastifyInstance, db: Db) {
     return row;
   });
 
+  app.delete("/v1/grants/agents/:grantId", async (req, reply) => {
+    const { grantId } = z.object({ grantId: z.string().uuid() }).parse(req.params);
+    const deleted = await db
+      .delete(agentGrants)
+      .where(eq(agentGrants.id, grantId))
+      .returning({ id: agentGrants.id });
+    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_grant" });
+    return { removed: true };
+  });
+
+  app.delete("/v1/grants/connectors/:grantId", async (req, reply) => {
+    const { grantId } = z.object({ grantId: z.string().uuid() }).parse(req.params);
+    const deleted = await db
+      .delete(connectorGrants)
+      .where(eq(connectorGrants.id, grantId))
+      .returning({ id: connectorGrants.id });
+    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_grant" });
+    return { removed: true };
+  });
+
   app.post("/v1/grants/agents", async (req, reply) => {
     const body = createAgentGrantSchema.parse(req.body);
     const [row] = await db
@@ -74,24 +94,23 @@ export function registerAgentConnectorRoutes(app: FastifyInstance, db: Db) {
     return reply.status(201).send(row);
   });
 
-  // §4 per-user default + ceiling (upsert).
+  // §4 per-user default + ceiling (partial upsert: an omitted field is left
+  // untouched — only an explicit null clears it, so a partial update can
+  // never silently lift the ceiling).
   app.post("/v1/users/:userId/agent-policy", async (req) => {
     const { userId } = userIdParam.parse(req.params);
     const body = setAgentPolicySchema.parse(req.body);
+    const set: Partial<{ defaultAgentId: string | null; ceilingAgentId: string | null }> = {};
+    if ("defaultAgentId" in (req.body as object)) set.defaultAgentId = body.defaultAgentId ?? null;
+    if ("ceilingAgentId" in (req.body as object)) set.ceilingAgentId = body.ceilingAgentId ?? null;
     const [row] = await db
       .insert(userAgentPolicies)
       .values({
         userId,
-        defaultAgentId: body.defaultAgentId ?? null,
-        ceilingAgentId: body.ceilingAgentId ?? null,
+        defaultAgentId: set.defaultAgentId ?? null,
+        ceilingAgentId: set.ceilingAgentId ?? null,
       })
-      .onConflictDoUpdate({
-        target: userAgentPolicies.userId,
-        set: {
-          defaultAgentId: body.defaultAgentId ?? null,
-          ceilingAgentId: body.ceilingAgentId ?? null,
-        },
-      })
+      .onConflictDoUpdate({ target: userAgentPolicies.userId, set })
       .returning();
     return row;
   });
@@ -151,7 +170,7 @@ export function registerAgentConnectorRoutes(app: FastifyInstance, db: Db) {
 
     const decision = evaluateAgent({
       userId,
-      agent: { id: agent.id, tier: agent.tier, enabled: agent.enabled },
+      agent: { id: agent.id, tier: agent.tier, enabled: agent.enabled, modes: agent.modes ?? null },
       mode: body.mode,
       agentGrants: grants,
       ceilingTier,

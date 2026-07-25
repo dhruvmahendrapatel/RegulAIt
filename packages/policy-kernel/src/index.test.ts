@@ -565,7 +565,7 @@ import {
   type ConnectorGrant,
 } from "./index.js";
 
-const AGENT: AgentRef = { id: "agent-claude", tier: 3, enabled: true };
+const AGENT: AgentRef = { id: "agent-claude", tier: 3, enabled: true, modes: null };
 const CONNECTOR = "connector-salesforce";
 
 function agentGrant(overrides: Partial<AgentGrant> = {}): AgentGrant {
@@ -706,5 +706,21 @@ describe("evaluateConnector (§2)", () => {
       connectorGrants: [connectorGrant({ userId: OTHER_USER })],
     });
     expect(d.effect).toBe("deny");
+  });
+});
+
+describe("agent declared modes (review fix)", () => {
+  it("the registry's declared modes bound every grant, even allowedModes null", () => {
+    const declared: AgentRef = { id: "agent-claude", tier: 3, enabled: true, modes: ["plan"] };
+    const ok = evaluateAgent({
+      userId: USER, agent: declared, mode: "plan", agentGrants: [agentGrant()],
+    });
+    expect(ok.effect).toBe("allow");
+
+    const undeclared = evaluateAgent({
+      userId: USER, agent: declared, mode: "execute", agentGrants: [agentGrant()],
+    });
+    expect(undeclared.effect).toBe("deny");
+    expect(undeclared.reason).toContain("not a declared mode");
   });
 });

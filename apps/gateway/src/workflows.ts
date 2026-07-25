@@ -24,6 +24,7 @@ import {
   type WorkflowDefinition,
   type WorkflowEvent,
 } from "@regulait/workflow-kernel";
+import { users } from "@regulait/db";
 import {
   advanceStageSchema,
   createAssignmentRuleSchema,
@@ -48,57 +49,66 @@ function resolveApprover(approver: string, initiatorUserId: string): string {
  */
 async function applyEvent(
   db: Db,
-  instance: InstanceRow,
+  instanceId: string,
   event: WorkflowEvent,
   actorUserId: string | null,
 ): Promise<{ state: InstanceState; effects: Effect[] }> {
-  const def = instance.definition as WorkflowDefinition;
-  const { state, effects } = transition(def, instance.state as InstanceState, event);
+  // One transaction with the instance row locked: concurrent decisions,
+  // re-opens, and aborts serialize instead of racing read-modify-write.
+  return db.transaction(async (tx) => {
+    const [instance] = await tx
+      .select()
+      .from(workflowInstances)
+      .where(eq(workflowInstances.id, instanceId))
+      .for("update");
+    if (!instance) throw new Error("instance disappeared");
 
-  await db
-    .update(workflowInstances)
-    .set({ state, status: state.status, updatedAt: new Date() })
-    .where(eq(workflowInstances.id, instance.id));
-  await db.insert(workflowEvents).values({ instanceId: instance.id, event, actorUserId });
+    const def = instance.definition as WorkflowDefinition;
+    const { state, effects } = transition(def, instance.state as InstanceState, event);
 
-  const isDenial = event.kind === "approval_denied" || event.kind === "abort";
-  await db.insert(auditLog).values({
-    userId: actorUserId ?? instance.initiatorUserId,
-    objectType: "workflow",
-    objectId: instance.id,
-    detail: { event },
-    effect: isDenial ? "deny" : "allow",
-    ruleId: `workflow:${event.kind}`,
-    ruleChain: [],
-    reason: `workflow instance event '${event.kind}' (status → ${state.status})`,
-  });
+    await tx
+      .update(workflowInstances)
+      .set({ state, status: state.status, updatedAt: new Date() })
+      .where(eq(workflowInstances.id, instance.id));
+    await tx.insert(workflowEvents).values({ instanceId: instance.id, event, actorUserId });
 
-  for (const effect of effects) {
-    if (effect.kind === "request_approval") {
-      // A re-opened sign-off supersedes any still-pending rows for the stage
-      // so a stale decision can't advance the new artifact version.
-      await db
+    const isDenial = event.kind === "approval_denied" || event.kind === "abort";
+    await tx.insert(auditLog).values({
+      userId: actorUserId ?? instance.initiatorUserId,
+      objectType: "workflow",
+      objectId: instance.id,
+      detail: { event },
+      effect: isDenial ? "deny" : "allow",
+      ruleId: `workflow:${event.kind}`,
+      ruleChain: [],
+      reason: `workflow instance event '${event.kind}' (status → ${state.status})`,
+    });
+
+    // A re-open stales EVERY outstanding gate downstream, and a terminal
+    // denial/abort must leave no live rows in the one inbox — supersede all
+    // pending rows for the instance in each of these cases.
+    if (event.kind === "artifact_submitted" || isDenial) {
+      await tx
         .update(approvals)
         .set({ status: "superseded" })
-        .where(
-          and(
-            eq(approvals.instanceId, instance.id),
-            eq(approvals.stageId, effect.stageId),
-            eq(approvals.status, "pending"),
-          ),
-        );
-      for (const approver of effect.approvers) {
-        await db.insert(approvals).values({
-          userId: instance.initiatorUserId,
-          objectType: "workflow",
-          instanceId: instance.id,
-          stageId: effect.stageId,
-          approverUserId: resolveApprover(approver, instance.initiatorUserId),
-        });
+        .where(and(eq(approvals.instanceId, instance.id), eq(approvals.status, "pending")));
+    }
+
+    for (const effect of effects) {
+      if (effect.kind === "request_approval") {
+        for (const approver of effect.approvers) {
+          await tx.insert(approvals).values({
+            userId: instance.initiatorUserId,
+            objectType: "workflow",
+            instanceId: instance.id,
+            stageId: effect.stageId,
+            approverUserId: resolveApprover(approver, instance.initiatorUserId),
+          });
+        }
       }
     }
-  }
-  return { state, effects };
+    return { state, effects };
+  });
 }
 
 /**
@@ -113,39 +123,28 @@ export async function applyWorkflowApprovalDecision(
   deciderUserId: string,
 ): Promise<void> {
   if (!approvalRow.instanceId || !approvalRow.stageId) return;
-  const [instance] = await db
-    .select()
-    .from(workflowInstances)
-    .where(eq(workflowInstances.id, approvalRow.instanceId));
-  if (!instance) return;
+  const stageId = approvalRow.stageId;
+  const instanceId = approvalRow.instanceId;
 
   if (decision === "denied") {
-    await db
-      .update(approvals)
-      .set({ status: "superseded" })
-      .where(
-        and(
-          eq(approvals.instanceId, instance.id),
-          eq(approvals.stageId, approvalRow.stageId),
-          eq(approvals.status, "pending"),
-        ),
-      );
-    await applyEvent(db, instance, { kind: "approval_denied" }, deciderUserId);
+    await applyEvent(db, instanceId, { kind: "approval_denied", stageId }, deciderUserId);
     return;
   }
 
+  // All-must-approve: advance only when no pending rows remain for the stage.
+  // A stale or wrong-stage decision is rejected by the kernel's stage check.
   const pending = await db
     .select({ id: approvals.id })
     .from(approvals)
     .where(
       and(
-        eq(approvals.instanceId, instance.id),
-        eq(approvals.stageId, approvalRow.stageId),
+        eq(approvals.instanceId, instanceId),
+        eq(approvals.stageId, stageId),
         eq(approvals.status, "pending"),
       ),
     );
   if (pending.length === 0) {
-    await applyEvent(db, instance, { kind: "approval_granted" }, deciderUserId);
+    await applyEvent(db, instanceId, { kind: "approval_granted", stageId }, deciderUserId);
   }
 }
 
@@ -155,6 +154,21 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db) {
   app.post("/v1/workflows/templates", async (req, reply) => {
     const body = createWorkflowTemplateSchema.parse(req.body);
     const definition = validateDefinition(body.definition);
+    // Approvers must be resolvable NOW — a bad approver id must fail template
+    // creation, not brick an instance mid-flight.
+    const named = definition.stages
+      .flatMap((st) => st.approvers ?? [])
+      .filter((a) => a !== "requesting_user");
+    if (named.length > 0) {
+      const uuidCheck = z.string().uuid();
+      if (named.some((a) => !uuidCheck.safeParse(a).success)) {
+        return reply.status(422).send({ error: "invalid_approver" });
+      }
+      const found = await db.select({ id: users.id }).from(users).where(inArray(users.id, named));
+      if (found.length !== new Set(named).size) {
+        return reply.status(422).send({ error: "invalid_approver" });
+      }
+    }
     const [row] = await db
       .insert(workflowTemplates)
       .values({ name: body.name, definition })
@@ -200,7 +214,10 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db) {
       }
       templateIds = [body.templateId];
     } else {
-      const rules = await db.select().from(workflowAssignmentRules);
+      const rules = await db
+        .select()
+        .from(workflowAssignmentRules)
+        .orderBy(workflowAssignmentRules.createdAt);
       templateIds = matchTemplates(body.change, rules);
       if (templateIds.length === 0) {
         return reply.status(422).send({ error: "no_workflow_matches_change" });
@@ -230,7 +247,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db) {
       })
       .returning();
 
-    const { state } = await applyEvent(db, instance!, { kind: "start" }, userId);
+    const { state } = await applyEvent(db, instance!.id, { kind: "start" }, userId);
     return reply.status(201).send({ id: instance!.id, status: state.status, state });
   });
 
@@ -265,9 +282,10 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db) {
     );
     if (!stage) return reply.status(404).send({ error: "unknown_artifact_stage" });
 
+    if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_drive" });
     const { state } = await applyEvent(
       db,
-      instance,
+      instance.id,
       { kind: "artifact_submitted", stageId: body.stageId },
       req.authCtx.userId,
     );
@@ -288,9 +306,10 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db) {
     const body = advanceStageSchema.parse(req.body);
     const loaded = await loadInstanceFor(req, instanceId);
     if (loaded.error) return reply.status(loaded.error).send({ error: "unavailable" });
+    if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_drive" });
     const { state } = await applyEvent(
       db,
-      loaded.instance,
+      loaded.instance.id,
       { kind: "human_trigger", stageId: body.stageId },
       req.authCtx.userId,
     );
@@ -301,7 +320,8 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db) {
     const { instanceId } = instanceIdParam.parse(req.params);
     const loaded = await loadInstanceFor(req, instanceId);
     if (loaded.error) return reply.status(loaded.error).send({ error: "unavailable" });
-    const { state } = await applyEvent(db, loaded.instance, { kind: "abort" }, req.authCtx.userId);
+    if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_drive" });
+    const { state } = await applyEvent(db, loaded.instance.id, { kind: "abort" }, req.authCtx.userId);
     return { status: state.status };
   });
 

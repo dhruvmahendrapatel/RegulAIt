@@ -1,0 +1,1 @@
+ALTER TABLE "approvals" ADD CONSTRAINT "approvals_instance_id_workflow_instances_id_fk" FOREIGN KEY ("instance_id") REFERENCES "public"."workflow_instances"("id") ON DELETE cascade ON UPDATE no action;

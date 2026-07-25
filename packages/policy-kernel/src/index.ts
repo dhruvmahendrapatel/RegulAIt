@@ -403,6 +403,8 @@ export interface AgentRef {
   /** capability/cost rank; higher = more capable/expensive. Basis of the §4 ceiling. */
   tier: number;
   enabled: boolean;
+  /** the registry's declared modes; null = registry does not constrain modes */
+  modes: string[] | null;
 }
 
 /** per-user agent entitlement; allowedModes null = every mode the agent has */
@@ -461,6 +463,18 @@ export function evaluateAgent(input: EvaluateAgentInput): AgentDecision {
     };
   }
   chain.push({ rule: "agent-registry-enabled", outcome: "allow" });
+
+  // The registry's declared modes bound every grant: an undeclared mode is
+  // invalid for everyone, even a grant with allowedModes null.
+  if (agent.modes !== null && !agent.modes.includes(mode)) {
+    chain.push({ rule: "agent-mode", outcome: "deny" });
+    return {
+      effect: "deny",
+      ruleId: "agent-mode",
+      ruleChain: chain,
+      reason: `mode '${mode}' is not a declared mode of agent '${agent.id}'`,
+    };
+  }
 
   const grant = input.agentGrants.find((g) => g.userId === userId && g.agentId === agent.id);
   if (!grant) {

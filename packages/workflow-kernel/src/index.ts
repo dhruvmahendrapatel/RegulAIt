@@ -1,5 +1,10 @@
 import { z } from "zod";
 
+/** invalid event for the instance's current state — a client error, not a crash */
+export class WorkflowStateError extends Error {}
+/** templates cannot be merged (same stage id, conflicting config) */
+export class MergeConflictError extends Error {}
+
 // ---------------------------------------------------------------------------
 // Template definition (§3): declarative, version-controllable, validated here.
 // Executable stage types in this slice: trigger, planning, artifact_generation,
@@ -146,13 +151,23 @@ export function matchTemplates(
 export function mergeDefinitions(defs: readonly WorkflowDefinition[]): WorkflowDefinition {
   if (defs.length === 0) throw new Error("mergeDefinitions requires at least one definition");
   if (defs.length === 1) return defs[0]!;
-  const seen = new Set<string>();
+  const byId = new Map<string, Stage>();
   const stages: Stage[] = [];
   for (const def of defs) {
     for (const stage of def.stages) {
-      if (seen.has(stage.id)) continue;
+      const existing = byId.get(stage.id);
+      if (existing) {
+        // identical duplicates dedupe; conflicting configs must not silently
+        // drop a (possibly stricter) template's stage
+        if (JSON.stringify(existing) !== JSON.stringify(stage)) {
+          throw new MergeConflictError(
+            `stage id '${stage.id}' appears in multiple templates with conflicting configs`,
+          );
+        }
+        continue;
+      }
       if (stage.type === "trigger" && stages.some((s) => s.type === "trigger")) continue;
-      seen.add(stage.id);
+      byId.set(stage.id, stage);
       stages.push(stage);
     }
   }
@@ -185,8 +200,8 @@ export interface InstanceState {
 export type WorkflowEvent =
   | { kind: "start" }
   | { kind: "artifact_submitted"; stageId: string }
-  | { kind: "approval_granted" }
-  | { kind: "approval_denied" }
+  | { kind: "approval_granted"; stageId: string }
+  | { kind: "approval_denied"; stageId: string }
   | { kind: "human_trigger"; stageId: string }
   | { kind: "stage_completed"; stageId: string }
   | { kind: "abort" };
@@ -283,7 +298,7 @@ export function transition(
   event: WorkflowEvent,
 ): TransitionResult {
   if (state.status === "completed" || state.status === "aborted" || state.status === "denied") {
-    throw new Error(`instance is terminal (${state.status}) and accepts no events`);
+    throw new WorkflowStateError(`instance is terminal (${state.status}) and accepts no events`);
   }
 
   if (event.kind === "abort") {
@@ -301,7 +316,7 @@ export function transition(
     const producer = def.stages.find(
       (st) => st.id === event.stageId && st.type === "artifact_generation",
     );
-    if (!producer) throw new Error(`no artifact_generation stage '${event.stageId}'`);
+    if (!producer) throw new WorkflowStateError(`no artifact_generation stage '${event.stageId}'`);
     const producerIndex = def.stages.findIndex((st) => st.id === event.stageId);
     const version = (state.artifactVersions[producer.output!] ?? 0) + 1;
     const s: InstanceState = {
@@ -321,15 +336,17 @@ export function transition(
       return runForward(def, s);
     }
     if (current?.id !== event.stageId) {
-      throw new Error(`instance is not waiting on artifact stage '${event.stageId}'`);
+      throw new WorkflowStateError(`instance is not waiting on artifact stage '${event.stageId}'`);
     }
     s.status = "running";
     return runForward(def, s);
   }
 
   if (event.kind === "approval_granted") {
-    if (current?.type !== "human_approval") {
-      throw new Error("instance is not blocked on an approval");
+    if (current?.type !== "human_approval" || current.id !== event.stageId) {
+      throw new WorkflowStateError(
+        `instance is not blocked on approval stage '${event.stageId}'`,
+      );
     }
     const s: InstanceState = {
       ...state,
@@ -343,8 +360,10 @@ export function transition(
   }
 
   if (event.kind === "approval_denied") {
-    if (current?.type !== "human_approval") {
-      throw new Error("instance is not blocked on an approval");
+    if (current?.type !== "human_approval" || current.id !== event.stageId) {
+      throw new WorkflowStateError(
+        `instance is not blocked on approval stage '${event.stageId}'`,
+      );
     }
     const s = { ...state, status: "denied" as const };
     return { state: s, effects: [{ kind: "instance_denied" }] };
@@ -352,10 +371,10 @@ export function transition(
 
   if (event.kind === "human_trigger" || event.kind === "stage_completed") {
     if (!current || current.id !== event.stageId) {
-      throw new Error(`instance is not waiting on stage '${event.stageId}'`);
+      throw new WorkflowStateError(`instance is not waiting on stage '${event.stageId}'`);
     }
     if (current.type !== "automated_build" && current.type !== "automated_check") {
-      throw new Error(`stage '${event.stageId}' is not triggerable`);
+      throw new WorkflowStateError(`stage '${event.stageId}' is not triggerable`);
     }
     const s: InstanceState = {
       ...state,
@@ -368,5 +387,5 @@ export function transition(
     return runForward(def, s);
   }
 
-  throw new Error(`unhandled event`);
+  throw new WorkflowStateError(`unhandled event`);
 }
