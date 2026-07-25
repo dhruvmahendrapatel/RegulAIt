@@ -242,6 +242,21 @@ measured usage ledger are written identically to the JSON path — streaming cha
 never governance or accounting. Deferred: streaming for worker-node/auto dispatch (runs are
 backend-driven, no client watching), multi-turn conversations.
 
+**OpenAI model adapter, 2026-07-25 — the provider-agnostic principle made real at the model
+layer.** `OpenAiProvider` in model-provider on the same playbook as the Anthropic adapter:
+official `openai` SDK (v6) with injectable fetch, chat.completions with
+`max_completion_tokens`, finish-reason mapping (stop/length/content_filter →
+end_turn/max_tokens/refusal), `message.refusal` honored — a refusal's content is never
+surfaced, matching the Anthropic discipline exactly — and streaming via `stream_options:
+{include_usage: true}` feeding the same `onText` callback with the same complete-result
+return. The registry now resolves anthropic + openai (apiKey required for both); google/xai
+stay explicitly rejected. ZERO gateway changes were needed: credentials (platform + BYO-key),
+routing, budgets, attribution, and streaming all already key off the provider string — the
+e2e proves a `provider: "openai"` agent rides the whole governed pipeline against a local
+fake chat.completions server (real adapter, correct Bearer key on the wire, measured usage
+ledgered). Deferred: google/xai adapters, OpenAI Responses-API surface, per-provider
+tool-use.
+
 **EPIC-06 started — PM-tool integration first slice, 2026-07-25.** New
 `packages/pm-provider` on the git-provider playbook (pillar 8, PM_TOOL_INTEGRATION_SPEC
 §2/§3/§6): neutral `PmProvider` interface (create/update/transition/comment/getWorkItem), the

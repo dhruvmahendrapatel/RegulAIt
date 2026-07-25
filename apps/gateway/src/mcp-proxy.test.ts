@@ -5508,3 +5508,74 @@ describe("streaming dispatch (SSE): same gates, same ledger, delivered as deltas
     expect(res.json().decision.ruleId).toBe("default-deny");
   });
 });
+
+describe("openai model adapter: the full governed pipeline over a second provider", () => {
+  it("dispatch rides an openai-provider agent end-to-end with measured usage", async () => {
+    // local fake chat.completions endpoint — the real adapter, no network
+    const hits: Array<{ auth: string | null }> = [];
+    const srv = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        hits.push({ auth: (req.headers.authorization as string) ?? null });
+        const parsed = JSON.parse(body || "{}");
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          id: "chatcmpl-e2e",
+          object: "chat.completion",
+          created: 1,
+          model: parsed.model,
+          choices: [{ index: 0, message: { role: "assistant", content: "openai says hi", refusal: null }, finish_reason: "stop", logprobs: null }],
+          usage: { prompt_tokens: 8, completion_tokens: 4, total_tokens: 12 },
+        }));
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    const port = (srv.address() as { port: number }).port;
+
+    try {
+      const oda = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email: "oai-oda@example.com", displayName: "OAI Oda" },
+      });
+      const odaAuth = await authFor(oda.json().id);
+      const agentRes = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/agents",
+        payload: {
+          name: "oai-agent", provider: "openai", tier: 1, modes: ["execute"],
+          costPerMTokIn: 2, costPerMTokOut: 8, model: "gpt-5",
+        },
+      });
+      await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/grants/agents",
+        payload: { userId: oda.json().id, agentId: agentRes.json().id },
+      });
+      await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/model-credentials",
+        payload: { provider: "openai", apiKey: "sk-oai-platform", baseUrl: `http://127.0.0.1:${port}/v1` },
+      });
+
+      const res = await app.inject({
+        method: "POST", headers: odaAuth, url: `/v1/agents/${agentRes.json().id}/invoke`,
+        payload: { mode: "execute", input: "hello openai", dispatch: true },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().dispatch.outputText).toBe("openai says hi");
+      expect(res.json().dispatch.stopReason).toBe("end_turn");
+      expect(res.json().dispatch.usage).toEqual({ inputTokens: 8, outputTokens: 4 });
+      expect(res.json().dispatch.credentialSource).toBe("platform");
+      expect(hits).toHaveLength(1);
+      expect(hits[0]!.auth).toBe("Bearer sk-oai-platform");
+
+      const ledger = await app.inject({
+        method: "GET", headers: AUTH, url: `/v1/usage-events?userId=${oda.json().id}`,
+      });
+      expect(ledger.json().events[0]).toMatchObject({
+        provider: "openai", model: "gpt-5", inputTokens: 8, outputTokens: 4,
+      });
+    } finally {
+      srv.closeAllConnections();
+      await new Promise<void>((r) => srv.close(() => r()));
+    }
+  });
+});
