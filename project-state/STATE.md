@@ -124,9 +124,18 @@ run — visible at `/v1/runs/:id`, bound via `workflow_instance_id` (waiting sin
 turns terminal: completed → `execution_succeeded` (flowing straight into downstream stages),
 aborted → `execution_failed` with the stage retryable (retry spawns a FRESH run; a live or
 completed run is never duplicated — idempotent like branch creation). The kernel forbids
-human-triggering a build-with-run stage — no bypassing the governed execution. Not yet:
-streaming, multi-turn/system prompts (nested-run workers still get node titles/inputs, not
-workflow artifacts), per-user credentials, openai/google/xai adapters.
+human-triggering a build-with-run stage — no bypassing the governed execution. **Fifth slice:
+signed-off artifacts in nested-run worker prompts — §2's scope-lock made real.** When a
+dispatched node belongs to a workflow-bound run, `buildNestedRunContext` injects the
+workflow's SIGNED-OFF artifacts as the model's system context ("execute strictly within the
+signed-off requirements below; do not expand scope") — the build executes against exactly
+what was approved, never a re-imagined version. The build stage's `scope` narrows the context
+to that one artifact; without it, the latest version of every artifact is included; artifact
+edits re-open the workflow upstream, so a re-run always carries the re-signed version. §6
+traceability: the exact `{output, version}` list that framed each execution is recorded in
+the `node_dispatched` history entry. Standalone (non-workflow) runs stay system-free —
+verified down to the provider call via the shared mock's dispatch log. Not yet: streaming,
+multi-turn dispatch, per-user credentials, openai/google/xai adapters.
 
 **EPIC-06 started — PM-tool integration first slice, 2026-07-25.** New
 `packages/pm-provider` on the git-provider playbook (pillar 8, PM_TOOL_INTEGRATION_SPEC

@@ -8,6 +8,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { z } from "zod";
 import { createDb, eq, mcpTools, modelCredentials, runMigrations, type Db } from "@regulait/db";
+import { resolveModelProvider, type MockModelProvider } from "@regulait/model-provider";
 import { buildApp } from "./app.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -4324,5 +4325,146 @@ describe("workflow build-stage nesting (§8): a build stage executes as an orche
       method: "GET", headers: nitaAuth, url: `/v1/workflows/instances/${instanceId}`,
     });
     expect(after.json().instance.status).toBe("completed");
+  });
+});
+
+describe("nested-run workers receive signed-off workflow artifacts (§2 scope-lock)", () => {
+  const mock = resolveModelProvider({ provider: "mock" }) as MockModelProvider;
+  const mkNode = (id: string, agentId: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    title: `task ${id}`,
+    ownerAgentId: agentId,
+    mode: "execute",
+    estimate: { in: 1, out: 1 },
+    ...extra,
+  });
+
+  let pipaId: string;
+  let pipaAuth: { authorization: string };
+  let scopeWorkerId: string;
+
+  it("the worker's system context is exactly the signed-off artifact, recorded for traceability", async () => {
+    const pipa = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email: "scope-pipa@example.com", displayName: "Scope Pipa" },
+    });
+    pipaId = pipa.json().id;
+    pipaAuth = await authFor(pipaId);
+    const approver = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email: "scope-approver@example.com", displayName: "Scope Approver" },
+    });
+    const agentRes = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/agents",
+      payload: {
+        name: "scope-worker", provider: "mock", tier: 0, modes: ["execute"],
+        costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-scope",
+      },
+    });
+    scopeWorkerId = agentRes.json().id;
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/grants/agents",
+      payload: { userId: pipaId, agentId: scopeWorkerId },
+    });
+
+    const tpl = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/templates",
+      payload: {
+        name: "scope-locked-build",
+        definition: {
+          workflow: "scope-locked-build",
+          stages: [
+            { id: "intake", type: "trigger" },
+            { id: "requirements", type: "artifact_generation", output: "requirements_file" },
+            {
+              id: "build",
+              type: "automated_build",
+              scope: "requirements_file",
+              run: {
+                run: "scope-run",
+                escalationApproverUserId: approver.json().id,
+                nodes: [mkNode("impl", scopeWorkerId)],
+              },
+            },
+          ],
+        },
+      },
+    });
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/assignment-rules",
+      payload: { templateId: tpl.json().id, changeType: "scope-lock-test" },
+    });
+
+    const started = await app.inject({
+      method: "POST", headers: pipaAuth, url: "/v1/workflows/instances",
+      payload: {
+        change: { description: "scoped", paths: ["s.ts"], changeType: "scope-lock-test", environment: "staging" },
+      },
+    });
+    const instanceId = started.json().id;
+    expect(started.json().status).toBe("blocked_on_artifact");
+
+    await app.inject({
+      method: "POST", headers: pipaAuth, url: `/v1/workflows/instances/${instanceId}/artifacts`,
+      payload: { stageId: "requirements", content: "UNIQUE-SCOPE-LOCK-CONTENT-77" },
+    });
+    const view = await app.inject({
+      method: "GET", headers: pipaAuth, url: `/v1/workflows/instances/${instanceId}`,
+    });
+    const runId = view.json().instance.context["runId:build"];
+    expect(runId).toBeTruthy();
+
+    const auto = await app.inject({
+      method: "POST", headers: pipaAuth, url: `/v1/runs/${runId}/auto`,
+      payload: { acceptReviews: true },
+    });
+    expect(auto.json().status).toBe("completed");
+    const after = await app.inject({
+      method: "GET", headers: pipaAuth, url: `/v1/workflows/instances/${instanceId}`,
+    });
+    expect(after.json().instance.status).toBe("completed");
+
+    // the model call itself carried the signed-off artifact as system context
+    const dispatch = mock.dispatches.find(
+      (d) => d.model === "mock-scope" && d.system?.includes("UNIQUE-SCOPE-LOCK-CONTENT-77"),
+    );
+    expect(dispatch).toBeDefined();
+    expect(dispatch!.system).toContain("signed-off artifact 'requirements_file' v1");
+    expect(dispatch!.system).toContain("node 'impl'");
+    expect(dispatch!.system).toContain("do not expand scope");
+
+    // §6 traceability: the run history records which artifact versions framed
+    // the execution
+    const runView = await app.inject({ method: "GET", headers: pipaAuth, url: `/v1/runs/${runId}` });
+    const evt = runView.json().events.find(
+      (e: { event: { kind: string } }) => e.event.kind === "node_dispatched",
+    );
+    expect(evt.event.contextArtifacts).toEqual([{ output: "requirements_file", version: 1 }]);
+  });
+
+  it("standalone runs stay artifact-free: no system context is injected", async () => {
+    const approver = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email: "scope-approver2@example.com", displayName: "Scope Approver 2" },
+    });
+    const created = await app.inject({
+      method: "POST", headers: pipaAuth, url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "standalone-no-system",
+          escalationApproverUserId: approver.json().id,
+          nodes: [mkNode("solo", scopeWorkerId)],
+        },
+      },
+    });
+    const runId = created.json().id;
+    const auto = await app.inject({
+      method: "POST", headers: pipaAuth, url: `/v1/runs/${runId}/auto`,
+      payload: { acceptReviews: true, inputs: { solo: "STANDALONE-NO-SYSTEM-42" } },
+    });
+    expect(auto.json().status).toBe("completed");
+    const dispatch = mock.dispatches.find((d) => d.input === "STANDALONE-NO-SYSTEM-42");
+    expect(dispatch).toBeDefined();
+    expect(dispatch!.system).toBeUndefined();
   });
 });

@@ -72,6 +72,8 @@ export async function executeGovernedDispatch(
     /** routing counterfactual for measured savings; null = no routing happened */
     baseline?: AgentRow | null;
     input: string;
+    /** system context (e.g. a nested run's signed-off workflow artifacts) */
+    system?: string | undefined;
     maxTokens?: number | undefined;
     detail?: Record<string, unknown>;
   },
@@ -116,6 +118,7 @@ export async function executeGovernedDispatch(
     result = await provider.dispatch({
       model: served.model,
       input: args.input,
+      ...(args.system ? { system: args.system } : {}),
       ...(args.maxTokens ? { maxTokens: args.maxTokens } : {}),
     });
   } catch (err) {

@@ -12,8 +12,11 @@ import {
   orchestrationRuns,
   userAgentPolicies,
   users,
+  workflowArtifacts,
+  workflowInstances,
   type Db,
 } from "@regulait/db";
+import type { WorkflowDefinition } from "@regulait/workflow-kernel";
 import { evaluateAgent, type AgentDecision } from "@regulait/policy-kernel";
 import {
   estimateGraphCost,
@@ -181,6 +184,56 @@ type NodeDispatchOutcome =
       budgetBreached: boolean;
     };
 
+/** §2 scope-lock made real for nested runs: workers execute against exactly
+ * the workflow's SIGNED-OFF artifacts, injected as system context — never a
+ * re-imagined version of the requirements. The build stage's `scope` narrows
+ * the context to one artifact; without it every artifact's latest version is
+ * included. Returns null when the instance has no artifacts (nothing to
+ * inject) or the run isn't the one the stage is bound to. */
+async function buildNestedRunContext(
+  db: Db,
+  instanceId: string,
+  runId: string,
+  runName: string,
+  node: TaskNode,
+): Promise<{ system: string; artifacts: Array<{ output: string; version: number }> } | null> {
+  const [instance] = await db
+    .select()
+    .from(workflowInstances)
+    .where(eq(workflowInstances.id, instanceId));
+  if (!instance) return null;
+  const def = instance.definition as WorkflowDefinition;
+  const context = instance.context as Record<string, unknown>;
+  const stage = def.stages.find(
+    (st) => st.type === "automated_build" && context[`runId:${st.id}`] === runId,
+  );
+
+  const rows = await db
+    .select()
+    .from(workflowArtifacts)
+    .where(eq(workflowArtifacts.instanceId, instanceId))
+    .orderBy(workflowArtifacts.version);
+  // latest version per output, optionally narrowed to the stage's scope
+  const latest = new Map<string, { output: string; version: number; content: string }>();
+  for (const row of rows) {
+    if (stage?.scope && row.output !== stage.scope) continue;
+    latest.set(row.output, { output: row.output, version: row.version, content: row.content });
+  }
+  if (latest.size === 0) return null;
+
+  const artifacts = [...latest.values()];
+  const sections = artifacts
+    .map((a) => `--- signed-off artifact '${a.output}' v${a.version} ---\n${a.content}`)
+    .join("\n\n");
+  return {
+    system:
+      `You are the worker agent for node '${node.id}' ("${node.title}") of run '${runName}', ` +
+      `executing the build stage of a governed workflow. Execute strictly within the ` +
+      `signed-off requirements below; do not expand scope.\n\n${sections}`,
+    artifacts: artifacts.map((a) => ({ output: a.output, version: a.version })),
+  };
+}
+
 /** Execute one in_progress node's work through the shared governed-dispatch
  * core: §5.1 re-checked under the INITIATING user at execution time, §5.2
  * measured-spend accounting, node_dispatched history, audit trail. Callers
@@ -235,6 +288,12 @@ async function dispatchRunNode(
     return { kind: "budget_blocked_measured", measuredSpentUsd: measuredSpent, capUsd: budget.capUsd };
   }
 
+  // §8/§2: a nested run's workers receive the workflow's signed-off
+  // artifacts as system context (scope-lock) — standalone runs get none.
+  const nested = run.workflowInstanceId
+    ? await buildNestedRunContext(db, run.workflowInstanceId, run.id, graph.run, node)
+    : null;
+
   const [servedAgent] = await db.select().from(agents).where(eq(agents.id, ownerId));
   const outcome = await executeGovernedDispatch(db, dataKey, {
     userId: run.initiatingUserId,
@@ -242,8 +301,14 @@ async function dispatchRunNode(
     requestedAgentId: node.ownerAgentId,
     baseline: null,
     input: args.input ?? node.title,
+    system: nested?.system,
     maxTokens: args.maxTokens,
-    detail: { runId: run.id, nodeId, mode: node.mode },
+    detail: {
+      runId: run.id,
+      nodeId,
+      mode: node.mode,
+      ...(nested ? { contextArtifacts: nested.artifacts } : {}),
+    },
   });
 
   if (!outcome.ok) {
@@ -329,6 +394,9 @@ async function dispatchRunNode(
       refusal: outcome.result.refusal,
       usage: outcome.result.usage,
       costUsd: outcome.result.costUsd,
+      // §6 traceability: exactly which signed-off artifact versions framed
+      // this execution
+      ...(nested ? { contextArtifacts: nested.artifacts } : {}),
       outputText: outcome.result.outputText.slice(0, 20_000),
     },
     actorUserId,
