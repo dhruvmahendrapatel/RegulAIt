@@ -2621,3 +2621,181 @@ describe("per-run budget caps (EPIC-05 §5.2)", () => {
     expect(afterApproval.statusCode).toBe(200);
   });
 });
+
+describe("PM-tool integration (EPIC-06 slice)", () => {
+  let pmUserId: string;
+  let pmUserAuth: { authorization: string };
+  let pmApproverId: string;
+  let workerId: string;
+  let runId: string;
+
+  it("connections store encrypted tokens, validate mappings, and reject unimplemented adapters", async () => {
+    const u = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "pm-pete@example.com", displayName: "PM Pete" },
+    });
+    pmUserId = u.json().id;
+    pmUserAuth = await authFor(pmUserId);
+    const a = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "pm-approver@example.com", displayName: "PM Approver" },
+    });
+    pmApproverId = a.json().id;
+
+    const jira = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/pm/connections",
+      payload: { name: "jira-main", provider: "jira", project: "PROJ", token: "tok" },
+    });
+    expect(jira.statusCode).toBe(422);
+
+    const badMapping = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/pm/connections",
+      payload: {
+        name: "bad-map",
+        provider: "mock",
+        project: "regulait",
+        token: "tok",
+        mapping: { task: { fields: {} } },
+      },
+    });
+    expect(badMapping.statusCode).toBe(400);
+
+    const ok = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/pm/connections",
+      payload: { name: "mock-ado", provider: "mock", project: "regulait", token: "pm-secret" },
+    });
+    expect(ok.statusCode).toBe(201);
+    expect(JSON.stringify(ok.json())).not.toContain("pm-secret");
+
+    const listing = await app.inject({ method: "GET", headers: AUTH, url: "/v1/pm/connections" });
+    expect(JSON.stringify(listing.json())).not.toContain("pm-secret");
+  });
+
+  it("pm-sync links every task-graph node to a real work item, idempotently, audited", async () => {
+    const agent = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/agents",
+      payload: { name: "pm-worker", provider: "anthropic", tier: 1, modes: ["execute"] },
+    });
+    workerId = agent.json().id;
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/grants/agents",
+      payload: { userId: pmUserId, agentId: workerId },
+    });
+
+    const created = await app.inject({
+      method: "POST",
+      headers: pmUserAuth,
+      url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "pm-linked-run",
+          escalationApproverUserId: pmApproverId,
+          nodes: [
+            { id: "api", title: "Build the API", ownerAgentId: workerId, mode: "execute" },
+            { id: "docs", title: "Write the docs", ownerAgentId: workerId, mode: "execute", dependsOn: ["api"] },
+          ],
+        },
+      },
+    });
+    runId = created.json().id;
+
+    const sync = await app.inject({
+      method: "POST",
+      headers: pmUserAuth,
+      url: `/v1/runs/${runId}/pm-sync`,
+      payload: { connectionName: "mock-ado" },
+    });
+    expect(sync.statusCode).toBe(201);
+    expect(sync.json().created).toHaveLength(2);
+
+    // idempotent: second sync creates nothing new
+    const again = await app.inject({
+      method: "POST",
+      headers: pmUserAuth,
+      url: `/v1/runs/${runId}/pm-sync`,
+      payload: { connectionName: "mock-ado" },
+    });
+    expect(again.json().created).toHaveLength(0);
+    expect(again.json().skipped.sort()).toEqual(["api", "docs"]);
+
+    // the mock provider really holds the items with mapped fields
+    const { resolvePmProvider } = await import("@regulait/pm-provider");
+    const mock = resolvePmProvider({ provider: "mock", token: "" });
+    const first = sync.json().created.find((c: { nodeId: string }) => c.nodeId === "api");
+    const item = await mock.getWorkItem("regulait", first.externalId);
+    expect(item.fields.title).toBe("Build the API");
+
+    // §5.3-style: creations are in the one audit trail
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit?userId=${pmUserId}` });
+    const pmRows = audit.json().entries.filter(
+      (e: { objectType: string }) => e.objectType === "pm_work_item",
+    );
+    expect(pmRows.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("node status changes mirror outbound through the statusMap (§3/§5)", async () => {
+    const ev = (payload: Record<string, unknown>) =>
+      app.inject({ method: "POST", headers: pmUserAuth, url: `/v1/runs/${runId}/events`, payload });
+    await ev({ kind: "start" });
+    const started = await ev({ kind: "node_started", nodeId: "api" });
+    expect(started.json().pmSync).toEqual({ ok: true, state: "Doing" });
+
+    const { resolvePmProvider } = await import("@regulait/pm-provider");
+    const mock = resolvePmProvider({ provider: "mock", token: "" });
+    const links = await app.inject({
+      method: "GET",
+      headers: pmUserAuth,
+      url: `/v1/pm/links?runId=${runId}`,
+    });
+    const apiLink = links.json().links.find((l: { nodeId: string }) => l.nodeId === "api");
+    expect((await mock.getWorkItem("regulait", apiLink.externalId)).state).toBe("Doing");
+
+    await ev({ kind: "node_submitted", nodeId: "api" });
+    const accepted = await ev({ kind: "node_accepted", nodeId: "api" });
+    expect(accepted.json().pmSync).toEqual({ ok: true, state: "Done" });
+    expect((await mock.getWorkItem("regulait", apiLink.externalId)).state).toBe("Done");
+  });
+
+  it("the links view reads PM-authoritative fields through live — no cached copy (§3)", async () => {
+    // simulate a human editing the description IN THE PM TOOL
+    const { resolvePmProvider } = await import("@regulait/pm-provider");
+    const mock = resolvePmProvider({ provider: "mock", token: "" });
+    const links = await app.inject({
+      method: "GET",
+      headers: pmUserAuth,
+      url: `/v1/pm/links?runId=${runId}`,
+    });
+    const docsLink = links.json().links.find((l: { nodeId: string }) => l.nodeId === "docs");
+    await mock.updateFields("regulait", docsLink.externalId, { description: "edited in the PM tool" });
+
+    const live = await app.inject({
+      method: "GET",
+      headers: pmUserAuth,
+      url: `/v1/pm/links?runId=${runId}&live=true`,
+    });
+    const docsLive = live.json().links.find((l: { nodeId: string }) => l.nodeId === "docs");
+    expect(docsLive.live.fields.description).toBe("edited in the PM tool");
+
+    // non-participants see nothing
+    const stranger = await app.inject({
+      method: "GET",
+      headers: await authFor(pmApproverId),
+      url: `/v1/pm/links?runId=${runId}`,
+    });
+    expect(stranger.statusCode).toBe(404);
+  });
+});

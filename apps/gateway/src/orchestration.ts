@@ -31,6 +31,7 @@ import {
 } from "@regulait/orchestration-kernel";
 import { classifyComplexity, estimateTokens, routeModel } from "@regulait/optimizer-kernel";
 import { createRunSchema, runEventSchema } from "@regulait/shared";
+import { mirrorNodeStatus } from "./pm.js";
 import { z } from "zod";
 
 /** §5.2 budget envelope persisted on the run. Every number is an ESTIMATE
@@ -203,7 +204,11 @@ export async function applyRunApprovalDecision(
   await applyRunEvent(db, approvalRow.runId, event, deciderUserId);
 }
 
-export function registerOrchestrationRoutes(app: FastifyInstance, db: Db) {
+export function registerOrchestrationRoutes(
+  app: FastifyInstance,
+  db: Db,
+  opts: { dataKey?: string } = {},
+) {
   async function loadRunFor(req: { authCtx: { userId: string | null; isAdmin: boolean } }, runId: string) {
     const [run] = await db.select().from(orchestrationRuns).where(eq(orchestrationRuns.id, runId));
     if (!run) return { error: 404 as const };
@@ -550,11 +555,21 @@ export function registerOrchestrationRoutes(app: FastifyInstance, db: Db) {
         .set({ budget: { ...budget, spentUsd: Number((budget.spentUsd + nodeCost).toFixed(6)) } })
         .where(eq(orchestrationRuns.id, runId));
     }
+    // EPIC-06 §3/§5: node status changes mirror outbound to the linked work
+    // item. A mirror failure never fails the run event — it is surfaced here.
+    let pmSync: Awaited<ReturnType<typeof mirrorNodeStatus>> = null;
+    if ("nodeId" in event) {
+      const newStatus = (run.state as RunState).nodeStatuses[event.nodeId];
+      if (newStatus) {
+        pmSync = await mirrorNodeStatus(db, opts.dataKey, runId, event.nodeId, newStatus, req.authCtx.userId);
+      }
+    }
     return {
       status: run.status,
       state: run.state,
       readyNodes: readyNodes(run.graph as TaskGraph, run.state as RunState),
       effects,
+      ...(pmSync ? { pmSync } : {}),
     };
   });
 

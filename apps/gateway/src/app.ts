@@ -62,6 +62,7 @@ import { registerMcpProxy } from "./mcp-proxy.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
 import { registerOptimizationRoutes } from "./optimization.js";
 import { applyRunApprovalDecision, registerOrchestrationRoutes } from "./orchestration.js";
+import { registerPmRoutes } from "./pm.js";
 import { RunStateError } from "@regulait/orchestration-kernel";
 import { applyWorkflowApprovalDecision, registerWorkflowRoutes } from "./workflows.js";
 import { MergeConflictError, WorkflowStateError } from "@regulait/workflow-kernel";
@@ -129,6 +130,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "POST /v1/runs",
     "POST /v1/runs/:runId/events",
     "GET /v1/runs/:runId",
+    "POST /v1/runs/:runId/pm-sync",
+    "GET /v1/pm/links",
   ]);
   app.addHook("preHandler", async (req, reply) => {
     const route = `${req.method} ${req.routeOptions.url ?? ""}`;
@@ -539,7 +542,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   registerAgentConnectorRoutes(app, db);
   registerOptimizationRoutes(app, db);
-  registerOrchestrationRoutes(app, db);
+  registerOrchestrationRoutes(app, db, { dataKey: opts.dataKey });
+  registerPmRoutes(app, db, { dataKey: opts.dataKey });
 
   registerWorkflowRoutes(app, db, { dataKey: opts.dataKey });
 

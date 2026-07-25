@@ -63,6 +63,26 @@ and a gateway executor: create_branch → open_pr (body auto-linked to the signe
 requirements artifact, §2 stage 7) → merge (configured strategy) with results in
 instance.context, failures retryable via /advance, everything audited.
 
+**EPIC-06 started — PM-tool integration first slice, 2026-07-25.** New
+`packages/pm-provider` on the git-provider playbook (pillar 8, PM_TOOL_INTEGRATION_SPEC
+§2/§3/§6): neutral `PmProvider` interface (create/update/transition/comment/getWorkItem), the
+load-bearing FIELD MAPPING layer as pure zod-validated config with per-adapter defaults an
+admin overrides (§7: never hardcoded), an Azure DevOps adapter (REST 7.x, PAT, injectable
+fetch, json-patch), an in-memory mock, and a registry that explicitly rejects
+jira/linear/asana/monday/generic_webhook until implemented. Migration 0013: `pm_connections`
+(AES-256-GCM tokens like git_connections) + `pm_links` — the record that makes a task-graph
+node BE a work item rather than a shadow copy; RegulAIt stores ONLY the linkage. §3 source of
+truth honored literally: priority/description/acceptance-criteria are never cached — the links
+view reads them through live (`?live=true`) from the PM tool. Status ownership (documented
+decision, spec silent): RegulAIt owns node status (it owns the state machine) and mirrors it
+OUTBOUND via the mapping's statusMap on every node event; unmapped statuses are skipped, never
+invented; mirror failures are surfaced in the response, never fail the run event, never hidden.
+Every creation/mirror writes the one audit trail (objectType "pm_work_item"). Endpoints:
+PM connection CRUD (admin), `POST /v1/runs/:id/pm-sync` (idempotent node→work-item linking),
+`GET /v1/pm/links` (+live read-through). Not in the slice: inbound sync (webhooks/polling —
+transport deliberately unchosen, needs an ADR), decision records (§4), approval mirroring
+(§5 — natural next slice), Jira + remaining adapters, workflow-instance linking.
+
 **EPIC-05 started — multi-agent orchestration first slice, 2026-07-25.** New pure
 `packages/orchestration-kernel` (pillar 7, MULTI_AGENT_ORCHESTRATION_SPEC §2–§5): task-graph
 validation (zod + cycle detection + §4 ownership rule: nodes sharing files must be
@@ -218,7 +238,7 @@ with a real in-process upstream MCP server and real MCP client (26 tests total).
 | EPIC-03 | Workflow engine MVP (now includes optional Design/Architecture sign-off stage type) | **in progress** — first slice merged (PR #9) | WORKFLOW_ENGINE_SPEC.md, ADR-0007 |
 | EPIC-04 | Token/cost optimization MVP (escalated to P0) | **in progress** — routing kernel + cost_events ledger (PR #12), lazy tool-loading (PR #13) merged; §9 workflow cost-sensitivity tag built | TOKEN_OPTIMIZATION_SPEC.md, ADR-0007 |
 | EPIC-05 | Multi-agent orchestration MVP (PM/Team-Lead/Worker delegation) | **in progress** — slice 1 merged (PR #14: kernel + runs + escalations); slice 2 built (§5.2 per-run budget caps: estimate, re-plan, approval gates) | MULTI_AGENT_ORCHESTRATION_SPEC.md, ADR-0008 |
-| EPIC-06 | PM-tool integration MVP (Azure DevOps/Jira/etc.) | not started | PM_TOOL_INTEGRATION_SPEC.md, ADR-0008 |
+| EPIC-06 | PM-tool integration MVP (Azure DevOps/Jira/etc.) | **in progress** — first slice built (pm-provider package: mapping layer + ADO/mock adapters; node↔work-item links; outbound status mirror; live read-through) | PM_TOOL_INTEGRATION_SPEC.md, ADR-0008 |
 
 ## Components
 | ID | Name | Status | Related |
