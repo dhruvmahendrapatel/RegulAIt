@@ -300,10 +300,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // visible, not silent.
   app.get("/v1/users/:userId/servers/:serverId/entitlements", async (req) => {
     const { userId, serverId } = visibleToolsParams.parse(req.params);
-    const [entitlements, roleRows] = await Promise.all([
+    const [entitlements, roleRows, serverTools] = await Promise.all([
       loadEntitlements(db, userId, serverId),
       db.select().from(roles),
+      db.select().from(mcpTools).where(eq(mcpTools.serverId, serverId)),
     ]);
+    const toolKindByName = new Map(serverTools.map((t) => [t.name, t.kind]));
     const roleName = (roleId: string) => roleRows.find((r) => r.id === roleId)?.name ?? roleId;
     const revocationFor = (toolName: string | null) =>
       entitlements.revocations?.find((r) => r.toolName === null || r.toolName === toolName);
@@ -346,8 +348,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           const roleToolNames = new Set(
             (entitlements.roleToolGrants ?? []).map((g) => g.toolName),
           );
+          // Only read-kind tools that exist on the server were ever conferred
+          // by read-only-all, so only those are genuine carve-outs of it.
           const carveOuts = (entitlements.revocations ?? [])
-            .filter((r) => r.toolName !== null && !roleToolNames.has(r.toolName))
+            .filter(
+              (r) =>
+                r.toolName !== null &&
+                !roleToolNames.has(r.toolName) &&
+                toolKindByName.get(r.toolName) === "read",
+            )
             .map((r) => ({ toolName: r.toolName, revocationId: r.id }));
           return {
             kind: "server-read-only" as const,

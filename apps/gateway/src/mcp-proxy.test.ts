@@ -1478,3 +1478,57 @@ describe("git-provider workflow stages (EPIC-03)", () => {
     expect(retried.json().context.lastError).toBeUndefined();
   });
 });
+
+describe("agents/connectors review follow-ups", () => {
+  it("carve-outs exclude write-kind and nonexistent tools; oversized invoke strings are rejected", async () => {
+    const sam = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email: "proxy-sam@example.com", displayName: "Proxy Sam" },
+    });
+    const samId = sam.json().id;
+    const role = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/roles", payload: { name: "sam-reader" },
+    });
+    await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/roles/${role.json().id}/grants/servers`,
+      payload: { serverId, readOnlyAll: true },
+    });
+    await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/users/${samId}/roles`,
+      payload: { roleId: role.json().id },
+    });
+    // three revocations: a real read tool, a write tool, and a ghost tool
+    for (const toolName of ["get_time", "write_note", "ghost_tool"]) {
+      await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/revocations",
+        payload: { userId: samId, serverId, toolName },
+      });
+    }
+
+    const view = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/users/${samId}/servers/${serverId}/entitlements`,
+    });
+    const serverEntry = view
+      .json()
+      .entitlements.find(
+        (e: { kind: string; source: string }) => e.kind === "server-read-only" && e.source === "role",
+      );
+    // only the read tool that exists is a genuine carve-out of read-only-all
+    expect(serverEntry.revokedTools.map((c: { toolName: string }) => c.toolName)).toEqual([
+      "get_time",
+    ]);
+    // all three revocations remain discoverable in the flat list
+    expect(view.json().revocations).toHaveLength(3);
+
+    const agent = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/agents",
+      payload: { name: "bounded-agent", provider: "test", tier: 1 },
+    });
+    const samAuth = await authFor(samId);
+    const oversized = await app.inject({
+      method: "POST", headers: samAuth, url: `/v1/agents/${agent.json().id}/invoke`,
+      payload: { mode: "x".repeat(65) },
+    });
+    expect(oversized.statusCode).toBe(400);
+  });
+});
