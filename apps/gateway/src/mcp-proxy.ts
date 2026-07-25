@@ -77,10 +77,11 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
   app.post("/mcp/:serverId", async (req, reply) => {
     const { serverId } = proxyParams.parse(req.params);
 
-    // Interim identity mechanism until real authn lands: trusted header only.
-    const userId = req.headers["x-regulait-user-id"];
-    if (typeof userId !== "string" || !z.string().uuid().safeParse(userId).success) {
-      return reply.status(401).send({ error: "missing_or_invalid_user" });
+    // Identity comes from the app-level auth hook (API key). The bootstrap
+    // token has no user identity, so it cannot call tools.
+    const userId = req.authCtx.userId;
+    if (!userId) {
+      return reply.status(403).send({ error: "bootstrap_cannot_call_tools" });
     }
 
     const [serverRow] = await db.select().from(mcpServers).where(eq(mcpServers.id, serverId));

@@ -49,6 +49,16 @@ admin CRUD, `/v1/evaluate` writes an audit row for every decision, visible-tools
 implements §3's visibility filtering). Work is on branch `claude/status-check-2gbrwf` (draft PR).
 **Not yet in the slice**: roles, agents/connectors/initiatives object types, admin portal.
 
+**Real authn landed (PR #6) — the pre-ship blocker is closed.** Per-user API keys (`rgl_` +
+24 random bytes, only the sha256 hash stored, shown once at creation, revocable, lastUsedAt
+tracked), `users.isAdmin` flag, and a deploy-time `REGULAIT_BOOTSTRAP_TOKEN` (admin with no
+user identity — exists only to mint the first real admin; cannot call tools or decide
+approvals). Every gateway route now requires a valid Bearer token; everything is admin-only
+except approvals-decide (named approver), own-visible-tools, and the MCP proxy (any user key).
+The proxy's trusted `x-regulait-user-id` header is gone — identity comes from the key. The
+approvals decide endpoint derives the decider from the authenticated identity (the old
+body-supplied `deciderUserId` was spoofable). Migration 0003 (`api_keys`, `users.is_admin`).
+
 **Data-scope rules landed (PR #5) — §3 feature-complete for the MCP object type.** Kernel:
 `DataScopeRule` input (per-user×server, optional tool scope, dot-path into call arguments,
 allowed-values list) — all matching rules must pass (AND), missing/non-scalar values fail

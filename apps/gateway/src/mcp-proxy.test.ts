@@ -72,6 +72,9 @@ async function startUpstream(): Promise<{ url: string; close: () => Promise<void
 
 // --- test setup ---
 
+const BOOT = "test-bootstrap-token";
+const AUTH = { authorization: `Bearer ${BOOT}` };
+
 let db: Db;
 let app: ReturnType<typeof buildApp>;
 let upstream: Awaited<ReturnType<typeof startUpstream>>;
@@ -80,18 +83,33 @@ let serverId: string;
 let aliceId: string;
 let bobId: string;
 
-function mcpClientFor(userId: string): Promise<Client> {
+async function apiKeyFor(userId: string): Promise<string> {
+  const res = await app.inject({
+    method: "POST",
+    headers: AUTH,
+    url: `/v1/users/${userId}/keys`,
+    payload: { name: "test-key" },
+  });
+  return res.json().token;
+}
+
+async function authFor(userId: string): Promise<{ authorization: string }> {
+  return { authorization: `Bearer ${await apiKeyFor(userId)}` };
+}
+
+async function mcpClientFor(userId: string): Promise<Client> {
   const client = new Client({ name: "test-client", version: "0.0.1" });
   const transport = new StreamableHTTPClientTransport(new URL(`${gatewayUrl}/mcp/${serverId}`), {
-    requestInit: { headers: { "x-regulait-user-id": userId } },
+    requestInit: { headers: { authorization: `Bearer ${await apiKeyFor(userId)}` } },
   });
-  return client.connect(transport).then(() => client);
+  await client.connect(transport);
+  return client;
 }
 
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
-  app = buildApp(db);
+  app = buildApp(db, { bootstrapToken: BOOT });
 
   upstream = await startUpstream();
 
@@ -100,6 +118,7 @@ beforeAll(async () => {
 
   const alice = await app.inject({
     method: "POST",
+    headers: AUTH,
     url: "/v1/users",
     payload: { email: "proxy-alice@example.com", displayName: "Proxy Alice" },
   });
@@ -107,6 +126,7 @@ beforeAll(async () => {
 
   const bob = await app.inject({
     method: "POST",
+    headers: AUTH,
     url: "/v1/users",
     payload: { email: "proxy-bob@example.com", displayName: "Proxy Bob" },
   });
@@ -114,6 +134,7 @@ beforeAll(async () => {
 
   const server = await app.inject({
     method: "POST",
+    headers: AUTH,
     url: "/v1/servers",
     payload: { name: "upstream-test", url: upstream.url },
   });
@@ -145,7 +166,7 @@ describe("MCP proxy path", () => {
     );
     await client.close();
 
-    const audit = await app.inject({ method: "GET", url: `/v1/audit?userId=${aliceId}` });
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit?userId=${aliceId}` });
     const entries = audit.json().entries;
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({ effect: "deny", toolName: "get_time" });
@@ -154,6 +175,7 @@ describe("MCP proxy path", () => {
   it("proxies a granted tool call end-to-end and audits the allow", async () => {
     const grant = await app.inject({
       method: "POST",
+      headers: AUTH,
       url: "/v1/grants/tools",
       payload: { userId: aliceId, serverId, toolName: "get_time" },
     });
@@ -167,7 +189,7 @@ describe("MCP proxy path", () => {
     expect(result.content).toEqual([{ type: "text", text: "12:00" }]);
     await client.close();
 
-    const audit = await app.inject({ method: "GET", url: `/v1/audit?userId=${aliceId}` });
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit?userId=${aliceId}` });
     const allowRow = audit.json().entries.find((e: { effect: string }) => e.effect === "allow");
     expect(allowRow).toMatchObject({ toolName: "get_time", ruleId: grantId });
   });
@@ -175,6 +197,7 @@ describe("MCP proxy path", () => {
   it("read-only-all grant exposes and allows read tools but denies writes", async () => {
     await app.inject({
       method: "POST",
+      headers: AUTH,
       url: "/v1/grants/servers",
       payload: { userId: bobId, serverId, readOnlyAll: true },
     });
@@ -209,12 +232,14 @@ describe("approvals through the proxy (§3 + §6 queue)", () => {
   it("pauses a write call behind an approval rule and queues exactly one pending entry", async () => {
     const dave = await app.inject({
       method: "POST",
+      headers: AUTH,
       url: "/v1/users",
       payload: { email: "proxy-dave@example.com", displayName: "Proxy Dave" },
     });
     daveId = dave.json().id;
     const carol = await app.inject({
       method: "POST",
+      headers: AUTH,
       url: "/v1/users",
       payload: { email: "proxy-carol@example.com", displayName: "Proxy Carol" },
     });
@@ -222,11 +247,13 @@ describe("approvals through the proxy (§3 + §6 queue)", () => {
 
     await app.inject({
       method: "POST",
+      headers: AUTH,
       url: "/v1/grants/tools",
       payload: { userId: daveId, serverId, toolName: "write_note" },
     });
     await app.inject({
       method: "POST",
+      headers: AUTH,
       url: "/v1/rules/approvals",
       payload: { userId: daveId, serverId, writeOnly: true, approverUserId: carolId },
     });
@@ -241,7 +268,7 @@ describe("approvals through the proxy (§3 + §6 queue)", () => {
     ).rejects.toThrow(/Approval required/);
     await client.close();
 
-    const queue = await app.inject({ method: "GET", url: "/v1/approvals?status=pending" });
+    const queue = await app.inject({ method: "GET", headers: AUTH, url: "/v1/approvals?status=pending" });
     const pending = queue
       .json()
       .approvals.filter((a: { userId: string }) => a.userId === daveId);
@@ -254,29 +281,31 @@ describe("approvals through the proxy (§3 + §6 queue)", () => {
   });
 
   it("only the named approver may decide", async () => {
-    const queue = await app.inject({ method: "GET", url: "/v1/approvals?status=pending" });
+    const queue = await app.inject({ method: "GET", headers: AUTH, url: "/v1/approvals?status=pending" });
     const approvalId = queue
       .json()
       .approvals.find((a: { userId: string }) => a.userId === daveId).id;
 
     const wrongDecider = await app.inject({
       method: "POST",
+      headers: await authFor(daveId),
       url: `/v1/approvals/${approvalId}/decide`,
-      payload: { deciderUserId: daveId, decision: "approved" },
+      payload: { decision: "approved" },
     });
     expect(wrongDecider.statusCode).toBe(403);
   });
 
   it("an approved call goes through once, consumes the approval, and audits the full journey", async () => {
-    const queue = await app.inject({ method: "GET", url: "/v1/approvals?status=pending" });
+    const queue = await app.inject({ method: "GET", headers: AUTH, url: "/v1/approvals?status=pending" });
     const approvalId = queue
       .json()
       .approvals.find((a: { userId: string }) => a.userId === daveId).id;
 
     const decide = await app.inject({
       method: "POST",
+      headers: await authFor(carolId),
       url: `/v1/approvals/${approvalId}/decide`,
-      payload: { deciderUserId: carolId, decision: "approved", reason: "looks safe" },
+      payload: { decision: "approved", reason: "looks safe" },
     });
     expect(decide.json().status).toBe("approved");
 
@@ -290,12 +319,12 @@ describe("approvals through the proxy (§3 + §6 queue)", () => {
     ).rejects.toThrow(/Approval required/);
     await client.close();
 
-    const consumed = await app.inject({ method: "GET", url: "/v1/approvals?status=consumed" });
+    const consumed = await app.inject({ method: "GET", headers: AUTH, url: "/v1/approvals?status=consumed" });
     expect(
       consumed.json().approvals.some((a: { id: string }) => a.id === approvalId),
     ).toBe(true);
 
-    const audit = await app.inject({ method: "GET", url: `/v1/audit?userId=${daveId}` });
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit?userId=${daveId}` });
     const effects = audit
       .json()
       .entries.map((e: { effect: string }) => e.effect)
@@ -304,14 +333,15 @@ describe("approvals through the proxy (§3 + §6 queue)", () => {
   });
 
   it("a denied approval does not let the call through", async () => {
-    const queue = await app.inject({ method: "GET", url: "/v1/approvals?status=pending" });
+    const queue = await app.inject({ method: "GET", headers: AUTH, url: "/v1/approvals?status=pending" });
     const approvalId = queue
       .json()
       .approvals.find((a: { userId: string }) => a.userId === daveId).id;
     await app.inject({
       method: "POST",
+      headers: await authFor(carolId),
       url: `/v1/approvals/${approvalId}/decide`,
-      payload: { deciderUserId: carolId, decision: "denied", reason: "not now" },
+      payload: { decision: "denied", reason: "not now" },
     });
 
     const client = await mcpClientFor(daveId);
@@ -326,17 +356,20 @@ describe("rate limits through the proxy (§3)", () => {
   it("denies the call that exceeds the window cap and audits the deny", async () => {
     const erin = await app.inject({
       method: "POST",
+      headers: AUTH,
       url: "/v1/users",
       payload: { email: "proxy-erin@example.com", displayName: "Proxy Erin" },
     });
     const erinId = erin.json().id;
     await app.inject({
       method: "POST",
+      headers: AUTH,
       url: "/v1/grants/tools",
       payload: { userId: erinId, serverId, toolName: "get_time" },
     });
     await app.inject({
       method: "POST",
+      headers: AUTH,
       url: "/v1/rules/rate-limits",
       payload: { userId: erinId, serverId, toolName: "get_time", maxCalls: 2, windowSeconds: 3600 },
     });
@@ -349,7 +382,7 @@ describe("rate limits through the proxy (§3)", () => {
     );
     await client.close();
 
-    const audit = await app.inject({ method: "GET", url: `/v1/audit?userId=${erinId}` });
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit?userId=${erinId}` });
     const effects = audit
       .json()
       .entries.map((e: { effect: string }) => e.effect)
@@ -362,17 +395,20 @@ describe("data-scope rules through the proxy (§3)", () => {
   it("allows in-scope argument values and denies out-of-scope ones, fail-closed on missing", async () => {
     const frank = await app.inject({
       method: "POST",
+      headers: AUTH,
       url: "/v1/users",
       payload: { email: "proxy-frank@example.com", displayName: "Proxy Frank" },
     });
     const frankId = frank.json().id;
     await app.inject({
       method: "POST",
+      headers: AUTH,
       url: "/v1/grants/tools",
       payload: { userId: frankId, serverId, toolName: "write_note" },
     });
     await app.inject({
       method: "POST",
+      headers: AUTH,
       url: "/v1/rules/data-scopes",
       payload: {
         userId: frankId,
@@ -397,7 +433,7 @@ describe("data-scope rules through the proxy (§3)", () => {
     );
     await client.close();
 
-    const audit = await app.inject({ method: "GET", url: `/v1/audit?userId=${frankId}` });
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit?userId=${frankId}` });
     const effects = audit
       .json()
       .entries.map((e: { effect: string }) => e.effect)
