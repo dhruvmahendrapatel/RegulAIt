@@ -212,6 +212,24 @@ mcp-default/retention/pii (detector + pruning jobs), reapply-to-in-flight on rec
 (diff covers the policy; in-flight instances keep their merged definitions), per-framework
 cost-governance policies (§8.6→§10.3).
 
+**First AWS deployment — the dev demo stack is LIVE, 2026-07-25 (ADR-0013).** The user
+explicitly requested an AWS deployment for hands-on testing (cannot run locally); explicit
+sign-off obtained in-session via an IAM Identity Center device-code login (Admin-BreakGlass,
+workload account). New reusable module `infra/modules/app-instance` (single AL2023 EC2 box,
+IMDSv2-only, SSM Session Manager access with NO ssh keypair, pulls a source tarball from a
+module-owned private S3 bucket, `docker compose up -d --build` with per-deploy random
+runtime config) composed into `infra/environments/regulait-dev-app` — its own state key
+(`regulait-dev-app/terraform.tfstate`) so app deploys can never re-plan the org/security
+baseline. Applied: instance `i-013c62adc887c76bb`, `http://3.237.199.248:3000` (/app +
+/admin verified 200 through the public IP; seed keys handed to the user in-chat, never
+committed). Dev-grade by declaration: HTTP only, port open to the world but everything
+key-gated, demo data, ~$15–30/mo (will trip the $5 foundation budget alert — expected).
+Teardown = `terraform destroy` in `regulait-dev-app`. NOT production; anything beyond demo
+use needs a new decision + explicit sign-off. Operational notes: registry.terraform.io is
+blocked from the remote dev container — providers install via a filesystem mirror fed from
+releases.hashicorp.com (see session log); Terraform runs with the `regulait-admin` SSO
+profile, state backend via `regulait-management`.
+
 **The product becomes USABLE, 2026-07-25 — four slices in one push.** (1) Quickstart
 plumbing: the gateway converges its schema on boot; `GET /v1/me`; own-scoped list views for
 non-admins (runs/instances = own, projects = memberships); an idempotent demo seed driven
@@ -228,8 +246,8 @@ real Cost & Projects dashboard (stat tiles, budget gauge, hand-rolled SVG showba
 charts). (4) Docker quickstart: Dockerfile + compose (Postgres + gateway + auto-migrate +
 demo seed; keys in the container log) + README for both paths. The whole surface was driven
 in a REAL headless-Chromium pass (sign-in, streamed reply, run auto-advanced to completion,
-workflow rail, inbox approve, admin charts — zero page errors). AWS deployment remains
-deliberately not started (standing guardrail: explicit decision required).
+workflow rail, inbox approve, admin charts — zero page errors). (AWS deployment followed
+the same day at the user's explicit request — see the entry above / ADR-0013.)
 
 **Admin portal MVP, 2026-07-25 (ADR-0012).** One dependency-free HTML+JS file served by the
 gateway at `GET /admin` — an auth-exempt STATIC SHELL (zero data, zero secrets; the admin
@@ -535,6 +553,7 @@ with a real in-process upstream MCP server and real MCP client (26 tests total).
 | COMPONENT-04 | RegulAIt GitHub repo | **live and private**: https://github.com/dhruvmahendrapatel/RegulAIt | EPIC-01 |
 | COMPONENT-05 | Admin portal | **MVP shipped** — single-file API-client portal at /admin (ADR-0012), §6's eight panels + §10.4 cost surface | EPIC-02, ADR-0012 |
 | COMPONENT-06 | Policy/allow-list engine | not started | EPIC-02 |
+| COMPONENT-07 | Dev demo stack on AWS (`regulait-dev-app`) | **live** — EC2 `i-013c62adc887c76bb`, http://3.237.199.248:3000, dev-grade only; teardown = `terraform destroy` | ADR-0013 |
 | COMPONENT-07 | Workflow orchestrator | not started | EPIC-03 |
 | COMPONENT-08 | caveman (output token compression, Claude Code plugin) | **installed**, user scope, no restrictions (verified fully local) | ADR-0005 |
 | COMPONENT-09 | graphify (code knowledge graph, Claude Code skill) | **installed**, project scope, restricted to `--code-only` (verified) | ADR-0005 |
