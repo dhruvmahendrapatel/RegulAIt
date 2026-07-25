@@ -284,7 +284,7 @@ describe("git_operation stages", () => {
     const r = transition(gitFlow, initialState(gitFlow), { kind: "start" });
     expect(() =>
       transition(gitFlow, r.state, { kind: "execution_succeeded", stageId: "merge" }),
-    ).toThrow(/not executing git stage/);
+    ).toThrow(/not executing stage/);
   });
 });
 
@@ -315,5 +315,45 @@ describe("cost-sensitivity tag (§9, EPIC-04)", () => {
   it("an untagged template counts as standard, so it blocks cost-sensitive downgrading", () => {
     const merged = mergeDefinitions([tagged("cost-sensitive", "a"), tagged(undefined, "b")]);
     expect(merged.costSensitivity).toBe("standard");
+  });
+});
+
+describe("automated_build with a nested run (§8)", () => {
+  const def = validateDefinition({
+    workflow: "nested",
+    stages: [
+      { id: "intake", type: "trigger" },
+      { id: "build", type: "automated_build", run: { any: "opaque graph" } },
+    ],
+  });
+
+  it("reaching the stage awaits execution and completes via execution_succeeded", () => {
+    const started = transition(def, initialState(def), { kind: "start" });
+    expect(started.state.status).toBe("awaiting_execution");
+    expect(started.effects).toContainEqual({ kind: "execute_stage", stageId: "build" });
+
+    const done = transition(def, started.state, { kind: "execution_succeeded", stageId: "build" });
+    expect(done.state.status).toBe("completed");
+  });
+
+  it("a human trigger can never bypass the nested run", () => {
+    const started = transition(def, initialState(def), { kind: "start" });
+    expect(() =>
+      transition(def, started.state, { kind: "human_trigger", stageId: "build" }),
+    ).toThrow(/nested run/);
+  });
+
+  it("a build stage WITHOUT a run still awaits a human trigger", () => {
+    const plain = validateDefinition({
+      workflow: "plain",
+      stages: [
+        { id: "intake", type: "trigger" },
+        { id: "build", type: "automated_build" },
+      ],
+    });
+    const started = transition(plain, initialState(plain), { kind: "start" });
+    expect(started.state.status).toBe("awaiting_trigger");
+    const done = transition(plain, started.state, { kind: "human_trigger", stageId: "build" });
+    expect(done.state.status).toBe("completed");
   });
 });

@@ -134,9 +134,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "GET /v1/approvals",
     "GET /v1/cost-events",
     "GET /v1/usage-events",
+    "POST /v1/users/:userId/model-credentials",
+    "GET /v1/users/:userId/model-credentials",
+    "DELETE /v1/users/:userId/model-credentials/:provider",
     "POST /v1/runs",
     "POST /v1/runs/:runId/events",
     "POST /v1/runs/:runId/nodes/:nodeId/dispatch",
+    "POST /v1/runs/:runId/auto",
     "GET /v1/runs/:runId",
     "POST /v1/runs/:runId/pm-sync",
     "POST /v1/workflows/instances/:instanceId/pm-sync",
@@ -547,7 +551,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     }
     // Orchestration escalations (§3): approve = another attempt, deny = abort.
     if (updated.objectType === "run") {
-      await applyRunApprovalDecision(db, updated, body.decision, deciderUserId);
+      await applyRunApprovalDecision(db, updated, body.decision, deciderUserId, opts.dataKey);
     }
     // EPIC-06 §5: sign-offs mirror to the linked work item — display only,
     // never a second decision point; a mirror failure never unwinds the

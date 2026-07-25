@@ -37,6 +37,12 @@ const stageSchema = z.object({
   output: z.string().min(1).optional(),
   /** automated_build: artifact (by output name) the build is scope-locked to */
   scope: z.string().min(1).optional(),
+  /** automated_build §8 nesting: an orchestration task graph executed as this
+   * stage. Opaque here — the GATEWAY validates it against the orchestration
+   * kernel at template creation (a template must never promise a graph the
+   * engine can't run). Present = the stage completes via its nested run, never
+   * via a human trigger. */
+  run: z.unknown().optional(),
   /** automated_check: named checks (informational in this slice) */
   checks: z.array(z.string().min(1)).optional(),
   /** git_operation: which operation this stage performs */
@@ -352,13 +358,14 @@ function runForward(def: WorkflowDefinition, state: InstanceState): TransitionRe
       });
       return { state: s, effects };
     }
-    if (stage.type === "git_operation") {
-      // executed by the gateway's git executor; retryable on failure
+    if (stage.type === "git_operation" || (stage.type === "automated_build" && stage.run !== undefined)) {
+      // executed by the gateway (git executor / nested orchestration run);
+      // retryable on failure
       s.status = "awaiting_execution";
       effects.push({ kind: "execute_stage", stageId: stage.id });
       return { state: s, effects };
     }
-    // automated_build / automated_check: await explicit trigger in this slice
+    // automated_build without a run / automated_check: await explicit trigger
     s.status = "awaiting_trigger";
     effects.push({ kind: "await_human_trigger", stageId: stage.id });
     return { state: s, effects };
@@ -443,8 +450,11 @@ export function transition(
   }
 
   if (event.kind === "execution_succeeded" || event.kind === "execution_failed") {
-    if (!current || current.id !== event.stageId || current.type !== "git_operation") {
-      throw new WorkflowStateError(`instance is not executing git stage '${event.stageId}'`);
+    const executable =
+      current?.type === "git_operation" ||
+      (current?.type === "automated_build" && current.run !== undefined);
+    if (!current || current.id !== event.stageId || !executable) {
+      throw new WorkflowStateError(`instance is not executing stage '${event.stageId}'`);
     }
     if (event.kind === "execution_failed") {
       // stays awaiting_execution — the event log records the error; retry re-executes
@@ -467,6 +477,13 @@ export function transition(
     }
     if (current.type !== "automated_build" && current.type !== "automated_check") {
       throw new WorkflowStateError(`stage '${event.stageId}' is not triggerable`);
+    }
+    if (current.type === "automated_build" && current.run !== undefined) {
+      // §8: a build stage with a nested run completes via that run's outcome
+      // — a human trigger must never bypass the governed execution.
+      throw new WorkflowStateError(
+        `stage '${event.stageId}' executes a nested run and cannot be human-triggered`,
+      );
     }
     const s: InstanceState = {
       ...state,

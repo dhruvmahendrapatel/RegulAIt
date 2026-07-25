@@ -97,9 +97,54 @@ estimate-based node-start gate: `budget.measuredSpentUsd` accumulates real dispa
 first cap crossing is allowed (measured cost is only knowable after the call) but escalates
 immediately into the one approvals queue (`__budget__:<node>`, audited require_approval), and
 every dispatch after it is blocked (409) until the named approver sanctions the overage.
-usage_events rows carry `{runId, nodeId}` attribution. Not yet: streaming, multi-turn/system
-prompts from workflow context, auto-dispatch of ready nodes (execution is caller-driven per
-node), per-user credentials, openai/google/xai adapters.
+usage_events rows carry `{runId, nodeId}` attribution. **Third slice: auto-dispatch of ready
+nodes.** `POST /v1/runs/:id/auto` is a self-driving pass with the same gates and zero new
+authority — one synchronous call (no scheduler/queue, ADR-0010's bias), starting the run if
+needed then repeatedly taking the first ready node through the SAME machinery the manual
+endpoints use: estimate gate → node_started → governed dispatch (§5.1 re-check per node) →
+node_submitted. Review stays a human gate BY DEFAULT — nodes land in_review and dependents
+wait; only an explicit `acceptReviews: true` also accepts each submission (audited in the
+event history like any acceptance). Node-level problems (entitlement denial, config gap,
+worker refusal) mark that node failed/blocked — §3's retry/reassign/escalate applies — and
+the pass keeps driving independent branches; run-level problems (estimate or measured budget)
+stop the whole pass, with the measured-budget check running BEFORE node start so a blocked
+pass never strands a node in_progress. Per-node inputs via `inputs` map (title fallback),
+`maxNodes` cap per pass, every pass summarized in one `run-auto-advance` audit row. **Fourth
+slice: workflow build-stage nesting (§8 of both EPIC-03 and EPIC-05).** An `automated_build`
+stage may carry a `run` config — an orchestration task graph, opaque to the workflow kernel
+(the GATEWAY validates it with the orchestration kernel at template creation, plus the graph's
+escalation approver — fail-fast, a template never promises a graph the engine can't run). The
+stage then executes via the same `awaiting_execution`/`execute_stage` machinery as git stages:
+the executor spawns a nested run through the same `planRun` the runs API uses, planned under
+the **workflow initiator's** entitlements (a workflow can never launch a run its human
+couldn't; an unentitled graph fails the stage explicitly with the plan rejection in
+`context.lastError`, retryable via /advance once granted). The nested run is a first-class
+run — visible at `/v1/runs/:id`, bound via `workflow_instance_id` (waiting since migration
+0011), driven manually or by `/auto` — and the run-event funnel notifies the parent when it
+turns terminal: completed → `execution_succeeded` (flowing straight into downstream stages),
+aborted → `execution_failed` with the stage retryable (retry spawns a FRESH run; a live or
+completed run is never duplicated — idempotent like branch creation). The kernel forbids
+human-triggering a build-with-run stage — no bypassing the governed execution. **Fifth slice:
+signed-off artifacts in nested-run worker prompts — §2's scope-lock made real.** When a
+dispatched node belongs to a workflow-bound run, `buildNestedRunContext` injects the
+workflow's SIGNED-OFF artifacts as the model's system context ("execute strictly within the
+signed-off requirements below; do not expand scope") — the build executes against exactly
+what was approved, never a re-imagined version. The build stage's `scope` narrows the context
+to that one artifact; without it, the latest version of every artifact is included; artifact
+edits re-open the workflow upstream, so a re-run always carries the re-signed version. §6
+traceability: the exact `{output, version}` list that framed each execution is recorded in
+the `node_dispatched` history entry. Standalone (non-workflow) runs stay system-free —
+verified down to the provider call via the shared mock's dispatch log. **Sixth slice:
+per-user model credentials (BYO key).** Migration 0017: `user_model_credentials` (unique per
+user×provider, AES-256-GCM, write-only like every credential surface). Self-service
+`POST/GET/DELETE /v1/users/:id/model-credentials` (self or admin; other users' credentials
+are 403-invisible). Dispatch resolution order: the BILLING user's own credential → platform
+`model_credentials` → explicit `no_model_credential` failure; the ledger records
+`credentialSource` (user|platform|none) on every usage event and in the dispatch response —
+spend on a user's key is visibly not platform spend. Verified end-to-end against a local fake
+Anthropic Messages server: the real adapter's actual `x-api-key` header carries the user's
+key when one exists, falls back to the platform key when deleted, and precedence is restored
+on re-add. Not yet: streaming, multi-turn dispatch, openai/google/xai adapters.
 
 **EPIC-06 started — PM-tool integration first slice, 2026-07-25.** New
 `packages/pm-provider` on the git-provider playbook (pillar 8, PM_TOOL_INTEGRATION_SPEC
@@ -306,7 +351,7 @@ with a real in-process upstream MCP server and real MCP client (26 tests total).
 | EPIC-02 | Governance layer MVP (now includes infra-ops/compliance-cascade/deploy-model, Shared Projects, cost dashboard — §1–§10) | **in progress** — stack chosen (ADR-0009), first slice = MCP-server governance vertical | GOVERNANCE_LAYER_SPEC.md, ADR-0007, ADR-0009 |
 | EPIC-03 | Workflow engine MVP (now includes optional Design/Architecture sign-off stage type) | **in progress** — first slice merged (PR #9) | WORKFLOW_ENGINE_SPEC.md, ADR-0007 |
 | EPIC-04 | Token/cost optimization MVP (escalated to P0) | **in progress** — routing kernel + cost_events ledger (PR #12), lazy tool-loading (PR #13), §9 workflow cost-sensitivity tag merged; real model dispatch built (model-provider + measured usage_events ledger — savings now measured, not just estimated) | TOKEN_OPTIMIZATION_SPEC.md, ADR-0007 |
-| EPIC-05 | Multi-agent orchestration MVP (PM/Team-Lead/Worker delegation) | **in progress** — slice 1 merged (PR #14: kernel + runs + escalations); slice 2 merged (§5.2 budget caps); worker-node dispatch built (real execution via governed dispatch core, measured budget enforcement) | MULTI_AGENT_ORCHESTRATION_SPEC.md, ADR-0008 |
+| EPIC-05 | Multi-agent orchestration MVP (PM/Team-Lead/Worker delegation) | **in progress** — slices 1–2 merged (kernel/runs/escalations, §5.2 budget caps); worker-node dispatch merged (PR #18); auto-dispatch merged (PR #19); workflow build-stage nesting built (§8: automated_build spawns a governed nested run) | MULTI_AGENT_ORCHESTRATION_SPEC.md, ADR-0008 |
 | EPIC-06 | PM-tool integration MVP (Azure DevOps/Jira/etc.) | **in progress** — slice 1 merged (PR #15); slices 2–4 built (§5 approval mirroring; §4 decision records; ADR-0010 inbound sync with drift detection) | PM_TOOL_INTEGRATION_SPEC.md, ADR-0008, ADR-0010 |
 
 ## Components

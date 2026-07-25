@@ -683,3 +683,22 @@ export const usageEvents = pgTable(
   },
   (t) => [index("usage_events_user_idx").on(t.userId, t.at)],
 );
+
+// MODEL DISPATCH: per-user provider credentials (BYO key). Resolution order
+// at dispatch is user credential → platform model_credentials → explicit
+// failure; same encryption discipline (AES-256-GCM under REGULAIT_DATA_KEY,
+// never plaintext at rest, never returned by any endpoint).
+export const userModelCredentials = pgTable(
+  "user_model_credentials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    provider: text("provider").notNull(),
+    keyCiphertext: text("key_ciphertext").notNull(),
+    baseUrl: text("base_url"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("user_model_credentials_user_provider_uq").on(t.userId, t.provider)],
+);

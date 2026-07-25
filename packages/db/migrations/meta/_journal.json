@@ -120,6 +120,13 @@
       "when": 1784951000000,
       "tag": "0016_model_dispatch",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1784952000000,
+      "tag": "0017_user_model_credentials",
+      "breakpoints": true
     }
   ]
 }

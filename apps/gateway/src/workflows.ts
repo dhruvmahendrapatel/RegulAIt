@@ -25,8 +25,10 @@ import {
   type WorkflowDefinition,
   type WorkflowEvent,
 } from "@regulait/workflow-kernel";
-import { users, gitConnections } from "@regulait/db";
+import { users, gitConnections, orchestrationRuns } from "@regulait/db";
 import { resolveProvider, GitProviderError } from "@regulait/git-provider";
+import { validateGraph } from "@regulait/orchestration-kernel";
+import { planRun } from "./orchestration.js";
 import { decryptSecret, encryptSecret as encryptTokenOnce } from "./secrets.js";
 import {
   advanceStageSchema,
@@ -174,6 +176,52 @@ export interface WorkflowRouteOptions {
   dataKey?: string;
 }
 
+/** §8 nesting: called from the orchestration run-event funnel when a run
+ * bound to a workflow instance reaches a terminal state. A completed run
+ * advances the instance's awaiting build stage; an aborted run records an
+ * execution failure and leaves the stage retryable via /advance (which
+ * spawns a fresh run). Stale or mismatched notifications are skipped —
+ * the instance's own state decides. */
+export async function handleNestedRunCompletion(
+  db: Db,
+  dataKey: string | undefined,
+  run: { id: string; workflowInstanceId: string | null; status: string },
+  actorUserId: string | null,
+): Promise<void> {
+  if (!run.workflowInstanceId) return;
+  const [instance] = await db
+    .select()
+    .from(workflowInstances)
+    .where(eq(workflowInstances.id, run.workflowInstanceId));
+  if (!instance || instance.status !== "awaiting_execution") return;
+  const def = instance.definition as WorkflowDefinition;
+  const state = instance.state as InstanceState;
+  const stage = def.stages[state.currentStageIndex];
+  if (!stage || stage.type !== "automated_build" || stage.run === undefined) return;
+  const context = instance.context as Record<string, unknown>;
+  if (context[`runId:${stage.id}`] !== run.id) return; // not the run this stage is waiting on
+
+  if (run.status === "completed") {
+    const r = await applyEvent(
+      db,
+      instance.id,
+      { kind: "execution_succeeded", stageId: stage.id },
+      actorUserId,
+    );
+    // completion can flow straight into a downstream git stage
+    await runGitExecutions(db, instance.id, r.effects, actorUserId, dataKey);
+  } else {
+    const ctx = { ...context, lastError: `${stage.id}: nested run ${run.id} aborted` };
+    await db.update(workflowInstances).set({ context: ctx }).where(eq(workflowInstances.id, instance.id));
+    await applyEvent(
+      db,
+      instance.id,
+      { kind: "execution_failed", stageId: stage.id, error: `nested run ${run.id} aborted` },
+      actorUserId,
+    );
+  }
+}
+
 /**
  * Execute pending git stages until the instance blocks on something else.
  * Each stage's result lands in instance.context; failures are recorded as
@@ -221,6 +269,65 @@ async function runGitExecutions(
     const def = instance.definition as WorkflowDefinition;
     const stage = def.stages.find((st) => st.id === effect.stageId)!;
     const context = { ...(instance.context as Record<string, unknown>) };
+
+    // §8 nesting: an automated_build stage with a run graph spawns a nested
+    // orchestration run instead of a git operation — planned under the
+    // INSTANCE INITIATOR's entitlements (planRun), driven by the normal run
+    // endpoints, completing the stage via handleNestedRunCompletion when the
+    // run turns terminal. Idempotent: a live or completed run for this stage
+    // is never duplicated; only an aborted one is replaced on retry.
+    if (stage.type === "automated_build" && stage.run !== undefined) {
+      delete context.executing;
+      const existingId = context[`runId:${stage.id}`];
+      if (typeof existingId === "string") {
+        const [existing] = await db
+          .select()
+          .from(orchestrationRuns)
+          .where(eq(orchestrationRuns.id, existingId));
+        if (existing && existing.status !== "aborted") {
+          await db
+            .update(workflowInstances)
+            .set({ context })
+            .where(eq(workflowInstances.id, instance.id));
+          if (existing.status === "completed") {
+            // replay after a missed completion notification
+            const r = await applyEvent(
+              db,
+              instanceId,
+              { kind: "execution_succeeded", stageId: stage.id },
+              actorUserId,
+            );
+            lastEffects = r.effects;
+            pending = r.effects.filter((e) => e.kind === "execute_stage");
+            continue;
+          }
+          break; // run is planned/running — the stage waits for it
+        }
+      }
+      const planned = await planRun(db, instance.initiatorUserId, stage.run, instance.id);
+      if (!planned.ok) {
+        const error = `nested run rejected: ${JSON.stringify(planned.body)}`;
+        context.lastError = `${stage.id}: ${error}`;
+        await db
+          .update(workflowInstances)
+          .set({ context })
+          .where(eq(workflowInstances.id, instance.id));
+        await applyEvent(
+          db,
+          instanceId,
+          { kind: "execution_failed", stageId: stage.id, error },
+          actorUserId,
+        );
+        break;
+      }
+      context[`runId:${stage.id}`] = planned.run.id;
+      delete context.lastError;
+      await db
+        .update(workflowInstances)
+        .set({ context })
+        .where(eq(workflowInstances.id, instance.id));
+      break; // stage stays awaiting_execution until the run completes
+    }
 
     let executionError: string | null = null;
     try {
@@ -368,6 +475,32 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       }
       const found = await db.select({ id: users.id }).from(users).where(inArray(users.id, named));
       if (found.length !== new Set(named).size) {
+        return reply.status(422).send({ error: "invalid_approver" });
+      }
+    }
+    // §8: nested run graphs must be valid NOW — a template must never promise
+    // a graph the orchestration engine can't run. Their escalation approvers
+    // resolve at template time too (same fail-fast rule as stage approvers).
+    const nestedApprovers: string[] = [];
+    for (const st of definition.stages) {
+      if (st.type !== "automated_build" || st.run === undefined) continue;
+      try {
+        nestedApprovers.push(validateGraph(st.run).escalationApproverUserId);
+      } catch (err) {
+        if (err instanceof z.ZodError) {
+          return reply
+            .status(422)
+            .send({ error: "invalid_run_graph", stageId: st.id, issues: err.issues });
+        }
+        throw err;
+      }
+    }
+    if (nestedApprovers.length > 0) {
+      const found = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(inArray(users.id, nestedApprovers));
+      if (found.length !== new Set(nestedApprovers).size) {
         return reply.status(422).send({ error: "invalid_approver" });
       }
     }
@@ -521,10 +654,15 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const loaded = await loadInstanceFor(req, instanceId);
     if (loaded.error) return reply.status(loaded.error).send({ error: "unavailable" });
     if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_drive" });
-    // Retrying a failed git stage: re-run the executor instead of a human trigger.
+    // Retrying a failed git stage or a build stage with a nested run:
+    // re-run the executor instead of a human trigger (the kernel forbids
+    // human-triggering a build-with-run stage — no bypassing the run).
     const def = loaded.instance.definition as WorkflowDefinition;
     const targetStage = def.stages.find((st) => st.id === body.stageId);
-    if (targetStage?.type === "git_operation") {
+    if (
+      targetStage?.type === "git_operation" ||
+      (targetStage?.type === "automated_build" && targetStage.run !== undefined)
+    ) {
       await runGitExecutions(
         db,
         loaded.instance.id,

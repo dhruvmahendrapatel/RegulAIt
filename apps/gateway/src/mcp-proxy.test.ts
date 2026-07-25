@@ -8,6 +8,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { z } from "zod";
 import { createDb, eq, mcpTools, modelCredentials, runMigrations, type Db } from "@regulait/db";
+import { resolveModelProvider, type MockModelProvider } from "@regulait/model-provider";
 import { buildApp } from "./app.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -3815,5 +3816,806 @@ describe("worker-node dispatch (EPIC-05 × real dispatch)", () => {
     });
     expect(third.statusCode).toBe(200);
     expect(third.json().budgetBreached).toBeUndefined();
+  });
+});
+
+describe("auto-dispatch of ready nodes (self-driving runs, same gates)", () => {
+  const mkNode = (id: string, agentId: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    title: `task ${id}`,
+    ownerAgentId: agentId,
+    mode: "execute",
+    estimate: { in: 1, out: 1 },
+    ...extra,
+  });
+  const mkUser = async (email: string, name: string) => {
+    const r = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email, displayName: name },
+    });
+    return r.json().id as string;
+  };
+
+  let junoId: string;
+  let junoAuth: { authorization: string };
+  let approverId: string;
+  let autoWorkerId: string;
+
+  it("acceptReviews=true drives a DAG to completion in one call, dependency-ordered", async () => {
+    junoId = await mkUser("auto-juno@example.com", "Auto Juno");
+    junoAuth = await authFor(junoId);
+    approverId = await mkUser("auto-approver@example.com", "Auto Approver");
+    const agentRes = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/agents",
+      payload: {
+        name: "auto-worker", provider: "mock", tier: 0, modes: ["execute"],
+        costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-auto",
+      },
+    });
+    autoWorkerId = agentRes.json().id;
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/grants/agents",
+      payload: { userId: junoId, agentId: autoWorkerId },
+    });
+
+    const created = await app.inject({
+      method: "POST", headers: junoAuth, url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "auto-full",
+          escalationApproverUserId: approverId,
+          nodes: [
+            mkNode("a", autoWorkerId),
+            mkNode("b", autoWorkerId, { dependsOn: ["a"] }),
+            mkNode("c", autoWorkerId),
+          ],
+        },
+      },
+    });
+    const runId = created.json().id;
+
+    const res = await app.inject({
+      method: "POST", headers: junoAuth, url: `/v1/runs/${runId}/auto`,
+      payload: { acceptReviews: true, inputs: { a: "draft the api", b: "review the api" } },
+    });
+    expect(res.statusCode).toBe(200);
+    const { status, steps, stoppedReason } = res.json();
+    expect(status).toBe("completed");
+    expect(stoppedReason).toBe("completed");
+    expect(steps).toHaveLength(3);
+    expect(steps.every((s: { action: string }) => s.action === "accepted")).toBe(true);
+    // b never runs before a
+    const order = steps.map((s: { nodeId: string }) => s.nodeId);
+    expect(order.indexOf("b")).toBeGreaterThan(order.indexOf("a"));
+
+    // three measured usage rows attributed to this run
+    const ledger = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/usage-events?userId=${junoId}`,
+    });
+    const rows = ledger.json().events.filter(
+      (e: { detail: { runId?: string } | null }) => e.detail?.runId === runId,
+    );
+    expect(rows).toHaveLength(3);
+
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit?userId=${junoId}` });
+    expect(
+      audit.json().entries.some((e: { ruleId: string }) => e.ruleId === "run-auto-advance"),
+    ).toBe(true);
+  });
+
+  it("by default review stays a human gate: the pass stops at in_review and resumes after acceptance", async () => {
+    const created = await app.inject({
+      method: "POST", headers: junoAuth, url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "auto-review-gate",
+          escalationApproverUserId: approverId,
+          nodes: [mkNode("a", autoWorkerId), mkNode("b", autoWorkerId, { dependsOn: ["a"] })],
+        },
+      },
+    });
+    const runId = created.json().id;
+
+    const first = await app.inject({
+      method: "POST", headers: junoAuth, url: `/v1/runs/${runId}/auto`, payload: {},
+    });
+    expect(first.statusCode).toBe(200);
+    expect(first.json().stoppedReason).toBe("awaiting_review");
+    expect(first.json().steps).toHaveLength(1);
+    expect(first.json().steps[0]).toMatchObject({ nodeId: "a", action: "submitted" });
+    expect(first.json().state.nodeStatuses).toMatchObject({ a: "in_review", b: "not_started" });
+
+    // the human accepts; the next pass picks up the dependent node
+    await app.inject({
+      method: "POST", headers: junoAuth, url: `/v1/runs/${runId}/events`,
+      payload: { kind: "node_accepted", nodeId: "a" },
+    });
+    const second = await app.inject({
+      method: "POST", headers: junoAuth, url: `/v1/runs/${runId}/auto`, payload: {},
+    });
+    expect(second.json().steps[0]).toMatchObject({ nodeId: "b", action: "submitted" });
+    expect(second.json().stoppedReason).toBe("awaiting_review");
+
+    await app.inject({
+      method: "POST", headers: junoAuth, url: `/v1/runs/${runId}/events`,
+      payload: { kind: "node_accepted", nodeId: "b" },
+    });
+    const view = await app.inject({ method: "GET", headers: junoAuth, url: `/v1/runs/${runId}` });
+    expect(view.json().run.status).toBe("completed");
+  });
+
+  it("a refusal blocks that node and the pass keeps driving independent branches", async () => {
+    const created = await app.inject({
+      method: "POST", headers: junoAuth, url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "auto-refusal",
+          escalationApproverUserId: approverId,
+          nodes: [mkNode("a", autoWorkerId), mkNode("b", autoWorkerId)],
+        },
+      },
+    });
+    const runId = created.json().id;
+
+    const res = await app.inject({
+      method: "POST", headers: junoAuth, url: `/v1/runs/${runId}/auto`,
+      payload: { acceptReviews: true, inputs: { a: "please <<refuse>> this" } },
+    });
+    expect(res.statusCode).toBe(200);
+    const byNode = Object.fromEntries(
+      res.json().steps.map((s: { nodeId: string; action: string }) => [s.nodeId, s.action]),
+    );
+    expect(byNode.a).toBe("refused");
+    expect(byNode.b).toBe("accepted");
+    expect(res.json().stoppedReason).toBe("blocked");
+    expect(res.json().state.nodeStatuses).toMatchObject({ a: "blocked", b: "done" });
+    expect(res.json().state.lastError.a).toBe("worker refused the task");
+  });
+
+  it("a measured budget breach stops the pass and leaves the rest of the graph untouched", async () => {
+    const kaiId = await mkUser("auto-kai@example.com", "Auto Kai");
+    const kaiAuth = await authFor(kaiId);
+    const priceyRes = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/agents",
+      payload: {
+        name: "auto-pricey", provider: "mock", tier: 0, modes: ["execute"],
+        costPerMTokIn: 1_000_000, costPerMTokOut: 1_000_000, model: "mock-auto-pricey",
+      },
+    });
+    const priceyId = priceyRes.json().id;
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/grants/agents",
+      payload: { userId: kaiId, agentId: priceyId },
+    });
+    await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/users/${kaiId}/agent-policy`,
+      payload: { runBudgetUsd: 10, runBudgetBreachAction: "approve" },
+    });
+
+    const created = await app.inject({
+      method: "POST", headers: kaiAuth, url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "auto-budget",
+          escalationApproverUserId: approverId,
+          nodes: [mkNode("a", priceyId), mkNode("b", priceyId), mkNode("c", priceyId)],
+        },
+      },
+    });
+    const runId = created.json().id;
+
+    const res = await app.inject({
+      method: "POST", headers: kaiAuth, url: `/v1/runs/${runId}/auto`,
+      payload: { acceptReviews: true, inputs: { a: "x".repeat(100) } },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().stoppedReason).toBe("budget_exceeded_measured");
+    expect(res.json().measuredSpentUsd).toBeGreaterThan(10);
+    // only the breaching node ran; nothing was stranded mid-flight
+    expect(res.json().state.nodeStatuses).toMatchObject({
+      a: "done", b: "not_started", c: "not_started",
+    });
+    const view = await app.inject({ method: "GET", headers: kaiAuth, url: `/v1/runs/${runId}` });
+    expect(
+      view.json().pendingApprovals.some((a: { stageId: string }) => a.stageId === "__budget__:a"),
+    ).toBe(true);
+  });
+
+  it("a terminal run cannot auto-advance", async () => {
+    const created = await app.inject({
+      method: "POST", headers: junoAuth, url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "auto-terminal",
+          escalationApproverUserId: approverId,
+          nodes: [mkNode("a", autoWorkerId)],
+        },
+      },
+    });
+    const runId = created.json().id;
+    await app.inject({
+      method: "POST", headers: junoAuth, url: `/v1/runs/${runId}/events`,
+      payload: { kind: "abort" },
+    });
+    const res = await app.inject({
+      method: "POST", headers: junoAuth, url: `/v1/runs/${runId}/auto`, payload: {},
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("run_terminal");
+  });
+});
+
+describe("workflow build-stage nesting (§8): a build stage executes as an orchestration run", () => {
+  const mkNode = (id: string, agentId: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    title: `task ${id}`,
+    ownerAgentId: agentId,
+    mode: "execute",
+    estimate: { in: 1, out: 1 },
+    ...extra,
+  });
+  const mkUser = async (email: string, name: string) => {
+    const r = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email, displayName: name },
+    });
+    return r.json().id as string;
+  };
+  const mkTemplate = async (name: string, changeType: string, definition: Record<string, unknown>) => {
+    const t = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/templates",
+      payload: { name, definition },
+    });
+    expect(t.statusCode).toBe(201);
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/assignment-rules",
+      payload: { templateId: t.json().id, changeType },
+    });
+    return t.json().id as string;
+  };
+  const startInstance = (auth: { authorization: string }, changeType: string) =>
+    app.inject({
+      method: "POST", headers: auth, url: "/v1/workflows/instances",
+      payload: {
+        change: { description: `${changeType} change`, paths: ["x.ts"], changeType, environment: "staging" },
+      },
+    });
+
+  let nitaId: string;
+  let nitaAuth: { authorization: string };
+  let nestApproverId: string;
+  let nestWorkerId: string;
+
+  it("start → nested run spawned under the initiator; completing the run completes the instance", async () => {
+    nitaId = await mkUser("nest-nita@example.com", "Nest Nita");
+    nitaAuth = await authFor(nitaId);
+    nestApproverId = await mkUser("nest-approver@example.com", "Nest Approver");
+    const agentRes = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/agents",
+      payload: {
+        name: "nest-worker", provider: "mock", tier: 0, modes: ["execute"],
+        costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-nest",
+      },
+    });
+    nestWorkerId = agentRes.json().id;
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/grants/agents",
+      payload: { userId: nitaId, agentId: nestWorkerId },
+    });
+
+    await mkTemplate("nested-build", "nest-happy", {
+      workflow: "nested-build",
+      stages: [
+        { id: "intake", type: "trigger" },
+        {
+          id: "build",
+          type: "automated_build",
+          run: {
+            run: "nested-build-run",
+            escalationApproverUserId: nestApproverId,
+            nodes: [mkNode("a", nestWorkerId), mkNode("b", nestWorkerId, { dependsOn: ["a"] })],
+          },
+        },
+      ],
+    });
+
+    const started = await startInstance(nitaAuth, "nest-happy");
+    expect(started.statusCode).toBe(201);
+    const instanceId = started.json().id;
+    expect(started.json().status).toBe("awaiting_execution");
+
+    const view = await app.inject({
+      method: "GET", headers: nitaAuth, url: `/v1/workflows/instances/${instanceId}`,
+    });
+    const runId = view.json().instance.context["runId:build"];
+    expect(runId).toBeTruthy();
+
+    // the nested run is a real, visible run bound to the instance, planned
+    // under the INITIATOR's entitlements and not yet started
+    const runView = await app.inject({ method: "GET", headers: nitaAuth, url: `/v1/runs/${runId}` });
+    expect(runView.statusCode).toBe(200);
+    expect(runView.json().run.workflowInstanceId).toBe(instanceId);
+    expect(runView.json().run.status).toBe("planned");
+    expect(runView.json().run.initiatingUserId).toBe(nitaId);
+
+    // retrying the stage while the run is live never spawns a second run
+    await app.inject({
+      method: "POST", headers: nitaAuth, url: `/v1/workflows/instances/${instanceId}/advance`,
+      payload: { stageId: "build" },
+    });
+    const runs = await app.inject({ method: "GET", headers: AUTH, url: "/v1/runs" });
+    expect(
+      runs.json().runs.filter((r: { workflowInstanceId: string | null }) => r.workflowInstanceId === instanceId),
+    ).toHaveLength(1);
+
+    // driving the nested run to completion advances the workflow automatically
+    const auto = await app.inject({
+      method: "POST", headers: nitaAuth, url: `/v1/runs/${runId}/auto`,
+      payload: { acceptReviews: true },
+    });
+    expect(auto.statusCode).toBe(200);
+    expect(auto.json().status).toBe("completed");
+
+    const after = await app.inject({
+      method: "GET", headers: nitaAuth, url: `/v1/workflows/instances/${instanceId}`,
+    });
+    expect(after.json().instance.status).toBe("completed");
+  });
+
+  it("template creation validates nested graphs and their approvers fail-fast", async () => {
+    const cyclic = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/templates",
+      payload: {
+        name: "nested-cyclic",
+        definition: {
+          workflow: "nested-cyclic",
+          stages: [
+            { id: "intake", type: "trigger" },
+            {
+              id: "build",
+              type: "automated_build",
+              run: {
+                run: "cyclic",
+                escalationApproverUserId: nestApproverId,
+                nodes: [
+                  mkNode("a", nestWorkerId, { dependsOn: ["b"] }),
+                  mkNode("b", nestWorkerId, { dependsOn: ["a"] }),
+                ],
+              },
+            },
+          ],
+        },
+      },
+    });
+    expect(cyclic.statusCode).toBe(422);
+    expect(cyclic.json().error).toBe("invalid_run_graph");
+
+    const ghostApprover = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/templates",
+      payload: {
+        name: "nested-ghost",
+        definition: {
+          workflow: "nested-ghost",
+          stages: [
+            { id: "intake", type: "trigger" },
+            {
+              id: "build",
+              type: "automated_build",
+              run: {
+                run: "ghost",
+                escalationApproverUserId: "00000000-0000-0000-0000-000000000000",
+                nodes: [mkNode("a", nestWorkerId)],
+              },
+            },
+          ],
+        },
+      },
+    });
+    expect(ghostApprover.statusCode).toBe(422);
+    expect(ghostApprover.json().error).toBe("invalid_approver");
+  });
+
+  it("a nested run the initiator is not entitled to fails the stage explicitly and is retryable after a grant", async () => {
+    const olafId = await mkUser("nest-olaf@example.com", "Nest Olaf");
+    const olafAuth = await authFor(olafId);
+
+    await mkTemplate("nested-entitlement", "nest-entitlement", {
+      workflow: "nested-entitlement",
+      stages: [
+        { id: "intake", type: "trigger" },
+        {
+          id: "build",
+          type: "automated_build",
+          run: {
+            run: "entitlement-run",
+            escalationApproverUserId: nestApproverId,
+            nodes: [mkNode("a", nestWorkerId)],
+          },
+        },
+      ],
+    });
+
+    // olaf has NO grant for nest-worker — the spawn is rejected, audited, retryable
+    const started = await startInstance(olafAuth, "nest-entitlement");
+    expect(started.statusCode).toBe(201);
+    const instanceId = started.json().id;
+    expect(started.json().status).toBe("awaiting_execution");
+    const view = await app.inject({
+      method: "GET", headers: olafAuth, url: `/v1/workflows/instances/${instanceId}`,
+    });
+    expect(String(view.json().instance.context.lastError)).toContain("entitlement_exceeded");
+    expect(view.json().instance.context["runId:build"]).toBeUndefined();
+
+    // grant arrives; retry via /advance spawns the run for real
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/grants/agents",
+      payload: { userId: olafId, agentId: nestWorkerId },
+    });
+    await app.inject({
+      method: "POST", headers: olafAuth, url: `/v1/workflows/instances/${instanceId}/advance`,
+      payload: { stageId: "build" },
+    });
+    const retried = await app.inject({
+      method: "GET", headers: olafAuth, url: `/v1/workflows/instances/${instanceId}`,
+    });
+    const runId = retried.json().instance.context["runId:build"];
+    expect(runId).toBeTruthy();
+
+    const auto = await app.inject({
+      method: "POST", headers: olafAuth, url: `/v1/runs/${runId}/auto`,
+      payload: { acceptReviews: true },
+    });
+    expect(auto.json().status).toBe("completed");
+    const after = await app.inject({
+      method: "GET", headers: olafAuth, url: `/v1/workflows/instances/${instanceId}`,
+    });
+    expect(after.json().instance.status).toBe("completed");
+  });
+
+  it("an aborted nested run fails the stage; retry spawns a fresh run", async () => {
+    await mkTemplate("nested-abort", "nest-abort", {
+      workflow: "nested-abort",
+      stages: [
+        { id: "intake", type: "trigger" },
+        {
+          id: "build",
+          type: "automated_build",
+          run: {
+            run: "abortable-run",
+            escalationApproverUserId: nestApproverId,
+            nodes: [mkNode("a", nestWorkerId)],
+          },
+        },
+      ],
+    });
+    const started = await startInstance(nitaAuth, "nest-abort");
+    const instanceId = started.json().id;
+    const view = await app.inject({
+      method: "GET", headers: nitaAuth, url: `/v1/workflows/instances/${instanceId}`,
+    });
+    const firstRunId = view.json().instance.context["runId:build"];
+
+    await app.inject({
+      method: "POST", headers: nitaAuth, url: `/v1/runs/${firstRunId}/events`,
+      payload: { kind: "abort" },
+    });
+    const failed = await app.inject({
+      method: "GET", headers: nitaAuth, url: `/v1/workflows/instances/${instanceId}`,
+    });
+    expect(failed.json().instance.status).toBe("awaiting_execution");
+    expect(String(failed.json().instance.context.lastError)).toContain("aborted");
+
+    await app.inject({
+      method: "POST", headers: nitaAuth, url: `/v1/workflows/instances/${instanceId}/advance`,
+      payload: { stageId: "build" },
+    });
+    const retried = await app.inject({
+      method: "GET", headers: nitaAuth, url: `/v1/workflows/instances/${instanceId}`,
+    });
+    const secondRunId = retried.json().instance.context["runId:build"];
+    expect(secondRunId).toBeTruthy();
+    expect(secondRunId).not.toBe(firstRunId);
+
+    const auto = await app.inject({
+      method: "POST", headers: nitaAuth, url: `/v1/runs/${secondRunId}/auto`,
+      payload: { acceptReviews: true },
+    });
+    expect(auto.json().status).toBe("completed");
+    const after = await app.inject({
+      method: "GET", headers: nitaAuth, url: `/v1/workflows/instances/${instanceId}`,
+    });
+    expect(after.json().instance.status).toBe("completed");
+  });
+});
+
+describe("nested-run workers receive signed-off workflow artifacts (§2 scope-lock)", () => {
+  const mock = resolveModelProvider({ provider: "mock" }) as MockModelProvider;
+  const mkNode = (id: string, agentId: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    title: `task ${id}`,
+    ownerAgentId: agentId,
+    mode: "execute",
+    estimate: { in: 1, out: 1 },
+    ...extra,
+  });
+
+  let pipaId: string;
+  let pipaAuth: { authorization: string };
+  let scopeWorkerId: string;
+
+  it("the worker's system context is exactly the signed-off artifact, recorded for traceability", async () => {
+    const pipa = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email: "scope-pipa@example.com", displayName: "Scope Pipa" },
+    });
+    pipaId = pipa.json().id;
+    pipaAuth = await authFor(pipaId);
+    const approver = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email: "scope-approver@example.com", displayName: "Scope Approver" },
+    });
+    const agentRes = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/agents",
+      payload: {
+        name: "scope-worker", provider: "mock", tier: 0, modes: ["execute"],
+        costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-scope",
+      },
+    });
+    scopeWorkerId = agentRes.json().id;
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/grants/agents",
+      payload: { userId: pipaId, agentId: scopeWorkerId },
+    });
+
+    const tpl = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/templates",
+      payload: {
+        name: "scope-locked-build",
+        definition: {
+          workflow: "scope-locked-build",
+          stages: [
+            { id: "intake", type: "trigger" },
+            { id: "requirements", type: "artifact_generation", output: "requirements_file" },
+            {
+              id: "build",
+              type: "automated_build",
+              scope: "requirements_file",
+              run: {
+                run: "scope-run",
+                escalationApproverUserId: approver.json().id,
+                nodes: [mkNode("impl", scopeWorkerId)],
+              },
+            },
+          ],
+        },
+      },
+    });
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/assignment-rules",
+      payload: { templateId: tpl.json().id, changeType: "scope-lock-test" },
+    });
+
+    const started = await app.inject({
+      method: "POST", headers: pipaAuth, url: "/v1/workflows/instances",
+      payload: {
+        change: { description: "scoped", paths: ["s.ts"], changeType: "scope-lock-test", environment: "staging" },
+      },
+    });
+    const instanceId = started.json().id;
+    expect(started.json().status).toBe("blocked_on_artifact");
+
+    await app.inject({
+      method: "POST", headers: pipaAuth, url: `/v1/workflows/instances/${instanceId}/artifacts`,
+      payload: { stageId: "requirements", content: "UNIQUE-SCOPE-LOCK-CONTENT-77" },
+    });
+    const view = await app.inject({
+      method: "GET", headers: pipaAuth, url: `/v1/workflows/instances/${instanceId}`,
+    });
+    const runId = view.json().instance.context["runId:build"];
+    expect(runId).toBeTruthy();
+
+    const auto = await app.inject({
+      method: "POST", headers: pipaAuth, url: `/v1/runs/${runId}/auto`,
+      payload: { acceptReviews: true },
+    });
+    expect(auto.json().status).toBe("completed");
+    const after = await app.inject({
+      method: "GET", headers: pipaAuth, url: `/v1/workflows/instances/${instanceId}`,
+    });
+    expect(after.json().instance.status).toBe("completed");
+
+    // the model call itself carried the signed-off artifact as system context
+    const dispatch = mock.dispatches.find(
+      (d) => d.model === "mock-scope" && d.system?.includes("UNIQUE-SCOPE-LOCK-CONTENT-77"),
+    );
+    expect(dispatch).toBeDefined();
+    expect(dispatch!.system).toContain("signed-off artifact 'requirements_file' v1");
+    expect(dispatch!.system).toContain("node 'impl'");
+    expect(dispatch!.system).toContain("do not expand scope");
+
+    // §6 traceability: the run history records which artifact versions framed
+    // the execution
+    const runView = await app.inject({ method: "GET", headers: pipaAuth, url: `/v1/runs/${runId}` });
+    const evt = runView.json().events.find(
+      (e: { event: { kind: string } }) => e.event.kind === "node_dispatched",
+    );
+    expect(evt.event.contextArtifacts).toEqual([{ output: "requirements_file", version: 1 }]);
+  });
+
+  it("standalone runs stay artifact-free: no system context is injected", async () => {
+    const approver = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email: "scope-approver2@example.com", displayName: "Scope Approver 2" },
+    });
+    const created = await app.inject({
+      method: "POST", headers: pipaAuth, url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "standalone-no-system",
+          escalationApproverUserId: approver.json().id,
+          nodes: [mkNode("solo", scopeWorkerId)],
+        },
+      },
+    });
+    const runId = created.json().id;
+    const auto = await app.inject({
+      method: "POST", headers: pipaAuth, url: `/v1/runs/${runId}/auto`,
+      payload: { acceptReviews: true, inputs: { solo: "STANDALONE-NO-SYSTEM-42" } },
+    });
+    expect(auto.json().status).toBe("completed");
+    const dispatch = mock.dispatches.find((d) => d.input === "STANDALONE-NO-SYSTEM-42");
+    expect(dispatch).toBeDefined();
+    expect(dispatch!.system).toBeUndefined();
+  });
+});
+
+describe("per-user model credentials (BYO key): user key wins, platform is the fallback", () => {
+  async function startFakeAnthropic(marker: string) {
+    const hits: Array<{ apiKey: string | null }> = [];
+    const server = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        hits.push({ apiKey: (req.headers["x-api-key"] as string) ?? null });
+        const parsed = JSON.parse(body || "{}");
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            id: `msg_${marker}_${hits.length}`,
+            type: "message",
+            role: "assistant",
+            model: parsed.model,
+            content: [{ type: "text", text: `${marker}-reply` }],
+            stop_reason: "end_turn",
+            stop_sequence: null,
+            usage: { input_tokens: 10, output_tokens: 5 },
+          }),
+        );
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const addr = server.address() as { port: number };
+    return {
+      url: `http://127.0.0.1:${addr.port}`,
+      hits,
+      close: () =>
+        new Promise<void>((r) => {
+          server.closeAllConnections();
+          server.close(() => r());
+        }),
+    };
+  }
+
+  let userSrv: Awaited<ReturnType<typeof startFakeAnthropic>>;
+  let platformSrv: Awaited<ReturnType<typeof startFakeAnthropic>>;
+  let rheaId: string;
+  let rheaAuth: { authorization: string };
+  let byokAgentId: string;
+
+  afterAll(async () => {
+    await userSrv?.close();
+    await platformSrv?.close();
+  });
+
+  it("credentials are self-service, write-only, and private to their user", async () => {
+    userSrv = await startFakeAnthropic("USERKEY");
+    platformSrv = await startFakeAnthropic("PLATFORM");
+    const rhea = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email: "byok-rhea@example.com", displayName: "Byok Rhea" },
+    });
+    rheaId = rhea.json().id;
+    rheaAuth = await authFor(rheaId);
+    const agentRes = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/agents",
+      payload: {
+        name: "byok-agent", provider: "anthropic", tier: 1, modes: ["execute"],
+        costPerMTokIn: 5, costPerMTokOut: 25, model: "claude-opus-5",
+      },
+    });
+    byokAgentId = agentRes.json().id;
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/grants/agents",
+      payload: { userId: rheaId, agentId: byokAgentId },
+    });
+
+    const created = await app.inject({
+      method: "POST", headers: rheaAuth, url: `/v1/users/${rheaId}/model-credentials`,
+      payload: { provider: "anthropic", apiKey: "sk-user-rhea-key", baseUrl: userSrv.url },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(JSON.stringify(created.json())).not.toContain("sk-user-rhea-key");
+
+    const listed = await app.inject({
+      method: "GET", headers: rheaAuth, url: `/v1/users/${rheaId}/model-credentials`,
+    });
+    expect(listed.json().credentials).toHaveLength(1);
+    expect(JSON.stringify(listed.json())).not.toContain("sk-user-rhea-key");
+
+    // another non-admin cannot touch rhea's credentials
+    const sven = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email: "byok-sven@example.com", displayName: "Byok Sven" },
+    });
+    const svenAuth = await authFor(sven.json().id);
+    const denied = await app.inject({
+      method: "GET", headers: svenAuth, url: `/v1/users/${rheaId}/model-credentials`,
+    });
+    expect(denied.statusCode).toBe(403);
+  });
+
+  it("a dispatch rides the user's own key when one exists", async () => {
+    const res = await app.inject({
+      method: "POST", headers: rheaAuth, url: `/v1/agents/${byokAgentId}/invoke`,
+      payload: { mode: "execute", input: "hello from byok", dispatch: true },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().dispatch.outputText).toBe("USERKEY-reply");
+    expect(res.json().dispatch.credentialSource).toBe("user");
+    expect(userSrv.hits).toHaveLength(1);
+    expect(userSrv.hits[0]!.apiKey).toBe("sk-user-rhea-key");
+    expect(platformSrv.hits).toHaveLength(0);
+
+    const ledger = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/usage-events?userId=${rheaId}`,
+    });
+    expect(ledger.json().events[0].detail.credentialSource).toBe("user");
+  });
+
+  it("without a user key the platform credential is the fallback", async () => {
+    const removed = await app.inject({
+      method: "DELETE", headers: rheaAuth, url: `/v1/users/${rheaId}/model-credentials/anthropic`,
+    });
+    expect(removed.json().removed).toBe(true);
+    // point the platform credential at the platform fake (upsert)
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/model-credentials",
+      payload: { provider: "anthropic", apiKey: "sk-platform-key", baseUrl: platformSrv.url },
+    });
+
+    const res = await app.inject({
+      method: "POST", headers: rheaAuth, url: `/v1/agents/${byokAgentId}/invoke`,
+      payload: { mode: "execute", input: "fallback please", dispatch: true },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().dispatch.outputText).toBe("PLATFORM-reply");
+    expect(res.json().dispatch.credentialSource).toBe("platform");
+    expect(platformSrv.hits).toHaveLength(1);
+    expect(platformSrv.hits[0]!.apiKey).toBe("sk-platform-key");
+  });
+
+  it("re-adding the user key restores precedence over the platform credential", async () => {
+    await app.inject({
+      method: "POST", headers: rheaAuth, url: `/v1/users/${rheaId}/model-credentials`,
+      payload: { provider: "anthropic", apiKey: "sk-user-rhea-key-2", baseUrl: userSrv.url },
+    });
+    const res = await app.inject({
+      method: "POST", headers: rheaAuth, url: `/v1/agents/${byokAgentId}/invoke`,
+      payload: { mode: "execute", input: "precedence check", dispatch: true },
+    });
+    expect(res.json().dispatch.credentialSource).toBe("user");
+    expect(userSrv.hits).toHaveLength(2);
+    expect(userSrv.hits[1]!.apiKey).toBe("sk-user-rhea-key-2");
+    expect(platformSrv.hits).toHaveLength(1); // untouched
   });
 });
