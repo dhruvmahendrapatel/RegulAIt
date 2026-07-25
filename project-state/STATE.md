@@ -63,6 +63,27 @@ and a gateway executor: create_branch → open_pr (body auto-linked to the signe
 requirements artifact, §2 stage 7) → merge (configured strategy) with results in
 instance.context, failures retryable via /advance, everything audited.
 
+**EPIC-05 started — multi-agent orchestration first slice, 2026-07-25.** New pure
+`packages/orchestration-kernel` (pillar 7, MULTI_AGENT_ORCHESTRATION_SPEC §2–§5): task-graph
+validation (zod + cycle detection + §4 ownership rule: nodes sharing files must be
+dependency-ordered), ready-set scheduling with `parallelizable:false` serializing the whole run,
+and a run state machine using the spec's five node statuses (not_started/in_progress/blocked/
+in_review/done) with §3's three failure outcomes — retry, reassign, escalate — all event-driven.
+**The task graph is input** (user/template-supplied): whether a PM Agent may generate it with a
+model call is an open spec question, deliberately deferred until real model dispatch exists.
+§5.1 (inheritance, never escalation) enforced at the gateway: every node owner — at plan time
+AND on reassignment — goes through the same `evaluateAgent` under the *initiating user's*
+grants/modes/ceiling; any deny rejects the whole plan (422) or the reassignment (403), audited.
+Escalations land in the ONE approvals queue (`approvals.run_id` + objectType "run", named
+approver from the graph; approve = re-open node, deny = abort run) and every run event writes to
+the one audit trail (objectType "run"). Migration 0011: `orchestration_runs` (graph/state jsonb
+snapshots, nullable workflow_instance_id for §8 build-stage nesting later),
+`orchestration_run_events` (append-only), `approvals.run_id`. Endpoints: POST /v1/runs
+(validate+plan, nothing executes until an explicit start), POST /v1/runs/:id/events,
+per-run view (initiator-only) + admin fleet view. Not in the slice: per-run budget caps (§5.2 —
+needs cost estimation over the graph, natural second slice), real worker dispatch, PM-agent
+decomposition, team-lead tier semantics, workflow build-stage nesting.
+
 **EPIC-04 started — token/cost optimization first slice, 2026-07-25.** New pure
 `packages/optimizer-kernel` (pillar 6, TOKEN_OPTIMIZATION_SPEC §7/§8): deterministic complexity
 classifier (never an LLM call — no text = no signal = no downgrade), token estimator, and
@@ -87,9 +108,15 @@ tools, withheld tools stay fully callable (tools/call never consults the selecti
 manifest shrinks, the entitlement never does), no intent or zero matches fails open to the full
 entitled list, the same per-user `routing_mode` passthrough switch disables it, and each
 tools/list writes a `lazy_tool_loading` cost event with tokens-saved measured from the actual
-serialized manifest chars withheld. Not in EPIC-04 yet: edit-vs-rewrite, compaction, file
-pre-processing, prompt/semantic caching, batching, workflow-template cost-sensitivity tags
-(§9's invoke-side signal is in).
+serialized manifest chars withheld. **Third slice: §9 cost-sensitivity tag on workflow
+templates** — `costSensitivity: cost-sensitive|standard|quality-sensitive` on the workflow
+definition (validated by the kernel, no new stage type, no migration — it rides the definition
+jsonb into the instance snapshot), merged strictest-wins in `mergeDefinitions` (an untagged
+template counts as "standard", so a merge can never inherit cost-sensitive downgrading from
+one team's template), surfaced top-level on the per-instance view. The invoke path has accepted
+the same enum since slice 1; wiring instance→invoke happens when workflows actually invoke
+models. Not in EPIC-04 yet: edit-vs-rewrite, compaction, file pre-processing, prompt/semantic
+caching, batching.
 
 **EPIC-03 started — workflow engine first slice (PR #9).** New pure `packages/workflow-kernel`:
 declarative template validation (§3 — executable stage types trigger/planning/
@@ -177,8 +204,8 @@ with a real in-process upstream MCP server and real MCP client (26 tests total).
 | EPIC-01 | Bootstrap: AWS foundation + GitHub repo + session-continuity scaffold | **done** | ADR-0001–0004 |
 | EPIC-02 | Governance layer MVP (now includes infra-ops/compliance-cascade/deploy-model, Shared Projects, cost dashboard — §1–§10) | **in progress** — stack chosen (ADR-0009), first slice = MCP-server governance vertical | GOVERNANCE_LAYER_SPEC.md, ADR-0007, ADR-0009 |
 | EPIC-03 | Workflow engine MVP (now includes optional Design/Architecture sign-off stage type) | **in progress** — first slice merged (PR #9) | WORKFLOW_ENGINE_SPEC.md, ADR-0007 |
-| EPIC-04 | Token/cost optimization MVP (escalated to P0) | **in progress** — routing kernel + cost_events ledger merged (PR #12); lazy tool-loading in the MCP proxy built | TOKEN_OPTIMIZATION_SPEC.md, ADR-0007 |
-| EPIC-05 | Multi-agent orchestration MVP (PM/Team-Lead/Worker delegation) | not started | MULTI_AGENT_ORCHESTRATION_SPEC.md, ADR-0008 |
+| EPIC-04 | Token/cost optimization MVP (escalated to P0) | **in progress** — routing kernel + cost_events ledger (PR #12), lazy tool-loading (PR #13) merged; §9 workflow cost-sensitivity tag built | TOKEN_OPTIMIZATION_SPEC.md, ADR-0007 |
+| EPIC-05 | Multi-agent orchestration MVP (PM/Team-Lead/Worker delegation) | **in progress** — first slice built (orchestration-kernel: DAG + ready-set + run state machine; §5.1 inheritance enforced; escalations in the one approvals queue) | MULTI_AGENT_ORCHESTRATION_SPEC.md, ADR-0008 |
 | EPIC-06 | PM-tool integration MVP (Azure DevOps/Jira/etc.) | not started | PM_TOOL_INTEGRATION_SPEC.md, ADR-0008 |
 
 ## Components

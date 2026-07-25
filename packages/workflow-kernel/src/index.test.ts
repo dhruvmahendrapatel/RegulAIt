@@ -287,3 +287,33 @@ describe("git_operation stages", () => {
     ).toThrow(/not executing git stage/);
   });
 });
+
+describe("cost-sensitivity tag (§9, EPIC-04)", () => {
+  const tagged = (tag: string | undefined, workflow: string) =>
+    validateDefinition({
+      workflow,
+      ...(tag ? { costSensitivity: tag } : {}),
+      stages: [{ id: `${workflow}-intake`, type: "trigger" }],
+    });
+
+  it("accepts the three tags and rejects anything else", () => {
+    for (const tag of ["cost-sensitive", "standard", "quality-sensitive"]) {
+      expect(tagged(tag, "w").costSensitivity).toBe(tag);
+    }
+    expect(() => tagged("cheapest", "w")).toThrow();
+  });
+
+  it("a single-template run keeps its own tag", () => {
+    expect(mergeDefinitions([tagged("cost-sensitive", "w")]).costSensitivity).toBe("cost-sensitive");
+  });
+
+  it("merge is strictest-wins: quality-sensitive beats cost-sensitive", () => {
+    const merged = mergeDefinitions([tagged("cost-sensitive", "a"), tagged("quality-sensitive", "b")]);
+    expect(merged.costSensitivity).toBe("quality-sensitive");
+  });
+
+  it("an untagged template counts as standard, so it blocks cost-sensitive downgrading", () => {
+    const merged = mergeDefinitions([tagged("cost-sensitive", "a"), tagged(undefined, "b")]);
+    expect(merged.costSensitivity).toBe("standard");
+  });
+});

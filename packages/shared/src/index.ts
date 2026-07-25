@@ -192,3 +192,27 @@ export const createGitConnectionSchema = z.object({
   baseUrl: z.string().url().optional(),
   token: z.string().min(1).max(512),
 });
+
+// EPIC-05 orchestration runs. The graph itself is validated by
+// @regulait/orchestration-kernel — shared only frames the envelope.
+export const createRunSchema = z.object({
+  graph: z.unknown(),
+  workflowInstanceId: z.string().uuid().optional(),
+});
+
+export const runEventSchema = z.object({
+  kind: z.enum([
+    "start",
+    "node_started",
+    "node_submitted",
+    "node_accepted",
+    "node_failed",
+    "retry_node",
+    "reassign_node",
+    "escalate_node",
+    "abort",
+  ]),
+  nodeId: z.string().min(1).max(64).optional(),
+  ownerAgentId: z.string().uuid().optional(),
+  error: z.string().min(1).max(2000).optional(),
+});

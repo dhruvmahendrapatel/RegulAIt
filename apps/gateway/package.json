@@ -19,7 +19,8 @@
     "zod": "^3.25.67",
     "@regulait/workflow-kernel": "workspace:*",
     "@regulait/git-provider": "workspace:*",
-    "@regulait/optimizer-kernel": "workspace:*"
+    "@regulait/optimizer-kernel": "workspace:*",
+    "@regulait/orchestration-kernel": "workspace:*"
   },
   "devDependencies": {
     "vitest": "^3.2.4"
