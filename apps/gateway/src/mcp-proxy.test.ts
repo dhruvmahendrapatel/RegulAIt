@@ -5823,3 +5823,113 @@ describe("jira pm adapter: run sync + status mirror against a live-shaped server
     }
   });
 });
+
+describe("linear pm adapter: GraphQL run sync + state mirror end-to-end", () => {
+  it("pm-sync creates Linear issues via issueCreate and node events mirror via workflow states", async () => {
+    let issueSeq = 0;
+    const gqlCalls: Array<{ auth: string | null; query: string; variables: Record<string, unknown> }> = [];
+    const srv = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        const parsed = JSON.parse(body || "{}");
+        gqlCalls.push({
+          auth: (req.headers.authorization as string) ?? null,
+          query: parsed.query ?? "",
+          variables: parsed.variables ?? {},
+        });
+        let data: unknown = {};
+        if (String(parsed.query).includes("teams(filter")) {
+          data = { teams: { nodes: [{ id: "team-uuid-9" }] } };
+        } else if (String(parsed.query).includes("issueCreate")) {
+          issueSeq += 1;
+          data = { issueCreate: { success: true, issue: { id: `lin-issue-${issueSeq}`, url: `https://linear.app/acme/issue/REG-${issueSeq}` } } };
+        } else if (String(parsed.query).includes("states")) {
+          data = { team: { states: { nodes: [
+            { id: "st-todo", name: "Todo" },
+            { id: "st-prog", name: "In Progress" },
+            { id: "st-done", name: "Done" },
+          ] } } };
+        } else if (String(parsed.query).includes("issueUpdate")) {
+          data = { issueUpdate: { success: true } };
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ data }));
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    const port = (srv.address() as { port: number }).port;
+
+    try {
+      const lena = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email: "linear-lena@example.com", displayName: "Linear Lena" },
+      });
+      const lenaAuth = await authFor(lena.json().id);
+      const approver = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email: "linear-approver@example.com", displayName: "Linear Approver" },
+      });
+      const agentRes = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/agents",
+        payload: {
+          name: "linear-worker", provider: "mock", tier: 0, modes: ["execute"],
+          costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-linear",
+        },
+      });
+      await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/grants/agents",
+        payload: { userId: lena.json().id, agentId: agentRes.json().id },
+      });
+      const conn = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/pm/connections",
+        payload: {
+          name: "linear-e2e", provider: "linear", project: "REG",
+          baseUrl: `http://127.0.0.1:${port}`, token: "lin_api_e2e_secret",
+        },
+      });
+      expect(conn.statusCode).toBe(201);
+
+      const run = await app.inject({
+        method: "POST", headers: lenaAuth, url: "/v1/runs",
+        payload: {
+          graph: {
+            run: "linear-sync-run",
+            escalationApproverUserId: approver.json().id,
+            nodes: [{ id: "a", title: "ship feature", ownerAgentId: agentRes.json().id, mode: "execute", estimate: { in: 1, out: 1 } }],
+          },
+        },
+      });
+      const runId = run.json().id;
+
+      const synced = await app.inject({
+        method: "POST", headers: lenaAuth, url: `/v1/runs/${runId}/pm-sync`,
+        payload: { connectionName: "linear-e2e" },
+      });
+      expect(synced.statusCode).toBe(201);
+      const creations = gqlCalls.filter((c) => c.query.includes("issueCreate"));
+      expect(creations).toHaveLength(2); // run parent + node
+      expect(creations[0]!.auth).toBe("lin_api_e2e_secret");
+      const nodeCreate = creations.find(
+        (c) => (c.variables.input as Record<string, unknown>).title === "ship feature",
+      );
+      expect(nodeCreate).toBeDefined();
+      expect((nodeCreate!.variables.input as Record<string, unknown>).teamId).toBe("team-uuid-9");
+
+      await app.inject({ method: "POST", headers: lenaAuth, url: `/v1/runs/${runId}/events`, payload: { kind: "start" } });
+      const started = await app.inject({
+        method: "POST", headers: lenaAuth, url: `/v1/runs/${runId}/events`,
+        payload: { kind: "node_started", nodeId: "a" },
+      });
+      expect(started.statusCode).toBe(200);
+      const stateMove = gqlCalls.find(
+        (c) => c.query.includes("issueUpdate") && (c.variables.input as Record<string, unknown>)?.stateId,
+      );
+      expect(stateMove).toBeDefined();
+      expect((stateMove!.variables.input as Record<string, unknown>).stateId).toBe("st-prog"); // → In Progress
+    } finally {
+      srv.closeAllConnections();
+      await new Promise<void>((r) => srv.close(() => r()));
+    }
+  });
+});

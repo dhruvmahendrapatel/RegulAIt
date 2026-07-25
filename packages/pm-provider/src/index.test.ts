@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   AzureDevOpsProvider,
   JiraProvider,
+  LinearProvider,
   MockPmProvider,
   PmProviderError,
   mappingFor,
@@ -36,7 +37,7 @@ describe("field mapping (§6/§7)", () => {
     });
     expect(resolveTaskFields(mapping, { title: "x" })).toEqual({ "Custom.Title": "x" });
     expect(() => mappingFor("azure_devops", { task: { fields: {} } })).toThrow();
-    expect(() => mappingFor("linear")).toThrow(PmProviderError); // no default shipped yet
+    expect(() => mappingFor("asana")).toThrow(PmProviderError); // no default shipped yet
   });
 });
 
@@ -96,7 +97,7 @@ describe("registry", () => {
     const b = resolvePmProvider({ provider: "mock", token: "" });
     expect(a).toBe(b);
     expect(() => resolvePmProvider({ provider: "azure_devops", token: "t" })).toThrow(/baseUrl/);
-    for (const provider of ["linear", "asana", "monday", "generic_webhook"] as const) {
+    for (const provider of ["asana", "monday", "generic_webhook"] as const) {
       expect(() => resolvePmProvider({ provider, token: "t" })).toThrow(/not implemented/);
     }
   });
@@ -279,8 +280,119 @@ describe("JiraProvider (REST v2, injectable fetch, no network)", () => {
       resolvePmProvider({ provider: "jira", token: "b:t", baseUrl: "https://a.atlassian.net" }).kind,
     ).toBe("jira");
     expect(() => resolvePmProvider({ provider: "jira", token: "b:t" })).toThrowError(/baseUrl/);
-    for (const provider of ["linear", "asana", "monday", "generic_webhook"] as const) {
+    for (const provider of ["asana", "monday", "generic_webhook"] as const) {
       expect(() => resolvePmProvider({ provider, token: "t" })).toThrowError(/not implemented/);
     }
+  });
+});
+
+describe("LinearProvider (GraphQL, injectable fetch, no network)", () => {
+  type Call = { query: string; variables: Record<string, unknown>; auth: string };
+  function fakeLinear(handler: (call: Call) => unknown) {
+    const calls: Call[] = [];
+    const fetchImpl = async (url: string, init?: { headers?: Record<string, string>; body?: string }) => {
+      const parsed = JSON.parse(String(init?.body));
+      const call: Call = {
+        query: parsed.query,
+        variables: parsed.variables,
+        auth: init?.headers?.authorization ?? "",
+      };
+      calls.push(call);
+      return {
+        status: 200,
+        json: async () => ({ data: handler(call) }),
+        text: async () => "",
+      };
+    };
+    return { calls, fetchImpl };
+  }
+
+  it("resolves the team key once, creates issues, and returns the Linear url", async () => {
+    const { calls, fetchImpl } = fakeLinear((call) => {
+      if (call.query.includes("teams(filter")) return { teams: { nodes: [{ id: "team-uuid-1" }] } };
+      return { issueCreate: { success: true, issue: { id: "issue-1", url: "https://linear.app/acme/issue/REG-1" } } };
+    });
+    const linear = new LinearProvider({ token: "lin_api_secret", fetchImpl });
+    const ref = await linear.createWorkItem("REG", "Issue", { title: "Build API", description: "initial" });
+    expect(calls[0]!.auth).toBe("lin_api_secret");
+    expect(calls[0]!.variables).toEqual({ key: "REG" });
+    expect(calls[1]!.variables).toEqual({
+      input: { teamId: "team-uuid-1", title: "Build API", description: "initial" },
+    });
+    expect(ref).toEqual({ id: "issue-1", url: "https://linear.app/acme/issue/REG-1" });
+
+    // the team id is cached — a second create resolves no team again
+    await linear.createWorkItem("REG", "Issue", { title: "Second" });
+    expect(calls.filter((c) => c.query.includes("teams(filter"))).toHaveLength(1);
+  });
+
+  it("transitions via the team's workflow states — explicit failure when the state is missing", async () => {
+    const { calls, fetchImpl } = fakeLinear((call) => {
+      if (call.query.includes("teams(filter")) return { teams: { nodes: [{ id: "team-uuid-1" }] } };
+      if (call.query.includes("states")) {
+        return { team: { states: { nodes: [
+          { id: "st-1", name: "Todo" },
+          { id: "st-2", name: "In Progress" },
+          { id: "st-3", name: "Done" },
+        ] } } };
+      }
+      return { issueUpdate: { success: true } };
+    });
+    const linear = new LinearProvider({ token: "t", fetchImpl });
+    await linear.transitionState("REG", "issue-1", "In Progress");
+    const update = calls.find((c) => c.query.includes("issueUpdate"))!;
+    expect(update.variables).toEqual({ id: "issue-1", input: { stateId: "st-2" } });
+
+    await expect(linear.transitionState("REG", "issue-1", "Blocked")).rejects.toThrowError(
+      /no workflow state 'Blocked'.*Todo, In Progress, Done/,
+    );
+  });
+
+  it("comments, reads issues into the neutral shape, and surfaces GraphQL errors", async () => {
+    const { fetchImpl } = fakeLinear((call) => {
+      if (call.query.includes("commentCreate")) return { commentCreate: { success: true } };
+      return {
+        issue: {
+          id: "issue-1",
+          url: "https://linear.app/acme/issue/REG-1",
+          title: "Build API",
+          description: "initial",
+          priority: 2,
+          state: { name: "In Progress" },
+          comments: { nodes: [{ body: "first" }] },
+        },
+      };
+    });
+    const linear = new LinearProvider({ token: "t", fetchImpl });
+    await linear.addComment("REG", "issue-1", "note");
+    const item = await linear.getWorkItem("REG", "issue-1");
+    expect(item).toMatchObject({
+      id: "issue-1",
+      type: "Issue",
+      state: "In Progress",
+      comments: ["first"],
+    });
+    expect(item.fields.title).toBe("Build API");
+
+    const failing = new LinearProvider({
+      token: "t",
+      fetchImpl: async () => ({
+        status: 200,
+        json: async () => ({ errors: [{ message: "not authorized" }] }),
+        text: async () => "",
+      }),
+    });
+    await expect(failing.getWorkItem("REG", "x")).rejects.toThrowError(/not authorized/);
+  });
+
+  it("default mapping exists and the registry resolves linear", () => {
+    const mapping = mappingFor("linear");
+    expect(resolveTaskFields(mapping, { title: "T", description: "D" })).toEqual({
+      title: "T",
+      description: "D",
+    });
+    expect(resolveStatus(mapping, "in_review")).toBe("In Review");
+    expect(resolveStatus(mapping, "blocked")).toBeNull();
+    expect(resolvePmProvider({ provider: "linear", token: "lin_api_x" }).kind).toBe("linear");
   });
 });

@@ -154,6 +154,25 @@ export function validateMapping(raw: unknown): PmMapping {
 }
 
 export const DEFAULT_MAPPINGS: Partial<Record<PmProviderKind, PmMapping>> = {
+  linear: {
+    task: {
+      workItemType: "Issue",
+      fields: {
+        title: "title",
+        status: "state",
+        description: "description",
+        priority: "priority",
+      },
+      // Linear's default workflow has no Blocked state — 'blocked' is
+      // deliberately unmapped (skip, never invent).
+      statusMap: {
+        not_started: "Todo",
+        in_progress: "In Progress",
+        in_review: "In Review",
+        done: "Done",
+      },
+    },
+  },
   jira: {
     task: {
       workItemType: "Task",
@@ -445,6 +464,166 @@ export class JiraProvider implements PmProvider {
 }
 
 // ---------------------------------------------------------------------------
+// Linear adapter — GraphQL-only API (api.linear.app/graphql), raw api-key
+// Authorization header, injectable fetch. The interface's `project` is a
+// Linear TEAM KEY (resolved to an id once and cached); states are per-team
+// workflow states resolved by name, failing explicit with the available list.
+// The `type` argument is accepted but Linear issues carry no native type —
+// documented, ignored.
+// ---------------------------------------------------------------------------
+
+export interface LinearAdapterOptions {
+  /** a Linear API key, sent verbatim in the Authorization header */
+  token: string;
+  /** override for testing/bridges; default https://api.linear.app */
+  baseUrl?: string | null;
+  fetchImpl?: FetchLike;
+}
+
+const LINEAR_DEFAULT_BASE = "https://api.linear.app";
+
+export class LinearProvider implements PmProvider {
+  readonly kind = "linear" as const;
+  private readonly base: string;
+  private readonly token: string;
+  private readonly fetchImpl: FetchLike;
+  private readonly teamIds = new Map<string, string>();
+
+  constructor(opts: LinearAdapterOptions) {
+    this.base = (opts.baseUrl ?? LINEAR_DEFAULT_BASE).replace(/\/$/, "");
+    this.token = opts.token;
+    this.fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
+  }
+
+  private async gql<T>(query: string, variables: Record<string, unknown>): Promise<T> {
+    const res = await this.fetchImpl(`${this.base}/graphql`, {
+      method: "POST",
+      headers: {
+        authorization: this.token,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ query, variables }),
+    });
+    if (res.status >= 400) {
+      throw new PmProviderError(`linear graphql failed: ${await res.text()}`, res.status);
+    }
+    const payload = (await res.json()) as { data?: T; errors?: Array<{ message?: string }> };
+    if (payload.errors?.length) {
+      throw new PmProviderError(
+        `linear graphql failed: ${payload.errors.map((e) => e.message).join("; ")}`,
+      );
+    }
+    return payload.data as T;
+  }
+
+  private async teamId(key: string): Promise<string> {
+    const cached = this.teamIds.get(key);
+    if (cached) return cached;
+    const data = await this.gql<{ teams: { nodes: Array<{ id: string }> } }>(
+      `query TeamByKey($key: String!) { teams(filter: { key: { eq: $key } }) { nodes { id } } }`,
+      { key },
+    );
+    const id = data.teams.nodes[0]?.id;
+    if (!id) throw new PmProviderError(`linear team with key '${key}' not found`, 404);
+    this.teamIds.set(key, id);
+    return id;
+  }
+
+  async createWorkItem(
+    project: string,
+    _type: string,
+    fields: Record<string, unknown>,
+  ): Promise<WorkItemRef> {
+    const teamId = await this.teamId(project);
+    const data = await this.gql<{
+      issueCreate: { success: boolean; issue: { id: string; url: string } };
+    }>(
+      `mutation CreateIssue($input: IssueCreateInput!) {
+        issueCreate(input: $input) { success issue { id url } }
+      }`,
+      { input: { teamId, ...fields } },
+    );
+    if (!data.issueCreate.success) throw new PmProviderError("linear issueCreate reported failure");
+    return { id: data.issueCreate.issue.id, url: data.issueCreate.issue.url };
+  }
+
+  async updateFields(_project: string, id: string, fields: Record<string, unknown>): Promise<void> {
+    await this.gql(
+      `mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
+        issueUpdate(id: $id, input: $input) { success }
+      }`,
+      { id, input: fields },
+    );
+  }
+
+  async transitionState(project: string, id: string, state: string): Promise<void> {
+    const teamId = await this.teamId(project);
+    const data = await this.gql<{ team: { states: { nodes: Array<{ id: string; name: string }> } } }>(
+      `query TeamStates($teamId: String!) { team(id: $teamId) { states { nodes { id name } } } }`,
+      { teamId },
+    );
+    const match = data.team.states.nodes.find((st) => st.name === state);
+    if (!match) {
+      const names = data.team.states.nodes.map((st) => st.name).join(", ") || "none";
+      throw new PmProviderError(
+        `linear team has no workflow state '${state}' (available: ${names})`,
+      );
+    }
+    await this.gql(
+      `mutation MoveIssue($id: String!, $input: IssueUpdateInput!) {
+        issueUpdate(id: $id, input: $input) { success }
+      }`,
+      { id, input: { stateId: match.id } },
+    );
+  }
+
+  async addComment(_project: string, id: string, text: string): Promise<void> {
+    await this.gql(
+      `mutation AddComment($input: CommentCreateInput!) {
+        commentCreate(input: $input) { success }
+      }`,
+      { input: { issueId: id, body: text } },
+    );
+  }
+
+  async getWorkItem(_project: string, id: string): Promise<WorkItem> {
+    const data = await this.gql<{
+      issue: {
+        id: string;
+        url: string;
+        title: string;
+        description: string | null;
+        priority: number | null;
+        state: { name: string } | null;
+        comments: { nodes: Array<{ body: string }> };
+      };
+    }>(
+      `query Issue($id: String!) {
+        issue(id: $id) {
+          id url title description priority
+          state { name }
+          comments { nodes { body } }
+        }
+      }`,
+      { id },
+    );
+    return {
+      id: data.issue.id,
+      url: data.issue.url,
+      type: "Issue",
+      state: data.issue.state?.name ?? null,
+      fields: {
+        title: data.issue.title,
+        description: data.issue.description,
+        priority: data.issue.priority,
+        state: data.issue.state?.name ?? null,
+      },
+      comments: data.issue.comments.nodes.map((c) => c.body),
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Mock adapter — in-memory, for tests and air-gapped development.
 // ---------------------------------------------------------------------------
 
@@ -543,9 +722,14 @@ export function resolvePmProvider(config: PmConnectionConfig, fetchImpl?: FetchL
         baseUrl: config.baseUrl,
         ...(fetchImpl ? { fetchImpl } : {}),
       });
+    case "linear":
+      return new LinearProvider({
+        token: config.token,
+        baseUrl: config.baseUrl ?? null,
+        ...(fetchImpl ? { fetchImpl } : {}),
+      });
     case "mock":
       return sharedMock;
-    case "linear":
     case "asana":
     case "monday":
     case "generic_webhook":

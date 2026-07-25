@@ -285,8 +285,19 @@ unmapped (Jira's default workflow has no Blocked state — skip, never invent). 
 resolves azure_devops + jira + mock; linear/asana/monday/generic_webhook stay rejected.
 E2e: a run pm-syncs against a live-shaped fake Jira server (run parent + node issues created
 with project/issuetype wrappers and Basic auth asserted on the wire) and a node_started event
-mirrors through a real GET-transitions → POST-transition sequence. Deferred: remaining PM
-adapters, ADF descriptions, Jira webhooks → the ADR-0010 normalized inbound shape.
+mirrors through a real GET-transitions → POST-transition sequence. **Linear adapter, same day**: GraphQL-only API
+handled natively — `LinearProvider` speaks `api.linear.app/graphql` (overridable) with the
+raw api-key Authorization header, resolves the connection's `project` as a Linear TEAM KEY to
+an id once (cached), and drives `issueCreate`/`issueUpdate`/`commentCreate`/`issue` queries;
+GraphQL `errors` arrays surface as explicit PmProviderErrors. Transitions resolve the TEAM's
+workflow states by name (explicit failure listing available states); Linear issues carry no
+native type, so the interface's `type` is accepted-and-ignored (documented). Default mapping
+maps title/description/priority with Linear's default state names; `blocked` unmapped again.
+Registry: azure_devops + jira + linear + mock; asana/monday/generic_webhook stay rejected.
+E2e: pm-sync + node_started mirror against a fake Linear GraphQL server (team resolution,
+issueCreate inputs, raw-token auth, and the stateId move all asserted). Deferred: remaining
+PM adapters, ADF descriptions, provider-native webhooks → the ADR-0010 normalized inbound
+shape.
 
 **EPIC-06 started — PM-tool integration first slice, 2026-07-25.** New
 `packages/pm-provider` on the git-provider playbook (pillar 8, PM_TOOL_INTEGRATION_SPEC
