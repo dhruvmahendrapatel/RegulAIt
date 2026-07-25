@@ -42,6 +42,11 @@ export const taskNodeSchema = z.object({
   parallelizable: z.boolean().default(true),
   /** §4 ownership: files/modules this node owns while it runs */
   files: z.array(z.string().min(1)).optional(),
+  /** §5.2: planner-declared token estimate for this node; the gateway falls
+   * back to a heuristic from the title when absent */
+  estimate: z
+    .object({ in: z.number().int().positive(), out: z.number().int().positive() })
+    .optional(),
 });
 export type TaskNode = z.infer<typeof taskNodeSchema>;
 
@@ -294,4 +299,65 @@ export function transitionRun(graph: TaskGraph, state: RunState, event: RunEvent
     }
   }
   return { state: next, effects };
+}
+
+// ---------------------------------------------------------------------------
+// §5.2 per-run budget: pure cost estimation over the graph. All numbers are
+// ESTIMATES until real model dispatch exists — enforcement is estimate-based
+// and every consumer labels it so. An unpriced owner makes the total
+// incomparable (null), which callers must treat as fail-closed when a cap is
+// set: a cap that cannot be checked is a cap that requires approval, never a
+// cap silently skipped (§7).
+// ---------------------------------------------------------------------------
+
+export interface NodeTokenEstimate {
+  in: number;
+  out: number;
+}
+
+export interface AgentPricingRef {
+  costPerMTokIn: number | null;
+  costPerMTokOut: number | null;
+}
+
+export interface GraphCostEstimate {
+  /** null when any node's owner is unpriced */
+  totalUsd: number | null;
+  perNodeUsd: Record<string, number | null>;
+  unpricedNodes: string[];
+}
+
+export function estimateNodeCost(
+  pricing: AgentPricingRef | undefined,
+  tokens: NodeTokenEstimate,
+): number | null {
+  if (!pricing || pricing.costPerMTokIn === null || pricing.costPerMTokOut === null) return null;
+  return (tokens.in * pricing.costPerMTokIn + tokens.out * pricing.costPerMTokOut) / 1_000_000;
+}
+
+export function estimateGraphCost(
+  graph: TaskGraph,
+  owners: Record<string, string>,
+  pricing: Record<string, AgentPricingRef>,
+  tokensFor: (node: TaskNode) => NodeTokenEstimate,
+): GraphCostEstimate {
+  const perNodeUsd: Record<string, number | null> = {};
+  const unpricedNodes: string[] = [];
+  let total: number | null = 0;
+  for (const node of graph.nodes) {
+    const owner = owners[node.id] ?? node.ownerAgentId;
+    const cost = estimateNodeCost(pricing[owner], node.estimate ?? tokensFor(node));
+    perNodeUsd[node.id] = cost;
+    if (cost === null) {
+      unpricedNodes.push(node.id);
+      total = null;
+    } else if (total !== null) {
+      total += cost;
+    }
+  }
+  return {
+    totalUsd: total === null ? null : Number(total.toFixed(6)),
+    perNodeUsd,
+    unpricedNodes,
+  };
 }

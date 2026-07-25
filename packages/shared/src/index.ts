@@ -122,6 +122,8 @@ export const setAgentPolicySchema = z.object({
   defaultAgentId: z.string().uuid().nullable().optional(),
   ceilingAgentId: z.string().uuid().nullable().optional(),
   routingMode: z.enum(["automatic", "passthrough"]).optional(),
+  runBudgetUsd: z.number().positive().nullable().optional(),
+  runBudgetBreachAction: z.enum(["approve", "replan"]).optional(),
 });
 
 export const invokeAgentSchema = z.object({

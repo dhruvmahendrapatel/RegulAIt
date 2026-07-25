@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  estimateGraphCost,
   initialRunState,
   readyNodes,
   transitionRun,
@@ -163,5 +164,43 @@ describe("run lifecycle + failure handling (§3)", () => {
     expect(() => transitionRun(g, s, { kind: "start" })).toThrow(/already started/);
     s = transitionRun(g, s, { kind: "node_started", nodeId: "only" }).state;
     expect(() => transitionRun(g, s, { kind: "node_started", nodeId: "only" })).toThrow(RunStateError);
+  });
+});
+
+describe("graph cost estimation (§5.2)", () => {
+  const OTHER = "44444444-4444-4444-8444-444444444444";
+  const g = graph([
+    node("a", { estimate: { in: 1000, out: 1000 } }),
+    node("b", { estimate: { in: 2000, out: 500 }, dependsOn: ["a"] }),
+  ]);
+  const pricing = { [AGENT]: { costPerMTokIn: 10, costPerMTokOut: 30 } };
+  const fallback = () => ({ in: 100, out: 100 });
+
+  it("sums per-node cost from declared estimates and current owners", () => {
+    const c = estimateGraphCost(g, initialRunState(g).owners, pricing, fallback);
+    // a: (1000*10 + 1000*30)/1e6 = 0.04; b: (2000*10 + 500*30)/1e6 = 0.035
+    expect(c.perNodeUsd.a).toBeCloseTo(0.04, 6);
+    expect(c.perNodeUsd.b).toBeCloseTo(0.035, 6);
+    expect(c.totalUsd).toBeCloseTo(0.075, 6);
+    expect(c.unpricedNodes).toEqual([]);
+  });
+
+  it("uses the fallback token estimator when a node declares none", () => {
+    const g2 = graph([node("x")]);
+    const c = estimateGraphCost(g2, initialRunState(g2).owners, pricing, fallback);
+    expect(c.perNodeUsd.x).toBeCloseTo((100 * 10 + 100 * 30) / 1e6, 9);
+  });
+
+  it("an unpriced owner nullifies the total (fail-closed under a cap)", () => {
+    const c = estimateGraphCost(g, { ...initialRunState(g).owners, b: OTHER }, pricing, fallback);
+    expect(c.totalUsd).toBeNull();
+    expect(c.unpricedNodes).toEqual(["b"]);
+    expect(c.perNodeUsd.a).toBeCloseTo(0.04, 6);
+  });
+
+  it("reassignment changes the estimate through the owners map", () => {
+    const richer = { ...pricing, [OTHER]: { costPerMTokIn: 1, costPerMTokOut: 3 } };
+    const c = estimateGraphCost(g, { ...initialRunState(g).owners, b: OTHER }, richer, fallback);
+    expect(c.perNodeUsd.b).toBeCloseTo((2000 * 1 + 500 * 3) / 1e6, 9);
   });
 });

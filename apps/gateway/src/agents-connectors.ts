@@ -108,10 +108,15 @@ export function registerAgentConnectorRoutes(app: FastifyInstance, db: Db) {
       defaultAgentId: string | null;
       ceilingAgentId: string | null;
       routingMode: "automatic" | "passthrough";
+      runBudgetUsd: number | null;
+      runBudgetBreachAction: "approve" | "replan";
     }> = {};
     if ("defaultAgentId" in (req.body as object)) set.defaultAgentId = body.defaultAgentId ?? null;
     if ("ceilingAgentId" in (req.body as object)) set.ceilingAgentId = body.ceilingAgentId ?? null;
     if (body.routingMode !== undefined) set.routingMode = body.routingMode;
+    if ("runBudgetUsd" in (req.body as object)) set.runBudgetUsd = body.runBudgetUsd ?? null;
+    if (body.runBudgetBreachAction !== undefined)
+      set.runBudgetBreachAction = body.runBudgetBreachAction;
     const [row] = await db
       .insert(userAgentPolicies)
       .values({
@@ -119,6 +124,8 @@ export function registerAgentConnectorRoutes(app: FastifyInstance, db: Db) {
         defaultAgentId: set.defaultAgentId ?? null,
         ceilingAgentId: set.ceilingAgentId ?? null,
         routingMode: set.routingMode ?? "automatic",
+        runBudgetUsd: set.runBudgetUsd ?? null,
+        runBudgetBreachAction: set.runBudgetBreachAction ?? "approve",
       })
       .onConflictDoUpdate({ target: userAgentPolicies.userId, set })
       .returning();

@@ -2347,3 +2347,277 @@ describe("multi-agent orchestration runs (EPIC-05 slice)", () => {
     expect(fleet.json().runs.length).toBeGreaterThanOrEqual(3);
   });
 });
+
+describe("per-run budget caps (EPIC-05 §5.2)", () => {
+  let benId: string;
+  let benAuth: { authorization: string };
+  let approverId: string;
+  let approverAuth: { authorization: string };
+  let cheapWorkerId: string;
+  let priceyWorkerId: string;
+
+  const mkNode = (id: string, agentId: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    title: `task ${id}`,
+    ownerAgentId: agentId,
+    mode: "execute",
+    estimate: { in: 100_000, out: 100_000 },
+    ...extra,
+  });
+
+  it("an under-cap run plans and starts; the budget envelope is visible and estimate-labeled", async () => {
+    const mkUser = async (email: string, name: string) => {
+      const r = await app.inject({
+        method: "POST",
+        headers: AUTH,
+        url: "/v1/users",
+        payload: { email, displayName: name },
+      });
+      return r.json().id as string;
+    };
+    benId = await mkUser("budget-ben@example.com", "Budget Ben");
+    approverId = await mkUser("budget-boss@example.com", "Budget Boss");
+    benAuth = await authFor(benId);
+    approverAuth = await authFor(approverId);
+
+    const mkAgent = async (name: string, tier: number, inC: number, outC: number) => {
+      const r = await app.inject({
+        method: "POST",
+        headers: AUTH,
+        url: "/v1/agents",
+        payload: {
+          name,
+          provider: "anthropic",
+          tier,
+          modes: ["execute"],
+          costPerMTokIn: inC,
+          costPerMTokOut: outC,
+        },
+      });
+      return r.json().id as string;
+    };
+    cheapWorkerId = await mkAgent("budget-cheap", 0, 1, 5);
+    priceyWorkerId = await mkAgent("budget-pricey", 2, 15, 75);
+    for (const agentId of [cheapWorkerId, priceyWorkerId]) {
+      await app.inject({
+        method: "POST",
+        headers: AUTH,
+        url: "/v1/grants/agents",
+        payload: { userId: benId, agentId },
+      });
+    }
+    // cap: pricey node = (1e5*15 + 1e5*75)/1e6 = $9; cheap node = $0.60
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: `/v1/users/${benId}/agent-policy`,
+      payload: { runBudgetUsd: 2, runBudgetBreachAction: "approve" },
+    });
+
+    const created = await app.inject({
+      method: "POST",
+      headers: benAuth,
+      url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "under-cap",
+          escalationApproverUserId: approverId,
+          nodes: [mkNode("n1", cheapWorkerId)],
+        },
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json().budgetApprovalPending).toBe(false);
+    expect(created.json().budget.capUsd).toBe(2);
+    expect(created.json().budget.estimatedTotalUsd).toBeCloseTo(0.6, 6);
+    expect(created.json().budget.estimationBasis).toContain("estimate");
+
+    const runId = created.json().id;
+    const started = await app.inject({
+      method: "POST",
+      headers: benAuth,
+      url: `/v1/runs/${runId}/events`,
+      payload: { kind: "start" },
+    });
+    expect(started.statusCode).toBe(200);
+    await app.inject({
+      method: "POST",
+      headers: benAuth,
+      url: `/v1/runs/${runId}/events`,
+      payload: { kind: "node_started", nodeId: "n1" },
+    });
+    const view = await app.inject({ method: "GET", headers: benAuth, url: `/v1/runs/${runId}` });
+    expect(view.json().run.budget.spentUsd).toBeCloseTo(0.6, 6);
+  });
+
+  it("over-cap with 'approve': start is gated until the named approver sanctions the overage; denial aborts", async () => {
+    const mkRun = async (name: string) => {
+      const r = await app.inject({
+        method: "POST",
+        headers: benAuth,
+        url: "/v1/runs",
+        payload: {
+          graph: {
+            run: name,
+            escalationApproverUserId: approverId,
+            nodes: [mkNode("big", priceyWorkerId)],
+          },
+        },
+      });
+      expect(r.statusCode).toBe(201);
+      expect(r.json().budgetApprovalPending).toBe(true);
+      return r.json().id as string;
+    };
+
+    const runId = await mkRun("over-cap-approve");
+    const blocked = await app.inject({
+      method: "POST",
+      headers: benAuth,
+      url: `/v1/runs/${runId}/events`,
+      payload: { kind: "start" },
+    });
+    expect(blocked.statusCode).toBe(409);
+    expect(blocked.json().error).toBe("budget_approval_pending");
+
+    const inbox = await app.inject({
+      method: "GET",
+      headers: approverAuth,
+      url: "/v1/approvals?status=pending",
+    });
+    const entry = inbox.json().approvals.find(
+      (a: { runId: string | null; stageId: string | null }) =>
+        a.runId === runId && a.stageId === "__budget__",
+    );
+    expect(entry).toBeDefined();
+    await app.inject({
+      method: "POST",
+      headers: approverAuth,
+      url: `/v1/approvals/${entry.id}/decide`,
+      payload: { decision: "approved" },
+    });
+    const started = await app.inject({
+      method: "POST",
+      headers: benAuth,
+      url: `/v1/runs/${runId}/events`,
+      payload: { kind: "start" },
+    });
+    expect(started.statusCode).toBe(200);
+
+    // denial path on a fresh run: the run aborts, nothing starts
+    const runId2 = await mkRun("over-cap-denied");
+    const inbox2 = await app.inject({
+      method: "GET",
+      headers: approverAuth,
+      url: "/v1/approvals?status=pending",
+    });
+    const entry2 = inbox2.json().approvals.find(
+      (a: { runId: string | null }) => a.runId === runId2,
+    );
+    await app.inject({
+      method: "POST",
+      headers: approverAuth,
+      url: `/v1/approvals/${entry2.id}/decide`,
+      payload: { decision: "denied" },
+    });
+    const view2 = await app.inject({ method: "GET", headers: benAuth, url: `/v1/runs/${runId2}` });
+    expect(view2.json().run.status).toBe("aborted");
+  });
+
+  it("over-cap with 'replan': owners are substituted to cheaper entitled agents and ledgered", async () => {
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: `/v1/users/${benId}/agent-policy`,
+      payload: { runBudgetBreachAction: "replan" },
+    });
+    const created = await app.inject({
+      method: "POST",
+      headers: benAuth,
+      url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "replanned",
+          escalationApproverUserId: approverId,
+          nodes: [mkNode("big", priceyWorkerId)],
+        },
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json().budgetApprovalPending).toBe(false);
+    expect(created.json().budget.replanned).toBe(true);
+    expect(created.json().budget.estimatedTotalUsd).toBeCloseTo(0.6, 6); // now on the cheap worker
+    const runId = created.json().id;
+
+    const view = await app.inject({ method: "GET", headers: benAuth, url: `/v1/runs/${runId}` });
+    expect(view.json().run.state.owners.big).toBe(cheapWorkerId);
+
+    // the substitution is a cost-attribution event like any routing decision
+    const ledger = await app.inject({
+      method: "GET",
+      headers: AUTH,
+      url: `/v1/cost-events?userId=${benId}`,
+    });
+    const row = ledger.json().events.find(
+      (e: { objectType: string; objectId: string | null }) =>
+        e.objectType === "run" && e.objectId === runId,
+    );
+    expect(row).toBeDefined();
+    expect(row.servedAgentId).toBe(cheapWorkerId);
+    expect(row.requestedAgentId).toBe(priceyWorkerId);
+    expect(row.estimatedCostSavedUsd).toBeGreaterThan(0);
+  });
+
+  it("in-flight breach: reassigning to a pricier agent trips the cap at node start, never silently", async () => {
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: `/v1/users/${benId}/agent-policy`,
+      payload: { runBudgetBreachAction: "approve" },
+    });
+    const created = await app.inject({
+      method: "POST",
+      headers: benAuth,
+      url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "drift",
+          escalationApproverUserId: approverId,
+          nodes: [mkNode("task", cheapWorkerId)],
+        },
+      },
+    });
+    expect(created.json().budgetApprovalPending).toBe(false);
+    const runId = created.json().id;
+    const ev = (payload: Record<string, unknown>) =>
+      app.inject({ method: "POST", headers: benAuth, url: `/v1/runs/${runId}/events`, payload });
+
+    await ev({ kind: "start" });
+    await ev({ kind: "node_started", nodeId: "task" });
+    await ev({ kind: "node_failed", nodeId: "task", error: "flaky" });
+    // pricier agent is ENTITLED (no §5.1 violation) but blows the cap
+    const reassigned = await ev({ kind: "reassign_node", nodeId: "task", ownerAgentId: priceyWorkerId });
+    expect(reassigned.statusCode).toBe(200);
+    const breach = await ev({ kind: "node_started", nodeId: "task" });
+    expect(breach.statusCode).toBe(409);
+    expect(breach.json().error).toBe("budget_exceeded");
+
+    const inbox = await app.inject({
+      method: "GET",
+      headers: approverAuth,
+      url: "/v1/approvals?status=pending",
+    });
+    const entry = inbox.json().approvals.find(
+      (a: { runId: string | null; stageId: string | null }) =>
+        a.runId === runId && a.stageId === "__budget__:task",
+    );
+    expect(entry).toBeDefined();
+    await app.inject({
+      method: "POST",
+      headers: approverAuth,
+      url: `/v1/approvals/${entry.id}/decide`,
+      payload: { decision: "approved" },
+    });
+    const afterApproval = await ev({ kind: "node_started", nodeId: "task" });
+    expect(afterApproval.statusCode).toBe(200);
+  });
+});

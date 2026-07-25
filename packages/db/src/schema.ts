@@ -342,6 +342,14 @@ export const userAgentPolicies = pgTable("user_agent_policies", {
   routingMode: text("routing_mode", { enum: ["automatic", "passthrough"] })
     .notNull()
     .default("automatic"),
+  // ORCHESTRATION §5.2: per-run budget cap for runs this user initiates, and
+  // what happens when a planned run exceeds it. Lives here as a stand-in for
+  // the per-project budget until a projects entity exists (admin-set either
+  // way). null = no cap.
+  runBudgetUsd: doublePrecision("run_budget_usd"),
+  runBudgetBreachAction: text("run_budget_breach_action", { enum: ["approve", "replan"] })
+    .notNull()
+    .default("approve"),
 });
 
 // §2 connector catalog + per-user grants (mode + object-level data scope).
@@ -468,7 +476,7 @@ export const costEvents = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
     userId: uuid("user_id").notNull(),
-    objectType: text("object_type", { enum: ["agent", "mcp_tool", "connector", "workflow"] })
+    objectType: text("object_type", { enum: ["agent", "mcp_tool", "connector", "workflow", "run"] })
       .notNull()
       .default("agent"),
     objectId: uuid("object_id"),
@@ -516,6 +524,8 @@ export const orchestrationRuns = pgTable(
     }),
     graph: jsonb("graph").notNull(),
     state: jsonb("state").notNull(),
+    /** §5.2 budget envelope: cap, estimates, live estimated spend, overage approval */
+    budget: jsonb("budget"),
     status: text("status", { enum: ["planned", "running", "completed", "aborted"] })
       .notNull()
       .default("planned"),
