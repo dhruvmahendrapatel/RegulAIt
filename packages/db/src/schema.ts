@@ -563,6 +563,8 @@ export const pmConnections = pgTable("pm_connections", {
   project: text("project").notNull(),
   tokenCiphertext: text("token_ciphertext").notNull(),
   mapping: jsonb("mapping"),
+  /** ADR-0010: sha256 of the per-connection webhook secret (plaintext shown once) */
+  webhookSecretHash: text("webhook_secret_hash"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -584,6 +586,12 @@ export const pmLinks = pgTable(
     externalId: text("external_id").notNull(),
     externalUrl: text("external_url").notNull(),
     lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
+    /** ADR-0010 inbound: last state reported BY the PM tool — recorded, never
+     * applied to the state machine; divergence surfaces as drift */
+    inboundState: text("inbound_state"),
+    inboundAt: timestamp("inbound_at", { withTimezone: true }),
+    /** set when the PM tool reports the item deleted */
+    orphanedAt: timestamp("orphaned_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -609,4 +617,22 @@ export const decisions = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("decisions_object_idx").on(t.objectType, t.objectId)],
+);
+
+// ADR-0010: append-only inbound webhook event log — every signal the PM tool
+// sends is retained, matched or not.
+export const pmSyncEvents = pgTable(
+  "pm_sync_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => pmConnections.id, { onDelete: "cascade" }),
+    linkId: uuid("link_id"),
+    externalId: text("external_id").notNull(),
+    kind: text("kind", { enum: ["updated", "deleted", "commented"] }).notNull(),
+    payload: jsonb("payload"),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("pm_sync_events_conn_idx").on(t.connectionId, t.receivedAt)],
 );

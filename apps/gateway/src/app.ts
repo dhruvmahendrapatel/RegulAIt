@@ -102,8 +102,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   app.decorateRequest("authCtx");
 
-  // Every route requires a valid Bearer token (bootstrap or API key).
+  // Every route requires a valid Bearer token (bootstrap or API key) — except
+  // the inbound PM webhook (ADR-0010), which is called by external systems and
+  // authenticates with its per-connection secret inside the route handler.
   app.addHook("preHandler", async (req, reply) => {
+    if (req.routeOptions.url === "/v1/pm/webhooks/:connectionName") {
+      req.authCtx = { userId: null, isAdmin: false, via: "api-key" };
+      return;
+    }
     const ctx = await authenticate(db, opts.bootstrapToken, req.headers.authorization);
     if (!ctx) return reply.status(401).send({ error: "unauthenticated" });
     req.authCtx = ctx;
@@ -135,6 +141,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "GET /v1/pm/links",
     "POST /v1/decisions",
     "GET /v1/decisions",
+    "POST /v1/pm/webhooks/:connectionName",
   ]);
   app.addHook("preHandler", async (req, reply) => {
     const route = `${req.method} ${req.routeOptions.url ?? ""}`;

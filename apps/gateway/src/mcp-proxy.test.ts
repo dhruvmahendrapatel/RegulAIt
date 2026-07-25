@@ -3224,3 +3224,170 @@ describe("PM decision records (EPIC-06 §4)", () => {
     expect(stranger.statusCode).toBe(404);
   });
 });
+
+describe("PM inbound sync (EPIC-06, ADR-0010)", () => {
+  let webhookSecret: string;
+  let inboundRunId: string;
+  let inboundAuth: { authorization: string };
+  let nodeExternalId: string;
+
+  it("connections mint a webhook secret exactly once; bad secrets are rejected", async () => {
+    const conn = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/pm/connections",
+      payload: { name: "mock-inbound", provider: "mock", project: "inbound-proj", token: "tok4" },
+    });
+    expect(conn.statusCode).toBe(201);
+    webhookSecret = conn.json().webhookSecret;
+    expect(webhookSecret).toMatch(/^rglwh_/);
+    const listing = await app.inject({ method: "GET", headers: AUTH, url: "/v1/pm/connections" });
+    expect(JSON.stringify(listing.json())).not.toContain(webhookSecret);
+
+    // no bearer token needed — but the per-connection secret is mandatory
+    const noSecret = await app.inject({
+      method: "POST",
+      url: "/v1/pm/webhooks/mock-inbound",
+      payload: { externalId: "1", event: "updated" },
+    });
+    expect(noSecret.statusCode).toBe(401);
+    const wrongSecret = await app.inject({
+      method: "POST",
+      url: "/v1/pm/webhooks/mock-inbound",
+      headers: { "x-regulait-webhook-secret": "rglwh_wrong" },
+      payload: { externalId: "1", event: "updated" },
+    });
+    expect(wrongSecret.statusCode).toBe(401);
+  });
+
+  it("inbound events record without touching the state machine; unmatched items are logged", async () => {
+    const user = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "pm-ines@example.com", displayName: "PM Ines" },
+    });
+    inboundAuth = await authFor(user.json().id);
+    const approver = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "pm-in-approver@example.com", displayName: "In Approver" },
+    });
+    const agent = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/agents",
+      payload: { name: "pm-in-worker", provider: "anthropic", tier: 1, modes: ["execute"] },
+    });
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/grants/agents",
+      payload: { userId: user.json().id, agentId: agent.json().id },
+    });
+    const run = await app.inject({
+      method: "POST",
+      headers: inboundAuth,
+      url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "inbound-run",
+          escalationApproverUserId: approver.json().id,
+          nodes: [{ id: "n1", title: "watched work", ownerAgentId: agent.json().id, mode: "execute" }],
+        },
+      },
+    });
+    inboundRunId = run.json().id;
+    const sync = await app.inject({
+      method: "POST",
+      headers: inboundAuth,
+      url: `/v1/runs/${inboundRunId}/pm-sync`,
+      payload: { connectionName: "mock-inbound" },
+    });
+    nodeExternalId = sync.json().created.find((c: { nodeId: string }) => c.nodeId === "n1").externalId;
+
+    const unmatched = await app.inject({
+      method: "POST",
+      url: "/v1/pm/webhooks/mock-inbound",
+      headers: { "x-regulait-webhook-secret": webhookSecret },
+      payload: { externalId: "does-not-exist", event: "updated", state: "Done" },
+    });
+    expect(unmatched.statusCode).toBe(202);
+    expect(unmatched.json().matched).toBe(false);
+
+    // start the node so RegulAIt's status is in_progress (maps to "Doing")
+    const ev = (payload: Record<string, unknown>) =>
+      app.inject({ method: "POST", headers: inboundAuth, url: `/v1/runs/${inboundRunId}/events`, payload });
+    await ev({ kind: "start" });
+    await ev({ kind: "node_started", nodeId: "n1" });
+
+    const agreeing = await app.inject({
+      method: "POST",
+      url: "/v1/pm/webhooks/mock-inbound",
+      headers: { "x-regulait-webhook-secret": webhookSecret },
+      payload: { externalId: nodeExternalId, event: "updated", state: "Doing" },
+    });
+    expect(agreeing.json()).toEqual({ matched: true, drift: false });
+
+    const links = await app.inject({
+      method: "GET",
+      headers: inboundAuth,
+      url: `/v1/pm/links?runId=${inboundRunId}`,
+    });
+    const link = links.json().links.find((l: { nodeId: string }) => l.nodeId === "n1");
+    expect(link.inboundState).toBe("Doing");
+    expect(link.drift).toBe(false);
+    // the state machine was never touched
+    const view = await app.inject({ method: "GET", headers: inboundAuth, url: `/v1/runs/${inboundRunId}` });
+    expect(view.json().run.state.nodeStatuses.n1).toBe("in_progress");
+  });
+
+  it("a disagreeing inbound state surfaces as drift — audited, never auto-applied", async () => {
+    const drifting = await app.inject({
+      method: "POST",
+      url: "/v1/pm/webhooks/mock-inbound",
+      headers: { "x-regulait-webhook-secret": webhookSecret },
+      payload: { externalId: nodeExternalId, event: "updated", state: "Done" },
+    });
+    expect(drifting.json()).toEqual({ matched: true, drift: true });
+
+    const links = await app.inject({
+      method: "GET",
+      headers: inboundAuth,
+      url: `/v1/pm/links?runId=${inboundRunId}`,
+    });
+    const link = links.json().links.find((l: { nodeId: string }) => l.nodeId === "n1");
+    expect(link.drift).toBe(true);
+    expect(link.inboundState).toBe("Done");
+
+    const view = await app.inject({ method: "GET", headers: inboundAuth, url: `/v1/runs/${inboundRunId}` });
+    expect(view.json().run.state.nodeStatuses.n1).toBe("in_progress"); // untouched
+
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: "/v1/audit" });
+    expect(
+      audit.json().entries.some((e: { ruleId: string }) => e.ruleId === "pm-drift-detected"),
+    ).toBe(true);
+  });
+
+  it("a deleted work item orphans the link, audited", async () => {
+    const deleted = await app.inject({
+      method: "POST",
+      url: "/v1/pm/webhooks/mock-inbound",
+      headers: { "x-regulait-webhook-secret": webhookSecret },
+      payload: { externalId: nodeExternalId, event: "deleted" },
+    });
+    expect(deleted.json().matched).toBe(true);
+    const links = await app.inject({
+      method: "GET",
+      headers: inboundAuth,
+      url: `/v1/pm/links?runId=${inboundRunId}`,
+    });
+    const link = links.json().links.find((l: { nodeId: string }) => l.nodeId === "n1");
+    expect(link.orphanedAt).not.toBeNull();
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: "/v1/audit" });
+    expect(
+      audit.json().entries.some((e: { ruleId: string }) => e.ruleId === "pm-link-orphaned"),
+    ).toBe(true);
+  });
+});

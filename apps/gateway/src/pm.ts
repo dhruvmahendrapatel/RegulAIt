@@ -9,6 +9,7 @@ import {
   orchestrationRuns,
   pmConnections,
   pmLinks,
+  pmSyncEvents,
   users,
   workflowInstances,
   type Db,
@@ -22,11 +23,19 @@ import {
   resolveStatus,
   resolveTaskFields,
 } from "@regulait/pm-provider";
-import type { TaskGraph } from "@regulait/orchestration-kernel";
+import type { RunState, TaskGraph } from "@regulait/orchestration-kernel";
 import type { WorkflowDefinition } from "@regulait/workflow-kernel";
-import { createDecisionSchema, createPmConnectionSchema, pmSyncSchema } from "@regulait/shared";
+import {
+  createDecisionSchema,
+  createPmConnectionSchema,
+  pmSyncSchema,
+  pmWebhookSchema,
+} from "@regulait/shared";
 import { decryptSecret, encryptSecret } from "./secrets.js";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
+
+const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 
 const runIdParam = z.object({ runId: z.string().uuid() });
 
@@ -197,6 +206,9 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
       }
       throw err; // zod mapping errors → 400 via the app error handler
     }
+    // ADR-0010: per-connection webhook secret — plaintext returned exactly
+    // once, only the hash is stored (same discipline as API keys).
+    const webhookSecret = `rglwh_${randomBytes(24).toString("hex")}`;
     const [row] = await db
       .insert(pmConnections)
       .values({
@@ -206,9 +218,10 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
         project: body.project,
         tokenCiphertext: encryptSecret(opts.dataKey, body.token),
         mapping: body.mapping ?? null,
+        webhookSecretHash: sha256(webhookSecret),
       })
       .returning(CONNECTION_COLUMNS);
-    return reply.status(201).send(row);
+    return reply.status(201).send({ ...row, webhookSecret });
   });
 
   app.get("/v1/pm/connections", async () => ({
@@ -386,6 +399,118 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
       .send({ created: true, externalId: ref.id, externalUrl: ref.url });
   });
 
+  // ADR-0010 inbound: the normalized webhook. Authenticated by the
+  // per-connection secret (constant-time compare against the stored hash) —
+  // NOT by a bearer token; the global auth hook exempts exactly this route.
+  // Inbound state is recorded, never applied to the state machine; divergence
+  // surfaces as drift in the links view and the one audit trail.
+  app.post("/v1/pm/webhooks/:connectionName", async (req, reply) => {
+    const { connectionName } = z
+      .object({ connectionName: z.string().min(1) })
+      .parse(req.params);
+    const [conn] = await db
+      .select()
+      .from(pmConnections)
+      .where(eq(pmConnections.name, connectionName));
+    const presented = req.headers["x-regulait-webhook-secret"];
+    if (!conn || !conn.webhookSecretHash || typeof presented !== "string") {
+      return reply.status(401).send({ error: "unauthenticated" });
+    }
+    const presentedHash = Buffer.from(sha256(presented), "hex");
+    const storedHash = Buffer.from(conn.webhookSecretHash, "hex");
+    if (presentedHash.length !== storedHash.length || !timingSafeEqual(presentedHash, storedHash)) {
+      return reply.status(401).send({ error: "unauthenticated" });
+    }
+
+    const body = pmWebhookSchema.parse(req.body);
+    const [link] = await db
+      .select()
+      .from(pmLinks)
+      .where(and(eq(pmLinks.connectionId, conn.id), eq(pmLinks.externalId, body.externalId)));
+    await db.insert(pmSyncEvents).values({
+      connectionId: conn.id,
+      linkId: link?.id ?? null,
+      externalId: body.externalId,
+      kind: body.event,
+      payload: { ...(body.state ? { state: body.state } : {}), ...(body.fields ? { fields: body.fields } : {}) },
+    });
+    if (!link) return reply.status(202).send({ matched: false });
+
+    // attribute inbound audit rows to the parent object's initiator
+    const ownerOf = async (): Promise<string | null> => {
+      if (link.objectType === "run_node" || link.objectType === "run") {
+        const [run] = await db
+          .select({ owner: orchestrationRuns.initiatingUserId })
+          .from(orchestrationRuns)
+          .where(eq(orchestrationRuns.id, link.objectId));
+        return run?.owner ?? null;
+      }
+      if (link.objectType === "workflow_instance") {
+        const [instance] = await db
+          .select({ owner: workflowInstances.initiatorUserId })
+          .from(workflowInstances)
+          .where(eq(workflowInstances.id, link.objectId));
+        return instance?.owner ?? null;
+      }
+      return null;
+    };
+
+    let drift = false;
+    if (body.event === "deleted") {
+      await db.update(pmLinks).set({ orphanedAt: new Date() }).where(eq(pmLinks.id, link.id));
+      const owner = await ownerOf();
+      if (owner) {
+        await db.insert(auditLog).values({
+          userId: owner,
+          objectType: "pm_work_item",
+          objectId: link.objectId,
+          detail: { externalId: link.externalId, linkType: link.objectType, event: "deleted" },
+          effect: "allow",
+          ruleId: "pm-link-orphaned",
+          ruleChain: [],
+          reason: `work item '${link.externalId}' was deleted in the PM tool; link marked orphaned`,
+        });
+      }
+    } else if (body.event === "updated" && body.state) {
+      await db
+        .update(pmLinks)
+        .set({ inboundState: body.state, inboundAt: new Date() })
+        .where(eq(pmLinks.id, link.id));
+      // Drift (run nodes only — status ownership is RegulAIt's): the reported
+      // state disagrees with the mapped state for the node's current status.
+      if (link.objectType === "run_node" && link.nodeId) {
+        const [run] = await db
+          .select()
+          .from(orchestrationRuns)
+          .where(eq(orchestrationRuns.id, link.objectId));
+        if (run) {
+          const nodeStatus = (run.state as RunState).nodeStatuses[link.nodeId];
+          const mapping = mappingFor(conn.provider, conn.mapping ?? undefined);
+          const expected = nodeStatus ? resolveStatus(mapping, nodeStatus) : null;
+          if (expected !== null && body.state !== expected) {
+            drift = true;
+            await db.insert(auditLog).values({
+              userId: run.initiatingUserId,
+              objectType: "pm_work_item",
+              objectId: link.objectId,
+              detail: {
+                nodeId: link.nodeId,
+                externalId: link.externalId,
+                reportedState: body.state,
+                expectedState: expected,
+              },
+              effect: "allow",
+              ruleId: "pm-drift-detected",
+              ruleChain: [],
+              reason: `PM tool reports '${body.state}' for node '${link.nodeId}' but RegulAIt's status maps to '${expected}' — drift surfaced, state machine untouched`,
+            });
+          }
+        }
+      }
+    }
+    return reply.status(202).send({ matched: true, drift });
+  });
+
   // §4: first-class decision records. Recorded locally ALWAYS; mirrored to
   // the PM tool as a linked work item of the mapped Decision-like type, or a
   // tagged comment on the parent item when no type is mapped — never dropped.
@@ -549,10 +674,30 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
     if (!req.authCtx.isAdmin && req.authCtx.userId !== run.initiatingUserId) {
       return reply.status(404).send({ error: "unavailable" });
     }
-    const links = await db
+    const rawLinks = await db
       .select()
       .from(pmLinks)
       .where(and(eq(pmLinks.objectType, "run_node"), eq(pmLinks.objectId, q.runId)));
+    // ADR-0010: drift annotation — the PM tool's last reported state vs the
+    // mapped state for the node's current status. Surfaced, never auto-fixed.
+    let driftMapping: ReturnType<typeof mappingFor> | null = null;
+    if (rawLinks.length > 0) {
+      const [driftConn] = await db
+        .select()
+        .from(pmConnections)
+        .where(eq(pmConnections.id, rawLinks[0]!.connectionId));
+      if (driftConn) driftMapping = mappingFor(driftConn.provider, driftConn.mapping ?? undefined);
+    }
+    const runState = run.state as RunState;
+    const links = rawLinks.map((link) => {
+      let drift = false;
+      if (driftMapping && link.inboundState && link.nodeId) {
+        const nodeStatus = runState.nodeStatuses[link.nodeId];
+        const expected = nodeStatus ? resolveStatus(driftMapping, nodeStatus) : null;
+        drift = expected !== null && link.inboundState !== expected;
+      }
+      return { ...link, drift };
+    });
     if (!q.live || links.length === 0) return { links };
     if (!opts.dataKey) return reply.status(503).send({ error: "pm_connections_require_data_key" });
     const [conn] = await db
