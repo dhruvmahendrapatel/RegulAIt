@@ -4,6 +4,7 @@ import {
   approvals,
   auditLog,
   count,
+  complianceProfiles,
   costEvents,
   desc,
   eq,
@@ -15,6 +16,7 @@ import {
   teamMembers,
   teams,
   usageEvents,
+  workflowTemplates,
   workflowArtifacts,
   workflowInstances,
   type Db,
@@ -26,6 +28,8 @@ import {
   createProjectSchema,
   createTeamSchema,
   promoteContextSchema,
+  reclassifySchema,
+  upsertComplianceProfileSchema,
 } from "@regulait/shared";
 import { z } from "zod";
 
@@ -107,6 +111,49 @@ export async function assertProjectAttribution(
   return { ok: true };
 }
 
+type ComplianceProfileRow = typeof complianceProfiles.$inferSelect;
+
+const PII_STRICTNESS: Record<string, number> = { log: 0, warn: 1, block: 2 };
+
+/** §8.3: the effective policy of a SET of framework profiles. The spec gives
+ * no strictness ordering among frameworks, so profiles compose additively:
+ * required templates union, mcp defaults tighten to read_only if ANY profile
+ * says so, retention takes the max, pii mode takes the strictest of the
+ * three defined modes (block > warn > log). */
+export function effectiveCompliancePolicy(profiles: ComplianceProfileRow[]) {
+  return {
+    requiredTemplateIds: [...new Set(profiles.flatMap((p) => p.requiredTemplateIds ?? []))],
+    mcpDefaultMode: profiles.some((p) => p.mcpDefaultMode === "read_only")
+      ? ("read_only" as const)
+      : ("read_write" as const),
+    auditRetentionDays: profiles.reduce<number | null>(
+      (m, p) =>
+        p.auditRetentionDays == null ? m : Math.max(m ?? 0, p.auditRetentionDays),
+      null,
+    ),
+    piiMode: profiles.reduce<"block" | "warn" | "log">(
+      (m, p) => (PII_STRICTNESS[p.piiMode]! > PII_STRICTNESS[m]! ? (p.piiMode as never) : m),
+      "log",
+    ),
+  };
+}
+
+async function profilesForTags(db: Db, tags: string[]): Promise<ComplianceProfileRow[]> {
+  if (tags.length === 0) return [];
+  const rows = await db.select().from(complianceProfiles);
+  return rows.filter((p) => tags.includes(p.tag));
+}
+
+/** §8.3 workflow cascade — the ENFORCED consumer. Returns the workflow
+ * template ids a project's classifications force into every governed change
+ * ("no manual per-control setup"). */
+export async function requiredTemplateIdsFor(db: Db, projectId: string): Promise<string[]> {
+  const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
+  const tags = (project?.classifications ?? []) as string[];
+  const profiles = await profilesForTags(db, tags);
+  return effectiveCompliancePolicy(profiles).requiredTemplateIds;
+}
+
 export type ProjectGate =
   | { ok: true; project: ProjectRow | null; spentUsd: number }
   | { ok: false; status: number; error: string; detail?: string };
@@ -170,6 +217,45 @@ export async function applyProjectApprovalDecision(
   deciderUserId: string,
 ): Promise<void> {
   if (!approvalRow.projectId) return;
+  // §8.3 reclassification: the diff was reviewed — approve commits the
+  // proposed tags, deny discards them; the current cascade stays either way
+  // until this moment. Never applied silently.
+  if (approvalRow.stageId === "__reclassification__") {
+    const [project] = await db.select().from(projects).where(eq(projects.id, approvalRow.projectId));
+    if (!project) return;
+    const proposed = (project.pendingClassifications ?? null) as string[] | null;
+    if (decision === "approved" && proposed) {
+      await db
+        .update(projects)
+        .set({ classifications: proposed, pendingClassifications: null })
+        .where(eq(projects.id, approvalRow.projectId));
+    } else {
+      await db
+        .update(projects)
+        .set({ pendingClassifications: null })
+        .where(eq(projects.id, approvalRow.projectId));
+    }
+    await db.insert(auditLog).values({
+      userId: deciderUserId,
+      objectType: "project",
+      objectId: approvalRow.projectId,
+      detail: {
+        phase: "reclassification-decision",
+        decision,
+        from: project.classifications ?? [],
+        proposed: proposed ?? [],
+      },
+      effect: decision === "approved" ? "allow" : "deny",
+      ruleId:
+        decision === "approved" ? "project-reclassified" : "project-reclassification-rejected",
+      ruleChain: [],
+      reason:
+        decision === "approved"
+          ? "reclassification diff approved; the new cascade is now in force"
+          : "reclassification rejected; the previous classifications remain in force",
+    });
+    return;
+  }
   // §9 conflict resolution: approve = the retained conflicting revision
   // becomes the accepted latest; deny = it stays retained, never current.
   if (approvalRow.stageId?.startsWith("__context_conflict__:")) {
@@ -262,6 +348,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         budgetUsd: body.budgetUsd ?? null,
         budgetApproverUserId: body.budgetApproverUserId ?? null,
         arbiterUserId: body.arbiterUserId ?? null,
+        classifications: body.classifications ?? null,
       })
       .returning();
     return reply.status(201).send(row);
@@ -293,7 +380,10 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
 
   app.post("/v1/teams", async (req, reply) => {
     const body = createTeamSchema.parse(req.body);
-    const [row] = await db.insert(teams).values({ name: body.name }).returning();
+    const [row] = await db
+      .insert(teams)
+      .values({ name: body.name, defaultClassifications: body.defaultClassifications ?? null })
+      .returning();
     return reply.status(201).send(row);
   });
 
@@ -340,7 +430,38 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       ruleChain: [],
       reason: `user granted '${body.role}' on shared project '${project.name}'`,
     });
-    return reply.status(201).send(row);
+    // §9.3: the project's classification governs inside the project; a
+    // member team whose defaults disagree is SURFACED here (response +
+    // audit), never silently resolved.
+    let classificationConflict: Record<string, unknown> | null = null;
+    if (body.teamId) {
+      const [team] = await db.select().from(teams).where(eq(teams.id, body.teamId));
+      const teamTags = (team?.defaultClassifications ?? []) as string[];
+      const projectTags = (project.classifications ?? []) as string[];
+      const missing = teamTags.filter((t) => !projectTags.includes(t));
+      if (missing.length > 0) {
+        classificationConflict = {
+          teamId: body.teamId,
+          teamDefaults: teamTags,
+          projectClassifications: projectTags,
+          notCoveredByProject: missing,
+          governing: "project",
+        };
+        await db.insert(auditLog).values({
+          userId: req.authCtx.userId ?? body.userId,
+          objectType: "project",
+          objectId: projectId,
+          detail: { phase: "classification-conflict", ...classificationConflict },
+          effect: "allow",
+          ruleId: "team-classification-conflict-surfaced",
+          ruleChain: [],
+          reason: `member team's default classifications [${missing.join(", ")}] are not covered by the project's [${projectTags.join(", ")}]; the project's classification governs inside the project`,
+        });
+      }
+    }
+    return reply
+      .status(201)
+      .send(classificationConflict ? { ...row, classificationConflict } : row);
   });
 
   app.get("/v1/projects/:projectId/members", async (req, reply) => {
@@ -554,6 +675,130 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         },
       })),
     };
+  });
+
+  // --- §8.3 compliance profiles (admin; policy-as-code via API) ---
+
+  app.post("/v1/compliance/profiles", async (req, reply) => {
+    const body = upsertComplianceProfileSchema.parse(req.body);
+    if (body.requiredTemplateIds?.length) {
+      const found = await db
+        .select({ id: workflowTemplates.id })
+        .from(workflowTemplates);
+      const known = new Set(found.map((t) => t.id));
+      if (body.requiredTemplateIds.some((id) => !known.has(id))) {
+        return reply.status(422).send({ error: "unknown_template" });
+      }
+    }
+    const values = {
+      tag: body.tag,
+      requiredTemplateIds: body.requiredTemplateIds ?? null,
+      mcpDefaultMode: body.mcpDefaultMode ?? ("read_write" as const),
+      auditRetentionDays: body.auditRetentionDays ?? null,
+      piiMode: body.piiMode ?? ("log" as const),
+    };
+    const [row] = await db
+      .insert(complianceProfiles)
+      .values(values)
+      .onConflictDoUpdate({ target: complianceProfiles.tag, set: values })
+      .returning();
+    return reply.status(201).send(row);
+  });
+
+  app.get("/v1/compliance/profiles", async () => ({
+    profiles: await db.select().from(complianceProfiles),
+  }));
+
+  // §8.3: what a project's tags currently drive — with HONEST enforcement
+  // labels. Workflow requirements are enforced at instance creation today;
+  // mcp/retention/pii are declared policy awaiting their enforcement points.
+  app.get("/v1/projects/:projectId/compliance", async (req, reply) => {
+    const { projectId } = projectIdParam.parse(req.params);
+    const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
+    if (!project) return reply.status(404).send({ error: "unknown_project" });
+    const gate = await requireRole(req, projectId, "viewer");
+    if (!gate.ok) return reply.status(gate.status).send({ error: gate.error });
+    const tags = (project.classifications ?? []) as string[];
+    const profiles = await profilesForTags(db, tags);
+    return {
+      classifications: tags,
+      pendingClassifications: (project.pendingClassifications ?? null) as string[] | null,
+      profiles,
+      effective: effectiveCompliancePolicy(profiles),
+      enforcement: {
+        requiredWorkflowTemplates: "enforced-at-instance-creation",
+        mcpDefaultMode: "declared-not-enforced",
+        auditRetentionDays: "declared-not-enforced",
+        piiMode: "declared-not-enforced",
+      },
+    };
+  });
+
+  // §8.3 reclassification: never silent. A first classification applies
+  // directly (nothing is in flight under the old cascade); any CHANGE
+  // computes the before/after diff and pends behind a named reviewer in the
+  // one approvals queue.
+  app.post("/v1/projects/:projectId/classifications", async (req, reply) => {
+    const { projectId } = projectIdParam.parse(req.params);
+    const body = reclassifySchema.parse(req.body);
+    const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
+    if (!project) return reply.status(404).send({ error: "unknown_project" });
+    const current = (project.classifications ?? []) as string[];
+
+    if (current.length === 0) {
+      await db
+        .update(projects)
+        .set({ classifications: body.classifications })
+        .where(eq(projects.id, projectId));
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId ?? project.budgetApproverUserId ?? projectId,
+        objectType: "project",
+        objectId: projectId,
+        detail: { phase: "classification", classifications: body.classifications },
+        effect: "allow",
+        ruleId: "project-classified",
+        ruleChain: [],
+        reason: `project classified [${body.classifications.join(", ")}]`,
+      });
+      return reply.status(200).send({ classifications: body.classifications, applied: true });
+    }
+
+    if (!body.reviewerUserId) {
+      return reply.status(422).send({
+        error: "reviewer_required",
+        detail: "changing an existing classification requires a named reviewer for the cascade diff",
+      });
+    }
+    const [before, after] = await Promise.all([
+      profilesForTags(db, current).then(effectiveCompliancePolicy),
+      profilesForTags(db, body.classifications).then(effectiveCompliancePolicy),
+    ]);
+    await db
+      .update(projects)
+      .set({ pendingClassifications: body.classifications })
+      .where(eq(projects.id, projectId));
+    const [approval] = await db
+      .insert(approvals)
+      .values({
+        userId: req.authCtx.userId ?? body.reviewerUserId,
+        objectType: "project",
+        projectId,
+        stageId: "__reclassification__",
+        approverUserId: body.reviewerUserId,
+      })
+      .returning({ id: approvals.id });
+    const diff = { from: current, to: body.classifications, effectiveBefore: before, effectiveAfter: after };
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? body.reviewerUserId,
+      objectType: "project",
+      objectId: projectId,
+      detail: { phase: "reclassification-proposed", ...diff },
+      effect: "require_approval",
+      ruleId: "project-reclassification-proposed",
+      ruleChain: [],
+      reason: `reclassification [${current.join(", ")}] -> [${body.classifications.join(", ")}] pends review; the cascade diff is attached — never applied silently`,
+    });
+    return reply.status(202).send({ pending: true, approvalId: approval!.id, diff });
   });
 
   app.get("/v1/projects/:projectId/costs", async (req, reply) => {

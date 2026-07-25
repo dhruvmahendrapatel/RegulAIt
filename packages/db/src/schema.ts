@@ -732,6 +732,30 @@ export const projects = pgTable("projects", {
   /** §9 named arbiter for shared-context conflicts; absent = conflicting
    * writes are rejected explicitly (never silently) */
   arbiterUserId: uuid("arbiter_user_id").references(() => users.id, { onDelete: "set null" }),
+  /** §8.3: compliance framework tags (multi-valued — hipaa, pci-dss, soc2,
+   * gdpr, custom…; the spec defines NO strictness ordering among frameworks) */
+  classifications: jsonb("classifications").$type<string[]>(),
+  /** §8.3 reclassification: proposed tags awaiting the diff-then-approve
+   * review — never applied silently */
+  pendingClassifications: jsonb("pending_classifications").$type<string[]>(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// §8.3: the cascade expressed as DATA — one admin-editable profile per
+// framework tag, mapping it to what it drives. Workflow requirements are
+// ENFORCED at instance creation; mcp/retention/pii are declared policy the
+// compliance view surfaces with honest enforcement labels until their
+// enforcement points exist.
+export const complianceProfiles = pgTable("compliance_profiles", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  tag: text("tag").notNull().unique(),
+  /** workflow templates this framework forces into every governed change */
+  requiredTemplateIds: jsonb("required_template_ids").$type<string[]>(),
+  mcpDefaultMode: text("mcp_default_mode", { enum: ["read_only", "read_write"] })
+    .notNull()
+    .default("read_write"),
+  auditRetentionDays: integer("audit_retention_days"),
+  piiMode: text("pii_mode", { enum: ["block", "warn", "log"] }).notNull().default("log"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -741,6 +765,10 @@ export const projects = pgTable("projects", {
 export const teams = pgTable("teams", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: text("name").notNull().unique(),
+  /** §9.3: the team's default classifications; a Shared Project's own tags
+   * take precedence inside the project, and mismatches are SURFACED (never
+   * silently resolved) at member-add */
+  defaultClassifications: jsonb("default_classifications").$type<string[]>(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

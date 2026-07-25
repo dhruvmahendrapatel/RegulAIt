@@ -29,7 +29,7 @@ import { users, gitConnections, orchestrationRuns } from "@regulait/db";
 import { resolveProvider, GitProviderError } from "@regulait/git-provider";
 import { validateGraph } from "@regulait/orchestration-kernel";
 import { planRun } from "./orchestration.js";
-import { assertProjectAttribution } from "./projects.js";
+import { assertProjectAttribution, requiredTemplateIdsFor } from "./projects.js";
 import { decryptSecret, encryptSecret as encryptTokenOnce } from "./secrets.js";
 import {
   advanceStageSchema,
@@ -555,9 +555,17 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
         .from(workflowAssignmentRules)
         .orderBy(workflowAssignmentRules.createdAt);
       templateIds = matchTemplates(body.change, rules);
-      if (templateIds.length === 0) {
-        return reply.status(422).send({ error: "no_workflow_matches_change" });
-      }
+    }
+    // §8.3 cascade — the ENFORCED consumer: a classified project's required
+    // templates are unioned in with no manual per-control setup (and can
+    // force a workflow even when no assignment rule matches). The existing
+    // §4 union/strictest merge keeps every added sign-off stage.
+    if (body.projectId) {
+      const required = await requiredTemplateIdsFor(db, body.projectId);
+      for (const id of required) if (!templateIds.includes(id)) templateIds.push(id);
+    }
+    if (templateIds.length === 0) {
+      return reply.status(422).send({ error: "no_workflow_matches_change" });
     }
 
     const templates = await db

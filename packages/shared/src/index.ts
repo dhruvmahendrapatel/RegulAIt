@@ -150,6 +150,8 @@ export const createProjectSchema = z
     budgetApproverUserId: z.string().uuid().nullable().optional(),
     /** §9 named arbiter for shared-context conflicts */
     arbiterUserId: z.string().uuid().nullable().optional(),
+    /** §8.3 compliance framework tags, applied directly at creation */
+    classifications: z.array(z.string().min(1).max(64)).max(16).optional(),
   })
   .refine((p) => p.budgetUsd == null || p.budgetApproverUserId != null, {
     message: "a project budget requires a budgetApproverUserId",
@@ -300,7 +302,28 @@ export const pmWebhookSchema = z.object({
 });
 
 // PILLAR 4 (§9, ADR-0011): teams + Shared-Project membership + context store.
-export const createTeamSchema = z.object({ name: z.string().min(1).max(200) });
+export const createTeamSchema = z.object({
+  name: z.string().min(1).max(200),
+  /** §9.3 team default classifications (surfaced on conflict, never silently resolved) */
+  defaultClassifications: z.array(z.string().min(1).max(64)).max(16).optional(),
+});
+
+// §8.3: one cascade profile per framework tag (upsert by tag).
+export const upsertComplianceProfileSchema = z.object({
+  tag: z.string().min(1).max(64),
+  requiredTemplateIds: z.array(z.string().uuid()).max(16).optional(),
+  mcpDefaultMode: z.enum(["read_only", "read_write"]).optional(),
+  auditRetentionDays: z.number().int().positive().nullable().optional(),
+  piiMode: z.enum(["block", "warn", "log"]).optional(),
+});
+
+// §8.3 reclassification: a diff-then-approve change to a project's tags.
+export const reclassifySchema = z.object({
+  classifications: z.array(z.string().min(1).max(64)).max(16),
+  /** required when the project already has classifications: the named admin
+   * who reviews the cascade diff before it commits */
+  reviewerUserId: z.string().uuid().optional(),
+});
 
 export const addTeamMemberSchema = z.object({ userId: z.string().uuid() });
 

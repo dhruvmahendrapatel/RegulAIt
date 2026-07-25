@@ -184,8 +184,33 @@ An arbiter-less project rejects conflicting writes explicitly (422). **Promotion
 contributor with no agent grant still hits default-deny (tested); and per ADR-0011, once a
 project has members, only members/admins may attribute spend/runs/instances to it (memberless
 projects stay open pillar-5 buckets). Everything audited as objectType "project". Deferred:
-classification precedence at member-team add (§9.3/§8.3), cross-team cost rollup views
-(§9.5), §9.4's suggested UI, SCIM team sync.
+cross-team cost rollup views (§9.5), §9.4's suggested UI, SCIM team sync.
+
+**Pillar 3's centerpiece lands — the §8.3 compliance-classification cascade, 2026-07-25.**
+Classifications are multi-valued FRAMEWORK tags (hipaa/pci-dss/soc2/custom — the spec defines
+no strictness ordering among frameworks, so nothing invents one) on the one `projects` entity
+(migration 0020, plus `teams.default_classifications` and admin-editable
+`compliance_profiles` — the entire cascade expressed as data, per-tag: required workflow
+templates, MCP default mode, audit-retention days, PII mode; policy-as-code via API, §5/§8.5).
+Profiles compose ADDITIVELY: template unions, mcp tightens to read_only if any says so,
+retention takes the max, pii takes the strictest of the three defined modes (block>warn>log —
+an ordering the spec does define). **The workflow dimension is ENFORCED**: at instance
+creation a classified project's required templates union into the matched set ("no manual
+per-control setup") and can FORCE a workflow when no assignment rule matches — the §4
+strictest-wins merge carries every added sign-off stage; the admin explicit-template escape
+hatch cannot skip it. **The other three dimensions are declared, honestly**:
+`GET /v1/projects/:id/compliance` returns the effective policy with per-dimension enforcement
+labels (`enforced-at-instance-creation` vs `declared-not-enforced`) — the estimationBasis
+discipline applied to compliance. **Reclassification is diff-then-approve** (the spec's most
+concrete behavior): first classification applies directly (audited); any CHANGE computes the
+before/after effective-policy diff, pends in `pending_classifications`, and opens a
+`__reclassification__` approval for a named reviewer through the ONE queue — approve commits,
+deny discards, never silent. **§9.3 precedence**: a member team whose default classifications
+aren't covered by the project's is surfaced at member-add (response + audit row,
+`governing: "project"`), never silently resolved. Deferred: enforcement points for
+mcp-default/retention/pii (detector + pruning jobs), reapply-to-in-flight on reclassification
+(diff covers the policy; in-flight instances keep their merged definitions), per-framework
+cost-governance policies (§8.6→§10.3).
 
 **EPIC-06 started — PM-tool integration first slice, 2026-07-25.** New
 `packages/pm-provider` on the git-provider playbook (pillar 8, PM_TOOL_INTEGRATION_SPEC

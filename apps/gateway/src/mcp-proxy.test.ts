@@ -5163,3 +5163,214 @@ describe("shared projects (pillar 4, ADR-0011): membership, context, conflicts, 
     expect(open.statusCode).toBe(200);
   });
 });
+
+describe("compliance classification cascade (§8.3)", () => {
+  let officerId: string;
+  let reviewerId: string;
+  let chloeAuth: { authorization: string };
+  let sensitiveTplId: string;
+  let standardTplId: string;
+  let ccProjId: string;
+
+  const mkUser = async (email: string, name: string) => {
+    const r = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email, displayName: name },
+    });
+    return r.json().id as string;
+  };
+
+  it("profiles compose additively into an effective policy with honest enforcement labels", async () => {
+    officerId = await mkUser("cc-officer@example.com", "CC Officer");
+    reviewerId = await mkUser("cc-reviewer@example.com", "CC Reviewer");
+    const chloeId = await mkUser("cc-chloe@example.com", "CC Chloe");
+    chloeAuth = await authFor(chloeId);
+
+    const sensitive = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/templates",
+      payload: {
+        name: "sensitive-data",
+        definition: {
+          workflow: "sensitive-data",
+          stages: [
+            { id: "cc-intake", type: "trigger" },
+            { id: "compliance-signoff", type: "human_approval", approvers: [officerId] },
+          ],
+        },
+      },
+    });
+    sensitiveTplId = sensitive.json().id;
+    const standard = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/templates",
+      payload: {
+        name: "cc-standard",
+        definition: { workflow: "cc-standard", stages: [{ id: "cc-std-intake", type: "trigger" }] },
+      },
+    });
+    standardTplId = standard.json().id;
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/assignment-rules",
+      payload: { templateId: standardTplId, changeType: "cc-standard-change" },
+    });
+
+    // a profile may only require templates that exist
+    const ghost = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/compliance/profiles",
+      payload: { tag: "bad", requiredTemplateIds: ["00000000-0000-0000-0000-000000000000"] },
+    });
+    expect(ghost.statusCode).toBe(422);
+
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/compliance/profiles",
+      payload: {
+        tag: "hipaa", requiredTemplateIds: [sensitiveTplId],
+        piiMode: "block", auditRetentionDays: 2555, mcpDefaultMode: "read_only",
+      },
+    });
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/compliance/profiles",
+      payload: { tag: "soc2", piiMode: "warn", auditRetentionDays: 365 },
+    });
+
+    const proj = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/projects",
+      payload: { name: "cc-proj", classifications: ["hipaa", "soc2"] },
+    });
+    ccProjId = proj.json().id;
+
+    const view = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/projects/${ccProjId}/compliance`,
+    });
+    expect(view.statusCode).toBe(200);
+    expect(view.json().classifications).toEqual(["hipaa", "soc2"]);
+    expect(view.json().effective).toMatchObject({
+      piiMode: "block",           // strictest of block/warn
+      auditRetentionDays: 2555,   // max
+      mcpDefaultMode: "read_only",
+      requiredTemplateIds: [sensitiveTplId],
+    });
+    expect(view.json().enforcement.requiredWorkflowTemplates).toBe("enforced-at-instance-creation");
+    expect(view.json().enforcement.piiMode).toBe("declared-not-enforced");
+  });
+
+  it("classification forces required workflow stages with no manual per-control setup", async () => {
+    // matched rule + classified project → the union carries the sign-off stage
+    const started = await app.inject({
+      method: "POST", headers: chloeAuth, url: "/v1/workflows/instances",
+      payload: {
+        projectId: ccProjId,
+        change: { description: "cc", paths: ["c.ts"], changeType: "cc-standard-change", environment: "staging" },
+      },
+    });
+    expect(started.statusCode).toBe(201);
+    expect(started.json().status).toBe("blocked_on_approval");
+    const view = await app.inject({
+      method: "GET", headers: chloeAuth, url: `/v1/workflows/instances/${started.json().id}`,
+    });
+    const stageIds = view.json().instance.definition.stages.map((s: { id: string }) => s.id);
+    expect(stageIds).toContain("compliance-signoff");
+    expect(view.json().pendingApprovals.some(
+      (a: { approverUserId: string }) => a.approverUserId === officerId,
+    )).toBe(true);
+
+    // no matching rule at all: the classification alone FORCES the workflow…
+    const forced = await app.inject({
+      method: "POST", headers: chloeAuth, url: "/v1/workflows/instances",
+      payload: {
+        projectId: ccProjId,
+        change: { description: "cc", paths: ["c.ts"], changeType: "cc-unmatched", environment: "staging" },
+      },
+    });
+    expect(forced.statusCode).toBe(201);
+    expect(forced.json().status).toBe("blocked_on_approval");
+
+    // …whereas the same change without the project finds no workflow
+    const bare = await app.inject({
+      method: "POST", headers: chloeAuth, url: "/v1/workflows/instances",
+      payload: {
+        change: { description: "cc", paths: ["c.ts"], changeType: "cc-unmatched", environment: "staging" },
+      },
+    });
+    expect(bare.statusCode).toBe(422);
+  });
+
+  it("reclassification is diff-then-approve — never applied silently", async () => {
+    // a change to existing tags needs a named reviewer
+    const noReviewer = await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/projects/${ccProjId}/classifications`,
+      payload: { classifications: ["soc2"] },
+    });
+    expect(noReviewer.statusCode).toBe(422);
+    expect(noReviewer.json().error).toBe("reviewer_required");
+
+    const proposed = await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/projects/${ccProjId}/classifications`,
+      payload: { classifications: ["soc2"], reviewerUserId: reviewerId },
+    });
+    expect(proposed.statusCode).toBe(202);
+    expect(proposed.json().diff.effectiveBefore.piiMode).toBe("block");
+    expect(proposed.json().diff.effectiveAfter.piiMode).toBe("warn");
+    const approvalId = proposed.json().approvalId;
+
+    // nothing changed yet — the old cascade stays in force
+    const during = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/projects/${ccProjId}/compliance`,
+    });
+    expect(during.json().classifications).toEqual(["hipaa", "soc2"]);
+    expect(during.json().pendingClassifications).toEqual(["soc2"]);
+
+    const reviewerAuth = await authFor(reviewerId);
+    await app.inject({
+      method: "POST", headers: reviewerAuth, url: `/v1/approvals/${approvalId}/decide`,
+      payload: { decision: "approved" },
+    });
+    const after = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/projects/${ccProjId}/compliance`,
+    });
+    expect(after.json().classifications).toEqual(["soc2"]);
+    expect(after.json().pendingClassifications).toBeNull();
+    expect(after.json().effective.piiMode).toBe("warn");
+
+    // a denied proposal leaves everything untouched
+    const again = await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/projects/${ccProjId}/classifications`,
+      payload: { classifications: ["hipaa"], reviewerUserId: reviewerId },
+    });
+    await app.inject({
+      method: "POST", headers: reviewerAuth, url: `/v1/approvals/${again.json().approvalId}/decide`,
+      payload: { decision: "denied" },
+    });
+    const final = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/projects/${ccProjId}/compliance`,
+    });
+    expect(final.json().classifications).toEqual(["soc2"]);
+    expect(final.json().pendingClassifications).toBeNull();
+  });
+
+  it("a member team's conflicting defaults are surfaced at member-add — the project governs", async () => {
+    const doraId = await mkUser("cc-dora@example.com", "CC Dora");
+    const pciTeam = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/teams",
+      payload: { name: "cc-pci-team", defaultClassifications: ["pci-dss"] },
+    });
+    await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/teams/${pciTeam.json().id}/members`,
+      payload: { userId: doraId },
+    });
+    const added = await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/projects/${ccProjId}/members`,
+      payload: { userId: doraId, role: "contributor", teamId: pciTeam.json().id },
+    });
+    expect(added.statusCode).toBe(201);
+    expect(added.json().classificationConflict).toMatchObject({
+      notCoveredByProject: ["pci-dss"],
+      governing: "project",
+    });
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: "/v1/audit" });
+    expect(
+      audit.json().entries.some(
+        (e: { ruleId: string }) => e.ruleId === "team-classification-conflict-surfaced",
+      ),
+    ).toBe(true);
+  });
+});
