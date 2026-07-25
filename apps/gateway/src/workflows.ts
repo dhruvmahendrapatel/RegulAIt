@@ -578,7 +578,15 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
         .from(approvals)
         .where(and(eq(approvals.instanceId, instanceId), eq(approvals.status, "pending"))),
     ]);
-    return { instance: loaded.instance, events, artifacts, pendingApprovals };
+    return {
+      instance: loaded.instance,
+      // §9: the effective (strictest-wins merged) cost-sensitivity for this run
+      costSensitivity:
+        (loaded.instance.definition as WorkflowDefinition).costSensitivity ?? "standard",
+      events,
+      artifacts,
+      pendingApprovals,
+    };
   });
 
   // …and the fleet view (admin).

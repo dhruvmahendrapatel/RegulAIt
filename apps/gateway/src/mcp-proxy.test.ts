@@ -1957,3 +1957,142 @@ describe("lazy tool-loading in the MCP proxy (EPIC-04 §8)", () => {
     await client.close();
   });
 });
+
+describe("workflow cost-sensitivity tag (EPIC-04 §9)", () => {
+  it("strictest-wins across merged templates and surfaces on the instance view", async () => {
+    const mkTpl = async (name: string, tag?: string) => {
+      const res = await app.inject({
+        method: "POST",
+        headers: AUTH,
+        url: "/v1/workflows/templates",
+        payload: {
+          name,
+          definition: {
+            workflow: name,
+            ...(tag ? { costSensitivity: tag } : {}),
+            stages: [
+              { id: "intake", type: "trigger" },
+              { id: `${name}-signoff`, type: "human_approval", approvers: ["requesting_user"] },
+            ],
+          },
+        },
+      });
+      expect(res.statusCode).toBe(201);
+      return res.json().id as string;
+    };
+
+    const invalid = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/workflows/templates",
+      payload: {
+        name: "bad-tag",
+        definition: {
+          workflow: "bad-tag",
+          costSensitivity: "cheapest",
+          stages: [{ id: "intake", type: "trigger" }],
+        },
+      },
+    });
+    expect(invalid.statusCode).toBe(400);
+
+    const cheapTpl = await mkTpl("tagged-cheap", "cost-sensitive");
+    const strictTpl = await mkTpl("tagged-strict", "quality-sensitive");
+    for (const templateId of [cheapTpl, strictTpl]) {
+      await app.inject({
+        method: "POST",
+        headers: AUTH,
+        url: "/v1/workflows/assignment-rules",
+        payload: { templateId, changeType: "cost-tag-e2e" },
+      });
+    }
+
+    const tina = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "opt-tina@example.com", displayName: "Opt Tina" },
+    });
+    const tinaAuth = await authFor(tina.json().id);
+    const started = await app.inject({
+      method: "POST",
+      headers: tinaAuth,
+      url: "/v1/workflows/instances",
+      payload: {
+        change: {
+          description: "tagged change",
+          paths: ["svc/x.ts"],
+          changeType: "cost-tag-e2e",
+          environment: "staging",
+        },
+      },
+    });
+    expect(started.statusCode).toBe(201);
+
+    const view = await app.inject({
+      method: "GET",
+      headers: tinaAuth,
+      url: `/v1/workflows/instances/${started.json().id}`,
+    });
+    expect(view.json().costSensitivity).toBe("quality-sensitive");
+    expect(view.json().instance.definition.costSensitivity).toBe("quality-sensitive");
+  });
+
+  it("an untagged run reads as standard", async () => {
+    const view = await app.inject({
+      method: "GET",
+      headers: AUTH,
+      url: "/v1/workflows/instances",
+    });
+    // fleet view untouched; per-instance default checked via a fresh untagged instance
+    expect(view.statusCode).toBe(200);
+
+    const tplRes = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/workflows/templates",
+      payload: {
+        name: "untagged-e2e",
+        definition: {
+          workflow: "untagged-e2e",
+          stages: [
+            { id: "intake", type: "trigger" },
+            { id: "untagged-signoff", type: "human_approval", approvers: ["requesting_user"] },
+          ],
+        },
+      },
+    });
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/workflows/assignment-rules",
+      payload: { templateId: tplRes.json().id, changeType: "untagged-e2e" },
+    });
+    const uma = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "opt-uma@example.com", displayName: "Opt Uma" },
+    });
+    const umaAuth = await authFor(uma.json().id);
+    const started = await app.inject({
+      method: "POST",
+      headers: umaAuth,
+      url: "/v1/workflows/instances",
+      payload: {
+        change: {
+          description: "plain change",
+          paths: ["svc/y.ts"],
+          changeType: "untagged-e2e",
+          environment: "staging",
+        },
+      },
+    });
+    const view2 = await app.inject({
+      method: "GET",
+      headers: umaAuth,
+      url: `/v1/workflows/instances/${started.json().id}`,
+    });
+    expect(view2.json().costSensitivity).toBe("standard");
+  });
+});

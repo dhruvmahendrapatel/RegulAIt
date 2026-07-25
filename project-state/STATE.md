@@ -87,9 +87,15 @@ tools, withheld tools stay fully callable (tools/call never consults the selecti
 manifest shrinks, the entitlement never does), no intent or zero matches fails open to the full
 entitled list, the same per-user `routing_mode` passthrough switch disables it, and each
 tools/list writes a `lazy_tool_loading` cost event with tokens-saved measured from the actual
-serialized manifest chars withheld. Not in EPIC-04 yet: edit-vs-rewrite, compaction, file
-pre-processing, prompt/semantic caching, batching, workflow-template cost-sensitivity tags
-(§9's invoke-side signal is in).
+serialized manifest chars withheld. **Third slice: §9 cost-sensitivity tag on workflow
+templates** — `costSensitivity: cost-sensitive|standard|quality-sensitive` on the workflow
+definition (validated by the kernel, no new stage type, no migration — it rides the definition
+jsonb into the instance snapshot), merged strictest-wins in `mergeDefinitions` (an untagged
+template counts as "standard", so a merge can never inherit cost-sensitive downgrading from
+one team's template), surfaced top-level on the per-instance view. The invoke path has accepted
+the same enum since slice 1; wiring instance→invoke happens when workflows actually invoke
+models. Not in EPIC-04 yet: edit-vs-rewrite, compaction, file pre-processing, prompt/semantic
+caching, batching.
 
 **EPIC-03 started — workflow engine first slice (PR #9).** New pure `packages/workflow-kernel`:
 declarative template validation (§3 — executable stage types trigger/planning/
@@ -177,7 +183,7 @@ with a real in-process upstream MCP server and real MCP client (26 tests total).
 | EPIC-01 | Bootstrap: AWS foundation + GitHub repo + session-continuity scaffold | **done** | ADR-0001–0004 |
 | EPIC-02 | Governance layer MVP (now includes infra-ops/compliance-cascade/deploy-model, Shared Projects, cost dashboard — §1–§10) | **in progress** — stack chosen (ADR-0009), first slice = MCP-server governance vertical | GOVERNANCE_LAYER_SPEC.md, ADR-0007, ADR-0009 |
 | EPIC-03 | Workflow engine MVP (now includes optional Design/Architecture sign-off stage type) | **in progress** — first slice merged (PR #9) | WORKFLOW_ENGINE_SPEC.md, ADR-0007 |
-| EPIC-04 | Token/cost optimization MVP (escalated to P0) | **in progress** — routing kernel + cost_events ledger merged (PR #12); lazy tool-loading in the MCP proxy built | TOKEN_OPTIMIZATION_SPEC.md, ADR-0007 |
+| EPIC-04 | Token/cost optimization MVP (escalated to P0) | **in progress** — routing kernel + cost_events ledger (PR #12), lazy tool-loading (PR #13) merged; §9 workflow cost-sensitivity tag built | TOKEN_OPTIMIZATION_SPEC.md, ADR-0007 |
 | EPIC-05 | Multi-agent orchestration MVP (PM/Team-Lead/Worker delegation) | not started | MULTI_AGENT_ORCHESTRATION_SPEC.md, ADR-0008 |
 | EPIC-06 | PM-tool integration MVP (Azure DevOps/Jira/etc.) | not started | PM_TOOL_INTEGRATION_SPEC.md, ADR-0008 |
 

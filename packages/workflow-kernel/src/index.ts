@@ -54,9 +54,21 @@ const stageSchema = z.object({
 });
 export type Stage = z.infer<typeof stageSchema>;
 
+/** OPTIMIZATION §9: workflow-level bias for pillar 6's optimizer. Strictness
+ * order (strictest last): cost-sensitive < standard < quality-sensitive. */
+export const COST_SENSITIVITIES = ["cost-sensitive", "standard", "quality-sensitive"] as const;
+export type CostSensitivityTag = (typeof COST_SENSITIVITIES)[number];
+const STRICTNESS: Record<CostSensitivityTag, number> = {
+  "cost-sensitive": 0,
+  standard: 1,
+  "quality-sensitive": 2,
+};
+
 export const workflowDefinitionSchema = z
   .object({
     workflow: z.string().min(1),
+    /** §9 cost-sensitivity tag; absent = "standard" */
+    costSensitivity: z.enum(COST_SENSITIVITIES).optional(),
     stages: z.array(stageSchema).min(1),
   })
   .superRefine((def, ctx) => {
@@ -217,7 +229,12 @@ export function mergeDefinitions(defs: readonly WorkflowDefinition[]): WorkflowD
       stages.push(stage);
     }
   }
-  return { workflow: defs.map((d) => d.workflow).join("+"), stages };
+  // §9 strictest-wins: an unset template counts as "standard", so a merge
+  // with any untagged template can never inherit cost-sensitive downgrading.
+  const costSensitivity = defs
+    .map((d) => d.costSensitivity ?? "standard")
+    .reduce((a, b) => (STRICTNESS[a] >= STRICTNESS[b] ? a : b));
+  return { workflow: defs.map((d) => d.workflow).join("+"), stages, costSensitivity };
 }
 
 // ---------------------------------------------------------------------------
