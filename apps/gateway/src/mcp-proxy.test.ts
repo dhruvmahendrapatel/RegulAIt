@@ -2342,8 +2342,12 @@ describe("multi-agent orchestration runs (EPIC-05 slice)", () => {
     });
     expect(otherDrive.statusCode).toBe(404);
 
+    // non-admins get their OWN runs from the list view, never the fleet
     const fleetAsNonAdmin = await app.inject({ method: "GET", headers: patAuth, url: "/v1/runs" });
-    expect(fleetAsNonAdmin.statusCode).toBe(403);
+    expect(fleetAsNonAdmin.statusCode).toBe(200);
+    expect(
+      fleetAsNonAdmin.json().runs.every((r: { initiatingUserId: string }) => r.initiatingUserId === patId),
+    ).toBe(true);
     const fleet = await app.inject({ method: "GET", headers: AUTH, url: "/v1/runs" });
     expect(fleet.json().runs.length).toBeGreaterThanOrEqual(3);
   });
@@ -5931,5 +5935,64 @@ describe("linear pm adapter: GraphQL run sync + state mirror end-to-end", () => 
       srv.closeAllConnections();
       await new Promise<void>((r) => srv.close(() => r()));
     }
+  });
+});
+
+describe("UI plumbing: /v1/me and own-scoped list views", () => {
+  it("identity echo works and non-admins see exactly their own runs/instances/projects", async () => {
+    const mia = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email: "ui-mia@example.com", displayName: "UI Mia" },
+    });
+    const miaId = mia.json().id;
+    const miaAuth = await authFor(miaId);
+
+    const me = await app.inject({ method: "GET", headers: miaAuth, url: "/v1/me" });
+    expect(me.statusCode).toBe(200);
+    expect(me.json()).toMatchObject({ userId: miaId, isAdmin: false });
+    expect(me.json().user.email).toBe("ui-mia@example.com");
+
+    // mia initiates one run; the fleet holds many others from earlier tests
+    const agentRes = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/agents",
+      payload: { name: "ui-worker", provider: "mock", tier: 0, modes: ["execute"], costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-ui" },
+    });
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/grants/agents",
+      payload: { userId: miaId, agentId: agentRes.json().id },
+    });
+    await app.inject({
+      method: "POST", headers: miaAuth, url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "ui-own-run",
+          escalationApproverUserId: miaId,
+          nodes: [{ id: "a", title: "t", ownerAgentId: agentRes.json().id, mode: "execute" }],
+        },
+      },
+    });
+    const myRuns = await app.inject({ method: "GET", headers: miaAuth, url: "/v1/runs" });
+    expect(myRuns.statusCode).toBe(200);
+    expect(myRuns.json().runs.length).toBe(1);
+    expect(myRuns.json().runs[0].name).toBe("ui-own-run");
+    const fleet = await app.inject({ method: "GET", headers: AUTH, url: "/v1/runs" });
+    expect(fleet.json().runs.length).toBeGreaterThan(1);
+
+    // instances: mia has none; the admin fleet is non-empty from earlier tests
+    const myInstances = await app.inject({ method: "GET", headers: miaAuth, url: "/v1/workflows/instances" });
+    expect(myInstances.json().instances).toHaveLength(0);
+
+    // projects: only memberships are visible to a non-admin
+    const proj = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/projects",
+      payload: { name: "ui-mia-project" },
+    });
+    await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/projects/${proj.json().id}/members`,
+      payload: { userId: miaId, role: "viewer" },
+    });
+    const myProjects = await app.inject({ method: "GET", headers: miaAuth, url: "/v1/projects" });
+    expect(myProjects.json().projects).toHaveLength(1);
+    expect(myProjects.json().projects[0].name).toBe("ui-mia-project");
   });
 });

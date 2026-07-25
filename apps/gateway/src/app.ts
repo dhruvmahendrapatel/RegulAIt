@@ -108,7 +108,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // the inbound PM webhook (ADR-0010), which is called by external systems and
   // authenticates with its per-connection secret inside the route handler.
   app.addHook("preHandler", async (req, reply) => {
-    if (req.routeOptions.url === "/v1/pm/webhooks/:connectionName" || req.routeOptions.url === "/admin") {
+    if (req.routeOptions.url === "/v1/pm/webhooks/:connectionName" || req.routeOptions.url === "/admin" || req.routeOptions.url === "/app") {
       req.authCtx = { userId: null, isAdmin: false, via: "api-key" };
       return;
     }
@@ -157,12 +157,31 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "GET /v1/decisions",
     "POST /v1/pm/webhooks/:connectionName",
     "GET /admin",
+    "GET /app",
+    "GET /v1/me",
+    "GET /v1/runs",
+    "GET /v1/workflows/instances",
+    "GET /v1/projects",
   ]);
   app.addHook("preHandler", async (req, reply) => {
     const route = `${req.method} ${req.routeOptions.url ?? ""}`;
     if (!NON_ADMIN_ROUTES.has(route) && !req.authCtx.isAdmin) {
       return reply.status(403).send({ error: "admin_only" });
     }
+  });
+
+  // identity echo for UI clients — who am I, what may I see
+  app.get("/v1/me", async (req) => {
+    const userId = req.authCtx.userId;
+    let user = null;
+    if (userId) {
+      const [row] = await db
+        .select({ id: users.id, email: users.email, displayName: users.displayName })
+        .from(users)
+        .where(eq(users.id, userId));
+      user = row ?? null;
+    }
+    return { userId, isAdmin: req.authCtx.isAdmin, user };
   });
 
   app.post("/v1/users", async (req, reply) => {

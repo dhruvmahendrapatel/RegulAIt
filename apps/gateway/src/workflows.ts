@@ -742,13 +742,19 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     };
   });
 
-  // …and the fleet view (admin).
-  app.get("/v1/workflows/instances", async (req) => {
+  // …and the list view: fleet for admins, own instances for everyone else.
+  app.get("/v1/workflows/instances", async (req, reply) => {
     const { status } = z.object({ status: z.string().optional() }).parse(req.query);
+    const conditions = [];
+    if (status) conditions.push(eq(workflowInstances.status, status));
+    if (!req.authCtx.isAdmin) {
+      if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_has_no_instances" });
+      conditions.push(eq(workflowInstances.initiatorUserId, req.authCtx.userId));
+    }
     const rows = await db
       .select()
       .from(workflowInstances)
-      .where(status ? eq(workflowInstances.status, status) : undefined)
+      .where(conditions.length ? and(...conditions) : undefined)
       .orderBy(desc(workflowInstances.createdAt))
       .limit(100);
     return { instances: rows };

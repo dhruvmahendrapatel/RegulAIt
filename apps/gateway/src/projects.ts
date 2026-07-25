@@ -5,6 +5,7 @@ import {
   auditLog,
   count,
   complianceProfiles,
+  inArray,
   costEvents,
   desc,
   eq,
@@ -354,9 +355,23 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     return reply.status(201).send(row);
   });
 
-  app.get("/v1/projects", async () => {
+  // fleet for admins; non-admins see the projects they are members of
+  app.get("/v1/projects", async (req, reply) => {
+    let memberProjectIds: string[] | null = null;
+    if (!req.authCtx.isAdmin) {
+      if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_has_no_projects" });
+      const memberships = await db
+        .select({ projectId: projectMembers.projectId })
+        .from(projectMembers)
+        .where(eq(projectMembers.userId, req.authCtx.userId));
+      memberProjectIds = memberships.map((m) => m.projectId);
+      if (memberProjectIds.length === 0) return { projects: [] };
+    }
     const [rows, spend] = await Promise.all([
-      db.select().from(projects),
+      db
+        .select()
+        .from(projects)
+        .where(memberProjectIds ? inArray(projects.id, memberProjectIds) : undefined),
       db
         .select({
           projectId: usageEvents.projectId,

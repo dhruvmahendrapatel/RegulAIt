@@ -1196,15 +1196,21 @@ export function registerOrchestrationRoutes(
     };
   });
 
-  // admin fleet view (§6 dashboard data source)
-  app.get("/v1/runs", async (req) => {
+  // fleet view for admins; non-admins see exactly their own initiated runs
+  app.get("/v1/runs", async (req, reply) => {
     const { status } = z
       .object({ status: z.enum(["planned", "running", "completed", "aborted"]).optional() })
       .parse(req.query);
+    const conditions = [];
+    if (status) conditions.push(eq(orchestrationRuns.status, status));
+    if (!req.authCtx.isAdmin) {
+      if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_has_no_runs" });
+      conditions.push(eq(orchestrationRuns.initiatingUserId, req.authCtx.userId));
+    }
     const rows = await db
       .select()
       .from(orchestrationRuns)
-      .where(status ? eq(orchestrationRuns.status, status) : undefined)
+      .where(conditions.length ? and(...conditions) : undefined)
       .orderBy(desc(orchestrationRuns.createdAt));
     return { runs: rows };
   });
