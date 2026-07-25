@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   AzureDevOpsProvider,
+  JiraProvider,
   MockPmProvider,
   PmProviderError,
   mappingFor,
@@ -35,7 +36,7 @@ describe("field mapping (§6/§7)", () => {
     });
     expect(resolveTaskFields(mapping, { title: "x" })).toEqual({ "Custom.Title": "x" });
     expect(() => mappingFor("azure_devops", { task: { fields: {} } })).toThrow();
-    expect(() => mappingFor("jira")).toThrow(PmProviderError); // no default shipped yet
+    expect(() => mappingFor("linear")).toThrow(PmProviderError); // no default shipped yet
   });
 });
 
@@ -95,7 +96,7 @@ describe("registry", () => {
     const b = resolvePmProvider({ provider: "mock", token: "" });
     expect(a).toBe(b);
     expect(() => resolvePmProvider({ provider: "azure_devops", token: "t" })).toThrow(/baseUrl/);
-    for (const provider of ["jira", "linear", "asana", "monday", "generic_webhook"] as const) {
+    for (const provider of ["linear", "asana", "monday", "generic_webhook"] as const) {
       expect(() => resolvePmProvider({ provider, token: "t" })).toThrow(/not implemented/);
     }
   });
@@ -167,5 +168,119 @@ describe("decision record resolution (§4)", () => {
     expect(resolveDecisionAction(bare, { decision: "d", rationale: null, decisionMaker: "m" })).toEqual({
       kind: "comment",
     });
+  });
+});
+
+describe("JiraProvider (REST v2, injectable fetch, no network)", () => {
+  const json = (body: unknown, status = 200) => ({
+    status,
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  });
+
+  it("creates an issue with project/issuetype wrappers, Basic email:token auth, and a browse url", async () => {
+    let captured: { url: string; headers: Record<string, string>; body: Record<string, unknown> } | null = null;
+    const jira = new JiraProvider({
+      token: "bot@example.com:api-token",
+      baseUrl: "https://acme.atlassian.net",
+      fetchImpl: async (url, init) => {
+        captured = {
+          url,
+          headers: init?.headers ?? {},
+          body: JSON.parse(String(init?.body)),
+        };
+        return json({ id: "10042", key: "REG-7", self: "..." });
+      },
+    });
+    const ref = await jira.createWorkItem("REG", "Task", { summary: "Build API", description: "initial" });
+    expect(captured!.url).toBe("https://acme.atlassian.net/rest/api/2/issue");
+    expect(captured!.headers.authorization).toBe(
+      "Basic " + Buffer.from("bot@example.com:api-token").toString("base64"),
+    );
+    expect(captured!.body).toEqual({
+      fields: {
+        project: { key: "REG" },
+        issuetype: { name: "Task" },
+        summary: "Build API",
+        description: "initial",
+      },
+    });
+    expect(ref).toEqual({ id: "10042", url: "https://acme.atlassian.net/browse/REG-7" });
+  });
+
+  it("transitions by looking up the workflow's available transitions — explicit failure when none match", async () => {
+    const calls: Array<{ method: string; url: string; body?: unknown }> = [];
+    const jira = new JiraProvider({
+      token: "b:t",
+      baseUrl: "https://acme.atlassian.net",
+      fetchImpl: async (url, init) => {
+        calls.push({ method: init?.method ?? "GET", url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+        if (url.endsWith("/transitions") && init?.method === "GET") {
+          return json({ transitions: [
+            { id: "11", name: "Start progress", to: { name: "In Progress" } },
+            { id: "31", name: "Done", to: { name: "Done" } },
+          ] });
+        }
+        return { status: 204, json: async () => null, text: async () => "" };
+      },
+    });
+    await jira.transitionState("REG", "10042", "In Progress");
+    expect(calls[1]).toMatchObject({
+      method: "POST",
+      url: "https://acme.atlassian.net/rest/api/2/issue/10042/transitions",
+      body: { transition: { id: "11" } },
+    });
+
+    await expect(jira.transitionState("REG", "10042", "Blocked")).rejects.toThrowError(
+      /no transition to 'Blocked'.*In Progress, Done/,
+    );
+  });
+
+  it("updates (204-empty tolerated), comments, and maps getWorkItem", async () => {
+    const jira = new JiraProvider({
+      token: "b:t",
+      baseUrl: "https://acme.atlassian.net",
+      fetchImpl: async (url, init) => {
+        if (init?.method === "PUT") return { status: 204, json: async () => null, text: async () => "" };
+        if (url.endsWith("/comment")) return json({ id: "c1" });
+        return json({
+          id: "10042",
+          key: "REG-7",
+          fields: {
+            summary: "Build API",
+            issuetype: { name: "Task" },
+            status: { name: "In Progress" },
+            priority: { name: "High" },
+            comment: { comments: [{ body: "first" }, { body: "second" }] },
+          },
+        });
+      },
+    });
+    await jira.updateFields("REG", "10042", { summary: "Renamed" });
+    await jira.addComment("REG", "10042", "note");
+    const item = await jira.getWorkItem("REG", "10042");
+    expect(item.type).toBe("Task");
+    expect(item.state).toBe("In Progress");
+    expect(item.url).toBe("https://acme.atlassian.net/browse/REG-7");
+    expect(item.comments).toEqual(["first", "second"]);
+  });
+
+  it("default mapping exists and the registry resolves jira (baseUrl required)", () => {
+    const mapping = mappingFor("jira");
+    expect(resolveTaskFields(mapping, { title: "T", description: "D" })).toEqual({
+      summary: "T",
+      description: "D",
+    });
+    expect(resolveStatus(mapping, "in_progress")).toBe("In Progress");
+    // Jira's default workflow has no Blocked state — skipped, never invented
+    expect(resolveStatus(mapping, "blocked")).toBeNull();
+
+    expect(
+      resolvePmProvider({ provider: "jira", token: "b:t", baseUrl: "https://a.atlassian.net" }).kind,
+    ).toBe("jira");
+    expect(() => resolvePmProvider({ provider: "jira", token: "b:t" })).toThrowError(/baseUrl/);
+    for (const provider of ["linear", "asana", "monday", "generic_webhook"] as const) {
+      expect(() => resolvePmProvider({ provider, token: "t" })).toThrowError(/not implemented/);
+    }
   });
 });

@@ -154,6 +154,25 @@ export function validateMapping(raw: unknown): PmMapping {
 }
 
 export const DEFAULT_MAPPINGS: Partial<Record<PmProviderKind, PmMapping>> = {
+  jira: {
+    task: {
+      workItemType: "Task",
+      fields: {
+        title: "summary",
+        status: "status",
+        description: "description",
+        priority: "priority",
+      },
+      // Jira's default workflow has no Blocked state — 'blocked' is
+      // deliberately unmapped (skip, never invent).
+      statusMap: {
+        not_started: "To Do",
+        in_progress: "In Progress",
+        in_review: "In Progress",
+        done: "Done",
+      },
+    },
+  },
   azure_devops: {
     task: {
       workItemType: "Task",
@@ -325,6 +344,107 @@ export class AzureDevOpsProvider implements PmProvider {
 }
 
 // ---------------------------------------------------------------------------
+// Jira adapter — REST v2 (plain-string fields; v3 would force ADF rich text),
+// Basic auth with an "email:api-token" credential (Jira Cloud convention),
+// injectable fetch. Jira states are NOT settable fields: transitionState
+// looks up the issue's available transitions and executes the matching one,
+// failing explicit when the workflow offers no path to the target state.
+// ---------------------------------------------------------------------------
+
+export interface JiraAdapterOptions {
+  /** "email:api-token" (Jira Cloud Basic auth) */
+  token: string;
+  /** e.g. https://<site>.atlassian.net */
+  baseUrl: string;
+  fetchImpl?: FetchLike;
+}
+
+export class JiraProvider implements PmProvider {
+  readonly kind = "jira" as const;
+  private readonly base: string;
+  private readonly auth: string;
+  private readonly fetchImpl: FetchLike;
+
+  constructor(opts: JiraAdapterOptions) {
+    this.base = opts.baseUrl.replace(/\/$/, "");
+    this.auth = `Basic ${Buffer.from(opts.token).toString("base64")}`;
+    this.fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
+  }
+
+  private async request(method: string, path: string, body?: unknown): Promise<unknown> {
+    const res = await this.fetchImpl(`${this.base}${path}`, {
+      method,
+      headers: {
+        authorization: this.auth,
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    if (res.status >= 400) {
+      throw new PmProviderError(`jira ${method} ${path} failed: ${await res.text()}`, res.status);
+    }
+    const text = await res.text();
+    return text ? JSON.parse(text) : null; // Jira returns 204/empty on updates
+  }
+
+  async createWorkItem(
+    project: string,
+    type: string,
+    fields: Record<string, unknown>,
+  ): Promise<WorkItemRef> {
+    const created = (await this.request("POST", "/rest/api/2/issue", {
+      fields: { project: { key: project }, issuetype: { name: type }, ...fields },
+    })) as { id: string; key: string };
+    return { id: String(created.id), url: `${this.base}/browse/${created.key}` };
+  }
+
+  async updateFields(_project: string, id: string, fields: Record<string, unknown>): Promise<void> {
+    await this.request("PUT", `/rest/api/2/issue/${id}`, { fields });
+  }
+
+  async transitionState(_project: string, id: string, state: string): Promise<void> {
+    const available = (await this.request("GET", `/rest/api/2/issue/${id}/transitions`)) as {
+      transitions?: Array<{ id: string; name: string; to?: { name?: string } }>;
+    };
+    const match = available.transitions?.find((t) => t.to?.name === state || t.name === state);
+    if (!match) {
+      const names = available.transitions?.map((t) => t.to?.name ?? t.name).join(", ") ?? "none";
+      throw new PmProviderError(
+        `jira workflow offers no transition to '${state}' (available: ${names})`,
+      );
+    }
+    await this.request("POST", `/rest/api/2/issue/${id}/transitions`, {
+      transition: { id: match.id },
+    });
+  }
+
+  async addComment(_project: string, id: string, text: string): Promise<void> {
+    await this.request("POST", `/rest/api/2/issue/${id}/comment`, { body: text });
+  }
+
+  async getWorkItem(_project: string, id: string): Promise<WorkItem> {
+    const issue = (await this.request("GET", `/rest/api/2/issue/${id}`)) as {
+      id: string;
+      key: string;
+      fields: Record<string, unknown> & {
+        issuetype?: { name?: string };
+        status?: { name?: string };
+        comment?: { comments?: Array<{ body?: string }> };
+      };
+    };
+    return {
+      id: String(issue.id),
+      url: `${this.base}/browse/${issue.key}`,
+      type: issue.fields.issuetype?.name ?? "",
+      state: issue.fields.status?.name ?? null,
+      fields: issue.fields,
+      comments: issue.fields.comment?.comments?.map((c) => c.body ?? "") ?? [],
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Mock adapter — in-memory, for tests and air-gapped development.
 // ---------------------------------------------------------------------------
 
@@ -414,9 +534,17 @@ export function resolvePmProvider(config: PmConnectionConfig, fetchImpl?: FetchL
         baseUrl: config.baseUrl,
         ...(fetchImpl ? { fetchImpl } : {}),
       });
+    case "jira":
+      if (!config.baseUrl) {
+        throw new PmProviderError("jira requires a baseUrl (https://<site>.atlassian.net)");
+      }
+      return new JiraProvider({
+        token: config.token,
+        baseUrl: config.baseUrl,
+        ...(fetchImpl ? { fetchImpl } : {}),
+      });
     case "mock":
       return sharedMock;
-    case "jira":
     case "linear":
     case "asana":
     case "monday":

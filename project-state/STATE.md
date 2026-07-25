@@ -273,6 +273,21 @@ rejection era is over, and pillar 1's any-vendor routing claim is demonstrated a
 live adapters with zero gateway changes each time. Deferred: OpenAI Responses-API surface,
 per-provider tool-use.
 
+**Jira PM adapter, 2026-07-25 — pillar 8 grows its second real tool.** `JiraProvider` in
+pm-provider: REST v2 deliberately (v3 forces ADF rich text; plain strings match the mapping
+layer), Basic auth with the Jira Cloud `email:api-token` credential convention, injectable
+fetch. The Jira-specific insight honored: **states are not settable fields** —
+`transitionState` looks up the issue's available workflow transitions and executes the
+matching one (by target-state or transition name), failing EXPLICIT with the available list
+when the workflow offers no path (mirror failures surface, never fail the run event — the
+established rule). `DEFAULT_MAPPINGS.jira` maps title→summary etc.; `blocked` is deliberately
+unmapped (Jira's default workflow has no Blocked state — skip, never invent). Registry
+resolves azure_devops + jira + mock; linear/asana/monday/generic_webhook stay rejected.
+E2e: a run pm-syncs against a live-shaped fake Jira server (run parent + node issues created
+with project/issuetype wrappers and Basic auth asserted on the wire) and a node_started event
+mirrors through a real GET-transitions → POST-transition sequence. Deferred: remaining PM
+adapters, ADF descriptions, Jira webhooks → the ADR-0010 normalized inbound shape.
+
 **EPIC-06 started — PM-tool integration first slice, 2026-07-25.** New
 `packages/pm-provider` on the git-provider playbook (pillar 8, PM_TOOL_INTEGRATION_SPEC
 §2/§3/§6): neutral `PmProvider` interface (create/update/transition/comment/getWorkItem), the

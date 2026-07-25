@@ -5713,3 +5713,113 @@ describe("xai model adapter: all four real providers ride the same governed pipe
     }
   });
 });
+
+describe("jira pm adapter: run sync + status mirror against a live-shaped server", () => {
+  it("pm-sync creates Jira issues and node events mirror through workflow transitions", async () => {
+    let issueSeq = 0;
+    const creations: Array<{ auth: string | null; body: Record<string, unknown> }> = [];
+    const transitionPosts: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const srv = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        const parsed = body ? JSON.parse(body) : {};
+        const send = (status: number, payload: unknown) => {
+          res.writeHead(status, { "content-type": "application/json" });
+          res.end(payload === null ? "" : JSON.stringify(payload));
+        };
+        if (req.method === "POST" && req.url === "/rest/api/2/issue") {
+          creations.push({ auth: (req.headers.authorization as string) ?? null, body: parsed });
+          issueSeq += 1;
+          return send(201, { id: String(10000 + issueSeq), key: `REG-${issueSeq}`, self: "..." });
+        }
+        if (req.method === "GET" && /\/transitions$/.test(req.url ?? "")) {
+          return send(200, { transitions: [
+            { id: "11", name: "Start progress", to: { name: "In Progress" } },
+            { id: "31", name: "Finish", to: { name: "Done" } },
+          ] });
+        }
+        if (req.method === "POST" && /\/transitions$/.test(req.url ?? "")) {
+          transitionPosts.push({ url: req.url ?? "", body: parsed });
+          return send(204, null);
+        }
+        return send(200, {});
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    const port = (srv.address() as { port: number }).port;
+
+    try {
+      const juno = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email: "jira-juno@example.com", displayName: "Jira Juno" },
+      });
+      const junoAuth = await authFor(juno.json().id);
+      const approver = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email: "jira-approver@example.com", displayName: "Jira Approver" },
+      });
+      const agentRes = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/agents",
+        payload: {
+          name: "jira-worker", provider: "mock", tier: 0, modes: ["execute"],
+          costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-jira",
+        },
+      });
+      await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/grants/agents",
+        payload: { userId: juno.json().id, agentId: agentRes.json().id },
+      });
+      const conn = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/pm/connections",
+        payload: {
+          name: "jira-e2e", provider: "jira", project: "REG",
+          baseUrl: `http://127.0.0.1:${port}`, token: "bot@example.com:api-token",
+        },
+      });
+      expect(conn.statusCode).toBe(201);
+
+      const run = await app.inject({
+        method: "POST", headers: junoAuth, url: "/v1/runs",
+        payload: {
+          graph: {
+            run: "jira-sync-run",
+            escalationApproverUserId: approver.json().id,
+            nodes: [{ id: "a", title: "implement api", ownerAgentId: agentRes.json().id, mode: "execute", estimate: { in: 1, out: 1 } }],
+          },
+        },
+      });
+      const runId = run.json().id;
+
+      const synced = await app.inject({
+        method: "POST", headers: junoAuth, url: `/v1/runs/${runId}/pm-sync`,
+        payload: { connectionName: "jira-e2e" },
+      });
+      expect(synced.statusCode).toBe(201);
+      // run-level parent + one node item, created with the mapped fields
+      expect(creations.length).toBe(2);
+      expect(creations[0]!.auth).toBe(
+        "Basic " + Buffer.from("bot@example.com:api-token").toString("base64"),
+      );
+      const nodeIssue = creations.find(
+        (c) => (c.body.fields as Record<string, unknown>).summary === "implement api",
+      );
+      expect(nodeIssue).toBeDefined();
+      expect((nodeIssue!.body.fields as Record<string, unknown>).project).toEqual({ key: "REG" });
+      expect((nodeIssue!.body.fields as Record<string, unknown>).issuetype).toEqual({ name: "Task" });
+
+      // a node event mirrors outbound through a Jira workflow transition
+      await app.inject({ method: "POST", headers: junoAuth, url: `/v1/runs/${runId}/events`, payload: { kind: "start" } });
+      const started = await app.inject({
+        method: "POST", headers: junoAuth, url: `/v1/runs/${runId}/events`,
+        payload: { kind: "node_started", nodeId: "a" },
+      });
+      expect(started.statusCode).toBe(200);
+      expect(transitionPosts.length).toBe(1);
+      expect(transitionPosts[0]!.body).toEqual({ transition: { id: "11" } }); // → In Progress
+    } finally {
+      srv.closeAllConnections();
+      await new Promise<void>((r) => srv.close(() => r()));
+    }
+  });
+});
