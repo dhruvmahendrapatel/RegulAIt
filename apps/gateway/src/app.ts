@@ -57,6 +57,7 @@ export interface BuildAppOptions {
 }
 import { z } from "zod";
 import { registerMcpProxy } from "./mcp-proxy.js";
+import { registerAgentConnectorRoutes } from "./agents-connectors.js";
 
 const uuidParam = z.object({ serverId: z.string().uuid() });
 const visibleToolsParams = z.object({
@@ -72,6 +73,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     if (err instanceof z.ZodError) {
       return reply.status(400).send({ error: "validation", issues: err.issues });
     }
+    // Postgres constraint violations surface as DrizzleQueryError wrapping the
+    // pg error; map them to client errors instead of a generic 500.
+    const pgCode = (err as { cause?: { code?: string } }).cause?.code;
+    if (pgCode === "23505") return reply.status(409).send({ error: "conflict" });
+    if (pgCode === "23503") return reply.status(400).send({ error: "invalid_reference" });
     app.log.error(err);
     if (process.env.DEBUG_ERRORS) console.error("GATEWAY ERR:", err);
     return reply.status(500).send({ error: "internal" });
@@ -93,6 +99,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "POST /v1/approvals/:approvalId/decide",
     "GET /v1/users/:userId/servers/:serverId/tools",
     "POST /mcp/:serverId",
+    "POST /v1/agents/:agentId/invoke",
+    "POST /v1/connectors/:connectorId/invoke",
+    "GET /v1/users/:userId/agents",
+    "GET /v1/users/:userId/connectors",
   ]);
   app.addHook("preHandler", async (req, reply) => {
     const route = `${req.method} ${req.routeOptions.url ?? ""}`;
@@ -305,6 +315,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           toolName: g.toolName,
           source: "role" as const,
           role: roleName(g.roleId),
+          roleId: g.roleId,
           grantId: g.id,
           revoked: Boolean(rev),
           ...(rev ? { revocationId: rev.id } : {}),
@@ -314,18 +325,43 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         .filter((g) => g.readOnlyAll)
         .map((g) => {
           const rev = revocationFor(null);
+          // Tool-scoped revocations also carve tools out of a role
+          // read-only-all grant (the kernel enforces this); flag them here so
+          // the deviation is visible, not silent (§5).
+          const carveOuts = (entitlements.revocations ?? [])
+            .filter((r) => r.toolName !== null)
+            .map((r) => ({ toolName: r.toolName, revocationId: r.id }));
           return {
             kind: "server-read-only" as const,
             toolName: null,
             source: "role" as const,
             role: roleName(g.roleId),
+            roleId: g.roleId,
             grantId: g.id,
             revoked: Boolean(rev),
             ...(rev ? { revocationId: rev.id } : {}),
+            ...(carveOuts.length > 0 ? { revokedTools: carveOuts } : {}),
           };
         }),
     ];
-    return { entitlements: entries };
+    // Every active revocation, so overrides are discoverable and reversible
+    // via DELETE /v1/revocations/:id even when no grant currently matches.
+    return { entitlements: entries, revocations: entitlements.revocations ?? [] };
+  });
+
+  app.get("/v1/revocations", async (req) => {
+    const query = z
+      .object({ userId: z.string().uuid().optional(), serverId: z.string().uuid().optional() })
+      .parse(req.query);
+    const conditions = [
+      query.userId ? eq(revocations.userId, query.userId) : undefined,
+      query.serverId ? eq(revocations.serverId, query.serverId) : undefined,
+    ].filter((c) => c !== undefined);
+    const rows = await db
+      .select()
+      .from(revocations)
+      .where(conditions.length > 0 ? and(...conditions) : undefined);
+    return { revocations: rows };
   });
 
   app.post("/v1/evaluate", async (req, reply) => {
@@ -448,6 +484,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     if (!updated) return reply.status(409).send({ error: "already_decided" });
     return updated;
   });
+
+  registerAgentConnectorRoutes(app, db);
 
   registerMcpProxy(app, db);
 

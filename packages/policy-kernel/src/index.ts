@@ -392,3 +392,221 @@ export function visibleTools(
       evaluate({ userId, serverId, tool, ...entitlements }).effect !== "deny",
   );
 }
+
+// ---------------------------------------------------------------------------
+// §2/§4 — Agents/Models object type
+// ---------------------------------------------------------------------------
+
+/** a registry entry: platform-wide catalog, decoupled from per-user entitlement (§4) */
+export interface AgentRef {
+  id: string;
+  /** capability/cost rank; higher = more capable/expensive. Basis of the §4 ceiling. */
+  tier: number;
+  enabled: boolean;
+}
+
+/** per-user agent entitlement; allowedModes null = every mode the agent has */
+export interface AgentGrant {
+  id: string;
+  userId: string;
+  agentId: string;
+  allowedModes: string[] | null;
+}
+
+export interface EvaluateAgentInput {
+  userId: string;
+  agent: AgentRef;
+  /** the mode being invoked (e.g. "plan", "execute") */
+  mode: string;
+  agentGrants: readonly AgentGrant[];
+  /** tier of the user's ceiling agent (§4); null/undefined = no ceiling set */
+  ceilingTier?: number | null;
+}
+
+export type AgentRuleName =
+  | "agent-registry-enabled"
+  | "agent-allow-list"
+  | "agent-mode"
+  | "agent-ceiling"
+  | "default-deny";
+
+export interface AgentRuleTrace {
+  rule: AgentRuleName;
+  outcome: "allow" | "deny" | "no-match";
+  grantId?: string;
+}
+
+export interface AgentDecision {
+  effect: "allow" | "deny";
+  ruleId: string;
+  ruleChain: AgentRuleTrace[];
+  reason: string;
+}
+
+/**
+ * §4: registry-enabled → per-user allow-list → mode restriction → ceiling →
+ * allow. Deny-by-default: no grant, no access, regardless of the registry.
+ */
+export function evaluateAgent(input: EvaluateAgentInput): AgentDecision {
+  const { userId, agent, mode } = input;
+  const chain: AgentRuleTrace[] = [];
+
+  if (!agent.enabled) {
+    chain.push({ rule: "agent-registry-enabled", outcome: "deny" });
+    return {
+      effect: "deny",
+      ruleId: "agent-registry-enabled",
+      ruleChain: chain,
+      reason: `agent '${agent.id}' is disabled platform-wide in the registry`,
+    };
+  }
+  chain.push({ rule: "agent-registry-enabled", outcome: "allow" });
+
+  const grant = input.agentGrants.find((g) => g.userId === userId && g.agentId === agent.id);
+  if (!grant) {
+    chain.push({ rule: "agent-allow-list", outcome: "no-match" });
+    chain.push({ rule: "default-deny", outcome: "deny" });
+    return {
+      effect: "deny",
+      ruleId: DEFAULT_DENY_RULE_ID,
+      ruleChain: chain,
+      reason: `agent '${agent.id}' is not on user '${userId}'s allow-list — default-deny`,
+    };
+  }
+  chain.push({ rule: "agent-allow-list", outcome: "allow", grantId: grant.id });
+
+  if (grant.allowedModes !== null && !grant.allowedModes.includes(mode)) {
+    chain.push({ rule: "agent-mode", outcome: "deny", grantId: grant.id });
+    return {
+      effect: "deny",
+      ruleId: grant.id,
+      ruleChain: chain,
+      reason: `mode '${mode}' of agent '${agent.id}' is not in the grant's allowed modes`,
+    };
+  }
+  chain.push({ rule: "agent-mode", outcome: grant.allowedModes === null ? "no-match" : "allow" });
+
+  if (input.ceilingTier != null && agent.tier > input.ceilingTier) {
+    chain.push({ rule: "agent-ceiling", outcome: "deny" });
+    return {
+      effect: "deny",
+      ruleId: "agent-ceiling",
+      ruleChain: chain,
+      reason:
+        `agent '${agent.id}' (tier ${agent.tier}) exceeds user's ceiling ` +
+        `(tier ${input.ceilingTier})`,
+    };
+  }
+  chain.push({ rule: "agent-ceiling", outcome: "no-match" });
+
+  return {
+    effect: "allow",
+    ruleId: grant.id,
+    ruleChain: chain,
+    reason: `agent '${agent.id}' mode '${mode}' allowed by user's agent grant`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// §2 — Connectors object type
+// ---------------------------------------------------------------------------
+
+/** per-user connector entitlement: mode + optional object-level data scope */
+export interface ConnectorGrant {
+  id: string;
+  userId: string;
+  connectorId: string;
+  /** "read" = read-only; "readwrite" = writes permitted */
+  mode: "read" | "readwrite";
+  /** null = all objects; otherwise the connector's reach is limited to these */
+  allowedObjects: string[] | null;
+}
+
+export interface EvaluateConnectorInput {
+  userId: string;
+  connectorId: string;
+  operation: "read" | "write";
+  /** the object/table/folder the call targets, when the caller specifies one */
+  object?: string | null;
+  connectorGrants: readonly ConnectorGrant[];
+}
+
+export type ConnectorRuleName =
+  | "connector-allow-list"
+  | "connector-mode"
+  | "connector-object-scope"
+  | "default-deny";
+
+export interface ConnectorRuleTrace {
+  rule: ConnectorRuleName;
+  outcome: "allow" | "deny" | "no-match";
+  grantId?: string;
+}
+
+export interface ConnectorDecision {
+  effect: "allow" | "deny";
+  ruleId: string;
+  ruleChain: ConnectorRuleTrace[];
+  reason: string;
+}
+
+/**
+ * §2: per-user connector grant → read/write mode → object-level data scope
+ * (fail closed when scoped and no object is named) → allow.
+ */
+export function evaluateConnector(input: EvaluateConnectorInput): ConnectorDecision {
+  const { userId, connectorId, operation } = input;
+  const chain: ConnectorRuleTrace[] = [];
+
+  const grant = input.connectorGrants.find(
+    (g) => g.userId === userId && g.connectorId === connectorId,
+  );
+  if (!grant) {
+    chain.push({ rule: "connector-allow-list", outcome: "no-match" });
+    chain.push({ rule: "default-deny", outcome: "deny" });
+    return {
+      effect: "deny",
+      ruleId: DEFAULT_DENY_RULE_ID,
+      ruleChain: chain,
+      reason: `connector '${connectorId}' is not on user '${userId}'s allow-list — default-deny`,
+    };
+  }
+  chain.push({ rule: "connector-allow-list", outcome: "allow", grantId: grant.id });
+
+  if (operation === "write" && grant.mode === "read") {
+    chain.push({ rule: "connector-mode", outcome: "deny", grantId: grant.id });
+    return {
+      effect: "deny",
+      ruleId: grant.id,
+      ruleChain: chain,
+      reason: `write to connector '${connectorId}' denied: grant is read-only`,
+    };
+  }
+  chain.push({ rule: "connector-mode", outcome: operation === "write" ? "allow" : "no-match" });
+
+  if (grant.allowedObjects !== null) {
+    const object = input.object ?? null;
+    if (object === null || !grant.allowedObjects.includes(object)) {
+      chain.push({ rule: "connector-object-scope", outcome: "deny", grantId: grant.id });
+      return {
+        effect: "deny",
+        ruleId: grant.id,
+        ruleChain: chain,
+        reason:
+          object === null
+            ? `connector '${connectorId}' grant is object-scoped and no object was named — fails closed`
+            : `object '${object}' is outside the grant's allowed objects for connector '${connectorId}'`,
+      };
+    }
+    chain.push({ rule: "connector-object-scope", outcome: "allow", grantId: grant.id });
+  } else {
+    chain.push({ rule: "connector-object-scope", outcome: "no-match" });
+  }
+
+  return {
+    effect: "allow",
+    ruleId: grant.id,
+    ruleChain: chain,
+    reason: `${operation} on connector '${connectorId}' allowed by user's connector grant`,
+  };
+}

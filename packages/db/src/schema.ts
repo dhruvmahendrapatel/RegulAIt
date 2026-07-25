@@ -76,14 +76,21 @@ export const serverGrants = pgTable(
 );
 
 // No FKs on purpose: audit records must survive user/server deletion.
+// One audit trail for every object type (§7): MCP tool calls fill
+// serverId/toolName; agent and connector decisions fill objectId/detail.
 export const auditLog = pgTable(
   "audit_log",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
     userId: uuid("user_id").notNull(),
-    serverId: uuid("server_id").notNull(),
-    toolName: text("tool_name").notNull(),
+    objectType: text("object_type", { enum: ["mcp_tool", "agent", "connector"] })
+      .notNull()
+      .default("mcp_tool"),
+    objectId: uuid("object_id"),
+    detail: jsonb("detail"),
+    serverId: uuid("server_id"),
+    toolName: text("tool_name"),
     effect: text("effect", { enum: ["allow", "deny", "require_approval"] }).notNull(),
     ruleId: text("rule_id").notNull(),
     ruleChain: jsonb("rule_chain").notNull(),
@@ -276,5 +283,71 @@ export const revocations = pgTable(
     toolName: text("tool_name"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("revocations_user_server_idx").on(t.userId, t.serverId)],
+  (t) => [
+    index("revocations_user_server_idx").on(t.userId, t.serverId),
+    // NULLS NOT DISTINCT in the migration: one revocation per (user, server, tool/null)
+    uniqueIndex("revocations_user_server_tool_uq").on(t.userId, t.serverId, t.toolName),
+  ],
+);
+
+// §4 global agent/model registry: platform-wide catalog, decoupled from
+// per-user entitlement. tier ranks capability/cost (basis of the ceiling).
+export const agents = pgTable("agents", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull().unique(),
+  provider: text("provider").notNull(),
+  tier: integer("tier").notNull(),
+  modes: jsonb("modes").$type<string[]>(),
+  enabled: boolean("enabled").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const agentGrants = pgTable(
+  "agent_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    allowedModes: jsonb("allowed_modes").$type<string[]>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("agent_grants_user_agent_uq").on(t.userId, t.agentId)],
+);
+
+// §4 per-user default and ceiling agent.
+export const userAgentPolicies = pgTable("user_agent_policies", {
+  userId: uuid("user_id")
+    .primaryKey()
+    .references(() => users.id, { onDelete: "cascade" }),
+  defaultAgentId: uuid("default_agent_id").references(() => agents.id, { onDelete: "set null" }),
+  ceilingAgentId: uuid("ceiling_agent_id").references(() => agents.id, { onDelete: "set null" }),
+});
+
+// §2 connector catalog + per-user grants (mode + object-level data scope).
+export const connectors = pgTable("connectors", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull().unique(),
+  kind: text("kind").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const connectorGrants = pgTable(
+  "connector_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    connectorId: uuid("connector_id")
+      .notNull()
+      .references(() => connectors.id, { onDelete: "cascade" }),
+    mode: text("mode", { enum: ["read", "readwrite"] }).notNull(),
+    allowedObjects: jsonb("allowed_objects").$type<string[]>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("connector_grants_user_connector_uq").on(t.userId, t.connectorId)],
 );
