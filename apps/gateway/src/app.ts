@@ -118,6 +118,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "POST /v1/workflows/instances/:instanceId/advance",
     "POST /v1/workflows/instances/:instanceId/abort",
     "GET /v1/workflows/instances/:instanceId",
+    "GET /v1/approvals",
   ]);
   app.addHook("preHandler", async (req, reply) => {
     const route = `${req.method} ${req.routeOptions.url ?? ""}`;
@@ -468,15 +469,21 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     return reply.status(201).send(row);
   });
 
-  // §6 Approvals Queue — one inbox for every paused call.
+  // §6 Approvals Queue — one inbox for every paused call. Admins see all;
+  // a non-admin sees exactly the approvals naming them as approver, so named
+  // approvers can discover what awaits their sign-off.
   app.get("/v1/approvals", async (req) => {
     const { status } = z
       .object({ status: z.enum(["pending", "approved", "denied", "consumed", "superseded"]).optional() })
       .parse(req.query);
+    const conditions = [
+      status ? eq(approvals.status, status) : undefined,
+      req.authCtx.isAdmin ? undefined : eq(approvals.approverUserId, req.authCtx.userId ?? ""),
+    ].filter((c) => c !== undefined);
     const rows = await db
       .select()
       .from(approvals)
-      .where(status ? eq(approvals.status, status) : undefined)
+      .where(conditions.length > 0 ? and(...conditions) : undefined)
       .orderBy(desc(approvals.requestedAt))
       .limit(100);
     return { approvals: rows };

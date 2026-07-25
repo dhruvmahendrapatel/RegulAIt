@@ -17,8 +17,9 @@ export function encryptSecret(dataKeyHex: string, plaintext: string): string {
 
 export function decryptSecret(dataKeyHex: string, stored: string): string {
   const key = Buffer.from(dataKeyHex, "hex");
+  if (key.length !== 32) throw new Error("data key must be 32 bytes (64 hex chars)");
   const [ivHex, tagHex, encHex] = stored.split(".");
-  if (!ivHex || !tagHex || !encHex) throw new Error("malformed ciphertext");
+  if (!ivHex || !tagHex || encHex === undefined) throw new Error("malformed ciphertext");
   const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(ivHex, "hex"));
   decipher.setAuthTag(Buffer.from(tagHex, "hex"));
   return Buffer.concat([decipher.update(Buffer.from(encHex, "hex")), decipher.final()]).toString(

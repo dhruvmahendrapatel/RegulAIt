@@ -182,5 +182,5 @@ export const createGitConnectionSchema = z.object({
   name: z.string().min(1),
   provider: z.enum(["github", "gitlab", "bitbucket", "azure_devops", "mock"]),
   baseUrl: z.string().url().optional(),
-  token: z.string(),
+  token: z.string().min(1).max(512),
 });
