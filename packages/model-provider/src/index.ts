@@ -43,6 +43,10 @@ export interface ModelDispatchRequest {
   input: string;
   system?: string;
   maxTokens?: number;
+  /** streaming: called with each text delta as it arrives. The returned
+   * result is still the COMPLETE message — accounting and refusal handling
+   * are identical to the non-streaming path. */
+  onText?: (delta: string) => void;
 }
 
 export interface ModelDispatchResult {
@@ -64,6 +68,9 @@ export interface ModelProvider {
 }
 
 const DEFAULT_MAX_TOKENS = 1024;
+/** above this, the Anthropic adapter streams internally even without a
+ * caller onText — long generations must not ride a single request timeout */
+const STREAM_THRESHOLD_TOKENS = 16_000;
 
 // ---------------------------------------------------------------------------
 // Anthropic adapter — official SDK, injectable fetch (same testability
@@ -91,14 +98,24 @@ export class AnthropicProvider implements ModelProvider {
   }
 
   async dispatch(req: ModelDispatchRequest): Promise<ModelDispatchResult> {
+    const params = {
+      model: req.model,
+      max_tokens: req.maxTokens ?? DEFAULT_MAX_TOKENS,
+      ...(req.system ? { system: req.system } : {}),
+      messages: [{ role: "user" as const, content: req.input }],
+    };
+    // stream when the caller wants deltas, or when the output budget is large
+    // enough that a single non-streaming request risks a timeout
+    const useStream = req.onText !== undefined || params.max_tokens > STREAM_THRESHOLD_TOKENS;
     let msg: Anthropic.Message;
     try {
-      msg = await this.client.messages.create({
-        model: req.model,
-        max_tokens: req.maxTokens ?? DEFAULT_MAX_TOKENS,
-        ...(req.system ? { system: req.system } : {}),
-        messages: [{ role: "user", content: req.input }],
-      });
+      if (useStream) {
+        const stream = this.client.messages.stream(params);
+        if (req.onText) stream.on("text", (delta) => req.onText!(delta));
+        msg = await stream.finalMessage();
+      } else {
+        msg = await this.client.messages.create(params);
+      }
     } catch (err) {
       if (err instanceof Anthropic.APIError) {
         throw new ModelProviderError(
@@ -165,6 +182,12 @@ export class MockModelProvider implements ModelProvider {
       };
     }
     const outputText = `mock(${req.model}): ${req.input}`;
+    if (req.onText) {
+      // deterministic chunking so the streaming path is testable end-to-end
+      const mid = Math.ceil(outputText.length / 2);
+      req.onText(outputText.slice(0, mid));
+      req.onText(outputText.slice(mid));
+    }
     return {
       outputText,
       stopReason: "end_turn",

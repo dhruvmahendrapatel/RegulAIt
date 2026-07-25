@@ -128,3 +128,52 @@ describe("resolveModelProvider registry", () => {
     expect(a).toBe(b);
   });
 });
+
+describe("streaming dispatch", () => {
+  it("mock streams deterministic deltas that concatenate to the full output", async () => {
+    const mock = new MockModelProvider();
+    const deltas: string[] = [];
+    const result = await mock.dispatch({
+      model: "mock-1",
+      input: "stream me",
+      onText: (d) => deltas.push(d),
+    });
+    expect(deltas.length).toBeGreaterThanOrEqual(2);
+    expect(deltas.join("")).toBe(result.outputText);
+  });
+
+  it("anthropic adapter streams via SSE and returns the same complete result", async () => {
+    const sse = [
+      `event: message_start\ndata: {"type":"message_start","message":{"id":"msg_stream_1","type":"message","role":"assistant","model":"claude-opus-5","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":12,"output_tokens":1}}}\n\n`,
+      `event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n`,
+      `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello "}}\n\n`,
+      `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"world"}}\n\n`,
+      `event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n`,
+      `event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}\n\n`,
+      `event: message_stop\ndata: {"type":"message_stop"}\n\n`,
+    ].join("");
+    let sawStreamFlag = false;
+    const provider = new AnthropicProvider({
+      apiKey: "test-key",
+      fetchImpl: async (_url, init) => {
+        sawStreamFlag = JSON.parse(String(init?.body)).stream === true;
+        return new Response(sse, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      },
+    });
+    const deltas: string[] = [];
+    const result = await provider.dispatch({
+      model: "claude-opus-5",
+      input: "greet",
+      onText: (d) => deltas.push(d),
+    });
+    expect(sawStreamFlag).toBe(true);
+    expect(deltas).toEqual(["Hello ", "world"]);
+    expect(result.outputText).toBe("Hello world");
+    expect(result.stopReason).toBe("end_turn");
+    expect(result.usage).toEqual({ inputTokens: 12, outputTokens: 5 });
+    expect(result.providerMessageId).toBe("msg_stream_1");
+  });
+});

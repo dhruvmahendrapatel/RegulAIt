@@ -227,6 +227,21 @@ API endpoints first (GET /v1/users, /v1/servers, /v1/servers/:id/tools, and the 
 /v1/rules/* lists — all admin-gated). Deferred (per ADR-0012): SPA rewrite, SCIM/SSO status,
 SIEM export, dry-run of UNSAVED policy, bulk actions, CSV export.
 
+**Streaming dispatch, 2026-07-25.** Two layers, same gates. Provider layer: `dispatch()`
+gains an `onText` delta callback; the Anthropic adapter uses the SDK's streaming API whenever
+a caller wants deltas OR `maxTokens` exceeds 16k (long generations must not ride a single
+request timeout), with `finalMessage()` returning the SAME complete result — accounting and
+refusal handling identical to non-streaming (unit-tested against a faked Anthropic SSE body
+through the injectable fetch: real SDK parse path, no network). The mock chunks its echo
+deterministically so streaming is testable end-to-end. Gateway layer:
+`/v1/agents/:id/invoke` accepts `stream: true` with `dispatch: true` — governance and routing
+decide BEFORE any stream opens (denials remain plain JSON 403), then the response hijacks to
+SSE: `delta` events as text arrives, one `result` event carrying exactly the JSON path's
+payload, `error` events for post-headers failures. The audit row (flagged `stream: true`) and
+measured usage ledger are written identically to the JSON path — streaming changes delivery,
+never governance or accounting. Deferred: streaming for worker-node/auto dispatch (runs are
+backend-driven, no client watching), multi-turn conversations.
+
 **EPIC-06 started — PM-tool integration first slice, 2026-07-25.** New
 `packages/pm-provider` on the git-provider playbook (pillar 8, PM_TOOL_INTEGRATION_SPEC
 §2/§3/§6): neutral `PmProvider` interface (create/update/transition/comment/getWorkItem), the

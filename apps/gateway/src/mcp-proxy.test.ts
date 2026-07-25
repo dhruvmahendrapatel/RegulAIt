@@ -5419,3 +5419,92 @@ describe("admin portal (ADR-0012): static shell + API-parity gap endpoints", () 
     expect(bob.statusCode).toBe(403);
   });
 });
+
+describe("streaming dispatch (SSE): same gates, same ledger, delivered as deltas", () => {
+  let sabaId: string;
+  let sabaAuth: { authorization: string };
+  let streamAgentId: string;
+
+  const parseEvents = (body: string) =>
+    body.split("\n\n").filter(Boolean).map((chunk) => {
+      const event = /event: (.+)/.exec(chunk)?.[1];
+      const data = /data: (.+)/.exec(chunk)?.[1];
+      return { event, data: data ? JSON.parse(data) : null };
+    });
+
+  it("dispatch+stream delivers deltas then one result event carrying the JSON payload", async () => {
+    const saba = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email: "stream-saba@example.com", displayName: "Stream Saba" },
+    });
+    sabaId = saba.json().id;
+    sabaAuth = await authFor(sabaId);
+    const agentRes = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/agents",
+      payload: {
+        name: "stream-agent", provider: "mock", tier: 0, modes: ["execute"],
+        costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-stream",
+      },
+    });
+    streamAgentId = agentRes.json().id;
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/grants/agents",
+      payload: { userId: sabaId, agentId: streamAgentId },
+    });
+
+    const res = await app.inject({
+      method: "POST", headers: sabaAuth, url: `/v1/agents/${streamAgentId}/invoke`,
+      payload: { mode: "execute", input: "stream this back", dispatch: true, stream: true },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toContain("text/event-stream");
+    const events = parseEvents(res.body);
+    const deltas = events.filter((e) => e.event === "delta");
+    const results = events.filter((e) => e.event === "result");
+    expect(deltas.length).toBeGreaterThanOrEqual(2);
+    expect(results).toHaveLength(1);
+    const result = results[0]!.data;
+    expect(result.decision.effect).toBe("allow");
+    expect(result.dispatch.outputText).toBe("mock(mock-stream): stream this back");
+    // the deltas ARE the output — concatenation matches the final result
+    expect(deltas.map((d) => d.data.text).join("")).toBe(result.dispatch.outputText);
+
+    // the measured ledger and audit trail are identical to the JSON path
+    const ledger = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/usage-events?userId=${sabaId}`,
+    });
+    expect(ledger.json().events).toHaveLength(1);
+    expect(ledger.json().events[0].model).toBe("mock-stream");
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit?userId=${sabaId}` });
+    const row = audit.json().entries.find((e: { objectType: string }) => e.objectType === "agent");
+    expect(row.detail.stream).toBe(true);
+    expect(row.detail.dispatch.model).toBe("mock-stream");
+  });
+
+  it("a refusal streams no deltas and the result event carries the refusal honestly", async () => {
+    const res = await app.inject({
+      method: "POST", headers: sabaAuth, url: `/v1/agents/${streamAgentId}/invoke`,
+      payload: { mode: "execute", input: "please <<refuse>> this", dispatch: true, stream: true },
+    });
+    const events = parseEvents(res.body);
+    expect(events.filter((e) => e.event === "delta")).toHaveLength(0);
+    const result = events.find((e) => e.event === "result")!.data;
+    expect(result.dispatch.refusal).toBe(true);
+    expect(result.dispatch.outputText).toBe("");
+  });
+
+  it("a denial never opens a stream — plain JSON 403 before any SSE", async () => {
+    const nog = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email: "stream-nog@example.com", displayName: "Stream Nog" },
+    });
+    const res = await app.inject({
+      method: "POST", headers: await authFor(nog.json().id),
+      url: `/v1/agents/${streamAgentId}/invoke`,
+      payload: { mode: "execute", input: "hi", dispatch: true, stream: true },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.headers["content-type"]).toContain("application/json");
+    expect(res.json().decision.ruleId).toBe("default-deny");
+  });
+});
