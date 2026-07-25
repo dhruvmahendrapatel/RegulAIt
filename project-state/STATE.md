@@ -83,9 +83,23 @@ list price (unpriced = null, a measured token count never becomes an invented do
 volumes — upgrading pillar 6's savings claim from estimated to measured per dispatch.
 `GET /v1/usage-events` mirrors the cost-events read surface (admin fleet-wide, non-admins
 forced to self; totals include measured spend + measured savings). Every dispatch is audited
-(model, stopReason, refusal in the agent audit row). Not yet: streaming, multi-turn/system
-prompts from workflow context, orchestration-run worker dispatch through this path, per-user
-credentials, openai/google/xai adapters.
+(model, stopReason, refusal in the agent audit row). **Second slice: worker-node dispatch —
+orchestration runs execute for real.** The dispatch core is extracted as a shared
+`executeGovernedDispatch` and `POST /v1/runs/:id/nodes/:nodeId/dispatch` runs a started
+(`in_progress`) node's work through it: the node's CURRENT owner is executed exactly as
+assigned (no routing at execution time — owner selection already happened, entitlement-checked,
+at plan/re-plan/reassign), and §5.1 is re-checked at dispatch time under the INITIATING user —
+a grant revoked mid-run stops the worker cold (403, audited). The state machine stays
+authoritative: dispatch produces output (returned + recorded as a `node_dispatched` entry in
+the run's append-only history, truncated), it never moves the node; a worker refusal is
+surfaced honestly and the node does not advance. §5.2 gains MEASURED enforcement alongside the
+estimate-based node-start gate: `budget.measuredSpentUsd` accumulates real dispatch cost; the
+first cap crossing is allowed (measured cost is only knowable after the call) but escalates
+immediately into the one approvals queue (`__budget__:<node>`, audited require_approval), and
+every dispatch after it is blocked (409) until the named approver sanctions the overage.
+usage_events rows carry `{runId, nodeId}` attribution. Not yet: streaming, multi-turn/system
+prompts from workflow context, auto-dispatch of ready nodes (execution is caller-driven per
+node), per-user credentials, openai/google/xai adapters.
 
 **EPIC-06 started — PM-tool integration first slice, 2026-07-25.** New
 `packages/pm-provider` on the git-provider playbook (pillar 8, PM_TOOL_INTEGRATION_SPEC
@@ -292,7 +306,7 @@ with a real in-process upstream MCP server and real MCP client (26 tests total).
 | EPIC-02 | Governance layer MVP (now includes infra-ops/compliance-cascade/deploy-model, Shared Projects, cost dashboard — §1–§10) | **in progress** — stack chosen (ADR-0009), first slice = MCP-server governance vertical | GOVERNANCE_LAYER_SPEC.md, ADR-0007, ADR-0009 |
 | EPIC-03 | Workflow engine MVP (now includes optional Design/Architecture sign-off stage type) | **in progress** — first slice merged (PR #9) | WORKFLOW_ENGINE_SPEC.md, ADR-0007 |
 | EPIC-04 | Token/cost optimization MVP (escalated to P0) | **in progress** — routing kernel + cost_events ledger (PR #12), lazy tool-loading (PR #13), §9 workflow cost-sensitivity tag merged; real model dispatch built (model-provider + measured usage_events ledger — savings now measured, not just estimated) | TOKEN_OPTIMIZATION_SPEC.md, ADR-0007 |
-| EPIC-05 | Multi-agent orchestration MVP (PM/Team-Lead/Worker delegation) | **in progress** — slice 1 merged (PR #14: kernel + runs + escalations); slice 2 built (§5.2 per-run budget caps: estimate, re-plan, approval gates) | MULTI_AGENT_ORCHESTRATION_SPEC.md, ADR-0008 |
+| EPIC-05 | Multi-agent orchestration MVP (PM/Team-Lead/Worker delegation) | **in progress** — slice 1 merged (PR #14: kernel + runs + escalations); slice 2 merged (§5.2 budget caps); worker-node dispatch built (real execution via governed dispatch core, measured budget enforcement) | MULTI_AGENT_ORCHESTRATION_SPEC.md, ADR-0008 |
 | EPIC-06 | PM-tool integration MVP (Azure DevOps/Jira/etc.) | **in progress** — slice 1 merged (PR #15); slices 2–4 built (§5 approval mirroring; §4 decision records; ADR-0010 inbound sync with drift detection) | PM_TOOL_INTEGRATION_SPEC.md, ADR-0008, ADR-0010 |
 
 ## Components

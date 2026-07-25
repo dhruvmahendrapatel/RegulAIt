@@ -3596,3 +3596,224 @@ describe("governed model dispatch (measured usage, pillar 5 actuals)", () => {
     expect(spoofed.json().events.every((e: { userId: string }) => e.userId === danaId)).toBe(true);
   });
 });
+
+describe("worker-node dispatch (EPIC-05 × real dispatch)", () => {
+  const mkNode = (id: string, agentId: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    title: `task ${id}`,
+    ownerAgentId: agentId,
+    mode: "execute",
+    estimate: { in: 1, out: 1 },
+    ...extra,
+  });
+  const mkUser = async (email: string, name: string) => {
+    const r = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email, displayName: name },
+    });
+    return r.json().id as string;
+  };
+  const mkAgent = async (payload: Record<string, unknown>) => {
+    const r = await app.inject({ method: "POST", headers: AUTH, url: "/v1/agents", payload });
+    return r.json().id as string;
+  };
+
+  let hanaId: string;
+  let hanaAuth: { authorization: string };
+  let omarId: string;
+  let workerId: string;
+  let workerGrantId: string;
+  let runId: string;
+
+  it("a started node executes its assigned owner and the run accumulates measured spend", async () => {
+    hanaId = await mkUser("wnode-hana@example.com", "Wnode Hana");
+    hanaAuth = await authFor(hanaId);
+    omarId = await mkUser("wnode-omar@example.com", "Wnode Omar");
+    workerId = await mkAgent({
+      name: "wnode-worker", provider: "mock", tier: 0, modes: ["execute"],
+      costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-worker",
+    });
+    const grant = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/grants/agents",
+      payload: { userId: hanaId, agentId: workerId },
+    });
+    workerGrantId = grant.json().id;
+
+    const created = await app.inject({
+      method: "POST", headers: hanaAuth, url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "wnode-run",
+          escalationApproverUserId: omarId,
+          nodes: [mkNode("a", workerId), mkNode("b", workerId, { dependsOn: ["a"] })],
+        },
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    runId = created.json().id;
+
+    await app.inject({ method: "POST", headers: hanaAuth, url: `/v1/runs/${runId}/events`, payload: { kind: "start" } });
+    await app.inject({
+      method: "POST", headers: hanaAuth, url: `/v1/runs/${runId}/events`,
+      payload: { kind: "node_started", nodeId: "a" },
+    });
+
+    const res = await app.inject({
+      method: "POST", headers: hanaAuth, url: `/v1/runs/${runId}/nodes/a/dispatch`,
+      payload: { input: "please draft the api endpoints" },
+    });
+    expect(res.statusCode).toBe(200);
+    const { dispatch, measuredSpentUsd } = res.json();
+    expect(dispatch.servedAgentId).toBe(workerId);
+    expect(dispatch.model).toBe("mock-worker");
+    expect(dispatch.outputText).toBe("mock(mock-worker): please draft the api endpoints");
+    expect(dispatch.refusal).toBe(false);
+    expect(dispatch.costUsd).toBeGreaterThan(0);
+    expect(measuredSpentUsd).toBeCloseTo(dispatch.costUsd, 10);
+
+    // measured usage is attributed to the run+node in the actuals ledger
+    const ledger = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/usage-events?userId=${hanaId}`,
+    });
+    const row = ledger.json().events.find(
+      (e: { detail: { nodeId?: string } | null }) => e.detail?.nodeId === "a",
+    );
+    expect(row).toBeDefined();
+    expect(row.detail.runId).toBe(runId);
+    expect(row.agentId).toBe(workerId);
+
+    // the dispatch is part of the run's append-only history
+    const view = await app.inject({ method: "GET", headers: hanaAuth, url: `/v1/runs/${runId}` });
+    const evt = view.json().events.find(
+      (e: { event: { kind: string } }) => e.event.kind === "node_dispatched",
+    );
+    expect(evt).toBeDefined();
+    expect(evt.event.nodeId).toBe("a");
+    expect(evt.event.outputText).toContain("api endpoints");
+    // dispatch never moves the state machine — the node is still in progress
+    expect(view.json().run.state.nodeStatuses.a).toBe("in_progress");
+    expect(view.json().run.budget.measuredSpentUsd).toBeCloseTo(dispatch.costUsd, 10);
+
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit?userId=${hanaId}` });
+    expect(
+      audit.json().entries.some((e: { ruleId: string }) => e.ruleId === "run-node-dispatched"),
+    ).toBe(true);
+  });
+
+  it("a node that is not in progress cannot dispatch — the state machine stays authoritative", async () => {
+    const res = await app.inject({
+      method: "POST", headers: hanaAuth, url: `/v1/runs/${runId}/nodes/b/dispatch`,
+      payload: {},
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("node_not_in_progress");
+  });
+
+  it("a worker refusal is surfaced honestly and the node does not advance", async () => {
+    const res = await app.inject({
+      method: "POST", headers: hanaAuth, url: `/v1/runs/${runId}/nodes/a/dispatch`,
+      payload: { input: "please <<refuse>> this task" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().dispatch.refusal).toBe(true);
+    expect(res.json().dispatch.outputText).toBe("");
+    const view = await app.inject({ method: "GET", headers: hanaAuth, url: `/v1/runs/${runId}` });
+    expect(view.json().run.state.nodeStatuses.a).toBe("in_progress");
+  });
+
+  it("a grant revoked mid-run stops the worker cold at the next dispatch (§5.1)", async () => {
+    await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/grants/agents/${workerGrantId}` });
+    const res = await app.inject({
+      method: "POST", headers: hanaAuth, url: `/v1/runs/${runId}/nodes/a/dispatch`,
+      payload: { input: "try again" },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toBe("entitlement_exceeded");
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit?userId=${hanaId}` });
+    expect(
+      audit.json().entries.some(
+        (e: { effect: string; detail: { phase?: string } | null }) =>
+          e.effect === "deny" && e.detail?.phase === "dispatch",
+      ),
+    ).toBe(true);
+  });
+
+  it("measured spend crossing the cap escalates once and blocks further dispatches until approved (§5.2)", async () => {
+    const iggyId = await mkUser("wnode-iggy@example.com", "Wnode Iggy");
+    const iggyAuth = await authFor(iggyId);
+    // $1/token pricing so a real dispatch dwarfs the tiny plan estimate
+    const priceyId = await mkAgent({
+      name: "wnode-pricey", provider: "mock", tier: 0, modes: ["execute"],
+      costPerMTokIn: 1_000_000, costPerMTokOut: 1_000_000, model: "mock-pricey",
+    });
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/grants/agents",
+      payload: { userId: iggyId, agentId: priceyId },
+    });
+    await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/users/${iggyId}/agent-policy`,
+      payload: { runBudgetUsd: 10, runBudgetBreachAction: "approve" },
+    });
+
+    const created = await app.inject({
+      method: "POST", headers: iggyAuth, url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "wnode-budget",
+          escalationApproverUserId: omarId,
+          nodes: [mkNode("a", priceyId), mkNode("b", priceyId)],
+        },
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json().budgetApprovalPending).toBe(false);
+    const budgetRunId = created.json().id;
+
+    await app.inject({ method: "POST", headers: iggyAuth, url: `/v1/runs/${budgetRunId}/events`, payload: { kind: "start" } });
+    for (const nodeId of ["a", "b"]) {
+      const started = await app.inject({
+        method: "POST", headers: iggyAuth, url: `/v1/runs/${budgetRunId}/events`,
+        payload: { kind: "node_started", nodeId },
+      });
+      expect(started.statusCode).toBe(200);
+    }
+
+    // first crossing is allowed (cost is only known after the call) but
+    // escalates immediately
+    const first = await app.inject({
+      method: "POST", headers: iggyAuth, url: `/v1/runs/${budgetRunId}/nodes/a/dispatch`,
+      payload: { input: "x".repeat(100) },
+    });
+    expect(first.statusCode).toBe(200);
+    expect(first.json().measuredSpentUsd).toBeGreaterThan(10);
+    expect(first.json().budgetBreached).toBe(true);
+
+    // everything after the crossing is blocked
+    const second = await app.inject({
+      method: "POST", headers: iggyAuth, url: `/v1/runs/${budgetRunId}/nodes/b/dispatch`,
+      payload: { input: "small" },
+    });
+    expect(second.statusCode).toBe(409);
+    expect(second.json().error).toBe("budget_exceeded_measured");
+
+    // the named approver sanctions the overage → dispatch resumes
+    const view = await app.inject({ method: "GET", headers: iggyAuth, url: `/v1/runs/${budgetRunId}` });
+    const pending = view.json().pendingApprovals.find(
+      (a: { stageId: string }) => a.stageId === "__budget__:a",
+    );
+    expect(pending).toBeDefined();
+    const decided = await app.inject({
+      method: "POST",
+      headers: await authFor(omarId),
+      url: `/v1/approvals/${pending.id}/decide`,
+      payload: { decision: "approved" },
+    });
+    expect(decided.statusCode).toBe(200);
+    const third = await app.inject({
+      method: "POST", headers: iggyAuth, url: `/v1/runs/${budgetRunId}/nodes/b/dispatch`,
+      payload: { input: "small" },
+    });
+    expect(third.statusCode).toBe(200);
+    expect(third.json().budgetBreached).toBeUndefined();
+  });
+});
