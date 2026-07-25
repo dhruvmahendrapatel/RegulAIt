@@ -138,6 +138,9 @@ export const invokeAgentSchema = z.object({
    * keeps the decision-only behavior */
   dispatch: z.boolean().optional(),
   maxTokens: z.number().int().min(1).max(64_000).optional(),
+  /** with dispatch: deliver the response as SSE (delta events, then one
+   * result event); governance and routing still decide BEFORE the stream opens */
+  stream: z.boolean().optional(),
   /** pillar 5: attribute this call's cost to a project */
   projectId: z.string().uuid().optional(),
 });

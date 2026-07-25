@@ -227,6 +227,45 @@ API endpoints first (GET /v1/users, /v1/servers, /v1/servers/:id/tools, and the 
 /v1/rules/* lists — all admin-gated). Deferred (per ADR-0012): SPA rewrite, SCIM/SSO status,
 SIEM export, dry-run of UNSAVED policy, bulk actions, CSV export.
 
+**Streaming dispatch, 2026-07-25.** Two layers, same gates. Provider layer: `dispatch()`
+gains an `onText` delta callback; the Anthropic adapter uses the SDK's streaming API whenever
+a caller wants deltas OR `maxTokens` exceeds 16k (long generations must not ride a single
+request timeout), with `finalMessage()` returning the SAME complete result — accounting and
+refusal handling identical to non-streaming (unit-tested against a faked Anthropic SSE body
+through the injectable fetch: real SDK parse path, no network). The mock chunks its echo
+deterministically so streaming is testable end-to-end. Gateway layer:
+`/v1/agents/:id/invoke` accepts `stream: true` with `dispatch: true` — governance and routing
+decide BEFORE any stream opens (denials remain plain JSON 403), then the response hijacks to
+SSE: `delta` events as text arrives, one `result` event carrying exactly the JSON path's
+payload, `error` events for post-headers failures. The audit row (flagged `stream: true`) and
+measured usage ledger are written identically to the JSON path — streaming changes delivery,
+never governance or accounting. Deferred: streaming for worker-node/auto dispatch (runs are
+backend-driven, no client watching), multi-turn conversations.
+
+**OpenAI model adapter, 2026-07-25 — the provider-agnostic principle made real at the model
+layer.** `OpenAiProvider` in model-provider on the same playbook as the Anthropic adapter:
+official `openai` SDK (v6) with injectable fetch, chat.completions with
+`max_completion_tokens`, finish-reason mapping (stop/length/content_filter →
+end_turn/max_tokens/refusal), `message.refusal` honored — a refusal's content is never
+surfaced, matching the Anthropic discipline exactly — and streaming via `stream_options:
+{include_usage: true}` feeding the same `onText` callback with the same complete-result
+return. The registry now resolves anthropic + openai (apiKey required for both); google/xai
+stay explicitly rejected. ZERO gateway changes were needed: credentials (platform + BYO-key),
+routing, budgets, attribution, and streaming all already key off the provider string — the
+e2e proves a `provider: "openai"` agent rides the whole governed pipeline against a local
+fake chat.completions server (real adapter, correct Bearer key on the wire, measured usage
+ledgered). **Google (Gemini) adapter, same day**: raw injectable
+fetch — DELIBERATELY not the unified `@google/genai` SDK, which exposes no fetch injection
+(untestable network code loses to plain REST; the git/pm adapters set the precedent) —
+`generateContent`/`streamGenerateContent?alt=sse` with `x-goog-api-key` auth, incremental SSE
+parsing feeding the same `onText` contract, finishReason mapping (STOP/MAX_TOKENS/SAFETY
+family → end_turn/max_tokens/refusal) plus `promptFeedback.blockReason` → refusal (input
+blocks and output filters both suppress content — same discipline). Registry now resolves
+anthropic + openai + google; only xai stays rejected. Zero gateway changes again — e2e rides
+a `provider: "google"` agent through the full pipeline against a local fake Gemini server
+(correct header key + path on the wire, measured usage ledgered). Deferred: xai adapter,
+OpenAI Responses-API surface, per-provider tool-use.
+
 **EPIC-06 started — PM-tool integration first slice, 2026-07-25.** New
 `packages/pm-provider` on the git-provider playbook (pillar 8, PM_TOOL_INTEGRATION_SPEC
 §2/§3/§6): neutral `PmProvider` interface (create/update/transition/comment/getWorkItem), the

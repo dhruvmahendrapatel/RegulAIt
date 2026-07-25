@@ -82,6 +82,8 @@ export async function executeGovernedDispatch(
     maxTokens?: number | undefined;
     /** pillar 5 attribution: the project this call bills to */
     projectId?: string | null | undefined;
+    /** streaming delta callback, forwarded to the provider */
+    onText?: ((delta: string) => void) | undefined;
     detail?: Record<string, unknown>;
   },
 ): Promise<DispatchOutcome> {
@@ -152,6 +154,7 @@ export async function executeGovernedDispatch(
       input: args.input,
       ...(args.system ? { system: args.system } : {}),
       ...(args.maxTokens ? { maxTokens: args.maxTokens } : {}),
+      ...(args.onText ? { onText: args.onText } : {}),
     });
   } catch (err) {
     if (err instanceof ModelProviderError) {
@@ -229,6 +232,7 @@ async function performDispatch(
     registry: AgentRow[];
     routing: ReturnType<typeof routeModel>;
     body: z.infer<typeof invokeAgentSchema>;
+    onText?: ((delta: string) => void) | undefined;
   },
 ): Promise<DispatchOutcome> {
   const { userId, requestedAgentId, registry, routing, body } = args;
@@ -240,6 +244,7 @@ async function performDispatch(
     input: body.input ?? "",
     maxTokens: body.maxTokens,
     projectId: body.projectId ?? null,
+    onText: args.onText,
     detail: { mode: body.mode },
   });
 }
@@ -584,6 +589,62 @@ export function registerAgentConnectorRoutes(
       // MODEL DISPATCH: real execution, strictly after governance + routing —
       // the served agent is routing's choice, so dispatch can never widen
       // entitlement. Measured usage lands in usage_events (pillar 5 actuals).
+      // STREAMING (stream: true): the same governed pipeline, delivered as
+      // SSE — deltas as they arrive, then ONE result event carrying exactly
+      // the payload the JSON path returns. Denials never reach this branch
+      // (they respond as plain JSON before any stream opens), and the audit
+      // row + usage ledger are written identically after completion.
+      if (body.dispatch && body.stream) {
+        reply.hijack();
+        reply.raw.writeHead(200, {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+          connection: "keep-alive",
+        });
+        const send = (event: string, data: unknown) =>
+          reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+        const outcome = await performDispatch(db, opts.dataKey, {
+          userId,
+          requestedAgentId: agent.id,
+          registry,
+          routing,
+          body,
+          onText: (delta) => send("delta", { text: delta }),
+        });
+        await db.insert(auditLog).values({
+          userId,
+          objectType: "agent",
+          objectId: agent.id,
+          detail: {
+            mode: body.mode,
+            servedAgentId: routing.selectedAgentId,
+            stream: true,
+            dispatch: outcome.ok
+              ? {
+                  model: outcome.result.model,
+                  stopReason: outcome.result.stopReason,
+                  refusal: outcome.result.refusal,
+                }
+              : { error: outcome.error },
+          },
+          effect: decision.effect,
+          ruleId: decision.ruleId,
+          ruleChain: decision.ruleChain,
+          reason: decision.reason,
+        });
+        if (outcome.ok) {
+          send("result", { decision, routing, dispatch: outcome.result });
+        } else {
+          send("error", {
+            decision,
+            routing,
+            error: outcome.error,
+            ...(outcome.detail ? { detail: outcome.detail } : {}),
+          });
+        }
+        reply.raw.end();
+        return reply;
+      }
       if (body.dispatch) {
         dispatchOutcome = await performDispatch(db, opts.dataKey, {
           userId,

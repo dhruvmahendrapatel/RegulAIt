@@ -19,6 +19,7 @@
  */
 
 import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 
 export const MODEL_PROVIDER_KINDS = ["anthropic", "openai", "google", "xai", "mock"] as const;
 export type ModelProviderKind = (typeof MODEL_PROVIDER_KINDS)[number];
@@ -43,6 +44,10 @@ export interface ModelDispatchRequest {
   input: string;
   system?: string;
   maxTokens?: number;
+  /** streaming: called with each text delta as it arrives. The returned
+   * result is still the COMPLETE message — accounting and refusal handling
+   * are identical to the non-streaming path. */
+  onText?: (delta: string) => void;
 }
 
 export interface ModelDispatchResult {
@@ -64,6 +69,9 @@ export interface ModelProvider {
 }
 
 const DEFAULT_MAX_TOKENS = 1024;
+/** above this, the Anthropic adapter streams internally even without a
+ * caller onText — long generations must not ride a single request timeout */
+const STREAM_THRESHOLD_TOKENS = 16_000;
 
 // ---------------------------------------------------------------------------
 // Anthropic adapter — official SDK, injectable fetch (same testability
@@ -91,14 +99,24 @@ export class AnthropicProvider implements ModelProvider {
   }
 
   async dispatch(req: ModelDispatchRequest): Promise<ModelDispatchResult> {
+    const params = {
+      model: req.model,
+      max_tokens: req.maxTokens ?? DEFAULT_MAX_TOKENS,
+      ...(req.system ? { system: req.system } : {}),
+      messages: [{ role: "user" as const, content: req.input }],
+    };
+    // stream when the caller wants deltas, or when the output budget is large
+    // enough that a single non-streaming request risks a timeout
+    const useStream = req.onText !== undefined || params.max_tokens > STREAM_THRESHOLD_TOKENS;
     let msg: Anthropic.Message;
     try {
-      msg = await this.client.messages.create({
-        model: req.model,
-        max_tokens: req.maxTokens ?? DEFAULT_MAX_TOKENS,
-        ...(req.system ? { system: req.system } : {}),
-        messages: [{ role: "user", content: req.input }],
-      });
+      if (useStream) {
+        const stream = this.client.messages.stream(params);
+        if (req.onText) stream.on("text", (delta) => req.onText!(delta));
+        msg = await stream.finalMessage();
+      } else {
+        msg = await this.client.messages.create(params);
+      }
     } catch (err) {
       if (err instanceof Anthropic.APIError) {
         throw new ModelProviderError(
@@ -128,6 +146,246 @@ export class AnthropicProvider implements ModelProvider {
         outputTokens: msg.usage.output_tokens,
       },
       providerMessageId: msg.id ?? null,
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// OpenAI adapter — official SDK, injectable fetch, same discipline as the
+// Anthropic adapter: complete result either way, refusals never surfaced as
+// answers, usage is the provider's own accounting.
+// ---------------------------------------------------------------------------
+
+export interface OpenAiAdapterOptions {
+  apiKey: string;
+  /** override for BYOC/air-gapped bridges; default is OpenAI's API */
+  baseUrl?: string | null;
+  fetchImpl?: typeof fetch;
+}
+
+function mapOpenAiStop(finishReason: string | null | undefined): ModelDispatchResult["stopReason"] {
+  if (finishReason === "stop") return "end_turn";
+  if (finishReason === "length") return "max_tokens";
+  if (finishReason === "content_filter") return "refusal";
+  return "other";
+}
+
+export class OpenAiProvider implements ModelProvider {
+  readonly kind = "openai" as const;
+  private readonly client: OpenAI;
+
+  constructor(opts: OpenAiAdapterOptions) {
+    this.client = new OpenAI({
+      apiKey: opts.apiKey,
+      ...(opts.baseUrl ? { baseURL: opts.baseUrl } : {}),
+      ...(opts.fetchImpl ? { fetch: opts.fetchImpl } : {}),
+      maxRetries: 2,
+    });
+  }
+
+  async dispatch(req: ModelDispatchRequest): Promise<ModelDispatchResult> {
+    const messages = [
+      ...(req.system ? [{ role: "system" as const, content: req.system }] : []),
+      { role: "user" as const, content: req.input },
+    ];
+    const maxTokens = req.maxTokens ?? DEFAULT_MAX_TOKENS;
+    try {
+      if (req.onText !== undefined || maxTokens > STREAM_THRESHOLD_TOKENS) {
+        const stream = await this.client.chat.completions.create({
+          model: req.model,
+          max_completion_tokens: maxTokens,
+          messages,
+          stream: true,
+          stream_options: { include_usage: true },
+        });
+        let text = "";
+        let refusalText = "";
+        let finishReason: string | null = null;
+        let id: string | null = null;
+        let usage = { inputTokens: 0, outputTokens: 0 };
+        for await (const chunk of stream) {
+          id = id ?? chunk.id ?? null;
+          const choice = chunk.choices?.[0];
+          if (choice?.delta?.content) {
+            text += choice.delta.content;
+            req.onText?.(choice.delta.content);
+          }
+          if (choice?.delta?.refusal) refusalText += choice.delta.refusal;
+          if (choice?.finish_reason) finishReason = choice.finish_reason;
+          if (chunk.usage) {
+            usage = {
+              inputTokens: chunk.usage.prompt_tokens ?? 0,
+              outputTokens: chunk.usage.completion_tokens ?? 0,
+            };
+          }
+        }
+        const refusal = mapOpenAiStop(finishReason) === "refusal" || refusalText.length > 0;
+        return {
+          outputText: refusal ? "" : text,
+          stopReason: refusal ? "refusal" : mapOpenAiStop(finishReason),
+          refusal,
+          usage,
+          providerMessageId: id,
+        };
+      }
+
+      const res = await this.client.chat.completions.create({
+        model: req.model,
+        max_completion_tokens: maxTokens,
+        messages,
+      });
+      const choice = res.choices[0];
+      const refusal =
+        mapOpenAiStop(choice?.finish_reason) === "refusal" || Boolean(choice?.message?.refusal);
+      return {
+        // a refusal's content must never be surfaced as an answer
+        outputText: refusal ? "" : (choice?.message?.content ?? ""),
+        stopReason: refusal ? "refusal" : mapOpenAiStop(choice?.finish_reason),
+        refusal,
+        usage: {
+          inputTokens: res.usage?.prompt_tokens ?? 0,
+          outputTokens: res.usage?.completion_tokens ?? 0,
+        },
+        providerMessageId: res.id ?? null,
+      };
+    } catch (err) {
+      if (err instanceof OpenAI.APIError) {
+        throw new ModelProviderError(
+          `openai dispatch failed: ${err.message}`,
+          typeof err.status === "number" ? err.status : undefined,
+        );
+      }
+      throw err;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Google (Gemini) adapter — RAW fetch, deliberately: the unified
+// @google/genai SDK does not expose injectable fetch, and untestable network
+// code loses to plain REST (the git/pm adapters set this precedent). Same
+// neutral contract and refusal discipline as the SDK-based adapters.
+// ---------------------------------------------------------------------------
+
+export interface GoogleAdapterOptions {
+  apiKey: string;
+  /** override for BYOC/air-gapped bridges; default is the Gemini API */
+  baseUrl?: string | null;
+  fetchImpl?: typeof fetch;
+}
+
+const GOOGLE_DEFAULT_BASE = "https://generativelanguage.googleapis.com/v1beta";
+const GOOGLE_REFUSAL_REASONS = new Set(["SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII"]);
+
+interface GeminiChunk {
+  responseId?: string;
+  candidates?: Array<{
+    content?: { parts?: Array<{ text?: string }> };
+    finishReason?: string;
+  }>;
+  promptFeedback?: { blockReason?: string };
+  usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
+}
+
+function mapGoogleStop(finishReason: string | null | undefined): ModelDispatchResult["stopReason"] {
+  if (finishReason === "STOP") return "end_turn";
+  if (finishReason === "MAX_TOKENS") return "max_tokens";
+  if (finishReason && GOOGLE_REFUSAL_REASONS.has(finishReason)) return "refusal";
+  return "other";
+}
+
+export class GoogleProvider implements ModelProvider {
+  readonly kind = "google" as const;
+  private readonly apiKey: string;
+  private readonly base: string;
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(opts: GoogleAdapterOptions) {
+    this.apiKey = opts.apiKey;
+    this.base = (opts.baseUrl ?? GOOGLE_DEFAULT_BASE).replace(/\/$/, "");
+    this.fetchImpl = opts.fetchImpl ?? fetch;
+  }
+
+  async dispatch(req: ModelDispatchRequest): Promise<ModelDispatchResult> {
+    const maxTokens = req.maxTokens ?? DEFAULT_MAX_TOKENS;
+    const useStream = req.onText !== undefined || maxTokens > STREAM_THRESHOLD_TOKENS;
+    const method = useStream ? "streamGenerateContent?alt=sse" : "generateContent";
+    const res = await this.fetchImpl(
+      `${this.base}/models/${encodeURIComponent(req.model)}:${method}`,
+      {
+        method: "POST",
+        headers: { "x-goog-api-key": this.apiKey, "content-type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: req.input }] }],
+          ...(req.system ? { systemInstruction: { parts: [{ text: req.system }] } } : {}),
+          generationConfig: { maxOutputTokens: maxTokens },
+        }),
+      },
+    );
+    if (!res.ok) {
+      let message = res.statusText;
+      try {
+        const j = (await res.json()) as { error?: { message?: string } };
+        message = j.error?.message ?? message;
+      } catch {
+        /* non-JSON error body */
+      }
+      throw new ModelProviderError(`google dispatch failed: ${message}`, res.status);
+    }
+
+    let text = "";
+    let finishReason: string | null = null;
+    let blockReason: string | null = null;
+    let id: string | null = null;
+    let usage = { inputTokens: 0, outputTokens: 0 };
+    const absorb = (chunk: GeminiChunk) => {
+      id = id ?? chunk.responseId ?? null;
+      blockReason = blockReason ?? chunk.promptFeedback?.blockReason ?? null;
+      const candidate = chunk.candidates?.[0];
+      const delta = candidate?.content?.parts?.map((p) => p.text ?? "").join("") ?? "";
+      if (delta) {
+        text += delta;
+        req.onText?.(delta);
+      }
+      if (candidate?.finishReason) finishReason = candidate.finishReason;
+      if (chunk.usageMetadata) {
+        usage = {
+          inputTokens: chunk.usageMetadata.promptTokenCount ?? 0,
+          outputTokens: chunk.usageMetadata.candidatesTokenCount ?? 0,
+        };
+      }
+    };
+
+    if (useStream) {
+      // incremental SSE parse so onText fires as chunks arrive
+      const reader = res.body?.getReader();
+      if (!reader) throw new ModelProviderError("google dispatch failed: empty stream body");
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        for (;;) {
+          const nl = buffer.indexOf("\n");
+          if (nl === -1) break;
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (line.startsWith("data: ")) absorb(JSON.parse(line.slice(6)) as GeminiChunk);
+        }
+      }
+    } else {
+      absorb((await res.json()) as GeminiChunk);
+    }
+
+    const refusal = blockReason !== null || mapGoogleStop(finishReason) === "refusal";
+    return {
+      // a refusal's content must never be surfaced as an answer
+      outputText: refusal ? "" : text,
+      stopReason: refusal ? "refusal" : mapGoogleStop(finishReason),
+      refusal,
+      usage,
+      providerMessageId: id,
     };
   }
 }
@@ -165,6 +423,12 @@ export class MockModelProvider implements ModelProvider {
       };
     }
     const outputText = `mock(${req.model}): ${req.input}`;
+    if (req.onText) {
+      // deterministic chunking so the streaming path is testable end-to-end
+      const mid = Math.ceil(outputText.length / 2);
+      req.onText(outputText.slice(0, mid));
+      req.onText(outputText.slice(mid));
+    }
     return {
       outputText,
       stopReason: "end_turn",
@@ -203,10 +467,26 @@ export function resolveModelProvider(
         baseUrl: config.baseUrl ?? null,
         ...(fetchImpl ? { fetchImpl } : {}),
       });
+    case "openai":
+      if (!config.apiKey) {
+        throw new ModelProviderError("openai requires an apiKey");
+      }
+      return new OpenAiProvider({
+        apiKey: config.apiKey,
+        baseUrl: config.baseUrl ?? null,
+        ...(fetchImpl ? { fetchImpl } : {}),
+      });
+    case "google":
+      if (!config.apiKey) {
+        throw new ModelProviderError("google requires an apiKey");
+      }
+      return new GoogleProvider({
+        apiKey: config.apiKey,
+        baseUrl: config.baseUrl ?? null,
+        ...(fetchImpl ? { fetchImpl } : {}),
+      });
     case "mock":
       return sharedMock;
-    case "openai":
-    case "google":
     case "xai":
       throw new ModelProviderError(
         `provider '${config.provider}' is interface-ready but its adapter is not implemented yet`,

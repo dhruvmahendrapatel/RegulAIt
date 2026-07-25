@@ -5419,3 +5419,229 @@ describe("admin portal (ADR-0012): static shell + API-parity gap endpoints", () 
     expect(bob.statusCode).toBe(403);
   });
 });
+
+describe("streaming dispatch (SSE): same gates, same ledger, delivered as deltas", () => {
+  let sabaId: string;
+  let sabaAuth: { authorization: string };
+  let streamAgentId: string;
+
+  const parseEvents = (body: string) =>
+    body.split("\n\n").filter(Boolean).map((chunk) => {
+      const event = /event: (.+)/.exec(chunk)?.[1];
+      const data = /data: (.+)/.exec(chunk)?.[1];
+      return { event, data: data ? JSON.parse(data) : null };
+    });
+
+  it("dispatch+stream delivers deltas then one result event carrying the JSON payload", async () => {
+    const saba = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email: "stream-saba@example.com", displayName: "Stream Saba" },
+    });
+    sabaId = saba.json().id;
+    sabaAuth = await authFor(sabaId);
+    const agentRes = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/agents",
+      payload: {
+        name: "stream-agent", provider: "mock", tier: 0, modes: ["execute"],
+        costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-stream",
+      },
+    });
+    streamAgentId = agentRes.json().id;
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/grants/agents",
+      payload: { userId: sabaId, agentId: streamAgentId },
+    });
+
+    const res = await app.inject({
+      method: "POST", headers: sabaAuth, url: `/v1/agents/${streamAgentId}/invoke`,
+      payload: { mode: "execute", input: "stream this back", dispatch: true, stream: true },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toContain("text/event-stream");
+    const events = parseEvents(res.body);
+    const deltas = events.filter((e) => e.event === "delta");
+    const results = events.filter((e) => e.event === "result");
+    expect(deltas.length).toBeGreaterThanOrEqual(2);
+    expect(results).toHaveLength(1);
+    const result = results[0]!.data;
+    expect(result.decision.effect).toBe("allow");
+    expect(result.dispatch.outputText).toBe("mock(mock-stream): stream this back");
+    // the deltas ARE the output — concatenation matches the final result
+    expect(deltas.map((d) => d.data.text).join("")).toBe(result.dispatch.outputText);
+
+    // the measured ledger and audit trail are identical to the JSON path
+    const ledger = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/usage-events?userId=${sabaId}`,
+    });
+    expect(ledger.json().events).toHaveLength(1);
+    expect(ledger.json().events[0].model).toBe("mock-stream");
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit?userId=${sabaId}` });
+    const row = audit.json().entries.find((e: { objectType: string }) => e.objectType === "agent");
+    expect(row.detail.stream).toBe(true);
+    expect(row.detail.dispatch.model).toBe("mock-stream");
+  });
+
+  it("a refusal streams no deltas and the result event carries the refusal honestly", async () => {
+    const res = await app.inject({
+      method: "POST", headers: sabaAuth, url: `/v1/agents/${streamAgentId}/invoke`,
+      payload: { mode: "execute", input: "please <<refuse>> this", dispatch: true, stream: true },
+    });
+    const events = parseEvents(res.body);
+    expect(events.filter((e) => e.event === "delta")).toHaveLength(0);
+    const result = events.find((e) => e.event === "result")!.data;
+    expect(result.dispatch.refusal).toBe(true);
+    expect(result.dispatch.outputText).toBe("");
+  });
+
+  it("a denial never opens a stream — plain JSON 403 before any SSE", async () => {
+    const nog = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email: "stream-nog@example.com", displayName: "Stream Nog" },
+    });
+    const res = await app.inject({
+      method: "POST", headers: await authFor(nog.json().id),
+      url: `/v1/agents/${streamAgentId}/invoke`,
+      payload: { mode: "execute", input: "hi", dispatch: true, stream: true },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.headers["content-type"]).toContain("application/json");
+    expect(res.json().decision.ruleId).toBe("default-deny");
+  });
+});
+
+describe("openai model adapter: the full governed pipeline over a second provider", () => {
+  it("dispatch rides an openai-provider agent end-to-end with measured usage", async () => {
+    // local fake chat.completions endpoint — the real adapter, no network
+    const hits: Array<{ auth: string | null }> = [];
+    const srv = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        hits.push({ auth: (req.headers.authorization as string) ?? null });
+        const parsed = JSON.parse(body || "{}");
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          id: "chatcmpl-e2e",
+          object: "chat.completion",
+          created: 1,
+          model: parsed.model,
+          choices: [{ index: 0, message: { role: "assistant", content: "openai says hi", refusal: null }, finish_reason: "stop", logprobs: null }],
+          usage: { prompt_tokens: 8, completion_tokens: 4, total_tokens: 12 },
+        }));
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    const port = (srv.address() as { port: number }).port;
+
+    try {
+      const oda = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email: "oai-oda@example.com", displayName: "OAI Oda" },
+      });
+      const odaAuth = await authFor(oda.json().id);
+      const agentRes = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/agents",
+        payload: {
+          name: "oai-agent", provider: "openai", tier: 1, modes: ["execute"],
+          costPerMTokIn: 2, costPerMTokOut: 8, model: "gpt-5",
+        },
+      });
+      await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/grants/agents",
+        payload: { userId: oda.json().id, agentId: agentRes.json().id },
+      });
+      await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/model-credentials",
+        payload: { provider: "openai", apiKey: "sk-oai-platform", baseUrl: `http://127.0.0.1:${port}/v1` },
+      });
+
+      const res = await app.inject({
+        method: "POST", headers: odaAuth, url: `/v1/agents/${agentRes.json().id}/invoke`,
+        payload: { mode: "execute", input: "hello openai", dispatch: true },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().dispatch.outputText).toBe("openai says hi");
+      expect(res.json().dispatch.stopReason).toBe("end_turn");
+      expect(res.json().dispatch.usage).toEqual({ inputTokens: 8, outputTokens: 4 });
+      expect(res.json().dispatch.credentialSource).toBe("platform");
+      expect(hits).toHaveLength(1);
+      expect(hits[0]!.auth).toBe("Bearer sk-oai-platform");
+
+      const ledger = await app.inject({
+        method: "GET", headers: AUTH, url: `/v1/usage-events?userId=${oda.json().id}`,
+      });
+      expect(ledger.json().events[0]).toMatchObject({
+        provider: "openai", model: "gpt-5", inputTokens: 8, outputTokens: 4,
+      });
+    } finally {
+      srv.closeAllConnections();
+      await new Promise<void>((r) => srv.close(() => r()));
+    }
+  });
+});
+
+describe("google model adapter: the full governed pipeline over a third provider", () => {
+  it("dispatch rides a google-provider agent end-to-end with measured usage", async () => {
+    const hits: Array<{ key: string | null; path: string }> = [];
+    const srv = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        hits.push({ key: (req.headers["x-goog-api-key"] as string) ?? null, path: req.url ?? "" });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          responseId: "resp-e2e",
+          candidates: [{ content: { role: "model", parts: [{ text: "gemini says hi" }] }, finishReason: "STOP" }],
+          usageMetadata: { promptTokenCount: 6, candidatesTokenCount: 3, totalTokenCount: 9 },
+        }));
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    const port = (srv.address() as { port: number }).port;
+
+    try {
+      const gia = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/users",
+        payload: { email: "goog-gia@example.com", displayName: "Goog Gia" },
+      });
+      const giaAuth = await authFor(gia.json().id);
+      const agentRes = await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/agents",
+        payload: {
+          name: "goog-agent", provider: "google", tier: 1, modes: ["execute"],
+          costPerMTokIn: 1.25, costPerMTokOut: 10, model: "gemini-2.5-pro",
+        },
+      });
+      await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/grants/agents",
+        payload: { userId: gia.json().id, agentId: agentRes.json().id },
+      });
+      await app.inject({
+        method: "POST", headers: AUTH, url: "/v1/model-credentials",
+        payload: { provider: "google", apiKey: "goog-platform-key", baseUrl: `http://127.0.0.1:${port}/v1beta` },
+      });
+
+      const res = await app.inject({
+        method: "POST", headers: giaAuth, url: `/v1/agents/${agentRes.json().id}/invoke`,
+        payload: { mode: "execute", input: "hello gemini", dispatch: true },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().dispatch.outputText).toBe("gemini says hi");
+      expect(res.json().dispatch.usage).toEqual({ inputTokens: 6, outputTokens: 3 });
+      expect(res.json().dispatch.credentialSource).toBe("platform");
+      expect(hits).toHaveLength(1);
+      expect(hits[0]!.key).toBe("goog-platform-key");
+      expect(hits[0]!.path).toContain("/models/gemini-2.5-pro:generateContent");
+
+      const ledger = await app.inject({
+        method: "GET", headers: AUTH, url: `/v1/usage-events?userId=${gia.json().id}`,
+      });
+      expect(ledger.json().events[0]).toMatchObject({
+        provider: "google", model: "gemini-2.5-pro", inputTokens: 6, outputTokens: 3,
+      });
+    } finally {
+      srv.closeAllConnections();
+      await new Promise<void>((r) => srv.close(() => r()));
+    }
+  });
+});
