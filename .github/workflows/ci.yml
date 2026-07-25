@@ -5,9 +5,15 @@ on:
   push:
     branches: [main]
 
+# Rapid follow-up pushes cancel the older in-flight run for the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
 
     services:
       postgres:
@@ -41,4 +47,20 @@ jobs:
 
       - run: pnpm -r build
 
+      # The two single-file UIs are template-literal HTML strings — tsc never
+      # parses their inline JS, so a typo ships a blank page with a green
+      # build. This extracts the rendered <script> blocks and node --checks them.
+      - run: node scripts/check-ui-syntax.mjs
+
       - run: pnpm -r test
+        env:
+          # 64-hex test-fixture key, same shape secrets.ts asserts. Not a secret.
+          REGULAIT_DATA_KEY: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+  docker-build:
+    # The quickstart path must never rot: prove the compose image still builds.
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t regulait-gateway:ci .
