@@ -111,6 +111,9 @@ importers:
 
   packages/pm-provider:
     dependencies:
+      '@regulait/shared':
+        specifier: workspace:*
+        version: link:../shared
       zod:
         specifier: ^3.25.67
         version: 3.25.76

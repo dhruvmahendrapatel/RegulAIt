@@ -292,14 +292,32 @@ export const runEventSchema = z.object({
 
 // EPIC-06 PM-tool integration. The mapping override is validated by
 // @regulait/pm-provider's zod schema in the gateway.
-export const createPmConnectionSchema = z.object({
-  name: z.string().min(1),
-  provider: z.enum(["azure_devops", "jira", "linear", "asana", "monday", "generic_webhook", "mock"]),
-  baseUrl: z.string().url().optional(),
-  project: z.string().min(1),
-  token: z.string().min(1).max(512),
-  mapping: z.unknown().optional(),
-});
+export const createPmConnectionSchema = z
+  .object({
+    name: z.string().min(1),
+    provider: z.enum(["azure_devops", "jira", "linear", "asana", "monday", "generic_webhook", "mock"]),
+    baseUrl: z.string().url().optional(),
+    project: z.string().min(1),
+    token: z.string().min(1).max(512),
+    mapping: z.unknown().optional(),
+    /** jira only: REST API version — 2 (legacy plain-text, the default) or
+     * 3 (ADF rich-text descriptions/comments). Coerced so the admin portal's
+     * select can post "3". */
+    apiVersion: z.coerce.number().int().optional(),
+  })
+  .superRefine((body, ctx) => {
+    if (body.apiVersion === undefined) return;
+    if (body.apiVersion !== 2 && body.apiVersion !== 3) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "apiVersion must be 2 or 3", path: ["apiVersion"] });
+    }
+    if (body.provider !== "jira") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "apiVersion only applies to jira connections",
+        path: ["apiVersion"],
+      });
+    }
+  });
 
 export const pmSyncSchema = z.object({ connectionName: z.string().min(1) });
 

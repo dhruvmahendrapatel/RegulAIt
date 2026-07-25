@@ -525,19 +525,22 @@ const TABS = [
     + table(c.connections.map((x) => ({
         name: x.name, provider: x.provider, project: x.project,
         baseUrl: x.baseUrl ?? "provider default",
+        api: x.apiVersion ? "v" + x.apiVersion : "provider default",
         webhookUrl: "/v1/pm/webhooks/" + x.name,
         created: x.createdAt,
       })))
-    + "<p class='dim' style='font-size:12px'>Tokens are AES-256-GCM encrypted at rest and never returned by any endpoint. Inbound events POST to the webhook URL with the connection's secret in <span class='mono'>x-regulait-webhook-secret</span> — the secret is shown exactly once at creation and only its hash is stored.</p></div>"
+    + "<p class='dim' style='font-size:12px'>Tokens are AES-256-GCM encrypted at rest and never returned by any endpoint. The webhook secret is shown exactly once at creation (stored hashed plus AES-256-GCM encrypted, never plaintext) and verifies inbound traffic with each provider's NATIVE mechanism: HMAC signatures for linear (<span class='mono'>linear-signature</span>), asana (<span class='mono'>x-hook-signature</span>, after the x-hook-secret handshake) and generic_webhook (<span class='mono'>x-regulait-signature</span>); a <span class='mono'>?token=</span> URL parameter for jira and monday (which cannot sign); basic-auth password for azure_devops; mock and generic_webhook also accept the legacy <span class='mono'>x-regulait-webhook-secret</span> header.</p></div>"
     + "<h2>Add a connection</h2><div class='card'>"
     + form("f-pmconn", [
         {name:"name",ph:"e.g. demo-pm"},
         {name:"provider",options:["mock","jira","azure_devops","linear","asana","monday","generic_webhook"]},
         {name:"project",ph:"e.g. REGULAIT-DEMO"},
         {name:"baseUrl",label:"base url",req:false,ph:"required for jira / azure_devops / generic_webhook"},
+        {name:"apiVersion",label:"api version (jira)",req:false,ph:"v2 (default)",
+         options:[{v:"3",l:"v3 + ADF rich text"},{v:"2",l:"v2 (legacy plain text)"}]},
         {name:"token",type:"password",ph:"never shown again",grow:true},
       ], "Add connection")
-    + "<p class='dim' style='font-size:12px'>Every provider kind is implemented — generic_webhook speaks RegulAIt's signed normalized event contract (HMAC-SHA256 of the body in <span class='mono'>x-regulait-signature</span>, under the connection token) to any HTTP receiver at its base URL. jira, azure_devops and generic_webhook need their base URL (e.g. https://&lt;site&gt;.atlassian.net, https://dev.azure.com/&lt;org&gt;, your receiver endpoint). The demo runs entirely on the mock provider — no external service is touched.</p></div>"
+    + "<p class='dim' style='font-size:12px'>Every provider kind is implemented — generic_webhook speaks RegulAIt's signed normalized event contract (HMAC-SHA256 of the body in <span class='mono'>x-regulait-signature</span>, under the connection token) to any HTTP receiver at its base URL. jira, azure_devops and generic_webhook need their base URL (e.g. https://&lt;site&gt;.atlassian.net, https://dev.azure.com/&lt;org&gt;, your receiver endpoint). The api version select applies to jira only: v2 (default) sends plain-text descriptions/comments; v3 sends them as ADF rich-text documents (paragraphs, headings, lists, code blocks) — Atlassian's GA direction. The demo runs entirely on the mock provider — no external service is touched.</p></div>"
     + "<div id='pmreveal'></div>";
   wire("f-pmconn", async (d) => {
     const created = await post("/v1/pm/connections", d);

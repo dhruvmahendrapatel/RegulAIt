@@ -24,6 +24,7 @@
 
 import { createHmac } from "node:crypto";
 import { z } from "zod";
+import { adfToText, textToAdf } from "./adf.js";
 
 export const PM_PROVIDER_KINDS = [
   "azure_devops",
@@ -420,11 +421,17 @@ export class AzureDevOpsProvider implements PmProvider {
 }
 
 // ---------------------------------------------------------------------------
-// Jira adapter — REST v2 (plain-string fields; v3 would force ADF rich text),
-// Basic auth with an "email:api-token" credential (Jira Cloud convention),
-// injectable fetch. Jira states are NOT settable fields: transitionState
-// looks up the issue's available transitions and executes the matching one,
-// failing explicit when the workflow offers no path to the target state.
+// Jira adapter — REST v2 by default (plain-string fields), optionally REST v3
+// where Atlassian's GA direction lives: v3 forces descriptions and comment
+// bodies to be ADF rich-text documents, so v3 mode converts the native
+// `description` field and comment text through adf.ts's textToAdf on the way
+// out and adfToText on the way back (a mapping that targets a NON-native
+// rich-text custom field is not converted — v3 admins should map description
+// to Jira's own `description` field). Basic auth with an "email:api-token"
+// credential (Jira Cloud convention), injectable fetch. Jira states are NOT
+// settable fields in either version: transitionState looks up the issue's
+// available transitions and executes the matching one, failing explicit when
+// the workflow offers no path to the target state.
 // ---------------------------------------------------------------------------
 
 export interface JiraAdapterOptions {
@@ -432,6 +439,8 @@ export interface JiraAdapterOptions {
   token: string;
   /** e.g. https://<site>.atlassian.net */
   baseUrl: string;
+  /** REST API version: 2 (default, plain-text bodies) or 3 (ADF bodies) */
+  apiVersion?: 2 | 3;
   fetchImpl?: FetchLike;
 }
 
@@ -439,12 +448,21 @@ export class JiraProvider implements PmProvider {
   readonly kind = "jira" as const;
   private readonly base: string;
   private readonly auth: string;
+  private readonly api: 2 | 3;
   private readonly fetchImpl: FetchLike;
 
   constructor(opts: JiraAdapterOptions) {
     this.base = opts.baseUrl.replace(/\/$/, "");
     this.auth = `Basic ${Buffer.from(opts.token).toString("base64")}`;
+    this.api = opts.apiVersion ?? 2;
     this.fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
+  }
+
+  /** v3 sends the native description field as an ADF document; v2 payloads
+   * pass through untouched. */
+  private outboundFields(fields: Record<string, unknown>): Record<string, unknown> {
+    if (this.api !== 3 || typeof fields.description !== "string") return fields;
+    return { ...fields, description: textToAdf(fields.description) };
   }
 
   private async request(method: string, path: string, body?: unknown): Promise<unknown> {
@@ -469,18 +487,20 @@ export class JiraProvider implements PmProvider {
     type: string,
     fields: Record<string, unknown>,
   ): Promise<WorkItemRef> {
-    const created = (await this.request("POST", "/rest/api/2/issue", {
-      fields: { project: { key: project }, issuetype: { name: type }, ...fields },
+    const created = (await this.request("POST", `/rest/api/${this.api}/issue`, {
+      fields: { project: { key: project }, issuetype: { name: type }, ...this.outboundFields(fields) },
     })) as { id: string; key: string };
     return { id: String(created.id), url: `${this.base}/browse/${created.key}` };
   }
 
   async updateFields(_project: string, id: string, fields: Record<string, unknown>): Promise<void> {
-    await this.request("PUT", `/rest/api/2/issue/${id}`, { fields });
+    await this.request("PUT", `/rest/api/${this.api}/issue/${id}`, {
+      fields: this.outboundFields(fields),
+    });
   }
 
   async transitionState(_project: string, id: string, state: string): Promise<void> {
-    const available = (await this.request("GET", `/rest/api/2/issue/${id}/transitions`)) as {
+    const available = (await this.request("GET", `/rest/api/${this.api}/issue/${id}/transitions`)) as {
       transitions?: Array<{ id: string; name: string; to?: { name?: string } }>;
     };
     const match = available.transitions?.find((t) => t.to?.name === state || t.name === state);
@@ -490,32 +510,43 @@ export class JiraProvider implements PmProvider {
         `jira workflow offers no transition to '${state}' (available: ${names})`,
       );
     }
-    await this.request("POST", `/rest/api/2/issue/${id}/transitions`, {
+    await this.request("POST", `/rest/api/${this.api}/issue/${id}/transitions`, {
       transition: { id: match.id },
     });
   }
 
   async addComment(_project: string, id: string, text: string): Promise<void> {
-    await this.request("POST", `/rest/api/2/issue/${id}/comment`, { body: text });
+    await this.request("POST", `/rest/api/${this.api}/issue/${id}/comment`, {
+      body: this.api === 3 ? textToAdf(text) : text,
+    });
   }
 
   async getWorkItem(_project: string, id: string): Promise<WorkItem> {
-    const issue = (await this.request("GET", `/rest/api/2/issue/${id}`)) as {
+    const issue = (await this.request("GET", `/rest/api/${this.api}/issue/${id}`)) as {
       id: string;
       key: string;
       fields: Record<string, unknown> & {
         issuetype?: { name?: string };
         status?: { name?: string };
-        comment?: { comments?: Array<{ body?: string }> };
+        comment?: { comments?: Array<{ body?: unknown }> };
       };
     };
+    // v3 answers ADF documents for the description and comment bodies —
+    // convert them back so callers always read plain, readable strings.
+    const fields =
+      this.api === 3 && issue.fields.description !== undefined
+        ? { ...issue.fields, description: adfToText(issue.fields.description) }
+        : issue.fields;
     return {
       id: String(issue.id),
       url: `${this.base}/browse/${issue.key}`,
       type: issue.fields.issuetype?.name ?? "",
       state: issue.fields.status?.name ?? null,
-      fields: issue.fields,
-      comments: issue.fields.comment?.comments?.map((c) => c.body ?? "") ?? [],
+      fields,
+      comments:
+        issue.fields.comment?.comments?.map((c) =>
+          this.api === 3 ? adfToText(c.body) : typeof c.body === "string" ? c.body : "",
+        ) ?? [],
     };
   }
 }
@@ -1243,6 +1274,32 @@ export class MockPmProvider implements PmProvider {
 }
 
 // ---------------------------------------------------------------------------
+// ADF conversion (Jira REST v3 rich-text bodies ↔ plain text) lives in
+// adf.ts and is re-exported here.
+// ---------------------------------------------------------------------------
+
+export { adfToText, textToAdf, type AdfDoc, type AdfNode } from "./adf.js";
+
+// ---------------------------------------------------------------------------
+// Inbound webhook translation (provider-native payloads → the ADR-0010
+// normalized shape) lives in inbound.ts and is re-exported here.
+// ---------------------------------------------------------------------------
+
+export {
+  constantTimeEqual,
+  parseAsanaInboundWebhook,
+  parseAzureDevOpsInboundWebhook,
+  parseGenericInboundWebhook,
+  parseInboundWebhook,
+  parseJiraInboundWebhook,
+  parseLinearInboundWebhook,
+  parseMondayInboundWebhook,
+  type InboundWebhookInput,
+  type InboundWebhookResult,
+  type NormalizedInboundEvent,
+} from "./inbound.js";
+
+// ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
 
@@ -1250,6 +1307,8 @@ export interface PmConnectionConfig {
   provider: PmProviderKind;
   token: string;
   baseUrl?: string | null;
+  /** jira only: REST API version — 2 (default, plain text) or 3 (ADF) */
+  apiVersion?: number | null;
 }
 
 /** shared mock instance so state persists across resolutions in one process */
@@ -1266,15 +1325,21 @@ export function resolvePmProvider(config: PmConnectionConfig, fetchImpl?: FetchL
         baseUrl: config.baseUrl,
         ...(fetchImpl ? { fetchImpl } : {}),
       });
-    case "jira":
+    case "jira": {
       if (!config.baseUrl) {
         throw new PmProviderError("jira requires a baseUrl (https://<site>.atlassian.net)");
+      }
+      const apiVersion = config.apiVersion ?? 2;
+      if (apiVersion !== 2 && apiVersion !== 3) {
+        throw new PmProviderError(`jira apiVersion must be 2 or 3, got '${apiVersion}'`);
       }
       return new JiraProvider({
         token: config.token,
         baseUrl: config.baseUrl,
+        apiVersion,
         ...(fetchImpl ? { fetchImpl } : {}),
       });
+    }
     case "linear":
       return new LinearProvider({
         token: config.token,

@@ -327,6 +327,101 @@ describe("JiraProvider (REST v2, injectable fetch, no network)", () => {
   });
 });
 
+describe("JiraProvider (REST v3 + ADF mode, injectable fetch, no network)", () => {
+  // The v2 describe above IS the regression suite for the default: apiVersion
+  // omitted must keep every /rest/api/2 path and plain-string body unchanged.
+  const json = (body: unknown, status = 200) => ({
+    status,
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  });
+
+  it("creates against /rest/api/3 with the description converted to an ADF document", async () => {
+    let captured: { url: string; body: Record<string, unknown> } | null = null;
+    const jira = new JiraProvider({
+      token: "bot@example.com:api-token",
+      baseUrl: "https://acme.atlassian.net",
+      apiVersion: 3,
+      fetchImpl: async (url, init) => {
+        captured = { url, body: JSON.parse(String(init?.body)) };
+        return json({ id: "10042", key: "REG-7", self: "..." });
+      },
+    });
+    await jira.createWorkItem("REG", "Task", {
+      summary: "Build API",
+      description: "# Goal\n\nShip the governed endpoint.",
+    });
+    expect(captured!.url).toBe("https://acme.atlassian.net/rest/api/3/issue");
+    const fields = captured!.body.fields as Record<string, unknown>;
+    expect(fields.summary).toBe("Build API"); // non-description fields stay plain
+    const desc = fields.description as { version: number; type: string; content: unknown[] };
+    expect(desc.version).toBe(1);
+    expect(desc.type).toBe("doc");
+    expect(desc.content.length).toBeGreaterThanOrEqual(2);
+    expect(JSON.stringify(desc)).toContain("Ship the governed endpoint.");
+  });
+
+  it("addComment sends an ADF body to the v3 comment endpoint", async () => {
+    let captured: { url: string; body: Record<string, unknown> } | null = null;
+    const jira = new JiraProvider({
+      token: "b:t",
+      baseUrl: "https://acme.atlassian.net",
+      apiVersion: 3,
+      fetchImpl: async (url, init) => {
+        captured = { url, body: JSON.parse(String(init?.body)) };
+        return json({ id: "c1" });
+      },
+    });
+    await jira.addComment("REG", "10042", "approved by dana");
+    expect(captured!.url).toBe("https://acme.atlassian.net/rest/api/3/issue/10042/comment");
+    const body = captured!.body.body as { version: number; type: string };
+    expect(body.version).toBe(1);
+    expect(body.type).toBe("doc");
+    expect(JSON.stringify(body)).toContain("approved by dana");
+  });
+
+  it("getWorkItem converts an ADF description and ADF comment bodies back to readable text", async () => {
+    const jira = new JiraProvider({
+      token: "b:t",
+      baseUrl: "https://acme.atlassian.net",
+      apiVersion: 3,
+      fetchImpl: async () =>
+        json({
+          id: "10042",
+          key: "REG-7",
+          fields: {
+            summary: "Build API",
+            issuetype: { name: "Task" },
+            status: { name: "In Progress" },
+            description: {
+              version: 1,
+              type: "doc",
+              content: [
+                { type: "heading", attrs: { level: 1 }, content: [{ type: "text", text: "Goal" }] },
+                { type: "paragraph", content: [{ type: "text", text: "Ship it." }] },
+              ],
+            },
+            comment: {
+              comments: [
+                {
+                  body: {
+                    version: 1,
+                    type: "doc",
+                    content: [{ type: "paragraph", content: [{ type: "text", text: "looks good" }] }],
+                  },
+                },
+              ],
+            },
+          },
+        }),
+    });
+    const item = await jira.getWorkItem("REG", "10042");
+    expect(item.fields.description).toBe("# Goal\n\nShip it.");
+    expect(item.comments).toEqual(["looks good"]);
+    expect(item.state).toBe("In Progress");
+  });
+});
+
 describe("LinearProvider (GraphQL, injectable fetch, no network)", () => {
   type Call = { query: string; variables: Record<string, unknown>; auth: string };
   function fakeLinear(handler: (call: Call) => unknown) {
