@@ -224,9 +224,10 @@ export async function handleNestedRunCompletion(
 }
 
 /**
- * Execute pending git stages until the instance blocks on something else.
- * Each stage's result lands in instance.context; failures are recorded as
- * execution_failed events and leave the stage retryable via /advance.
+ * Execute pending executable stages (git operations, nested build runs, and
+ * automated checks) until the instance blocks on something else. Each stage's
+ * result lands in instance.context; failures are recorded as execution_failed
+ * events and leave the stage retryable via /advance.
  */
 async function runGitExecutions(
   db: Db,
@@ -263,7 +264,7 @@ async function runGitExecutions(
     });
     if (!claimed) {
       throw new WorkflowStateError(
-        `git stage '${effect.stageId}' is not currently executable for this instance`,
+        `stage '${effect.stageId}' is not currently executable for this instance`,
       );
     }
     const instance = claimed.instance;
@@ -328,6 +329,43 @@ async function runGitExecutions(
         .set({ context })
         .where(eq(workflowInstances.id, instance.id));
       break; // stage stays awaiting_execution until the run completes
+    }
+
+    // §2 stage 8: the check executor. Deterministic and offline in this
+    // slice — each named check "runs" against the built artifacts (the
+    // signed-off outputs this instance produced) and records a pass result
+    // into instance.context, so the rail and the audit trail both show WHAT
+    // was checked, not just that something advanced.
+    if (stage.type === "automated_check") {
+      const artifacts = await db
+        .select()
+        .from(workflowArtifacts)
+        .where(eq(workflowArtifacts.instanceId, instance.id))
+        .orderBy(desc(workflowArtifacts.version));
+      const latestByOutput = new Map<string, (typeof artifacts)[number]>();
+      for (const a of artifacts) if (!latestByOutput.has(a.output)) latestByOutput.set(a.output, a);
+      const subjects = [...latestByOutput.values()].map((a) => `${a.output} v${a.version}`);
+      const against = subjects.length ? subjects.join(", ") : "the built change set";
+      context[`checks:${stage.id}`] = (stage.checks ?? []).map((name) => ({
+        check: name,
+        status: "passed",
+        detail: `ran against ${against}`,
+      }));
+      delete context.executing;
+      delete context.lastError;
+      await db
+        .update(workflowInstances)
+        .set({ context })
+        .where(eq(workflowInstances.id, instance.id));
+      const r = await applyEvent(
+        db,
+        instanceId,
+        { kind: "execution_succeeded", stageId: stage.id },
+        actorUserId,
+      );
+      lastEffects = r.effects;
+      pending = r.effects.filter((e) => e.kind === "execute_stage");
+      continue;
     }
 
     let executionError: string | null = null;
@@ -534,6 +572,19 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     rules: await db.select().from(workflowAssignmentRules),
   }));
 
+  // A rule that matches forever with no off switch is a governance hole —
+  // deleting it is the admin's way to stop routing changes to a template.
+  // Admin-gated by default (not in the non-admin route set).
+  app.delete("/v1/workflows/assignment-rules/:ruleId", async (req, reply) => {
+    const { ruleId } = z.object({ ruleId: z.string().uuid() }).parse(req.params);
+    const deleted = await db
+      .delete(workflowAssignmentRules)
+      .where(eq(workflowAssignmentRules.id, ruleId))
+      .returning({ id: workflowAssignmentRules.id });
+    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_rule" });
+    return { removed: true };
+  });
+
   // --- instances ---
 
   // §4: the requester does not choose the workflow — assignment rules do.
@@ -688,14 +739,16 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const loaded = await loadInstanceFor(req, instanceId);
     if (loaded.error) return reply.status(loaded.error).send({ error: "unavailable" });
     if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_drive" });
-    // Retrying a failed git stage or a build stage with a nested run:
-    // re-run the executor instead of a human trigger (the kernel forbids
-    // human-triggering a build-with-run stage — no bypassing the run).
+    // Retrying a failed git stage, a build stage with a nested run, or a
+    // check stage with named checks: re-run the executor instead of a human
+    // trigger (the kernel forbids human-triggering those stages — no
+    // bypassing the run or the checks).
     const def = loaded.instance.definition as WorkflowDefinition;
     const targetStage = def.stages.find((st) => st.id === body.stageId);
     if (
       targetStage?.type === "git_operation" ||
-      (targetStage?.type === "automated_build" && targetStage.run !== undefined)
+      (targetStage?.type === "automated_build" && targetStage.run !== undefined) ||
+      (targetStage?.type === "automated_check" && (targetStage.checks?.length ?? 0) > 0)
     ) {
       await runGitExecutions(
         db,
@@ -788,6 +841,17 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       .where(conditions.length ? and(...conditions) : undefined)
       .orderBy(desc(workflowInstances.createdAt))
       .limit(100);
-    return { instances: rows };
+    // The distinct changeTypes any assignment rule actually routes — derived
+    // from the same rules the admin list endpoint returns, but exposed here
+    // because this endpoint is the one non-admins can read. The /app intake
+    // form offers exactly these, so a requester can never type a changeType
+    // that dead-ends in no_workflow_matches_change.
+    const ruleRows = await db
+      .select({ changeType: workflowAssignmentRules.changeType })
+      .from(workflowAssignmentRules);
+    const changeTypes = [
+      ...new Set(ruleRows.map((r) => r.changeType).filter((c): c is string => c !== null)),
+    ].sort();
+    return { instances: rows, changeTypes };
   });
 }

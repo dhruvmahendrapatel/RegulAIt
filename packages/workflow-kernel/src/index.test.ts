@@ -167,15 +167,50 @@ describe("instance state machine", () => {
     expect(() => transition(standard, r.state, { kind: "approval_granted", stageId: "requirements_signoff" })).toThrow(/terminal/);
   });
 
-  it("human triggers walk build and checks to completion", () => {
+  it("a human trigger walks build to the check executor; check success completes", () => {
     let r = transition(standard, initialState(standard), { kind: "start" });
     r = transition(standard, r.state, { kind: "artifact_submitted", stageId: "requirements" });
     r = transition(standard, r.state, { kind: "approval_granted", stageId: "requirements_signoff" });
     r = transition(standard, r.state, { kind: "human_trigger", stageId: "build" });
-    expect(r.state.status).toBe("awaiting_trigger");
-    r = transition(standard, r.state, { kind: "human_trigger", stageId: "checks" });
+    // named checks are executed by the gateway, never human-triggered
+    expect(r.state.status).toBe("awaiting_execution");
+    expect(r.effects).toContainEqual({ kind: "execute_stage", stageId: "checks" });
+    expect(() =>
+      transition(standard, r.state, { kind: "human_trigger", stageId: "checks" }),
+    ).toThrow(/named checks/);
+    r = transition(standard, r.state, { kind: "execution_succeeded", stageId: "checks" });
     expect(r.state.status).toBe("completed");
     expect(r.effects).toContainEqual({ kind: "instance_completed" });
+  });
+
+  it("a check stage WITHOUT named checks still awaits a human trigger", () => {
+    const plain = validateDefinition({
+      workflow: "plain-check",
+      stages: [
+        { id: "intake", type: "trigger" },
+        { id: "checks", type: "automated_check" },
+      ],
+    });
+    const started = transition(plain, initialState(plain), { kind: "start" });
+    expect(started.state.status).toBe("awaiting_trigger");
+    const done = transition(plain, started.state, { kind: "human_trigger", stageId: "checks" });
+    expect(done.state.status).toBe("completed");
+  });
+
+  it("a failed check stays awaiting execution and is retryable", () => {
+    const checked = validateDefinition({
+      workflow: "check-retry",
+      stages: [
+        { id: "intake", type: "trigger" },
+        { id: "checks", type: "automated_check", checks: ["ci_tests", "lint"] },
+      ],
+    });
+    let r = transition(checked, initialState(checked), { kind: "start" });
+    expect(r.state.status).toBe("awaiting_execution");
+    r = transition(checked, r.state, { kind: "execution_failed", stageId: "checks", error: "flake" });
+    expect(r.state.status).toBe("awaiting_execution");
+    r = transition(checked, r.state, { kind: "execution_succeeded", stageId: "checks" });
+    expect(r.state.status).toBe("completed");
   });
 
   it("rejects out-of-order events", () => {

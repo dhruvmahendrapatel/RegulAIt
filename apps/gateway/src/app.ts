@@ -163,6 +163,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "GET /v1/projects/:projectId/context",
     "POST /v1/projects/:projectId/context/promote",
     "GET /v1/projects/:projectId/compliance",
+    "GET /v1/projects/:projectId/costs",
     "POST /v1/runs",
     "POST /v1/runs/:runId/events",
     "POST /v1/runs/:runId/nodes/:nodeId/dispatch",

@@ -1098,14 +1098,19 @@ export function registerOrchestrationRoutes(
 
   // AUTO-ADVANCE: a self-driving pass over the run — same gates, zero new
   // authority. One synchronous call (no scheduler/queue infrastructure, same
-  // bias as ADR-0010) starts the run if needed, then repeatedly takes the
-  // first ready node through start → governed dispatch → submit. Review
-  // stays a human gate by DEFAULT: nodes land in_review and dependents wait;
-  // only an explicit acceptReviews=true also accepts each submission.
-  // Node-level problems (entitlement, config, refusal) mark that node failed
-  // and the loop continues on independent branches; run-level problems
-  // (budget) stop the whole pass. Every step is the same audited event/
-  // dispatch machinery the manual endpoints use.
+  // bias as ADR-0010) starts the run if needed, then drives the FULL ready
+  // set as a wave (§4 parallelism made real): every wave node is started —
+  // each through its own budget gates — and dispatched before any of them is
+  // submitted, so independent branches are genuinely concurrent in the run's
+  // recorded state rather than a one-at-a-time march; dependents become the
+  // next wave. Review stays a human gate by DEFAULT: nodes land in_review
+  // and dependents wait; only an explicit acceptReviews=true also accepts
+  // each submission. Node-level problems (entitlement, config, refusal) mark
+  // that node failed and the wave continues on independent branches;
+  // run-level problems (budget) stop the whole pass — with everything
+  // already dispatched still submitted, so nothing strands in_progress.
+  // Every step is the same audited event/dispatch machinery the manual
+  // endpoints use.
   app.post("/v1/runs/:runId/auto", async (req, reply) => {
     const { runId } = runIdParam.parse(req.params);
     const body = autoAdvanceSchema.parse(req.body ?? {});
@@ -1163,100 +1168,139 @@ export function registerOrchestrationRoutes(
               : "no_ready_nodes";
         break;
       }
-      const nodeId = ready[0]!;
+      // One WAVE = the whole ready set (capped by the pass budget). Each wave
+      // node is started (through its own §5.2 gates) and dispatched before
+      // any submission lands, so independent branches overlap in the recorded
+      // state — the events history shows node B starting while node A is
+      // still in_progress. Submissions close the wave; dependents surface as
+      // the next wave's ready set.
+      const wave = ready.slice(0, Math.max(1, body.maxNodes - dispatched));
+      const toSubmit: string[] = [];
+      let waveStop: string | null = null;
 
-      // run-level measured-budget stop BEFORE starting the node, so a blocked
-      // pass never strands a node in_progress.
-      const budget = (run.budget ?? null) as RunBudget | null;
-      const measuredSpent = budget?.measuredSpentUsd ?? 0;
-      if (budget && budget.capUsd !== null && !budget.overageApproved && measuredSpent >= budget.capUsd) {
-        stoppedReason = "budget_exceeded_measured";
-        steps.push({ nodeId, action: "blocked_budget_measured", measuredSpentUsd: measuredSpent });
-        break;
-      }
+      for (const nodeId of wave) {
+        run = await reload();
+        // Serialization honesty: a non-parallelizable wave member (or a wave
+        // member invalidated by an earlier wave failure) is skipped, not
+        // forced — the next iteration re-evaluates readiness from scratch.
+        if (!readyNodes(run.graph as TaskGraph, run.state as RunState).includes(nodeId)) continue;
 
-      // §5.2 estimate gate, then the same node_started event the manual path uses
-      const gate = await gateNodeStartBudget(db, run, nodeId, actor);
-      if (gate.blocked) {
-        stoppedReason = "budget_exceeded";
-        steps.push({ nodeId, action: "start_blocked_budget", ...gate.blocked });
-        break;
-      }
-      await applyRunEvent(db, runId, { kind: "node_started", nodeId }, actor, opts.dataKey);
-      if (budget && gate.nodeCost !== null) {
-        await db
-          .update(orchestrationRuns)
-          .set({
-            budget: { ...budget, spentUsd: Number((budget.spentUsd + gate.nodeCost).toFixed(6)) },
-          })
-          .where(eq(orchestrationRuns.id, runId));
-      }
-
-      const out = await dispatchRunNode(
-        db,
-        opts.dataKey,
-        await reload(),
-        nodeId,
-        { input: body.inputs?.[nodeId], maxTokens: body.maxTokens },
-        actor,
-      );
-
-      if (out.kind === "budget_blocked_measured") {
-        stoppedReason = "budget_exceeded_measured";
-        steps.push({ nodeId, action: "blocked_budget_measured", measuredSpentUsd: out.measuredSpentUsd });
-        break;
-      }
-      if (out.kind === "entitlement_denied" || out.kind === "dispatch_failed" || out.kind === "unknown_agent") {
-        // node-level problem: fail THIS node (blocked, §3 retry/reassign/
-        // escalate applies), keep driving independent branches
-        const error =
-          out.kind === "entitlement_denied"
-            ? `entitlement denied: ${out.decision.reason}`
-            : out.kind === "unknown_agent"
-              ? "owner agent no longer exists"
-              : `dispatch failed: ${out.error}`;
-        await applyRunEvent(db, runId, { kind: "node_failed", nodeId, error }, actor, opts.dataKey);
-        await mirrorNodeStatus(db, opts.dataKey, runId, nodeId, "blocked", actor);
-        steps.push({ nodeId, action: "failed", error });
-        continue;
-      }
-      if (out.kind !== "ok") {
-        // unknown_node / not_in_progress cannot happen for a node we just
-        // started — defensive stop rather than a silent loop
-        stoppedReason = out.kind;
-        break;
-      }
-
-      dispatched++;
-      if (out.result.refusal) {
-        await applyRunEvent(
-          db,
-          runId,
-          { kind: "node_failed", nodeId, error: "worker refused the task" },
-          actor,
-          opts.dataKey,
-        );
-        await mirrorNodeStatus(db, opts.dataKey, runId, nodeId, "blocked", actor);
-        steps.push({ nodeId, action: "refused" });
-        if (out.budgetBreached) {
-          stoppedReason = "budget_exceeded_measured";
+        // run-level measured-budget stop BEFORE starting the node, so a
+        // blocked pass never strands a node in_progress.
+        const budget = (run.budget ?? null) as RunBudget | null;
+        const measuredSpent = budget?.measuredSpentUsd ?? 0;
+        if (budget && budget.capUsd !== null && !budget.overageApproved && measuredSpent >= budget.capUsd) {
+          waveStop = "budget_exceeded_measured";
+          steps.push({ nodeId, action: "blocked_budget_measured", measuredSpentUsd: measuredSpent });
           break;
         }
-        continue;
+
+        // §5.2 estimate gate, then the same node_started event the manual path uses
+        const gate = await gateNodeStartBudget(db, run, nodeId, actor);
+        if (gate.blocked) {
+          waveStop = "budget_exceeded";
+          steps.push({ nodeId, action: "start_blocked_budget", ...gate.blocked });
+          break;
+        }
+        await applyRunEvent(db, runId, { kind: "node_started", nodeId }, actor, opts.dataKey);
+        if (budget && gate.nodeCost !== null) {
+          await db
+            .update(orchestrationRuns)
+            .set({
+              budget: { ...budget, spentUsd: Number((budget.spentUsd + gate.nodeCost).toFixed(6)) },
+            })
+            .where(eq(orchestrationRuns.id, runId));
+        }
+
+        const out = await dispatchRunNode(
+          db,
+          opts.dataKey,
+          await reload(),
+          nodeId,
+          { input: body.inputs?.[nodeId], maxTokens: body.maxTokens },
+          actor,
+        );
+
+        if (out.kind === "budget_blocked_measured") {
+          // started this wave but the cap arrived first — fail it (blocked,
+          // retryable once the overage is approved) rather than strand it
+          waveStop = "budget_exceeded_measured";
+          steps.push({ nodeId, action: "blocked_budget_measured", measuredSpentUsd: out.measuredSpentUsd });
+          await applyRunEvent(
+            db,
+            runId,
+            { kind: "node_failed", nodeId, error: "budget cap reached before this node could dispatch" },
+            actor,
+            opts.dataKey,
+          );
+          break;
+        }
+        if (out.kind === "entitlement_denied" || out.kind === "dispatch_failed" || out.kind === "unknown_agent") {
+          // node-level problem: fail THIS node (blocked, §3 retry/reassign/
+          // escalate applies), keep driving independent branches
+          const error =
+            out.kind === "entitlement_denied"
+              ? `entitlement denied: ${out.decision.reason}`
+              : out.kind === "unknown_agent"
+                ? "owner agent no longer exists"
+                : `dispatch failed: ${out.error}`;
+          await applyRunEvent(db, runId, { kind: "node_failed", nodeId, error }, actor, opts.dataKey);
+          await mirrorNodeStatus(db, opts.dataKey, runId, nodeId, "blocked", actor);
+          steps.push({ nodeId, action: "failed", error });
+          continue;
+        }
+        if (out.kind !== "ok") {
+          // unknown_node / not_in_progress cannot happen for a node we just
+          // started — defensive stop rather than a silent loop
+          waveStop = out.kind;
+          break;
+        }
+
+        dispatched++;
+        if (out.result.refusal) {
+          await applyRunEvent(
+            db,
+            runId,
+            { kind: "node_failed", nodeId, error: "worker refused the task" },
+            actor,
+            opts.dataKey,
+          );
+          await mirrorNodeStatus(db, opts.dataKey, runId, nodeId, "blocked", actor);
+          steps.push({ nodeId, action: "refused" });
+          if (out.budgetBreached) {
+            waveStop = "budget_exceeded_measured";
+            break;
+          }
+          continue;
+        }
+
+        toSubmit.push(nodeId);
+        steps.push({
+          nodeId,
+          action: body.acceptReviews ? "accepted" : "submitted",
+          costUsd: out.result.costUsd,
+        });
+        if (out.budgetBreached) {
+          waveStop = "budget_exceeded_measured";
+          break;
+        }
       }
 
-      await applyRunEvent(db, runId, { kind: "node_submitted", nodeId }, actor, opts.dataKey);
-      let action = "submitted";
-      let finalStatus: "in_review" | "done" = "in_review";
-      if (body.acceptReviews) {
-        await applyRunEvent(db, runId, { kind: "node_accepted", nodeId }, actor, opts.dataKey);
-        action = "accepted";
-        finalStatus = "done";
+      // Close the wave: everything that dispatched cleanly is submitted (and
+      // optionally accepted) — even when the wave stopped early, so a budget
+      // stop never leaves finished work stranded in_progress.
+      for (const nodeId of toSubmit) {
+        await applyRunEvent(db, runId, { kind: "node_submitted", nodeId }, actor, opts.dataKey);
+        let finalStatus: "in_review" | "done" = "in_review";
+        if (body.acceptReviews) {
+          await applyRunEvent(db, runId, { kind: "node_accepted", nodeId }, actor, opts.dataKey);
+          finalStatus = "done";
+        }
+        await mirrorNodeStatus(db, opts.dataKey, runId, nodeId, finalStatus, actor);
       }
-      await mirrorNodeStatus(db, opts.dataKey, runId, nodeId, finalStatus, actor);
-      steps.push({ nodeId, action, costUsd: out.result.costUsd });
-      if (out.budgetBreached) {
-        stoppedReason = "budget_exceeded_measured";
+
+      if (waveStop) {
+        stoppedReason = waveStop;
         break;
       }
     }

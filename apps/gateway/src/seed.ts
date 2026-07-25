@@ -285,9 +285,57 @@ const sensitiveTpl = await ensureTemplate("sensitive-data", {
     { id: "compliance-signoff", type: "human_approval", approvers: [averyId] },
   ],
 });
+
+// The complete-pipeline template (§2 end-to-end): intake → plan → requirements
+// artifact → Avery's sign-off → automated build as a NESTED RUN on the mock
+// agents → automated checks (mock check executor, recorded pass results) →
+// branch → PR → merge gate (Avery) → squash merge. Git stages run against the
+// MOCK git provider — the whole chain is drivable with zero external
+// credentials. The connection token below is an obvious dummy, encrypted at
+// rest like any other.
+if (DATA_KEY) {
+  const gitConns = (await call("GET", "/v1/git/connections")).connections ?? [];
+  if (!gitConns.some((c: Json) => c.name === "demo-git")) {
+    await call("POST", "/v1/git/connections", {
+      name: "demo-git",
+      provider: "mock",
+      token: "mock-token-not-a-real-credential",
+    });
+  }
+}
+const pipelineTpl = await ensureTemplate("complete-pipeline", {
+  workflow: "complete-pipeline",
+  stages: [
+    { id: "intake", type: "trigger" },
+    { id: "plan", type: "planning" },
+    { id: "requirements", type: "artifact_generation", output: "requirements_file" },
+    { id: "signoff", type: "human_approval", approvers: [averyId] },
+    {
+      id: "build",
+      type: "automated_build",
+      scope: "requirements_file",
+      run: {
+        run: "pipeline-build",
+        escalationApproverUserId: averyId,
+        nodes: [
+          { id: "implement", title: "Implement the signed-off requirements", ownerAgentId: agentIds["balanced-mock"], mode: "execute", estimate: { in: 600, out: 1200 } },
+          { id: "self-review", title: "Review the implementation against the requirements", ownerAgentId: agentIds["fast-mock"], mode: "execute", dependsOn: ["implement"], estimate: { in: 300, out: 600 } },
+        ],
+      },
+    },
+    { id: "checks", type: "automated_check", checks: ["unit_tests", "lint", "security_scan"] },
+    { id: "branch", type: "git_operation", action: "create_branch", connection: "demo-git", repo: "acme/checkout" },
+    { id: "open_pr", type: "git_operation", action: "open_pr", connection: "demo-git", repo: "acme/checkout" },
+    { id: "merge_gate", type: "human_approval", approvers: [averyId] },
+    { id: "merge", type: "git_operation", action: "merge", connection: "demo-git", repo: "acme/checkout", strategy: "squash" },
+  ],
+});
 const rules = (await call("GET", "/v1/workflows/assignment-rules")).rules ?? [];
 if (!rules.some((r: Json) => r.templateId === standardTpl)) {
   await call("POST", "/v1/workflows/assignment-rules", { templateId: standardTpl, changeType: "feature" });
+}
+if (!rules.some((r: Json) => r.templateId === pipelineTpl)) {
+  await call("POST", "/v1/workflows/assignment-rules", { templateId: pipelineTpl, changeType: "pipeline-demo" });
 }
 await call("POST", "/v1/compliance/profiles", {
   tag: "hipaa",
@@ -631,6 +679,42 @@ if (!danaInstances.some((i: Json) => i.change?.description === DANA_CHANGE)) {
   );
 }
 
+// The complete-pipeline instance, parked at the SIGN-OFF gate so the demo can
+// drive the whole chain live: Avery approves in the Inbox → the nested build
+// run spawns (Dana auto-advances it from Runs) → checks record pass results →
+// branch + PR open on the mock provider → the merge gate lands back in
+// Avery's Inbox → approve → squash-merged. Deliberately not pre-driven past
+// sign-off — everything after it happens on stage during the demo.
+const PIPELINE_CHANGE = "Ship the checkout payment-vault fallback";
+const danaInstances2 = (await call("GET", "/v1/workflows/instances", undefined, danaAuth)).instances ?? [];
+if (!danaInstances2.some((i: Json) => i.change?.description === PIPELINE_CHANGE)) {
+  const inst = await call(
+    "POST",
+    "/v1/workflows/instances",
+    {
+      change: {
+        description: PIPELINE_CHANGE,
+        paths: ["src/checkout/vault-fallback.ts"],
+        changeType: "pipeline-demo",
+        environment: "staging",
+      },
+    },
+    danaAuth,
+  );
+  await call(
+    "POST",
+    `/v1/workflows/instances/${inst.id}/artifacts`,
+    {
+      stageId: "requirements",
+      content:
+        "# Requirements: payment-vault fallback\n\n1. Checkout falls back to the one-off card form " +
+        "when the vault is unreachable.\n2. The fallback surfaces a non-blocking notice, never an error page.\n" +
+        "3. No PAN or CVV ever touches our own storage — vault tokens only.",
+    },
+    danaAuth,
+  );
+}
+
 const AVERY_CHANGE = "Add an audit export for PHI access logs";
 const averyInstances = (await call("GET", "/v1/workflows/instances", undefined, averyAuth)).instances ?? [];
 if (!averyInstances.some((i: Json) => i.change?.description === AVERY_CHANGE)) {
@@ -652,6 +736,47 @@ if (!averyInstances.some((i: Json) => i.change?.description === AVERY_CHANGE)) {
     },
     averyAuth,
   );
+}
+
+// --- PM links + a decision record on the demo objects (pillar 8) ----------
+// checkout-refactor's task graph maps onto mock work items in REGULAIT-DEMO
+// and carries one recorded decision, and Dana's workflow instance gets its
+// single linked item — so the /app PM strip and Decisions card open
+// non-empty. pm-sync is idempotent server-side (already-linked = skipped);
+// the append-only decision is guarded by a lookup.
+if (DATA_KEY) {
+  const runsNow = (await call("GET", "/v1/runs", undefined, danaAuth)).runs ?? [];
+  const checkoutRun = runsNow.find((r: Json) => r.name === "checkout-refactor");
+  if (checkoutRun) {
+    await call("POST", `/v1/runs/${checkoutRun.id}/pm-sync`, { connectionName: "demo-pm" }, danaAuth);
+    const decided =
+      (await call("GET", `/v1/decisions?objectType=run&objectId=${checkoutRun.id}`, undefined, danaAuth))
+        .decisions ?? [];
+    if (decided.length === 0) {
+      await call(
+        "POST",
+        "/v1/decisions",
+        {
+          objectType: "run",
+          objectId: checkoutRun.id,
+          decision: "Ship the checkout refactor behind the existing checkout feature flag",
+          rationale:
+            "The design node's API shape is additive; keeping the flag makes rollback a config change, not a deploy.",
+        },
+        danaAuth,
+      );
+    }
+  }
+  const instancesNow = (await call("GET", "/v1/workflows/instances", undefined, danaAuth)).instances ?? [];
+  const danaInst = instancesNow.find((i: Json) => i.change?.description === DANA_CHANGE);
+  if (danaInst) {
+    await call(
+      "POST",
+      `/v1/workflows/instances/${danaInst.id}/pm-sync`,
+      { connectionName: "demo-pm" },
+      danaAuth,
+    );
+  }
 }
 
 await app.close();
@@ -686,11 +811,40 @@ ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecre
   both with members, team provenance, shared context, a budget and real
   measured spend from 12 seeded mock dispatches.
 
+  Spend & savings (pillars 5+6, /app): every user has a personal cost page —
+  measured spend, tokens, savings by technique, spend by agent, recent
+  invocations — plus a drill-down into any project they are a MEMBER of
+  (the per-project /costs endpoint admits members, not only admins).
+
+  PM integration (pillar 8): the mock 'demo-pm' connection is linked to
+  Dana's checkout-refactor run (every node = a mock work item, one decision
+  recorded and mirrored) and to her workflow instance — see the PM strip on
+  each detail page ('Sync now' re-links, drift is surfaced, never
+  auto-fixed). /admin → PM Connections lists/creates connections; the
+  webhook secret is shown exactly once there, like every secret.
+
+  Workflows (pillar 2): 3 templates — standard-change (type 'feature'),
+  sensitive-data (hipaa cascade), and complete-pipeline (type 'pipeline-demo':
+  intake → plan → requirements → sign-off → nested build run → checks →
+  branch → PR → merge gate → squash merge, all on the MOCK git provider via
+  the 'demo-git' connection). /admin → Workflows shows the chains, authors
+  templates from a JSON starter, manages assignment rules (with delete) and
+  git connections.
+
   Still to do in the demo — nothing is seeded finished:
-    · avery  Inbox: a workflow sign-off; Workflows: an instance awaiting its
-             requirements artifact; Runs: a planned run to start.
+    · avery  Inbox: TWO workflow sign-offs (standard + the pipeline);
+             Workflows: an instance awaiting its requirements artifact;
+             Runs: a planned run to start.
     · dana   Inbox: a shared-context conflict to arbitrate; Runs: a node
              awaiting review, then auto-advance the rest.
+
+  Drive the pipeline live ('Ship the checkout payment-vault fallback'):
+    1. avery  Inbox → approve the sign-off (reads the artifact inline)
+    2. dana   the build stage spawns a nested run — open it from the
+              workflow's 'watch the run' link (or Runs) and Auto-advance
+    3. (auto) checks record pass results; branch + PR open on the mock
+              provider — the PR URL appears under Delivery
+    4. avery  Inbox → approve the merge gate → squash-merged, chain complete.
 
   Simulation / Access preview — pick Dana + the repo server from the selects
   and step through the precedence chain:

@@ -314,8 +314,9 @@ export async function applyProjectApprovalDecision(
 /** PILLAR 5: the per-project cost dashboard — real-time rollup of MEASURED
  * spend (usage_events) and ESTIMATED savings (cost_events), budget-vs-actual,
  * a simple run-rate forecast, and showback breakdowns by user and agent.
- * Admin-only: this is the FinOps surface, not a member view (membership
- * arrives with Shared Projects, pillar 4). */
+ * Readable by admins (the FinOps fleet view) and by the project's own
+ * MEMBERS (§9.3 — the people whose work the numbers are), enforced in the
+ * route. */
 const ROLE_RANK: Record<string, number> = { viewer: 0, contributor: 1, owner: 2 };
 
 export function registerProjectRoutes(app: FastifyInstance, db: Db) {
@@ -1014,6 +1015,20 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     const { projectId } = projectIdParam.parse(req.params);
     const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
     if (!project) return reply.status(404).send({ error: "unknown_project" });
+    // Pillar 5 for the people doing the work, not only FinOps: an admin sees
+    // every project; a non-admin sees the rollup of a project they are a
+    // MEMBER of — the same spend their own invokes and runs feed. Anyone
+    // else gets a plain 403, membership is the whole test.
+    if (!req.authCtx.isAdmin) {
+      if (!req.authCtx.userId) return reply.status(403).send({ error: "not_a_project_member" });
+      const [membership] = await db
+        .select({ userId: projectMembers.userId })
+        .from(projectMembers)
+        .where(
+          and(eq(projectMembers.projectId, projectId), eq(projectMembers.userId, req.authCtx.userId)),
+        );
+      if (!membership) return reply.status(403).send({ error: "not_a_project_member" });
+    }
 
     const where = eq(usageEvents.projectId, projectId);
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 3600 * 1000);

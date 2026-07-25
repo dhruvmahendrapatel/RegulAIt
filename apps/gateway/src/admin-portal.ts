@@ -385,6 +385,156 @@ const TABS = [
   wire("f-dsr", (d) => post("/v1/rules/data-scopes", { ...d, allowedValues: String(d.allowedValues).split(",") }));
   wire("f-rlr", (d) => post("/v1/rules/rate-limits", { ...d, maxCalls: Number(d.maxCalls), windowSeconds: Number(d.windowSeconds) }));
 }],
+["Workflows", async (el) => {
+  // Pillar 2's admin home: templates (with their stage chain), the assignment
+  // rules that route changes to them, and the git connections their
+  // git_operation stages execute against.
+  const [t, r, g] = await Promise.all([
+    get("/v1/workflows/templates"),
+    get("/v1/workflows/assignment-rules"),
+    get("/v1/git/connections").catch(() => ({ connections: [] })),
+  ]);
+  const tplName = Object.fromEntries(t.templates.map((x) => [x.id, x.name]));
+  const tplOpts = t.templates.map((x) => ({ v: x.id, l: x.name }));
+  const rail = (def) => "<div class='stage-rail' style='margin-top:6px'>"
+    + (def.stages ?? []).map((s) => "<span class='stage'>" + esc(s.id)
+      + "<span class='faint' style='font-size:10px'>" + esc(s.type) + "</span></span>").join("")
+    + "</div>";
+  const conds = (x) => [
+    x.pathPattern ? "path " + x.pathPattern : null,
+    x.changeType ? "type " + x.changeType : null,
+    x.environment ? "env " + x.environment : null,
+  ].filter(Boolean).join(" + ");
+  const tplRows = t.templates.map((tpl) => {
+    const assigned = r.rules.filter((x) => x.templateId === tpl.id);
+    return "<div class='node-row' style='align-items:flex-start'><div class='grow'>"
+      + "<div><strong>" + esc(tpl.name) + "</strong>"
+      + (tpl.definition.costSensitivity ? " <span class='badge'>" + esc(tpl.definition.costSensitivity) + "</span>" : "") + "</div>"
+      + rail(tpl.definition)
+      + "<div class='dim' style='font-size:12px;margin-top:6px'>"
+      + (assigned.length ? "routed when: " + esc(assigned.map(conds).join("  |  ")) : "no assignment rule routes here — reachable only via compliance cascade or an admin's explicit pick")
+      + "</div></div></div>";
+  }).join("") || "<div class='empty'>no templates yet — author one below</div>";
+
+  // Starter definitions match the exact shape the template zod schema
+  // accepts. Approvals default to "requesting_user" so a starter POSTs as-is;
+  // git stages reference the first registered connection.
+  const connName = (g.connections[0] || {}).name ?? "demo-git";
+  const planStages = [
+    { id: "intake", type: "trigger" },
+    { id: "plan", type: "planning" },
+    { id: "requirements", type: "artifact_generation", output: "requirements_file" },
+    { id: "signoff", type: "human_approval", approvers: ["requesting_user"] },
+  ];
+  const buildStages = planStages.concat([
+    { id: "build", type: "automated_build", scope: "requirements_file" },
+    { id: "checks", type: "automated_check", checks: ["unit_tests", "lint"] },
+  ]);
+  const STARTERS = [
+    { id: "plan", label: "Plan & sign-off (4 stages)", def: { workflow: "plan-signoff", stages: planStages } },
+    { id: "build", label: "Plan, build & check (6 stages)", def: { workflow: "build-check", stages: buildStages } },
+    { id: "pipeline", label: "Complete pipeline to merge (10 stages)", def: {
+      workflow: "complete-pipeline",
+      stages: buildStages.slice(0, 5).concat([
+        { id: "checks", type: "automated_check", checks: ["unit_tests", "lint", "security_scan"] },
+        { id: "branch", type: "git_operation", action: "create_branch", connection: connName, repo: "acme/app" },
+        { id: "open_pr", type: "git_operation", action: "open_pr", connection: connName, repo: "acme/app" },
+        { id: "merge_gate", type: "human_approval", approvers: ["requesting_user"] },
+        { id: "merge", type: "git_operation", action: "merge", connection: connName, repo: "acme/app", strategy: "squash" },
+      ]),
+    } },
+  ];
+  el.innerHTML = "<h2>Templates — stage chains + how changes route to them</h2><div class='card'>" + tplRows + "</div>"
+    + "<h2>Author a template</h2><div class='card'>"
+    + "<div class='row'>"
+    + "<div><label class='f'>name</label><input id='wft-name' placeholder='e.g. api-change'></div>"
+    + "<div><label class='f'>start from</label><select id='wft-starter'>"
+    + STARTERS.map((s) => "<option value='" + s.id + "'>" + esc(s.label) + "</option>").join("")
+    + "</select></div></div>"
+    + "<textarea id='wft-json' rows='16' style='width:100%;margin-top:10px' spellcheck='false'></textarea>"
+    + "<p class='dim' style='font-size:12px;margin:8px 0 0'>A definition is { workflow, costSensitivity?, stages[] }; the first stage must be a trigger. Stage types: trigger · planning · artifact_generation {output} · human_approval {approvers: user-ids or the literal requesting_user} · automated_build {scope?, run?} (a run graph executes as a governed nested run) · automated_check {checks[]} (named checks run automatically and record pass results) · git_operation {action: create_branch | open_pr | merge, connection, repo, base?, branchPrefix?, strategy?}. open_pr needs an earlier create_branch, merge an earlier open_pr. Validation errors from the server appear below, field by field.</p>"
+    + "<div class='row' style='margin-top:10px'><button class='small primary' id='wft-create'>Create template</button><span class='err-line' id='wft-err'></span></div></div>"
+    + "<h2>Assignment rules — which template governs which change</h2><div class='card'>"
+    + form("f-wfrule", [
+        {name:"templateId",label:"template",options:tplOpts},
+        {name:"pathPattern",label:"path pattern",req:false,ph:"e.g. src/** (optional)"},
+        {name:"changeType",label:"change type",req:false,ph:"e.g. feature (optional)"},
+        {name:"environment",label:"environment",req:false,ph:"e.g. production (optional)"},
+      ], "Add rule")
+    + table(r.rules.map((x) => ({
+        id: x.id, template: tplName[x.templateId] ?? x.templateId,
+        matches: conds(x), created: x.createdAt,
+      })), (row) => "<button class='small danger' data-rdel='" + row.id + "'>delete</button>")
+    + "<p class='dim' style='font-size:12px'>Conditions AND together; set at least one. Every rule that matches a change contributes its template — the merged flow keeps every sign-off. Deleting a rule stops the routing; in-flight instances keep their snapshotted definition.</p></div>"
+    + "<h2>Git connections — what git_operation stages execute against</h2><div class='card'>"
+    + form("f-git", [
+        {name:"name",ph:"e.g. demo-git"},
+        {name:"provider",options:["mock","github","gitlab","bitbucket","azure_devops"]},
+        {name:"baseUrl",label:"base url",req:false,ph:"optional (e.g. GHE)"},
+        {name:"token",type:"password",ph:"never shown again",grow:true},
+      ], "Add connection")
+    + table(g.connections.map((c) => ({
+        name: c.name, provider: c.provider, baseUrl: c.baseUrl ?? "provider default", created: c.createdAt,
+      })))
+    + "<p class='dim' style='font-size:12px'>Tokens are AES-256-GCM encrypted at rest and never returned by any endpoint. Templates reference a connection by name. The demo runs entirely on the mock provider — no external service is touched.</p></div>";
+
+  const fillStarter = () => {
+    const s = STARTERS.find((x) => x.id === $("#wft-starter").value) ?? STARTERS[0];
+    $("#wft-json").value = JSON.stringify(s.def, null, 2);
+  };
+  fillStarter();
+  $("#wft-starter").addEventListener("change", fillStarter);
+  $("#wft-create").addEventListener("click", async () => {
+    const err = $("#wft-err"); err.textContent = "";
+    const name = $("#wft-name").value.trim();
+    if (!name) { err.textContent = "name: a template name is required"; return; }
+    let definition;
+    try { definition = JSON.parse($("#wft-json").value); }
+    catch (ex) { err.textContent = "definition JSON does not parse — " + ex.message; return; }
+    try { await post("/v1/workflows/templates", { name, definition }); render(); }
+    catch (ex) { err.textContent = ex.message; }
+  });
+  el.querySelectorAll("[data-rdel]").forEach((b) => b.addEventListener("click", async () => {
+    try { await del("/v1/workflows/assignment-rules/" + b.dataset.rdel); render(); }
+    catch (ex) { alert(ex.message); }
+  }));
+  wire("f-wfrule", (d) => post("/v1/workflows/assignment-rules", d));
+  wire("f-git", (d) => post("/v1/git/connections", d));
+}],
+["PM Connections", async (el) => {
+  // Pillar 8's admin home: the customer's PM tool stays the source of truth
+  // for priority/description; RegulAIt links work items, mirrors status and
+  // sign-offs out, and records inbound webhook state as drift — never a
+  // shadow copy.
+  const c = await get("/v1/pm/connections");
+  el.innerHTML = "<p class='sub'>Task graphs and workflow stages map onto the customer's own work items (pillar 8). Users link a run from its detail page; status, sign-offs and decisions mirror out; inbound webhooks record drift, never overwrite the state machine.</p>"
+    + "<h2>Connections</h2><div class='card'>"
+    + table(c.connections.map((x) => ({
+        name: x.name, provider: x.provider, project: x.project,
+        baseUrl: x.baseUrl ?? "provider default",
+        webhookUrl: "/v1/pm/webhooks/" + x.name,
+        created: x.createdAt,
+      })))
+    + "<p class='dim' style='font-size:12px'>Tokens are AES-256-GCM encrypted at rest and never returned by any endpoint. Inbound events POST to the webhook URL with the connection's secret in <span class='mono'>x-regulait-webhook-secret</span> — the secret is shown exactly once at creation and only its hash is stored.</p></div>"
+    + "<h2>Add a connection</h2><div class='card'>"
+    + form("f-pmconn", [
+        {name:"name",ph:"e.g. demo-pm"},
+        {name:"provider",options:["mock","jira","azure_devops","linear"]},
+        {name:"project",ph:"e.g. REGULAIT-DEMO"},
+        {name:"baseUrl",label:"base url",req:false,ph:"required for jira / azure_devops"},
+        {name:"token",type:"password",ph:"never shown again",grow:true},
+      ], "Add connection")
+    + "<p class='dim' style='font-size:12px'>The select offers exactly the providers the registry can dispatch today — asana, monday and the generic webhook adapter are interface-ready but not yet implemented, so they are deliberately not offered. jira and azure_devops need their base URL (e.g. https://&lt;site&gt;.atlassian.net, https://dev.azure.com/&lt;org&gt;). The demo runs entirely on the mock provider — no external service is touched.</p></div>"
+    + "<div id='pmreveal'></div>";
+  wire("f-pmconn", async (d) => {
+    const created = await post("/v1/pm/connections", d);
+    // same one-time-secret pattern as API keys: the webhook secret exists in
+    // exactly one response, so the reveal must survive this render.
+    revealSecret("#pmreveal", "Webhook secret for " + created.name, created.webhookSecret,
+      "External systems present it as x-regulait-webhook-secret when POSTing to " + location.origin + "/v1/pm/webhooks/" + created.name + ". Revisit this tab to see the new connection listed.");
+    $("#pmreveal").scrollIntoView({ block: "nearest" });
+  }, true);
+}],
 ["Audit & Activity Log", async (el) => {
   const u = await get("/v1/users");
   el.innerHTML = "<div class='card'>"

@@ -74,6 +74,45 @@ const statusBadge = (s) => {
   return '<span class="badge ' + (map[s] ?? "") + '">' + esc(String(s).replaceAll("_", " ")) + "</span>";
 };
 
+// duration from a millisecond span — for per-node and per-run elapsed times
+const fmtDur = (ms) => {
+  if (ms == null || !isFinite(ms) || ms < 0) return "—";
+  const s = ms / 1000;
+  if (s < 10) return s.toFixed(1) + "s";
+  if (s < 60) return Math.round(s) + "s";
+  if (s < 3600) return Math.floor(s / 60) + "m " + Math.round(s % 60) + "s";
+  return Math.floor(s / 3600) + "h " + Math.round((s % 3600) / 60) + "m";
+};
+
+// --- hand-rolled SVG charts (same pattern as /admin — no external assets) --
+function barChart(items, valueKey, labelFn) {
+  if (!items?.length) return "<div class='empty'>no data</div>";
+  const max = Math.max(...items.map((i) => Number(i[valueKey]) || 0), 1e-9);
+  const rowH = 26, w = 640;
+  const short = (label) => {
+    const s = String(label ?? "");
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-/.test(s)) return s.slice(0, 8) + "…";
+    return s.length > 24 ? s.slice(0, 23) + "…" : s;
+  };
+  const rows = items.slice(0, 10).map((item, i) => {
+    const v = Number(item[valueKey]) || 0;
+    const bw = Math.max(2, (v / max) * (w - 280));
+    const y = i * rowH;
+    return \`<text x="0" y="\${y + 16}" fill="var(--text-dim)" font-size="11.5" font-family="var(--mono)">\${esc(short(labelFn(item)))}</text>
+      <rect x="200" y="\${y + 5}" width="\${bw}" height="14" rx="3" fill="var(--accent)" opacity="0.85"/>
+      <text x="\${206 + bw}" y="\${y + 16}" fill="var(--text)" font-size="11.5" font-family="var(--mono)">\${fmtUsd(v)}</text>\`;
+  }).join("");
+  return \`<div class="chart"><svg viewBox="0 0 \${w} \${Math.min(items.length, 10) * rowH}" xmlns="http://www.w3.org/2000/svg">\${rows}</svg></div>\`;
+}
+function budgetGauge(spent, cap, overageApproved) {
+  if (cap == null) return "<span class='dim'>no budget set</span>";
+  const pct = Math.min(100, (spent / cap) * 100);
+  const over = spent > cap;
+  return \`<div class="row"><span class="num">\${fmtUsd(spent)}</span><span class="dim">of \${fmtUsd(cap)}</span>
+    \${over ? '<span class="badge ' + (overageApproved ? "warn" : "bad") + '">' + (overageApproved ? "overage approved" : "over budget") + "</span>" : ""}</div>
+    <div class="bar" style="margin-top:8px"><i class="\${over ? "over" : ""}" style="width:\${pct}%"></i></div>\`;
+}
+
 // ---------------------------------------------------------------- shell --
 const PAGES = [
   { id: "playground", label: "Playground" },
@@ -81,6 +120,7 @@ const PAGES = [
   { id: "workflows", label: "Workflows" },
   { id: "inbox", label: "Inbox" },
   { id: "projects", label: "Projects" },
+  { id: "spend", label: "Spend & savings" },
   { id: "settings", label: "Settings" },
 ];
 
@@ -130,6 +170,7 @@ function shell(content, active) {
 
 // ------------------------------------------------------------ playground --
 const chatHistory = []; // persists across renders within the session
+let PG_ABORT = null;    // AbortController while a stream is open — one at a time
 
 // Whose key pays for this agent, said before the request rather than only
 // after it. Routing can still move the request to another agent, so the
@@ -180,11 +221,12 @@ function playgroundPage() {
     <div class="row">
       <textarea id="pg-input" class="grow" rows="2" placeholder="\${noAgents ? "No agent granted to your account yet…" : "Ask the agent to do something…"}"\${noAgents ? " disabled" : ""}></textarea>
       <button class="primary" id="pg-send"\${noAgents ? " disabled" : ""}>Send</button>
+      <button id="pg-stop" style="display:none" title="close the stream — the dispatch already ran, anything streamed stays">Stop</button>
     </div>
   </div>\`;
 }
 
-function renderExchange(x) {
+function renderExchange(x, i) {
   const meta = [];
   if (x.result) {
     const r = x.result;
@@ -209,12 +251,18 @@ function renderExchange(x) {
     ? \`<details style="margin-top:6px"><summary class="faint" style="cursor:pointer;font-size:11.5px">governance trace</summary>
        <pre style="margin-top:6px">\${esc(JSON.stringify(x.denied ?? { decision: x.result.decision, routing: x.result.routing }, null, 2))}</pre></details>\`
     : "";
+  // per-exchange handoffs: copy the reply, or carry the prompt into the New
+  // Run form as the first node's work order (pillar 7 starts where the
+  // conversation stopped scaling)
+  const tools = x.streaming ? "" :
+    \`<button class="ghost small" data-copy="\${i}" title="copy the reply text">copy</button>
+     <button class="ghost small" data-torun="\${i}" title="plan a multi-agent run with this prompt as the first node's instruction">turn into a run</button>\`;
   return \`
     <div class="msg user"><div class="who">\${esc(ME.user.displayName)}</div><div class="bubble">\${esc(x.prompt)}</div></div>
     <div class="msg agent">
       <div class="who">\${esc(x.agentName)}</div>
       <div class="bubble">\${esc(x.text)}\${x.streaming ? '<span class="caret"></span>' : ""}</div>
-      <div class="meta">\${meta.join("")}</div>\${trace}
+      <div class="meta">\${meta.join("")}\${tools}</div>\${trace}
     </div>\`;
 }
 
@@ -223,10 +271,29 @@ function drawChat() {
   if (!log) return;
   log.innerHTML = chatHistory.map(renderExchange).join("") ||
     '<div class="empty">Pick an agent and say something.</div>';
+  log.querySelectorAll("[data-copy]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const x = chatHistory[Number(b.dataset.copy)];
+      try { await navigator.clipboard.writeText(x.text || x.prompt); b.textContent = "copied"; }
+      catch { b.textContent = "select it manually"; }
+    }));
+  log.querySelectorAll("[data-torun]").forEach((b) =>
+    b.addEventListener("click", () => {
+      NR_PREFILL = chatHistory[Number(b.dataset.torun)].prompt;
+      location.hash = "#/runs";
+      toast("Prompt carried into the New Run form — the first node runs with it as its instruction");
+    }));
   log.parentElement.scrollIntoView(false);
 }
 
+function pgStreamUi(streaming) {
+  const send = $("#pg-send"), stop = $("#pg-stop");
+  if (send) send.disabled = streaming;
+  if (stop) stop.style.display = streaming ? "" : "none";
+}
+
 async function sendPrompt() {
+  if (PG_ABORT) return; // one stream at a time — Send is disabled anyway
   const input = $("#pg-input");
   const prompt = input.value.trim();
   if (!prompt) return;
@@ -237,12 +304,16 @@ async function sendPrompt() {
   input.value = "";
   const x = { prompt, agentName: AGENT_NAMES[agentId] ?? "agent", text: "", streaming: true };
   chatHistory.push(x); drawChat();
+  const ctrl = new AbortController();
+  PG_ABORT = ctrl;
+  pgStreamUi(true);
 
   try {
     const res = await fetch("/v1/agents/" + agentId + "/invoke", {
       method: "POST",
       headers: { authorization: "Bearer " + KEY, "content-type": "application/json" },
       body: JSON.stringify({ mode: "execute", input: prompt, dispatch: true, stream: true, costSensitivity, ...(projectId ? { projectId } : {}) }),
+      signal: ctrl.signal,
     });
     if (!res.ok || !res.headers.get("content-type")?.includes("event-stream")) {
       const j = await res.json();
@@ -283,7 +354,19 @@ async function sendPrompt() {
     }
     x.streaming = false; drawChat();
   } catch (e) {
-    x.streaming = false; x.error = "request_failed"; x.text = e.message; drawChat();
+    x.streaming = false;
+    if (e.name === "AbortError") {
+      // the dispatch already ran server-side (governance + cost included) —
+      // only the stream was closed; whatever arrived stays on screen.
+      x.error = "stopped";
+      x.text = (x.text ? x.text + "\\n\\n" : "") + "(stream stopped — the dispatch itself already ran and was metered)";
+    } else {
+      x.error = "request_failed"; x.text = e.message;
+    }
+    drawChat();
+  } finally {
+    PG_ABORT = null;
+    pgStreamUi(false);
   }
 }
 
@@ -321,12 +404,16 @@ const RUN_TEMPLATES = [
 ];
 // mock agents run with no external credential, so they are the default owner
 const nrDefaultAgent = () => (AGENTS.find((a) => a.provider === "mock") ?? AGENTS[0])?.agentId ?? "";
+// a playground prompt carried over by 'turn into a run' — becomes the first
+// node's instruction until cleared or the run is planned
+let NR_PREFILL = null;
+const nrInstructionFor = (n, idx) => (idx === 0 && NR_PREFILL ? NR_PREFILL : n.instruction);
 const nrAgentSel = (nid) => '<select data-nagent="' + nid + '">' + AGENTS.map((a) =>
   '<option value="' + a.agentId + '"' + (a.agentId === nrDefaultAgent() ? " selected" : "") + '>' + esc(a.name) + " · " + esc(a.provider) + "</option>").join("") + "</select>";
-const nrNodeRowsHtml = (t) => t.nodes.map((n) => \`<div class="node-row">
+const nrNodeRowsHtml = (t) => t.nodes.map((n, idx) => \`<div class="node-row">
   <span class="node-dot not_started"></span>
-  <div class="grow"><label class="f">\${esc(n.id)}\${n.dependsOn.length ? " · after " + n.dependsOn.join(", ") : ""}</label>
-    <input data-ntitle="\${n.id}" value="\${esc(n.title)}" style="width:100%" title="\${esc(n.instruction)}"></div>
+  <div class="grow"><label class="f">\${esc(n.id)}\${n.dependsOn.length ? " · after " + n.dependsOn.join(", ") : ""}\${idx === 0 && NR_PREFILL ? ' <span class="badge accent">instruction from playground</span>' : ""}</label>
+    <input data-ntitle="\${n.id}" value="\${esc(n.title)}" style="width:100%" title="\${esc(nrInstructionFor(n, idx))}"></div>
   <div><label class="f">Agent</label>\${nrAgentSel(n.id)}</div>
 </div>\`).join("");
 // the exact JSON the form POSTs — also what the advanced textarea pre-fills
@@ -336,10 +423,10 @@ function nrGraph() {
     run: ($("#nr-title")?.value ?? "").trim() || "untitled run",
     // escalations land in the planner's own inbox unless the JSON names someone else
     escalationApproverUserId: ME.userId,
-    nodes: t.nodes.map((n) => ({
+    nodes: t.nodes.map((n, idx) => ({
       id: n.id,
       title: ($('[data-ntitle="' + n.id + '"]')?.value ?? n.title).trim() || n.title,
-      instruction: n.instruction,
+      instruction: nrInstructionFor(n, idx),
       ownerAgentId: $('[data-nagent="' + n.id + '"]')?.value ?? nrDefaultAgent(),
       mode: "execute",
       dependsOn: n.dependsOn,
@@ -363,11 +450,17 @@ async function runsPage() {
   const projectOpts = ['<option value="">no project</option>']
     .concat(PROJECTS.map((p) => \`<option value="\${p.id}">\${esc(p.name)}</option>\`)).join("");
   const tplOpts = RUN_TEMPLATES.map((t) => \`<option value="\${t.id}">\${esc(t.label)}</option>\`).join("");
+  const prefillNote = NR_PREFILL
+    ? \`<div class="row" style="margin-bottom:8px"><span class="badge accent">from playground</span>
+       <span class="dim" style="font-size:12.5px">the first node's instruction is your playground prompt — hover its title (or open Advanced) to read it</span>
+       <button class="ghost small" id="nr-clearpre">clear</button></div>\`
+    : "";
   const newRun = AGENTS.length === 0
     ? '<div class="empty">No agents are granted to your account — ask an admin to grant you one before planning a run.</div>'
     : \`
+    \${prefillNote}
     <div class="row">
-      <div class="grow"><label class="f">Title</label><input id="nr-title" placeholder="What is this run for?" style="width:100%"></div>
+      <div class="grow"><label class="f">Title</label><input id="nr-title" placeholder="What is this run for?" value="\${esc(NR_PREFILL ? NR_PREFILL.split("\\n")[0].slice(0, 120) : "")}" style="width:100%"></div>
       <div><label class="f">Bill to</label><select id="nr-project">\${projectOpts}</select></div>
       <div><label class="f">Template</label><select id="nr-template">\${tplOpts}</select></div>
     </div>
@@ -391,6 +484,7 @@ async function runsPage() {
 }
 
 function wireRuns() {
+  $("#nr-clearpre")?.addEventListener("click", () => { NR_PREFILL = null; render(); });
   $("#nr-template")?.addEventListener("change", () => {
     const t = RUN_TEMPLATES.find((x) => x.id === $("#nr-template").value) ?? RUN_TEMPLATES[0];
     $("#nr-nodes").innerHTML = nrNodeRowsHtml(t);
@@ -414,9 +508,157 @@ function wireRuns() {
     const projectId = $("#nr-project").value || undefined;
     try {
       const r = await post("/v1/runs", { graph, ...(projectId ? { projectId } : {}) });
+      NR_PREFILL = null; // consumed by this run
       toast(r.budgetApprovalPending ? "Run planned — over your budget cap, approval requested" : "Run planned");
       location.hash = "#/runs/" + r.id;
     } catch (e) { err.textContent = e.message; } // zod issues arrive via errMessage
+  });
+}
+
+// what an auto-advance pass actually stopped on — rendered, never discarded
+const STOP_LABELS = {
+  completed: "run completed",
+  awaiting_review: "stopped: review required",
+  blocked: "stopped: a node is blocked",
+  budget_exceeded: "stopped: budget cap reached (estimated)",
+  budget_exceeded_measured: "stopped: budget cap reached",
+  max_nodes_reached: "stopped: pass node-cap reached",
+  iteration_cap: "stopped: iteration cap reached",
+  in_progress_elsewhere: "stopped: a node is still in progress",
+  no_ready_nodes: "stopped: nothing is ready to dispatch",
+  terminal: "stopped: run is terminal",
+};
+
+// Per-node execution windows from the timestamped event history: first
+// node_started opens the window, the last node_submitted/node_failed closes
+// it; a fresh start (retry) re-opens it. Open windows read as
+// running-until-now. Overlapping windows = nodes that ran CONCURRENTLY.
+function nodeTimings(events) {
+  const w = {};
+  for (const e of events) {
+    const ev = e.event; if (!ev || !ev.nodeId) continue;
+    const t = new Date(e.at).getTime();
+    const win = w[ev.nodeId] ?? (w[ev.nodeId] = { start: null, end: null });
+    if (ev.kind === "node_started") { if (win.start === null) win.start = t; win.end = null; }
+    if (ev.kind === "node_submitted" || ev.kind === "node_failed") win.end = t;
+  }
+  return w;
+}
+
+// The dependency graph as a real graph: columns by dependency depth, curved
+// edges from each dependency, nodes coloured exactly like the .node-dot
+// status classes. Inline SVG, no library.
+function dagSvg(graph, state) {
+  const nodes = graph.nodes;
+  const depth = {};
+  const depthOf = (id) => {
+    if (id in depth) return depth[id];
+    depth[id] = 0; // cycle guard (the kernel already rejects cycles)
+    const n = nodes.find((x) => x.id === id);
+    depth[id] = (n?.dependsOn ?? []).reduce((m, dep) => Math.max(m, depthOf(dep) + 1), 0);
+    return depth[id];
+  };
+  nodes.forEach((n) => depthOf(n.id));
+  const rows = {}, pos = {};
+  for (const n of nodes) {
+    const c = depth[n.id];
+    const r = rows[c] ?? 0;
+    rows[c] = r + 1;
+    pos[n.id] = { x: 70 + c * 170, y: 34 + r * 56 };
+  }
+  const maxC = Math.max(...nodes.map((n) => depth[n.id]), 0);
+  const maxR = Math.max(...Object.values(rows), 1);
+  const wpx = 70 + maxC * 170 + 110;
+  const hpx = 34 + (maxR - 1) * 56 + 40;
+  const color = { not_started: "var(--text-faint)", in_progress: "var(--info)", blocked: "var(--bad)", in_review: "var(--warn)", done: "var(--ok)" };
+  const edges = nodes.flatMap((n) => (n.dependsOn ?? []).map((dep) => {
+    const a = pos[dep], b = pos[n.id];
+    if (!a || !b) return "";
+    const mx = (a.x + b.x) / 2;
+    return '<path d="M' + (a.x + 10) + " " + a.y + " C " + mx + " " + a.y + ", " + mx + " " + b.y + ", " + (b.x - 10) + " " + b.y + '" fill="none" stroke="var(--border-strong)" stroke-width="1.5"/>';
+  }));
+  const dots = nodes.map((n) => {
+    const p = pos[n.id];
+    const st = state.nodeStatuses[n.id];
+    const short = n.id.length > 16 ? n.id.slice(0, 15) + "…" : n.id;
+    return (st === "in_progress" ? '<circle cx="' + p.x + '" cy="' + p.y + '" r="12" fill="var(--info)" opacity="0.18"/>' : "")
+      + '<circle cx="' + p.x + '" cy="' + p.y + '" r="7" fill="' + (color[st] ?? "var(--text-faint)") + '"/>'
+      + '<text x="' + p.x + '" y="' + (p.y + 23) + '" text-anchor="middle" fill="var(--text-dim)" font-size="10.5" font-family="var(--mono)">' + esc(short) + "</text>";
+  });
+  return '<div class="chart"><svg viewBox="0 0 ' + wpx + " " + hpx + '" style="max-width:' + wpx + 'px" xmlns="http://www.w3.org/2000/svg">' + edges.join("") + dots.join("") + "</svg></div>";
+}
+
+// ---- pillar 8 strip: linked work items + decision records ---------------
+// Shared by run detail and workflow detail. Hidden entirely for viewers the
+// API turns away (e.g. an approver reading someone else's run).
+async function pmStripHtml(kind, id) {
+  const isRun = kind === "run";
+  const [linksRes, decRes] = await Promise.all([
+    get("/v1/pm/links?" + (isRun ? "runId=" : "instanceId=") + id).catch(() => null),
+    get("/v1/decisions?objectType=" + (isRun ? "run" : "workflow_instance") + "&objectId=" + id).catch(() => null),
+  ]);
+  const links = (linksRes && linksRes.links) || [];
+  const decisions = (decRes && decRes.decisions) || [];
+  const linkRow = (l) => \`<div class="node-row">
+    <div class="grow">
+      <div><span class="mono">\${esc(l.externalId)}</span>
+        \${l.nodeId ? ' <span class="faint mono" style="font-size:11px">node ' + esc(l.nodeId) + "</span>" : ' <span class="faint" style="font-size:11px">' + (isRun ? "run item" : "workflow item") + "</span>"}
+        \${l.drift ? ' <span class="badge bad" title="the PM tool reports a different state than this node&#39;s status maps to — surfaced, never auto-fixed">drift</span>' : ""}
+        \${l.orphanedAt ? ' <span class="badge warn">deleted in PM tool</span>' : ""}</div>
+      <div class="dim" style="font-size:12px">\${esc(l.connectionName ?? "")} · reported state \${esc(l.inboundState ?? "—")} · synced \${l.lastSyncedAt ? ago(l.lastSyncedAt) : "never"}</div>
+      \${l.externalUrl ? '<div class="faint mono" style="font-size:11px">' + esc(l.externalUrl) + "</div>" : ""}
+    </div>
+  </div>\`;
+  const linksCard = links.length
+    ? \`<h2>PM work items</h2><div class="card">
+        <div class="row" style="margin-bottom:4px">
+          <span class="dim" style="font-size:12.5px">The PM tool owns priority and description; RegulAIt mirrors status out and shows inbound drift instead of overwriting anything.</span>
+          <span class="grow"></span>
+          <button class="small" id="pm-sync-now" data-conn="\${esc(links[0].connectionName ?? "")}">Sync now</button>
+        </div>
+        \${links.map(linkRow).join("")}
+      </div>\`
+    : "";
+  const decRow = (d) => \`<div class="node-row">
+    <div class="grow">
+      <div>\${esc(d.decision)}</div>
+      <div class="dim" style="font-size:12px">by \${esc(d.decisionMakerName ?? "unknown")} · \${ago(d.createdAt)}\${d.rationale ? " · “" + esc(d.rationale) + "”" : ""}</div>
+    </div>
+    \${d.pmMirror ? '<span class="badge info" title="' + esc(d.pmMirror.externalUrl ?? "") + '">mirrored · ' + esc(d.pmMirror.externalId) + "</span>" : '<span class="badge">recorded</span>'}
+  </div>\`;
+  const decCard = decRes
+    ? \`<h2>Decisions</h2><div class="card">
+        \${decisions.map(decRow).join("") || '<div class="faint" style="font-size:12.5px">no decisions recorded yet</div>'}
+        <div class="row" style="margin-top:10px">
+          <input id="dec-new" class="grow" placeholder="Record a decision on this \${isRun ? "run" : "workflow"}…">
+          <button class="small" id="dec-add">Record</button>
+        </div>
+        <div class="faint" style="font-size:11.5px;margin-top:4px">Recorded locally always; mirrored to the linked work item when one exists — as a Decision-typed item or a tagged comment, never silently dropped.</div>
+      </div>\`
+    : "";
+  return linksCard + decCard;
+}
+
+function wirePmStrip(kind, id) {
+  const isRun = kind === "run";
+  $("#pm-sync-now")?.addEventListener("click", async () => {
+    const conn = $("#pm-sync-now").dataset.conn;
+    if (!conn) { toast("✗ the linked connection no longer exists"); return; }
+    try {
+      await post(isRun ? "/v1/runs/" + id + "/pm-sync" : "/v1/workflows/instances/" + id + "/pm-sync", { connectionName: conn });
+      toast("Synced — unlinked nodes linked, timestamps refreshed"); render();
+    } catch (e) { toast("✗ " + e.message); }
+  });
+  $("#dec-add")?.addEventListener("click", async () => {
+    const text = ($("#dec-new")?.value ?? "").trim();
+    if (!text) return;
+    try {
+      const r = await post("/v1/decisions", { objectType: isRun ? "run" : "workflow_instance", objectId: id, decision: text });
+      toast(r.pmMirror
+        ? (r.pmMirror.ok ? "Decision recorded — mirrored to the PM tool as " + r.pmMirror.action : "Decision recorded — PM mirror failed: " + r.pmMirror.error)
+        : "Decision recorded");
+      render();
+    } catch (e) { toast("✗ " + e.message); }
   });
 }
 
@@ -425,59 +667,97 @@ async function runDetailPage(id) {
   const run = v.run, graph = run.graph, state = run.state, budget = run.budget ?? {};
   const outputs = {};
   for (const e of v.events) if (e.event?.kind === "node_dispatched") outputs[e.event.nodeId] = e.event;
+  const now = Date.now();
+  const timings = nodeTimings(v.events);
+  const terminal = run.status === "completed" || run.status === "aborted";
+  const overlapsAny = (nid) => {
+    const a = timings[nid]; if (!a || a.start === null) return false;
+    return Object.entries(timings).some(([oid, b]) =>
+      oid !== nid && b.start !== null && a.start < (b.end ?? now) && b.start < (a.end ?? now));
+  };
+  let anyParallel = false;
+  const reagentSel = (nid) => '<select data-reagent="' + nid + '">' + AGENTS.map((a) =>
+    '<option value="' + a.agentId + '"' + (a.agentId === state.owners[nid] ? " selected" : "") + '>' + esc(a.name) + " · " + esc(a.provider) + "</option>").join("") + "</select>";
   const nodes = graph.nodes.map((n) => {
     const st = state.nodeStatuses[n.id];
     const out = outputs[n.id];
     // instruction edits only matter for a node that can still dispatch
     const editable = st === "not_started" || st === "in_progress" || st === "blocked";
     const instr = n.instruction ?? n.title;
+    const w = timings[n.id];
+    const elapsed = w && w.start !== null ? fmtDur((w.end ?? now) - w.start) : null;
+    const parallel = overlapsAny(n.id);
+    if (parallel) anyParallel = true;
     const editor = editable ? \`<div data-nedbox="\${n.id}" style="display:none;margin-top:6px">
         <textarea data-ninput="\${n.id}" data-def="\${esc(instr)}" rows="4" style="width:100%" spellcheck="false">\${esc(instr)}</textarea>
         <div class="faint" style="font-size:11.5px;margin-top:2px">Sent to this node's worker as its instructions on the next dispatch\${st === "in_progress" ? "" : " (auto-advance picks edits up)"}.</div>
         \${st === "in_progress" ? '<button class="small" data-dispatch="' + n.id + '" style="margin-top:6px">Dispatch with these instructions</button>' : ""}
       </div>\` : "";
+    // §3's full verb set for a blocked node — retry as-is, reassign to
+    // another entitled agent, or escalate to the run's named approver
+    const blockedCtl = st === "blocked" ? \`<div class="row" style="margin-top:6px">
+        <button class="small" data-retry="\${n.id}">Retry</button>
+        \${reagentSel(n.id)}
+        <button class="small" data-reassign="\${n.id}" title="re-checked against your entitlements — a run can never drift to an agent you couldn't use yourself">Reassign</button>
+        <button class="small" data-escalate="\${n.id}" title="hand this failure to the run's escalation approver — it lands in their inbox">Escalate</button>
+      </div>\` : "";
     return \`<div class="node-row">
       <span class="node-dot \${st}"></span>
       <div class="grow">
         <div>\${esc(n.title)} <span class="faint mono" style="font-size:11px">\${esc(n.id)}</span></div>
-        <div class="dim" style="font-size:12px">\${esc(AGENT_NAMES[state.owners[n.id]] ?? "agent")}\${n.dependsOn?.length ? " · after " + n.dependsOn.join(", ") : ""}</div>
+        <div class="dim" style="font-size:12px">\${esc(AGENT_NAMES[state.owners[n.id]] ?? "agent")}\${n.dependsOn?.length ? " · after " + n.dependsOn.join(", ") : ""}\${elapsed ? ' · <span class="num">' + elapsed + "</span>" : ""}\${parallel ? ' <span class="badge info" title="its execution window overlapped another node&#39;s — they ran concurrently">∥ parallel</span>' : ""}</div>
         \${out ? \`<details style="margin-top:4px"><summary class="faint" style="cursor:pointer;font-size:11.5px">output · \${fmtUsd(out.costUsd)} · \${esc(out.model)}</summary><pre style="margin-top:6px">\${esc(out.outputText)}</pre></details>\` : ""}
         \${state.lastError?.[n.id] ? '<div class="err-line">' + esc(state.lastError[n.id]) + "</div>" : ""}
+        \${blockedCtl}
         \${editor}
       </div>
       \${editable ? '<button class="ghost small" data-nedit="' + n.id + '" title="adjust the instructions sent to this node&#39;s worker">✎</button>' : ""}
       <div>\${statusBadge(st)}</div>
       \${st === "in_review" ? '<button class="small" data-accept="' + n.id + '">Accept</button>' : ""}
-      \${st === "blocked" ? '<button class="small" data-retry="' + n.id + '">Retry</button>' : ""}
     </div>\`;
   }).join("");
   const cap = budget.capUsd;
   const spent = budget.measuredSpentUsd ?? 0;
   const pct = cap ? Math.min(100, (spent / cap) * 100) : 0;
+  // run elapsed: from the start event to the last event (terminal) or now
+  const runElapsed = v.events.length
+    ? fmtDur((terminal ? new Date(v.events[v.events.length - 1].at).getTime() : now) - new Date(v.events[0].at).getTime())
+    : null;
   return \`
   <button class="ghost small" data-go="runs">← All runs</button>
   <h1 style="margin-top:8px">\${esc(run.name)}</h1>
-  <p class="sub">\${statusBadge(run.status)} &nbsp; created \${ago(run.createdAt)}\${run.projectId ? " · billed to " + esc((PROJECTS.find((p)=>p.id===run.projectId)||{}).name ?? "a project") : ""}</p>
+  <p class="sub">\${statusBadge(run.status)} &nbsp; created \${ago(run.createdAt)}\${runElapsed ? ' · <span class="num">' + runElapsed + "</span> elapsed" : ""}\${run.projectId ? " · billed to " + esc((PROJECTS.find((p)=>p.id===run.projectId)||{}).name ?? "a project") : ""}</p>
   <div class="row" style="margin-bottom:12px">
     \${run.status === "planned" ? '<button class="primary" id="run-start">Start run</button>' : ""}
-    \${run.status === "running" || run.status === "planned" ? '<button id="run-auto">Auto-advance</button><label class="dim" style="font-size:12.5px"><input type="checkbox" id="run-accept" checked style="vertical-align:-2px"> auto-accept reviews</label>' : ""}
+    \${run.status === "running" || run.status === "planned" ? '<button id="run-auto">Auto-advance</button><label class="dim" style="font-size:12.5px"><input type="checkbox" id="run-accept" checked style="vertical-align:-2px"> auto-accept reviews</label><button class="danger small" id="run-abort" title="stop this run for good — unfinished nodes stay where they are">Abort run</button>' : ""}
   </div>
+  <div class="card">\${dagSvg(graph, state)}
+    \${anyParallel ? '<div class="faint" style="font-size:11.5px;margin-top:4px">∥-marked nodes ran concurrently — independent branches dispatch as one wave, not one at a time.</div>' : ""}
+  </div>
+  <h2>Nodes</h2>
   <div class="card">\${nodes}</div>
   \${cap != null ? \`<h2>Budget</h2><div class="card">
     <div class="row"><span class="num">\${fmtUsd(spent)}</span><span class="dim">of \${fmtUsd(cap)} measured</span>
     \${budget.overageApproved ? '<span class="badge warn">overage approved</span>' : ""}</div>
     <div class="bar" style="margin-top:8px"><i class="\${spent > cap ? "over" : ""}" style="width:\${pct}%"></i></div>
   </div>\` : ""}
-  \${v.pendingApprovals?.length ? '<h2>Waiting on approvals</h2><div class="card">' + v.pendingApprovals.map((a) => '<div class="row"><span class="mono">' + esc(a.stageId) + '</span><span class="dim" style="font-size:12px">awaiting ' + esc(a.approverName ?? "the named approver") + "</span>" + statusBadge(a.status) + "</div>").join("") + "</div>" : ""}\`;
+  \${v.pendingApprovals?.length ? '<h2>Waiting on approvals</h2><div class="card">' + v.pendingApprovals.map((a) => '<div class="row"><span class="mono">' + esc(a.stageId) + '</span><span class="dim" style="font-size:12px">awaiting ' + esc(a.approverName ?? "the named approver") + "</span>" + statusBadge(a.status) + "</div>").join("") + "</div>" : ""}
+  \${await pmStripHtml("run", id)}\`;
 }
 
 async function wireRunDetail(id) {
+  // fn may return a string to override the fixed label — the auto-advance
+  // toast reports what the pass actually stopped on, not a blanket success
   const act = async (fn, label) => {
-    try { await fn(); toast(label); render(); }
+    try { const out = await fn(); toast(typeof out === "string" ? out : label); render(); }
     catch (e) { toast("✗ " + e.message); }
   };
   $("#run-start")?.addEventListener("click", () =>
     act(() => post("/v1/runs/" + id + "/events", { kind: "start" }), "Run started"));
+  $("#run-abort")?.addEventListener("click", () => {
+    if (!confirm("Abort this run? It cannot resume — unfinished nodes stay where they are, and the abort is audited.")) return;
+    act(() => post("/v1/runs/" + id + "/events", { kind: "abort" }), "Run aborted");
+  });
   $("#run-auto")?.addEventListener("click", () =>
     act(async () => {
       // any edited per-node instruction rides along as that node's input
@@ -490,7 +770,9 @@ async function wireRunDetail(id) {
         acceptReviews: $("#run-accept")?.checked ?? true,
         ...(Object.keys(inputs).length ? { inputs } : {}),
       });
-      return r;
+      // honest completion: say WHY the pass stopped, not just that it ran
+      const label = STOP_LABELS[r.stoppedReason] ?? ("stopped: " + String(r.stoppedReason).replaceAll("_", " "));
+      return "Auto-advance took " + r.steps.length + " step" + (r.steps.length === 1 ? "" : "s") + " — " + label;
     }, "Auto-advance pass complete"));
   document.querySelectorAll("[data-nedit]").forEach((b) =>
     b.addEventListener("click", () => {
@@ -515,11 +797,26 @@ async function wireRunDetail(id) {
   document.querySelectorAll("[data-retry]").forEach((b) =>
     b.addEventListener("click", () =>
       act(() => post("/v1/runs/" + id + "/events", { kind: "retry_node", nodeId: b.dataset.retry }), "Node re-opened")));
+  // §3's remaining verbs, first-class in the kernel but so far API-only:
+  // reassign re-checks the new owner against YOUR entitlements server-side;
+  // escalate parks the failure in the named approver's inbox.
+  document.querySelectorAll("[data-reassign]").forEach((b) =>
+    b.addEventListener("click", () =>
+      act(() => post("/v1/runs/" + id + "/events", {
+        kind: "reassign_node",
+        nodeId: b.dataset.reassign,
+        ownerAgentId: $('[data-reagent="' + b.dataset.reassign + '"]')?.value,
+      }), "Node reassigned and re-opened")));
+  document.querySelectorAll("[data-escalate]").forEach((b) =>
+    b.addEventListener("click", () =>
+      act(() => post("/v1/runs/" + id + "/events", { kind: "escalate_node", nodeId: b.dataset.escalate }),
+        "Escalated — waiting in the approver's inbox")));
+  wirePmStrip("run", id);
 }
 
 // -------------------------------------------------------------- workflows --
 async function workflowsPage() {
-  const { instances } = await get("/v1/workflows/instances");
+  const { instances, changeTypes } = await get("/v1/workflows/instances");
   const rows = instances.map((i) => \`<tr class="click" data-go="workflows/\${i.id}">
     <td>\${esc(i.change?.description ?? "")}</td>
     <td>\${statusBadge(i.status)}</td>
@@ -527,15 +824,20 @@ async function workflowsPage() {
     <td class="dim">\${ago(i.createdAt)}</td></tr>\`).join("");
   const projectOpts = ['<option value="">no project</option>']
     .concat(PROJECTS.map((p) => \`<option value="\${p.id}">\${esc(p.name)}</option>\`)).join("");
+  // Only changeTypes an assignment rule actually routes are offered — a
+  // free-text type was a guaranteed no_workflow_matches_change dead end.
+  const typeField = (changeTypes ?? []).length
+    ? \`<div><label class="f">Type</label><select id="wf-type">\${(changeTypes ?? []).map((t) => \`<option value="\${esc(t)}">\${esc(t)}</option>\`).join("")}</select></div>\`
+    : '<div><label class="f">Type</label><div class="dim" style="font-size:12.5px;padding-top:8px">no routable change types — an admin must add an assignment rule</div></div>';
   return \`
   <h1>Workflows</h1>
-  <p class="sub">Governed change requests — intake to sign-off to build.</p>
+  <p class="sub">Governed change requests — intake to sign-off to build, checks, PR and merge.</p>
   <div class="card">
     <div class="row">
       <div class="grow"><label class="f">Describe the change</label><input id="wf-desc" placeholder="Add rate limiting to the public API" style="width:100%"></div>
-      <div><label class="f">Type</label><input id="wf-type" value="feature" size="9"></div>
+      \${typeField}
       <div><label class="f">Bill to</label><select id="wf-project">\${projectOpts}</select></div>
-      <div style="align-self:flex-end"><button class="primary" id="wf-new">Start workflow</button></div>
+      <div style="align-self:flex-end"><button class="primary" id="wf-new"\${(changeTypes ?? []).length ? "" : " disabled"}>Start workflow</button></div>
     </div>
     <div class="err-line" id="wf-err" style="margin-top:6px"></div>
   </div>
@@ -578,6 +880,29 @@ async function workflowDetailPage(id) {
     \`<details style="margin-bottom:8px"><summary class="dim" style="cursor:pointer">\${esc(a.output)} v\${a.version}</summary><pre style="margin-top:6px">\${esc(a.content)}</pre>
       \${inst.projectId ? \`<div class="row" style="margin-top:6px"><button class="small" data-promote="\${a.id}" data-pid="\${inst.projectId}">Promote to shared context</button><span class="faint" style="font-size:11.5px">copies this version into \${esc(projName)}’s shared context with provenance — initiator only</span></div>\` : ""}
     </details>\`).join("");
+  // The check executor records what it ran into context under "checks:<stage>"
+  // — surface every named check with its pass result, not just "advanced".
+  const checkCards = def.stages
+    .filter((s) => s.type === "automated_check" && inst.context?.["checks:" + s.id])
+    .map((s) => {
+      const results = inst.context["checks:" + s.id];
+      return \`<h2>Checks · \${esc(s.id)}</h2><div class="card">\`
+        + results.map((c) => \`<div class="node-row">
+            <div class="grow"><span class="mono">\${esc(c.check)}</span>
+              <span class="dim" style="font-size:12px"> · \${esc(c.detail ?? "")}</span></div>
+            \${c.status === "passed" ? '<span class="badge ok">passed</span>' : statusBadge(c.status)}
+          </div>\`).join("")
+        + "</div>";
+    }).join("");
+  // Delivery: everything the git stages produced — branch, PR, merge sha.
+  const ctx2 = inst.context ?? {};
+  const delivery = ctx2.branch || ctx2.prUrl || ctx2.mergeSha
+    ? '<h2>Delivery</h2><div class="card">'
+      + (ctx2.branch ? '<div class="row"><span class="faint" style="font-size:11px;text-transform:uppercase;letter-spacing:.06em">branch</span><span class="mono">' + esc(ctx2.branch) + "</span></div>" : "")
+      + (ctx2.prUrl ? '<div class="row" style="margin-top:6px"><span class="faint" style="font-size:11px;text-transform:uppercase;letter-spacing:.06em">pull request</span><a href="' + esc(ctx2.prUrl) + '" class="mono">' + esc(ctx2.prUrl) + "</a>" + (ctx2.prId ? ' <span class="badge">#' + esc(ctx2.prId) + "</span>" : "") + "</div>" : "")
+      + (ctx2.mergeSha ? '<div class="row" style="margin-top:6px"><span class="faint" style="font-size:11px;text-transform:uppercase;letter-spacing:.06em">merged</span><span class="mono">' + esc(ctx2.mergeSha) + '</span><span class="badge ok">merged</span></div>' : "")
+      + "</div>"
+    : "";
   return \`
   <button class="ghost small" data-go="workflows">← All workflows</button>
   <h1 style="margin-top:8px">\${esc(inst.change?.description ?? "")}</h1>
@@ -585,7 +910,9 @@ async function workflowDetailPage(id) {
   <div class="card"><div class="stage-rail">\${rail}</div></div>
   \${action}
   \${artifacts ? "<h2>Artifacts</h2><div class=card>" + artifacts + "</div>" : ""}
-  \${inst.context?.prUrl ? '<h2>Delivery</h2><div class="card"><a href="' + esc(inst.context.prUrl) + '">' + esc(inst.context.prUrl) + "</a></div>" : ""}\`;
+  \${checkCards}
+  \${delivery}
+  \${await pmStripHtml("workflow_instance", id)}\`;
 }
 
 function wireWorkflows() {
@@ -597,7 +924,7 @@ function wireWorkflows() {
         change: {
           description: $("#wf-desc").value || "untitled change",
           paths: ["src/"],
-          changeType: $("#wf-type").value || "feature",
+          changeType: $("#wf-type")?.value || "feature",
           environment: "staging",
         },
       });
@@ -624,6 +951,7 @@ function wireWorkflowDetail(id, inst) {
   });
   document.querySelectorAll("[data-promote]").forEach((b) =>
     b.addEventListener("click", () => promoteArtifact(b.dataset.pid, b.dataset.promote)));
+  wirePmStrip("workflow_instance", id);
 }
 
 // ------------------------------------------------------------------ inbox --
@@ -1027,6 +1355,83 @@ function wireProjects() {
     b.addEventListener("click", () => promoteArtifact(b.dataset.pid, b.dataset.promote)));
 }
 
+// ------------------------------------------------------------------ spend --
+// Pillars 5 + 6 where the work happens: the SAME self-scoped ledgers the
+// admin dashboard rolls up — measured actuals from usage_events, estimated
+// savings from cost_events — plus a drill-down into any project the user is
+// a member of (the /costs endpoint admits members, not only admins).
+async function spendPage() {
+  const [usage, costs, dir] = await Promise.all([
+    get("/v1/usage-events?limit=100"),
+    get("/v1/cost-events?limit=200"),
+    get("/v1/users/directory").catch(() => ({ users: [] })),
+  ]);
+  DIRECTORY = dir.users ?? [];
+  const t = usage.totals ?? {};
+  const events = usage.events ?? [];
+  const estSaved = (costs.totals ?? []).reduce((s, x) => s + (Number(x.estimatedCostSavedUsd) || 0), 0);
+  const byAgent = {};
+  for (const e of events) {
+    const cur = byAgent[e.agentId] ?? (byAgent[e.agentId] = { label: AGENT_NAMES[e.agentId] ?? e.model, costUsd: 0, events: 0 });
+    cur.costUsd += e.costUsd ?? 0; cur.events++;
+  }
+  const agentItems = Object.values(byAgent).sort((a, b) => b.costUsd - a.costUsd);
+  const projName = (pid) => pid ? ((PROJECTS.find((p) => p.id === pid) || {}).name ?? pid.slice(0, 8) + "…") : "—";
+  const rows = events.slice(0, 30).map((e) => \`<tr>
+    <td class="dim">\${ago(e.at)}</td>
+    <td>\${esc(AGENT_NAMES[e.agentId] ?? "agent")}</td>
+    <td class="mono" style="font-size:11.5px">\${esc(e.model)}\${e.refusal ? ' <span class="badge bad">refused</span>' : ""}</td>
+    <td class="num">\${e.inputTokens}→\${e.outputTokens}</td>
+    <td class="num">\${fmtUsd(e.costUsd)}</td>
+    <td class="num">\${e.measuredCostSavedUsd ? fmtUsd(e.measuredCostSavedUsd) : "—"}</td>
+    <td class="dim">\${esc(projName(e.projectId))}</td></tr>\`).join("");
+  const drill = PROJECTS.length
+    ? \`<h2>Per-project drill-down — projects you are a member of</h2><div class="card">
+        <div class="row">\${PROJECTS.map((p) => \`<button class="small" data-spendproj="\${p.id}">\${esc(p.name)}</button>\`).join("")}</div>
+        <div id="spend-proj"></div>
+      </div>\`
+    : "";
+  return \`
+  <h1>Spend & savings</h1>
+  <p class="sub">Your own measured spend, and what the optimization layer saved on your behalf — the same ledgers the admin dashboard rolls up, scoped to you.</p>
+  <div class="grid2">
+    <div class="card stat"><div class="v">\${fmtUsd(t.costUsd)}</div><div class="l">measured spend · \${t.events ?? 0} calls</div></div>
+    <div class="card stat"><div class="v">\${t.inputTokens ?? 0} → \${t.outputTokens ?? 0}</div><div class="l">tokens in → out</div></div>
+    <div class="card stat"><div class="v">\${fmtUsd(t.measuredCostSavedUsd)}</div><div class="l">measured savings — routing actuals</div></div>
+    <div class="card stat"><div class="v">\${fmtUsd(estSaved)}</div><div class="l">estimated savings — all techniques</div></div>
+  </div>
+  <h2>Savings by technique — estimated, full history</h2><div class="card">\${barChart(costs.totals ?? [], "estimatedCostSavedUsd", (i) => i.technique)}</div>
+  <h2>Spend by agent — last \${events.length} invocation\${events.length === 1 ? "" : "s"}</h2><div class="card">\${barChart(agentItems, "costUsd", (i) => i.label)}</div>
+  <h2>Recent invocations</h2>
+  <div class="card" style="padding:0 18px">
+    <table><tr><th>When</th><th>Agent</th><th>Model served</th><th>Tokens</th><th>Cost</th><th>Saved</th><th>Project</th></tr>
+    \${rows || '<tr><td colspan="7"><div class="empty">No metered invocations yet — say something in the Playground.</div></td></tr>'}</table>
+  </div>
+  \${drill}\`;
+}
+
+function wireSpend() {
+  document.querySelectorAll("[data-spendproj]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const out = $("#spend-proj");
+      out.innerHTML = '<div class="empty">loading…</div>';
+      try {
+        const c = await get("/v1/projects/" + b.dataset.spendproj + "/costs");
+        const m = c.measured ?? {};
+        const userName = (uid) => (DIRECTORY.find((u) => u.id === uid) || {}).name ?? uid;
+        out.innerHTML =
+          '<div class="grid2" style="margin-top:12px">'
+          + '<div class="card stat"><div class="v">' + fmtUsd(m.costUsd) + '</div><div class="l">project measured spend · ' + (m.events ?? 0) + " calls</div></div>"
+          + '<div class="card stat"><div class="v">' + fmtUsd(c.forecast?.projectedEomUsd) + '</div><div class="l">projected month-end · ' + esc(c.forecast?.basis ?? "") + "</div></div>"
+          + "</div>"
+          + '<h2>Budget vs actual</h2><div class="card">' + budgetGauge(c.budget.spentUsd, c.budget.budgetUsd, c.budget.overageApproved) + "</div>"
+          + '<h2>Showback by member</h2><div class="card">' + barChart(c.byUser, "costUsd", (i) => userName(i.userId)) + "</div>"
+          + '<h2>By agent / model</h2><div class="card">' + barChart(c.byAgent, "costUsd", (i) => AGENT_NAMES[i.agentId] ?? i.model) + "</div>"
+          + '<h2>Estimated savings by technique</h2><div class="card">' + barChart(c.estimatedSavings, "estimatedCostSavedUsd", (i) => i.technique) + "</div>";
+      } catch (e) { out.innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; }
+    }));
+}
+
 // --------------------------------------------------------------- settings --
 // BYO keys, self-service. The write is the same POST an admin would make on
 // your behalf; the read never returns a key, only which providers you have
@@ -1125,6 +1530,7 @@ async function render() {
     else if (page === "workflows") content = await workflowsPage();
     else if (page === "inbox") content = await inboxPage();
     else if (page === "projects") content = await projectsPage();
+    else if (page === "spend") content = await spendPage();
     else if (page === "settings") content = await settingsPage();
     else content = playgroundPage();
   } catch (e) {
@@ -1140,7 +1546,9 @@ async function render() {
 
   if (page === "playground") {
     drawChat();
+    pgStreamUi(Boolean(PG_ABORT)); // a stream may still be open across renders
     $("#pg-send")?.addEventListener("click", sendPrompt);
+    $("#pg-stop")?.addEventListener("click", () => { PG_ABORT?.abort(); });
     $("#pg-agent")?.addEventListener("change", (e) => {
       const a = AGENTS.find((x) => x.agentId === e.target.value);
       if ($("#pg-key")) $("#pg-key").innerHTML = keyHint(a);
@@ -1149,6 +1557,7 @@ async function render() {
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendPrompt(); }
     });
   }
+  if (page === "spend") wireSpend();
   if (page === "settings") wireSettings();
   if (page === "runs" && !id) wireRuns();
   if (page === "runs" && id) wireRunDetail(id);

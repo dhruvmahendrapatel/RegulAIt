@@ -5,6 +5,7 @@ import {
   decisions,
   desc,
   eq,
+  inArray,
   isNull,
   orchestrationRuns,
   pmConnections,
@@ -659,57 +660,123 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
       .from(decisions)
       .where(and(eq(decisions.objectType, q.objectType), eq(decisions.objectId, q.objectId)))
       .orderBy(desc(decisions.createdAt));
-    return { decisions: rows };
+    // Display enrichment, purely additive (same discipline as approvals):
+    // the maker's name, and the PM mirror when the decision was materialized
+    // as a linked Decision-typed work item. A comment-mirror leaves no link
+    // row — those render as plain recorded decisions.
+    const makerIds = [...new Set(rows.map((r) => r.decisionMakerUserId))];
+    const [makerRows, mirrorLinks] = await Promise.all([
+      makerIds.length
+        ? db
+            .select({ id: users.id, displayName: users.displayName, email: users.email })
+            .from(users)
+            .where(inArray(users.id, makerIds))
+        : [],
+      rows.length
+        ? db
+            .select()
+            .from(pmLinks)
+            .where(
+              and(
+                eq(pmLinks.objectType, "decision"),
+                inArray(
+                  pmLinks.objectId,
+                  rows.map((r) => r.id),
+                ),
+              ),
+            )
+        : [],
+    ]);
+    const nameOf = new Map(makerRows.map((u) => [u.id, u.displayName || u.email]));
+    const mirrorOf = new Map(mirrorLinks.map((l) => [l.objectId, l]));
+    return {
+      decisions: rows.map((r) => {
+        const mirror = mirrorOf.get(r.id);
+        return {
+          ...r,
+          decisionMakerName: nameOf.get(r.decisionMakerUserId) ?? null,
+          pmMirror: mirror
+            ? { externalId: mirror.externalId, externalUrl: mirror.externalUrl }
+            : null,
+        };
+      }),
+    };
   });
 
   // §3 read-through: RegulAIt stores only the linkage. live=true resolves the
   // PM-authoritative fields (priority/description/…) from the tool right now —
-  // there is no cached copy to serve stale.
+  // there is no cached copy to serve stale. Scoped to ONE parent object:
+  // exactly one of runId (the run's node links plus its run-level parent
+  // item) or instanceId (the workflow instance's single item). Each link
+  // carries its connection's NAME so a caller can drive the matching
+  // pm-sync endpoint without the admin-only connections list.
   app.get("/v1/pm/links", async (req, reply) => {
     const q = z
-      .object({ runId: z.string().uuid(), live: z.coerce.boolean().default(false) })
+      .object({
+        runId: z.string().uuid().optional(),
+        instanceId: z.string().uuid().optional(),
+        live: z.coerce.boolean().default(false),
+      })
+      .refine((v) => Boolean(v.runId) !== Boolean(v.instanceId), {
+        message: "exactly one of runId or instanceId is required",
+      })
       .parse(req.query);
-    const [run] = await db.select().from(orchestrationRuns).where(eq(orchestrationRuns.id, q.runId));
-    if (!run) return reply.status(404).send({ error: "unavailable" });
-    if (!req.authCtx.isAdmin && req.authCtx.userId !== run.initiatingUserId) {
-      return reply.status(404).send({ error: "unavailable" });
-    }
-    const rawLinks = await db
-      .select()
-      .from(pmLinks)
-      .where(and(eq(pmLinks.objectType, "run_node"), eq(pmLinks.objectId, q.runId)));
-    // ADR-0010: drift annotation — the PM tool's last reported state vs the
-    // mapped state for the node's current status. Surfaced, never auto-fixed.
-    let driftMapping: ReturnType<typeof mappingFor> | null = null;
-    if (rawLinks.length > 0) {
-      const [driftConn] = await db
+    let rawLinks: (typeof pmLinks.$inferSelect)[];
+    let runState: RunState | null = null;
+    if (q.runId) {
+      const [run] = await db.select().from(orchestrationRuns).where(eq(orchestrationRuns.id, q.runId));
+      if (!run) return reply.status(404).send({ error: "unavailable" });
+      if (!req.authCtx.isAdmin && req.authCtx.userId !== run.initiatingUserId) {
+        return reply.status(404).send({ error: "unavailable" });
+      }
+      runState = run.state as RunState;
+      rawLinks = await db
         .select()
-        .from(pmConnections)
-        .where(eq(pmConnections.id, rawLinks[0]!.connectionId));
-      if (driftConn) driftMapping = mappingFor(driftConn.provider, driftConn.mapping ?? undefined);
+        .from(pmLinks)
+        .where(and(inArray(pmLinks.objectType, ["run", "run_node"]), eq(pmLinks.objectId, q.runId)));
+    } else {
+      const [instance] = await db
+        .select()
+        .from(workflowInstances)
+        .where(eq(workflowInstances.id, q.instanceId!));
+      if (!instance) return reply.status(404).send({ error: "unavailable" });
+      if (!req.authCtx.isAdmin && req.authCtx.userId !== instance.initiatorUserId) {
+        return reply.status(404).send({ error: "unavailable" });
+      }
+      rawLinks = await db
+        .select()
+        .from(pmLinks)
+        .where(
+          and(eq(pmLinks.objectType, "workflow_instance"), eq(pmLinks.objectId, q.instanceId!)),
+        );
     }
-    const runState = run.state as RunState;
+    const connIds = [...new Set(rawLinks.map((l) => l.connectionId))];
+    const connRows = connIds.length
+      ? await db.select().from(pmConnections).where(inArray(pmConnections.id, connIds))
+      : [];
+    const connById = new Map(connRows.map((c) => [c.id, c]));
+    // ADR-0010: drift annotation (run nodes only — status ownership is
+    // RegulAIt's) — the PM tool's last reported state vs the mapped state for
+    // the node's current status. Surfaced, never auto-fixed.
     const links = rawLinks.map((link) => {
+      const conn = connById.get(link.connectionId);
       let drift = false;
-      if (driftMapping && link.inboundState && link.nodeId) {
+      if (runState && conn && link.inboundState && link.nodeId) {
         const nodeStatus = runState.nodeStatuses[link.nodeId];
-        const expected = nodeStatus ? resolveStatus(driftMapping, nodeStatus) : null;
+        const mapping = mappingFor(conn.provider, conn.mapping ?? undefined);
+        const expected = nodeStatus ? resolveStatus(mapping, nodeStatus) : null;
         drift = expected !== null && link.inboundState !== expected;
       }
-      return { ...link, drift };
+      return { ...link, connectionName: conn?.name ?? null, drift };
     });
     if (!q.live || links.length === 0) return { links };
     if (!opts.dataKey) return reply.status(503).send({ error: "pm_connections_require_data_key" });
-    const [conn] = await db
-      .select()
-      .from(pmConnections)
-      .where(eq(pmConnections.id, links[0]!.connectionId));
-    if (!conn) return { links };
-    const provider = providerFor(conn, opts.dataKey);
     const live = await Promise.all(
       links.map(async (link) => {
+        const conn = connById.get(link.connectionId);
+        if (!conn) return { ...link, live: null, liveError: "connection no longer exists" };
         try {
-          const item = await provider.getWorkItem(conn.project, link.externalId);
+          const item = await providerFor(conn, opts.dataKey!).getWorkItem(conn.project, link.externalId);
           return { ...link, live: { state: item.state, fields: item.fields, comments: item.comments } };
         } catch (err) {
           return { ...link, live: null, liveError: err instanceof Error ? err.message : String(err) };
