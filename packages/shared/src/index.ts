@@ -143,6 +143,19 @@ export const invokeAgentSchema = z.object({
   stream: z.boolean().optional(),
   /** pillar 5: attribute this call's cost to a project */
   projectId: z.string().uuid().optional(),
+  /** multi-turn: dispatch inside this conversation — the stored history rides
+   * the request as the model's messages array, and the user+assistant turns
+   * are persisted on completion. Only meaningful with dispatch=true; a
+   * decision-only invoke never touches conversation history. */
+  conversationId: z.string().uuid().optional(),
+});
+
+/** MULTI-TURN CONVERSATIONS: create an empty personal thread. The owner is
+ * always the authenticated caller — never a body field. */
+export const createConversationSchema = z.object({
+  agentId: z.string().uuid(),
+  /** pillar 5: default attribution for every turn dispatched in this thread */
+  projectId: z.string().uuid().optional(),
 });
 
 export const createProjectSchema = z

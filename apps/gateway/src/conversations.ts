@@ -1,0 +1,228 @@
+import type { FastifyInstance } from "fastify";
+import {
+  agents,
+  asc,
+  conversationMessages,
+  conversations,
+  count,
+  desc,
+  eq,
+  projects,
+  type Db,
+} from "@regulait/db";
+import type { ModelChatMessage } from "@regulait/model-provider";
+import { createConversationSchema } from "@regulait/shared";
+import { z } from "zod";
+import { assertProjectAttribution } from "./projects.js";
+
+/**
+ * MULTI-TURN CONVERSATIONS — the storage and access layer behind the
+ * Playground's memory. A conversation is strictly PERSONAL: every route here
+ * is own-scoped by the authenticated identity, admins included — an admin
+ * reads the audit trail and the usage ledger, not other people's threads.
+ *
+ * Persistence contract (kept identical for streaming and non-streaming
+ * dispatches — both call recordConversationTurns after the outcome):
+ * - successful dispatch: user turn + assistant turn (dispatch facts in
+ *   detail) persist together in one transaction;
+ * - model refusal: both turns persist; the assistant turn carries
+ *   detail.refusal=true and a refusal marker where outputText is empty;
+ * - governance DENIAL (403): the user turn persists with detail.denied so
+ *   history shows the attempt honestly — but a denied turn is EXCLUDED from
+ *   the model-bound history of later turns (content the governance layer
+ *   refused to send must never reach a provider afterwards), and no
+ *   assistant turn is written;
+ * - dispatch failure (no_model_credential, provider 5xx, budget gate):
+ *   NOTHING persists — the turn never reached a model, and a retry after
+ *   fixing the config must not leave duplicate user turns behind.
+ * conversationId only takes effect on dispatch=true invokes; a decision-only
+ * invoke never touches history.
+ */
+
+const conversationIdParam = z.object({ conversationId: z.string().uuid() });
+
+export type ConversationRow = typeof conversations.$inferSelect;
+
+export type ConversationContext =
+  | {
+      ok: true;
+      conversation: ConversationRow;
+      /** prior turns in order, denied attempts excluded — the model-bound history */
+      history: ModelChatMessage[];
+      /** size signal for the optimizer's input-token estimate */
+      historyChars: number;
+    }
+  | { ok: false; status: number; error: string };
+
+/** Load a conversation for the invoke path: 404 unknown, 403 not the
+ * caller's own (admins included), else the row plus its model-bound history. */
+export async function loadOwnConversation(
+  db: Db,
+  conversationId: string,
+  userId: string,
+): Promise<ConversationContext> {
+  const [row] = await db.select().from(conversations).where(eq(conversations.id, conversationId));
+  if (!row) return { ok: false, status: 404, error: "unknown_conversation" };
+  if (row.userId !== userId) return { ok: false, status: 403, error: "forbidden" };
+  const msgs = await db
+    .select()
+    .from(conversationMessages)
+    .where(eq(conversationMessages.conversationId, conversationId))
+    .orderBy(asc(conversationMessages.createdAt));
+  const history: ModelChatMessage[] = msgs
+    .filter((m) => !(m.detail as { denied?: boolean } | null)?.denied)
+    .map((m) => ({ role: m.role, content: m.content }));
+  return {
+    ok: true,
+    conversation: row,
+    history,
+    historyChars: history.reduce((n, m) => n + m.content.length, 0),
+  };
+}
+
+/** first ~60 chars of the first user turn, whitespace-collapsed */
+function autoTitle(content: string): string {
+  return content.replace(/\s+/g, " ").trim().slice(0, 60);
+}
+
+/** Persist one exchange atomically: the user turn, optionally the assistant
+ * turn, the updated-at bump, and the auto-title (first user turn, only while
+ * title is null) — all or nothing, so a crash mid-write can never leave a
+ * half-written exchange. createdAt is written explicitly (assistant strictly
+ * 1ms after user) so ordering never depends on a shared transaction
+ * timestamp. */
+export async function recordConversationTurns(
+  db: Db,
+  conversation: ConversationRow,
+  turns: {
+    userContent: string;
+    userDetail?: Record<string, unknown>;
+    assistant?: { content: string; detail: Record<string, unknown> };
+  },
+): Promise<void> {
+  const at = new Date();
+  await db.transaction(async (tx) => {
+    await tx.insert(conversationMessages).values({
+      conversationId: conversation.id,
+      role: "user",
+      content: turns.userContent,
+      detail: turns.userDetail ?? null,
+      createdAt: at,
+    });
+    if (turns.assistant) {
+      await tx.insert(conversationMessages).values({
+        conversationId: conversation.id,
+        role: "assistant",
+        content: turns.assistant.content,
+        detail: turns.assistant.detail,
+        createdAt: new Date(at.getTime() + 1),
+      });
+    }
+    await tx
+      .update(conversations)
+      .set({
+        updatedAt: new Date(at.getTime() + 1),
+        ...(conversation.title === null && turns.userContent.trim()
+          ? { title: autoTitle(turns.userContent) }
+          : {}),
+      })
+      .where(eq(conversations.id, conversation.id));
+  });
+}
+
+/** Own-scoped CRUD for conversations (all four are NON_ADMIN_ROUTES; the
+ * dispatch-with-history path lives on the existing governed invoke route). */
+export function registerConversationRoutes(app: FastifyInstance, db: Db) {
+  app.post("/v1/conversations", async (req, reply) => {
+    const body = createConversationSchema.parse(req.body);
+    const userId = req.authCtx.userId;
+    if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_converse" });
+    // fail early on a dangling agent id — every turn will invoke it
+    const [agent] = await db.select({ id: agents.id }).from(agents).where(eq(agents.id, body.agentId));
+    if (!agent) return reply.status(404).send({ error: "unknown_agent" });
+    // pillar 5: the thread's default attribution must be a project the
+    // caller may bill to — same gate as a direct attributed invoke
+    if (body.projectId) {
+      const attribution = await assertProjectAttribution(db, body.projectId, userId, req.authCtx.isAdmin);
+      if (!attribution.ok) return reply.status(attribution.status).send({ error: attribution.error });
+    }
+    const [row] = await db
+      .insert(conversations)
+      .values({ userId, agentId: body.agentId, projectId: body.projectId ?? null })
+      .returning();
+    return reply.status(201).send(row);
+  });
+
+  app.get("/v1/conversations", async (req, reply) => {
+    const userId = req.authCtx.userId;
+    if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_converse" });
+    const rows = await db
+      .select({
+        id: conversations.id,
+        title: conversations.title,
+        agentId: conversations.agentId,
+        agentName: agents.name,
+        projectId: conversations.projectId,
+        projectName: projects.name,
+        createdAt: conversations.createdAt,
+        updatedAt: conversations.updatedAt,
+        messageCount: count(conversationMessages.id),
+      })
+      .from(conversations)
+      .leftJoin(agents, eq(agents.id, conversations.agentId))
+      .leftJoin(projects, eq(projects.id, conversations.projectId))
+      .leftJoin(conversationMessages, eq(conversationMessages.conversationId, conversations.id))
+      .where(eq(conversations.userId, userId))
+      .groupBy(conversations.id, agents.name, projects.name)
+      .orderBy(desc(conversations.updatedAt));
+    return { conversations: rows };
+  });
+
+  app.get("/v1/conversations/:conversationId", async (req, reply) => {
+    const { conversationId } = conversationIdParam.parse(req.params);
+    const userId = req.authCtx.userId;
+    if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_converse" });
+    const [row] = await db.select().from(conversations).where(eq(conversations.id, conversationId));
+    if (!row) return reply.status(404).send({ error: "unknown_conversation" });
+    // personal, admins included — see module doc
+    if (row.userId !== userId) return reply.status(403).send({ error: "forbidden" });
+    const [[agent], [project], messages] = await Promise.all([
+      db.select({ name: agents.name }).from(agents).where(eq(agents.id, row.agentId)),
+      row.projectId
+        ? db.select({ name: projects.name }).from(projects).where(eq(projects.id, row.projectId))
+        : Promise.resolve([undefined]),
+      db
+        .select({
+          id: conversationMessages.id,
+          role: conversationMessages.role,
+          content: conversationMessages.content,
+          detail: conversationMessages.detail,
+          createdAt: conversationMessages.createdAt,
+        })
+        .from(conversationMessages)
+        .where(eq(conversationMessages.conversationId, conversationId))
+        .orderBy(asc(conversationMessages.createdAt)),
+    ]);
+    return {
+      ...row,
+      agentName: agent?.name ?? null,
+      projectName: project?.name ?? null,
+      messages,
+    };
+  });
+
+  app.delete("/v1/conversations/:conversationId", async (req, reply) => {
+    const { conversationId } = conversationIdParam.parse(req.params);
+    const userId = req.authCtx.userId;
+    if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_converse" });
+    const [row] = await db
+      .select({ id: conversations.id, userId: conversations.userId })
+      .from(conversations)
+      .where(eq(conversations.id, conversationId));
+    if (!row) return reply.status(404).send({ error: "unknown_conversation" });
+    if (row.userId !== userId) return reply.status(403).send({ error: "forbidden" });
+    // hard delete; conversation_messages cascade with the FK
+    await db.delete(conversations).where(eq(conversations.id, conversationId));
+    return { removed: true };
+  });
+}

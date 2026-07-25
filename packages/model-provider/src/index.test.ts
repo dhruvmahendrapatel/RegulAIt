@@ -602,3 +602,199 @@ describe("XaiProvider (OpenAI-compatible core pointed at api.x.ai)", () => {
     await expect(failing.dispatch({ model: "grok-4", input: "x" })).rejects.toThrowError(/xai dispatch failed/);
   });
 });
+
+describe("multi-turn messages contract (full history including newest turn; input ignored)", () => {
+  const HISTORY = [
+    { role: "user" as const, content: "plan the payments migration" },
+    { role: "assistant" as const, content: "Plan — payments migration. Four steps: …" },
+    { role: "user" as const, content: "now make it shorter" },
+  ];
+
+  it("anthropic sends the messages array verbatim (roles map 1:1) and ignores input", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new AnthropicProvider({
+      apiKey: "k",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return anthropicJson({
+          id: "msg_mt_1",
+          type: "message",
+          role: "assistant",
+          model: "claude-opus-5",
+          content: [{ type: "text", text: "shorter plan" }],
+          stop_reason: "end_turn",
+          stop_sequence: null,
+          usage: { input_tokens: 30, output_tokens: 4 },
+        });
+      },
+    });
+    await provider.dispatch({
+      model: "claude-opus-5",
+      input: "IGNORED",
+      messages: HISTORY,
+      system: "answer tersely",
+    });
+    expect(captured!.system).toBe("answer tersely");
+    expect(captured!.messages).toEqual([
+      { role: "user", content: "plan the payments migration" },
+      { role: "assistant", content: "Plan — payments migration. Four steps: …" },
+      { role: "user", content: "now make it shorter" },
+    ]);
+    expect(JSON.stringify(captured)).not.toContain("IGNORED");
+  });
+
+  it("openai prepends system then the history; assistant stays assistant", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new OpenAiProvider({
+      apiKey: "sk",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return new Response(
+          JSON.stringify({
+            id: "chatcmpl-mt1",
+            object: "chat.completion",
+            created: 1,
+            model: "gpt-5",
+            choices: [{ index: 0, message: { role: "assistant", content: "ok", refusal: null }, finish_reason: "stop", logprobs: null }],
+            usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+    await provider.dispatch({ model: "gpt-5", input: "IGNORED", messages: HISTORY, system: "s" });
+    expect(captured!.messages).toEqual([
+      { role: "system", content: "s" },
+      { role: "user", content: "plan the payments migration" },
+      { role: "assistant", content: "Plan — payments migration. Four steps: …" },
+      { role: "user", content: "now make it shorter" },
+    ]);
+  });
+
+  it("xai (shared chat-completions core) carries the same history shape", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new XaiProvider({
+      apiKey: "xk",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return new Response(
+          JSON.stringify({
+            id: "chatcmpl-xmt1",
+            object: "chat.completion",
+            created: 1,
+            model: "grok-4",
+            choices: [{ index: 0, message: { role: "assistant", content: "ok", refusal: null }, finish_reason: "stop", logprobs: null }],
+            usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+    await provider.dispatch({ model: "grok-4", input: "IGNORED", messages: HISTORY });
+    expect(captured!.messages).toEqual([
+      { role: "user", content: "plan the payments migration" },
+      { role: "assistant", content: "Plan — payments migration. Four steps: …" },
+      { role: "user", content: "now make it shorter" },
+    ]);
+  });
+
+  it("google maps assistant -> role 'model' in contents, user stays 'user'", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new GoogleProvider({
+      apiKey: "gk",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return new Response(
+          JSON.stringify({
+            responseId: "resp-mt1",
+            candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+            usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 1 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+    await provider.dispatch({ model: "gemini-2.5-pro", input: "IGNORED", messages: HISTORY });
+    expect(captured!.contents).toEqual([
+      { role: "user", parts: [{ text: "plan the payments migration" }] },
+      { role: "model", parts: [{ text: "Plan — payments migration. Four steps: …" }] },
+      { role: "user", parts: [{ text: "now make it shorter" }] },
+    ]);
+  });
+
+  it("mock opens with a continuation line and a terse follow-up inherits the previous turn's topic", async () => {
+    const mock = new MockModelProvider();
+    const r = await mock.dispatch({ model: "mock-balanced", input: "", messages: HISTORY });
+    // history is 3 turns, so 2 precede the newest
+    expect(r.outputText).toContain("Continuing from the previous 2 turns");
+    // "now make it shorter" is 4 words (< 8): the topic comes from turn 1
+    expect(r.outputText).toContain("payments migration");
+    // measured input covers the whole history, not just the newest turn
+    const historyChars = HISTORY.map((m) => m.content).join("\n").length;
+    expect(r.usage.inputTokens).toBe(Math.ceil(historyChars / 4));
+    expect(r.stopReason).toBe("end_turn");
+  });
+
+  it("mock dispatches intent on the LAST user turn when it is not terse", async () => {
+    const mock = new MockModelProvider();
+    const r = await mock.dispatch({
+      model: "mock-balanced",
+      input: "",
+      messages: [
+        { role: "user", content: "plan the payments migration" },
+        { role: "assistant", content: "Plan — payments migration. …" },
+        { role: "user", content: "please review this follow-up change for regression risk" },
+      ],
+    });
+    expect(r.outputText).toContain("Continuing from the previous 2 turns:");
+    // a full sentence keeps its own intent + topic (review shape, own subject)
+    expect(r.outputText).toMatch(/^- \[major\]/m);
+    expect(r.outputText).toContain("follow-up change for regression risk");
+  });
+
+  it("mock refuses on <<refuse>> in the last user turn even with history (input ignored)", async () => {
+    const mock = new MockModelProvider();
+    const r = await mock.dispatch({
+      model: "mock-balanced",
+      input: "no refuse marker here",
+      messages: [
+        { role: "user", content: "plan the payments migration" },
+        { role: "assistant", content: "Plan …" },
+        { role: "user", content: "please <<refuse>> this" },
+      ],
+    });
+    expect(r.refusal).toBe(true);
+    expect(r.outputText).toBe("");
+    expect(r.usage.outputTokens).toBe(0);
+  });
+
+  it("mock system ack still opens the reply, before the continuation line", async () => {
+    const mock = new MockModelProvider();
+    const r = await mock.dispatch({
+      model: "mock-fast",
+      input: "",
+      messages: HISTORY,
+      system: "You are the payments planning assistant.",
+    });
+    expect(r.outputText.startsWith("Working within the signed-off scope: ")).toBe(true);
+    expect(r.outputText.indexOf("Working within")).toBeLessThan(
+      r.outputText.indexOf("Continuing from the previous"),
+    );
+  });
+
+  it("regression: a single-input request is byte-identical to the pre-messages behaviour", async () => {
+    const mock = new MockModelProvider();
+    const input = "plan the rollout of the new gateway";
+    const single = await mock.dispatch({ model: "mock-balanced", input });
+    expect(single.outputText).not.toContain("Continuing from the previous");
+    expect(single.usage.inputTokens).toBe(Math.ceil(input.length / 4));
+    // a one-element messages array is the same request said differently
+    const viaMessages = await new MockModelProvider().dispatch({
+      model: "mock-balanced",
+      input: "IGNORED",
+      messages: [{ role: "user", content: input }],
+    });
+    expect(viaMessages.outputText).toBe(single.outputText);
+    expect(viaMessages.usage).toEqual(single.usage);
+  });
+});

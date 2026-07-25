@@ -37,11 +37,25 @@ export class ModelProviderError extends Error {
   }
 }
 
+/** One turn of a multi-turn conversation. `system` is deliberately NOT a
+ * role here — it stays a separate ModelDispatchRequest field, because two of
+ * the providers (Anthropic, Google) carry it out-of-band anyway. */
+export interface ModelChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
 export interface ModelDispatchRequest {
   /** provider-native model id (e.g. claude-opus-5) — chosen upstream by routing */
   model: string;
-  /** the user's request text, sent as a single user turn */
+  /** the user's request text, sent as a single user turn. IGNORED when
+   * `messages` is present — the newest turn must ride inside `messages`. */
   input: string;
+  /** multi-turn contract: when present, this is the FULL ordered history
+   * INCLUDING the newest user turn, and `input` is ignored entirely; when
+   * absent, behaviour is byte-identical to the single-turn contract (`input`
+   * as one user turn). `system` stays a separate field either way. */
+  messages?: ModelChatMessage[];
   system?: string;
   maxTokens?: number;
   /** streaming: called with each text delta as it arrives. The returned
@@ -66,6 +80,16 @@ export interface ModelDispatchResult {
 export interface ModelProvider {
   readonly kind: ModelProviderKind;
   dispatch(req: ModelDispatchRequest): Promise<ModelDispatchResult>;
+}
+
+/** The effective ordered turn list: `messages` verbatim when present (the
+ * full-history contract above), else `input` as the single user turn — the
+ * one place the messages-vs-input precedence is decided, so every adapter
+ * agrees on it. */
+function chatTurns(req: ModelDispatchRequest): ModelChatMessage[] {
+  return req.messages && req.messages.length > 0
+    ? req.messages
+    : [{ role: "user", content: req.input }];
 }
 
 const DEFAULT_MAX_TOKENS = 1024;
@@ -103,7 +127,8 @@ export class AnthropicProvider implements ModelProvider {
       model: req.model,
       max_tokens: req.maxTokens ?? DEFAULT_MAX_TOKENS,
       ...(req.system ? { system: req.system } : {}),
-      messages: [{ role: "user" as const, content: req.input }],
+      // roles map 1:1 onto the Messages API
+      messages: chatTurns(req).map((m) => ({ role: m.role, content: m.content })),
     };
     // stream when the caller wants deltas, or when the output budget is large
     // enough that a single non-streaming request risks a timeout
@@ -179,7 +204,8 @@ async function dispatchChatCompletions(
 ): Promise<ModelDispatchResult> {
   const messages = [
       ...(req.system ? [{ role: "system" as const, content: req.system }] : []),
-      { role: "user" as const, content: req.input },
+      // system first (as today), then the ordered turns — assistant stays assistant
+      ...chatTurns(req).map((m) => ({ role: m.role, content: m.content })),
     ];
     const maxTokens = req.maxTokens ?? DEFAULT_MAX_TOKENS;
     try {
@@ -352,7 +378,11 @@ export class GoogleProvider implements ModelProvider {
         method: "POST",
         headers: { "x-goog-api-key": this.apiKey, "content-type": "application/json" },
         body: JSON.stringify({
-          contents: [{ role: "user", parts: [{ text: req.input }] }],
+          // Gemini's assistant role is "model"
+          contents: chatTurns(req).map((m) => ({
+            role: m.role === "assistant" ? "model" : "user",
+            parts: [{ text: m.content }],
+          })),
           ...(req.system ? { systemInstruction: { parts: [{ text: req.system }] } } : {}),
           generationConfig: { maxOutputTokens: maxTokens },
         }),
@@ -434,8 +464,11 @@ export class GoogleProvider implements ModelProvider {
 // a plausible shape (summary / review / plan / code / explanation / test
 // plan / general), the model id's tier (fast / balanced / premium) controls
 // depth, and a present system prompt is acknowledged in the opening line so
-// demos visibly prove context flowed through. Everything is a pure function
-// of (model, input, system) — no randomness, no network.
+// demos visibly prove context flowed through. Multi-turn requests keep the
+// same discipline: intent/tier dispatch on the LAST user turn, a visible
+// continuation opener when history precedes it, and a terse follow-up
+// inherits the previous user turn's topic. Everything is a pure function of
+// (model, input/messages, system) — no randomness, no network.
 // ---------------------------------------------------------------------------
 
 export interface MockDispatch extends ModelDispatchRequest {
@@ -833,6 +866,11 @@ function mockReplyBody(intent: MockIntent, tier: MockTier, topic: string): strin
   }
 }
 
+/** A terse follow-up ("now make it shorter") carries no topic of its own —
+ * below this word count the mock pulls the topic from the PREVIOUS user turn
+ * so the demo visibly proves history flowed through. */
+const TERSE_FOLLOW_UP_WORDS = 8;
+
 export class MockModelProvider implements ModelProvider {
   readonly kind = "mock" as const;
   readonly dispatches: MockDispatch[] = [];
@@ -841,17 +879,48 @@ export class MockModelProvider implements ModelProvider {
   async dispatch(req: ModelDispatchRequest): Promise<ModelDispatchResult> {
     const seq = ++this.seq;
     this.dispatches.push({ ...req, seq });
-    if (req.input.includes("<<refuse>>")) {
+    // Multi-turn: intent/tier/refusal dispatch on the LAST user turn (input
+    // is ignored when messages is present, per the request contract), while
+    // measured input tokens cover the WHOLE history — context costs what it
+    // costs. With no messages both reduce exactly to the single-input path.
+    const turns = chatTurns(req);
+    const lastUserIdx = turns.map((m) => m.role).lastIndexOf("user");
+    const lastUser = lastUserIdx >= 0 ? turns[lastUserIdx]!.content : "";
+    const historyText = turns.map((m) => m.content).join("\n");
+    if (lastUser.includes("<<refuse>>")) {
       return {
         outputText: "",
         stopReason: "refusal",
         refusal: true,
-        usage: { inputTokens: mockTokens(req.input), outputTokens: 0 },
+        usage: { inputTokens: mockTokens(historyText), outputTokens: 0 },
         providerMessageId: `mock-msg-${seq}`,
       };
     }
-    const body = mockReplyBody(mockIntent(req.input), mockTier(req.model), mockTopic(req.input));
-    const outputText = req.system ? `${mockSystemAck(req.system)}\n\n${body}` : body;
+    // A short continuation opener whenever real history precedes the newest
+    // turn; a terse follow-up additionally inherits the previous user turn's
+    // topic — "now make it shorter" answers about the earlier subject, not
+    // about the four words themselves.
+    let topicSource = lastUser;
+    let continuation = "";
+    if (turns.length > 1) {
+      const prevUser = turns
+        .slice(0, Math.max(lastUserIdx, 0))
+        .reverse()
+        .find((m) => m.role === "user");
+      const terse =
+        lastUser.trim().split(/\s+/).filter(Boolean).length < TERSE_FOLLOW_UP_WORDS;
+      if (terse && prevUser) topicSource = prevUser.content;
+      const n = turns.length - 1;
+      continuation =
+        `Continuing from the previous ${n} turn${n === 1 ? "" : "s"}` +
+        (terse && prevUser ? `, still on ${mockTopic(prevUser.content)}:` : ":");
+    }
+    const body = mockReplyBody(mockIntent(lastUser), mockTier(req.model), mockTopic(topicSource));
+    const outputText = [
+      ...(req.system ? [mockSystemAck(req.system)] : []),
+      ...(continuation ? [continuation] : []),
+      body,
+    ].join("\n\n");
     if (req.onText) {
       // deterministic chunking so the streaming path is testable end-to-end
       const chunkSize = 40;
@@ -863,7 +932,7 @@ export class MockModelProvider implements ModelProvider {
       outputText,
       stopReason: "end_turn",
       refusal: false,
-      usage: { inputTokens: mockTokens(req.input), outputTokens: mockTokens(outputText) },
+      usage: { inputTokens: mockTokens(historyText), outputTokens: mockTokens(outputText) },
       providerMessageId: `mock-msg-${seq}`,
     };
   }

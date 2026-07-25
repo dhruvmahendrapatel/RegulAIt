@@ -25,6 +25,7 @@ import {
   isModelProviderKind,
   ModelProviderError,
   resolveModelProvider,
+  type ModelChatMessage,
 } from "@regulait/model-provider";
 import {
   createAgentGrantSchema,
@@ -40,6 +41,11 @@ import {
 import { z } from "zod";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { assertProjectAttribution, postDispatchProjectAlert, preDispatchProjectGate } from "./projects.js";
+import {
+  loadOwnConversation,
+  recordConversationTurns,
+  type ConversationContext,
+} from "./conversations.js";
 
 const userIdParam = z.object({ userId: z.string().uuid() });
 const agentIdParam = z.object({ agentId: z.string().uuid() });
@@ -91,6 +97,9 @@ export async function executeGovernedDispatch(
     /** routing counterfactual for measured savings; null = no routing happened */
     baseline?: AgentRow | null;
     input: string;
+    /** multi-turn: the FULL ordered history including the newest user turn;
+     * when present the provider ignores `input` (model-provider contract) */
+    messages?: ModelChatMessage[] | undefined;
     /** system context (e.g. a nested run's signed-off workflow artifacts) */
     system?: string | undefined;
     maxTokens?: number | undefined;
@@ -166,6 +175,7 @@ export async function executeGovernedDispatch(
     result = await provider.dispatch({
       model: served.model,
       input: args.input,
+      ...(args.messages ? { messages: args.messages } : {}),
       ...(args.system ? { system: args.system } : {}),
       ...(args.maxTokens ? { maxTokens: args.maxTokens } : {}),
       ...(args.onText ? { onText: args.onText } : {}),
@@ -246,6 +256,10 @@ async function performDispatch(
     registry: AgentRow[];
     routing: ReturnType<typeof routeModel>;
     body: z.infer<typeof invokeAgentSchema>;
+    /** effective attribution — explicit body.projectId, else the conversation's */
+    projectId: string | null;
+    /** multi-turn history including the newest turn (conversation dispatches) */
+    messages?: ModelChatMessage[] | undefined;
     onText?: ((delta: string) => void) | undefined;
   },
 ): Promise<DispatchOutcome> {
@@ -256,10 +270,11 @@ async function performDispatch(
     requestedAgentId,
     baseline: registry.find((a) => a.id === routing.baselineAgentId) ?? null,
     input: body.input ?? "",
+    messages: args.messages,
     maxTokens: body.maxTokens,
-    projectId: body.projectId ?? null,
+    projectId: args.projectId,
     onText: args.onText,
-    detail: { mode: body.mode },
+    detail: { mode: body.mode, ...(body.conversationId ? { conversationId: body.conversationId } : {}) },
   });
 }
 
@@ -563,11 +578,23 @@ export function registerAgentConnectorRoutes(
     const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
     if (!agent) return reply.status(404).send({ error: "unknown_agent" });
 
+    // MULTI-TURN: resolve the conversation before anything can bill or
+    // dispatch — unknown is 404, someone else's is 403 (admins included;
+    // conversations are personal, see conversations.ts).
+    let convo: Extract<ConversationContext, { ok: true }> | null = null;
+    if (body.conversationId) {
+      const loaded = await loadOwnConversation(db, body.conversationId, userId);
+      if (!loaded.ok) return reply.status(loaded.status).send({ error: loaded.error });
+      convo = loaded;
+    }
+
     // pillar 5 + ADR-0011: attribution must point at a real project the
-    // caller may bill to — the ledgers are FK-free, so the gate is here at
-    // the entry point.
-    if (body.projectId) {
-      const attribution = await assertProjectAttribution(db, body.projectId, userId, req.authCtx.isAdmin);
+    // caller may bill to — an explicit projectId wins, else the
+    // conversation's default; the ledgers are FK-free, so the gate is here
+    // at the entry point.
+    const projectId = body.projectId ?? convo?.conversation.projectId ?? null;
+    if (projectId) {
+      const attribution = await assertProjectAttribution(db, projectId, userId, req.authCtx.isAdmin);
       if (!attribution.ok) return reply.status(attribution.status).send({ error: attribution.error });
     }
 
@@ -652,8 +679,13 @@ export function registerAgentConnectorRoutes(
         costPerMTokIn: a.costPerMTokIn ?? null,
         costPerMTokOut: a.costPerMTokOut ?? null,
       }));
+      // Conversations: complexity stays classified on the NEWEST user turn
+      // (the routing signal), but the history riding the same request is
+      // counted into the input estimate so budget gates and cost forecasts
+      // stay truthful as the thread grows.
       const complexity = classifyComplexity(body.input);
       const estimate = estimateTokens(body.input, complexity);
+      if (convo && convo.historyChars > 0) estimate.in += Math.ceil(convo.historyChars / 4);
       routing = routeModel({
         requestedAgentId: agent.id,
         candidates,
@@ -681,9 +713,46 @@ export function registerAgentConnectorRoutes(
         estimatedCostSavedUsd: routing.estimatedCostSavedUsd,
         estimationBasis: routing.estimationBasis,
         ruleId: routing.ruleId,
-        projectId: body.projectId ?? null,
-        detail: { effect: routing.effect, complexity, mode: body.mode },
+        projectId,
+        detail: {
+          effect: routing.effect,
+          complexity,
+          mode: body.mode,
+          ...(body.conversationId ? { conversationId: body.conversationId } : {}),
+        },
       });
+
+      // MULTI-TURN: a conversation dispatch sends the FULL ordered history
+      // plus the newest user turn as the provider messages array; the
+      // governed pipeline around it (policy, routing, budget, attribution,
+      // audit, usage ledger) is exactly the single-turn one.
+      const messages: ModelChatMessage[] | undefined =
+        convo && body.dispatch
+          ? [...convo.history, { role: "user" as const, content: body.input ?? "" }]
+          : undefined;
+      // One persistence rule for the streaming and non-streaming paths —
+      // the exact contract lives in conversations.ts. A failed outcome
+      // persists nothing (never a half-written turn).
+      const persistTurns = async (outcome: DispatchOutcome) => {
+        if (!convo || !outcome.ok) return;
+        const r = outcome.result;
+        await recordConversationTurns(db, convo.conversation, {
+          userContent: body.input ?? "",
+          assistant: {
+            content: r.refusal
+              ? r.outputText || "[the model declined to answer this request]"
+              : r.outputText,
+            detail: {
+              stopReason: r.stopReason,
+              refusal: r.refusal,
+              servedAgentId: r.servedAgentId,
+              modelUsed: r.model,
+              costUsd: r.costUsd,
+              credentialSource: r.credentialSource,
+            },
+          },
+        });
+      };
 
       // MODEL DISPATCH: real execution, strictly after governance + routing —
       // the served agent is routing's choice, so dispatch can never widen
@@ -708,8 +777,11 @@ export function registerAgentConnectorRoutes(
           registry,
           routing,
           body,
+          projectId,
+          messages,
           onText: (delta) => send("delta", { text: delta }),
         });
+        await persistTurns(outcome);
         await db.insert(auditLog).values({
           userId,
           objectType: "agent",
@@ -752,7 +824,10 @@ export function registerAgentConnectorRoutes(
           registry,
           routing,
           body,
+          projectId,
+          messages,
         });
+        await persistTurns(dispatchOutcome);
       }
     }
 
@@ -783,7 +858,18 @@ export function registerAgentConnectorRoutes(
       reason: decision.reason,
     });
 
-    if (decision.effect !== "allow") return reply.status(403).send({ decision });
+    if (decision.effect !== "allow") {
+      // A denied conversation turn is recorded honestly (detail.denied, no
+      // assistant turn) but never replayed to a provider on later turns —
+      // loadOwnConversation filters it out of the model-bound history.
+      if (convo && body.dispatch) {
+        await recordConversationTurns(db, convo.conversation, {
+          userContent: body.input ?? "",
+          userDetail: { denied: true, ruleId: decision.ruleId, reason: decision.reason },
+        });
+      }
+      return reply.status(403).send({ decision });
+    }
     if (dispatchOutcome && !dispatchOutcome.ok) {
       return reply.status(dispatchOutcome.status).send({
         decision,
