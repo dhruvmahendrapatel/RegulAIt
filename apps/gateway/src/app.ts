@@ -54,6 +54,8 @@ declare module "fastify" {
 export interface BuildAppOptions {
   /** deploy-time admin token used to create the first real user + key */
   bootstrapToken?: string;
+  /** hex AES-256 key for encrypting stored git tokens (REGULAIT_DATA_KEY) */
+  dataKey?: string;
 }
 import { z } from "zod";
 import { registerMcpProxy } from "./mcp-proxy.js";
@@ -500,14 +502,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     if (!updated) return reply.status(409).send({ error: "already_decided" });
     // Workflow sign-offs advance their instance through the same one inbox (§5).
     if (updated.objectType === "workflow") {
-      await applyWorkflowApprovalDecision(db, updated, body.decision, deciderUserId);
+      await applyWorkflowApprovalDecision(db, updated, body.decision, deciderUserId, opts.dataKey);
     }
     return updated;
   });
 
   registerAgentConnectorRoutes(app, db);
 
-  registerWorkflowRoutes(app, db);
+  registerWorkflowRoutes(app, db, { dataKey: opts.dataKey });
 
   registerMcpProxy(app, db);
 

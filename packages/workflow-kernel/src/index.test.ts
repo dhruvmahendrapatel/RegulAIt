@@ -225,3 +225,65 @@ describe("review-fix regressions", () => {
     expect(mergeDefinitions([a, a]).stages.filter((s) => s.id === "signoff")).toHaveLength(1);
   });
 });
+
+describe("git_operation stages", () => {
+  const gitFlow = validateDefinition({
+    workflow: "git-flow",
+    stages: [
+      { id: "intake", type: "trigger" },
+      { id: "branch", type: "git_operation", action: "create_branch", connection: "gh", repo: "o/r" },
+      { id: "pr", type: "git_operation", action: "open_pr", connection: "gh", repo: "o/r" },
+      { id: "merge_gate", type: "human_approval", approvers: ["requesting_user"] },
+      { id: "merge", type: "git_operation", action: "merge", connection: "gh", repo: "o/r", strategy: "squash" },
+    ],
+  });
+
+  it("validates ordering and required config", () => {
+    expect(() =>
+      validateDefinition({
+        workflow: "bad",
+        stages: [
+          { id: "t", type: "trigger" },
+          { id: "g", type: "git_operation", action: "open_pr", connection: "gh", repo: "o/r" },
+        ],
+      }),
+    ).toThrow(/needs an earlier create_branch/);
+    expect(() =>
+      validateDefinition({
+        workflow: "bad",
+        stages: [
+          { id: "t", type: "trigger" },
+          { id: "g", type: "git_operation" },
+        ],
+      }),
+    ).toThrow(/needs action, connection, and repo/);
+  });
+
+  it("git stages block on execution; success advances, failure stays retryable", () => {
+    let r = transition(gitFlow, initialState(gitFlow), { kind: "start" });
+    expect(r.state.status).toBe("awaiting_execution");
+    expect(r.effects).toContainEqual({ kind: "execute_stage", stageId: "branch" });
+
+    r = transition(gitFlow, r.state, { kind: "execution_failed", stageId: "branch", error: "boom" });
+    expect(r.state.status).toBe("awaiting_execution");
+
+    r = transition(gitFlow, r.state, { kind: "execution_succeeded", stageId: "branch" });
+    expect(r.state.status).toBe("awaiting_execution");
+    expect(r.effects).toContainEqual({ kind: "execute_stage", stageId: "pr" });
+
+    r = transition(gitFlow, r.state, { kind: "execution_succeeded", stageId: "pr" });
+    expect(r.state.status).toBe("blocked_on_approval");
+
+    r = transition(gitFlow, r.state, { kind: "approval_granted", stageId: "merge_gate" });
+    expect(r.state.status).toBe("awaiting_execution");
+    r = transition(gitFlow, r.state, { kind: "execution_succeeded", stageId: "merge" });
+    expect(r.state.status).toBe("completed");
+  });
+
+  it("rejects execution events for the wrong stage", () => {
+    const r = transition(gitFlow, initialState(gitFlow), { kind: "start" });
+    expect(() =>
+      transition(gitFlow, r.state, { kind: "execution_succeeded", stageId: "merge" }),
+    ).toThrow(/not executing git stage/);
+  });
+});

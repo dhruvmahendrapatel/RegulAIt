@@ -20,7 +20,11 @@ export const EXECUTABLE_STAGE_TYPES = [
   "human_approval",
   "automated_build",
   "automated_check",
+  "git_operation",
 ] as const;
+
+export const GIT_ACTIONS = ["create_branch", "open_pr", "merge"] as const;
+export type GitAction = (typeof GIT_ACTIONS)[number];
 
 export type StageType = (typeof EXECUTABLE_STAGE_TYPES)[number];
 
@@ -35,6 +39,18 @@ const stageSchema = z.object({
   scope: z.string().min(1).optional(),
   /** automated_check: named checks (informational in this slice) */
   checks: z.array(z.string().min(1)).optional(),
+  /** git_operation: which operation this stage performs */
+  action: z.enum(GIT_ACTIONS).optional(),
+  /** git_operation: name of the registered git connection to use */
+  connection: z.string().min(1).optional(),
+  /** git_operation: owner/repo the operation targets */
+  repo: z.string().min(1).optional(),
+  /** git_operation open_pr/create_branch: base branch (default main) */
+  base: z.string().min(1).optional(),
+  /** git_operation create_branch: branch name prefix (default regulait) */
+  branchPrefix: z.string().min(1).optional(),
+  /** git_operation merge: merge strategy (default merge) */
+  strategy: z.enum(["merge", "squash", "rebase"]).optional(),
 });
 export type Stage = z.infer<typeof stageSchema>;
 
@@ -72,6 +88,36 @@ export const workflowDefinitionSchema = z
             message: `build stage '${s.id}' is scoped to artifact '${s.scope}' no stage produces`,
           });
         }
+      }
+    }
+    for (const s of def.stages) {
+      if (s.type !== "git_operation") continue;
+      if (!s.action || !s.connection || !s.repo) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `git_operation stage '${s.id}' needs action, connection, and repo`,
+        });
+        continue;
+      }
+      const index = def.stages.indexOf(s);
+      const earlier = def.stages.slice(0, index);
+      if (
+        s.action === "open_pr" &&
+        !earlier.some((o) => o.type === "git_operation" && o.action === "create_branch")
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `open_pr stage '${s.id}' needs an earlier create_branch stage`,
+        });
+      }
+      if (
+        s.action === "merge" &&
+        !earlier.some((o) => o.type === "git_operation" && o.action === "open_pr")
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `merge stage '${s.id}' needs an earlier open_pr stage`,
+        });
       }
     }
     if (def.stages[0]!.type !== "trigger") {
@@ -185,6 +231,7 @@ export type InstanceStatus =
   | "blocked_on_approval"
   | "blocked_on_artifact"
   | "awaiting_trigger"
+  | "awaiting_execution"
   | "completed"
   | "aborted"
   | "denied";
@@ -204,6 +251,8 @@ export type WorkflowEvent =
   | { kind: "approval_denied"; stageId: string }
   | { kind: "human_trigger"; stageId: string }
   | { kind: "stage_completed"; stageId: string }
+  | { kind: "execution_succeeded"; stageId: string }
+  | { kind: "execution_failed"; stageId: string; error: string }
   | { kind: "abort" };
 
 /** side effects the caller (gateway) must perform after a transition */
@@ -211,6 +260,7 @@ export type Effect =
   | { kind: "request_approval"; stageId: string; approvers: string[] }
   | { kind: "await_artifact"; stageId: string; output: string }
   | { kind: "await_human_trigger"; stageId: string }
+  | { kind: "execute_stage"; stageId: string }
   | { kind: "instance_completed" }
   | { kind: "instance_denied" }
   | { kind: "instance_aborted" };
@@ -283,6 +333,12 @@ function runForward(def: WorkflowDefinition, state: InstanceState): TransitionRe
         stageId: stage.id,
         approvers: stage.approvers ?? [],
       });
+      return { state: s, effects };
+    }
+    if (stage.type === "git_operation") {
+      // executed by the gateway's git executor; retryable on failure
+      s.status = "awaiting_execution";
+      effects.push({ kind: "execute_stage", stageId: stage.id });
       return { state: s, effects };
     }
     // automated_build / automated_check: await explicit trigger in this slice
@@ -367,6 +423,25 @@ export function transition(
     }
     const s = { ...state, status: "denied" as const };
     return { state: s, effects: [{ kind: "instance_denied" }] };
+  }
+
+  if (event.kind === "execution_succeeded" || event.kind === "execution_failed") {
+    if (!current || current.id !== event.stageId || current.type !== "git_operation") {
+      throw new WorkflowStateError(`instance is not executing git stage '${event.stageId}'`);
+    }
+    if (event.kind === "execution_failed") {
+      // stays awaiting_execution — the event log records the error; retry re-executes
+      return { state: { ...state }, effects: [] };
+    }
+    const s: InstanceState = {
+      ...state,
+      status: "running",
+      stageStatuses: [...state.stageStatuses],
+      artifactVersions: { ...state.artifactVersions },
+    };
+    s.stageStatuses[s.currentStageIndex] = "completed";
+    s.currentStageIndex += 1;
+    return runForward(def, s);
   }
 
   if (event.kind === "human_trigger" || event.kind === "stage_completed") {

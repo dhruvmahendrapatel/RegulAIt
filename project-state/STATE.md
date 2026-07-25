@@ -49,6 +49,20 @@ admin CRUD, `/v1/evaluate` writes an audit row for every decision, visible-tools
 implements §3's visibility filtering). Work is on branch `claude/status-check-2gbrwf` (draft PR).
 **Not yet in the slice**: initiatives object type, admin portal.
 
+**Review fixes + git-provider abstraction (PR #10).** The PR #8/#9 adversarial reviews'
+confirmed findings are fixed (2 critical: stage-scoped approval events kill cross-stage
+approval forgery; transactional FOR-UPDATE event application kills decision races; plus
+supersede-all on re-open/deny/abort, merge-conflict-throwing template merge, approver
+validation at template creation, declared-modes enforcement, ceiling-preserving partial
+agent-policy upsert, revocable agent/connector grants). Then `git_operation` became a real
+executable stage type: new `packages/git-provider` (provider-neutral interface; GitHub REST
+adapter with injectable fetch; in-memory mock for tests/air-gapped dev; GitLab/Bitbucket/ADO
+interface-ready but explicitly rejected until implemented), `git_connections` with
+AES-256-GCM-encrypted tokens (REGULAIT_DATA_KEY; storage refused without it, migration 0009),
+and a gateway executor: create_branch → open_pr (body auto-linked to the signed-off
+requirements artifact, §2 stage 7) → merge (configured strategy) with results in
+instance.context, failures retryable via /advance, everything audited.
+
 **EPIC-03 started — workflow engine first slice (PR #9).** New pure `packages/workflow-kernel`:
 declarative template validation (§3 — executable stage types trigger/planning/
 artifact_generation/human_approval/automated_build/automated_check; git_operation/deployment/

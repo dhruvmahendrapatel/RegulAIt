@@ -7,6 +7,7 @@ const port = Number(process.env.PORT ?? 3000);
 
 const app = buildApp(createDb(connectionString), {
   bootstrapToken: process.env.REGULAIT_BOOTSTRAP_TOKEN,
+  dataKey: process.env.REGULAIT_DATA_KEY,
 });
 
 app.listen({ port, host: "0.0.0.0" }).then((address) => {

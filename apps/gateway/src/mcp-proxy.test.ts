@@ -109,7 +109,7 @@ async function mcpClientFor(userId: string): Promise<Client> {
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
-  app = buildApp(db, { bootstrapToken: BOOT });
+  app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
 
   upstream = await startUpstream();
 
@@ -1311,5 +1311,170 @@ describe("workflow review-fix regressions", () => {
     expect(del.statusCode).toBe(200);
     const listing = await app.inject({ method: "GET", headers: AUTH, url: `/v1/users/${piaId}/agents` });
     expect(listing.json().agents).toHaveLength(0);
+  });
+});
+
+describe("git-provider workflow stages (EPIC-03)", () => {
+  it("runs a governed change end-to-end: branch → PR linked to artifact → merge gate → squash merge", async () => {
+    const conn = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/git/connections",
+      payload: { name: "mock-git", provider: "mock", token: "irrelevant" },
+    });
+    expect(conn.statusCode).toBe(201);
+    expect(conn.body).not.toContain("irrelevant");
+
+    const quinn = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "proxy-quinn@example.com", displayName: "Proxy Quinn" },
+    });
+    const quinnId = quinn.json().id;
+    const quinnAuth = await authFor(quinnId);
+
+    const tpl = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/workflows/templates",
+      payload: {
+        name: "git-change",
+        definition: {
+          workflow: "git-change",
+          stages: [
+            { id: "intake", type: "trigger" },
+            { id: "requirements", type: "artifact_generation", output: "requirements_file" },
+            { id: "requirements_signoff", type: "human_approval", approvers: ["requesting_user"] },
+            { id: "branch", type: "git_operation", action: "create_branch", connection: "mock-git", repo: "acme/app" },
+            { id: "open_pr", type: "git_operation", action: "open_pr", connection: "mock-git", repo: "acme/app" },
+            { id: "merge_gate", type: "human_approval", approvers: ["requesting_user"] },
+            { id: "merge", type: "git_operation", action: "merge", connection: "mock-git", repo: "acme/app", strategy: "squash" },
+          ],
+        },
+      },
+    });
+    expect(tpl.statusCode).toBe(201);
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/workflows/assignment-rules",
+      payload: { templateId: tpl.json().id, changeType: "git-change-test" },
+    });
+
+    const started = await app.inject({
+      method: "POST",
+      headers: quinnAuth,
+      url: "/v1/workflows/instances",
+      payload: {
+        change: { description: "add rate limiting", paths: ["api/limits.ts"], changeType: "git-change-test", environment: "staging" },
+      },
+    });
+    const instanceId = started.json().id;
+    expect(started.json().status).toBe("blocked_on_artifact");
+
+    await app.inject({
+      method: "POST",
+      headers: quinnAuth,
+      url: `/v1/workflows/instances/${instanceId}/artifacts`,
+      payload: { stageId: "requirements", content: "# Rate limiting requirements" },
+    });
+    const q = await app.inject({ method: "GET", headers: AUTH, url: "/v1/approvals?status=pending" });
+    const signoff = q.json().approvals.find(
+      (a: { instanceId: string | null; stageId: string }) =>
+        a.instanceId === instanceId && a.stageId === "requirements_signoff",
+    );
+    // approval unblocks straight into the git stages: branch + PR run automatically
+    await app.inject({
+      method: "POST",
+      headers: quinnAuth,
+      url: `/v1/approvals/${signoff.id}/decide`,
+      payload: { decision: "approved" },
+    });
+
+    let view = await app.inject({ method: "GET", headers: quinnAuth, url: `/v1/workflows/instances/${instanceId}` });
+    expect(view.json().instance.status).toBe("blocked_on_approval");
+    const ctx = view.json().instance.context;
+    expect(ctx.branch).toBe(`regulait/${instanceId.slice(0, 8)}`);
+    expect(ctx.prId).toBe("1");
+    expect(ctx.prUrl).toBe("mock://acme/app/pull/1");
+
+    const q2 = await app.inject({ method: "GET", headers: AUTH, url: "/v1/approvals?status=pending" });
+    const mergeGate = q2.json().approvals.find(
+      (a: { instanceId: string | null; stageId: string }) =>
+        a.instanceId === instanceId && a.stageId === "merge_gate",
+    );
+    await app.inject({
+      method: "POST",
+      headers: quinnAuth,
+      url: `/v1/approvals/${mergeGate.id}/decide`,
+      payload: { decision: "approved" },
+    });
+
+    view = await app.inject({ method: "GET", headers: quinnAuth, url: `/v1/workflows/instances/${instanceId}` });
+    expect(view.json().instance.status).toBe("completed");
+    expect(view.json().instance.context.mergeSha).toBe("sha-merge-1");
+  });
+
+  it("execution failures are retryable and recorded, not terminal", async () => {
+    const rita = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "proxy-rita@example.com", displayName: "Proxy Rita" },
+    });
+    const ritaAuth = await authFor(rita.json().id);
+
+    const tpl = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/workflows/templates",
+      payload: {
+        name: "bad-conn-flow",
+        definition: {
+          workflow: "bad-conn-flow",
+          stages: [
+            { id: "intake", type: "trigger" },
+            { id: "branch", type: "git_operation", action: "create_branch", connection: "ghost-conn", repo: "acme/app" },
+          ],
+        },
+      },
+    });
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/workflows/assignment-rules",
+      payload: { templateId: tpl.json().id, changeType: "bad-conn-test" },
+    });
+
+    const started = await app.inject({
+      method: "POST",
+      headers: ritaAuth,
+      url: "/v1/workflows/instances",
+      payload: {
+        change: { description: "x", paths: ["a.ts"], changeType: "bad-conn-test", environment: "staging" },
+      },
+    });
+    const instanceId = started.json().id;
+    expect(started.json().status).toBe("awaiting_execution");
+
+    const view = await app.inject({ method: "GET", headers: ritaAuth, url: `/v1/workflows/instances/${instanceId}` });
+    expect(view.json().instance.context.lastError).toContain("unknown git connection");
+
+    // register the missing connection, then retry via advance
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/git/connections",
+      payload: { name: "ghost-conn", provider: "mock", token: "t" },
+    });
+    const retried = await app.inject({
+      method: "POST",
+      headers: ritaAuth,
+      url: `/v1/workflows/instances/${instanceId}/advance`,
+      payload: { stageId: "branch" },
+    });
+    expect(retried.json().status).toBe("completed");
+    expect(retried.json().context.lastError).toBeUndefined();
   });
 });
