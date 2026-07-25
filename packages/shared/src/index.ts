@@ -121,7 +121,7 @@ export const setAgentPolicySchema = z.object({
   ceilingAgentId: z.string().uuid().nullable().optional(),
 });
 
-export const invokeAgentSchema = z.object({ mode: z.string().min(1) });
+export const invokeAgentSchema = z.object({ mode: z.string().min(1).max(64) });
 
 export const createConnectorSchema = z.object({
   name: z.string().min(1),
@@ -137,7 +137,7 @@ export const createConnectorGrantSchema = z.object({
 
 export const invokeConnectorSchema = z.object({
   operation: z.enum(["read", "write"]),
-  object: z.string().min(1).optional(),
+  object: z.string().min(1).max(256).optional(),
 });
 
 export const changeDescriptorSchema = z.object({
