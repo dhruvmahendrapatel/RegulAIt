@@ -554,3 +554,157 @@ describe("role-derived entitlements (§5)", () => {
     expect(visible.map((t) => t.name)).toEqual(["query_database"]);
   });
 });
+
+// --- §2/§4 agents + connectors ---
+
+import {
+  evaluateAgent,
+  evaluateConnector,
+  type AgentGrant,
+  type AgentRef,
+  type ConnectorGrant,
+} from "./index.js";
+
+const AGENT: AgentRef = { id: "agent-claude", tier: 3, enabled: true };
+const CONNECTOR = "connector-salesforce";
+
+function agentGrant(overrides: Partial<AgentGrant> = {}): AgentGrant {
+  return { id: "ag-1", userId: USER, agentId: "agent-claude", allowedModes: null, ...overrides };
+}
+
+function connectorGrant(overrides: Partial<ConnectorGrant> = {}): ConnectorGrant {
+  return {
+    id: "cg-1",
+    userId: USER,
+    connectorId: CONNECTOR,
+    mode: "read",
+    allowedObjects: null,
+    ...overrides,
+  };
+}
+
+describe("evaluateAgent (§4)", () => {
+  it("denies by default without a grant, even for an enabled agent", () => {
+    const d = evaluateAgent({ userId: USER, agent: AGENT, mode: "plan", agentGrants: [] });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe(DEFAULT_DENY_RULE_ID);
+  });
+
+  it("denies a platform-disabled agent even when granted", () => {
+    const d = evaluateAgent({
+      userId: USER,
+      agent: { ...AGENT, enabled: false },
+      mode: "plan",
+      agentGrants: [agentGrant()],
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe("agent-registry-enabled");
+  });
+
+  it("allows a granted agent and traces the grant", () => {
+    const d = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "execute", agentGrants: [agentGrant()],
+    });
+    expect(d.effect).toBe("allow");
+    expect(d.ruleId).toBe("ag-1");
+    expect(d.ruleChain).toContainEqual({
+      rule: "agent-allow-list", outcome: "allow", grantId: "ag-1",
+    });
+  });
+
+  it("mode-level restriction on top of agent-level restriction (§4)", () => {
+    const grant = agentGrant({ allowedModes: ["plan"] });
+    const plan = evaluateAgent({ userId: USER, agent: AGENT, mode: "plan", agentGrants: [grant] });
+    expect(plan.effect).toBe("allow");
+
+    const exec = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "execute", agentGrants: [grant],
+    });
+    expect(exec.effect).toBe("deny");
+    expect(exec.reason).toContain("mode 'execute'");
+  });
+
+  it("ceiling denies agents above the user's tier ceiling, allows at the ceiling", () => {
+    const at = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "plan", agentGrants: [agentGrant()], ceilingTier: 3,
+    });
+    expect(at.effect).toBe("allow");
+
+    const above = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "plan", agentGrants: [agentGrant()], ceilingTier: 2,
+    });
+    expect(above.effect).toBe("deny");
+    expect(above.ruleId).toBe("agent-ceiling");
+  });
+
+  it("another user's grant does not apply", () => {
+    const d = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "plan",
+      agentGrants: [agentGrant({ userId: OTHER_USER })],
+    });
+    expect(d.effect).toBe("deny");
+  });
+});
+
+describe("evaluateConnector (§2)", () => {
+  it("denies by default without a grant", () => {
+    const d = evaluateConnector({
+      userId: USER, connectorId: CONNECTOR, operation: "read", connectorGrants: [],
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe(DEFAULT_DENY_RULE_ID);
+  });
+
+  it("read-only grant allows reads and denies writes", () => {
+    const read = evaluateConnector({
+      userId: USER, connectorId: CONNECTOR, operation: "read",
+      connectorGrants: [connectorGrant()],
+    });
+    expect(read.effect).toBe("allow");
+
+    const write = evaluateConnector({
+      userId: USER, connectorId: CONNECTOR, operation: "write",
+      connectorGrants: [connectorGrant()],
+    });
+    expect(write.effect).toBe("deny");
+    expect(write.reason).toContain("read-only");
+  });
+
+  it("readwrite grant allows writes", () => {
+    const d = evaluateConnector({
+      userId: USER, connectorId: CONNECTOR, operation: "write",
+      connectorGrants: [connectorGrant({ mode: "readwrite" })],
+    });
+    expect(d.effect).toBe("allow");
+  });
+
+  it("object scope allows listed objects, denies others, fails closed when unnamed", () => {
+    const grant = connectorGrant({ allowedObjects: ["accounts", "contacts"] });
+    const ok = evaluateConnector({
+      userId: USER, connectorId: CONNECTOR, operation: "read", object: "accounts",
+      connectorGrants: [grant],
+    });
+    expect(ok.effect).toBe("allow");
+
+    const outside = evaluateConnector({
+      userId: USER, connectorId: CONNECTOR, operation: "read", object: "payroll",
+      connectorGrants: [grant],
+    });
+    expect(outside.effect).toBe("deny");
+
+    const unnamed = evaluateConnector({
+      userId: USER, connectorId: CONNECTOR, operation: "read",
+      connectorGrants: [grant],
+    });
+    expect(unnamed.effect).toBe("deny");
+    expect(unnamed.reason).toContain("fails closed");
+  });
+
+  it("another user's connector grant does not apply", () => {
+    const d = evaluateConnector({
+      userId: USER, connectorId: CONNECTOR, operation: "read",
+      connectorGrants: [connectorGrant({ userId: OTHER_USER })],
+    });
+    expect(d.effect).toBe("deny");
+  });
+});

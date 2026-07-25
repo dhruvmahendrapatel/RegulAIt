@@ -100,3 +100,42 @@ export const createRevocationSchema = z.object({
   serverId: z.string().uuid(),
   toolName: z.string().min(1).nullable().optional(),
 });
+
+export const createAgentSchema = z.object({
+  name: z.string().min(1),
+  provider: z.string().min(1),
+  tier: z.number().int().min(0),
+  modes: z.array(z.string().min(1)).nullable().optional(),
+});
+
+export const setAgentEnabledSchema = z.object({ enabled: z.boolean() });
+
+export const createAgentGrantSchema = z.object({
+  userId: z.string().uuid(),
+  agentId: z.string().uuid(),
+  allowedModes: z.array(z.string().min(1)).nullable().optional(),
+});
+
+export const setAgentPolicySchema = z.object({
+  defaultAgentId: z.string().uuid().nullable().optional(),
+  ceilingAgentId: z.string().uuid().nullable().optional(),
+});
+
+export const invokeAgentSchema = z.object({ mode: z.string().min(1) });
+
+export const createConnectorSchema = z.object({
+  name: z.string().min(1),
+  kind: z.string().min(1),
+});
+
+export const createConnectorGrantSchema = z.object({
+  userId: z.string().uuid(),
+  connectorId: z.string().uuid(),
+  mode: z.enum(["read", "readwrite"]),
+  allowedObjects: z.array(z.string().min(1)).nullable().optional(),
+});
+
+export const invokeConnectorSchema = z.object({
+  operation: z.enum(["read", "write"]),
+  object: z.string().min(1).optional(),
+});

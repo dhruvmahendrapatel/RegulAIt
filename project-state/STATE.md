@@ -47,7 +47,20 @@ users/mcp_servers/mcp_tools/tool_grants/server_grants/audit_log — audit rows d
 no FKs so they survive deletions), `packages/shared` (zod schemas), `apps/gateway` (Fastify:
 admin CRUD, `/v1/evaluate` writes an audit row for every decision, visible-tools endpoint
 implements §3's visibility filtering). Work is on branch `claude/status-check-2gbrwf` (draft PR).
-**Not yet in the slice**: agents/connectors/initiatives object types, admin portal.
+**Not yet in the slice**: initiatives object type, admin portal.
+
+**§5 review fixes + agents/connectors governance (PR #8).** The PR #7 adversarial-review
+findings are fixed: revocations are unique per (user, server, tool) with NULLS NOT DISTINCT
+(migration 0005, duplicates deduped), Postgres constraint violations map to 409/400 instead of
+500, and the entitlements view now surfaces tool-scoped carve-outs of role read-only-all grants
+plus a `GET /v1/revocations` listing. Governance then extended to two more §2 object types
+(migration 0006): **agents** — global registry (name/provider/tier/modes/enabled, §4), per-user
+grants with mode-level restriction, per-user default+ceiling policy (tier-based), and a governed
+`POST /v1/agents/:id/invoke` enforcement point (registry-enabled → allow-list → mode → ceiling →
+allow, deny-by-default); **connectors** — catalog, per-user grants with read/readwrite mode and
+`allowedObjects` data scope (fail-closed), governed `POST /v1/connectors/:id/invoke`. Both audit
+into the **same** audit_log, widened with object_type/object_id/detail (§7's one audit trail).
+Actual provider routing attaches to the invoke endpoints later — governance precedes routing.
 
 **Roles + per-user overrides landed (PR #7) — §5 for the MCP object type.** Kernel: role-derived
 grants (`RoleToolGrant`/`RoleServerGrant`, pre-filtered by the gateway to assigned roles) and
