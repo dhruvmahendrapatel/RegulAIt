@@ -3,19 +3,24 @@ import {
   and,
   auditLog,
   eq,
+  isNull,
   orchestrationRuns,
   pmConnections,
   pmLinks,
+  users,
+  workflowInstances,
   type Db,
 } from "@regulait/db";
 import {
   PmProviderError,
   mappingFor,
+  resolveApprovalAction,
   resolvePmProvider,
   resolveStatus,
   resolveTaskFields,
 } from "@regulait/pm-provider";
 import type { TaskGraph } from "@regulait/orchestration-kernel";
+import type { WorkflowDefinition } from "@regulait/workflow-kernel";
 import { createPmConnectionSchema, pmSyncSchema } from "@regulait/shared";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { z } from "zod";
@@ -85,6 +90,88 @@ export async function mirrorNodeStatus(
   } catch (err) {
     // §3 "never drift silently": the failure is returned to the caller and
     // the link's lastSyncedAt stays stale — visible, not hidden.
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** §5: mirror a decided sign-off onto the linked work item — a status
+ * transition when the mapping names one for this stage, a comment otherwise
+ * (never a silent drop). Strictly a mirror of the ONE approvals queue: the
+ * decision is already made and recorded; a mirror failure never unwinds it. */
+export async function mirrorApprovalDecision(
+  db: Db,
+  dataKey: string | undefined,
+  approvalRow: {
+    objectType: string;
+    instanceId: string | null;
+    runId: string | null;
+    stageId: string | null;
+    status: string;
+    decisionReason: string | null;
+  },
+  deciderUserId: string,
+): Promise<{ ok: boolean; action?: string; error?: string } | null> {
+  if (!dataKey || !approvalRow.stageId) return null;
+  let linkWhere;
+  if (approvalRow.objectType === "workflow" && approvalRow.instanceId) {
+    linkWhere = and(
+      eq(pmLinks.objectType, "workflow_instance"),
+      eq(pmLinks.objectId, approvalRow.instanceId),
+      isNull(pmLinks.nodeId),
+    );
+  } else if (
+    approvalRow.objectType === "run" &&
+    approvalRow.runId &&
+    !approvalRow.stageId.startsWith("__budget__")
+  ) {
+    linkWhere = and(
+      eq(pmLinks.objectType, "run_node"),
+      eq(pmLinks.objectId, approvalRow.runId),
+      eq(pmLinks.nodeId, approvalRow.stageId),
+    );
+  } else {
+    return null;
+  }
+  const [link] = await db.select().from(pmLinks).where(linkWhere);
+  if (!link) return null;
+  const [conn] = await db.select().from(pmConnections).where(eq(pmConnections.id, link.connectionId));
+  if (!conn) return null;
+  const mapping = mappingFor(conn.provider, conn.mapping ?? undefined);
+  // Sign-off decisions only transition on approval; a denial is always a
+  // comment — a customer's "Approved" state must never be entered on a deny.
+  const action =
+    approvalRow.status === "approved"
+      ? resolveApprovalAction(mapping, approvalRow.stageId)
+      : ({ kind: "comment" } as const);
+  try {
+    const provider = providerFor(conn, dataKey);
+    const [decider] = await db.select({ email: users.email }).from(users).where(eq(users.id, deciderUserId));
+    const note =
+      `[RegulAIt] sign-off '${approvalRow.stageId}' ${approvalRow.status} by ${decider?.email ?? deciderUserId}` +
+      (approvalRow.decisionReason ? `: ${approvalRow.decisionReason}` : "");
+    if (action.kind === "transition") {
+      await provider.transitionState(conn.project, link.externalId, action.state);
+    }
+    await provider.addComment(conn.project, link.externalId, note);
+    await db.update(pmLinks).set({ lastSyncedAt: new Date() }).where(eq(pmLinks.id, link.id));
+    await db.insert(auditLog).values({
+      userId: deciderUserId,
+      objectType: "pm_work_item",
+      objectId: approvalRow.instanceId ?? approvalRow.runId,
+      detail: {
+        stageId: approvalRow.stageId,
+        externalId: link.externalId,
+        decision: approvalRow.status,
+        action: action.kind,
+        ...(action.kind === "transition" ? { state: action.state } : {}),
+      },
+      effect: "allow",
+      ruleId: "pm-approval-mirrored",
+      ruleChain: [],
+      reason: `sign-off '${approvalRow.stageId}' (${approvalRow.status}) mirrored as ${action.kind}`,
+    });
+    return { ok: true, action: action.kind };
+  } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
@@ -193,6 +280,84 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
       created,
       skipped: [...linked].filter((n): n is string => n !== null),
     });
+  });
+
+  // §5: link a workflow instance to ONE work item so its sign-offs are
+  // visible in the customer's tool without opening RegulAIt.
+  app.post("/v1/workflows/instances/:instanceId/pm-sync", async (req, reply) => {
+    const { instanceId } = z.object({ instanceId: z.string().uuid() }).parse(req.params);
+    const body = pmSyncSchema.parse(req.body);
+    const [instance] = await db
+      .select()
+      .from(workflowInstances)
+      .where(eq(workflowInstances.id, instanceId));
+    if (!instance) return reply.status(404).send({ error: "unavailable" });
+    if (!req.authCtx.isAdmin && req.authCtx.userId !== instance.initiatorUserId) {
+      return reply.status(404).send({ error: "unavailable" });
+    }
+    if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_sync" });
+    if (!opts.dataKey) return reply.status(503).send({ error: "pm_connections_require_data_key" });
+    const [conn] = await db
+      .select()
+      .from(pmConnections)
+      .where(eq(pmConnections.name, body.connectionName));
+    if (!conn) return reply.status(404).send({ error: "unknown_connection" });
+
+    const [existing] = await db
+      .select()
+      .from(pmLinks)
+      .where(
+        and(
+          eq(pmLinks.objectType, "workflow_instance"),
+          eq(pmLinks.objectId, instanceId),
+          isNull(pmLinks.nodeId),
+        ),
+      );
+    if (existing) {
+      return reply
+        .status(200)
+        .send({ created: false, externalId: existing.externalId, externalUrl: existing.externalUrl });
+    }
+
+    const def = instance.definition as WorkflowDefinition;
+    const change = instance.change as { description: string };
+    const mapping = mappingFor(conn.provider, conn.mapping ?? undefined);
+    let provider;
+    try {
+      provider = providerFor(conn, opts.dataKey);
+    } catch (err) {
+      if (err instanceof PmProviderError) {
+        return reply.status(422).send({ error: "unsupported_pm_provider", detail: err.message });
+      }
+      throw err;
+    }
+    const ref = await provider.createWorkItem(
+      conn.project,
+      mapping.task.workItemType,
+      resolveTaskFields(mapping, { title: `${def.workflow}: ${change.description}` }),
+    );
+    await db.insert(pmLinks).values({
+      connectionId: conn.id,
+      objectType: "workflow_instance",
+      objectId: instanceId,
+      nodeId: null,
+      externalId: ref.id,
+      externalUrl: ref.url,
+      lastSyncedAt: new Date(),
+    });
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId,
+      objectType: "pm_work_item",
+      objectId: instanceId,
+      detail: { externalId: ref.id, connection: conn.name, phase: "create" },
+      effect: "allow",
+      ruleId: "pm-work-item-created",
+      ruleChain: [],
+      reason: `workflow instance linked to ${conn.provider} work item '${ref.id}'`,
+    });
+    return reply
+      .status(201)
+      .send({ created: true, externalId: ref.id, externalUrl: ref.url });
   });
 
   // §3 read-through: RegulAIt stores only the linkage. live=true resolves the

@@ -62,7 +62,7 @@ import { registerMcpProxy } from "./mcp-proxy.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
 import { registerOptimizationRoutes } from "./optimization.js";
 import { applyRunApprovalDecision, registerOrchestrationRoutes } from "./orchestration.js";
-import { registerPmRoutes } from "./pm.js";
+import { mirrorApprovalDecision, registerPmRoutes } from "./pm.js";
 import { RunStateError } from "@regulait/orchestration-kernel";
 import { applyWorkflowApprovalDecision, registerWorkflowRoutes } from "./workflows.js";
 import { MergeConflictError, WorkflowStateError } from "@regulait/workflow-kernel";
@@ -131,6 +131,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "POST /v1/runs/:runId/events",
     "GET /v1/runs/:runId",
     "POST /v1/runs/:runId/pm-sync",
+    "POST /v1/workflows/instances/:instanceId/pm-sync",
     "GET /v1/pm/links",
   ]);
   app.addHook("preHandler", async (req, reply) => {
@@ -537,7 +538,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     if (updated.objectType === "run") {
       await applyRunApprovalDecision(db, updated, body.decision, deciderUserId);
     }
-    return updated;
+    // EPIC-06 §5: sign-offs mirror to the linked work item — display only,
+    // never a second decision point; a mirror failure never unwinds the
+    // decision, it is surfaced in the response.
+    const pmMirror = await mirrorApprovalDecision(db, opts.dataKey, updated, deciderUserId);
+    return pmMirror ? { ...updated, pmMirror } : updated;
   });
 
   registerAgentConnectorRoutes(app, db);

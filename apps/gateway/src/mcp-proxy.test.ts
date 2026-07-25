@@ -2799,3 +2799,237 @@ describe("PM-tool integration (EPIC-06 slice)", () => {
     expect(stranger.statusCode).toBe(404);
   });
 });
+
+describe("PM approval mirroring (EPIC-06 §5)", () => {
+  let miaId: string;
+  let miaAuth: { authorization: string };
+
+  it("an approved sign-off transitions the linked item when the stage is mapped", async () => {
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/pm/connections",
+      payload: {
+        name: "mock-signoff",
+        provider: "mock",
+        project: "signoff-proj",
+        token: "tok2",
+        mapping: {
+          task: { workItemType: "Task", fields: { title: "title", status: "state" } },
+          approval: { target: "status_transition", stageMap: { signoff: "Signed Off" } },
+        },
+      },
+    });
+
+    const tpl = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/workflows/templates",
+      payload: {
+        name: "pm-mirror-wf",
+        definition: {
+          workflow: "pm-mirror-wf",
+          stages: [
+            { id: "intake", type: "trigger" },
+            { id: "spec", type: "artifact_generation", output: "spec_doc" },
+            { id: "signoff", type: "human_approval", approvers: ["requesting_user"] },
+          ],
+        },
+      },
+    });
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/workflows/assignment-rules",
+      payload: { templateId: tpl.json().id, changeType: "pm-mirror-e2e" },
+    });
+
+    const mia = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "pm-mia@example.com", displayName: "PM Mia" },
+    });
+    miaId = mia.json().id;
+    miaAuth = await authFor(miaId);
+
+    const started = await app.inject({
+      method: "POST",
+      headers: miaAuth,
+      url: "/v1/workflows/instances",
+      payload: {
+        change: {
+          description: "mirrored change",
+          paths: ["svc/a.ts"],
+          changeType: "pm-mirror-e2e",
+          environment: "staging",
+        },
+      },
+    });
+    const instanceId = started.json().id;
+
+    const sync = await app.inject({
+      method: "POST",
+      headers: miaAuth,
+      url: `/v1/workflows/instances/${instanceId}/pm-sync`,
+      payload: { connectionName: "mock-signoff" },
+    });
+    expect(sync.statusCode).toBe(201);
+    const externalId = sync.json().externalId;
+    // idempotent
+    const again = await app.inject({
+      method: "POST",
+      headers: miaAuth,
+      url: `/v1/workflows/instances/${instanceId}/pm-sync`,
+      payload: { connectionName: "mock-signoff" },
+    });
+    expect(again.statusCode).toBe(200);
+    expect(again.json().created).toBe(false);
+
+    await app.inject({
+      method: "POST",
+      headers: miaAuth,
+      url: `/v1/workflows/instances/${instanceId}/artifacts`,
+      payload: { stageId: "spec", content: "the spec" },
+    });
+    const inbox = await app.inject({ method: "GET", headers: miaAuth, url: "/v1/approvals?status=pending" });
+    const entry = inbox.json().approvals.find(
+      (a: { instanceId: string | null }) => a.instanceId === instanceId,
+    );
+    const decided = await app.inject({
+      method: "POST",
+      headers: miaAuth,
+      url: `/v1/approvals/${entry.id}/decide`,
+      payload: { decision: "approved", reason: "looks good" },
+    });
+    expect(decided.statusCode).toBe(200);
+    expect(decided.json().pmMirror).toEqual({ ok: true, action: "transition" });
+
+    const { resolvePmProvider } = await import("@regulait/pm-provider");
+    const mock = resolvePmProvider({ provider: "mock", token: "" });
+    const item = await mock.getWorkItem("signoff-proj", externalId);
+    expect(item.state).toBe("Signed Off");
+    expect(item.comments.some((c) => c.includes("signoff") && c.includes("approved"))).toBe(true);
+    expect(item.comments.some((c) => c.includes("looks good"))).toBe(true);
+  });
+
+  it("a denial never enters the mapped state — it degrades to a comment", async () => {
+    const started = await app.inject({
+      method: "POST",
+      headers: miaAuth,
+      url: "/v1/workflows/instances",
+      payload: {
+        change: {
+          description: "denied change",
+          paths: ["svc/b.ts"],
+          changeType: "pm-mirror-e2e",
+          environment: "staging",
+        },
+      },
+    });
+    const instanceId = started.json().id;
+    const sync = await app.inject({
+      method: "POST",
+      headers: miaAuth,
+      url: `/v1/workflows/instances/${instanceId}/pm-sync`,
+      payload: { connectionName: "mock-signoff" },
+    });
+    const externalId = sync.json().externalId;
+    await app.inject({
+      method: "POST",
+      headers: miaAuth,
+      url: `/v1/workflows/instances/${instanceId}/artifacts`,
+      payload: { stageId: "spec", content: "risky spec" },
+    });
+    const inbox = await app.inject({ method: "GET", headers: miaAuth, url: "/v1/approvals?status=pending" });
+    const entry = inbox.json().approvals.find(
+      (a: { instanceId: string | null }) => a.instanceId === instanceId,
+    );
+    const decided = await app.inject({
+      method: "POST",
+      headers: miaAuth,
+      url: `/v1/approvals/${entry.id}/decide`,
+      payload: { decision: "denied", reason: "too risky" },
+    });
+    expect(decided.json().pmMirror).toEqual({ ok: true, action: "comment" });
+
+    const { resolvePmProvider } = await import("@regulait/pm-provider");
+    const mock = resolvePmProvider({ provider: "mock", token: "" });
+    const item = await mock.getWorkItem("signoff-proj", externalId);
+    expect(item.state).not.toBe("Signed Off");
+    expect(item.comments.some((c) => c.includes("denied") && c.includes("too risky"))).toBe(true);
+  });
+
+  it("run escalation decisions mirror as comments on the node's linked item", async () => {
+    const approver = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "pm-run-approver@example.com", displayName: "Run Approver" },
+    });
+    const approverId = approver.json().id;
+    const agent = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/agents",
+      payload: { name: "pm-mirror-worker", provider: "anthropic", tier: 1, modes: ["execute"] },
+    });
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/grants/agents",
+      payload: { userId: miaId, agentId: agent.json().id },
+    });
+    const run = await app.inject({
+      method: "POST",
+      headers: miaAuth,
+      url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "mirror-escalation",
+          escalationApproverUserId: approverId,
+          nodes: [{ id: "risky", title: "Risky task", ownerAgentId: agent.json().id, mode: "execute" }],
+        },
+      },
+    });
+    const runId = run.json().id;
+    await app.inject({
+      method: "POST",
+      headers: miaAuth,
+      url: `/v1/runs/${runId}/pm-sync`,
+      payload: { connectionName: "mock-signoff" },
+    });
+    const ev = (payload: Record<string, unknown>) =>
+      app.inject({ method: "POST", headers: miaAuth, url: `/v1/runs/${runId}/events`, payload });
+    await ev({ kind: "start" });
+    await ev({ kind: "node_started", nodeId: "risky" });
+    await ev({ kind: "node_failed", nodeId: "risky", error: "worker crashed" });
+    await ev({ kind: "escalate_node", nodeId: "risky" });
+
+    const approverAuth = await authFor(approverId);
+    const inbox = await app.inject({
+      method: "GET",
+      headers: approverAuth,
+      url: "/v1/approvals?status=pending",
+    });
+    const entry = inbox.json().approvals.find((a: { runId: string | null }) => a.runId === runId);
+    const decided = await app.inject({
+      method: "POST",
+      headers: approverAuth,
+      url: `/v1/approvals/${entry.id}/decide`,
+      payload: { decision: "approved" },
+    });
+    expect(decided.json().pmMirror).toEqual({ ok: true, action: "comment" });
+
+    const links = await app.inject({
+      method: "GET",
+      headers: miaAuth,
+      url: `/v1/pm/links?runId=${runId}`,
+    });
+    const nodeLink = links.json().links.find((l: { nodeId: string }) => l.nodeId === "risky");
+    const { resolvePmProvider } = await import("@regulait/pm-provider");
+    const mock = resolvePmProvider({ provider: "mock", token: "" });
+    const item = await mock.getWorkItem("signoff-proj", nodeLink.externalId);
+    expect(item.comments.some((c) => c.includes("risky") && c.includes("approved"))).toBe(true);
+  });
+});

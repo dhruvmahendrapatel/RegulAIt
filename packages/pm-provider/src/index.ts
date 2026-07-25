@@ -89,8 +89,31 @@ export const pmMappingSchema = z.object({
     /** RegulAIt node status → provider state name; unmapped = skip, never invent */
     statusMap: z.record(z.string().min(1)).optional(),
   }),
+  /** §5: how sign-off decisions appear on the linked item. Absent config or an
+   * unmapped stage falls back to a comment — a decision is never silently
+   * dropped (§4's fallback rule applied to approvals). */
+  approval: z
+    .object({
+      target: z.enum(["status_transition", "comment"]).default("comment"),
+      /** sign-off stage id → provider state (used when target=status_transition) */
+      stageMap: z.record(z.string().min(1)).optional(),
+    })
+    .optional(),
 });
 export type PmMapping = z.infer<typeof pmMappingSchema>;
+
+export type ApprovalMirrorAction = { kind: "transition"; state: string } | { kind: "comment" };
+
+/** Pure §5 resolution: a mapped stage under status_transition transitions the
+ * item; everything else degrades to a comment — never a silent drop. */
+export function resolveApprovalAction(mapping: PmMapping, stageId: string): ApprovalMirrorAction {
+  const cfg = mapping.approval;
+  if (cfg?.target === "status_transition") {
+    const state = cfg.stageMap?.[stageId];
+    if (state) return { kind: "transition", state };
+  }
+  return { kind: "comment" };
+}
 
 export function validateMapping(raw: unknown): PmMapping {
   return pmMappingSchema.parse(raw);

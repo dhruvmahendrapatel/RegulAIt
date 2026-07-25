@@ -79,9 +79,19 @@ OUTBOUND via the mapping's statusMap on every node event; unmapped statuses are 
 invented; mirror failures are surfaced in the response, never fail the run event, never hidden.
 Every creation/mirror writes the one audit trail (objectType "pm_work_item"). Endpoints:
 PM connection CRUD (admin), `POST /v1/runs/:id/pm-sync` (idempotent node→work-item linking),
-`GET /v1/pm/links` (+live read-through). Not in the slice: inbound sync (webhooks/polling —
-transport deliberately unchosen, needs an ADR), decision records (§4), approval mirroring
-(§5 — natural next slice), Jira + remaining adapters, workflow-instance linking.
+`GET /v1/pm/links` (+live read-through). **Second slice: §5 approval
+mirroring.** Mapping gains an `approval` section (`target: status_transition|comment` +
+per-stage `stageMap`); pure `resolveApprovalAction` degrades everything unmapped to a comment —
+a sign-off decision is never silently dropped (§4's fallback rule applied to approvals), and a
+DENIAL never enters a mapped state (always a comment — a customer's "Approved" state is only
+entered on approve). Workflow instances now link to ONE work item
+(`POST /v1/workflows/instances/:id/pm-sync`, idempotent), and the decide endpoint mirrors every
+decided workflow sign-off and run escalation onto its linked item (transition and/or
+`[RegulAIt] sign-off …` comment with decider + reason) — strictly display, never a second
+decision point; a mirror failure is surfaced in the decide response and never unwinds the
+decision. All mirrors audited (pm_work_item). Not in EPIC-06 yet: inbound sync
+(webhooks/polling — transport deliberately unchosen, needs an ADR), §4 decision records,
+budget-approval mirroring (no run-level link yet), Jira + remaining adapters.
 
 **EPIC-05 started — multi-agent orchestration first slice, 2026-07-25.** New pure
 `packages/orchestration-kernel` (pillar 7, MULTI_AGENT_ORCHESTRATION_SPEC §2–§5): task-graph
@@ -238,7 +248,7 @@ with a real in-process upstream MCP server and real MCP client (26 tests total).
 | EPIC-03 | Workflow engine MVP (now includes optional Design/Architecture sign-off stage type) | **in progress** — first slice merged (PR #9) | WORKFLOW_ENGINE_SPEC.md, ADR-0007 |
 | EPIC-04 | Token/cost optimization MVP (escalated to P0) | **in progress** — routing kernel + cost_events ledger (PR #12), lazy tool-loading (PR #13) merged; §9 workflow cost-sensitivity tag built | TOKEN_OPTIMIZATION_SPEC.md, ADR-0007 |
 | EPIC-05 | Multi-agent orchestration MVP (PM/Team-Lead/Worker delegation) | **in progress** — slice 1 merged (PR #14: kernel + runs + escalations); slice 2 built (§5.2 per-run budget caps: estimate, re-plan, approval gates) | MULTI_AGENT_ORCHESTRATION_SPEC.md, ADR-0008 |
-| EPIC-06 | PM-tool integration MVP (Azure DevOps/Jira/etc.) | **in progress** — first slice built (pm-provider package: mapping layer + ADO/mock adapters; node↔work-item links; outbound status mirror; live read-through) | PM_TOOL_INTEGRATION_SPEC.md, ADR-0008 |
+| EPIC-06 | PM-tool integration MVP (Azure DevOps/Jira/etc.) | **in progress** — slice 1 merged (PR #15: mapping layer, links, status mirror); slice 2 built (§5 approval mirroring: stage transitions/comments on linked items) | PM_TOOL_INTEGRATION_SPEC.md, ADR-0008 |
 
 ## Components
 | ID | Name | Status | Related |
