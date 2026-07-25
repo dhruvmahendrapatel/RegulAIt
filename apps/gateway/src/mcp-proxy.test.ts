@@ -7,7 +7,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { z } from "zod";
-import { createDb, eq, mcpTools, runMigrations, type Db } from "@regulait/db";
+import { createDb, eq, mcpTools, modelCredentials, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -3389,5 +3389,210 @@ describe("PM inbound sync (EPIC-06, ADR-0010)", () => {
     expect(
       audit.json().entries.some((e: { ruleId: string }) => e.ruleId === "pm-link-orphaned"),
     ).toBe(true);
+  });
+});
+
+describe("governed model dispatch (measured usage, pillar 5 actuals)", () => {
+  let danaId: string;
+  let danaAuth: { authorization: string };
+  let bigId: string;
+  let cheapId: string;
+
+  const mkAgent = async (payload: Record<string, unknown>) => {
+    const r = await app.inject({ method: "POST", headers: AUTH, url: "/v1/agents", payload });
+    expect(r.statusCode).toBe(201);
+    return r.json().id as string;
+  };
+  const grant = (userId: string, agentId: string) =>
+    app.inject({ method: "POST", headers: AUTH, url: "/v1/grants/agents", payload: { userId, agentId } });
+
+  it("dispatch=true executes the ROUTED model and ledgers measured usage + measured savings", async () => {
+    const dana = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "dispatch-dana@example.com", displayName: "Dispatch Dana" },
+    });
+    danaId = dana.json().id;
+    danaAuth = await authFor(danaId);
+
+    bigId = await mkAgent({
+      name: "disp-big", provider: "mock", tier: 2, modes: ["plan", "execute"],
+      costPerMTokIn: 15, costPerMTokOut: 75, model: "mock-large",
+    });
+    cheapId = await mkAgent({
+      name: "disp-cheap", provider: "mock", tier: 0, modes: ["plan", "execute"],
+      costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-small",
+    });
+    await grant(danaId, bigId);
+    await grant(danaId, cheapId);
+
+    const res = await app.inject({
+      method: "POST",
+      headers: danaAuth,
+      url: `/v1/agents/${bigId}/invoke`,
+      payload: { mode: "plan", input: "summarize this short note", dispatch: true },
+    });
+    expect(res.statusCode).toBe(200);
+    const { decision, routing, dispatch } = res.json();
+    expect(decision.effect).toBe("allow");
+    expect(routing.selectedAgentId).toBe(cheapId);
+    // the dispatch executed exactly what routing chose — never the requested model
+    expect(dispatch.servedAgentId).toBe(cheapId);
+    expect(dispatch.model).toBe("mock-small");
+    expect(dispatch.outputText).toBe("mock(mock-small): summarize this short note");
+    expect(dispatch.refusal).toBe(false);
+    expect(dispatch.stopReason).toBe("end_turn");
+    expect(dispatch.usage.inputTokens).toBeGreaterThan(0);
+    expect(dispatch.usage.outputTokens).toBeGreaterThan(0);
+    expect(dispatch.costUsd).toBeGreaterThan(0);
+    // measured savings: baseline (requested big) price minus served price at
+    // the SAME measured token volumes
+    expect(dispatch.measuredCostSavedUsd).toBeGreaterThan(0);
+
+    const ledger = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/usage-events?userId=${danaId}`,
+    });
+    expect(ledger.statusCode).toBe(200);
+    const { events, totals } = ledger.json();
+    expect(events).toHaveLength(1);
+    expect(events[0].agentId).toBe(cheapId);
+    expect(events[0].requestedAgentId).toBe(bigId);
+    expect(events[0].baselineAgentId).toBe(bigId);
+    expect(events[0].provider).toBe("mock");
+    expect(events[0].model).toBe("mock-small");
+    expect(events[0].inputTokens).toBe(dispatch.usage.inputTokens);
+    expect(events[0].costUsd).toBeCloseTo(dispatch.costUsd, 10);
+    expect(totals.events).toBe(1);
+    expect(totals.costUsd).toBeGreaterThan(0);
+    expect(totals.measuredCostSavedUsd).toBeGreaterThan(0);
+
+    // the audit row records that a real dispatch happened
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit?userId=${danaId}` });
+    const row = audit.json().entries.find((e: { objectType: string }) => e.objectType === "agent");
+    expect(row.detail.dispatch).toMatchObject({ model: "mock-small", refusal: false });
+  });
+
+  it("a model refusal is surfaced honestly — empty output, refusal flagged, usage still ledgered", async () => {
+    const res = await app.inject({
+      method: "POST",
+      headers: danaAuth,
+      url: `/v1/agents/${cheapId}/invoke`,
+      payload: { mode: "plan", input: "please <<refuse>> this request", dispatch: true },
+    });
+    expect(res.statusCode).toBe(200);
+    const { dispatch } = res.json();
+    expect(dispatch.refusal).toBe(true);
+    expect(dispatch.stopReason).toBe("refusal");
+    expect(dispatch.outputText).toBe("");
+
+    const ledger = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/usage-events?userId=${danaId}`,
+    });
+    const refusalRow = ledger.json().events.find((e: { refusal: boolean }) => e.refusal);
+    expect(refusalRow).toBeDefined();
+    expect(refusalRow.outputTokens).toBe(0);
+  });
+
+  it("decision-only invokes are unchanged: no dispatch field, no usage row", async () => {
+    const before = (
+      await app.inject({ method: "GET", headers: AUTH, url: `/v1/usage-events?userId=${danaId}` })
+    ).json().events.length;
+    const res = await app.inject({
+      method: "POST",
+      headers: danaAuth,
+      url: `/v1/agents/${cheapId}/invoke`,
+      payload: { mode: "plan", input: "just a decision please" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().dispatch).toBeUndefined();
+    const after = (
+      await app.inject({ method: "GET", headers: AUTH, url: `/v1/usage-events?userId=${danaId}` })
+    ).json().events.length;
+    expect(after).toBe(before);
+  });
+
+  it("an agent without a model id fails explicit — never a silent fallback", async () => {
+    const erik = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "dispatch-erik@example.com", displayName: "Dispatch Erik" },
+    });
+    const erikId = erik.json().id;
+    const nomodelId = await mkAgent({
+      name: "disp-nomodel", provider: "mock", tier: 0, modes: ["plan"],
+      costPerMTokIn: 1, costPerMTokOut: 5,
+    });
+    await grant(erikId, nomodelId);
+    const res = await app.inject({
+      method: "POST",
+      headers: await authFor(erikId),
+      url: `/v1/agents/${nomodelId}/invoke`,
+      payload: { mode: "plan", input: "hello", dispatch: true },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("agent_not_dispatchable");
+  });
+
+  it("a real provider without a stored credential fails explicit", async () => {
+    const frida = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "dispatch-frida@example.com", displayName: "Dispatch Frida" },
+    });
+    const fridaId = frida.json().id;
+    const anthropicAgentId = await mkAgent({
+      name: "disp-anthropic", provider: "anthropic", tier: 0, modes: ["plan"],
+      costPerMTokIn: 5, costPerMTokOut: 25, model: "claude-opus-5",
+    });
+    await grant(fridaId, anthropicAgentId);
+    const res = await app.inject({
+      method: "POST",
+      headers: await authFor(fridaId),
+      url: `/v1/agents/${anthropicAgentId}/invoke`,
+      payload: { mode: "plan", input: "hello", dispatch: true },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("no_model_credential");
+  });
+
+  it("model credentials are write-only: stored encrypted, listed without the key, admin-only", async () => {
+    const created = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/model-credentials",
+      payload: { provider: "anthropic", apiKey: "sk-ant-test-secret" },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(JSON.stringify(created.json())).not.toContain("sk-ant-test-secret");
+
+    const listed = await app.inject({ method: "GET", headers: AUTH, url: "/v1/model-credentials" });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json().credentials.some((c: { provider: string }) => c.provider === "anthropic")).toBe(true);
+    expect(JSON.stringify(listed.json())).not.toContain("sk-ant-test-secret");
+
+    // at rest: ciphertext, not plaintext
+    const [row] = await db.select().from(modelCredentials);
+    expect(row!.keyCiphertext).not.toContain("sk-ant-test-secret");
+
+    // non-admins cannot touch the credential surface
+    const denied = await app.inject({
+      method: "GET", headers: danaAuth, url: "/v1/model-credentials",
+    });
+    expect(denied.statusCode).toBe(403);
+  });
+
+  it("non-admins see only their own usage history", async () => {
+    const own = await app.inject({ method: "GET", headers: danaAuth, url: "/v1/usage-events" });
+    expect(own.statusCode).toBe(200);
+    expect(own.json().events.every((e: { userId: string }) => e.userId === danaId)).toBe(true);
+
+    // asking for someone else's history is forced back to self
+    const spoofed = await app.inject({
+      method: "GET", headers: danaAuth, url: "/v1/usage-events?userId=00000000-0000-0000-0000-000000000000",
+    });
+    expect(spoofed.json().events.every((e: { userId: string }) => e.userId === danaId)).toBe(true);
   });
 });

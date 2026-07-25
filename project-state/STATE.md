@@ -63,6 +63,30 @@ and a gateway executor: create_branch → open_pr (body auto-linked to the signe
 requirements artifact, §2 stage 7) → merge (configured strategy) with results in
 instance.context, failures retryable via /advance, everything audited.
 
+**Real model dispatch, 2026-07-25 — the estimates-to-actuals unblocker.** New
+`packages/model-provider` on the git/pm-provider playbook: neutral `ModelProvider` interface
+(`dispatch(model, input, …) → {outputText, stopReason, refusal, usage}`), an Anthropic adapter
+on the official `@anthropic-ai/sdk` (injectable fetch — unit tests never touch the network;
+`stop_reason: "refusal"` handled explicitly: refused content is NEVER surfaced as an answer),
+an in-memory mock (input `<<refuse>>` triggers the refusal path for e2e tests), and a registry
+that rejects openai/google/xai until implemented. Placement is the whole point: dispatch runs
+strictly AFTER governance and AFTER routing in `/v1/agents/:id/invoke` (`dispatch: true`) — the
+provider package is handed the served model id as an input and never picks one, so widening
+entitlement is structurally impossible. Config problems fail explicit (409
+`agent_not_dispatchable` / `no_model_credential`), never fall back to a different model.
+Migration 0016: `agents.model` (provider-native id; null = decision-only),
+`model_credentials` (one per provider, AES-256-GCM under REGULAIT_DATA_KEY, write-only API —
+never returned), and `usage_events` — pillar 5's MEASURED actual-spend ledger, deliberately
+distinct from estimate-based `cost_events`: provider-reported token counts × the served agent's
+list price (unpriced = null, a measured token count never becomes an invented dollar), plus
+`measuredCostSavedUsd` — what the routing baseline would have cost at the SAME measured
+volumes — upgrading pillar 6's savings claim from estimated to measured per dispatch.
+`GET /v1/usage-events` mirrors the cost-events read surface (admin fleet-wide, non-admins
+forced to self; totals include measured spend + measured savings). Every dispatch is audited
+(model, stopReason, refusal in the agent audit row). Not yet: streaming, multi-turn/system
+prompts from workflow context, orchestration-run worker dispatch through this path, per-user
+credentials, openai/google/xai adapters.
+
 **EPIC-06 started — PM-tool integration first slice, 2026-07-25.** New
 `packages/pm-provider` on the git-provider playbook (pillar 8, PM_TOOL_INTEGRATION_SPEC
 §2/§3/§6): neutral `PmProvider` interface (create/update/transition/comment/getWorkItem), the
@@ -267,7 +291,7 @@ with a real in-process upstream MCP server and real MCP client (26 tests total).
 | EPIC-01 | Bootstrap: AWS foundation + GitHub repo + session-continuity scaffold | **done** | ADR-0001–0004 |
 | EPIC-02 | Governance layer MVP (now includes infra-ops/compliance-cascade/deploy-model, Shared Projects, cost dashboard — §1–§10) | **in progress** — stack chosen (ADR-0009), first slice = MCP-server governance vertical | GOVERNANCE_LAYER_SPEC.md, ADR-0007, ADR-0009 |
 | EPIC-03 | Workflow engine MVP (now includes optional Design/Architecture sign-off stage type) | **in progress** — first slice merged (PR #9) | WORKFLOW_ENGINE_SPEC.md, ADR-0007 |
-| EPIC-04 | Token/cost optimization MVP (escalated to P0) | **in progress** — routing kernel + cost_events ledger (PR #12), lazy tool-loading (PR #13) merged; §9 workflow cost-sensitivity tag built | TOKEN_OPTIMIZATION_SPEC.md, ADR-0007 |
+| EPIC-04 | Token/cost optimization MVP (escalated to P0) | **in progress** — routing kernel + cost_events ledger (PR #12), lazy tool-loading (PR #13), §9 workflow cost-sensitivity tag merged; real model dispatch built (model-provider + measured usage_events ledger — savings now measured, not just estimated) | TOKEN_OPTIMIZATION_SPEC.md, ADR-0007 |
 | EPIC-05 | Multi-agent orchestration MVP (PM/Team-Lead/Worker delegation) | **in progress** — slice 1 merged (PR #14: kernel + runs + escalations); slice 2 built (§5.2 per-run budget caps: estimate, re-plan, approval gates) | MULTI_AGENT_ORCHESTRATION_SPEC.md, ADR-0008 |
 | EPIC-06 | PM-tool integration MVP (Azure DevOps/Jira/etc.) | **in progress** — slice 1 merged (PR #15); slices 2–4 built (§5 approval mirroring; §4 decision records; ADR-0010 inbound sync with drift detection) | PM_TOOL_INTEGRATION_SPEC.md, ADR-0008, ADR-0010 |
 

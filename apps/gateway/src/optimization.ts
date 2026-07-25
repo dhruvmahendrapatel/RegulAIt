@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { costEvents, count, desc, eq, sql, type Db } from "@regulait/db";
+import { costEvents, count, desc, eq, sql, usageEvents, type Db } from "@regulait/db";
 import { z } from "zod";
 
 const listQuery = z.object({
@@ -38,6 +38,33 @@ export function registerOptimizationRoutes(app: FastifyInstance, db: Db) {
         .from(costEvents)
         .where(where)
         .groupBy(costEvents.technique),
+    ]);
+
+    return { events, totals };
+  });
+
+  // PILLAR 5 actuals: the measured-spend ledger written by real dispatches.
+  // Same visibility rule as cost-events — non-admins see only themselves.
+  app.get("/v1/usage-events", async (req, reply) => {
+    const q = listQuery.parse(req.query);
+    const userId = req.authCtx.isAdmin ? q.userId : req.authCtx.userId;
+    if (!req.authCtx.isAdmin && !userId) {
+      return reply.status(403).send({ error: "bootstrap_has_no_usage_history" });
+    }
+    const where = userId ? eq(usageEvents.userId, userId) : undefined;
+
+    const [events, [totals]] = await Promise.all([
+      db.select().from(usageEvents).where(where).orderBy(desc(usageEvents.at)).limit(q.limit),
+      db
+        .select({
+          events: count(),
+          inputTokens: sql<number>`coalesce(sum(${usageEvents.inputTokens}), 0)::int`,
+          outputTokens: sql<number>`coalesce(sum(${usageEvents.outputTokens}), 0)::int`,
+          costUsd: sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8`,
+          measuredCostSavedUsd: sql<number>`coalesce(sum(${usageEvents.measuredCostSavedUsd}), 0)::float8`,
+        })
+        .from(usageEvents)
+        .where(where),
     ]);
 
     return { events, totals };

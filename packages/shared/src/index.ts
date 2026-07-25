@@ -108,6 +108,8 @@ export const createAgentSchema = z.object({
   modes: z.array(z.string().min(1)).nullable().optional(),
   costPerMTokIn: z.number().nonnegative().nullable().optional(),
   costPerMTokOut: z.number().nonnegative().nullable().optional(),
+  /** provider-native model id (e.g. claude-opus-5); null = not dispatchable */
+  model: z.string().min(1).nullable().optional(),
 });
 
 export const setAgentEnabledSchema = z.object({ enabled: z.boolean() });
@@ -128,9 +130,20 @@ export const setAgentPolicySchema = z.object({
 
 export const invokeAgentSchema = z.object({
   mode: z.string().min(1).max(64),
-  /** request text, used only for pure complexity classification/token estimation */
+  /** request text: complexity classification/token estimation input, and the
+   * user turn actually sent to the model when dispatch=true */
   input: z.string().max(100_000).optional(),
   costSensitivity: z.enum(["cost-sensitive", "standard", "quality-sensitive"]).optional(),
+  /** true = actually execute the routed model (governed dispatch); absent/false
+   * keeps the decision-only behavior */
+  dispatch: z.boolean().optional(),
+  maxTokens: z.number().int().min(1).max(64_000).optional(),
+});
+
+export const createModelCredentialSchema = z.object({
+  provider: z.enum(["anthropic", "openai", "google", "xai"]),
+  apiKey: z.string().min(1),
+  baseUrl: z.string().url().nullable().optional(),
 });
 
 export const createConnectorSchema = z.object({
