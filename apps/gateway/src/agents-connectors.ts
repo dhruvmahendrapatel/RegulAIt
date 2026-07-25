@@ -586,7 +586,15 @@ export function registerAgentConnectorRoutes(
 
     const decision = evaluateAgent({
       userId,
-      agent: { id: agent.id, tier: agent.tier, enabled: agent.enabled, modes: agent.modes ?? null },
+      // the display name rides along so denial prose says "premium-mock
+      // (c8d62183…)" instead of a bare UUID (the id stays in the trace)
+      agent: {
+        id: agent.id,
+        name: agent.name,
+        tier: agent.tier,
+        enabled: agent.enabled,
+        modes: agent.modes ?? null,
+      },
       mode: body.mode,
       agentGrants: grants,
       ceilingTier,
@@ -604,7 +612,7 @@ export function registerAgentConnectorRoutes(
         (a) =>
           evaluateAgent({
             userId,
-            agent: { id: a.id, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
+            agent: { id: a.id, name: a.name, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
             mode: body.mode,
             agentGrants: grants,
             ceilingTier,
@@ -852,6 +860,7 @@ export function registerAgentConnectorRoutes(
     const decision = evaluateConnector({
       userId,
       connectorId,
+      connectorName: connector.name,
       operation: body.operation,
       object: body.object ?? null,
       connectorGrants: grants,

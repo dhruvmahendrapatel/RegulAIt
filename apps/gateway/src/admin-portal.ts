@@ -7,7 +7,7 @@
  * hand-rolled SVG charts (strict self-containment — no external assets).
  */
 
-import { UI_CSS, UI_ERRORS_JS } from "./ui-theme.js";
+import { UI_CSS, UI_DISPLAY_JS, UI_ERRORS_JS } from "./ui-theme.js";
 
 export const ADMIN_PORTAL_HTML = `<!doctype html>
 <html lang="en">
@@ -22,6 +22,7 @@ export const ADMIN_PORTAL_HTML = `<!doctype html>
 <script>
 "use strict";
 ${UI_ERRORS_JS}
+${UI_DISPLAY_JS}
 const $ = (s, el) => (el ?? document).querySelector(s);
 const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const fmtUsd = (v) => v == null ? "—" : "$" + Number(v).toFixed(4).replace(/0+$/,"").replace(/\\.$/,"");
@@ -48,21 +49,33 @@ const post = (p, b) => api("POST", p, b);
 const patch = (p, b) => api("PATCH", p, b);
 const del = (p) => api("DELETE", p);
 
+// short enum-ish cells that must never wrap into a vertical smear
+const NOWRAP_COLS = new Set(["status", "type", "effect", "kind", "provider", "mode", "role"]);
+const ISO_RE = /^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}/;
 function table(rows, actions) {
   if (!rows || rows.length === 0) return "<div class='empty'>none yet</div>";
   const cols = [...new Set(rows.flatMap((r) => Object.keys(r)))].filter((c) => c !== "ruleChain");
-  let h = "<table><tr>" + cols.map((c) => "<th>" + esc(c) + "</th>").join("") + (actions ? "<th></th>" : "") + "</tr>";
+  let h = "<div class='tblwrap'><table><tr>" + cols.map((c) => "<th>" + esc(c) + "</th>").join("") + (actions ? "<th></th>" : "") + "</tr>";
   for (const r of rows) {
     h += "<tr>" + cols.map((c) => {
       let v = r[c];
       if (typeof v === "object" && v !== null) v = JSON.stringify(v);
-      const cls = c === "id" || String(c).endsWith("Id") || c === "at" || c === "createdAt" ? " class='mono dim'" : "";
+      // any raw UUID renders as a truncated chip — full id in the tooltip,
+      // click to copy — never as thirteen stacked fragments
+      if (typeof v === "string" && UUID_RE.test(v)) return "<td class='nowrap'>" + idChip(v) + "</td>";
+      // ISO timestamps compact to date + minute, full precision in the tooltip
+      if (typeof v === "string" && ISO_RE.test(v)) {
+        return "<td class='mono dim nowrap' title='" + esc(v) + "'>" + esc(v.slice(0, 10) + " " + v.slice(11, 16)) + "</td>";
+      }
+      const cls = c === "id" || String(c).endsWith("Id") || c === "at" || c === "createdAt" ? " class='mono dim'"
+        : c === "stage" ? " class='label'"
+        : NOWRAP_COLS.has(c) ? " class='nowrap'" : "";
       return "<td" + cls + ">" + esc(v) + "</td>";
     }).join("");
-    if (actions) h += "<td>" + actions(r) + "</td>";
+    if (actions) h += "<td class='act'>" + actions(r) + "</td>";
     h += "</tr>";
   }
-  return h + "</table>";
+  return h + "</table></div>";
 }
 // An option is either a bare string (value === label) or {v,l} — the second
 // form is what lets every id field become a name the operator recognizes
@@ -537,13 +550,16 @@ const TABS = [
 }],
 ["Audit & Activity Log", async (el) => {
   const u = await get("/v1/users");
+  // the users list is already here for the filter — reuse it so the table
+  // says who acted by name (an unknown id still renders as a truncated chip)
+  const uname = Object.fromEntries(u.users.map((x) => [x.id, x.displayName || x.email]));
   el.innerHTML = "<div class='card'>"
     + form("f-audit", [{name:"userId",label:"filter by user",options:userOpts(u.users),req:false,ph:"— all users —"}], "Load")
     + "<div id='auditout'></div></div>";
   const load = async (userId) => {
     const a = await get("/v1/audit" + (userId ? "?userId=" + userId : ""));
     $("#auditout").innerHTML = table(a.entries.map((e) => ({
-      at: e.at, user: e.userId, object: e.objectType, effect: e.effect, rule: e.ruleId, reason: e.reason,
+      at: e.at, user: uname[e.userId] ?? e.userId, object: e.objectType, effect: e.effect, rule: e.ruleId, reason: e.reason,
     })));
   };
   wire("f-audit", (d) => load(d.userId), true);
@@ -555,15 +571,23 @@ const TABS = [
   const [a, me] = await Promise.all([get("/v1/approvals"), get("/v1/me").catch(() => ({ userId: null }))]);
   el.innerHTML = "<p class='sub'>The one inbox: MCP pauses, workflow sign-offs, run escalations, budget overages, context conflicts, reclassifications. The named approver decides; an admin may decide in their place only with a recorded reason (audit-marked as an override).</p><div class='card'>"
     + table(a.approvals.map((r) => ({
-        id: r.id, type: r.objectType, stage: r.stageId, governs: r.objectLabel,
+        id: r.id, type: r.objectType,
+        // internal sentinel stages read as their human labels (shared with
+        // /app's inbox) — '__context_conflict__:<uuid>' never reaches a cell
+        stage: approvalStageLabel(r) ?? r.stageId,
+        governs: r.objectLabel,
         requestedBy: r.requestedByName, approver: r.approverName ?? r.approverUserId,
-        status: r.status, reason: r.decisionReason, requestedAt: r.requestedAt,
+        status: r.status,
+        // only rows that HAVE a decision reason contribute the column — an
+        // all-pending queue doesn't pay 70px for an empty header
+        ...(r.decisionReason ? { reason: r.decisionReason } : {}),
+        requestedAt: r.requestedAt,
       })),
       (r) => {
         const row = a.approvals.find((x) => x.id === r.id);
         if (row.status !== "pending") return "";
         const override = me.userId !== row.approverUserId;
-        return "<input data-reason='" + row.id + "' placeholder='" + (override ? "reason (required — override)" : "reason (optional)") + "' style='font-size:12px;max-width:170px'> "
+        return "<input data-reason='" + row.id + "' placeholder='" + (override ? "reason (override)" : "reason (optional)") + "' title='" + (override ? "required — you are not the named approver" : "optional") + "' style='font-size:12px;width:140px'> "
           + "<button class='small primary' data-dec='approved' data-id='" + row.id + "'>approve</button> "
           + "<button class='small danger' data-dec='denied' data-id='" + row.id + "'>deny</button>"
           + (override ? " <span class='badge warn'>override</span>" : "");
@@ -590,6 +614,7 @@ const TABS = [
     get("/v1/projects"), get("/v1/users"), get("/v1/compliance/profiles"), get("/v1/teams"),
   ]);
   const uOpts = userOpts(u.users);
+  const uname = Object.fromEntries(u.users.map((x) => [x.id, x.displayName || x.email]));
   const tagOpts = cp.profiles.map((x) => x.tag);
   const pOpts = p.projects.map((x) => ({ v: x.id, l: x.name }));
   const teamOpts = t.teams.map((x) => ({ v: x.id, l: x.name }));
@@ -684,7 +709,7 @@ const TABS = [
       + "<div class='card stat'><div class='v'>" + fmtUsd(m.measuredCostSavedUsd) + "</div><div class='l'>measured savings (pillar 6)</div></div>"
       + "</div>"
       + "<h2>Budget vs actual</h2><div class='card'>" + budgetGauge(costs.budget.spentUsd, costs.budget.budgetUsd, costs.budget.overageApproved) + "</div>"
-      + "<h2>Showback by user</h2><div class='card'>" + barChart(costs.byUser, "costUsd", (i) => i.userId) + "</div>"
+      + "<h2>Showback by user</h2><div class='card'>" + barChart(costs.byUser, "costUsd", (i) => uname[i.userId] ?? i.userId) + "</div>"
       + "<h2>By agent / model</h2><div class='card'>" + barChart(costs.byAgent, "costUsd", (i) => i.model) + "</div>"
       + "<h2>Estimated savings by technique</h2><div class='card'>" + barChart(costs.estimatedSavings, "estimatedCostSavedUsd", (i) => i.technique) + "</div>"
       + "<h2>Compliance — effective policy + enforcement labels</h2><div class='card'><pre>" + esc(JSON.stringify(compliance, null, 2)) + "</pre></div>";

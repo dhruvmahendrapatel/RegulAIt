@@ -638,6 +638,8 @@ interface MockItem {
 export class MockPmProvider implements PmProvider {
   readonly kind = "mock" as const;
   readonly projects = new Map<string, Map<string, MockItem>>();
+  /** ids explicitly deleted via deleteWorkItem — upsert never resurrects them */
+  readonly tombstones = new Map<string, Set<string>>();
   private nextId = 1;
 
   private project(name: string): Map<string, MockItem> {
@@ -649,13 +651,27 @@ export class MockPmProvider implements PmProvider {
     return p;
   }
 
+  private assertInput(project: string, id?: string): void {
+    if (!project.trim()) throw new PmProviderError("project is required", 400);
+    if (id !== undefined && !id.trim()) throw new PmProviderError("work item id is required", 400);
+  }
+
+  private tombstoned(project: string, id: string): boolean {
+    return this.tombstones.get(project)?.has(id) ?? false;
+  }
+
   async createWorkItem(
     project: string,
     type: string,
     fields: Record<string, unknown>,
   ): Promise<WorkItemRef> {
-    const id = String(this.nextId++);
-    this.project(project).set(id, {
+    this.assertInput(project);
+    if (!type.trim()) throw new PmProviderError("work item type is required", 400);
+    const p = this.project(project);
+    let id = String(this.nextId++);
+    // never silently overwrite an item another path already holds this id for
+    while (p.has(id) || this.tombstoned(project, id)) id = String(this.nextId++);
+    p.set(id, {
       id,
       type,
       state: (fields.state as string) ?? "To Do",
@@ -665,27 +681,70 @@ export class MockPmProvider implements PmProvider {
     return { id, url: `mock-pm://${project}/items/${id}` };
   }
 
-  private itemOrThrow(project: string, id: string): MockItem {
-    const item = this.project(project).get(id);
-    if (!item) throw new PmProviderError(`unknown work item '${id}'`, 404);
+  /** The mock stands in for a DURABLE external tool while living in process
+   * memory, so writes are upserts: an unknown id is auto-created rather than
+   * rejected — links minted by another process (the seeder, a previous
+   * gateway) keep working across restarts. Explicitly deleted items stay
+   * dead; genuinely invalid input still fails loudly. */
+  private upsert(project: string, id: string): MockItem {
+    this.assertInput(project, id);
+    if (this.tombstoned(project, id)) {
+      throw new PmProviderError(`work item '${id}' was deleted`, 410);
+    }
+    const p = this.project(project);
+    let item = p.get(id);
+    if (!item) {
+      item = { id, type: "Task", state: "To Do", fields: {}, comments: [] };
+      p.set(id, item);
+      const n = Number(id);
+      if (Number.isInteger(n) && n >= this.nextId) this.nextId = n + 1;
+    }
     return item;
   }
 
   async updateFields(project: string, id: string, fields: Record<string, unknown>): Promise<void> {
-    Object.assign(this.itemOrThrow(project, id).fields, fields);
+    Object.assign(this.upsert(project, id).fields, fields);
   }
 
   async transitionState(project: string, id: string, state: string): Promise<void> {
-    this.itemOrThrow(project, id).state = state;
+    if (!state.trim()) throw new PmProviderError("state is required", 400);
+    this.upsert(project, id).state = state;
   }
 
   async addComment(project: string, id: string, text: string): Promise<void> {
-    this.itemOrThrow(project, id).comments.push(text);
+    this.upsert(project, id).comments.push(text);
   }
 
+  /** Reads stay strict — link verification (the gateway's honest 'Sync now')
+   * depends on a missing item actually reading as missing. */
   async getWorkItem(project: string, id: string): Promise<WorkItem> {
-    const item = this.itemOrThrow(project, id);
+    this.assertInput(project, id);
+    if (this.tombstoned(project, id)) {
+      throw new PmProviderError(`work item '${id}' was deleted`, 410);
+    }
+    const item = this.project(project).get(id);
+    if (!item) throw new PmProviderError(`unknown work item '${id}'`, 404);
     return { ...item, url: `mock-pm://${project}/items/${item.id}` };
+  }
+
+  /** Mock-only capability: simulate the customer deleting the item in their
+   * tool. The id is tombstoned so no upsert quietly resurrects it. */
+  async deleteWorkItem(project: string, id: string): Promise<void> {
+    this.assertInput(project, id);
+    this.project(project).delete(id);
+    let t = this.tombstones.get(project);
+    if (!t) {
+      t = new Set();
+      this.tombstones.set(project, t);
+    }
+    t.add(id);
+  }
+
+  /** Mock-only capability: simulate a process restart (fresh in-memory store). */
+  reset(): void {
+    this.projects.clear();
+    this.tombstones.clear();
+    this.nextId = 1;
   }
 }
 

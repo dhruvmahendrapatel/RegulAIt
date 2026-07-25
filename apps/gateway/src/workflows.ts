@@ -28,7 +28,7 @@ import {
 import { users, gitConnections, orchestrationRuns } from "@regulait/db";
 import { resolveProvider, GitProviderError } from "@regulait/git-provider";
 import { validateGraph } from "@regulait/orchestration-kernel";
-import { planRun } from "./orchestration.js";
+import { inTransaction, planRun, type ApprovalPostCommit, type DbOrTx } from "./orchestration.js";
 import { assertProjectAttribution, requiredTemplateIdsFor } from "./projects.js";
 import { decryptSecret, encryptSecret as encryptTokenOnce } from "./secrets.js";
 import {
@@ -55,15 +55,17 @@ function resolveApprover(approver: string, initiatorUserId: string): string {
  * all named approvers must approve).
  */
 async function applyEvent(
-  db: Db,
+  db: DbOrTx,
   instanceId: string,
   event: WorkflowEvent,
   actorUserId: string | null,
   precondition?: (tx: Parameters<Parameters<Db["transaction"]>[0]>[0]) => Promise<boolean>,
 ): Promise<{ state: InstanceState; effects: Effect[]; skipped?: boolean }> {
   // One transaction with the instance row locked: concurrent decisions,
-  // re-opens, and aborts serialize instead of racing read-modify-write.
-  return db.transaction(async (tx) => {
+  // re-opens, and aborts serialize instead of racing read-modify-write. When
+  // the caller already holds a transaction (the decide endpoint), this nests
+  // as a savepoint so the whole flow commits or rolls back together.
+  return inTransaction(db, async (tx) => {
     const [instance] = await tx
       .select()
       .from(workflowInstances)
@@ -126,21 +128,25 @@ async function applyEvent(
  * Called from the §6 decide endpoint for approvals with objectType
  * 'workflow'. All-must-approve: the instance advances only when no pending
  * rows remain for the stage; any denial denies the stage immediately.
+ * Runs on the decide endpoint's OPEN transaction so a kernel refusal
+ * (WorkflowStateError → 409) rolls the decision itself back; returns the
+ * post-commit step (git/build stage execution) for the caller to run once
+ * the decision is durable.
  */
 export async function applyWorkflowApprovalDecision(
-  db: Db,
+  dbx: DbOrTx,
   approvalRow: { instanceId: string | null; stageId: string | null },
   decision: "approved" | "denied",
   deciderUserId: string,
   dataKey?: string,
-): Promise<void> {
-  if (!approvalRow.instanceId || !approvalRow.stageId) return;
+): Promise<ApprovalPostCommit | null> {
+  if (!approvalRow.instanceId || !approvalRow.stageId) return null;
   const stageId = approvalRow.stageId;
   const instanceId = approvalRow.instanceId;
 
   if (decision === "denied") {
-    await applyEvent(db, instanceId, { kind: "approval_denied", stageId }, deciderUserId);
-    return;
+    await applyEvent(dbx, instanceId, { kind: "approval_denied", stageId }, deciderUserId);
+    return null;
   }
 
   // All-must-approve: the pending count is evaluated INSIDE applyEvent's
@@ -148,7 +154,7 @@ export async function applyWorkflowApprovalDecision(
   // serializes with the grant instead of racing it. A stale or wrong-stage
   // decision is additionally rejected by the kernel's stage check.
   const r = await applyEvent(
-    db,
+    dbx,
     instanceId,
     { kind: "approval_granted", stageId },
     deciderUserId,
@@ -166,10 +172,12 @@ export async function applyWorkflowApprovalDecision(
       return pending.length === 0;
     },
   );
-  if (!r.skipped) {
-    // an approval can unblock straight into a git stage (e.g. merge gate → merge)
+  if (r.skipped) return null;
+  // an approval can unblock straight into a git stage (e.g. merge gate →
+  // merge) — executed post-commit, against the real Db
+  return async (db) => {
     await runGitExecutions(db, instanceId, r.effects, deciderUserId, dataKey);
-  }
+  };
 }
 
 export interface WorkflowRouteOptions {

@@ -212,6 +212,29 @@ mcp-default/retention/pii (detector + pruning jobs), reapply-to-in-flight on rec
 (diff covers the policy; in-flight instances keep their merged definitions), per-framework
 cost-governance policies (§8.6→§10.3).
 
+**Demo-readiness sweep — the product becomes CLIENT-PRESENTABLE, 2026-07-25.** After the user
+tested the deployed stack ("UI looks okay, functionality still looks incomplete"), a 15-agent
+audit produced 126 verified gaps with one diagnosis: ~98 REST routes behind eight working
+kernels, but the UIs called only 11/22 of them, the seed created no integrations, and nothing
+could be *created* from a browser. Seven slices fixed this (commits 94bfb5f, d012f01, 198704e,
+plus the fix pass): (1) the seed now populates every object type with real dispatched spend;
+(2) credential/key layer — platform + BYO model credentials, one-time API-key reveal, agent-
+policy editor, zero raw-UUID inputs; (3) closed approval loop — approver reads, inline
+artifact previews, decision reasons, audited admin override; (4) New Run form (canned DAG
+templates + advanced JSON), per-node instructions, project create/PATCH, teams; (5) full
+pillar-4 write surface — context editor with baseRevision contract, history, promote,
+conflict arbitration with both texts; (6) pillar-2 admin home + seeded 10-stage pipeline
+(intake→…→sign-off→nested build→checks→branch→mock PR→merge gate→merge) drivable end-to-end;
+(7) pillars 5/6/8 in /app — spend page, DAG SVG with elapsed/abort/reassign/escalate, honest
+stop reasons, true parallel waves, PM strip + connections tab. The mock provider now returns
+intent-shaped tier-differentiated replies (echo bot dead); orchestration routing respects
+credential dispatchability. A three-persona headless-Chromium drive (~50 screenshots) and a
+fresh-eyes judge returned "demo-ready-with-caveats" with 6 must-fixes — all fixed and
+re-verified live (atomic decide + superseded stale approvals, PM mirror upsert + honest sync
++ orphan handling, compact approvals queue with friendly labels, zero console errors on
+approver cross-reads, names instead of UUIDs in human-facing strings, self-review guard with
+mandatory reason). Suite: 293 → **365 tests**, all green.
+
 **First AWS deployment — the dev demo stack is LIVE, 2026-07-25 (ADR-0013).** The user
 explicitly requested an AWS deployment for hands-on testing (cannot run locally); explicit
 sign-off obtained in-session via an IAM Identity Center device-code login (Admin-BreakGlass,

@@ -6,7 +6,7 @@
  * would make.
  */
 
-import { UI_CSS, UI_ERRORS_JS } from "./ui-theme.js";
+import { UI_CSS, UI_DISPLAY_JS, UI_ERRORS_JS } from "./ui-theme.js";
 
 export const APP_HTML = `<!doctype html>
 <html lang="en">
@@ -21,6 +21,7 @@ export const APP_HTML = `<!doctype html>
 <script>
 "use strict";
 ${UI_ERRORS_JS}
+${UI_DISPLAY_JS}
 const $ = (s, el) => (el ?? document).querySelector(s);
 const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const fmtUsd = (v) => v == null ? "—" : "$" + Number(v).toFixed(4).replace(/0+$/,"").replace(/\\.$/,"");
@@ -245,7 +246,11 @@ function renderExchange(x, i) {
       if (r.dispatch.projectBudgetAlerted) meta.push('<span class="badge warn">budget alert</span>');
     }
   }
-  if (x.denied) meta.push('<span class="badge bad">denied · ' + esc(x.denied.ruleId) + "</span>");
+  if (x.denied) {
+    // a named rule ("agent-ceiling") reads as itself; a grant-row UUID truncates
+    const rid = UUID_RE.test(x.denied.ruleId) ? shortId(x.denied.ruleId) : x.denied.ruleId;
+    meta.push('<span class="badge bad" title="' + esc(x.denied.ruleId) + '">denied · ' + esc(rid) + "</span>");
+  }
   if (x.error) meta.push('<span class="badge bad">' + esc(x.error) + "</span>");
   const trace = x.result || x.denied
     ? \`<details style="margin-top:6px"><summary class="faint" style="cursor:pointer;font-size:11.5px">governance trace</summary>
@@ -316,10 +321,14 @@ async function sendPrompt() {
       signal: ctrl.signal,
     });
     if (!res.ok || !res.headers.get("content-type")?.includes("event-stream")) {
-      const j = await res.json();
+      // fetch never throws on a 4xx — and neither may this branch: a denial
+      // is an EXPECTED outcome that renders as its badge + trace, so the body
+      // parse is guarded and nothing here can escape as an uncaught error.
+      let j = null;
+      try { j = await res.json(); } catch { j = null; }
       x.streaming = false;
-      if (j.decision && j.decision.effect !== "allow") { x.denied = j.decision; x.text = j.decision.reason; }
-      else { x.error = j.error ?? ("HTTP " + res.status); x.text = errMessage(res.status, j); }
+      if (j && j.decision && j.decision.effect !== "allow") { x.denied = j.decision; x.text = j.decision.reason; }
+      else { x.error = (j && j.error) ?? ("HTTP " + res.status); x.text = errMessage(res.status, j ?? {}); }
       drawChat(); return;
     }
     const reader = res.body.getReader();
@@ -589,9 +598,12 @@ function dagSvg(graph, state) {
 }
 
 // ---- pillar 8 strip: linked work items + decision records ---------------
-// Shared by run detail and workflow detail. Hidden entirely for viewers the
-// API turns away (e.g. an approver reading someone else's run).
-async function pmStripHtml(kind, id) {
+// Shared by run detail and workflow detail. Rendered for the object's
+// initiator (and admins) only: a cross-reading approver sees the object
+// itself, not its PM strip — so this never fires the two reads the API
+// would turn away, and their console stays clean of guaranteed 404s.
+async function pmStripHtml(kind, id, ownerUserId) {
+  if (ownerUserId && ME.userId !== ownerUserId && !ME.isAdmin) return "";
   const isRun = kind === "run";
   const [linksRes, decRes] = await Promise.all([
     get("/v1/pm/links?" + (isRun ? "runId=" : "instanceId=") + id).catch(() => null),
@@ -741,8 +753,8 @@ async function runDetailPage(id) {
     \${budget.overageApproved ? '<span class="badge warn">overage approved</span>' : ""}</div>
     <div class="bar" style="margin-top:8px"><i class="\${spent > cap ? "over" : ""}" style="width:\${pct}%"></i></div>
   </div>\` : ""}
-  \${v.pendingApprovals?.length ? '<h2>Waiting on approvals</h2><div class="card">' + v.pendingApprovals.map((a) => '<div class="row"><span class="mono">' + esc(a.stageId) + '</span><span class="dim" style="font-size:12px">awaiting ' + esc(a.approverName ?? "the named approver") + "</span>" + statusBadge(a.status) + "</div>").join("") + "</div>" : ""}
-  \${await pmStripHtml("run", id)}\`;
+  \${v.pendingApprovals?.length ? '<h2>Waiting on approvals</h2><div class="card">' + v.pendingApprovals.map((a) => '<div class="row"><span class="mono">' + esc(approvalStageLabel(a) ?? a.stageId) + '</span><span class="dim" style="font-size:12px">awaiting ' + esc(a.approverName ?? "the named approver") + "</span>" + statusBadge(a.status) + "</div>").join("") + "</div>" : ""}
+  \${await pmStripHtml("run", id, run.initiatingUserId)}\`;
 }
 
 async function wireRunDetail(id) {
@@ -912,7 +924,7 @@ async function workflowDetailPage(id) {
   \${artifacts ? "<h2>Artifacts</h2><div class=card>" + artifacts + "</div>" : ""}
   \${checkCards}
   \${delivery}
-  \${await pmStripHtml("workflow_instance", id)}\`;
+  \${await pmStripHtml("workflow_instance", id, inst.initiatorUserId)}\`;
 }
 
 function wireWorkflows() {
@@ -956,11 +968,10 @@ function wireWorkflowDetail(id, inst) {
 
 // ------------------------------------------------------------------ inbox --
 const approvalLabel = (a) => {
-  if (a.stageId === "__project_budget__") return "Project budget overage";
-  if (a.stageId === "__reclassification__") return "Compliance reclassification";
-  if (a.stageId?.startsWith("__context_conflict__"))
-    return "Shared-context conflict" + (a.contextConflict ? " · '" + a.contextConflict.key + "'" : "");
-  if (a.stageId?.startsWith("__budget__")) return "Run budget overage";
+  // sentinel stages share one mapping with /admin's queue (ui-theme.ts) so
+  // the two surfaces can never label the same approval differently
+  const sentinel = approvalStageLabel(a);
+  if (sentinel) return sentinel;
   return (a.objectType === "workflow" ? "Sign-off · " : a.objectType === "run" ? "Run escalation · " : "") + (a.stageId ?? "");
 };
 // where the governed object lives in this app — the row must let the

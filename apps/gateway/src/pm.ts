@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import {
   and,
+  approvals,
   auditLog,
   decisions,
   desc,
@@ -74,11 +75,18 @@ export async function mirrorNodeStatus(
   nodeStatus: string,
   actorUserId: string,
 ): Promise<{ ok: boolean; state?: string; error?: string } | null> {
+  // Orphaned links (item deleted in the tool, or unrepairable at sync time)
+  // are dead: mirrors skip them rather than writing into the void.
   const [link] = await db
     .select()
     .from(pmLinks)
     .where(
-      and(eq(pmLinks.objectType, "run_node"), eq(pmLinks.objectId, runId), eq(pmLinks.nodeId, nodeId)),
+      and(
+        eq(pmLinks.objectType, "run_node"),
+        eq(pmLinks.objectId, runId),
+        eq(pmLinks.nodeId, nodeId),
+        isNull(pmLinks.orphanedAt),
+      ),
     );
   if (!link || !dataKey) return null;
   const [conn] = await db.select().from(pmConnections).where(eq(pmConnections.id, link.connectionId));
@@ -131,6 +139,7 @@ export async function mirrorApprovalDecision(
       eq(pmLinks.objectType, "workflow_instance"),
       eq(pmLinks.objectId, approvalRow.instanceId),
       isNull(pmLinks.nodeId),
+      isNull(pmLinks.orphanedAt),
     );
   } else if (
     approvalRow.objectType === "run" &&
@@ -141,6 +150,7 @@ export async function mirrorApprovalDecision(
       eq(pmLinks.objectType, "run_node"),
       eq(pmLinks.objectId, approvalRow.runId),
       eq(pmLinks.nodeId, approvalRow.stageId),
+      isNull(pmLinks.orphanedAt),
     );
   } else {
     return null;
@@ -190,6 +200,30 @@ export async function mirrorApprovalDecision(
 }
 
 export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?: string }) {
+  // Read-only widening for the PM strip's GETs, mirroring loadRunFor /
+  // loadInstanceFor: the named approver of a PENDING approval on a run or
+  // workflow instance may read its links/decisions (200 with [] when there is
+  // nothing) — they can already read the object itself, and a guaranteed 404
+  // under their cross-read was pure console noise. Every write keeps the
+  // admin/initiator gate.
+  const isPendingApproverOn = async (
+    userId: string | null,
+    ref: { runId?: string; instanceId?: string },
+  ): Promise<boolean> => {
+    if (!userId) return false;
+    const scope = ref.runId
+      ? eq(approvals.runId, ref.runId)
+      : eq(approvals.instanceId, ref.instanceId!);
+    const [naming] = await db
+      .select({ id: approvals.id })
+      .from(approvals)
+      .where(
+        and(scope, eq(approvals.approverUserId, userId), eq(approvals.status, "pending")),
+      )
+      .limit(1);
+    return Boolean(naming);
+  };
+
   app.post("/v1/pm/connections", async (req, reply) => {
     const body = createPmConnectionSchema.parse(req.body);
     if (!opts.dataKey) {
@@ -258,19 +292,75 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
       }
       throw err;
     }
-    const existing = await db
+    // HONEST sync: every existing link is verified against the provider
+    // before this call claims anything. Alive → verified. Missing → repaired
+    // in place with a write against the same id (upsert-capable providers —
+    // the mock — recreate it, so restart drift heals instead of festering).
+    // Unrepairable → orphanedAt set, skipped by all future mirrors, reported.
+    const allLinks = await db
       .select()
       .from(pmLinks)
-      .where(and(eq(pmLinks.objectType, "run_node"), eq(pmLinks.objectId, runId)));
-    const linked = new Set(existing.map((l) => l.nodeId));
+      .where(and(inArray(pmLinks.objectType, ["run", "run_node"]), eq(pmLinks.objectId, runId)));
+    const titleFor = (link: (typeof allLinks)[number]) =>
+      link.objectType === "run"
+        ? `run: ${graph.run}`
+        : (graph.nodes.find((n) => n.id === link.nodeId)?.title ?? link.nodeId ?? "task");
 
-    // Run-level parent item (idempotent): the anchor for run-scoped records —
-    // §4 decisions and, later, budget approvals — that no single node owns.
-    const [runLink] = await db
-      .select()
-      .from(pmLinks)
-      .where(and(eq(pmLinks.objectType, "run"), eq(pmLinks.objectId, runId), isNull(pmLinks.nodeId)));
-    if (!runLink) {
+    const verified: Array<{ nodeId: string | null; externalId: string }> = [];
+    const repaired: Array<{ nodeId: string | null; externalId: string }> = [];
+    const orphaned: Array<{ nodeId: string | null; externalId: string; error: string }> = [];
+    for (const link of allLinks) {
+      if (link.orphanedAt) continue; // known-dead from a previous pass; stays skipped
+      try {
+        await provider.getWorkItem(conn.project, link.externalId);
+        verified.push({ nodeId: link.nodeId, externalId: link.externalId });
+        continue;
+      } catch (err) {
+        if (!(err instanceof PmProviderError)) throw err;
+      }
+      try {
+        await provider.updateFields(
+          conn.project,
+          link.externalId,
+          resolveTaskFields(mapping, { title: titleFor(link) }),
+        );
+        await db.update(pmLinks).set({ lastSyncedAt: new Date() }).where(eq(pmLinks.id, link.id));
+        repaired.push({ nodeId: link.nodeId, externalId: link.externalId });
+        await db.insert(auditLog).values({
+          userId: req.authCtx.userId,
+          objectType: "pm_work_item",
+          objectId: runId,
+          detail: { nodeId: link.nodeId, externalId: link.externalId, connection: conn.name, phase: "repair" },
+          effect: "allow",
+          ruleId: "pm-link-repaired",
+          ruleChain: [],
+          reason: `work item '${link.externalId}' was missing at the provider; recreated in place during sync`,
+        });
+      } catch (repairErr) {
+        if (!(repairErr instanceof PmProviderError)) throw repairErr;
+        await db.update(pmLinks).set({ orphanedAt: new Date() }).where(eq(pmLinks.id, link.id));
+        orphaned.push({ nodeId: link.nodeId, externalId: link.externalId, error: repairErr.message });
+        await db.insert(auditLog).values({
+          userId: req.authCtx.userId,
+          objectType: "pm_work_item",
+          objectId: runId,
+          detail: { nodeId: link.nodeId, externalId: link.externalId, connection: conn.name, phase: "orphan" },
+          effect: "allow",
+          ruleId: "pm-link-orphaned",
+          ruleChain: [],
+          reason: `work item '${link.externalId}' could not be verified or repaired (${repairErr.message}); link marked orphaned`,
+        });
+      }
+    }
+
+    // Idempotent creation for what has NO link row yet. Orphaned links keep
+    // their row (and the unique index) — those objects stay visibly orphaned
+    // rather than silently re-linked.
+    const linked = new Set(
+      allLinks.filter((l) => l.objectType === "run_node").map((l) => l.nodeId),
+    );
+    const hasRunLink = allLinks.some((l) => l.objectType === "run");
+    if (!hasRunLink) {
       const ref = await provider.createWorkItem(
         conn.project,
         mapping.task.workItemType,
@@ -318,6 +408,9 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
     }
     return reply.status(201).send({
       created,
+      verified,
+      repaired,
+      orphaned,
       skipped: [...linked].filter((n): n is string => n !== null),
     });
   });
@@ -343,22 +436,6 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
       .where(eq(pmConnections.name, body.connectionName));
     if (!conn) return reply.status(404).send({ error: "unknown_connection" });
 
-    const [existing] = await db
-      .select()
-      .from(pmLinks)
-      .where(
-        and(
-          eq(pmLinks.objectType, "workflow_instance"),
-          eq(pmLinks.objectId, instanceId),
-          isNull(pmLinks.nodeId),
-        ),
-      );
-    if (existing) {
-      return reply
-        .status(200)
-        .send({ created: false, externalId: existing.externalId, externalUrl: existing.externalUrl });
-    }
-
     const def = instance.definition as WorkflowDefinition;
     const change = instance.change as { description: string };
     const mapping = mappingFor(conn.provider, conn.mapping ?? undefined);
@@ -371,10 +448,71 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
       }
       throw err;
     }
+    const title = `${def.workflow}: ${change.description}`;
+
+    // Same honest-sync contract as the run endpoint: an existing link is
+    // VERIFIED, not assumed — alive → verified, missing → repaired in place
+    // (upsert), unrepairable → orphaned and skipped by future mirrors.
+    const [existing] = await db
+      .select()
+      .from(pmLinks)
+      .where(
+        and(
+          eq(pmLinks.objectType, "workflow_instance"),
+          eq(pmLinks.objectId, instanceId),
+          isNull(pmLinks.nodeId),
+        ),
+      );
+    if (existing) {
+      const base = { created: false, externalId: existing.externalId, externalUrl: existing.externalUrl };
+      if (existing.orphanedAt) {
+        return reply.status(200).send({ ...base, orphaned: true });
+      }
+      try {
+        await provider.getWorkItem(conn.project, existing.externalId);
+        return reply.status(200).send({ ...base, verified: true });
+      } catch (err) {
+        if (!(err instanceof PmProviderError)) throw err;
+      }
+      try {
+        await provider.updateFields(
+          conn.project,
+          existing.externalId,
+          resolveTaskFields(mapping, { title }),
+        );
+        await db.update(pmLinks).set({ lastSyncedAt: new Date() }).where(eq(pmLinks.id, existing.id));
+        await db.insert(auditLog).values({
+          userId: req.authCtx.userId,
+          objectType: "pm_work_item",
+          objectId: instanceId,
+          detail: { externalId: existing.externalId, connection: conn.name, phase: "repair" },
+          effect: "allow",
+          ruleId: "pm-link-repaired",
+          ruleChain: [],
+          reason: `work item '${existing.externalId}' was missing at the provider; recreated in place during sync`,
+        });
+        return reply.status(200).send({ ...base, repaired: true });
+      } catch (repairErr) {
+        if (!(repairErr instanceof PmProviderError)) throw repairErr;
+        await db.update(pmLinks).set({ orphanedAt: new Date() }).where(eq(pmLinks.id, existing.id));
+        await db.insert(auditLog).values({
+          userId: req.authCtx.userId,
+          objectType: "pm_work_item",
+          objectId: instanceId,
+          detail: { externalId: existing.externalId, connection: conn.name, phase: "orphan" },
+          effect: "allow",
+          ruleId: "pm-link-orphaned",
+          ruleChain: [],
+          reason: `work item '${existing.externalId}' could not be verified or repaired (${repairErr.message}); link marked orphaned`,
+        });
+        return reply.status(200).send({ ...base, orphaned: true, error: repairErr.message });
+      }
+    }
+
     const ref = await provider.createWorkItem(
       conn.project,
       mapping.task.workItemType,
-      resolveTaskFields(mapping, { title: `${def.workflow}: ${change.description}` }),
+      resolveTaskFields(mapping, { title }),
     );
     await db.insert(pmLinks).values({
       connectionId: conn.id,
@@ -522,18 +660,21 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
 
     // access: the parent object's initiator (or admin)
     let ownerUserId: string | null = null;
+    let objectLabel: string | null = null;
     if (body.objectType === "run") {
       const [run] = await db
-        .select({ owner: orchestrationRuns.initiatingUserId })
+        .select({ owner: orchestrationRuns.initiatingUserId, name: orchestrationRuns.name })
         .from(orchestrationRuns)
         .where(eq(orchestrationRuns.id, body.objectId));
       ownerUserId = run?.owner ?? null;
+      objectLabel = run?.name ?? null;
     } else {
       const [instance] = await db
-        .select({ owner: workflowInstances.initiatorUserId })
+        .select({ owner: workflowInstances.initiatorUserId, change: workflowInstances.change })
         .from(workflowInstances)
         .where(eq(workflowInstances.id, body.objectId));
       ownerUserId = instance?.owner ?? null;
+      objectLabel = (instance?.change as { description?: string } | null)?.description ?? null;
     }
     if (!ownerUserId) return reply.status(404).send({ error: "unavailable" });
     if (!req.authCtx.isAdmin && userId !== ownerUserId) {
@@ -558,7 +699,10 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
       effect: "allow",
       ruleId: "decision-recorded",
       ruleChain: [],
-      reason: `decision recorded on ${body.objectType} '${body.objectId}'`,
+      // named in prose, id truncated — the full id lives in detail.parentId
+      reason: `decision recorded on ${body.objectType} ${
+        objectLabel ? `'${objectLabel}' (${body.objectId.slice(0, 8)}…)` : `'${body.objectId}'`
+      }`,
     });
 
     // §4 mirror — best-effort, surfaced, never blocking the local record.
@@ -571,6 +715,7 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
           eq(pmLinks.objectType, body.objectType === "run" ? "run" : "workflow_instance"),
           eq(pmLinks.objectId, body.objectId),
           isNull(pmLinks.nodeId),
+          isNull(pmLinks.orphanedAt),
         ),
       );
     if (parentLink && opts.dataKey) {
@@ -653,7 +798,11 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
     }
     if (!ownerUserId) return reply.status(404).send({ error: "unavailable" });
     if (!req.authCtx.isAdmin && req.authCtx.userId !== ownerUserId) {
-      return reply.status(404).send({ error: "unavailable" });
+      const widened = await isPendingApproverOn(
+        req.authCtx.userId,
+        q.objectType === "run" ? { runId: q.objectId } : { instanceId: q.objectId },
+      );
+      if (!widened) return reply.status(404).send({ error: "unavailable" });
     }
     const rows = await db
       .select()
@@ -726,7 +875,11 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
     if (q.runId) {
       const [run] = await db.select().from(orchestrationRuns).where(eq(orchestrationRuns.id, q.runId));
       if (!run) return reply.status(404).send({ error: "unavailable" });
-      if (!req.authCtx.isAdmin && req.authCtx.userId !== run.initiatingUserId) {
+      if (
+        !req.authCtx.isAdmin &&
+        req.authCtx.userId !== run.initiatingUserId &&
+        !(await isPendingApproverOn(req.authCtx.userId, { runId: q.runId }))
+      ) {
         return reply.status(404).send({ error: "unavailable" });
       }
       runState = run.state as RunState;
@@ -740,7 +893,11 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
         .from(workflowInstances)
         .where(eq(workflowInstances.id, q.instanceId!));
       if (!instance) return reply.status(404).send({ error: "unavailable" });
-      if (!req.authCtx.isAdmin && req.authCtx.userId !== instance.initiatorUserId) {
+      if (
+        !req.authCtx.isAdmin &&
+        req.authCtx.userId !== instance.initiatorUserId &&
+        !(await isPendingApproverOn(req.authCtx.userId, { instanceId: q.instanceId! }))
+      ) {
         return reply.status(404).send({ error: "unavailable" });
       }
       rawLinks = await db

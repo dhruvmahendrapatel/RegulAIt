@@ -102,6 +102,18 @@ td { padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: 
 tr:hover td { background: #ffffff05; }
 tr.click { cursor: pointer; }
 .mono { font-family: var(--mono); font-size: 12px; }
+/* compact tables: ids truncate to a chip, short enum-ish cells never wrap,
+   an action cell keeps a sensible width (its controls may wrap once, its
+   buttons never split), and a too-wide table scrolls inside its wrapper
+   instead of bleeding past the card edge */
+td.nowrap, .nowrap { white-space: nowrap; }
+td.act { min-width: 160px; }
+td.act button { white-space: nowrap; }
+/* label-ish cells (e.g. a friendly stage name) wrap at spaces, never mid-word */
+td.label { min-width: 150px; overflow-wrap: normal; }
+.tblwrap { overflow-x: auto; }
+.id-chip { cursor: pointer; }
+.id-chip:hover { color: var(--text); }
 .dim { color: var(--text-dim); }
 .faint { color: var(--text-faint); }
 .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
@@ -219,4 +231,45 @@ function errMessage(status, json) {
   const details = errDetails(json);
   return details.length ? head + " — " + details.join("; ") : head;
 }
+`;
+
+/**
+ * Display helpers both UIs interpolate after UI_ERRORS_JS. One shared source
+ * for two things that must never drift apart:
+ * - the Approvals Queue's internal sentinel stages (__project_budget__,
+ *   __reclassification__, __context_conflict__:<uuid>, __budget__:…) mapped
+ *   to the same human labels in /app's inbox and /admin's queue;
+ * - UUID display: an id truncates to an 8-char chip whose tooltip carries the
+ *   full value and whose click copies it — nothing auditable is lost, nothing
+ *   250px tall is rendered.
+ * Each page defines esc() and these run at render time, so the reference
+ * resolves — helpers here must stay hoisted function declarations.
+ */
+export const UI_DISPLAY_JS = `
+// internal sentinel stages -> human labels (null = not a sentinel)
+function approvalStageLabel(a) {
+  const s = a.stageId ?? "";
+  if (s === "__project_budget__") return "Budget overage";
+  if (s === "__reclassification__") return "Reclassification";
+  if (s.startsWith("__context_conflict__"))
+    return "Context conflict" + (a.contextConflict && a.contextConflict.key ? " · " + a.contextConflict.key : "");
+  if (s.startsWith("__budget__")) return "Run budget";
+  return null;
+}
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const shortId = (id) => String(id).slice(0, 8) + "…";
+// truncated id chip: full id in the tooltip, click to copy
+function idChip(id) {
+  return "<span class='mono dim id-chip' data-copyid='" + esc(id) + "' title='" + esc(id) + " — click to copy'>" + esc(shortId(id)) + "</span>";
+}
+document.addEventListener("click", async (e) => {
+  const chip = e.target && e.target.closest ? e.target.closest("[data-copyid]") : null;
+  if (!chip) return;
+  try {
+    await navigator.clipboard.writeText(chip.dataset.copyid);
+    const orig = chip.textContent;
+    chip.textContent = "copied";
+    setTimeout(() => { chip.textContent = orig; }, 900);
+  } catch { /* clipboard unavailable — the tooltip still shows the full id */ }
+});
 `;

@@ -51,7 +51,41 @@ describe("mock adapter", () => {
     expect(item.state).toBe("Doing");
     expect(item.fields.title).toBe("n1");
     expect(item.comments).toEqual(["approved by lena"]);
-    await expect(pm.transitionState("proj", "999", "Done")).rejects.toThrow(PmProviderError);
+  });
+
+  it("writes against an unknown id auto-create the item (upsert across restarts); reads stay strict", async () => {
+    const pm = new MockPmProvider();
+    // a link minted by a previous process still mirrors after a "restart"
+    await pm.transitionState("proj", "7", "Done");
+    await pm.addComment("proj", "7", "mirrored after restart");
+    const revived = await pm.getWorkItem("proj", "7");
+    expect(revived.state).toBe("Done");
+    expect(revived.comments).toEqual(["mirrored after restart"]);
+    // upsert bumped the id counter — a fresh create never collides with "7"
+    const fresh = await pm.createWorkItem("proj", "Task", { title: "n2" });
+    expect(fresh.id).not.toBe("7");
+    // reads on a genuinely unknown id still 404 (link verification depends on it)
+    await expect(pm.getWorkItem("proj", "999")).rejects.toThrow(PmProviderError);
+    // genuinely invalid input still fails loudly
+    await expect(pm.transitionState("proj", "  ", "Done")).rejects.toThrow(PmProviderError);
+    await expect(pm.transitionState("proj", "7", " ")).rejects.toThrow(PmProviderError);
+    await expect(pm.updateFields(" ", "7", {})).rejects.toThrow(PmProviderError);
+  });
+
+  it("deleteWorkItem tombstones the id — no upsert resurrects it; reset() simulates a restart", async () => {
+    const pm = new MockPmProvider();
+    const ref = await pm.createWorkItem("proj", "Task", { title: "doomed" });
+    await pm.deleteWorkItem("proj", ref.id);
+    await expect(pm.getWorkItem("proj", ref.id)).rejects.toThrow(/deleted/);
+    await expect(pm.addComment("proj", ref.id, "zombie")).rejects.toThrow(/deleted/);
+    await expect(pm.updateFields("proj", ref.id, { title: "back?" })).rejects.toThrow(/deleted/);
+    // new creates skip the tombstoned id
+    const next = await pm.createWorkItem("proj", "Task", { title: "next" });
+    expect(next.id).not.toBe(ref.id);
+    // reset wipes items AND tombstones — a fresh process starts clean
+    pm.reset();
+    await pm.addComment("proj", ref.id, "new life in a new process");
+    expect((await pm.getWorkItem("proj", ref.id)).comments).toEqual(["new life in a new process"]);
   });
 });
 

@@ -112,6 +112,25 @@ function attachInstructions(graph: TaskGraph, graphRaw: unknown): void {
 
 type RunRow = typeof orchestrationRuns.$inferSelect;
 
+/** The open-transaction type the codebase's db.transaction callbacks receive. */
+export type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+/** Route-level flows (the decide endpoint) thread their open transaction down
+ * so the decision write and the event it causes commit or roll back together;
+ * standalone callers pass the Db itself. */
+export type DbOrTx = Db | Tx;
+
+/** Run `fn` inside a transaction on `dbx`. On a Db this opens a real
+ * transaction; on an already-open transaction it opens a savepoint, so the
+ * whole flow stays atomic from the outermost caller's perspective. */
+export function inTransaction<T>(dbx: DbOrTx, fn: (tx: Tx) => Promise<T>): Promise<T> {
+  return (dbx as Db).transaction(fn);
+}
+
+/** A step that must run only after the decision transaction has committed
+ * (git executions, nested-run completion): the decision is durable first, and
+ * a failure here can never be mistaken for a failed decision. */
+export type ApprovalPostCommit = (db: Db) => Promise<void>;
+
 /** §5.2 estimate-based node-start gate. Returns the node's estimated cost
  * under its CURRENT owner, or a blocked payload — in which case the
  * `__budget__:<node>` approval and require_approval audit row have already
@@ -498,18 +517,19 @@ async function evaluateNodeOwner(
 }
 
 /** Transactionally apply one run event: kernel transition under FOR UPDATE,
- * append-only event history, one audit trail (§5.3), and §3 escalations
- * materialized into the ONE approvals queue. This is the single funnel for
- * ALL run events, so §8 nesting hooks here: a run reaching a terminal state
- * notifies its parent workflow instance (after the transaction commits). */
-async function applyRunEvent(
-  db: Db,
+ * append-only event history, one audit trail (§5.3), §3 escalations
+ * materialized into the ONE approvals queue, and — the other side of the same
+ * coin — approvals mooted by the event (a reassigned/retried node, a run
+ * turning terminal) superseded in the SAME transaction, so the queue never
+ * shows a decidable gate for work that has moved on. Accepts an open
+ * transaction (decide-endpoint atomicity) or the Db. */
+async function applyRunEventTx(
+  dbx: DbOrTx,
   runId: string,
   event: RunEvent,
   actorUserId: string,
-  dataKey?: string,
 ): Promise<{ run: RunRow; effects: RunEffect[] }> {
-  const applied = await db.transaction(async (tx) => {
+  return inTransaction(dbx, async (tx) => {
     const [run] = await tx
       .select()
       .from(orchestrationRuns)
@@ -557,64 +577,111 @@ async function applyRunEvent(
         });
       }
     }
+    // A reassigned or retried node moots its open escalation AND its
+    // node-scoped budget gate: the situation the approver was asked about no
+    // longer exists. Superseded, never silently left decidable.
+    if (event.kind === "reassign_node" || event.kind === "retry_node") {
+      await tx
+        .update(approvals)
+        .set({ status: "superseded" })
+        .where(
+          and(
+            eq(approvals.runId, runId),
+            eq(approvals.status, "pending"),
+            inArray(approvals.stageId, [event.nodeId, `__budget__:${event.nodeId}`]),
+          ),
+        );
+    }
+    // A terminal run moots EVERY approval still pending against it.
+    if (state.status === "completed" || state.status === "aborted") {
+      await tx
+        .update(approvals)
+        .set({ status: "superseded" })
+        .where(and(eq(approvals.runId, runId), eq(approvals.status, "pending")));
+    }
     return { run: updated!, effects };
   });
-  // §8 nesting: a terminal nested run advances (or fails) its parent
-  // workflow's build stage. applyRunEvent throws on already-terminal runs,
-  // so a terminal status here is always a fresh transition.
-  if (
-    applied.run.workflowInstanceId &&
-    (applied.run.status === "completed" || applied.run.status === "aborted")
-  ) {
-    await handleNestedRunCompletion(db, dataKey, applied.run, actorUserId);
+}
+
+/** §8 nesting: a terminal nested run advances (or fails) its parent
+ * workflow's build stage — as a post-commit step, since it drives its own
+ * transactions and git executions. transitionRun throws on already-terminal
+ * runs, so a terminal status here is always a fresh transition. */
+function nestedCompletionPostCommit(
+  run: RunRow,
+  actorUserId: string,
+  dataKey?: string,
+): ApprovalPostCommit | null {
+  if (run.workflowInstanceId && (run.status === "completed" || run.status === "aborted")) {
+    return (db) => handleNestedRunCompletion(db, dataKey, run, actorUserId);
   }
+  return null;
+}
+
+/** The single funnel for ALL standalone run-event applications: transition +
+ * bookkeeping in one transaction, then the §8 parent-workflow notification. */
+async function applyRunEvent(
+  db: Db,
+  runId: string,
+  event: RunEvent,
+  actorUserId: string,
+  dataKey?: string,
+): Promise<{ run: RunRow; effects: RunEffect[] }> {
+  const applied = await applyRunEventTx(db, runId, event, actorUserId);
+  const postCommit = nestedCompletionPostCommit(applied.run, actorUserId, dataKey);
+  if (postCommit) await postCommit(db);
   return applied;
 }
 
 /** Decide-endpoint hook (§3): approving an escalated node re-opens it for
- * another attempt; denying it aborts the whole run. */
+ * another attempt; denying it aborts the whole run. Runs on the decide
+ * endpoint's OPEN transaction so a kernel refusal (RunStateError → 409) rolls
+ * the decision itself back; returns the post-commit step (§8 parent-workflow
+ * notification) for the caller to run once the decision is durable. */
 export async function applyRunApprovalDecision(
-  db: Db,
+  dbx: DbOrTx,
   approvalRow: { runId: string | null; stageId: string | null },
   decision: "approved" | "denied",
   deciderUserId: string,
   dataKey?: string,
-): Promise<void> {
-  if (!approvalRow.runId || !approvalRow.stageId) return;
+): Promise<ApprovalPostCommit | null> {
+  if (!approvalRow.runId || !approvalRow.stageId) return null;
+  const runId = approvalRow.runId;
   // §5.2 budget approvals: approving lifts cap enforcement for this run
   // (the overage is now sanctioned); denying aborts it. Never a silent path.
   if (approvalRow.stageId.startsWith("__budget__")) {
     if (decision === "approved") {
-      const [run] = await db
+      const [run] = await dbx
         .select()
         .from(orchestrationRuns)
-        .where(eq(orchestrationRuns.id, approvalRow.runId));
-      if (!run) return;
+        .where(eq(orchestrationRuns.id, runId));
+      if (!run) return null;
       const budget = (run.budget ?? {}) as Record<string, unknown>;
-      await db
+      await dbx
         .update(orchestrationRuns)
         .set({ budget: { ...budget, overageApproved: true } })
-        .where(eq(orchestrationRuns.id, approvalRow.runId));
-      await db.insert(auditLog).values({
+        .where(eq(orchestrationRuns.id, runId));
+      await dbx.insert(auditLog).values({
         userId: deciderUserId,
         objectType: "run",
-        objectId: approvalRow.runId,
+        objectId: runId,
         detail: { phase: "budget-decision", stageId: approvalRow.stageId },
         effect: "allow",
         ruleId: "run-budget-overage-approved",
         ruleChain: [],
         reason: "budget overage approved by the named approver; cap enforcement lifted for this run",
       });
-    } else {
-      await applyRunEvent(db, approvalRow.runId, { kind: "abort" }, deciderUserId, dataKey);
+      return null;
     }
-    return;
+    const aborted = await applyRunEventTx(dbx, runId, { kind: "abort" }, deciderUserId);
+    return nestedCompletionPostCommit(aborted.run, deciderUserId, dataKey);
   }
   const event: RunEvent =
     decision === "approved"
       ? { kind: "retry_node", nodeId: approvalRow.stageId }
       : { kind: "abort" };
-  await applyRunEvent(db, approvalRow.runId, event, deciderUserId, dataKey);
+  const applied = await applyRunEventTx(dbx, runId, event, deciderUserId);
+  return nestedCompletionPostCommit(applied.run, deciderUserId, dataKey);
 }
 
 export type PlanRunResult =

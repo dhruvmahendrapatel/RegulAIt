@@ -964,11 +964,12 @@ describe("workflow engine (EPIC-03 slice)", () => {
       .approvals.find((a: { instanceId: string | null }) => a.instanceId === instanceId);
     expect(signoff).toMatchObject({ objectType: "workflow", stageId: "requirements_signoff", approverUserId: leoId });
 
+    // requesting_user sign-offs are self-reviews — a reason is mandatory
     const approve = await app.inject({
       method: "POST",
       headers: leoAuth,
       url: `/v1/approvals/${signoff.id}/decide`,
-      payload: { decision: "approved" },
+      payload: { decision: "approved", reason: "self-review: solo demo flow" },
     });
     expect(approve.statusCode).toBe(200);
 
@@ -993,7 +994,7 @@ describe("workflow engine (EPIC-03 slice)", () => {
       method: "POST",
       headers: leoAuth,
       url: `/v1/approvals/${signoff2.id}/decide`,
-      payload: { decision: "approved" },
+      payload: { decision: "approved", reason: "self-review: v2 re-approval" },
     });
 
     for (const stageId of ["build", "checks"]) {
@@ -1073,7 +1074,7 @@ describe("workflow engine (EPIC-03 slice)", () => {
       method: "POST",
       headers: leoAuth,
       url: `/v1/approvals/${s1.id}/decide`,
-      payload: { decision: "approved" },
+      payload: { decision: "approved", reason: "self-review: own requirements gate" },
     });
     for (const stageId of ["build", "checks"]) {
       await app.inject({
@@ -1209,7 +1210,7 @@ describe("workflow review-fix regressions", () => {
     );
     await app.inject({
       method: "POST", headers: ninaAuth, url: `/v1/approvals/${gate1Row.id}/decide`,
-      payload: { decision: "approved" },
+      payload: { decision: "approved", reason: "self-review: gate1 is mine" },
     });
 
     // now blocked on gate2 with a live pending row — re-open by editing the artifact
@@ -1392,7 +1393,7 @@ describe("git-provider workflow stages (EPIC-03)", () => {
       method: "POST",
       headers: quinnAuth,
       url: `/v1/approvals/${signoff.id}/decide`,
-      payload: { decision: "approved" },
+      payload: { decision: "approved", reason: "self-review: git chain demo" },
     });
 
     let view = await app.inject({ method: "GET", headers: quinnAuth, url: `/v1/workflows/instances/${instanceId}` });
@@ -1411,7 +1412,7 @@ describe("git-provider workflow stages (EPIC-03)", () => {
       method: "POST",
       headers: quinnAuth,
       url: `/v1/approvals/${mergeGate.id}/decide`,
-      payload: { decision: "approved" },
+      payload: { decision: "approved", reason: "self-review: merging my own gate" },
     });
 
     view = await app.inject({ method: "GET", headers: quinnAuth, url: `/v1/workflows/instances/${instanceId}` });
@@ -1584,7 +1585,7 @@ describe("git executor hardening (review follow-ups)", () => {
       );
       return app.inject({
         method: "POST", headers: umaAuth, url: `/v1/approvals/${row.id}/decide`,
-        payload: { decision: "approved" },
+        payload: { decision: "approved", reason: "self-review: reopen replay test" },
       });
     };
 
@@ -1634,7 +1635,7 @@ describe("git executor hardening (review follow-ups)", () => {
     );
     await app.inject({
       method: "POST", headers: umaAuth, url: `/v1/approvals/${signoff.id}/decide`,
-      payload: { decision: "denied" },
+      payload: { decision: "denied", reason: "self-review: denying my own gate" },
     });
 
     const bypass = await app.inject({
@@ -5429,9 +5430,11 @@ describe("compliance classification cascade (§8.3)", () => {
     expect(during.json().pendingClassifications).toEqual(["soc2"]);
 
     const reviewerAuth = await authFor(reviewerId);
+    // proposed via the identityless bootstrap token, so the row's requester
+    // fell back to the reviewer — reads as a self-review, reason required
     await app.inject({
       method: "POST", headers: reviewerAuth, url: `/v1/approvals/${approvalId}/decide`,
-      payload: { decision: "approved" },
+      payload: { decision: "approved", reason: "reviewed diff; soc2-only is correct" },
     });
     const after = await app.inject({
       method: "GET", headers: AUTH, url: `/v1/projects/${ccProjId}/compliance`,
@@ -5447,7 +5450,7 @@ describe("compliance classification cascade (§8.3)", () => {
     });
     await app.inject({
       method: "POST", headers: reviewerAuth, url: `/v1/approvals/${again.json().approvalId}/decide`,
-      payload: { decision: "denied" },
+      payload: { decision: "denied", reason: "keep soc2-only" },
     });
     const final = await app.inject({
       method: "GET", headers: AUTH, url: `/v1/projects/${ccProjId}/compliance`,
@@ -6252,6 +6255,40 @@ describe("slice 3: the approval loop closes — approver reads, reasons, admin o
     expect(driveRun.statusCode).toBe(404);
   });
 
+  it("the named approver's PM-strip reads return 200 [] instead of guaranteed 404s", async () => {
+    // finding 4: the approver cross-read fired GET /v1/pm/links and
+    // GET /v1/decisions that 404'd for non-initiators — the same
+    // named-pending-approver widening as the instance/run GETs now admits
+    // them, answering 200 with [] where nothing exists.
+    const runLinks = await app.inject({ method: "GET", headers: oleAuth, url: `/v1/pm/links?runId=${runId}` });
+    expect(runLinks.statusCode).toBe(200);
+    expect(runLinks.json().links).toEqual([]);
+    const runDecisions = await app.inject({
+      method: "GET", headers: oleAuth, url: `/v1/decisions?objectType=run&objectId=${runId}`,
+    });
+    expect(runDecisions.statusCode).toBe(200);
+    expect(runDecisions.json().decisions).toEqual([]);
+
+    const instLinks = await app.inject({
+      method: "GET", headers: oleAuth, url: `/v1/pm/links?instanceId=${instanceId}`,
+    });
+    expect(instLinks.statusCode).toBe(200);
+    expect(instLinks.json().links).toEqual([]);
+    const instDecisions = await app.inject({
+      method: "GET", headers: oleAuth, url: `/v1/decisions?objectType=workflow_instance&objectId=${instanceId}`,
+    });
+    expect(instDecisions.statusCode).toBe(200);
+    expect(instDecisions.json().decisions).toEqual([]);
+
+    // an uninvolved user still gets existence-hiding 404s
+    const zedLinks = await app.inject({ method: "GET", headers: zedAuth, url: `/v1/pm/links?runId=${runId}` });
+    expect(zedLinks.statusCode).toBe(404);
+    const zedDecisions = await app.inject({
+      method: "GET", headers: zedAuth, url: `/v1/decisions?objectType=run&objectId=${runId}`,
+    });
+    expect(zedDecisions.statusCode).toBe(404);
+  });
+
   it("deciding with a reason records it; the read window closes once nothing is pending", async () => {
     const decided = await app.inject({
       method: "POST", headers: oleAuth, url: `/v1/approvals/${runApprovalId}/decide`,
@@ -6273,6 +6310,13 @@ describe("slice 3: the approval loop closes — approver reads, reasons, admin o
     // no pending approval on the run names Ole anymore → the read closes again
     const runView = await app.inject({ method: "GET", headers: oleAuth, url: `/v1/runs/${runId}` });
     expect(runView.statusCode).toBe(404);
+    // …and so does the widened PM strip
+    const runLinks = await app.inject({ method: "GET", headers: oleAuth, url: `/v1/pm/links?runId=${runId}` });
+    expect(runLinks.statusCode).toBe(404);
+    const runDecisions = await app.inject({
+      method: "GET", headers: oleAuth, url: `/v1/decisions?objectType=run&objectId=${runId}`,
+    });
+    expect(runDecisions.statusCode).toBe(404);
   });
 
   it("admin override: 403 for a third user, mandatory reason, audit-marked", async () => {

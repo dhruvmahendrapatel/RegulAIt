@@ -728,6 +728,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     return {
       approvals: rows.map((r) => ({
         ...r,
+        // Finding-6 separation-of-duties surface: the approver IS the user
+        // who triggered the governed action — the UI badges it, deciding it
+        // requires a recorded reason.
+        selfReview: r.userId === r.approverUserId,
         requestedByName: nameOf.get(r.userId) ?? null,
         approverName: nameOf.get(r.approverUserId) ?? null,
         decidedByName: r.decidedBy ? (nameOf.get(r.decidedBy) ?? null) : null,
@@ -753,6 +757,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
     const [row] = await db.select().from(approvals).where(eq(approvals.id, approvalId));
     if (!row) return reply.status(404).send({ error: "unknown_approval" });
+    // A superseded gate is dead, not decidable: its node was reassigned or
+    // retried, its run turned terminal, or a newer artifact re-opened the
+    // stage. Refuse loudly instead of accepting a decision about nothing.
+    if (row.status === "superseded") {
+      return reply.status(409).send({
+        error: "approval_superseded",
+        detail: "this approval was superseded (its node, run, or stage moved on) and can no longer be decided",
+      });
+    }
     // Only the rule's named approver may decide (§3) — with one escape hatch:
     // an org ADMIN may decide in the approver's place to unblock a stuck
     // queue, but only with a recorded reason, and the override is written to
@@ -769,56 +782,126 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         });
       }
     }
-
-    const [updated] = await db
-      .update(approvals)
-      .set({
-        status: body.decision,
-        decidedBy: deciderUserId,
-        decidedAt: new Date(),
-        decisionReason: body.reason ?? null,
-      })
-      .where(and(eq(approvals.id, approvalId), eq(approvals.status, "pending")))
-      .returning();
-    if (!updated) return reply.status(409).send({ error: "already_decided" });
-    if (adminOverride) {
-      await db.insert(auditLog).values({
-        userId: deciderUserId,
-        objectType: updated.objectType,
-        objectId: updated.instanceId ?? updated.runId ?? updated.projectId ?? null,
-        serverId: updated.serverId,
-        toolName: updated.toolName,
-        detail: {
-          approvalId: updated.id,
-          adminOverride: true,
-          namedApproverUserId: row.approverUserId,
-          decision: body.decision,
-          stageId: updated.stageId,
-        },
-        effect: body.decision === "approved" ? "allow" : "deny",
-        ruleId: "approval-admin-override",
-        ruleChain: [],
-        reason: `admin decided in place of the named approver: ${body.reason}`,
+    // Separation-of-duties guard: the named approver IS the user who
+    // triggered the governed action. Still decidable (alternate-approver
+    // routing is deliberately out of scope) but never silently — a recorded
+    // reason is required and the audit row is stamped selfReview.
+    const selfReview = row.userId === row.approverUserId;
+    if (selfReview && !body.reason?.trim()) {
+      return reply.status(400).send({
+        error: "self_review_reason_required",
+        detail: "this is a self-review (the approver is the requesting user); deciding it requires a recorded reason",
       });
     }
-    // Workflow sign-offs advance their instance through the same one inbox (§5).
-    if (updated.objectType === "workflow") {
-      await applyWorkflowApprovalDecision(db, updated, body.decision, deciderUserId, opts.dataKey);
+
+    // ONE transaction: the decision write and the run/workflow/project event
+    // it causes commit or roll back together — a downstream invalid-state 409
+    // can never leave a silently persisted decision behind. Post-commit
+    // execution (git stages, nested-run completion) and the PM mirror run
+    // only after the decision is durable.
+    const outcome = await db.transaction(async (tx) => {
+      const [updated] = await tx
+        .update(approvals)
+        .set({
+          status: body.decision,
+          decidedBy: deciderUserId,
+          decidedAt: new Date(),
+          decisionReason: body.reason ?? null,
+        })
+        .where(and(eq(approvals.id, approvalId), eq(approvals.status, "pending")))
+        .returning();
+      if (!updated) return { updated: null, postCommit: null };
+      if (adminOverride) {
+        await tx.insert(auditLog).values({
+          userId: deciderUserId,
+          objectType: updated.objectType,
+          objectId: updated.instanceId ?? updated.runId ?? updated.projectId ?? null,
+          serverId: updated.serverId,
+          toolName: updated.toolName,
+          detail: {
+            approvalId: updated.id,
+            adminOverride: true,
+            namedApproverUserId: row.approverUserId,
+            decision: body.decision,
+            stageId: updated.stageId,
+          },
+          effect: body.decision === "approved" ? "allow" : "deny",
+          ruleId: "approval-admin-override",
+          ruleChain: [],
+          reason: `admin decided in place of the named approver: ${body.reason}`,
+        });
+      }
+      if (selfReview) {
+        await tx.insert(auditLog).values({
+          userId: deciderUserId,
+          objectType: updated.objectType,
+          objectId: updated.instanceId ?? updated.runId ?? updated.projectId ?? null,
+          serverId: updated.serverId,
+          toolName: updated.toolName,
+          detail: {
+            approvalId: updated.id,
+            selfReview: true,
+            decision: body.decision,
+            stageId: updated.stageId,
+          },
+          effect: body.decision === "approved" ? "allow" : "deny",
+          ruleId: "approval-self-review",
+          ruleChain: [],
+          reason: `self-review: the approver is the requesting user; decided with recorded reason: ${body.reason}`,
+        });
+      }
+      let postCommit: ((d: Db) => Promise<void>) | null = null;
+      // Workflow sign-offs advance their instance through the same one inbox (§5).
+      if (updated.objectType === "workflow") {
+        postCommit = await applyWorkflowApprovalDecision(tx, updated, body.decision, deciderUserId, opts.dataKey);
+      }
+      // Orchestration escalations (§3): approve = another attempt, deny = abort.
+      if (updated.objectType === "run") {
+        postCommit = await applyRunApprovalDecision(tx, updated, body.decision, deciderUserId, opts.dataKey);
+      }
+      // Pillar 5 budget escalations + §9 context-conflict resolutions.
+      if (updated.objectType === "project") {
+        await applyProjectApprovalDecision(tx as unknown as Db, updated, body.decision, deciderUserId);
+      }
+      return { updated, postCommit };
+    });
+    if (!outcome.updated) {
+      // raced: re-read so the refusal names what actually happened
+      const [current] = await db
+        .select({ status: approvals.status })
+        .from(approvals)
+        .where(eq(approvals.id, approvalId));
+      return reply.status(409).send(
+        current?.status === "superseded"
+          ? {
+              error: "approval_superseded",
+              detail: "this approval was superseded (its node, run, or stage moved on) and can no longer be decided",
+            }
+          : { error: "already_decided" },
+      );
     }
-    // Orchestration escalations (§3): approve = another attempt, deny = abort.
-    if (updated.objectType === "run") {
-      await applyRunApprovalDecision(db, updated, body.decision, deciderUserId, opts.dataKey);
-    }
-    // Pillar 5 budget escalations + §9 context-conflict resolutions.
-    if (updated.objectType === "project") {
-      await applyProjectApprovalDecision(db, updated, body.decision, deciderUserId);
+    // The decision is durable from here on: an execution hiccup surfaces in
+    // the response (and the execution machinery's own failure events), never
+    // as a failed decide.
+    let executionError: string | null = null;
+    if (outcome.postCommit) {
+      try {
+        await outcome.postCommit(db);
+      } catch (err) {
+        executionError = err instanceof Error ? err.message : String(err);
+      }
     }
     // EPIC-06 §5: sign-offs mirror to the linked work item — display only,
     // never a second decision point; a mirror failure never unwinds the
     // decision, it is surfaced in the response.
-    const pmMirror = await mirrorApprovalDecision(db, opts.dataKey, updated, deciderUserId);
-    const decided = adminOverride ? { ...updated, adminOverride: true } : updated;
-    return pmMirror ? { ...decided, pmMirror } : decided;
+    const pmMirror = await mirrorApprovalDecision(db, opts.dataKey, outcome.updated, deciderUserId);
+    return {
+      ...outcome.updated,
+      ...(adminOverride ? { adminOverride: true } : {}),
+      ...(selfReview ? { selfReview: true } : {}),
+      ...(pmMirror ? { pmMirror } : {}),
+      ...(executionError ? { executionError } : {}),
+    };
   });
 
   // ADR-0012: the portal is a static shell (zero data, zero secrets) that

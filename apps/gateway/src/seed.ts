@@ -742,18 +742,30 @@ if (!averyInstances.some((i: Json) => i.change?.description === AVERY_CHANGE)) {
 // checkout-refactor's task graph maps onto mock work items in REGULAIT-DEMO
 // and carries one recorded decision, and Dana's workflow instance gets its
 // single linked item — so the /app PM strip and Decisions card open
-// non-empty. pm-sync is idempotent server-side (already-linked = skipped);
-// the append-only decision is guarded by a lookup.
+// non-empty. pm-sync verifies every existing link live and repairs (or
+// orphans) dead ones; the append-only decision is guarded by a lookup.
+// The summary printed below reports only what was VERIFIED against the
+// provider, never an assumption — the mock store is per-process, so a
+// re-seed re-syncs links but cannot restore comments an earlier process made.
+let pmSummaryLine = "skipped — REGULAIT_DATA_KEY unset, no PM connection seeded";
 if (DATA_KEY) {
   const runsNow = (await call("GET", "/v1/runs", undefined, danaAuth)).runs ?? [];
   const checkoutRun = runsNow.find((r: Json) => r.name === "checkout-refactor");
+  let syncLine = "checkout-refactor run not found, nothing synced";
+  let decisionLine = "no decision recorded";
   if (checkoutRun) {
-    await call("POST", `/v1/runs/${checkoutRun.id}/pm-sync`, { connectionName: "demo-pm" }, danaAuth);
+    const sync = await call("POST", `/v1/runs/${checkoutRun.id}/pm-sync`, { connectionName: "demo-pm" }, danaAuth);
+    syncLine = [
+      `${sync.created?.length ?? 0} item(s) created`,
+      `${sync.verified?.length ?? 0} verified live`,
+      ...((sync.repaired?.length ?? 0) > 0 ? [`${sync.repaired.length} repaired in place`] : []),
+      ...((sync.orphaned?.length ?? 0) > 0 ? [`${sync.orphaned.length} ORPHANED`] : []),
+    ].join(", ");
     const decided =
       (await call("GET", `/v1/decisions?objectType=run&objectId=${checkoutRun.id}`, undefined, danaAuth))
         .decisions ?? [];
     if (decided.length === 0) {
-      await call(
+      const recorded = await call(
         "POST",
         "/v1/decisions",
         {
@@ -765,7 +777,26 @@ if (DATA_KEY) {
         },
         danaAuth,
       );
+      if (recorded.pmMirror?.ok === false) {
+        throw new Error(`seeded decision failed to mirror: ${recorded.pmMirror.error}`);
+      }
     }
+    // Live verification, not a claim: is the decision comment actually on the
+    // run's work item at the provider right now?
+    const linksLive =
+      (await call("GET", `/v1/pm/links?runId=${checkoutRun.id}&live=true`, undefined, danaAuth)).links ?? [];
+    const runParent = linksLive.find((l: Json) => l.objectType === "run" && !l.orphanedAt);
+    const mirrorVisible = Boolean(
+      runParent?.live?.comments?.some((c: string) => c.startsWith("[RegulAIt] decision")),
+    );
+    const decidedCount = Math.max(
+      1,
+      ((await call("GET", `/v1/decisions?objectType=run&objectId=${checkoutRun.id}`, undefined, danaAuth))
+        .decisions ?? []).length,
+    );
+    decisionLine = mirrorVisible
+      ? `${decidedCount} decision(s) recorded, mirror VERIFIED live on the run's work item`
+      : `${decidedCount} decision(s) recorded locally; the mirror comment is not visible on the provider right now (per-process mock store) — the next decision recorded against the running gateway mirrors fresh`;
   }
   const instancesNow = (await call("GET", "/v1/workflows/instances", undefined, danaAuth)).instances ?? [];
   const danaInst = instancesNow.find((i: Json) => i.change?.description === DANA_CHANGE);
@@ -777,6 +808,7 @@ if (DATA_KEY) {
       danaAuth,
     );
   }
+  pmSummaryLine = `${syncLine}; ${decisionLine}`;
 }
 
 await app.close();
@@ -817,11 +849,14 @@ ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecre
   (the per-project /costs endpoint admits members, not only admins).
 
   PM integration (pillar 8): the mock 'demo-pm' connection is linked to
-  Dana's checkout-refactor run (every node = a mock work item, one decision
-  recorded and mirrored) and to her workflow instance — see the PM strip on
-  each detail page ('Sync now' re-links, drift is surfaced, never
-  auto-fixed). /admin → PM Connections lists/creates connections; the
-  webhook secret is shown exactly once there, like every secret.
+  Dana's checkout-refactor run (every node = a mock work item) and to her
+  workflow instance. This seed run, verified live against the provider:
+  ${pmSummaryLine}.
+  See the PM strip on each detail page ('Sync now' verifies every link live,
+  repairs missing items in place, and orphans unrepairable ones; drift is
+  surfaced, never auto-fixed). /admin → PM Connections lists/creates
+  connections; the webhook secret is shown exactly once there, like every
+  secret.
 
   Workflows (pillar 2): 3 templates — standard-change (type 'feature'),
   sensitive-data (hipaa cascade), and complete-pipeline (type 'pipeline-demo':
