@@ -60,6 +60,7 @@ export interface BuildAppOptions {
 import { z } from "zod";
 import { registerMcpProxy } from "./mcp-proxy.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
+import { registerOptimizationRoutes } from "./optimization.js";
 import { applyWorkflowApprovalDecision, registerWorkflowRoutes } from "./workflows.js";
 import { MergeConflictError, WorkflowStateError } from "@regulait/workflow-kernel";
 
@@ -119,6 +120,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "POST /v1/workflows/instances/:instanceId/abort",
     "GET /v1/workflows/instances/:instanceId",
     "GET /v1/approvals",
+    "GET /v1/cost-events",
   ]);
   app.addHook("preHandler", async (req, reply) => {
     const route = `${req.method} ${req.routeOptions.url ?? ""}`;
@@ -524,6 +526,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   });
 
   registerAgentConnectorRoutes(app, db);
+  registerOptimizationRoutes(app, db);
 
   registerWorkflowRoutes(app, db, { dataKey: opts.dataKey });
 

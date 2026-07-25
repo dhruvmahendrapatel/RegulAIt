@@ -71,6 +71,13 @@
       "when": 1784944000000,
       "tag": "0009_git_connections",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1784945000000,
+      "tag": "0010_token_optimization",
+      "breakpoints": true
     }
   ]
 }

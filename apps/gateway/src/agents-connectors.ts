@@ -5,11 +5,13 @@ import {
   auditLog,
   connectorGrants,
   connectors,
+  costEvents,
   eq,
   userAgentPolicies,
   type Db,
 } from "@regulait/db";
 import { evaluateAgent, evaluateConnector } from "@regulait/policy-kernel";
+import { classifyComplexity, estimateTokens, routeModel } from "@regulait/optimizer-kernel";
 import {
   createAgentGrantSchema,
   createAgentSchema,
@@ -40,6 +42,8 @@ export function registerAgentConnectorRoutes(app: FastifyInstance, db: Db) {
         provider: body.provider,
         tier: body.tier,
         modes: body.modes ?? null,
+        costPerMTokIn: body.costPerMTokIn ?? null,
+        costPerMTokOut: body.costPerMTokOut ?? null,
       })
       .returning();
     return reply.status(201).send(row);
@@ -100,15 +104,21 @@ export function registerAgentConnectorRoutes(app: FastifyInstance, db: Db) {
   app.post("/v1/users/:userId/agent-policy", async (req) => {
     const { userId } = userIdParam.parse(req.params);
     const body = setAgentPolicySchema.parse(req.body);
-    const set: Partial<{ defaultAgentId: string | null; ceilingAgentId: string | null }> = {};
+    const set: Partial<{
+      defaultAgentId: string | null;
+      ceilingAgentId: string | null;
+      routingMode: "automatic" | "passthrough";
+    }> = {};
     if ("defaultAgentId" in (req.body as object)) set.defaultAgentId = body.defaultAgentId ?? null;
     if ("ceilingAgentId" in (req.body as object)) set.ceilingAgentId = body.ceilingAgentId ?? null;
+    if (body.routingMode !== undefined) set.routingMode = body.routingMode;
     const [row] = await db
       .insert(userAgentPolicies)
       .values({
         userId,
         defaultAgentId: set.defaultAgentId ?? null,
         ceilingAgentId: set.ceilingAgentId ?? null,
+        routingMode: set.routingMode ?? "automatic",
       })
       .onConflictDoUpdate({ target: userAgentPolicies.userId, set })
       .returning();
@@ -176,18 +186,73 @@ export function registerAgentConnectorRoutes(app: FastifyInstance, db: Db) {
       ceilingTier,
     });
 
+    // OPTIMIZATION §8: routing runs strictly after — and inside — governance.
+    // The candidate set is exactly the agents evaluateAgent would allow for
+    // this user+mode, so the optimizer can never widen entitlement (§12).
+    let routing = null;
+    if (decision.effect === "allow") {
+      const registry = await db.select().from(agents).where(eq(agents.enabled, true));
+      const candidates = registry
+        .filter(
+          (a) =>
+            evaluateAgent({
+              userId,
+              agent: { id: a.id, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
+              mode: body.mode,
+              agentGrants: grants,
+              ceilingTier,
+            }).effect === "allow",
+        )
+        .map((a) => ({
+          id: a.id,
+          tier: a.tier,
+          costPerMTokIn: a.costPerMTokIn ?? null,
+          costPerMTokOut: a.costPerMTokOut ?? null,
+        }));
+      const complexity = classifyComplexity(body.input);
+      const estimate = estimateTokens(body.input, complexity);
+      routing = routeModel({
+        requestedAgentId: agent.id,
+        candidates,
+        routingMode: policy?.routingMode ?? "automatic",
+        complexity,
+        costSensitivity: body.costSensitivity,
+        ceilingTier,
+        estimate,
+      });
+      await db.insert(costEvents).values({
+        userId,
+        objectType: "agent",
+        objectId: agent.id,
+        technique: "model_routing",
+        requestedAgentId: agent.id,
+        servedAgentId: routing.selectedAgentId,
+        baselineAgentId: routing.baselineAgentId,
+        estimatedTokensIn: estimate.in,
+        estimatedTokensOut: estimate.out,
+        estimatedTokensSaved: routing.estimatedTokensSaved,
+        estimatedCostSavedUsd: routing.estimatedCostSavedUsd,
+        estimationBasis: routing.estimationBasis,
+        ruleId: routing.ruleId,
+        detail: { effect: routing.effect, complexity, mode: body.mode },
+      });
+    }
+
     await db.insert(auditLog).values({
       userId,
       objectType: "agent",
       objectId: agent.id,
-      detail: { mode: body.mode },
+      // §8: the served model is always visible in the execution log
+      detail: { mode: body.mode, ...(routing ? { servedAgentId: routing.selectedAgentId } : {}) },
       effect: decision.effect,
       ruleId: decision.ruleId,
       ruleChain: decision.ruleChain,
       reason: decision.reason,
     });
 
-    return reply.status(decision.effect === "allow" ? 200 : 403).send({ decision });
+    return reply
+      .status(decision.effect === "allow" ? 200 : 403)
+      .send(routing ? { decision, routing } : { decision });
   });
 
   // --- connectors (§2) ---

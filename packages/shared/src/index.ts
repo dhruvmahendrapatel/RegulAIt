@@ -106,6 +106,8 @@ export const createAgentSchema = z.object({
   provider: z.string().min(1),
   tier: z.number().int().min(0),
   modes: z.array(z.string().min(1)).nullable().optional(),
+  costPerMTokIn: z.number().nonnegative().nullable().optional(),
+  costPerMTokOut: z.number().nonnegative().nullable().optional(),
 });
 
 export const setAgentEnabledSchema = z.object({ enabled: z.boolean() });
@@ -119,9 +121,15 @@ export const createAgentGrantSchema = z.object({
 export const setAgentPolicySchema = z.object({
   defaultAgentId: z.string().uuid().nullable().optional(),
   ceilingAgentId: z.string().uuid().nullable().optional(),
+  routingMode: z.enum(["automatic", "passthrough"]).optional(),
 });
 
-export const invokeAgentSchema = z.object({ mode: z.string().min(1).max(64) });
+export const invokeAgentSchema = z.object({
+  mode: z.string().min(1).max(64),
+  /** request text, used only for pure complexity classification/token estimation */
+  input: z.string().max(100_000).optional(),
+  costSensitivity: z.enum(["cost-sensitive", "standard", "quality-sensitive"]).optional(),
+});
 
 export const createConnectorSchema = z.object({
   name: z.string().min(1),

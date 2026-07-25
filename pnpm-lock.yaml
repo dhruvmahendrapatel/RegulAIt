@@ -26,6 +26,9 @@ importers:
       '@regulait/git-provider':
         specifier: workspace:*
         version: link:../../packages/git-provider
+      '@regulait/optimizer-kernel':
+        specifier: workspace:*
+        version: link:../../packages/optimizer-kernel
       '@regulait/policy-kernel':
         specifier: workspace:*
         version: link:../../packages/policy-kernel
@@ -63,6 +66,12 @@ importers:
         version: 0.31.10
 
   packages/git-provider:
+    devDependencies:
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/node@26.1.1)(tsx@4.23.1)
+
+  packages/optimizer-kernel:
     devDependencies:
       vitest:
         specifier: ^3.2.4

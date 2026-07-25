@@ -1698,3 +1698,193 @@ describe("git executor hardening (review follow-ups)", () => {
     expect(emptyToken.statusCode).toBe(400);
   });
 });
+
+describe("token/cost optimization (EPIC-04 §7/§8)", () => {
+  let ottoId: string;
+  let ottoAuth: { authorization: string };
+  let cheapId: string;
+  let midId: string;
+  let bigId: string;
+
+  it("routes a low-complexity request down to the cheapest entitled model and ledgers the savings", async () => {
+    const otto = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "opt-otto@example.com", displayName: "Opt Otto" },
+    });
+    ottoId = otto.json().id;
+    ottoAuth = await authFor(ottoId);
+
+    const mk = async (name: string, tier: number, inC: number, outC: number) => {
+      const r = await app.inject({
+        method: "POST",
+        headers: AUTH,
+        url: "/v1/agents",
+        payload: {
+          name,
+          provider: "anthropic",
+          tier,
+          modes: ["plan", "execute"],
+          costPerMTokIn: inC,
+          costPerMTokOut: outC,
+        },
+      });
+      return r.json().id as string;
+    };
+    cheapId = await mk("opt-cheap", 0, 1, 5);
+    midId = await mk("opt-mid", 1, 3, 15);
+    bigId = await mk("opt-big", 2, 15, 75);
+    for (const agentId of [cheapId, midId, bigId]) {
+      await app.inject({
+        method: "POST",
+        headers: AUTH,
+        url: "/v1/grants/agents",
+        payload: { userId: ottoId, agentId },
+      });
+    }
+
+    const res = await app.inject({
+      method: "POST",
+      headers: ottoAuth,
+      url: `/v1/agents/${bigId}/invoke`,
+      payload: { mode: "plan", input: "summarize this one-line note please" },
+    });
+    expect(res.statusCode).toBe(200);
+    const { decision, routing } = res.json();
+    expect(decision.effect).toBe("allow");
+    expect(routing.effect).toBe("routed");
+    expect(routing.selectedAgentId).toBe(cheapId);
+    expect(routing.baselineAgentId).toBe(bigId);
+    expect(routing.estimatedCostSavedUsd).toBeGreaterThan(0);
+    expect(routing.estimationBasis).toContain("vs-baseline");
+
+    // §8: the served model is visible in the execution (audit) log
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit?userId=${ottoId}` });
+    const row = audit.json().entries.find((e: { objectType: string }) => e.objectType === "agent");
+    expect(row.detail.servedAgentId).toBe(cheapId);
+
+    // §7: one dashboard-ready cost event per routing decision
+    const ledger = await app.inject({
+      method: "GET",
+      headers: AUTH,
+      url: `/v1/cost-events?userId=${ottoId}`,
+    });
+    expect(ledger.statusCode).toBe(200);
+    const { events, totals } = ledger.json();
+    expect(events).toHaveLength(1);
+    expect(events[0].technique).toBe("model_routing");
+    expect(events[0].servedAgentId).toBe(cheapId);
+    expect(events[0].baselineAgentId).toBe(bigId);
+    const routingTotal = totals.find((t: { technique: string }) => t.technique === "model_routing");
+    expect(routingTotal.estimatedCostSavedUsd).toBeGreaterThan(0);
+  });
+
+  it("routing never selects a model the user is not entitled to (§12)", async () => {
+    const nina = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "opt-nina@example.com", displayName: "Opt Nina" },
+    });
+    const ninaId = nina.json().id;
+    // Nina can use big + mid but was never granted the cheapest model.
+    for (const agentId of [midId, bigId]) {
+      await app.inject({
+        method: "POST",
+        headers: AUTH,
+        url: "/v1/grants/agents",
+        payload: { userId: ninaId, agentId },
+      });
+    }
+    const res = await app.inject({
+      method: "POST",
+      headers: await authFor(ninaId),
+      url: `/v1/agents/${bigId}/invoke`,
+      payload: { mode: "plan", input: "tiny ask" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().routing.selectedAgentId).toBe(midId);
+  });
+
+  it("quality-sensitive requests and passthrough mode both disable downgrading (§9/§12)", async () => {
+    const qs = await app.inject({
+      method: "POST",
+      headers: ottoAuth,
+      url: `/v1/agents/${bigId}/invoke`,
+      payload: { mode: "plan", input: "tiny ask", costSensitivity: "quality-sensitive" },
+    });
+    expect(qs.json().routing.effect).toBe("passthrough");
+    expect(qs.json().routing.ruleId).toBe("cost-sensitivity");
+
+    // admin flips Otto's off switch on the existing agent-policy surface
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: `/v1/users/${ottoId}/agent-policy`,
+      payload: { routingMode: "passthrough" },
+    });
+    const off = await app.inject({
+      method: "POST",
+      headers: ottoAuth,
+      url: `/v1/agents/${bigId}/invoke`,
+      payload: { mode: "plan", input: "tiny ask" },
+    });
+    expect(off.json().routing.effect).toBe("passthrough");
+    expect(off.json().routing.ruleId).toBe("routing-mode");
+    expect(off.json().routing.selectedAgentId).toBe(bigId);
+    await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: `/v1/users/${ottoId}/agent-policy`,
+      payload: { routingMode: "automatic" },
+    });
+  });
+
+  it("no input text means no signal and no downgrade", async () => {
+    const res = await app.inject({
+      method: "POST",
+      headers: ottoAuth,
+      url: `/v1/agents/${bigId}/invoke`,
+      payload: { mode: "plan" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().routing.effect).toBe("passthrough");
+    expect(res.json().routing.selectedAgentId).toBe(bigId);
+  });
+
+  it("denied invokes write no cost event, and non-admins see only their own ledger", async () => {
+    const eve = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: "opt-eve@example.com", displayName: "Opt Eve" },
+    });
+    const eveId = eve.json().id;
+    const eveAuth = await authFor(eveId);
+
+    // no grant → 403, and no ledger row
+    const denied = await app.inject({
+      method: "POST",
+      headers: eveAuth,
+      url: `/v1/agents/${bigId}/invoke`,
+      payload: { mode: "plan", input: "tiny ask" },
+    });
+    expect(denied.statusCode).toBe(403);
+    const eveLedger = await app.inject({ method: "GET", headers: eveAuth, url: "/v1/cost-events" });
+    expect(eveLedger.statusCode).toBe(200);
+    expect(eveLedger.json().events).toHaveLength(0);
+
+    // a non-admin asking for someone else's history is forced back to self
+    const spoofed = await app.inject({
+      method: "GET",
+      headers: eveAuth,
+      url: `/v1/cost-events?userId=${ottoId}`,
+    });
+    expect(spoofed.json().events).toHaveLength(0);
+
+    // admin sees the fleet
+    const all = await app.inject({ method: "GET", headers: AUTH, url: "/v1/cost-events" });
+    expect(all.json().events.length).toBeGreaterThanOrEqual(3);
+  });
+});
