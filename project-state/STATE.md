@@ -63,6 +63,26 @@ and a gateway executor: create_branch → open_pr (body auto-linked to the signe
 requirements artifact, §2 stage 7) → merge (configured strategy) with results in
 instance.context, failures retryable via /advance, everything audited.
 
+**EPIC-06 started — PM-tool integration first slice, 2026-07-25.** New
+`packages/pm-provider` on the git-provider playbook (pillar 8, PM_TOOL_INTEGRATION_SPEC
+§2/§3/§6): neutral `PmProvider` interface (create/update/transition/comment/getWorkItem), the
+load-bearing FIELD MAPPING layer as pure zod-validated config with per-adapter defaults an
+admin overrides (§7: never hardcoded), an Azure DevOps adapter (REST 7.x, PAT, injectable
+fetch, json-patch), an in-memory mock, and a registry that explicitly rejects
+jira/linear/asana/monday/generic_webhook until implemented. Migration 0013: `pm_connections`
+(AES-256-GCM tokens like git_connections) + `pm_links` — the record that makes a task-graph
+node BE a work item rather than a shadow copy; RegulAIt stores ONLY the linkage. §3 source of
+truth honored literally: priority/description/acceptance-criteria are never cached — the links
+view reads them through live (`?live=true`) from the PM tool. Status ownership (documented
+decision, spec silent): RegulAIt owns node status (it owns the state machine) and mirrors it
+OUTBOUND via the mapping's statusMap on every node event; unmapped statuses are skipped, never
+invented; mirror failures are surfaced in the response, never fail the run event, never hidden.
+Every creation/mirror writes the one audit trail (objectType "pm_work_item"). Endpoints:
+PM connection CRUD (admin), `POST /v1/runs/:id/pm-sync` (idempotent node→work-item linking),
+`GET /v1/pm/links` (+live read-through). Not in the slice: inbound sync (webhooks/polling —
+transport deliberately unchosen, needs an ADR), decision records (§4), approval mirroring
+(§5 — natural next slice), Jira + remaining adapters, workflow-instance linking.
+
 **EPIC-05 started — multi-agent orchestration first slice, 2026-07-25.** New pure
 `packages/orchestration-kernel` (pillar 7, MULTI_AGENT_ORCHESTRATION_SPEC §2–§5): task-graph
 validation (zod + cycle detection + §4 ownership rule: nodes sharing files must be
@@ -80,9 +100,21 @@ the one audit trail (objectType "run"). Migration 0011: `orchestration_runs` (gr
 snapshots, nullable workflow_instance_id for §8 build-stage nesting later),
 `orchestration_run_events` (append-only), `approvals.run_id`. Endpoints: POST /v1/runs
 (validate+plan, nothing executes until an explicit start), POST /v1/runs/:id/events,
-per-run view (initiator-only) + admin fleet view. Not in the slice: per-run budget caps (§5.2 —
-needs cost estimation over the graph, natural second slice), real worker dispatch, PM-agent
-decomposition, team-lead tier semantics, workflow build-stage nesting.
+per-run view (initiator-only) + admin fleet view. **Second slice: §5.2 per-run budget caps.** Pure `estimateGraphCost`/`estimateNodeCost` in the
+orchestration kernel (per-node token estimates — planner-declared or heuristic — × the owner
+agent's list price; an unpriced owner nullifies the total, which fails CLOSED under a cap:
+a cap that can't be checked requires approval, never silent skip, §7). Cap + breach action
+(`approve`|`replan`) are admin-set on `user_agent_policies` — an explicit stand-in for the
+per-project budget until a projects entity exists. Three §5.2 enforcement points, all
+estimate-based (labeled as such in every payload) until real dispatch exists: (1) pre-execution
+— over-cap plans either auto-re-plan (owners substituted per node via pillar 6's `routeModel`
+with cost-sensitive bias over the entitlement-filtered candidate set — re-plan can never
+escalate; substitutions ledgered as `cost_events` objectType "run") or gate `start` behind a
+`__budget__` approval; (2) in-flight — `spentUsd` accumulates per node start, and a node whose
+CURRENT owner (e.g. after reassignment to a pricier entitled agent) would breach the cap is
+paused with a `__budget__:<node>` approval; (3) decisions — approve lifts cap enforcement for
+that run (sanctioned overage, audited), deny aborts. Still not in EPIC-05: real worker dispatch,
+PM-agent decomposition, team-lead tier, workflow build-stage nesting, per-project budgets.
 
 **EPIC-04 started — token/cost optimization first slice, 2026-07-25.** New pure
 `packages/optimizer-kernel` (pillar 6, TOKEN_OPTIMIZATION_SPEC §7/§8): deterministic complexity
@@ -205,8 +237,8 @@ with a real in-process upstream MCP server and real MCP client (26 tests total).
 | EPIC-02 | Governance layer MVP (now includes infra-ops/compliance-cascade/deploy-model, Shared Projects, cost dashboard — §1–§10) | **in progress** — stack chosen (ADR-0009), first slice = MCP-server governance vertical | GOVERNANCE_LAYER_SPEC.md, ADR-0007, ADR-0009 |
 | EPIC-03 | Workflow engine MVP (now includes optional Design/Architecture sign-off stage type) | **in progress** — first slice merged (PR #9) | WORKFLOW_ENGINE_SPEC.md, ADR-0007 |
 | EPIC-04 | Token/cost optimization MVP (escalated to P0) | **in progress** — routing kernel + cost_events ledger (PR #12), lazy tool-loading (PR #13) merged; §9 workflow cost-sensitivity tag built | TOKEN_OPTIMIZATION_SPEC.md, ADR-0007 |
-| EPIC-05 | Multi-agent orchestration MVP (PM/Team-Lead/Worker delegation) | **in progress** — first slice built (orchestration-kernel: DAG + ready-set + run state machine; §5.1 inheritance enforced; escalations in the one approvals queue) | MULTI_AGENT_ORCHESTRATION_SPEC.md, ADR-0008 |
-| EPIC-06 | PM-tool integration MVP (Azure DevOps/Jira/etc.) | not started | PM_TOOL_INTEGRATION_SPEC.md, ADR-0008 |
+| EPIC-05 | Multi-agent orchestration MVP (PM/Team-Lead/Worker delegation) | **in progress** — slice 1 merged (PR #14: kernel + runs + escalations); slice 2 built (§5.2 per-run budget caps: estimate, re-plan, approval gates) | MULTI_AGENT_ORCHESTRATION_SPEC.md, ADR-0008 |
+| EPIC-06 | PM-tool integration MVP (Azure DevOps/Jira/etc.) | **in progress** — first slice built (pm-provider package: mapping layer + ADO/mock adapters; node↔work-item links; outbound status mirror; live read-through) | PM_TOOL_INTEGRATION_SPEC.md, ADR-0008 |
 
 ## Components
 | ID | Name | Status | Related |

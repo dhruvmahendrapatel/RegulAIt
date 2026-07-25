@@ -85,7 +85,9 @@ export const auditLog = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
     userId: uuid("user_id").notNull(),
-    objectType: text("object_type", { enum: ["mcp_tool", "agent", "connector", "workflow", "run"] })
+    objectType: text("object_type", {
+      enum: ["mcp_tool", "agent", "connector", "workflow", "run", "pm_work_item"],
+    })
       .notNull()
       .default("mcp_tool"),
     objectId: uuid("object_id"),
@@ -342,6 +344,14 @@ export const userAgentPolicies = pgTable("user_agent_policies", {
   routingMode: text("routing_mode", { enum: ["automatic", "passthrough"] })
     .notNull()
     .default("automatic"),
+  // ORCHESTRATION §5.2: per-run budget cap for runs this user initiates, and
+  // what happens when a planned run exceeds it. Lives here as a stand-in for
+  // the per-project budget until a projects entity exists (admin-set either
+  // way). null = no cap.
+  runBudgetUsd: doublePrecision("run_budget_usd"),
+  runBudgetBreachAction: text("run_budget_breach_action", { enum: ["approve", "replan"] })
+    .notNull()
+    .default("approve"),
 });
 
 // §2 connector catalog + per-user grants (mode + object-level data scope).
@@ -468,7 +478,7 @@ export const costEvents = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
     userId: uuid("user_id").notNull(),
-    objectType: text("object_type", { enum: ["agent", "mcp_tool", "connector", "workflow"] })
+    objectType: text("object_type", { enum: ["agent", "mcp_tool", "connector", "workflow", "run"] })
       .notNull()
       .default("agent"),
     objectId: uuid("object_id"),
@@ -516,6 +526,8 @@ export const orchestrationRuns = pgTable(
     }),
     graph: jsonb("graph").notNull(),
     state: jsonb("state").notNull(),
+    /** §5.2 budget envelope: cap, estimates, live estimated spend, overage approval */
+    budget: jsonb("budget"),
     status: text("status", { enum: ["planned", "running", "completed", "aborted"] })
       .notNull()
       .default("planned"),
@@ -536,4 +548,47 @@ export const orchestrationRunEvents = pgTable(
     at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("orchestration_run_events_run_idx").on(t.runId)],
+);
+
+// PM-TOOL INTEGRATION (EPIC-06, pillar 8). Connections mirror git_connections:
+// the token is stored AES-256-GCM-encrypted, never plaintext. mapping is the
+// admin's override of the adapter's default field mapping (null = default).
+export const pmConnections = pgTable("pm_connections", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull().unique(),
+  provider: text("provider", {
+    enum: ["azure_devops", "jira", "linear", "asana", "monday", "generic_webhook", "mock"],
+  }).notNull(),
+  baseUrl: text("base_url"),
+  project: text("project").notNull(),
+  tokenCiphertext: text("token_ciphertext").notNull(),
+  mapping: jsonb("mapping"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// §2/§6: the link record making a task-graph node BE a work item rather than
+// a shadow copy. RegulAIt stores only the linkage — the PM-authoritative
+// fields (priority/description/acceptance criteria) are read through live,
+// never cached here (§3).
+export const pmLinks = pgTable(
+  "pm_links",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => pmConnections.id, { onDelete: "cascade" }),
+    objectType: text("object_type", { enum: ["run_node", "run", "workflow_instance"] }).notNull(),
+    objectId: uuid("object_id").notNull(),
+    /** task-graph node id when objectType is run_node */
+    nodeId: text("node_id"),
+    externalId: text("external_id").notNull(),
+    externalUrl: text("external_url").notNull(),
+    lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // NULLS NOT DISTINCT applied in the hand-written migration (0005 precedent)
+    uniqueIndex("pm_links_conn_obj_node_uq").on(t.connectionId, t.objectType, t.objectId, t.nodeId),
+    index("pm_links_object_idx").on(t.objectType, t.objectId),
+  ],
 );

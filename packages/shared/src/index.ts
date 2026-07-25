@@ -122,6 +122,8 @@ export const setAgentPolicySchema = z.object({
   defaultAgentId: z.string().uuid().nullable().optional(),
   ceilingAgentId: z.string().uuid().nullable().optional(),
   routingMode: z.enum(["automatic", "passthrough"]).optional(),
+  runBudgetUsd: z.number().positive().nullable().optional(),
+  runBudgetBreachAction: z.enum(["approve", "replan"]).optional(),
 });
 
 export const invokeAgentSchema = z.object({
@@ -216,3 +218,16 @@ export const runEventSchema = z.object({
   ownerAgentId: z.string().uuid().optional(),
   error: z.string().min(1).max(2000).optional(),
 });
+
+// EPIC-06 PM-tool integration. The mapping override is validated by
+// @regulait/pm-provider's zod schema in the gateway.
+export const createPmConnectionSchema = z.object({
+  name: z.string().min(1),
+  provider: z.enum(["azure_devops", "jira", "linear", "asana", "monday", "generic_webhook", "mock"]),
+  baseUrl: z.string().url().optional(),
+  project: z.string().min(1),
+  token: z.string().min(1).max(512),
+  mapping: z.unknown().optional(),
+});
+
+export const pmSyncSchema = z.object({ connectionName: z.string().min(1) });
