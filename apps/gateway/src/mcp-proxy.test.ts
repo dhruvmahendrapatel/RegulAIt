@@ -2096,3 +2096,254 @@ describe("workflow cost-sensitivity tag (EPIC-04 §9)", () => {
     expect(view2.json().costSensitivity).toBe("standard");
   });
 });
+
+describe("multi-agent orchestration runs (EPIC-05 slice)", () => {
+  let patId: string;
+  let patAuth: { authorization: string };
+  let lenaId: string;
+  let lenaAuth: { authorization: string };
+  let smallId: string;
+  let altId: string;
+  let bigId: string;
+
+  const mkNode = (id: string, agentId: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    title: `task ${id}`,
+    ownerAgentId: agentId,
+    mode: "execute",
+    ...extra,
+  });
+
+  it("plans a run only within the initiating user's entitlements (§5.1)", async () => {
+    const mkUser = async (email: string, name: string) => {
+      const r = await app.inject({
+        method: "POST",
+        headers: AUTH,
+        url: "/v1/users",
+        payload: { email, displayName: name },
+      });
+      return r.json().id as string;
+    };
+    patId = await mkUser("orc-pat@example.com", "Orc Pat");
+    lenaId = await mkUser("orc-lena@example.com", "Orc Lena");
+    patAuth = await authFor(patId);
+    lenaAuth = await authFor(lenaId);
+
+    const mkAgent = async (name: string, tier: number) => {
+      const r = await app.inject({
+        method: "POST",
+        headers: AUTH,
+        url: "/v1/agents",
+        payload: { name, provider: "anthropic", tier, modes: ["plan", "execute"] },
+      });
+      return r.json().id as string;
+    };
+    smallId = await mkAgent("orc-worker-small", 1);
+    altId = await mkAgent("orc-worker-alt", 1);
+    bigId = await mkAgent("orc-worker-big", 3);
+    for (const agentId of [smallId, altId]) {
+      await app.inject({
+        method: "POST",
+        headers: AUTH,
+        url: "/v1/grants/agents",
+        payload: { userId: patId, agentId },
+      });
+    }
+
+    // a cycle is rejected before anything is stored
+    const cyclic = await app.inject({
+      method: "POST",
+      headers: patAuth,
+      url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "cyclic",
+          escalationApproverUserId: lenaId,
+          nodes: [mkNode("a", smallId, { dependsOn: ["b"] }), mkNode("b", smallId, { dependsOn: ["a"] })],
+        },
+      },
+    });
+    expect(cyclic.statusCode).toBe(400);
+
+    // unordered shared file ownership is rejected (§4)
+    const conflict = await app.inject({
+      method: "POST",
+      headers: patAuth,
+      url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "conflict",
+          escalationApproverUserId: lenaId,
+          nodes: [mkNode("a", smallId, { files: ["x.ts"] }), mkNode("b", smallId, { files: ["x.ts"] })],
+        },
+      },
+    });
+    expect(conflict.statusCode).toBe(400);
+
+    // a node owned by an agent the INITIATING user was never granted → the
+    // whole plan is rejected: no path where privilege increases downward.
+    const escalating = await app.inject({
+      method: "POST",
+      headers: patAuth,
+      url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "escalating",
+          escalationApproverUserId: lenaId,
+          nodes: [mkNode("a", smallId), mkNode("b", bigId)],
+        },
+      },
+    });
+    expect(escalating.statusCode).toBe(422);
+    expect(escalating.json().error).toBe("entitlement_exceeded");
+    expect(escalating.json().nodes[0].nodeId).toBe("b");
+    expect(escalating.json().nodes[0].decision.ruleId).toBe("default-deny");
+  });
+
+  it("runs a DAG to completion: parallel roots, dependency gating, one audit trail", async () => {
+    const created = await app.inject({
+      method: "POST",
+      headers: patAuth,
+      url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "feature-build",
+          escalationApproverUserId: lenaId,
+          nodes: [
+            mkNode("api", smallId, { files: ["api.ts"] }),
+            mkNode("ui", altId, { files: ["ui.tsx"] }),
+            mkNode("integrate", smallId, { dependsOn: ["api", "ui"] }),
+          ],
+        },
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json().status).toBe("planned");
+    const runId = created.json().id;
+
+    const ev = (payload: Record<string, unknown>) =>
+      app.inject({ method: "POST", headers: patAuth, url: `/v1/runs/${runId}/events`, payload });
+
+    const started = await ev({ kind: "start" });
+    expect(started.json().readyNodes).toEqual(["api", "ui"]);
+
+    for (const nodeId of ["api", "ui"]) {
+      await ev({ kind: "node_started", nodeId });
+      await ev({ kind: "node_submitted", nodeId });
+      await ev({ kind: "node_accepted", nodeId });
+    }
+    const view = await app.inject({ method: "GET", headers: patAuth, url: `/v1/runs/${runId}` });
+    expect(view.json().readyNodes).toEqual(["integrate"]);
+
+    await ev({ kind: "node_started", nodeId: "integrate" });
+    await ev({ kind: "node_submitted", nodeId: "integrate" });
+    const done = await ev({ kind: "node_accepted", nodeId: "integrate" });
+    expect(done.json().status).toBe("completed");
+
+    // §5.3: every run event landed in the ONE audit trail
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit?userId=${patId}` });
+    const runRows = audit.json().entries.filter((e: { objectType: string }) => e.objectType === "run");
+    expect(runRows.length).toBeGreaterThanOrEqual(10);
+
+    // terminal runs reject further events
+    const late = await ev({ kind: "abort" });
+    expect(late.statusCode).toBe(409);
+  });
+
+  it("failure → escalation lands in the one approvals queue; approval re-opens the node (§3)", async () => {
+    const created = await app.inject({
+      method: "POST",
+      headers: patAuth,
+      url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "flaky-task",
+          escalationApproverUserId: lenaId,
+          nodes: [mkNode("solo", smallId)],
+        },
+      },
+    });
+    const runId = created.json().id;
+    const ev = (payload: Record<string, unknown>) =>
+      app.inject({ method: "POST", headers: patAuth, url: `/v1/runs/${runId}/events`, payload });
+
+    await ev({ kind: "start" });
+    await ev({ kind: "node_started", nodeId: "solo" });
+    await ev({ kind: "node_failed", nodeId: "solo", error: "worker crashed" });
+
+    // reassignment is a fresh §5.1 check — the ungranted big agent is refused
+    const badReassign = await ev({ kind: "reassign_node", nodeId: "solo", ownerAgentId: bigId });
+    expect(badReassign.statusCode).toBe(403);
+    expect(badReassign.json().error).toBe("entitlement_exceeded");
+
+    const escalated = await ev({ kind: "escalate_node", nodeId: "solo" });
+    expect(escalated.statusCode).toBe(200);
+
+    // Lena sees it in the same approvals inbox as every other approval
+    const inbox = await app.inject({ method: "GET", headers: lenaAuth, url: "/v1/approvals?status=pending" });
+    const entry = inbox.json().approvals.find((a: { runId: string | null }) => a.runId === runId);
+    expect(entry).toBeDefined();
+    expect(entry.objectType).toBe("run");
+    expect(entry.stageId).toBe("solo");
+
+    // Pat is not the named approver
+    const patDecide = await app.inject({
+      method: "POST",
+      headers: patAuth,
+      url: `/v1/approvals/${entry.id}/decide`,
+      payload: { decision: "approved" },
+    });
+    expect(patDecide.statusCode).toBe(403);
+
+    const decided = await app.inject({
+      method: "POST",
+      headers: lenaAuth,
+      url: `/v1/approvals/${entry.id}/decide`,
+      payload: { decision: "approved" },
+    });
+    expect(decided.statusCode).toBe(200);
+
+    const view = await app.inject({ method: "GET", headers: patAuth, url: `/v1/runs/${runId}` });
+    expect(view.json().run.state.nodeStatuses.solo).toBe("not_started");
+    expect(view.json().run.state.attempts.solo).toBe(1);
+    expect(view.json().readyNodes).toEqual(["solo"]);
+
+    // valid reassignment to a granted agent, then run to completion
+    await ev({ kind: "node_started", nodeId: "solo" });
+    await ev({ kind: "node_failed", nodeId: "solo", error: "still flaky" });
+    const reassigned = await ev({ kind: "reassign_node", nodeId: "solo", ownerAgentId: altId });
+    expect(reassigned.statusCode).toBe(200);
+    await ev({ kind: "node_started", nodeId: "solo" });
+    await ev({ kind: "node_submitted", nodeId: "solo" });
+    const done = await ev({ kind: "node_accepted", nodeId: "solo" });
+    expect(done.json().status).toBe("completed");
+    expect(done.json().state.owners.solo).toBe(altId);
+  });
+
+  it("runs are invisible to non-participants; fleet view is admin-only", async () => {
+    const created = await app.inject({
+      method: "POST",
+      headers: patAuth,
+      url: "/v1/runs",
+      payload: {
+        graph: { run: "private", escalationApproverUserId: lenaId, nodes: [mkNode("n", smallId)] },
+      },
+    });
+    const runId = created.json().id;
+
+    const other = await app.inject({ method: "GET", headers: lenaAuth, url: `/v1/runs/${runId}` });
+    expect(other.statusCode).toBe(404);
+    const otherDrive = await app.inject({
+      method: "POST",
+      headers: lenaAuth,
+      url: `/v1/runs/${runId}/events`,
+      payload: { kind: "start" },
+    });
+    expect(otherDrive.statusCode).toBe(404);
+
+    const fleetAsNonAdmin = await app.inject({ method: "GET", headers: patAuth, url: "/v1/runs" });
+    expect(fleetAsNonAdmin.statusCode).toBe(403);
+    const fleet = await app.inject({ method: "GET", headers: AUTH, url: "/v1/runs" });
+    expect(fleet.json().runs.length).toBeGreaterThanOrEqual(3);
+  });
+});

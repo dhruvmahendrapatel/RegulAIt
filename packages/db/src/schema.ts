@@ -85,7 +85,7 @@ export const auditLog = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
     userId: uuid("user_id").notNull(),
-    objectType: text("object_type", { enum: ["mcp_tool", "agent", "connector", "workflow"] })
+    objectType: text("object_type", { enum: ["mcp_tool", "agent", "connector", "workflow", "run"] })
       .notNull()
       .default("mcp_tool"),
     objectId: uuid("object_id"),
@@ -152,13 +152,15 @@ export const approvals = pgTable(
     userId: uuid("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
-    objectType: text("object_type", { enum: ["mcp_tool", "workflow"] })
+    objectType: text("object_type", { enum: ["mcp_tool", "workflow", "run"] })
       .notNull()
       .default("mcp_tool"),
     serverId: uuid("server_id").references(() => mcpServers.id, { onDelete: "cascade" }),
     toolName: text("tool_name"),
     ruleId: uuid("rule_id"),
     instanceId: uuid("instance_id"),
+    /** orchestration-run escalations (§3): the run this approval gates; stageId carries the node id */
+    runId: uuid("run_id"),
     stageId: text("stage_id"),
     approverUserId: uuid("approver_user_id").notNull(),
     status: text("status", {
@@ -495,4 +497,43 @@ export const costEvents = pgTable(
     index("cost_events_user_at_idx").on(t.userId, t.at),
     index("cost_events_technique_idx").on(t.technique),
   ],
+);
+
+// ORCHESTRATION (EPIC-05, pillar 7): one row per run. The task graph and run
+// state are jsonb snapshots exactly like workflow_instances — the kernel owns
+// their shape. workflow_instance_id links a run nested inside a build stage
+// (§8); null = directly-initiated run.
+export const orchestrationRuns = pgTable(
+  "orchestration_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    initiatingUserId: uuid("initiating_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    workflowInstanceId: uuid("workflow_instance_id").references(() => workflowInstances.id, {
+      onDelete: "set null",
+    }),
+    graph: jsonb("graph").notNull(),
+    state: jsonb("state").notNull(),
+    status: text("status", { enum: ["planned", "running", "completed", "aborted"] })
+      .notNull()
+      .default("planned"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("orchestration_runs_user_idx").on(t.initiatingUserId)],
+);
+
+export const orchestrationRunEvents = pgTable(
+  "orchestration_run_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => orchestrationRuns.id, { onDelete: "cascade" }),
+    event: jsonb("event").notNull(),
+    actorUserId: uuid("actor_user_id"),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("orchestration_run_events_run_idx").on(t.runId)],
 );

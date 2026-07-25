@@ -61,6 +61,8 @@ import { z } from "zod";
 import { registerMcpProxy } from "./mcp-proxy.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
 import { registerOptimizationRoutes } from "./optimization.js";
+import { applyRunApprovalDecision, registerOrchestrationRoutes } from "./orchestration.js";
+import { RunStateError } from "@regulait/orchestration-kernel";
 import { applyWorkflowApprovalDecision, registerWorkflowRoutes } from "./workflows.js";
 import { MergeConflictError, WorkflowStateError } from "@regulait/workflow-kernel";
 
@@ -82,6 +84,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // pg error; map them to client errors instead of a generic 500.
     if (err instanceof WorkflowStateError) {
       return reply.status(409).send({ error: "invalid_workflow_state", detail: err.message });
+    }
+    if (err instanceof RunStateError) {
+      return reply.status(409).send({ error: "invalid_run_state", detail: err.message });
     }
     if (err instanceof MergeConflictError) {
       return reply.status(422).send({ error: "template_merge_conflict", detail: err.message });
@@ -121,6 +126,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "GET /v1/workflows/instances/:instanceId",
     "GET /v1/approvals",
     "GET /v1/cost-events",
+    "POST /v1/runs",
+    "POST /v1/runs/:runId/events",
+    "GET /v1/runs/:runId",
   ]);
   app.addHook("preHandler", async (req, reply) => {
     const route = `${req.method} ${req.routeOptions.url ?? ""}`;
@@ -522,11 +530,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     if (updated.objectType === "workflow") {
       await applyWorkflowApprovalDecision(db, updated, body.decision, deciderUserId, opts.dataKey);
     }
+    // Orchestration escalations (§3): approve = another attempt, deny = abort.
+    if (updated.objectType === "run") {
+      await applyRunApprovalDecision(db, updated, body.decision, deciderUserId);
+    }
     return updated;
   });
 
   registerAgentConnectorRoutes(app, db);
   registerOptimizationRoutes(app, db);
+  registerOrchestrationRoutes(app, db);
 
   registerWorkflowRoutes(app, db, { dataKey: opts.dataKey });
 
