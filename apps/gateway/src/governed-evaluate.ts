@@ -8,11 +8,10 @@ import {
   eq,
   gte,
   rateLimits,
-  serverGrants,
-  toolGrants,
   type Db,
 } from "@regulait/db";
 import { evaluate, type Decision, type ToolRef } from "@regulait/policy-kernel";
+import { loadEntitlements } from "./entitlements.js";
 
 export interface GovernedEvaluation {
   decision: Decision;
@@ -33,15 +32,8 @@ export async function governedEvaluate(
   tool: ToolRef,
   args?: Record<string, unknown>,
 ): Promise<GovernedEvaluation> {
-  const [tGrants, sGrants, aRules, limits, scopeRules, approvedRows] = await Promise.all([
-    db
-      .select()
-      .from(toolGrants)
-      .where(and(eq(toolGrants.userId, userId), eq(toolGrants.serverId, serverId))),
-    db
-      .select()
-      .from(serverGrants)
-      .where(and(eq(serverGrants.userId, userId), eq(serverGrants.serverId, serverId))),
+  const [entitlements, aRules, limits, scopeRules, approvedRows] = await Promise.all([
+    loadEntitlements(db, userId, serverId),
     db
       .select()
       .from(approvalRules)
@@ -92,8 +84,7 @@ export async function governedEvaluate(
     userId,
     serverId,
     tool,
-    toolGrants: tGrants,
-    serverGrants: sGrants,
+    ...entitlements,
     approvalRules: aRules,
     rateLimits: limitsWithCounts,
     dataScopeRules: scopeRules,

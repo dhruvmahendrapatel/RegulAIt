@@ -75,3 +75,28 @@ export const createDataScopeRuleSchema = z.object({
   argPath: z.string().min(1),
   allowedValues: z.array(z.string()).min(1),
 });
+
+export const createRoleSchema = z.object({
+  name: z.string().min(1),
+  description: z.string().optional(),
+});
+
+export const createRoleToolGrantSchema = z.object({
+  serverId: z.string().uuid(),
+  toolName: z.string().min(1),
+});
+
+export const createRoleServerGrantSchema = z.object({
+  serverId: z.string().uuid(),
+  readOnlyAll: z.boolean(),
+});
+
+export const assignRoleSchema = z.object({
+  roleId: z.string().uuid(),
+});
+
+export const createRevocationSchema = z.object({
+  userId: z.string().uuid(),
+  serverId: z.string().uuid(),
+  toolName: z.string().min(1).nullable().optional(),
+});

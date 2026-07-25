@@ -17,12 +17,11 @@ import {
   eq,
   mcpServers,
   mcpTools,
-  serverGrants,
-  toolGrants,
   type Db,
 } from "@regulait/db";
 import { visibleTools, type ToolRef } from "@regulait/policy-kernel";
 import { governedEvaluate } from "./governed-evaluate.js";
+import { loadEntitlements } from "./entitlements.js";
 import { z } from "zod";
 
 const proxyParams = z.object({ serverId: z.string().uuid() });
@@ -59,19 +58,6 @@ async function syncUpstreamTools(db: Db, serverId: string, client: Client): Prom
   return tools;
 }
 
-async function loadGrants(db: Db, userId: string, serverId: string) {
-  const [tGrants, sGrants] = await Promise.all([
-    db
-      .select()
-      .from(toolGrants)
-      .where(and(eq(toolGrants.userId, userId), eq(toolGrants.serverId, serverId))),
-    db
-      .select()
-      .from(serverGrants)
-      .where(and(eq(serverGrants.userId, userId), eq(serverGrants.serverId, serverId))),
-  ]);
-  return { tGrants, sGrants };
-}
 
 export function registerMcpProxy(app: FastifyInstance, db: Db) {
   app.post("/mcp/:serverId", async (req, reply) => {
@@ -98,14 +84,14 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
 
     proxy.setRequestHandler(ListToolsRequestSchema, async () => {
       const upstreamTools = await syncUpstreamTools(db, serverId, upstream);
-      const { tGrants, sGrants } = await loadGrants(db, userId, serverId);
+      const entitlements = await loadEntitlements(db, userId, serverId);
       const refs: ToolRef[] = upstreamTools.map((t) => ({
         serverId,
         name: t.name,
         kind: toolKind(t),
       }));
       const visible = new Set(
-        visibleTools(userId, serverId, refs, tGrants, sGrants).map((t) => t.name),
+        visibleTools(userId, serverId, refs, entitlements).map((t) => t.name),
       );
       return { tools: upstreamTools.filter((t) => visible.has(t.name)) };
     });
