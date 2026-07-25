@@ -212,6 +212,21 @@ mcp-default/retention/pii (detector + pruning jobs), reapply-to-in-flight on rec
 (diff covers the policy; in-flight instances keep their merged definitions), per-framework
 cost-governance policies (§8.6→§10.3).
 
+**Admin portal MVP, 2026-07-25 (ADR-0012).** One dependency-free HTML+JS file served by the
+gateway at `GET /admin` — an auth-exempt STATIC SHELL (zero data, zero secrets; the admin
+pastes an API key held in memory only) that is strictly a client of the public REST API, so
+§5's policy-as-code parity holds by construction: the portal can be deleted without losing
+any capability, and no state is UI-only. Tabs are §6's eight functional surfaces VERBATIM
+(Users & Roles with the revocation/override layer, Agent Governance with enable toggles +
+per-user entitlement views, Connector Governance, MCP Server Governance with the
+auto-discovered tool inventory, Policy & Rules Engine over all three rule types, Audit &
+Activity Log, the ONE Approvals Queue with inline decide, Simulation / Access preview over
+/v1/evaluate) plus the §10.4-mandated Cost & Projects surface (budget-vs-actual + forecast +
+showback + savings + compliance view per project). Gaps found while building were fixed as
+API endpoints first (GET /v1/users, /v1/servers, /v1/servers/:id/tools, and the three
+/v1/rules/* lists — all admin-gated). Deferred (per ADR-0012): SPA rewrite, SCIM/SSO status,
+SIEM export, dry-run of UNSAVED policy, bulk actions, CSV export.
+
 **EPIC-06 started — PM-tool integration first slice, 2026-07-25.** New
 `packages/pm-provider` on the git-provider playbook (pillar 8, PM_TOOL_INTEGRATION_SPEC
 §2/§3/§6): neutral `PmProvider` interface (create/update/transition/comment/getWorkItem), the
@@ -427,7 +442,7 @@ with a real in-process upstream MCP server and real MCP client (26 tests total).
 | COMPONENT-02 | Identity Center permission sets (Admin-BreakGlass/Deploy-Builder/ReadOnly-Audit) | **applied** (Admin-BreakGlass imported from its manual bootstrap creation, other two created by Terraform) | EPIC-01, ADR-0004 |
 | COMPONENT-03 | GitHub OIDC CI role | Terraform authored, intentionally not wired into main.tf/applied (no workload to deploy yet) | EPIC-01 |
 | COMPONENT-04 | RegulAIt GitHub repo | **live and private**: https://github.com/dhruvmahendrapatel/RegulAIt | EPIC-01 |
-| COMPONENT-05 | Admin portal | not started | EPIC-02 |
+| COMPONENT-05 | Admin portal | **MVP shipped** — single-file API-client portal at /admin (ADR-0012), §6's eight panels + §10.4 cost surface | EPIC-02, ADR-0012 |
 | COMPONENT-06 | Policy/allow-list engine | not started | EPIC-02 |
 | COMPONENT-07 | Workflow orchestrator | not started | EPIC-03 |
 | COMPONENT-08 | caveman (output token compression, Claude Code plugin) | **installed**, user scope, no restrictions (verified fully local) | ADR-0005 |

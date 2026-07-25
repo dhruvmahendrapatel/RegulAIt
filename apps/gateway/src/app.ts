@@ -61,6 +61,7 @@ import { z } from "zod";
 import { registerMcpProxy } from "./mcp-proxy.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
 import { applyProjectApprovalDecision, registerProjectRoutes } from "./projects.js";
+import { ADMIN_PORTAL_HTML } from "./admin-portal.js";
 import { registerOptimizationRoutes } from "./optimization.js";
 import { applyRunApprovalDecision, registerOrchestrationRoutes } from "./orchestration.js";
 import { mirrorApprovalDecision, registerPmRoutes } from "./pm.js";
@@ -107,7 +108,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // the inbound PM webhook (ADR-0010), which is called by external systems and
   // authenticates with its per-connection secret inside the route handler.
   app.addHook("preHandler", async (req, reply) => {
-    if (req.routeOptions.url === "/v1/pm/webhooks/:connectionName") {
+    if (req.routeOptions.url === "/v1/pm/webhooks/:connectionName" || req.routeOptions.url === "/admin") {
       req.authCtx = { userId: null, isAdmin: false, via: "api-key" };
       return;
     }
@@ -155,6 +156,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "POST /v1/decisions",
     "GET /v1/decisions",
     "POST /v1/pm/webhooks/:connectionName",
+    "GET /admin",
   ]);
   app.addHook("preHandler", async (req, reply) => {
     const route = `${req.method} ${req.routeOptions.url ?? ""}`;
@@ -171,6 +173,20 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       .returning();
     return reply.status(201).send(row);
   });
+
+  // ADR-0012: portal-driven API-parity gap fill — the bulk user table needs
+  // a list endpoint, not only POST.
+  app.get("/v1/users", async () => ({
+    users: await db
+      .select({
+        id: users.id,
+        email: users.email,
+        displayName: users.displayName,
+        isAdmin: users.isAdmin,
+        createdAt: users.createdAt,
+      })
+      .from(users),
+  }));
 
   app.post("/v1/users/:userId/keys", async (req, reply) => {
     const { userId } = z.object({ userId: z.string().uuid() }).parse(req.params);
@@ -215,6 +231,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const body = createServerSchema.parse(req.body);
     const [row] = await db.insert(mcpServers).values(body).returning();
     return reply.status(201).send(row);
+  });
+
+  app.get("/v1/servers", async () => ({ servers: await db.select().from(mcpServers) }));
+
+  app.get("/v1/servers/:serverId/tools", async (req) => {
+    const { serverId } = uuidParam.parse(req.params);
+    return { tools: await db.select().from(mcpTools).where(eq(mcpTools.serverId, serverId)) };
   });
 
   app.post("/v1/servers/:serverId/tools", async (req, reply) => {
@@ -460,6 +483,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     return decision;
   });
 
+  app.get("/v1/rules/approvals", async () => ({
+    rules: await db.select().from(approvalRules),
+  }));
+  app.get("/v1/rules/data-scopes", async () => ({
+    rules: await db.select().from(dataScopeRules),
+  }));
+  app.get("/v1/rules/rate-limits", async () => ({
+    rules: await db.select().from(rateLimits),
+  }));
+
   app.post("/v1/rules/approvals", async (req, reply) => {
     const body = createApprovalRuleSchema.parse(req.body);
     const [row] = await db
@@ -570,6 +603,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const pmMirror = await mirrorApprovalDecision(db, opts.dataKey, updated, deciderUserId);
     return pmMirror ? { ...updated, pmMirror } : updated;
   });
+
+  // ADR-0012: the portal is a static shell (zero data, zero secrets) that
+  // talks to the same REST API as any script — policy-as-code by construction.
+  app.get("/admin", async (_req, reply) => reply.type("text/html").send(ADMIN_PORTAL_HTML));
 
   registerAgentConnectorRoutes(app, db, { dataKey: opts.dataKey });
   registerProjectRoutes(app, db);

@@ -5374,3 +5374,48 @@ describe("compliance classification cascade (§8.3)", () => {
     ).toBe(true);
   });
 });
+
+describe("admin portal (ADR-0012): static shell + API-parity gap endpoints", () => {
+  it("GET /admin serves the shell without auth — zero data, zero secrets inside", async () => {
+    const res = await app.inject({ method: "GET", url: "/admin" });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toContain("text/html");
+    // §6 panel names verbatim
+    for (const panel of [
+      "Users & Roles", "Agent Governance", "Connector Governance",
+      "MCP Server Governance", "Policy & Rules Engine", "Audit & Activity Log",
+      "Approvals Queue", "Simulation / Access preview", "Cost & Projects",
+    ]) {
+      expect(res.body).toContain(panel);
+    }
+    // the shell holds no data: nothing it serves varies with DB state
+    expect(res.body).not.toContain("@example.com");
+  });
+
+  it("the gap list endpoints exist and stay admin-only", async () => {
+    const usersList = await app.inject({ method: "GET", headers: AUTH, url: "/v1/users" });
+    expect(usersList.statusCode).toBe(200);
+    expect(usersList.json().users.length).toBeGreaterThan(0);
+    expect(usersList.json().users[0]).toHaveProperty("email");
+
+    const servers = await app.inject({ method: "GET", headers: AUTH, url: "/v1/servers" });
+    expect(servers.statusCode).toBe(200);
+    expect(servers.json().servers.length).toBeGreaterThan(0);
+    const tools = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/servers/${serverId}/tools`,
+    });
+    expect(tools.statusCode).toBe(200);
+
+    for (const path of ["/v1/rules/approvals", "/v1/rules/data-scopes", "/v1/rules/rate-limits"]) {
+      const r = await app.inject({ method: "GET", headers: AUTH, url: path });
+      expect(r.statusCode).toBe(200);
+      expect(Array.isArray(r.json().rules)).toBe(true);
+    }
+
+    // non-admins get none of this
+    const bob = await app.inject({
+      method: "GET", headers: await authFor(bobId), url: "/v1/users",
+    });
+    expect(bob.statusCode).toBe(403);
+  });
+});
