@@ -1,5 +1,7 @@
 # RegulAIt
 
+![CI](https://github.com/dhruvmahendrapatel/RegulAIt/workflows/CI/badge.svg)
+
 RegulAIt is an AI-native agent/development platform, currently in its infrastructure bootstrap
 phase. Long-term vision, architecture decisions, and live project status are tracked in this
 repo rather than in any one conversation, so work can be picked up by anyone (or any AI session)
