@@ -389,3 +389,79 @@ describe("slice 5: promote-to-shared-context from the workflow detail surface", 
     expect(stolen.json().error).toBe("not_the_artifact_owner");
   });
 });
+
+describe("pillar-4 polish: falsifiable provenance + the concurrent-write race", () => {
+  const PKEY = "s5-provenance";
+
+  it("a bootstrap-token contribution is refused — never mis-attributed to a governance-role holder", async () => {
+    // the bootstrap/admin token has NO user identity; authorship must not fall
+    // back to the project's budget approver or arbiter (the old bug)
+    const res = await app.inject({
+      method: "POST", headers: AUTH,
+      url: `/v1/projects/${projectId}/context`,
+      payload: { key: PKEY, content: "written by no real user" },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toBe("bootstrap_cannot_contribute");
+    // and nothing landed under anyone's name for that key
+    const view = await app.inject({
+      method: "GET", headers: vinnieAuth, url: `/v1/projects/${projectId}/context?key=${PKEY}`,
+    });
+    expect(view.json().context).toEqual([]);
+  });
+
+  it("an authenticated contribution attributes to the REAL writer", async () => {
+    const write = await app.inject({
+      method: "POST", headers: coraAuth,
+      url: `/v1/projects/${projectId}/context`,
+      payload: { key: PKEY, content: "written by cora" },
+    });
+    expect(write.statusCode).toBe(201);
+    const view = await app.inject({
+      method: "GET", headers: vinnieAuth, url: `/v1/projects/${projectId}/context?key=${PKEY}`,
+    });
+    expect(view.json().context[0].provenance).toMatchObject({ userId: coraId, userName: "S5 Cora" });
+  });
+
+  it("two concurrent same-key writes never duplicate a revision (the unique index holds)", async () => {
+    const RKEY = "s5-race";
+    const seed = await app.inject({
+      method: "POST", headers: coraAuth, url: `/v1/projects/${projectId}/context`,
+      payload: { key: RKEY, content: "race base v1" },
+    });
+    expect(seed.statusCode).toBe(201);
+
+    // fire two writes concurrently, both naming the SAME base revision — they
+    // compute the same next revision and race for it
+    const [a, b] = await Promise.all([
+      app.inject({
+        method: "POST", headers: coraAuth, url: `/v1/projects/${projectId}/context`,
+        payload: { key: RKEY, baseRevision: 1, content: "racer A" },
+      }),
+      app.inject({
+        method: "POST", headers: caseyAuth, url: `/v1/projects/${projectId}/context`,
+        payload: { key: RKEY, baseRevision: 1, content: "racer B" },
+      }),
+    ]);
+    // neither 500s; one becomes the current revision, the loser is retried and
+    // lands as a distinct higher (conflicting) revision — never a duplicate
+    expect(a.statusCode).toBe(201);
+    expect(b.statusCode).toBe(201);
+
+    const history = await app.inject({
+      method: "GET", headers: vinnieAuth,
+      url: `/v1/projects/${projectId}/context?key=${RKEY}&history=true`,
+    });
+    const revs = history.json().history.map((r: { revision: number }) => r.revision);
+    expect(revs.length).toBe(3); // rev1 + the two racers
+    expect(new Set(revs).size).toBe(revs.length); // NO duplicate revision number
+    // exactly one racer won the accepted head (rev2); the other is a retained
+    // conflict (rev3), never a second row at the same revision
+    const accepted = history
+      .json()
+      .history.filter((r: { accepted: boolean }) => r.accepted)
+      .map((r: { revision: number }) => r.revision)
+      .sort((x: number, y: number) => x - y);
+    expect(accepted).toEqual([1, 2]);
+  });
+});

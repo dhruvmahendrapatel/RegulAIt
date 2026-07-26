@@ -96,6 +96,7 @@ export const auditLog = pgTable(
         "pm_work_item",
         "decision",
         "project",
+        "initiative",
         "infra_operation",
       ],
     })
@@ -806,6 +807,20 @@ export const userModelCredentials = pgTable(
   (t) => [uniqueIndex("user_model_credentials_user_provider_uq").on(t.userId, t.provider)],
 );
 
+// PILLAR 5 cross-team rollup: an Initiative is a flat, reporting-only grouping
+// of projects for cost attribution across teams (chargeback/showback at a
+// higher level than a single project). v1 is grouping only — no initiative-level
+// budget or enforcement; a project's own budget/governance is unchanged.
+// Declared before `projects` so the projects.initiativeId FK is an ordinary
+// forward reference rather than a thunk-only one.
+export const initiatives = pgTable("initiatives", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull().unique(),
+  /** chargeback/showback: the customer's own cost-center code for the initiative */
+  costCenter: text("cost_center"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 // PILLAR 5: the cost-attribution object. Minimal on purpose — membership and
 // sharing semantics arrive with Shared Projects (pillar 4); until then any
 // authenticated caller may attribute spend to a project (noted, deferred).
@@ -816,12 +831,28 @@ export const projects = pgTable("projects", {
   name: text("name").notNull().unique(),
   /** chargeback/showback: the customer's own cost-center code */
   costCenter: text("cost_center"),
+  /** pillar-5 rollup: optional parent Initiative for cross-team cost grouping.
+   * Reporting-only — grouping a project under an initiative changes NO
+   * governance or budget behaviour. onDelete 'set null': deleting an initiative
+   * orphans its children back to ungrouped, never deletes project rows. */
+  initiativeId: uuid("initiative_id").references(() => initiatives.id, { onDelete: "set null" }),
   budgetUsd: doublePrecision("budget_usd"),
   budgetApproverUserId: uuid("budget_approver_user_id").references(() => users.id, {
     onDelete: "set null",
   }),
+  /** pillar-5 budget window: 'none' = lifetime-cumulative (default, back-compat);
+   * 'monthly' = only spend within the current calendar month (UTC) counts. */
+  budgetPeriod: text("budget_period").notNull().default("none"),
+  /** warn (non-blocking) when windowed spend crosses budget*pct/100; the hard
+   * block + escalation always stays at 100%. Default 100 = warn only at the cap
+   * (byte-identical to the pre-threshold behaviour). */
+  alertThresholdPct: integer("alert_threshold_pct").notNull().default(100),
   /** a decided __project_budget__ approval lifts enforcement for this project */
   overageApproved: boolean("overage_approved").notNull().default(false),
+  /** the period key (e.g. '2026-07') an overage was approved for; the latch
+   * only suppresses enforcement while it equals the current period. Null when
+   * budgetPeriod='none' (the lifetime latch is unscoped) or never approved. */
+  overageApprovedPeriod: text("overage_approved_period"),
   /** §9 named arbiter for shared-context conflicts; absent = conflicting
    * writes are rejected explicitly (never silently) */
   arbiterUserId: uuid("arbiter_user_id").references(() => users.id, { onDelete: "set null" }),

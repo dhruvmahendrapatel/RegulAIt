@@ -1,0 +1,318 @@
+import { beforeAll, describe, expect, it } from "vitest";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { and, auditLog, createDb, eq, runMigrations, usageEvents, type Db } from "@regulait/db";
+import { buildApp } from "./app.js";
+
+/**
+ * §8.4 PII ENFORCEMENT (pillar 3) — the compliance cascade's piiMode turned
+ * into a real enforcement point at every PROJECT-ATTRIBUTED model + connector
+ * dispatch, plus audit-log retention pruning to the global floor.
+ *
+ * Proves:
+ *   · block INPUT: a classified 'block' project denies a PII-bearing prompt
+ *     BEFORE the provider runs — 403 pii_blocked, a 'pii-blocked' deny audit,
+ *     and NO usage row (no cost incurred);
+ *   · block OUTPUT: PII in the MODEL OUTPUT (the <<emit-ssn>> mock affordance)
+ *     is BILL-AND-WITHHELD — a usage row IS written (honest spend) but the text
+ *     is replaced by the withheld marker, and the audit deny names phase output;
+ *   · warn: proceeds, attaches a pii warning + a 'pii-warned' allow audit;
+ *   · log: proceeds silently, recording category COUNTS in the usage detail;
+ *   · a non-classified project is unaffected (regression — no pii field);
+ *   · connector INPUT block mirrors the model path;
+ *   · retention: rows older than the GLOBAL floor prune, newer rows survive.
+ *
+ * Shares one database with the other gateway suites (fileParallelism off), so
+ * every object here is name-prefixed pii-.
+ */
+
+const DATABASE_URL = process.env.DATABASE_URL;
+if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
+
+const migrationsFolder = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../../packages/db/migrations",
+);
+
+const BOOT = "pii-bootstrap-token";
+const AUTH = { authorization: `Bearer ${BOOT}` };
+const DATA_KEY = "f".repeat(64);
+
+const SSN = "123-45-6789"; // well-known INVALID test SSN — never real PII
+
+let db: Db;
+let app: ReturnType<typeof buildApp>;
+let danaId: string;
+let danaAuth: { authorization: string };
+let agentId: string;
+let connectorId: string;
+let blockProj: string;
+let warnProj: string;
+let logProj: string;
+let plainProj: string;
+
+async function makeUser(email: string, displayName: string, isAdmin: boolean) {
+  const u = await app.inject({ method: "POST", url: "/v1/users", headers: AUTH, payload: { email, displayName, isAdmin } });
+  const id = u.json().id;
+  const k = await app.inject({ method: "POST", url: `/v1/users/${id}/keys`, headers: AUTH, payload: { name: "pii" } });
+  return { id, auth: { authorization: `Bearer ${k.json().token}` } };
+}
+async function makeProject(name: string, classifications?: string[]) {
+  const r = await app.inject({
+    method: "POST",
+    url: "/v1/projects",
+    headers: AUTH,
+    payload: { name, ...(classifications ? { classifications } : {}) },
+  });
+  expect(r.statusCode).toBe(201);
+  return r.json().id as string;
+}
+async function invoke(input: string, projectId: string) {
+  return app.inject({
+    method: "POST",
+    url: `/v1/agents/${agentId}/invoke`,
+    headers: danaAuth,
+    payload: { mode: "execute", input, dispatch: true, projectId },
+  });
+}
+async function usageCount(projectId: string): Promise<number> {
+  const rows = await db.select().from(usageEvents).where(eq(usageEvents.projectId, projectId));
+  return rows.length;
+}
+
+beforeAll(async () => {
+  db = createDb(DATABASE_URL);
+  await runMigrations(db, migrationsFolder);
+  app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+
+  const dana = await makeUser("pii-dana@example.com", "PII Dana", false);
+  danaId = dana.id;
+  danaAuth = dana.auth;
+
+  const agent = await app.inject({
+    method: "POST",
+    url: "/v1/agents",
+    headers: AUTH,
+    payload: { name: "pii-mock", provider: "mock", tier: 1, costPerMTokIn: 3, costPerMTokOut: 15, model: "mock-balanced" },
+  });
+  agentId = agent.json().id;
+  await app.inject({ method: "POST", url: "/v1/grants/agents", headers: AUTH, payload: { userId: danaId, agentId } });
+
+  const connector = await app.inject({
+    method: "POST",
+    url: "/v1/connectors",
+    headers: AUTH,
+    payload: { name: "pii-mock-conn", kind: "data", providerKind: "mock", pricePerCallUsd: 0.001 },
+  });
+  connectorId = connector.json().id;
+  await app.inject({
+    method: "POST",
+    url: "/v1/grants/connectors",
+    headers: AUTH,
+    payload: { userId: danaId, connectorId, mode: "readwrite" },
+  });
+
+  // §8.3 compliance profiles the three modes cascade from
+  for (const [tag, piiMode, auditRetentionDays] of [
+    ["pii-block", "block", 90],
+    ["pii-warn", "warn", null],
+    ["pii-log", "log", null],
+  ] as const) {
+    await app.inject({
+      method: "POST",
+      url: "/v1/compliance/profiles",
+      headers: AUTH,
+      payload: { tag, piiMode, ...(auditRetentionDays ? { auditRetentionDays } : {}) },
+    });
+  }
+
+  blockProj = await makeProject("pii-block-proj", ["pii-block"]);
+  warnProj = await makeProject("pii-warn-proj", ["pii-warn"]);
+  logProj = await makeProject("pii-log-proj", ["pii-log"]);
+  plainProj = await makeProject("pii-plain-proj");
+});
+
+describe("§8.4 model dispatch PII enforcement", () => {
+  it("block INPUT: denies a PII prompt BEFORE the provider — 403, deny audit, NO usage row", async () => {
+    const before = await usageCount(blockProj);
+    const res = await invoke(`Please export the record for SSN ${SSN}.`, blockProj);
+    expect(res.statusCode).toBe(403);
+    const body = res.json();
+    expect(body.error).toBe("pii_blocked");
+    expect(body.pii.action).toBe("block");
+    expect(body.pii.inputHits.some((h: { category: string }) => h.category === "ssn")).toBe(true);
+    // no cost: the input block ran before any provider work
+    expect(await usageCount(blockProj)).toBe(before);
+    // a 'pii-blocked' deny is on the ledger for dana
+    const denies = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.userId, danaId), eq(auditLog.ruleId, "pii-blocked")));
+    expect(denies.length).toBeGreaterThan(0);
+    expect(denies.every((d) => d.effect === "deny")).toBe(true);
+  });
+
+  it("block OUTPUT: bills-and-withholds — usage row written, output withheld, deny names phase output", async () => {
+    const before = await usageCount(blockProj);
+    // <<emit-ssn>> is CLEAN input (no PII pattern) but the mock replies with a
+    // fake SSN, so the OUTPUT check fires, not the input one
+    const res = await invoke("Summarize the case notes. <<emit-ssn>>", blockProj);
+    expect(res.statusCode).toBe(200);
+    const d = res.json().dispatch;
+    expect(d.pii.action).toBe("block");
+    expect(d.pii.withheld).toBe(true);
+    expect(d.pii.outputHits.some((h: { category: string }) => h.category === "ssn")).toBe(true);
+    expect(d.outputText).toContain("output withheld");
+    expect(d.outputText).toContain("ssn");
+    expect(d.outputText).not.toContain(SSN); // the real value never rides the response
+    // the spend is honest: exactly one new usage row
+    expect(await usageCount(blockProj)).toBe(before + 1);
+    // and the withheld usage row records COUNTS only, never the substring
+    const rows = await db.select().from(usageEvents).where(eq(usageEvents.projectId, blockProj));
+    const latest = rows[rows.length - 1]!;
+    const detail = latest.detail as { pii?: { action: string; outputHits: unknown[] } };
+    expect(detail.pii?.action).toBe("block");
+    expect(JSON.stringify(detail)).not.toContain(SSN);
+    // an OUTPUT-phase deny is recorded
+    const denies = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.userId, danaId), eq(auditLog.ruleId, "pii-blocked")));
+    const outputPhase = denies.filter(
+      (x) => (x.detail as { pii?: { phase?: string } }).pii?.phase === "output",
+    );
+    expect(outputPhase.length).toBeGreaterThan(0);
+  });
+
+  it("warn: proceeds, attaches a pii warning + a 'pii-warned' allow audit", async () => {
+    const before = await usageCount(warnProj);
+    const res = await invoke(`Draft a note referencing SSN ${SSN}.`, warnProj);
+    expect(res.statusCode).toBe(200);
+    const d = res.json().dispatch;
+    expect(d.pii.action).toBe("warn");
+    expect(d.pii.withheld).toBe(false);
+    expect(d.pii.inputHits.some((h: { category: string }) => h.category === "ssn")).toBe(true);
+    expect(await usageCount(warnProj)).toBe(before + 1); // proceeded, billed
+    const warns = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.userId, danaId), eq(auditLog.ruleId, "pii-warned")));
+    expect(warns.length).toBeGreaterThan(0);
+    expect(warns.every((w) => w.effect === "allow")).toBe(true);
+  });
+
+  it("log: proceeds silently, recording category COUNTS in the usage detail", async () => {
+    const before = await usageCount(logProj);
+    const res = await invoke(`Note the SSN ${SSN} for the record.`, logProj);
+    expect(res.statusCode).toBe(200);
+    const d = res.json().dispatch;
+    expect(d.pii.action).toBe("log");
+    expect(d.pii.withheld).toBe(false);
+    expect(d.outputText).not.toContain("output withheld"); // no user-visible change
+    expect(await usageCount(logProj)).toBe(before + 1);
+    const rows = await db.select().from(usageEvents).where(eq(usageEvents.projectId, logProj));
+    const detail = rows[rows.length - 1]!.detail as { pii?: { action: string; inputHits: unknown[] } };
+    expect(detail.pii?.action).toBe("log");
+    expect(JSON.stringify(detail)).not.toContain(SSN); // counts only
+  });
+
+  it("regression: a non-classified project is unaffected — no pii field", async () => {
+    const res = await invoke(`Handle SSN ${SSN} here.`, plainProj);
+    expect(res.statusCode).toBe(200);
+    const d = res.json().dispatch;
+    expect(d.pii).toBeUndefined();
+    expect(d.outputText).not.toContain("output withheld");
+  });
+});
+
+describe("§8.4 connector PII enforcement", () => {
+  it("connector INPUT block: a PII payload denies before the adapter runs — no usage row", async () => {
+    const before = await usageCount(blockProj);
+    const res = await app.inject({
+      method: "POST",
+      url: `/v1/connectors/${connectorId}/invoke`,
+      headers: danaAuth,
+      payload: { operation: "write", object: "records", payload: { note: `patient SSN ${SSN}` }, projectId: blockProj },
+    });
+    expect(res.statusCode).toBe(403);
+    const body = res.json();
+    expect(body.error).toBe("pii_blocked");
+    expect(body.pii.action).toBe("block");
+    // decision was allow (governance), the PII deny is a SEPARATE row
+    expect(body.decision.effect).toBe("allow");
+    expect(await usageCount(blockProj)).toBe(before); // nothing billed
+    const connDenies = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.userId, danaId), eq(auditLog.ruleId, "pii-blocked")));
+    expect(connDenies.some((x) => x.objectType === "connector")).toBe(true);
+  });
+});
+
+describe("§8.4 audit-log retention pruning", () => {
+  // three ancient rows (older than any realistic global floor) + one recent
+  // marker; the prune deletes the ancient, keeps the marker
+  const ancient = new Date(Date.now() - 30_000 * 24 * 3600 * 1000);
+  let ancientIds: string[];
+  let markerId: string;
+
+  beforeAll(async () => {
+    const ins = await db
+      .insert(auditLog)
+      .values(
+        [0, 1, 2].map((i) => ({
+          at: ancient,
+          userId: danaId,
+          objectType: "project" as const,
+          detail: { phase: "pii-retention-fixture", i },
+          effect: "allow" as const,
+          ruleId: "pii-test-ancient",
+          ruleChain: [],
+          reason: "ancient fixture row for retention pruning",
+        })),
+      )
+      .returning({ id: auditLog.id });
+    ancientIds = ins.map((r) => r.id);
+    const [marker] = await db
+      .insert(auditLog)
+      .values({
+        userId: danaId,
+        objectType: "project",
+        detail: { phase: "pii-retention-marker" },
+        effect: "allow",
+        ruleId: "pii-test-recent",
+        ruleChain: [],
+        reason: "recent marker row that must survive the prune",
+      })
+      .returning({ id: auditLog.id });
+    markerId = marker!.id;
+  });
+
+  it("GET /v1/audit/retention exposes the global floor and a prunable count", async () => {
+    const res = await app.inject({ method: "GET", url: "/v1/audit/retention", headers: AUTH });
+    expect(res.statusCode).toBe(200);
+    const b = res.json();
+    expect(typeof b.retainedDays).toBe("number"); // a profile sets one
+    expect(b.floorSource.length).toBeGreaterThan(0);
+    expect(b.prunable).toBeGreaterThanOrEqual(3); // our three ancient rows
+  });
+
+  it("POST /v1/audit/prune deletes rows older than the floor and keeps newer ones", async () => {
+    const res = await app.inject({ method: "POST", url: "/v1/audit/prune", headers: AUTH });
+    expect(res.statusCode).toBe(200);
+    const b = res.json();
+    expect(b.deleted).toBeGreaterThanOrEqual(3);
+    expect(typeof b.retainedDays).toBe("number");
+    // the ancient rows are gone
+    for (const id of ancientIds) {
+      const rows = await db.select().from(auditLog).where(eq(auditLog.id, id));
+      expect(rows.length).toBe(0);
+    }
+    // the recent marker survives
+    const marker = await db.select().from(auditLog).where(eq(auditLog.id, markerId));
+    expect(marker.length).toBe(1);
+    // the prune itself is audited (a keep-forever meta row)
+    const meta = await db.select().from(auditLog).where(eq(auditLog.ruleId, "audit-log-pruned"));
+    expect(meta.length).toBeGreaterThan(0);
+  });
+});

@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export { detectPII, type PiiHit, type PiiCategory } from "./pii.js";
+
 export const toolKindSchema = z.enum(["read", "write"]);
 export type ToolKind = z.infer<typeof toolKindSchema>;
 
@@ -215,10 +217,17 @@ export const createProjectSchema = z
     costCenter: z.string().min(1).max(100).nullable().optional(),
     budgetUsd: z.number().positive().nullable().optional(),
     budgetApproverUserId: z.string().uuid().nullable().optional(),
+    /** pillar-5 budget window: 'none' (lifetime) or 'monthly' (calendar month) */
+    budgetPeriod: z.enum(["none", "monthly"]).optional(),
+    /** warn (non-blocking) when windowed spend crosses this percent of budget;
+     * the hard block stays at 100%, so 1..100 is the meaningful range */
+    alertThresholdPct: z.number().int().min(1).max(100).optional(),
     /** §9 named arbiter for shared-context conflicts */
     arbiterUserId: z.string().uuid().nullable().optional(),
     /** §8.3 compliance framework tags, applied directly at creation */
     classifications: z.array(z.string().min(1).max(64)).max(16).optional(),
+    /** pillar-5 rollup: parent Initiative id (reporting-only grouping) */
+    initiativeId: z.string().uuid().nullable().optional(),
   })
   .refine((p) => p.budgetUsd == null || p.budgetApproverUserId != null, {
     message: "a project budget requires a budgetApproverUserId",
@@ -235,7 +244,28 @@ export const updateProjectSchema = z
     costCenter: z.string().min(1).max(100).nullable().optional(),
     budgetUsd: z.number().positive().nullable().optional(),
     budgetApproverUserId: z.string().uuid().nullable().optional(),
+    budgetPeriod: z.enum(["none", "monthly"]).optional(),
+    alertThresholdPct: z.number().int().min(1).max(100).optional(),
     arbiterUserId: z.string().uuid().nullable().optional(),
+    /** pillar-5 rollup: parent Initiative id (reporting-only grouping) */
+    initiativeId: z.string().uuid().nullable().optional(),
+  })
+  .refine((p) => Object.values(p).some((v) => v !== undefined), {
+    message: "nothing to update — provide at least one field",
+  });
+
+/** pillar-5 cross-team rollup: an Initiative is a flat, reporting-only grouping
+ * of projects for chargeback/showback above the single-project level. No
+ * budget or enforcement in v1 — grouping only. */
+export const createInitiativeSchema = z.object({
+  name: z.string().min(1).max(200),
+  costCenter: z.string().min(1).max(100).nullable().optional(),
+});
+
+export const updateInitiativeSchema = z
+  .object({
+    name: z.string().min(1).max(200).optional(),
+    costCenter: z.string().min(1).max(100).nullable().optional(),
   })
   .refine((p) => Object.values(p).some((v) => v !== undefined), {
     message: "nothing to update — provide at least one field",
@@ -560,6 +590,13 @@ export const addProjectMemberSchema = z.object({
   role: z.enum(["owner", "contributor", "viewer"]),
   /** the member's contributing team for provenance; must be one of their teams */
   teamId: z.string().uuid().nullable().optional(),
+});
+
+/** the owner's per-member role change (PATCH /projects/:id/members/:userId).
+ * Membership is otherwise add-only; this and DELETE are the only mutators, and
+ * both are guarded by last-owner protection so a project can't be orphaned. */
+export const patchProjectMemberSchema = z.object({
+  role: z.enum(["owner", "contributor", "viewer"]),
 });
 
 export const contributeContextSchema = z.object({

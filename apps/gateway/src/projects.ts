@@ -11,6 +11,8 @@ import {
   desc,
   eq,
   gte,
+  initiatives,
+  lt,
   projectContextItems,
   projectMembers,
   projects,
@@ -28,28 +30,123 @@ import {
   addProjectMemberSchema,
   addTeamMemberSchema,
   contributeContextSchema,
+  createInitiativeSchema,
   createProjectSchema,
   createTeamSchema,
+  detectPII,
+  patchProjectMemberSchema,
   promoteContextSchema,
   reclassifySchema,
+  updateInitiativeSchema,
   updateProjectSchema,
   upsertComplianceProfileSchema,
+  type PiiHit,
 } from "@regulait/shared";
 import { z } from "zod";
 
 type ProjectRow = typeof projects.$inferSelect;
 
 const projectIdParam = z.object({ projectId: z.string().uuid() });
+const initiativeIdParam = z.object({ initiativeId: z.string().uuid() });
+
+/** RFC-4180 field escaping: quote and double-up embedded quotes whenever a
+ * field carries a comma, quote, or newline; leave plain fields untouched. */
+function csvField(value: unknown): string {
+  const s = value == null ? "" : String(value);
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+/** The per-invocation CSV shape shared by both export endpoints: one header row
+ * plus one row per usage_event, escaped. */
+export const USAGE_CSV_HEADER = [
+  "at",
+  "userId",
+  "objectType",
+  "agentId",
+  "connectorId",
+  "model",
+  "operation",
+  "inputTokens",
+  "outputTokens",
+  "costUsd",
+  "measuredCostSavedUsd",
+  "projectId",
+] as const;
+
+export function usageEventsCsv(rows: Array<typeof usageEvents.$inferSelect>): string {
+  const lines = [USAGE_CSV_HEADER.join(",")];
+  for (const r of rows) {
+    lines.push(
+      [
+        r.at instanceof Date ? r.at.toISOString() : r.at,
+        r.userId,
+        r.objectType,
+        r.agentId,
+        r.connectorId,
+        r.model,
+        r.operation,
+        r.inputTokens,
+        r.outputTokens,
+        r.costUsd,
+        r.measuredCostSavedUsd,
+        r.projectId,
+      ]
+        .map(csvField)
+        .join(","),
+    );
+  }
+  return lines.join("\r\n") + "\r\n";
+}
 
 /** §9 conflict approvals: stageId = this prefix + the retained item's id. */
 const CONTEXT_CONFLICT_PREFIX = "__context_conflict__:";
 
-/** Measured spend attributed to a project so far (pillar 5 actuals). */
-async function projectSpendUsd(db: Db, projectId: string): Promise<number> {
+/** Calendar-month period key 'YYYY-MM' (UTC) for the period containing `now`.
+ * The overage latch is scoped to this key so a sanctioned overage never carries
+ * into the next month. */
+export function currentPeriodKey(now: Date = new Date()): string {
+  const y = now.getUTCFullYear();
+  const m = String(now.getUTCMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`;
+}
+
+/** UTC month-start timestamp for the period containing `now` — the lower bound
+ * of a 'monthly' budget window. */
+export function periodStart(now: Date = new Date()): Date {
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0));
+}
+
+/** True when a project's budget window is the current calendar month. */
+function isMonthly(project: Pick<ProjectRow, "budgetPeriod">): boolean {
+  return project.budgetPeriod === "monthly";
+}
+
+/** True when an approved overage still suppresses enforcement: always under a
+ * lifetime ('none') budget, but under a 'monthly' budget only while the latch's
+ * period matches the current one — on a new month the latch is inert and
+ * enforcement resumes. */
+function overageActive(project: ProjectRow, periodKey: string): boolean {
+  if (!project.overageApproved) return false;
+  if (!isMonthly(project)) return true;
+  return project.overageApprovedPeriod === periodKey;
+}
+
+/** Measured spend attributed to a project (pillar 5 actuals). Under a 'monthly'
+ * budget only spend within the current calendar-month window counts; otherwise
+ * it is lifetime-cumulative (default, back-compat). */
+async function projectSpendUsd(
+  db: Db,
+  projectId: string,
+  opts?: { monthly?: boolean; now?: Date },
+): Promise<number> {
+  const where =
+    opts?.monthly
+      ? and(eq(usageEvents.projectId, projectId), gte(usageEvents.at, periodStart(opts.now)))
+      : eq(usageEvents.projectId, projectId);
   const [row] = await db
     .select({ spent: sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8` })
     .from(usageEvents)
-    .where(eq(usageEvents.projectId, projectId));
+    .where(where);
   return row?.spent ?? 0;
 }
 
@@ -174,6 +271,72 @@ async function profilesForTags(db: Db, tags: string[]): Promise<ComplianceProfil
   return rows.filter((p) => tags.includes(p.tag));
 }
 
+// --- §8.4 PII enforcement (pillar 3) -------------------------------------
+// The compliance cascade's piiMode dimension, turned from a declared policy
+// into a real enforcement point applied at every project-attributed dispatch.
+
+export type PiiMode = "block" | "warn" | "log";
+
+/** The effective piiMode a project's classifications force, or null when the
+ * project is unclassified / has no matching compliance profile (in which case
+ * PII enforcement is a no-op — unchanged behaviour). A profile always carries
+ * a piiMode (the upsert defaults it to 'log'), so a matched project always
+ * resolves to one of the three modes. */
+export async function projectPiiMode(
+  db: Db,
+  projectId: string | null | undefined,
+): Promise<PiiMode | null> {
+  if (!projectId) return null;
+  const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
+  if (!project) return null;
+  const tags = (project.classifications ?? []) as string[];
+  if (tags.length === 0) return null;
+  const profiles = await profilesForTags(db, tags);
+  if (profiles.length === 0) return null;
+  return effectiveCompliancePolicy(profiles).piiMode;
+}
+
+export interface PiiEnforcement {
+  action: "allow" | "warn" | "block";
+  hits: PiiHit[];
+  phase: "input" | "output";
+}
+
+/** §8.4 message with COUNTS ONLY — never the matched substrings. */
+export function piiCategoryList(hits: PiiHit[]): string {
+  return hits.map((h) => h.category).join(", ");
+}
+
+/** The withheld-output marker a bill-and-withhold OUTPUT block substitutes for
+ * the model/connector text — legible, and §8.4-safe (categories, never
+ * content). */
+export function piiWithheldMarker(hits: PiiHit[]): string {
+  return `[output withheld — contained PII: ${piiCategoryList(hits)}]`;
+}
+
+/**
+ * §8.4 PII enforcement decision for ONE phase. Detects PII in exactly the
+ * side provided (input XOR output) and maps the project's effective piiMode
+ * onto an action:
+ *  - block: hits present -> 'block' (the caller denies on input BEFORE the
+ *    provider call, or bills-and-withholds on output AFTER it).
+ *  - warn : hits present -> 'warn' (proceed, attach a warning + audit).
+ *  - log  : hits present -> 'allow' (proceed silently; the caller records the
+ *    category counts in its usage/audit detail).
+ * No hits (or no mode) -> 'allow', so a clean payload on a classified project
+ * stays byte-identical to the pre-enforcement behaviour. Pure over its args. */
+export function enforcePII(
+  mode: PiiMode,
+  io: { input?: string | undefined; output?: string | undefined },
+): PiiEnforcement {
+  const phase: "input" | "output" = io.output !== undefined ? "output" : "input";
+  const text = phase === "output" ? (io.output ?? "") : (io.input ?? "");
+  const hits = detectPII(text);
+  if (hits.length === 0) return { action: "allow", hits, phase };
+  const action = mode === "block" ? "block" : mode === "warn" ? "warn" : "allow";
+  return { action, hits, phase };
+}
+
 /** §8.3 workflow cascade — the ENFORCED consumer. Returns the workflow
  * template ids a project's classifications force into every governed change
  * ("no manual per-control setup"). */
@@ -203,10 +366,12 @@ export async function preDispatchProjectGate(
   if (!project) {
     return { ok: false, status: 422, error: "unknown_project", detail: projectId };
   }
-  if (project.budgetUsd == null || project.overageApproved) {
+  const now = new Date();
+  const periodKey = currentPeriodKey(now);
+  if (project.budgetUsd == null || overageActive(project, periodKey)) {
     return { ok: true, project, spentUsd: 0 };
   }
-  const spentUsd = await projectSpendUsd(db, projectId);
+  const spentUsd = await projectSpendUsd(db, projectId, { monthly: isMonthly(project), now });
   if (spentUsd >= project.budgetUsd) {
     await escalateProjectBudget(db, project, userId, spentUsd);
     return {
@@ -219,22 +384,85 @@ export async function preDispatchProjectGate(
   return { ok: true, project, spentUsd };
 }
 
-/** Post-dispatch alert: the FIRST crossing is allowed (measured cost arrives
- * after the call) but escalates immediately into the one approvals queue;
- * the pre-gate blocks everything after it. Returns true when it alerted. */
+/** The two distinct, non-blocking budget signals a dispatch can raise, surfaced
+ * on the response and audited. `escalated` is the 100% crossing (routed into the
+ * one approvals queue; the pre-gate blocks everything after it); `thresholdAlert`
+ * is the softer configurable warning (>= budget*pct/100 but still < 100%). */
+export interface ProjectBudgetSignal {
+  escalated: boolean;
+  thresholdAlert: boolean;
+  thresholdPct: number;
+  spentUsd: number;
+  budgetUsd: number | null;
+  period: string | null;
+}
+
+const NO_BUDGET_SIGNAL: ProjectBudgetSignal = {
+  escalated: false,
+  thresholdAlert: false,
+  thresholdPct: 100,
+  spentUsd: 0,
+  budgetUsd: null,
+  period: null,
+};
+
+/** Post-dispatch alert: the FIRST crossing of the budget is allowed (measured
+ * cost arrives after the call) but escalates immediately into the one approvals
+ * queue; the pre-gate blocks everything after it. Below the cap, if windowed
+ * spend has crossed the configurable alert threshold (< 100%) a distinct
+ * non-blocking 'budget-threshold-alert' is raised instead. */
 export async function postDispatchProjectAlert(
   db: Db,
   gate: ProjectGate,
   userId: string,
   costUsd: number | null,
-): Promise<boolean> {
-  if (!gate.ok || !gate.project || gate.project.budgetUsd == null || gate.project.overageApproved) {
-    return false;
-  }
+): Promise<ProjectBudgetSignal> {
+  if (!gate.ok || !gate.project) return NO_BUDGET_SIGNAL;
+  const project = gate.project;
+  if (project.budgetUsd == null) return NO_BUDGET_SIGNAL;
+  const budgetUsd = project.budgetUsd;
+  const now = new Date();
+  const periodKey = currentPeriodKey(now);
+  const monthly = isMonthly(project);
+  const pct = project.alertThresholdPct ?? 100;
   const newSpent = gate.spentUsd + (costUsd ?? 0);
-  if (newSpent <= gate.project.budgetUsd) return false;
-  await escalateProjectBudget(db, gate.project, userId, newSpent);
-  return true;
+  const signal: ProjectBudgetSignal = {
+    escalated: false,
+    thresholdAlert: false,
+    thresholdPct: pct,
+    spentUsd: newSpent,
+    budgetUsd: project.budgetUsd,
+    period: monthly ? periodKey : null,
+  };
+  // a sanctioned overage (scoped to this period under a monthly budget)
+  // suppresses both signals until the next period
+  if (overageActive(project, periodKey)) return signal;
+  if (newSpent > budgetUsd) {
+    await escalateProjectBudget(db, project, userId, newSpent);
+    return { ...signal, escalated: true };
+  }
+  const thresholdUsd = (budgetUsd * pct) / 100;
+  if (pct < 100 && newSpent >= thresholdUsd) {
+    await db.insert(auditLog).values({
+      userId,
+      objectType: "project",
+      objectId: project.id,
+      detail: {
+        phase: "project-budget-threshold",
+        spentUsd: newSpent,
+        budgetUsd: project.budgetUsd,
+        thresholdPct: pct,
+        thresholdUsd,
+        ...(monthly ? { period: periodKey } : {}),
+      },
+      effect: "allow",
+      ruleId: "budget-threshold-alert",
+      ruleChain: [],
+      reason: `measured project spend $${newSpent.toFixed(6)} crossed the ${pct}% alert threshold ($${thresholdUsd.toFixed(6)}) of the $${project.budgetUsd} budget — warning, dispatch proceeded`,
+    });
+    return { ...signal, thresholdAlert: true };
+  }
+  return signal;
 }
 
 /** Decide-endpoint hook for objectType 'project': budget overages and
@@ -314,9 +542,15 @@ export async function applyProjectApprovalDecision(
   }
   if (approvalRow.stageId !== "__project_budget__") return;
   if (decision === "approved") {
+    // scope the latch to the CURRENT period under a monthly budget, so the
+    // sanction expires at the next rollover; a lifetime budget stays unscoped
+    const [proj] = await db.select().from(projects).where(eq(projects.id, approvalRow.projectId));
     await db
       .update(projects)
-      .set({ overageApproved: true })
+      .set({
+        overageApproved: true,
+        overageApprovedPeriod: proj && isMonthly(proj) ? currentPeriodKey() : null,
+      })
       .where(eq(projects.id, approvalRow.projectId));
   }
   await db.insert(auditLog).values({
@@ -428,8 +662,11 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         costCenter: body.costCenter ?? null,
         budgetUsd: body.budgetUsd ?? null,
         budgetApproverUserId: body.budgetApproverUserId ?? null,
+        budgetPeriod: body.budgetPeriod ?? "none",
+        alertThresholdPct: body.alertThresholdPct ?? 100,
         arbiterUserId: body.arbiterUserId ?? null,
         classifications: body.classifications ?? null,
+        initiativeId: body.initiativeId ?? null,
       })
       .returning();
     return reply.status(201).send(row);
@@ -452,7 +689,12 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         body.budgetApproverUserId === undefined
           ? project.budgetApproverUserId
           : body.budgetApproverUserId,
+      budgetPeriod: body.budgetPeriod === undefined ? project.budgetPeriod : body.budgetPeriod,
+      alertThresholdPct:
+        body.alertThresholdPct === undefined ? project.alertThresholdPct : body.alertThresholdPct,
       arbiterUserId: body.arbiterUserId === undefined ? project.arbiterUserId : body.arbiterUserId,
+      initiativeId:
+        body.initiativeId === undefined ? project.initiativeId : body.initiativeId,
     };
     // the create-time invariant, held against the row this patch would leave
     if (merged.budgetUsd != null && merged.budgetApproverUserId == null) {
@@ -476,6 +718,123 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       reason: `project '${project.name}' updated: ${Object.keys(changed).join(", ")}`,
     });
     return row;
+  });
+
+  // ---------------------------------------------------------------------------
+  // PILLAR 5 cross-team rollup: Initiatives. A flat, reporting-only grouping of
+  // projects for cost attribution above the single-project level. ADMIN ONLY by
+  // the default gate — a rollup spans projects a non-admin may not be a member
+  // of. v1 is grouping only: NO initiative-level budget or enforcement, and
+  // grouping a project changes NONE of its own governance or budget behaviour.
+  app.post("/v1/initiatives", async (req, reply) => {
+    const body = createInitiativeSchema.parse(req.body);
+    const [row] = await db
+      .insert(initiatives)
+      .values({ name: body.name, costCenter: body.costCenter ?? null })
+      .returning();
+    return reply.status(201).send(row);
+  });
+
+  // Every initiative with its child-project count and rolled-up LIFETIME spend.
+  // Count and spend are each one grouped pass (over projects, and over
+  // usage_events joined to projects), mapped back on initiativeId; an initiative
+  // with no children reads 0 projects / $0.
+  app.get("/v1/initiatives", async (_req, _reply) => {
+    const [rows, childCounts, spendByInitiative] = await Promise.all([
+      db.select().from(initiatives).orderBy(desc(initiatives.createdAt)),
+      db
+        .select({ initiativeId: projects.initiativeId, projectCount: count() })
+        .from(projects)
+        .groupBy(projects.initiativeId),
+      db
+        .select({
+          initiativeId: projects.initiativeId,
+          costUsd: sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8`,
+        })
+        .from(usageEvents)
+        .innerJoin(projects, eq(usageEvents.projectId, projects.id))
+        .groupBy(projects.initiativeId),
+    ]);
+    const countMap = new Map(childCounts.map((c) => [c.initiativeId, c.projectCount]));
+    const spendMap = new Map(spendByInitiative.map((s) => [s.initiativeId, s.costUsd]));
+    return {
+      initiatives: rows.map((r) => ({
+        ...r,
+        projectCount: countMap.get(r.id) ?? 0,
+        spentUsd: spendMap.get(r.id) ?? 0,
+      })),
+    };
+  });
+
+  // One initiative with its child projects (each carrying its lifetime spend)
+  // and the rolled-up total. 404 on an unknown id.
+  app.get("/v1/initiatives/:initiativeId", async (req, reply) => {
+    const { initiativeId } = initiativeIdParam.parse(req.params);
+    const [initiative] = await db
+      .select()
+      .from(initiatives)
+      .where(eq(initiatives.id, initiativeId));
+    if (!initiative) return reply.status(404).send({ error: "unknown_initiative" });
+    // left join so a child project with no spend still appears at $0
+    const children = await db
+      .select({
+        id: projects.id,
+        name: projects.name,
+        spentUsd: sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8`,
+      })
+      .from(projects)
+      .leftJoin(usageEvents, eq(usageEvents.projectId, projects.id))
+      .where(eq(projects.initiativeId, initiativeId))
+      .groupBy(projects.id, projects.name);
+    const totalUsd = Number(children.reduce((s, c) => s + (c.spentUsd ?? 0), 0).toFixed(6));
+    return { initiative, projects: children, projectCount: children.length, spentUsd: totalUsd };
+  });
+
+  // Rename / re-cost-center an initiative (grouping only). 404 on unknown id.
+  app.patch("/v1/initiatives/:initiativeId", async (req, reply) => {
+    const { initiativeId } = initiativeIdParam.parse(req.params);
+    const body = updateInitiativeSchema.parse(req.body);
+    const [initiative] = await db
+      .select()
+      .from(initiatives)
+      .where(eq(initiatives.id, initiativeId));
+    if (!initiative) return reply.status(404).send({ error: "unknown_initiative" });
+    const merged = {
+      name: body.name ?? initiative.name,
+      costCenter: body.costCenter === undefined ? initiative.costCenter : body.costCenter,
+    };
+    const [row] = await db
+      .update(initiatives)
+      .set(merged)
+      .where(eq(initiatives.id, initiativeId))
+      .returning();
+    const changed = Object.fromEntries(
+      Object.entries(body).filter(([, v]) => v !== undefined),
+    ) as Record<string, unknown>;
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? initiativeId,
+      objectType: "initiative",
+      objectId: initiativeId,
+      detail: { phase: "update", changed },
+      effect: "allow",
+      ruleId: "initiative-updated",
+      ruleChain: [],
+      reason: `initiative '${initiative.name}' updated: ${Object.keys(changed).join(", ")}`,
+    });
+    return row;
+  });
+
+  // Delete an initiative. The FK onDelete='set null' orphans its children back
+  // to ungrouped automatically — a project row is never deleted with it.
+  app.delete("/v1/initiatives/:initiativeId", async (req, reply) => {
+    const { initiativeId } = initiativeIdParam.parse(req.params);
+    const [initiative] = await db
+      .select()
+      .from(initiatives)
+      .where(eq(initiatives.id, initiativeId));
+    if (!initiative) return reply.status(404).send({ error: "unknown_initiative" });
+    await db.delete(initiatives).where(eq(initiatives.id, initiativeId));
+    return reply.status(200).send({ ok: true });
   });
 
   // fleet for admins; non-admins see the projects they are members of
@@ -648,6 +1007,86 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     };
   });
 
+  // Membership lifecycle (owner-only): a role change and a removal are the
+  // only two mutators — membership is otherwise add-only. Both are guarded by
+  // LAST-OWNER PROTECTION: a demote-away-from-owner or a remove of the sole
+  // remaining owner is hard-blocked (409 last_owner) so a Shared Project can
+  // never be orphaned without an administrator.
+  const memberParams = z.object({ projectId: z.string().uuid(), userId: z.string().uuid() });
+
+  async function ownerCount(projectId: string): Promise<number> {
+    const [row] = await db
+      .select({ n: count() })
+      .from(projectMembers)
+      .where(and(eq(projectMembers.projectId, projectId), eq(projectMembers.role, "owner")));
+    return row?.n ?? 0;
+  }
+
+  app.patch("/v1/projects/:projectId/members/:userId", async (req, reply) => {
+    const { projectId, userId } = memberParams.parse(req.params);
+    const body = patchProjectMemberSchema.parse(req.body);
+    const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
+    if (!project) return reply.status(404).send({ error: "unknown_project" });
+    const gate = await requireRole(req, projectId, "owner");
+    if (!gate.ok) return reply.status(gate.status).send({ error: gate.error });
+    const [member] = await db
+      .select()
+      .from(projectMembers)
+      .where(and(eq(projectMembers.projectId, projectId), eq(projectMembers.userId, userId)));
+    if (!member) return reply.status(404).send({ error: "not_a_member" });
+    // last-owner protection: demoting the sole owner would orphan the project
+    if (member.role === "owner" && body.role !== "owner" && (await ownerCount(projectId)) <= 1) {
+      return reply.status(409).send({ error: "last_owner" });
+    }
+    const [row] = await db
+      .update(projectMembers)
+      .set({ role: body.role })
+      .where(and(eq(projectMembers.projectId, projectId), eq(projectMembers.userId, userId)))
+      .returning();
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? userId,
+      objectType: "project",
+      objectId: projectId,
+      detail: { phase: "membership", memberUserId: userId, from: member.role, role: body.role },
+      effect: "allow",
+      ruleId: "project-member-role-changed",
+      ruleChain: [],
+      reason: `member role changed '${member.role}' -> '${body.role}' on shared project '${project.name}'`,
+    });
+    return row;
+  });
+
+  app.delete("/v1/projects/:projectId/members/:userId", async (req, reply) => {
+    const { projectId, userId } = memberParams.parse(req.params);
+    const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
+    if (!project) return reply.status(404).send({ error: "unknown_project" });
+    const gate = await requireRole(req, projectId, "owner");
+    if (!gate.ok) return reply.status(gate.status).send({ error: gate.error });
+    const [member] = await db
+      .select()
+      .from(projectMembers)
+      .where(and(eq(projectMembers.projectId, projectId), eq(projectMembers.userId, userId)));
+    if (!member) return reply.status(404).send({ error: "not_a_member" });
+    // last-owner protection: removing the sole owner would orphan the project
+    if (member.role === "owner" && (await ownerCount(projectId)) <= 1) {
+      return reply.status(409).send({ error: "last_owner" });
+    }
+    await db
+      .delete(projectMembers)
+      .where(and(eq(projectMembers.projectId, projectId), eq(projectMembers.userId, userId)));
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? userId,
+      objectType: "project",
+      objectId: projectId,
+      detail: { phase: "membership", memberUserId: userId, removedRole: member.role },
+      effect: "allow",
+      ruleId: "project-member-removed",
+      ruleChain: [],
+      reason: `member removed from shared project '${project.name}'`,
+    });
+    return reply.status(200).send({ removed: true });
+  });
+
   // --- shared context store (§9.2, ADR-0011): append-only revisions ---
 
   async function writeContextRevision(
@@ -666,7 +1105,11 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     if (!project) return reply.status(404).send({ error: "unknown_project" });
     const gate = await requireRole(req, projectId, "contributor");
     if (!gate.ok) return reply.status(gate.status).send({ error: gate.error });
-    const userId = req.authCtx.userId ?? project.budgetApproverUserId ?? project.arbiterUserId;
+    // Authorship REQUIRES a real authenticated user — a context contribution is
+    // a provenance record, so it can never be attributed to a governance-role
+    // holder the writer merely happens to sit under. The bootstrap token (no
+    // userId) simply cannot contribute; it is not silently reattributed.
+    const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_contribute" });
     // provenance team must be one of the writer's teams (default: membership's)
     let teamId = args.teamId ?? gate.membership?.teamId ?? null;
@@ -678,80 +1121,117 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       if (!inTeam) return reply.status(422).send({ error: "not_in_team" });
     }
 
-    const rows = await db
-      .select({ revision: projectContextItems.revision, accepted: projectContextItems.accepted })
-      .from(projectContextItems)
-      .where(and(eq(projectContextItems.projectId, projectId), eq(projectContextItems.key, args.key)));
-    const maxRevision = rows.reduce((m, r) => Math.max(m, r.revision), 0);
-    const latestAccepted = rows.filter((r) => r.accepted).reduce((m, r) => Math.max(m, r.revision), 0);
-    const revision = maxRevision + 1;
+    // The read (maxRevision/latestAccepted) + insert run inside ONE
+    // transaction, and (project_id, key, revision) is UNIQUE (migration 0019).
+    // Two concurrent same-key writes that compute the SAME next revision can
+    // therefore never both land: one commits, the other's insert hits the
+    // unique violation. That loser is retried once against the winner's now-
+    // committed row — recomputing to a distinct higher revision, or (if the
+    // winner advanced the accepted head past its base) becoming a conflict
+    // routed to the arbiter — so a lost race is a clean outcome, never a
+    // duplicate revision number.
+    type Outcome =
+      | { kind: "reply"; status: number; body: unknown }
+      | { kind: "created"; body: Record<string, unknown> };
+    const attempt = (): Promise<Outcome> =>
+      db.transaction(async (tx): Promise<Outcome> => {
+        const rows = await tx
+          .select({ revision: projectContextItems.revision, accepted: projectContextItems.accepted })
+          .from(projectContextItems)
+          .where(and(eq(projectContextItems.projectId, projectId), eq(projectContextItems.key, args.key)));
+        const maxRevision = rows.reduce((m, r) => Math.max(m, r.revision), 0);
+        const latestAccepted = rows.filter((r) => r.accepted).reduce((m, r) => Math.max(m, r.revision), 0);
+        const revision = maxRevision + 1;
 
-    // read-before-write is explicit: once a key exists, a write must name the
-    // accepted revision it is based on — never a silent overwrite (§9.2)
-    if (rows.length > 0 && args.baseRevision === undefined) {
-      return reply.status(409).send({ error: "base_revision_required", latestAccepted });
-    }
-    const conflicting = rows.length > 0 && args.baseRevision !== latestAccepted;
-    if (conflicting && !project.arbiterUserId) {
-      return reply.status(422).send({ error: "no_arbiter", detail: "set arbiterUserId to accept conflicting revisions" });
-    }
+        // read-before-write is explicit: once a key exists, a write must name
+        // the accepted revision it is based on — never a silent overwrite (§9.2)
+        if (rows.length > 0 && args.baseRevision === undefined) {
+          return { kind: "reply", status: 409, body: { error: "base_revision_required", latestAccepted } };
+        }
+        const conflicting = rows.length > 0 && args.baseRevision !== latestAccepted;
+        if (conflicting && !project.arbiterUserId) {
+          return {
+            kind: "reply",
+            status: 422,
+            body: { error: "no_arbiter", detail: "set arbiterUserId to accept conflicting revisions" },
+          };
+        }
 
-    const [item] = await db
-      .insert(projectContextItems)
-      .values({
-        projectId,
-        key: args.key,
-        revision,
-        content: args.content,
-        baseRevision: args.baseRevision ?? null,
-        accepted: !conflicting,
-        contributedByUserId: userId,
-        contributedByTeamId: teamId,
-        sourceArtifactId: args.sourceArtifactId ?? null,
-      })
-      .returning();
+        const [item] = await tx
+          .insert(projectContextItems)
+          .values({
+            projectId,
+            key: args.key,
+            revision,
+            content: args.content,
+            baseRevision: args.baseRevision ?? null,
+            accepted: !conflicting,
+            contributedByUserId: userId,
+            contributedByTeamId: teamId,
+            sourceArtifactId: args.sourceArtifactId ?? null,
+          })
+          .returning();
 
-    let approvalId: string | null = null;
-    if (conflicting) {
-      const [approval] = await db
-        .insert(approvals)
-        .values({
+        let approvalId: string | null = null;
+        if (conflicting) {
+          const [approval] = await tx
+            .insert(approvals)
+            .values({
+              userId,
+              objectType: "project",
+              projectId,
+              stageId: `${CONTEXT_CONFLICT_PREFIX}${item!.id}`,
+              approverUserId: project.arbiterUserId!,
+            })
+            .returning({ id: approvals.id });
+          approvalId = approval!.id;
+        }
+        await tx.insert(auditLog).values({
           userId,
           objectType: "project",
-          projectId,
-          stageId: `${CONTEXT_CONFLICT_PREFIX}${item!.id}`,
-          approverUserId: project.arbiterUserId!,
-        })
-        .returning({ id: approvals.id });
-      approvalId = approval!.id;
+          objectId: projectId,
+          detail: {
+            phase: "context",
+            key: args.key,
+            revision,
+            baseRevision: args.baseRevision ?? null,
+            conflicting,
+            teamId,
+            ...(args.sourceArtifactId ? { sourceArtifactId: args.sourceArtifactId } : {}),
+          },
+          effect: conflicting ? "require_approval" : "allow",
+          ruleId: conflicting ? "project-context-conflict" : "project-context-contributed",
+          ruleChain: [],
+          reason: conflicting
+            ? `revision ${revision} of '${args.key}' is based on stale revision ${args.baseRevision}; retained and routed to the named arbiter — never silently overwritten`
+            : `revision ${revision} of '${args.key}' accepted`,
+        });
+        return {
+          kind: "created",
+          body: {
+            id: item!.id,
+            key: args.key,
+            revision,
+            accepted: !conflicting,
+            ...(conflicting ? { conflict: true, approvalId } : {}),
+          },
+        };
+      });
+
+    const isUniqueViolation = (e: unknown) =>
+      (e as { cause?: { code?: string } }).cause?.code === "23505";
+    let outcome: Outcome;
+    try {
+      outcome = await attempt();
+    } catch (e) {
+      // lost the revision-number race — recompute against the winner's commit
+      // and try exactly once more; a second collision surfaces as a clean 409
+      // via the global constraint handler.
+      if (!isUniqueViolation(e)) throw e;
+      outcome = await attempt();
     }
-    await db.insert(auditLog).values({
-      userId,
-      objectType: "project",
-      objectId: projectId,
-      detail: {
-        phase: "context",
-        key: args.key,
-        revision,
-        baseRevision: args.baseRevision ?? null,
-        conflicting,
-        teamId,
-        ...(args.sourceArtifactId ? { sourceArtifactId: args.sourceArtifactId } : {}),
-      },
-      effect: conflicting ? "require_approval" : "allow",
-      ruleId: conflicting ? "project-context-conflict" : "project-context-contributed",
-      ruleChain: [],
-      reason: conflicting
-        ? `revision ${revision} of '${args.key}' is based on stale revision ${args.baseRevision}; retained and routed to the named arbiter — never silently overwritten`
-        : `revision ${revision} of '${args.key}' accepted`,
-    });
-    return reply.status(201).send({
-      id: item!.id,
-      key: args.key,
-      revision,
-      accepted: !conflicting,
-      ...(conflicting ? { conflict: true, approvalId } : {}),
-    });
+    if (outcome.kind === "reply") return reply.status(outcome.status).send(outcome.body);
+    return reply.status(201).send(outcome.body);
   }
 
   app.post("/v1/projects/:projectId/context", async (req, reply) => {
@@ -945,6 +1425,89 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     profiles: await db.select().from(complianceProfiles),
   }));
 
+  // §8.4 audit-log retention: audit_log has NO projectId column, so retention
+  // is a single GLOBAL floor = the MAX auditRetentionDays across ALL compliance
+  // profiles (longest-floor-wins, the same discipline the infra backup floor
+  // uses). A framework with a shorter retention can never shorten another
+  // framework's audit trail. Both endpoints are admin-only (the global gate).
+
+  /** Compute the global retention floor + how many rows currently sit below
+   * it — the admin's before-you-prune view. maxDays null = no profile sets a
+   * retention, so nothing is ever eligible for pruning (fail-safe: keep all). */
+  async function retentionFloor(): Promise<{
+    retainedDays: number | null;
+    floorSource: string[];
+    cutoff: Date | null;
+    prunable: number;
+  }> {
+    const profiles = await db.select().from(complianceProfiles);
+    const withDays = profiles.filter(
+      (p): p is typeof p & { auditRetentionDays: number } => p.auditRetentionDays != null,
+    );
+    if (withDays.length === 0) {
+      return { retainedDays: null, floorSource: [], cutoff: null, prunable: 0 };
+    }
+    const retainedDays = withDays.reduce((m, p) => Math.max(m, p.auditRetentionDays), 0);
+    const floorSource = withDays
+      .filter((p) => p.auditRetentionDays === retainedDays)
+      .map((p) => p.tag);
+    const cutoff = new Date(Date.now() - retainedDays * 24 * 3600 * 1000);
+    const [row] = await db
+      .select({ n: count() })
+      .from(auditLog)
+      .where(lt(auditLog.at, cutoff));
+    return { retainedDays, floorSource, cutoff, prunable: row?.n ?? 0 };
+  }
+
+  app.get("/v1/audit/retention", async () => {
+    const f = await retentionFloor();
+    return {
+      retainedDays: f.retainedDays,
+      floorSource: f.floorSource,
+      cutoff: f.cutoff,
+      prunable: f.prunable,
+      basis: "global max auditRetentionDays across all compliance profiles (longest-floor-wins)",
+    };
+  });
+
+  app.post("/v1/audit/prune", async (req, reply) => {
+    const f = await retentionFloor();
+    if (f.retainedDays == null || f.cutoff == null) {
+      // no framework sets a retention -> nothing is eligible; keep everything
+      return reply.status(200).send({ deleted: 0, retainedDays: null, floorSource: [] });
+    }
+    const deleted = await db
+      .delete(auditLog)
+      .where(lt(auditLog.at, f.cutoff))
+      .returning({ id: auditLog.id });
+    // The prune action is itself audited — a meta row that, by construction,
+    // is newer than the cutoff and so survives its own and every future prune.
+    // audit_log.userId is a non-null uuid with no FK; the deploy-time admin
+    // token has no user id, so fall back to the nil uuid (a valid uuid shape).
+    const actorId = req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000";
+    await db.insert(auditLog).values({
+      userId: actorId,
+      objectType: "project",
+      objectId: null,
+      detail: {
+        phase: "audit-retention-prune",
+        deleted: deleted.length,
+        retainedDays: f.retainedDays,
+        floorSource: f.floorSource,
+        cutoff: f.cutoff,
+      },
+      effect: "allow",
+      ruleId: "audit-log-pruned",
+      ruleChain: [],
+      reason: `pruned ${deleted.length} audit row(s) older than ${f.retainedDays}d (global floor from [${f.floorSource.join(", ")}])`,
+    });
+    return reply.status(200).send({
+      deleted: deleted.length,
+      retainedDays: f.retainedDays,
+      floorSource: f.floorSource,
+    });
+  });
+
   // §8.3: what a project's tags currently drive — with HONEST enforcement
   // labels. Workflow requirements are enforced at instance creation today;
   // mcp/retention/pii are declared policy awaiting their enforcement points.
@@ -964,16 +1527,25 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       enforcement: {
         requiredWorkflowTemplates: "enforced-at-instance-creation",
         mcpDefaultMode: "declared-not-enforced",
-        // §8.3 -> §8.2: auditRetentionDays now also FEEDS the pillar-3 infra
-        // backup-retention floor (consumed there); audit-LOG pruning itself
-        // remains a declared policy awaiting its own enforcement point.
-        auditRetentionDays: "consumed-by-infra-backup-floor; audit-log pruning declared-not-enforced",
+        // §8.3 -> §8.2: auditRetentionDays FEEDS the pillar-3 infra backup
+        // floor AND now drives audit-log pruning: POST /v1/audit/prune deletes
+        // rows older than the GLOBAL max retention across all profiles
+        // (longest-floor-wins), so a shorter-retention framework can never
+        // shorten another's audit trail. GET /v1/audit/retention shows the
+        // computed floor before pruning.
+        auditRetentionDays:
+          "consumed-by-infra-backup-floor; audit-log pruning enforced via POST /v1/audit/prune (global floor)",
         // These two are ENFORCED by pillar 3: any infra resource carrying this
         // project's tags derives a backup-retention floor / patch-cadence
         // ceiling from them at scan time (see /v1/infra).
         backupRetentionDays: "enforced-as-infra-floor (pillar 3)",
         patchCadenceDays: "enforced-as-infra-ceiling (pillar 3)",
-        piiMode: "declared-not-enforced",
+        // §8.4: piiMode is enforced at every PROJECT-ATTRIBUTED model and
+        // connector dispatch — input blocks BEFORE the provider call (no
+        // cost), output blocks bill-and-withhold, warn attaches a warning,
+        // log records category counts. The MCP-proxy tool path is NOT yet
+        // enforced (it carries no projectId) — a disclosed follow-up.
+        piiMode: "enforced-on-model-and-connector-dispatch (mcp deferred)",
       },
     };
   });
@@ -1072,7 +1644,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     const agentWhere = and(where, eq(usageEvents.objectType, "agent"));
     const connectorWhere = and(where, eq(usageEvents.objectType, "connector"));
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 3600 * 1000);
-    const [[measured], byUser, byAgent, byConnector, estimated, [recent]] = await Promise.all([
+    const [[measured], byUser, byAgent, byConnector, byTeam, estimated, [recent]] = await Promise.all([
       db
         .select({
           events: count(),
@@ -1114,6 +1686,35 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         .leftJoin(connectors, eq(usageEvents.connectorId, connectors.id))
         .where(connectorWhere)
         .groupBy(usageEvents.connectorId, connectors.name, usageEvents.operation),
+      // Cross-team rollup WITHIN this project: attribute each spending user's
+      // cost to the team they contribute under HERE (project_members.teamId),
+      // not their home team. A member with no team on this project — or spend
+      // from a non-member — rolls up under a null teamId row (labeled "(no
+      // team)" in the UI; the API never fabricates a team). One ledger, still
+      // scoped by the same `where` as every other breakdown.
+      db
+        .select({
+          teamId: projectMembers.teamId,
+          name: teams.name,
+          costUsd: sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8`,
+          events: count(),
+        })
+        .from(usageEvents)
+        .leftJoin(
+          projectMembers,
+          and(
+            eq(usageEvents.userId, projectMembers.userId),
+            eq(projectMembers.projectId, projectId),
+          ),
+        )
+        .leftJoin(teams, eq(projectMembers.teamId, teams.id))
+        .where(where)
+        .groupBy(projectMembers.teamId, teams.name),
+      // Estimated (not measured) savings, grouped by the optimization technique
+      // that produced them. NOTE: a per-workflow cost-attribution source for
+      // cost_events is RESERVED for a future slice (roll a workflow stage's
+      // spend up to its parent initiative) — no writer is built yet, so no such
+      // rows exist to group here today.
       db
         .select({
           technique: costEvents.technique,
@@ -1130,27 +1731,69 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     ]);
 
     const spentUsd = measured?.costUsd ?? 0;
+    // budget window: under a 'monthly' budget the gauge reads only the current
+    // calendar-month spend; the lifetime total is still reported alongside it.
+    const now = new Date();
+    const periodKey = currentPeriodKey(now);
+    const monthly = isMonthly(project);
+    let windowedSpentUsd = spentUsd;
+    if (monthly) {
+      const [w] = await db
+        .select({ costUsd: sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8` })
+        .from(usageEvents)
+        .where(and(where, gte(usageEvents.at, periodStart(now))));
+      windowedSpentUsd = w?.costUsd ?? 0;
+    }
+    const pct = project.alertThresholdPct ?? 100;
+    const thresholdUsd =
+      project.budgetUsd == null ? null : Number(((project.budgetUsd * pct) / 100).toFixed(6));
     // simple run-rate forecast, labeled as such: last-7-days daily rate
     // projected to the end of the current month
     const dailyRateUsd = (recent?.costUsd ?? 0) / 7;
-    const now = new Date();
     const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
     const daysRemaining = Math.max(0, (endOfMonth.getTime() - now.getTime()) / (24 * 3600 * 1000));
     const projectedEomUsd = Number((spentUsd + dailyRateUsd * daysRemaining).toFixed(6));
 
+    // pillar-5 rollup label: this project's parent Initiative, if grouped under
+    // one. Surfaced here (reporting-only) so the member-facing /app can show the
+    // initiative name without the admin-only /v1/initiatives endpoint.
+    const [initiative] = project.initiativeId
+      ? await db
+          .select({ id: initiatives.id, name: initiatives.name, costCenter: initiatives.costCenter })
+          .from(initiatives)
+          .where(eq(initiatives.id, project.initiativeId))
+      : [];
+
     return {
       project,
+      initiative: initiative ?? null,
       measured,
       byUser,
       byAgent,
       byConnector,
+      byTeam,
       estimatedSavings: estimated,
       budget: {
         budgetUsd: project.budgetUsd,
-        spentUsd,
-        remainingUsd: project.budgetUsd == null ? null : Number((project.budgetUsd - spentUsd).toFixed(6)),
-        overBudget: project.budgetUsd != null && spentUsd > project.budgetUsd,
+        // the gauge reads the WINDOWED spend (== lifetime when period='none')
+        spentUsd: windowedSpentUsd,
+        lifetimeSpentUsd: spentUsd,
+        period: monthly ? "monthly" : "none",
+        periodKey: monthly ? periodKey : null,
+        remainingUsd:
+          project.budgetUsd == null ? null : Number((project.budgetUsd - windowedSpentUsd).toFixed(6)),
+        overBudget: project.budgetUsd != null && windowedSpentUsd > project.budgetUsd,
+        alertThresholdPct: pct,
+        thresholdUsd,
+        thresholdCrossed:
+          project.budgetUsd != null &&
+          thresholdUsd != null &&
+          windowedSpentUsd >= thresholdUsd &&
+          windowedSpentUsd <= project.budgetUsd,
         overageApproved: project.overageApproved,
+        overageApprovedPeriod: project.overageApprovedPeriod,
+        // whether the latch is currently suppressing enforcement
+        overageActive: overageActive(project, periodKey),
       },
       forecast: {
         basis: "last-7-days-run-rate projected to end of current month",
@@ -1158,5 +1801,34 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         projectedEomUsd,
       },
     };
+  });
+
+  // Per-invocation CSV export for a project's spend — same member/admin authz
+  // as the /costs rollup (membership is the whole test for a non-admin). The
+  // rows are the raw usage_events, newest first, for FinOps/chargeback export.
+  app.get("/v1/projects/:projectId/costs.csv", async (req, reply) => {
+    const { projectId } = projectIdParam.parse(req.params);
+    const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
+    if (!project) return reply.status(404).send({ error: "unknown_project" });
+    if (!req.authCtx.isAdmin) {
+      if (!req.authCtx.userId) return reply.status(403).send({ error: "not_a_project_member" });
+      const [membership] = await db
+        .select({ userId: projectMembers.userId })
+        .from(projectMembers)
+        .where(
+          and(eq(projectMembers.projectId, projectId), eq(projectMembers.userId, req.authCtx.userId)),
+        );
+      if (!membership) return reply.status(403).send({ error: "not_a_project_member" });
+    }
+    const rows = await db
+      .select()
+      .from(usageEvents)
+      .where(eq(usageEvents.projectId, projectId))
+      .orderBy(desc(usageEvents.at));
+    const safeName = project.name.replace(/[^A-Za-z0-9_.-]+/g, "-");
+    return reply
+      .header("content-type", "text/csv; charset=utf-8")
+      .header("content-disposition", `attachment; filename="${safeName}-costs.csv"`)
+      .send(usageEventsCsv(rows));
   });
 }

@@ -56,6 +56,19 @@ async function api(method, path, body) {
 }
 const get = (p) => api("GET", p);
 const post = (p, b) => api("POST", p, b ?? {});
+const patch = (p, b) => api("PATCH", p, b ?? {});
+// authed file download: fetch the CSV with our bearer, then trigger a browser
+// save via a transient blob URL (the endpoint sets Content-Disposition too)
+async function downloadCsv(path, filename) {
+  const res = await fetch(path, { headers: { authorization: "Bearer " + KEY } });
+  if (!res.ok) { toast("CSV download failed (" + res.status + ")"); return; }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
 const del = (p) => api("DELETE", p);
 
 function toast(msg, ms) {
@@ -106,13 +119,27 @@ function barChart(items, valueKey, labelFn) {
   }).join("");
   return \`<div class="chart"><svg viewBox="0 0 \${w} \${Math.min(items.length, 10) * rowH}" xmlns="http://www.w3.org/2000/svg">\${rows}</svg></div>\`;
 }
-function budgetGauge(spent, cap, overageApproved) {
+function budgetGauge(spent, cap, overageApproved, opts) {
   if (cap == null) return "<span class='dim'>no budget set</span>";
+  opts = opts || {};
   const pct = Math.min(100, (spent / cap) * 100);
   const over = spent > cap;
-  return \`<div class="row"><span class="num">\${fmtUsd(spent)}</span><span class="dim">of \${fmtUsd(cap)}</span>
-    \${over ? '<span class="badge ' + (overageApproved ? "warn" : "bad") + '">' + (overageApproved ? "overage approved" : "over budget") + "</span>" : ""}</div>
-    <div class="bar" style="margin-top:8px"><i class="\${over ? "over" : ""}" style="width:\${pct}%"></i></div>\`;
+  const tPct = opts.alertThresholdPct;
+  // amber threshold-crossed vs red over-budget: prefer the API's own flag, but
+  // fall back to a local compute so the fleet-list mini-gauge works too
+  const crossed = !over && (opts.thresholdCrossed ?? (tPct != null && tPct < 100 && opts.thresholdUsd != null && spent >= opts.thresholdUsd));
+  const periodLabel = opts.period === "monthly" ? " this month" : "";
+  const marker = (tPct != null && tPct < 100)
+    ? '<span class="mark" style="left:' + tPct + '%" title="' + tPct + '% alert threshold"></span>'
+    : "";
+  const badge = over
+    ? '<span class="badge ' + (overageApproved ? "warn" : "bad") + '">' + (overageApproved ? "overage approved" : "over budget") + "</span>"
+    : crossed
+    ? '<span class="badge warn">' + tPct + "% threshold crossed</span>"
+    : "";
+  const fill = over ? "over" : crossed ? "warn" : "";
+  return \`<div class="row"><span class="num">\${fmtUsd(spent)}</span><span class="dim">of \${fmtUsd(cap)}\${periodLabel}</span>\${badge}</div>
+    <div class="bar" style="margin-top:8px;position:relative"><i class="\${fill}" style="width:\${pct}%"></i>\${marker}</div>\`;
 }
 
 // ---------------------------------------------------------------- shell --
@@ -353,6 +380,19 @@ async function playgroundPage() {
   </div>\`;
 }
 
+// §8.4 PII badge — categories only (COUNTS in the tooltip), never content.
+function piiCats(hits) { return (hits ?? []).map((h) => h.category).join(", "); }
+function piiBadge(pii) {
+  const cats = piiCats([...(pii.inputHits ?? []), ...(pii.outputHits ?? [])]);
+  const tip = "compliance PII policy '" + esc(pii.mode) + "' — categories: " + esc(cats || "none")
+    + (pii.withheld ? " · output withheld and billed" : "");
+  if (pii.action === "block")
+    return '<span class="badge bad" title="' + tip + '">PII blocked' + (pii.withheld ? " · output withheld" : "") + "</span>";
+  if (pii.action === "warn")
+    return '<span class="badge warn" title="' + tip + '">PII warning: ' + esc(cats) + "</span>";
+  return '<span class="badge" title="' + tip + '">PII logged: ' + esc(cats) + "</span>";
+}
+
 function renderExchange(x, i) {
   const meta = [];
   if (x.result) {
@@ -373,6 +413,11 @@ function renderExchange(x, i) {
       if (r.dispatch.credentialSource === "platform") meta.push('<span class="badge">platform key</span>');
       if (r.dispatch.projectBudgetAlerted) meta.push('<span class="badge warn">budget alert</span>');
     }
+    // §8.4 PII enforcement — the compliance cascade's piiMode acting on this
+    // dispatch. block (red) / warn (amber) / log (faint). Categories only,
+    // never the matched content.
+    const pii = r.dispatch && r.dispatch.pii;
+    if (pii) meta.push(piiBadge(pii));
     // pillar 6 context compaction — what this turn's model actually saw
     if (r.compaction) {
       if (r.compaction.compacted) meta.push('<span class="badge accent" title="this turn pushed the thread past the compaction threshold — older turns were summarized by a governed, metered dispatch; stored history is untouched">history compacted</span>');
@@ -386,6 +431,9 @@ function renderExchange(x, i) {
     meta.push('<span class="badge bad" title="' + esc(x.denied.ruleId) + '">denied · ' + esc(rid) + "</span>");
   }
   if (x.error) meta.push('<span class="badge bad">' + esc(x.error) + "</span>");
+  // §8.4 input-block: the pii ships on the error/denial payload, not on a
+  // dispatch result — render it here if it wasn't already shown above
+  if (x.pii && !(x.result && x.result.dispatch && x.result.dispatch.pii)) meta.push(piiBadge(x.pii));
   // replayed exchanges carry no decision/routing payload — no empty expander
   const trace = x.denied || (x.result && (x.result.decision || x.result.routing || x.result.compaction))
     ? \`<details style="margin-top:6px"><summary class="faint" style="cursor:pointer;font-size:11.5px">governance trace</summary>
@@ -485,6 +533,7 @@ async function sendPrompt() {
       x.streaming = false;
       if (j && j.decision && j.decision.effect !== "allow") { x.denied = j.decision; x.text = j.decision.reason; }
       else { x.error = (j && j.error) ?? ("HTTP " + res.status); x.text = errMessage(res.status, j ?? {}); }
+      if (j && j.pii) x.pii = j.pii;
       drawChat(); return;
     }
     const reader = res.body.getReader();
@@ -502,7 +551,16 @@ async function sendPrompt() {
         if (!ev || !data) continue;
         const payload = JSON.parse(data);
         if (ev === "delta") { x.text += payload.text; drawChat(); }
-        if (ev === "result") { x.result = payload; x.streaming = false; if (payload.dispatch?.refusal) x.text = "The model declined this request."; drawChat(); }
+        if (ev === "result") {
+          x.result = payload; x.streaming = false;
+          if (payload.dispatch?.refusal) x.text = "The model declined this request.";
+          // §8.4 output bill-and-withhold: the model streamed deltas, but the
+          // final output was withheld — replace the bubble with the marker so
+          // the withheld content does not remain on screen
+          if (payload.dispatch?.pii?.withheld) x.text = payload.dispatch.outputText;
+          if (payload.dispatch?.pii) x.pii = payload.dispatch.pii;
+          drawChat();
+        }
         // the error event carries the same detail the JSON path does — losing
         // it leaves an empty bubble under a bare red slug. Anything already
         // streamed stays; the explanation is appended to it.
@@ -510,6 +568,8 @@ async function sendPrompt() {
           const msg = errMessage(res.status, payload);
           x.error = payload.error;
           x.text = x.text ? x.text + "\\n\\n" + msg : msg;
+          // §8.4 input-block ships its pii summary on the error payload
+          if (payload.pii) x.pii = payload.pii;
           // a failed dispatch still had a governance + routing decision — keep
           // it so the trace explains which agent was chosen and why
           if (payload.decision) x.result = { decision: payload.decision, routing: payload.routing };
@@ -1618,13 +1678,23 @@ async function projectCard(p, instances) {
     ? \`<div class="row" style="margin-top:10px"><span class="badge warn">\${pending.length} revision\${pending.length > 1 ? "s" : ""} awaiting arbiter</span>\${arbLine}</div>\`
     : "";
 
-  const memberRows = members.map((m) => \`<div class="node-row">
+  const ownerCount = members.filter((m) => m.role === "owner").length;
+  const memberRows = members.map((m) => {
+    const soleOwner = m.role === "owner" && ownerCount <= 1;
+    const badge = \`<span class="badge \${m.role === "owner" ? "accent" : m.role === "contributor" ? "info" : ""}">\${m.role}</span>\`;
+    const roleSel = \`<select class="small" data-mrole="\${m.userId}" data-pid="\${p.id}"\${soleOwner ? ' disabled title="promote another owner before changing the sole owner"' : ""}>\${["owner", "contributor", "viewer"].map((r) => \`<option value="\${r}"\${r === m.role ? " selected" : ""}>\${r}</option>\`).join("")}</select>\`;
+    const rmBtn = \`<button class="ghost small" data-mremove="\${m.userId}" data-pid="\${p.id}"\${soleOwner ? ' disabled title="promote another owner before removing the sole owner"' : ""}>Remove</button>\`;
+    return \`<div class="node-row">
     <div class="grow">
       <div>\${esc(m.userName ?? "unknown")}\${m.userId === ME.userId ? ' <span class="faint">(you)</span>' : ""}</div>
       <div class="dim" style="font-size:12px">\${m.teamName ? esc(m.teamName) : "no team"} · joined \${ago(m.createdAt)}</div>
     </div>
-    <span class="badge \${m.role === "owner" ? "accent" : m.role === "contributor" ? "info" : ""}">\${m.role}</span>
-  </div>\`).join("");
+    \${myRole === "owner" ? roleSel + " " + rmBtn : badge}
+  </div>\`;
+  }).join("");
+  const memberErr = myRole === "owner"
+    ? \`<div class="err-line" data-merr="\${p.id}" style="margin-top:4px"></div>\`
+    : "";
   const nonMembers = DIRECTORY.filter((u) => !members.some((m) => m.userId === u.id));
   const addMemberForm = myRole !== "owner" ? "" : nonMembers.length === 0
     ? '<div class="faint" style="font-size:12px;margin-top:8px">everyone in the directory is already a member</div>'
@@ -1672,6 +1742,7 @@ async function projectCard(p, instances) {
     \${promotable.length ? '<h2 style="margin-top:14px">Promote a signed-off artifact</h2>' + promoteRows : ""}
     <h2 style="margin-top:14px">Members</h2>
     \${memberRows || '<div class="faint" style="font-size:12.5px">no members — this project is an open cost bucket</div>'}
+    \${memberErr}
     \${addMemberForm}
   </div>\`;
 }
@@ -1724,6 +1795,38 @@ function wireProjects() {
         await post("/v1/projects/" + pid + "/members", { userId, role, ...(teamId ? { teamId } : {}) });
         toast("Member added"); render();
       } catch (e) { if (err) err.textContent = e.message; }
+    }));
+  document.querySelectorAll("[data-mrole]").forEach((sel) =>
+    sel.addEventListener("change", async () => {
+      const pid = sel.dataset.pid, userId = sel.dataset.mrole;
+      const err = $('[data-merr="' + pid + '"]');
+      if (err) err.textContent = "";
+      try {
+        await patch("/v1/projects/" + pid + "/members/" + userId, { role: sel.value });
+        toast("Role updated"); render();
+      } catch (e) {
+        // last-owner block and any other rejection surface on the error line;
+        // re-render so the dropdown snaps back to the persisted role
+        if (err) err.textContent = e.status === 409 && e.payload?.error === "last_owner"
+          ? "Can't demote the sole owner — promote another owner first."
+          : e.message;
+        render();
+      }
+    }));
+  document.querySelectorAll("[data-mremove]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const pid = b.dataset.pid, userId = b.dataset.mremove;
+      if (!confirm("Remove this member? They lose context visibility and spend attribution for this project.")) return;
+      const err = $('[data-merr="' + pid + '"]');
+      if (err) err.textContent = "";
+      try {
+        await del("/v1/projects/" + pid + "/members/" + userId);
+        toast("Member removed"); render();
+      } catch (e) {
+        if (err) err.textContent = e.status === 409 && e.payload?.error === "last_owner"
+          ? "Can't remove the sole owner — promote another owner first."
+          : e.message;
+      }
     }));
   document.querySelectorAll("[data-promote]").forEach((b) =>
     b.addEventListener("click", () => promoteArtifact(b.dataset.pid, b.dataset.promote)));
@@ -1808,19 +1911,30 @@ function wireSpend() {
       const out = $("#spend-proj");
       out.innerHTML = '<div class="empty">loading…</div>';
       try {
-        const c = await get("/v1/projects/" + b.dataset.spendproj + "/costs");
+        const pid = b.dataset.spendproj;
+        const c = await get("/v1/projects/" + pid + "/costs");
         const m = c.measured ?? {};
+        const bg = c.budget ?? {};
         const userName = (uid) => (DIRECTORY.find((u) => u.id === uid) || {}).name ?? uid;
+        const periodNote = bg.period === "monthly"
+          ? '<span class="dim" style="font-size:12px">budget window: this calendar month (' + esc(bg.periodKey ?? "") + ")</span>"
+          : '<span class="dim" style="font-size:12px">budget window: lifetime</span>';
         out.innerHTML =
-          '<div class="grid2" style="margin-top:12px">'
+          (c.initiative ? '<p class="sub" style="margin:12px 0 0">Initiative: ' + esc(c.initiative.name) + "</p>" : "")
+          + '<div class="grid2" style="margin-top:12px">'
           + '<div class="card stat"><div class="v">' + fmtUsd(m.costUsd) + '</div><div class="l">project measured spend · ' + (m.events ?? 0) + " calls</div></div>"
           + '<div class="card stat"><div class="v">' + fmtUsd(c.forecast?.projectedEomUsd) + '</div><div class="l">projected month-end · ' + esc(c.forecast?.basis ?? "") + "</div></div>"
           + "</div>"
-          + '<h2>Budget vs actual</h2><div class="card">' + budgetGauge(c.budget.spentUsd, c.budget.budgetUsd, c.budget.overageApproved) + "</div>"
+          + '<div class="row" style="margin-top:14px"><h2 style="margin:0">Budget vs actual</h2><span class="grow"></span><button class="small" data-csv="' + esc(pid) + '">Download CSV</button></div>'
+          + '<div class="card">' + budgetGauge(bg.spentUsd, bg.budgetUsd, bg.overageApproved, bg) + '<div class="row" style="margin-top:8px">' + periodNote + "</div></div>"
           + '<h2>Showback by member</h2><div class="card">' + barChart(c.byUser, "costUsd", (i) => userName(i.userId)) + "</div>"
+          + '<h2>Showback by team</h2><div class="card">' + barChart(c.byTeam ?? [], "costUsd", (i) => i.name ?? "(no team)") + "</div>"
           + '<h2>By agent / model</h2><div class="card">' + barChart(c.byAgent, "costUsd", (i) => AGENT_NAMES[i.agentId] ?? i.model) + "</div>"
           + '<h2>Spend by connector</h2><div class="card">' + ((c.byConnector ?? []).length ? barChart(c.byConnector, "costUsd", (i) => (i.name ?? "connector") + " · " + (i.operation ?? "")) : '<div class="empty">No metered connector calls for this project.</div>') + "</div>"
           + '<h2>Estimated savings by technique</h2><div class="card">' + barChart(c.estimatedSavings, "estimatedCostSavedUsd", (i) => i.technique) + "</div>";
+        const csvBtn = out.querySelector("[data-csv]");
+        if (csvBtn) csvBtn.addEventListener("click", () =>
+          downloadCsv("/v1/projects/" + pid + "/costs.csv", (c.project?.name ?? "project") + "-costs.csv"));
       } catch (e) { out.innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; }
     }));
 }

@@ -8,9 +8,10 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { z } from "zod";
-import { and, connectors, createDb, eq, mcpTools, modelCredentials, runMigrations, usageEvents, type Db } from "@regulait/db";
+import { and, connectors, createDb, eq, mcpTools, modelCredentials, projects, runMigrations, usageEvents, type Db } from "@regulait/db";
 import { resolveModelProvider, type MockModelProvider } from "@regulait/model-provider";
 import { buildApp } from "./app.js";
+import { currentPeriodKey } from "./projects.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -5647,6 +5648,192 @@ describe("per-project cost rollup (pillar 5): attribution, dashboard, budget enf
     });
     expect(missing.statusCode).toBe(404);
   });
+
+  // ----- polish slice 3: monthly budget window + alert threshold + CSV -----
+
+  it("a monthly budget counts only current-month spend; older spend is excluded from the gate but shown as lifetime", async () => {
+    const proj = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/projects",
+      payload: {
+        name: "monthly-window", budgetUsd: 1, budgetApproverUserId: finnId,
+        budgetPeriod: "monthly", alertThresholdPct: 50,
+      },
+    });
+    expect(proj.statusCode).toBe(201);
+    expect(proj.json().budgetPeriod).toBe("monthly");
+    expect(proj.json().alertThresholdPct).toBe(50);
+    const monthlyId = proj.json().id;
+
+    // an OLD event (previous calendar month), over budget on its own — must be
+    // excluded from the current-month window but counted in lifetime
+    const now = new Date();
+    const lastMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 15, 12, 0, 0));
+    await db.insert(usageEvents).values({
+      userId: tessaId, projectId: monthlyId, objectType: "agent",
+      agentId: projWorkerId, model: "mock-proj", inputTokens: 1, outputTokens: 1,
+      costUsd: 5, at: lastMonth,
+    });
+
+    const roll = await app.inject({ method: "GET", headers: AUTH, url: `/v1/projects/${monthlyId}/costs` });
+    const bg = roll.json().budget;
+    expect(bg.period).toBe("monthly");
+    expect(bg.periodKey).toBe(currentPeriodKey(now));
+    expect(bg.spentUsd).toBe(0); // windowed: the old row is outside the window
+    expect(bg.lifetimeSpentUsd).toBeCloseTo(5, 6);
+    expect(bg.remainingUsd).toBeCloseTo(1, 6); // full budget available this month
+
+    // a current-month dispatch is ALLOWED despite the over-budget lifetime spend
+    const inv = await app.inject({
+      method: "POST", headers: tessaAuth, url: `/v1/agents/${projWorkerId}/invoke`,
+      payload: { mode: "execute", input: "current month spend", dispatch: true, projectId: monthlyId },
+    });
+    expect(inv.statusCode).toBe(200);
+  });
+
+  it("the alert threshold warns below the cap; the cap hard-blocks; the overage is scoped to its period", async () => {
+    const proj = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/projects",
+      payload: {
+        name: "monthly-threshold", budgetUsd: 1, budgetApproverUserId: finnId,
+        budgetPeriod: "monthly", alertThresholdPct: 60,
+      },
+    });
+    const mId = proj.json().id;
+    const now = new Date();
+    const inWindow = () => new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 1, 0, 0));
+
+    // seed current-month spend to 70% of the $1 budget (past the 60% threshold,
+    // below the cap) so the next dispatch trips the NON-BLOCKING alert
+    await db.insert(usageEvents).values({
+      userId: tessaId, projectId: mId, objectType: "agent",
+      agentId: projWorkerId, model: "mock-proj", inputTokens: 1, outputTokens: 1,
+      costUsd: 0.7, at: inWindow(),
+    });
+    const warned = await app.inject({
+      method: "POST", headers: tessaAuth, url: `/v1/agents/${projWorkerId}/invoke`,
+      payload: { mode: "execute", input: "nudge past threshold", dispatch: true, projectId: mId },
+    });
+    expect(warned.statusCode).toBe(200); // non-blocking
+    expect(warned.json().dispatch.projectBudgetAlerted).toBe(false);
+    expect(warned.json().dispatch.projectBudgetThresholdAlert).toMatchObject({
+      thresholdPct: 60, period: currentPeriodKey(now),
+    });
+    const rollWarn = await app.inject({ method: "GET", headers: AUTH, url: `/v1/projects/${mId}/costs` });
+    expect(rollWarn.json().budget.thresholdCrossed).toBe(true);
+    expect(rollWarn.json().budget.overBudget).toBe(false);
+
+    // push windowed spend over the cap → the pre-gate hard-blocks the next call
+    await db.insert(usageEvents).values({
+      userId: tessaId, projectId: mId, objectType: "agent",
+      agentId: projWorkerId, model: "mock-proj", inputTokens: 1, outputTokens: 1,
+      costUsd: 0.5, at: inWindow(),
+    });
+    const blocked = await app.inject({
+      method: "POST", headers: tessaAuth, url: `/v1/agents/${projWorkerId}/invoke`,
+      payload: { mode: "execute", input: "over cap", dispatch: true, projectId: mId },
+    });
+    expect(blocked.statusCode).toBe(409);
+    expect(blocked.json().error).toBe("project_budget_exceeded");
+
+    // the named approver sanctions the overage → dispatch resumes THIS period,
+    // and the latch is stamped with the current period key
+    const finnAuth = await authFor(finnId);
+    const inbox = await app.inject({ method: "GET", headers: finnAuth, url: "/v1/approvals" });
+    const pending = inbox.json().approvals.find(
+      (a: { objectType: string; projectId: string | null; stageId: string | null; status: string }) =>
+        a.objectType === "project" && a.projectId === mId && a.status === "pending",
+    );
+    expect(pending).toBeDefined();
+    await app.inject({
+      method: "POST", headers: finnAuth, url: `/v1/approvals/${pending.id}/decide`,
+      payload: { decision: "approved" },
+    });
+    const resumed = await app.inject({
+      method: "POST", headers: tessaAuth, url: `/v1/agents/${projWorkerId}/invoke`,
+      payload: { mode: "execute", input: "resumed this period", dispatch: true, projectId: mId },
+    });
+    expect(resumed.statusCode).toBe(200);
+    const rollAfter = await app.inject({ method: "GET", headers: AUTH, url: `/v1/projects/${mId}/costs` });
+    expect(rollAfter.json().budget.overageApprovedPeriod).toBe(currentPeriodKey(now));
+    expect(rollAfter.json().budget.overageActive).toBe(true);
+
+    // simulate a NEW period: the latch was approved for a prior period, so it no
+    // longer suppresses enforcement — the pre-gate blocks again
+    await db
+      .update(projects)
+      .set({ overageApprovedPeriod: "2000-01" })
+      .where(eq(projects.id, mId));
+    const nextPeriod = await app.inject({
+      method: "POST", headers: tessaAuth, url: `/v1/agents/${projWorkerId}/invoke`,
+      payload: { mode: "execute", input: "new period", dispatch: true, projectId: mId },
+    });
+    expect(nextPeriod.statusCode).toBe(409);
+    expect(nextPeriod.json().error).toBe("project_budget_exceeded");
+  });
+
+  it("PATCH can set budgetPeriod and alertThresholdPct, and the rollup reflects them", async () => {
+    const proj = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/projects",
+      payload: { name: "patch-period", budgetUsd: 4, budgetApproverUserId: finnId },
+    });
+    const pId = proj.json().id;
+    // default: lifetime, threshold 100
+    const before = await app.inject({ method: "GET", headers: AUTH, url: `/v1/projects/${pId}/costs` });
+    expect(before.json().budget.period).toBe("none");
+    expect(before.json().budget.alertThresholdPct).toBe(100);
+
+    const patched = await app.inject({
+      method: "PATCH", headers: AUTH, url: `/v1/projects/${pId}`,
+      payload: { budgetPeriod: "monthly", alertThresholdPct: 75 },
+    });
+    expect(patched.statusCode).toBe(200);
+    expect(patched.json().budgetPeriod).toBe("monthly");
+    expect(patched.json().alertThresholdPct).toBe(75);
+    const after = await app.inject({ method: "GET", headers: AUTH, url: `/v1/projects/${pId}/costs` });
+    expect(after.json().budget.period).toBe("monthly");
+    expect(after.json().budget.alertThresholdPct).toBe(75);
+    // out-of-range threshold is rejected by the schema
+    const bad = await app.inject({
+      method: "PATCH", headers: AUTH, url: `/v1/projects/${pId}`,
+      payload: { alertThresholdPct: 250 },
+    });
+    expect(bad.statusCode).toBe(400);
+  });
+
+  it("costs.csv exports per-invocation rows with a header, escaping, and member-only authz", async () => {
+    // admin sees atlas' rows (3 dispatches from the attribution test)
+    const csv = await app.inject({ method: "GET", headers: AUTH, url: `/v1/projects/${atlasId}/costs.csv` });
+    expect(csv.statusCode).toBe(200);
+    expect(csv.headers["content-type"]).toContain("text/csv");
+    expect(csv.headers["content-disposition"]).toContain("attachment");
+    const lines = csv.body.trim().split("\r\n");
+    expect(lines[0]).toBe(
+      "at,userId,objectType,agentId,connectorId,model,operation,inputTokens,outputTokens,costUsd,measuredCostSavedUsd,projectId",
+    );
+    expect(lines.length).toBe(1 + 3); // header + 3 usage rows
+
+    // a non-member (atlas is memberless, so non-admins are refused) gets 403
+    const denied = await app.inject({ method: "GET", headers: tessaAuth, url: `/v1/projects/${atlasId}/costs.csv` });
+    expect(denied.statusCode).toBe(403);
+
+    // proper CSV escaping: a model with a comma and a quote is quoted + doubled
+    const proj = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/projects", payload: { name: "csv-escape" },
+    });
+    const eId = proj.json().id;
+    await db.insert(usageEvents).values({
+      userId: tessaId, projectId: eId, objectType: "agent",
+      agentId: projWorkerId, model: 'a,b"c', inputTokens: 1, outputTokens: 1, costUsd: 0.01,
+    });
+    const esc = await app.inject({ method: "GET", headers: AUTH, url: `/v1/projects/${eId}/costs.csv` });
+    expect(esc.body).toContain('"a,b""c"');
+
+    // the caller's own usage export honours ?format=csv
+    const mine = await app.inject({ method: "GET", headers: tessaAuth, url: "/v1/usage-events?format=csv" });
+    expect(mine.statusCode).toBe(200);
+    expect(mine.headers["content-type"]).toContain("text/csv");
+    expect(mine.body.split("\r\n")[0]).toContain("at,userId,objectType");
+  });
 });
 
 describe("shared projects (pillar 4, ADR-0011): membership, context, conflicts, promotion", () => {
@@ -6030,7 +6217,10 @@ describe("compliance classification cascade (§8.3)", () => {
       requiredTemplateIds: [sensitiveTplId],
     });
     expect(view.json().enforcement.requiredWorkflowTemplates).toBe("enforced-at-instance-creation");
-    expect(view.json().enforcement.piiMode).toBe("declared-not-enforced");
+    // §8.4: piiMode is now enforced at every project-attributed model +
+    // connector dispatch (MCP-proxy tool path deferred — it carries no
+    // projectId); the label is honest about that split.
+    expect(view.json().enforcement.piiMode).toBe("enforced-on-model-and-connector-dispatch (mcp deferred)");
   });
 
   it("classification forces required workflow stages with no manual per-control setup", async () => {

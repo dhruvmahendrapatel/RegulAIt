@@ -226,13 +226,35 @@ function barChart(items, valueKey, labelFn) {
   }).join("");
   return \`<div class="chart"><svg viewBox="0 0 \${w} \${Math.min(items.length, 10) * rowH}" xmlns="http://www.w3.org/2000/svg">\${rows}</svg></div>\`;
 }
-function budgetGauge(spent, cap, overageApproved) {
+function budgetGauge(spent, cap, overageApproved, opts) {
   if (cap == null) return "<span class='dim'>no budget set</span>";
+  opts = opts || {};
   const pct = Math.min(100, (spent / cap) * 100);
   const over = spent > cap;
-  return \`<div class="row"><span class="num">\${fmtUsd(spent)}</span><span class="dim">of \${fmtUsd(cap)}</span>
-    \${over ? '<span class="badge ' + (overageApproved ? "warn" : "bad") + '">' + (overageApproved ? "overage approved" : "over budget") + "</span>" : ""}</div>
-    <div class="bar" style="margin-top:8px"><i class="\${over ? "over" : ""}" style="width:\${pct}%"></i></div>\`;
+  const tPct = opts.alertThresholdPct;
+  const crossed = !over && (opts.thresholdCrossed ?? (tPct != null && tPct < 100 && opts.thresholdUsd != null && spent >= opts.thresholdUsd));
+  const periodLabel = opts.period === "monthly" ? " this month" : "";
+  const marker = (tPct != null && tPct < 100)
+    ? '<span class="mark" style="left:' + tPct + '%" title="' + tPct + '% alert threshold"></span>'
+    : "";
+  const badge = over
+    ? '<span class="badge ' + (overageApproved ? "warn" : "bad") + '">' + (overageApproved ? "overage approved" : "over budget") + "</span>"
+    : crossed
+    ? '<span class="badge warn">' + tPct + "% threshold crossed</span>"
+    : "";
+  const fill = over ? "over" : crossed ? "warn" : "";
+  return \`<div class="row"><span class="num">\${fmtUsd(spent)}</span><span class="dim">of \${fmtUsd(cap)}\${periodLabel}</span>\${badge}</div>
+    <div class="bar" style="margin-top:8px;position:relative"><i class="\${fill}" style="width:\${pct}%"></i>\${marker}</div>\`;
+}
+// authed CSV download via a transient blob URL (endpoint sets Content-Disposition)
+async function downloadCsv(path, filename) {
+  const res = await fetch(path, { headers: { authorization: "Bearer " + KEY } });
+  if (!res.ok) { alert("CSV download failed (" + res.status + ")"); return; }
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
 }
 
 // --- §6's eight functional surfaces + the §10.4 cost surface -------------
@@ -628,13 +650,38 @@ const TABS = [
   }, true);
 }],
 ["Audit & Activity Log", async (el) => {
-  const u = await get("/v1/users");
+  const [u, ret] = await Promise.all([get("/v1/users"), get("/v1/audit/retention")]);
   // the users list is already here for the filter — reuse it so the table
   // says who acted by name (an unknown id still renders as a truncated chip)
   const uname = Object.fromEntries(u.users.map((x) => [x.id, x.displayName || x.email]));
+  // §8.4 retention floor + prune. The floor is a single GLOBAL value (longest
+  // auditRetentionDays across all compliance profiles) because audit rows are
+  // not per-project — a shorter-retention framework can never shorten another
+  // framework's trail. Show it before pruning; the button confirms first.
+  const retLine = ret.retainedDays == null
+    ? "No compliance profile sets a retention — nothing is eligible for pruning (all rows kept)."
+    : "Global floor <b>" + ret.retainedDays + " days</b> (from " + esc((ret.floorSource || []).join(", ") || "—")
+      + ") · <b>" + ret.prunable + "</b> row(s) older than the floor";
   el.innerHTML = "<div class='card'>"
+    + "<h3 style='margin:0 0 4px'>Audit-log retention (§8.4)</h3>"
+    + "<p class='sub'>Retention is a single global floor: the longest auditRetentionDays across every compliance profile (longest-floor-wins). Pruning deletes audit rows older than that floor; the prune itself is audited.</p>"
+    + "<p>" + retLine + "</p>"
+    + (ret.retainedDays != null
+        ? "<button class='danger' id='audit-prune'" + (ret.prunable ? "" : " disabled") + ">Prune audit log</button>"
+        : "")
+    + "</div>"
+    + "<div class='card'>"
     + form("f-audit", [{name:"userId",label:"filter by user",options:userOpts(u.users),req:false,ph:"— all users —"}], "Load")
     + "<div id='auditout'></div></div>";
+  const prune = $("#audit-prune");
+  if (prune) prune.addEventListener("click", async () => {
+    if (!confirm("Delete " + ret.prunable + " audit row(s) older than " + ret.retainedDays + " days? This cannot be undone.")) return;
+    try {
+      const r = await post("/v1/audit/prune", {});
+      alert("Pruned " + r.deleted + " audit row(s) — floor " + r.retainedDays + "d from " + (r.floorSource || []).join(", ") + ".");
+      render();
+    } catch (ex) { alert(ex.message); }
+  });
   const load = async (userId) => {
     const a = await get("/v1/audit" + (userId ? "?userId=" + userId : ""));
     $("#auditout").innerHTML = table(a.entries.map((e) => ({
@@ -689,14 +736,17 @@ const TABS = [
   }, true);
 }],
 ["Cost & Projects", async (el) => {
-  const [p, u, cp, t] = await Promise.all([
-    get("/v1/projects"), get("/v1/users"), get("/v1/compliance/profiles"), get("/v1/teams"),
+  const [p, u, cp, t, ini] = await Promise.all([
+    get("/v1/projects"), get("/v1/users"), get("/v1/compliance/profiles"), get("/v1/teams"), get("/v1/initiatives"),
   ]);
   const uOpts = userOpts(u.users);
   const uname = Object.fromEntries(u.users.map((x) => [x.id, x.displayName || x.email]));
+  // pillar-5 rollup: id -> name so the fleet table can name each project's parent
+  const iname = Object.fromEntries((ini.initiatives ?? []).map((x) => [x.id, x.name]));
   const tagOpts = cp.profiles.map((x) => x.tag);
   const pOpts = p.projects.map((x) => ({ v: x.id, l: x.name }));
   const teamOpts = t.teams.map((x) => ({ v: x.id, l: x.name }));
+  const iniOpts = (ini.initiatives ?? []).map((x) => ({ v: x.id, l: x.name }));
   const KEEP = { v: "", l: "— leave unchanged —" }, CLEAR = { v: "__clear__", l: "— clear —" };
   el.innerHTML = "<h2>Create a project</h2><div class='card'>"
     + form("f-proj", [
@@ -704,17 +754,26 @@ const TABS = [
         {name:"costCenter",label:"cost center",req:false,ph:"e.g. CC-0042"},
         {name:"budgetUsd",label:"budget usd",type:"number",req:false,ph:"e.g. 25"},
         {name:"budgetApproverUserId",label:"budget approver",options:uOpts,req:false,ph:"— none —"},
+        {name:"budgetPeriod",label:"budget period",options:[{v:"none",l:"none (lifetime)"},{v:"monthly",l:"monthly (calendar month)"}],req:false,ph:"none (lifetime)"},
+        {name:"alertThresholdPct",label:"alert threshold %",type:"number",req:false,ph:"e.g. 80 (default 100)"},
         {name:"arbiterUserId",label:"context arbiter",options:uOpts,req:false,ph:"— none —"},
         {name:"classifications",label:"classifications",options:tagOpts,req:false,multi:true},
       ], "Create project")
     + "<p class='dim' style='font-size:12px'>A budget only exists together with its named budget approver — set both or neither; the API refuses one without the other. Classifications (ctrl/cmd-click for several) come from the compliance profiles and cascade that framework's required workflows, PII mode and retention onto everything the project governs — changing them later goes through the reclassification review, never a plain edit.</p></div>"
     + "<h2>Projects — fleet spend</h2><div class='card'>"
-    + table(p.projects.map((r) => ({ name: r.name, costCenter: r.costCenter, spent: fmtUsd(r.spentUsd), budget: fmtUsd(r.budgetUsd), classifications: (r.classifications ?? []).join(", ") })),
+    + table(p.projects.map((r) => ({ name: r.name, costCenter: r.costCenter, initiative: iname[r.initiativeId] ?? "—", spent: fmtUsd(r.spentUsd), budget: fmtUsd(r.budgetUsd), period: r.budgetPeriod ?? "none", "alert %": r.alertThresholdPct ?? 100, classifications: (r.classifications ?? []).join(", ") })),
       (r) => {
         const id = p.projects.find((x) => x.name === r.name).id;
         return "<button class='small' data-proj='" + id + "'>rollup</button> <button class='small' data-pedit='" + id + "'>edit</button>";
       })
     + "</div><div id='projout'></div>"
+    + "<h2>Initiatives — cross-team rollup</h2><div class='card'>"
+    + form("f-ini", [
+        {name:"name",ph:"e.g. Platform Modernization"},
+        {name:"costCenter",label:"cost center",req:false,ph:"e.g. CC-PLAT"},
+      ], "Create initiative")
+    + table((ini.initiatives ?? []).map((r) => ({ name: r.name, "cost center": r.costCenter ?? "—", projects: r.projectCount ?? 0, "rolled-up spend": fmtUsd(r.spentUsd) })))
+    + "<p class='dim' style='font-size:12px'>An initiative is a flat, reporting-only grouping of projects for cross-team cost attribution — no initiative-level budget or enforcement; each project keeps its own budget and governance. Group a project under one on the edit form below.</p></div>"
     + "<h2>Edit a project — budget, approver, arbiter, cost center, name</h2><div class='card'>"
     + form("f-pedit", [
         {name:"projectId",label:"project",options:pOpts},
@@ -722,7 +781,10 @@ const TABS = [
         {name:"costCenter",label:"cost center",req:false,ph:"leave unchanged"},
         {name:"budgetUsd",label:"budget usd",type:"number",req:false,ph:"leave unchanged"},
         {name:"budgetApproverUserId",label:"budget approver",options:[CLEAR].concat(uOpts),req:false,ph:KEEP.l},
+        {name:"budgetPeriod",label:"budget period",options:[{v:"none",l:"none (lifetime)"},{v:"monthly",l:"monthly (calendar month)"}],req:false,ph:KEEP.l},
+        {name:"alertThresholdPct",label:"alert threshold %",type:"number",req:false,ph:"leave unchanged"},
         {name:"arbiterUserId",label:"arbiter",options:[CLEAR].concat(uOpts),req:false,ph:KEEP.l},
+        {name:"initiativeId",label:"initiative",options:[CLEAR].concat(iniOpts),req:false,ph:KEEP.l},
       ], "Save changes")
     + "<p class='dim' style='font-size:12px'>Only the fields you fill in change. A budget still requires a named approver after the edit — the API holds the invariant against the merged result. Classifications are absent on purpose: reclassification is a governed diff-then-approve change with its own flow.</p></div>"
     + "<h2>Teams</h2><div class='card'>"
@@ -756,6 +818,8 @@ const TABS = [
       ...(d.costCenter ? { costCenter: d.costCenter } : {}),
       ...(d.budgetUsd ? { budgetUsd: Number(d.budgetUsd) } : {}),
       ...(d.budgetApproverUserId ? { budgetApproverUserId: d.budgetApproverUserId } : {}),
+      ...(d.budgetPeriod ? { budgetPeriod: d.budgetPeriod } : {}),
+      ...(d.alertThresholdPct ? { alertThresholdPct: Number(d.alertThresholdPct) } : {}),
       ...(d.arbiterUserId ? { arbiterUserId: d.arbiterUserId } : {}),
       ...(d.classifications ? { classifications: [].concat(d.classifications) } : {}),
     });
@@ -765,9 +829,15 @@ const TABS = [
     if (d.name) body.name = d.name;
     if (d.costCenter) body.costCenter = d.costCenter;
     if ("budgetUsd" in d) body.budgetUsd = Number(d.budgetUsd);
-    for (const k of ["budgetApproverUserId", "arbiterUserId"]) if (k in d) body[k] = d[k] === "__clear__" ? null : d[k];
+    if (d.budgetPeriod) body.budgetPeriod = d.budgetPeriod;
+    if (d.alertThresholdPct) body.alertThresholdPct = Number(d.alertThresholdPct);
+    for (const k of ["budgetApproverUserId", "arbiterUserId", "initiativeId"]) if (k in d) body[k] = d[k] === "__clear__" ? null : d[k];
     return patch("/v1/projects/" + d.projectId, body);
   });
+  wire("f-ini", (d) => post("/v1/initiatives", {
+    name: d.name,
+    ...(d.costCenter ? { costCenter: d.costCenter } : {}),
+  }));
   wire("f-team", (d) => post("/v1/teams", {
     name: d.name,
     ...(d.defaultClassifications ? { defaultClassifications: [].concat(d.defaultClassifications) } : {}),
@@ -780,18 +850,26 @@ const TABS = [
     ]);
     const m = costs.measured ?? {};
     $("#projout").innerHTML =
-      "<h2>" + esc(costs.project.name) + "</h2>"
+      "<h2>" + esc(costs.project.name) + (costs.initiative ? " <span class='dim' style='font-size:14px'>· " + esc(costs.initiative.name) + "</span>" : "") + "</h2>"
       + "<div class='grid2'>"
       + "<div class='card stat'><div class='v'>" + fmtUsd(m.costUsd) + "</div><div class='l'>measured spend · " + (m.events ?? 0) + " calls</div></div>"
       + "<div class='card stat'><div class='v'>" + fmtUsd(costs.forecast?.projectedEomUsd) + "</div><div class='l'>projected month-end · " + esc(costs.forecast?.basis ?? "") + "</div></div>"
       + "<div class='card stat'><div class='v'>" + (m.inputTokens ?? 0) + " → " + (m.outputTokens ?? 0) + "</div><div class='l'>tokens in → out</div></div>"
       + "<div class='card stat'><div class='v'>" + fmtUsd(m.measuredCostSavedUsd) + "</div><div class='l'>measured savings (pillar 6)</div></div>"
       + "</div>"
-      + "<h2>Budget vs actual</h2><div class='card'>" + budgetGauge(costs.budget.spentUsd, costs.budget.budgetUsd, costs.budget.overageApproved) + "</div>"
+      + "<div class='row'><h2 style='margin:0'>Budget vs actual</h2><span class='grow'></span><button class='small' id='proj-csv'>Download CSV</button></div>"
+      + "<div class='card'>" + budgetGauge(costs.budget.spentUsd, costs.budget.budgetUsd, costs.budget.overageApproved, costs.budget)
+      + "<div class='row' style='margin-top:8px'><span class='dim' style='font-size:12px'>budget window: "
+      + (costs.budget.period === "monthly" ? "this calendar month (" + esc(costs.budget.periodKey ?? "") + ")" : "lifetime")
+      + " · alert at " + (costs.budget.alertThresholdPct ?? 100) + "%</span></div></div>"
       + "<h2>Showback by user</h2><div class='card'>" + barChart(costs.byUser, "costUsd", (i) => uname[i.userId] ?? i.userId) + "</div>"
+      + "<h2>Showback by team</h2><div class='card'>" + barChart(costs.byTeam ?? [], "costUsd", (i) => i.name ?? "(no team)") + "</div>"
       + "<h2>By agent / model</h2><div class='card'>" + barChart(costs.byAgent, "costUsd", (i) => i.model) + "</div>"
       + "<h2>Estimated savings by technique</h2><div class='card'>" + barChart(costs.estimatedSavings, "estimatedCostSavedUsd", (i) => i.technique) + "</div>"
       + "<h2>Compliance — effective policy + enforcement labels</h2><div class='card'><pre>" + esc(JSON.stringify(compliance, null, 2)) + "</pre></div>";
+    const csvBtn = $("#proj-csv");
+    if (csvBtn) csvBtn.addEventListener("click", () =>
+      downloadCsv("/v1/projects/" + b.dataset.proj + "/costs.csv", (costs.project?.name ?? "project") + "-costs.csv"));
   }));
 }],
 ["Infrastructure / Operations", async (el) => {

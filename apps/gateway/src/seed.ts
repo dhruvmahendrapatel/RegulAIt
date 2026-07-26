@@ -418,8 +418,19 @@ const demoProjectId = await ensureProject({
   costCenter: "CC-0001",
   budgetUsd: 0.2,
   budgetApproverUserId: averyId,
+  // pillar-5 polish: a calendar-month budget window with a modest 80% warn
+  // threshold, so the "this month" gauge and the non-blocking alert are both
+  // demoable against the seeded spend (which lands in the current month).
+  budgetPeriod: "monthly",
+  alertThresholdPct: 80,
   // §9 arbiter: Dana owns the domain, so shared-context conflicts land on her
   arbiterUserId: danaId,
+});
+// idempotent on re-seed: ensureProject returns an existing row unchanged, so
+// carry the period/threshold onto a demo-project created before this slice.
+await call("PATCH", `/v1/projects/${demoProjectId}`, {
+  budgetPeriod: "monthly",
+  alertThresholdPct: 80,
 });
 const hipaaProjectId = await ensureProject({
   name: "hipaa-project",
@@ -432,7 +443,11 @@ const hipaaProjectId = await ensureProject({
 // Membership carries the contributing team, so every context write inherits
 // provenance without anyone having to state it.
 for (const [projectId, userId, role, teamId] of [
-  [demoProjectId, danaId, "contributor", platformTeamId],
+  // demo-project intentionally carries TWO owners (Dana + admin) so the
+  // membership-lifecycle demo can demote/remove one owner and still leave the
+  // project with an owner — the last-owner block is demoable on hipaa-project,
+  // where admin is the sole owner.
+  [demoProjectId, danaId, "owner", platformTeamId],
   [demoProjectId, averyId, "contributor", null],
   [demoProjectId, adminId, "owner", platformTeamId],
   [hipaaProjectId, danaId, "contributor", platformTeamId],
@@ -440,6 +455,25 @@ for (const [projectId, userId, role, teamId] of [
   [hipaaProjectId, adminId, "owner", clinicalTeamId],
 ] as const) {
   await call("POST", `/v1/projects/${projectId}/members`, { userId, role, teamId }); // 409 dup = fine
+}
+
+// --- initiatives (pillar-5 cross-team rollup) ----------------------------
+// A flat, reporting-only grouping of projects for chargeback/showback above
+// the single-project level. Grouping is idempotent and changes no governance.
+const initiativeList = (await call("GET", "/v1/initiatives")).initiatives ?? [];
+async function ensureInitiative(name: string, costCenter?: string): Promise<string> {
+  const existing = initiativeList.find((i: Json) => i.name === name);
+  if (existing) return existing.id;
+  return (await call("POST", "/v1/initiatives", { name, ...(costCenter ? { costCenter } : {}) })).id;
+}
+const platformInitiativeId = await ensureInitiative("Platform Modernization", "CC-PLAT");
+// Group the demo project under it — only when it isn't already there, so a
+// re-seed neither re-PATCHes nor overwrites a later manual regrouping.
+const demoRow = ((await call("GET", "/v1/projects")).projects ?? []).find(
+  (p: Json) => p.id === demoProjectId,
+);
+if (!demoRow?.initiativeId) {
+  await call("PATCH", `/v1/projects/${demoProjectId}`, { initiativeId: platformInitiativeId });
 }
 
 // --- shared context (§9.2): accepted revisions + one live conflict --------
@@ -683,6 +717,29 @@ controls a reviewer would check before sign-off.`;
       { operation: "read", object, projectId: demoProjectId },
       danaAuth,
     );
+  }
+
+  // §8.4 PII ENFORCEMENT DEMO — the hipaa project seeds piiMode 'block', so a
+  // dispatch whose INPUT carries an obvious FAKE SSN is denied BEFORE the
+  // provider call (no cost, no usage row) and leaves a 'pii-blocked' audit
+  // deny. This makes the block real in the audit log + the Playground badge.
+  // The number below is a well-known INVALID test SSN — never real PII. Guarded
+  // idempotent: only fired if no pii-blocked row exists yet.
+  const auditSoFar = (await call("GET", "/v1/audit")).entries ?? [];
+  if (!auditSoFar.some((e: Json) => e.ruleId === "pii-blocked")) {
+    // app.inject directly (not call()) — a 403 is the EXPECTED, correct outcome
+    // and must not abort the seed.
+    await app.inject({
+      method: "POST",
+      url: `/v1/agents/${agentIds["balanced-mock"]}/invoke`,
+      headers: danaAuth,
+      payload: {
+        mode: "execute",
+        dispatch: true,
+        projectId: hipaaProjectId,
+        input: "Please redact this record before export — patient SSN 123-45-6789 must not leak.",
+      },
+    });
   }
 }
 
@@ -964,6 +1021,13 @@ ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecre
   Projects: demo-project and hipaa-project (classification-forced sign-off),
   both with members, team provenance, shared context, a budget and real
   measured spend from 12 seeded mock dispatches.
+
+  PII enforcement (§8.4, pillar 3): hipaa-project seeds piiMode 'block', so a
+  seeded dispatch whose input carried a fake SSN was DENIED before the model
+  ran (no cost) — see the 'pii-blocked' deny in /admin → Audit, and try it
+  live in the Playground (a prompt with an SSN billed to hipaa-project shows a
+  red 'PII blocked' badge). /admin → Audit also prunes the log to the global
+  retention floor (longest auditRetentionDays across profiles; hipaa = 2555d).
 
   Playground (multi-turn): dana opens on a seeded 2-turn conversation billed
   to demo-project — the terse follow-up's reply visibly continues the first

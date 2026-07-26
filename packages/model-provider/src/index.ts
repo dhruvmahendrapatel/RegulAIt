@@ -1386,6 +1386,28 @@ export class MockModelProvider implements ModelProvider {
       };
     }
 
+    // Test/demo affordance for §8.4 OUTPUT-side PII enforcement: the sentinel
+    // itself carries NO PII pattern (so an INPUT PII check passes it through),
+    // but the reply emits a well-known INVALID test SSN — letting a suite
+    // exercise the OUTPUT bill-and-withhold path deterministically. Never real
+    // PII. Mirrors the "<<refuse>>" / "<<use-tool:…>>" sentinels above.
+    if (lastUser.includes("<<emit-ssn>>")) {
+      const outputText = "For your records, the flagged identifier is 123-45-6789 — handle per policy.";
+      if (req.onText) {
+        const chunkSize = 40;
+        for (let i = 0; i < outputText.length; i += chunkSize) {
+          req.onText(outputText.slice(i, i + chunkSize));
+        }
+      }
+      return {
+        outputText,
+        stopReason: "end_turn",
+        refusal: false,
+        usage: { inputTokens: mockTokens(historyText), outputTokens: mockTokens(outputText) },
+        providerMessageId: `mock-msg-${seq}`,
+      };
+    }
+
     // Tool-using loop (pillar 7). "<<refuse>>" already took precedence above.
     // The loop sentinel keeps requesting the tool every turn; the once sentinel
     // requests it until a tool_result comes back, then finalizes. Detection

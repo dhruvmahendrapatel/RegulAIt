@@ -1,6 +1,6 @@
 ---
 phase: governance-mvp-in-progress
-last_updated: 2026-07-25
+last_updated: 2026-07-26
 active_epics: [EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
 last_session: sessions/2026-07-24-session-02.md
@@ -393,6 +393,51 @@ Sync-now verification works, and receivers without read-back fail loudly into th
 orphan flow. `DEFAULT_MAPPINGS.generic_webhook` is the IDENTITY map over all five canonical
 states including blocked — nothing invented because the vocabulary is ours. E2e: the fake
 receiver verifies the HMAC on every request and asserts the token never travels raw.
+**Compliance enforcement — PII mode + audit-retention pruning, 2026-07-26 (pillar 3 polish
+1/4; no migration).** The cascade's last two "declared-not-enforced" dimensions become real.
+New pure `packages/shared/src/pii.ts` `detectPII` (email / bounded SSN / Luhn-validated CC /
+US phone — returns per-category COUNTS ONLY, never the matched substring, §8.4-safe). Wired
+into the two PROJECT-ATTRIBUTED dispatch paths (executeGovernedDispatch + connector invoke;
+MCP path honestly DEFERRED — it has no projectId): block on INPUT denies pre-call (no cost,
+effect deny ruleId pii-blocked); block on OUTPUT bills-and-withholds (usage row written for
+honest spend, outputText replaced by a withheld marker); warn proceeds + piiWarning + audit
+pii-warned; log records category counts only. No-classification project = byte-identical
+no-op. Audit-retention pruner: POST /v1/audit/prune (admin) deletes audit_log rows older than
+a GLOBAL floor = max auditRetentionDays across all compliance profiles (longest-floor-wins,
+audit_log has no projectId) + GET /v1/audit/retention shows the floor; the /compliance labels
+honestly flipped (only claiming model+connector PII, mcp deferred). Suite 552 → 577.
+Independently re-verified: build clean, shared pii 17/17, gateway pii e2e + mcp-proxy 158/158.
+KNOWN LIMIT: streaming output-block can transiently flash raw text before the result event
+overwrites with the withheld marker (input-block — the common vector — is airtight pre-call);
+fast-follow = suppress streaming for block-mode projects.
+
+**Pillar 3/4/5 polish batch complete, 2026-07-26 (4 slices, all stacked on PR #29).** Slice 1 =
+the compliance-enforcement block just above (PII mode + audit-retention pruning, no migration).
+Slice 2 (pillar-4 membership lifecycle, NO migration): PATCH/DELETE project members, owner-gated,
+with hard last-owner protection (409); a provenance fix (context authorship now requires a real
+authenticated user — bootstrap token 403s instead of being mis-attributed) and a write-race fix
+(writeContextRevision read+insert wrapped in a transaction, 23505 caught+retried against the
+existing (project,key,revision) unique index). Slice 3 (pillar-5 cost depth, migration 0028):
+projects gain budget_period (none|monthly) + alert_threshold_pct + overage_approved_period —
+calendar-month (UTC) windowed spend, overage latch scoped to the approved period key (clears on
+rollover), non-blocking threshold alert below cap + hard block at 100%, CSV export
+(/costs.csv + /usage-events?format=csv, RFC-4180, member-authz). Slice 4 (pillar-5 Initiative
+object + cross-team rollups, migration 0029): new `initiatives` table — a FLAT, REPORTING-ONLY
+grouping of projects (NOT a governance tier; no initiative-level budget/enforcement in v1) — plus
+a nullable `projects.initiative_id` FK (onDelete set null: deleting an initiative orphans children
+back to ungrouped, never deletes project rows). Admin-only CRUD /v1/initiatives (deliberately NOT
+in NON_ADMIN_ROUTES — a rollup spans projects a non-admin may not be a member of), rolling up
+child count + spend. /v1/projects/:id/costs gains a `byTeam` breakdown (spend attributed to the
+team each member contributes under IN THIS project via project_members.teamId; null = "(no team)",
+never fabricated) and the project's parent `initiative` label (so the member /app can show it
+without the admin endpoint). Per-workflow cost_events source documented-as-reserved (comment,
+no writer). Suite 552 → 597 across the batch. Each slice independently re-verified on a fresh DB
+(build + check-ui-syntax + the relevant security-critical suites); slice 4 final: gateway 284/284
++ policy-kernel 71 + optimizer 31 + orchestration 23 + shared green. CI on PR #29 is
+billing-cap-blocked (account-level Actions minutes cap: both jobs instant-fail, 404 logs, empty
+output — verified not code); local verification is the gate. The AWS dev stack is on the
+pre-polish merged-main build; a redeploy would be needed after PR #29 merges (only on request).
+
 **§8.2 infrastructure-operations layer, 2026-07-26 — pillar 3's last unstarted surface lands
 as a GOVERNED-operations layer (migration 0027).** Monitored resources + operational policies
 + inert findings + governed remediation — not a real patcher; a keyless MockInfraProvider

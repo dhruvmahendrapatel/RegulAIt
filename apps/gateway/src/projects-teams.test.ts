@@ -328,6 +328,167 @@ describe("slice 4: the New Run form's payload — per-node instructions", () => 
   });
 });
 
+describe("pillar-4 membership lifecycle: PATCH/DELETE members + last-owner", () => {
+  let projectId: string;
+  let ownerAId: string; // first owner
+  let ownerBId: string; // second owner (so demote/remove leaves one behind)
+  let memberId: string; // a contributor to promote/demote/remove
+  let ownerAAuth: { authorization: string };
+  let memberAuth: { authorization: string };
+
+  const mkUser = async (email: string, name: string) => {
+    const r = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users", payload: { email, displayName: name },
+    });
+    expect(r.statusCode).toBe(201);
+    return r.json().id as string;
+  };
+  const authFor = async (userId: string) => {
+    const r = await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/users/${userId}/keys`, payload: { name: "ml" },
+    });
+    return { authorization: `Bearer ${r.json().token}` };
+  };
+  const addMember = (userId: string, role: string) =>
+    app.inject({
+      method: "POST", headers: AUTH, url: `/v1/projects/${projectId}/members`,
+      payload: { userId, role },
+    });
+
+  beforeAll(async () => {
+    ownerAId = await mkUser("s4-owner-a@example.com", "S4 Owner A");
+    ownerBId = await mkUser("s4-owner-b@example.com", "S4 Owner B");
+    memberId = await mkUser("s4-member@example.com", "S4 Member");
+    ownerAAuth = await authFor(ownerAId);
+    memberAuth = await authFor(memberId);
+    const project = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/projects", payload: { name: "s4-lifecycle" },
+    });
+    projectId = project.json().id;
+    for (const [uid, role] of [
+      [ownerAId, "owner"],
+      [ownerBId, "owner"],
+      [memberId, "contributor"],
+    ] as const) {
+      expect((await addMember(uid, role)).statusCode).toBe(201);
+    }
+  });
+
+  it("an owner promotes a contributor to owner and the change is audited", async () => {
+    const res = await app.inject({
+      method: "PATCH", headers: ownerAAuth,
+      url: `/v1/projects/${projectId}/members/${memberId}`,
+      payload: { role: "owner" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().role).toBe("owner");
+
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: "/v1/audit" });
+    const entry = audit.json().entries.find(
+      (e: { ruleId: string; objectId: string | null; detail: { memberUserId?: string } }) =>
+        e.ruleId === "project-member-role-changed" &&
+        e.objectId === projectId &&
+        e.detail.memberUserId === memberId,
+    );
+    expect(entry).toBeTruthy();
+    expect(entry.detail).toMatchObject({ from: "contributor", role: "owner" });
+
+    // put it back to contributor for the following tests (three owners → one)
+    const back = await app.inject({
+      method: "PATCH", headers: ownerAAuth,
+      url: `/v1/projects/${projectId}/members/${memberId}`,
+      payload: { role: "contributor" },
+    });
+    expect(back.statusCode).toBe(200);
+  });
+
+  it("removing a member is audited and drops them from the list", async () => {
+    const res = await app.inject({
+      method: "DELETE", headers: ownerAAuth,
+      url: `/v1/projects/${projectId}/members/${memberId}`,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ removed: true });
+
+    const list = await app.inject({
+      method: "GET", headers: ownerAAuth, url: `/v1/projects/${projectId}/members`,
+    });
+    expect(list.json().members.find((m: { userId: string }) => m.userId === memberId)).toBeUndefined();
+
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: "/v1/audit" });
+    expect(
+      audit.json().entries.some(
+        (e: { ruleId: string; detail: { memberUserId?: string } }) =>
+          e.ruleId === "project-member-removed" && e.detail.memberUserId === memberId,
+      ),
+    ).toBe(true);
+  });
+
+  it("a 404 for a non-member on both PATCH and DELETE", async () => {
+    const patch = await app.inject({
+      method: "PATCH", headers: ownerAAuth,
+      url: `/v1/projects/${projectId}/members/${memberId}`, // just removed
+      payload: { role: "viewer" },
+    });
+    expect(patch.statusCode).toBe(404);
+    expect(patch.json().error).toBe("not_a_member");
+    const del = await app.inject({
+      method: "DELETE", headers: ownerAAuth,
+      url: `/v1/projects/${projectId}/members/${memberId}`,
+    });
+    expect(del.statusCode).toBe(404);
+  });
+
+  it("LAST-OWNER hard-block: with two owners one demote is allowed, the second is 409", async () => {
+    // two owners remain (A, B). Demote B → allowed (A left).
+    const demoteB = await app.inject({
+      method: "PATCH", headers: ownerAAuth,
+      url: `/v1/projects/${projectId}/members/${ownerBId}`,
+      payload: { role: "contributor" },
+    });
+    expect(demoteB.statusCode).toBe(200);
+
+    // A is now the sole owner. Demoting A would orphan the project → 409.
+    const demoteA = await app.inject({
+      method: "PATCH", headers: ownerAAuth,
+      url: `/v1/projects/${projectId}/members/${ownerAId}`,
+      payload: { role: "contributor" },
+    });
+    expect(demoteA.statusCode).toBe(409);
+    expect(demoteA.json().error).toBe("last_owner");
+  });
+
+  it("LAST-OWNER hard-block also guards DELETE of the sole owner", async () => {
+    const delA = await app.inject({
+      method: "DELETE", headers: ownerAAuth,
+      url: `/v1/projects/${projectId}/members/${ownerAId}`,
+    });
+    expect(delA.statusCode).toBe(409);
+    expect(delA.json().error).toBe("last_owner");
+    // and the owner is still there
+    const list = await app.inject({
+      method: "GET", headers: ownerAAuth, url: `/v1/projects/${projectId}/members`,
+    });
+    expect(list.json().members.find((m: { userId: string }) => m.userId === ownerAId).role).toBe("owner");
+  });
+
+  it("a non-owner member cannot PATCH or DELETE membership (403)", async () => {
+    // re-add the contributor to have a non-owner actor
+    await addMember(memberId, "contributor");
+    const patch = await app.inject({
+      method: "PATCH", headers: memberAuth,
+      url: `/v1/projects/${projectId}/members/${ownerAId}`,
+      payload: { role: "viewer" },
+    });
+    expect(patch.statusCode).toBe(403);
+    const del = await app.inject({
+      method: "DELETE", headers: memberAuth,
+      url: `/v1/projects/${projectId}/members/${ownerAId}`,
+    });
+    expect(del.statusCode).toBe(403);
+  });
+});
+
 describe("slice 4: the /admin Teams surface", () => {
   it("creates a team, adds a member, and the list names its members", async () => {
     const team = await app.inject({
