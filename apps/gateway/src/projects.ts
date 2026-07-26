@@ -45,15 +45,104 @@ type ProjectRow = typeof projects.$inferSelect;
 
 const projectIdParam = z.object({ projectId: z.string().uuid() });
 
+/** RFC-4180 field escaping: quote and double-up embedded quotes whenever a
+ * field carries a comma, quote, or newline; leave plain fields untouched. */
+function csvField(value: unknown): string {
+  const s = value == null ? "" : String(value);
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+/** The per-invocation CSV shape shared by both export endpoints: one header row
+ * plus one row per usage_event, escaped. */
+export const USAGE_CSV_HEADER = [
+  "at",
+  "userId",
+  "objectType",
+  "agentId",
+  "connectorId",
+  "model",
+  "operation",
+  "inputTokens",
+  "outputTokens",
+  "costUsd",
+  "measuredCostSavedUsd",
+  "projectId",
+] as const;
+
+export function usageEventsCsv(rows: Array<typeof usageEvents.$inferSelect>): string {
+  const lines = [USAGE_CSV_HEADER.join(",")];
+  for (const r of rows) {
+    lines.push(
+      [
+        r.at instanceof Date ? r.at.toISOString() : r.at,
+        r.userId,
+        r.objectType,
+        r.agentId,
+        r.connectorId,
+        r.model,
+        r.operation,
+        r.inputTokens,
+        r.outputTokens,
+        r.costUsd,
+        r.measuredCostSavedUsd,
+        r.projectId,
+      ]
+        .map(csvField)
+        .join(","),
+    );
+  }
+  return lines.join("\r\n") + "\r\n";
+}
+
 /** §9 conflict approvals: stageId = this prefix + the retained item's id. */
 const CONTEXT_CONFLICT_PREFIX = "__context_conflict__:";
 
-/** Measured spend attributed to a project so far (pillar 5 actuals). */
-async function projectSpendUsd(db: Db, projectId: string): Promise<number> {
+/** Calendar-month period key 'YYYY-MM' (UTC) for the period containing `now`.
+ * The overage latch is scoped to this key so a sanctioned overage never carries
+ * into the next month. */
+export function currentPeriodKey(now: Date = new Date()): string {
+  const y = now.getUTCFullYear();
+  const m = String(now.getUTCMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`;
+}
+
+/** UTC month-start timestamp for the period containing `now` — the lower bound
+ * of a 'monthly' budget window. */
+export function periodStart(now: Date = new Date()): Date {
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0));
+}
+
+/** True when a project's budget window is the current calendar month. */
+function isMonthly(project: Pick<ProjectRow, "budgetPeriod">): boolean {
+  return project.budgetPeriod === "monthly";
+}
+
+/** True when an approved overage still suppresses enforcement: always under a
+ * lifetime ('none') budget, but under a 'monthly' budget only while the latch's
+ * period matches the current one — on a new month the latch is inert and
+ * enforcement resumes. */
+function overageActive(project: ProjectRow, periodKey: string): boolean {
+  if (!project.overageApproved) return false;
+  if (!isMonthly(project)) return true;
+  return project.overageApprovedPeriod === periodKey;
+}
+
+/** Measured spend attributed to a project (pillar 5 actuals). Under a 'monthly'
+ * budget only spend within the current calendar-month window counts; otherwise
+ * it is lifetime-cumulative (default, back-compat). */
+async function projectSpendUsd(
+  db: Db,
+  projectId: string,
+  opts?: { monthly?: boolean; now?: Date },
+): Promise<number> {
+  const where =
+    opts?.monthly
+      ? and(eq(usageEvents.projectId, projectId), gte(usageEvents.at, periodStart(opts.now)))
+      : eq(usageEvents.projectId, projectId);
   const [row] = await db
     .select({ spent: sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8` })
     .from(usageEvents)
-    .where(eq(usageEvents.projectId, projectId));
+    .where(where);
   return row?.spent ?? 0;
 }
 
@@ -273,10 +362,12 @@ export async function preDispatchProjectGate(
   if (!project) {
     return { ok: false, status: 422, error: "unknown_project", detail: projectId };
   }
-  if (project.budgetUsd == null || project.overageApproved) {
+  const now = new Date();
+  const periodKey = currentPeriodKey(now);
+  if (project.budgetUsd == null || overageActive(project, periodKey)) {
     return { ok: true, project, spentUsd: 0 };
   }
-  const spentUsd = await projectSpendUsd(db, projectId);
+  const spentUsd = await projectSpendUsd(db, projectId, { monthly: isMonthly(project), now });
   if (spentUsd >= project.budgetUsd) {
     await escalateProjectBudget(db, project, userId, spentUsd);
     return {
@@ -289,22 +380,85 @@ export async function preDispatchProjectGate(
   return { ok: true, project, spentUsd };
 }
 
-/** Post-dispatch alert: the FIRST crossing is allowed (measured cost arrives
- * after the call) but escalates immediately into the one approvals queue;
- * the pre-gate blocks everything after it. Returns true when it alerted. */
+/** The two distinct, non-blocking budget signals a dispatch can raise, surfaced
+ * on the response and audited. `escalated` is the 100% crossing (routed into the
+ * one approvals queue; the pre-gate blocks everything after it); `thresholdAlert`
+ * is the softer configurable warning (>= budget*pct/100 but still < 100%). */
+export interface ProjectBudgetSignal {
+  escalated: boolean;
+  thresholdAlert: boolean;
+  thresholdPct: number;
+  spentUsd: number;
+  budgetUsd: number | null;
+  period: string | null;
+}
+
+const NO_BUDGET_SIGNAL: ProjectBudgetSignal = {
+  escalated: false,
+  thresholdAlert: false,
+  thresholdPct: 100,
+  spentUsd: 0,
+  budgetUsd: null,
+  period: null,
+};
+
+/** Post-dispatch alert: the FIRST crossing of the budget is allowed (measured
+ * cost arrives after the call) but escalates immediately into the one approvals
+ * queue; the pre-gate blocks everything after it. Below the cap, if windowed
+ * spend has crossed the configurable alert threshold (< 100%) a distinct
+ * non-blocking 'budget-threshold-alert' is raised instead. */
 export async function postDispatchProjectAlert(
   db: Db,
   gate: ProjectGate,
   userId: string,
   costUsd: number | null,
-): Promise<boolean> {
-  if (!gate.ok || !gate.project || gate.project.budgetUsd == null || gate.project.overageApproved) {
-    return false;
-  }
+): Promise<ProjectBudgetSignal> {
+  if (!gate.ok || !gate.project) return NO_BUDGET_SIGNAL;
+  const project = gate.project;
+  if (project.budgetUsd == null) return NO_BUDGET_SIGNAL;
+  const budgetUsd = project.budgetUsd;
+  const now = new Date();
+  const periodKey = currentPeriodKey(now);
+  const monthly = isMonthly(project);
+  const pct = project.alertThresholdPct ?? 100;
   const newSpent = gate.spentUsd + (costUsd ?? 0);
-  if (newSpent <= gate.project.budgetUsd) return false;
-  await escalateProjectBudget(db, gate.project, userId, newSpent);
-  return true;
+  const signal: ProjectBudgetSignal = {
+    escalated: false,
+    thresholdAlert: false,
+    thresholdPct: pct,
+    spentUsd: newSpent,
+    budgetUsd: project.budgetUsd,
+    period: monthly ? periodKey : null,
+  };
+  // a sanctioned overage (scoped to this period under a monthly budget)
+  // suppresses both signals until the next period
+  if (overageActive(project, periodKey)) return signal;
+  if (newSpent > budgetUsd) {
+    await escalateProjectBudget(db, project, userId, newSpent);
+    return { ...signal, escalated: true };
+  }
+  const thresholdUsd = (budgetUsd * pct) / 100;
+  if (pct < 100 && newSpent >= thresholdUsd) {
+    await db.insert(auditLog).values({
+      userId,
+      objectType: "project",
+      objectId: project.id,
+      detail: {
+        phase: "project-budget-threshold",
+        spentUsd: newSpent,
+        budgetUsd: project.budgetUsd,
+        thresholdPct: pct,
+        thresholdUsd,
+        ...(monthly ? { period: periodKey } : {}),
+      },
+      effect: "allow",
+      ruleId: "budget-threshold-alert",
+      ruleChain: [],
+      reason: `measured project spend $${newSpent.toFixed(6)} crossed the ${pct}% alert threshold ($${thresholdUsd.toFixed(6)}) of the $${project.budgetUsd} budget — warning, dispatch proceeded`,
+    });
+    return { ...signal, thresholdAlert: true };
+  }
+  return signal;
 }
 
 /** Decide-endpoint hook for objectType 'project': budget overages and
@@ -384,9 +538,15 @@ export async function applyProjectApprovalDecision(
   }
   if (approvalRow.stageId !== "__project_budget__") return;
   if (decision === "approved") {
+    // scope the latch to the CURRENT period under a monthly budget, so the
+    // sanction expires at the next rollover; a lifetime budget stays unscoped
+    const [proj] = await db.select().from(projects).where(eq(projects.id, approvalRow.projectId));
     await db
       .update(projects)
-      .set({ overageApproved: true })
+      .set({
+        overageApproved: true,
+        overageApprovedPeriod: proj && isMonthly(proj) ? currentPeriodKey() : null,
+      })
       .where(eq(projects.id, approvalRow.projectId));
   }
   await db.insert(auditLog).values({
@@ -498,6 +658,8 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         costCenter: body.costCenter ?? null,
         budgetUsd: body.budgetUsd ?? null,
         budgetApproverUserId: body.budgetApproverUserId ?? null,
+        budgetPeriod: body.budgetPeriod ?? "none",
+        alertThresholdPct: body.alertThresholdPct ?? 100,
         arbiterUserId: body.arbiterUserId ?? null,
         classifications: body.classifications ?? null,
       })
@@ -522,6 +684,9 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         body.budgetApproverUserId === undefined
           ? project.budgetApproverUserId
           : body.budgetApproverUserId,
+      budgetPeriod: body.budgetPeriod === undefined ? project.budgetPeriod : body.budgetPeriod,
+      alertThresholdPct:
+        body.alertThresholdPct === undefined ? project.alertThresholdPct : body.alertThresholdPct,
       arbiterUserId: body.arbiterUserId === undefined ? project.arbiterUserId : body.arbiterUserId,
     };
     // the create-time invariant, held against the row this patch would leave
@@ -1413,10 +1578,25 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     ]);
 
     const spentUsd = measured?.costUsd ?? 0;
+    // budget window: under a 'monthly' budget the gauge reads only the current
+    // calendar-month spend; the lifetime total is still reported alongside it.
+    const now = new Date();
+    const periodKey = currentPeriodKey(now);
+    const monthly = isMonthly(project);
+    let windowedSpentUsd = spentUsd;
+    if (monthly) {
+      const [w] = await db
+        .select({ costUsd: sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8` })
+        .from(usageEvents)
+        .where(and(where, gte(usageEvents.at, periodStart(now))));
+      windowedSpentUsd = w?.costUsd ?? 0;
+    }
+    const pct = project.alertThresholdPct ?? 100;
+    const thresholdUsd =
+      project.budgetUsd == null ? null : Number(((project.budgetUsd * pct) / 100).toFixed(6));
     // simple run-rate forecast, labeled as such: last-7-days daily rate
     // projected to the end of the current month
     const dailyRateUsd = (recent?.costUsd ?? 0) / 7;
-    const now = new Date();
     const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
     const daysRemaining = Math.max(0, (endOfMonth.getTime() - now.getTime()) / (24 * 3600 * 1000));
     const projectedEomUsd = Number((spentUsd + dailyRateUsd * daysRemaining).toFixed(6));
@@ -1430,10 +1610,25 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       estimatedSavings: estimated,
       budget: {
         budgetUsd: project.budgetUsd,
-        spentUsd,
-        remainingUsd: project.budgetUsd == null ? null : Number((project.budgetUsd - spentUsd).toFixed(6)),
-        overBudget: project.budgetUsd != null && spentUsd > project.budgetUsd,
+        // the gauge reads the WINDOWED spend (== lifetime when period='none')
+        spentUsd: windowedSpentUsd,
+        lifetimeSpentUsd: spentUsd,
+        period: monthly ? "monthly" : "none",
+        periodKey: monthly ? periodKey : null,
+        remainingUsd:
+          project.budgetUsd == null ? null : Number((project.budgetUsd - windowedSpentUsd).toFixed(6)),
+        overBudget: project.budgetUsd != null && windowedSpentUsd > project.budgetUsd,
+        alertThresholdPct: pct,
+        thresholdUsd,
+        thresholdCrossed:
+          project.budgetUsd != null &&
+          thresholdUsd != null &&
+          windowedSpentUsd >= thresholdUsd &&
+          windowedSpentUsd <= project.budgetUsd,
         overageApproved: project.overageApproved,
+        overageApprovedPeriod: project.overageApprovedPeriod,
+        // whether the latch is currently suppressing enforcement
+        overageActive: overageActive(project, periodKey),
       },
       forecast: {
         basis: "last-7-days-run-rate projected to end of current month",
@@ -1441,5 +1636,34 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         projectedEomUsd,
       },
     };
+  });
+
+  // Per-invocation CSV export for a project's spend — same member/admin authz
+  // as the /costs rollup (membership is the whole test for a non-admin). The
+  // rows are the raw usage_events, newest first, for FinOps/chargeback export.
+  app.get("/v1/projects/:projectId/costs.csv", async (req, reply) => {
+    const { projectId } = projectIdParam.parse(req.params);
+    const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
+    if (!project) return reply.status(404).send({ error: "unknown_project" });
+    if (!req.authCtx.isAdmin) {
+      if (!req.authCtx.userId) return reply.status(403).send({ error: "not_a_project_member" });
+      const [membership] = await db
+        .select({ userId: projectMembers.userId })
+        .from(projectMembers)
+        .where(
+          and(eq(projectMembers.projectId, projectId), eq(projectMembers.userId, req.authCtx.userId)),
+        );
+      if (!membership) return reply.status(403).send({ error: "not_a_project_member" });
+    }
+    const rows = await db
+      .select()
+      .from(usageEvents)
+      .where(eq(usageEvents.projectId, projectId))
+      .orderBy(desc(usageEvents.at));
+    const safeName = project.name.replace(/[^A-Za-z0-9_.-]+/g, "-");
+    return reply
+      .header("content-type", "text/csv; charset=utf-8")
+      .header("content-disposition", `attachment; filename="${safeName}-costs.csv"`)
+      .send(usageEventsCsv(rows));
   });
 }

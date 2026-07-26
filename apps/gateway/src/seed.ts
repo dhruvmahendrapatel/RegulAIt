@@ -418,8 +418,19 @@ const demoProjectId = await ensureProject({
   costCenter: "CC-0001",
   budgetUsd: 0.2,
   budgetApproverUserId: averyId,
+  // pillar-5 polish: a calendar-month budget window with a modest 80% warn
+  // threshold, so the "this month" gauge and the non-blocking alert are both
+  // demoable against the seeded spend (which lands in the current month).
+  budgetPeriod: "monthly",
+  alertThresholdPct: 80,
   // §9 arbiter: Dana owns the domain, so shared-context conflicts land on her
   arbiterUserId: danaId,
+});
+// idempotent on re-seed: ensureProject returns an existing row unchanged, so
+// carry the period/threshold onto a demo-project created before this slice.
+await call("PATCH", `/v1/projects/${demoProjectId}`, {
+  budgetPeriod: "monthly",
+  alertThresholdPct: 80,
 });
 const hipaaProjectId = await ensureProject({
   name: "hipaa-project",

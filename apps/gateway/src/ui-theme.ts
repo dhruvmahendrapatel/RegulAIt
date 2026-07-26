@@ -161,6 +161,8 @@ pre, .codeblock {
 .bar { height: 6px; border-radius: 3px; background: #ffffff10; overflow: hidden; }
 .bar > i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
 .bar > i.over { background: var(--bad); }
+.bar > i.warn { background: var(--warn); }
+.bar > span.mark { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--text); opacity: .55; }
 
 /* ---- auth gate ----------------------------------------------------- */
 .gate { min-height: 100vh; display: flex; align-items: center; justify-content: center; }

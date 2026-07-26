@@ -226,13 +226,35 @@ function barChart(items, valueKey, labelFn) {
   }).join("");
   return \`<div class="chart"><svg viewBox="0 0 \${w} \${Math.min(items.length, 10) * rowH}" xmlns="http://www.w3.org/2000/svg">\${rows}</svg></div>\`;
 }
-function budgetGauge(spent, cap, overageApproved) {
+function budgetGauge(spent, cap, overageApproved, opts) {
   if (cap == null) return "<span class='dim'>no budget set</span>";
+  opts = opts || {};
   const pct = Math.min(100, (spent / cap) * 100);
   const over = spent > cap;
-  return \`<div class="row"><span class="num">\${fmtUsd(spent)}</span><span class="dim">of \${fmtUsd(cap)}</span>
-    \${over ? '<span class="badge ' + (overageApproved ? "warn" : "bad") + '">' + (overageApproved ? "overage approved" : "over budget") + "</span>" : ""}</div>
-    <div class="bar" style="margin-top:8px"><i class="\${over ? "over" : ""}" style="width:\${pct}%"></i></div>\`;
+  const tPct = opts.alertThresholdPct;
+  const crossed = !over && (opts.thresholdCrossed ?? (tPct != null && tPct < 100 && opts.thresholdUsd != null && spent >= opts.thresholdUsd));
+  const periodLabel = opts.period === "monthly" ? " this month" : "";
+  const marker = (tPct != null && tPct < 100)
+    ? '<span class="mark" style="left:' + tPct + '%" title="' + tPct + '% alert threshold"></span>'
+    : "";
+  const badge = over
+    ? '<span class="badge ' + (overageApproved ? "warn" : "bad") + '">' + (overageApproved ? "overage approved" : "over budget") + "</span>"
+    : crossed
+    ? '<span class="badge warn">' + tPct + "% threshold crossed</span>"
+    : "";
+  const fill = over ? "over" : crossed ? "warn" : "";
+  return \`<div class="row"><span class="num">\${fmtUsd(spent)}</span><span class="dim">of \${fmtUsd(cap)}\${periodLabel}</span>\${badge}</div>
+    <div class="bar" style="margin-top:8px;position:relative"><i class="\${fill}" style="width:\${pct}%"></i>\${marker}</div>\`;
+}
+// authed CSV download via a transient blob URL (endpoint sets Content-Disposition)
+async function downloadCsv(path, filename) {
+  const res = await fetch(path, { headers: { authorization: "Bearer " + KEY } });
+  if (!res.ok) { alert("CSV download failed (" + res.status + ")"); return; }
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
 }
 
 // --- §6's eight functional surfaces + the §10.4 cost surface -------------
@@ -729,12 +751,14 @@ const TABS = [
         {name:"costCenter",label:"cost center",req:false,ph:"e.g. CC-0042"},
         {name:"budgetUsd",label:"budget usd",type:"number",req:false,ph:"e.g. 25"},
         {name:"budgetApproverUserId",label:"budget approver",options:uOpts,req:false,ph:"— none —"},
+        {name:"budgetPeriod",label:"budget period",options:[{v:"none",l:"none (lifetime)"},{v:"monthly",l:"monthly (calendar month)"}],req:false,ph:"none (lifetime)"},
+        {name:"alertThresholdPct",label:"alert threshold %",type:"number",req:false,ph:"e.g. 80 (default 100)"},
         {name:"arbiterUserId",label:"context arbiter",options:uOpts,req:false,ph:"— none —"},
         {name:"classifications",label:"classifications",options:tagOpts,req:false,multi:true},
       ], "Create project")
     + "<p class='dim' style='font-size:12px'>A budget only exists together with its named budget approver — set both or neither; the API refuses one without the other. Classifications (ctrl/cmd-click for several) come from the compliance profiles and cascade that framework's required workflows, PII mode and retention onto everything the project governs — changing them later goes through the reclassification review, never a plain edit.</p></div>"
     + "<h2>Projects — fleet spend</h2><div class='card'>"
-    + table(p.projects.map((r) => ({ name: r.name, costCenter: r.costCenter, spent: fmtUsd(r.spentUsd), budget: fmtUsd(r.budgetUsd), classifications: (r.classifications ?? []).join(", ") })),
+    + table(p.projects.map((r) => ({ name: r.name, costCenter: r.costCenter, spent: fmtUsd(r.spentUsd), budget: fmtUsd(r.budgetUsd), period: r.budgetPeriod ?? "none", "alert %": r.alertThresholdPct ?? 100, classifications: (r.classifications ?? []).join(", ") })),
       (r) => {
         const id = p.projects.find((x) => x.name === r.name).id;
         return "<button class='small' data-proj='" + id + "'>rollup</button> <button class='small' data-pedit='" + id + "'>edit</button>";
@@ -747,6 +771,8 @@ const TABS = [
         {name:"costCenter",label:"cost center",req:false,ph:"leave unchanged"},
         {name:"budgetUsd",label:"budget usd",type:"number",req:false,ph:"leave unchanged"},
         {name:"budgetApproverUserId",label:"budget approver",options:[CLEAR].concat(uOpts),req:false,ph:KEEP.l},
+        {name:"budgetPeriod",label:"budget period",options:[{v:"none",l:"none (lifetime)"},{v:"monthly",l:"monthly (calendar month)"}],req:false,ph:KEEP.l},
+        {name:"alertThresholdPct",label:"alert threshold %",type:"number",req:false,ph:"leave unchanged"},
         {name:"arbiterUserId",label:"arbiter",options:[CLEAR].concat(uOpts),req:false,ph:KEEP.l},
       ], "Save changes")
     + "<p class='dim' style='font-size:12px'>Only the fields you fill in change. A budget still requires a named approver after the edit — the API holds the invariant against the merged result. Classifications are absent on purpose: reclassification is a governed diff-then-approve change with its own flow.</p></div>"
@@ -781,6 +807,8 @@ const TABS = [
       ...(d.costCenter ? { costCenter: d.costCenter } : {}),
       ...(d.budgetUsd ? { budgetUsd: Number(d.budgetUsd) } : {}),
       ...(d.budgetApproverUserId ? { budgetApproverUserId: d.budgetApproverUserId } : {}),
+      ...(d.budgetPeriod ? { budgetPeriod: d.budgetPeriod } : {}),
+      ...(d.alertThresholdPct ? { alertThresholdPct: Number(d.alertThresholdPct) } : {}),
       ...(d.arbiterUserId ? { arbiterUserId: d.arbiterUserId } : {}),
       ...(d.classifications ? { classifications: [].concat(d.classifications) } : {}),
     });
@@ -790,6 +818,8 @@ const TABS = [
     if (d.name) body.name = d.name;
     if (d.costCenter) body.costCenter = d.costCenter;
     if ("budgetUsd" in d) body.budgetUsd = Number(d.budgetUsd);
+    if (d.budgetPeriod) body.budgetPeriod = d.budgetPeriod;
+    if (d.alertThresholdPct) body.alertThresholdPct = Number(d.alertThresholdPct);
     for (const k of ["budgetApproverUserId", "arbiterUserId"]) if (k in d) body[k] = d[k] === "__clear__" ? null : d[k];
     return patch("/v1/projects/" + d.projectId, body);
   });
@@ -812,11 +842,18 @@ const TABS = [
       + "<div class='card stat'><div class='v'>" + (m.inputTokens ?? 0) + " → " + (m.outputTokens ?? 0) + "</div><div class='l'>tokens in → out</div></div>"
       + "<div class='card stat'><div class='v'>" + fmtUsd(m.measuredCostSavedUsd) + "</div><div class='l'>measured savings (pillar 6)</div></div>"
       + "</div>"
-      + "<h2>Budget vs actual</h2><div class='card'>" + budgetGauge(costs.budget.spentUsd, costs.budget.budgetUsd, costs.budget.overageApproved) + "</div>"
+      + "<div class='row'><h2 style='margin:0'>Budget vs actual</h2><span class='grow'></span><button class='small' id='proj-csv'>Download CSV</button></div>"
+      + "<div class='card'>" + budgetGauge(costs.budget.spentUsd, costs.budget.budgetUsd, costs.budget.overageApproved, costs.budget)
+      + "<div class='row' style='margin-top:8px'><span class='dim' style='font-size:12px'>budget window: "
+      + (costs.budget.period === "monthly" ? "this calendar month (" + esc(costs.budget.periodKey ?? "") + ")" : "lifetime")
+      + " · alert at " + (costs.budget.alertThresholdPct ?? 100) + "%</span></div></div>"
       + "<h2>Showback by user</h2><div class='card'>" + barChart(costs.byUser, "costUsd", (i) => uname[i.userId] ?? i.userId) + "</div>"
       + "<h2>By agent / model</h2><div class='card'>" + barChart(costs.byAgent, "costUsd", (i) => i.model) + "</div>"
       + "<h2>Estimated savings by technique</h2><div class='card'>" + barChart(costs.estimatedSavings, "estimatedCostSavedUsd", (i) => i.technique) + "</div>"
       + "<h2>Compliance — effective policy + enforcement labels</h2><div class='card'><pre>" + esc(JSON.stringify(compliance, null, 2)) + "</pre></div>";
+    const csvBtn = $("#proj-csv");
+    if (csvBtn) csvBtn.addEventListener("click", () =>
+      downloadCsv("/v1/projects/" + b.dataset.proj + "/costs.csv", (costs.project?.name ?? "project") + "-costs.csv"));
   }));
 }],
 ["Infrastructure / Operations", async (el) => {

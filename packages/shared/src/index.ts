@@ -217,6 +217,11 @@ export const createProjectSchema = z
     costCenter: z.string().min(1).max(100).nullable().optional(),
     budgetUsd: z.number().positive().nullable().optional(),
     budgetApproverUserId: z.string().uuid().nullable().optional(),
+    /** pillar-5 budget window: 'none' (lifetime) or 'monthly' (calendar month) */
+    budgetPeriod: z.enum(["none", "monthly"]).optional(),
+    /** warn (non-blocking) when windowed spend crosses this percent of budget;
+     * the hard block stays at 100%, so 1..100 is the meaningful range */
+    alertThresholdPct: z.number().int().min(1).max(100).optional(),
     /** §9 named arbiter for shared-context conflicts */
     arbiterUserId: z.string().uuid().nullable().optional(),
     /** §8.3 compliance framework tags, applied directly at creation */
@@ -237,6 +242,8 @@ export const updateProjectSchema = z
     costCenter: z.string().min(1).max(100).nullable().optional(),
     budgetUsd: z.number().positive().nullable().optional(),
     budgetApproverUserId: z.string().uuid().nullable().optional(),
+    budgetPeriod: z.enum(["none", "monthly"]).optional(),
+    alertThresholdPct: z.number().int().min(1).max(100).optional(),
     arbiterUserId: z.string().uuid().nullable().optional(),
   })
   .refine((p) => Object.values(p).some((v) => v !== undefined), {

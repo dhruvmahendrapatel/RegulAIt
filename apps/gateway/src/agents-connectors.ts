@@ -371,8 +371,9 @@ export async function executeGovernedDispatch(
     });
   }
   // first budget crossing is allowed (measured cost arrives after the call)
-  // but alerts immediately; the pre-gate blocks everything after it
-  const projectBudgetAlerted = await postDispatchProjectAlert(db, projectGate, userId, costUsd);
+  // but alerts immediately; the pre-gate blocks everything after it. Below the
+  // cap, the softer configurable threshold raises a distinct non-blocking signal.
+  const budgetSignal = await postDispatchProjectAlert(db, projectGate, userId, costUsd);
 
   return {
     ok: true,
@@ -387,7 +388,17 @@ export async function executeGovernedDispatch(
       costUsd,
       measuredCostSavedUsd,
       credentialSource,
-      projectBudgetAlerted,
+      projectBudgetAlerted: budgetSignal.escalated,
+      ...(budgetSignal.thresholdAlert
+        ? {
+            projectBudgetThresholdAlert: {
+              thresholdPct: budgetSignal.thresholdPct,
+              spentUsd: budgetSignal.spentUsd,
+              budgetUsd: budgetSignal.budgetUsd,
+              ...(budgetSignal.period ? { period: budgetSignal.period } : {}),
+            },
+          }
+        : {}),
       ...(pii ? { pii } : {}),
     },
   };

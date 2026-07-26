@@ -1,10 +1,12 @@
 import type { FastifyInstance } from "fastify";
 import { costEvents, count, desc, eq, sql, usageEvents, type Db } from "@regulait/db";
 import { z } from "zod";
+import { usageEventsCsv } from "./projects.js";
 
 const listQuery = z.object({
   userId: z.string().uuid().optional(),
   limit: z.coerce.number().int().min(1).max(500).default(100),
+  format: z.enum(["json", "csv"]).default("json"),
 });
 
 /** OPTIMIZATION §7: the savings ledger read surface. Pillar 5's per-project
@@ -52,6 +54,19 @@ export function registerOptimizationRoutes(app: FastifyInstance, db: Db) {
       return reply.status(403).send({ error: "bootstrap_has_no_usage_history" });
     }
     const where = userId ? eq(usageEvents.userId, userId) : undefined;
+
+    if (q.format === "csv") {
+      const rows = await db
+        .select()
+        .from(usageEvents)
+        .where(where)
+        .orderBy(desc(usageEvents.at))
+        .limit(q.limit);
+      return reply
+        .header("content-type", "text/csv; charset=utf-8")
+        .header("content-disposition", 'attachment; filename="usage-events.csv"')
+        .send(usageEventsCsv(rows));
+    }
 
     const [events, [totals]] = await Promise.all([
       db.select().from(usageEvents).where(where).orderBy(desc(usageEvents.at)).limit(q.limit),

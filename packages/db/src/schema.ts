@@ -820,8 +820,19 @@ export const projects = pgTable("projects", {
   budgetApproverUserId: uuid("budget_approver_user_id").references(() => users.id, {
     onDelete: "set null",
   }),
+  /** pillar-5 budget window: 'none' = lifetime-cumulative (default, back-compat);
+   * 'monthly' = only spend within the current calendar month (UTC) counts. */
+  budgetPeriod: text("budget_period").notNull().default("none"),
+  /** warn (non-blocking) when windowed spend crosses budget*pct/100; the hard
+   * block + escalation always stays at 100%. Default 100 = warn only at the cap
+   * (byte-identical to the pre-threshold behaviour). */
+  alertThresholdPct: integer("alert_threshold_pct").notNull().default(100),
   /** a decided __project_budget__ approval lifts enforcement for this project */
   overageApproved: boolean("overage_approved").notNull().default(false),
+  /** the period key (e.g. '2026-07') an overage was approved for; the latch
+   * only suppresses enforcement while it equals the current period. Null when
+   * budgetPeriod='none' (the lifetime latch is unscoped) or never approved. */
+  overageApprovedPeriod: text("overage_approved_period"),
   /** §9 named arbiter for shared-context conflicts; absent = conflicting
    * writes are rejected explicitly (never silently) */
   arbiterUserId: uuid("arbiter_user_id").references(() => users.id, { onDelete: "set null" }),

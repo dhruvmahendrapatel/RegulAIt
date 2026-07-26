@@ -57,6 +57,18 @@ async function api(method, path, body) {
 const get = (p) => api("GET", p);
 const post = (p, b) => api("POST", p, b ?? {});
 const patch = (p, b) => api("PATCH", p, b ?? {});
+// authed file download: fetch the CSV with our bearer, then trigger a browser
+// save via a transient blob URL (the endpoint sets Content-Disposition too)
+async function downloadCsv(path, filename) {
+  const res = await fetch(path, { headers: { authorization: "Bearer " + KEY } });
+  if (!res.ok) { toast("CSV download failed (" + res.status + ")"); return; }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
 const del = (p) => api("DELETE", p);
 
 function toast(msg, ms) {
@@ -107,13 +119,27 @@ function barChart(items, valueKey, labelFn) {
   }).join("");
   return \`<div class="chart"><svg viewBox="0 0 \${w} \${Math.min(items.length, 10) * rowH}" xmlns="http://www.w3.org/2000/svg">\${rows}</svg></div>\`;
 }
-function budgetGauge(spent, cap, overageApproved) {
+function budgetGauge(spent, cap, overageApproved, opts) {
   if (cap == null) return "<span class='dim'>no budget set</span>";
+  opts = opts || {};
   const pct = Math.min(100, (spent / cap) * 100);
   const over = spent > cap;
-  return \`<div class="row"><span class="num">\${fmtUsd(spent)}</span><span class="dim">of \${fmtUsd(cap)}</span>
-    \${over ? '<span class="badge ' + (overageApproved ? "warn" : "bad") + '">' + (overageApproved ? "overage approved" : "over budget") + "</span>" : ""}</div>
-    <div class="bar" style="margin-top:8px"><i class="\${over ? "over" : ""}" style="width:\${pct}%"></i></div>\`;
+  const tPct = opts.alertThresholdPct;
+  // amber threshold-crossed vs red over-budget: prefer the API's own flag, but
+  // fall back to a local compute so the fleet-list mini-gauge works too
+  const crossed = !over && (opts.thresholdCrossed ?? (tPct != null && tPct < 100 && opts.thresholdUsd != null && spent >= opts.thresholdUsd));
+  const periodLabel = opts.period === "monthly" ? " this month" : "";
+  const marker = (tPct != null && tPct < 100)
+    ? '<span class="mark" style="left:' + tPct + '%" title="' + tPct + '% alert threshold"></span>'
+    : "";
+  const badge = over
+    ? '<span class="badge ' + (overageApproved ? "warn" : "bad") + '">' + (overageApproved ? "overage approved" : "over budget") + "</span>"
+    : crossed
+    ? '<span class="badge warn">' + tPct + "% threshold crossed</span>"
+    : "";
+  const fill = over ? "over" : crossed ? "warn" : "";
+  return \`<div class="row"><span class="num">\${fmtUsd(spent)}</span><span class="dim">of \${fmtUsd(cap)}\${periodLabel}</span>\${badge}</div>
+    <div class="bar" style="margin-top:8px;position:relative"><i class="\${fill}" style="width:\${pct}%"></i>\${marker}</div>\`;
 }
 
 // ---------------------------------------------------------------- shell --
@@ -1885,19 +1911,28 @@ function wireSpend() {
       const out = $("#spend-proj");
       out.innerHTML = '<div class="empty">loading…</div>';
       try {
-        const c = await get("/v1/projects/" + b.dataset.spendproj + "/costs");
+        const pid = b.dataset.spendproj;
+        const c = await get("/v1/projects/" + pid + "/costs");
         const m = c.measured ?? {};
+        const bg = c.budget ?? {};
         const userName = (uid) => (DIRECTORY.find((u) => u.id === uid) || {}).name ?? uid;
+        const periodNote = bg.period === "monthly"
+          ? '<span class="dim" style="font-size:12px">budget window: this calendar month (' + esc(bg.periodKey ?? "") + ")</span>"
+          : '<span class="dim" style="font-size:12px">budget window: lifetime</span>';
         out.innerHTML =
           '<div class="grid2" style="margin-top:12px">'
           + '<div class="card stat"><div class="v">' + fmtUsd(m.costUsd) + '</div><div class="l">project measured spend · ' + (m.events ?? 0) + " calls</div></div>"
           + '<div class="card stat"><div class="v">' + fmtUsd(c.forecast?.projectedEomUsd) + '</div><div class="l">projected month-end · ' + esc(c.forecast?.basis ?? "") + "</div></div>"
           + "</div>"
-          + '<h2>Budget vs actual</h2><div class="card">' + budgetGauge(c.budget.spentUsd, c.budget.budgetUsd, c.budget.overageApproved) + "</div>"
+          + '<div class="row" style="margin-top:14px"><h2 style="margin:0">Budget vs actual</h2><span class="grow"></span><button class="small" data-csv="' + esc(pid) + '">Download CSV</button></div>'
+          + '<div class="card">' + budgetGauge(bg.spentUsd, bg.budgetUsd, bg.overageApproved, bg) + '<div class="row" style="margin-top:8px">' + periodNote + "</div></div>"
           + '<h2>Showback by member</h2><div class="card">' + barChart(c.byUser, "costUsd", (i) => userName(i.userId)) + "</div>"
           + '<h2>By agent / model</h2><div class="card">' + barChart(c.byAgent, "costUsd", (i) => AGENT_NAMES[i.agentId] ?? i.model) + "</div>"
           + '<h2>Spend by connector</h2><div class="card">' + ((c.byConnector ?? []).length ? barChart(c.byConnector, "costUsd", (i) => (i.name ?? "connector") + " · " + (i.operation ?? "")) : '<div class="empty">No metered connector calls for this project.</div>') + "</div>"
           + '<h2>Estimated savings by technique</h2><div class="card">' + barChart(c.estimatedSavings, "estimatedCostSavedUsd", (i) => i.technique) + "</div>";
+        const csvBtn = out.querySelector("[data-csv]");
+        if (csvBtn) csvBtn.addEventListener("click", () =>
+          downloadCsv("/v1/projects/" + pid + "/costs.csv", (c.project?.name ?? "project") + "-costs.csv"));
       } catch (e) { out.innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; }
     }));
 }
