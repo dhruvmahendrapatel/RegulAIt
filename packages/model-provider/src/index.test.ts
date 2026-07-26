@@ -6,6 +6,7 @@ import {
   GoogleProvider,
   OpenAiProvider,
   XaiProvider,
+  TASK_DECOMPOSITION_SENTINEL,
   resolveModelProvider,
 } from "./index.js";
 
@@ -796,5 +797,100 @@ describe("multi-turn messages contract (full history including newest turn; inpu
     });
     expect(viaMessages.outputText).toBe(single.outputText);
     expect(viaMessages.usage).toEqual(single.usage);
+  });
+});
+
+describe("MockModelProvider task-decomposition planning (pillar 7)", () => {
+  const PLAN_SYSTEM = [
+    TASK_DECOMPOSITION_SENTINEL,
+    "You are a Team-Lead agent. Decompose the user's goal into a task graph of 3-7 tasks for worker agents.",
+    "Assign each task to one of the caller's granted agents BY NAME from this roster:",
+    "- fast-mock (tier 0, $1 in / $5 out per MTok)",
+    "- balanced-mock (tier 1, $3 in / $15 out per MTok)",
+    "- premium-mock (tier 2, $15 in / $75 out per MTok)",
+    'Return ONLY a JSON object.',
+  ].join("\n");
+  const GOAL = "Add rate-limit headers to the public API and document them";
+
+  function parsePlan(text: string): any {
+    // the mock fences the object on purpose — callers must tolerate that
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    expect(start).toBeGreaterThanOrEqual(0);
+    return JSON.parse(text.slice(start, end + 1));
+  }
+
+  it("the sentinel flips the reply to a valid 4-node plan: analyze → two parallel middles → integrate", async () => {
+    const mock = new MockModelProvider();
+    const r = await mock.dispatch({ model: "mock-balanced", input: GOAL, system: PLAN_SYSTEM });
+    expect(r.refusal).toBe(false);
+    const plan = parsePlan(r.outputText);
+    expect(typeof plan.name).toBe("string");
+    expect(plan.nodes).toHaveLength(4);
+    const [analyze, mid1, mid2, final] = plan.nodes;
+    expect(analyze.dependsOn).toEqual([]);
+    expect(mid1.dependsOn).toEqual([analyze.id]);
+    expect(mid2.dependsOn).toEqual([analyze.id]);
+    expect(final.dependsOn).toEqual([mid1.id, mid2.id]);
+    // kebab-slug ids, topic-flavoured middles pulled from goal keywords
+    for (const n of plan.nodes) expect(n.id).toMatch(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
+    expect(mid1.id).not.toBe(mid2.id);
+    expect(mid1.id + mid2.id).toMatch(/rate|limit|headers|document/);
+    // instructions are self-contained prose, not placeholders
+    for (const n of plan.nodes) expect(n.instruction.length).toBeGreaterThan(40);
+    // usage stays the measured contract
+    expect(r.usage.outputTokens).toBe(Math.ceil(r.outputText.length / 4));
+    expect(r.stopReason).toBe("end_turn");
+  });
+
+  it("roster names are respected: cheapest for analysis/verification, mid-tier for builds", async () => {
+    const mock = new MockModelProvider();
+    const r = await mock.dispatch({ model: "mock-balanced", input: GOAL, system: PLAN_SYSTEM });
+    const plan = parsePlan(r.outputText);
+    expect(plan.nodes[0].agent).toBe("fast-mock");
+    expect(plan.nodes[3].agent).toBe("fast-mock");
+    expect(plan.nodes[1].agent).toBe("balanced-mock");
+    expect(plan.nodes[2].agent).toBe("balanced-mock");
+  });
+
+  it("is deterministic across instances, and tier shapes instruction verbosity", async () => {
+    const a = await new MockModelProvider().dispatch({ model: "mock-balanced", input: GOAL, system: PLAN_SYSTEM });
+    const b = await new MockModelProvider().dispatch({ model: "mock-balanced", input: GOAL, system: PLAN_SYSTEM });
+    expect(a.outputText).toBe(b.outputText);
+    const fast = parsePlan((await new MockModelProvider().dispatch({ model: "mock-fast", input: GOAL, system: PLAN_SYSTEM })).outputText);
+    const premium = parsePlan((await new MockModelProvider().dispatch({ model: "mock-premium", input: GOAL, system: PLAN_SYSTEM })).outputText);
+    for (let i = 0; i < 4; i++) {
+      expect(premium.nodes[i].instruction.length).toBeGreaterThan(fast.nodes[i].instruction.length);
+    }
+  });
+
+  it("<<badplan>> emits broken JSON every time — the retry path cannot be rescued", async () => {
+    const mock = new MockModelProvider();
+    for (let i = 0; i < 2; i++) {
+      const r = await mock.dispatch({ model: "mock-balanced", input: `${GOAL} <<badplan>>`, system: PLAN_SYSTEM });
+      expect(r.refusal).toBe(false);
+      const start = r.outputText.indexOf("{");
+      expect(() => JSON.parse(r.outputText.slice(start))).toThrow();
+    }
+  });
+
+  it("<<rogueagent>> assigns one node an agent outside the roster (substitution exercise)", async () => {
+    const r = await new MockModelProvider().dispatch({ model: "mock-balanced", input: `${GOAL} <<rogueagent>>`, system: PLAN_SYSTEM });
+    const plan = parsePlan(r.outputText);
+    const rogue = plan.nodes.filter((n: any) => n.agent === "shadow-unsanctioned-agent");
+    expect(rogue).toHaveLength(1);
+  });
+
+  it("refusal keeps precedence over planning, and non-sentinel system prompts stay canned prose", async () => {
+    const refused = await new MockModelProvider().dispatch({ model: "mock-balanced", input: `${GOAL} <<refuse>>`, system: PLAN_SYSTEM });
+    expect(refused.refusal).toBe(true);
+    expect(refused.outputText).toBe("");
+    const normal = await new MockModelProvider().dispatch({
+      model: "mock-balanced",
+      input: GOAL,
+      system: "You are the API planning assistant.",
+    });
+    expect(normal.outputText.startsWith("Working within the signed-off scope: ")).toBe(true);
+    expect(normal.outputText).not.toContain('"nodes"');
   });
 });

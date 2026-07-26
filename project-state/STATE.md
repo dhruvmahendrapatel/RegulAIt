@@ -393,6 +393,23 @@ Sync-now verification works, and receivers without read-back fail loudly into th
 orphan flow. `DEFAULT_MAPPINGS.generic_webhook` is the IDENTITY map over all five canonical
 states including blocked — nothing invented because the vocabulary is ours. E2e: the fake
 receiver verifies the HMAC on every request and asserts the token never travels raw.
+**Agent-driven task decomposition, 2026-07-26 — pillar 7's headline lands, human-gated.**
+`POST /v1/runs/decompose` {goal, projectId?, leadAgentId?}: a Team-Lead agent (leadAgentId ??
+user default ?? cheapest granted mock, entitlement-checked under mode "plan") drafts a
+task-graph PROPOSAL via one governed metered dispatch (policy → project budget gate →
+usage/audit with detail.purpose:"decompose"; roster in the prompt = the caller's entitled
+AND dispatchable agents with tier/price so suggestions are grounded). Parse (balanced-JSON,
+fence-tolerant) → decompositionPlanSchema (2-8 kebab-id nodes) → agent names resolved
+against real grants (unknown → default agent with recorded substitution) → the SAME kernel
+validateGraph as planRun; one error-fed retry then honest 422 with rawOutput (both attempts
+billed). It never creates a run — the proposal lands in the New Run editor (editable
+everything, substitution badges, lead cost banner, "nothing runs until you accept") and
+acceptance is the unchanged human plan gate. Mock planner: deterministic 4-node
+analyze → two parallel goal-keyword middles → integrate, roster-aware, tier-scaled —
+demoable with zero external keys. Suite 443 → 455; browser-verified (drafted plan executed
+to completion with ∥ badges, zero console errors). Deferred (unchanged): Team-Lead TIER
+with transitive entitlement narrowing, tool-using multi-turn workers.
+
 **Multi-turn conversations, 2026-07-25 — the Playground stops being amnesiac (pillar 6
 prerequisite unlocked).** `ModelDispatchRequest.messages` (full ordered history; `input`
 ignored when present, byte-identical single-turn otherwise) threaded through all five

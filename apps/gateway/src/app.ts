@@ -74,6 +74,7 @@ import { ADMIN_PORTAL_HTML } from "./admin-portal.js";
 import { APP_HTML } from "./app-ui.js";
 import { registerOptimizationRoutes } from "./optimization.js";
 import { applyRunApprovalDecision, registerOrchestrationRoutes } from "./orchestration.js";
+import { registerDecomposeRoutes } from "./decompose.js";
 import { mirrorApprovalDecision, registerPmRoutes } from "./pm.js";
 import { RunStateError } from "@regulait/orchestration-kernel";
 import { applyWorkflowApprovalDecision, registerWorkflowRoutes } from "./workflows.js";
@@ -170,6 +171,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "GET /v1/projects/:projectId/compliance",
     "GET /v1/projects/:projectId/costs",
     "POST /v1/runs",
+    "POST /v1/runs/decompose",
     "POST /v1/runs/:runId/events",
     "POST /v1/runs/:runId/nodes/:nodeId/dispatch",
     "POST /v1/runs/:runId/auto",
@@ -932,6 +934,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerProjectRoutes(app, db);
   registerOptimizationRoutes(app, db);
   registerOrchestrationRoutes(app, db, { dataKey: opts.dataKey });
+  registerDecomposeRoutes(app, db, { dataKey: opts.dataKey });
   registerPmRoutes(app, db, { dataKey: opts.dataKey });
 
   registerWorkflowRoutes(app, db, { dataKey: opts.dataKey });

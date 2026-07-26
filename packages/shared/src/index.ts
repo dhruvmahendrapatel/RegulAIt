@@ -269,6 +269,43 @@ export const createRunSchema = z.object({
   projectId: z.string().uuid().optional(),
 });
 
+// PILLAR 7 agent-driven task decomposition: a lead agent DRAFTS a plan; the
+// human reviews/edits it and submits through the normal POST /v1/runs — the
+// plan gate stays human.
+export const decomposeGoalSchema = z.object({
+  goal: z.string().min(10).max(4000),
+  /** pillar 5: the lead dispatch bills to this project like any other call */
+  projectId: z.string().uuid().optional(),
+  /** explicit lead pick; defaults to the caller's default agent, then the
+   * cheapest granted mock agent */
+  leadAgentId: z.string().uuid().optional(),
+});
+
+/** The raw plan shape the lead agent must return from a decompose dispatch.
+ * Agent references are NAMES from the roster the planning prompt supplied —
+ * the gateway resolves them to granted agent ids (falling back, recorded,
+ * when a name is unknown or ungranted). */
+export const decompositionPlanSchema = z.object({
+  name: z.string().min(1).max(200),
+  nodes: z
+    .array(
+      z.object({
+        id: z
+          .string()
+          .min(1)
+          .max(64)
+          .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, "node id must be a kebab-case slug"),
+        title: z.string().min(1).max(200),
+        instruction: z.string().min(1).max(4000),
+        agent: z.string().min(1).max(200),
+        dependsOn: z.array(z.string().min(1)).default([]),
+      }),
+    )
+    .min(2)
+    .max(8),
+});
+export type DecompositionPlan = z.infer<typeof decompositionPlanSchema>;
+
 export const autoAdvanceSchema = z.object({
   /** cap on successful dispatches in one pass */
   maxNodes: z.number().int().min(1).max(100).default(20),

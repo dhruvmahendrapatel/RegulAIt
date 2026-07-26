@@ -871,6 +871,144 @@ function mockReplyBody(intent: MockIntent, tier: MockTier, topic: string): strin
  * so the demo visibly proves history flowed through. */
 const TERSE_FOLLOW_UP_WORDS = 8;
 
+// ---------------------------------------------------------------------------
+// Task-decomposition planning (pillar 7). The gateway's decompose endpoint
+// puts this sentinel at the top of its planning system prompt; when the mock
+// sees it, the reply is a VALID deterministic JSON plan derived from the goal
+// text — 4 nodes: analyze → two parallel topic-flavoured middles → an
+// integrate/verify node depending on both. Agent names are parsed out of the
+// roster the prompt embeds (cheapest for analysis/verification, mid-tier for
+// build), and the model tier still shapes instruction verbosity. Two
+// deterministic test triggers ride the goal text like "<<refuse>>" does:
+// "<<badplan>>" emits broken JSON EVERY time (exercising the retry-then-422
+// path), "<<rogueagent>>" assigns one node an agent name outside the roster
+// (exercising substitution recording).
+// ---------------------------------------------------------------------------
+
+export const TASK_DECOMPOSITION_SENTINEL = "TASK-DECOMPOSITION REQUEST";
+
+const PLAN_STOPWORDS = new Set([
+  "the", "and", "that", "this", "those", "these", "with", "into", "from", "over",
+  "your", "our", "their", "them", "then", "should", "must", "will", "have",
+  "make", "build", "create", "implement", "write", "draft", "please", "them",
+  "public", "private", "some", "every", "each", "when", "where", "what", "them",
+]);
+
+/** two distinct topic words lifted from the goal so the parallel middle
+ * tasks read as goal-specific, never boilerplate */
+function planKeywords(goal: string): [string, string] {
+  const words = goal
+    .replace(/<<[^>]*>>/g, " ")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length >= 4 && !PLAN_STOPWORDS.has(w));
+  const uniq = [...new Set(words)];
+  return [uniq[0] ?? "core", uniq[1] ?? "supporting"];
+}
+
+function planSlug(word: string): string {
+  const s = word.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24);
+  return s || "task";
+}
+
+/** roster lines look like "- fast-mock (tier 0, $1 in / $5 out per MTok)" —
+ * the stable format the gateway's planning prompt emits */
+function planRoster(system: string): Array<{ name: string; tier: number }> {
+  const out: Array<{ name: string; tier: number }> = [];
+  for (const m of system.matchAll(/^- (.+?) \(tier (\d+)/gm)) {
+    out.push({ name: m[1]!, tier: Number(m[2]) });
+  }
+  return out;
+}
+
+/** tier controls how many of a node's candidate sentences survive — the same
+ * fast/balanced/premium verbosity contract the canned replies keep */
+function planInstruction(sentences: string[], tier: MockTier): string {
+  const keep = tier === "fast" ? 2 : tier === "balanced" ? 3 : 4;
+  return sentences.slice(0, keep).join(" ");
+}
+
+function mockDecompositionReply(goal: string, system: string, tier: MockTier): string {
+  if (goal.includes("<<badplan>>")) {
+    // deliberately unparseable, EVERY time — the caller's one retry cannot fix it
+    return '```json\n{"name": "broken plan", "nodes": [{"id": "oops"\n```';
+  }
+  const roster = planRoster(system).sort((a, b) => a.tier - b.tier || a.name.localeCompare(b.name));
+  const cheap = roster[0]?.name ?? "unknown-agent";
+  const mid = roster[Math.floor((roster.length - 1) / 2)]?.name ?? cheap;
+  const [kw1, kw2] = planKeywords(goal);
+  const topic = mockTopic(goal.replace(/<<[^>]*>>/g, " ").trim());
+  const slug1 = planSlug(kw1);
+  let slug2 = planSlug(kw2);
+  if (slug2 === slug1) slug2 = `${slug2}-2`;
+  const rogue = goal.includes("<<rogueagent>>");
+  const nodes = [
+    {
+      id: "analyze-requirements",
+      title: `Analyze the requirements for ${topic}`,
+      instruction: planInstruction(
+        [
+          `Analyze the goal "${topic}" and enumerate every concrete requirement it implies, including constraints that are stated only indirectly.`,
+          `Produce a short written analysis a downstream worker can act on without seeing the original goal.`,
+          `Call out any ambiguity explicitly rather than resolving it silently.`,
+          `Close with the acceptance criteria the final verification step should check against.`,
+        ],
+        tier,
+      ),
+      agent: cheap,
+      dependsOn: [],
+    },
+    {
+      id: `build-${slug1}`,
+      title: `Implement the ${kw1} changes`,
+      instruction: planInstruction(
+        [
+          `Implement the ${kw1} portion of the work described by the analysis task, keeping the change minimal and self-contained.`,
+          `Describe the change precisely enough that a reviewer can verify it without further context.`,
+          `State explicitly how each error case is handled.`,
+          `Flag any deviation from the analysis and the reason for it.`,
+        ],
+        tier,
+      ),
+      agent: mid,
+      dependsOn: ["analyze-requirements"],
+    },
+    {
+      id: `build-${slug2}`,
+      title: `Prepare the ${kw2} deliverable`,
+      instruction: planInstruction(
+        [
+          `Prepare the ${kw2} deliverable independently of the other build task — the two run in parallel and must not assume each other's output.`,
+          `Keep the result complete and reviewable on its own.`,
+          `List anything the integration step must reconcile between the two parallel tracks.`,
+          `Note any follow-up work that is out of scope here.`,
+        ],
+        tier,
+      ),
+      agent: rogue ? "shadow-unsanctioned-agent" : mid,
+      dependsOn: ["analyze-requirements"],
+    },
+    {
+      id: "integrate-verify",
+      title: `Integrate and verify ${topic}`,
+      instruction: planInstruction(
+        [
+          `Integrate the outputs of both parallel build tasks into one coherent result for ${topic}.`,
+          `Verify the combined result against the acceptance criteria from the analysis task and report each check with its outcome.`,
+          `Resolve any conflict between the two tracks explicitly, never by silently preferring one.`,
+          `State clearly whether the goal is met or what remains.`,
+        ],
+        tier,
+      ),
+      agent: cheap,
+      dependsOn: [`build-${slug1}`, `build-${slug2}`],
+    },
+  ];
+  // fenced on purpose: callers must tolerate a code fence around the object
+  return "```json\n" + JSON.stringify({ name: topic, nodes }, null, 2) + "\n```";
+}
+
 export class MockModelProvider implements ModelProvider {
   readonly kind = "mock" as const;
   readonly dispatches: MockDispatch[] = [];
@@ -915,12 +1053,17 @@ export class MockModelProvider implements ModelProvider {
         `Continuing from the previous ${n} turn${n === 1 ? "" : "s"}` +
         (terse && prevUser ? `, still on ${mockTopic(prevUser.content)}:` : ":");
     }
-    const body = mockReplyBody(mockIntent(lastUser), mockTier(req.model), mockTopic(topicSource));
-    const outputText = [
-      ...(req.system ? [mockSystemAck(req.system)] : []),
-      ...(continuation ? [continuation] : []),
-      body,
-    ].join("\n\n");
+    // Planning requests answer with ONLY the JSON plan (tolerably fenced) —
+    // no system-ack or continuation opener, since the caller machine-parses
+    // the reply. Streaming and usage accounting stay on the shared path.
+    const planning = req.system?.includes(TASK_DECOMPOSITION_SENTINEL) ?? false;
+    const outputText = planning
+      ? mockDecompositionReply(lastUser, req.system!, mockTier(req.model))
+      : [
+          ...(req.system ? [mockSystemAck(req.system)] : []),
+          ...(continuation ? [continuation] : []),
+          mockReplyBody(mockIntent(lastUser), mockTier(req.model), mockTopic(topicSource)),
+        ].join("\n\n");
     if (req.onText) {
       // deterministic chunking so the streaming path is testable end-to-end
       const chunkSize = 40;

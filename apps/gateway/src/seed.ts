@@ -908,7 +908,9 @@ ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecre
              Workflows: an instance awaiting its requirements artifact;
              Runs: a planned run to start.
     · dana   Inbox: a shared-context conflict to arbitrate; Runs: a node
-             awaiting review, then auto-advance the rest.
+             awaiting review, then auto-advance the rest; Runs → New run →
+             "Describe the goal" drafts a task graph with a lead agent
+             (mock, zero external keys) — review, tweak, Plan run.
 
   Drive the pipeline live ('Ship the checkout payment-vault fallback'):
     1. avery  Inbox → approve the sign-off (reads the artifact inline)

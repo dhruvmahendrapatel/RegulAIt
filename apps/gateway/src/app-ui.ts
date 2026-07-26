@@ -37,6 +37,7 @@ let KEY = sessionStorage.getItem("regulait.key") ?? "";
 let ME = null;
 let AGENTS = [];        // my granted agents
 let AGENT_NAMES = {};   // id -> name
+let DEFAULT_AGENT_ID = null; // my policy's default agent (lead-agent preselect)
 let PROJECTS = [];      // my member projects
 let INBOX_COUNT = 0;
 let MY_PROVIDERS = []; // providers I hold my own key for (never the key itself)
@@ -142,6 +143,7 @@ async function bootstrap() {
   ]);
   AGENTS = mine.agents ?? [];
   AGENT_NAMES = Object.fromEntries(AGENTS.map((a) => [a.agentId, a.name]));
+  DEFAULT_AGENT_ID = mine.defaultAgentId ?? null;
   PROJECTS = projects.projects ?? [];
   MY_PROVIDERS = (creds.credentials ?? []).map((c) => c.provider);
   const inbox = await get("/v1/approvals").catch(() => ({ approvals: [] }));
@@ -552,17 +554,69 @@ const nrDefaultAgent = () => (AGENTS.find((a) => a.provider === "mock") ?? AGENT
 // a playground prompt carried over by 'turn into a run' — becomes the first
 // node's instruction until cleared or the run is planned
 let NR_PREFILL = null;
+// PILLAR 7 goal decomposition: the lead agent's drafted proposal, rendered
+// into this same editor (title/instruction/agent editable, nodes deletable)
+// until discarded or planned. NOTHING runs until Plan run is clicked — the
+// plan gate stays human.
+let NR_PROPOSAL = null; // {name, nodes:[{id,title,instruction,ownerAgentId,agentName,dependsOn,substituted?}], dispatch, retried, leadName}
+let NR_GOAL = "";       // the goal textarea survives the re-render after a draft lands
 const nrInstructionFor = (n, idx) => (idx === 0 && NR_PREFILL ? NR_PREFILL : n.instruction);
-const nrAgentSel = (nid) => '<select data-nagent="' + nid + '">' + AGENTS.map((a) =>
-  '<option value="' + a.agentId + '"' + (a.agentId === nrDefaultAgent() ? " selected" : "") + '>' + esc(a.name) + " · " + esc(a.provider) + "</option>").join("") + "</select>";
+const nrAgentSel = (nid, selected) => '<select data-nagent="' + nid + '">' + AGENTS.map((a) =>
+  '<option value="' + a.agentId + '"' + (a.agentId === (selected ?? nrDefaultAgent()) ? " selected" : "") + '>' + esc(a.name) + " · " + esc(a.provider) + "</option>").join("") + "</select>";
 const nrNodeRowsHtml = (t) => t.nodes.map((n, idx) => \`<div class="node-row">
   <span class="node-dot not_started"></span>
   <div class="grow"><label class="f">\${esc(n.id)}\${n.dependsOn.length ? " · after " + n.dependsOn.join(", ") : ""}\${idx === 0 && NR_PREFILL ? ' <span class="badge accent">instruction from playground</span>' : ""}</label>
     <input data-ntitle="\${n.id}" value="\${esc(n.title)}" style="width:100%" title="\${esc(nrInstructionFor(n, idx))}"></div>
   <div><label class="f">Agent</label>\${nrAgentSel(n.id)}</div>
 </div>\`).join("");
+// proposal rows: same editor shape as templates, plus an editable instruction
+// textarea, a per-node delete, and substitution badges for agents the lead
+// suggested but the caller isn't granted
+const nrProposalRowsHtml = () => NR_PROPOSAL.nodes.map((n) => \`<div class="node-row">
+  <span class="node-dot not_started"></span>
+  <div class="grow"><label class="f">\${esc(n.id)}\${n.dependsOn.length ? " · after " + n.dependsOn.join(", ") : ""}\${n.substituted ? ' <span class="badge warn" title="the lead suggested &#39;' + esc(n.substituted.requestedAgentName) + '&#39;, which is not granted to you — swapped to a granted agent">substituted</span>' : ""}</label>
+    <input data-ntitle="\${esc(n.id)}" value="\${esc(n.title)}" style="width:100%">
+    <textarea data-ninstr="\${esc(n.id)}" rows="3" style="width:100%;margin-top:4px" spellcheck="false" title="this node's worker is prompted with exactly this instruction">\${esc(n.instruction)}</textarea></div>
+  <div><label class="f">Agent</label>\${nrAgentSel(n.id, n.ownerAgentId)}</div>
+  <button class="ghost small" data-ndel="\${esc(n.id)}" title="drop this task from the plan">×</button>
+</div>\`).join("");
+// carry any in-DOM edits back into the proposal before a partial re-render
+function nrSyncProposal() {
+  if (!NR_PROPOSAL) return;
+  for (const n of NR_PROPOSAL.nodes) {
+    n.title = ($('[data-ntitle="' + n.id + '"]')?.value ?? n.title).trim() || n.title;
+    n.instruction = ($('[data-ninstr="' + n.id + '"]')?.value ?? n.instruction).trim() || n.instruction;
+    n.ownerAgentId = $('[data-nagent="' + n.id + '"]')?.value ?? n.ownerAgentId;
+  }
+}
+function nrWireProposalRows() {
+  document.querySelectorAll("[data-ndel]").forEach((b) =>
+    b.addEventListener("click", () => {
+      nrSyncProposal();
+      const id = b.dataset.ndel;
+      NR_PROPOSAL.nodes = NR_PROPOSAL.nodes.filter((n) => n.id !== id)
+        .map((n) => ({ ...n, dependsOn: n.dependsOn.filter((d) => d !== id) }));
+      $("#nr-nodes").innerHTML = nrProposalRowsHtml();
+      nrWireProposalRows();
+      if ($("#nr-adv")?.open) $("#nr-json").value = JSON.stringify(nrGraph(), null, 2);
+    }));
+}
 // the exact JSON the form POSTs — also what the advanced textarea pre-fills
 function nrGraph() {
+  if (NR_PROPOSAL) {
+    return {
+      run: ($("#nr-title")?.value ?? "").trim() || NR_PROPOSAL.name || "untitled run",
+      escalationApproverUserId: ME.userId,
+      nodes: NR_PROPOSAL.nodes.map((n) => ({
+        id: n.id,
+        title: ($('[data-ntitle="' + n.id + '"]')?.value ?? n.title).trim() || n.title,
+        instruction: ($('[data-ninstr="' + n.id + '"]')?.value ?? n.instruction).trim() || n.instruction,
+        ownerAgentId: $('[data-nagent="' + n.id + '"]')?.value ?? n.ownerAgentId,
+        mode: "execute",
+        dependsOn: n.dependsOn,
+      })),
+    };
+  }
   const t = RUN_TEMPLATES.find((x) => x.id === $("#nr-template")?.value) ?? RUN_TEMPLATES[0];
   return {
     run: ($("#nr-title")?.value ?? "").trim() || "untitled run",
@@ -600,16 +654,44 @@ async function runsPage() {
        <span class="dim" style="font-size:12.5px">the first node's instruction is your playground prompt — hover its title (or open Advanced) to read it</span>
        <button class="ghost small" id="nr-clearpre">clear</button></div>\`
     : "";
+  // PILLAR 7: "Describe the goal" — a lead agent drafts the task graph, the
+  // human reviews it in this very editor before anything is even planned.
+  const leadDefault = AGENTS.some((a) => a.agentId === DEFAULT_AGENT_ID)
+    ? DEFAULT_AGENT_ID
+    : nrDefaultAgent();
+  const leadOpts = AGENTS.map((a) =>
+    \`<option value="\${a.agentId}"\${a.agentId === leadDefault ? " selected" : ""}>\${esc(a.name)} · \${esc(a.provider)} · tier \${a.tier}</option>\`).join("");
+  const goalSection = \`
+    <div class="row">
+      <div class="grow"><label class="f">Describe the goal</label><textarea id="nr-goal" rows="2" style="width:100%" placeholder="What should this run achieve? A lead agent drafts the task graph — you review and edit it before anything runs.">\${esc(NR_GOAL)}</textarea></div>
+      <div><label class="f">Lead agent</label><select id="nr-lead">\${leadOpts}</select></div>
+      <div style="align-self:flex-end"><button id="nr-draft" title="one governed, metered lead dispatch drafts a proposal — it does NOT create a run">Draft plan with a lead agent</button></div>
+    </div>
+    <div class="err-line" id="nr-goalerr" style="margin-top:4px"></div>
+    <hr class="hr">\`;
+  const subNotes = NR_PROPOSAL ? NR_PROPOSAL.nodes.filter((n) => n.substituted).map((n) =>
+    \`<div class="dim" style="font-size:12px;margin-bottom:4px">node \${esc(n.id)}: the lead suggested “\${esc(n.substituted.requestedAgentName)}”, which is not granted to you — swapped to \${esc(AGENT_NAMES[n.ownerAgentId] ?? "a granted agent")}.</div>\`).join("") : "";
+  const proposalNote = NR_PROPOSAL
+    ? \`<div class="row" style="margin-bottom:8px">
+        <span class="badge accent">plan drafted by \${esc(NR_PROPOSAL.leadName)}</span>
+        <span class="badge">lead cost \${fmtUsd(NR_PROPOSAL.dispatch.costUsd)} · \${esc(NR_PROPOSAL.dispatch.modelUsed)}</span>
+        \${NR_PROPOSAL.retried ? '<span class="badge warn" title="the first draft failed validation; the lead corrected it on one retry">retried once</span>' : ""}
+        <span class="dim" style="font-size:12.5px">review before planning — nothing runs until you accept</span>
+        <button class="ghost small" id="nr-clearprop">discard</button>
+      </div>\${subNotes}\`
+    : "";
   const newRun = AGENTS.length === 0
     ? '<div class="empty">No agents are granted to your account — ask an admin to grant you one before planning a run.</div>'
     : \`
+    \${goalSection}
+    \${proposalNote}
     \${prefillNote}
     <div class="row">
-      <div class="grow"><label class="f">Title</label><input id="nr-title" placeholder="What is this run for?" value="\${esc(NR_PREFILL ? NR_PREFILL.split("\\n")[0].slice(0, 120) : "")}" style="width:100%"></div>
+      <div class="grow"><label class="f">Title</label><input id="nr-title" placeholder="What is this run for?" value="\${esc(NR_PROPOSAL ? NR_PROPOSAL.name : (NR_PREFILL ? NR_PREFILL.split("\\n")[0].slice(0, 120) : ""))}" style="width:100%"></div>
       <div><label class="f">Bill to</label><select id="nr-project">\${projectOpts}</select></div>
-      <div><label class="f">Template</label><select id="nr-template">\${tplOpts}</select></div>
+      <div><label class="f">Template</label><select id="nr-template"\${NR_PROPOSAL ? ' title="picking a template discards the drafted proposal"' : ""}>\${tplOpts}</select></div>
     </div>
-    <div id="nr-nodes" style="margin-top:6px">\${nrNodeRowsHtml(RUN_TEMPLATES[0])}</div>
+    <div id="nr-nodes" style="margin-top:6px">\${NR_PROPOSAL ? nrProposalRowsHtml() : nrNodeRowsHtml(RUN_TEMPLATES[0])}</div>
     <details id="nr-adv" style="margin-top:10px">
       <summary class="faint" style="cursor:pointer;font-size:11.5px">Advanced — edit the graph JSON directly (authoritative while open)</summary>
       <textarea id="nr-json" rows="16" style="width:100%;margin-top:8px" spellcheck="false"></textarea>
@@ -630,7 +712,37 @@ async function runsPage() {
 
 function wireRuns() {
   $("#nr-clearpre")?.addEventListener("click", () => { NR_PREFILL = null; render(); });
+  // PILLAR 7 goal → drafted proposal. The decompose call is a governed,
+  // metered lead dispatch that returns a PROPOSAL only — it lands in this
+  // editor for review; Plan run below is the unchanged human accept.
+  $("#nr-goal")?.addEventListener("input", (e) => { NR_GOAL = e.target.value; });
+  $("#nr-draft")?.addEventListener("click", async () => {
+    const err = $("#nr-goalerr"); err.textContent = "";
+    const goal = ($("#nr-goal")?.value ?? "").trim();
+    NR_GOAL = goal;
+    if (goal.length < 10) { err.textContent = "goal: describe it in at least 10 characters"; return; }
+    const leadAgentId = $("#nr-lead")?.value;
+    const projectId = $("#nr-project").value || undefined;
+    const b = $("#nr-draft"); b.disabled = true; b.textContent = "Drafting…";
+    try {
+      const r = await post("/v1/runs/decompose", { goal, ...(leadAgentId ? { leadAgentId } : {}), ...(projectId ? { projectId } : {}) });
+      NR_PROPOSAL = {
+        name: r.proposal.name, nodes: r.proposal.nodes,
+        dispatch: r.dispatch, retried: r.retried,
+        leadName: AGENT_NAMES[r.dispatch.servedAgentId] ?? "lead agent",
+      };
+      render();
+      toast("Plan drafted — review and adjust, then Plan run");
+    } catch (e) {
+      // 422 decomposition_invalid arrives with its detail via errMessage
+      err.textContent = e.message;
+      b.disabled = false; b.textContent = "Draft plan with a lead agent";
+    }
+  });
+  $("#nr-clearprop")?.addEventListener("click", () => { NR_PROPOSAL = null; render(); });
+  nrWireProposalRows();
   $("#nr-template")?.addEventListener("change", () => {
+    NR_PROPOSAL = null; // a template pick replaces the drafted proposal
     const t = RUN_TEMPLATES.find((x) => x.id === $("#nr-template").value) ?? RUN_TEMPLATES[0];
     $("#nr-nodes").innerHTML = nrNodeRowsHtml(t);
     // a new template is a new base — refill the JSON even if it was edited
@@ -654,6 +766,7 @@ function wireRuns() {
     try {
       const r = await post("/v1/runs", { graph, ...(projectId ? { projectId } : {}) });
       NR_PREFILL = null; // consumed by this run
+      NR_PROPOSAL = null; NR_GOAL = ""; // the proposal was accepted into this run
       toast(r.budgetApprovalPending ? "Run planned — over your budget cap, approval requested" : "Run planned");
       location.hash = "#/runs/" + r.id;
     } catch (e) { err.textContent = e.message; } // zod issues arrive via errMessage
