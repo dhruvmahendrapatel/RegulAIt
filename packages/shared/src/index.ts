@@ -143,6 +143,19 @@ export const invokeAgentSchema = z.object({
   stream: z.boolean().optional(),
   /** pillar 5: attribute this call's cost to a project */
   projectId: z.string().uuid().optional(),
+  /** multi-turn: dispatch inside this conversation — the stored history rides
+   * the request as the model's messages array, and the user+assistant turns
+   * are persisted on completion. Only meaningful with dispatch=true; a
+   * decision-only invoke never touches conversation history. */
+  conversationId: z.string().uuid().optional(),
+});
+
+/** MULTI-TURN CONVERSATIONS: create an empty personal thread. The owner is
+ * always the authenticated caller — never a body field. */
+export const createConversationSchema = z.object({
+  agentId: z.string().uuid(),
+  /** pillar 5: default attribution for every turn dispatched in this thread */
+  projectId: z.string().uuid().optional(),
 });
 
 export const createProjectSchema = z
@@ -256,6 +269,49 @@ export const createRunSchema = z.object({
   projectId: z.string().uuid().optional(),
 });
 
+// PILLAR 7 agent-driven task decomposition: a lead agent DRAFTS a plan; the
+// human reviews/edits it and submits through the normal POST /v1/runs — the
+// plan gate stays human.
+export const decomposeGoalSchema = z.object({
+  goal: z.string().min(10).max(4000),
+  /** pillar 5: the lead dispatch bills to this project like any other call */
+  projectId: z.string().uuid().optional(),
+  /** explicit lead pick; defaults to the caller's default agent, then the
+   * cheapest granted mock agent */
+  leadAgentId: z.string().uuid().optional(),
+});
+
+/** The raw plan shape the lead agent must return from a decompose dispatch.
+ * Agent references are NAMES from the roster the planning prompt supplied —
+ * the gateway resolves them to granted agent ids (falling back, recorded,
+ * when a name is unknown or ungranted). */
+export const decompositionPlanSchema = z.object({
+  name: z.string().min(1).max(200),
+  nodes: z
+    .array(
+      z.object({
+        id: z
+          .string()
+          .min(1)
+          .max(64)
+          .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, "node id must be a kebab-case slug"),
+        title: z.string().min(1).max(200),
+        instruction: z.string().min(1).max(4000),
+        agent: z.string().min(1).max(200),
+        dependsOn: z.array(z.string().min(1)).default([]),
+        /** pillar 7: MCP server NAMES this task's worker may draw tools from
+         * (resolved to ids + entitlement-narrowed by the gateway). Optional —
+         * a task with no tools is an ordinary single-turn worker. */
+        toolServers: z.array(z.string().min(1).max(200)).optional(),
+        /** pillar 7: max tool-using turns for this worker (gateway-bounded) */
+        maxTurns: z.number().int().min(1).max(20).optional(),
+      }),
+    )
+    .min(2)
+    .max(8),
+});
+export type DecompositionPlan = z.infer<typeof decompositionPlanSchema>;
+
 export const autoAdvanceSchema = z.object({
   /** cap on successful dispatches in one pass */
   maxNodes: z.number().int().min(1).max(100).default(20),
@@ -271,6 +327,9 @@ export const dispatchNodeSchema = z.object({
   /** work instructions for the node's worker; defaults to the node title */
   input: z.string().max(100_000).optional(),
   maxTokens: z.number().int().min(1).max(64_000).optional(),
+  /** pillar 7: override the node's declared tool-loop turn cap for this
+   * dispatch (still gateway-bounded) */
+  maxTurns: z.number().int().min(1).max(20).optional(),
 });
 
 export const runEventSchema = z.object({

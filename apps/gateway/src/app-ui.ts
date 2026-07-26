@@ -37,6 +37,7 @@ let KEY = sessionStorage.getItem("regulait.key") ?? "";
 let ME = null;
 let AGENTS = [];        // my granted agents
 let AGENT_NAMES = {};   // id -> name
+let DEFAULT_AGENT_ID = null; // my policy's default agent (lead-agent preselect)
 let PROJECTS = [];      // my member projects
 let INBOX_COUNT = 0;
 let MY_PROVIDERS = []; // providers I hold my own key for (never the key itself)
@@ -142,6 +143,7 @@ async function bootstrap() {
   ]);
   AGENTS = mine.agents ?? [];
   AGENT_NAMES = Object.fromEntries(AGENTS.map((a) => [a.agentId, a.name]));
+  DEFAULT_AGENT_ID = mine.defaultAgentId ?? null;
   PROJECTS = projects.projects ?? [];
   MY_PROVIDERS = (creds.credentials ?? []).map((c) => c.provider);
   const inbox = await get("/v1/approvals").catch(() => ({ approvals: [] }));
@@ -170,8 +172,58 @@ function shell(content, active) {
 }
 
 // ------------------------------------------------------------ playground --
-const chatHistory = []; // persists across renders within the session
+// The Playground is a real multi-turn surface: threads live server-side
+// (/v1/conversations, personal, admins included), the open thread's id lives
+// in sessionStorage (tab-scoped, like the key), and chatHistory below is only
+// the OPEN thread's render model — rebuilt from the server when a thread is
+// opened, appended to live while one streams. Runs/workflows keep their
+// single-turn invoke semantics untouched.
+const chatHistory = []; // the open thread's exchanges — persists across renders within the tab
 let PG_ABORT = null;    // AbortController while a stream is open — one at a time
+let CONVO_ID = sessionStorage.getItem("regulait.convo") || null; // active thread — tab-scoped
+let CONVOS = [];            // conversations rail cache (newest-updated first, from the server)
+let CHAT_LOADED_FOR = null; // which conversation chatHistory mirrors (null = fresh unsaved chat)
+let PG_PREFILL = null;      // agent/project selects to apply right after opening a thread
+
+function setConvo(id) {
+  CONVO_ID = id;
+  if (id) sessionStorage.setItem("regulait.convo", id);
+  else sessionStorage.removeItem("regulait.convo");
+}
+
+// Server history -> the exact exchange shape renderExchange draws live, so a
+// replayed thread wears the same bubbles and badges a live one does: the
+// assistant detail carries the dispatch facts (modelUsed/costUsd/refusal/
+// credentialSource), and a denied user turn carries detail.denied and gets
+// its denial pill with no assistant bubble.
+function exchangesFromMessages(v) {
+  const out = [];
+  for (const m of v.messages ?? []) {
+    if (m.role === "user") {
+      const x = { prompt: m.content, agentName: v.agentName ?? "agent", text: "", streaming: false };
+      if (m.detail && m.detail.denied) { x.denied = m.detail; x.text = m.detail.reason ?? ""; }
+      out.push(x);
+    } else if (m.role === "assistant") {
+      const x = out[out.length - 1];
+      if (!x || x.denied || x.result) continue; // history is strict user/assistant pairs — be defensive anyway
+      const d = m.detail ?? {};
+      x.text = m.content;
+      x.agentName = AGENT_NAMES[d.servedAgentId] ?? x.agentName;
+      x.result = { dispatch: {
+        model: d.modelUsed, costUsd: d.costUsd, refusal: d.refusal,
+        credentialSource: d.credentialSource, stopReason: d.stopReason,
+      } };
+      if (d.compaction) x.result.compaction = d.compaction;
+    }
+    // pillar 6 compaction boundary: everything up to and including this stored
+    // message is model-bound only via the summary — draw the divider after
+    // the exchange this message belongs to (full history stays visible above)
+    if (v.summaryThroughMessageId && m.id === v.summaryThroughMessageId && out.length) {
+      out[out.length - 1].compactedBoundary = { summary: v.summary, summaryTokens: v.summaryTokens };
+    }
+  }
+  return out;
+}
 
 // Whose key pays for this agent, said before the request rather than only
 // after it. Routing can still move the request to another agent, so the
@@ -184,7 +236,76 @@ function keyHint(agent) {
     : "No " + esc(agent.provider) + " key of your own — this uses the platform credential if an admin has configured one. <a href='#/settings'>Add your key</a>";
 }
 
-function playgroundPage() {
+// The conversations rail: newest-updated first, active highlight, delete
+// affordance. Rendered into #convo-rail so refreshRail() can update it after
+// a turn lands without re-rendering the whole page (a stream may be open).
+function railHtml() {
+  const items = CONVOS.map((c) => {
+    const n = c.messageCount ?? 0;
+    return \`<div class="convo-item \${c.id === CONVO_ID ? "active" : ""}" data-convo="\${esc(c.id)}" title="\${esc(c.title ?? "Untitled")}">
+      <div class="grow" style="min-width:0">
+        <div class="t">\${esc(c.title ?? "Untitled")}</div>
+        <div class="m">\${esc(c.agentName ?? "agent")} · \${ago(c.updatedAt)} · \${n} msg\${n === 1 ? "" : "s"}</div>
+      </div>
+      <button class="x" data-delconvo="\${esc(c.id)}" title="delete this conversation — its history is removed for good">×</button>
+    </div>\`;
+  }).join("");
+  return \`
+    <button class="small" id="convo-new" style="width:100%">+ New conversation</button>
+    <div style="margin-top:8px">\${items || '<div class="faint" style="font-size:12px;padding:12px 4px;text-align:center">No conversations yet — send a message and a thread starts itself.</div>'}</div>\`;
+}
+
+async function refreshRail() {
+  // called after a turn lands: title/updatedAt/messageCount move without a
+  // full re-render (which would tear down an open stream's DOM)
+  try { CONVOS = (await get("/v1/conversations")).conversations ?? []; } catch { return; }
+  const rail = $("#convo-rail");
+  if (!rail) return;
+  rail.innerHTML = railHtml();
+  wireRail();
+}
+
+function wireRail() {
+  $("#convo-new")?.addEventListener("click", () => {
+    if (PG_ABORT) { toast("A reply is still streaming — Stop it or let it finish first."); return; }
+    setConvo(null); chatHistory.length = 0; CHAT_LOADED_FOR = null; render();
+  });
+  document.querySelectorAll("[data-convo]").forEach((el) =>
+    el.addEventListener("click", () => {
+      if (PG_ABORT) { toast("A reply is still streaming — Stop it or let it finish first."); return; }
+      if (el.dataset.convo === CONVO_ID) return;
+      setConvo(el.dataset.convo); CHAT_LOADED_FOR = null; render();
+    }));
+  document.querySelectorAll("[data-delconvo]").forEach((b) =>
+    b.addEventListener("click", async (e) => {
+      e.stopPropagation(); // the row click underneath would open the thread
+      if (!confirm("Delete this conversation? Its full history is removed — this cannot be undone.")) return;
+      try {
+        await del("/v1/conversations/" + b.dataset.delconvo);
+        if (CONVO_ID === b.dataset.delconvo) { setConvo(null); chatHistory.length = 0; CHAT_LOADED_FOR = null; }
+        toast("Conversation deleted");
+        render();
+      } catch (err) { toast("✗ " + err.message); }
+    }));
+}
+
+async function playgroundPage() {
+  try { CONVOS = (await get("/v1/conversations")).conversations ?? []; } catch { CONVOS = []; }
+  // Restore the open thread (sessionStorage) or load a just-clicked one.
+  // A stale id — deleted elsewhere, another account's — clears silently
+  // instead of erroring the page. Never reload under an open stream.
+  if (CONVO_ID && !PG_ABORT && CHAT_LOADED_FOR !== CONVO_ID) {
+    try {
+      const v = await get("/v1/conversations/" + CONVO_ID);
+      chatHistory.length = 0;
+      chatHistory.push(...exchangesFromMessages(v));
+      CHAT_LOADED_FOR = CONVO_ID;
+      // reflect the thread's own agent + bill-to defaults in the selects
+      // (applied post-render); both stay fully switchable mid-conversation
+      PG_PREFILL = { agentId: v.agentId, projectId: v.projectId };
+    } catch { setConvo(null); chatHistory.length = 0; CHAT_LOADED_FOR = null; }
+  }
+  if (!CONVO_ID && CHAT_LOADED_FOR !== null && !PG_ABORT) { chatHistory.length = 0; CHAT_LOADED_FOR = null; }
   // No grants means no agent to invoke — without this guard the select is
   // empty, Send POSTs to /v1/agents//invoke, and the user gets Fastify's 404.
   const noAgents = AGENTS.length === 0;
@@ -197,32 +318,37 @@ function playgroundPage() {
     .concat(PROJECTS.map((p) => \`<option value="\${p.id}">\${esc(p.name)}</option>\`)).join("");
   return \`
   <h1>Playground</h1>
-  <p class="sub">Every message goes through governance, routing, and metered dispatch — the trace shows what actually happened.</p>
-  <div class="card">
-    <div class="row">
-      \${agentField}
-      <div><label class="f">Bill to</label><select id="pg-project">\${projectOpts}</select></div>
-      <div><label class="f">Priority</label>
-        <select id="pg-sens">
-          <option value="standard">standard</option>
-          <option value="cost-sensitive">cost-sensitive</option>
-          <option value="quality-sensitive">quality-sensitive</option>
-        </select>
+  <p class="sub">Every message goes through governance, routing, and metered dispatch — the trace shows what actually happened. Conversations remember: each turn carries the whole thread.</p>
+  <div class="pg-split">
+    <aside class="card convo-rail" id="convo-rail">\${railHtml()}</aside>
+    <div class="grow" style="min-width:0">
+      <div class="card">
+        <div class="row">
+          \${agentField}
+          <div><label class="f">Bill to</label><select id="pg-project">\${projectOpts}</select></div>
+          <div><label class="f">Priority</label>
+            <select id="pg-sens">
+              <option value="standard">standard</option>
+              <option value="cost-sensitive">cost-sensitive</option>
+              <option value="quality-sensitive">quality-sensitive</option>
+            </select>
+          </div>
+        </div>
+        \${noAgents ? "" : '<hr class="hr"><div class="faint" style="font-size:11.5px" id="pg-key">' + keyHint(AGENTS[0]) + "</div>"}
       </div>
-    </div>
-    \${noAgents ? "" : '<hr class="hr"><div class="faint" style="font-size:11.5px" id="pg-key">' + keyHint(AGENTS[0]) + "</div>"}
-  </div>
-  <div class="card" style="margin-top:12px">
-    <div class="chat-log" id="chat-log">
-      \${chatHistory.length ? "" : (noAgents
-        ? '<div class="empty">Nothing to send to yet — an admin has to grant your account an agent first.</div>'
-        : '<div class="empty">Pick an agent and say something. Mock agents reply instantly with no external keys; type «&lt;&lt;refuse&gt;&gt;» to see refusal handling.</div>')}
-    </div>
-    <hr class="hr">
-    <div class="row">
-      <textarea id="pg-input" class="grow" rows="2" placeholder="\${noAgents ? "No agent granted to your account yet…" : "Ask the agent to do something…"}"\${noAgents ? " disabled" : ""}></textarea>
-      <button class="primary" id="pg-send"\${noAgents ? " disabled" : ""}>Send</button>
-      <button id="pg-stop" style="display:none" title="close the stream — the dispatch already ran, anything streamed stays">Stop</button>
+      <div class="card" style="margin-top:12px">
+        <div class="chat-log" id="chat-log">
+          \${chatHistory.length ? "" : (noAgents
+            ? '<div class="empty">Nothing to send to yet — an admin has to grant your account an agent first.</div>'
+            : '<div class="empty">Pick an agent and say something — the first message starts a conversation. Mock agents reply instantly with no external keys; type «&lt;&lt;refuse&gt;&gt;» to see refusal handling.</div>')}
+        </div>
+        <hr class="hr">
+        <div class="row">
+          <textarea id="pg-input" class="grow" rows="2" placeholder="\${noAgents ? "No agent granted to your account yet…" : (CONVO_ID ? "Continue the conversation…" : "Ask the agent to do something…")}"\${noAgents ? " disabled" : ""}></textarea>
+          <button class="primary" id="pg-send"\${noAgents ? " disabled" : ""}>Send</button>
+          <button id="pg-stop" style="display:none" title="close the stream — the dispatch already ran, anything streamed stays">Stop</button>
+        </div>
+      </div>
     </div>
   </div>\`;
 }
@@ -237,13 +363,21 @@ function renderExchange(x, i) {
     }
     if (r.dispatch) {
       if (r.dispatch.refusal) meta.push('<span class="badge bad">refused</span>');
-      if (r.dispatch.costUsd != null) meta.push('<span class="badge">' + fmtUsd(r.dispatch.costUsd) + " · " + r.dispatch.usage.inputTokens + "→" + r.dispatch.usage.outputTokens + " tok</span>");
-      meta.push('<span class="badge">' + esc(r.dispatch.model) + "</span>");
+      // replayed history carries cost/model but not token counts (the usage
+      // detail stays in the ledgers) — the badge degrades instead of dying
+      if (r.dispatch.costUsd != null) meta.push('<span class="badge">' + fmtUsd(r.dispatch.costUsd) + (r.dispatch.usage ? " · " + r.dispatch.usage.inputTokens + "→" + r.dispatch.usage.outputTokens + " tok" : "") + "</span>");
+      if (r.dispatch.model) meta.push('<span class="badge">' + esc(r.dispatch.model) + "</span>");
       // whose credential actually paid for this call — the one thing a BYO-key
       // user cannot verify any other way
       if (r.dispatch.credentialSource === "user") meta.push('<span class="badge info">your key</span>');
       if (r.dispatch.credentialSource === "platform") meta.push('<span class="badge">platform key</span>');
       if (r.dispatch.projectBudgetAlerted) meta.push('<span class="badge warn">budget alert</span>');
+    }
+    // pillar 6 context compaction — what this turn's model actually saw
+    if (r.compaction) {
+      if (r.compaction.compacted) meta.push('<span class="badge accent" title="this turn pushed the thread past the compaction threshold — older turns were summarized by a governed, metered dispatch; stored history is untouched">history compacted</span>');
+      if (r.compaction.active) meta.push('<span class="badge info" title="the model received a summary of the older turns plus the recent window — est. ' + (r.compaction.savedTokensEst ?? 0) + ' tokens saved">summary context · ~' + (r.compaction.savedTokensEst ?? 0) + ' tok saved</span>');
+      if (r.compaction.failOpen) meta.push('<span class="badge warn" title="the compaction dispatch failed (' + esc(r.compaction.failOpen.error ?? "") + ') — this turn was sent with the full history instead (fail-open)">compaction failed open</span>');
     }
   }
   if (x.denied) {
@@ -252,9 +386,10 @@ function renderExchange(x, i) {
     meta.push('<span class="badge bad" title="' + esc(x.denied.ruleId) + '">denied · ' + esc(rid) + "</span>");
   }
   if (x.error) meta.push('<span class="badge bad">' + esc(x.error) + "</span>");
-  const trace = x.result || x.denied
+  // replayed exchanges carry no decision/routing payload — no empty expander
+  const trace = x.denied || (x.result && (x.result.decision || x.result.routing || x.result.compaction))
     ? \`<details style="margin-top:6px"><summary class="faint" style="cursor:pointer;font-size:11.5px">governance trace</summary>
-       <pre style="margin-top:6px">\${esc(JSON.stringify(x.denied ?? { decision: x.result.decision, routing: x.result.routing }, null, 2))}</pre></details>\`
+       <pre style="margin-top:6px">\${esc(JSON.stringify(x.denied ?? { decision: x.result.decision, routing: x.result.routing, ...(x.result.compaction ? { compaction: x.result.compaction } : {}) }, null, 2))}</pre></details>\`
     : "";
   // per-exchange handoffs: copy the reply, or carry the prompt into the New
   // Run form as the first node's work order (pillar 7 starts where the
@@ -262,13 +397,21 @@ function renderExchange(x, i) {
   const tools = x.streaming ? "" :
     \`<button class="ghost small" data-copy="\${i}" title="copy the reply text">copy</button>
      <button class="ghost small" data-torun="\${i}" title="plan a multi-agent run with this prompt as the first node's instruction">turn into a run</button>\`;
+  // pillar 6: slim divider at the compaction boundary — the full history
+  // above stays visible and stored; only the model-bound context shrank
+  const divider = x.compactedBoundary
+    ? \`<div class="compact-divider" style="margin:10px 0;padding:6px 12px;border:1px dashed var(--border-strong);border-radius:8px;font-size:11.5px">
+        <details><summary class="faint" style="cursor:pointer">— older turns above are compacted into a summary — full history retained; the model sees the summary + recent turns\${x.compactedBoundary.summaryTokens ? " (~" + x.compactedBoundary.summaryTokens + " tok)" : ""} —</summary>
+        <pre style="margin-top:6px;white-space:pre-wrap">\${esc(x.compactedBoundary.summary ?? "")}</pre></details>
+      </div>\`
+    : "";
   return \`
     <div class="msg user"><div class="who">\${esc(ME.user.displayName)}</div><div class="bubble">\${esc(x.prompt)}</div></div>
     <div class="msg agent">
       <div class="who">\${esc(x.agentName)}</div>
       <div class="bubble">\${esc(x.text)}\${x.streaming ? '<span class="caret"></span>' : ""}</div>
       <div class="meta">\${meta.join("")}\${tools}</div>\${trace}
-    </div>\`;
+    </div>\${divider}\`;
 }
 
 function drawChat() {
@@ -306,6 +449,19 @@ async function sendPrompt() {
   if (!agentId) { toast("No agents granted to your account — ask an admin."); return; }
   const projectId = $("#pg-project").value || undefined;
   const costSensitivity = $("#pg-sens").value;
+  // MULTI-TURN: the first Send with no open thread creates one (with the
+  // selected agent + bill-to as the thread's defaults), then every send
+  // dispatches inside it. The invoke URL's agent stays the CURRENTLY selected
+  // one — switching agents mid-thread just points later turns at the new
+  // agent, which the backend allows.
+  if (!CONVO_ID) {
+    try {
+      const row = await post("/v1/conversations", { agentId, ...(projectId ? { projectId } : {}) });
+      setConvo(row.id);
+      CHAT_LOADED_FOR = row.id; // what's on screen (nothing yet) IS this thread
+    } catch (e) { toast("✗ couldn’t start a conversation — " + e.message); return; }
+  }
+  const conversationId = CONVO_ID;
   input.value = "";
   const x = { prompt, agentName: AGENT_NAMES[agentId] ?? "agent", text: "", streaming: true };
   chatHistory.push(x); drawChat();
@@ -317,7 +473,7 @@ async function sendPrompt() {
     const res = await fetch("/v1/agents/" + agentId + "/invoke", {
       method: "POST",
       headers: { authorization: "Bearer " + KEY, "content-type": "application/json" },
-      body: JSON.stringify({ mode: "execute", input: prompt, dispatch: true, stream: true, costSensitivity, ...(projectId ? { projectId } : {}) }),
+      body: JSON.stringify({ mode: "execute", input: prompt, dispatch: true, stream: true, costSensitivity, conversationId, ...(projectId ? { projectId } : {}) }),
       signal: ctrl.signal,
     });
     if (!res.ok || !res.headers.get("content-type")?.includes("event-stream")) {
@@ -376,6 +532,16 @@ async function sendPrompt() {
   } finally {
     PG_ABORT = null;
     pgStreamUi(false);
+    if (x.result && x.result.compaction && x.result.compaction.compacted) {
+      // this turn compacted the thread — reload it from the server so the
+      // divider (and the persisted summary behind it) appears in place
+      CHAT_LOADED_FOR = null;
+      render();
+    } else {
+      // the turn (or denial) just changed this thread's title/updatedAt/count —
+      // move its rail entry without re-rendering the page
+      refreshRail();
+    }
   }
 }
 
@@ -416,30 +582,107 @@ const nrDefaultAgent = () => (AGENTS.find((a) => a.provider === "mock") ?? AGENT
 // a playground prompt carried over by 'turn into a run' — becomes the first
 // node's instruction until cleared or the run is planned
 let NR_PREFILL = null;
+// PILLAR 7 goal decomposition: the lead agent's drafted proposal, rendered
+// into this same editor (title/instruction/agent editable, nodes deletable)
+// until discarded or planned. NOTHING runs until Plan run is clicked — the
+// plan gate stays human.
+let NR_PROPOSAL = null; // {name, nodes:[{id,title,instruction,ownerAgentId,agentName,dependsOn,substituted?}], dispatch, retried, leadName}
+let NR_GOAL = "";       // the goal textarea survives the re-render after a draft lands
 const nrInstructionFor = (n, idx) => (idx === 0 && NR_PREFILL ? NR_PREFILL : n.instruction);
-const nrAgentSel = (nid) => '<select data-nagent="' + nid + '">' + AGENTS.map((a) =>
-  '<option value="' + a.agentId + '"' + (a.agentId === nrDefaultAgent() ? " selected" : "") + '>' + esc(a.name) + " · " + esc(a.provider) + "</option>").join("") + "</select>";
+const nrAgentSel = (nid, selected) => '<select data-nagent="' + nid + '">' + AGENTS.map((a) =>
+  '<option value="' + a.agentId + '"' + (a.agentId === (selected ?? nrDefaultAgent()) ? " selected" : "") + '>' + esc(a.name) + " · " + esc(a.provider) + "</option>").join("") + "</select>";
+// PILLAR 7: per-node tool controls — MCP server id(s) the worker may draw
+// tools from (comma-separated) and a tool-loop turn cap. Blank = no tools /
+// default cap, so canned templates stay ordinary single-turn workers.
+const nrToolsCtl = (id, servers, turns) => \`<div><label class="f">Max turns</label><input type="number" min="1" max="20" data-nturns="\${esc(id)}" value="\${turns ?? ""}" style="width:60px" title="pillar 7: tool-using loop turn cap for this worker — blank uses the default"></div>
+  <div><label class="f">Tool servers</label><input data-ntools="\${esc(id)}" value="\${esc((servers ?? []).join(","))}" placeholder="MCP server id(s)" style="width:150px" title="pillar 7: comma-separated MCP server ids this worker may call tools from (governed per-call under your entitlements) — blank for none"></div>\`;
 const nrNodeRowsHtml = (t) => t.nodes.map((n, idx) => \`<div class="node-row">
   <span class="node-dot not_started"></span>
   <div class="grow"><label class="f">\${esc(n.id)}\${n.dependsOn.length ? " · after " + n.dependsOn.join(", ") : ""}\${idx === 0 && NR_PREFILL ? ' <span class="badge accent">instruction from playground</span>' : ""}</label>
     <input data-ntitle="\${n.id}" value="\${esc(n.title)}" style="width:100%" title="\${esc(nrInstructionFor(n, idx))}"></div>
   <div><label class="f">Agent</label>\${nrAgentSel(n.id)}</div>
+  \${nrToolsCtl(n.id, n.toolServers, n.maxTurns)}
 </div>\`).join("");
+// proposal rows: same editor shape as templates, plus an editable instruction
+// textarea, a per-node delete, and substitution badges for agents the lead
+// suggested but the caller isn't granted
+const nrProposalRowsHtml = () => NR_PROPOSAL.nodes.map((n) => \`<div class="node-row">
+  <span class="node-dot not_started"></span>
+  <div class="grow"><label class="f">\${esc(n.id)}\${n.dependsOn.length ? " · after " + n.dependsOn.join(", ") : ""}\${n.substituted ? ' <span class="badge warn" title="the lead suggested &#39;' + esc(n.substituted.requestedAgentName) + '&#39;, which is not granted to you — swapped to a granted agent">substituted</span>' : ""}\${(n.toolServers && n.toolServers.length) ? ' <span class="badge info" title="this worker is a tool-using loop — every tool call is governed per-call under your entitlements">tool-using</span>' : ""}</label>
+    <input data-ntitle="\${esc(n.id)}" value="\${esc(n.title)}" style="width:100%">
+    <textarea data-ninstr="\${esc(n.id)}" rows="3" style="width:100%;margin-top:4px" spellcheck="false" title="this node's worker is prompted with exactly this instruction">\${esc(n.instruction)}</textarea></div>
+  <div><label class="f">Agent</label>\${nrAgentSel(n.id, n.ownerAgentId)}</div>
+  \${nrToolsCtl(n.id, n.toolServers, n.maxTurns)}
+  <button class="ghost small" data-ndel="\${esc(n.id)}" title="drop this task from the plan">×</button>
+</div>\`).join("");
+// read a node's tool controls out of the DOM
+const nrToolServers = (id) => (($('[data-ntools="' + id + '"]')?.value ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+const nrMaxTurns = (id) => { const v = parseInt($('[data-nturns="' + id + '"]')?.value ?? "", 10); return Number.isFinite(v) && v > 0 ? v : null; };
+// carry any in-DOM edits back into the proposal before a partial re-render
+function nrSyncProposal() {
+  if (!NR_PROPOSAL) return;
+  for (const n of NR_PROPOSAL.nodes) {
+    n.title = ($('[data-ntitle="' + n.id + '"]')?.value ?? n.title).trim() || n.title;
+    n.instruction = ($('[data-ninstr="' + n.id + '"]')?.value ?? n.instruction).trim() || n.instruction;
+    n.ownerAgentId = $('[data-nagent="' + n.id + '"]')?.value ?? n.ownerAgentId;
+    n.toolServers = nrToolServers(n.id);
+    const mt = nrMaxTurns(n.id);
+    if (mt) n.maxTurns = mt; else delete n.maxTurns;
+  }
+}
+function nrWireProposalRows() {
+  document.querySelectorAll("[data-ndel]").forEach((b) =>
+    b.addEventListener("click", () => {
+      nrSyncProposal();
+      const id = b.dataset.ndel;
+      NR_PROPOSAL.nodes = NR_PROPOSAL.nodes.filter((n) => n.id !== id)
+        .map((n) => ({ ...n, dependsOn: n.dependsOn.filter((d) => d !== id) }));
+      $("#nr-nodes").innerHTML = nrProposalRowsHtml();
+      nrWireProposalRows();
+      if ($("#nr-adv")?.open) $("#nr-json").value = JSON.stringify(nrGraph(), null, 2);
+    }));
+}
 // the exact JSON the form POSTs — also what the advanced textarea pre-fills
 function nrGraph() {
+  if (NR_PROPOSAL) {
+    return {
+      run: ($("#nr-title")?.value ?? "").trim() || NR_PROPOSAL.name || "untitled run",
+      escalationApproverUserId: ME.userId,
+      nodes: NR_PROPOSAL.nodes.map((n) => {
+        const servers = nrToolServers(n.id);
+        const turns = nrMaxTurns(n.id);
+        return {
+          id: n.id,
+          title: ($('[data-ntitle="' + n.id + '"]')?.value ?? n.title).trim() || n.title,
+          instruction: ($('[data-ninstr="' + n.id + '"]')?.value ?? n.instruction).trim() || n.instruction,
+          ownerAgentId: $('[data-nagent="' + n.id + '"]')?.value ?? n.ownerAgentId,
+          mode: "execute",
+          dependsOn: n.dependsOn,
+          ...(servers.length ? { toolServers: servers } : {}),
+          ...(turns ? { maxTurns: turns } : {}),
+        };
+      }),
+    };
+  }
   const t = RUN_TEMPLATES.find((x) => x.id === $("#nr-template")?.value) ?? RUN_TEMPLATES[0];
   return {
     run: ($("#nr-title")?.value ?? "").trim() || "untitled run",
     // escalations land in the planner's own inbox unless the JSON names someone else
     escalationApproverUserId: ME.userId,
-    nodes: t.nodes.map((n, idx) => ({
-      id: n.id,
-      title: ($('[data-ntitle="' + n.id + '"]')?.value ?? n.title).trim() || n.title,
-      instruction: nrInstructionFor(n, idx),
-      ownerAgentId: $('[data-nagent="' + n.id + '"]')?.value ?? nrDefaultAgent(),
-      mode: "execute",
-      dependsOn: n.dependsOn,
-    })),
+    nodes: t.nodes.map((n, idx) => {
+      const servers = nrToolServers(n.id);
+      const turns = nrMaxTurns(n.id);
+      return {
+        id: n.id,
+        title: ($('[data-ntitle="' + n.id + '"]')?.value ?? n.title).trim() || n.title,
+        instruction: nrInstructionFor(n, idx),
+        ownerAgentId: $('[data-nagent="' + n.id + '"]')?.value ?? nrDefaultAgent(),
+        mode: "execute",
+        dependsOn: n.dependsOn,
+        ...(servers.length ? { toolServers: servers } : {}),
+        ...(turns ? { maxTurns: turns } : {}),
+      };
+    }),
   };
 }
 
@@ -464,16 +707,44 @@ async function runsPage() {
        <span class="dim" style="font-size:12.5px">the first node's instruction is your playground prompt — hover its title (or open Advanced) to read it</span>
        <button class="ghost small" id="nr-clearpre">clear</button></div>\`
     : "";
+  // PILLAR 7: "Describe the goal" — a lead agent drafts the task graph, the
+  // human reviews it in this very editor before anything is even planned.
+  const leadDefault = AGENTS.some((a) => a.agentId === DEFAULT_AGENT_ID)
+    ? DEFAULT_AGENT_ID
+    : nrDefaultAgent();
+  const leadOpts = AGENTS.map((a) =>
+    \`<option value="\${a.agentId}"\${a.agentId === leadDefault ? " selected" : ""}>\${esc(a.name)} · \${esc(a.provider)} · tier \${a.tier}</option>\`).join("");
+  const goalSection = \`
+    <div class="row">
+      <div class="grow"><label class="f">Describe the goal</label><textarea id="nr-goal" rows="2" style="width:100%" placeholder="What should this run achieve? A lead agent drafts the task graph — you review and edit it before anything runs.">\${esc(NR_GOAL)}</textarea></div>
+      <div><label class="f">Lead agent</label><select id="nr-lead">\${leadOpts}</select></div>
+      <div style="align-self:flex-end"><button id="nr-draft" title="one governed, metered lead dispatch drafts a proposal — it does NOT create a run">Draft plan with a lead agent</button></div>
+    </div>
+    <div class="err-line" id="nr-goalerr" style="margin-top:4px"></div>
+    <hr class="hr">\`;
+  const subNotes = NR_PROPOSAL ? NR_PROPOSAL.nodes.filter((n) => n.substituted).map((n) =>
+    \`<div class="dim" style="font-size:12px;margin-bottom:4px">node \${esc(n.id)}: the lead suggested “\${esc(n.substituted.requestedAgentName)}”, which is not granted to you — swapped to \${esc(AGENT_NAMES[n.ownerAgentId] ?? "a granted agent")}.</div>\`).join("") : "";
+  const proposalNote = NR_PROPOSAL
+    ? \`<div class="row" style="margin-bottom:8px">
+        <span class="badge accent">plan drafted by \${esc(NR_PROPOSAL.leadName)}</span>
+        <span class="badge">lead cost \${fmtUsd(NR_PROPOSAL.dispatch.costUsd)} · \${esc(NR_PROPOSAL.dispatch.modelUsed)}</span>
+        \${NR_PROPOSAL.retried ? '<span class="badge warn" title="the first draft failed validation; the lead corrected it on one retry">retried once</span>' : ""}
+        <span class="dim" style="font-size:12.5px">review before planning — nothing runs until you accept</span>
+        <button class="ghost small" id="nr-clearprop">discard</button>
+      </div>\${subNotes}\`
+    : "";
   const newRun = AGENTS.length === 0
     ? '<div class="empty">No agents are granted to your account — ask an admin to grant you one before planning a run.</div>'
     : \`
+    \${goalSection}
+    \${proposalNote}
     \${prefillNote}
     <div class="row">
-      <div class="grow"><label class="f">Title</label><input id="nr-title" placeholder="What is this run for?" value="\${esc(NR_PREFILL ? NR_PREFILL.split("\\n")[0].slice(0, 120) : "")}" style="width:100%"></div>
+      <div class="grow"><label class="f">Title</label><input id="nr-title" placeholder="What is this run for?" value="\${esc(NR_PROPOSAL ? NR_PROPOSAL.name : (NR_PREFILL ? NR_PREFILL.split("\\n")[0].slice(0, 120) : ""))}" style="width:100%"></div>
       <div><label class="f">Bill to</label><select id="nr-project">\${projectOpts}</select></div>
-      <div><label class="f">Template</label><select id="nr-template">\${tplOpts}</select></div>
+      <div><label class="f">Template</label><select id="nr-template"\${NR_PROPOSAL ? ' title="picking a template discards the drafted proposal"' : ""}>\${tplOpts}</select></div>
     </div>
-    <div id="nr-nodes" style="margin-top:6px">\${nrNodeRowsHtml(RUN_TEMPLATES[0])}</div>
+    <div id="nr-nodes" style="margin-top:6px">\${NR_PROPOSAL ? nrProposalRowsHtml() : nrNodeRowsHtml(RUN_TEMPLATES[0])}</div>
     <details id="nr-adv" style="margin-top:10px">
       <summary class="faint" style="cursor:pointer;font-size:11.5px">Advanced — edit the graph JSON directly (authoritative while open)</summary>
       <textarea id="nr-json" rows="16" style="width:100%;margin-top:8px" spellcheck="false"></textarea>
@@ -494,7 +765,37 @@ async function runsPage() {
 
 function wireRuns() {
   $("#nr-clearpre")?.addEventListener("click", () => { NR_PREFILL = null; render(); });
+  // PILLAR 7 goal → drafted proposal. The decompose call is a governed,
+  // metered lead dispatch that returns a PROPOSAL only — it lands in this
+  // editor for review; Plan run below is the unchanged human accept.
+  $("#nr-goal")?.addEventListener("input", (e) => { NR_GOAL = e.target.value; });
+  $("#nr-draft")?.addEventListener("click", async () => {
+    const err = $("#nr-goalerr"); err.textContent = "";
+    const goal = ($("#nr-goal")?.value ?? "").trim();
+    NR_GOAL = goal;
+    if (goal.length < 10) { err.textContent = "goal: describe it in at least 10 characters"; return; }
+    const leadAgentId = $("#nr-lead")?.value;
+    const projectId = $("#nr-project").value || undefined;
+    const b = $("#nr-draft"); b.disabled = true; b.textContent = "Drafting…";
+    try {
+      const r = await post("/v1/runs/decompose", { goal, ...(leadAgentId ? { leadAgentId } : {}), ...(projectId ? { projectId } : {}) });
+      NR_PROPOSAL = {
+        name: r.proposal.name, nodes: r.proposal.nodes,
+        dispatch: r.dispatch, retried: r.retried,
+        leadName: AGENT_NAMES[r.dispatch.servedAgentId] ?? "lead agent",
+      };
+      render();
+      toast("Plan drafted — review and adjust, then Plan run");
+    } catch (e) {
+      // 422 decomposition_invalid arrives with its detail via errMessage
+      err.textContent = e.message;
+      b.disabled = false; b.textContent = "Draft plan with a lead agent";
+    }
+  });
+  $("#nr-clearprop")?.addEventListener("click", () => { NR_PROPOSAL = null; render(); });
+  nrWireProposalRows();
   $("#nr-template")?.addEventListener("change", () => {
+    NR_PROPOSAL = null; // a template pick replaces the drafted proposal
     const t = RUN_TEMPLATES.find((x) => x.id === $("#nr-template").value) ?? RUN_TEMPLATES[0];
     $("#nr-nodes").innerHTML = nrNodeRowsHtml(t);
     // a new template is a new base — refill the JSON even if it was edited
@@ -518,6 +819,7 @@ function wireRuns() {
     try {
       const r = await post("/v1/runs", { graph, ...(projectId ? { projectId } : {}) });
       NR_PREFILL = null; // consumed by this run
+      NR_PROPOSAL = null; NR_GOAL = ""; // the proposal was accepted into this run
       toast(r.budgetApprovalPending ? "Run planned — over your budget cap, approval requested" : "Run planned");
       location.hash = "#/runs/" + r.id;
     } catch (e) { err.textContent = e.message; } // zod issues arrive via errMessage
@@ -718,7 +1020,7 @@ async function runDetailPage(id) {
       <div class="grow">
         <div>\${esc(n.title)} <span class="faint mono" style="font-size:11px">\${esc(n.id)}</span></div>
         <div class="dim" style="font-size:12px">\${esc(AGENT_NAMES[state.owners[n.id]] ?? "agent")}\${n.dependsOn?.length ? " · after " + n.dependsOn.join(", ") : ""}\${elapsed ? ' · <span class="num">' + elapsed + "</span>" : ""}\${parallel ? ' <span class="badge info" title="its execution window overlapped another node&#39;s — they ran concurrently">∥ parallel</span>' : ""}</div>
-        \${out ? \`<details style="margin-top:4px"><summary class="faint" style="cursor:pointer;font-size:11.5px">output · \${fmtUsd(out.costUsd)} · \${esc(out.model)}</summary><pre style="margin-top:6px">\${esc(out.outputText)}</pre></details>\` : ""}
+        \${out ? \`<details style="margin-top:4px"><summary class="faint" style="cursor:pointer;font-size:11.5px">output · \${fmtUsd(out.costUsd)} · \${esc(out.model)}\${out.toolCalls ? ' · <span class="badge info" title="pillar 7: this worker ran a governed tool-using loop — each tool call was re-checked under your entitlements">' + out.turns + ' turn' + (out.turns === 1 ? "" : "s") + ' · ' + out.toolCalls + ' tool call' + (out.toolCalls === 1 ? "" : "s") + '</span>' : ""}\${out.toolApprovalPending ? ' <span class="badge warn" title="the loop paused on a tool approval now pending in the queue">tool approval pending</span>' : ""}</summary><pre style="margin-top:6px">\${esc(out.outputText)}</pre></details>\` : ""}
         \${state.lastError?.[n.id] ? '<div class="err-line">' + esc(state.lastError[n.id]) + "</div>" : ""}
         \${blockedCtl}
         \${editor}
@@ -1534,7 +1836,7 @@ async function render() {
   const { page, id } = route();
   let content = "";
   try {
-    if (page === "playground") content = playgroundPage();
+    if (page === "playground") content = await playgroundPage();
     else if (page === "runs" && id) content = await runDetailPage(id);
     else if (page === "runs") content = await runsPage();
     else if (page === "workflows" && id) content = await workflowDetailPage(id);
@@ -1543,7 +1845,7 @@ async function render() {
     else if (page === "projects") content = await projectsPage();
     else if (page === "spend") content = await spendPage();
     else if (page === "settings") content = await settingsPage();
-    else content = playgroundPage();
+    else content = await playgroundPage();
   } catch (e) {
     content = '<div class="empty">Couldn’t load this view — ' + esc(e.message) + "</div>";
   }
@@ -1556,6 +1858,18 @@ async function render() {
   $("#signout")?.addEventListener("click", signOut);
 
   if (page === "playground") {
+    // a thread was just opened — reflect its own defaults in the selects once
+    if (PG_PREFILL) {
+      const ag = $("#pg-agent");
+      if (ag && PG_PREFILL.agentId && AGENTS.some((a) => a.agentId === PG_PREFILL.agentId)) {
+        ag.value = PG_PREFILL.agentId;
+        if ($("#pg-key")) $("#pg-key").innerHTML = keyHint(AGENTS.find((a) => a.agentId === PG_PREFILL.agentId));
+      }
+      const pr = $("#pg-project");
+      if (pr) pr.value = PG_PREFILL.projectId && PROJECTS.some((p) => p.id === PG_PREFILL.projectId) ? PG_PREFILL.projectId : "";
+      PG_PREFILL = null;
+    }
+    wireRail();
     drawChat();
     pgStreamUi(Boolean(PG_ABORT)); // a stream may still be open across renders
     $("#pg-send")?.addEventListener("click", sendPrompt);

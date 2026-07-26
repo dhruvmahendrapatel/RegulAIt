@@ -47,6 +47,19 @@ export const taskNodeSchema = z.object({
   estimate: z
     .object({ in: z.number().int().positive(), out: z.number().int().positive() })
     .optional(),
+  /** pillar 7 tool-using worker: MCP servers this node's worker may draw tools
+   * from. A DECLARATION ONLY — the gateway narrows it to exactly the tools the
+   * INITIATING user is entitled to on those servers; declaring a server the
+   * user isn't granted on simply yields no tools. */
+  toolServers: z.array(z.string().uuid()).optional(),
+  /** optional allow-list of tool NAMES within the declared servers; absent =
+   * every entitled tool on those servers */
+  toolNames: z.array(z.string().min(1).max(128)).optional(),
+  /** pillar 7: max model turns in the node's tool-using loop (each turn is one
+   * measured, governed dispatch). Bounded so a runaway declaration can't
+   * request an unbounded loop; the gateway also applies the per-run budget and
+   * measured-spend caps per turn. */
+  maxTurns: z.number().int().min(1).max(20).optional(),
 });
 export type TaskNode = z.infer<typeof taskNodeSchema>;
 

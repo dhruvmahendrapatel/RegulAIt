@@ -210,6 +210,89 @@ export function routeModel(input: RouteModelInput): RoutingDecision {
 }
 
 // ---------------------------------------------------------------------------
+// §5 context compaction: the pure decision core behind the gateway's
+// conversation compaction. The gateway loads the stored (model-bound) history,
+// this plans WHETHER to compact and THROUGH WHICH message, the gateway runs
+// the governed summarization dispatch and persists the summary. Stored
+// messages are never deleted or altered — compaction only changes what is
+// model-bound, so the plan is pure arithmetic over per-message token
+// estimates.
+// ---------------------------------------------------------------------------
+
+/** §5 threshold: compact once the model-bound history exceeds this many
+ * estimated tokens. Per-user/per-project tuning is deferred — the agent-policy
+ * row has no natural home for it without a migration, and a dial nobody can
+ * see yet isn't worth one (see COMPACTION notes in the gateway). */
+export const DEFAULT_COMPACTION_THRESHOLD_TOKENS = 1600;
+/** §5 conservative-by-default: the newest turns always ride verbatim — only
+ * messages OLDER than this window are ever summarized away. */
+export const COMPACTION_RECENT_WINDOW_MESSAGES = 4;
+
+const COMPACTION_BASIS = "estimated-tokens-of-omitted-history-minus-summary-tokens";
+
+export interface PlanCompactionInput {
+  /** per-message token estimates of the stored model-bound history, in order.
+   * On re-compaction the caller passes only the messages AFTER the existing
+   * summary boundary — the returned index is relative to this slice. */
+  messageTokens: readonly number[];
+  /** tokens of the existing summary that already rides every dispatch (0 = none) */
+  summaryTokens?: number;
+  thresholdTokens?: number;
+  recentWindowMessages?: number;
+}
+
+export interface CompactionPlan {
+  shouldCompact: boolean;
+  /** compact messages [0..compactThroughIndex] inclusive; -1 = nothing to compact */
+  compactThroughIndex: number;
+  /** what the model would currently carry: existing summary + history */
+  historyTokens: number;
+  reason: string;
+  estimationBasis: string;
+}
+
+/** Decide whether the history has outgrown the threshold and, if so, how far
+ * to compact: everything except the last `recentWindowMessages` messages.
+ * Strictly-greater on the threshold — a history AT the threshold still rides
+ * verbatim (no downgrade without a clear signal, like routeModel). */
+export function planCompaction(input: PlanCompactionInput): CompactionPlan {
+  const threshold = input.thresholdTokens ?? DEFAULT_COMPACTION_THRESHOLD_TOKENS;
+  const window = input.recentWindowMessages ?? COMPACTION_RECENT_WINDOW_MESSAGES;
+  const historyTokens =
+    (input.summaryTokens ?? 0) + input.messageTokens.reduce((s, t) => s + t, 0);
+  const none = (reason: string): CompactionPlan => ({
+    shouldCompact: false,
+    compactThroughIndex: -1,
+    historyTokens,
+    reason,
+    estimationBasis: COMPACTION_BASIS,
+  });
+  if (historyTokens <= threshold) {
+    return none(`history ~${historyTokens} tokens is within the ${threshold}-token threshold`);
+  }
+  if (input.messageTokens.length <= window) {
+    return none(
+      `history exceeds the threshold but only ${input.messageTokens.length} message(s) exist — the ${window}-message verbatim window leaves nothing to compact`,
+    );
+  }
+  return {
+    shouldCompact: true,
+    compactThroughIndex: input.messageTokens.length - window - 1,
+    historyTokens,
+    reason: `history ~${historyTokens} tokens exceeds the ${threshold}-token threshold; compacting all but the ${window} newest messages`,
+    estimationBasis: COMPACTION_BASIS,
+  };
+}
+
+/** §7 savings claim for a dispatch that rode a summary instead of the full
+ * history: the omitted messages' estimated tokens minus the summary that
+ * replaced them, floored at 0 — a verbose summary never reports negative
+ * savings as if it were a win. */
+export function compactionSavings(omittedTokens: number, summaryTokens: number): number {
+  return Math.max(0, omittedTokens - summaryTokens);
+}
+
+// ---------------------------------------------------------------------------
 // §8 lazy tool-loading: expose only the entitled tools relevant to the
 // caller's declared intent. Withheld tools remain fully callable — this trims
 // the manifest a model has to read, never the entitlement (§12). No intent =

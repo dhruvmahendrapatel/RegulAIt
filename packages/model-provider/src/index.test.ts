@@ -6,6 +6,8 @@ import {
   GoogleProvider,
   OpenAiProvider,
   XaiProvider,
+  CONVERSATION_COMPACTION_SENTINEL,
+  TASK_DECOMPOSITION_SENTINEL,
   resolveModelProvider,
 } from "./index.js";
 
@@ -600,5 +602,543 @@ describe("XaiProvider (OpenAI-compatible core pointed at api.x.ai)", () => {
         }),
     });
     await expect(failing.dispatch({ model: "grok-4", input: "x" })).rejects.toThrowError(/xai dispatch failed/);
+  });
+});
+
+describe("multi-turn messages contract (full history including newest turn; input ignored)", () => {
+  const HISTORY = [
+    { role: "user" as const, content: "plan the payments migration" },
+    { role: "assistant" as const, content: "Plan — payments migration. Four steps: …" },
+    { role: "user" as const, content: "now make it shorter" },
+  ];
+
+  it("anthropic sends the messages array verbatim (roles map 1:1) and ignores input", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new AnthropicProvider({
+      apiKey: "k",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return anthropicJson({
+          id: "msg_mt_1",
+          type: "message",
+          role: "assistant",
+          model: "claude-opus-5",
+          content: [{ type: "text", text: "shorter plan" }],
+          stop_reason: "end_turn",
+          stop_sequence: null,
+          usage: { input_tokens: 30, output_tokens: 4 },
+        });
+      },
+    });
+    await provider.dispatch({
+      model: "claude-opus-5",
+      input: "IGNORED",
+      messages: HISTORY,
+      system: "answer tersely",
+    });
+    expect(captured!.system).toBe("answer tersely");
+    expect(captured!.messages).toEqual([
+      { role: "user", content: "plan the payments migration" },
+      { role: "assistant", content: "Plan — payments migration. Four steps: …" },
+      { role: "user", content: "now make it shorter" },
+    ]);
+    expect(JSON.stringify(captured)).not.toContain("IGNORED");
+  });
+
+  it("openai prepends system then the history; assistant stays assistant", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new OpenAiProvider({
+      apiKey: "sk",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return new Response(
+          JSON.stringify({
+            id: "chatcmpl-mt1",
+            object: "chat.completion",
+            created: 1,
+            model: "gpt-5",
+            choices: [{ index: 0, message: { role: "assistant", content: "ok", refusal: null }, finish_reason: "stop", logprobs: null }],
+            usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+    await provider.dispatch({ model: "gpt-5", input: "IGNORED", messages: HISTORY, system: "s" });
+    expect(captured!.messages).toEqual([
+      { role: "system", content: "s" },
+      { role: "user", content: "plan the payments migration" },
+      { role: "assistant", content: "Plan — payments migration. Four steps: …" },
+      { role: "user", content: "now make it shorter" },
+    ]);
+  });
+
+  it("xai (shared chat-completions core) carries the same history shape", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new XaiProvider({
+      apiKey: "xk",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return new Response(
+          JSON.stringify({
+            id: "chatcmpl-xmt1",
+            object: "chat.completion",
+            created: 1,
+            model: "grok-4",
+            choices: [{ index: 0, message: { role: "assistant", content: "ok", refusal: null }, finish_reason: "stop", logprobs: null }],
+            usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+    await provider.dispatch({ model: "grok-4", input: "IGNORED", messages: HISTORY });
+    expect(captured!.messages).toEqual([
+      { role: "user", content: "plan the payments migration" },
+      { role: "assistant", content: "Plan — payments migration. Four steps: …" },
+      { role: "user", content: "now make it shorter" },
+    ]);
+  });
+
+  it("google maps assistant -> role 'model' in contents, user stays 'user'", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new GoogleProvider({
+      apiKey: "gk",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return new Response(
+          JSON.stringify({
+            responseId: "resp-mt1",
+            candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+            usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 1 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+    await provider.dispatch({ model: "gemini-2.5-pro", input: "IGNORED", messages: HISTORY });
+    expect(captured!.contents).toEqual([
+      { role: "user", parts: [{ text: "plan the payments migration" }] },
+      { role: "model", parts: [{ text: "Plan — payments migration. Four steps: …" }] },
+      { role: "user", parts: [{ text: "now make it shorter" }] },
+    ]);
+  });
+
+  it("mock opens with a continuation line and a terse follow-up inherits the previous turn's topic", async () => {
+    const mock = new MockModelProvider();
+    const r = await mock.dispatch({ model: "mock-balanced", input: "", messages: HISTORY });
+    // history is 3 turns, so 2 precede the newest
+    expect(r.outputText).toContain("Continuing from the previous 2 turns");
+    // "now make it shorter" is 4 words (< 8): the topic comes from turn 1
+    expect(r.outputText).toContain("payments migration");
+    // measured input covers the whole history, not just the newest turn
+    const historyChars = HISTORY.map((m) => m.content).join("\n").length;
+    expect(r.usage.inputTokens).toBe(Math.ceil(historyChars / 4));
+    expect(r.stopReason).toBe("end_turn");
+  });
+
+  it("mock dispatches intent on the LAST user turn when it is not terse", async () => {
+    const mock = new MockModelProvider();
+    const r = await mock.dispatch({
+      model: "mock-balanced",
+      input: "",
+      messages: [
+        { role: "user", content: "plan the payments migration" },
+        { role: "assistant", content: "Plan — payments migration. …" },
+        { role: "user", content: "please review this follow-up change for regression risk" },
+      ],
+    });
+    expect(r.outputText).toContain("Continuing from the previous 2 turns:");
+    // a full sentence keeps its own intent + topic (review shape, own subject)
+    expect(r.outputText).toMatch(/^- \[major\]/m);
+    expect(r.outputText).toContain("follow-up change for regression risk");
+  });
+
+  it("mock refuses on <<refuse>> in the last user turn even with history (input ignored)", async () => {
+    const mock = new MockModelProvider();
+    const r = await mock.dispatch({
+      model: "mock-balanced",
+      input: "no refuse marker here",
+      messages: [
+        { role: "user", content: "plan the payments migration" },
+        { role: "assistant", content: "Plan …" },
+        { role: "user", content: "please <<refuse>> this" },
+      ],
+    });
+    expect(r.refusal).toBe(true);
+    expect(r.outputText).toBe("");
+    expect(r.usage.outputTokens).toBe(0);
+  });
+
+  it("mock system ack still opens the reply, before the continuation line", async () => {
+    const mock = new MockModelProvider();
+    const r = await mock.dispatch({
+      model: "mock-fast",
+      input: "",
+      messages: HISTORY,
+      system: "You are the payments planning assistant.",
+    });
+    expect(r.outputText.startsWith("Working within the signed-off scope: ")).toBe(true);
+    expect(r.outputText.indexOf("Working within")).toBeLessThan(
+      r.outputText.indexOf("Continuing from the previous"),
+    );
+  });
+
+  it("regression: a single-input request is byte-identical to the pre-messages behaviour", async () => {
+    const mock = new MockModelProvider();
+    const input = "plan the rollout of the new gateway";
+    const single = await mock.dispatch({ model: "mock-balanced", input });
+    expect(single.outputText).not.toContain("Continuing from the previous");
+    expect(single.usage.inputTokens).toBe(Math.ceil(input.length / 4));
+    // a one-element messages array is the same request said differently
+    const viaMessages = await new MockModelProvider().dispatch({
+      model: "mock-balanced",
+      input: "IGNORED",
+      messages: [{ role: "user", content: input }],
+    });
+    expect(viaMessages.outputText).toBe(single.outputText);
+    expect(viaMessages.usage).toEqual(single.usage);
+  });
+});
+
+describe("MockModelProvider task-decomposition planning (pillar 7)", () => {
+  const PLAN_SYSTEM = [
+    TASK_DECOMPOSITION_SENTINEL,
+    "You are a Team-Lead agent. Decompose the user's goal into a task graph of 3-7 tasks for worker agents.",
+    "Assign each task to one of the caller's granted agents BY NAME from this roster:",
+    "- fast-mock (tier 0, $1 in / $5 out per MTok)",
+    "- balanced-mock (tier 1, $3 in / $15 out per MTok)",
+    "- premium-mock (tier 2, $15 in / $75 out per MTok)",
+    'Return ONLY a JSON object.',
+  ].join("\n");
+  const GOAL = "Add rate-limit headers to the public API and document them";
+
+  function parsePlan(text: string): any {
+    // the mock fences the object on purpose — callers must tolerate that
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    expect(start).toBeGreaterThanOrEqual(0);
+    return JSON.parse(text.slice(start, end + 1));
+  }
+
+  it("the sentinel flips the reply to a valid 4-node plan: analyze → two parallel middles → integrate", async () => {
+    const mock = new MockModelProvider();
+    const r = await mock.dispatch({ model: "mock-balanced", input: GOAL, system: PLAN_SYSTEM });
+    expect(r.refusal).toBe(false);
+    const plan = parsePlan(r.outputText);
+    expect(typeof plan.name).toBe("string");
+    expect(plan.nodes).toHaveLength(4);
+    const [analyze, mid1, mid2, final] = plan.nodes;
+    expect(analyze.dependsOn).toEqual([]);
+    expect(mid1.dependsOn).toEqual([analyze.id]);
+    expect(mid2.dependsOn).toEqual([analyze.id]);
+    expect(final.dependsOn).toEqual([mid1.id, mid2.id]);
+    // kebab-slug ids, topic-flavoured middles pulled from goal keywords
+    for (const n of plan.nodes) expect(n.id).toMatch(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
+    expect(mid1.id).not.toBe(mid2.id);
+    expect(mid1.id + mid2.id).toMatch(/rate|limit|headers|document/);
+    // instructions are self-contained prose, not placeholders
+    for (const n of plan.nodes) expect(n.instruction.length).toBeGreaterThan(40);
+    // usage stays the measured contract
+    expect(r.usage.outputTokens).toBe(Math.ceil(r.outputText.length / 4));
+    expect(r.stopReason).toBe("end_turn");
+  });
+
+  it("roster names are respected: cheapest for analysis/verification, mid-tier for builds", async () => {
+    const mock = new MockModelProvider();
+    const r = await mock.dispatch({ model: "mock-balanced", input: GOAL, system: PLAN_SYSTEM });
+    const plan = parsePlan(r.outputText);
+    expect(plan.nodes[0].agent).toBe("fast-mock");
+    expect(plan.nodes[3].agent).toBe("fast-mock");
+    expect(plan.nodes[1].agent).toBe("balanced-mock");
+    expect(plan.nodes[2].agent).toBe("balanced-mock");
+  });
+
+  it("is deterministic across instances, and tier shapes instruction verbosity", async () => {
+    const a = await new MockModelProvider().dispatch({ model: "mock-balanced", input: GOAL, system: PLAN_SYSTEM });
+    const b = await new MockModelProvider().dispatch({ model: "mock-balanced", input: GOAL, system: PLAN_SYSTEM });
+    expect(a.outputText).toBe(b.outputText);
+    const fast = parsePlan((await new MockModelProvider().dispatch({ model: "mock-fast", input: GOAL, system: PLAN_SYSTEM })).outputText);
+    const premium = parsePlan((await new MockModelProvider().dispatch({ model: "mock-premium", input: GOAL, system: PLAN_SYSTEM })).outputText);
+    for (let i = 0; i < 4; i++) {
+      expect(premium.nodes[i].instruction.length).toBeGreaterThan(fast.nodes[i].instruction.length);
+    }
+  });
+
+  it("<<badplan>> emits broken JSON every time — the retry path cannot be rescued", async () => {
+    const mock = new MockModelProvider();
+    for (let i = 0; i < 2; i++) {
+      const r = await mock.dispatch({ model: "mock-balanced", input: `${GOAL} <<badplan>>`, system: PLAN_SYSTEM });
+      expect(r.refusal).toBe(false);
+      const start = r.outputText.indexOf("{");
+      expect(() => JSON.parse(r.outputText.slice(start))).toThrow();
+    }
+  });
+
+  it("<<rogueagent>> assigns one node an agent outside the roster (substitution exercise)", async () => {
+    const r = await new MockModelProvider().dispatch({ model: "mock-balanced", input: `${GOAL} <<rogueagent>>`, system: PLAN_SYSTEM });
+    const plan = parsePlan(r.outputText);
+    const rogue = plan.nodes.filter((n: any) => n.agent === "shadow-unsanctioned-agent");
+    expect(rogue).toHaveLength(1);
+  });
+
+  it("refusal keeps precedence over planning, and non-sentinel system prompts stay canned prose", async () => {
+    const refused = await new MockModelProvider().dispatch({ model: "mock-balanced", input: `${GOAL} <<refuse>>`, system: PLAN_SYSTEM });
+    expect(refused.refusal).toBe(true);
+    expect(refused.outputText).toBe("");
+    const normal = await new MockModelProvider().dispatch({
+      model: "mock-balanced",
+      input: GOAL,
+      system: "You are the API planning assistant.",
+    });
+    expect(normal.outputText.startsWith("Working within the signed-off scope: ")).toBe(true);
+    expect(normal.outputText).not.toContain('"nodes"');
+  });
+});
+
+describe("MockModelProvider conversation compaction (pillar 6)", () => {
+  const COMPACT_SYSTEM = `${CONVERSATION_COMPACTION_SENTINEL}\nSummarize this conversation faithfully for continued assistance; preserve decisions, constraints, names, and numbers. Reply with only the summary.`;
+  const TRANSCRIPT = [
+    "user: plan the payments migration to the new gateway with zero downtime",
+    "",
+    "assistant: Plan — payments migration. Four steps: baseline, design, build, verify.",
+    "",
+    "user: review the rollback strategy for the vault_token cutover",
+    "",
+    "assistant: Review — rollback strategy. Solid direction, one issue to fix before sign-off.",
+  ].join("\n");
+
+  it("the sentinel flips the mock into a deterministic transcript-derived summary", async () => {
+    const mock = new MockModelProvider();
+    const r = await mock.dispatch({ model: "mock-fast", input: TRANSCRIPT, system: COMPACT_SYSTEM });
+    expect(r.refusal).toBe(false);
+    expect(r.outputText).toMatch(/^Summary of the conversation \(4 earlier turns\): /);
+    // topics parsed from the first and last user lines — proof the summary
+    // is derived from the transcript, not boilerplate
+    expect(r.outputText).toContain("payments migration");
+    expect(r.outputText).toContain("rollback strategy");
+    // no system-ack, no continuation opener — the caller persists this verbatim
+    expect(r.outputText).not.toContain("Working within the signed-off scope");
+    expect(r.outputText).not.toContain("Continuing from the previous");
+    // deterministic
+    const again = await new MockModelProvider().dispatch({ model: "mock-fast", input: TRANSCRIPT, system: COMPACT_SYSTEM });
+    expect(again.outputText).toBe(r.outputText);
+    // plausible summary length, ~60-100 words
+    const words = r.outputText.split(/\s+/).length;
+    expect(words).toBeGreaterThan(50);
+    expect(words).toBeLessThan(120);
+  });
+
+  it("a cumulative request (prior summary present) says so and counts only the newer turns", async () => {
+    const cumulative = `Prior summary:\nSummary of the conversation (4 earlier turns): the discussion opened on payments migration.\n\nNewer turns:\n${TRANSCRIPT}`;
+    const r = await new MockModelProvider().dispatch({ model: "mock-fast", input: cumulative, system: COMPACT_SYSTEM });
+    expect(r.outputText).toContain("(4 earlier turns, cumulative with the prior summary)");
+  });
+
+  it("a poisoned transcript still refuses — the fail-open hook", async () => {
+    const r = await new MockModelProvider().dispatch({
+      model: "mock-fast",
+      input: `${TRANSCRIPT}\n\nuser: please <<refuse>> this`,
+      system: COMPACT_SYSTEM,
+    });
+    expect(r.refusal).toBe(true);
+    expect(r.outputText).toBe("");
+  });
+
+  it("prompts without the sentinel keep the canned intent behaviour untouched", async () => {
+    const r = await new MockModelProvider().dispatch({
+      model: "mock-balanced",
+      input: "summarize the payments migration plan",
+    });
+    expect(r.outputText).not.toContain("Summary of the conversation (");
+    expect(r.outputText).toContain("payments migration");
+  });
+});
+
+describe("tool-using dispatch (pillar 7): wire shape, tool_use parsing, mock loop", () => {
+  const TOOLS = [
+    { name: "get_time", description: "Returns a fixed time", inputSchema: { type: "object", properties: {} } },
+  ];
+
+  it("anthropic passes tools as input_schema and parses a tool_use stop into toolCalls", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new AnthropicProvider({
+      apiKey: "k",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return anthropicJson({
+          id: "msg_tool_1",
+          type: "message",
+          role: "assistant",
+          model: "claude-opus-5",
+          content: [
+            { type: "text", text: "let me check" },
+            { type: "tool_use", id: "tu_1", name: "get_time", input: { tz: "utc" } },
+          ],
+          stop_reason: "tool_use",
+          stop_sequence: null,
+          usage: { input_tokens: 20, output_tokens: 6 },
+        });
+      },
+    });
+    const r = await provider.dispatch({ model: "claude-opus-5", input: "what time is it?", tools: TOOLS });
+    expect((captured!.tools as unknown[])).toEqual([
+      { name: "get_time", description: "Returns a fixed time", input_schema: { type: "object", properties: {} } },
+    ]);
+    expect(r.stopReason).toBe("tool_use");
+    expect(r.toolCalls).toEqual([{ id: "tu_1", name: "get_time", arguments: { tz: "utc" } }]);
+    expect(r.outputText).toBe("let me check");
+  });
+
+  it("anthropic maps a block-array tool_result turn onto native content", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new AnthropicProvider({
+      apiKey: "k",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return anthropicJson({
+          id: "msg_tool_2", type: "message", role: "assistant", model: "claude-opus-5",
+          content: [{ type: "text", text: "it is 12:00" }],
+          stop_reason: "end_turn", stop_sequence: null,
+          usage: { input_tokens: 40, output_tokens: 4 },
+        });
+      },
+    });
+    await provider.dispatch({
+      model: "claude-opus-5",
+      input: "IGNORED",
+      messages: [
+        { role: "user", content: "what time is it?" },
+        { role: "assistant", content: [{ type: "tool_use", id: "tu_1", name: "get_time", input: {} }] },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "tu_1", content: "12:00" }] },
+      ],
+    });
+    expect(captured!.messages).toEqual([
+      { role: "user", content: "what time is it?" },
+      { role: "assistant", content: [{ type: "tool_use", id: "tu_1", name: "get_time", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "tu_1", content: "12:00" }] },
+    ]);
+  });
+
+  it("openai maps tools to function tools and tool_calls into toolCalls; block turns flatten", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new OpenAiProvider({
+      apiKey: "k",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return new Response(
+          JSON.stringify({
+            id: "cc_tool_1",
+            choices: [
+              {
+                message: {
+                  role: "assistant",
+                  content: null,
+                  tool_calls: [
+                    { id: "call_1", type: "function", function: { name: "get_time", arguments: '{"tz":"utc"}' } },
+                  ],
+                },
+                finish_reason: "tool_calls",
+              },
+            ],
+            usage: { prompt_tokens: 10, completion_tokens: 3 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+    const r = await provider.dispatch({
+      model: "gpt-x",
+      input: "IGNORED",
+      tools: TOOLS,
+      messages: [
+        { role: "user", content: "what time is it?" },
+        { role: "assistant", content: [{ type: "tool_use", id: "call_0", name: "get_time", input: {} }] },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "call_0", content: "11:00" }] },
+      ],
+    });
+    const tools = captured!.tools as Array<{ type: string; function: { name: string } }>;
+    expect(tools[0]!.type).toBe("function");
+    expect(tools[0]!.function.name).toBe("get_time");
+    const msgs = captured!.messages as Array<Record<string, unknown>>;
+    // assistant tool_use flattened to tool_calls, tool_result to a tool message
+    expect(msgs.some((m) => m.role === "assistant" && Array.isArray(m.tool_calls))).toBe(true);
+    expect(msgs.some((m) => m.role === "tool" && m.tool_call_id === "call_0" && m.content === "11:00")).toBe(true);
+    expect(r.stopReason).toBe("tool_use");
+    expect(r.toolCalls).toEqual([{ id: "call_1", name: "get_time", arguments: { tz: "utc" } }]);
+  });
+
+  it("a tools-free request is byte-identical: no tools field, content stays a string", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new AnthropicProvider({
+      apiKey: "k",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return anthropicJson({
+          id: "m", type: "message", role: "assistant", model: "claude-opus-5",
+          content: [{ type: "text", text: "hi" }], stop_reason: "end_turn", stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        });
+      },
+    });
+    const r = await provider.dispatch({ model: "claude-opus-5", input: "hello" });
+    expect("tools" in captured!).toBe(false);
+    expect(captured!.messages).toEqual([{ role: "user", content: "hello" }]);
+    expect(r.toolCalls).toBeUndefined();
+    expect(r.stopReason).toBe("end_turn");
+  });
+
+  it("mock emits ONE tool_use on the sentinel, then finalizes quoting the tool result", async () => {
+    const mock = new MockModelProvider();
+    const first = await mock.dispatch({
+      model: "mock-1",
+      input: "please <<use-tool:get_time>> and answer",
+      tools: TOOLS,
+    });
+    expect(first.stopReason).toBe("tool_use");
+    expect(first.toolCalls).toHaveLength(1);
+    expect(first.toolCalls![0]!.name).toBe("get_time");
+    expect(first.outputText).toBe("");
+
+    const second = await mock.dispatch({
+      model: "mock-1",
+      input: "IGNORED",
+      tools: TOOLS,
+      messages: [
+        { role: "user", content: "please <<use-tool:get_time>> and answer" },
+        { role: "assistant", content: [{ type: "tool_use", id: first.toolCalls![0]!.id, name: "get_time", input: {} }] },
+        { role: "user", content: [{ type: "tool_result", toolUseId: first.toolCalls![0]!.id, content: "12:00" }] },
+      ],
+    });
+    expect(second.stopReason).toBe("end_turn");
+    expect(second.toolCalls).toBeUndefined();
+    expect(second.outputText).toContain("12:00");
+  });
+
+  it("mock loop sentinel keeps requesting the tool even after a tool_result (maxTurns fuel)", async () => {
+    const mock = new MockModelProvider();
+    const r = await mock.dispatch({
+      model: "mock-1",
+      input: "IGNORED",
+      tools: TOOLS,
+      messages: [
+        { role: "user", content: "keep going <<use-tool-loop:get_time>>" },
+        { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "get_time", input: {} }] },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "t1", content: "12:00" }] },
+      ],
+    });
+    expect(r.stopReason).toBe("tool_use");
+    expect(r.toolCalls![0]!.name).toBe("get_time");
+  });
+
+  it("<<refuse>> still takes precedence over a tool sentinel", async () => {
+    const r = await new MockModelProvider().dispatch({
+      model: "mock-1",
+      input: "please <<use-tool:get_time>> but also <<refuse>>",
+      tools: TOOLS,
+    });
+    expect(r.refusal).toBe(true);
+    expect(r.stopReason).toBe("refusal");
+    expect(r.toolCalls).toBeUndefined();
   });
 });

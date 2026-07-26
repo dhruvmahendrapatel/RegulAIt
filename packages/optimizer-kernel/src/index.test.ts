@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyComplexity,
+  compactionSavings,
+  COMPACTION_RECENT_WINDOW_MESSAGES,
+  DEFAULT_COMPACTION_THRESHOLD_TOKENS,
+  planCompaction,
   selectTools,
   estimateTokens,
   routeModel,
@@ -222,5 +226,87 @@ describe("selectTools (lazy tool-loading §8)", () => {
     expect(d.effect).toBe("narrowed");
     expect(d.selected).toHaveLength(2);
     expect(d.withheld).toHaveLength(4);
+  });
+});
+
+describe("planCompaction", () => {
+  const msgs = (...tokens: number[]) => tokens;
+
+  it("does not compact under the threshold, and not AT the exact boundary either", () => {
+    const under = planCompaction({ messageTokens: msgs(400, 400, 400), thresholdTokens: 1600 });
+    expect(under.shouldCompact).toBe(false);
+    expect(under.compactThroughIndex).toBe(-1);
+    expect(under.historyTokens).toBe(1200);
+
+    // exactly 1600 = still within — strictly-greater semantics
+    const exact = planCompaction({
+      messageTokens: msgs(400, 400, 400, 200, 100, 100),
+      thresholdTokens: 1600,
+    });
+    expect(exact.historyTokens).toBe(1600);
+    expect(exact.shouldCompact).toBe(false);
+
+    const over = planCompaction({
+      messageTokens: msgs(400, 400, 400, 200, 100, 101),
+      thresholdTokens: 1600,
+    });
+    expect(over.shouldCompact).toBe(true);
+  });
+
+  it("compacts everything except the recent verbatim window", () => {
+    const plan = planCompaction({
+      messageTokens: msgs(500, 500, 500, 100, 100, 100, 100),
+      thresholdTokens: 1600,
+      recentWindowMessages: 4,
+    });
+    expect(plan.shouldCompact).toBe(true);
+    // 7 messages, keep the last 4 → compact through index 2
+    expect(plan.compactThroughIndex).toBe(2);
+    expect(plan.historyTokens).toBe(1900);
+  });
+
+  it("never compacts when the history has no messages older than the window", () => {
+    // over threshold but only 4 messages — the window covers them all
+    const plan = planCompaction({
+      messageTokens: msgs(900, 900, 900, 900),
+      thresholdTokens: 1600,
+      recentWindowMessages: 4,
+    });
+    expect(plan.shouldCompact).toBe(false);
+    expect(plan.compactThroughIndex).toBe(-1);
+
+    // fewer messages than the window, same answer
+    const few = planCompaction({ messageTokens: msgs(2000), thresholdTokens: 1600 });
+    expect(few.shouldCompact).toBe(false);
+  });
+
+  it("re-compaction: the existing summary counts toward the threshold and the index stays slice-relative", () => {
+    // post-summary slice alone is under threshold; summary tokens tip it over
+    const without = planCompaction({ messageTokens: msgs(300, 300, 300, 300, 300) });
+    expect(without.shouldCompact).toBe(false);
+    const plan = planCompaction({
+      messageTokens: msgs(300, 300, 300, 300, 300),
+      summaryTokens: 200,
+    });
+    expect(plan.historyTokens).toBe(1700);
+    expect(plan.shouldCompact).toBe(true);
+    // 5 post-summary messages, keep 4 → compact through slice index 0
+    expect(plan.compactThroughIndex).toBe(0);
+  });
+
+  it("uses the documented defaults (1600 tokens, 4-message window)", () => {
+    expect(DEFAULT_COMPACTION_THRESHOLD_TOKENS).toBe(1600);
+    expect(COMPACTION_RECENT_WINDOW_MESSAGES).toBe(4);
+    const plan = planCompaction({ messageTokens: [500, 500, 500, 500, 500] });
+    expect(plan.shouldCompact).toBe(true);
+    expect(plan.compactThroughIndex).toBe(0);
+  });
+});
+
+describe("compactionSavings", () => {
+  it("is omitted minus summary, floored at zero", () => {
+    expect(compactionSavings(1000, 150)).toBe(850);
+    expect(compactionSavings(100, 150)).toBe(0);
+    expect(compactionSavings(0, 0)).toBe(0);
   });
 });

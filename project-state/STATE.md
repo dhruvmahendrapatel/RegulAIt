@@ -393,6 +393,84 @@ Sync-now verification works, and receivers without read-back fail loudly into th
 orphan flow. `DEFAULT_MAPPINGS.generic_webhook` is the IDENTITY map over all five canonical
 states including blocked — nothing invented because the vocabulary is ours. E2e: the fake
 receiver verifies the HMAC on every request and asserts the token never travels raw.
+**Tool-using multi-turn workers, 2026-07-26 — pillar 7's workers become a governed agentic
+loop (no migration).** dispatchRunNode's single model call is now a bounded loop: each turn
+one governed dispatch (measured usage row billed to run.projectId) with `tools` + accumulated
+tool-history messages; when the model returns stopReason "tool_use", each tool call runs
+through the SAME governance path as the MCP proxy — extracted as `executeGovernedToolCall`
+(mcp-proxy.ts) and invoked AS run.initiatingUserId, one audit row each, so allow-list/
+data-scope/rate-limit/approval self-enforce MID-LOOP across turns (rate limits are audit-log-
+derived, so the Nth call is counted for free). Bounded by BOTH node.maxTurns (default 6, cap
+20) AND the per-run measured budget checked EVERY turn — a runaway loop halts and escalates a
+__budget__ approval into the one queue exactly like a single dispatch; an approval_required
+tool breaks the loop leaving the node blocked, never hangs; no privilege increase entering
+the loop. Provider contract extended additively (ModelToolDef in, "tool_use" stopReason +
+toolCalls out, ModelChatMessage.content widened to text/tool_use/tool_result blocks; byte-
+identical when tools absent) — Anthropic + OpenAI-family fully wired, Google best-effort. Mock
+gains `<<use-tool:NAME>>` / `<<use-tool-loop:NAME>>` sentinels so the loop is testable keyless
+against the real-upstream MCP harness. Node declares toolServers/toolNames/maxTurns in the
+graph jsonb (kernel schema extended — NO migration; per-turn/tool trace rides the event jsonb
+as node_tool_call). Decompose planning prompt lists the caller's entitled servers+tools so the
+lead can assign them; New Run editor gains per-node tool-servers + max-turns controls. Suite
+473 → 485 (7 unit + 5 e2e over the real upstream: granted-loop, ungranted-deny-mid-loop,
+maxTurns cap, rate-limit-mid-loop, per-turn-budget halt+escalate). Independently re-verified:
+build clean, mcp-proxy 137/137 green after the extraction. Deferred (unchanged): Team-Lead
+TIER with transitive entitlement narrowing.
+
+**Automatic context compaction, 2026-07-26 — pillar 6 §5 lands (first technique enabled by
+the messages array).** Pure decision in optimizer-kernel (planCompaction/compactionSavings;
+threshold >1600 est. tokens of model-bound history, last 4 messages always verbatim;
+constants — per-user dials deferred pending an agent-policy migration home). Migration 0024:
+summary/summary_through_message_id/summary_tokens/compacted_at on conversations — stored
+messages NEVER deleted or altered (asserted). The summarizer is one governed dispatch to
+the caller's cheapest entitled+dispatchable agent (audit purpose:"compact", billed to the
+same project — the visible price of the savings); re-compaction is CUMULATIVE (prior
+summary + newer turns, compacted-away turns never re-read); failure fails OPEN (audited
+context-compaction-failed-open, full history dispatches, turn succeeds, failOpen in trace);
+routingMode "passthrough" disables it (§12 off-switch consistency). Savings = max(0,
+omitted − summary) tokens at the served agent's input price, recorded per summary-riding
+dispatch under technique context_compaction in the SAME detail shape as model_routing — the
+Spend page and admin charts lit up with zero chart changes. /app shows a compaction divider
+with the expandable stored summary + badges + trace detail, persisted on replayed threads.
+Suite 455 → 473; browser-verified (on-topic continuation through the summary, $0.0044
+compaction bar beside model_routing, zero console errors).
+
+**Agent-driven task decomposition, 2026-07-26 — pillar 7's headline lands, human-gated.**
+`POST /v1/runs/decompose` {goal, projectId?, leadAgentId?}: a Team-Lead agent (leadAgentId ??
+user default ?? cheapest granted mock, entitlement-checked under mode "plan") drafts a
+task-graph PROPOSAL via one governed metered dispatch (policy → project budget gate →
+usage/audit with detail.purpose:"decompose"; roster in the prompt = the caller's entitled
+AND dispatchable agents with tier/price so suggestions are grounded). Parse (balanced-JSON,
+fence-tolerant) → decompositionPlanSchema (2-8 kebab-id nodes) → agent names resolved
+against real grants (unknown → default agent with recorded substitution) → the SAME kernel
+validateGraph as planRun; one error-fed retry then honest 422 with rawOutput (both attempts
+billed). It never creates a run — the proposal lands in the New Run editor (editable
+everything, substitution badges, lead cost banner, "nothing runs until you accept") and
+acceptance is the unchanged human plan gate. Mock planner: deterministic 4-node
+analyze → two parallel goal-keyword middles → integrate, roster-aware, tier-scaled —
+demoable with zero external keys. Suite 443 → 455; browser-verified (drafted plan executed
+to completion with ∥ badges, zero console errors). Deferred (unchanged): Team-Lead TIER
+with transitive entitlement narrowing, tool-using multi-turn workers.
+
+**Multi-turn conversations, 2026-07-25 — the Playground stops being amnesiac (pillar 6
+prerequisite unlocked).** `ModelDispatchRequest.messages` (full ordered history; `input`
+ignored when present, byte-identical single-turn otherwise) threaded through all five
+providers (google maps assistant→"model"; mock opens with a continuation line and terse
+follow-ups inherit the previous turn's topic — demo-provable). Migration 0023:
+`conversations` + `conversation_messages` (FK-free subject ids like the ledgers, cascade on
+messages, assistant detail jsonb = stopReason/refusal/servedAgentId/modelUsed/costUsd/
+credentialSource). Invoke accepts `conversationId`: ownership checked before anything bills;
+EVERY turn is the unchanged governed pipeline (policy → routing → budget → audit → ledgers,
+history growth added to cost estimates so budget gates stay truthful); transactional
+persistence — success both turns, refusal flagged, denial user-turn-only (excluded from
+future model-bound history), dispatch failure nothing. Own-scoped CRUD. /app Playground is
+now two-pane: conversations rail (new/delete/active restore via sessionStorage), history
+replayed through the SAME badge renderers as live turns (incl. denial pills), auto-create +
+auto-title on first send, mid-thread agent/project switching. Seeded 2-exchange demo
+conversation (idempotent, real-API-driven) + new seed.test.ts double-run suite. Suite
+416 → 443. Browser-verified: continuation reply on-topic, reload restores thread, zero
+console errors.
+
 **Provider-native inbound webhooks, 2026-07-25 — the deferred ADR-0010 depth item.** New
 `packages/pm-provider/src/inbound.ts`: per-provider `parseInboundWebhook` (exhaustive
 registry) verifying each tool's REAL mechanism and translating its REAL payloads into the

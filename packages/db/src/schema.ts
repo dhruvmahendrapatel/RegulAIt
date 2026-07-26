@@ -750,6 +750,58 @@ export const projects = pgTable("projects", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+// MULTI-TURN CONVERSATIONS: a personal (per-user) thread of governed
+// dispatches against one agent. FK-free ids on purpose, like the ledgers —
+// a conversation is the user's own record and must not vanish because an
+// agent or project row was deleted; access control is enforced at the
+// routes (strictly own-scoped, admins included).
+export const conversations = pgTable(
+  "conversations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id").notNull(),
+    agentId: uuid("agent_id").notNull(),
+    /** pillar 5 default attribution for every turn dispatched in this thread */
+    projectId: uuid("project_id"),
+    /** auto-titled from the first user turn (~60 chars) when left null */
+    title: text("title"),
+    /** PILLAR 6 §5 context compaction: the persisted summary of every turn up
+     * to and including summary_through_message_id. One summary per
+     * conversation, REPLACED cumulatively on re-compaction (new input =
+     * existing summary + turns since). Stored messages are never deleted or
+     * altered — these fields only change what is model-bound. */
+    summary: text("summary"),
+    summaryThroughMessageId: uuid("summary_through_message_id"),
+    /** chars/4 estimate of the summary — the cost side of the savings claim */
+    summaryTokens: integer("summary_tokens"),
+    compactedAt: timestamp("compacted_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("conversations_user_updated_idx").on(t.userId, t.updatedAt)],
+);
+
+// One row per persisted turn. Assistant turns carry the dispatch facts in
+// detail (stopReason/refusal/servedAgentId/modelUsed/costUsd/credentialSource);
+// a user turn that was governance-DENIED carries detail.denied so history
+// shows the attempt honestly. createdAt is written explicitly by the gateway
+// (user turn strictly before its assistant turn) so ordering never depends on
+// a shared transaction timestamp.
+export const conversationMessages = pgTable(
+  "conversation_messages",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    role: text("role", { enum: ["user", "assistant"] }).notNull(),
+    content: text("content").notNull(),
+    detail: jsonb("detail"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("conversation_messages_conv_at_idx").on(t.conversationId, t.createdAt)],
+);
+
 // §8.3: the cascade expressed as DATA — one admin-editable profile per
 // framework tag, mapping it to what it drives. Workflow requirements are
 // ENFORCED at instance creation; mcp/retention/pii are declared policy the

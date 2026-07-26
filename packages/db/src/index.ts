@@ -5,7 +5,7 @@ import * as schema from "./schema.js";
 export * from "./schema.js";
 export { schema };
 export { runMigrations } from "./migrate.js";
-export { and, count, desc, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";
+export { and, asc, count, desc, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";
 
 export type Db = ReturnType<typeof createDb>;
 
