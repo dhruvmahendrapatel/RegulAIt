@@ -20,6 +20,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(zod@3.25.76)
+      '@regulait/connector-provider':
+        specifier: workspace:*
+        version: link:../../packages/connector-provider
       '@regulait/db':
         specifier: workspace:*
         version: link:../../packages/db
@@ -50,6 +53,16 @@ importers:
       fastify:
         specifier: ^5.4.0
         version: 5.10.0
+      zod:
+        specifier: ^3.25.67
+        version: 3.25.76
+    devDependencies:
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/node@26.1.1)(tsx@4.23.1)
+
+  packages/connector-provider:
+    dependencies:
       zod:
         specifier: ^3.25.67
         version: 3.25.76

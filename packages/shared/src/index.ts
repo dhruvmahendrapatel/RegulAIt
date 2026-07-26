@@ -196,9 +196,34 @@ export const createModelCredentialSchema = z.object({
   baseUrl: z.string().url().nullable().optional(),
 });
 
+/** the connector-provider adapter enum (mirrors the CONNECTOR_PROVIDER_KINDS
+ * union without importing the package into shared) */
+export const connectorProviderKindSchema = z.enum([
+  "http",
+  "webhook",
+  "slack",
+  "github",
+  "jira",
+  "snowflake",
+  "generic",
+  "mock",
+]);
+
 export const createConnectorSchema = z.object({
   name: z.string().min(1),
+  /** free-text display CATEGORY (unchanged) — NOT the execution adapter */
   kind: z.string().min(1),
+  /** EXECUTION: the adapter that runs the call; absent = governance-only */
+  providerKind: connectorProviderKindSchema.optional(),
+  baseUrl: z.string().url().optional(),
+  /** pillar 5 flat list price per allowed call; absent/null = unpriced */
+  pricePerCallUsd: z.number().nonnegative().nullable().optional(),
+});
+
+/** platform connector credential (mirrors createModelCredentialSchema) */
+export const createConnectorCredentialSchema = z.object({
+  token: z.string().min(1).max(2048),
+  baseUrl: z.string().url().nullable().optional(),
 });
 
 export const createConnectorGrantSchema = z.object({
@@ -211,6 +236,10 @@ export const createConnectorGrantSchema = z.object({
 export const invokeConnectorSchema = z.object({
   operation: z.enum(["read", "write"]),
   object: z.string().min(1).max(256).optional(),
+  /** EXECUTION: the write body / read parameters handed to the adapter */
+  payload: z.record(z.unknown()).optional(),
+  /** pillar 5: attribute this call's cost to a project */
+  projectId: z.string().uuid().optional(),
 });
 
 export const changeDescriptorSchema = z.object({

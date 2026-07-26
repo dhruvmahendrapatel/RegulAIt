@@ -363,7 +363,35 @@ export const userAgentPolicies = pgTable("user_agent_policies", {
 export const connectors = pgTable("connectors", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: text("name").notNull().unique(),
+  // free-text display CATEGORY (e.g. "crm", "issue-tracker") — NOT the adapter.
   kind: text("kind").notNull(),
+  // EXECUTION (pillar 5 §10.3): the connector-provider adapter enum
+  // (http/webhook/generic/mock/…). Null = governance-only: the invoke endpoint
+  // still evaluates policy + writes one audit row but contacts nothing and
+  // meters nothing (today's behaviour). Non-null = the call really executes.
+  providerKind: text("provider_kind"),
+  // connection root for the adapter (generic/http/webhook); a credential row may
+  // override it (credential.baseUrl wins), mirroring model_credentials.
+  baseUrl: text("base_url"),
+  // pillar 5: flat list price per allowed call. Null = unpriced → cost null,
+  // never invented (mirrors agents' costPerMTok null-safety).
+  pricePerCallUsd: doublePrecision("price_per_call_usd"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// EXECUTION: one platform credential per connector, AES-256-GCM encrypted with
+// REGULAIT_DATA_KEY (same discipline as model/git/PM tokens — never plaintext
+// at rest, never returned by any endpoint). Keyless kinds (mock, unauthenticated
+// generic) never write a row here. Platform-scoped only this slice (no per-user
+// BYO connector credential yet).
+export const connectorCredentials = pgTable("connector_credentials", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  connectorId: uuid("connector_id")
+    .notNull()
+    .unique()
+    .references(() => connectors.id, { onDelete: "cascade" }),
+  tokenCiphertext: text("token_ciphertext").notNull(),
+  baseUrl: text("base_url"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -679,21 +707,30 @@ export const usageEvents = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
     userId: uuid("user_id").notNull(),
-    /** the agent that actually served (post-routing) */
-    agentId: uuid("agent_id").notNull(),
+    /** what this spend row is FOR: 'agent' (model dispatch) or 'connector'
+     * (a governed connector call). One ledger, so the per-project rollup
+     * picks connector spend up automatically. */
+    objectType: text("object_type").notNull().default("agent"),
+    /** the agent that actually served (post-routing) — null on connector rows */
+    agentId: uuid("agent_id"),
     requestedAgentId: uuid("requested_agent_id"),
     baselineAgentId: uuid("baseline_agent_id"),
-    provider: text("provider").notNull(),
-    model: text("model").notNull(),
-    inputTokens: integer("input_tokens").notNull(),
-    outputTokens: integer("output_tokens").notNull(),
-    /** measured tokens × the served agent's list price; null = unpriced, never invented */
+    /** connector rows only: the connector that executed, and its operation */
+    connectorId: uuid("connector_id"),
+    operation: text("operation"),
+    /** null on connector rows (no provider/model/tokens) */
+    provider: text("provider"),
+    model: text("model"),
+    inputTokens: integer("input_tokens"),
+    outputTokens: integer("output_tokens"),
+    /** agent rows: measured tokens × list price. connector rows: the
+     * connector's flat price_per_call_usd. Null = unpriced, never invented. */
     costUsd: doublePrecision("cost_usd"),
     /** what the routing baseline would have cost at the SAME measured token
      * volumes, minus costUsd — the honest, measured version of the routing
      * savings that cost_events could only estimate */
     measuredCostSavedUsd: doublePrecision("measured_cost_saved_usd"),
-    stopReason: text("stop_reason").notNull(),
+    stopReason: text("stop_reason"),
     refusal: boolean("refusal").notNull().default(false),
     providerMessageId: text("provider_message_id"),
     /** PILLAR 5 attribution; FK-free like the rest of the ledger */

@@ -1734,23 +1734,40 @@ function wireProjects() {
 // savings from cost_events — plus a drill-down into any project the user is
 // a member of (the /costs endpoint admits members, not only admins).
 async function spendPage() {
-  const [usage, costs, dir] = await Promise.all([
+  const [usage, costs, dir, conns] = await Promise.all([
     get("/v1/usage-events?limit=100"),
     get("/v1/cost-events?limit=200"),
     get("/v1/users/directory").catch(() => ({ users: [] })),
+    // the caller's OWN granted connectors (non-admin-safe) — carries names for
+    // the Spend-by-connector labels without touching the admin-only catalog
+    ME.userId ? get("/v1/users/" + ME.userId + "/connectors").catch(() => ({ connectors: [] })) : Promise.resolve({ connectors: [] }),
   ]);
   DIRECTORY = dir.users ?? [];
+  const CONNECTOR_NAMES = Object.fromEntries((conns.connectors ?? []).map((c) => [c.connectorId, c.name]));
   const t = usage.totals ?? {};
   const events = usage.events ?? [];
   const estSaved = (costs.totals ?? []).reduce((s, x) => s + (Number(x.estimatedCostSavedUsd) || 0), 0);
+  // one ledger, two object types: agent rows drive Spend by agent, connector
+  // rows drive Spend by connector — split so neither shows as the other.
   const byAgent = {};
+  const byConnector = {};
   for (const e of events) {
+    if (e.objectType === "connector") {
+      const key = (e.connectorId ?? "?") + ":" + (e.operation ?? "");
+      const cur = byConnector[key] ?? (byConnector[key] = {
+        label: (CONNECTOR_NAMES[e.connectorId] ?? "connector") + " · " + (e.operation ?? ""),
+        costUsd: 0, events: 0,
+      });
+      cur.costUsd += e.costUsd ?? 0; cur.events++;
+      continue;
+    }
     const cur = byAgent[e.agentId] ?? (byAgent[e.agentId] = { label: AGENT_NAMES[e.agentId] ?? e.model, costUsd: 0, events: 0 });
     cur.costUsd += e.costUsd ?? 0; cur.events++;
   }
   const agentItems = Object.values(byAgent).sort((a, b) => b.costUsd - a.costUsd);
+  const connectorItems = Object.values(byConnector).sort((a, b) => b.costUsd - a.costUsd);
   const projName = (pid) => pid ? ((PROJECTS.find((p) => p.id === pid) || {}).name ?? pid.slice(0, 8) + "…") : "—";
-  const rows = events.slice(0, 30).map((e) => \`<tr>
+  const rows = events.filter((e) => e.objectType !== "connector").slice(0, 30).map((e) => \`<tr>
     <td class="dim">\${ago(e.at)}</td>
     <td>\${esc(AGENT_NAMES[e.agentId] ?? "agent")}</td>
     <td class="mono" style="font-size:11.5px">\${esc(e.model)}\${e.refusal ? ' <span class="badge bad">refused</span>' : ""}</td>
@@ -1775,6 +1792,7 @@ async function spendPage() {
   </div>
   <h2>Savings by technique — estimated, full history</h2><div class="card">\${barChart(costs.totals ?? [], "estimatedCostSavedUsd", (i) => i.technique)}</div>
   <h2>Spend by agent — last \${events.length} invocation\${events.length === 1 ? "" : "s"}</h2><div class="card">\${barChart(agentItems, "costUsd", (i) => i.label)}</div>
+  <h2>Spend by connector</h2><div class="card">\${connectorItems.length ? barChart(connectorItems, "costUsd", (i) => i.label) : '<div class="empty">No metered connector calls yet — invoke a connector with a provider adapter.</div>'}</div>
   <h2>Recent invocations</h2>
   <div class="card" style="padding:0 18px">
     <table><tr><th>When</th><th>Agent</th><th>Model served</th><th>Tokens</th><th>Cost</th><th>Saved</th><th>Project</th></tr>
@@ -1800,6 +1818,7 @@ function wireSpend() {
           + '<h2>Budget vs actual</h2><div class="card">' + budgetGauge(c.budget.spentUsd, c.budget.budgetUsd, c.budget.overageApproved) + "</div>"
           + '<h2>Showback by member</h2><div class="card">' + barChart(c.byUser, "costUsd", (i) => userName(i.userId)) + "</div>"
           + '<h2>By agent / model</h2><div class="card">' + barChart(c.byAgent, "costUsd", (i) => AGENT_NAMES[i.agentId] ?? i.model) + "</div>"
+          + '<h2>Spend by connector</h2><div class="card">' + ((c.byConnector ?? []).length ? barChart(c.byConnector, "costUsd", (i) => (i.name ?? "connector") + " · " + (i.operation ?? "")) : '<div class="empty">No metered connector calls for this project.</div>') + "</div>"
           + '<h2>Estimated savings by technique</h2><div class="card">' + barChart(c.estimatedSavings, "estimatedCostSavedUsd", (i) => i.technique) + "</div>";
       } catch (e) { out.innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; }
     }));

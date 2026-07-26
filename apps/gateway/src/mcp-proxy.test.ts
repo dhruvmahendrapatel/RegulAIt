@@ -8,7 +8,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { z } from "zod";
-import { createDb, eq, mcpTools, modelCredentials, runMigrations, type Db } from "@regulait/db";
+import { and, connectors, createDb, eq, mcpTools, modelCredentials, runMigrations, usageEvents, type Db } from "@regulait/db";
 import { resolveModelProvider, type MockModelProvider } from "@regulait/model-provider";
 import { buildApp } from "./app.js";
 
@@ -871,6 +871,234 @@ describe("connector governance (§2)", () => {
       .map((e: { effect: string }) => e.effect)
       .reverse();
     expect(effects).toEqual(["allow", "deny", "deny"]);
+  });
+});
+
+describe("connector execution layer (pillar 5 §10.3, pillar 1 connectors)", () => {
+  let cxUserId: string;
+  let cxAuth: { authorization: string };
+  let projectId: string;
+  let mockConnId: string;
+  let govOnlyConnId: string;
+  let httpConnId: string;
+  let boomConnId: string;
+  let fake: { url: string; close: () => Promise<void> };
+
+  async function connectorUsageRows(connectorId: string) {
+    return db.select().from(usageEvents).where(eq(usageEvents.connectorId, connectorId));
+  }
+
+  beforeAll(async () => {
+    // a real, non-admin caller (bootstrap cannot invoke)
+    const u = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email: "conn-exec@example.com", displayName: "Conn Exec" },
+    });
+    cxUserId = u.json().id;
+    cxAuth = await authFor(cxUserId);
+
+    // a project with NO members → attribution is open to any caller
+    const p = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/projects", payload: { name: "conn-exec-project" },
+    });
+    projectId = p.json().id;
+
+    // a fake upstream for the generic-http round trip: GET /accounts → 200,
+    // GET /boom → 500 (the failure path)
+    fake = await (async () => {
+      const server = http.createServer((req, res) => {
+        if (req.url === "/boom") { res.writeHead(500, { "content-type": "application/json" }); res.end(JSON.stringify({ error: "kaboom" })); return; }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ object: req.url, rows: [1, 2, 3], auth: req.headers.authorization ?? null }));
+      });
+      await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+      const addr = server.address();
+      if (typeof addr !== "object" || !addr) throw new Error("no address");
+      return {
+        url: `http://127.0.0.1:${addr.port}`,
+        close: () => new Promise<void>((r) => { server.closeAllConnections(); server.close(() => r()); }),
+      };
+    })();
+
+    // mock-kind PRICED connector (keyless, executes) — read-only grant scoped
+    // to "accounts" so both an allowed and a denied path are exercisable
+    mockConnId = (await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/connectors",
+      payload: { name: "cx-warehouse", kind: "data-warehouse", providerKind: "mock", pricePerCallUsd: 0.002 },
+    })).json().id;
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/grants/connectors",
+      payload: { userId: cxUserId, connectorId: mockConnId, mode: "read", allowedObjects: ["accounts"] },
+    });
+
+    // governance-only connector (no providerKind) — back-compat
+    govOnlyConnId = (await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/connectors",
+      payload: { name: "cx-govonly", kind: "crm" },
+    })).json().id;
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/grants/connectors",
+      payload: { userId: cxUserId, connectorId: govOnlyConnId, mode: "read" },
+    });
+
+    // generic-http connector against the fake server (keyless), priced
+    httpConnId = (await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/connectors",
+      payload: { name: "cx-http", kind: "rest-api", providerKind: "http", baseUrl: fake.url, pricePerCallUsd: 0.01 },
+    })).json().id;
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/grants/connectors",
+      payload: { userId: cxUserId, connectorId: httpConnId, mode: "read", allowedObjects: ["accounts", "boom"] },
+    });
+
+    // a second generic-http connector whose reads 500 (failure path)
+    boomConnId = (await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/connectors",
+      payload: { name: "cx-boom", kind: "rest-api", providerKind: "generic", baseUrl: fake.url, pricePerCallUsd: 0.01 },
+    })).json().id;
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/grants/connectors",
+      payload: { userId: cxUserId, connectorId: boomConnId, mode: "read", allowedObjects: ["boom"] },
+    });
+  });
+
+  afterAll(async () => { await fake.close(); });
+
+  it("an allowed mock-kind priced call executes and lands ONE attributed usage row", async () => {
+    const res = await app.inject({
+      method: "POST", headers: cxAuth, url: `/v1/connectors/${mockConnId}/invoke`,
+      payload: { operation: "read", object: "accounts", projectId },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.decision.effect).toBe("allow");
+    // real result body from the mock adapter
+    expect(body.result.status).toBe(200);
+    expect(body.result.body.object).toBe("accounts");
+    expect(body.costUsd).toBeCloseTo(0.002, 10);
+
+    const rows = await connectorUsageRows(mockConnId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.objectType).toBe("connector");
+    expect(rows[0]!.connectorId).toBe(mockConnId);
+    expect(rows[0]!.operation).toBe("read");
+    expect(rows[0]!.costUsd).toBeCloseTo(0.002, 10);
+    expect(rows[0]!.projectId).toBe(projectId);
+    // connector rows carry no model/tokens — the nullable columns stay null
+    expect(rows[0]!.agentId).toBeNull();
+    expect(rows[0]!.model).toBeNull();
+    expect(rows[0]!.inputTokens).toBeNull();
+  });
+
+  it("a DENIED call bills nothing — no usage row (mirror the model path)", async () => {
+    // write against a read-only grant → denied
+    const denied = await app.inject({
+      method: "POST", headers: cxAuth, url: `/v1/connectors/${mockConnId}/invoke`,
+      payload: { operation: "write", object: "accounts", projectId },
+    });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json().result).toBeUndefined();
+
+    // read outside the object scope → denied
+    const outside = await app.inject({
+      method: "POST", headers: cxAuth, url: `/v1/connectors/${mockConnId}/invoke`,
+      payload: { operation: "read", object: "payroll", projectId },
+    });
+    expect(outside.statusCode).toBe(403);
+
+    // still exactly the one row from the allowed call above — denials added none
+    expect(await connectorUsageRows(mockConnId)).toHaveLength(1);
+  });
+
+  it("a providerKind-null connector keeps today's behaviour: decision only, no result, no cost, no usage row", async () => {
+    const res = await app.inject({
+      method: "POST", headers: cxAuth, url: `/v1/connectors/${govOnlyConnId}/invoke`,
+      payload: { operation: "read", object: "leads", projectId },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.decision.effect).toBe("allow");
+    expect(body.result).toBeUndefined();
+    expect(body.costUsd).toBeUndefined();
+    expect(await connectorUsageRows(govOnlyConnId)).toHaveLength(0);
+  });
+
+  it("a generic-http connector really round-trips to the upstream and bills the flat price", async () => {
+    const res = await app.inject({
+      method: "POST", headers: cxAuth, url: `/v1/connectors/${httpConnId}/invoke`,
+      payload: { operation: "read", object: "accounts", projectId },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    // the fake server echoed the path it was actually GET'd on
+    expect(body.result.status).toBe(200);
+    expect(body.result.body.object).toBe("/accounts");
+    expect(body.result.body.rows).toEqual([1, 2, 3]);
+    expect(body.costUsd).toBeCloseTo(0.01, 10);
+    const rows = await connectorUsageRows(httpConnId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.costUsd).toBeCloseTo(0.01, 10);
+  });
+
+  it("a failed upstream (non-2xx) surfaces as 502 and bills nothing", async () => {
+    const res = await app.inject({
+      method: "POST", headers: cxAuth, url: `/v1/connectors/${boomConnId}/invoke`,
+      payload: { operation: "read", object: "boom", projectId },
+    });
+    expect(res.statusCode).toBe(502);
+    expect(res.json().error).toBe("connector_invoke_failed");
+    expect(await connectorUsageRows(boomConnId)).toHaveLength(0);
+  });
+
+  it("the project rollup shows connector spend in measured + byConnector, NOT in byAgent", async () => {
+    const rollup = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/projects/${projectId}/costs`,
+    });
+    expect(rollup.statusCode).toBe(200);
+    const body = rollup.json();
+    // measured spans both object types — two executed connector calls, no agents
+    expect(body.measured.events).toBe(2);
+    expect(body.measured.costUsd).toBeCloseTo(0.012, 6);
+    // byConnector carries the named breakdown
+    const names = body.byConnector.map((c: { name: string }) => c.name).sort();
+    expect(names).toEqual(["cx-http", "cx-warehouse"]);
+    expect(body.byConnector.every((c: { operation: string }) => c.operation === "read")).toBe(true);
+    // connector rows never appear as phantom agents
+    expect(body.byAgent).toHaveLength(0);
+  });
+
+  it("credential add → list (never the secret) → delete", async () => {
+    const add = await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/connectors/${mockConnId}/credential`,
+      payload: { token: "super-secret-token", baseUrl: "https://warehouse.example" },
+    });
+    expect(add.statusCode).toBe(201);
+    expect(JSON.stringify(add.json())).not.toContain("super-secret-token");
+
+    const list = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/connectors/${mockConnId}/credential`,
+    });
+    expect(list.statusCode).toBe(200);
+    expect(list.json().credential.baseUrl).toBe("https://warehouse.example");
+    expect(JSON.stringify(list.json())).not.toContain("super-secret-token");
+    expect(list.json().credential.tokenCiphertext).toBeUndefined();
+
+    const del = await app.inject({
+      method: "DELETE", headers: AUTH, url: `/v1/connectors/${mockConnId}/credential`,
+    });
+    expect(del.statusCode).toBe(200);
+    const gone = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/connectors/${mockConnId}/credential`,
+    });
+    expect(gone.json().credential).toBeNull();
+  });
+
+  it("credential routes are admin-only (a non-admin caller is refused)", async () => {
+    const res = await app.inject({
+      method: "POST", headers: cxAuth, url: `/v1/connectors/${mockConnId}/credential`,
+      payload: { token: "x" },
+    });
+    expect(res.statusCode).toBe(403);
   });
 });
 

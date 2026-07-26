@@ -393,6 +393,31 @@ Sync-now verification works, and receivers without read-back fail loudly into th
 orphan flow. `DEFAULT_MAPPINGS.generic_webhook` is the IDENTITY map over all five canonical
 states including blocked — nothing invented because the vocabulary is ours. E2e: the fake
 receiver verifies the HMAC on every request and asserts the token never travels raw.
+**Connector execution layer, 2026-07-26 — pillar 5's connector-cost gap closed (migration
+0025).** POST /v1/connectors/:id/invoke now really contacts the target system and meters cost.
+New package `packages/connector-provider` mirrors pm-provider: CONNECTOR_PROVIDER_KINDS
+(http/webhook/slack/github/jira/snowflake/generic/mock) + isConnectorProviderKind, neutral
+`ConnectorProvider.invoke({operation,object?,payload?})→{status,body}`, injectable FetchLike,
+GenericHttpConnectorProvider (read→GET, write→POST payload, optional bearer) + Webhook +
+keyless MockConnectorProvider; registry exhaustive-switch, mock keyless, generic/http/webhook
+need baseUrl, slack/github/jira/snowflake throw 501 (no silent promises). THE INVARIANT: one
+allowed call = the existing ONE audit row + exactly ONE usage_events row; denied → 403 no bill,
+failed upstream → 502 no bill (mirrors model path); execute+meter strictly inside the allow
+branch. Flat pricing: pricePerCallUsd (null = unpriced → null cost, never invented). BACK-COMPAT:
+a connector with null providerKind keeps today's governance-only behaviour exactly (decision +
+audit, no execution, no cost) — nothing breaks until a connector opts in. Migration 0025:
+connectors +provider_kind/base_url/price_per_call_usd (kind stays the free-text CATEGORY); new
+connector_credentials (AES-256-GCM, platform-scoped, never returned); UNIFIED LEDGER —
+usage_events token/model NOT NULLs relaxed + object_type ('agent' default, backfilled) +
+connector_id + operation, so connector spend rides the SAME ledger and the project total +
+showback-by-member pick it up automatically. Rollup gains byConnector (byAgent filtered to
+object_type='agent', no phantoms); Spend page + per-project drill-down get a "Spend by connector"
+card. Seed: snowflake-analytics now mock-kind $0.002/call (executes keyless) + 3 attributed
+reads, jira-cloud stays governance-only. Suite 508 → 524 (8 provider unit + 8 e2e).
+Independently re-verified: build clean, mcp-proxy 145/145, all 8 connector-execution e2e green,
+migration applies on boot. Every governed entry point — model dispatch, MCP tool, connector —
+now flows through the one attribution point.
+
 **Team-Lead entitlement-narrowing tier, 2026-07-26 — pillar 7 §5.1 lands; pillar 7 complete
 (no migration).** Worker nodes can declare a `leadNodeId` + `allowedAgentIds`/`allowedToolRefs`
 delegation subset (ride the graph jsonb like the tool fields). The pure kernel helper

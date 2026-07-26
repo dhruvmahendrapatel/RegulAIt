@@ -247,13 +247,20 @@ if (!existingRateLimits.some((r: Json) => scopeMatches(r, averyId, warehouseServ
 
 // --- connectors (§2) -----------------------------------------------------
 const connectorList = (await call("GET", "/v1/connectors")).connectors ?? [];
-async function ensureConnector(name: string, kind: string): Promise<string> {
+async function ensureConnector(name: string, kind: string, extras: Json = {}): Promise<string> {
   const existing = connectorList.find((c: Json) => c.name === name);
   if (existing) return existing.id;
-  return (await call("POST", "/v1/connectors", { name, kind })).id;
+  return (await call("POST", "/v1/connectors", { name, kind, ...extras })).id;
 }
+// jira-cloud stays GOVERNANCE-ONLY (no providerKind) — decision + audit, no
+// execution, no cost. snowflake-analytics gets the keyless 'mock' adapter and a
+// flat price, so it EXECUTES and METERS with zero external keys: one demoable
+// connector in each mode side by side.
 const jiraConnectorId = await ensureConnector("jira-cloud", "issue-tracker");
-const warehouseConnectorId = await ensureConnector("snowflake-analytics", "data-warehouse");
+const warehouseConnectorId = await ensureConnector("snowflake-analytics", "data-warehouse", {
+  providerKind: "mock",
+  pricePerCallUsd: 0.002,
+});
 for (const grant of [
   { userId: danaId, connectorId: jiraConnectorId, mode: "readwrite", allowedObjects: ["issue", "comment"] },
   { userId: danaId, connectorId: warehouseConnectorId, mode: "read" },
@@ -596,6 +603,20 @@ controls a reviewer would check before sign-off.`;
       inv.auth,
     );
   }
+
+  // Real, metered CONNECTOR calls attributed to a project — Dana reads the
+  // keyless mock-adapter warehouse connector a few times, so the "Spend by
+  // connector" card is non-empty on first open. Each allowed call = one audit
+  // row + one usage_events row (object_type 'connector') priced at the
+  // connector's flat rate; nothing external is contacted.
+  for (const object of ["accounts", "orders", "revenue_by_region"]) {
+    await call(
+      "POST",
+      `/v1/connectors/${warehouseConnectorId}/invoke`,
+      { operation: "read", object, projectId: demoProjectId },
+      danaAuth,
+    );
+  }
 }
 
 // --- demo conversation (multi-turn Playground memory) ---------------------
@@ -855,7 +876,9 @@ RegulAIt demo data ready.
 ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecret}\n` : ""}
   Governance: 2 MCP servers with 8 tools (read + write), a 'repo-analyst' role
   granting read-only-all, per-user tool grants layered on top, 2 revocations,
-  2 approval rules, 1 data-scope rule, 2 rate limits, 2 connectors, 7 agents
+  2 approval rules, 1 data-scope rule, 2 rate limits, 2 connectors (snowflake-
+  analytics executes via a keyless mock adapter and is metered per call at
+  $0.002; jira-cloud stays governance-only), 7 agents
   (3 mock = usable with no external keys; anthropic/openai/google/xai go live
   once you add a model credential in /admin → Model Credentials, which also
   lists exactly which agents are still waiting on one), and per-user agent
@@ -881,9 +904,9 @@ ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecre
   routed and metered exactly like a single-turn invoke.
 
   Spend & savings (pillars 5+6, /app): every user has a personal cost page —
-  measured spend, tokens, savings by technique, spend by agent, recent
-  invocations — plus a drill-down into any project they are a MEMBER of
-  (the per-project /costs endpoint admits members, not only admins).
+  measured spend, tokens, savings by technique, spend by agent, spend by
+  connector, recent invocations — plus a drill-down into any project they are a
+  MEMBER of (the per-project /costs endpoint admits members, not only admins).
 
   PM integration (pillar 8): the mock 'demo-pm' connection is linked to
   Dana's checkout-refactor run (every node = a mock work item) and to her

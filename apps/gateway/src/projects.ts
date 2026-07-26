@@ -3,6 +3,7 @@ import {
   and,
   approvals,
   auditLog,
+  connectors,
   count,
   complianceProfiles,
   inArray,
@@ -1031,8 +1032,14 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     }
 
     const where = eq(usageEvents.projectId, projectId);
+    // Connector rows carry no agent/model — keep byAgent to object_type='agent'
+    // so a connector call never appears as a phantom agent. The `measured` total
+    // and `byUser` deliberately span BOTH object types (one spend ledger), so
+    // connector spend rolls up automatically without double-counting.
+    const agentWhere = and(where, eq(usageEvents.objectType, "agent"));
+    const connectorWhere = and(where, eq(usageEvents.objectType, "connector"));
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 3600 * 1000);
-    const [[measured], byUser, byAgent, estimated, [recent]] = await Promise.all([
+    const [[measured], byUser, byAgent, byConnector, estimated, [recent]] = await Promise.all([
       db
         .select({
           events: count(),
@@ -1060,8 +1067,20 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
           events: count(),
         })
         .from(usageEvents)
-        .where(where)
+        .where(agentWhere)
         .groupBy(usageEvents.agentId, usageEvents.model),
+      db
+        .select({
+          connectorId: usageEvents.connectorId,
+          name: connectors.name,
+          operation: usageEvents.operation,
+          costUsd: sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8`,
+          events: count(),
+        })
+        .from(usageEvents)
+        .leftJoin(connectors, eq(usageEvents.connectorId, connectors.id))
+        .where(connectorWhere)
+        .groupBy(usageEvents.connectorId, connectors.name, usageEvents.operation),
       db
         .select({
           technique: costEvents.technique,
@@ -1091,6 +1110,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       measured,
       byUser,
       byAgent,
+      byConnector,
       estimatedSavings: estimated,
       budget: {
         budgetUsd: project.budgetUsd,
