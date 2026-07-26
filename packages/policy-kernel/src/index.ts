@@ -54,14 +54,34 @@ export interface Revocation {
 }
 
 /**
+ * PILLAR 1 rule scoping: the subject a restriction rule binds to. The gateway
+ * pre-filters rules to those the evaluated user actually matches (by direct
+ * user id, by an assigned role, by a team membership, or fleet-wide), exactly
+ * as it already pre-filters role-derived grants — so the kernel stays
+ * subject-free. 'user' (or an absent field, for a legacy rule) is the only
+ * scope whose user-id the kernel still checks; the rest arrive pre-matched.
+ */
+export type RuleScope = "user" | "role" | "team" | "fleet";
+/** whether a rule binds to one server (serverId set) or every server (all). */
+export type RuleServerScope = "server" | "all";
+
+/**
  * §3 approval requirement: a matching, granted call pauses for a named
  * approver's sign-off instead of executing. toolName null = any tool on the
  * server; writeOnly narrows the rule to write-kind tools.
+ *
+ * PILLAR 1: userId/serverId are nullable — a role/team/fleet rule has no user,
+ * an all-servers rule has no server. scope/serverScope carry the discriminant;
+ * absent = the legacy per-user, per-server rule (back-compat).
  */
 export interface ApprovalRule {
   id: string;
-  userId: string;
-  serverId: string;
+  userId: string | null;
+  serverId: string | null;
+  roleId?: string | null;
+  teamId?: string | null;
+  scope?: RuleScope;
+  serverScope?: RuleServerScope;
   toolName: string | null;
   writeOnly: boolean;
   approverUserId: string;
@@ -78,8 +98,12 @@ export interface ApprovalRule {
  */
 export interface DataScopeRule {
   id: string;
-  userId: string;
-  serverId: string;
+  userId: string | null;
+  serverId: string | null;
+  roleId?: string | null;
+  teamId?: string | null;
+  scope?: RuleScope;
+  serverScope?: RuleServerScope;
   toolName: string | null;
   argPath: string;
   allowedValues: string[];
@@ -92,8 +116,12 @@ export interface DataScopeRule {
  */
 export interface RateLimit {
   id: string;
-  userId: string;
-  serverId: string;
+  userId: string | null;
+  serverId: string | null;
+  roleId?: string | null;
+  teamId?: string | null;
+  scope?: RuleScope;
+  serverScope?: RuleServerScope;
   toolName: string | null;
   maxCalls: number;
   windowSeconds: number;
@@ -191,6 +219,51 @@ function refLabel(id: string, name?: string | null): string {
 
 function matchesScope(ruleToolName: string | null, toolName: string): boolean {
   return ruleToolName === null || ruleToolName === toolName;
+}
+
+/**
+ * PILLAR 1 rule scoping — the SUBJECT half of a restriction rule's match. The
+ * gateway already pre-filtered role/team/fleet rules to those this user
+ * matches (by assigned role, team membership, or fleet-wide), so the kernel
+ * only re-checks the one scope it must never widen: a 'user'-scoped rule (or a
+ * legacy rule with no scope) still binds to exactly its own user id, so one
+ * user's user-specific restriction can never bleed onto another. This is
+ * additive-only: it can never turn a default-deny into an allow.
+ */
+function ruleAppliesToSubject(r: { userId?: string | null; scope?: RuleScope }, userId: string): boolean {
+  return (r.scope ?? "user") === "user" ? r.userId === userId : true;
+}
+
+/**
+ * The SERVER half: an all-servers rule (serverScope 'all', serverId null)
+ * matches every server; otherwise the rule's server must be this server. A
+ * legacy rule (no serverScope, serverId set) keeps the exact old behaviour.
+ */
+function ruleAppliesToServer(
+  r: { serverId?: string | null; serverScope?: RuleServerScope },
+  serverId: string,
+): boolean {
+  return (r.serverScope ?? "server") === "all" ? true : r.serverId === serverId;
+}
+
+/**
+ * Additive audit prose naming the scope a restriction matched by — empty for a
+ * plain per-user, per-server rule so every legacy reason string is byte-
+ * identical, non-empty for a role/team/fleet or all-servers rule.
+ */
+function scopeReason(r: {
+  scope?: RuleScope;
+  serverScope?: RuleServerScope;
+  roleId?: string | null;
+  teamId?: string | null;
+}): string {
+  const parts: string[] = [];
+  const scope = r.scope ?? "user";
+  if (scope === "fleet") parts.push("fleet-wide rule");
+  else if (scope === "role") parts.push(`role-scoped rule (role ${refLabel(r.roleId ?? "?")})`);
+  else if (scope === "team") parts.push(`team-scoped rule (team ${refLabel(r.teamId ?? "?")})`);
+  if ((r.serverScope ?? "server") === "all") parts.push("all servers");
+  return parts.length ? ` [${parts.join(", ")}]` : "";
 }
 
 function argAtPath(args: Record<string, unknown> | undefined, path: string): unknown {
@@ -335,9 +408,16 @@ export function evaluate(input: EvaluationInput): Decision {
     chain.push({ rule: "lead-ceiling", outcome: "allow" });
   }
 
+  // PILLAR 1: the rule set arrives already scope-filtered by the gateway, so
+  // the kernel match collapses the subject/server dimensions through the two
+  // helpers (which keep legacy per-user, per-server rules identical) and adds
+  // the tool dimension. Every matching rule across every scope must be
+  // satisfied — the widened set composes to the INTERSECTION of allow-lists.
   const scopeRules = (input.dataScopeRules ?? []).filter(
     (r) =>
-      r.userId === userId && r.serverId === serverId && matchesScope(r.toolName, tool.name),
+      ruleAppliesToSubject(r, userId) &&
+      ruleAppliesToServer(r, serverId) &&
+      matchesScope(r.toolName, tool.name),
   );
   if (scopeRules.length > 0) {
     for (const rule of scopeRules) {
@@ -361,10 +441,13 @@ export function evaluate(input: EvaluationInput): Decision {
     chain.push({ rule: "data-scope", outcome: "no-match" });
   }
 
+  // PILLAR 1: widened rate limits each keep their own per-subject count/window
+  // (the gateway counts each independently). The first exhausted one denies —
+  // tightest-wins with no summing and no cross-scope relaxation.
   const exhaustedLimit = (input.rateLimits ?? []).find(
     (l) =>
-      l.userId === userId &&
-      l.serverId === serverId &&
+      ruleAppliesToSubject(l, userId) &&
+      ruleAppliesToServer(l, serverId) &&
       matchesScope(l.toolName, tool.name) &&
       l.currentCount >= l.maxCalls,
   );
@@ -382,10 +465,12 @@ export function evaluate(input: EvaluationInput): Decision {
   }
   chain.push({ rule: "rate-limit", outcome: "no-match" });
 
+  // PILLAR 1: first matching approval rule across any scope pauses the call —
+  // a broader fleet/role/team rule requires sign-off just as a user rule does.
   const approvalRule = (input.approvalRules ?? []).find(
     (r) =>
-      r.userId === userId &&
-      r.serverId === serverId &&
+      ruleAppliesToSubject(r, userId) &&
+      ruleAppliesToServer(r, serverId) &&
       matchesScope(r.toolName, tool.name) &&
       (!r.writeOnly || tool.kind === "write"),
   );
@@ -404,7 +489,10 @@ export function evaluate(input: EvaluationInput): Decision {
         ruleChain: chain,
         reason:
           `call to '${tool.name}' on server ${serverRef} requires sign-off by ` +
-          `approver ${refLabel(approvalRule.approverUserId, approvalRule.approverName)}`,
+          `approver ${refLabel(approvalRule.approverUserId, approvalRule.approverName)}` +
+          // additive: name WHICH scope paused the call so the audit distinguishes
+          // a fleet approval from a user one. Legacy/user rules read exactly as before.
+          scopeReason(approvalRule),
         approverUserId: approvalRule.approverUserId,
         ...(approvalRule.approverName ? { approverName: approvalRule.approverName } : {}),
       };

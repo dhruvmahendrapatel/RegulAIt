@@ -42,21 +42,71 @@ export const createServerGrantSchema = z.object({
   readOnlyAll: z.boolean(),
 });
 
-export const createApprovalRuleSchema = z.object({
-  userId: z.string().uuid(),
-  serverId: z.string().uuid(),
-  toolName: z.string().min(1).nullable().optional(),
-  writeOnly: z.boolean().optional(),
-  approverUserId: z.string().uuid(),
-});
+// PILLAR 1 rule scoping: the shared discriminant every restriction rule carries.
+// A rule targets exactly ONE subject dimension (scope) and ONE server dimension
+// (serverScope). Defaults keep every legacy caller — userId + serverId with no
+// scope — valid and unchanged (scope='user', serverScope='server'). The
+// superRefine below mirrors the DB CHECK constraints byte-for-byte, so a bad
+// discriminant is rejected loudly at the edge (400) rather than by Postgres (500).
+export const ruleScopeSchema = z.enum(["user", "role", "team", "fleet"]);
+export const ruleServerScopeSchema = z.enum(["server", "all"]);
 
-export const createRateLimitSchema = z.object({
-  userId: z.string().uuid(),
-  serverId: z.string().uuid(),
-  toolName: z.string().min(1).nullable().optional(),
-  maxCalls: z.number().int().positive(),
-  windowSeconds: z.number().int().positive(),
-});
+const ruleScopeFields = {
+  userId: z.string().uuid().nullable().optional(),
+  serverId: z.string().uuid().nullable().optional(),
+  roleId: z.string().uuid().nullable().optional(),
+  teamId: z.string().uuid().nullable().optional(),
+  scope: ruleScopeSchema.default("user"),
+  serverScope: ruleServerScopeSchema.default("server"),
+};
+
+type RuleScopeShape = {
+  scope: z.infer<typeof ruleScopeSchema>;
+  serverScope: z.infer<typeof ruleServerScopeSchema>;
+  userId?: string | null | undefined;
+  serverId?: string | null | undefined;
+  roleId?: string | null | undefined;
+  teamId?: string | null | undefined;
+};
+
+function refineRuleScope(body: RuleScopeShape, ctx: z.RefinementCtx) {
+  // subject discriminant — exactly the DB scope CHECK
+  if (body.scope === "user" && !body.userId)
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "scope 'user' requires a userId", path: ["userId"] });
+  if (body.scope === "role" && !body.roleId)
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "scope 'role' requires a roleId", path: ["roleId"] });
+  if (body.scope === "team" && !body.teamId)
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "scope 'team' requires a teamId", path: ["teamId"] });
+  if (body.scope === "fleet" && (body.userId || body.roleId || body.teamId))
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "scope 'fleet' takes no userId/roleId/teamId",
+      path: ["scope"],
+    });
+  // server discriminant — exactly the DB server_scope CHECK
+  if (body.serverScope === "server" && !body.serverId)
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "serverScope 'server' requires a serverId", path: ["serverId"] });
+  if (body.serverScope === "all" && body.serverId)
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "serverScope 'all' takes no serverId", path: ["serverId"] });
+}
+
+export const createApprovalRuleSchema = z
+  .object({
+    ...ruleScopeFields,
+    toolName: z.string().min(1).nullable().optional(),
+    writeOnly: z.boolean().optional(),
+    approverUserId: z.string().uuid(),
+  })
+  .superRefine(refineRuleScope);
+
+export const createRateLimitSchema = z
+  .object({
+    ...ruleScopeFields,
+    toolName: z.string().min(1).nullable().optional(),
+    maxCalls: z.number().int().positive(),
+    windowSeconds: z.number().int().positive(),
+  })
+  .superRefine(refineRuleScope);
 
 // The decider is the authenticated caller — never a body field.
 export const decideApprovalSchema = z.object({
@@ -68,13 +118,14 @@ export const createApiKeySchema = z.object({
   name: z.string().min(1),
 });
 
-export const createDataScopeRuleSchema = z.object({
-  userId: z.string().uuid(),
-  serverId: z.string().uuid(),
-  toolName: z.string().min(1).nullable().optional(),
-  argPath: z.string().min(1),
-  allowedValues: z.array(z.string()).min(1),
-});
+export const createDataScopeRuleSchema = z
+  .object({
+    ...ruleScopeFields,
+    toolName: z.string().min(1).nullable().optional(),
+    argPath: z.string().min(1),
+    allowedValues: z.array(z.string()).min(1),
+  })
+  .superRefine(refineRuleScope);
 
 export const createRoleSchema = z.object({
   name: z.string().min(1),

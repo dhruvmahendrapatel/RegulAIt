@@ -245,6 +245,33 @@ if (!existingRateLimits.some((r: Json) => scopeMatches(r, averyId, warehouseServ
   });
 }
 
+// --- PILLAR 1 rule scoping: rules beyond one user × one server -------------
+// A FLEET approval rule and a ROLE-scoped rate limit sit alongside the
+// user-specific rules above, so the Policy & Rules tab shows a mix of scopes
+// and a governed WRITE by anyone — even a user with no user-specific rule —
+// pauses org-wide. These are pure RESTRICTIONS: they only ever ADD a
+// require_approval / cap, never rescue an ungranted call.
+if (!existingApprovalRules.some((r: Json) => r.scope === "fleet")) {
+  // any write tool, on any server, by any user requires the admin's sign-off
+  await call("POST", "/v1/rules/approvals", {
+    scope: "fleet",
+    serverScope: "all",
+    writeOnly: true,
+    approverUserId: adminId,
+  });
+}
+if (!existingRateLimits.some((r: Json) => r.scope === "role" && r.roleId === analystRoleId)) {
+  // the repo-analyst role is capped org-wide (all servers) — a generous cap so
+  // it demonstrates a role-scoped, all-servers limit without denying the demo
+  await call("POST", "/v1/rules/rate-limits", {
+    scope: "role",
+    roleId: analystRoleId,
+    serverScope: "all",
+    maxCalls: 500,
+    windowSeconds: 3600,
+  });
+}
+
 // --- connectors (§2) -----------------------------------------------------
 const connectorList = (await call("GET", "/v1/connectors")).connectors ?? [];
 async function ensureConnector(name: string, kind: string, extras: Json = {}): Promise<string> {
@@ -516,6 +543,7 @@ if (!alreadyActive) {
     [danaId, repoServerId, "read_file"], // allow — role read-only-all
     [danaId, repoServerId, "search_code"], // deny — per-user revocation beats the role
     [danaId, repoServerId, "write_file"], // require_approval — direct grant + approval rule
+    [danaId, warehouseServerId, "export_table"], // require_approval — FLEET write rule (no user rule here)
     [averyId, repoServerId, "delete_branch"], // deny — nothing grants a write here
     [averyId, warehouseServerId, "query"], // deny — the role's grant is revoked for Avery
   ] as const) {
@@ -876,7 +904,8 @@ RegulAIt demo data ready.
 ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecret}\n` : ""}
   Governance: 2 MCP servers with 8 tools (read + write), a 'repo-analyst' role
   granting read-only-all, per-user tool grants layered on top, 2 revocations,
-  2 approval rules, 1 data-scope rule, 2 rate limits, 2 connectors (snowflake-
+  scoped policy rules (user + a FLEET write-approval + a ROLE-scoped rate limit,
+  so any governed write pauses org-wide), 1 data-scope rule, 2 connectors (snowflake-
   analytics executes via a keyless mock adapter and is metered per call at
   $0.002; jira-cloud stays governance-only), 7 agents
   (3 mock = usable with no external keys; anthropic/openai/google/xai go live

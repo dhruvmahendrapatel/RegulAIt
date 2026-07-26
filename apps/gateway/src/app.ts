@@ -569,13 +569,33 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     rules: await db.select().from(rateLimits),
   }));
 
+  // PILLAR 1 rule scoping: the discriminant is already validated by the shared
+  // superRefine (mirrors the DB CHECK). We null out every off-scope subject/
+  // server field so the row is clean and the DB CHECK always passes — a
+  // role-scoped rule stores only roleId, a fleet rule stores none, an
+  // all-servers rule stores no serverId.
+  const scopedRuleColumns = (body: {
+    scope: "user" | "role" | "team" | "fleet";
+    serverScope: "server" | "all";
+    userId?: string | null;
+    roleId?: string | null;
+    teamId?: string | null;
+    serverId?: string | null;
+  }) => ({
+    scope: body.scope,
+    serverScope: body.serverScope,
+    userId: body.scope === "user" ? body.userId! : null,
+    roleId: body.scope === "role" ? body.roleId! : null,
+    teamId: body.scope === "team" ? body.teamId! : null,
+    serverId: body.serverScope === "server" ? body.serverId! : null,
+  });
+
   app.post("/v1/rules/approvals", async (req, reply) => {
     const body = createApprovalRuleSchema.parse(req.body);
     const [row] = await db
       .insert(approvalRules)
       .values({
-        userId: body.userId,
-        serverId: body.serverId,
+        ...scopedRuleColumns(body),
         toolName: body.toolName ?? null,
         writeOnly: body.writeOnly ?? false,
         approverUserId: body.approverUserId,
@@ -589,8 +609,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const [row] = await db
       .insert(dataScopeRules)
       .values({
-        userId: body.userId,
-        serverId: body.serverId,
+        ...scopedRuleColumns(body),
         toolName: body.toolName ?? null,
         argPath: body.argPath,
         allowedValues: body.allowedValues,
@@ -604,8 +623,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const [row] = await db
       .insert(rateLimits)
       .values({
-        userId: body.userId,
-        serverId: body.serverId,
+        ...scopedRuleColumns(body),
         toolName: body.toolName ?? null,
         maxCalls: body.maxCalls,
         windowSeconds: body.windowSeconds,

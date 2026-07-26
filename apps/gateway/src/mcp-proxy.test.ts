@@ -446,6 +446,164 @@ describe("data-scope rules through the proxy (§3)", () => {
   });
 });
 
+describe("rule scoping through the proxy (pillar 1): fleet / role / team restrictions", () => {
+  // Each scenario gets its OWN server row (same upstream, distinct id) so a
+  // fleet-wide rule created in one test never leaks onto another's server —
+  // exactly the isolation the invariant demands (a scoped rule only ever ADDS
+  // a restriction, and only within its own scope).
+  let approverId: string;
+
+  async function newUser(email: string): Promise<string> {
+    const res = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/users",
+      payload: { email, displayName: `Scope ${email.split("@")[0]}` },
+    });
+    return res.json().id;
+  }
+  let serverSeq = 0;
+  async function freshServer(): Promise<string> {
+    const srv = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/servers",
+      payload: { name: `p1-upstream-${serverSeq++}`, url: upstream.url },
+    });
+    const serverId = srv.json().id;
+    // one listTools syncs the inventory (get_time read / write_note write)
+    const client = await scopeClient(approverId, serverId);
+    await client.listTools();
+    await client.close();
+    return serverId;
+  }
+  async function grant(userId: string, serverId: string, toolName: string): Promise<void> {
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/grants/tools",
+      payload: { userId, serverId, toolName },
+    });
+  }
+  async function scopeClient(userId: string, serverId: string): Promise<Client> {
+    const client = new Client({ name: "test-client", version: "0.0.1" });
+    const transport = new StreamableHTTPClientTransport(new URL(`${gatewayUrl}/mcp/${serverId}`), {
+      requestInit: { headers: { authorization: `Bearer ${await apiKeyFor(userId)}` } },
+    });
+    await client.connect(transport);
+    return client;
+  }
+
+  it("sets up the shared approver", async () => {
+    approverId = await newUser("p1-approver@example.com");
+  });
+
+  it("a FLEET approval rule pauses a granted WRITE by a user with NO user-specific rule", async () => {
+    const serverId = await freshServer();
+    const hana = await newUser("p1-hana@example.com");
+    await grant(hana, serverId, "get_time");
+    await grant(hana, serverId, "write_note");
+    // fleet subject (any user), pinned to this server so it stays isolated
+    const rule = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/rules/approvals",
+      payload: { scope: "fleet", serverScope: "server", serverId, writeOnly: true, approverUserId: approverId },
+    });
+    expect(rule.statusCode).toBe(201);
+    expect(rule.json()).toMatchObject({ scope: "fleet", userId: null, serverScope: "server" });
+
+    const client = await scopeClient(hana, serverId);
+    // a read still passes (the writeOnly rule skips reads)
+    const ok = await client.callTool({ name: "get_time", arguments: {} });
+    expect(ok.content).toEqual([{ type: "text", text: "12:00" }]);
+    // the write pauses on the fleet rule even though Hana has no user rule
+    await expect(
+      client.callTool({ name: "write_note", arguments: { text: "hi" } }),
+    ).rejects.toThrow(/Approval required/);
+    await client.close();
+
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit?userId=${hana}` });
+    const effects = audit.json().entries.map((e: { effect: string }) => e.effect).reverse();
+    expect(effects).toEqual(["allow", "require_approval"]);
+  });
+
+  it("a ROLE-scoped rule + a user rule → most-restrictive: still require_approval, never relaxed", async () => {
+    const serverId = await freshServer();
+    const ivan = await newUser("p1-ivan@example.com");
+    await grant(ivan, serverId, "write_note");
+    const role = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/roles",
+      payload: { name: "p1-writers", description: "role-scoped rule demo" },
+    });
+    const roleId = role.json().id;
+    await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/users/${ivan}/roles`, payload: { roleId },
+    });
+    // a role-scoped approval rule on this server for the whole role
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/rules/approvals",
+      payload: { scope: "role", roleId, serverScope: "server", serverId, writeOnly: true, approverUserId: approverId },
+    });
+    // plus a user-specific rule for Ivan too — cannot relax the role restriction
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/rules/approvals",
+      payload: { scope: "user", userId: ivan, serverScope: "server", serverId, writeOnly: true, approverUserId: approverId },
+    });
+
+    const client = await scopeClient(ivan, serverId);
+    await expect(
+      client.callTool({ name: "write_note", arguments: { text: "role" } }),
+    ).rejects.toThrow(/Approval required/);
+    await client.close();
+  });
+
+  it("a TEAM-scoped rule applies to team MEMBERS only, not to non-members", async () => {
+    const serverId = await freshServer();
+    const member = await newUser("p1-member@example.com");
+    const outsider = await newUser("p1-outsider@example.com");
+    await grant(member, serverId, "write_note");
+    await grant(outsider, serverId, "write_note");
+    const team = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/teams", payload: { name: "p1-team" },
+    });
+    const teamId = team.json().id;
+    await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/teams/${teamId}/members`, payload: { userId: member },
+    });
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/rules/approvals",
+      payload: { scope: "team", teamId, serverScope: "server", serverId, writeOnly: true, approverUserId: approverId },
+    });
+
+    // the member is paused by the team rule
+    const mClient = await scopeClient(member, serverId);
+    await expect(
+      mClient.callTool({ name: "write_note", arguments: { text: "in" } }),
+    ).rejects.toThrow(/Approval required/);
+    await mClient.close();
+
+    // the non-member is NOT — the rule never widens to a user outside the team
+    const oClient = await scopeClient(outsider, serverId);
+    const ok = await oClient.callTool({ name: "write_note", arguments: { text: "out" } });
+    expect(ok.content).toEqual([{ type: "text", text: "wrote: out" }]);
+    await oClient.close();
+  });
+
+  it("rejects a mis-discriminated rule at the edge (400), never at the database", async () => {
+    // scope 'fleet' must carry no subject id
+    const badFleet = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/rules/approvals",
+      payload: { scope: "fleet", serverScope: "all", userId: approverId, writeOnly: true, approverUserId: approverId },
+    });
+    expect(badFleet.statusCode).toBe(400);
+    // scope 'role' must carry a roleId
+    const badRole = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/rules/rate-limits",
+      payload: { scope: "role", serverScope: "all", maxCalls: 5, windowSeconds: 60 },
+    });
+    expect(badRole.statusCode).toBe(400);
+    // serverScope 'all' must carry no serverId
+    const badServer = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/rules/data-scopes",
+      payload: { scope: "fleet", serverScope: "all", serverId: "00000000-0000-4000-8000-000000000000", argPath: "x", allowedValues: ["a"] },
+    });
+    expect(badServer.statusCode).toBe(400);
+  });
+});
+
 describe("roles + per-user overrides through the proxy (§5)", () => {
   let graceId: string;
   let roleId: string;

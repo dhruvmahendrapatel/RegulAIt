@@ -104,16 +104,25 @@ export const auditLog = pgTable(
 
 // §3 approval requirement rules: a granted call matching a rule pauses for
 // the named approver. toolName null = any tool on the server.
+//
+// PILLAR 1 rule scoping: userId/serverId are nullable now — a rule is bound to
+// exactly ONE subject dimension chosen by `scope` (user | role | team | fleet)
+// and ONE server dimension chosen by `serverScope` (server | all). The DB
+// CHECK constraints (migration 0026) enforce the discriminant. Existing rows
+// carry scope='user', serverScope='server' and behave identically. The rule
+// stays a pure RESTRICTION evaluated after the grant check.
 export const approvalRules = pgTable(
   "approval_rules",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    userId: uuid("user_id")
+    userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    serverId: uuid("server_id").references(() => mcpServers.id, { onDelete: "cascade" }),
+    roleId: uuid("role_id").references(() => roles.id, { onDelete: "cascade" }),
+    teamId: uuid("team_id").references(() => teams.id, { onDelete: "cascade" }),
+    scope: text("scope", { enum: ["user", "role", "team", "fleet"] })
       .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    serverId: uuid("server_id")
-      .notNull()
-      .references(() => mcpServers.id, { onDelete: "cascade" }),
+      .default("user"),
+    serverScope: text("server_scope", { enum: ["server", "all"] }).notNull().default("server"),
     toolName: text("tool_name"),
     writeOnly: boolean("write_only").notNull().default(false),
     approverUserId: uuid("approver_user_id")
@@ -121,27 +130,42 @@ export const approvalRules = pgTable(
       .references(() => users.id, { onDelete: "cascade" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("approval_rules_user_server_idx").on(t.userId, t.serverId)],
+  (t) => [
+    index("approval_rules_user_server_idx").on(t.userId, t.serverId),
+    index("approval_rules_scope_idx").on(t.scope, t.serverScope, t.serverId),
+    index("approval_rules_role_idx").on(t.roleId),
+    index("approval_rules_team_idx").on(t.teamId),
+  ],
 );
 
 // §3 rate/volume limits. toolName null = server-wide cap. Usage is counted
 // from audit_log allow rows at evaluation time, not stored here.
+// PILLAR 1 rule scoping: same scope/serverScope discriminant as approval_rules
+// (see there). A role/team/fleet limit's window is still counted PER USER —
+// each subject the widened rule matches keeps its own independent count.
 export const rateLimits = pgTable(
   "rate_limits",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    userId: uuid("user_id")
+    userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    serverId: uuid("server_id").references(() => mcpServers.id, { onDelete: "cascade" }),
+    roleId: uuid("role_id").references(() => roles.id, { onDelete: "cascade" }),
+    teamId: uuid("team_id").references(() => teams.id, { onDelete: "cascade" }),
+    scope: text("scope", { enum: ["user", "role", "team", "fleet"] })
       .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    serverId: uuid("server_id")
-      .notNull()
-      .references(() => mcpServers.id, { onDelete: "cascade" }),
+      .default("user"),
+    serverScope: text("server_scope", { enum: ["server", "all"] }).notNull().default("server"),
     toolName: text("tool_name"),
     maxCalls: integer("max_calls").notNull(),
     windowSeconds: integer("window_seconds").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("rate_limits_user_server_idx").on(t.userId, t.serverId)],
+  (t) => [
+    index("rate_limits_user_server_idx").on(t.userId, t.serverId),
+    index("rate_limits_scope_idx").on(t.scope, t.serverScope, t.serverId),
+    index("rate_limits_role_idx").on(t.roleId),
+    index("rate_limits_team_idx").on(t.teamId),
+  ],
 );
 
 // §6 Approvals Queue: one pending entry per paused call. Approved entries are
@@ -186,22 +210,32 @@ export const approvals = pgTable(
 // §3 data-scope rules: allow-list the values a call-argument field may take
 // for a granted tool. argPath is a dot-path into the call arguments;
 // allowedValues is a jsonb string array. Missing/non-scalar values fail closed.
+// PILLAR 1 rule scoping: same scope/serverScope discriminant as approval_rules
+// (see there). Every matching scoped rule must still be satisfied — a widened
+// rule set composes to the INTERSECTION of allow-lists, never a relaxation.
 export const dataScopeRules = pgTable(
   "data_scope_rules",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    userId: uuid("user_id")
+    userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    serverId: uuid("server_id").references(() => mcpServers.id, { onDelete: "cascade" }),
+    roleId: uuid("role_id").references(() => roles.id, { onDelete: "cascade" }),
+    teamId: uuid("team_id").references(() => teams.id, { onDelete: "cascade" }),
+    scope: text("scope", { enum: ["user", "role", "team", "fleet"] })
       .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    serverId: uuid("server_id")
-      .notNull()
-      .references(() => mcpServers.id, { onDelete: "cascade" }),
+      .default("user"),
+    serverScope: text("server_scope", { enum: ["server", "all"] }).notNull().default("server"),
     toolName: text("tool_name"),
     argPath: text("arg_path").notNull(),
     allowedValues: jsonb("allowed_values").$type<string[]>().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("data_scope_rules_user_server_idx").on(t.userId, t.serverId)],
+  (t) => [
+    index("data_scope_rules_user_server_idx").on(t.userId, t.serverId),
+    index("data_scope_rules_scope_idx").on(t.scope, t.serverScope, t.serverId),
+    index("data_scope_rules_role_idx").on(t.roleId),
+    index("data_scope_rules_team_idx").on(t.teamId),
+  ],
 );
 
 // Per-user API keys. Only the sha256 hash of the token is stored; the

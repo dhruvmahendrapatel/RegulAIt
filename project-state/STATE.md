@@ -393,6 +393,30 @@ Sync-now verification works, and receivers without read-back fail loudly into th
 orphan flow. `DEFAULT_MAPPINGS.generic_webhook` is the IDENTITY map over all five canonical
 states including blocked — nothing invented because the vocabulary is ours. E2e: the fake
 receiver verifies the HMAC on every request and asserts the token never travels raw.
+**Pillar-1 rule scoping, 2026-07-26 — policy rules gain role/team/fleet scope (migration
+0026); the "one row per user per server" gap closed.** All three restriction-rule tables
+(approval_rules, rate_limits, data_scope_rules) were hard-bound to one user × one server
+(NOT NULL FKs) — a fleet-wide "any write requires approval" was inexpressible. Migration 0026
+(identical per table): user_id/server_id → nullable; add role_id/team_id (nullable FKs),
+scope ('user'|'role'|'team'|'fleet', default 'user') + server_scope ('server'|'all', default
+'server'); raw CHECK constraints enforce the discriminant; existing rows backfill to
+scope='user'/server_scope='server' — byte-identical behaviour (all pre-existing single-user
+rule tests pass unchanged). The gateway pre-filters rules in SQL by scope-membership —
+`(fleet OR user=me OR role∈myRoles OR team∈myTeams) AND (all-servers OR server=this)`
+(loadScopeMemberships resolves roleIds+teamIds) — exactly as role GRANTS are already
+pre-filtered, keeping the kernel subject-free. THE INVARIANT (proven): all three rule types
+run ONLY AFTER the untouched grant check, so a scoped rule can only ADD a deny/require_approval/
+cap — it can never move default-deny to allow, and never relax another scope. Most-restrictive-
+wins with NO cross-scope override (no exemptions in v1 — that would widen; deferred as a
+separate explicit object): data-scope intersects all matching rules, rate-limits keep
+independent per-subject counts (tightest denies first, no summing; all-servers rules count
+across servers), approval pauses on any scope match. Guard test: a fleet/role restriction
+never rescues an ungranted call. Admin Policy & Rules tab gains scope + server-scope selectors
+with a swapping target select and legible "fleet"/"role: X"/"team: Y"/"all servers" listing;
+seed shows a fleet approval rule + a role-scoped rate limit. Suite 524 → 535 (6 kernel unit +
+5 e2e incl. the headline "fleet rule reaches a user with NO user-specific rule"). Independently
+re-verified: build clean, policy-kernel 71/71, mcp-proxy 150/150.
+
 **Connector execution layer, 2026-07-26 — pillar 5's connector-cost gap closed (migration
 0025).** POST /v1/connectors/:id/invoke now really contacts the target system and meters cost.
 New package `packages/connector-provider` mirrors pm-provider: CONNECTOR_PROVIDER_KINDS

@@ -6,6 +6,10 @@ export * from "./schema.js";
 export { schema };
 export { runMigrations } from "./migrate.js";
 export { and, asc, count, desc, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";
+// Types consumers need to build reusable predicates without taking a direct
+// dependency on drizzle-orm (PILLAR 1 rule-scoping SQL pre-filter, etc.).
+export type { SQL } from "drizzle-orm";
+export type { PgColumn } from "drizzle-orm/pg-core";
 
 export type Db = ReturnType<typeof createDb>;
 
