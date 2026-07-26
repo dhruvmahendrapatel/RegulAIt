@@ -8,10 +8,33 @@ import {
   roleToolGrants,
   roles,
   serverGrants,
+  teamMembers,
   toolGrants,
   type Db,
 } from "@regulait/db";
 import type { Entitlements } from "@regulait/policy-kernel";
+
+/**
+ * PILLAR 1 rule scoping: the subject memberships that decide which widened
+ * restriction rules apply to a user — the roles they are assigned and the
+ * teams they belong to. The gateway uses these to pre-filter role/team-scoped
+ * rules in SQL, exactly as it pre-filters role-derived GRANTS, keeping the
+ * kernel subject-free. This is entitlement METADATA only: membership widens
+ * which RESTRICTIONS can bind, never which tools/agents a user may call.
+ */
+export async function loadScopeMemberships(
+  db: Db,
+  userId: string,
+): Promise<{ roleIds: string[]; teamIds: string[] }> {
+  const [assignments, memberships] = await Promise.all([
+    db.select({ roleId: roleAssignments.roleId }).from(roleAssignments).where(eq(roleAssignments.userId, userId)),
+    db.select({ teamId: teamMembers.teamId }).from(teamMembers).where(eq(teamMembers.userId, userId)),
+  ]);
+  return {
+    roleIds: assignments.map((a) => a.roleId),
+    teamIds: memberships.map((m) => m.teamId),
+  };
+}
 
 /**
  * Load everything that determines what a user may do on a server (§5):

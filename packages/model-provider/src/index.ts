@@ -1202,6 +1202,65 @@ function mockDecompositionReply(goal: string, system: string, tier: MockTier): s
   let slug2 = planSlug(kw2);
   if (slug2 === slug1) slug2 = `${slug2}-2`;
   const rogue = goal.includes("<<rogueagent>>");
+
+  // §5.1 Team-Lead delegation demo hook: "<<lead-plan>>" deterministically
+  // emits a TWO-LEVEL hierarchy — one lead coordinating two workers that
+  // delegate to it via leadId — so the whole narrowing tier is demoable with
+  // zero external keys. The lead declares allowedAgents = {cheap, mid} plus one
+  // deliberately over-broad name outside the roster, so the gateway's
+  // drop-and-record path is exercised; the two workers are owned by cheap/mid,
+  // both inside the ceiling.
+  if (goal.includes("<<lead-plan>>")) {
+    const leadNodes = [
+      {
+        id: "coordinate",
+        title: `Coordinate the ${topic} effort`,
+        instruction: planInstruction(
+          [
+            `Coordinate the delivery of "${topic}" by delegating to the two worker tasks under you.`,
+            `Hold the workers to the agent and tool ceiling declared here; do not let scope widen.`,
+            `Reconcile the two tracks into one coherent result before reporting.`,
+            `State explicitly whether the goal is met or what remains.`,
+          ],
+          tier,
+        ),
+        agent: cheap,
+        dependsOn: [] as string[],
+        allowedAgents: [cheap, mid, "shadow-unsanctioned-agent"],
+      },
+      {
+        id: `build-${slug1}`,
+        title: `Implement the ${kw1} changes`,
+        instruction: planInstruction(
+          [
+            `Implement the ${kw1} portion under the coordinate lead, staying inside the delegated agent/tool ceiling.`,
+            `Describe the change precisely enough for the lead to verify it.`,
+            `Flag any deviation and the reason for it.`,
+          ],
+          tier,
+        ),
+        agent: mid,
+        dependsOn: ["coordinate"],
+        leadId: "coordinate",
+      },
+      {
+        id: "verify",
+        title: `Verify the ${topic} result`,
+        instruction: planInstruction(
+          [
+            `Verify the combined result for "${topic}" against the coordinate lead's acceptance criteria.`,
+            `Report each check with its outcome; never silently prefer one track.`,
+            `State clearly whether the goal is met.`,
+          ],
+          tier,
+        ),
+        agent: cheap,
+        dependsOn: [`build-${slug1}`],
+        leadId: "coordinate",
+      },
+    ];
+    return "```json\n" + JSON.stringify({ name: topic, nodes: leadNodes }, null, 2) + "\n```";
+  }
   const nodes = [
     {
       id: "analyze-requirements",

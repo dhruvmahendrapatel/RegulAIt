@@ -20,12 +20,18 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(zod@3.25.76)
+      '@regulait/connector-provider':
+        specifier: workspace:*
+        version: link:../../packages/connector-provider
       '@regulait/db':
         specifier: workspace:*
         version: link:../../packages/db
       '@regulait/git-provider':
         specifier: workspace:*
         version: link:../../packages/git-provider
+      '@regulait/infra-provider':
+        specifier: workspace:*
+        version: link:../../packages/infra-provider
       '@regulait/model-provider':
         specifier: workspace:*
         version: link:../../packages/model-provider
@@ -58,6 +64,16 @@ importers:
         specifier: ^3.2.4
         version: 3.2.7(@types/node@26.1.1)(tsx@4.23.1)
 
+  packages/connector-provider:
+    dependencies:
+      zod:
+        specifier: ^3.25.67
+        version: 3.25.76
+    devDependencies:
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/node@26.1.1)(tsx@4.23.1)
+
   packages/db:
     dependencies:
       drizzle-orm:
@@ -75,6 +91,16 @@ importers:
         version: 0.31.10
 
   packages/git-provider:
+    devDependencies:
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/node@26.1.1)(tsx@4.23.1)
+
+  packages/infra-provider:
+    dependencies:
+      zod:
+        specifier: ^3.25.67
+        version: 3.25.76
     devDependencies:
       vitest:
         specifier: ^3.2.4

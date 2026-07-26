@@ -42,21 +42,71 @@ export const createServerGrantSchema = z.object({
   readOnlyAll: z.boolean(),
 });
 
-export const createApprovalRuleSchema = z.object({
-  userId: z.string().uuid(),
-  serverId: z.string().uuid(),
-  toolName: z.string().min(1).nullable().optional(),
-  writeOnly: z.boolean().optional(),
-  approverUserId: z.string().uuid(),
-});
+// PILLAR 1 rule scoping: the shared discriminant every restriction rule carries.
+// A rule targets exactly ONE subject dimension (scope) and ONE server dimension
+// (serverScope). Defaults keep every legacy caller — userId + serverId with no
+// scope — valid and unchanged (scope='user', serverScope='server'). The
+// superRefine below mirrors the DB CHECK constraints byte-for-byte, so a bad
+// discriminant is rejected loudly at the edge (400) rather than by Postgres (500).
+export const ruleScopeSchema = z.enum(["user", "role", "team", "fleet"]);
+export const ruleServerScopeSchema = z.enum(["server", "all"]);
 
-export const createRateLimitSchema = z.object({
-  userId: z.string().uuid(),
-  serverId: z.string().uuid(),
-  toolName: z.string().min(1).nullable().optional(),
-  maxCalls: z.number().int().positive(),
-  windowSeconds: z.number().int().positive(),
-});
+const ruleScopeFields = {
+  userId: z.string().uuid().nullable().optional(),
+  serverId: z.string().uuid().nullable().optional(),
+  roleId: z.string().uuid().nullable().optional(),
+  teamId: z.string().uuid().nullable().optional(),
+  scope: ruleScopeSchema.default("user"),
+  serverScope: ruleServerScopeSchema.default("server"),
+};
+
+type RuleScopeShape = {
+  scope: z.infer<typeof ruleScopeSchema>;
+  serverScope: z.infer<typeof ruleServerScopeSchema>;
+  userId?: string | null | undefined;
+  serverId?: string | null | undefined;
+  roleId?: string | null | undefined;
+  teamId?: string | null | undefined;
+};
+
+function refineRuleScope(body: RuleScopeShape, ctx: z.RefinementCtx) {
+  // subject discriminant — exactly the DB scope CHECK
+  if (body.scope === "user" && !body.userId)
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "scope 'user' requires a userId", path: ["userId"] });
+  if (body.scope === "role" && !body.roleId)
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "scope 'role' requires a roleId", path: ["roleId"] });
+  if (body.scope === "team" && !body.teamId)
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "scope 'team' requires a teamId", path: ["teamId"] });
+  if (body.scope === "fleet" && (body.userId || body.roleId || body.teamId))
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "scope 'fleet' takes no userId/roleId/teamId",
+      path: ["scope"],
+    });
+  // server discriminant — exactly the DB server_scope CHECK
+  if (body.serverScope === "server" && !body.serverId)
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "serverScope 'server' requires a serverId", path: ["serverId"] });
+  if (body.serverScope === "all" && body.serverId)
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "serverScope 'all' takes no serverId", path: ["serverId"] });
+}
+
+export const createApprovalRuleSchema = z
+  .object({
+    ...ruleScopeFields,
+    toolName: z.string().min(1).nullable().optional(),
+    writeOnly: z.boolean().optional(),
+    approverUserId: z.string().uuid(),
+  })
+  .superRefine(refineRuleScope);
+
+export const createRateLimitSchema = z
+  .object({
+    ...ruleScopeFields,
+    toolName: z.string().min(1).nullable().optional(),
+    maxCalls: z.number().int().positive(),
+    windowSeconds: z.number().int().positive(),
+  })
+  .superRefine(refineRuleScope);
 
 // The decider is the authenticated caller — never a body field.
 export const decideApprovalSchema = z.object({
@@ -68,13 +118,14 @@ export const createApiKeySchema = z.object({
   name: z.string().min(1),
 });
 
-export const createDataScopeRuleSchema = z.object({
-  userId: z.string().uuid(),
-  serverId: z.string().uuid(),
-  toolName: z.string().min(1).nullable().optional(),
-  argPath: z.string().min(1),
-  allowedValues: z.array(z.string()).min(1),
-});
+export const createDataScopeRuleSchema = z
+  .object({
+    ...ruleScopeFields,
+    toolName: z.string().min(1).nullable().optional(),
+    argPath: z.string().min(1),
+    allowedValues: z.array(z.string()).min(1),
+  })
+  .superRefine(refineRuleScope);
 
 export const createRoleSchema = z.object({
   name: z.string().min(1),
@@ -196,9 +247,34 @@ export const createModelCredentialSchema = z.object({
   baseUrl: z.string().url().nullable().optional(),
 });
 
+/** the connector-provider adapter enum (mirrors the CONNECTOR_PROVIDER_KINDS
+ * union without importing the package into shared) */
+export const connectorProviderKindSchema = z.enum([
+  "http",
+  "webhook",
+  "slack",
+  "github",
+  "jira",
+  "snowflake",
+  "generic",
+  "mock",
+]);
+
 export const createConnectorSchema = z.object({
   name: z.string().min(1),
+  /** free-text display CATEGORY (unchanged) — NOT the execution adapter */
   kind: z.string().min(1),
+  /** EXECUTION: the adapter that runs the call; absent = governance-only */
+  providerKind: connectorProviderKindSchema.optional(),
+  baseUrl: z.string().url().optional(),
+  /** pillar 5 flat list price per allowed call; absent/null = unpriced */
+  pricePerCallUsd: z.number().nonnegative().nullable().optional(),
+});
+
+/** platform connector credential (mirrors createModelCredentialSchema) */
+export const createConnectorCredentialSchema = z.object({
+  token: z.string().min(1).max(2048),
+  baseUrl: z.string().url().nullable().optional(),
 });
 
 export const createConnectorGrantSchema = z.object({
@@ -211,6 +287,10 @@ export const createConnectorGrantSchema = z.object({
 export const invokeConnectorSchema = z.object({
   operation: z.enum(["read", "write"]),
   object: z.string().min(1).max(256).optional(),
+  /** EXECUTION: the write body / read parameters handed to the adapter */
+  payload: z.record(z.unknown()).optional(),
+  /** pillar 5: attribute this call's cost to a project */
+  projectId: z.string().uuid().optional(),
 });
 
 export const changeDescriptorSchema = z.object({
@@ -305,6 +385,18 @@ export const decompositionPlanSchema = z.object({
         toolServers: z.array(z.string().min(1).max(200)).optional(),
         /** pillar 7: max tool-using turns for this worker (gateway-bounded) */
         maxTurns: z.number().int().min(1).max(20).optional(),
+        /** §5.1 Team-Lead delegation: the id of another node in this plan that
+         * acts as this task's LEAD. Optional — a flat plan omits it. The
+         * gateway validates the reference and the acyclic chain. */
+        leadId: z.string().min(1).max(64).optional(),
+        /** §5.1: when this task is itself a LEAD, the agent NAMES (from the
+         * roster) a worker under it may be owned by — a ceiling the gateway
+         * resolves to ids and NARROWS to the caller's own entitlements
+         * (anything outside is dropped and recorded). */
+        allowedAgents: z.array(z.string().min(1).max(200)).optional(),
+        /** §5.1: when this task is itself a LEAD, the tool NAMES a worker under
+         * it may call — a ceiling narrowed to the caller's entitled tools. */
+        allowedTools: z.array(z.string().min(1).max(128)).optional(),
       }),
     )
     .min(2)
@@ -412,6 +504,45 @@ export const upsertComplianceProfileSchema = z.object({
   mcpDefaultMode: z.enum(["read_only", "read_write"]).optional(),
   auditRetentionDays: z.number().int().positive().nullable().optional(),
   piiMode: z.enum(["block", "warn", "log"]).optional(),
+  /** §8.3 -> §8.2: the backup retention + patch cadence floors this framework
+   * forces onto any infra resource carrying its tag (pillar 3). */
+  backupRetentionDays: z.number().int().positive().nullable().optional(),
+  patchCadenceDays: z.number().int().positive().nullable().optional(),
+});
+
+// PILLAR 3 (§8.2): the governed infrastructure-operations layer.
+export const createInfraResourceSchema = z.object({
+  kind: z.enum(["control_plane", "agent_runtime", "cert", "backup_target"]),
+  name: z.string().min(1).max(200),
+  /** infra-provider kind; 'mock' (keyless, deterministic) for the MVP */
+  provider: z.enum(["mock", "aws", "azure", "gcp"]).default("mock"),
+  config: z.record(z.unknown()).optional(),
+  /** §8.3 compliance tags; the cascade derives backup/patch floors */
+  classifications: z.array(z.string().min(1).max(64)).max(16).optional(),
+});
+
+// An operational policy. A null resourceId is fleet-wide. The auto-remediate
+// ceiling EXCLUDES 'critical' by construction — critical findings are always
+// approval-gated regardless of policy.
+export const createInfraPolicySchema = z.object({
+  resourceId: z.string().uuid().nullable().optional(),
+  patchCadenceDays: z.number().int().positive().nullable().optional(),
+  certRotationDaysBeforeExpiry: z.number().int().positive().nullable().optional(),
+  backupSchedule: z.string().min(1).max(200).nullable().optional(),
+  backupRetentionDays: z.number().int().positive().nullable().optional(),
+  driftBaseline: z.record(z.unknown()).nullable().optional(),
+  autoRemediateMaxSeverity: z.enum(["low", "medium", "high"]).nullable().optional(),
+});
+
+// Scan on demand — optionally a single resource, else the whole fleet.
+export const scanInfraSchema = z
+  .object({ resourceId: z.string().uuid().optional() })
+  .optional()
+  .default({});
+
+// Propose a governed remediation for an OPEN finding: a named approver gates it.
+export const proposeInfraRemediationSchema = z.object({
+  approverUserId: z.string().uuid(),
 });
 
 // §8.3 reclassification: a diff-then-approve change to a project's tags.

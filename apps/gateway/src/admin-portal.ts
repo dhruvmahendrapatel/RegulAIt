@@ -133,6 +133,44 @@ function linkTools(id, index) {
   srv.addEventListener("change", fill);
   fill();
 }
+// PILLAR 1 rule scoping: the scope/serverScope selects drive which target
+// select is live. Only the target matching the chosen scope is shown+enabled
+// (fleet shows none); the hidden ones are DISABLED so the browser never
+// submits them — a role rule posts only roleId, a fleet rule posts none.
+// serverScope 'all' hides+disables serverId and toolName, so the rule binds to
+// every server. Disabled controls are excluded from FormData, so this is the
+// single point that keeps the posted body matching the chosen discriminant.
+function linkScope(id) {
+  const f = $("#" + id); if (!f) return;
+  const scope = f.querySelector("[name=scope]");
+  const sscope = f.querySelector("[name=serverScope]");
+  if (!scope || !sscope) return;
+  const targets = {
+    user: f.querySelector("[name=userId]"),
+    role: f.querySelector("[name=roleId]"),
+    team: f.querySelector("[name=teamId]"),
+  };
+  const srv = f.querySelector("[name=serverId]");
+  const tool = f.querySelector("[name=toolName]");
+  const setShown = (elm, shown) => {
+    if (!elm) return;
+    elm.disabled = !shown;
+    const wrap = elm.closest("div");
+    if (wrap) wrap.style.display = shown ? "" : "none";
+  };
+  const applyScope = () => {
+    for (const k of ["user", "role", "team"]) setShown(targets[k], scope.value === k);
+  };
+  const applyServerScope = () => {
+    const all = sscope.value === "all";
+    setShown(srv, !all);
+    setShown(tool, !all);
+  };
+  scope.addEventListener("change", applyScope);
+  sscope.addEventListener("change", applyServerScope);
+  applyScope();
+  applyServerScope();
+}
 // The one-time reveal: an API key's plaintext exists for exactly one HTTP
 // response and is sha256 at rest, so this panel is the only chance to copy
 // it. Never re-readable, by design — there is no endpoint that could.
@@ -380,20 +418,58 @@ const TABS = [
   wire("f-sgrant", (d) => post("/v1/grants/servers", { ...d, readOnlyAll: d.readOnlyAll === "true" }));
 }],
 ["Policy & Rules Engine", async (el) => {
-  const [ap, ds, rl, u, s] = await Promise.all([
+  // PILLAR 1 rule scoping: a rule can target one user, an assigned role, a
+  // team, or the whole fleet — on one server or all of them. Fetch roles and
+  // teams alongside users/servers so every scope has a named target select.
+  const [ap, ds, rl, u, s, r, t] = await Promise.all([
     get("/v1/rules/approvals"), get("/v1/rules/data-scopes"), get("/v1/rules/rate-limits"),
-    get("/v1/users"), get("/v1/servers"),
+    get("/v1/users"), get("/v1/servers"), get("/v1/roles"), get("/v1/teams"),
   ]);
   const tools = await toolIndex(s.servers);
   const uOpts = userOpts(u.users), sOpts = serverOpts(s.servers);
-  const subject = [{name:"userId",label:"user",options:uOpts},{name:"serverId",label:"server",options:sOpts},{name:"toolName",label:"tool",options:[],req:false}];
+  const rOpts = roleOpts(r.roles), tOpts = (t.teams ?? []).map((x) => ({ v: x.id, l: x.name }));
+  // The subject block: scope select, the three swappable target selects (only
+  // the matching one stays live — linkScope handles it), then the server
+  // dimension. toolName is optional and repopulated from the chosen server.
+  const subject = [
+    {name:"scope",label:"scope",options:[{v:"user",l:"user"},{v:"role",l:"role"},{v:"team",l:"team"},{v:"fleet",l:"fleet"}]},
+    {name:"userId",label:"user",options:uOpts},
+    {name:"roleId",label:"role",options:rOpts},
+    {name:"teamId",label:"team",options:tOpts},
+    {name:"serverScope",label:"servers",options:[{v:"server",l:"this server"},{v:"all",l:"all servers"}]},
+    {name:"serverId",label:"server",options:sOpts},
+    {name:"toolName",label:"tool",options:[],req:false},
+  ];
+  // Legible rule rows: every id becomes a name and the discriminant collapses
+  // to one "target" + one "server" cell, like the Approvals Queue does.
+  const uName = new Map(u.users.map((x) => [x.id, x.displayName || x.email]));
+  const rName = new Map(r.roles.map((x) => [x.id, x.name]));
+  const tName = new Map((t.teams ?? []).map((x) => [x.id, x.name]));
+  const sName = new Map(s.servers.map((x) => [x.id, x.name]));
+  const targetOf = (row) =>
+    row.scope === "fleet" ? "fleet"
+    : row.scope === "role" ? "role: " + (rName.get(row.roleId) ?? row.roleId)
+    : row.scope === "team" ? "team: " + (tName.get(row.teamId) ?? row.teamId)
+    : "user: " + (uName.get(row.userId) ?? row.userId);
+  const serverOf = (row) => row.serverScope === "all" ? "all servers" : (sName.get(row.serverId) ?? row.serverId);
+  const rulesView = (rows) => (rows ?? []).map((row) => {
+    const o = { id: row.id, target: targetOf(row), server: serverOf(row), tool: row.toolName ?? "— any —" };
+    if (row.writeOnly !== undefined) o.writeOnly = row.writeOnly;
+    if (row.approverUserId) o.approver = uName.get(row.approverUserId) ?? row.approverUserId;
+    if (row.argPath !== undefined) o.argPath = row.argPath;
+    if (row.allowedValues !== undefined) o.allowedValues = row.allowedValues;
+    if (row.maxCalls !== undefined) o.maxCalls = row.maxCalls;
+    if (row.windowSeconds !== undefined) o.windowSeconds = row.windowSeconds;
+    o.createdAt = row.createdAt;
+    return o;
+  });
   el.innerHTML = "<h2>Approval rules</h2><div class='card'>"
-    + form("f-apr", subject.concat([{name:"approverUserId",label:"approver",options:uOpts}]), "Add") + table(ap.rules) + "</div>"
+    + form("f-apr", subject.concat([{name:"approverUserId",label:"approver",options:uOpts}]), "Add") + table(rulesView(ap.rules)) + "</div>"
     + "<h2>Data-scope rules</h2><div class='card'>"
-    + form("f-dsr", subject.concat([{name:"argPath",label:"arg path",ph:"e.g. database"},{name:"allowedValues",label:"allowed values",ph:"comma,separated"}]), "Add") + table(ds.rules) + "</div>"
+    + form("f-dsr", subject.concat([{name:"argPath",label:"arg path",ph:"e.g. database"},{name:"allowedValues",label:"allowed values",ph:"comma,separated"}]), "Add") + table(rulesView(ds.rules)) + "</div>"
     + "<h2>Rate limits</h2><div class='card'>"
-    + form("f-rlr", subject.concat([{name:"maxCalls",label:"max calls",type:"number"},{name:"windowSeconds",label:"window seconds",type:"number"}]), "Add") + table(rl.rules) + "</div>";
-  for (const id of ["f-apr", "f-dsr", "f-rlr"]) linkTools(id, tools);
+    + form("f-rlr", subject.concat([{name:"maxCalls",label:"max calls",type:"number"},{name:"windowSeconds",label:"window seconds",type:"number"}]), "Add") + table(rulesView(rl.rules)) + "</div>";
+  for (const id of ["f-apr", "f-dsr", "f-rlr"]) { linkTools(id, tools); linkScope(id); }
   wire("f-apr", (d) => post("/v1/rules/approvals", d));
   wire("f-dsr", (d) => post("/v1/rules/data-scopes", { ...d, allowedValues: String(d.allowedValues).split(",") }));
   wire("f-rlr", (d) => post("/v1/rules/rate-limits", { ...d, maxCalls: Number(d.maxCalls), windowSeconds: Number(d.windowSeconds) }));
@@ -717,6 +793,130 @@ const TABS = [
       + "<h2>Estimated savings by technique</h2><div class='card'>" + barChart(costs.estimatedSavings, "estimatedCostSavedUsd", (i) => i.technique) + "</div>"
       + "<h2>Compliance — effective policy + enforcement labels</h2><div class='card'><pre>" + esc(JSON.stringify(compliance, null, 2)) + "</pre></div>";
   }));
+}],
+["Infrastructure / Operations", async (el) => {
+  // PILLAR 3 §8.2: monitored resources + operational policies + detected
+  // findings + governed remediation. Findings are inert until governed — a new
+  // one is auto-remediated (audited) only under a permissive policy, else it is
+  // approval-gated; every 'critical' is always approval-gated.
+  const [res, pol, fin, posture, u, cp] = await Promise.all([
+    get("/v1/infra/resources"), get("/v1/infra/policies"), get("/v1/infra/findings"),
+    get("/v1/infra/posture"), get("/v1/users"), get("/v1/compliance/profiles"),
+  ]);
+  const uOpts = userOpts(u.users);
+  const tagOpts = cp.profiles.map((x) => x.tag);
+  const rOpts = res.resources.map((x) => ({ v: x.id, l: x.name + " · " + x.kind }));
+  const SEV = { critical: "bad", high: "bad", medium: "warn", low: "ok" };
+  const STATUS_BADGE = {
+    open: "warn", remediation_proposed: "warn", auto_remediated: "ok",
+    approved: "ok", remediated: "ok", accepted_risk: "bad",
+  };
+  const p = posture;
+  el.innerHTML =
+    "<h2>Posture</h2><div class='grid2'>"
+    + "<div class='card stat'><div class='v'>" + (p.resources ?? 0) + "</div><div class='l'>monitored resources</div></div>"
+    + "<div class='card stat'><div class='v'>" + (p.open ?? 0) + "</div><div class='l'>open findings (" + (p.findings ?? 0) + " total)</div></div>"
+    + "<div class='card stat'><div class='v'>" + (p.bySeverity?.critical ?? 0) + " / " + (p.bySeverity?.high ?? 0) + "</div><div class='l'>critical / high</div></div>"
+    + "<div class='card stat'><div class='v'>" + (p.backup?.missed ?? 0) + " / " + (p.backup?.targets ?? 0) + "</div><div class='l'>backups missed / targets</div></div>"
+    + "</div>"
+    + "<div class='card'><div class='kv'>"
+    + "<span class='k'>by kind</span><span>" + esc(JSON.stringify(p.byKind ?? {})) + "</span>"
+    + "<span class='k'>by severity</span><span>" + esc(JSON.stringify(p.bySeverity ?? {})) + "</span>"
+    + "<span class='k'>by status</span><span>" + esc(JSON.stringify(p.byStatus ?? {})) + "</span>"
+    + "</div><div class='row' style='margin-top:12px'><button class='small primary' id='infra-scan'>Scan now</button>"
+    + "<span class='dim' style='font-size:12px'>Scanning detects findings idempotently, then auto-remediates any that a policy permits (audited) — everything else waits for a governed remediation.</span></div></div>"
+
+    + "<h2>Register a resource</h2><div class='card'>"
+    + form("f-ires", [
+        {name:"name",ph:"e.g. control-plane-gateway"},
+        {name:"kind",label:"kind",options:["control_plane","agent_runtime","cert","backup_target"]},
+        {name:"provider",label:"provider",options:["mock","aws","azure","gcp"]},
+        {name:"daysUntilExpiry",label:"cert: days-until-expiry",type:"number",req:false,ph:"cert only (<=0 = expired = critical)"},
+        {name:"hoursSinceLastBackup",label:"backup: hours since last",type:"number",req:false,ph:"backup_target only"},
+        {name:"classifications",label:"classifications",options:tagOpts,req:false,multi:true},
+      ], "Register resource")
+    + "<p class='dim' style='font-size:12px'>Only 'mock' executes today (keyless, deterministic); aws/azure/gcp are interface-ready and 501 on scan. Classifications cascade §8.3 backup-retention/patch-cadence floors onto the resource.</p></div>"
+
+    + "<h2>Resources — with cascade-derived floors</h2><div class='card'>"
+    + table(res.resources.map((r) => ({
+        name: r.name, kind: r.kind, provider: r.provider,
+        classifications: (r.classifications ?? []).join(", ") || "—",
+        autoCeiling: r.effectivePolicy?.autoRemediateMaxSeverity ?? "never",
+        backupFloorDays: r.effectivePolicy?.backupRetentionDaysFloor ?? "—",
+        patchCeilingDays: r.effectivePolicy?.patchCadenceDaysCeiling ?? "—",
+      })))
+    + "<p class='dim' style='font-size:12px'>backupFloorDays = max(policy, §8.3 backup retention, §8.3 audit retention) — this is where the formerly-dead auditRetentionDays is finally consumed. patchCeilingDays = min(policy, §8.3 patch cadence).</p></div>"
+
+    + "<h2>Set a policy</h2><div class='card'>"
+    + form("f-ipol", [
+        {name:"resourceId",label:"resource (blank = fleet-wide)",options:rOpts,req:false,ph:"— fleet-wide default —"},
+        {name:"patchCadenceDays",label:"patch cadence days",type:"number",req:false},
+        {name:"certRotationDaysBeforeExpiry",label:"cert rotation window days",type:"number",req:false},
+        {name:"backupSchedule",label:"backup schedule",req:false,ph:"e.g. daily-0200"},
+        {name:"backupRetentionDays",label:"backup retention days",type:"number",req:false},
+        {name:"autoRemediateMaxSeverity",label:"auto-remediate ceiling",options:["low","medium","high"],req:false,ph:"— never auto-remediate —"},
+      ], "Save policy")
+    + "<p class='dim' style='font-size:12px'>The auto-remediate ceiling cannot be 'critical' — every critical finding is always approval-gated. A resource-scoped policy overrides the fleet-wide default.</p></div>"
+    + "<div class='card'>" + table(pol.policies.map((r) => ({
+        scope: r.resourceId ? (rOpts.find((o) => o.v === r.resourceId)?.l ?? "resource") : "fleet-wide",
+        patchCadenceDays: r.patchCadenceDays ?? "—",
+        certWindowDays: r.certRotationDaysBeforeExpiry ?? "—",
+        backupSchedule: r.backupSchedule ?? "—",
+        backupRetentionDays: r.backupRetentionDays ?? "—",
+        autoCeiling: r.autoRemediateMaxSeverity ?? "never",
+      }))) + "</div>"
+
+    + "<h2>Findings — severity-sorted posture inbox</h2><div class='card'>"
+    + form("f-remapprover", [{name:"approverUserId",label:"remediation approver",options:uOpts}], "Set approver")
+    + "<p class='dim' style='font-size:12px'>Pick the named approver, then 'propose remediation' on any open finding — it lands in the Approvals Queue (objectType infra_operation). Auto-remediated findings are already fixed; only 'open' findings can be proposed.</p>"
+    + "<div class='tblwrap'><table><tr><th>resource</th><th>kind</th><th>severity</th><th>status</th><th>summary</th><th>detected</th><th></th></tr>"
+    + fin.findings.map((f) => {
+        const sev = "<span class='badge " + (SEV[f.severity] ?? "") + "'>" + esc(f.severity) + "</span>";
+        const st = "<span class='badge " + (STATUS_BADGE[f.status] ?? "") + "'>" + esc(f.status) + "</span>";
+        const act = f.status === "open"
+          ? "<button class='small primary' data-remediate='" + f.id + "'>propose remediation</button>"
+          : f.status === "auto_remediated" ? "<span class='dim'>auto-fixed</span>"
+          : f.status === "remediated" ? "<span class='dim'>remediated</span>"
+          : f.status === "remediation_proposed" ? "<span class='dim'>awaiting approval</span>"
+          : f.status === "accepted_risk" ? "<span class='dim'>accepted risk</span>" : "";
+        return "<tr><td>" + esc(f.resourceName ?? "—") + "</td><td class='nowrap'>" + esc(f.kind) + "</td>"
+          + "<td class='nowrap'>" + sev + "</td><td class='nowrap'>" + st + "</td>"
+          + "<td>" + esc((f.detail && f.detail.summary) ? f.detail.summary : "") + "</td>"
+          + "<td class='mono dim nowrap' title='" + esc(f.detectedAt) + "'>" + esc(String(f.detectedAt).slice(0, 16).replace("T", " ")) + "</td>"
+          + "<td class='act'>" + act + "</td></tr>";
+      }).join("")
+    + "</table></div></div>";
+
+  $("#infra-scan").addEventListener("click", async () => {
+    try { const r = await post("/v1/infra/scan", {}); alert("Scan complete — " + r.created + " new, " + r.autoRemediated + " auto-remediated, " + r.refreshed + " refreshed."); render(); }
+    catch (ex) { alert(ex.message); }
+  });
+  el.querySelectorAll("[data-remediate]").forEach((b) => b.addEventListener("click", async () => {
+    const approver = $("#f-remapprover")?.querySelector("[name=approverUserId]")?.value;
+    if (!approver) { alert("Pick a remediation approver first."); return; }
+    try { await post("/v1/infra/findings/" + b.dataset.remediate + "/remediate", { approverUserId: approver }); render(); }
+    catch (ex) { alert(ex.message); }
+  }));
+  // the approver select is a live control, not a submit — stop it rebooting the SPA
+  $("#f-remapprover")?.addEventListener("submit", (e) => e.preventDefault());
+  wire("f-ires", (d) => {
+    const config = {};
+    if (d.daysUntilExpiry != null && d.daysUntilExpiry !== "") config.daysUntilExpiry = Number(d.daysUntilExpiry);
+    if (d.hoursSinceLastBackup != null && d.hoursSinceLastBackup !== "") config.hoursSinceLastBackup = Number(d.hoursSinceLastBackup);
+    return post("/v1/infra/resources", {
+      name: d.name, kind: d.kind, provider: d.provider,
+      ...(Object.keys(config).length ? { config } : {}),
+      ...(d.classifications ? { classifications: [].concat(d.classifications) } : {}),
+    });
+  });
+  wire("f-ipol", (d) => {
+    const body = {};
+    if (d.resourceId) body.resourceId = d.resourceId;
+    for (const k of ["patchCadenceDays", "certRotationDaysBeforeExpiry", "backupRetentionDays"]) if (k in d) body[k] = Number(d[k]);
+    if (d.backupSchedule) body.backupSchedule = d.backupSchedule;
+    if (d.autoRemediateMaxSeverity) body.autoRemediateMaxSeverity = d.autoRemediateMaxSeverity;
+    return post("/v1/infra/policies", body);
+  });
 }],
 ];
 

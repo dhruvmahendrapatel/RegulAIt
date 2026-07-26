@@ -317,3 +317,54 @@ describe("project budget gate — the lead dispatch is a dispatch like any other
     expect(res.json().error).toBe("project_budget_exceeded");
   });
 });
+
+describe("POST /v1/runs/decompose — §5.1 Team-Lead two-level plan", () => {
+  it("drafts a lead + workers with leadNodeId and a ceiling narrowed to the caller's grants (over-broad dropped-and-recorded)", async () => {
+    const res = await app.inject({
+      method: "POST",
+      headers: deeAuth,
+      url: "/v1/runs/decompose",
+      payload: { goal: `${GOAL} <<lead-plan>>`, projectId },
+    });
+    expect(res.statusCode).toBe(200);
+    const nodes = res.json().proposal.nodes as Array<{
+      id: string;
+      ownerAgentId: string;
+      leadNodeId?: string;
+      allowedAgentIds?: string[];
+      droppedAllowedAgents?: string[];
+    }>;
+    expect(nodes).toHaveLength(3);
+
+    // the lead node carries a ceiling resolved to the caller's OWN entitled agents
+    const lead = nodes.find((n) => n.id === "coordinate")!;
+    expect(lead.leadNodeId).toBeUndefined();
+    expect(lead.allowedAgentIds).toEqual(expect.arrayContaining([fastId, balancedId]));
+    // the over-broad "shadow-unsanctioned-agent" the lead named was DROPPED and RECORDED
+    expect(lead.droppedAllowedAgents).toContain("shadow-unsanctioned-agent");
+    // nothing outside the caller's grants leaked into the ceiling
+    for (const id of lead.allowedAgentIds ?? []) {
+      expect([fastId, balancedId, premiumId]).toContain(id);
+    }
+
+    // the two workers delegate to the lead and are owned within its ceiling
+    const workers = nodes.filter((n) => n.leadNodeId === "coordinate");
+    expect(workers).toHaveLength(2);
+    for (const w of workers) {
+      expect(lead.allowedAgentIds).toContain(w.ownerAgentId);
+    }
+
+    // the drafted two-level plan submits through the NORMAL plan endpoint as-is —
+    // the resolved leadNodeId/allowedAgentIds pass kernel validation + entitlement
+    const planned = await app.inject({
+      method: "POST",
+      headers: deeAuth,
+      url: "/v1/runs",
+      payload: {
+        graph: { run: res.json().proposal.name, escalationApproverUserId: deeId, nodes },
+        projectId,
+      },
+    });
+    expect(planned.statusCode).toBe(201);
+  });
+});

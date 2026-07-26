@@ -245,15 +245,49 @@ if (!existingRateLimits.some((r: Json) => scopeMatches(r, averyId, warehouseServ
   });
 }
 
+// --- PILLAR 1 rule scoping: rules beyond one user × one server -------------
+// A FLEET approval rule and a ROLE-scoped rate limit sit alongside the
+// user-specific rules above, so the Policy & Rules tab shows a mix of scopes
+// and a governed WRITE by anyone — even a user with no user-specific rule —
+// pauses org-wide. These are pure RESTRICTIONS: they only ever ADD a
+// require_approval / cap, never rescue an ungranted call.
+if (!existingApprovalRules.some((r: Json) => r.scope === "fleet")) {
+  // any write tool, on any server, by any user requires the admin's sign-off
+  await call("POST", "/v1/rules/approvals", {
+    scope: "fleet",
+    serverScope: "all",
+    writeOnly: true,
+    approverUserId: adminId,
+  });
+}
+if (!existingRateLimits.some((r: Json) => r.scope === "role" && r.roleId === analystRoleId)) {
+  // the repo-analyst role is capped org-wide (all servers) — a generous cap so
+  // it demonstrates a role-scoped, all-servers limit without denying the demo
+  await call("POST", "/v1/rules/rate-limits", {
+    scope: "role",
+    roleId: analystRoleId,
+    serverScope: "all",
+    maxCalls: 500,
+    windowSeconds: 3600,
+  });
+}
+
 // --- connectors (§2) -----------------------------------------------------
 const connectorList = (await call("GET", "/v1/connectors")).connectors ?? [];
-async function ensureConnector(name: string, kind: string): Promise<string> {
+async function ensureConnector(name: string, kind: string, extras: Json = {}): Promise<string> {
   const existing = connectorList.find((c: Json) => c.name === name);
   if (existing) return existing.id;
-  return (await call("POST", "/v1/connectors", { name, kind })).id;
+  return (await call("POST", "/v1/connectors", { name, kind, ...extras })).id;
 }
+// jira-cloud stays GOVERNANCE-ONLY (no providerKind) — decision + audit, no
+// execution, no cost. snowflake-analytics gets the keyless 'mock' adapter and a
+// flat price, so it EXECUTES and METERS with zero external keys: one demoable
+// connector in each mode side by side.
 const jiraConnectorId = await ensureConnector("jira-cloud", "issue-tracker");
-const warehouseConnectorId = await ensureConnector("snowflake-analytics", "data-warehouse");
+const warehouseConnectorId = await ensureConnector("snowflake-analytics", "data-warehouse", {
+  providerKind: "mock",
+  pricePerCallUsd: 0.002,
+});
 for (const grant of [
   { userId: danaId, connectorId: jiraConnectorId, mode: "readwrite", allowedObjects: ["issue", "comment"] },
   { userId: danaId, connectorId: warehouseConnectorId, mode: "read" },
@@ -343,6 +377,10 @@ await call("POST", "/v1/compliance/profiles", {
   piiMode: "block",
   auditRetentionDays: 2555,
   mcpDefaultMode: "read_only",
+  // §8.3 -> §8.2 (pillar 3): the infra floors this framework forces onto any
+  // resource carrying the 'hipaa' tag. 2555d backup retention, 30d patch cadence.
+  backupRetentionDays: 2555,
+  patchCadenceDays: 30,
 });
 
 // --- teams (§9 provenance) -----------------------------------------------
@@ -479,6 +517,41 @@ if (!hipaaCtx.some((c: Json) => c.key === "phi-handling")) {
   );
 }
 
+// --- infra operations (pillar 3 §8.2) ------------------------------------
+// A keyless, mock-provider fleet: a control plane (drift + CVE), an agent
+// runtime under a permissive policy (its LOW drift auto-remediates on scan,
+// audited — no approval), two certs (one expiring HIGH, one already-EXPIRED
+// CRITICAL that is ALWAYS approval-gated), and a HIPAA-classified backup target
+// whose §8.3 cascade derives a 2555d retention FLOOR that overrides its own 30d
+// policy. One scan through the real API materializes the mixed posture; the
+// signature-uniqueness index makes a re-run idempotent.
+const infraResList = (await call("GET", "/v1/infra/resources")).resources ?? [];
+async function ensureInfraResource(name: string, kind: string, extras: Json = {}): Promise<string> {
+  const existing = infraResList.find((r: Json) => r.name === name);
+  if (existing) return existing.id;
+  return (await call("POST", "/v1/infra/resources", { name, kind, provider: "mock", ...extras })).id;
+}
+await ensureInfraResource("control-plane-gateway", "control_plane");
+const runtimeResId = await ensureInfraResource("agent-runtime-pool", "agent_runtime");
+await ensureInfraResource("api-tls-cert", "cert", { config: { daysUntilExpiry: 5 } });
+await ensureInfraResource("legacy-tls-cert", "cert", { config: { daysUntilExpiry: -2 } });
+const backupResId = await ensureInfraResource("phi-backup-primary", "backup_target", {
+  config: { hoursSinceLastBackup: 100 },
+  classifications: ["hipaa"],
+});
+const infraPolList = (await call("GET", "/v1/infra/policies")).policies ?? [];
+async function ensureInfraPolicy(resourceId: string, body: Json): Promise<void> {
+  if (infraPolList.some((p: Json) => p.resourceId === resourceId)) return;
+  await call("POST", "/v1/infra/policies", { resourceId, ...body });
+}
+// agent-runtime: a permissive ceiling of 'low' — its low drift auto-remediates.
+await ensureInfraPolicy(runtimeResId, { autoRemediateMaxSeverity: "low", patchCadenceDays: 90 });
+// backup target: a 30d retention policy the HIPAA cascade floor (2555d) overrides.
+await ensureInfraPolicy(backupResId, { backupRetentionDays: 30, backupSchedule: "daily-0200" });
+// One scan: detects the mix and auto-remediates only what the policy permits.
+// Idempotent — a re-run refreshes detected_at, never duplicates a finding.
+await call("POST", "/v1/infra/scan", {});
+
 // --- PM connection (mock provider) ---------------------------------------
 // EPIC-06 against the in-memory MOCK provider: no external service, no real
 // credential. The token below is an obvious dummy and is encrypted at rest
@@ -509,6 +582,7 @@ if (!alreadyActive) {
     [danaId, repoServerId, "read_file"], // allow — role read-only-all
     [danaId, repoServerId, "search_code"], // deny — per-user revocation beats the role
     [danaId, repoServerId, "write_file"], // require_approval — direct grant + approval rule
+    [danaId, warehouseServerId, "export_table"], // require_approval — FLEET write rule (no user rule here)
     [averyId, repoServerId, "delete_branch"], // deny — nothing grants a write here
     [averyId, warehouseServerId, "query"], // deny — the role's grant is revoked for Avery
   ] as const) {
@@ -594,6 +668,20 @@ controls a reviewer would check before sign-off.`;
         projectId: inv.projectId,
       },
       inv.auth,
+    );
+  }
+
+  // Real, metered CONNECTOR calls attributed to a project — Dana reads the
+  // keyless mock-adapter warehouse connector a few times, so the "Spend by
+  // connector" card is non-empty on first open. Each allowed call = one audit
+  // row + one usage_events row (object_type 'connector') priced at the
+  // connector's flat rate; nothing external is contacted.
+  for (const object of ["accounts", "orders", "revenue_by_region"]) {
+    await call(
+      "POST",
+      `/v1/connectors/${warehouseConnectorId}/invoke`,
+      { operation: "read", object, projectId: demoProjectId },
+      danaAuth,
     );
   }
 }
@@ -855,7 +943,10 @@ RegulAIt demo data ready.
 ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecret}\n` : ""}
   Governance: 2 MCP servers with 8 tools (read + write), a 'repo-analyst' role
   granting read-only-all, per-user tool grants layered on top, 2 revocations,
-  2 approval rules, 1 data-scope rule, 2 rate limits, 2 connectors, 7 agents
+  scoped policy rules (user + a FLEET write-approval + a ROLE-scoped rate limit,
+  so any governed write pauses org-wide), 1 data-scope rule, 2 connectors (snowflake-
+  analytics executes via a keyless mock adapter and is metered per call at
+  $0.002; jira-cloud stays governance-only), 7 agents
   (3 mock = usable with no external keys; anthropic/openai/google/xai go live
   once you add a model credential in /admin → Model Credentials, which also
   lists exactly which agents are still waiting on one), and per-user agent
@@ -881,9 +972,9 @@ ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecre
   routed and metered exactly like a single-turn invoke.
 
   Spend & savings (pillars 5+6, /app): every user has a personal cost page —
-  measured spend, tokens, savings by technique, spend by agent, recent
-  invocations — plus a drill-down into any project they are a MEMBER of
-  (the per-project /costs endpoint admits members, not only admins).
+  measured spend, tokens, savings by technique, spend by agent, spend by
+  connector, recent invocations — plus a drill-down into any project they are a
+  MEMBER of (the per-project /costs endpoint admits members, not only admins).
 
   PM integration (pillar 8): the mock 'demo-pm' connection is linked to
   Dana's checkout-refactor run (every node = a mock work item) and to her
@@ -894,6 +985,15 @@ ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecre
   surfaced, never auto-fixed). /admin → PM Connections lists/creates
   connections; the webhook secret is shown exactly once there, like every
   secret.
+
+  Infra ops (pillar 3, §8.2): 5 mock resources with a scanned posture —
+  /admin → Infrastructure / Operations. The agent-runtime's LOW drift
+  auto-remediated on scan (audited, no approval, under its 'low' ceiling);
+  the control plane's drift+CVE and the API cert's HIGH expiry stay open; the
+  legacy cert is EXPIRED = CRITICAL and is ALWAYS approval-gated. 'Propose
+  remediation' on any open finding queues an infra_operation approval; the
+  HIPAA-tagged backup target shows a 2555d retention FLOOR from the §8.3
+  cascade overriding its own 30d policy.
 
   Workflows (pillar 2): 3 templates — standard-change (type 'feature'),
   sensitive-data (hipaa cascade), and complete-pipeline (type 'pipeline-demo':

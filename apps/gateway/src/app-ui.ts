@@ -596,25 +596,42 @@ const nrAgentSel = (nid, selected) => '<select data-nagent="' + nid + '">' + AGE
 // default cap, so canned templates stay ordinary single-turn workers.
 const nrToolsCtl = (id, servers, turns) => \`<div><label class="f">Max turns</label><input type="number" min="1" max="20" data-nturns="\${esc(id)}" value="\${turns ?? ""}" style="width:60px" title="pillar 7: tool-using loop turn cap for this worker — blank uses the default"></div>
   <div><label class="f">Tool servers</label><input data-ntools="\${esc(id)}" value="\${esc((servers ?? []).join(","))}" placeholder="MCP server id(s)" style="width:150px" title="pillar 7: comma-separated MCP server ids this worker may call tools from (governed per-call under your entitlements) — blank for none"></div>\`;
-const nrNodeRowsHtml = (t) => t.nodes.map((n, idx) => \`<div class="node-row">
+// §5.1 Team-Lead delegation controls: choose another node as THIS node's lead
+// (its worker inherits — and can never exceed — that lead's ceiling), and, when
+// this node is itself a lead, the agents/tools it allows its workers. Blank
+// lead + empty allow-lists = a flat node, byte-identical to today.
+const nrLeadOpts = (id, allIds, sel) => '<option value="">(no lead)</option>' +
+  allIds.filter((x) => x !== id).map((x) => '<option value="' + esc(x) + '"' + (x === sel ? " selected" : "") + '>' + esc(x) + "</option>").join("");
+const nrAllowAgentOpts = (selected) => AGENTS.map((a) =>
+  '<option value="' + a.agentId + '"' + ((selected ?? []).includes(a.agentId) ? " selected" : "") + '>' + esc(a.name) + "</option>").join("");
+const nrLeadCtl = (id, allIds, lead, aAgents, aTools) => \`<div><label class="f">Lead</label><select data-nlead="\${esc(id)}" title="§5.1: run this node under another node's delegation ceiling — its entitlements narrow this worker's">\${nrLeadOpts(id, allIds, lead)}</select></div>
+  <div><label class="f">Allowed agents</label><select multiple data-nallowagents="\${esc(id)}" style="min-width:120px;height:44px" title="§5.1 ceiling: agents a worker under THIS node (as lead) may be owned by — none selected = no agent constraint">\${nrAllowAgentOpts(aAgents)}</select></div>
+  <div><label class="f">Allowed tools</label><input data-nallowtools="\${esc(id)}" value="\${esc((aTools ?? []).join(","))}" placeholder="tool names" style="width:120px" title="§5.1 ceiling: comma-separated tool names a worker under THIS node may call — blank = no tool constraint"></div>\`;
+const nrLead = (id) => { const v = $('[data-nlead="' + id + '"]')?.value ?? ""; return v || null; };
+const nrAllowedAgents = (id) => Array.from($('[data-nallowagents="' + id + '"]')?.selectedOptions ?? []).map((o) => o.value);
+const nrAllowedTools = (id) => (($('[data-nallowtools="' + id + '"]')?.value ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+const nrLeadLabelHtml = (lead) => lead ? ' <span class="badge info" data-leadbadge="1">under ' + esc(lead) + '</span>' : "";
+const nrNodeRowsHtml = (t) => { const allIds = t.nodes.map((x) => x.id); return t.nodes.map((n, idx) => \`<div class="node-row">
   <span class="node-dot not_started"></span>
-  <div class="grow"><label class="f">\${esc(n.id)}\${n.dependsOn.length ? " · after " + n.dependsOn.join(", ") : ""}\${idx === 0 && NR_PREFILL ? ' <span class="badge accent">instruction from playground</span>' : ""}</label>
+  <div class="grow"><label class="f">\${esc(n.id)}\${n.dependsOn.length ? " · after " + n.dependsOn.join(", ") : ""}\${idx === 0 && NR_PREFILL ? ' <span class="badge accent">instruction from playground</span>' : ""}<span data-leadlabel="\${esc(n.id)}"></span></label>
     <input data-ntitle="\${n.id}" value="\${esc(n.title)}" style="width:100%" title="\${esc(nrInstructionFor(n, idx))}"></div>
   <div><label class="f">Agent</label>\${nrAgentSel(n.id)}</div>
   \${nrToolsCtl(n.id, n.toolServers, n.maxTurns)}
-</div>\`).join("");
+  \${nrLeadCtl(n.id, allIds, undefined, undefined, undefined)}
+</div>\`).join(""); };
 // proposal rows: same editor shape as templates, plus an editable instruction
 // textarea, a per-node delete, and substitution badges for agents the lead
 // suggested but the caller isn't granted
-const nrProposalRowsHtml = () => NR_PROPOSAL.nodes.map((n) => \`<div class="node-row">
+const nrProposalRowsHtml = () => { const allIds = NR_PROPOSAL.nodes.map((x) => x.id); return NR_PROPOSAL.nodes.map((n) => \`<div class="node-row"\${n.leadNodeId ? ' style="margin-left:22px"' : ""}>
   <span class="node-dot not_started"></span>
-  <div class="grow"><label class="f">\${esc(n.id)}\${n.dependsOn.length ? " · after " + n.dependsOn.join(", ") : ""}\${n.substituted ? ' <span class="badge warn" title="the lead suggested &#39;' + esc(n.substituted.requestedAgentName) + '&#39;, which is not granted to you — swapped to a granted agent">substituted</span>' : ""}\${(n.toolServers && n.toolServers.length) ? ' <span class="badge info" title="this worker is a tool-using loop — every tool call is governed per-call under your entitlements">tool-using</span>' : ""}</label>
+  <div class="grow"><label class="f">\${esc(n.id)}\${n.dependsOn.length ? " · after " + n.dependsOn.join(", ") : ""}\${n.substituted ? ' <span class="badge warn" title="the lead suggested &#39;' + esc(n.substituted.requestedAgentName) + '&#39;, which is not granted to you — swapped to a granted agent">substituted</span>' : ""}\${(n.toolServers && n.toolServers.length) ? ' <span class="badge info" title="this worker is a tool-using loop — every tool call is governed per-call under your entitlements">tool-using</span>' : ""}\${(n.allowedAgentIds && n.allowedAgentIds.length) || (n.allowedToolRefs && n.allowedToolRefs.length) ? ' <span class="badge accent" title="this node is a Team-Lead — it caps the agents/tools its workers may use">lead</span>' : ""}<span data-leadlabel="\${esc(n.id)}">\${nrLeadLabelHtml(n.leadNodeId)}</span></label>
     <input data-ntitle="\${esc(n.id)}" value="\${esc(n.title)}" style="width:100%">
     <textarea data-ninstr="\${esc(n.id)}" rows="3" style="width:100%;margin-top:4px" spellcheck="false" title="this node's worker is prompted with exactly this instruction">\${esc(n.instruction)}</textarea></div>
   <div><label class="f">Agent</label>\${nrAgentSel(n.id, n.ownerAgentId)}</div>
   \${nrToolsCtl(n.id, n.toolServers, n.maxTurns)}
+  \${nrLeadCtl(n.id, allIds, n.leadNodeId, n.allowedAgentIds, n.allowedToolRefs)}
   <button class="ghost small" data-ndel="\${esc(n.id)}" title="drop this task from the plan">×</button>
-</div>\`).join("");
+</div>\`).join(""); };
 // read a node's tool controls out of the DOM
 const nrToolServers = (id) => (($('[data-ntools="' + id + '"]')?.value ?? "").split(",").map((s) => s.trim()).filter(Boolean));
 const nrMaxTurns = (id) => { const v = parseInt($('[data-nturns="' + id + '"]')?.value ?? "", 10); return Number.isFinite(v) && v > 0 ? v : null; };
@@ -628,6 +645,12 @@ function nrSyncProposal() {
     n.toolServers = nrToolServers(n.id);
     const mt = nrMaxTurns(n.id);
     if (mt) n.maxTurns = mt; else delete n.maxTurns;
+    const lead = nrLead(n.id);
+    if (lead) n.leadNodeId = lead; else delete n.leadNodeId;
+    const aAgents = nrAllowedAgents(n.id);
+    if (aAgents.length) n.allowedAgentIds = aAgents; else delete n.allowedAgentIds;
+    const aTools = nrAllowedTools(n.id);
+    if (aTools.length) n.allowedToolRefs = aTools; else delete n.allowedToolRefs;
   }
 }
 function nrWireProposalRows() {
@@ -636,9 +659,26 @@ function nrWireProposalRows() {
       nrSyncProposal();
       const id = b.dataset.ndel;
       NR_PROPOSAL.nodes = NR_PROPOSAL.nodes.filter((n) => n.id !== id)
-        .map((n) => ({ ...n, dependsOn: n.dependsOn.filter((d) => d !== id) }));
+        .map((n) => ({ ...n, dependsOn: n.dependsOn.filter((d) => d !== id),
+          leadNodeId: n.leadNodeId === id ? undefined : n.leadNodeId }));
       $("#nr-nodes").innerHTML = nrProposalRowsHtml();
       nrWireProposalRows();
+      nrWireLeadRows();
+      if ($("#nr-adv")?.open) $("#nr-json").value = JSON.stringify(nrGraph(), null, 2);
+    }));
+  nrWireLeadRows();
+}
+// §5.1: reflect a lead pick immediately — the row indents and shows an "under
+// <lead>" badge so the two-level hierarchy is legible as you build it.
+function nrWireLeadRows() {
+  document.querySelectorAll("[data-nlead]").forEach((sel) =>
+    sel.addEventListener("change", () => {
+      const id = sel.dataset.nlead;
+      const lead = sel.value;
+      const row = sel.closest(".node-row");
+      const label = row?.querySelector('[data-leadlabel="' + id + '"]');
+      if (label) label.innerHTML = nrLeadLabelHtml(lead);
+      if (row) row.style.marginLeft = lead ? "22px" : "";
       if ($("#nr-adv")?.open) $("#nr-json").value = JSON.stringify(nrGraph(), null, 2);
     }));
 }
@@ -651,6 +691,9 @@ function nrGraph() {
       nodes: NR_PROPOSAL.nodes.map((n) => {
         const servers = nrToolServers(n.id);
         const turns = nrMaxTurns(n.id);
+        const lead = nrLead(n.id);
+        const aAgents = nrAllowedAgents(n.id);
+        const aTools = nrAllowedTools(n.id);
         return {
           id: n.id,
           title: ($('[data-ntitle="' + n.id + '"]')?.value ?? n.title).trim() || n.title,
@@ -660,6 +703,9 @@ function nrGraph() {
           dependsOn: n.dependsOn,
           ...(servers.length ? { toolServers: servers } : {}),
           ...(turns ? { maxTurns: turns } : {}),
+          ...(lead ? { leadNodeId: lead } : {}),
+          ...(aAgents.length ? { allowedAgentIds: aAgents } : {}),
+          ...(aTools.length ? { allowedToolRefs: aTools } : {}),
         };
       }),
     };
@@ -672,6 +718,9 @@ function nrGraph() {
     nodes: t.nodes.map((n, idx) => {
       const servers = nrToolServers(n.id);
       const turns = nrMaxTurns(n.id);
+      const lead = nrLead(n.id);
+      const aAgents = nrAllowedAgents(n.id);
+      const aTools = nrAllowedTools(n.id);
       return {
         id: n.id,
         title: ($('[data-ntitle="' + n.id + '"]')?.value ?? n.title).trim() || n.title,
@@ -681,6 +730,9 @@ function nrGraph() {
         dependsOn: n.dependsOn,
         ...(servers.length ? { toolServers: servers } : {}),
         ...(turns ? { maxTurns: turns } : {}),
+        ...(lead ? { leadNodeId: lead } : {}),
+        ...(aAgents.length ? { allowedAgentIds: aAgents } : {}),
+        ...(aTools.length ? { allowedToolRefs: aTools } : {}),
       };
     }),
   };
@@ -724,6 +776,13 @@ async function runsPage() {
     <hr class="hr">\`;
   const subNotes = NR_PROPOSAL ? NR_PROPOSAL.nodes.filter((n) => n.substituted).map((n) =>
     \`<div class="dim" style="font-size:12px;margin-bottom:4px">node \${esc(n.id)}: the lead suggested “\${esc(n.substituted.requestedAgentName)}”, which is not granted to you — swapped to \${esc(AGENT_NAMES[n.ownerAgentId] ?? "a granted agent")}.</div>\`).join("") : "";
+  // §5.1: ceiling entries the lead named that fall outside your own entitlements
+  // were dropped from the delegation ceiling (suggest, never grant) — surfaced
+  // exactly like a substituted owner so nothing is silently widened.
+  const dropNotes = NR_PROPOSAL ? NR_PROPOSAL.nodes.flatMap((n) => [
+    ...((n.droppedAllowedAgents ?? []).length ? [\`<div class="dim" style="font-size:12px;margin-bottom:4px">node \${esc(n.id)}: lead ceiling dropped un-granted agent(s) \${esc(n.droppedAllowedAgents.join(", "))} — not in your entitlements.</div>\`] : []),
+    ...((n.droppedAllowedTools ?? []).length ? [\`<div class="dim" style="font-size:12px;margin-bottom:4px">node \${esc(n.id)}: lead ceiling dropped un-entitled tool(s) \${esc(n.droppedAllowedTools.join(", "))}.</div>\`] : []),
+  ]).join("") : "";
   const proposalNote = NR_PROPOSAL
     ? \`<div class="row" style="margin-bottom:8px">
         <span class="badge accent">plan drafted by \${esc(NR_PROPOSAL.leadName)}</span>
@@ -731,7 +790,7 @@ async function runsPage() {
         \${NR_PROPOSAL.retried ? '<span class="badge warn" title="the first draft failed validation; the lead corrected it on one retry">retried once</span>' : ""}
         <span class="dim" style="font-size:12.5px">review before planning — nothing runs until you accept</span>
         <button class="ghost small" id="nr-clearprop">discard</button>
-      </div>\${subNotes}\`
+      </div>\${subNotes}\${dropNotes}\`
     : "";
   const newRun = AGENTS.length === 0
     ? '<div class="empty">No agents are granted to your account — ask an admin to grant you one before planning a run.</div>'
@@ -798,6 +857,7 @@ function wireRuns() {
     NR_PROPOSAL = null; // a template pick replaces the drafted proposal
     const t = RUN_TEMPLATES.find((x) => x.id === $("#nr-template").value) ?? RUN_TEMPLATES[0];
     $("#nr-nodes").innerHTML = nrNodeRowsHtml(t);
+    nrWireLeadRows();
     // a new template is a new base — refill the JSON even if it was edited
     if ($("#nr-adv").open) $("#nr-json").value = JSON.stringify(nrGraph(), null, 2);
   });
@@ -1274,6 +1334,7 @@ const approvalLabel = (a) => {
   // the two surfaces can never label the same approval differently
   const sentinel = approvalStageLabel(a);
   if (sentinel) return sentinel;
+  if (a.objectType === "infra_operation") return "Infra remediation" + (a.objectLabel ? " · " + a.objectLabel : "");
   return (a.objectType === "workflow" ? "Sign-off · " : a.objectType === "run" ? "Run escalation · " : "") + (a.stageId ?? "");
 };
 // where the governed object lives in this app — the row must let the
@@ -1674,23 +1735,40 @@ function wireProjects() {
 // savings from cost_events — plus a drill-down into any project the user is
 // a member of (the /costs endpoint admits members, not only admins).
 async function spendPage() {
-  const [usage, costs, dir] = await Promise.all([
+  const [usage, costs, dir, conns] = await Promise.all([
     get("/v1/usage-events?limit=100"),
     get("/v1/cost-events?limit=200"),
     get("/v1/users/directory").catch(() => ({ users: [] })),
+    // the caller's OWN granted connectors (non-admin-safe) — carries names for
+    // the Spend-by-connector labels without touching the admin-only catalog
+    ME.userId ? get("/v1/users/" + ME.userId + "/connectors").catch(() => ({ connectors: [] })) : Promise.resolve({ connectors: [] }),
   ]);
   DIRECTORY = dir.users ?? [];
+  const CONNECTOR_NAMES = Object.fromEntries((conns.connectors ?? []).map((c) => [c.connectorId, c.name]));
   const t = usage.totals ?? {};
   const events = usage.events ?? [];
   const estSaved = (costs.totals ?? []).reduce((s, x) => s + (Number(x.estimatedCostSavedUsd) || 0), 0);
+  // one ledger, two object types: agent rows drive Spend by agent, connector
+  // rows drive Spend by connector — split so neither shows as the other.
   const byAgent = {};
+  const byConnector = {};
   for (const e of events) {
+    if (e.objectType === "connector") {
+      const key = (e.connectorId ?? "?") + ":" + (e.operation ?? "");
+      const cur = byConnector[key] ?? (byConnector[key] = {
+        label: (CONNECTOR_NAMES[e.connectorId] ?? "connector") + " · " + (e.operation ?? ""),
+        costUsd: 0, events: 0,
+      });
+      cur.costUsd += e.costUsd ?? 0; cur.events++;
+      continue;
+    }
     const cur = byAgent[e.agentId] ?? (byAgent[e.agentId] = { label: AGENT_NAMES[e.agentId] ?? e.model, costUsd: 0, events: 0 });
     cur.costUsd += e.costUsd ?? 0; cur.events++;
   }
   const agentItems = Object.values(byAgent).sort((a, b) => b.costUsd - a.costUsd);
+  const connectorItems = Object.values(byConnector).sort((a, b) => b.costUsd - a.costUsd);
   const projName = (pid) => pid ? ((PROJECTS.find((p) => p.id === pid) || {}).name ?? pid.slice(0, 8) + "…") : "—";
-  const rows = events.slice(0, 30).map((e) => \`<tr>
+  const rows = events.filter((e) => e.objectType !== "connector").slice(0, 30).map((e) => \`<tr>
     <td class="dim">\${ago(e.at)}</td>
     <td>\${esc(AGENT_NAMES[e.agentId] ?? "agent")}</td>
     <td class="mono" style="font-size:11.5px">\${esc(e.model)}\${e.refusal ? ' <span class="badge bad">refused</span>' : ""}</td>
@@ -1715,6 +1793,7 @@ async function spendPage() {
   </div>
   <h2>Savings by technique — estimated, full history</h2><div class="card">\${barChart(costs.totals ?? [], "estimatedCostSavedUsd", (i) => i.technique)}</div>
   <h2>Spend by agent — last \${events.length} invocation\${events.length === 1 ? "" : "s"}</h2><div class="card">\${barChart(agentItems, "costUsd", (i) => i.label)}</div>
+  <h2>Spend by connector</h2><div class="card">\${connectorItems.length ? barChart(connectorItems, "costUsd", (i) => i.label) : '<div class="empty">No metered connector calls yet — invoke a connector with a provider adapter.</div>'}</div>
   <h2>Recent invocations</h2>
   <div class="card" style="padding:0 18px">
     <table><tr><th>When</th><th>Agent</th><th>Model served</th><th>Tokens</th><th>Cost</th><th>Saved</th><th>Project</th></tr>
@@ -1740,6 +1819,7 @@ function wireSpend() {
           + '<h2>Budget vs actual</h2><div class="card">' + budgetGauge(c.budget.spentUsd, c.budget.budgetUsd, c.budget.overageApproved) + "</div>"
           + '<h2>Showback by member</h2><div class="card">' + barChart(c.byUser, "costUsd", (i) => userName(i.userId)) + "</div>"
           + '<h2>By agent / model</h2><div class="card">' + barChart(c.byAgent, "costUsd", (i) => AGENT_NAMES[i.agentId] ?? i.model) + "</div>"
+          + '<h2>Spend by connector</h2><div class="card">' + ((c.byConnector ?? []).length ? barChart(c.byConnector, "costUsd", (i) => (i.name ?? "connector") + " · " + (i.operation ?? "")) : '<div class="empty">No metered connector calls for this project.</div>') + "</div>"
           + '<h2>Estimated savings by technique</h2><div class="card">' + barChart(c.estimatedSavings, "estimatedCostSavedUsd", (i) => i.technique) + "</div>";
       } catch (e) { out.innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; }
     }));

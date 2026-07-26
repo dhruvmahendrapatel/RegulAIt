@@ -807,3 +807,241 @@ describe("display names in reason prose (demo finding 5)", () => {
     expect(d.reason).toContain(`'salesforce' (${CONNECTOR.slice(0, 8)}…)`);
   });
 });
+
+// ---------------------------------------------------------------------------
+// §5.1 Team-Lead entitlement-narrowing ceiling
+// ---------------------------------------------------------------------------
+
+describe("evaluateAgent Team-Lead ceiling (§5.1)", () => {
+  it("allows a granted agent that is inside the lead ceiling", () => {
+    const d = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "execute",
+      agentGrants: [agentGrant()], ceilingAgentIds: ["agent-claude", "agent-gpt"],
+    });
+    expect(d.effect).toBe("allow");
+    expect(d.ruleChain).toContainEqual({ rule: "agent-lead-ceiling", outcome: "allow" });
+  });
+
+  it("DENIES a granted agent that the lead ceiling excludes (narrows, not relabels)", () => {
+    const d = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "execute",
+      agentGrants: [agentGrant()], ceilingAgentIds: ["agent-gpt"], // claude granted but not in ceiling
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe("agent-lead-ceiling");
+    expect(d.reason).toContain("delegation ceiling");
+  });
+
+  it("does not rescue an UNgranted agent — an empty grant stays default-deny even if the ceiling lists it", () => {
+    const d = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "execute",
+      agentGrants: [], ceilingAgentIds: ["agent-claude"],
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe(DEFAULT_DENY_RULE_ID); // ceiling never reached
+    expect(d.ruleChain).not.toContainEqual({ rule: "agent-lead-ceiling", outcome: "allow" });
+  });
+
+  it("an empty ceiling forbids every agent (nothing allowed)", () => {
+    const d = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "execute",
+      agentGrants: [agentGrant()], ceilingAgentIds: [],
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe("agent-lead-ceiling");
+  });
+
+  it("a null/absent ceiling changes nothing (flat run) and adds no trace entry", () => {
+    const d = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "execute", agentGrants: [agentGrant()], ceilingAgentIds: null,
+    });
+    expect(d.effect).toBe("allow");
+    expect(d.ruleChain.some((r) => r.rule === "agent-lead-ceiling")).toBe(false);
+  });
+});
+
+describe("evaluate tool Team-Lead ceiling (§5.1)", () => {
+  it("allows a granted tool inside the ceiling", () => {
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [toolGrant()], serverGrants: [], ceilingTools: ["query_database", "list_rows"],
+    });
+    expect(d.effect).toBe("allow");
+    expect(d.ruleChain).toContainEqual({ rule: "lead-ceiling", outcome: "allow" });
+  });
+
+  it("DENIES a granted tool the ceiling excludes, with ruleId lead-ceiling (narrows)", () => {
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [toolGrant()], serverGrants: [], ceilingTools: ["some_other_tool"],
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe("lead-ceiling");
+  });
+
+  it("does NOT rescue an ungranted tool — stays default-deny before the ceiling is consulted", () => {
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: writeTool, // not granted
+      toolGrants: [toolGrant()], serverGrants: [], ceilingTools: ["drop_table"],
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe(DEFAULT_DENY_RULE_ID);
+    expect(d.ruleChain.some((r) => r.rule === "lead-ceiling")).toBe(false);
+  });
+
+  it("a null/absent ceiling changes nothing and adds no trace entry (137 proxy tests stay green)", () => {
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool, toolGrants: [toolGrant()], serverGrants: [],
+    });
+    expect(d.effect).toBe("allow");
+    expect(d.ruleChain.some((r) => r.rule === "lead-ceiling")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PILLAR 1 rule scoping — role/team/fleet-scoped restriction rules
+//
+// The rule set arrives ALREADY scope-filtered by the gateway (a fleet rule has
+// no user id, a role rule matched the user's roles, etc.). The kernel only
+// re-checks the one scope it must never widen: a 'user'-scoped rule still binds
+// to its own user id. Every scoped rule is a pure RESTRICTION evaluated after
+// the grant check — it can only ever ADD a deny/approval/cap.
+// ---------------------------------------------------------------------------
+
+describe("rule scoping (pillar 1): fleet/role/team restrictions", () => {
+  const fleetApproval = (over: Partial<ApprovalRule> = {}): ApprovalRule => ({
+    id: "ar-fleet",
+    userId: null,
+    serverId: null,
+    scope: "fleet",
+    serverScope: "all",
+    toolName: null,
+    writeOnly: false,
+    approverUserId: APPROVER,
+    ...over,
+  });
+
+  it("a FLEET approval rule pauses a granted call by a user with NO user-specific rule", () => {
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [toolGrant()], serverGrants: [],
+      approvalRules: [fleetApproval()],
+    });
+    expect(d.effect).toBe("require_approval");
+    expect(d.ruleId).toBe("ar-fleet");
+    expect(d.approverUserId).toBe(APPROVER);
+    // additive audit prose names the scope that paused it
+    expect(d.reason).toContain("fleet-wide rule");
+    expect(d.reason).toContain("all servers");
+  });
+
+  it("a ROLE-scoped approval rule requires sign-off; a user rule cannot relax it (most-restrictive-wins)", () => {
+    const roleRule: ApprovalRule = {
+      id: "ar-role", userId: null, serverId: SERVER, roleId: ROLE, scope: "role",
+      serverScope: "server", toolName: null, writeOnly: false, approverUserId: APPROVER,
+    };
+    // role rule alone → pauses
+    const d1 = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [toolGrant()], serverGrants: [], approvalRules: [roleRule],
+    });
+    expect(d1.effect).toBe("require_approval");
+    expect(d1.reason).toContain("role-scoped rule");
+    // adding a user-scoped rule too — still require_approval, never relaxed
+    const userRule = approvalRule({ id: "ar-user" });
+    const d2 = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [toolGrant()], serverGrants: [], approvalRules: [userRule, roleRule],
+    });
+    expect(d2.effect).toBe("require_approval");
+  });
+
+  it("data-scope rules from two scopes INTERSECT — a value must satisfy every matching rule", () => {
+    const userDs: DataScopeRule = {
+      id: "ds-user", userId: USER, serverId: SERVER, scope: "user", serverScope: "server",
+      toolName: null, argPath: "schema", allowedValues: ["analytics", "reporting"],
+    };
+    const fleetDs: DataScopeRule = {
+      id: "ds-fleet", userId: null, serverId: null, scope: "fleet", serverScope: "all",
+      toolName: null, argPath: "schema", allowedValues: ["reporting", "ops"],
+    };
+    const base = {
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [toolGrant()], serverGrants: [], dataScopeRules: [userDs, fleetDs],
+    };
+    // in BOTH allow-lists → allowed
+    expect(evaluate({ ...base, args: { schema: "reporting" } }).effect).toBe("allow");
+    // only in the user rule → the fleet rule denies it
+    const dA = evaluate({ ...base, args: { schema: "analytics" } });
+    expect(dA.effect).toBe("deny");
+    expect(dA.ruleId).toBe("ds-fleet");
+    // only in the fleet rule → the user rule denies it
+    const dO = evaluate({ ...base, args: { schema: "ops" } });
+    expect(dO.effect).toBe("deny");
+    expect(dO.ruleId).toBe("ds-user");
+  });
+
+  it("a FLEET and a USER rate limit each count independently; the tightest (exhausted) denies first", () => {
+    const userRl: RateLimit = {
+      id: "rl-user", userId: USER, serverId: SERVER, scope: "user", serverScope: "server",
+      toolName: null, maxCalls: 5, windowSeconds: 60, currentCount: 2,
+    };
+    const fleetRl: RateLimit = {
+      id: "rl-fleet", userId: null, serverId: null, scope: "fleet", serverScope: "all",
+      toolName: null, maxCalls: 3, windowSeconds: 60, currentCount: 3,
+    };
+    // fleet exhausted, user not → fleet denies
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [toolGrant()], serverGrants: [], rateLimits: [userRl, fleetRl],
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe("rl-fleet");
+    // neither exhausted → allowed
+    const ok = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [toolGrant()], serverGrants: [],
+      rateLimits: [{ ...userRl }, { ...fleetRl, currentCount: 0 }],
+    });
+    expect(ok.effect).toBe("allow");
+    // user exhausted instead → user denies
+    const du = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [toolGrant()], serverGrants: [],
+      rateLimits: [{ ...userRl, currentCount: 5 }, { ...fleetRl, currentCount: 0 }],
+    });
+    expect(du.effect).toBe("deny");
+    expect(du.ruleId).toBe("rl-user");
+  });
+
+  it("THE INVARIANT: a fleet/role restriction NEVER rescues an ungranted call — default-deny still wins", () => {
+    // fleet approval on an ungranted tool
+    const dApproval = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [], serverGrants: [], approvalRules: [fleetApproval()],
+    });
+    expect(dApproval.effect).toBe("deny");
+    expect(dApproval.ruleId).toBe(DEFAULT_DENY_RULE_ID);
+    // a role data-scope rule on an ungranted tool likewise cannot rescue it
+    const roleDs: DataScopeRule = {
+      id: "ds-role", userId: null, serverId: SERVER, roleId: ROLE, scope: "role",
+      serverScope: "server", toolName: null, argPath: "schema", allowedValues: ["analytics"],
+    };
+    const dScope = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [], serverGrants: [], dataScopeRules: [roleDs], args: { schema: "analytics" },
+    });
+    expect(dScope.effect).toBe("deny");
+    expect(dScope.ruleId).toBe(DEFAULT_DENY_RULE_ID);
+  });
+
+  it("a user-scoped rule still binds to its own user id — another user's fleet-free rule never applies", () => {
+    // legacy/user rule for OTHER_USER is not applied to USER (subject check kept)
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [toolGrant()], serverGrants: [],
+      approvalRules: [approvalRule({ userId: OTHER_USER })],
+    });
+    expect(d.effect).toBe("allow");
+  });
+});

@@ -3,6 +3,7 @@ import {
   and,
   approvals,
   auditLog,
+  connectors,
   count,
   complianceProfiles,
   inArray,
@@ -125,7 +126,11 @@ const PII_STRICTNESS: Record<string, number> = { log: 0, warn: 1, block: 2 };
  * no strictness ordering among frameworks, so profiles compose additively:
  * required templates union, mcp defaults tighten to read_only if ANY profile
  * says so, retention takes the max, pii mode takes the strictest of the
- * three defined modes (block > warn > log). */
+ * three defined modes (block > warn > log).
+ *
+ * §8.3 -> §8.2 tie (pillar 3): backupRetentionDays composes as the MAX (the
+ * longest floor wins) and patchCadenceDays as the MIN (the strictest cadence
+ * wins). The pillar-3 infra layer consumes these — see infra.ts. */
 export function effectiveCompliancePolicy(profiles: ComplianceProfileRow[]) {
   return {
     requiredTemplateIds: [...new Set(profiles.flatMap((p) => p.requiredTemplateIds ?? []))],
@@ -141,7 +146,26 @@ export function effectiveCompliancePolicy(profiles: ComplianceProfileRow[]) {
       (m, p) => (PII_STRICTNESS[p.piiMode]! > PII_STRICTNESS[m]! ? (p.piiMode as never) : m),
       "log",
     ),
+    backupRetentionDays: profiles.reduce<number | null>(
+      (m, p) =>
+        p.backupRetentionDays == null ? m : Math.max(m ?? 0, p.backupRetentionDays),
+      null,
+    ),
+    patchCadenceDays: profiles.reduce<number | null>(
+      (m, p) =>
+        p.patchCadenceDays == null ? m : m == null ? p.patchCadenceDays : Math.min(m, p.patchCadenceDays),
+      null,
+    ),
   };
+}
+
+/** Exported for the pillar-3 infra layer (§8.3 cascade consumption): the
+ * compliance profiles matching a set of tags. */
+export async function complianceProfilesForTags(
+  db: Db,
+  tags: string[],
+): Promise<ComplianceProfileRow[]> {
+  return profilesForTags(db, tags);
 }
 
 async function profilesForTags(db: Db, tags: string[]): Promise<ComplianceProfileRow[]> {
@@ -906,6 +930,8 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       mcpDefaultMode: body.mcpDefaultMode ?? ("read_write" as const),
       auditRetentionDays: body.auditRetentionDays ?? null,
       piiMode: body.piiMode ?? ("log" as const),
+      backupRetentionDays: body.backupRetentionDays ?? null,
+      patchCadenceDays: body.patchCadenceDays ?? null,
     };
     const [row] = await db
       .insert(complianceProfiles)
@@ -938,7 +964,15 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       enforcement: {
         requiredWorkflowTemplates: "enforced-at-instance-creation",
         mcpDefaultMode: "declared-not-enforced",
-        auditRetentionDays: "declared-not-enforced",
+        // §8.3 -> §8.2: auditRetentionDays now also FEEDS the pillar-3 infra
+        // backup-retention floor (consumed there); audit-LOG pruning itself
+        // remains a declared policy awaiting its own enforcement point.
+        auditRetentionDays: "consumed-by-infra-backup-floor; audit-log pruning declared-not-enforced",
+        // These two are ENFORCED by pillar 3: any infra resource carrying this
+        // project's tags derives a backup-retention floor / patch-cadence
+        // ceiling from them at scan time (see /v1/infra).
+        backupRetentionDays: "enforced-as-infra-floor (pillar 3)",
+        patchCadenceDays: "enforced-as-infra-ceiling (pillar 3)",
         piiMode: "declared-not-enforced",
       },
     };
@@ -1031,8 +1065,14 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     }
 
     const where = eq(usageEvents.projectId, projectId);
+    // Connector rows carry no agent/model — keep byAgent to object_type='agent'
+    // so a connector call never appears as a phantom agent. The `measured` total
+    // and `byUser` deliberately span BOTH object types (one spend ledger), so
+    // connector spend rolls up automatically without double-counting.
+    const agentWhere = and(where, eq(usageEvents.objectType, "agent"));
+    const connectorWhere = and(where, eq(usageEvents.objectType, "connector"));
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 3600 * 1000);
-    const [[measured], byUser, byAgent, estimated, [recent]] = await Promise.all([
+    const [[measured], byUser, byAgent, byConnector, estimated, [recent]] = await Promise.all([
       db
         .select({
           events: count(),
@@ -1060,8 +1100,20 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
           events: count(),
         })
         .from(usageEvents)
-        .where(where)
+        .where(agentWhere)
         .groupBy(usageEvents.agentId, usageEvents.model),
+      db
+        .select({
+          connectorId: usageEvents.connectorId,
+          name: connectors.name,
+          operation: usageEvents.operation,
+          costUsd: sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8`,
+          events: count(),
+        })
+        .from(usageEvents)
+        .leftJoin(connectors, eq(usageEvents.connectorId, connectors.id))
+        .where(connectorWhere)
+        .groupBy(usageEvents.connectorId, connectors.name, usageEvents.operation),
       db
         .select({
           technique: costEvents.technique,
@@ -1091,6 +1143,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       measured,
       byUser,
       byAgent,
+      byConnector,
       estimatedSavings: estimated,
       budget: {
         budgetUsd: project.budgetUsd,

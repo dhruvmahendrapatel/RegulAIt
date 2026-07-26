@@ -70,6 +70,7 @@ import { registerMcpProxy } from "./mcp-proxy.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
 import { registerConversationRoutes } from "./conversations.js";
 import { applyProjectApprovalDecision, registerProjectRoutes } from "./projects.js";
+import { applyInfraApprovalDecision, registerInfraRoutes } from "./infra.js";
 import { ADMIN_PORTAL_HTML } from "./admin-portal.js";
 import { APP_HTML } from "./app-ui.js";
 import { registerOptimizationRoutes } from "./optimization.js";
@@ -569,13 +570,33 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     rules: await db.select().from(rateLimits),
   }));
 
+  // PILLAR 1 rule scoping: the discriminant is already validated by the shared
+  // superRefine (mirrors the DB CHECK). We null out every off-scope subject/
+  // server field so the row is clean and the DB CHECK always passes — a
+  // role-scoped rule stores only roleId, a fleet rule stores none, an
+  // all-servers rule stores no serverId.
+  const scopedRuleColumns = (body: {
+    scope: "user" | "role" | "team" | "fleet";
+    serverScope: "server" | "all";
+    userId?: string | null;
+    roleId?: string | null;
+    teamId?: string | null;
+    serverId?: string | null;
+  }) => ({
+    scope: body.scope,
+    serverScope: body.serverScope,
+    userId: body.scope === "user" ? body.userId! : null,
+    roleId: body.scope === "role" ? body.roleId! : null,
+    teamId: body.scope === "team" ? body.teamId! : null,
+    serverId: body.serverScope === "server" ? body.serverId! : null,
+  });
+
   app.post("/v1/rules/approvals", async (req, reply) => {
     const body = createApprovalRuleSchema.parse(req.body);
     const [row] = await db
       .insert(approvalRules)
       .values({
-        userId: body.userId,
-        serverId: body.serverId,
+        ...scopedRuleColumns(body),
         toolName: body.toolName ?? null,
         writeOnly: body.writeOnly ?? false,
         approverUserId: body.approverUserId,
@@ -589,8 +610,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const [row] = await db
       .insert(dataScopeRules)
       .values({
-        userId: body.userId,
-        serverId: body.serverId,
+        ...scopedRuleColumns(body),
         toolName: body.toolName ?? null,
         argPath: body.argPath,
         allowedValues: body.allowedValues,
@@ -604,8 +624,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const [row] = await db
       .insert(rateLimits)
       .values({
-        userId: body.userId,
-        serverId: body.serverId,
+        ...scopedRuleColumns(body),
         toolName: body.toolName ?? null,
         maxCalls: body.maxCalls,
         windowSeconds: body.windowSeconds,
@@ -870,6 +889,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       if (updated.objectType === "project") {
         await applyProjectApprovalDecision(tx as unknown as Db, updated, body.decision, deciderUserId);
       }
+      // Pillar 3 §8.2 governed remediations: approve -> provider.remediate +
+      // finding 'remediated'; deny -> 'accepted_risk'. Both audited. SoD guards
+      // (named-approver, admin-override-reason, self-review-reason) apply above.
+      if (updated.objectType === "infra_operation") {
+        await applyInfraApprovalDecision(tx as unknown as Db, updated, body.decision, deciderUserId);
+      }
       return { updated, postCommit };
     });
     if (!outcome.updated) {
@@ -932,6 +957,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerAgentConnectorRoutes(app, db, { dataKey: opts.dataKey });
   registerConversationRoutes(app, db);
   registerProjectRoutes(app, db);
+  registerInfraRoutes(app, db, opts.dataKey);
   registerOptimizationRoutes(app, db);
   registerOrchestrationRoutes(app, db, { dataKey: opts.dataKey });
   registerDecomposeRoutes(app, db, { dataKey: opts.dataKey });

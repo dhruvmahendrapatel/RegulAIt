@@ -393,6 +393,109 @@ Sync-now verification works, and receivers without read-back fail loudly into th
 orphan flow. `DEFAULT_MAPPINGS.generic_webhook` is the IDENTITY map over all five canonical
 states including blocked — nothing invented because the vocabulary is ours. E2e: the fake
 receiver verifies the HMAC on every request and asserts the token never travels raw.
+**§8.2 infrastructure-operations layer, 2026-07-26 — pillar 3's last unstarted surface lands
+as a GOVERNED-operations layer (migration 0027).** Monitored resources + operational policies
++ inert findings + governed remediation — not a real patcher; a keyless MockInfraProvider
+demos the whole detect→propose→approve→remediate spectrum. Migration 0027: infra_resources
+(kind control_plane|agent_runtime|cert|backup_target, classifications), infra_policies
+(patch cadence, cert-rotation window, backup schedule+retention, drift baseline,
+auto_remediate_max_severity — enum low|medium|high, can't hold 'critical'), infra_findings
+(drift|cve|cert_expiring|backup_missed × low|medium|high|critical, status open|
+remediation_proposed|auto_remediated|remediated|accepted_risk; UNIQUE on
+(resource,kind,detail.signature) so re-scan is idempotent); + approvals/audit_log objectType
++= 'infra_operation'; + compliance_profiles gains backup_retention_days + patch_cadence_days.
+New packages/infra-provider mirrors connector-provider (scan/remediate interface, mock keyless
++ aws/azure/gcp 501). THE INVARIANT: a finding is an inert report; a remediation is governed.
+On scan a finding is AUTO-remediated (no approval, still AUDITED ruleId infra-auto-remediate)
+iff policy has an auto ceiling AND severity ≤ ceiling AND severity !== 'critical'; everything
+else + ALL critical findings are approval-gated (approvals row objectType infra_operation via
+__infra_remediation__ sentinel → the shared /decide txn → applyInfraApprovalDecision calls
+provider.remediate on approve / accepted_risk on deny, both audited, all SoD guards for free).
+Critical is doubly guarded (ceiling can't be 'critical' + explicit !=='critical'). §8.3
+FINALLY ENFORCED: effectiveCompliancePolicy now composes backupRetentionDays (max) +
+patchCadenceDays (min); a classified resource's backup floor = max(policy, cascade.backup,
+cascade.auditRetentionDays) — consuming the formerly-dead auditRetentionDays — and its patch
+ceiling = min(policy, cascade.patch); the /compliance endpoint's "declared-not-enforced"
+labels honestly narrowed to only the still-unenforced parts. Admin Operations tab (resources/
+policies/scan-now/findings-inbox/posture); app-ui infra approval label; seed 5 resources (one
+HIPAA) + a scan producing the auto/open/critical mix. Suite 535 → 552 (10 provider unit + 7
+e2e). Independently re-verified: build clean, infra-provider 10/10, infra e2e + mcp-proxy
+157/157 (shared decide path regression-free).
+
+**Pillar-1 rule scoping, 2026-07-26 — policy rules gain role/team/fleet scope (migration
+0026); the "one row per user per server" gap closed.** All three restriction-rule tables
+(approval_rules, rate_limits, data_scope_rules) were hard-bound to one user × one server
+(NOT NULL FKs) — a fleet-wide "any write requires approval" was inexpressible. Migration 0026
+(identical per table): user_id/server_id → nullable; add role_id/team_id (nullable FKs),
+scope ('user'|'role'|'team'|'fleet', default 'user') + server_scope ('server'|'all', default
+'server'); raw CHECK constraints enforce the discriminant; existing rows backfill to
+scope='user'/server_scope='server' — byte-identical behaviour (all pre-existing single-user
+rule tests pass unchanged). The gateway pre-filters rules in SQL by scope-membership —
+`(fleet OR user=me OR role∈myRoles OR team∈myTeams) AND (all-servers OR server=this)`
+(loadScopeMemberships resolves roleIds+teamIds) — exactly as role GRANTS are already
+pre-filtered, keeping the kernel subject-free. THE INVARIANT (proven): all three rule types
+run ONLY AFTER the untouched grant check, so a scoped rule can only ADD a deny/require_approval/
+cap — it can never move default-deny to allow, and never relax another scope. Most-restrictive-
+wins with NO cross-scope override (no exemptions in v1 — that would widen; deferred as a
+separate explicit object): data-scope intersects all matching rules, rate-limits keep
+independent per-subject counts (tightest denies first, no summing; all-servers rules count
+across servers), approval pauses on any scope match. Guard test: a fleet/role restriction
+never rescues an ungranted call. Admin Policy & Rules tab gains scope + server-scope selectors
+with a swapping target select and legible "fleet"/"role: X"/"team: Y"/"all servers" listing;
+seed shows a fleet approval rule + a role-scoped rate limit. Suite 524 → 535 (6 kernel unit +
+5 e2e incl. the headline "fleet rule reaches a user with NO user-specific rule"). Independently
+re-verified: build clean, policy-kernel 71/71, mcp-proxy 150/150.
+
+**Connector execution layer, 2026-07-26 — pillar 5's connector-cost gap closed (migration
+0025).** POST /v1/connectors/:id/invoke now really contacts the target system and meters cost.
+New package `packages/connector-provider` mirrors pm-provider: CONNECTOR_PROVIDER_KINDS
+(http/webhook/slack/github/jira/snowflake/generic/mock) + isConnectorProviderKind, neutral
+`ConnectorProvider.invoke({operation,object?,payload?})→{status,body}`, injectable FetchLike,
+GenericHttpConnectorProvider (read→GET, write→POST payload, optional bearer) + Webhook +
+keyless MockConnectorProvider; registry exhaustive-switch, mock keyless, generic/http/webhook
+need baseUrl, slack/github/jira/snowflake throw 501 (no silent promises). THE INVARIANT: one
+allowed call = the existing ONE audit row + exactly ONE usage_events row; denied → 403 no bill,
+failed upstream → 502 no bill (mirrors model path); execute+meter strictly inside the allow
+branch. Flat pricing: pricePerCallUsd (null = unpriced → null cost, never invented). BACK-COMPAT:
+a connector with null providerKind keeps today's governance-only behaviour exactly (decision +
+audit, no execution, no cost) — nothing breaks until a connector opts in. Migration 0025:
+connectors +provider_kind/base_url/price_per_call_usd (kind stays the free-text CATEGORY); new
+connector_credentials (AES-256-GCM, platform-scoped, never returned); UNIFIED LEDGER —
+usage_events token/model NOT NULLs relaxed + object_type ('agent' default, backfilled) +
+connector_id + operation, so connector spend rides the SAME ledger and the project total +
+showback-by-member pick it up automatically. Rollup gains byConnector (byAgent filtered to
+object_type='agent', no phantoms); Spend page + per-project drill-down get a "Spend by connector"
+card. Seed: snowflake-analytics now mock-kind $0.002/call (executes keyless) + 3 attributed
+reads, jira-cloud stays governance-only. Suite 508 → 524 (8 provider unit + 8 e2e).
+Independently re-verified: build clean, mcp-proxy 145/145, all 8 connector-execution e2e green,
+migration applies on boot. Every governed entry point — model dispatch, MCP tool, connector —
+now flows through the one attribution point.
+
+**Team-Lead entitlement-narrowing tier, 2026-07-26 — pillar 7 §5.1 lands; pillar 7 complete
+(no migration).** Worker nodes can declare a `leadNodeId` + `allowedAgentIds`/`allowedToolRefs`
+delegation subset (ride the graph jsonb like the tool fields). The pure kernel helper
+`computeNodeCeiling(graph, nodeId)` walks the lead chain UP and INTERSECTS each ancestor's
+allow-sets (null = no constraint at that hop = identity; set∩set; empty = nothing) → a node's
+transitive ceiling. policy-kernel: evaluateAgent gains ceilingAgentIds (new rule
+`agent-lead-ceiling`), evaluate gains ceilingTools (new rule `lead-ceiling`) — consulted ONLY
+on the allow path, so a ceiling can turn an allow into a deny but NEVER rescue an ungranted
+call; default-deny preserved; a null ceiling adds no trace entry (flat runs byte-identical).
+The INVARIANT (proven, not relabeled): effective = user_grants ∩ lead_chain_ceiling, composing
+grandchild ≤ child ≤ lead ≤ initiating user — a worker is denied a tool/agent its INITIATING
+USER genuinely holds because a lead excludes it, while a lead-less control node uses it fine.
+Grants subject stays run.initiatingUserId at every site; the ceiling is a SEPARATE arg threaded
+into evaluateNodeOwner (dispatch + reassign), planRun evalOwner (envelope + budget re-plan
+candidate filter — a re-plan won't move a node onto a ceiling-forbidden agent), resolveNode
+ToolContext (narrows what the model is even offered), and per-call executeGovernedToolCall (hard
+enforcement). Distinct audit ruleId separates "narrowed by lead" from "user not granted" with
+zero new logging. Decompose planner drafts optional two-level hierarchies (lead suggests subset,
+gateway drops+records anything beyond the caller's own grants, human edits — the New Run editor
+gained a per-node Lead select + allowed-agents/tools controls + indented hierarchy render);
+mock `<<lead-plan>>` sentinel for keyless demo. Suite 485 → 508 (9 kernel unit + others).
+Independently re-verified: build clean, policy-kernel 65/65, orchestration-tools e2e 9/9
+including the narrowing cases. **Pillar 7 is now complete** — agents plan (decompose), do
+tool-using work (governed loop), and delegate under enforced transitive entitlement ceilings.
+
 **Tool-using multi-turn workers, 2026-07-26 — pillar 7's workers become a governed agentic
 loop (no migration).** dispatchRunNode's single model call is now a bounded loop: each turn
 one governed dispatch (measured usage row billed to run.projectId) with `tools` + accumulated

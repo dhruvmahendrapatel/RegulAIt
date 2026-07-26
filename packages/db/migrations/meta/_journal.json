@@ -176,6 +176,27 @@
       "when": 1784960000000,
       "tag": "0024_conversation_compaction",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1784961000000,
+      "tag": "0025_connector_execution",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1784962000000,
+      "tag": "0026_rule_scoping",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1784963000000,
+      "tag": "0027_infra_operations",
+      "breakpoints": true
     }
   ]
 }

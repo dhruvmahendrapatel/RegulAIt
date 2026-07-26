@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   integer,
   boolean,
@@ -86,7 +87,17 @@ export const auditLog = pgTable(
     at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
     userId: uuid("user_id").notNull(),
     objectType: text("object_type", {
-      enum: ["mcp_tool", "agent", "connector", "workflow", "run", "pm_work_item", "decision", "project"],
+      enum: [
+        "mcp_tool",
+        "agent",
+        "connector",
+        "workflow",
+        "run",
+        "pm_work_item",
+        "decision",
+        "project",
+        "infra_operation",
+      ],
     })
       .notNull()
       .default("mcp_tool"),
@@ -104,16 +115,25 @@ export const auditLog = pgTable(
 
 // §3 approval requirement rules: a granted call matching a rule pauses for
 // the named approver. toolName null = any tool on the server.
+//
+// PILLAR 1 rule scoping: userId/serverId are nullable now — a rule is bound to
+// exactly ONE subject dimension chosen by `scope` (user | role | team | fleet)
+// and ONE server dimension chosen by `serverScope` (server | all). The DB
+// CHECK constraints (migration 0026) enforce the discriminant. Existing rows
+// carry scope='user', serverScope='server' and behave identically. The rule
+// stays a pure RESTRICTION evaluated after the grant check.
 export const approvalRules = pgTable(
   "approval_rules",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    userId: uuid("user_id")
+    userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    serverId: uuid("server_id").references(() => mcpServers.id, { onDelete: "cascade" }),
+    roleId: uuid("role_id").references(() => roles.id, { onDelete: "cascade" }),
+    teamId: uuid("team_id").references(() => teams.id, { onDelete: "cascade" }),
+    scope: text("scope", { enum: ["user", "role", "team", "fleet"] })
       .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    serverId: uuid("server_id")
-      .notNull()
-      .references(() => mcpServers.id, { onDelete: "cascade" }),
+      .default("user"),
+    serverScope: text("server_scope", { enum: ["server", "all"] }).notNull().default("server"),
     toolName: text("tool_name"),
     writeOnly: boolean("write_only").notNull().default(false),
     approverUserId: uuid("approver_user_id")
@@ -121,27 +141,42 @@ export const approvalRules = pgTable(
       .references(() => users.id, { onDelete: "cascade" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("approval_rules_user_server_idx").on(t.userId, t.serverId)],
+  (t) => [
+    index("approval_rules_user_server_idx").on(t.userId, t.serverId),
+    index("approval_rules_scope_idx").on(t.scope, t.serverScope, t.serverId),
+    index("approval_rules_role_idx").on(t.roleId),
+    index("approval_rules_team_idx").on(t.teamId),
+  ],
 );
 
 // §3 rate/volume limits. toolName null = server-wide cap. Usage is counted
 // from audit_log allow rows at evaluation time, not stored here.
+// PILLAR 1 rule scoping: same scope/serverScope discriminant as approval_rules
+// (see there). A role/team/fleet limit's window is still counted PER USER —
+// each subject the widened rule matches keeps its own independent count.
 export const rateLimits = pgTable(
   "rate_limits",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    userId: uuid("user_id")
+    userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    serverId: uuid("server_id").references(() => mcpServers.id, { onDelete: "cascade" }),
+    roleId: uuid("role_id").references(() => roles.id, { onDelete: "cascade" }),
+    teamId: uuid("team_id").references(() => teams.id, { onDelete: "cascade" }),
+    scope: text("scope", { enum: ["user", "role", "team", "fleet"] })
       .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    serverId: uuid("server_id")
-      .notNull()
-      .references(() => mcpServers.id, { onDelete: "cascade" }),
+      .default("user"),
+    serverScope: text("server_scope", { enum: ["server", "all"] }).notNull().default("server"),
     toolName: text("tool_name"),
     maxCalls: integer("max_calls").notNull(),
     windowSeconds: integer("window_seconds").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("rate_limits_user_server_idx").on(t.userId, t.serverId)],
+  (t) => [
+    index("rate_limits_user_server_idx").on(t.userId, t.serverId),
+    index("rate_limits_scope_idx").on(t.scope, t.serverScope, t.serverId),
+    index("rate_limits_role_idx").on(t.roleId),
+    index("rate_limits_team_idx").on(t.teamId),
+  ],
 );
 
 // §6 Approvals Queue: one pending entry per paused call. Approved entries are
@@ -154,7 +189,9 @@ export const approvals = pgTable(
     userId: uuid("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
-    objectType: text("object_type", { enum: ["mcp_tool", "workflow", "run", "project"] })
+    objectType: text("object_type", {
+      enum: ["mcp_tool", "workflow", "run", "project", "infra_operation"],
+    })
       .notNull()
       .default("mcp_tool"),
     serverId: uuid("server_id").references(() => mcpServers.id, { onDelete: "cascade" }),
@@ -186,22 +223,32 @@ export const approvals = pgTable(
 // §3 data-scope rules: allow-list the values a call-argument field may take
 // for a granted tool. argPath is a dot-path into the call arguments;
 // allowedValues is a jsonb string array. Missing/non-scalar values fail closed.
+// PILLAR 1 rule scoping: same scope/serverScope discriminant as approval_rules
+// (see there). Every matching scoped rule must still be satisfied — a widened
+// rule set composes to the INTERSECTION of allow-lists, never a relaxation.
 export const dataScopeRules = pgTable(
   "data_scope_rules",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    userId: uuid("user_id")
+    userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    serverId: uuid("server_id").references(() => mcpServers.id, { onDelete: "cascade" }),
+    roleId: uuid("role_id").references(() => roles.id, { onDelete: "cascade" }),
+    teamId: uuid("team_id").references(() => teams.id, { onDelete: "cascade" }),
+    scope: text("scope", { enum: ["user", "role", "team", "fleet"] })
       .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    serverId: uuid("server_id")
-      .notNull()
-      .references(() => mcpServers.id, { onDelete: "cascade" }),
+      .default("user"),
+    serverScope: text("server_scope", { enum: ["server", "all"] }).notNull().default("server"),
     toolName: text("tool_name"),
     argPath: text("arg_path").notNull(),
     allowedValues: jsonb("allowed_values").$type<string[]>().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("data_scope_rules_user_server_idx").on(t.userId, t.serverId)],
+  (t) => [
+    index("data_scope_rules_user_server_idx").on(t.userId, t.serverId),
+    index("data_scope_rules_scope_idx").on(t.scope, t.serverScope, t.serverId),
+    index("data_scope_rules_role_idx").on(t.roleId),
+    index("data_scope_rules_team_idx").on(t.teamId),
+  ],
 );
 
 // Per-user API keys. Only the sha256 hash of the token is stored; the
@@ -363,7 +410,35 @@ export const userAgentPolicies = pgTable("user_agent_policies", {
 export const connectors = pgTable("connectors", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: text("name").notNull().unique(),
+  // free-text display CATEGORY (e.g. "crm", "issue-tracker") — NOT the adapter.
   kind: text("kind").notNull(),
+  // EXECUTION (pillar 5 §10.3): the connector-provider adapter enum
+  // (http/webhook/generic/mock/…). Null = governance-only: the invoke endpoint
+  // still evaluates policy + writes one audit row but contacts nothing and
+  // meters nothing (today's behaviour). Non-null = the call really executes.
+  providerKind: text("provider_kind"),
+  // connection root for the adapter (generic/http/webhook); a credential row may
+  // override it (credential.baseUrl wins), mirroring model_credentials.
+  baseUrl: text("base_url"),
+  // pillar 5: flat list price per allowed call. Null = unpriced → cost null,
+  // never invented (mirrors agents' costPerMTok null-safety).
+  pricePerCallUsd: doublePrecision("price_per_call_usd"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// EXECUTION: one platform credential per connector, AES-256-GCM encrypted with
+// REGULAIT_DATA_KEY (same discipline as model/git/PM tokens — never plaintext
+// at rest, never returned by any endpoint). Keyless kinds (mock, unauthenticated
+// generic) never write a row here. Platform-scoped only this slice (no per-user
+// BYO connector credential yet).
+export const connectorCredentials = pgTable("connector_credentials", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  connectorId: uuid("connector_id")
+    .notNull()
+    .unique()
+    .references(() => connectors.id, { onDelete: "cascade" }),
+  tokenCiphertext: text("token_ciphertext").notNull(),
+  baseUrl: text("base_url"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -679,21 +754,30 @@ export const usageEvents = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
     userId: uuid("user_id").notNull(),
-    /** the agent that actually served (post-routing) */
-    agentId: uuid("agent_id").notNull(),
+    /** what this spend row is FOR: 'agent' (model dispatch) or 'connector'
+     * (a governed connector call). One ledger, so the per-project rollup
+     * picks connector spend up automatically. */
+    objectType: text("object_type").notNull().default("agent"),
+    /** the agent that actually served (post-routing) — null on connector rows */
+    agentId: uuid("agent_id"),
     requestedAgentId: uuid("requested_agent_id"),
     baselineAgentId: uuid("baseline_agent_id"),
-    provider: text("provider").notNull(),
-    model: text("model").notNull(),
-    inputTokens: integer("input_tokens").notNull(),
-    outputTokens: integer("output_tokens").notNull(),
-    /** measured tokens × the served agent's list price; null = unpriced, never invented */
+    /** connector rows only: the connector that executed, and its operation */
+    connectorId: uuid("connector_id"),
+    operation: text("operation"),
+    /** null on connector rows (no provider/model/tokens) */
+    provider: text("provider"),
+    model: text("model"),
+    inputTokens: integer("input_tokens"),
+    outputTokens: integer("output_tokens"),
+    /** agent rows: measured tokens × list price. connector rows: the
+     * connector's flat price_per_call_usd. Null = unpriced, never invented. */
     costUsd: doublePrecision("cost_usd"),
     /** what the routing baseline would have cost at the SAME measured token
      * volumes, minus costUsd — the honest, measured version of the routing
      * savings that cost_events could only estimate */
     measuredCostSavedUsd: doublePrecision("measured_cost_saved_usd"),
-    stopReason: text("stop_reason").notNull(),
+    stopReason: text("stop_reason"),
     refusal: boolean("refusal").notNull().default(false),
     providerMessageId: text("provider_message_id"),
     /** PILLAR 5 attribution; FK-free like the rest of the ledger */
@@ -817,6 +901,11 @@ export const complianceProfiles = pgTable("compliance_profiles", {
     .default("read_write"),
   auditRetentionDays: integer("audit_retention_days"),
   piiMode: text("pii_mode", { enum: ["block", "warn", "log"] }).notNull().default("log"),
+  /** §8.3 -> §8.2 tie: the backup retention + patch cadence this framework
+   * forces onto any infra resource carrying its tag (pillar 3). Null = the
+   * framework declares no infra floor of its own. */
+  backupRetentionDays: integer("backup_retention_days"),
+  patchCadenceDays: integer("patch_cadence_days"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -893,5 +982,89 @@ export const projectContextItems = pgTable(
   (t) => [
     uniqueIndex("project_context_project_key_rev_uq").on(t.projectId, t.key, t.revision),
     index("project_context_project_key_idx").on(t.projectId, t.key),
+  ],
+);
+
+// PILLAR 3 (§8.2): a GOVERNED-OPERATIONS layer — monitored resources +
+// operational policies + detected findings + governed remediation. NOT a real
+// infra patcher: findings are inert reports; a remediation is a governed action
+// (auto-remediated under policy, or approval-gated) that runs strictly after
+// the governance decision, exactly like the connector execution layer.
+
+// A monitored piece of infrastructure. `provider` is an infra-provider kind
+// ('mock' for the MVP); `classifications` carries §8.3 compliance tags whose
+// cascade derives the resource's backup/patch floors (§8.3 -> §8.2).
+export const infraResources = pgTable("infra_resources", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  kind: text("kind", { enum: ["control_plane", "agent_runtime", "cert", "backup_target"] }).notNull(),
+  name: text("name").notNull().unique(),
+  /** infra-provider kind — 'mock' is keyless/deterministic for the MVP */
+  provider: text("provider").notNull().default("mock"),
+  /** provider-specific handle (endpoint, days-until-expiry, backup age, …) */
+  config: jsonb("config").$type<Record<string, unknown>>(),
+  /** §8.3 compliance tags — the cascade applies backup/patch floors */
+  classifications: jsonb("classifications").$type<string[]>(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// An operational policy. A null resourceId is FLEET-WIDE (a default for every
+// resource); a resource-scoped policy overrides it. `autoRemediateMaxSeverity`
+// is the ceiling at/under which a NEW finding is auto-remediated (audited, no
+// approval) — null = never auto-remediate. 'critical' is NOT a valid value:
+// critical findings are ALWAYS approval-gated regardless of policy.
+export const infraPolicies = pgTable(
+  "infra_policies",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    resourceId: uuid("resource_id").references(() => infraResources.id, { onDelete: "cascade" }),
+    patchCadenceDays: integer("patch_cadence_days"),
+    certRotationDaysBeforeExpiry: integer("cert_rotation_days_before_expiry"),
+    backupSchedule: text("backup_schedule"),
+    backupRetentionDays: integer("backup_retention_days"),
+    driftBaseline: jsonb("drift_baseline").$type<Record<string, unknown>>(),
+    autoRemediateMaxSeverity: text("auto_remediate_max_severity", {
+      enum: ["low", "medium", "high"],
+    }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("infra_policies_resource_idx").on(t.resourceId)],
+);
+
+// A detected finding — an INERT report until governed. `signature` (carried in
+// detail) is a stable natural key so a re-scan is idempotent: the unique index
+// on (resource_id, kind, detail->>'signature') means scanning twice refreshes
+// detected_at rather than duplicating an open finding.
+export const infraFindings = pgTable(
+  "infra_findings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    resourceId: uuid("resource_id")
+      .notNull()
+      .references(() => infraResources.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: ["drift", "cve", "cert_expiring", "backup_missed"] }).notNull(),
+    severity: text("severity", { enum: ["low", "medium", "high", "critical"] }).notNull(),
+    detail: jsonb("detail").$type<Record<string, unknown>>().notNull(),
+    detectedAt: timestamp("detected_at", { withTimezone: true }).notNull().defaultNow(),
+    status: text("status", {
+      enum: [
+        "open",
+        "remediation_proposed",
+        "auto_remediated",
+        "approved",
+        "remediated",
+        "accepted_risk",
+      ],
+    })
+      .notNull()
+      .default("open"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("infra_findings_resource_idx").on(t.resourceId),
+    uniqueIndex("infra_findings_natural_key_uq").on(
+      t.resourceId,
+      t.kind,
+      sql`(${t.detail}->>'signature')`,
+    ),
   ],
 );

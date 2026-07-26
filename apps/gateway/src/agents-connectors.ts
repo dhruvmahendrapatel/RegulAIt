@@ -3,6 +3,7 @@ import {
   agentGrants,
   agents,
   auditLog,
+  connectorCredentials,
   connectorGrants,
   connectors,
   costEvents,
@@ -15,6 +16,11 @@ import {
   type Db,
 } from "@regulait/db";
 import { evaluateAgent, evaluateConnector } from "@regulait/policy-kernel";
+import {
+  ConnectorProviderError,
+  isConnectorProviderKind,
+  resolveConnectorProvider,
+} from "@regulait/connector-provider";
 import {
   classifyComplexity,
   estimateTokens,
@@ -31,6 +37,7 @@ import {
 import {
   createAgentGrantSchema,
   createAgentSchema,
+  createConnectorCredentialSchema,
   createConnectorGrantSchema,
   createConnectorSchema,
   createModelCredentialSchema,
@@ -220,6 +227,7 @@ export async function executeGovernedDispatch(
 
   await db.insert(usageEvents).values({
     userId,
+    objectType: "agent",
     agentId: served.id,
     requestedAgentId,
     baselineAgentId: baseline?.id ?? null,
@@ -993,6 +1001,59 @@ export function registerAgentConnectorRoutes(
 
   app.get("/v1/connectors", async () => ({ connectors: await db.select().from(connectors) }));
 
+  // --- connector credentials (admin-only via the global gate) ---
+  // One platform credential per connector, encrypted at rest, never returned —
+  // exactly the write-only discipline of the model-credential routes. Keyless
+  // kinds (mock, unauthenticated generic) never need one.
+
+  const connectorCredCols = {
+    id: connectorCredentials.id,
+    connectorId: connectorCredentials.connectorId,
+    baseUrl: connectorCredentials.baseUrl,
+    createdAt: connectorCredentials.createdAt,
+  };
+
+  app.post("/v1/connectors/:connectorId/credential", async (req, reply) => {
+    const { connectorId } = connectorIdParam.parse(req.params);
+    const body = createConnectorCredentialSchema.parse(req.body);
+    if (!opts.dataKey) {
+      return reply.status(503).send({ error: "no_data_key", detail: "set REGULAIT_DATA_KEY" });
+    }
+    const [connector] = await db.select().from(connectors).where(eq(connectors.id, connectorId));
+    if (!connector) return reply.status(404).send({ error: "unknown_connector" });
+    const values = {
+      connectorId,
+      tokenCiphertext: encryptSecret(opts.dataKey, body.token),
+      baseUrl: body.baseUrl ?? null,
+    };
+    const [row] = await db
+      .insert(connectorCredentials)
+      .values(values)
+      .onConflictDoUpdate({ target: connectorCredentials.connectorId, set: values })
+      .returning(connectorCredCols);
+    return reply.status(201).send(row);
+  });
+
+  app.get("/v1/connectors/:connectorId/credential", async (req, reply) => {
+    const { connectorId } = connectorIdParam.parse(req.params);
+    const [row] = await db
+      .select(connectorCredCols)
+      .from(connectorCredentials)
+      .where(eq(connectorCredentials.connectorId, connectorId));
+    // never the secret — only that one is configured, its baseUrl, and when
+    return { credential: row ?? null };
+  });
+
+  app.delete("/v1/connectors/:connectorId/credential", async (req, reply) => {
+    const { connectorId } = connectorIdParam.parse(req.params);
+    const deleted = await db
+      .delete(connectorCredentials)
+      .where(eq(connectorCredentials.connectorId, connectorId))
+      .returning({ id: connectorCredentials.id });
+    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_credential" });
+    return { removed: true };
+  });
+
   app.post("/v1/grants/connectors", async (req, reply) => {
     const body = createConnectorGrantSchema.parse(req.body);
     const [row] = await db
@@ -1036,6 +1097,15 @@ export function registerAgentConnectorRoutes(
     const [connector] = await db.select().from(connectors).where(eq(connectors.id, connectorId));
     if (!connector) return reply.status(404).send({ error: "unknown_connector" });
 
+    // pillar 5 + ADR-0011: attribution must point at a real project the caller
+    // may bill to — mirror the model invoke path. Checked up front, before any
+    // execution or metering can happen.
+    const projectId = body.projectId ?? null;
+    if (projectId) {
+      const attribution = await assertProjectAttribution(db, projectId, userId, req.authCtx.isAdmin);
+      if (!attribution.ok) return reply.status(attribution.status).send({ error: attribution.error });
+    }
+
     const grants = await db
       .select()
       .from(connectorGrants)
@@ -1050,6 +1120,7 @@ export function registerAgentConnectorRoutes(
       connectorGrants: grants,
     });
 
+    // THE ONE AUDIT ROW — unchanged, written for every decision (allow or deny).
     await db.insert(auditLog).values({
       userId,
       objectType: "connector",
@@ -1061,6 +1132,86 @@ export function registerAgentConnectorRoutes(
       reason: decision.reason,
     });
 
-    return reply.status(decision.effect === "allow" ? 200 : 403).send({ decision });
+    // A DENIED call bills nothing and executes nothing (mirror the model path).
+    if (decision.effect !== "allow") {
+      return reply.status(403).send({ decision });
+    }
+
+    // EXECUTION runs strictly INSIDE the allow branch, after the audit insert.
+    // A connector with no providerKind keeps TODAY'S behaviour exactly:
+    // governance-only, no execution, no cost, no usage row.
+    if (!connector.providerKind) {
+      return reply.send({ decision });
+    }
+    if (!isConnectorProviderKind(connector.providerKind)) {
+      return reply.status(409).send({
+        decision,
+        error: "unknown_connector_provider",
+        detail: `connector '${connector.name}' has an unrecognized provider_kind '${connector.providerKind}'`,
+      });
+    }
+
+    // Resolve the platform credential (connector_credentials → decrypt with the
+    // data key). Keyless kinds (mock, unauthenticated generic) skip it; a keyed
+    // kind with no stored credential fails explicit like the model path. A
+    // credential.baseUrl overrides the connector's, mirroring model_credentials.
+    const keylessKinds = new Set(["mock", "generic", "http", "webhook"]);
+    let token: string | null = null;
+    let baseUrl: string | null = connector.baseUrl ?? null;
+    const [cred] = await db
+      .select()
+      .from(connectorCredentials)
+      .where(eq(connectorCredentials.connectorId, connectorId));
+    if (cred) {
+      if (!opts.dataKey) {
+        return reply.status(503).send({ error: "no_data_key", detail: "set REGULAIT_DATA_KEY" });
+      }
+      token = decryptSecret(opts.dataKey, cred.tokenCiphertext);
+      if (cred.baseUrl) baseUrl = cred.baseUrl;
+    } else if (!keylessKinds.has(connector.providerKind)) {
+      return reply.status(409).send({
+        decision,
+        error: "no_connector_credential",
+        detail: `connector '${connector.name}' (${connector.providerKind}) has no stored credential`,
+      });
+    }
+
+    // Execute. A FAILED call (ConnectorProviderError) bills NOTHING and
+    // surfaces as 502 — the same discipline as a failed model dispatch.
+    let result;
+    try {
+      const provider = resolveConnectorProvider({ kind: connector.providerKind, baseUrl, token });
+      result = await provider.invoke({
+        operation: body.operation,
+        object: body.object ?? null,
+        payload: body.payload ?? null,
+      });
+    } catch (err) {
+      if (err instanceof ConnectorProviderError) {
+        return reply
+          .status(502)
+          .send({ decision, error: "connector_invoke_failed", detail: err.message });
+      }
+      throw err;
+    }
+
+    // pillar 5 actuals: an allowed, executed call bills the connector's flat
+    // list price. Unpriced → null, never an invented figure (agents' rule).
+    const costUsd = connector.pricePerCallUsd ?? null;
+    await db.insert(usageEvents).values({
+      userId,
+      objectType: "connector",
+      connectorId,
+      operation: body.operation,
+      costUsd,
+      projectId,
+      detail: {
+        status: result.status,
+        ...(body.object ? { object: body.object } : {}),
+        providerKind: connector.providerKind,
+      },
+    });
+
+    return reply.send({ decision, result: { status: result.status, body: result.body }, costUsd });
   });
 }
