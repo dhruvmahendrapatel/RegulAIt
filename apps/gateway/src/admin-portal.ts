@@ -736,14 +736,17 @@ const TABS = [
   }, true);
 }],
 ["Cost & Projects", async (el) => {
-  const [p, u, cp, t] = await Promise.all([
-    get("/v1/projects"), get("/v1/users"), get("/v1/compliance/profiles"), get("/v1/teams"),
+  const [p, u, cp, t, ini] = await Promise.all([
+    get("/v1/projects"), get("/v1/users"), get("/v1/compliance/profiles"), get("/v1/teams"), get("/v1/initiatives"),
   ]);
   const uOpts = userOpts(u.users);
   const uname = Object.fromEntries(u.users.map((x) => [x.id, x.displayName || x.email]));
+  // pillar-5 rollup: id -> name so the fleet table can name each project's parent
+  const iname = Object.fromEntries((ini.initiatives ?? []).map((x) => [x.id, x.name]));
   const tagOpts = cp.profiles.map((x) => x.tag);
   const pOpts = p.projects.map((x) => ({ v: x.id, l: x.name }));
   const teamOpts = t.teams.map((x) => ({ v: x.id, l: x.name }));
+  const iniOpts = (ini.initiatives ?? []).map((x) => ({ v: x.id, l: x.name }));
   const KEEP = { v: "", l: "— leave unchanged —" }, CLEAR = { v: "__clear__", l: "— clear —" };
   el.innerHTML = "<h2>Create a project</h2><div class='card'>"
     + form("f-proj", [
@@ -758,12 +761,19 @@ const TABS = [
       ], "Create project")
     + "<p class='dim' style='font-size:12px'>A budget only exists together with its named budget approver — set both or neither; the API refuses one without the other. Classifications (ctrl/cmd-click for several) come from the compliance profiles and cascade that framework's required workflows, PII mode and retention onto everything the project governs — changing them later goes through the reclassification review, never a plain edit.</p></div>"
     + "<h2>Projects — fleet spend</h2><div class='card'>"
-    + table(p.projects.map((r) => ({ name: r.name, costCenter: r.costCenter, spent: fmtUsd(r.spentUsd), budget: fmtUsd(r.budgetUsd), period: r.budgetPeriod ?? "none", "alert %": r.alertThresholdPct ?? 100, classifications: (r.classifications ?? []).join(", ") })),
+    + table(p.projects.map((r) => ({ name: r.name, costCenter: r.costCenter, initiative: iname[r.initiativeId] ?? "—", spent: fmtUsd(r.spentUsd), budget: fmtUsd(r.budgetUsd), period: r.budgetPeriod ?? "none", "alert %": r.alertThresholdPct ?? 100, classifications: (r.classifications ?? []).join(", ") })),
       (r) => {
         const id = p.projects.find((x) => x.name === r.name).id;
         return "<button class='small' data-proj='" + id + "'>rollup</button> <button class='small' data-pedit='" + id + "'>edit</button>";
       })
     + "</div><div id='projout'></div>"
+    + "<h2>Initiatives — cross-team rollup</h2><div class='card'>"
+    + form("f-ini", [
+        {name:"name",ph:"e.g. Platform Modernization"},
+        {name:"costCenter",label:"cost center",req:false,ph:"e.g. CC-PLAT"},
+      ], "Create initiative")
+    + table((ini.initiatives ?? []).map((r) => ({ name: r.name, "cost center": r.costCenter ?? "—", projects: r.projectCount ?? 0, "rolled-up spend": fmtUsd(r.spentUsd) })))
+    + "<p class='dim' style='font-size:12px'>An initiative is a flat, reporting-only grouping of projects for cross-team cost attribution — no initiative-level budget or enforcement; each project keeps its own budget and governance. Group a project under one on the edit form below.</p></div>"
     + "<h2>Edit a project — budget, approver, arbiter, cost center, name</h2><div class='card'>"
     + form("f-pedit", [
         {name:"projectId",label:"project",options:pOpts},
@@ -774,6 +784,7 @@ const TABS = [
         {name:"budgetPeriod",label:"budget period",options:[{v:"none",l:"none (lifetime)"},{v:"monthly",l:"monthly (calendar month)"}],req:false,ph:KEEP.l},
         {name:"alertThresholdPct",label:"alert threshold %",type:"number",req:false,ph:"leave unchanged"},
         {name:"arbiterUserId",label:"arbiter",options:[CLEAR].concat(uOpts),req:false,ph:KEEP.l},
+        {name:"initiativeId",label:"initiative",options:[CLEAR].concat(iniOpts),req:false,ph:KEEP.l},
       ], "Save changes")
     + "<p class='dim' style='font-size:12px'>Only the fields you fill in change. A budget still requires a named approver after the edit — the API holds the invariant against the merged result. Classifications are absent on purpose: reclassification is a governed diff-then-approve change with its own flow.</p></div>"
     + "<h2>Teams</h2><div class='card'>"
@@ -820,9 +831,13 @@ const TABS = [
     if ("budgetUsd" in d) body.budgetUsd = Number(d.budgetUsd);
     if (d.budgetPeriod) body.budgetPeriod = d.budgetPeriod;
     if (d.alertThresholdPct) body.alertThresholdPct = Number(d.alertThresholdPct);
-    for (const k of ["budgetApproverUserId", "arbiterUserId"]) if (k in d) body[k] = d[k] === "__clear__" ? null : d[k];
+    for (const k of ["budgetApproverUserId", "arbiterUserId", "initiativeId"]) if (k in d) body[k] = d[k] === "__clear__" ? null : d[k];
     return patch("/v1/projects/" + d.projectId, body);
   });
+  wire("f-ini", (d) => post("/v1/initiatives", {
+    name: d.name,
+    ...(d.costCenter ? { costCenter: d.costCenter } : {}),
+  }));
   wire("f-team", (d) => post("/v1/teams", {
     name: d.name,
     ...(d.defaultClassifications ? { defaultClassifications: [].concat(d.defaultClassifications) } : {}),
@@ -835,7 +850,7 @@ const TABS = [
     ]);
     const m = costs.measured ?? {};
     $("#projout").innerHTML =
-      "<h2>" + esc(costs.project.name) + "</h2>"
+      "<h2>" + esc(costs.project.name) + (costs.initiative ? " <span class='dim' style='font-size:14px'>· " + esc(costs.initiative.name) + "</span>" : "") + "</h2>"
       + "<div class='grid2'>"
       + "<div class='card stat'><div class='v'>" + fmtUsd(m.costUsd) + "</div><div class='l'>measured spend · " + (m.events ?? 0) + " calls</div></div>"
       + "<div class='card stat'><div class='v'>" + fmtUsd(costs.forecast?.projectedEomUsd) + "</div><div class='l'>projected month-end · " + esc(costs.forecast?.basis ?? "") + "</div></div>"
@@ -848,6 +863,7 @@ const TABS = [
       + (costs.budget.period === "monthly" ? "this calendar month (" + esc(costs.budget.periodKey ?? "") + ")" : "lifetime")
       + " · alert at " + (costs.budget.alertThresholdPct ?? 100) + "%</span></div></div>"
       + "<h2>Showback by user</h2><div class='card'>" + barChart(costs.byUser, "costUsd", (i) => uname[i.userId] ?? i.userId) + "</div>"
+      + "<h2>Showback by team</h2><div class='card'>" + barChart(costs.byTeam ?? [], "costUsd", (i) => i.name ?? "(no team)") + "</div>"
       + "<h2>By agent / model</h2><div class='card'>" + barChart(costs.byAgent, "costUsd", (i) => i.model) + "</div>"
       + "<h2>Estimated savings by technique</h2><div class='card'>" + barChart(costs.estimatedSavings, "estimatedCostSavedUsd", (i) => i.technique) + "</div>"
       + "<h2>Compliance — effective policy + enforcement labels</h2><div class='card'><pre>" + esc(JSON.stringify(compliance, null, 2)) + "</pre></div>";

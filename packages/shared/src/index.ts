@@ -226,6 +226,8 @@ export const createProjectSchema = z
     arbiterUserId: z.string().uuid().nullable().optional(),
     /** §8.3 compliance framework tags, applied directly at creation */
     classifications: z.array(z.string().min(1).max(64)).max(16).optional(),
+    /** pillar-5 rollup: parent Initiative id (reporting-only grouping) */
+    initiativeId: z.string().uuid().nullable().optional(),
   })
   .refine((p) => p.budgetUsd == null || p.budgetApproverUserId != null, {
     message: "a project budget requires a budgetApproverUserId",
@@ -245,6 +247,25 @@ export const updateProjectSchema = z
     budgetPeriod: z.enum(["none", "monthly"]).optional(),
     alertThresholdPct: z.number().int().min(1).max(100).optional(),
     arbiterUserId: z.string().uuid().nullable().optional(),
+    /** pillar-5 rollup: parent Initiative id (reporting-only grouping) */
+    initiativeId: z.string().uuid().nullable().optional(),
+  })
+  .refine((p) => Object.values(p).some((v) => v !== undefined), {
+    message: "nothing to update — provide at least one field",
+  });
+
+/** pillar-5 cross-team rollup: an Initiative is a flat, reporting-only grouping
+ * of projects for chargeback/showback above the single-project level. No
+ * budget or enforcement in v1 — grouping only. */
+export const createInitiativeSchema = z.object({
+  name: z.string().min(1).max(200),
+  costCenter: z.string().min(1).max(100).nullable().optional(),
+});
+
+export const updateInitiativeSchema = z
+  .object({
+    name: z.string().min(1).max(200).optional(),
+    costCenter: z.string().min(1).max(100).nullable().optional(),
   })
   .refine((p) => Object.values(p).some((v) => v !== undefined), {
     message: "nothing to update — provide at least one field",

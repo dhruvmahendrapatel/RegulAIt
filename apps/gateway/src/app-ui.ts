@@ -1920,13 +1920,15 @@ function wireSpend() {
           ? '<span class="dim" style="font-size:12px">budget window: this calendar month (' + esc(bg.periodKey ?? "") + ")</span>"
           : '<span class="dim" style="font-size:12px">budget window: lifetime</span>';
         out.innerHTML =
-          '<div class="grid2" style="margin-top:12px">'
+          (c.initiative ? '<p class="sub" style="margin:12px 0 0">Initiative: ' + esc(c.initiative.name) + "</p>" : "")
+          + '<div class="grid2" style="margin-top:12px">'
           + '<div class="card stat"><div class="v">' + fmtUsd(m.costUsd) + '</div><div class="l">project measured spend · ' + (m.events ?? 0) + " calls</div></div>"
           + '<div class="card stat"><div class="v">' + fmtUsd(c.forecast?.projectedEomUsd) + '</div><div class="l">projected month-end · ' + esc(c.forecast?.basis ?? "") + "</div></div>"
           + "</div>"
           + '<div class="row" style="margin-top:14px"><h2 style="margin:0">Budget vs actual</h2><span class="grow"></span><button class="small" data-csv="' + esc(pid) + '">Download CSV</button></div>'
           + '<div class="card">' + budgetGauge(bg.spentUsd, bg.budgetUsd, bg.overageApproved, bg) + '<div class="row" style="margin-top:8px">' + periodNote + "</div></div>"
           + '<h2>Showback by member</h2><div class="card">' + barChart(c.byUser, "costUsd", (i) => userName(i.userId)) + "</div>"
+          + '<h2>Showback by team</h2><div class="card">' + barChart(c.byTeam ?? [], "costUsd", (i) => i.name ?? "(no team)") + "</div>"
           + '<h2>By agent / model</h2><div class="card">' + barChart(c.byAgent, "costUsd", (i) => AGENT_NAMES[i.agentId] ?? i.model) + "</div>"
           + '<h2>Spend by connector</h2><div class="card">' + ((c.byConnector ?? []).length ? barChart(c.byConnector, "costUsd", (i) => (i.name ?? "connector") + " · " + (i.operation ?? "")) : '<div class="empty">No metered connector calls for this project.</div>') + "</div>"
           + '<h2>Estimated savings by technique</h2><div class="card">' + barChart(c.estimatedSavings, "estimatedCostSavedUsd", (i) => i.technique) + "</div>";

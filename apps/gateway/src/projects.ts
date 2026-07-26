@@ -11,6 +11,7 @@ import {
   desc,
   eq,
   gte,
+  initiatives,
   lt,
   projectContextItems,
   projectMembers,
@@ -29,12 +30,14 @@ import {
   addProjectMemberSchema,
   addTeamMemberSchema,
   contributeContextSchema,
+  createInitiativeSchema,
   createProjectSchema,
   createTeamSchema,
   detectPII,
   patchProjectMemberSchema,
   promoteContextSchema,
   reclassifySchema,
+  updateInitiativeSchema,
   updateProjectSchema,
   upsertComplianceProfileSchema,
   type PiiHit,
@@ -44,6 +47,7 @@ import { z } from "zod";
 type ProjectRow = typeof projects.$inferSelect;
 
 const projectIdParam = z.object({ projectId: z.string().uuid() });
+const initiativeIdParam = z.object({ initiativeId: z.string().uuid() });
 
 /** RFC-4180 field escaping: quote and double-up embedded quotes whenever a
  * field carries a comma, quote, or newline; leave plain fields untouched. */
@@ -662,6 +666,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         alertThresholdPct: body.alertThresholdPct ?? 100,
         arbiterUserId: body.arbiterUserId ?? null,
         classifications: body.classifications ?? null,
+        initiativeId: body.initiativeId ?? null,
       })
       .returning();
     return reply.status(201).send(row);
@@ -688,6 +693,8 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       alertThresholdPct:
         body.alertThresholdPct === undefined ? project.alertThresholdPct : body.alertThresholdPct,
       arbiterUserId: body.arbiterUserId === undefined ? project.arbiterUserId : body.arbiterUserId,
+      initiativeId:
+        body.initiativeId === undefined ? project.initiativeId : body.initiativeId,
     };
     // the create-time invariant, held against the row this patch would leave
     if (merged.budgetUsd != null && merged.budgetApproverUserId == null) {
@@ -711,6 +718,123 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       reason: `project '${project.name}' updated: ${Object.keys(changed).join(", ")}`,
     });
     return row;
+  });
+
+  // ---------------------------------------------------------------------------
+  // PILLAR 5 cross-team rollup: Initiatives. A flat, reporting-only grouping of
+  // projects for cost attribution above the single-project level. ADMIN ONLY by
+  // the default gate — a rollup spans projects a non-admin may not be a member
+  // of. v1 is grouping only: NO initiative-level budget or enforcement, and
+  // grouping a project changes NONE of its own governance or budget behaviour.
+  app.post("/v1/initiatives", async (req, reply) => {
+    const body = createInitiativeSchema.parse(req.body);
+    const [row] = await db
+      .insert(initiatives)
+      .values({ name: body.name, costCenter: body.costCenter ?? null })
+      .returning();
+    return reply.status(201).send(row);
+  });
+
+  // Every initiative with its child-project count and rolled-up LIFETIME spend.
+  // Count and spend are each one grouped pass (over projects, and over
+  // usage_events joined to projects), mapped back on initiativeId; an initiative
+  // with no children reads 0 projects / $0.
+  app.get("/v1/initiatives", async (_req, _reply) => {
+    const [rows, childCounts, spendByInitiative] = await Promise.all([
+      db.select().from(initiatives).orderBy(desc(initiatives.createdAt)),
+      db
+        .select({ initiativeId: projects.initiativeId, projectCount: count() })
+        .from(projects)
+        .groupBy(projects.initiativeId),
+      db
+        .select({
+          initiativeId: projects.initiativeId,
+          costUsd: sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8`,
+        })
+        .from(usageEvents)
+        .innerJoin(projects, eq(usageEvents.projectId, projects.id))
+        .groupBy(projects.initiativeId),
+    ]);
+    const countMap = new Map(childCounts.map((c) => [c.initiativeId, c.projectCount]));
+    const spendMap = new Map(spendByInitiative.map((s) => [s.initiativeId, s.costUsd]));
+    return {
+      initiatives: rows.map((r) => ({
+        ...r,
+        projectCount: countMap.get(r.id) ?? 0,
+        spentUsd: spendMap.get(r.id) ?? 0,
+      })),
+    };
+  });
+
+  // One initiative with its child projects (each carrying its lifetime spend)
+  // and the rolled-up total. 404 on an unknown id.
+  app.get("/v1/initiatives/:initiativeId", async (req, reply) => {
+    const { initiativeId } = initiativeIdParam.parse(req.params);
+    const [initiative] = await db
+      .select()
+      .from(initiatives)
+      .where(eq(initiatives.id, initiativeId));
+    if (!initiative) return reply.status(404).send({ error: "unknown_initiative" });
+    // left join so a child project with no spend still appears at $0
+    const children = await db
+      .select({
+        id: projects.id,
+        name: projects.name,
+        spentUsd: sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8`,
+      })
+      .from(projects)
+      .leftJoin(usageEvents, eq(usageEvents.projectId, projects.id))
+      .where(eq(projects.initiativeId, initiativeId))
+      .groupBy(projects.id, projects.name);
+    const totalUsd = Number(children.reduce((s, c) => s + (c.spentUsd ?? 0), 0).toFixed(6));
+    return { initiative, projects: children, projectCount: children.length, spentUsd: totalUsd };
+  });
+
+  // Rename / re-cost-center an initiative (grouping only). 404 on unknown id.
+  app.patch("/v1/initiatives/:initiativeId", async (req, reply) => {
+    const { initiativeId } = initiativeIdParam.parse(req.params);
+    const body = updateInitiativeSchema.parse(req.body);
+    const [initiative] = await db
+      .select()
+      .from(initiatives)
+      .where(eq(initiatives.id, initiativeId));
+    if (!initiative) return reply.status(404).send({ error: "unknown_initiative" });
+    const merged = {
+      name: body.name ?? initiative.name,
+      costCenter: body.costCenter === undefined ? initiative.costCenter : body.costCenter,
+    };
+    const [row] = await db
+      .update(initiatives)
+      .set(merged)
+      .where(eq(initiatives.id, initiativeId))
+      .returning();
+    const changed = Object.fromEntries(
+      Object.entries(body).filter(([, v]) => v !== undefined),
+    ) as Record<string, unknown>;
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? initiativeId,
+      objectType: "initiative",
+      objectId: initiativeId,
+      detail: { phase: "update", changed },
+      effect: "allow",
+      ruleId: "initiative-updated",
+      ruleChain: [],
+      reason: `initiative '${initiative.name}' updated: ${Object.keys(changed).join(", ")}`,
+    });
+    return row;
+  });
+
+  // Delete an initiative. The FK onDelete='set null' orphans its children back
+  // to ungrouped automatically — a project row is never deleted with it.
+  app.delete("/v1/initiatives/:initiativeId", async (req, reply) => {
+    const { initiativeId } = initiativeIdParam.parse(req.params);
+    const [initiative] = await db
+      .select()
+      .from(initiatives)
+      .where(eq(initiatives.id, initiativeId));
+    if (!initiative) return reply.status(404).send({ error: "unknown_initiative" });
+    await db.delete(initiatives).where(eq(initiatives.id, initiativeId));
+    return reply.status(200).send({ ok: true });
   });
 
   // fleet for admins; non-admins see the projects they are members of
@@ -1520,7 +1644,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     const agentWhere = and(where, eq(usageEvents.objectType, "agent"));
     const connectorWhere = and(where, eq(usageEvents.objectType, "connector"));
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 3600 * 1000);
-    const [[measured], byUser, byAgent, byConnector, estimated, [recent]] = await Promise.all([
+    const [[measured], byUser, byAgent, byConnector, byTeam, estimated, [recent]] = await Promise.all([
       db
         .select({
           events: count(),
@@ -1562,6 +1686,35 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         .leftJoin(connectors, eq(usageEvents.connectorId, connectors.id))
         .where(connectorWhere)
         .groupBy(usageEvents.connectorId, connectors.name, usageEvents.operation),
+      // Cross-team rollup WITHIN this project: attribute each spending user's
+      // cost to the team they contribute under HERE (project_members.teamId),
+      // not their home team. A member with no team on this project — or spend
+      // from a non-member — rolls up under a null teamId row (labeled "(no
+      // team)" in the UI; the API never fabricates a team). One ledger, still
+      // scoped by the same `where` as every other breakdown.
+      db
+        .select({
+          teamId: projectMembers.teamId,
+          name: teams.name,
+          costUsd: sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8`,
+          events: count(),
+        })
+        .from(usageEvents)
+        .leftJoin(
+          projectMembers,
+          and(
+            eq(usageEvents.userId, projectMembers.userId),
+            eq(projectMembers.projectId, projectId),
+          ),
+        )
+        .leftJoin(teams, eq(projectMembers.teamId, teams.id))
+        .where(where)
+        .groupBy(projectMembers.teamId, teams.name),
+      // Estimated (not measured) savings, grouped by the optimization technique
+      // that produced them. NOTE: a per-workflow cost-attribution source for
+      // cost_events is RESERVED for a future slice (roll a workflow stage's
+      // spend up to its parent initiative) — no writer is built yet, so no such
+      // rows exist to group here today.
       db
         .select({
           technique: costEvents.technique,
@@ -1601,12 +1754,24 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     const daysRemaining = Math.max(0, (endOfMonth.getTime() - now.getTime()) / (24 * 3600 * 1000));
     const projectedEomUsd = Number((spentUsd + dailyRateUsd * daysRemaining).toFixed(6));
 
+    // pillar-5 rollup label: this project's parent Initiative, if grouped under
+    // one. Surfaced here (reporting-only) so the member-facing /app can show the
+    // initiative name without the admin-only /v1/initiatives endpoint.
+    const [initiative] = project.initiativeId
+      ? await db
+          .select({ id: initiatives.id, name: initiatives.name, costCenter: initiatives.costCenter })
+          .from(initiatives)
+          .where(eq(initiatives.id, project.initiativeId))
+      : [];
+
     return {
       project,
+      initiative: initiative ?? null,
       measured,
       byUser,
       byAgent,
       byConnector,
+      byTeam,
       estimatedSavings: estimated,
       budget: {
         budgetUsd: project.budgetUsd,

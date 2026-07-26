@@ -457,6 +457,25 @@ for (const [projectId, userId, role, teamId] of [
   await call("POST", `/v1/projects/${projectId}/members`, { userId, role, teamId }); // 409 dup = fine
 }
 
+// --- initiatives (pillar-5 cross-team rollup) ----------------------------
+// A flat, reporting-only grouping of projects for chargeback/showback above
+// the single-project level. Grouping is idempotent and changes no governance.
+const initiativeList = (await call("GET", "/v1/initiatives")).initiatives ?? [];
+async function ensureInitiative(name: string, costCenter?: string): Promise<string> {
+  const existing = initiativeList.find((i: Json) => i.name === name);
+  if (existing) return existing.id;
+  return (await call("POST", "/v1/initiatives", { name, ...(costCenter ? { costCenter } : {}) })).id;
+}
+const platformInitiativeId = await ensureInitiative("Platform Modernization", "CC-PLAT");
+// Group the demo project under it — only when it isn't already there, so a
+// re-seed neither re-PATCHes nor overwrites a later manual regrouping.
+const demoRow = ((await call("GET", "/v1/projects")).projects ?? []).find(
+  (p: Json) => p.id === demoProjectId,
+);
+if (!demoRow?.initiativeId) {
+  await call("PATCH", `/v1/projects/${demoProjectId}`, { initiativeId: platformInitiativeId });
+}
+
 // --- shared context (§9.2): accepted revisions + one live conflict --------
 const demoCtx = (await call("GET", `/v1/projects/${demoProjectId}/context`)).context ?? [];
 if (!demoCtx.some((c: Json) => c.key === "coding-standards")) {

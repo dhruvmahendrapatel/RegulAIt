@@ -204,6 +204,13 @@
       "when": 1784964000000,
       "tag": "0028_project_budget_periods",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1784965000000,
+      "tag": "0029_initiatives",
+      "breakpoints": true
     }
   ]
 }
