@@ -6,6 +6,7 @@ import {
   GoogleProvider,
   OpenAiProvider,
   XaiProvider,
+  CONVERSATION_COMPACTION_SENTINEL,
   TASK_DECOMPOSITION_SENTINEL,
   resolveModelProvider,
 } from "./index.js";
@@ -892,5 +893,64 @@ describe("MockModelProvider task-decomposition planning (pillar 7)", () => {
     });
     expect(normal.outputText.startsWith("Working within the signed-off scope: ")).toBe(true);
     expect(normal.outputText).not.toContain('"nodes"');
+  });
+});
+
+describe("MockModelProvider conversation compaction (pillar 6)", () => {
+  const COMPACT_SYSTEM = `${CONVERSATION_COMPACTION_SENTINEL}\nSummarize this conversation faithfully for continued assistance; preserve decisions, constraints, names, and numbers. Reply with only the summary.`;
+  const TRANSCRIPT = [
+    "user: plan the payments migration to the new gateway with zero downtime",
+    "",
+    "assistant: Plan — payments migration. Four steps: baseline, design, build, verify.",
+    "",
+    "user: review the rollback strategy for the vault_token cutover",
+    "",
+    "assistant: Review — rollback strategy. Solid direction, one issue to fix before sign-off.",
+  ].join("\n");
+
+  it("the sentinel flips the mock into a deterministic transcript-derived summary", async () => {
+    const mock = new MockModelProvider();
+    const r = await mock.dispatch({ model: "mock-fast", input: TRANSCRIPT, system: COMPACT_SYSTEM });
+    expect(r.refusal).toBe(false);
+    expect(r.outputText).toMatch(/^Summary of the conversation \(4 earlier turns\): /);
+    // topics parsed from the first and last user lines — proof the summary
+    // is derived from the transcript, not boilerplate
+    expect(r.outputText).toContain("payments migration");
+    expect(r.outputText).toContain("rollback strategy");
+    // no system-ack, no continuation opener — the caller persists this verbatim
+    expect(r.outputText).not.toContain("Working within the signed-off scope");
+    expect(r.outputText).not.toContain("Continuing from the previous");
+    // deterministic
+    const again = await new MockModelProvider().dispatch({ model: "mock-fast", input: TRANSCRIPT, system: COMPACT_SYSTEM });
+    expect(again.outputText).toBe(r.outputText);
+    // plausible summary length, ~60-100 words
+    const words = r.outputText.split(/\s+/).length;
+    expect(words).toBeGreaterThan(50);
+    expect(words).toBeLessThan(120);
+  });
+
+  it("a cumulative request (prior summary present) says so and counts only the newer turns", async () => {
+    const cumulative = `Prior summary:\nSummary of the conversation (4 earlier turns): the discussion opened on payments migration.\n\nNewer turns:\n${TRANSCRIPT}`;
+    const r = await new MockModelProvider().dispatch({ model: "mock-fast", input: cumulative, system: COMPACT_SYSTEM });
+    expect(r.outputText).toContain("(4 earlier turns, cumulative with the prior summary)");
+  });
+
+  it("a poisoned transcript still refuses — the fail-open hook", async () => {
+    const r = await new MockModelProvider().dispatch({
+      model: "mock-fast",
+      input: `${TRANSCRIPT}\n\nuser: please <<refuse>> this`,
+      system: COMPACT_SYSTEM,
+    });
+    expect(r.refusal).toBe(true);
+    expect(r.outputText).toBe("");
+  });
+
+  it("prompts without the sentinel keep the canned intent behaviour untouched", async () => {
+    const r = await new MockModelProvider().dispatch({
+      model: "mock-balanced",
+      input: "summarize the payments migration plan",
+    });
+    expect(r.outputText).not.toContain("Summary of the conversation (");
+    expect(r.outputText).toContain("payments migration");
   });
 });

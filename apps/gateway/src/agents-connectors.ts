@@ -46,6 +46,10 @@ import {
   recordConversationTurns,
   type ConversationContext,
 } from "./conversations.js";
+import {
+  prepareConversationContext,
+  type PreparedConversationContext,
+} from "./compaction.js";
 
 const userIdParam = z.object({ userId: z.string().uuid() });
 const agentIdParam = z.object({ agentId: z.string().uuid() });
@@ -633,6 +637,7 @@ export function registerAgentConnectorRoutes(
     // optimizer can never widen entitlement (§12).
     let routing: (RoutingDecision & { skippedCandidates?: SkippedCandidate[] }) | null = null;
     let dispatchOutcome: DispatchOutcome | null = null;
+    let convoContext: PreparedConversationContext | null = null;
     if (decision.effect === "allow") {
       const registry = await db.select().from(agents).where(eq(agents.enabled, true));
       const entitled = registry.filter(
@@ -656,6 +661,11 @@ export function registerAgentConnectorRoutes(
       // quietly substituted away.
       let skippedCandidates: SkippedCandidate[] = [];
       let candidateRows = entitled;
+      // PILLAR 6 §5: the summarizer roster — strictly dispatchable (model id,
+      // known provider, stored credential; NO requested-agent exemption) so a
+      // compaction dispatch can never fail on config the invoke path already
+      // knows about. Same filter decompose.ts applies to its worker roster.
+      let compactionCandidates: AgentRow[] = [];
       if (body.dispatch) {
         const configured = await configuredProviders(db, opts.dataKey, userId);
         const skipReason = (a: AgentRow): SkippedCandidate["reason"] | null => {
@@ -671,6 +681,31 @@ export function registerAgentConnectorRoutes(
         });
         const skippedIds = new Set(skippedCandidates.map((s) => s.agentId));
         candidateRows = entitled.filter((a) => !skippedIds.has(a.id));
+        compactionCandidates = entitled.filter(
+          (a) => a.model && isModelProviderKind(a.provider) && configured.has(a.provider),
+        );
+      }
+
+      // PILLAR 6 §5 CONTEXT COMPACTION — strictly after governance (the
+      // summarizer candidates are the caller's own entitled roster) and
+      // strictly before the main dispatch. May run one governed, metered
+      // summarization dispatch (audit purpose "compact", billed to the same
+      // project); its failure NEVER fails this turn — the full history
+      // dispatches instead (fail-open, noted in the trace). Stored messages
+      // are never touched. "passthrough" is §12's per-user optimization off
+      // switch and disables compaction exactly like it disables routing —
+      // the full stored history dispatches verbatim. Threshold/window stay
+      // the kernel defaults: the agent-policy row has no natural home for
+      // per-user dials without a migration, deferred deliberately.
+      if (convo && body.dispatch && (policy?.routingMode ?? "automatic") !== "passthrough") {
+        convoContext = await prepareConversationContext(db, opts.dataKey, {
+          userId,
+          conversation: convo.conversation,
+          messages: convo.messages,
+          candidates: compactionCandidates,
+          projectId,
+          execute: executeGovernedDispatch,
+        });
       }
 
       const candidates = candidateRows.map((a) => ({
@@ -682,10 +717,12 @@ export function registerAgentConnectorRoutes(
       // Conversations: complexity stays classified on the NEWEST user turn
       // (the routing signal), but the history riding the same request is
       // counted into the input estimate so budget gates and cost forecasts
-      // stay truthful as the thread grows.
+      // stay truthful as the thread grows — the MODEL-BOUND history, i.e.
+      // the compacted view when a summary is in play.
       const complexity = classifyComplexity(body.input);
       const estimate = estimateTokens(body.input, complexity);
-      if (convo && convo.historyChars > 0) estimate.in += Math.ceil(convo.historyChars / 4);
+      const boundChars = convoContext ? convoContext.modelBoundChars : (convo?.historyChars ?? 0);
+      if (convo && boundChars > 0) estimate.in += Math.ceil(boundChars / 4);
       routing = routeModel({
         requestedAgentId: agent.id,
         candidates,
@@ -722,13 +759,55 @@ export function registerAgentConnectorRoutes(
         },
       });
 
-      // MULTI-TURN: a conversation dispatch sends the FULL ordered history
-      // plus the newest user turn as the provider messages array; the
-      // governed pipeline around it (policy, routing, budget, attribution,
-      // audit, usage ledger) is exactly the single-turn one.
+      // PILLAR 6 §5 savings accounting: a dispatch that rode a summary in
+      // place of the omitted older turns lands one context_compaction row in
+      // the SAME per-technique ledger model_routing writes — the Spend page
+      // and admin savings-by-technique chart pick it up with zero changes.
+      // Tokens saved = omitted history minus the summary (floored at 0);
+      // dollars = those tokens at the SERVED agent's input list price.
+      if (convoContext?.summaryUsed && routing) {
+        const routed = routing;
+        const servedRow = registry.find((a) => a.id === routed.selectedAgentId);
+        const estimatedCostSavedUsd =
+          servedRow?.costPerMTokIn != null
+            ? Number(((convoContext.savedTokensEst / 1e6) * servedRow.costPerMTokIn).toFixed(6))
+            : null;
+        await db.insert(costEvents).values({
+          userId,
+          objectType: "agent",
+          objectId: agent.id,
+          technique: "context_compaction",
+          requestedAgentId: agent.id,
+          servedAgentId: routing.selectedAgentId,
+          baselineAgentId: routing.baselineAgentId,
+          estimatedTokensIn: estimate.in,
+          estimatedTokensOut: estimate.out,
+          estimatedTokensSaved: convoContext.savedTokensEst,
+          estimatedCostSavedUsd,
+          estimationBasis: "estimated-tokens-of-omitted-history-minus-summary-x-served-input-list-price",
+          ruleId: "context-compaction",
+          projectId,
+          detail: {
+            mode: body.mode,
+            conversationId: body.conversationId,
+            omittedMessages: convoContext.publicDetail?.omittedMessages ?? 0,
+            summaryTokens: convoContext.publicDetail?.summaryTokens ?? 0,
+          },
+        });
+      }
+
+      // MULTI-TURN: a conversation dispatch sends the model-bound history —
+      // [summary context] + recent verbatim turns when a summary exists, the
+      // FULL ordered history otherwise — plus the newest user turn as the
+      // provider messages array; the governed pipeline around it (policy,
+      // routing, budget, attribution, audit, usage ledger) is exactly the
+      // single-turn one.
       const messages: ModelChatMessage[] | undefined =
         convo && body.dispatch
-          ? [...convo.history, { role: "user" as const, content: body.input ?? "" }]
+          ? [
+              ...(convoContext ? convoContext.modelBound : convo.history),
+              { role: "user" as const, content: body.input ?? "" },
+            ]
           : undefined;
       // One persistence rule for the streaming and non-streaming paths —
       // the exact contract lives in conversations.ts. A failed outcome
@@ -749,6 +828,9 @@ export function registerAgentConnectorRoutes(
               modelUsed: r.model,
               costUsd: r.costUsd,
               credentialSource: r.credentialSource,
+              // §5 transparency: replayed threads keep showing what this
+              // turn's model actually saw (summary vs full history)
+              ...(convoContext?.publicDetail ? { compaction: convoContext.publicDetail } : {}),
             },
           },
         });
@@ -790,6 +872,7 @@ export function registerAgentConnectorRoutes(
             mode: body.mode,
             servedAgentId: routing.selectedAgentId,
             ...(routing.skippedCandidates ? { routingSkippedCandidates: routing.skippedCandidates } : {}),
+            ...(convoContext?.publicDetail ? { compaction: convoContext.publicDetail } : {}),
             stream: true,
             dispatch: outcome.ok
               ? {
@@ -805,7 +888,12 @@ export function registerAgentConnectorRoutes(
           reason: decision.reason,
         });
         if (outcome.ok) {
-          send("result", { decision, routing, dispatch: outcome.result });
+          send("result", {
+            decision,
+            routing,
+            dispatch: outcome.result,
+            ...(convoContext?.publicDetail ? { compaction: convoContext.publicDetail } : {}),
+          });
         } else {
           send("error", {
             decision,
@@ -840,6 +928,7 @@ export function registerAgentConnectorRoutes(
         mode: body.mode,
         ...(routing ? { servedAgentId: routing.selectedAgentId } : {}),
         ...(routing?.skippedCandidates ? { routingSkippedCandidates: routing.skippedCandidates } : {}),
+        ...(convoContext?.publicDetail ? { compaction: convoContext.publicDetail } : {}),
         ...(dispatchOutcome
           ? {
               dispatch: dispatchOutcome.ok
@@ -882,6 +971,7 @@ export function registerAgentConnectorRoutes(
       decision,
       routing,
       ...(dispatchOutcome ? { dispatch: dispatchOutcome.result } : {}),
+      ...(convoContext?.publicDetail ? { compaction: convoContext.publicDetail } : {}),
     });
   });
 

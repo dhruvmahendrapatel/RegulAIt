@@ -765,6 +765,16 @@ export const conversations = pgTable(
     projectId: uuid("project_id"),
     /** auto-titled from the first user turn (~60 chars) when left null */
     title: text("title"),
+    /** PILLAR 6 §5 context compaction: the persisted summary of every turn up
+     * to and including summary_through_message_id. One summary per
+     * conversation, REPLACED cumulatively on re-compaction (new input =
+     * existing summary + turns since). Stored messages are never deleted or
+     * altered — these fields only change what is model-bound. */
+    summary: text("summary"),
+    summaryThroughMessageId: uuid("summary_through_message_id"),
+    /** chars/4 estimate of the summary — the cost side of the savings claim */
+    summaryTokens: integer("summary_tokens"),
+    compactedAt: timestamp("compacted_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

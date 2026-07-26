@@ -42,15 +42,21 @@ import { assertProjectAttribution } from "./projects.js";
 const conversationIdParam = z.object({ conversationId: z.string().uuid() });
 
 export type ConversationRow = typeof conversations.$inferSelect;
+export type StoredConversationMessage = typeof conversationMessages.$inferSelect;
 
 export type ConversationContext =
   | {
       ok: true;
       conversation: ConversationRow;
-      /** prior turns in order, denied attempts excluded — the model-bound history */
+      /** prior turns in order, denied attempts excluded — the FULL model-bound
+       * history (compaction.ts decides per dispatch whether a summary replaces
+       * the older part of it) */
       history: ModelChatMessage[];
       /** size signal for the optimizer's input-token estimate */
       historyChars: number;
+      /** every stored row in order, denied included — compaction planning
+       * needs ids and per-message sizes, and must never mutate these */
+      messages: StoredConversationMessage[];
     }
   | { ok: false; status: number; error: string };
 
@@ -77,6 +83,7 @@ export async function loadOwnConversation(
     conversation: row,
     history,
     historyChars: history.reduce((n, m) => n + m.content.length, 0),
+    messages: msgs,
   };
 }
 

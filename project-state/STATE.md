@@ -393,6 +393,24 @@ Sync-now verification works, and receivers without read-back fail loudly into th
 orphan flow. `DEFAULT_MAPPINGS.generic_webhook` is the IDENTITY map over all five canonical
 states including blocked — nothing invented because the vocabulary is ours. E2e: the fake
 receiver verifies the HMAC on every request and asserts the token never travels raw.
+**Automatic context compaction, 2026-07-26 — pillar 6 §5 lands (first technique enabled by
+the messages array).** Pure decision in optimizer-kernel (planCompaction/compactionSavings;
+threshold >1600 est. tokens of model-bound history, last 4 messages always verbatim;
+constants — per-user dials deferred pending an agent-policy migration home). Migration 0024:
+summary/summary_through_message_id/summary_tokens/compacted_at on conversations — stored
+messages NEVER deleted or altered (asserted). The summarizer is one governed dispatch to
+the caller's cheapest entitled+dispatchable agent (audit purpose:"compact", billed to the
+same project — the visible price of the savings); re-compaction is CUMULATIVE (prior
+summary + newer turns, compacted-away turns never re-read); failure fails OPEN (audited
+context-compaction-failed-open, full history dispatches, turn succeeds, failOpen in trace);
+routingMode "passthrough" disables it (§12 off-switch consistency). Savings = max(0,
+omitted − summary) tokens at the served agent's input price, recorded per summary-riding
+dispatch under technique context_compaction in the SAME detail shape as model_routing — the
+Spend page and admin charts lit up with zero chart changes. /app shows a compaction divider
+with the expandable stored summary + badges + trace detail, persisted on replayed threads.
+Suite 455 → 473; browser-verified (on-topic continuation through the summary, $0.0044
+compaction bar beside model_routing, zero console errors).
+
 **Agent-driven task decomposition, 2026-07-26 — pillar 7's headline lands, human-gated.**
 `POST /v1/runs/decompose` {goal, projectId?, leadAgentId?}: a Team-Lead agent (leadAgentId ??
 user default ?? cheapest granted mock, entitlement-checked under mode "plan") drafts a

@@ -213,6 +213,13 @@ function exchangesFromMessages(v) {
         model: d.modelUsed, costUsd: d.costUsd, refusal: d.refusal,
         credentialSource: d.credentialSource, stopReason: d.stopReason,
       } };
+      if (d.compaction) x.result.compaction = d.compaction;
+    }
+    // pillar 6 compaction boundary: everything up to and including this stored
+    // message is model-bound only via the summary — draw the divider after
+    // the exchange this message belongs to (full history stays visible above)
+    if (v.summaryThroughMessageId && m.id === v.summaryThroughMessageId && out.length) {
+      out[out.length - 1].compactedBoundary = { summary: v.summary, summaryTokens: v.summaryTokens };
     }
   }
   return out;
@@ -366,6 +373,12 @@ function renderExchange(x, i) {
       if (r.dispatch.credentialSource === "platform") meta.push('<span class="badge">platform key</span>');
       if (r.dispatch.projectBudgetAlerted) meta.push('<span class="badge warn">budget alert</span>');
     }
+    // pillar 6 context compaction — what this turn's model actually saw
+    if (r.compaction) {
+      if (r.compaction.compacted) meta.push('<span class="badge accent" title="this turn pushed the thread past the compaction threshold — older turns were summarized by a governed, metered dispatch; stored history is untouched">history compacted</span>');
+      if (r.compaction.active) meta.push('<span class="badge info" title="the model received a summary of the older turns plus the recent window — est. ' + (r.compaction.savedTokensEst ?? 0) + ' tokens saved">summary context · ~' + (r.compaction.savedTokensEst ?? 0) + ' tok saved</span>');
+      if (r.compaction.failOpen) meta.push('<span class="badge warn" title="the compaction dispatch failed (' + esc(r.compaction.failOpen.error ?? "") + ') — this turn was sent with the full history instead (fail-open)">compaction failed open</span>');
+    }
   }
   if (x.denied) {
     // a named rule ("agent-ceiling") reads as itself; a grant-row UUID truncates
@@ -374,9 +387,9 @@ function renderExchange(x, i) {
   }
   if (x.error) meta.push('<span class="badge bad">' + esc(x.error) + "</span>");
   // replayed exchanges carry no decision/routing payload — no empty expander
-  const trace = x.denied || (x.result && (x.result.decision || x.result.routing))
+  const trace = x.denied || (x.result && (x.result.decision || x.result.routing || x.result.compaction))
     ? \`<details style="margin-top:6px"><summary class="faint" style="cursor:pointer;font-size:11.5px">governance trace</summary>
-       <pre style="margin-top:6px">\${esc(JSON.stringify(x.denied ?? { decision: x.result.decision, routing: x.result.routing }, null, 2))}</pre></details>\`
+       <pre style="margin-top:6px">\${esc(JSON.stringify(x.denied ?? { decision: x.result.decision, routing: x.result.routing, ...(x.result.compaction ? { compaction: x.result.compaction } : {}) }, null, 2))}</pre></details>\`
     : "";
   // per-exchange handoffs: copy the reply, or carry the prompt into the New
   // Run form as the first node's work order (pillar 7 starts where the
@@ -384,13 +397,21 @@ function renderExchange(x, i) {
   const tools = x.streaming ? "" :
     \`<button class="ghost small" data-copy="\${i}" title="copy the reply text">copy</button>
      <button class="ghost small" data-torun="\${i}" title="plan a multi-agent run with this prompt as the first node's instruction">turn into a run</button>\`;
+  // pillar 6: slim divider at the compaction boundary — the full history
+  // above stays visible and stored; only the model-bound context shrank
+  const divider = x.compactedBoundary
+    ? \`<div class="compact-divider" style="margin:10px 0;padding:6px 12px;border:1px dashed var(--border-strong);border-radius:8px;font-size:11.5px">
+        <details><summary class="faint" style="cursor:pointer">— older turns above are compacted into a summary — full history retained; the model sees the summary + recent turns\${x.compactedBoundary.summaryTokens ? " (~" + x.compactedBoundary.summaryTokens + " tok)" : ""} —</summary>
+        <pre style="margin-top:6px;white-space:pre-wrap">\${esc(x.compactedBoundary.summary ?? "")}</pre></details>
+      </div>\`
+    : "";
   return \`
     <div class="msg user"><div class="who">\${esc(ME.user.displayName)}</div><div class="bubble">\${esc(x.prompt)}</div></div>
     <div class="msg agent">
       <div class="who">\${esc(x.agentName)}</div>
       <div class="bubble">\${esc(x.text)}\${x.streaming ? '<span class="caret"></span>' : ""}</div>
       <div class="meta">\${meta.join("")}\${tools}</div>\${trace}
-    </div>\`;
+    </div>\${divider}\`;
 }
 
 function drawChat() {
@@ -511,9 +532,16 @@ async function sendPrompt() {
   } finally {
     PG_ABORT = null;
     pgStreamUi(false);
-    // the turn (or denial) just changed this thread's title/updatedAt/count —
-    // move its rail entry without re-rendering the page
-    refreshRail();
+    if (x.result && x.result.compaction && x.result.compaction.compacted) {
+      // this turn compacted the thread — reload it from the server so the
+      // divider (and the persisted summary behind it) appears in place
+      CHAT_LOADED_FOR = null;
+      render();
+    } else {
+      // the turn (or denial) just changed this thread's title/updatedAt/count —
+      // move its rail entry without re-rendering the page
+      refreshRail();
+    }
   }
 }
 

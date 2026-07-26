@@ -887,6 +887,40 @@ const TERSE_FOLLOW_UP_WORDS = 8;
 
 export const TASK_DECOMPOSITION_SENTINEL = "TASK-DECOMPOSITION REQUEST";
 
+// ---------------------------------------------------------------------------
+// Context compaction (pillar 6, TOKEN_OPTIMIZATION_SPEC §5). The gateway's
+// compaction dispatch puts this sentinel at the top of its summarization
+// system prompt; when the mock sees it, the reply is a deterministic,
+// faithful-looking summary derived from the transcript it was handed —
+// opening/closing topics parsed back out of the "user:"/"assistant:" lines,
+// turn count included — so the whole compaction loop is demoable with zero
+// external keys. A transcript carrying "<<refuse>>" still refuses first
+// (the shared lastUser check), which is exactly the fail-open test hook.
+// ---------------------------------------------------------------------------
+
+export const CONVERSATION_COMPACTION_SENTINEL = "CONVERSATION-COMPACTION REQUEST";
+
+function mockCompactionSummary(transcript: string): string {
+  const turnLines = transcript.split("\n").filter((l) => /^(user|assistant): /.test(l));
+  const userLines = turnLines
+    .filter((l) => l.startsWith("user: "))
+    .map((l) => l.slice("user: ".length));
+  const opening = mockTopic(userLines[0] ?? "the request");
+  const latest = mockTopic(userLines[userLines.length - 1] ?? "the request");
+  const cumulative = transcript.includes("Prior summary:");
+  const span = latest === opening ? "" : ` and most recently covered ${latest}`;
+  return (
+    `Summary of the conversation (${turnLines.length} earlier turns` +
+    `${cumulative ? ", cumulative with the prior summary" : ""}): ` +
+    `the discussion opened on ${opening}${span}. ` +
+    `Decisions and constraints agreed in those turns stay binding: scope is held exactly as stated, ` +
+    `every name, number, and system mentioned is preserved as given, and open questions keep their ` +
+    `assigned owners. The assistant's earlier replies — summaries, plans, and reviews — were accepted ` +
+    `as consistent with that scope. Nothing in the compacted turns contradicts the current direction; ` +
+    `continue from this context as if the full history were present.`
+  );
+}
+
 const PLAN_STOPWORDS = new Set([
   "the", "and", "that", "this", "those", "these", "with", "into", "from", "over",
   "your", "our", "their", "them", "then", "should", "must", "will", "have",
@@ -1055,15 +1089,20 @@ export class MockModelProvider implements ModelProvider {
     }
     // Planning requests answer with ONLY the JSON plan (tolerably fenced) —
     // no system-ack or continuation opener, since the caller machine-parses
-    // the reply. Streaming and usage accounting stay on the shared path.
+    // the reply. Compaction requests answer with ONLY the deterministic
+    // summary — same reasoning: the caller persists the reply verbatim.
+    // Streaming and usage accounting stay on the shared path.
     const planning = req.system?.includes(TASK_DECOMPOSITION_SENTINEL) ?? false;
+    const compacting = req.system?.includes(CONVERSATION_COMPACTION_SENTINEL) ?? false;
     const outputText = planning
       ? mockDecompositionReply(lastUser, req.system!, mockTier(req.model))
-      : [
-          ...(req.system ? [mockSystemAck(req.system)] : []),
-          ...(continuation ? [continuation] : []),
-          mockReplyBody(mockIntent(lastUser), mockTier(req.model), mockTopic(topicSource)),
-        ].join("\n\n");
+      : compacting
+        ? mockCompactionSummary(lastUser)
+        : [
+            ...(req.system ? [mockSystemAck(req.system)] : []),
+            ...(continuation ? [continuation] : []),
+            mockReplyBody(mockIntent(lastUser), mockTier(req.model), mockTopic(topicSource)),
+          ].join("\n\n");
     if (req.onText) {
       // deterministic chunking so the streaming path is testable end-to-end
       const chunkSize = 40;
