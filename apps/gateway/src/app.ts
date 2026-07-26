@@ -70,6 +70,7 @@ import { registerMcpProxy } from "./mcp-proxy.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
 import { registerConversationRoutes } from "./conversations.js";
 import { applyProjectApprovalDecision, registerProjectRoutes } from "./projects.js";
+import { applyInfraApprovalDecision, registerInfraRoutes } from "./infra.js";
 import { ADMIN_PORTAL_HTML } from "./admin-portal.js";
 import { APP_HTML } from "./app-ui.js";
 import { registerOptimizationRoutes } from "./optimization.js";
@@ -888,6 +889,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       if (updated.objectType === "project") {
         await applyProjectApprovalDecision(tx as unknown as Db, updated, body.decision, deciderUserId);
       }
+      // Pillar 3 §8.2 governed remediations: approve -> provider.remediate +
+      // finding 'remediated'; deny -> 'accepted_risk'. Both audited. SoD guards
+      // (named-approver, admin-override-reason, self-review-reason) apply above.
+      if (updated.objectType === "infra_operation") {
+        await applyInfraApprovalDecision(tx as unknown as Db, updated, body.decision, deciderUserId);
+      }
       return { updated, postCommit };
     });
     if (!outcome.updated) {
@@ -950,6 +957,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerAgentConnectorRoutes(app, db, { dataKey: opts.dataKey });
   registerConversationRoutes(app, db);
   registerProjectRoutes(app, db);
+  registerInfraRoutes(app, db, opts.dataKey);
   registerOptimizationRoutes(app, db);
   registerOrchestrationRoutes(app, db, { dataKey: opts.dataKey });
   registerDecomposeRoutes(app, db, { dataKey: opts.dataKey });

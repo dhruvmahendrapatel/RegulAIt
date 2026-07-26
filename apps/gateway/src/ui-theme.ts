@@ -265,6 +265,7 @@ function approvalStageLabel(a) {
   if (s.startsWith("__context_conflict__"))
     return "Context conflict" + (a.contextConflict && a.contextConflict.key ? " · " + a.contextConflict.key : "");
   if (s.startsWith("__budget__")) return "Run budget";
+  if (s.startsWith("__infra_remediation__")) return "Infra remediation";
   return null;
 }
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

@@ -24,7 +24,8 @@
     "@regulait/orchestration-kernel": "workspace:*",
     "@regulait/pm-provider": "workspace:*",
     "@regulait/model-provider": "workspace:*",
-    "@regulait/connector-provider": "workspace:*"
+    "@regulait/connector-provider": "workspace:*",
+    "@regulait/infra-provider": "workspace:*"
   },
   "devDependencies": {
     "vitest": "^3.2.4"

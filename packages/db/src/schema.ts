@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   integer,
   boolean,
@@ -86,7 +87,17 @@ export const auditLog = pgTable(
     at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
     userId: uuid("user_id").notNull(),
     objectType: text("object_type", {
-      enum: ["mcp_tool", "agent", "connector", "workflow", "run", "pm_work_item", "decision", "project"],
+      enum: [
+        "mcp_tool",
+        "agent",
+        "connector",
+        "workflow",
+        "run",
+        "pm_work_item",
+        "decision",
+        "project",
+        "infra_operation",
+      ],
     })
       .notNull()
       .default("mcp_tool"),
@@ -178,7 +189,9 @@ export const approvals = pgTable(
     userId: uuid("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
-    objectType: text("object_type", { enum: ["mcp_tool", "workflow", "run", "project"] })
+    objectType: text("object_type", {
+      enum: ["mcp_tool", "workflow", "run", "project", "infra_operation"],
+    })
       .notNull()
       .default("mcp_tool"),
     serverId: uuid("server_id").references(() => mcpServers.id, { onDelete: "cascade" }),
@@ -888,6 +901,11 @@ export const complianceProfiles = pgTable("compliance_profiles", {
     .default("read_write"),
   auditRetentionDays: integer("audit_retention_days"),
   piiMode: text("pii_mode", { enum: ["block", "warn", "log"] }).notNull().default("log"),
+  /** §8.3 -> §8.2 tie: the backup retention + patch cadence this framework
+   * forces onto any infra resource carrying its tag (pillar 3). Null = the
+   * framework declares no infra floor of its own. */
+  backupRetentionDays: integer("backup_retention_days"),
+  patchCadenceDays: integer("patch_cadence_days"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -964,5 +982,89 @@ export const projectContextItems = pgTable(
   (t) => [
     uniqueIndex("project_context_project_key_rev_uq").on(t.projectId, t.key, t.revision),
     index("project_context_project_key_idx").on(t.projectId, t.key),
+  ],
+);
+
+// PILLAR 3 (§8.2): a GOVERNED-OPERATIONS layer — monitored resources +
+// operational policies + detected findings + governed remediation. NOT a real
+// infra patcher: findings are inert reports; a remediation is a governed action
+// (auto-remediated under policy, or approval-gated) that runs strictly after
+// the governance decision, exactly like the connector execution layer.
+
+// A monitored piece of infrastructure. `provider` is an infra-provider kind
+// ('mock' for the MVP); `classifications` carries §8.3 compliance tags whose
+// cascade derives the resource's backup/patch floors (§8.3 -> §8.2).
+export const infraResources = pgTable("infra_resources", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  kind: text("kind", { enum: ["control_plane", "agent_runtime", "cert", "backup_target"] }).notNull(),
+  name: text("name").notNull().unique(),
+  /** infra-provider kind — 'mock' is keyless/deterministic for the MVP */
+  provider: text("provider").notNull().default("mock"),
+  /** provider-specific handle (endpoint, days-until-expiry, backup age, …) */
+  config: jsonb("config").$type<Record<string, unknown>>(),
+  /** §8.3 compliance tags — the cascade applies backup/patch floors */
+  classifications: jsonb("classifications").$type<string[]>(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// An operational policy. A null resourceId is FLEET-WIDE (a default for every
+// resource); a resource-scoped policy overrides it. `autoRemediateMaxSeverity`
+// is the ceiling at/under which a NEW finding is auto-remediated (audited, no
+// approval) — null = never auto-remediate. 'critical' is NOT a valid value:
+// critical findings are ALWAYS approval-gated regardless of policy.
+export const infraPolicies = pgTable(
+  "infra_policies",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    resourceId: uuid("resource_id").references(() => infraResources.id, { onDelete: "cascade" }),
+    patchCadenceDays: integer("patch_cadence_days"),
+    certRotationDaysBeforeExpiry: integer("cert_rotation_days_before_expiry"),
+    backupSchedule: text("backup_schedule"),
+    backupRetentionDays: integer("backup_retention_days"),
+    driftBaseline: jsonb("drift_baseline").$type<Record<string, unknown>>(),
+    autoRemediateMaxSeverity: text("auto_remediate_max_severity", {
+      enum: ["low", "medium", "high"],
+    }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("infra_policies_resource_idx").on(t.resourceId)],
+);
+
+// A detected finding — an INERT report until governed. `signature` (carried in
+// detail) is a stable natural key so a re-scan is idempotent: the unique index
+// on (resource_id, kind, detail->>'signature') means scanning twice refreshes
+// detected_at rather than duplicating an open finding.
+export const infraFindings = pgTable(
+  "infra_findings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    resourceId: uuid("resource_id")
+      .notNull()
+      .references(() => infraResources.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: ["drift", "cve", "cert_expiring", "backup_missed"] }).notNull(),
+    severity: text("severity", { enum: ["low", "medium", "high", "critical"] }).notNull(),
+    detail: jsonb("detail").$type<Record<string, unknown>>().notNull(),
+    detectedAt: timestamp("detected_at", { withTimezone: true }).notNull().defaultNow(),
+    status: text("status", {
+      enum: [
+        "open",
+        "remediation_proposed",
+        "auto_remediated",
+        "approved",
+        "remediated",
+        "accepted_risk",
+      ],
+    })
+      .notNull()
+      .default("open"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("infra_findings_resource_idx").on(t.resourceId),
+    uniqueIndex("infra_findings_natural_key_uq").on(
+      t.resourceId,
+      t.kind,
+      sql`(${t.detail}->>'signature')`,
+    ),
   ],
 );

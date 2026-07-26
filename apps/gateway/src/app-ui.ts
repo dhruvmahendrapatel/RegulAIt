@@ -1334,6 +1334,7 @@ const approvalLabel = (a) => {
   // the two surfaces can never label the same approval differently
   const sentinel = approvalStageLabel(a);
   if (sentinel) return sentinel;
+  if (a.objectType === "infra_operation") return "Infra remediation" + (a.objectLabel ? " · " + a.objectLabel : "");
   return (a.objectType === "workflow" ? "Sign-off · " : a.objectType === "run" ? "Run escalation · " : "") + (a.stageId ?? "");
 };
 // where the governed object lives in this app — the row must let the

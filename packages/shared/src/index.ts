@@ -504,6 +504,45 @@ export const upsertComplianceProfileSchema = z.object({
   mcpDefaultMode: z.enum(["read_only", "read_write"]).optional(),
   auditRetentionDays: z.number().int().positive().nullable().optional(),
   piiMode: z.enum(["block", "warn", "log"]).optional(),
+  /** §8.3 -> §8.2: the backup retention + patch cadence floors this framework
+   * forces onto any infra resource carrying its tag (pillar 3). */
+  backupRetentionDays: z.number().int().positive().nullable().optional(),
+  patchCadenceDays: z.number().int().positive().nullable().optional(),
+});
+
+// PILLAR 3 (§8.2): the governed infrastructure-operations layer.
+export const createInfraResourceSchema = z.object({
+  kind: z.enum(["control_plane", "agent_runtime", "cert", "backup_target"]),
+  name: z.string().min(1).max(200),
+  /** infra-provider kind; 'mock' (keyless, deterministic) for the MVP */
+  provider: z.enum(["mock", "aws", "azure", "gcp"]).default("mock"),
+  config: z.record(z.unknown()).optional(),
+  /** §8.3 compliance tags; the cascade derives backup/patch floors */
+  classifications: z.array(z.string().min(1).max(64)).max(16).optional(),
+});
+
+// An operational policy. A null resourceId is fleet-wide. The auto-remediate
+// ceiling EXCLUDES 'critical' by construction — critical findings are always
+// approval-gated regardless of policy.
+export const createInfraPolicySchema = z.object({
+  resourceId: z.string().uuid().nullable().optional(),
+  patchCadenceDays: z.number().int().positive().nullable().optional(),
+  certRotationDaysBeforeExpiry: z.number().int().positive().nullable().optional(),
+  backupSchedule: z.string().min(1).max(200).nullable().optional(),
+  backupRetentionDays: z.number().int().positive().nullable().optional(),
+  driftBaseline: z.record(z.unknown()).nullable().optional(),
+  autoRemediateMaxSeverity: z.enum(["low", "medium", "high"]).nullable().optional(),
+});
+
+// Scan on demand — optionally a single resource, else the whole fleet.
+export const scanInfraSchema = z
+  .object({ resourceId: z.string().uuid().optional() })
+  .optional()
+  .default({});
+
+// Propose a governed remediation for an OPEN finding: a named approver gates it.
+export const proposeInfraRemediationSchema = z.object({
+  approverUserId: z.string().uuid(),
 });
 
 // §8.3 reclassification: a diff-then-approve change to a project's tags.

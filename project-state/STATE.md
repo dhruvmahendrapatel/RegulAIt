@@ -393,6 +393,35 @@ Sync-now verification works, and receivers without read-back fail loudly into th
 orphan flow. `DEFAULT_MAPPINGS.generic_webhook` is the IDENTITY map over all five canonical
 states including blocked — nothing invented because the vocabulary is ours. E2e: the fake
 receiver verifies the HMAC on every request and asserts the token never travels raw.
+**§8.2 infrastructure-operations layer, 2026-07-26 — pillar 3's last unstarted surface lands
+as a GOVERNED-operations layer (migration 0027).** Monitored resources + operational policies
++ inert findings + governed remediation — not a real patcher; a keyless MockInfraProvider
+demos the whole detect→propose→approve→remediate spectrum. Migration 0027: infra_resources
+(kind control_plane|agent_runtime|cert|backup_target, classifications), infra_policies
+(patch cadence, cert-rotation window, backup schedule+retention, drift baseline,
+auto_remediate_max_severity — enum low|medium|high, can't hold 'critical'), infra_findings
+(drift|cve|cert_expiring|backup_missed × low|medium|high|critical, status open|
+remediation_proposed|auto_remediated|remediated|accepted_risk; UNIQUE on
+(resource,kind,detail.signature) so re-scan is idempotent); + approvals/audit_log objectType
++= 'infra_operation'; + compliance_profiles gains backup_retention_days + patch_cadence_days.
+New packages/infra-provider mirrors connector-provider (scan/remediate interface, mock keyless
++ aws/azure/gcp 501). THE INVARIANT: a finding is an inert report; a remediation is governed.
+On scan a finding is AUTO-remediated (no approval, still AUDITED ruleId infra-auto-remediate)
+iff policy has an auto ceiling AND severity ≤ ceiling AND severity !== 'critical'; everything
+else + ALL critical findings are approval-gated (approvals row objectType infra_operation via
+__infra_remediation__ sentinel → the shared /decide txn → applyInfraApprovalDecision calls
+provider.remediate on approve / accepted_risk on deny, both audited, all SoD guards for free).
+Critical is doubly guarded (ceiling can't be 'critical' + explicit !=='critical'). §8.3
+FINALLY ENFORCED: effectiveCompliancePolicy now composes backupRetentionDays (max) +
+patchCadenceDays (min); a classified resource's backup floor = max(policy, cascade.backup,
+cascade.auditRetentionDays) — consuming the formerly-dead auditRetentionDays — and its patch
+ceiling = min(policy, cascade.patch); the /compliance endpoint's "declared-not-enforced"
+labels honestly narrowed to only the still-unenforced parts. Admin Operations tab (resources/
+policies/scan-now/findings-inbox/posture); app-ui infra approval label; seed 5 resources (one
+HIPAA) + a scan producing the auto/open/critical mix. Suite 535 → 552 (10 provider unit + 7
+e2e). Independently re-verified: build clean, infra-provider 10/10, infra e2e + mcp-proxy
+157/157 (shared decide path regression-free).
+
 **Pillar-1 rule scoping, 2026-07-26 — policy rules gain role/team/fleet scope (migration
 0026); the "one row per user per server" gap closed.** All three restriction-rule tables
 (approval_rules, rate_limits, data_scope_rules) were hard-bound to one user × one server

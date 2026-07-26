@@ -377,6 +377,10 @@ await call("POST", "/v1/compliance/profiles", {
   piiMode: "block",
   auditRetentionDays: 2555,
   mcpDefaultMode: "read_only",
+  // §8.3 -> §8.2 (pillar 3): the infra floors this framework forces onto any
+  // resource carrying the 'hipaa' tag. 2555d backup retention, 30d patch cadence.
+  backupRetentionDays: 2555,
+  patchCadenceDays: 30,
 });
 
 // --- teams (§9 provenance) -----------------------------------------------
@@ -512,6 +516,41 @@ if (!hipaaCtx.some((c: Json) => c.key === "phi-handling")) {
     averyAuth,
   );
 }
+
+// --- infra operations (pillar 3 §8.2) ------------------------------------
+// A keyless, mock-provider fleet: a control plane (drift + CVE), an agent
+// runtime under a permissive policy (its LOW drift auto-remediates on scan,
+// audited — no approval), two certs (one expiring HIGH, one already-EXPIRED
+// CRITICAL that is ALWAYS approval-gated), and a HIPAA-classified backup target
+// whose §8.3 cascade derives a 2555d retention FLOOR that overrides its own 30d
+// policy. One scan through the real API materializes the mixed posture; the
+// signature-uniqueness index makes a re-run idempotent.
+const infraResList = (await call("GET", "/v1/infra/resources")).resources ?? [];
+async function ensureInfraResource(name: string, kind: string, extras: Json = {}): Promise<string> {
+  const existing = infraResList.find((r: Json) => r.name === name);
+  if (existing) return existing.id;
+  return (await call("POST", "/v1/infra/resources", { name, kind, provider: "mock", ...extras })).id;
+}
+await ensureInfraResource("control-plane-gateway", "control_plane");
+const runtimeResId = await ensureInfraResource("agent-runtime-pool", "agent_runtime");
+await ensureInfraResource("api-tls-cert", "cert", { config: { daysUntilExpiry: 5 } });
+await ensureInfraResource("legacy-tls-cert", "cert", { config: { daysUntilExpiry: -2 } });
+const backupResId = await ensureInfraResource("phi-backup-primary", "backup_target", {
+  config: { hoursSinceLastBackup: 100 },
+  classifications: ["hipaa"],
+});
+const infraPolList = (await call("GET", "/v1/infra/policies")).policies ?? [];
+async function ensureInfraPolicy(resourceId: string, body: Json): Promise<void> {
+  if (infraPolList.some((p: Json) => p.resourceId === resourceId)) return;
+  await call("POST", "/v1/infra/policies", { resourceId, ...body });
+}
+// agent-runtime: a permissive ceiling of 'low' — its low drift auto-remediates.
+await ensureInfraPolicy(runtimeResId, { autoRemediateMaxSeverity: "low", patchCadenceDays: 90 });
+// backup target: a 30d retention policy the HIPAA cascade floor (2555d) overrides.
+await ensureInfraPolicy(backupResId, { backupRetentionDays: 30, backupSchedule: "daily-0200" });
+// One scan: detects the mix and auto-remediates only what the policy permits.
+// Idempotent — a re-run refreshes detected_at, never duplicates a finding.
+await call("POST", "/v1/infra/scan", {});
 
 // --- PM connection (mock provider) ---------------------------------------
 // EPIC-06 against the in-memory MOCK provider: no external service, no real
@@ -946,6 +985,15 @@ ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecre
   surfaced, never auto-fixed). /admin → PM Connections lists/creates
   connections; the webhook secret is shown exactly once there, like every
   secret.
+
+  Infra ops (pillar 3, §8.2): 5 mock resources with a scanned posture —
+  /admin → Infrastructure / Operations. The agent-runtime's LOW drift
+  auto-remediated on scan (audited, no approval, under its 'low' ceiling);
+  the control plane's drift+CVE and the API cert's HIGH expiry stay open; the
+  legacy cert is EXPIRED = CRITICAL and is ALWAYS approval-gated. 'Propose
+  remediation' on any open finding queues an infra_operation approval; the
+  HIPAA-tagged backup target shows a 2555d retention FLOOR from the §8.3
+  cascade overriding its own 30d policy.
 
   Workflows (pillar 2): 3 templates — standard-change (type 'feature'),
   sensitive-data (hipaa cascade), and complete-pipeline (type 'pipeline-demo':
