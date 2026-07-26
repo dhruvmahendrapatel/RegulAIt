@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export { detectPII, type PiiHit, type PiiCategory } from "./pii.js";
+
 export const toolKindSchema = z.enum(["read", "write"]);
 export type ToolKind = z.infer<typeof toolKindSchema>;
 

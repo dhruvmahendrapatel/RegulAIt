@@ -11,6 +11,7 @@ import {
   desc,
   eq,
   gte,
+  lt,
   projectContextItems,
   projectMembers,
   projects,
@@ -30,10 +31,12 @@ import {
   contributeContextSchema,
   createProjectSchema,
   createTeamSchema,
+  detectPII,
   promoteContextSchema,
   reclassifySchema,
   updateProjectSchema,
   upsertComplianceProfileSchema,
+  type PiiHit,
 } from "@regulait/shared";
 import { z } from "zod";
 
@@ -172,6 +175,72 @@ async function profilesForTags(db: Db, tags: string[]): Promise<ComplianceProfil
   if (tags.length === 0) return [];
   const rows = await db.select().from(complianceProfiles);
   return rows.filter((p) => tags.includes(p.tag));
+}
+
+// --- §8.4 PII enforcement (pillar 3) -------------------------------------
+// The compliance cascade's piiMode dimension, turned from a declared policy
+// into a real enforcement point applied at every project-attributed dispatch.
+
+export type PiiMode = "block" | "warn" | "log";
+
+/** The effective piiMode a project's classifications force, or null when the
+ * project is unclassified / has no matching compliance profile (in which case
+ * PII enforcement is a no-op — unchanged behaviour). A profile always carries
+ * a piiMode (the upsert defaults it to 'log'), so a matched project always
+ * resolves to one of the three modes. */
+export async function projectPiiMode(
+  db: Db,
+  projectId: string | null | undefined,
+): Promise<PiiMode | null> {
+  if (!projectId) return null;
+  const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
+  if (!project) return null;
+  const tags = (project.classifications ?? []) as string[];
+  if (tags.length === 0) return null;
+  const profiles = await profilesForTags(db, tags);
+  if (profiles.length === 0) return null;
+  return effectiveCompliancePolicy(profiles).piiMode;
+}
+
+export interface PiiEnforcement {
+  action: "allow" | "warn" | "block";
+  hits: PiiHit[];
+  phase: "input" | "output";
+}
+
+/** §8.4 message with COUNTS ONLY — never the matched substrings. */
+export function piiCategoryList(hits: PiiHit[]): string {
+  return hits.map((h) => h.category).join(", ");
+}
+
+/** The withheld-output marker a bill-and-withhold OUTPUT block substitutes for
+ * the model/connector text — legible, and §8.4-safe (categories, never
+ * content). */
+export function piiWithheldMarker(hits: PiiHit[]): string {
+  return `[output withheld — contained PII: ${piiCategoryList(hits)}]`;
+}
+
+/**
+ * §8.4 PII enforcement decision for ONE phase. Detects PII in exactly the
+ * side provided (input XOR output) and maps the project's effective piiMode
+ * onto an action:
+ *  - block: hits present -> 'block' (the caller denies on input BEFORE the
+ *    provider call, or bills-and-withholds on output AFTER it).
+ *  - warn : hits present -> 'warn' (proceed, attach a warning + audit).
+ *  - log  : hits present -> 'allow' (proceed silently; the caller records the
+ *    category counts in its usage/audit detail).
+ * No hits (or no mode) -> 'allow', so a clean payload on a classified project
+ * stays byte-identical to the pre-enforcement behaviour. Pure over its args. */
+export function enforcePII(
+  mode: PiiMode,
+  io: { input?: string | undefined; output?: string | undefined },
+): PiiEnforcement {
+  const phase: "input" | "output" = io.output !== undefined ? "output" : "input";
+  const text = phase === "output" ? (io.output ?? "") : (io.input ?? "");
+  const hits = detectPII(text);
+  if (hits.length === 0) return { action: "allow", hits, phase };
+  const action = mode === "block" ? "block" : mode === "warn" ? "warn" : "allow";
+  return { action, hits, phase };
 }
 
 /** §8.3 workflow cascade — the ENFORCED consumer. Returns the workflow
@@ -945,6 +1014,89 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     profiles: await db.select().from(complianceProfiles),
   }));
 
+  // §8.4 audit-log retention: audit_log has NO projectId column, so retention
+  // is a single GLOBAL floor = the MAX auditRetentionDays across ALL compliance
+  // profiles (longest-floor-wins, the same discipline the infra backup floor
+  // uses). A framework with a shorter retention can never shorten another
+  // framework's audit trail. Both endpoints are admin-only (the global gate).
+
+  /** Compute the global retention floor + how many rows currently sit below
+   * it — the admin's before-you-prune view. maxDays null = no profile sets a
+   * retention, so nothing is ever eligible for pruning (fail-safe: keep all). */
+  async function retentionFloor(): Promise<{
+    retainedDays: number | null;
+    floorSource: string[];
+    cutoff: Date | null;
+    prunable: number;
+  }> {
+    const profiles = await db.select().from(complianceProfiles);
+    const withDays = profiles.filter(
+      (p): p is typeof p & { auditRetentionDays: number } => p.auditRetentionDays != null,
+    );
+    if (withDays.length === 0) {
+      return { retainedDays: null, floorSource: [], cutoff: null, prunable: 0 };
+    }
+    const retainedDays = withDays.reduce((m, p) => Math.max(m, p.auditRetentionDays), 0);
+    const floorSource = withDays
+      .filter((p) => p.auditRetentionDays === retainedDays)
+      .map((p) => p.tag);
+    const cutoff = new Date(Date.now() - retainedDays * 24 * 3600 * 1000);
+    const [row] = await db
+      .select({ n: count() })
+      .from(auditLog)
+      .where(lt(auditLog.at, cutoff));
+    return { retainedDays, floorSource, cutoff, prunable: row?.n ?? 0 };
+  }
+
+  app.get("/v1/audit/retention", async () => {
+    const f = await retentionFloor();
+    return {
+      retainedDays: f.retainedDays,
+      floorSource: f.floorSource,
+      cutoff: f.cutoff,
+      prunable: f.prunable,
+      basis: "global max auditRetentionDays across all compliance profiles (longest-floor-wins)",
+    };
+  });
+
+  app.post("/v1/audit/prune", async (req, reply) => {
+    const f = await retentionFloor();
+    if (f.retainedDays == null || f.cutoff == null) {
+      // no framework sets a retention -> nothing is eligible; keep everything
+      return reply.status(200).send({ deleted: 0, retainedDays: null, floorSource: [] });
+    }
+    const deleted = await db
+      .delete(auditLog)
+      .where(lt(auditLog.at, f.cutoff))
+      .returning({ id: auditLog.id });
+    // The prune action is itself audited — a meta row that, by construction,
+    // is newer than the cutoff and so survives its own and every future prune.
+    // audit_log.userId is a non-null uuid with no FK; the deploy-time admin
+    // token has no user id, so fall back to the nil uuid (a valid uuid shape).
+    const actorId = req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000";
+    await db.insert(auditLog).values({
+      userId: actorId,
+      objectType: "project",
+      objectId: null,
+      detail: {
+        phase: "audit-retention-prune",
+        deleted: deleted.length,
+        retainedDays: f.retainedDays,
+        floorSource: f.floorSource,
+        cutoff: f.cutoff,
+      },
+      effect: "allow",
+      ruleId: "audit-log-pruned",
+      ruleChain: [],
+      reason: `pruned ${deleted.length} audit row(s) older than ${f.retainedDays}d (global floor from [${f.floorSource.join(", ")}])`,
+    });
+    return reply.status(200).send({
+      deleted: deleted.length,
+      retainedDays: f.retainedDays,
+      floorSource: f.floorSource,
+    });
+  });
+
   // §8.3: what a project's tags currently drive — with HONEST enforcement
   // labels. Workflow requirements are enforced at instance creation today;
   // mcp/retention/pii are declared policy awaiting their enforcement points.
@@ -964,16 +1116,25 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       enforcement: {
         requiredWorkflowTemplates: "enforced-at-instance-creation",
         mcpDefaultMode: "declared-not-enforced",
-        // §8.3 -> §8.2: auditRetentionDays now also FEEDS the pillar-3 infra
-        // backup-retention floor (consumed there); audit-LOG pruning itself
-        // remains a declared policy awaiting its own enforcement point.
-        auditRetentionDays: "consumed-by-infra-backup-floor; audit-log pruning declared-not-enforced",
+        // §8.3 -> §8.2: auditRetentionDays FEEDS the pillar-3 infra backup
+        // floor AND now drives audit-log pruning: POST /v1/audit/prune deletes
+        // rows older than the GLOBAL max retention across all profiles
+        // (longest-floor-wins), so a shorter-retention framework can never
+        // shorten another's audit trail. GET /v1/audit/retention shows the
+        // computed floor before pruning.
+        auditRetentionDays:
+          "consumed-by-infra-backup-floor; audit-log pruning enforced via POST /v1/audit/prune (global floor)",
         // These two are ENFORCED by pillar 3: any infra resource carrying this
         // project's tags derives a backup-retention floor / patch-cadence
         // ceiling from them at scan time (see /v1/infra).
         backupRetentionDays: "enforced-as-infra-floor (pillar 3)",
         patchCadenceDays: "enforced-as-infra-ceiling (pillar 3)",
-        piiMode: "declared-not-enforced",
+        // §8.4: piiMode is enforced at every PROJECT-ATTRIBUTED model and
+        // connector dispatch — input blocks BEFORE the provider call (no
+        // cost), output blocks bill-and-withhold, warn attaches a warning,
+        // log records category counts. The MCP-proxy tool path is NOT yet
+        // enforced (it carries no projectId) — a disclosed follow-up.
+        piiMode: "enforced-on-model-and-connector-dispatch (mcp deferred)",
       },
     };
   });

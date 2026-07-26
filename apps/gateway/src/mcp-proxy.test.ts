@@ -6030,7 +6030,10 @@ describe("compliance classification cascade (§8.3)", () => {
       requiredTemplateIds: [sensitiveTplId],
     });
     expect(view.json().enforcement.requiredWorkflowTemplates).toBe("enforced-at-instance-creation");
-    expect(view.json().enforcement.piiMode).toBe("declared-not-enforced");
+    // §8.4: piiMode is now enforced at every project-attributed model +
+    // connector dispatch (MCP-proxy tool path deferred — it carries no
+    // projectId); the label is honest about that split.
+    expect(view.json().enforcement.piiMode).toBe("enforced-on-model-and-connector-dispatch (mcp deferred)");
   });
 
   it("classification forces required workflow stages with no manual per-control setup", async () => {

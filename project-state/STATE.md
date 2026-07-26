@@ -393,6 +393,24 @@ Sync-now verification works, and receivers without read-back fail loudly into th
 orphan flow. `DEFAULT_MAPPINGS.generic_webhook` is the IDENTITY map over all five canonical
 states including blocked — nothing invented because the vocabulary is ours. E2e: the fake
 receiver verifies the HMAC on every request and asserts the token never travels raw.
+**Compliance enforcement — PII mode + audit-retention pruning, 2026-07-26 (pillar 3 polish
+1/4; no migration).** The cascade's last two "declared-not-enforced" dimensions become real.
+New pure `packages/shared/src/pii.ts` `detectPII` (email / bounded SSN / Luhn-validated CC /
+US phone — returns per-category COUNTS ONLY, never the matched substring, §8.4-safe). Wired
+into the two PROJECT-ATTRIBUTED dispatch paths (executeGovernedDispatch + connector invoke;
+MCP path honestly DEFERRED — it has no projectId): block on INPUT denies pre-call (no cost,
+effect deny ruleId pii-blocked); block on OUTPUT bills-and-withholds (usage row written for
+honest spend, outputText replaced by a withheld marker); warn proceeds + piiWarning + audit
+pii-warned; log records category counts only. No-classification project = byte-identical
+no-op. Audit-retention pruner: POST /v1/audit/prune (admin) deletes audit_log rows older than
+a GLOBAL floor = max auditRetentionDays across all compliance profiles (longest-floor-wins,
+audit_log has no projectId) + GET /v1/audit/retention shows the floor; the /compliance labels
+honestly flipped (only claiming model+connector PII, mcp deferred). Suite 552 → 577.
+Independently re-verified: build clean, shared pii 17/17, gateway pii e2e + mcp-proxy 158/158.
+KNOWN LIMIT: streaming output-block can transiently flash raw text before the result event
+overwrites with the withheld marker (input-block — the common vector — is airtight pre-call);
+fast-follow = suppress streaming for block-mode projects.
+
 **§8.2 infrastructure-operations layer, 2026-07-26 — pillar 3's last unstarted surface lands
 as a GOVERNED-operations layer (migration 0027).** Monitored resources + operational policies
 + inert findings + governed remediation — not a real patcher; a keyless MockInfraProvider

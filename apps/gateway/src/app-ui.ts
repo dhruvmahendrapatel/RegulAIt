@@ -353,6 +353,19 @@ async function playgroundPage() {
   </div>\`;
 }
 
+// §8.4 PII badge — categories only (COUNTS in the tooltip), never content.
+function piiCats(hits) { return (hits ?? []).map((h) => h.category).join(", "); }
+function piiBadge(pii) {
+  const cats = piiCats([...(pii.inputHits ?? []), ...(pii.outputHits ?? [])]);
+  const tip = "compliance PII policy '" + esc(pii.mode) + "' — categories: " + esc(cats || "none")
+    + (pii.withheld ? " · output withheld and billed" : "");
+  if (pii.action === "block")
+    return '<span class="badge bad" title="' + tip + '">PII blocked' + (pii.withheld ? " · output withheld" : "") + "</span>";
+  if (pii.action === "warn")
+    return '<span class="badge warn" title="' + tip + '">PII warning: ' + esc(cats) + "</span>";
+  return '<span class="badge" title="' + tip + '">PII logged: ' + esc(cats) + "</span>";
+}
+
 function renderExchange(x, i) {
   const meta = [];
   if (x.result) {
@@ -373,6 +386,11 @@ function renderExchange(x, i) {
       if (r.dispatch.credentialSource === "platform") meta.push('<span class="badge">platform key</span>');
       if (r.dispatch.projectBudgetAlerted) meta.push('<span class="badge warn">budget alert</span>');
     }
+    // §8.4 PII enforcement — the compliance cascade's piiMode acting on this
+    // dispatch. block (red) / warn (amber) / log (faint). Categories only,
+    // never the matched content.
+    const pii = r.dispatch && r.dispatch.pii;
+    if (pii) meta.push(piiBadge(pii));
     // pillar 6 context compaction — what this turn's model actually saw
     if (r.compaction) {
       if (r.compaction.compacted) meta.push('<span class="badge accent" title="this turn pushed the thread past the compaction threshold — older turns were summarized by a governed, metered dispatch; stored history is untouched">history compacted</span>');
@@ -386,6 +404,9 @@ function renderExchange(x, i) {
     meta.push('<span class="badge bad" title="' + esc(x.denied.ruleId) + '">denied · ' + esc(rid) + "</span>");
   }
   if (x.error) meta.push('<span class="badge bad">' + esc(x.error) + "</span>");
+  // §8.4 input-block: the pii ships on the error/denial payload, not on a
+  // dispatch result — render it here if it wasn't already shown above
+  if (x.pii && !(x.result && x.result.dispatch && x.result.dispatch.pii)) meta.push(piiBadge(x.pii));
   // replayed exchanges carry no decision/routing payload — no empty expander
   const trace = x.denied || (x.result && (x.result.decision || x.result.routing || x.result.compaction))
     ? \`<details style="margin-top:6px"><summary class="faint" style="cursor:pointer;font-size:11.5px">governance trace</summary>
@@ -485,6 +506,7 @@ async function sendPrompt() {
       x.streaming = false;
       if (j && j.decision && j.decision.effect !== "allow") { x.denied = j.decision; x.text = j.decision.reason; }
       else { x.error = (j && j.error) ?? ("HTTP " + res.status); x.text = errMessage(res.status, j ?? {}); }
+      if (j && j.pii) x.pii = j.pii;
       drawChat(); return;
     }
     const reader = res.body.getReader();
@@ -502,7 +524,16 @@ async function sendPrompt() {
         if (!ev || !data) continue;
         const payload = JSON.parse(data);
         if (ev === "delta") { x.text += payload.text; drawChat(); }
-        if (ev === "result") { x.result = payload; x.streaming = false; if (payload.dispatch?.refusal) x.text = "The model declined this request."; drawChat(); }
+        if (ev === "result") {
+          x.result = payload; x.streaming = false;
+          if (payload.dispatch?.refusal) x.text = "The model declined this request.";
+          // §8.4 output bill-and-withhold: the model streamed deltas, but the
+          // final output was withheld — replace the bubble with the marker so
+          // the withheld content does not remain on screen
+          if (payload.dispatch?.pii?.withheld) x.text = payload.dispatch.outputText;
+          if (payload.dispatch?.pii) x.pii = payload.dispatch.pii;
+          drawChat();
+        }
         // the error event carries the same detail the JSON path does — losing
         // it leaves an empty bubble under a bare red slug. Anything already
         // streamed stays; the explanation is appended to it.
@@ -510,6 +541,8 @@ async function sendPrompt() {
           const msg = errMessage(res.status, payload);
           x.error = payload.error;
           x.text = x.text ? x.text + "\\n\\n" + msg : msg;
+          // §8.4 input-block ships its pii summary on the error payload
+          if (payload.pii) x.pii = payload.pii;
           // a failed dispatch still had a governance + routing decision — keep
           // it so the trace explains which agent was chosen and why
           if (payload.decision) x.result = { decision: payload.decision, routing: payload.routing };

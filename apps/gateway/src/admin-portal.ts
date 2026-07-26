@@ -628,13 +628,38 @@ const TABS = [
   }, true);
 }],
 ["Audit & Activity Log", async (el) => {
-  const u = await get("/v1/users");
+  const [u, ret] = await Promise.all([get("/v1/users"), get("/v1/audit/retention")]);
   // the users list is already here for the filter — reuse it so the table
   // says who acted by name (an unknown id still renders as a truncated chip)
   const uname = Object.fromEntries(u.users.map((x) => [x.id, x.displayName || x.email]));
+  // §8.4 retention floor + prune. The floor is a single GLOBAL value (longest
+  // auditRetentionDays across all compliance profiles) because audit rows are
+  // not per-project — a shorter-retention framework can never shorten another
+  // framework's trail. Show it before pruning; the button confirms first.
+  const retLine = ret.retainedDays == null
+    ? "No compliance profile sets a retention — nothing is eligible for pruning (all rows kept)."
+    : "Global floor <b>" + ret.retainedDays + " days</b> (from " + esc((ret.floorSource || []).join(", ") || "—")
+      + ") · <b>" + ret.prunable + "</b> row(s) older than the floor";
   el.innerHTML = "<div class='card'>"
+    + "<h3 style='margin:0 0 4px'>Audit-log retention (§8.4)</h3>"
+    + "<p class='sub'>Retention is a single global floor: the longest auditRetentionDays across every compliance profile (longest-floor-wins). Pruning deletes audit rows older than that floor; the prune itself is audited.</p>"
+    + "<p>" + retLine + "</p>"
+    + (ret.retainedDays != null
+        ? "<button class='danger' id='audit-prune'" + (ret.prunable ? "" : " disabled") + ">Prune audit log</button>"
+        : "")
+    + "</div>"
+    + "<div class='card'>"
     + form("f-audit", [{name:"userId",label:"filter by user",options:userOpts(u.users),req:false,ph:"— all users —"}], "Load")
     + "<div id='auditout'></div></div>";
+  const prune = $("#audit-prune");
+  if (prune) prune.addEventListener("click", async () => {
+    if (!confirm("Delete " + ret.prunable + " audit row(s) older than " + ret.retainedDays + " days? This cannot be undone.")) return;
+    try {
+      const r = await post("/v1/audit/prune", {});
+      alert("Pruned " + r.deleted + " audit row(s) — floor " + r.retainedDays + "d from " + (r.floorSource || []).join(", ") + ".");
+      render();
+    } catch (ex) { alert(ex.message); }
+  });
   const load = async (userId) => {
     const a = await get("/v1/audit" + (userId ? "?userId=" + userId : ""));
     $("#auditout").innerHTML = table(a.entries.map((e) => ({

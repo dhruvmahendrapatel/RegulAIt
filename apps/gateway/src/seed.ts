@@ -684,6 +684,29 @@ controls a reviewer would check before sign-off.`;
       danaAuth,
     );
   }
+
+  // §8.4 PII ENFORCEMENT DEMO — the hipaa project seeds piiMode 'block', so a
+  // dispatch whose INPUT carries an obvious FAKE SSN is denied BEFORE the
+  // provider call (no cost, no usage row) and leaves a 'pii-blocked' audit
+  // deny. This makes the block real in the audit log + the Playground badge.
+  // The number below is a well-known INVALID test SSN — never real PII. Guarded
+  // idempotent: only fired if no pii-blocked row exists yet.
+  const auditSoFar = (await call("GET", "/v1/audit")).entries ?? [];
+  if (!auditSoFar.some((e: Json) => e.ruleId === "pii-blocked")) {
+    // app.inject directly (not call()) — a 403 is the EXPECTED, correct outcome
+    // and must not abort the seed.
+    await app.inject({
+      method: "POST",
+      url: `/v1/agents/${agentIds["balanced-mock"]}/invoke`,
+      headers: danaAuth,
+      payload: {
+        mode: "execute",
+        dispatch: true,
+        projectId: hipaaProjectId,
+        input: "Please redact this record before export — patient SSN 123-45-6789 must not leak.",
+      },
+    });
+  }
 }
 
 // --- demo conversation (multi-turn Playground memory) ---------------------
@@ -964,6 +987,13 @@ ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecre
   Projects: demo-project and hipaa-project (classification-forced sign-off),
   both with members, team provenance, shared context, a budget and real
   measured spend from 12 seeded mock dispatches.
+
+  PII enforcement (§8.4, pillar 3): hipaa-project seeds piiMode 'block', so a
+  seeded dispatch whose input carried a fake SSN was DENIED before the model
+  ran (no cost) — see the 'pii-blocked' deny in /admin → Audit, and try it
+  live in the Playground (a prompt with an SSN billed to hipaa-project shows a
+  red 'PII blocked' badge). /admin → Audit also prunes the log to the global
+  retention floor (longest auditRetentionDays across profiles; hipaa = 2555d).
 
   Playground (multi-turn): dana opens on a seeded 2-turn conversation billed
   to demo-project — the terse follow-up's reply visibly continues the first

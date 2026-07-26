@@ -46,9 +46,19 @@ import {
   setAgentEnabledSchema,
   setAgentPolicySchema,
 } from "@regulait/shared";
+import type { PiiHit } from "@regulait/shared";
 import { z } from "zod";
 import { decryptSecret, encryptSecret } from "./secrets.js";
-import { assertProjectAttribution, postDispatchProjectAlert, preDispatchProjectGate } from "./projects.js";
+import {
+  assertProjectAttribution,
+  enforcePII,
+  piiCategoryList,
+  piiWithheldMarker,
+  postDispatchProjectAlert,
+  preDispatchProjectGate,
+  projectPiiMode,
+  type PiiMode,
+} from "./projects.js";
 import {
   loadOwnConversation,
   recordConversationTurns,
@@ -74,6 +84,19 @@ export interface SkippedCandidate {
   reason: "no_model_credential" | "no_model_id" | "unknown_provider";
 }
 
+/** §8.4 PII enforcement outcome threaded onto a dispatch. COUNTS ONLY —
+ * inputHits/outputHits are per-category counts, never the matched text. */
+export interface DispatchPii {
+  mode: PiiMode;
+  /** the effective action on this dispatch: 'block' (output withheld here, or
+   * a pre-call input block that never reached the model), 'warn', or 'log'. */
+  action: "block" | "warn" | "log";
+  inputHits: PiiHit[];
+  outputHits: PiiHit[];
+  /** true when a block replaced the model output with the withheld marker */
+  withheld: boolean;
+}
+
 export type DispatchOutcome =
   | {
       ok: true;
@@ -90,9 +113,11 @@ export type DispatchOutcome =
         measuredCostSavedUsd: number | null;
         credentialSource: "user" | "platform" | "none";
         projectBudgetAlerted: boolean;
+        /** §8.4: present only when a classified project's PII policy acted */
+        pii?: DispatchPii;
       };
     }
-  | { ok: false; status: number; error: string; detail?: string };
+  | { ok: false; status: number; error: string; detail?: string; pii?: DispatchPii };
 
 /** The one governed-dispatch core, shared by the direct invoke path and the
  * orchestration worker-node path. The served agent is an INPUT — this
@@ -149,6 +174,43 @@ export async function executeGovernedDispatch(
       error: projectGate.error,
       ...(projectGate.detail ? { detail: projectGate.detail } : {}),
     };
+  }
+
+  // §8.4 PII ENFORCEMENT (pillar 3). The project's effective piiMode is
+  // resolved from its compliance cascade; an unclassified/unmatched project
+  // yields null and every check below is a no-op (byte-identical behaviour).
+  const piiMode = await projectPiiMode(db, args.projectId ?? null);
+  let inputHits: PiiHit[] = [];
+  if (piiMode) {
+    // INPUT check runs BEFORE any provider work, so a block incurs no cost —
+    // no usage row, no dispatch, no tokens.
+    const chk = enforcePII(piiMode, { input: args.input });
+    inputHits = chk.hits;
+    if (chk.action === "block") {
+      const reason = `input contains PII: ${piiCategoryList(chk.hits)}`;
+      const pii: DispatchPii = {
+        mode: piiMode,
+        action: "block",
+        inputHits: chk.hits,
+        outputHits: [],
+        withheld: false,
+      };
+      await db.insert(auditLog).values({
+        userId,
+        objectType: "agent",
+        objectId: served.id,
+        detail: {
+          phase: "pii",
+          pii: { mode: piiMode, action: "block", phase: "input", inputHits: chk.hits, outputHits: [] },
+          ...(args.projectId ? { projectId: args.projectId } : {}),
+        },
+        effect: "deny",
+        ruleId: "pii-blocked",
+        ruleChain: [],
+        reason,
+      });
+      return { ok: false, status: 403, error: "pii_blocked", detail: reason, pii };
+    }
   }
 
   let apiKey: string | null = null;
@@ -225,6 +287,37 @@ export async function executeGovernedDispatch(
         costUsd
       : null;
 
+  // §8.4 OUTPUT check: the call already ran, so a block here is BILL-AND-
+  // WITHHOLD — the usage row below records the honest spend, but the output
+  // text is replaced by a withheld marker and the response is denial-shaped.
+  let outputHits: PiiHit[] = [];
+  let outputText = result.outputText;
+  let withheld = false;
+  if (piiMode) {
+    const chk = enforcePII(piiMode, { output: result.outputText });
+    outputHits = chk.hits;
+    if (chk.action === "block") {
+      withheld = true;
+      outputText = piiWithheldMarker(chk.hits);
+    }
+  }
+  const anyHits = inputHits.length > 0 || outputHits.length > 0;
+  // The recorded action, only meaningful when there were hits: a withheld
+  // output is 'block', otherwise the mode's own posture (warn / log).
+  const piiAction: DispatchPii["action"] = withheld
+    ? "block"
+    : piiMode === "warn"
+      ? "warn"
+      : "log";
+  const pii: DispatchPii | null =
+    piiMode && anyHits
+      ? { mode: piiMode, action: piiAction, inputHits, outputHits, withheld }
+      : null;
+  // §8.4: COUNTS ONLY in the usage detail — never the matched substrings.
+  const piiDetail = pii
+    ? { pii: { mode: pii.mode, action: pii.action, inputHits, outputHits } }
+    : {};
+
   await db.insert(usageEvents).values({
     userId,
     objectType: "agent",
@@ -241,8 +334,42 @@ export async function executeGovernedDispatch(
     refusal: result.refusal,
     providerMessageId: result.providerMessageId,
     projectId: args.projectId ?? null,
-    detail: { credentialSource, ...(args.detail ?? {}) },
+    detail: { credentialSource, ...(args.detail ?? {}), ...piiDetail },
   });
+  // §8.4 audit rows for a PII event (never for a clean payload): an OUTPUT
+  // block is a governance deny; a warn is an allow with the 'pii-warned' rule;
+  // log mode records counts in the usage detail above and stays silent here.
+  if (withheld) {
+    await db.insert(auditLog).values({
+      userId,
+      objectType: "agent",
+      objectId: served.id,
+      detail: {
+        phase: "pii",
+        pii: { mode: piiMode, action: "block", phase: "output", inputHits, outputHits },
+        ...(args.projectId ? { projectId: args.projectId } : {}),
+      },
+      effect: "deny",
+      ruleId: "pii-blocked",
+      ruleChain: [],
+      reason: `output contains PII: ${piiCategoryList(outputHits)} — billed and withheld`,
+    });
+  } else if (piiMode === "warn" && anyHits) {
+    await db.insert(auditLog).values({
+      userId,
+      objectType: "agent",
+      objectId: served.id,
+      detail: {
+        phase: "pii",
+        pii: { mode: piiMode, action: "warn", inputHits, outputHits },
+        ...(args.projectId ? { projectId: args.projectId } : {}),
+      },
+      effect: "allow",
+      ruleId: "pii-warned",
+      ruleChain: [],
+      reason: `PII detected (${piiCategoryList([...inputHits, ...outputHits])}) — warned, dispatch proceeded`,
+    });
+  }
   // first budget crossing is allowed (measured cost arrives after the call)
   // but alerts immediately; the pre-gate blocks everything after it
   const projectBudgetAlerted = await postDispatchProjectAlert(db, projectGate, userId, costUsd);
@@ -252,7 +379,7 @@ export async function executeGovernedDispatch(
     result: {
       servedAgentId: served.id,
       model: served.model,
-      outputText: result.outputText,
+      outputText,
       stopReason: result.stopReason,
       refusal: result.refusal,
       ...(result.toolCalls ? { toolCalls: result.toolCalls } : {}),
@@ -261,6 +388,7 @@ export async function executeGovernedDispatch(
       measuredCostSavedUsd,
       credentialSource,
       projectBudgetAlerted,
+      ...(pii ? { pii } : {}),
     },
   };
 }
@@ -916,6 +1044,7 @@ export function registerAgentConnectorRoutes(
             routing,
             error: outcome.error,
             ...(outcome.detail ? { detail: outcome.detail } : {}),
+            ...(outcome.pii ? { pii: outcome.pii } : {}),
           });
         }
         reply.raw.end();
@@ -981,6 +1110,7 @@ export function registerAgentConnectorRoutes(
         routing,
         error: dispatchOutcome.error,
         ...(dispatchOutcome.detail ? { detail: dispatchOutcome.detail } : {}),
+        ...(dispatchOutcome.pii ? { pii: dispatchOutcome.pii } : {}),
       });
     }
     return reply.send({
@@ -1176,6 +1306,43 @@ export function registerAgentConnectorRoutes(
       });
     }
 
+    // §8.4 PII ENFORCEMENT (pillar 3), connector path. The effective piiMode
+    // comes from the attributed project's cascade; an unattributed/unclassified
+    // call yields null and every check is a no-op. The INPUT check runs BEFORE
+    // provider.invoke, so a block executes nothing and bills nothing.
+    const piiMode: PiiMode | null = projectId ? await projectPiiMode(db, projectId) : null;
+    let inputHits: PiiHit[] = [];
+    if (piiMode) {
+      const chk = enforcePII(piiMode, {
+        input: JSON.stringify({ object: body.object ?? null, payload: body.payload ?? null }),
+      });
+      inputHits = chk.hits;
+      if (chk.action === "block") {
+        const reason = `input contains PII: ${piiCategoryList(chk.hits)}`;
+        await db.insert(auditLog).values({
+          userId,
+          objectType: "connector",
+          objectId: connectorId,
+          detail: {
+            phase: "pii",
+            pii: { mode: piiMode, action: "block", phase: "input", inputHits: chk.hits, outputHits: [] },
+            operation: body.operation,
+            ...(projectId ? { projectId } : {}),
+          },
+          effect: "deny",
+          ruleId: "pii-blocked",
+          ruleChain: [],
+          reason,
+        });
+        return reply.status(403).send({
+          decision,
+          error: "pii_blocked",
+          detail: reason,
+          pii: { mode: piiMode, action: "block", inputHits: chk.hits, outputHits: [], withheld: false },
+        });
+      }
+    }
+
     // Execute. A FAILED call (ConnectorProviderError) bills NOTHING and
     // surfaces as 502 — the same discipline as a failed model dispatch.
     let result;
@@ -1195,6 +1362,31 @@ export function registerAgentConnectorRoutes(
       throw err;
     }
 
+    // §8.4 OUTPUT check: the call ran, so a block is BILL-AND-WITHHOLD — the
+    // usage row records honest spend, but result.body is replaced by the
+    // withheld marker and the response is denial-shaped.
+    let outputHits: PiiHit[] = [];
+    let respBody = result.body;
+    let withheld = false;
+    if (piiMode) {
+      const chk = enforcePII(piiMode, { output: JSON.stringify(result.body ?? null) });
+      outputHits = chk.hits;
+      if (chk.action === "block") {
+        withheld = true;
+        respBody = piiWithheldMarker(chk.hits);
+      }
+    }
+    const anyHits = inputHits.length > 0 || outputHits.length > 0;
+    const piiAction: "block" | "warn" | "log" = withheld
+      ? "block"
+      : piiMode === "warn"
+        ? "warn"
+        : "log";
+    const pii =
+      piiMode && anyHits
+        ? { mode: piiMode, action: piiAction, inputHits, outputHits, withheld }
+        : null;
+
     // pillar 5 actuals: an allowed, executed call bills the connector's flat
     // list price. Unpriced → null, never an invented figure (agents' rule).
     const costUsd = connector.pricePerCallUsd ?? null;
@@ -1209,9 +1401,52 @@ export function registerAgentConnectorRoutes(
         status: result.status,
         ...(body.object ? { object: body.object } : {}),
         providerKind: connector.providerKind,
+        // §8.4 COUNTS ONLY — never the matched substrings
+        ...(pii ? { pii: { mode: pii.mode, action: pii.action, inputHits, outputHits } } : {}),
       },
     });
+    // §8.4 audit rows for a PII event (never for a clean payload): an OUTPUT
+    // block is a deny; a warn is an allow with 'pii-warned'; log is silent
+    // (counts already recorded in the usage detail above).
+    if (withheld) {
+      await db.insert(auditLog).values({
+        userId,
+        objectType: "connector",
+        objectId: connectorId,
+        detail: {
+          phase: "pii",
+          pii: { mode: piiMode, action: "block", phase: "output", inputHits, outputHits },
+          operation: body.operation,
+          ...(projectId ? { projectId } : {}),
+        },
+        effect: "deny",
+        ruleId: "pii-blocked",
+        ruleChain: [],
+        reason: `output contains PII: ${piiCategoryList(outputHits)} — billed and withheld`,
+      });
+    } else if (piiMode === "warn" && anyHits) {
+      await db.insert(auditLog).values({
+        userId,
+        objectType: "connector",
+        objectId: connectorId,
+        detail: {
+          phase: "pii",
+          pii: { mode: piiMode, action: "warn", inputHits, outputHits },
+          operation: body.operation,
+          ...(projectId ? { projectId } : {}),
+        },
+        effect: "allow",
+        ruleId: "pii-warned",
+        ruleChain: [],
+        reason: `PII detected (${piiCategoryList([...inputHits, ...outputHits])}) — warned, invoke proceeded`,
+      });
+    }
 
-    return reply.send({ decision, result: { status: result.status, body: result.body }, costUsd });
+    return reply.send({
+      decision,
+      result: { status: result.status, body: respBody },
+      costUsd,
+      ...(pii ? { pii } : {}),
+    });
   });
 }
