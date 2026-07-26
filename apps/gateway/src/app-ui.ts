@@ -591,23 +591,33 @@ let NR_GOAL = "";       // the goal textarea survives the re-render after a draf
 const nrInstructionFor = (n, idx) => (idx === 0 && NR_PREFILL ? NR_PREFILL : n.instruction);
 const nrAgentSel = (nid, selected) => '<select data-nagent="' + nid + '">' + AGENTS.map((a) =>
   '<option value="' + a.agentId + '"' + (a.agentId === (selected ?? nrDefaultAgent()) ? " selected" : "") + '>' + esc(a.name) + " · " + esc(a.provider) + "</option>").join("") + "</select>";
+// PILLAR 7: per-node tool controls — MCP server id(s) the worker may draw
+// tools from (comma-separated) and a tool-loop turn cap. Blank = no tools /
+// default cap, so canned templates stay ordinary single-turn workers.
+const nrToolsCtl = (id, servers, turns) => \`<div><label class="f">Max turns</label><input type="number" min="1" max="20" data-nturns="\${esc(id)}" value="\${turns ?? ""}" style="width:60px" title="pillar 7: tool-using loop turn cap for this worker — blank uses the default"></div>
+  <div><label class="f">Tool servers</label><input data-ntools="\${esc(id)}" value="\${esc((servers ?? []).join(","))}" placeholder="MCP server id(s)" style="width:150px" title="pillar 7: comma-separated MCP server ids this worker may call tools from (governed per-call under your entitlements) — blank for none"></div>\`;
 const nrNodeRowsHtml = (t) => t.nodes.map((n, idx) => \`<div class="node-row">
   <span class="node-dot not_started"></span>
   <div class="grow"><label class="f">\${esc(n.id)}\${n.dependsOn.length ? " · after " + n.dependsOn.join(", ") : ""}\${idx === 0 && NR_PREFILL ? ' <span class="badge accent">instruction from playground</span>' : ""}</label>
     <input data-ntitle="\${n.id}" value="\${esc(n.title)}" style="width:100%" title="\${esc(nrInstructionFor(n, idx))}"></div>
   <div><label class="f">Agent</label>\${nrAgentSel(n.id)}</div>
+  \${nrToolsCtl(n.id, n.toolServers, n.maxTurns)}
 </div>\`).join("");
 // proposal rows: same editor shape as templates, plus an editable instruction
 // textarea, a per-node delete, and substitution badges for agents the lead
 // suggested but the caller isn't granted
 const nrProposalRowsHtml = () => NR_PROPOSAL.nodes.map((n) => \`<div class="node-row">
   <span class="node-dot not_started"></span>
-  <div class="grow"><label class="f">\${esc(n.id)}\${n.dependsOn.length ? " · after " + n.dependsOn.join(", ") : ""}\${n.substituted ? ' <span class="badge warn" title="the lead suggested &#39;' + esc(n.substituted.requestedAgentName) + '&#39;, which is not granted to you — swapped to a granted agent">substituted</span>' : ""}</label>
+  <div class="grow"><label class="f">\${esc(n.id)}\${n.dependsOn.length ? " · after " + n.dependsOn.join(", ") : ""}\${n.substituted ? ' <span class="badge warn" title="the lead suggested &#39;' + esc(n.substituted.requestedAgentName) + '&#39;, which is not granted to you — swapped to a granted agent">substituted</span>' : ""}\${(n.toolServers && n.toolServers.length) ? ' <span class="badge info" title="this worker is a tool-using loop — every tool call is governed per-call under your entitlements">tool-using</span>' : ""}</label>
     <input data-ntitle="\${esc(n.id)}" value="\${esc(n.title)}" style="width:100%">
     <textarea data-ninstr="\${esc(n.id)}" rows="3" style="width:100%;margin-top:4px" spellcheck="false" title="this node's worker is prompted with exactly this instruction">\${esc(n.instruction)}</textarea></div>
   <div><label class="f">Agent</label>\${nrAgentSel(n.id, n.ownerAgentId)}</div>
+  \${nrToolsCtl(n.id, n.toolServers, n.maxTurns)}
   <button class="ghost small" data-ndel="\${esc(n.id)}" title="drop this task from the plan">×</button>
 </div>\`).join("");
+// read a node's tool controls out of the DOM
+const nrToolServers = (id) => (($('[data-ntools="' + id + '"]')?.value ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+const nrMaxTurns = (id) => { const v = parseInt($('[data-nturns="' + id + '"]')?.value ?? "", 10); return Number.isFinite(v) && v > 0 ? v : null; };
 // carry any in-DOM edits back into the proposal before a partial re-render
 function nrSyncProposal() {
   if (!NR_PROPOSAL) return;
@@ -615,6 +625,9 @@ function nrSyncProposal() {
     n.title = ($('[data-ntitle="' + n.id + '"]')?.value ?? n.title).trim() || n.title;
     n.instruction = ($('[data-ninstr="' + n.id + '"]')?.value ?? n.instruction).trim() || n.instruction;
     n.ownerAgentId = $('[data-nagent="' + n.id + '"]')?.value ?? n.ownerAgentId;
+    n.toolServers = nrToolServers(n.id);
+    const mt = nrMaxTurns(n.id);
+    if (mt) n.maxTurns = mt; else delete n.maxTurns;
   }
 }
 function nrWireProposalRows() {
@@ -635,14 +648,20 @@ function nrGraph() {
     return {
       run: ($("#nr-title")?.value ?? "").trim() || NR_PROPOSAL.name || "untitled run",
       escalationApproverUserId: ME.userId,
-      nodes: NR_PROPOSAL.nodes.map((n) => ({
-        id: n.id,
-        title: ($('[data-ntitle="' + n.id + '"]')?.value ?? n.title).trim() || n.title,
-        instruction: ($('[data-ninstr="' + n.id + '"]')?.value ?? n.instruction).trim() || n.instruction,
-        ownerAgentId: $('[data-nagent="' + n.id + '"]')?.value ?? n.ownerAgentId,
-        mode: "execute",
-        dependsOn: n.dependsOn,
-      })),
+      nodes: NR_PROPOSAL.nodes.map((n) => {
+        const servers = nrToolServers(n.id);
+        const turns = nrMaxTurns(n.id);
+        return {
+          id: n.id,
+          title: ($('[data-ntitle="' + n.id + '"]')?.value ?? n.title).trim() || n.title,
+          instruction: ($('[data-ninstr="' + n.id + '"]')?.value ?? n.instruction).trim() || n.instruction,
+          ownerAgentId: $('[data-nagent="' + n.id + '"]')?.value ?? n.ownerAgentId,
+          mode: "execute",
+          dependsOn: n.dependsOn,
+          ...(servers.length ? { toolServers: servers } : {}),
+          ...(turns ? { maxTurns: turns } : {}),
+        };
+      }),
     };
   }
   const t = RUN_TEMPLATES.find((x) => x.id === $("#nr-template")?.value) ?? RUN_TEMPLATES[0];
@@ -650,14 +669,20 @@ function nrGraph() {
     run: ($("#nr-title")?.value ?? "").trim() || "untitled run",
     // escalations land in the planner's own inbox unless the JSON names someone else
     escalationApproverUserId: ME.userId,
-    nodes: t.nodes.map((n, idx) => ({
-      id: n.id,
-      title: ($('[data-ntitle="' + n.id + '"]')?.value ?? n.title).trim() || n.title,
-      instruction: nrInstructionFor(n, idx),
-      ownerAgentId: $('[data-nagent="' + n.id + '"]')?.value ?? nrDefaultAgent(),
-      mode: "execute",
-      dependsOn: n.dependsOn,
-    })),
+    nodes: t.nodes.map((n, idx) => {
+      const servers = nrToolServers(n.id);
+      const turns = nrMaxTurns(n.id);
+      return {
+        id: n.id,
+        title: ($('[data-ntitle="' + n.id + '"]')?.value ?? n.title).trim() || n.title,
+        instruction: nrInstructionFor(n, idx),
+        ownerAgentId: $('[data-nagent="' + n.id + '"]')?.value ?? nrDefaultAgent(),
+        mode: "execute",
+        dependsOn: n.dependsOn,
+        ...(servers.length ? { toolServers: servers } : {}),
+        ...(turns ? { maxTurns: turns } : {}),
+      };
+    }),
   };
 }
 
@@ -995,7 +1020,7 @@ async function runDetailPage(id) {
       <div class="grow">
         <div>\${esc(n.title)} <span class="faint mono" style="font-size:11px">\${esc(n.id)}</span></div>
         <div class="dim" style="font-size:12px">\${esc(AGENT_NAMES[state.owners[n.id]] ?? "agent")}\${n.dependsOn?.length ? " · after " + n.dependsOn.join(", ") : ""}\${elapsed ? ' · <span class="num">' + elapsed + "</span>" : ""}\${parallel ? ' <span class="badge info" title="its execution window overlapped another node&#39;s — they ran concurrently">∥ parallel</span>' : ""}</div>
-        \${out ? \`<details style="margin-top:4px"><summary class="faint" style="cursor:pointer;font-size:11.5px">output · \${fmtUsd(out.costUsd)} · \${esc(out.model)}</summary><pre style="margin-top:6px">\${esc(out.outputText)}</pre></details>\` : ""}
+        \${out ? \`<details style="margin-top:4px"><summary class="faint" style="cursor:pointer;font-size:11.5px">output · \${fmtUsd(out.costUsd)} · \${esc(out.model)}\${out.toolCalls ? ' · <span class="badge info" title="pillar 7: this worker ran a governed tool-using loop — each tool call was re-checked under your entitlements">' + out.turns + ' turn' + (out.turns === 1 ? "" : "s") + ' · ' + out.toolCalls + ' tool call' + (out.toolCalls === 1 ? "" : "s") + '</span>' : ""}\${out.toolApprovalPending ? ' <span class="badge warn" title="the loop paused on a tool approval now pending in the queue">tool approval pending</span>' : ""}</summary><pre style="margin-top:6px">\${esc(out.outputText)}</pre></details>\` : ""}
         \${state.lastError?.[n.id] ? '<div class="err-line">' + esc(state.lastError[n.id]) + "</div>" : ""}
         \${blockedCtl}
         \${editor}

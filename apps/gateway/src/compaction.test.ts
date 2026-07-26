@@ -231,7 +231,7 @@ describe("threshold crossing → one governed compaction dispatch", () => {
     // the LAST main dispatch of the loop above rode the summary
     const wire = mock.dispatches.at(-1)!;
     expect(wire.messages![0]!.role).toBe("user");
-    expect(wire.messages![0]!.content.startsWith(SUMMARY_CONTEXT_PREFIX)).toBe(true);
+    expect((wire.messages![0]!.content as string).startsWith(SUMMARY_CONTEXT_PREFIX)).toBe(true);
     expect(wire.messages![0]!.content).toContain("Summary of the conversation (");
     // compacted-away turn content must NOT ride the wire
     expect(wire.messages!.slice(1).some((m) => m.content === turnInput(0))).toBe(false);
@@ -353,7 +353,7 @@ describe("fail-open — a failing summarizer never fails the user's turn", () =>
 
     // full history rode the wire — no summary context message
     const wire = mock.dispatches.at(-1)!;
-    expect(wire.messages![0]!.content.startsWith(SUMMARY_CONTEXT_PREFIX)).toBe(false);
+    expect((wire.messages![0]!.content as string).startsWith(SUMMARY_CONTEXT_PREFIX)).toBe(false);
     expect(wire.messages!.length).toBeGreaterThan(6);
 
     // nothing persisted on the conversation; the fail-open is audited

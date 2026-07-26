@@ -26,6 +26,7 @@ import {
   ModelProviderError,
   resolveModelProvider,
   type ModelChatMessage,
+  type ModelToolDef,
 } from "@regulait/model-provider";
 import {
   createAgentGrantSchema,
@@ -75,6 +76,8 @@ export type DispatchOutcome =
         outputText: string;
         stopReason: string;
         refusal: boolean;
+        /** present only when the model paused to call tools (pillar 7 loop) */
+        toolCalls?: Array<{ id: string; name: string; arguments: unknown }>;
         usage: { inputTokens: number; outputTokens: number };
         costUsd: number | null;
         measuredCostSavedUsd: number | null;
@@ -106,6 +109,9 @@ export async function executeGovernedDispatch(
     messages?: ModelChatMessage[] | undefined;
     /** system context (e.g. a nested run's signed-off workflow artifacts) */
     system?: string | undefined;
+    /** pillar 7: tools the worker may call this turn. When absent the request
+     * is byte-identical to the tool-free dispatch. */
+    tools?: ModelToolDef[] | undefined;
     maxTokens?: number | undefined;
     /** pillar 5 attribution: the project this call bills to */
     projectId?: string | null | undefined;
@@ -181,6 +187,7 @@ export async function executeGovernedDispatch(
       input: args.input,
       ...(args.messages ? { messages: args.messages } : {}),
       ...(args.system ? { system: args.system } : {}),
+      ...(args.tools ? { tools: args.tools } : {}),
       ...(args.maxTokens ? { maxTokens: args.maxTokens } : {}),
       ...(args.onText ? { onText: args.onText } : {}),
     });
@@ -240,6 +247,7 @@ export async function executeGovernedDispatch(
       outputText: result.outputText,
       stopReason: result.stopReason,
       refusal: result.refusal,
+      ...(result.toolCalls ? { toolCalls: result.toolCalls } : {}),
       usage: result.usage,
       costUsd,
       measuredCostSavedUsd,

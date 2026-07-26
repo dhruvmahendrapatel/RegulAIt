@@ -34,7 +34,11 @@ import {
   type TaskNode,
 } from "@regulait/orchestration-kernel";
 import { classifyComplexity, estimateTokens, routeModel } from "@regulait/optimizer-kernel";
-import { isModelProviderKind } from "@regulait/model-provider";
+import {
+  isModelProviderKind,
+  type ModelChatMessage,
+  type ModelContentBlock,
+} from "@regulait/model-provider";
 import {
   autoAdvanceSchema,
   createRunSchema,
@@ -46,6 +50,7 @@ import {
   executeGovernedDispatch,
   type SkippedCandidate,
 } from "./agents-connectors.js";
+import { executeGovernedToolCall, resolveNodeToolContext } from "./mcp-proxy.js";
 import { assertProjectAttribution } from "./projects.js";
 import { mirrorNodeStatus } from "./pm.js";
 import { handleNestedRunCompletion } from "./workflows.js";
@@ -235,6 +240,11 @@ type NodeDispatchOutcome =
         costUsd: number | null;
         measuredCostSavedUsd: number | null;
         credentialSource: "user" | "platform" | "none";
+        /** pillar 7 loop trace: model turns taken and governed tool calls made */
+        turns: number;
+        toolCalls: number;
+        /** true when the loop halted with a tool approval pending in the queue */
+        toolApprovalPending?: boolean;
       };
       measuredSpentUsd: number;
       budgetBreached: boolean;
@@ -300,7 +310,11 @@ async function dispatchRunNode(
   dataKey: string | undefined,
   run: RunRow,
   nodeId: string,
-  args: { input?: string | undefined; maxTokens?: number | undefined },
+  args: {
+    input?: string | undefined;
+    maxTokens?: number | undefined;
+    maxTurns?: number | undefined;
+  },
   actorUserId: string,
 ): Promise<NodeDispatchOutcome> {
   const graph = run.graph as TaskGraph;
@@ -351,110 +365,286 @@ async function dispatchRunNode(
     : null;
 
   const [servedAgent] = await db.select().from(agents).where(eq(agents.id, ownerId));
-  const outcome = await executeGovernedDispatch(db, dataKey, {
-    userId: run.initiatingUserId,
-    served: servedAgent,
-    requestedAgentId: node.ownerAgentId,
-    baseline: null,
-    input: args.input ?? nodeInstruction(node) ?? node.title,
-    system: nested?.system,
-    maxTokens: args.maxTokens,
-    projectId: run.projectId ?? null,
-    detail: {
-      runId: run.id,
-      nodeId,
-      mode: node.mode,
-      ...(nested ? { contextArtifacts: nested.artifacts } : {}),
-    },
-  });
 
-  if (!outcome.ok) {
-    await db.insert(auditLog).values({
-      userId: actorUserId,
-      objectType: "run",
-      objectId: run.id,
-      detail: { nodeId, ownerAgentId: ownerId, phase: "dispatch", error: outcome.error },
-      effect: "allow",
-      ruleId: "run-node-dispatch-failed",
-      ruleChain: [],
-      reason: `node '${nodeId}' dispatch failed before execution: ${outcome.error}`,
-    });
-    return {
-      kind: "dispatch_failed",
-      status: outcome.status,
-      error: outcome.error,
-      ...(outcome.detail ? { detail: outcome.detail } : {}),
-    };
-  }
+  // PILLAR 7 tool-using worker: resolve the node's DECLARED tool servers into
+  // the initiating user's ENTITLED tool defs (model-facing) plus a name→server
+  // routing map spanning each declared server's full manifest (governance
+  // routing). A node that declares nothing gets no tools and the loop is a
+  // single ordinary turn — byte-identical to the pre-loop behaviour.
+  const declaredServers = node.toolServers ?? [];
+  const declaredNames = node.toolNames;
+  const { toolDefs, serverByTool } =
+    declaredServers.length > 0
+      ? await resolveNodeToolContext(db, run.initiatingUserId, declaredServers, declaredNames)
+      : { toolDefs: [], serverByTool: new Map<string, string>() };
+  const maxTurnsDecl = args.maxTurns ?? node.maxTurns;
+  const maxTurns = Math.min(Math.max(maxTurnsDecl ?? DEFAULT_WORKER_MAX_TURNS, 1), MAX_WORKER_TURNS);
 
-  // Measured spend accumulates on the run. The FIRST cap crossing is
-  // allowed (measured cost is only known after the call) but escalates
-  // immediately into the one approvals queue; the pre-check above blocks
-  // everything after it. Never silently exceeded (§7).
-  let newMeasured = measuredSpent;
+  const firstInput = args.input ?? nodeInstruction(node) ?? node.title;
+  const messages: ModelChatMessage[] = [{ role: "user", content: firstInput }];
+
+  // The bounded governed agentic loop. Each iteration is ONE measured, governed
+  // model turn; every tool call inside it is a FULL governed+audited action
+  // re-checked against the INITIATING user (§5.1), and the per-run measured cap
+  // + first-crossing escalation are evaluated PER TURN (§5.2), so a runaway
+  // loop halts and escalates into the one approvals queue exactly like a single
+  // dispatch. No path increases privilege entering the loop.
+  let runningMeasured = measuredSpent;
   let budgetBreached = false;
-  if (budget) {
-    newMeasured = Number((measuredSpent + (outcome.result.costUsd ?? 0)).toFixed(6));
-    await db
-      .update(orchestrationRuns)
-      .set({ budget: { ...budget, measuredSpentUsd: newMeasured } })
-      .where(eq(orchestrationRuns.id, run.id));
-    if (budget.capUsd !== null && !budget.overageApproved && newMeasured > budget.capUsd) {
-      budgetBreached = true;
-      const [pending] = await db
-        .select({ id: approvals.id })
-        .from(approvals)
-        .where(
-          and(
-            eq(approvals.runId, run.id),
-            eq(approvals.stageId, `__budget__:${nodeId}`),
-            eq(approvals.status, "pending"),
-          ),
-        )
-        .limit(1);
-      if (!pending) {
-        await db.insert(approvals).values({
-          userId: run.initiatingUserId,
-          objectType: "run",
-          runId: run.id,
-          stageId: `__budget__:${nodeId}`,
-          approverUserId: graph.escalationApproverUserId,
-        });
+  let turnCount = 0;
+  let toolCallCount = 0;
+  let toolApprovalPending = false;
+  let totalCostUsd: number | null = 0;
+  const totalUsage = { inputTokens: 0, outputTokens: 0 };
+  let last: Extract<Awaited<ReturnType<typeof executeGovernedDispatch>>, { ok: true }> | null = null;
+
+  for (let turn = 0; turn < maxTurns; turn++) {
+    // §5.2 PER-TURN measured pre-gate: a loop already at/over the cap stops
+    // before spending more. On turn 0 with no prior success this surfaces as
+    // budget_blocked_measured (identical to a blocked single dispatch).
+    if (budget && budget.capUsd !== null && !budget.overageApproved && runningMeasured >= budget.capUsd) {
+      if (turn === 0) {
+        return { kind: "budget_blocked_measured", measuredSpentUsd: runningMeasured, capUsd: budget.capUsd };
       }
+      break;
+    }
+
+    const outcome = await executeGovernedDispatch(db, dataKey, {
+      userId: run.initiatingUserId,
+      served: servedAgent,
+      requestedAgentId: node.ownerAgentId,
+      baseline: null,
+      input: firstInput,
+      messages,
+      system: nested?.system,
+      ...(toolDefs.length > 0 ? { tools: toolDefs } : {}),
+      maxTokens: args.maxTokens,
+      projectId: run.projectId ?? null,
+      detail: {
+        runId: run.id,
+        nodeId,
+        mode: node.mode,
+        turn,
+        ...(nested ? { contextArtifacts: nested.artifacts } : {}),
+      },
+    });
+
+    if (!outcome.ok) {
       await db.insert(auditLog).values({
         userId: actorUserId,
         objectType: "run",
         objectId: run.id,
-        detail: {
-          phase: "budget-breach-measured",
-          nodeId,
-          measuredSpentUsd: newMeasured,
-          capUsd: budget.capUsd,
-        },
-        effect: "require_approval",
-        ruleId: "run-budget-cap",
+        detail: { nodeId, ownerAgentId: ownerId, phase: "dispatch", turn, error: outcome.error },
+        effect: "allow",
+        ruleId: "run-node-dispatch-failed",
         ruleChain: [],
-        reason: `measured spend $${newMeasured} exceeds the $${budget.capUsd} cap after node '${nodeId}' dispatched; approval required to continue`,
+        reason: `node '${nodeId}' dispatch failed before execution: ${outcome.error}`,
+      });
+      return {
+        kind: "dispatch_failed",
+        status: outcome.status,
+        error: outcome.error,
+        ...(outcome.detail ? { detail: outcome.detail } : {}),
+      };
+    }
+
+    turnCount++;
+    last = outcome;
+    totalUsage.inputTokens += outcome.result.usage.inputTokens;
+    totalUsage.outputTokens += outcome.result.usage.outputTokens;
+    if (outcome.result.costUsd == null) totalCostUsd = null;
+    else if (totalCostUsd !== null) totalCostUsd = Number((totalCostUsd + outcome.result.costUsd).toFixed(6));
+
+    // §5.2: measured spend accumulates on the run AFTER every turn. The first
+    // cap crossing is allowed (measured cost is only known post-call) but
+    // escalates immediately into the one approvals queue; the per-turn
+    // pre-gate above then blocks the next turn. Never silently exceeded (§7).
+    if (budget) {
+      runningMeasured = Number((runningMeasured + (outcome.result.costUsd ?? 0)).toFixed(6));
+      await db
+        .update(orchestrationRuns)
+        .set({ budget: { ...budget, measuredSpentUsd: runningMeasured } })
+        .where(eq(orchestrationRuns.id, run.id));
+      if (
+        budget.capUsd !== null &&
+        !budget.overageApproved &&
+        runningMeasured > budget.capUsd &&
+        !budgetBreached
+      ) {
+        budgetBreached = true;
+        const [pending] = await db
+          .select({ id: approvals.id })
+          .from(approvals)
+          .where(
+            and(
+              eq(approvals.runId, run.id),
+              eq(approvals.stageId, `__budget__:${nodeId}`),
+              eq(approvals.status, "pending"),
+            ),
+          )
+          .limit(1);
+        if (!pending) {
+          await db.insert(approvals).values({
+            userId: run.initiatingUserId,
+            objectType: "run",
+            runId: run.id,
+            stageId: `__budget__:${nodeId}`,
+            approverUserId: graph.escalationApproverUserId,
+          });
+        }
+        await db.insert(auditLog).values({
+          userId: actorUserId,
+          objectType: "run",
+          objectId: run.id,
+          detail: {
+            phase: "budget-breach-measured",
+            nodeId,
+            turn,
+            measuredSpentUsd: runningMeasured,
+            capUsd: budget.capUsd,
+          },
+          effect: "require_approval",
+          ruleId: "run-budget-cap",
+          ruleChain: [],
+          reason: `measured spend $${runningMeasured} exceeds the $${budget.capUsd} cap after node '${nodeId}' dispatched; approval required to continue`,
+        });
+      }
+    }
+
+    const toolCalls = outcome.result.stopReason === "tool_use" ? (outcome.result.toolCalls ?? []) : [];
+    if (toolCalls.length === 0) break; // a final text answer — the loop is done
+
+    // Append the assistant tool_use turn, then execute each call AS THE
+    // INITIATING USER and append the tool_result turn so the model can react.
+    const assistantBlocks: ModelContentBlock[] = [];
+    if (outcome.result.outputText) {
+      assistantBlocks.push({ type: "text", text: outcome.result.outputText });
+    }
+    for (const tc of toolCalls) {
+      assistantBlocks.push({ type: "tool_use", id: tc.id, name: tc.name, input: tc.arguments });
+    }
+    messages.push({ role: "assistant", content: assistantBlocks });
+
+    const resultBlocks: ModelContentBlock[] = [];
+    let breakForApproval = false;
+    for (const tc of toolCalls) {
+      toolCallCount++;
+      const serverId = serverByTool.get(tc.name);
+      let block: ModelContentBlock;
+      let traceStatus: string;
+      if (!serverId) {
+        // the model asked for a tool no declared server manifests — no
+        // governance target, so report it back as an error and move on
+        block = {
+          type: "tool_result",
+          toolUseId: tc.id,
+          content: `tool '${tc.name}' is not available to this node`,
+          isError: true,
+        };
+        traceStatus = "unavailable";
+      } else {
+        const toolOut = await executeGovernedToolCall(db, dataKey, {
+          userId: run.initiatingUserId,
+          serverId,
+          toolName: tc.name,
+          arguments: (tc.arguments ?? {}) as Record<string, unknown>,
+        });
+        switch (toolOut.kind) {
+          case "allowed":
+            block = { type: "tool_result", toolUseId: tc.id, content: toolResultText(toolOut.content) };
+            traceStatus = "allowed";
+            break;
+          case "denied":
+            block = {
+              type: "tool_result",
+              toolUseId: tc.id,
+              content: `blocked by governance: ${toolOut.decision.reason}`,
+              isError: true,
+            };
+            traceStatus = "denied";
+            break;
+          case "approval_required":
+            block = {
+              type: "tool_result",
+              toolUseId: tc.id,
+              content: `approval required: '${toolOut.approvalId}' is pending sign-off — this worker is paused until it is decided`,
+              isError: true,
+            };
+            traceStatus = "approval_required";
+            breakForApproval = true;
+            toolApprovalPending = true;
+            break;
+          case "approval_consumed_race":
+            block = {
+              type: "tool_result",
+              toolUseId: tc.id,
+              content: `approval '${toolOut.approvalId}' was already consumed — retry to request a new one`,
+              isError: true,
+            };
+            traceStatus = "approval_consumed_race";
+            break;
+          case "unknown_tool":
+            block = {
+              type: "tool_result",
+              toolUseId: tc.id,
+              content: `unknown tool '${tc.name}'`,
+              isError: true,
+            };
+            traceStatus = "unknown_tool";
+            break;
+        }
+      }
+      resultBlocks.push(block);
+      // Append-only trace of every tool call (no migration — rides the events
+      // jsonb). The governed decision's own audit row is written by
+      // executeGovernedToolCall; this is the run-side record of the loop.
+      await db.insert(orchestrationRunEvents).values({
+        runId: run.id,
+        event: {
+          kind: "node_tool_call",
+          nodeId,
+          turn,
+          toolName: tc.name,
+          serverId: serverId ?? null,
+          status: traceStatus,
+        },
+        actorUserId,
       });
     }
+    messages.push({ role: "user", content: resultBlocks });
+
+    // §5.1/§3: an approval-required tool halts the loop with the approval in
+    // the one queue — the human decides, then re-dispatches the node. Never a
+    // hang.
+    if (breakForApproval) break;
   }
 
-  // Append-only history: the dispatch is part of the run's record.
+  // last is non-null: turn 0 always dispatches (the budget pre-gate returns
+  // before the loop body when it would block). Defensive fallback otherwise.
+  if (!last) {
+    return { kind: "budget_blocked_measured", measuredSpentUsd: runningMeasured, capUsd: budget?.capUsd ?? 0 };
+  }
+
+  // Append-only history: the node's whole loop is one node_dispatched record —
+  // final text, summed usage/cost, and the loop trace counts.
   await db.insert(orchestrationRunEvents).values({
     runId: run.id,
     event: {
       kind: "node_dispatched",
       nodeId,
-      agentId: outcome.result.servedAgentId,
-      model: outcome.result.model,
-      stopReason: outcome.result.stopReason,
-      refusal: outcome.result.refusal,
-      usage: outcome.result.usage,
-      costUsd: outcome.result.costUsd,
+      agentId: last.result.servedAgentId,
+      model: last.result.model,
+      stopReason: last.result.stopReason,
+      refusal: last.result.refusal,
+      usage: totalUsage,
+      costUsd: totalCostUsd,
+      turns: turnCount,
+      toolCalls: toolCallCount,
+      ...(toolApprovalPending ? { toolApprovalPending: true } : {}),
       // §6 traceability: exactly which signed-off artifact versions framed
       // this execution
       ...(nested ? { contextArtifacts: nested.artifacts } : {}),
-      outputText: outcome.result.outputText.slice(0, 20_000),
+      outputText: last.result.outputText.slice(0, 20_000),
     },
     actorUserId,
   });
@@ -464,20 +654,59 @@ async function dispatchRunNode(
     objectId: run.id,
     detail: {
       nodeId,
-      agentId: outcome.result.servedAgentId,
-      model: outcome.result.model,
-      stopReason: outcome.result.stopReason,
-      refusal: outcome.result.refusal,
-      costUsd: outcome.result.costUsd,
+      agentId: last.result.servedAgentId,
+      model: last.result.model,
+      stopReason: last.result.stopReason,
+      refusal: last.result.refusal,
+      costUsd: totalCostUsd,
+      turns: turnCount,
+      toolCalls: toolCallCount,
       phase: "dispatch",
     },
     effect: "allow",
     ruleId: "run-node-dispatched",
     ruleChain: [],
-    reason: `node '${nodeId}' executed by its assigned owner under the initiating user's entitlements`,
+    reason: `node '${nodeId}' executed by its assigned owner under the initiating user's entitlements (${turnCount} turn(s), ${toolCallCount} tool call(s))`,
   });
 
-  return { kind: "ok", result: outcome.result, measuredSpentUsd: newMeasured, budgetBreached };
+  return {
+    kind: "ok",
+    result: {
+      servedAgentId: last.result.servedAgentId,
+      model: last.result.model,
+      outputText: last.result.outputText,
+      stopReason: last.result.stopReason,
+      refusal: last.result.refusal,
+      usage: totalUsage,
+      costUsd: totalCostUsd,
+      measuredCostSavedUsd: last.result.measuredCostSavedUsd,
+      credentialSource: last.result.credentialSource,
+      turns: turnCount,
+      toolCalls: toolCallCount,
+      ...(toolApprovalPending ? { toolApprovalPending: true } : {}),
+    },
+    measuredSpentUsd: runningMeasured,
+    budgetBreached,
+  };
+}
+
+/** default and hard ceiling for a worker node's tool-using loop turns */
+const DEFAULT_WORKER_MAX_TURNS = 6;
+const MAX_WORKER_TURNS = 20;
+
+/** Flatten an MCP callTool result to text for a tool_result block — join text
+ * content parts, else stringify. Keeps the model's view of the tool output
+ * faithful without leaking transport structure. */
+function toolResultText(content: unknown): string {
+  const c = content as { content?: Array<{ type?: string; text?: string }> } | null;
+  if (c && Array.isArray(c.content)) {
+    const text = c.content
+      .filter((b) => b?.type === "text" && typeof b.text === "string")
+      .map((b) => b.text)
+      .join(" ");
+    if (text) return text;
+  }
+  return JSON.stringify(content ?? null);
 }
 
 /** §5.1: a node's worker runs strictly inside the INITIATING user's

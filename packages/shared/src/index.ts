@@ -299,6 +299,12 @@ export const decompositionPlanSchema = z.object({
         instruction: z.string().min(1).max(4000),
         agent: z.string().min(1).max(200),
         dependsOn: z.array(z.string().min(1)).default([]),
+        /** pillar 7: MCP server NAMES this task's worker may draw tools from
+         * (resolved to ids + entitlement-narrowed by the gateway). Optional —
+         * a task with no tools is an ordinary single-turn worker. */
+        toolServers: z.array(z.string().min(1).max(200)).optional(),
+        /** pillar 7: max tool-using turns for this worker (gateway-bounded) */
+        maxTurns: z.number().int().min(1).max(20).optional(),
       }),
     )
     .min(2)
@@ -321,6 +327,9 @@ export const dispatchNodeSchema = z.object({
   /** work instructions for the node's worker; defaults to the node title */
   input: z.string().max(100_000).optional(),
   maxTokens: z.number().int().min(1).max(64_000).optional(),
+  /** pillar 7: override the node's declared tool-loop turn cap for this
+   * dispatch (still gateway-bounded) */
+  maxTurns: z.number().int().min(1).max(20).optional(),
 });
 
 export const runEventSchema = z.object({

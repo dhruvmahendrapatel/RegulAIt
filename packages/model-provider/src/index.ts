@@ -37,12 +37,32 @@ export class ModelProviderError extends Error {
   }
 }
 
+/** A tool the model may call during a turn (pillar 7 tool-using workers). The
+ * `inputSchema` is a JSON Schema object — the same shape the MCP manifest
+ * carries, so a governed tool's declared inputs pass straight through. */
+export interface ModelToolDef {
+  name: string;
+  description?: string;
+  inputSchema: Record<string, unknown>;
+}
+
+/** A block inside a multi-turn message's content. Text is the ordinary case;
+ * tool_use is what an assistant turn appends when it calls a tool; tool_result
+ * is the following user turn carrying that tool's output back into history.
+ * Together they let a tool-using loop append turns across iterations. */
+export type ModelContentBlock =
+  | { type: "text"; text: string }
+  | { type: "tool_use"; id: string; name: string; input: unknown }
+  | { type: "tool_result"; toolUseId: string; content: string; isError?: boolean };
+
 /** One turn of a multi-turn conversation. `system` is deliberately NOT a
  * role here — it stays a separate ModelDispatchRequest field, because two of
- * the providers (Anthropic, Google) carry it out-of-band anyway. */
+ * the providers (Anthropic, Google) carry it out-of-band anyway. `content` is
+ * a plain string for ordinary turns, or an ordered block array when a turn
+ * carries tool_use / tool_result parts (a tool-using loop's history). */
 export interface ModelChatMessage {
   role: "user" | "assistant";
-  content: string;
+  content: string | ModelContentBlock[];
 }
 
 export interface ModelDispatchRequest {
@@ -58,6 +78,12 @@ export interface ModelDispatchRequest {
   messages?: ModelChatMessage[];
   system?: string;
   maxTokens?: number;
+  /** tools the model may call this turn (pillar 7). When absent, the request
+   * is byte-identical to the tool-free contract — no adapter sends a `tools`
+   * field. When present, a model may answer with stopReason "tool_use" and
+   * `toolCalls`, which the caller executes and feeds back as tool_result
+   * turns. */
+  tools?: ModelToolDef[];
   /** streaming: called with each text delta as it arrives. The returned
    * result is still the COMPLETE message — accounting and refusal handling
    * are identical to the non-streaming path. */
@@ -66,11 +92,16 @@ export interface ModelDispatchRequest {
 
 export interface ModelDispatchResult {
   outputText: string;
-  /** normalized: end_turn | max_tokens | refusal | other */
-  stopReason: "end_turn" | "max_tokens" | "refusal" | "other";
+  /** normalized: end_turn | max_tokens | refusal | tool_use | other. tool_use
+   * means the model paused to call the tools in `toolCalls`. */
+  stopReason: "end_turn" | "max_tokens" | "refusal" | "tool_use" | "other";
   /** true when the model itself declined (stop_reason=refusal) — callers must
    * check this before treating outputText as an answer */
   refusal: boolean;
+  /** present only when stopReason is "tool_use": the tool calls the model
+   * wants executed, in the provider-neutral shape the caller re-governs and
+   * runs before feeding results back as the next turn. */
+  toolCalls?: Array<{ id: string; name: string; arguments: unknown }>;
   /** MEASURED by the provider, never estimated here */
   usage: { inputTokens: number; outputTokens: number };
   /** provider-side message/request identifier for cross-system audit joins */
@@ -127,8 +158,21 @@ export class AnthropicProvider implements ModelProvider {
       model: req.model,
       max_tokens: req.maxTokens ?? DEFAULT_MAX_TOKENS,
       ...(req.system ? { system: req.system } : {}),
-      // roles map 1:1 onto the Messages API
-      messages: chatTurns(req).map((m) => ({ role: m.role, content: m.content })),
+      // roles map 1:1 onto the Messages API; a block-array turn (tool_use /
+      // tool_result history) maps each block to its native content shape
+      messages: chatTurns(req).map((m) => ({
+        role: m.role,
+        content: anthropicContent(m.content),
+      })),
+      ...(req.tools
+        ? {
+            tools: req.tools.map((t) => ({
+              name: t.name,
+              ...(t.description ? { description: t.description } : {}),
+              input_schema: t.inputSchema as Anthropic.Tool.InputSchema,
+            })),
+          }
+        : {}),
     };
     // stream when the caller wants deltas, or when the output budget is large
     // enough that a single non-streaming request risks a timeout
@@ -153,9 +197,16 @@ export class AnthropicProvider implements ModelProvider {
     }
     const refusal = msg.stop_reason === "refusal";
     const stopReason: ModelDispatchResult["stopReason"] =
-      msg.stop_reason === "end_turn" || msg.stop_reason === "max_tokens" || refusal
-        ? (msg.stop_reason as ModelDispatchResult["stopReason"])
-        : "other";
+      msg.stop_reason === "tool_use"
+        ? "tool_use"
+        : msg.stop_reason === "end_turn" || msg.stop_reason === "max_tokens" || refusal
+          ? (msg.stop_reason as ModelDispatchResult["stopReason"])
+          : "other";
+    // the tool_use content blocks the loop executes — these are exactly the
+    // ones a text-only caller ignores; surfaced here as neutral toolCalls
+    const toolCalls = msg.content
+      .filter((b): b is Anthropic.ToolUseBlock => b.type === "tool_use")
+      .map((b) => ({ id: b.id, name: b.name, arguments: b.input }));
     return {
       // a refusal's content must never be surfaced as an answer
       outputText: refusal
@@ -166,6 +217,7 @@ export class AnthropicProvider implements ModelProvider {
             .join(""),
       stopReason,
       refusal,
+      ...(toolCalls.length > 0 ? { toolCalls } : {}),
       usage: {
         inputTokens: msg.usage.input_tokens,
         outputTokens: msg.usage.output_tokens,
@@ -173,6 +225,28 @@ export class AnthropicProvider implements ModelProvider {
       providerMessageId: msg.id ?? null,
     };
   }
+}
+
+/** Map our neutral content (string or block array) onto Anthropic's native
+ * message content. A string stays a string (byte-identical to the tool-free
+ * path); a block array maps text / tool_use / tool_result to the Messages API
+ * block shapes. */
+function anthropicContent(
+  content: string | ModelContentBlock[],
+): string | Anthropic.ContentBlockParam[] {
+  if (typeof content === "string") return content;
+  return content.map((b): Anthropic.ContentBlockParam => {
+    if (b.type === "text") return { type: "text", text: b.text };
+    if (b.type === "tool_use") {
+      return { type: "tool_use", id: b.id, name: b.name, input: b.input };
+    }
+    return {
+      type: "tool_result",
+      tool_use_id: b.toolUseId,
+      content: b.content,
+      ...(b.isError ? { is_error: true } : {}),
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -192,7 +266,67 @@ function mapOpenAiStop(finishReason: string | null | undefined): ModelDispatchRe
   if (finishReason === "stop") return "end_turn";
   if (finishReason === "length") return "max_tokens";
   if (finishReason === "content_filter") return "refusal";
+  if (finishReason === "tool_calls") return "tool_use";
   return "other";
+}
+
+/** Tool-call arguments arrive as a JSON string on the OpenAI family; parse
+ * defensively so a malformed fragment never throws out of the adapter. */
+function parseJsonArgs(raw: string): unknown {
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
+/** Flatten our neutral turns onto OpenAI chat messages. A string turn maps
+ * 1:1 (byte-identical to the tool-free path). A block-array turn can expand:
+ * an assistant turn's tool_use blocks become `tool_calls`, and each
+ * tool_result block becomes its own `role:"tool"` message — the shape the
+ * chat-completions API requires. */
+function openAiMessages(
+  turns: ModelChatMessage[],
+): OpenAI.Chat.Completions.ChatCompletionMessageParam[] {
+  const out: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [];
+  for (const m of turns) {
+    if (typeof m.content === "string") {
+      out.push({ role: m.role, content: m.content } as OpenAI.Chat.Completions.ChatCompletionMessageParam);
+      continue;
+    }
+    const text = m.content
+      .filter((b): b is Extract<ModelContentBlock, { type: "text" }> => b.type === "text")
+      .map((b) => b.text)
+      .join("");
+    const toolUses = m.content.filter(
+      (b): b is Extract<ModelContentBlock, { type: "tool_use" }> => b.type === "tool_use",
+    );
+    if (m.role === "assistant") {
+      out.push({
+        role: "assistant",
+        content: text || null,
+        ...(toolUses.length > 0
+          ? {
+              tool_calls: toolUses.map((b) => ({
+                id: b.id,
+                type: "function" as const,
+                function: { name: b.name, arguments: JSON.stringify(b.input ?? {}) },
+              })),
+            }
+          : {}),
+      });
+    } else if (text) {
+      out.push({ role: "user", content: text });
+    }
+    // tool_result blocks always ride as their own tool-role messages
+    for (const b of m.content) {
+      if (b.type === "tool_result") {
+        out.push({ role: "tool", tool_call_id: b.toolUseId, content: b.content });
+      }
+    }
+  }
+  return out;
 }
 
 /** The chat-completions dispatch core, shared by every OpenAI-compatible
@@ -203,17 +337,33 @@ async function dispatchChatCompletions(
   label: string,
 ): Promise<ModelDispatchResult> {
   const messages = [
-      ...(req.system ? [{ role: "system" as const, content: req.system }] : []),
-      // system first (as today), then the ordered turns — assistant stays assistant
-      ...chatTurns(req).map((m) => ({ role: m.role, content: m.content })),
+      ...(req.system
+        ? [{ role: "system" as const, content: req.system }]
+        : []),
+      // system first (as today), then the ordered turns — assistant stays
+      // assistant; block-array turns flatten to tool_calls / tool messages
+      ...openAiMessages(chatTurns(req)),
     ];
     const maxTokens = req.maxTokens ?? DEFAULT_MAX_TOKENS;
+    const toolParam = req.tools
+      ? {
+          tools: req.tools.map((t) => ({
+            type: "function" as const,
+            function: {
+              name: t.name,
+              ...(t.description ? { description: t.description } : {}),
+              parameters: t.inputSchema,
+            },
+          })),
+        }
+      : {};
     try {
       if (req.onText !== undefined || maxTokens > STREAM_THRESHOLD_TOKENS) {
         const stream = await client.chat.completions.create({
           model: req.model,
           max_completion_tokens: maxTokens,
           messages,
+          ...toolParam,
           stream: true,
           stream_options: { include_usage: true },
         });
@@ -222,6 +372,8 @@ async function dispatchChatCompletions(
         let finishReason: string | null = null;
         let id: string | null = null;
         let usage = { inputTokens: 0, outputTokens: 0 };
+        // tool_calls arrive fragmented across deltas, keyed by index
+        const toolAcc = new Map<number, { id: string; name: string; args: string }>();
         for await (const chunk of stream) {
           id = id ?? chunk.id ?? null;
           const choice = chunk.choices?.[0];
@@ -230,6 +382,13 @@ async function dispatchChatCompletions(
             req.onText?.(choice.delta.content);
           }
           if (choice?.delta?.refusal) refusalText += choice.delta.refusal;
+          for (const tc of choice?.delta?.tool_calls ?? []) {
+            const slot = toolAcc.get(tc.index) ?? { id: "", name: "", args: "" };
+            if (tc.id) slot.id = tc.id;
+            if (tc.function?.name) slot.name = tc.function.name;
+            if (tc.function?.arguments) slot.args += tc.function.arguments;
+            toolAcc.set(tc.index, slot);
+          }
           if (choice?.finish_reason) finishReason = choice.finish_reason;
           if (chunk.usage) {
             usage = {
@@ -239,10 +398,16 @@ async function dispatchChatCompletions(
           }
         }
         const refusal = mapOpenAiStop(finishReason) === "refusal" || refusalText.length > 0;
+        const toolCalls = [...toolAcc.values()].map((t) => ({
+          id: t.id,
+          name: t.name,
+          arguments: parseJsonArgs(t.args),
+        }));
         return {
           outputText: refusal ? "" : text,
           stopReason: refusal ? "refusal" : mapOpenAiStop(finishReason),
           refusal,
+          ...(toolCalls.length > 0 ? { toolCalls } : {}),
           usage,
           providerMessageId: id,
         };
@@ -252,15 +417,22 @@ async function dispatchChatCompletions(
         model: req.model,
         max_completion_tokens: maxTokens,
         messages,
+        ...toolParam,
       });
       const choice = res.choices[0];
       const refusal =
         mapOpenAiStop(choice?.finish_reason) === "refusal" || Boolean(choice?.message?.refusal);
+      const toolCalls = (choice?.message?.tool_calls ?? []).flatMap((tc) =>
+        tc.type === "function"
+          ? [{ id: tc.id, name: tc.function.name, arguments: parseJsonArgs(tc.function.arguments) }]
+          : [],
+      );
       return {
         // a refusal's content must never be surfaced as an answer
         outputText: refusal ? "" : (choice?.message?.content ?? ""),
         stopReason: refusal ? "refusal" : mapOpenAiStop(choice?.finish_reason),
         refusal,
+        ...(toolCalls.length > 0 ? { toolCalls } : {}),
         usage: {
           inputTokens: res.usage?.prompt_tokens ?? 0,
           outputTokens: res.usage?.completion_tokens ?? 0,
@@ -339,14 +511,39 @@ export interface GoogleAdapterOptions {
 const GOOGLE_DEFAULT_BASE = "https://generativelanguage.googleapis.com/v1beta";
 const GOOGLE_REFUSAL_REASONS = new Set(["SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII"]);
 
+interface GeminiFunctionCall {
+  name: string;
+  args?: Record<string, unknown>;
+}
+interface GeminiPart {
+  text?: string;
+  functionCall?: GeminiFunctionCall;
+}
 interface GeminiChunk {
   responseId?: string;
   candidates?: Array<{
-    content?: { parts?: Array<{ text?: string }> };
+    content?: { parts?: GeminiPart[] };
     finishReason?: string;
   }>;
   promptFeedback?: { blockReason?: string };
   usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
+}
+
+/** Map our neutral content onto Gemini parts. A string stays one text part
+ * (byte-identical to the tool-free path). tool_use → functionCall, tool_result
+ * → functionResponse. Gemini keys a functionResponse by the tool NAME, which
+ * our tool_result block does not carry — the loop's providers of record are
+ * Anthropic + the OpenAI family, so this mapping is best-effort and not
+ * exercised by the tool-loop tests. */
+function googleParts(content: string | ModelContentBlock[]): Record<string, unknown>[] {
+  if (typeof content === "string") return [{ text: content }];
+  return content.map((b) => {
+    if (b.type === "text") return { text: b.text };
+    if (b.type === "tool_use") return { functionCall: { name: b.name, args: b.input } };
+    return {
+      functionResponse: { name: b.toolUseId, response: { content: b.content, isError: b.isError ?? false } },
+    };
+  });
 }
 
 function mapGoogleStop(finishReason: string | null | undefined): ModelDispatchResult["stopReason"] {
@@ -381,9 +578,22 @@ export class GoogleProvider implements ModelProvider {
           // Gemini's assistant role is "model"
           contents: chatTurns(req).map((m) => ({
             role: m.role === "assistant" ? "model" : "user",
-            parts: [{ text: m.content }],
+            parts: googleParts(m.content),
           })),
           ...(req.system ? { systemInstruction: { parts: [{ text: req.system }] } } : {}),
+          ...(req.tools
+            ? {
+                tools: [
+                  {
+                    functionDeclarations: req.tools.map((t) => ({
+                      name: t.name,
+                      ...(t.description ? { description: t.description } : {}),
+                      parameters: t.inputSchema,
+                    })),
+                  },
+                ],
+              }
+            : {}),
           generationConfig: { maxOutputTokens: maxTokens },
         }),
       },
@@ -404,6 +614,7 @@ export class GoogleProvider implements ModelProvider {
     let blockReason: string | null = null;
     let id: string | null = null;
     let usage = { inputTokens: 0, outputTokens: 0 };
+    const toolCalls: Array<{ id: string; name: string; arguments: unknown }> = [];
     const absorb = (chunk: GeminiChunk) => {
       id = id ?? chunk.responseId ?? null;
       blockReason = blockReason ?? chunk.promptFeedback?.blockReason ?? null;
@@ -412,6 +623,15 @@ export class GoogleProvider implements ModelProvider {
       if (delta) {
         text += delta;
         req.onText?.(delta);
+      }
+      for (const p of candidate?.content?.parts ?? []) {
+        if (p.functionCall) {
+          toolCalls.push({
+            id: `${id ?? "gemini"}-fc-${toolCalls.length}`,
+            name: p.functionCall.name,
+            arguments: p.functionCall.args ?? {},
+          });
+        }
       }
       if (candidate?.finishReason) finishReason = candidate.finishReason;
       if (chunk.usageMetadata) {
@@ -448,8 +668,13 @@ export class GoogleProvider implements ModelProvider {
     return {
       // a refusal's content must never be surfaced as an answer
       outputText: refusal ? "" : text,
-      stopReason: refusal ? "refusal" : mapGoogleStop(finishReason),
+      stopReason: refusal
+        ? "refusal"
+        : toolCalls.length > 0
+          ? "tool_use"
+          : mapGoogleStop(finishReason),
       refusal,
+      ...(toolCalls.length > 0 ? { toolCalls } : {}),
       usage,
       providerMessageId: id,
     };
@@ -1043,6 +1268,39 @@ function mockDecompositionReply(goal: string, system: string, tier: MockTier): s
   return "```json\n" + JSON.stringify({ name: topic, nodes }, null, 2) + "\n```";
 }
 
+// ---------------------------------------------------------------------------
+// Tool-using loop test hooks (pillar 7). Mirroring "<<refuse>>": an input
+// containing "<<use-tool:NAME>>" makes the mock emit ONE tool_use for NAME on
+// the turn it appears; once a tool_result rides in history the mock finalizes
+// with a text answer that QUOTES the tool result, so the whole governed loop
+// is demoable with zero external keys. "<<use-tool-loop:NAME>>" keeps
+// requesting the tool on EVERY turn (never finalizes) — the deterministic way
+// to exercise a node's maxTurns cap.
+// ---------------------------------------------------------------------------
+
+/** flatten a turn's content to plain text (text + tool_result bodies) so the
+ * intent/tier/sentinel logic reads a string regardless of block vs string */
+function mockBlockText(content: string | ModelContentBlock[]): string {
+  if (typeof content === "string") return content;
+  return content
+    .map((b) => (b.type === "text" ? b.text : b.type === "tool_result" ? b.content : ""))
+    .join(" ");
+}
+
+function mockHasToolResult(turns: ModelChatMessage[]): boolean {
+  return turns.some(
+    (m) => Array.isArray(m.content) && m.content.some((b) => b.type === "tool_result"),
+  );
+}
+
+function mockToolResults(turns: ModelChatMessage[]): string[] {
+  return turns.flatMap((m) =>
+    Array.isArray(m.content)
+      ? m.content.flatMap((b) => (b.type === "tool_result" ? [b.content] : []))
+      : [],
+  );
+}
+
 export class MockModelProvider implements ModelProvider {
   readonly kind = "mock" as const;
   readonly dispatches: MockDispatch[] = [];
@@ -1057,14 +1315,57 @@ export class MockModelProvider implements ModelProvider {
     // costs. With no messages both reduce exactly to the single-input path.
     const turns = chatTurns(req);
     const lastUserIdx = turns.map((m) => m.role).lastIndexOf("user");
-    const lastUser = lastUserIdx >= 0 ? turns[lastUserIdx]!.content : "";
-    const historyText = turns.map((m) => m.content).join("\n");
+    const lastUser = lastUserIdx >= 0 ? mockBlockText(turns[lastUserIdx]!.content) : "";
+    const historyText = turns.map((m) => mockBlockText(m.content)).join("\n");
     if (lastUser.includes("<<refuse>>")) {
       return {
         outputText: "",
         stopReason: "refusal",
         refusal: true,
         usage: { inputTokens: mockTokens(historyText), outputTokens: 0 },
+        providerMessageId: `mock-msg-${seq}`,
+      };
+    }
+
+    // Tool-using loop (pillar 7). "<<refuse>>" already took precedence above.
+    // The loop sentinel keeps requesting the tool every turn; the once sentinel
+    // requests it until a tool_result comes back, then finalizes. Detection
+    // reads the WHOLE history text (the instruction turn persists across
+    // iterations), gated on tool_result presence for the once case.
+    const loopMatch = historyText.match(/<<use-tool-loop:([A-Za-z0-9_.-]+)>>/);
+    const onceMatch = historyText.match(/<<use-tool:([A-Za-z0-9_.-]+)>>/);
+    const toolResultSeen = mockHasToolResult(turns);
+    const wantTool = loopMatch ?? (!toolResultSeen ? onceMatch : null);
+    if (wantTool) {
+      // one deterministic tool_use, canned empty args — a governed loop turns
+      // this into a re-checked tool call, then feeds the result back
+      return {
+        outputText: "",
+        stopReason: "tool_use",
+        refusal: false,
+        toolCalls: [{ id: `mock-tool-${seq}`, name: wantTool[1]!, arguments: {} }],
+        usage: { inputTokens: mockTokens(historyText), outputTokens: 1 },
+        providerMessageId: `mock-msg-${seq}`,
+      };
+    }
+    if (toolResultSeen) {
+      // finalize: a plain text answer that QUOTES the tool result(s) so the
+      // loop's demo visibly proves the tool output flowed back into the model
+      const quoted = mockToolResults(turns).join(" | ");
+      const finalText =
+        `Tool call complete — the tool returned: ${quoted}. ` +
+        `Final answer for "${mockTopic(lastUser || historyText)}" incorporating that result.`;
+      if (req.onText) {
+        const chunkSize = 40;
+        for (let i = 0; i < finalText.length; i += chunkSize) {
+          req.onText(finalText.slice(i, i + chunkSize));
+        }
+      }
+      return {
+        outputText: finalText,
+        stopReason: "end_turn",
+        refusal: false,
+        usage: { inputTokens: mockTokens(historyText), outputTokens: mockTokens(finalText) },
         providerMessageId: `mock-msg-${seq}`,
       };
     }
@@ -1081,11 +1382,11 @@ export class MockModelProvider implements ModelProvider {
         .find((m) => m.role === "user");
       const terse =
         lastUser.trim().split(/\s+/).filter(Boolean).length < TERSE_FOLLOW_UP_WORDS;
-      if (terse && prevUser) topicSource = prevUser.content;
+      if (terse && prevUser) topicSource = mockBlockText(prevUser.content);
       const n = turns.length - 1;
       continuation =
         `Continuing from the previous ${n} turn${n === 1 ? "" : "s"}` +
-        (terse && prevUser ? `, still on ${mockTopic(prevUser.content)}:` : ":");
+        (terse && prevUser ? `, still on ${mockTopic(mockBlockText(prevUser.content))}:` : ":");
     }
     // Planning requests answer with ONLY the JSON plan (tolerably fenced) —
     // no system-ack or continuation opener, since the caller machine-parses

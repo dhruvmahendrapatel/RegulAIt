@@ -17,14 +17,51 @@
  */
 
 import type { FastifyInstance } from "fastify";
-import { agentGrants, agents, auditLog, eq, userAgentPolicies, type Db } from "@regulait/db";
-import { evaluateAgent, type AgentDecision } from "@regulait/policy-kernel";
+import {
+  agentGrants,
+  agents,
+  auditLog,
+  eq,
+  mcpServers,
+  mcpTools,
+  userAgentPolicies,
+  type Db,
+} from "@regulait/db";
+import { evaluateAgent, visibleTools, type AgentDecision, type ToolRef } from "@regulait/policy-kernel";
 import { validateGraph } from "@regulait/orchestration-kernel";
 import { isModelProviderKind, TASK_DECOMPOSITION_SENTINEL } from "@regulait/model-provider";
 import { decomposeGoalSchema, decompositionPlanSchema } from "@regulait/shared";
 import { configuredProviders, executeGovernedDispatch, type AgentRow } from "./agents-connectors.js";
+import { loadEntitlements } from "./entitlements.js";
 import { assertProjectAttribution } from "./projects.js";
 import { z } from "zod";
+
+/** A server the caller may draw worker tools from, with the tool names they
+ * are entitled to on it — the pillar 7 half of the planning roster. */
+interface ToolServerInfo {
+  id: string;
+  name: string;
+  tools: string[];
+}
+
+/** The caller's entitled MCP servers + tool names, from the manifest inventory
+ * (no upstream connect — the same visibleTools filter the proxy uses). A
+ * server the caller can see no tools on is dropped: the lead can only assign
+ * tools the caller could actually use. */
+async function callerToolServers(db: Db, userId: string): Promise<ToolServerInfo[]> {
+  const servers = await db.select().from(mcpServers);
+  const out: ToolServerInfo[] = [];
+  for (const s of servers) {
+    const [tools, entitlements] = await Promise.all([
+      db.select().from(mcpTools).where(eq(mcpTools.serverId, s.id)),
+      loadEntitlements(db, userId, s.id),
+    ]);
+    const refs: ToolRef[] = tools.map((t) => ({ serverId: t.serverId, name: t.name, kind: t.kind }));
+    const names = visibleTools(userId, s.id, refs, entitlements).map((t) => t.name);
+    if (names.length > 0) out.push({ id: s.id, name: s.name, tools: names });
+  }
+  return out;
+}
 
 /** the mode worker nodes run in (matching the New Run editor's graphs) — the
  * roster and every name resolution are entitlement-checked under it */
@@ -68,8 +105,15 @@ export function extractFirstJsonObject(text: string): unknown | null {
  * with MockModelProvider's planner (name + tier parsed back out), and the
  * sentinel is what flips the mock into planning mode — the whole feature is
  * demoable with zero external keys. */
-function planningPrompt(roster: AgentRow[]): string {
+function planningPrompt(roster: AgentRow[], toolServers: ToolServerInfo[]): string {
   const fmtUsd = (v: number | null) => (v == null ? "?" : `$${v}`);
+  const toolLines =
+    toolServers.length > 0
+      ? [
+          "A worker may optionally be given MCP tools to call across turns. Assign tools only when the task genuinely needs live data or an external action; give such a task a small maxTurns (2-4). Available tool servers (assign BY NAME):",
+          ...toolServers.map((s) => `- ${s.name}: ${s.tools.join(", ")}`),
+        ]
+      : [];
   return [
     TASK_DECOMPOSITION_SENTINEL,
     "You are a Team-Lead agent. Decompose the user's goal into a task graph of 3-7 tasks for worker agents.",
@@ -80,8 +124,10 @@ function planningPrompt(roster: AgentRow[]): string {
       (a) =>
         `- ${a.name} (tier ${a.tier}, ${fmtUsd(a.costPerMTokIn)} in / ${fmtUsd(a.costPerMTokOut)} out per MTok)`,
     ),
+    ...toolLines,
     "Return ONLY a JSON object of exactly this shape, with no prose around it:",
-    '{"name": string, "nodes": [{"id": "kebab-case-slug", "title": string, "instruction": string, "agent": "<roster name>", "dependsOn": ["ids"]}]}',
+    '{"name": string, "nodes": [{"id": "kebab-case-slug", "title": string, "instruction": string, "agent": "<roster name>", "dependsOn": ["ids"], "toolServers": ["<server name>"], "maxTurns": number}]}',
+    "toolServers and maxTurns are OPTIONAL — omit them for ordinary single-turn tasks.",
   ].join("\n");
 }
 
@@ -94,6 +140,13 @@ interface ProposalNode {
   mode: string;
   dependsOn: string[];
   substituted?: { requestedAgentName: string; reason: "unknown_or_ungranted_agent" };
+  /** pillar 7: resolved MCP server ids this worker may draw tools from */
+  toolServers?: string[];
+  /** pillar 7: server NAMES the lead named that the caller isn't entitled on
+   * (dropped from toolServers) — surfaced so the UI can explain the omission */
+  droppedToolServers?: string[];
+  /** pillar 7: the worker's tool-loop turn cap */
+  maxTurns?: number;
 }
 
 type ParseOutcome =
@@ -108,6 +161,7 @@ function parseProposal(
   refusal: boolean,
   roster: AgentRow[],
   fallbackOwner: AgentRow,
+  toolServers: ToolServerInfo[],
 ): ParseOutcome {
   if (refusal) return { ok: false, errors: ["the lead agent declined the planning request"] };
   const raw = extractFirstJsonObject(outputText);
@@ -120,9 +174,20 @@ function parseProposal(
     };
   }
   const byName = new Map(roster.map((a) => [a.name.toLowerCase(), a]));
+  const serverByName = new Map(toolServers.map((s) => [s.name.toLowerCase(), s]));
   const nodes: ProposalNode[] = parsed.data.nodes.map((n) => {
     const suggested = byName.get(n.agent.toLowerCase());
     const owner = suggested ?? fallbackOwner;
+    // §5.1: a lead may SUGGEST tool servers, never grant them — resolve names
+    // to ids against the caller's entitled set, dropping any the caller can't
+    // reach (recorded, exactly like an ungranted agent suggestion).
+    const resolvedServers: string[] = [];
+    const droppedServers: string[] = [];
+    for (const name of n.toolServers ?? []) {
+      const s = serverByName.get(name.toLowerCase());
+      if (s) resolvedServers.push(s.id);
+      else droppedServers.push(name);
+    }
     return {
       id: n.id,
       title: n.title,
@@ -131,6 +196,9 @@ function parseProposal(
       agentName: owner.name,
       mode: WORKER_MODE,
       dependsOn: n.dependsOn,
+      ...(resolvedServers.length > 0 ? { toolServers: resolvedServers } : {}),
+      ...(droppedServers.length > 0 ? { droppedToolServers: droppedServers } : {}),
+      ...(n.maxTurns ? { maxTurns: n.maxTurns } : {}),
       ...(suggested
         ? {}
         : {
@@ -252,7 +320,10 @@ export function registerDecomposeRoutes(
       });
     }
 
-    const system = planningPrompt(roster);
+    // pillar 7: the tool servers the caller could assign to workers, listed in
+    // the planning prompt alongside the agent roster
+    const toolServerInfo = await callerToolServers(db, userId);
+    const system = planningPrompt(roster, toolServerInfo);
     const totals = { costUsd: 0 as number, costKnown: true, tokensIn: 0, tokensOut: 0 };
     const attempt = async (retryErrors: string[] | null) =>
       executeGovernedDispatch(db, opts.dataKey, {
@@ -284,7 +355,7 @@ export function registerDecomposeRoutes(
         .send({ error: first.error, ...(first.detail ? { detail: first.detail } : {}) });
     }
     absorb(first.result);
-    let parsed = parseProposal(first.result.outputText, first.result.refusal, roster, fallbackOwner);
+    let parsed = parseProposal(first.result.outputText, first.result.refusal, roster, fallbackOwner, toolServerInfo);
 
     // Kernel graph validation folds into the same retry loop as schema errors.
     const kernelErrors = (nodes: ProposalNode[], name: string): string[] => {
@@ -320,7 +391,7 @@ export function registerDecomposeRoutes(
       }
       absorb(second.result);
       rawOutput = second.result.outputText;
-      parsed = parseProposal(second.result.outputText, second.result.refusal, roster, fallbackOwner);
+      parsed = parseProposal(second.result.outputText, second.result.refusal, roster, fallbackOwner, toolServerInfo);
       graphErrors = parsed.ok ? kernelErrors(parsed.nodes, parsed.name) : [];
       if (!parsed.ok || graphErrors.length > 0) {
         const detail = (parsed.ok ? graphErrors : parsed.errors).join("; ");

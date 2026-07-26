@@ -954,3 +954,191 @@ describe("MockModelProvider conversation compaction (pillar 6)", () => {
     expect(r.outputText).toContain("payments migration");
   });
 });
+
+describe("tool-using dispatch (pillar 7): wire shape, tool_use parsing, mock loop", () => {
+  const TOOLS = [
+    { name: "get_time", description: "Returns a fixed time", inputSchema: { type: "object", properties: {} } },
+  ];
+
+  it("anthropic passes tools as input_schema and parses a tool_use stop into toolCalls", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new AnthropicProvider({
+      apiKey: "k",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return anthropicJson({
+          id: "msg_tool_1",
+          type: "message",
+          role: "assistant",
+          model: "claude-opus-5",
+          content: [
+            { type: "text", text: "let me check" },
+            { type: "tool_use", id: "tu_1", name: "get_time", input: { tz: "utc" } },
+          ],
+          stop_reason: "tool_use",
+          stop_sequence: null,
+          usage: { input_tokens: 20, output_tokens: 6 },
+        });
+      },
+    });
+    const r = await provider.dispatch({ model: "claude-opus-5", input: "what time is it?", tools: TOOLS });
+    expect((captured!.tools as unknown[])).toEqual([
+      { name: "get_time", description: "Returns a fixed time", input_schema: { type: "object", properties: {} } },
+    ]);
+    expect(r.stopReason).toBe("tool_use");
+    expect(r.toolCalls).toEqual([{ id: "tu_1", name: "get_time", arguments: { tz: "utc" } }]);
+    expect(r.outputText).toBe("let me check");
+  });
+
+  it("anthropic maps a block-array tool_result turn onto native content", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new AnthropicProvider({
+      apiKey: "k",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return anthropicJson({
+          id: "msg_tool_2", type: "message", role: "assistant", model: "claude-opus-5",
+          content: [{ type: "text", text: "it is 12:00" }],
+          stop_reason: "end_turn", stop_sequence: null,
+          usage: { input_tokens: 40, output_tokens: 4 },
+        });
+      },
+    });
+    await provider.dispatch({
+      model: "claude-opus-5",
+      input: "IGNORED",
+      messages: [
+        { role: "user", content: "what time is it?" },
+        { role: "assistant", content: [{ type: "tool_use", id: "tu_1", name: "get_time", input: {} }] },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "tu_1", content: "12:00" }] },
+      ],
+    });
+    expect(captured!.messages).toEqual([
+      { role: "user", content: "what time is it?" },
+      { role: "assistant", content: [{ type: "tool_use", id: "tu_1", name: "get_time", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "tu_1", content: "12:00" }] },
+    ]);
+  });
+
+  it("openai maps tools to function tools and tool_calls into toolCalls; block turns flatten", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new OpenAiProvider({
+      apiKey: "k",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return new Response(
+          JSON.stringify({
+            id: "cc_tool_1",
+            choices: [
+              {
+                message: {
+                  role: "assistant",
+                  content: null,
+                  tool_calls: [
+                    { id: "call_1", type: "function", function: { name: "get_time", arguments: '{"tz":"utc"}' } },
+                  ],
+                },
+                finish_reason: "tool_calls",
+              },
+            ],
+            usage: { prompt_tokens: 10, completion_tokens: 3 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+    const r = await provider.dispatch({
+      model: "gpt-x",
+      input: "IGNORED",
+      tools: TOOLS,
+      messages: [
+        { role: "user", content: "what time is it?" },
+        { role: "assistant", content: [{ type: "tool_use", id: "call_0", name: "get_time", input: {} }] },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "call_0", content: "11:00" }] },
+      ],
+    });
+    const tools = captured!.tools as Array<{ type: string; function: { name: string } }>;
+    expect(tools[0]!.type).toBe("function");
+    expect(tools[0]!.function.name).toBe("get_time");
+    const msgs = captured!.messages as Array<Record<string, unknown>>;
+    // assistant tool_use flattened to tool_calls, tool_result to a tool message
+    expect(msgs.some((m) => m.role === "assistant" && Array.isArray(m.tool_calls))).toBe(true);
+    expect(msgs.some((m) => m.role === "tool" && m.tool_call_id === "call_0" && m.content === "11:00")).toBe(true);
+    expect(r.stopReason).toBe("tool_use");
+    expect(r.toolCalls).toEqual([{ id: "call_1", name: "get_time", arguments: { tz: "utc" } }]);
+  });
+
+  it("a tools-free request is byte-identical: no tools field, content stays a string", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new AnthropicProvider({
+      apiKey: "k",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return anthropicJson({
+          id: "m", type: "message", role: "assistant", model: "claude-opus-5",
+          content: [{ type: "text", text: "hi" }], stop_reason: "end_turn", stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        });
+      },
+    });
+    const r = await provider.dispatch({ model: "claude-opus-5", input: "hello" });
+    expect("tools" in captured!).toBe(false);
+    expect(captured!.messages).toEqual([{ role: "user", content: "hello" }]);
+    expect(r.toolCalls).toBeUndefined();
+    expect(r.stopReason).toBe("end_turn");
+  });
+
+  it("mock emits ONE tool_use on the sentinel, then finalizes quoting the tool result", async () => {
+    const mock = new MockModelProvider();
+    const first = await mock.dispatch({
+      model: "mock-1",
+      input: "please <<use-tool:get_time>> and answer",
+      tools: TOOLS,
+    });
+    expect(first.stopReason).toBe("tool_use");
+    expect(first.toolCalls).toHaveLength(1);
+    expect(first.toolCalls![0]!.name).toBe("get_time");
+    expect(first.outputText).toBe("");
+
+    const second = await mock.dispatch({
+      model: "mock-1",
+      input: "IGNORED",
+      tools: TOOLS,
+      messages: [
+        { role: "user", content: "please <<use-tool:get_time>> and answer" },
+        { role: "assistant", content: [{ type: "tool_use", id: first.toolCalls![0]!.id, name: "get_time", input: {} }] },
+        { role: "user", content: [{ type: "tool_result", toolUseId: first.toolCalls![0]!.id, content: "12:00" }] },
+      ],
+    });
+    expect(second.stopReason).toBe("end_turn");
+    expect(second.toolCalls).toBeUndefined();
+    expect(second.outputText).toContain("12:00");
+  });
+
+  it("mock loop sentinel keeps requesting the tool even after a tool_result (maxTurns fuel)", async () => {
+    const mock = new MockModelProvider();
+    const r = await mock.dispatch({
+      model: "mock-1",
+      input: "IGNORED",
+      tools: TOOLS,
+      messages: [
+        { role: "user", content: "keep going <<use-tool-loop:get_time>>" },
+        { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "get_time", input: {} }] },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "t1", content: "12:00" }] },
+      ],
+    });
+    expect(r.stopReason).toBe("tool_use");
+    expect(r.toolCalls![0]!.name).toBe("get_time");
+  });
+
+  it("<<refuse>> still takes precedence over a tool sentinel", async () => {
+    const r = await new MockModelProvider().dispatch({
+      model: "mock-1",
+      input: "please <<use-tool:get_time>> but also <<refuse>>",
+      tools: TOOLS,
+    });
+    expect(r.refusal).toBe(true);
+    expect(r.stopReason).toBe("refusal");
+    expect(r.toolCalls).toBeUndefined();
+  });
+});
