@@ -393,6 +393,31 @@ Sync-now verification works, and receivers without read-back fail loudly into th
 orphan flow. `DEFAULT_MAPPINGS.generic_webhook` is the IDENTITY map over all five canonical
 states including blocked — nothing invented because the vocabulary is ours. E2e: the fake
 receiver verifies the HMAC on every request and asserts the token never travels raw.
+**Team-Lead entitlement-narrowing tier, 2026-07-26 — pillar 7 §5.1 lands; pillar 7 complete
+(no migration).** Worker nodes can declare a `leadNodeId` + `allowedAgentIds`/`allowedToolRefs`
+delegation subset (ride the graph jsonb like the tool fields). The pure kernel helper
+`computeNodeCeiling(graph, nodeId)` walks the lead chain UP and INTERSECTS each ancestor's
+allow-sets (null = no constraint at that hop = identity; set∩set; empty = nothing) → a node's
+transitive ceiling. policy-kernel: evaluateAgent gains ceilingAgentIds (new rule
+`agent-lead-ceiling`), evaluate gains ceilingTools (new rule `lead-ceiling`) — consulted ONLY
+on the allow path, so a ceiling can turn an allow into a deny but NEVER rescue an ungranted
+call; default-deny preserved; a null ceiling adds no trace entry (flat runs byte-identical).
+The INVARIANT (proven, not relabeled): effective = user_grants ∩ lead_chain_ceiling, composing
+grandchild ≤ child ≤ lead ≤ initiating user — a worker is denied a tool/agent its INITIATING
+USER genuinely holds because a lead excludes it, while a lead-less control node uses it fine.
+Grants subject stays run.initiatingUserId at every site; the ceiling is a SEPARATE arg threaded
+into evaluateNodeOwner (dispatch + reassign), planRun evalOwner (envelope + budget re-plan
+candidate filter — a re-plan won't move a node onto a ceiling-forbidden agent), resolveNode
+ToolContext (narrows what the model is even offered), and per-call executeGovernedToolCall (hard
+enforcement). Distinct audit ruleId separates "narrowed by lead" from "user not granted" with
+zero new logging. Decompose planner drafts optional two-level hierarchies (lead suggests subset,
+gateway drops+records anything beyond the caller's own grants, human edits — the New Run editor
+gained a per-node Lead select + allowed-agents/tools controls + indented hierarchy render);
+mock `<<lead-plan>>` sentinel for keyless demo. Suite 485 → 508 (9 kernel unit + others).
+Independently re-verified: build clean, policy-kernel 65/65, orchestration-tools e2e 9/9
+including the narrowing cases. **Pillar 7 is now complete** — agents plan (decompose), do
+tool-using work (governed loop), and delegate under enforced transitive entitlement ceilings.
+
 **Tool-using multi-turn workers, 2026-07-26 — pillar 7's workers become a governed agentic
 loop (no migration).** dispatchRunNode's single model call is now a bounded loop: each turn
 one governed dispatch (measured usage row billed to run.projectId) with `tools` + accumulated

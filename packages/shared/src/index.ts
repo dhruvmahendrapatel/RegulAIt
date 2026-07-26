@@ -305,6 +305,18 @@ export const decompositionPlanSchema = z.object({
         toolServers: z.array(z.string().min(1).max(200)).optional(),
         /** pillar 7: max tool-using turns for this worker (gateway-bounded) */
         maxTurns: z.number().int().min(1).max(20).optional(),
+        /** §5.1 Team-Lead delegation: the id of another node in this plan that
+         * acts as this task's LEAD. Optional — a flat plan omits it. The
+         * gateway validates the reference and the acyclic chain. */
+        leadId: z.string().min(1).max(64).optional(),
+        /** §5.1: when this task is itself a LEAD, the agent NAMES (from the
+         * roster) a worker under it may be owned by — a ceiling the gateway
+         * resolves to ids and NARROWS to the caller's own entitlements
+         * (anything outside is dropped and recorded). */
+        allowedAgents: z.array(z.string().min(1).max(200)).optional(),
+        /** §5.1: when this task is itself a LEAD, the tool NAMES a worker under
+         * it may call — a ceiling narrowed to the caller's entitled tools. */
+        allowedTools: z.array(z.string().min(1).max(128)).optional(),
       }),
     )
     .min(2)

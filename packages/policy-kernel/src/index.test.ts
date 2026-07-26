@@ -807,3 +807,93 @@ describe("display names in reason prose (demo finding 5)", () => {
     expect(d.reason).toContain(`'salesforce' (${CONNECTOR.slice(0, 8)}…)`);
   });
 });
+
+// ---------------------------------------------------------------------------
+// §5.1 Team-Lead entitlement-narrowing ceiling
+// ---------------------------------------------------------------------------
+
+describe("evaluateAgent Team-Lead ceiling (§5.1)", () => {
+  it("allows a granted agent that is inside the lead ceiling", () => {
+    const d = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "execute",
+      agentGrants: [agentGrant()], ceilingAgentIds: ["agent-claude", "agent-gpt"],
+    });
+    expect(d.effect).toBe("allow");
+    expect(d.ruleChain).toContainEqual({ rule: "agent-lead-ceiling", outcome: "allow" });
+  });
+
+  it("DENIES a granted agent that the lead ceiling excludes (narrows, not relabels)", () => {
+    const d = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "execute",
+      agentGrants: [agentGrant()], ceilingAgentIds: ["agent-gpt"], // claude granted but not in ceiling
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe("agent-lead-ceiling");
+    expect(d.reason).toContain("delegation ceiling");
+  });
+
+  it("does not rescue an UNgranted agent — an empty grant stays default-deny even if the ceiling lists it", () => {
+    const d = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "execute",
+      agentGrants: [], ceilingAgentIds: ["agent-claude"],
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe(DEFAULT_DENY_RULE_ID); // ceiling never reached
+    expect(d.ruleChain).not.toContainEqual({ rule: "agent-lead-ceiling", outcome: "allow" });
+  });
+
+  it("an empty ceiling forbids every agent (nothing allowed)", () => {
+    const d = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "execute",
+      agentGrants: [agentGrant()], ceilingAgentIds: [],
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe("agent-lead-ceiling");
+  });
+
+  it("a null/absent ceiling changes nothing (flat run) and adds no trace entry", () => {
+    const d = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "execute", agentGrants: [agentGrant()], ceilingAgentIds: null,
+    });
+    expect(d.effect).toBe("allow");
+    expect(d.ruleChain.some((r) => r.rule === "agent-lead-ceiling")).toBe(false);
+  });
+});
+
+describe("evaluate tool Team-Lead ceiling (§5.1)", () => {
+  it("allows a granted tool inside the ceiling", () => {
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [toolGrant()], serverGrants: [], ceilingTools: ["query_database", "list_rows"],
+    });
+    expect(d.effect).toBe("allow");
+    expect(d.ruleChain).toContainEqual({ rule: "lead-ceiling", outcome: "allow" });
+  });
+
+  it("DENIES a granted tool the ceiling excludes, with ruleId lead-ceiling (narrows)", () => {
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [toolGrant()], serverGrants: [], ceilingTools: ["some_other_tool"],
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe("lead-ceiling");
+  });
+
+  it("does NOT rescue an ungranted tool — stays default-deny before the ceiling is consulted", () => {
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: writeTool, // not granted
+      toolGrants: [toolGrant()], serverGrants: [], ceilingTools: ["drop_table"],
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe(DEFAULT_DENY_RULE_ID);
+    expect(d.ruleChain.some((r) => r.rule === "lead-ceiling")).toBe(false);
+  });
+
+  it("a null/absent ceiling changes nothing and adds no trace entry (137 proxy tests stay green)", () => {
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool, toolGrants: [toolGrant()], serverGrants: [],
+    });
+    expect(d.effect).toBe("allow");
+    expect(d.ruleChain.some((r) => r.rule === "lead-ceiling")).toBe(false);
+  });
+});

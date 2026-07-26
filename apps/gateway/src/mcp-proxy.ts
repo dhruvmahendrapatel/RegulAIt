@@ -75,6 +75,11 @@ export async function executeGovernedToolCall(
     serverId: string;
     toolName: string;
     arguments?: Record<string, unknown> | undefined;
+    /** §5.1 Team-Lead ceiling: the tool NAMES this worker's lead chain permits.
+     * null/undefined = no lead constraint (a human proxy call or a flat run).
+     * Only ever narrows — a granted tool outside the ceiling is denied with
+     * ruleId `lead-ceiling`, which flows into the audit trail distinctly. */
+    ceilingTools?: readonly string[] | null;
   },
 ): Promise<GovernedToolCallOutcome> {
   const { userId, serverId, toolName } = args;
@@ -110,6 +115,7 @@ export async function executeGovernedToolCall(
       serverId,
       { serverId, name: toolName, kind },
       args.arguments,
+      args.ceilingTools ?? null,
     );
 
     await db.insert(auditLog).values({
@@ -213,10 +219,19 @@ export async function resolveNodeToolContext(
   userId: string,
   serverIds: string[],
   allowNames: string[] | undefined,
+  /** §5.1 Team-Lead ceiling: the tool NAMES this worker's lead chain permits.
+   * null/undefined = no lead constraint. A non-null set NARROWS the visible
+   * tool defs too, so the model is never even offered a tool the lead forbids —
+   * belt to executeGovernedToolCall's braces (the hard per-call enforcement).
+   * The name→server map still spans the whole manifest so a ceiling-excluded
+   * tool the model somehow requests still routes to a governed `lead-ceiling`
+   * deny rather than silently vanishing. */
+  ceilingToolRefs?: readonly string[] | null,
 ): Promise<{ toolDefs: ModelToolDef[]; serverByTool: Map<string, string> }> {
   const toolDefs: ModelToolDef[] = [];
   const serverByTool = new Map<string, string>();
   const nameFilter = allowNames && allowNames.length > 0 ? new Set(allowNames) : null;
+  const ceilingFilter = ceilingToolRefs != null ? new Set(ceilingToolRefs) : null;
   for (const serverId of serverIds) {
     const [serverRow] = await db.select().from(mcpServers).where(eq(mcpServers.id, serverId));
     if (!serverRow) continue;
@@ -236,6 +251,9 @@ export async function resolveNodeToolContext(
         if (!serverByTool.has(t.name)) serverByTool.set(t.name, serverId);
         if (!visible.has(t.name)) continue;
         if (nameFilter && !nameFilter.has(t.name)) continue;
+        // §5.1: the lead ceiling narrows visibility — a forbidden tool is never
+        // offered to the model (it stays in serverByTool for hard enforcement).
+        if (ceilingFilter && !ceilingFilter.has(t.name)) continue;
         toolDefs.push({
           name: t.name,
           ...(t.description ? { description: t.description } : {}),

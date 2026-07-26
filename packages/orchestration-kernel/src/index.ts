@@ -60,6 +60,22 @@ export const taskNodeSchema = z.object({
    * request an unbounded loop; the gateway also applies the per-run budget and
    * measured-spend caps per turn. */
   maxTurns: z.number().int().min(1).max(20).optional(),
+  /** §5.1 Team-Lead delegation: the id of another node in this graph acting as
+   * this node's LEAD. The lead's `allowedAgentIds`/`allowedToolRefs` form a
+   * CEILING that composes transitively up the chain and can only NARROW what
+   * the initiating user is already granted — never widen it (default-deny is
+   * preserved). A node with no lead is unconstrained beyond the user's own
+   * grants, so flat runs behave exactly as before. */
+  leadNodeId: z.string().min(1).max(64).optional(),
+  /** §5.1 ceiling this node (as a lead) imposes on its delegated workers: the
+   * agent ids a worker under it may be owned by. Absent = "no agent constraint
+   * at this hop" (the intersection identity). Applies only to nodes that name
+   * this node via `leadNodeId` — never to this node itself. */
+  allowedAgentIds: z.array(z.string().uuid()).optional(),
+  /** §5.1 ceiling this node (as a lead) imposes on its delegated workers: the
+   * tool NAMES a worker under it may call (same shape as `toolNames`). Absent =
+   * "no tool constraint at this hop". */
+  allowedToolRefs: z.array(z.string().min(1).max(128)).optional(),
 });
 export type TaskNode = z.infer<typeof taskNodeSchema>;
 
@@ -107,6 +123,34 @@ export const taskGraphSchema = z
     if (graph.nodes.some((n) => visit(n.id))) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "task graph contains a cycle" });
     }
+    // §5.1 Team-Lead delegation: a leadNodeId must reference an existing node,
+    // never itself, and the lead chain (leadNodeId edges) must be acyclic — a
+    // ceiling that referenced itself, a stranger, or a loop could not compose.
+    for (const n of graph.nodes) {
+      if (n.leadNodeId === undefined) continue;
+      if (n.leadNodeId === n.id) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `node '${n.id}' is its own lead` });
+      } else if (!ids.has(n.leadNodeId)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `node '${n.id}' names unknown lead node '${n.leadNodeId}'`,
+        });
+      }
+    }
+    const leadColor = new Map<string, 0 | 1 | 2>();
+    const visitLead = (id: string): boolean => {
+      const c = leadColor.get(id) ?? 0;
+      if (c === 1) return true;
+      if (c === 2) return false;
+      leadColor.set(id, 1);
+      const lead = byId.get(id)?.leadNodeId;
+      if (lead && lead !== id && byId.has(lead) && visitLead(lead)) return true;
+      leadColor.set(id, 2);
+      return false;
+    };
+    if (graph.nodes.some((n) => visitLead(n.id))) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "task graph contains a lead-chain cycle" });
+    }
     // §4 ownership: two nodes touching the same files must be ordered by a
     // dependency path (either direction) — otherwise they could run in
     // parallel on shared state, which the spec forbids.
@@ -142,6 +186,65 @@ export type TaskGraph = z.infer<typeof taskGraphSchema>;
 
 export function validateGraph(raw: unknown): TaskGraph {
   return taskGraphSchema.parse(raw);
+}
+
+// ---------------------------------------------------------------------------
+// §5.1 Team-Lead entitlement-narrowing ceiling
+// ---------------------------------------------------------------------------
+
+/** The delegation ceiling a node inherits from its lead chain. `null` at a
+ * field means "no constraint of that kind above this node" — the effective set
+ * is then the initiating user's own grants, unchanged. A non-null array is the
+ * INTERSECTION of every ancestor lead's declared allow-list of that kind, so it
+ * can only be a subset of what the user is granted, never a superset. An empty
+ * array means "nothing of this kind is allowed under the chain". */
+export interface NodeCeiling {
+  /** agent ids a worker under this chain may be owned by; null = unconstrained */
+  agentIds: string[] | null;
+  /** tool NAMES a worker under this chain may call; null = unconstrained */
+  toolRefs: string[] | null;
+}
+
+/** Intersect two ceiling hops. `null` is the identity (no constraint at that
+ * hop), so null ∩ x = x. Two sets intersect to their shared members; an empty
+ * result stays empty (nothing allowed). A ceiling can therefore only ever
+ * SHRINK as the chain lengthens — the invariant that makes delegation safe. */
+function intersectCeiling(a: readonly string[] | null, b: readonly string[] | null): string[] | null {
+  if (a === null) return b === null ? null : [...b];
+  if (b === null) return [...a];
+  const bset = new Set(b);
+  return a.filter((x) => bset.has(x));
+}
+
+/**
+ * PURE helper (no I/O): walk the `leadNodeId` chain UP from `nodeId` and
+ * intersect every ancestor lead's `allowedAgentIds`/`allowedToolRefs` into one
+ * ceiling. The node's OWN allow-lists are the ceiling it imposes on ITS
+ * workers, not on itself, so they are not included here — a node's ceiling
+ * comes entirely from the leads above it.
+ *
+ * Transitivity falls straight out of the fold: grandchild ≤ child ≤ lead ≤
+ * (the user's own grants, applied separately by the policy kernel). A node
+ * with no lead returns {null, null} — unconstrained beyond its user's grants,
+ * so flat runs are byte-identical to pre-delegation behaviour. The walk is
+ * cycle-guarded so the helper is safe on any input, even though validateGraph
+ * already rejects lead-chain cycles.
+ */
+export function computeNodeCeiling(graph: TaskGraph, nodeId: string): NodeCeiling {
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  let agentIds: string[] | null = null;
+  let toolRefs: string[] | null = null;
+  const seen = new Set<string>([nodeId]);
+  let cur = byId.get(nodeId)?.leadNodeId;
+  while (cur && !seen.has(cur)) {
+    seen.add(cur);
+    const lead = byId.get(cur);
+    if (!lead) break;
+    agentIds = intersectCeiling(agentIds, lead.allowedAgentIds ?? null);
+    toolRefs = intersectCeiling(toolRefs, lead.allowedToolRefs ?? null);
+    cur = lead.leadNodeId;
+  }
+  return { agentIds, toolRefs };
 }
 
 // ---------------------------------------------------------------------------

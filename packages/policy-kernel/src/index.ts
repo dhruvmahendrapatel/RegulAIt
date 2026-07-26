@@ -130,6 +130,15 @@ export interface EvaluationInput {
    * approval rule for this single evaluation.
    */
   approvedApprovalId?: string | null;
+  /**
+   * §5.1 Team-Lead delegation ceiling: when a worker node runs under a lead,
+   * the gateway passes the intersected allow-list of tool NAMES its lead chain
+   * permits. A non-null value only ever NARROWS — a granted tool whose name is
+   * not in the set is denied; it can never rescue an ungranted call (that is
+   * default-denied before this is even consulted). Null/undefined = no lead
+   * ceiling (a flat run), and behaviour is unchanged.
+   */
+  ceilingTools?: readonly string[] | null;
 }
 
 export interface Decision {
@@ -164,6 +173,7 @@ export type RuleName =
   | "data-scope"
   | "rate-limit"
   | "approval-required"
+  | "lead-ceiling"
   | "default-deny";
 
 export const DEFAULT_DENY_RULE_ID = "default-deny";
@@ -303,6 +313,26 @@ export function evaluate(input: EvaluationInput): Decision {
       ruleChain: chain,
       reason: `no grant matches user ${userRef}, server ${serverRef}, tool '${tool.name}' — default-deny`,
     };
+  }
+
+  // §5.1 Team-Lead ceiling: the call is GRANTED, but a lead chain further up
+  // may forbid this tool. A ceiling only NARROWS — it is consulted only after a
+  // grant was found (so it can never rescue an ungranted call), and it takes
+  // precedence over data-scope/rate-limit/approval since a tool the lead
+  // forbids is forbidden regardless of those. Absent = no lead constraint.
+  if (input.ceilingTools != null) {
+    if (!input.ceilingTools.includes(tool.name)) {
+      chain.push({ rule: "lead-ceiling", outcome: "deny" });
+      return {
+        effect: "deny",
+        ruleId: "lead-ceiling",
+        ruleChain: chain,
+        reason:
+          `tool '${tool.name}' on server ${serverRef} is granted to user ${userRef} but excluded ` +
+          `by the Team-Lead delegation ceiling for this worker`,
+      };
+    }
+    chain.push({ rule: "lead-ceiling", outcome: "allow" });
   }
 
   const scopeRules = (input.dataScopeRules ?? []).filter(
@@ -453,6 +483,14 @@ export interface EvaluateAgentInput {
   agentGrants: readonly AgentGrant[];
   /** tier of the user's ceiling agent (§4); null/undefined = no ceiling set */
   ceilingTier?: number | null;
+  /**
+   * §5.1 Team-Lead delegation ceiling: when a worker node runs under a lead,
+   * the gateway passes the intersected allow-list of agent ids its lead chain
+   * permits. A non-null value only ever NARROWS — an agent the user is granted
+   * whose id is not in the set is denied; it can never rescue an ungranted
+   * agent (that is default-denied first). Null/undefined = no lead ceiling.
+   */
+  ceilingAgentIds?: readonly string[] | null;
 }
 
 export type AgentRuleName =
@@ -460,6 +498,7 @@ export type AgentRuleName =
   | "agent-allow-list"
   | "agent-mode"
   | "agent-ceiling"
+  | "agent-lead-ceiling"
   | "default-deny";
 
 export interface AgentRuleTrace {
@@ -543,6 +582,25 @@ export function evaluateAgent(input: EvaluateAgentInput): AgentDecision {
     };
   }
   chain.push({ rule: "agent-ceiling", outcome: "no-match" });
+
+  // §5.1 Team-Lead ceiling: the agent is granted and within the user's tier
+  // ceiling, but a lead chain may exclude it. Only NARROWS — reached only on
+  // the allow path (an ungranted agent was default-denied above), so it can
+  // never widen. Absent = no lead constraint (a flat run).
+  if (input.ceilingAgentIds != null) {
+    if (!input.ceilingAgentIds.includes(agent.id)) {
+      chain.push({ rule: "agent-lead-ceiling", outcome: "deny" });
+      return {
+        effect: "deny",
+        ruleId: "agent-lead-ceiling",
+        ruleChain: chain,
+        reason:
+          `agent ${agentRef} is granted to the user but excluded by the Team-Lead ` +
+          `delegation ceiling for this worker`,
+      };
+    }
+    chain.push({ rule: "agent-lead-ceiling", outcome: "allow" });
+  }
 
   return {
     effect: "allow",

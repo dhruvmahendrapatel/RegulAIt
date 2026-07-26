@@ -125,9 +125,11 @@ function planningPrompt(roster: AgentRow[], toolServers: ToolServerInfo[]): stri
         `- ${a.name} (tier ${a.tier}, ${fmtUsd(a.costPerMTokIn)} in / ${fmtUsd(a.costPerMTokOut)} out per MTok)`,
     ),
     ...toolLines,
+    "You MAY optionally produce a TWO-LEVEL plan: designate one or more tasks as a LEAD, and have other tasks delegate to it by setting their \"leadId\" to the lead task's id. A lead declares \"allowedAgents\" (a SUBSET of the roster names above) and optionally \"allowedTools\" — a CEILING that every worker under it is bound by. A worker under a lead must be assigned an agent from that lead's allowedAgents. Keep it optional: a flat plan with no leadId is equally valid.",
+    "A ceiling can only NARROW — never assign a worker an agent or tool outside its lead's allow-list; the gateway will drop anything over-broad and the plan should not rely on it.",
     "Return ONLY a JSON object of exactly this shape, with no prose around it:",
-    '{"name": string, "nodes": [{"id": "kebab-case-slug", "title": string, "instruction": string, "agent": "<roster name>", "dependsOn": ["ids"], "toolServers": ["<server name>"], "maxTurns": number}]}',
-    "toolServers and maxTurns are OPTIONAL — omit them for ordinary single-turn tasks.",
+    '{"name": string, "nodes": [{"id": "kebab-case-slug", "title": string, "instruction": string, "agent": "<roster name>", "dependsOn": ["ids"], "toolServers": ["<server name>"], "maxTurns": number, "leadId": "<lead task id>", "allowedAgents": ["<roster name>"], "allowedTools": ["<tool name>"]}]}',
+    "toolServers, maxTurns, leadId, allowedAgents, and allowedTools are ALL OPTIONAL — omit them for ordinary flat single-turn tasks.",
   ].join("\n");
 }
 
@@ -147,6 +149,20 @@ interface ProposalNode {
   droppedToolServers?: string[];
   /** pillar 7: the worker's tool-loop turn cap */
   maxTurns?: number;
+  /** §5.1 Team-Lead delegation: the id of the node acting as this task's lead */
+  leadNodeId?: string;
+  /** §5.1: when this task is a LEAD, the resolved agent ids a worker under it
+   * may be owned by — the ceiling, narrowed to the caller's entitlements */
+  allowedAgentIds?: string[];
+  /** §5.1: when this task is a LEAD, the resolved tool NAMES a worker under it
+   * may call — the ceiling, narrowed to the caller's entitled tools */
+  allowedToolRefs?: string[];
+  /** §5.1: agent NAMES the lead named for its ceiling that the caller isn't
+   * granted (dropped from allowedAgentIds) — surfaced for the UI, exactly like
+   * a dropped tool server or a substituted owner */
+  droppedAllowedAgents?: string[];
+  /** §5.1: tool NAMES named for the ceiling the caller isn't entitled to */
+  droppedAllowedTools?: string[];
 }
 
 type ParseOutcome =
@@ -175,6 +191,13 @@ function parseProposal(
   }
   const byName = new Map(roster.map((a) => [a.name.toLowerCase(), a]));
   const serverByName = new Map(toolServers.map((s) => [s.name.toLowerCase(), s]));
+  // §5.1: the caller's entitled tool NAMES across their reachable servers — the
+  // set a lead ceiling of tool names is narrowed to.
+  const entitledToolNames = new Map<string, string>();
+  for (const s of toolServers) {
+    for (const t of s.tools) if (!entitledToolNames.has(t.toLowerCase())) entitledToolNames.set(t.toLowerCase(), t);
+  }
+  const planIds = new Set(parsed.data.nodes.map((n) => n.id));
   const nodes: ProposalNode[] = parsed.data.nodes.map((n) => {
     const suggested = byName.get(n.agent.toLowerCase());
     const owner = suggested ?? fallbackOwner;
@@ -188,6 +211,27 @@ function parseProposal(
       if (s) resolvedServers.push(s.id);
       else droppedServers.push(name);
     }
+    // §5.1 Team-Lead ceiling: a lead may SUGGEST an agent/tool allow-list for
+    // its workers, never grant one — resolve names to ids against the caller's
+    // OWN entitlements, DROPPING and recording anything outside them (the exact
+    // "suggest, never grant" drop pattern toolServers uses). The ceiling is
+    // narrowed to the caller's grants at draft time, then narrows further only.
+    const allowedAgentIds: string[] = [];
+    const droppedAllowedAgents: string[] = [];
+    for (const name of n.allowedAgents ?? []) {
+      const a = byName.get(name.toLowerCase());
+      if (a && !allowedAgentIds.includes(a.id)) allowedAgentIds.push(a.id);
+      else if (!a) droppedAllowedAgents.push(name);
+    }
+    const allowedToolRefs: string[] = [];
+    const droppedAllowedTools: string[] = [];
+    for (const name of n.allowedTools ?? []) {
+      const t = entitledToolNames.get(name.toLowerCase());
+      if (t && !allowedToolRefs.includes(t)) allowedToolRefs.push(t);
+      else if (!t) droppedAllowedTools.push(name);
+    }
+    // a leadId is honoured only when it names another node in this plan.
+    const leadNodeId = n.leadId && n.leadId !== n.id && planIds.has(n.leadId) ? n.leadId : undefined;
     return {
       id: n.id,
       title: n.title,
@@ -199,6 +243,11 @@ function parseProposal(
       ...(resolvedServers.length > 0 ? { toolServers: resolvedServers } : {}),
       ...(droppedServers.length > 0 ? { droppedToolServers: droppedServers } : {}),
       ...(n.maxTurns ? { maxTurns: n.maxTurns } : {}),
+      ...(leadNodeId ? { leadNodeId } : {}),
+      ...(allowedAgentIds.length > 0 ? { allowedAgentIds } : {}),
+      ...(allowedToolRefs.length > 0 ? { allowedToolRefs } : {}),
+      ...(droppedAllowedAgents.length > 0 ? { droppedAllowedAgents } : {}),
+      ...(droppedAllowedTools.length > 0 ? { droppedAllowedTools } : {}),
       ...(suggested
         ? {}
         : {
@@ -369,6 +418,9 @@ export function registerDecomposeRoutes(
             ownerAgentId: n.ownerAgentId,
             mode: n.mode,
             dependsOn: n.dependsOn,
+            ...(n.leadNodeId ? { leadNodeId: n.leadNodeId } : {}),
+            ...(n.allowedAgentIds ? { allowedAgentIds: n.allowedAgentIds } : {}),
+            ...(n.allowedToolRefs ? { allowedToolRefs: n.allowedToolRefs } : {}),
           })),
         });
         return [];

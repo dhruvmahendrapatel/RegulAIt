@@ -34,6 +34,9 @@ export async function governedEvaluate(
   serverId: string,
   tool: ToolRef,
   args?: Record<string, unknown>,
+  /** §5.1 Team-Lead ceiling: the tool NAMES this worker's lead chain permits.
+   * null/undefined = no lead constraint. Only ever narrows a granted call. */
+  ceilingTools?: readonly string[] | null,
 ): Promise<GovernedEvaluation> {
   const [entitlements, aRules, limits, scopeRules, approvedRows, serverRows] = await Promise.all([
     loadEntitlements(db, userId, serverId),
@@ -111,6 +114,7 @@ export async function governedEvaluate(
     dataScopeRules: scopeRules,
     args,
     approvedApprovalId,
+    ceilingTools: ceilingTools ?? null,
   });
 
   return { decision, approvedApprovalId };

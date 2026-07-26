@@ -204,3 +204,81 @@ describe("graph cost estimation (§5.2)", () => {
     expect(c.perNodeUsd.b).toBeCloseTo((2000 * 1 + 500 * 3) / 1e6, 9);
   });
 });
+
+// ---------------------------------------------------------------------------
+// §5.1 Team-Lead entitlement-narrowing ceiling
+// ---------------------------------------------------------------------------
+import { computeNodeCeiling } from "./index.js";
+
+const AG_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const AG_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const AG_C = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+
+describe("lead-chain graph validation (§5.1)", () => {
+  it("accepts a two-level hierarchy with a valid leadNodeId", () => {
+    const g = graph([
+      node("lead", { allowedAgentIds: [AG_A, AG_B] }),
+      node("worker", { leadNodeId: "lead", ownerAgentId: AG_A }),
+    ]);
+    expect(g.nodes.find((n) => n.id === "worker")!.leadNodeId).toBe("lead");
+  });
+  it("rejects a node that is its own lead", () => {
+    expect(() => graph([node("a", { leadNodeId: "a" })])).toThrow(/its own lead/);
+  });
+  it("rejects a leadNodeId that names a non-existent node", () => {
+    expect(() => graph([node("a", { leadNodeId: "ghost" })])).toThrow(/unknown lead node/);
+  });
+  it("rejects a lead-chain cycle", () => {
+    expect(() =>
+      graph([node("a", { leadNodeId: "b" }), node("b", { leadNodeId: "a" })]),
+    ).toThrow(/lead-chain cycle/);
+  });
+});
+
+describe("computeNodeCeiling (§5.1)", () => {
+  it("a node with no lead is unconstrained ({null, null}) — flat runs unchanged", () => {
+    const g = graph([node("a")]);
+    expect(computeNodeCeiling(g, "a")).toEqual({ agentIds: null, toolRefs: null });
+  });
+  it("a worker inherits its lead's allow-lists exactly", () => {
+    const g = graph([
+      node("lead", { allowedAgentIds: [AG_A, AG_B], allowedToolRefs: ["get_time"] }),
+      node("w", { leadNodeId: "lead", ownerAgentId: AG_A }),
+    ]);
+    expect(computeNodeCeiling(g, "w")).toEqual({ agentIds: [AG_A, AG_B], toolRefs: ["get_time"] });
+    // the lead itself is unconstrained — its allow-lists bind its workers, not itself
+    expect(computeNodeCeiling(g, "lead")).toEqual({ agentIds: null, toolRefs: null });
+  });
+  it("null hops are the intersection identity (null ∩ set = set)", () => {
+    const g = graph([
+      node("top", { allowedAgentIds: [AG_A, AG_B] }), // no toolRefs
+      node("mid", { leadNodeId: "top", allowedToolRefs: ["get_time"] }), // no agentIds
+      node("leaf", { leadNodeId: "mid", ownerAgentId: AG_A }),
+    ]);
+    // agentIds constrained only at top, toolRefs only at mid — each survives
+    expect(computeNodeCeiling(g, "leaf")).toEqual({
+      agentIds: [AG_A, AG_B],
+      toolRefs: ["get_time"],
+    });
+  });
+  it("transitivity: grandchild ceiling = intersection down the whole chain", () => {
+    const g = graph([
+      node("lead", { allowedAgentIds: [AG_A, AG_B, AG_C], allowedToolRefs: ["get_time", "write_note"] }),
+      node("child", { leadNodeId: "lead", allowedAgentIds: [AG_A, AG_B], allowedToolRefs: ["get_time"] }),
+      node("grand", { leadNodeId: "child", ownerAgentId: AG_A }),
+    ]);
+    const c = computeNodeCeiling(g, "grand");
+    expect(c.agentIds).toEqual([AG_A, AG_B]); // child ∩ lead
+    expect(c.toolRefs).toEqual(["get_time"]);
+    // child ≤ lead
+    expect(computeNodeCeiling(g, "child").agentIds).toEqual([AG_A, AG_B, AG_C]);
+  });
+  it("empty intersection means nothing is allowed (not 'unconstrained')", () => {
+    const g = graph([
+      node("lead", { allowedAgentIds: [AG_A] }),
+      node("child", { leadNodeId: "lead", allowedAgentIds: [AG_B] }),
+      node("grand", { leadNodeId: "child", ownerAgentId: AG_A }),
+    ]);
+    expect(computeNodeCeiling(g, "grand").agentIds).toEqual([]);
+  });
+});

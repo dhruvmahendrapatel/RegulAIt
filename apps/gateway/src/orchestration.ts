@@ -20,6 +20,7 @@ import {
 import type { WorkflowDefinition } from "@regulait/workflow-kernel";
 import { evaluateAgent, type AgentDecision } from "@regulait/policy-kernel";
 import {
+  computeNodeCeiling,
   estimateGraphCost,
   estimateNodeCost,
   initialRunState,
@@ -325,15 +326,22 @@ async function dispatchRunNode(
     return { kind: "not_in_progress", status: state.nodeStatuses[nodeId] ?? null };
   }
 
+  // §5.1 Team-Lead ceiling for this node: the intersected agent/tool allow-list
+  // its lead chain imposes. {null, null} for a node with no lead (flat run) —
+  // then the checks below are byte-identical to pre-delegation behaviour.
+  const ceiling = computeNodeCeiling(graph, nodeId);
+
   // §5.1 at execution time: grants may have changed since plan/start — the
   // CURRENT owner is re-checked under the INITIATING user right before the
-  // model call. A revoked grant stops the worker cold.
+  // model call, AND against the lead ceiling. A revoked grant OR a ceiling
+  // exclusion stops the worker cold.
   const ownerId = state.owners[nodeId] ?? node.ownerAgentId;
   const { decision, unknownAgent } = await evaluateNodeOwner(
     db,
     run.initiatingUserId,
     ownerId,
     node.mode,
+    ceiling.agentIds,
   );
   if (unknownAgent) return { kind: "unknown_agent" };
   if (decision!.effect !== "allow") {
@@ -375,7 +383,13 @@ async function dispatchRunNode(
   const declaredNames = node.toolNames;
   const { toolDefs, serverByTool } =
     declaredServers.length > 0
-      ? await resolveNodeToolContext(db, run.initiatingUserId, declaredServers, declaredNames)
+      ? await resolveNodeToolContext(
+          db,
+          run.initiatingUserId,
+          declaredServers,
+          declaredNames,
+          ceiling.toolRefs,
+        )
       : { toolDefs: [], serverByTool: new Map<string, string>() };
   const maxTurnsDecl = args.maxTurns ?? node.maxTurns;
   const maxTurns = Math.min(Math.max(maxTurnsDecl ?? DEFAULT_WORKER_MAX_TURNS, 1), MAX_WORKER_TURNS);
@@ -548,6 +562,9 @@ async function dispatchRunNode(
           serverId,
           toolName: tc.name,
           arguments: (tc.arguments ?? {}) as Record<string, unknown>,
+          // §5.1 hard enforcement: even if a tool leaked into context, the lead
+          // ceiling denies the call with ruleId `lead-ceiling`.
+          ceilingTools: ceiling.toolRefs,
         });
         switch (toolOut.kind) {
           case "allowed":
@@ -718,6 +735,11 @@ async function evaluateNodeOwner(
   userId: string,
   agentId: string,
   mode: string,
+  /** §5.1 Team-Lead ceiling: the agent ids this node's lead chain permits.
+   * null = no lead constraint. The GRANTS subject stays `userId` (the
+   * initiating user) — the ceiling is a SEPARATE intersecting constraint that
+   * can only narrow, never a substitute for the user's own grant load. */
+  ceilingAgentIds: readonly string[] | null = null,
 ): Promise<{ decision: AgentDecision | null; unknownAgent: boolean }> {
   const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
   if (!agent) return { decision: null, unknownAgent: true };
@@ -740,6 +762,7 @@ async function evaluateNodeOwner(
       mode,
       agentGrants: grants,
       ceilingTier,
+      ceilingAgentIds,
     }),
     unknownAgent: false,
   };
@@ -972,7 +995,11 @@ export async function planRun(
     if (policy?.ceilingAgentId) {
       ceilingTier = agentById.get(policy.ceilingAgentId)?.tier ?? null;
     }
-    const evalOwner = (agentId: string, mode: string): AgentDecision | null => {
+    const evalOwner = (
+      agentId: string,
+      mode: string,
+      ceilingAgentIds: readonly string[] | null = null,
+    ): AgentDecision | null => {
       const agent = agentById.get(agentId);
       if (!agent) return null;
       return evaluateAgent({
@@ -981,13 +1008,21 @@ export async function planRun(
         mode,
         agentGrants: grants,
         ceilingTier,
+        ceilingAgentIds,
       });
     };
 
-    // §5.1 per-node envelope check under the initiating user's entitlements.
+    // §5.1 per-node envelope check under the initiating user's entitlements AND
+    // that node's Team-Lead ceiling (the intersected agent allow-list of its
+    // lead chain). A node whose owner the lead forbids is denied at plan time
+    // with ruleId `agent-lead-ceiling`, exactly as at dispatch/reassign.
     const envelope: Array<{ nodeId: string; decision: AgentDecision }> = [];
     for (const node of graph.nodes) {
-      const decision = evalOwner(node.ownerAgentId, node.mode);
+      const decision = evalOwner(
+        node.ownerAgentId,
+        node.mode,
+        computeNodeCeiling(graph, node.id).agentIds,
+      );
       if (!decision) {
         return { ok: false, status: 422, body: { error: "unknown_agent", nodeId: node.id } };
       }
@@ -1062,9 +1097,13 @@ export async function planRun(
       };
       for (const node of graph.nodes) {
         const ownerId = state.owners[node.id]!;
+        // §5.1: a budget re-plan must NOT move a node onto an agent its lead
+        // ceiling forbids — the candidate pool is entitlement-filtered AND
+        // ceiling-filtered, so a cheaper-but-forbidden agent is never chosen.
+        const nodeCeiling = computeNodeCeiling(graph, node.id).agentIds;
         const entitled = agentRows
           .filter((a) => a.enabled)
-          .filter((a) => evalOwner(a.id, node.mode)?.effect === "allow");
+          .filter((a) => evalOwner(a.id, node.mode, nodeCeiling)?.effect === "allow");
         const skippedCandidates: SkippedCandidate[] = entitled.flatMap((a) => {
           const reason = skipReason(a, ownerId);
           return reason ? [{ agentId: a.id, name: a.name, reason }] : [];
@@ -1277,11 +1316,15 @@ export function registerOrchestrationRoutes(
       const graph = loaded.run.graph as TaskGraph;
       const node = graph.nodes.find((n) => n.id === body.nodeId);
       if (!node) return reply.status(400).send({ error: "unknown_node" });
+      // §5.1: a reassignment must also honour this node's lead ceiling — it can
+      // never move the node onto an agent the lead forbids, even if the
+      // initiating user is granted it.
       const { decision, unknownAgent } = await evaluateNodeOwner(
         db,
         loaded.run.initiatingUserId,
         body.ownerAgentId,
         node.mode,
+        computeNodeCeiling(graph, node.id).agentIds,
       );
       if (unknownAgent) return reply.status(422).send({ error: "unknown_agent" });
       if (decision!.effect !== "allow") {

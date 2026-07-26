@@ -447,3 +447,210 @@ describe("(e) the per-run measured budget halts the loop mid-way and escalates a
     expect(decided.statusCode).toBe(200);
   });
 });
+
+// ---------------------------------------------------------------------------
+// §5.1 Team-Lead entitlement-narrowing tier. The load-bearing proof: a worker
+// under a lead is DENIED an agent/tool that the INITIATING USER *is* granted,
+// because the lead's ceiling excludes it — the ceiling NARROWS, never relabels.
+// ---------------------------------------------------------------------------
+
+describe("(f) TOOL narrowing: a lead ceiling denies a granted tool a control node can still call", () => {
+  it("worker under lead{get_time} is denied write_note (lead-ceiling); a lead-less control node calls it fine", async () => {
+    const uid = await mkUser("otools-f@example.com", "Otools F");
+    const uAuth = await authFor(uid);
+    const workerId = await mkAgent({
+      name: "otools-f-worker", provider: "mock", tier: 0, modes: ["execute"],
+      costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-worker",
+    });
+    await grantAgent(uid, workerId);
+    // the user IS granted BOTH tools — only the ceiling flips write_note for the worker
+    await grantTool(uid, "get_time");
+    await grantTool(uid, "write_note");
+
+    const created = await app.inject({
+      method: "POST", headers: uAuth, url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "otools-f-run",
+          escalationApproverUserId: approverId,
+          nodes: [
+            mkNode("lead", workerId, { allowedToolRefs: ["get_time"], instruction: "coordinate the tool work" }),
+            mkNode("w", workerId, {
+              leadNodeId: "lead", dependsOn: ["lead"], toolServers: [serverId],
+              instruction: "please <<use-tool:write_note>> then report",
+            }),
+            mkNode("c", workerId, {
+              toolServers: [serverId],
+              instruction: "please <<use-tool:write_note>> then report",
+            }),
+          ],
+        },
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    const runId = created.json().id;
+
+    const auto = await app.inject({
+      method: "POST", headers: uAuth, url: `/v1/runs/${runId}/auto`, payload: { acceptReviews: true },
+    });
+    expect(auto.statusCode).toBe(200);
+    expect(auto.json().status).toBe("completed");
+
+    const view = await app.inject({ method: "GET", headers: uAuth, url: `/v1/runs/${runId}` });
+    const toolEvents = view.json().events.filter(
+      (e: { event: { kind: string } }) => e.event.kind === "node_tool_call",
+    );
+    const wCall = toolEvents.find((e: { event: { nodeId: string } }) => e.event.nodeId === "w");
+    const cCall = toolEvents.find((e: { event: { nodeId: string } }) => e.event.nodeId === "c");
+    // the worker's write_note is DENIED by the ceiling; the control's is ALLOWED
+    expect(wCall.event).toMatchObject({ toolName: "write_note", status: "denied" });
+    expect(cCall.event).toMatchObject({ toolName: "write_note", status: "allowed" });
+
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit?userId=${uid}` });
+    const writeRows = audit.json().entries.filter(
+      (e: { serverId: string | null; toolName: string | null }) =>
+        e.serverId === serverId && e.toolName === "write_note",
+    );
+    // the ceiling deny carries the distinct ruleId `lead-ceiling` into the audit trail
+    const denyRow = writeRows.find((e: { effect: string }) => e.effect === "deny");
+    expect(denyRow).toBeDefined();
+    expect(denyRow.ruleId).toBe("lead-ceiling");
+    // and the SAME user's SAME grant allows write_note on the control node — proving
+    // the grant is real and only the ceiling narrows it
+    const allowRow = writeRows.find((e: { effect: string }) => e.effect === "allow");
+    expect(allowRow).toBeDefined();
+  });
+});
+
+describe("(g) AGENT narrowing: a lead ceiling denies a granted owner at plan time", () => {
+  it("worker owned by B under lead{A} is denied agent-lead-ceiling; the identical lead-less node plans fine", async () => {
+    const uid = await mkUser("otools-g@example.com", "Otools G");
+    const uAuth = await authFor(uid);
+    const agentA = await mkAgent({
+      name: "otools-g-A", provider: "mock", tier: 0, modes: ["execute"],
+      costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-a",
+    });
+    const agentB = await mkAgent({
+      name: "otools-g-B", provider: "mock", tier: 0, modes: ["execute"],
+      costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-b",
+    });
+    await grantAgent(uid, agentA);
+    await grantAgent(uid, agentB); // B IS granted to the user — only the ceiling excludes it
+
+    const denied = await app.inject({
+      method: "POST", headers: uAuth, url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "otools-g-run",
+          escalationApproverUserId: approverId,
+          nodes: [
+            mkNode("lead", agentA, { allowedAgentIds: [agentA] }),
+            mkNode("w", agentB, { leadNodeId: "lead" }),
+          ],
+        },
+      },
+    });
+    expect(denied.statusCode).toBe(422);
+    expect(denied.json().error).toBe("entitlement_exceeded");
+    const wDenial = denied.json().nodes.find((n: { nodeId: string }) => n.nodeId === "w");
+    expect(wDenial.decision.ruleId).toBe("agent-lead-ceiling");
+
+    // the SAME owner B, same user, WITHOUT a lead → allowed. The ceiling narrows, nothing else.
+    const ok = await app.inject({
+      method: "POST", headers: uAuth, url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "otools-g-run-flat",
+          escalationApproverUserId: approverId,
+          nodes: [mkNode("w2", agentB)],
+        },
+      },
+    });
+    expect(ok.statusCode).toBe(201);
+  });
+});
+
+describe("(h) transitivity: the ceiling narrows at EACH hop; a grandchild can't exceed the top", () => {
+  it("owner C is allowed one hop down (child) but denied two hops down (grandchild) because child narrowed it", async () => {
+    const uid = await mkUser("otools-h@example.com", "Otools H");
+    const uAuth = await authFor(uid);
+    const mk = (n: string) => mkAgent({
+      name: `otools-h-${n}`, provider: "mock", tier: 0, modes: ["execute"],
+      costPerMTokIn: 1, costPerMTokOut: 5, model: `mock-${n}`,
+    });
+    const agentA = await mk("a");
+    const agentB = await mk("b");
+    const agentC = await mk("c");
+    for (const a of [agentA, agentB, agentC]) await grantAgent(uid, a);
+
+    const res = await app.inject({
+      method: "POST", headers: uAuth, url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "otools-h-run",
+          escalationApproverUserId: approverId,
+          nodes: [
+            mkNode("lead", agentA, { allowedAgentIds: [agentA, agentB, agentC] }),
+            // child owner C is inside the lead's {A,B,C} ceiling → allowed
+            mkNode("child", agentC, { leadNodeId: "lead", allowedAgentIds: [agentA, agentB] }),
+            // grandchild ceiling = child{A,B} ∩ lead{A,B,C} = {A,B}; owner C excluded
+            mkNode("grand", agentC, { leadNodeId: "child" }),
+          ],
+        },
+      },
+    });
+    expect(res.statusCode).toBe(422);
+    const deniedIds = res.json().nodes.map((n: { nodeId: string }) => n.nodeId);
+    expect(deniedIds).toContain("grand");
+    expect(deniedIds).not.toContain("child"); // C fine one hop down, forbidden two hops down
+    const grand = res.json().nodes.find((n: { nodeId: string }) => n.nodeId === "grand");
+    expect(grand.decision.ruleId).toBe("agent-lead-ceiling");
+  });
+});
+
+describe("(i) re-plan safety: a budget re-plan never moves a node onto a ceiling-forbidden agent", () => {
+  it("substitutes a lead-less node to the cheaper agent but leaves a ceiling-capped node on its pricey owner", async () => {
+    const uid = await mkUser("otools-i@example.com", "Otools I");
+    const uAuth = await authFor(uid);
+    const priceyId = await mkAgent({
+      name: "otools-i-pricey", provider: "mock", tier: 0, modes: ["execute"],
+      costPerMTokIn: 1000, costPerMTokOut: 1000, model: "mock-pricey",
+    });
+    const cheapId = await mkAgent({
+      name: "otools-i-cheap", provider: "mock", tier: 0, modes: ["execute"],
+      costPerMTokIn: 1, costPerMTokOut: 1, model: "mock-cheap",
+    });
+    await grantAgent(uid, priceyId);
+    await grantAgent(uid, cheapId); // cheap IS granted — a normal re-plan would jump to it
+    // low cap + replan breach action → the pre-execution re-plan kicks in
+    await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/users/${uid}/agent-policy`,
+      payload: { runBudgetUsd: 0.0001, runBudgetBreachAction: "replan" },
+    });
+
+    const created = await app.inject({
+      method: "POST", headers: uAuth, url: "/v1/runs",
+      payload: {
+        graph: {
+          run: "otools-i-run",
+          escalationApproverUserId: approverId,
+          nodes: [
+            // lead's ceiling EXCLUDES the cheap agent
+            mkNode("lead", cheapId, { allowedAgentIds: [priceyId] }),
+            mkNode("capped", priceyId, { leadNodeId: "lead" }),
+            mkNode("control", priceyId, {}),
+          ],
+        },
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    const runId = created.json().id;
+
+    const view = await app.inject({ method: "GET", headers: uAuth, url: `/v1/runs/${runId}` });
+    const owners = view.json().run.state.owners as Record<string, string>;
+    // the lead-less control node WAS substituted to the cheaper agent...
+    expect(owners.control).toBe(cheapId);
+    // ...but the ceiling-capped node was NOT — cheap is forbidden by its lead
+    expect(owners.capped).toBe(priceyId);
+  });
+});
