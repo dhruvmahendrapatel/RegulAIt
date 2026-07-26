@@ -32,6 +32,7 @@ import {
   createProjectSchema,
   createTeamSchema,
   detectPII,
+  patchProjectMemberSchema,
   promoteContextSchema,
   reclassifySchema,
   updateProjectSchema,
@@ -717,6 +718,86 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     };
   });
 
+  // Membership lifecycle (owner-only): a role change and a removal are the
+  // only two mutators — membership is otherwise add-only. Both are guarded by
+  // LAST-OWNER PROTECTION: a demote-away-from-owner or a remove of the sole
+  // remaining owner is hard-blocked (409 last_owner) so a Shared Project can
+  // never be orphaned without an administrator.
+  const memberParams = z.object({ projectId: z.string().uuid(), userId: z.string().uuid() });
+
+  async function ownerCount(projectId: string): Promise<number> {
+    const [row] = await db
+      .select({ n: count() })
+      .from(projectMembers)
+      .where(and(eq(projectMembers.projectId, projectId), eq(projectMembers.role, "owner")));
+    return row?.n ?? 0;
+  }
+
+  app.patch("/v1/projects/:projectId/members/:userId", async (req, reply) => {
+    const { projectId, userId } = memberParams.parse(req.params);
+    const body = patchProjectMemberSchema.parse(req.body);
+    const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
+    if (!project) return reply.status(404).send({ error: "unknown_project" });
+    const gate = await requireRole(req, projectId, "owner");
+    if (!gate.ok) return reply.status(gate.status).send({ error: gate.error });
+    const [member] = await db
+      .select()
+      .from(projectMembers)
+      .where(and(eq(projectMembers.projectId, projectId), eq(projectMembers.userId, userId)));
+    if (!member) return reply.status(404).send({ error: "not_a_member" });
+    // last-owner protection: demoting the sole owner would orphan the project
+    if (member.role === "owner" && body.role !== "owner" && (await ownerCount(projectId)) <= 1) {
+      return reply.status(409).send({ error: "last_owner" });
+    }
+    const [row] = await db
+      .update(projectMembers)
+      .set({ role: body.role })
+      .where(and(eq(projectMembers.projectId, projectId), eq(projectMembers.userId, userId)))
+      .returning();
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? userId,
+      objectType: "project",
+      objectId: projectId,
+      detail: { phase: "membership", memberUserId: userId, from: member.role, role: body.role },
+      effect: "allow",
+      ruleId: "project-member-role-changed",
+      ruleChain: [],
+      reason: `member role changed '${member.role}' -> '${body.role}' on shared project '${project.name}'`,
+    });
+    return row;
+  });
+
+  app.delete("/v1/projects/:projectId/members/:userId", async (req, reply) => {
+    const { projectId, userId } = memberParams.parse(req.params);
+    const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
+    if (!project) return reply.status(404).send({ error: "unknown_project" });
+    const gate = await requireRole(req, projectId, "owner");
+    if (!gate.ok) return reply.status(gate.status).send({ error: gate.error });
+    const [member] = await db
+      .select()
+      .from(projectMembers)
+      .where(and(eq(projectMembers.projectId, projectId), eq(projectMembers.userId, userId)));
+    if (!member) return reply.status(404).send({ error: "not_a_member" });
+    // last-owner protection: removing the sole owner would orphan the project
+    if (member.role === "owner" && (await ownerCount(projectId)) <= 1) {
+      return reply.status(409).send({ error: "last_owner" });
+    }
+    await db
+      .delete(projectMembers)
+      .where(and(eq(projectMembers.projectId, projectId), eq(projectMembers.userId, userId)));
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? userId,
+      objectType: "project",
+      objectId: projectId,
+      detail: { phase: "membership", memberUserId: userId, removedRole: member.role },
+      effect: "allow",
+      ruleId: "project-member-removed",
+      ruleChain: [],
+      reason: `member removed from shared project '${project.name}'`,
+    });
+    return reply.status(200).send({ removed: true });
+  });
+
   // --- shared context store (§9.2, ADR-0011): append-only revisions ---
 
   async function writeContextRevision(
@@ -735,7 +816,11 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     if (!project) return reply.status(404).send({ error: "unknown_project" });
     const gate = await requireRole(req, projectId, "contributor");
     if (!gate.ok) return reply.status(gate.status).send({ error: gate.error });
-    const userId = req.authCtx.userId ?? project.budgetApproverUserId ?? project.arbiterUserId;
+    // Authorship REQUIRES a real authenticated user — a context contribution is
+    // a provenance record, so it can never be attributed to a governance-role
+    // holder the writer merely happens to sit under. The bootstrap token (no
+    // userId) simply cannot contribute; it is not silently reattributed.
+    const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_contribute" });
     // provenance team must be one of the writer's teams (default: membership's)
     let teamId = args.teamId ?? gate.membership?.teamId ?? null;
@@ -747,80 +832,117 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       if (!inTeam) return reply.status(422).send({ error: "not_in_team" });
     }
 
-    const rows = await db
-      .select({ revision: projectContextItems.revision, accepted: projectContextItems.accepted })
-      .from(projectContextItems)
-      .where(and(eq(projectContextItems.projectId, projectId), eq(projectContextItems.key, args.key)));
-    const maxRevision = rows.reduce((m, r) => Math.max(m, r.revision), 0);
-    const latestAccepted = rows.filter((r) => r.accepted).reduce((m, r) => Math.max(m, r.revision), 0);
-    const revision = maxRevision + 1;
+    // The read (maxRevision/latestAccepted) + insert run inside ONE
+    // transaction, and (project_id, key, revision) is UNIQUE (migration 0019).
+    // Two concurrent same-key writes that compute the SAME next revision can
+    // therefore never both land: one commits, the other's insert hits the
+    // unique violation. That loser is retried once against the winner's now-
+    // committed row — recomputing to a distinct higher revision, or (if the
+    // winner advanced the accepted head past its base) becoming a conflict
+    // routed to the arbiter — so a lost race is a clean outcome, never a
+    // duplicate revision number.
+    type Outcome =
+      | { kind: "reply"; status: number; body: unknown }
+      | { kind: "created"; body: Record<string, unknown> };
+    const attempt = (): Promise<Outcome> =>
+      db.transaction(async (tx): Promise<Outcome> => {
+        const rows = await tx
+          .select({ revision: projectContextItems.revision, accepted: projectContextItems.accepted })
+          .from(projectContextItems)
+          .where(and(eq(projectContextItems.projectId, projectId), eq(projectContextItems.key, args.key)));
+        const maxRevision = rows.reduce((m, r) => Math.max(m, r.revision), 0);
+        const latestAccepted = rows.filter((r) => r.accepted).reduce((m, r) => Math.max(m, r.revision), 0);
+        const revision = maxRevision + 1;
 
-    // read-before-write is explicit: once a key exists, a write must name the
-    // accepted revision it is based on — never a silent overwrite (§9.2)
-    if (rows.length > 0 && args.baseRevision === undefined) {
-      return reply.status(409).send({ error: "base_revision_required", latestAccepted });
-    }
-    const conflicting = rows.length > 0 && args.baseRevision !== latestAccepted;
-    if (conflicting && !project.arbiterUserId) {
-      return reply.status(422).send({ error: "no_arbiter", detail: "set arbiterUserId to accept conflicting revisions" });
-    }
+        // read-before-write is explicit: once a key exists, a write must name
+        // the accepted revision it is based on — never a silent overwrite (§9.2)
+        if (rows.length > 0 && args.baseRevision === undefined) {
+          return { kind: "reply", status: 409, body: { error: "base_revision_required", latestAccepted } };
+        }
+        const conflicting = rows.length > 0 && args.baseRevision !== latestAccepted;
+        if (conflicting && !project.arbiterUserId) {
+          return {
+            kind: "reply",
+            status: 422,
+            body: { error: "no_arbiter", detail: "set arbiterUserId to accept conflicting revisions" },
+          };
+        }
 
-    const [item] = await db
-      .insert(projectContextItems)
-      .values({
-        projectId,
-        key: args.key,
-        revision,
-        content: args.content,
-        baseRevision: args.baseRevision ?? null,
-        accepted: !conflicting,
-        contributedByUserId: userId,
-        contributedByTeamId: teamId,
-        sourceArtifactId: args.sourceArtifactId ?? null,
-      })
-      .returning();
+        const [item] = await tx
+          .insert(projectContextItems)
+          .values({
+            projectId,
+            key: args.key,
+            revision,
+            content: args.content,
+            baseRevision: args.baseRevision ?? null,
+            accepted: !conflicting,
+            contributedByUserId: userId,
+            contributedByTeamId: teamId,
+            sourceArtifactId: args.sourceArtifactId ?? null,
+          })
+          .returning();
 
-    let approvalId: string | null = null;
-    if (conflicting) {
-      const [approval] = await db
-        .insert(approvals)
-        .values({
+        let approvalId: string | null = null;
+        if (conflicting) {
+          const [approval] = await tx
+            .insert(approvals)
+            .values({
+              userId,
+              objectType: "project",
+              projectId,
+              stageId: `${CONTEXT_CONFLICT_PREFIX}${item!.id}`,
+              approverUserId: project.arbiterUserId!,
+            })
+            .returning({ id: approvals.id });
+          approvalId = approval!.id;
+        }
+        await tx.insert(auditLog).values({
           userId,
           objectType: "project",
-          projectId,
-          stageId: `${CONTEXT_CONFLICT_PREFIX}${item!.id}`,
-          approverUserId: project.arbiterUserId!,
-        })
-        .returning({ id: approvals.id });
-      approvalId = approval!.id;
+          objectId: projectId,
+          detail: {
+            phase: "context",
+            key: args.key,
+            revision,
+            baseRevision: args.baseRevision ?? null,
+            conflicting,
+            teamId,
+            ...(args.sourceArtifactId ? { sourceArtifactId: args.sourceArtifactId } : {}),
+          },
+          effect: conflicting ? "require_approval" : "allow",
+          ruleId: conflicting ? "project-context-conflict" : "project-context-contributed",
+          ruleChain: [],
+          reason: conflicting
+            ? `revision ${revision} of '${args.key}' is based on stale revision ${args.baseRevision}; retained and routed to the named arbiter — never silently overwritten`
+            : `revision ${revision} of '${args.key}' accepted`,
+        });
+        return {
+          kind: "created",
+          body: {
+            id: item!.id,
+            key: args.key,
+            revision,
+            accepted: !conflicting,
+            ...(conflicting ? { conflict: true, approvalId } : {}),
+          },
+        };
+      });
+
+    const isUniqueViolation = (e: unknown) =>
+      (e as { cause?: { code?: string } }).cause?.code === "23505";
+    let outcome: Outcome;
+    try {
+      outcome = await attempt();
+    } catch (e) {
+      // lost the revision-number race — recompute against the winner's commit
+      // and try exactly once more; a second collision surfaces as a clean 409
+      // via the global constraint handler.
+      if (!isUniqueViolation(e)) throw e;
+      outcome = await attempt();
     }
-    await db.insert(auditLog).values({
-      userId,
-      objectType: "project",
-      objectId: projectId,
-      detail: {
-        phase: "context",
-        key: args.key,
-        revision,
-        baseRevision: args.baseRevision ?? null,
-        conflicting,
-        teamId,
-        ...(args.sourceArtifactId ? { sourceArtifactId: args.sourceArtifactId } : {}),
-      },
-      effect: conflicting ? "require_approval" : "allow",
-      ruleId: conflicting ? "project-context-conflict" : "project-context-contributed",
-      ruleChain: [],
-      reason: conflicting
-        ? `revision ${revision} of '${args.key}' is based on stale revision ${args.baseRevision}; retained and routed to the named arbiter — never silently overwritten`
-        : `revision ${revision} of '${args.key}' accepted`,
-    });
-    return reply.status(201).send({
-      id: item!.id,
-      key: args.key,
-      revision,
-      accepted: !conflicting,
-      ...(conflicting ? { conflict: true, approvalId } : {}),
-    });
+    if (outcome.kind === "reply") return reply.status(outcome.status).send(outcome.body);
+    return reply.status(201).send(outcome.body);
   }
 
   app.post("/v1/projects/:projectId/context", async (req, reply) => {

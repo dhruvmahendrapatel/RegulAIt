@@ -56,6 +56,7 @@ async function api(method, path, body) {
 }
 const get = (p) => api("GET", p);
 const post = (p, b) => api("POST", p, b ?? {});
+const patch = (p, b) => api("PATCH", p, b ?? {});
 const del = (p) => api("DELETE", p);
 
 function toast(msg, ms) {
@@ -1651,13 +1652,23 @@ async function projectCard(p, instances) {
     ? \`<div class="row" style="margin-top:10px"><span class="badge warn">\${pending.length} revision\${pending.length > 1 ? "s" : ""} awaiting arbiter</span>\${arbLine}</div>\`
     : "";
 
-  const memberRows = members.map((m) => \`<div class="node-row">
+  const ownerCount = members.filter((m) => m.role === "owner").length;
+  const memberRows = members.map((m) => {
+    const soleOwner = m.role === "owner" && ownerCount <= 1;
+    const badge = \`<span class="badge \${m.role === "owner" ? "accent" : m.role === "contributor" ? "info" : ""}">\${m.role}</span>\`;
+    const roleSel = \`<select class="small" data-mrole="\${m.userId}" data-pid="\${p.id}"\${soleOwner ? ' disabled title="promote another owner before changing the sole owner"' : ""}>\${["owner", "contributor", "viewer"].map((r) => \`<option value="\${r}"\${r === m.role ? " selected" : ""}>\${r}</option>\`).join("")}</select>\`;
+    const rmBtn = \`<button class="ghost small" data-mremove="\${m.userId}" data-pid="\${p.id}"\${soleOwner ? ' disabled title="promote another owner before removing the sole owner"' : ""}>Remove</button>\`;
+    return \`<div class="node-row">
     <div class="grow">
       <div>\${esc(m.userName ?? "unknown")}\${m.userId === ME.userId ? ' <span class="faint">(you)</span>' : ""}</div>
       <div class="dim" style="font-size:12px">\${m.teamName ? esc(m.teamName) : "no team"} · joined \${ago(m.createdAt)}</div>
     </div>
-    <span class="badge \${m.role === "owner" ? "accent" : m.role === "contributor" ? "info" : ""}">\${m.role}</span>
-  </div>\`).join("");
+    \${myRole === "owner" ? roleSel + " " + rmBtn : badge}
+  </div>\`;
+  }).join("");
+  const memberErr = myRole === "owner"
+    ? \`<div class="err-line" data-merr="\${p.id}" style="margin-top:4px"></div>\`
+    : "";
   const nonMembers = DIRECTORY.filter((u) => !members.some((m) => m.userId === u.id));
   const addMemberForm = myRole !== "owner" ? "" : nonMembers.length === 0
     ? '<div class="faint" style="font-size:12px;margin-top:8px">everyone in the directory is already a member</div>'
@@ -1705,6 +1716,7 @@ async function projectCard(p, instances) {
     \${promotable.length ? '<h2 style="margin-top:14px">Promote a signed-off artifact</h2>' + promoteRows : ""}
     <h2 style="margin-top:14px">Members</h2>
     \${memberRows || '<div class="faint" style="font-size:12.5px">no members — this project is an open cost bucket</div>'}
+    \${memberErr}
     \${addMemberForm}
   </div>\`;
 }
@@ -1757,6 +1769,38 @@ function wireProjects() {
         await post("/v1/projects/" + pid + "/members", { userId, role, ...(teamId ? { teamId } : {}) });
         toast("Member added"); render();
       } catch (e) { if (err) err.textContent = e.message; }
+    }));
+  document.querySelectorAll("[data-mrole]").forEach((sel) =>
+    sel.addEventListener("change", async () => {
+      const pid = sel.dataset.pid, userId = sel.dataset.mrole;
+      const err = $('[data-merr="' + pid + '"]');
+      if (err) err.textContent = "";
+      try {
+        await patch("/v1/projects/" + pid + "/members/" + userId, { role: sel.value });
+        toast("Role updated"); render();
+      } catch (e) {
+        // last-owner block and any other rejection surface on the error line;
+        // re-render so the dropdown snaps back to the persisted role
+        if (err) err.textContent = e.status === 409 && e.payload?.error === "last_owner"
+          ? "Can't demote the sole owner — promote another owner first."
+          : e.message;
+        render();
+      }
+    }));
+  document.querySelectorAll("[data-mremove]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const pid = b.dataset.pid, userId = b.dataset.mremove;
+      if (!confirm("Remove this member? They lose context visibility and spend attribution for this project.")) return;
+      const err = $('[data-merr="' + pid + '"]');
+      if (err) err.textContent = "";
+      try {
+        await del("/v1/projects/" + pid + "/members/" + userId);
+        toast("Member removed"); render();
+      } catch (e) {
+        if (err) err.textContent = e.status === 409 && e.payload?.error === "last_owner"
+          ? "Can't remove the sole owner — promote another owner first."
+          : e.message;
+      }
     }));
   document.querySelectorAll("[data-promote]").forEach((b) =>
     b.addEventListener("click", () => promoteArtifact(b.dataset.pid, b.dataset.promote)));

@@ -166,6 +166,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "DELETE /v1/users/:userId/model-credentials/:provider",
     "POST /v1/projects/:projectId/members",
     "GET /v1/projects/:projectId/members",
+    "PATCH /v1/projects/:projectId/members/:userId",
+    "DELETE /v1/projects/:projectId/members/:userId",
     "POST /v1/projects/:projectId/context",
     "GET /v1/projects/:projectId/context",
     "POST /v1/projects/:projectId/context/promote",

@@ -564,6 +564,13 @@ export const addProjectMemberSchema = z.object({
   teamId: z.string().uuid().nullable().optional(),
 });
 
+/** the owner's per-member role change (PATCH /projects/:id/members/:userId).
+ * Membership is otherwise add-only; this and DELETE are the only mutators, and
+ * both are guarded by last-owner protection so a project can't be orphaned. */
+export const patchProjectMemberSchema = z.object({
+  role: z.enum(["owner", "contributor", "viewer"]),
+});
+
 export const contributeContextSchema = z.object({
   key: z.string().min(1).max(128),
   content: z.string().min(1).max(200_000),

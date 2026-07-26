@@ -432,7 +432,11 @@ const hipaaProjectId = await ensureProject({
 // Membership carries the contributing team, so every context write inherits
 // provenance without anyone having to state it.
 for (const [projectId, userId, role, teamId] of [
-  [demoProjectId, danaId, "contributor", platformTeamId],
+  // demo-project intentionally carries TWO owners (Dana + admin) so the
+  // membership-lifecycle demo can demote/remove one owner and still leave the
+  // project with an owner — the last-owner block is demoable on hipaa-project,
+  // where admin is the sole owner.
+  [demoProjectId, danaId, "owner", platformTeamId],
   [demoProjectId, averyId, "contributor", null],
   [demoProjectId, adminId, "owner", platformTeamId],
   [hipaaProjectId, danaId, "contributor", platformTeamId],
