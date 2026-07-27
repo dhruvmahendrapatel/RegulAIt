@@ -77,6 +77,12 @@ export interface ModelDispatchRequest {
    * as one user turn). `system` stays a separate field either way. */
   messages?: ModelChatMessage[];
   system?: string;
+  /** pillar-6 prompt caching: when true AND `system` is present, the adapter
+   * marks the system prefix cacheable (Anthropic cache_control ephemeral) so a
+   * repeat dispatch reusing it reads it from cache. Adapters without an
+   * explicit cache-control mechanism (OpenAI/xAI auto-cache; Google) treat this
+   * as a no-op. Purely a cost annotation — never changes the model or output. */
+  cacheSystem?: boolean;
   maxTokens?: number;
   /** tools the model may call this turn (pillar 7). When absent, the request
    * is byte-identical to the tool-free contract — no adapter sends a `tools`
@@ -157,7 +163,20 @@ export class AnthropicProvider implements ModelProvider {
     const params = {
       model: req.model,
       max_tokens: req.maxTokens ?? DEFAULT_MAX_TOKENS,
-      ...(req.system ? { system: req.system } : {}),
+      // pillar-6 prompt caching: when the caller asks to cache the system
+      // prefix, send `system` as a single text block carrying an ephemeral
+      // cache_control breakpoint (the SDK accepts either a string or a text
+      // block array). Absent cacheSystem, `system` stays a plain string —
+      // byte-identical to the pre-caching request.
+      ...(req.system
+        ? {
+            system: req.cacheSystem
+              ? ([
+                  { type: "text", text: req.system, cache_control: { type: "ephemeral" } },
+                ] as Anthropic.TextBlockParam[])
+              : req.system,
+          }
+        : {}),
       // roles map 1:1 onto the Messages API; a block-array turn (tool_use /
       // tool_result history) maps each block to its native content shape
       messages: chatTurns(req).map((m) => ({
@@ -337,6 +356,10 @@ async function dispatchChatCompletions(
   label: string,
 ): Promise<ModelDispatchResult> {
   const messages = [
+      // pillar-6 prompt caching: `req.cacheSystem` is intentionally ignored on
+      // the OpenAI-compatible family — OpenAI/xAI auto-cache long prompt
+      // prefixes and expose no explicit ephemeral cache-control breakpoint, so
+      // the system message rides as a plain string exactly as before.
       ...(req.system
         ? [{ role: "system" as const, content: req.system }]
         : []),
@@ -580,6 +603,10 @@ export class GoogleProvider implements ModelProvider {
             role: m.role === "assistant" ? "model" : "user",
             parts: googleParts(m.content),
           })),
+          // pillar-6 prompt caching: `req.cacheSystem` is intentionally ignored
+          // here — the Gemini generateContent surface exposes no per-request
+          // ephemeral cache-control breakpoint, so the systemInstruction is sent
+          // unchanged.
           ...(req.system ? { systemInstruction: { parts: [{ text: req.system }] } } : {}),
           ...(req.tools
             ? {

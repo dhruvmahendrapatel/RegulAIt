@@ -1,6 +1,6 @@
 ---
 phase: governance-mvp-in-progress
-last_updated: 2026-07-26
+last_updated: 2026-07-27
 active_epics: [EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
 last_session: sessions/2026-07-24-session-02.md
@@ -582,6 +582,24 @@ Spend page and admin charts lit up with zero chart changes. /app shows a compact
 with the expandable stored summary + badges + trace detail, persisted on replayed threads.
 Suite 455 → 473; browser-verified (on-topic continuation through the summary, $0.0044
 compaction bar beside model_routing, zero console errors).
+
+**Prompt caching, 2026-07-27 — pillar 6's 4th technique (after routing, compaction, lazy
+tool-loading).** NO migration — the `prompt_caching` cost_events enum value already existed.
+Pure `planPromptCache` (optimizer-kernel): marks a stable system prefix cacheable once it clears
+Anthropic's 1024-token minimum; passthrough is the §12 off switch; estimatedTokensSaved = the full
+prefix served from cache per reuse; CACHE_READ_DISCOUNT 0.9 (ephemeral read ≈ 0.1× list, with the
+first-call ~1.25× write surcharge acknowledged — the estimate is the labeled STEADY-STATE reuse
+saving). model-provider gains an optional `cacheSystem` on the dispatch request: the Anthropic
+adapter emits `system` as a text block carrying `cache_control:{type:ephemeral}` when set (plain
+string otherwise, byte-identical); OpenAI/xAI/Google are documented no-ops (auto-cache / no
+explicit breakpoint). Gateway writes ONE `prompt_caching` cost_events estimate when caching applies
+and threads `cacheSystem` through the dispatch path — a pure cost annotation that never changes the
+served agent/model/entitlement/budget/output (§12). The cacheable prefix is sourced from a new
+optional `system` field on the invoke request body (the `agents` table has no system-prompt column
+yet — a stored `agents.systemPrompt` column is the natural future home, deferred to avoid a
+migration this slice). Suite 284 → 288 (prompt-caching.test.ts); optimizer 31 → 36, model-provider
+57 → 60. No UI change (savings-by-technique chart is technique-generic). Remaining pillar-6
+techniques: edit-vs-rewrite, file pre-processing, semantic caching, request batching.
 
 **Agent-driven task decomposition, 2026-07-26 — pillar 7's headline lands, human-gated.**
 `POST /v1/runs/decompose` {goal, projectId?, leadAgentId?}: a Team-Lead agent (leadAgentId ??

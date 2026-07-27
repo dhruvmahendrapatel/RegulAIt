@@ -5,6 +5,9 @@ import {
   COMPACTION_RECENT_WINDOW_MESSAGES,
   DEFAULT_COMPACTION_THRESHOLD_TOKENS,
   planCompaction,
+  planPromptCache,
+  CACHE_READ_DISCOUNT,
+  DEFAULT_MIN_CACHEABLE_TOKENS,
   selectTools,
   estimateTokens,
   routeModel,
@@ -308,5 +311,53 @@ describe("compactionSavings", () => {
     expect(compactionSavings(1000, 150)).toBe(850);
     expect(compactionSavings(100, 150)).toBe(0);
     expect(compactionSavings(0, 0)).toBe(0);
+  });
+});
+
+describe("planPromptCache (prompt caching §8/§10)", () => {
+  it("passthrough disables caching entirely (§12 off switch)", () => {
+    const p = planPromptCache({ systemTokens: 5000, routingMode: "passthrough" });
+    expect(p.cacheSystem).toBe(false);
+    expect(p.ruleId).toBe("routing-mode");
+    expect(p.estimatedTokensSaved).toBe(0);
+    expect(p.reason).toContain("passthrough");
+    expect(p.ruleChain).toEqual([{ rule: "routing-mode", outcome: "passthrough" }]);
+  });
+
+  it("a system prefix below the minimum (including null/0) is never marked cacheable", () => {
+    for (const systemTokens of [null, undefined, 0, 1023]) {
+      const p = planPromptCache({ systemTokens, routingMode: "automatic" });
+      expect(p.cacheSystem).toBe(false);
+      expect(p.ruleId).toBe("prefix-size");
+      expect(p.ruleChain.at(-1)!.outcome).toBe("too-small");
+      expect(p.estimatedTokensSaved).toBe(0);
+      expect(p.reason).toContain(`${DEFAULT_MIN_CACHEABLE_TOKENS}`);
+    }
+  });
+
+  it("a prefix at or above the minimum is marked cacheable and saves the full prefix per reuse", () => {
+    const at = planPromptCache({ systemTokens: DEFAULT_MIN_CACHEABLE_TOKENS, routingMode: "automatic" });
+    expect(at.cacheSystem).toBe(true);
+    expect(at.ruleId).toBe("prefix-size");
+    expect(at.ruleChain.at(-1)!.outcome).toBe("applied");
+    expect(at.estimatedTokensSaved).toBe(DEFAULT_MIN_CACHEABLE_TOKENS);
+    expect(at.estimationBasis).toContain("prompt-caching");
+
+    const above = planPromptCache({ systemTokens: 8000, routingMode: "automatic" });
+    expect(above.cacheSystem).toBe(true);
+    expect(above.estimatedTokensSaved).toBe(8000); // the full prefix, served from cache each reuse
+  });
+
+  it("honors a custom minCacheableTokens threshold", () => {
+    const below = planPromptCache({ systemTokens: 500, routingMode: "automatic", minCacheableTokens: 2000 });
+    expect(below.cacheSystem).toBe(false);
+    const above = planPromptCache({ systemTokens: 2500, routingMode: "automatic", minCacheableTokens: 2000 });
+    expect(above.cacheSystem).toBe(true);
+    expect(above.estimatedTokensSaved).toBe(2500);
+  });
+
+  it("exposes the documented default constants", () => {
+    expect(DEFAULT_MIN_CACHEABLE_TOKENS).toBe(1024);
+    expect(CACHE_READ_DISCOUNT).toBe(0.9);
   });
 });

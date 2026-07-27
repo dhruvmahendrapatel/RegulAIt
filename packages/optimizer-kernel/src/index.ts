@@ -293,6 +293,97 @@ export function compactionSavings(omittedTokens: number, summaryTokens: number):
 }
 
 // ---------------------------------------------------------------------------
+// §8/§10 prompt caching: mark a large, stable system prefix cacheable so
+// repeated dispatches reusing it read it from cache instead of re-billing the
+// prefix each turn. This is the PURE decision — whether the system prefix
+// clears the provider's minimum cacheable size — and an ESTIMATE of the input
+// tokens saved per subsequent reuse. The gateway applies the cache_control and
+// writes the cost_events estimate; the model adapter emits the real breakpoint.
+// ---------------------------------------------------------------------------
+
+/** Anthropic's minimum cacheable prompt size for the models we route to; below
+ * this the provider won't cache, so we don't mark it. */
+export const DEFAULT_MIN_CACHEABLE_TOKENS = 1024;
+
+/** Fraction of the cached prefix's input cost saved on a cache READ (Anthropic
+ * ephemeral cache read ≈ 0.1x list, i.e. ~90% off). Used to estimate reuse
+ * savings. There is a ~1.25x write surcharge on the FIRST call — the estimate
+ * is explicitly the STEADY-STATE reuse saving, labeled as such. */
+export const CACHE_READ_DISCOUNT = 0.9;
+
+export interface PlanPromptCacheInput {
+  /** estimated token count of the stable system prefix (0/undefined = none) */
+  systemTokens: number | null | undefined;
+  /** §12 off switch — "passthrough" disables caching entirely */
+  routingMode: RoutingMode;
+  /** override the min cacheable size (default DEFAULT_MIN_CACHEABLE_TOKENS) */
+  minCacheableTokens?: number;
+}
+
+export type PromptCacheRuleName = "routing-mode" | "prefix-size";
+
+export interface PromptCachePlan {
+  /** true = mark the system prefix cacheable on the outgoing request */
+  cacheSystem: boolean;
+  ruleId: PromptCacheRuleName;
+  ruleChain: Array<{ rule: PromptCacheRuleName; outcome: "passthrough" | "applied" | "too-small" }>;
+  reason: string;
+  /** estimated input tokens saved PER subsequent reuse of the cached prefix */
+  estimatedTokensSaved: number;
+  estimationBasis: string;
+}
+
+const PROMPT_CACHE_BASIS =
+  "prompt-caching: estimated input-token reuse savings on the cached system prefix (Anthropic ephemeral cache; realized only on repeat within the cache window)";
+
+/** Decide whether the stable system prefix is worth caching. Like routeModel,
+ * "passthrough" is the §12 off switch and a below-threshold prefix is never
+ * marked (no downgrade without a clear signal). When marked, the estimate is
+ * the FULL prefix served from cache on each reuse; the gateway converts it to
+ * USD at the served agent's input price × CACHE_READ_DISCOUNT. */
+export function planPromptCache(input: PlanPromptCacheInput): PromptCachePlan {
+  const minCacheable = input.minCacheableTokens ?? DEFAULT_MIN_CACHEABLE_TOKENS;
+  const systemTokens = input.systemTokens ?? 0;
+
+  if (input.routingMode === "passthrough") {
+    return {
+      cacheSystem: false,
+      ruleId: "routing-mode",
+      ruleChain: [{ rule: "routing-mode", outcome: "passthrough" }],
+      reason: "prompt caching disabled for this user (passthrough mode)",
+      estimatedTokensSaved: 0,
+      estimationBasis: PROMPT_CACHE_BASIS,
+    };
+  }
+
+  if (systemTokens < minCacheable) {
+    return {
+      cacheSystem: false,
+      ruleId: "prefix-size",
+      ruleChain: [
+        { rule: "routing-mode", outcome: "applied" },
+        { rule: "prefix-size", outcome: "too-small" },
+      ],
+      reason: `system prefix ~${systemTokens} tokens is below the ${minCacheable}-token minimum cacheable size; not marked`,
+      estimatedTokensSaved: 0,
+      estimationBasis: PROMPT_CACHE_BASIS,
+    };
+  }
+
+  return {
+    cacheSystem: true,
+    ruleId: "prefix-size",
+    ruleChain: [
+      { rule: "routing-mode", outcome: "applied" },
+      { rule: "prefix-size", outcome: "applied" },
+    ],
+    reason: `system prefix ~${systemTokens} tokens clears the ${minCacheable}-token minimum; marked cacheable (savings realized on repeat reuse within the cache window)`,
+    estimatedTokensSaved: systemTokens,
+    estimationBasis: PROMPT_CACHE_BASIS,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // §8 lazy tool-loading: expose only the entitled tools relevant to the
 // caller's declared intent. Withheld tools remain fully callable — this trims
 // the manifest a model has to read, never the entitlement (§12). No intent =

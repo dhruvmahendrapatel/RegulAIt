@@ -254,6 +254,60 @@ describe("AnthropicProvider (injectable fetch, no network)", () => {
   });
 });
 
+describe("prompt caching (pillar 6): system-prefix cache_control", () => {
+  const okMessage = {
+    id: "msg_pc_1",
+    type: "message",
+    role: "assistant",
+    model: "claude-opus-5",
+    content: [{ type: "text", text: "ok" }],
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    usage: { input_tokens: 5, output_tokens: 1 },
+  };
+
+  it("anthropic marks the system prefix cacheable with an ephemeral breakpoint when cacheSystem is set", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new AnthropicProvider({
+      apiKey: "k",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return anthropicJson(okMessage);
+      },
+    });
+    await provider.dispatch({
+      model: "claude-opus-5",
+      input: "hello",
+      system: "STABLE INSTRUCTIONS",
+      cacheSystem: true,
+    });
+    expect(captured!.system).toEqual([
+      { type: "text", text: "STABLE INSTRUCTIONS", cache_control: { type: "ephemeral" } },
+    ]);
+  });
+
+  it("without cacheSystem the system prefix stays a plain string (byte-identical)", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new AnthropicProvider({
+      apiKey: "k",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return anthropicJson(okMessage);
+      },
+    });
+    await provider.dispatch({ model: "claude-opus-5", input: "hello", system: "STABLE INSTRUCTIONS" });
+    expect(captured!.system).toBe("STABLE INSTRUCTIONS");
+  });
+
+  it("mock records the cacheSystem flag it received so callers can assert it was set", async () => {
+    const mock = new MockModelProvider();
+    await mock.dispatch({ model: "mock-1", input: "hi", system: "s", cacheSystem: true });
+    expect(mock.dispatches.at(-1)!.cacheSystem).toBe(true);
+    await mock.dispatch({ model: "mock-1", input: "hi", system: "s" });
+    expect(mock.dispatches.at(-1)!.cacheSystem).toBeUndefined();
+  });
+});
+
 describe("resolveModelProvider registry", () => {
   it("every real provider resolves with a key and is rejected without one", () => {
     for (const provider of ["anthropic", "openai", "google", "xai"] as const) {

@@ -186,6 +186,11 @@ export const invokeAgentSchema = z.object({
   /** request text: complexity classification/token estimation input, and the
    * user turn actually sent to the model when dispatch=true */
   input: z.string().max(100_000).optional(),
+  /** pillar-6 prompt caching: the stable system-prompt prefix sent as the
+   * dispatch's `system`. A large, reused prefix is marked cacheable so repeat
+   * dispatches read it from cache instead of re-billing it. Absent = no system
+   * prompt (byte-identical to the pre-caching contract). */
+  system: z.string().max(100_000).optional(),
   costSensitivity: z.enum(["cost-sensitive", "standard", "quality-sensitive"]).optional(),
   /** true = actually execute the routed model (governed dispatch); absent/false
    * keeps the decision-only behavior */
