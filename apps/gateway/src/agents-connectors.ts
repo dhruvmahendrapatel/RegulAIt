@@ -9,6 +9,7 @@ import {
   costEvents,
   and,
   eq,
+  inArray,
   modelCredentials,
   usageEvents,
   userModelCredentials,
@@ -27,6 +28,8 @@ import {
   routeModel,
   planPromptCache,
   CACHE_READ_DISCOUNT,
+  planEditVsRewrite,
+  classifyEditIntent,
   type RoutingDecision,
 } from "@regulait/optimizer-kernel";
 import {
@@ -70,6 +73,7 @@ import {
   prepareConversationContext,
   type PreparedConversationContext,
 } from "./compaction.js";
+import { loadRoleAgentGrants, loadRoleConnectorGrants } from "./entitlements.js";
 
 const userIdParam = z.object({ userId: z.string().uuid() });
 const agentIdParam = z.object({ agentId: z.string().uuid() });
@@ -426,6 +430,10 @@ async function performDispatch(
     projectId: string | null;
     /** multi-turn history including the newest turn (conversation dispatches) */
     messages?: ModelChatMessage[] | undefined;
+    /** pillar-6 edit-vs-rewrite: the single-turn user input to send, overriding
+     * `body.input` when the caller has composed a baseline-augmented input.
+     * Absent = the plain `body.input` (byte-identical to the pre-edit path). */
+    input?: string | undefined;
     /** pillar-6 prompt caching: the stable system prefix to send, and whether
      * to mark it cacheable (the kernel's planPromptCache decision). */
     system?: string | undefined;
@@ -439,7 +447,7 @@ async function performDispatch(
     served: registry.find((a) => a.id === routing.selectedAgentId),
     requestedAgentId,
     baseline: registry.find((a) => a.id === routing.baselineAgentId) ?? null,
-    input: body.input ?? "",
+    input: args.input ?? body.input ?? "",
     messages: args.messages,
     ...(args.system ? { system: args.system } : {}),
     ...(args.cacheSystem ? { cacheSystem: true } : {}),
@@ -710,7 +718,7 @@ export function registerAgentConnectorRoutes(
     if (!req.authCtx.isAdmin && req.authCtx.userId !== userId) {
       return reply.status(403).send({ error: "forbidden" });
     }
-    const [grants, [policy]] = await Promise.all([
+    const [grants, roleGrants, [policy]] = await Promise.all([
       db
         .select({
           agentId: agents.id,
@@ -724,12 +732,62 @@ export function registerAgentConnectorRoutes(
         .from(agentGrants)
         .innerJoin(agents, eq(agentGrants.agentId, agents.id))
         .where(eq(agentGrants.userId, userId)),
+      // §5 role-bundled grants (ADR-0014) — folded into the Access-preview so
+      // Simulation shows a role-granted agent, tagged with its provenance.
+      loadRoleAgentGrants(db, userId),
       db.select().from(userAgentPolicies).where(eq(userAgentPolicies.userId, userId)),
     ]);
+
+    // Direct grants win the displayed entry; a role that also grants the same
+    // agent surfaces as provenance on that row (roles[]). A role-ONLY agent
+    // becomes its own source:"role" row so the Access-preview is complete.
+    const directIds = new Set(grants.map((g) => g.agentId));
+    const direct = grants.map((g) => ({
+      ...g,
+      source: "direct" as const,
+      roles: roleGrants.filter((r) => r.agentId === g.agentId).map((r) => r.roleName ?? r.roleId),
+    }));
+    const roleOnlyIds = [...new Set(roleGrants.map((r) => r.agentId).filter((id) => !directIds.has(id)))];
+    const roleAgentMeta = roleOnlyIds.length
+      ? await db
+          .select({
+            id: agents.id,
+            name: agents.name,
+            provider: agents.provider,
+            tier: agents.tier,
+            enabled: agents.enabled,
+          })
+          .from(agents)
+          .where(inArray(agents.id, roleOnlyIds))
+      : [];
+    const metaById = new Map(roleAgentMeta.map((a) => [a.id, a]));
+    const roleOnly = roleOnlyIds
+      .map((agentId) => {
+        const meta = metaById.get(agentId);
+        if (!meta) return null;
+        // First role granting this agent owns the displayed grant row; every
+        // granting role still shows in roles[] for provenance.
+        const granting = roleGrants.filter((r) => r.agentId === agentId);
+        const primary = granting[0];
+        if (!primary) return null;
+        return {
+          agentId,
+          name: meta.name,
+          provider: meta.provider,
+          tier: meta.tier,
+          enabled: meta.enabled,
+          allowedModes: primary.allowedModes,
+          grantId: primary.id,
+          source: "role" as const,
+          roles: granting.map((r) => r.roleName ?? r.roleId),
+        };
+      })
+      .filter((r): r is NonNullable<typeof r> => r !== null);
+
     // The whole policy, not half of it: an editor that can set a run budget
     // but never read the current one makes every edit a guess.
     return {
-      agents: grants,
+      agents: [...direct, ...roleOnly],
       defaultAgentId: policy?.defaultAgentId ?? null,
       ceilingAgentId: policy?.ceilingAgentId ?? null,
       routingMode: policy?.routingMode ?? null,
@@ -770,8 +828,11 @@ export function registerAgentConnectorRoutes(
       if (!attribution.ok) return reply.status(attribution.status).send({ error: attribution.error });
     }
 
-    const [grants, [policy]] = await Promise.all([
+    const [grants, roleAgentGrantsForUser, [policy]] = await Promise.all([
       db.select().from(agentGrants).where(eq(agentGrants.userId, userId)),
+      // §5 role-bundled grants (ADR-0014) — a role-granted agent must invoke
+      // just like a directly granted one.
+      loadRoleAgentGrants(db, userId),
       db.select().from(userAgentPolicies).where(eq(userAgentPolicies.userId, userId)),
     ]);
     let ceilingTier: number | null = null;
@@ -796,6 +857,7 @@ export function registerAgentConnectorRoutes(
       },
       mode: body.mode,
       agentGrants: grants,
+      roleAgentGrants: roleAgentGrantsForUser,
       ceilingTier,
     });
 
@@ -815,6 +877,7 @@ export function registerAgentConnectorRoutes(
             agent: { id: a.id, name: a.name, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
             mode: body.mode,
             agentGrants: grants,
+            roleAgentGrants: roleAgentGrantsForUser,
             ceilingTier,
           }).effect === "allow",
       );
@@ -891,6 +954,12 @@ export function registerAgentConnectorRoutes(
       const estimate = estimateTokens(body.input, complexity);
       const boundChars = convoContext ? convoContext.modelBoundChars : (convo?.historyChars ?? 0);
       if (convo && boundChars > 0) estimate.in += Math.ceil(boundChars / 4);
+      // PILLAR 6 §8 edit-vs-rewrite: when the caller supplies a baseline to
+      // edit, the model must SEE it either way, so its input tokens are a real
+      // part of this dispatch's payload — fold them into the routing estimate
+      // (like conversation history above) BEFORE routing/budget/cost see it.
+      const baselineTokens = body.baseline ? Math.ceil(body.baseline.length / 4) : 0;
+      if (baselineTokens) estimate.in += baselineTokens;
       routing = routeModel({
         requestedAgentId: agent.id,
         candidates,
@@ -1014,6 +1083,67 @@ export function registerAgentConnectorRoutes(
         });
       }
 
+      // PILLAR 6 §8 EDIT VS REWRITE — a pure cost annotation on this
+      // ALREADY-authorized dispatch: the kernel decides whether the caller's
+      // change request reads as a targeted EDIT over a large-enough baseline;
+      // if so the gateway (a) injects a compact-diff directive into the
+      // dispatch system and the supplied baseline into the input so the OUTPUT
+      // saving is real, and (b) lands one estimate row in the SAME
+      // per-technique ledger. It NEVER changes the served agent, model,
+      // entitlement, budget, or output contract (the §12 "can never widen
+      // entitlement" invariant) — guarded on `routing` like the caching and
+      // compaction blocks. "passthrough" is the per-user off switch. The saving
+      // is OUTPUT tokens (a small diff vs re-emitting the whole baseline), so
+      // dollars = saved tokens at the SERVED agent's OUTPUT list price. Written
+      // only when the edit path actually applies.
+      const editPlan = planEditVsRewrite({
+        baselineTokens,
+        requestText: body.input,
+        routingMode: policy?.routingMode ?? "automatic",
+      });
+      if (body.dispatch && editPlan.mode === "edit" && routing) {
+        const routed = routing;
+        const servedRow = registry.find((a) => a.id === routed.selectedAgentId);
+        const estimatedCostSavedUsd =
+          servedRow?.costPerMTokOut != null
+            ? Number(((editPlan.estimatedTokensSaved / 1e6) * servedRow.costPerMTokOut).toFixed(6))
+            : null;
+        await db.insert(costEvents).values({
+          userId,
+          objectType: "agent",
+          objectId: agent.id,
+          technique: "edit_vs_rewrite",
+          requestedAgentId: agent.id,
+          servedAgentId: routing.selectedAgentId,
+          baselineAgentId: routing.baselineAgentId,
+          estimatedTokensIn: estimate.in,
+          estimatedTokensOut: estimate.out,
+          estimatedTokensSaved: editPlan.estimatedTokensSaved,
+          estimatedCostSavedUsd,
+          estimationBasis: editPlan.estimationBasis,
+          ruleId: "edit-vs-rewrite",
+          projectId,
+          detail: { baselineTokens, intent: classifyEditIntent(body.input), mode: body.mode },
+        });
+      }
+
+      // Compose the OUTGOING system + input. Both are ADDITIVE: with neither
+      // technique active they are byte-identical to today. Prompt caching
+      // supplies the stable `system`; edit-vs-rewrite (when applied) appends a
+      // compact-diff directive to that system and the supplied baseline to the
+      // input, so the model actually receives the diff instruction + the
+      // content it must edit (not just an accounting row).
+      let dispatchSystem = systemPrompt;
+      let dispatchInput = body.input ?? "";
+      if (editPlan.applyDiffDirective && body.baseline) {
+        dispatchSystem =
+          (systemPrompt ? systemPrompt + "\n\n" : "") +
+          "The user is editing the BASELINE content below. Return ONLY a minimal " +
+          "unified diff (the changed hunks with a little surrounding context), NOT " +
+          "the full rewritten content.";
+        dispatchInput = dispatchInput + "\n\n----- BASELINE -----\n" + body.baseline;
+      }
+
       // MULTI-TURN: a conversation dispatch sends the model-bound history —
       // [summary context] + recent verbatim turns when a summary exists, the
       // FULL ordered history otherwise — plus the newest user turn as the
@@ -1024,7 +1154,7 @@ export function registerAgentConnectorRoutes(
         convo && body.dispatch
           ? [
               ...(convoContext ? convoContext.modelBound : convo.history),
-              { role: "user" as const, content: body.input ?? "" },
+              { role: "user" as const, content: dispatchInput },
             ]
           : undefined;
       // One persistence rule for the streaming and non-streaming paths —
@@ -1079,7 +1209,8 @@ export function registerAgentConnectorRoutes(
           body,
           projectId,
           messages,
-          system: systemPrompt,
+          input: dispatchInput,
+          system: dispatchSystem,
           cacheSystem: promptCache.cacheSystem,
           onText: (delta) => send("delta", { text: delta }),
         });
@@ -1135,7 +1266,8 @@ export function registerAgentConnectorRoutes(
           body,
           projectId,
           messages,
-          system: systemPrompt,
+          input: dispatchInput,
+          system: dispatchSystem,
           cacheSystem: promptCache.cacheSystem,
         });
         await persistTurns(dispatchOutcome);
@@ -1281,19 +1413,62 @@ export function registerAgentConnectorRoutes(
     if (!req.authCtx.isAdmin && req.authCtx.userId !== userId) {
       return reply.status(403).send({ error: "forbidden" });
     }
-    const rows = await db
-      .select({
-        connectorId: connectors.id,
-        name: connectors.name,
-        kind: connectors.kind,
-        mode: connectorGrants.mode,
-        allowedObjects: connectorGrants.allowedObjects,
-        grantId: connectorGrants.id,
+    const [rows, roleGrants] = await Promise.all([
+      db
+        .select({
+          connectorId: connectors.id,
+          name: connectors.name,
+          kind: connectors.kind,
+          mode: connectorGrants.mode,
+          allowedObjects: connectorGrants.allowedObjects,
+          grantId: connectorGrants.id,
+        })
+        .from(connectorGrants)
+        .innerJoin(connectors, eq(connectorGrants.connectorId, connectors.id))
+        .where(eq(connectorGrants.userId, userId)),
+      // §5 role-bundled grants (ADR-0014), folded into the Access-preview.
+      loadRoleConnectorGrants(db, userId),
+    ]);
+
+    const directIds = new Set(rows.map((r) => r.connectorId));
+    const direct = rows.map((r) => ({
+      ...r,
+      source: "direct" as const,
+      roles: roleGrants
+        .filter((g) => g.connectorId === r.connectorId)
+        .map((g) => g.roleName ?? g.roleId),
+    }));
+    const roleOnlyIds = [
+      ...new Set(roleGrants.map((g) => g.connectorId).filter((id) => !directIds.has(id))),
+    ];
+    const roleConnMeta = roleOnlyIds.length
+      ? await db
+          .select({ id: connectors.id, name: connectors.name, kind: connectors.kind })
+          .from(connectors)
+          .where(inArray(connectors.id, roleOnlyIds))
+      : [];
+    const metaById = new Map(roleConnMeta.map((c) => [c.id, c]));
+    const roleOnly = roleOnlyIds
+      .map((connectorId) => {
+        const meta = metaById.get(connectorId);
+        if (!meta) return null;
+        const granting = roleGrants.filter((g) => g.connectorId === connectorId);
+        const primary = granting[0];
+        if (!primary) return null;
+        return {
+          connectorId,
+          name: meta.name,
+          kind: meta.kind,
+          mode: primary.mode,
+          allowedObjects: primary.allowedObjects,
+          grantId: primary.id,
+          source: "role" as const,
+          roles: granting.map((g) => g.roleName ?? g.roleId),
+        };
       })
-      .from(connectorGrants)
-      .innerJoin(connectors, eq(connectorGrants.connectorId, connectors.id))
-      .where(eq(connectorGrants.userId, userId));
-    return { connectors: rows };
+      .filter((r): r is NonNullable<typeof r> => r !== null);
+
+    return { connectors: [...direct, ...roleOnly] };
   });
 
   app.post("/v1/connectors/:connectorId/invoke", async (req, reply) => {
@@ -1314,10 +1489,12 @@ export function registerAgentConnectorRoutes(
       if (!attribution.ok) return reply.status(attribution.status).send({ error: attribution.error });
     }
 
-    const grants = await db
-      .select()
-      .from(connectorGrants)
-      .where(eq(connectorGrants.userId, userId));
+    const [grants, roleConnectorGrantsForUser] = await Promise.all([
+      db.select().from(connectorGrants).where(eq(connectorGrants.userId, userId)),
+      // §5 role-bundled grants (ADR-0014): unioned in the kernel so a narrow
+      // direct grant cannot mask a broader role grant.
+      loadRoleConnectorGrants(db, userId),
+    ]);
 
     const decision = evaluateConnector({
       userId,
@@ -1326,6 +1503,7 @@ export function registerAgentConnectorRoutes(
       operation: body.operation,
       object: body.object ?? null,
       connectorGrants: grants,
+      roleConnectorGrants: roleConnectorGrantsForUser,
     });
 
     // THE ONE AUDIT ROW — unchanged, written for every decision (allow or deny).

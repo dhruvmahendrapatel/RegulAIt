@@ -287,6 +287,26 @@ API endpoints first (GET /v1/users, /v1/servers, /v1/servers/:id/tools, and the 
 /v1/rules/* lists — all admin-gated). Deferred (per ADR-0012): SPA rewrite, SCIM/SSO status,
 SIEM export, dry-run of UNSAVED policy, bulk actions, CSV export.
 
+**Admin console restructure + roles as a full provisioning bundle, 2026-07-27 (ADR-0014,
+migration 0030).** Two gaps closed on user feedback. (1) **Roles now grant agents + connectors**,
+not just MCP tools/servers — new `role_agent_grants`/`role_connector_grants` tables (twins of the
+per-user grant tables); the kernel folds role-derived grants in additively (`evaluateAgent`
+direct-then-role with ceiling/mode still applied; `evaluateConnector` UNION-OF-GRANTS so a narrow
+direct grant can't mask a broader role grant), wired into all six evaluate sites; endpoints
+POST /v1/roles/:id/grants/{agents,connectors} + four-bucket read-back GET /v1/roles/:id/grants;
+per-user revocation of role-derived agent/connector grants deferred (revocations are MCP-only).
+ADR-0014 records the additive UNION-MAX semantics. (2) **The portal's flat 13-tab list became 6
+grouped sections** (Identity & Access / AI Governance / Policy / Delivery / Cost / Operations); the
+overloaded "Users & Roles" tab split into **Users / Roles / Teams**; deep-linking via
+`location.hash` (reload keeps the page); the Roles page gained the **role-grants UI** (pick a role →
+grant agents/connectors/MCP tools/servers → see the bundle) — the previously-missing "what does
+this role grant" surface. UX pass (shared helpers): toast feedback replacing all alert()s +
+submit-disable in `wire()`, confirm() on destructive actions, a mobile hamburger drawer (nav no
+longer vanishes <900px), `field()` label/aria association, and a contrast bump. Verified on a fresh
+DB (build + check-ui-syntax + gateway 297/297 + kernel 82/82) and a Playwright browser drive
+(screenshots). Deferred UX follow-ups: table sorting/filter/pagination, human column labels,
+raw-JSON operator views, full a11y/contrast sweep.
+
 **Streaming dispatch, 2026-07-25.** Two layers, same gates. Provider layer: `dispatch()`
 gains an `onText` delta callback; the Anthropic adapter uses the SDK's streaming API whenever
 a caller wants deltas OR `maxTokens` exceeds 16k (long generations must not ride a single
@@ -600,6 +620,25 @@ yet — a stored `agents.systemPrompt` column is the natural future home, deferr
 migration this slice). Suite 284 → 288 (prompt-caching.test.ts); optimizer 31 → 36, model-provider
 57 → 60. No UI change (savings-by-technique chart is technique-generic). Remaining pillar-6
 techniques: edit-vs-rewrite, file pre-processing, semantic caching, request batching.
+
+**Edit-vs-rewrite, 2026-07-27 — pillar 6's 5th technique.** NO migration (the `edit_vs_rewrite`
+cost_events enum value already existed). Pure kernel: `classifyEditIntent` (edit / rewrite /
+unknown keyword heuristic — a REWRITE signal WINS when both appear, so a full rewrite is the safe
+non-optimizing default and we never diff on an ambiguous ask) + `planEditVsRewrite` (guard order
+mirrors planPromptCache: passthrough → no baseline → non-edit intent → baseline below the
+200-token floor → else edit). When the request reads as a targeted edit over a large-enough
+baseline, the gateway injects a compact-diff directive into the dispatch `system` and the
+caller-supplied baseline (delimited) into the dispatch `input`, so the model returns a small diff
+instead of re-emitting the whole file — the OUTPUT saving is real (not just accounting), the same
+way prompt caching actually emits `cache_control`. Opt-in via a new `baseline` field on the invoke
+body; baseline tokens are folded into the routing estimate BEFORE routeModel (the model must see
+the file either way, so routing/budget/cost reflect the real payload); one `edit_vs_rewrite`
+cost_events estimate is written, priced at the served agent's OUTPUT list price (saving ≈ baseline
+× 0.75 output tokens). Pure cost annotation — never changes the served agent/model/entitlement/
+budget/output; passthrough is the off switch. The baseline rides the model input for that one
+dispatch only — persisted conversation history keeps the original request, so it never bloats or
+re-sends. Suite 288 → 292 (edit-rewrite.test.ts); optimizer 36 → 47. No UI change. Remaining
+pillar-6 techniques: file pre-processing, semantic caching, request batching.
 
 **Agent-driven task decomposition, 2026-07-26 — pillar 7's headline lands, human-gated.**
 `POST /v1/runs/decompose` {goal, projectId?, leadAgentId?}: a Team-Lead agent (leadAgentId ??

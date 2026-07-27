@@ -561,6 +561,23 @@ export interface AgentGrant {
   allowedModes: string[] | null;
 }
 
+/**
+ * §5 role-derived agent entitlement — the AGENT twin of RoleAgentGrant's MCP
+ * cousin (RoleToolGrant). Shape-identical to AgentGrant minus userId (the
+ * gateway pre-filters these to the user's assigned roles), plus roleId and an
+ * optional roleName for reason prose only. A role grant confers no more than a
+ * direct grant would: the same allowedModes narrowing and the per-user tier
+ * ceiling still apply on top.
+ */
+export interface RoleAgentGrant {
+  id: string;
+  roleId: string;
+  /** optional display name for the role — reason prose only */
+  roleName?: string | null;
+  agentId: string;
+  allowedModes: string[] | null;
+}
+
 export interface EvaluateAgentInput {
   userId: string;
   /** optional display name for the user — reason prose only */
@@ -569,6 +586,8 @@ export interface EvaluateAgentInput {
   /** the mode being invoked (e.g. "plan", "execute") */
   mode: string;
   agentGrants: readonly AgentGrant[];
+  /** role-derived agent grants, pre-filtered by the gateway to the user's assigned roles */
+  roleAgentGrants?: readonly RoleAgentGrant[];
   /** tier of the user's ceiling agent (§4); null/undefined = no ceiling set */
   ceilingTier?: number | null;
   /**
@@ -584,6 +603,7 @@ export interface EvaluateAgentInput {
 export type AgentRuleName =
   | "agent-registry-enabled"
   | "agent-allow-list"
+  | "role-agent-allow-list"
   | "agent-mode"
   | "agent-ceiling"
   | "agent-lead-ceiling"
@@ -634,7 +654,18 @@ export function evaluateAgent(input: EvaluateAgentInput): AgentDecision {
     };
   }
 
-  const grant = input.agentGrants.find((g) => g.userId === userId && g.agentId === agent.id);
+  // §5 grant precedence: a direct user grant wins; only if none exists is a
+  // role-derived grant consulted (pre-filtered by the gateway to the user's
+  // assigned roles). A role grant is purely ADDITIVE — the mode check and the
+  // per-user tier ceiling below still run against it unchanged, so it can never
+  // confer more than a direct grant would. Per-user revocation of role-derived
+  // AGENT grants is deferred (the revocations table is MCP-only today; this
+  // evaluator has no revocation input), so "revocations win" holds vacuously.
+  const direct = input.agentGrants.find((g) => g.userId === userId && g.agentId === agent.id);
+  const roleGrant = direct
+    ? undefined
+    : (input.roleAgentGrants ?? []).find((g) => g.agentId === agent.id);
+  const grant = direct ?? roleGrant;
   if (!grant) {
     chain.push({ rule: "agent-allow-list", outcome: "no-match" });
     chain.push({ rule: "default-deny", outcome: "deny" });
@@ -645,7 +676,11 @@ export function evaluateAgent(input: EvaluateAgentInput): AgentDecision {
       reason: `agent ${agentRef} is not on user ${refLabel(userId, input.userName)}'s allow-list — default-deny`,
     };
   }
-  chain.push({ rule: "agent-allow-list", outcome: "allow", grantId: grant.id });
+  chain.push(
+    roleGrant
+      ? { rule: "role-agent-allow-list", outcome: "allow", grantId: grant.id }
+      : { rule: "agent-allow-list", outcome: "allow", grantId: grant.id },
+  );
 
   if (grant.allowedModes !== null && !grant.allowedModes.includes(mode)) {
     chain.push({ rule: "agent-mode", outcome: "deny", grantId: grant.id });
@@ -694,7 +729,10 @@ export function evaluateAgent(input: EvaluateAgentInput): AgentDecision {
     effect: "allow",
     ruleId: grant.id,
     ruleChain: chain,
-    reason: `agent ${agentRef} mode '${mode}' allowed by user's agent grant`,
+    reason: roleGrant
+      ? `agent ${agentRef} mode '${mode}' allowed by the grant of assigned role ` +
+        `${refLabel(roleGrant.roleId, roleGrant.roleName)}`
+      : `agent ${agentRef} mode '${mode}' allowed by user's agent grant`,
   };
 }
 
@@ -713,6 +751,22 @@ export interface ConnectorGrant {
   allowedObjects: string[] | null;
 }
 
+/**
+ * §5 role-derived connector entitlement — the CONNECTOR twin of RoleAgentGrant.
+ * Shape-identical to ConnectorGrant minus userId (pre-filtered to the user's
+ * assigned roles by the gateway), plus roleId and an optional roleName for
+ * reason prose only.
+ */
+export interface RoleConnectorGrant {
+  id: string;
+  roleId: string;
+  /** optional display name for the role — reason prose only */
+  roleName?: string | null;
+  connectorId: string;
+  mode: "read" | "readwrite";
+  allowedObjects: string[] | null;
+}
+
 export interface EvaluateConnectorInput {
   userId: string;
   /** optional display names — reason prose only */
@@ -723,10 +777,13 @@ export interface EvaluateConnectorInput {
   /** the object/table/folder the call targets, when the caller specifies one */
   object?: string | null;
   connectorGrants: readonly ConnectorGrant[];
+  /** role-derived connector grants, pre-filtered by the gateway to the user's assigned roles */
+  roleConnectorGrants?: readonly RoleConnectorGrant[];
 }
 
 export type ConnectorRuleName =
   | "connector-allow-list"
+  | "role-connector-allow-list"
   | "connector-mode"
   | "connector-object-scope"
   | "default-deny";
@@ -753,10 +810,41 @@ export function evaluateConnector(input: EvaluateConnectorInput): ConnectorDecis
   const connectorRef = refLabel(connectorId, input.connectorName);
   const chain: ConnectorRuleTrace[] = [];
 
-  const grant = input.connectorGrants.find(
-    (g) => g.userId === userId && g.connectorId === connectorId,
-  );
-  if (!grant) {
+  // §5 UNION-OF-GRANTS (ADR-0014). Unlike the boolean MCP kernel, connector
+  // entitlement is the UNION of the user's direct grants and their role-derived
+  // grants for this connector — NOT direct-first short-circuit. A narrow direct
+  // grant must never MASK a broader role grant (that would reduce a user's
+  // entitlement below what assigning the role confers). So: gather every
+  // candidate, ALLOW if ANY single candidate satisfies BOTH the mode
+  // requirement and the object scope, and deny only when NONE does. Candidates
+  // are ordered direct-first purely for stable deny prose. When no role grants
+  // are passed there is exactly one candidate and every trace/return below is
+  // byte-identical to the pre-§5 direct-only path.
+  //
+  // Per-user revocation of role-derived CONNECTOR grants is deferred (the
+  // revocations table is MCP-only today; this evaluator has no revocation
+  // input), so role grants override nothing and "revocations win" holds
+  // vacuously.
+  type ConnectorCandidate = { grant: ConnectorGrant; role?: RoleConnectorGrant };
+  const candidates: ConnectorCandidate[] = [
+    ...input.connectorGrants
+      .filter((g) => g.userId === userId && g.connectorId === connectorId)
+      .map((g) => ({ grant: g })),
+    ...(input.roleConnectorGrants ?? [])
+      .filter((g) => g.connectorId === connectorId)
+      .map((role) => ({
+        grant: {
+          id: role.id,
+          userId,
+          connectorId: role.connectorId,
+          mode: role.mode,
+          allowedObjects: role.allowedObjects,
+        } as ConnectorGrant,
+        role,
+      })),
+  ];
+
+  if (candidates.length === 0) {
     chain.push({ rule: "connector-allow-list", outcome: "no-match" });
     chain.push({ rule: "default-deny", outcome: "deny" });
     return {
@@ -766,7 +854,27 @@ export function evaluateConnector(input: EvaluateConnectorInput): ConnectorDecis
       reason: `connector ${connectorRef} is not on user ${refLabel(userId, input.userName)}'s allow-list — default-deny`,
     };
   }
-  chain.push({ rule: "connector-allow-list", outcome: "allow", grantId: grant.id });
+
+  const modeSatisfied = (g: ConnectorGrant) => !(operation === "write" && g.mode === "read");
+  const objectSatisfied = (g: ConnectorGrant) => {
+    if (g.allowedObjects === null) return true;
+    const object = input.object ?? null;
+    return object !== null && g.allowedObjects.includes(object);
+  };
+  // The first candidate satisfying BOTH dimensions wins (direct-first). When
+  // none does, fall back to the first (direct) candidate so the deny reason is
+  // stable and direct-first — running the exact original single-grant checks
+  // below against it reproduces the pre-§5 deny trace byte-for-byte.
+  // candidates is non-empty here (the length-0 case returned above), so the
+  // fallback index is always defined.
+  const winner: ConnectorCandidate =
+    candidates.find((c) => modeSatisfied(c.grant) && objectSatisfied(c.grant)) ?? candidates[0]!;
+  const grant = winner.grant;
+  chain.push({
+    rule: winner.role ? "role-connector-allow-list" : "connector-allow-list",
+    outcome: "allow",
+    grantId: grant.id,
+  });
 
   if (operation === "write" && grant.mode === "read") {
     chain.push({ rule: "connector-mode", outcome: "deny", grantId: grant.id });
@@ -802,6 +910,9 @@ export function evaluateConnector(input: EvaluateConnectorInput): ConnectorDecis
     effect: "allow",
     ruleId: grant.id,
     ruleChain: chain,
-    reason: `${operation} on connector ${connectorRef} allowed by user's connector grant`,
+    reason: winner.role
+      ? `${operation} on connector ${connectorRef} allowed by the grant of assigned role ` +
+        `${refLabel(winner.role.roleId, winner.role.roleName)}`
+      : `${operation} on connector ${connectorRef} allowed by user's connector grant`,
   };
 }

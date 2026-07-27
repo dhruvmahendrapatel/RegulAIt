@@ -563,6 +563,8 @@ import {
   type AgentGrant,
   type AgentRef,
   type ConnectorGrant,
+  type RoleAgentGrant,
+  type RoleConnectorGrant,
 } from "./index.js";
 
 const AGENT: AgentRef = { id: "agent-claude", tier: 3, enabled: true, modes: null };
@@ -706,6 +708,148 @@ describe("evaluateConnector (§2)", () => {
       connectorGrants: [connectorGrant({ userId: OTHER_USER })],
     });
     expect(d.effect).toBe("deny");
+  });
+});
+
+// --- §5 role-bundled agent + connector grants (ADR-0014) ---
+
+function roleAgentGrant(overrides: Partial<RoleAgentGrant> = {}): RoleAgentGrant {
+  return { id: "rag-1", roleId: ROLE, agentId: "agent-claude", allowedModes: null, ...overrides };
+}
+
+function roleConnectorGrant(overrides: Partial<RoleConnectorGrant> = {}): RoleConnectorGrant {
+  return { id: "rcg-1", roleId: ROLE, connectorId: CONNECTOR, mode: "read", allowedObjects: null, ...overrides };
+}
+
+describe("role-bundled agent grants (§5, ADR-0014)", () => {
+  it("(a) a role-only agent grant allows and traces role-agent-allow-list", () => {
+    const d = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "execute",
+      agentGrants: [],
+      roleAgentGrants: [roleAgentGrant()],
+    });
+    expect(d.effect).toBe("allow");
+    expect(d.ruleId).toBe("rag-1");
+    expect(d.reason).toContain(ROLE);
+    expect(d.ruleChain).toContainEqual({
+      rule: "role-agent-allow-list", outcome: "allow", grantId: "rag-1",
+    });
+  });
+
+  it("(b) a direct agent grant wins and the role grant is never consulted", () => {
+    const d = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "execute",
+      agentGrants: [agentGrant()],
+      roleAgentGrants: [roleAgentGrant()],
+    });
+    expect(d.effect).toBe("allow");
+    expect(d.ruleId).toBe("ag-1");
+    expect(d.ruleChain.some((t) => t.rule === "role-agent-allow-list")).toBe(false);
+    expect(d.ruleChain).toContainEqual({
+      rule: "agent-allow-list", outcome: "allow", grantId: "ag-1",
+    });
+  });
+
+  it("(c) the per-user tier ceiling narrows a role grant (agent-ceiling deny)", () => {
+    const d = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "plan",
+      agentGrants: [],
+      roleAgentGrants: [roleAgentGrant()],
+      ceilingTier: 2, // AGENT.tier === 3
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe("agent-ceiling");
+  });
+
+  it("(d) a role grant's allowedModes excludes the mode → agent-mode deny", () => {
+    const d = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "execute",
+      agentGrants: [],
+      roleAgentGrants: [roleAgentGrant({ allowedModes: ["plan"] })],
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe("rag-1");
+    expect(d.reason).toContain("mode 'execute'");
+  });
+
+  it("no role grants passed → byte-identical default-deny (direct-only unchanged)", () => {
+    const withEmpty = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "plan", agentGrants: [], roleAgentGrants: [],
+    });
+    const without = evaluateAgent({ userId: USER, agent: AGENT, mode: "plan", agentGrants: [] });
+    expect(withEmpty).toEqual(without);
+  });
+});
+
+describe("role-bundled connector grants (§5, ADR-0014, UNION-MAX)", () => {
+  it("(e1) a role-only connector grant allows and traces role-connector-allow-list", () => {
+    const d = evaluateConnector({
+      userId: USER, connectorId: CONNECTOR, operation: "read",
+      connectorGrants: [],
+      roleConnectorGrants: [roleConnectorGrant()],
+    });
+    expect(d.effect).toBe("allow");
+    expect(d.ruleId).toBe("rcg-1");
+    expect(d.reason).toContain(ROLE);
+    expect(d.ruleChain).toContainEqual({
+      rule: "role-connector-allow-list", outcome: "allow", grantId: "rcg-1",
+    });
+  });
+
+  it("(e2) a role grant mode 'read' + write op → connector-mode deny", () => {
+    const d = evaluateConnector({
+      userId: USER, connectorId: CONNECTOR, operation: "write",
+      connectorGrants: [],
+      roleConnectorGrants: [roleConnectorGrant({ mode: "read" })],
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.reason).toContain("read-only");
+  });
+
+  it("(e3) a role grant allowedObjects excludes the object → object-scope deny", () => {
+    const d = evaluateConnector({
+      userId: USER, connectorId: CONNECTOR, operation: "read", object: "payroll",
+      connectorGrants: [],
+      roleConnectorGrants: [roleConnectorGrant({ allowedObjects: ["accounts"] })],
+    });
+    expect(d.effect).toBe("deny");
+  });
+
+  it("(f) ADDITIVITY GUARD: narrow direct grant does NOT mask a broader role grant", () => {
+    // direct read-only + role readwrite, write op → the union ALLOWS via the
+    // role grant. A direct-first short-circuit would have wrongly denied here.
+    const d = evaluateConnector({
+      userId: USER, connectorId: CONNECTOR, operation: "write",
+      connectorGrants: [connectorGrant({ mode: "read" })],
+      roleConnectorGrants: [roleConnectorGrant({ mode: "readwrite" })],
+    });
+    expect(d.effect).toBe("allow");
+    expect(d.ruleId).toBe("rcg-1");
+    expect(d.ruleChain).toContainEqual({
+      rule: "role-connector-allow-list", outcome: "allow", grantId: "rcg-1",
+    });
+  });
+
+  it("union across object scope: a broader role object-scope rescues a narrow direct one", () => {
+    const d = evaluateConnector({
+      userId: USER, connectorId: CONNECTOR, operation: "read", object: "payroll",
+      connectorGrants: [connectorGrant({ allowedObjects: ["accounts"] })],
+      roleConnectorGrants: [roleConnectorGrant({ allowedObjects: ["payroll"] })],
+    });
+    expect(d.effect).toBe("allow");
+    expect(d.ruleId).toBe("rcg-1");
+  });
+
+  it("no role grants passed → byte-identical to the direct-only evaluation", () => {
+    const withEmpty = evaluateConnector({
+      userId: USER, connectorId: CONNECTOR, operation: "read",
+      connectorGrants: [connectorGrant()], roleConnectorGrants: [],
+    });
+    const without = evaluateConnector({
+      userId: USER, connectorId: CONNECTOR, operation: "read",
+      connectorGrants: [connectorGrant()],
+    });
+    expect(withEmpty).toEqual(without);
   });
 });
 

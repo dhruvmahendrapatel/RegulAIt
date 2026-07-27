@@ -144,6 +144,19 @@ export const createRoleServerGrantSchema = z.object({
   readOnlyAll: z.boolean(),
 });
 
+// §5 role-bundled AGENT/CONNECTOR grants — shape-identical to the direct
+// agent/connector grant bodies so a role grant can never exceed a direct one.
+export const createRoleAgentGrantSchema = z.object({
+  agentId: z.string().uuid(),
+  allowedModes: z.array(z.string().min(1)).nullable().optional(),
+});
+
+export const createRoleConnectorGrantSchema = z.object({
+  connectorId: z.string().uuid(),
+  mode: z.enum(["read", "readwrite"]),
+  allowedObjects: z.array(z.string().min(1)).nullable().optional(),
+});
+
 export const assignRoleSchema = z.object({
   roleId: z.string().uuid(),
 });
@@ -191,6 +204,11 @@ export const invokeAgentSchema = z.object({
    * dispatches read it from cache instead of re-billing it. Absent = no system
    * prompt (byte-identical to the pre-caching contract). */
   system: z.string().max(100_000).optional(),
+  /** pillar-6 edit-vs-rewrite: the existing content the user is asking to
+   * modify. When present and the request reads as a targeted edit, the model
+   * is instructed to return a compact diff instead of re-emitting the whole
+   * thing. Absent = plain generation (byte-identical to the pre-edit contract). */
+  baseline: z.string().max(200_000).optional(),
   costSensitivity: z.enum(["cost-sensitive", "standard", "quality-sensitive"]).optional(),
   /** true = actually execute the routed model (governed dispatch); absent/false
    * keeps the decision-only behavior */

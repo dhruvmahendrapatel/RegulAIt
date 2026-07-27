@@ -63,17 +63,29 @@ a { color: var(--accent); text-decoration: none; }
 .side .foot { margin-top: auto; padding: 10px 8px 0; font-size: 11.5px; color: var(--text-faint); border-top: 1px solid var(--border); }
 .side .foot .who { color: var(--text-dim); font-family: var(--mono); font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
 .main { flex: 1; min-width: 0; padding: 26px 34px 60px; max-width: 1060px; }
+/* mobile nav toggle — hidden on desktop, shown only inside the <900px query */
+.hamburger { display: none; align-items: center; justify-content: center; font-size: 18px; line-height: 1; background: #ffffff0d; border: 1px solid var(--border-strong); border-radius: 8px; padding: 6px 11px; margin-bottom: 14px; cursor: pointer; color: var(--text); }
 
 /* ---- primitives ---------------------------------------------------- */
 h1 { font-size: 19px; font-weight: 600; margin: 0 0 2px; letter-spacing: -.01em; }
 .sub { color: var(--text-dim); font-size: 13px; margin: 0 0 22px; }
-h2 { font-size: 11.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--text-faint); font-weight: 600; margin: 26px 0 10px; }
+h2 { font-size: 11.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--text-dim); font-weight: 600; margin: 26px 0 10px; }
 .card { background: var(--bg-raised); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; }
 .card + .card { margin-top: 12px; }
 .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .grow { flex: 1; min-width: 0; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-@media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } .side { display:none; } .main { padding: 18px; } }
+@media (max-width: 900px) {
+  .grid2 { grid-template-columns: 1fr; }
+  .side { display: none; }
+  .side.open {
+    display: flex; position: fixed; top: 0; left: 0; bottom: 0; z-index: 60;
+    width: 240px; height: 100vh; background: var(--bg-raised);
+    box-shadow: 0 0 40px #000000aa;
+  }
+  .hamburger { display: inline-flex; }
+  .main { padding: 18px; }
+}
 
 button, .btn {
   font: inherit; color: var(--text); background: #ffffff0d; border: 1px solid var(--border-strong);
@@ -94,10 +106,10 @@ input, select, textarea {
 }
 input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 textarea { resize: vertical; font-family: var(--mono); font-size: 12.5px; }
-label.f { display: block; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--text-faint); margin: 0 0 4px; }
+label.f { display: block; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--text-dim); margin: 0 0 4px; }
 
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
-th { text-align: left; font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-faint); font-weight: 600; padding: 6px 10px; border-bottom: 1px solid var(--border-strong); }
+th { text-align: left; font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-dim); font-weight: 600; padding: 6px 10px; border-bottom: 1px solid var(--border-strong); }
 td { padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; overflow-wrap: anywhere; }
 tr:hover td { background: #ffffff05; }
 tr.click { cursor: pointer; }
@@ -139,12 +151,15 @@ pre, .codeblock {
 .hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
 .empty { color: var(--text-faint); padding: 26px 0; text-align: center; font-size: 13px; }
 .err-line { color: var(--bad); font-size: 12.5px; }
+#toast-region { position: fixed; bottom: 22px; right: 22px; display: flex; flex-direction: column; gap: 8px; z-index: 50; pointer-events: none; }
 .toast {
-  position: fixed; bottom: 22px; right: 22px; background: var(--bg-raised);
+  background: var(--bg-raised);
   border: 1px solid var(--border-strong); border-left: 3px solid var(--accent);
   border-radius: 8px; padding: 10px 16px; font-size: 13px; max-width: 380px;
-  box-shadow: 0 8px 30px #00000066; z-index: 50;
+  box-shadow: 0 8px 30px #00000066;
 }
+.toast.ok { border-left-color: var(--ok); }
+.toast.err { border-left-color: var(--bad); }
 /* ---- one-time secret reveal ---------------------------------------- */
 /* A plaintext API key exists for exactly one response — the panel that shows
    it should look like the one chance it is. */

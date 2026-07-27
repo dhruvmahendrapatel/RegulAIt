@@ -6352,13 +6352,19 @@ describe("admin portal (ADR-0012): static shell + API-parity gap endpoints", () 
     const res = await app.inject({ method: "GET", url: "/admin" });
     expect(res.statusCode).toBe(200);
     expect(res.headers["content-type"]).toContain("text/html");
-    // §6 panel names verbatim
+    // §6 functional surfaces, as the (restructured) tab titles — Users & Roles
+    // is now split into Users / Roles / Teams, and the governance tabs carry
+    // their shorter section-grouped labels.
     for (const panel of [
-      "Users & Roles", "Agent Governance", "Connector Governance",
-      "MCP Server Governance", "Policy & Rules Engine", "Audit & Activity Log",
-      "Approvals Queue", "Simulation / Access preview", "Cost & Projects",
+      "Users", "Roles", "Teams", "Agents", "Connectors", "MCP Servers",
+      "Rules Engine", "Audit Log", "Approvals Queue",
+      "Simulation / Access preview", "Cost & Projects",
     ]) {
       expect(res.body).toContain(panel);
+    }
+    // the grouped-nav section headers are present (the new information architecture)
+    for (const section of ["Identity & Access", "AI Governance", "Policy", "Operations"]) {
+      expect(res.body).toContain(section);
     }
     // the shell holds no data: nothing it serves varies with DB state
     expect(res.body).not.toContain("@example.com");

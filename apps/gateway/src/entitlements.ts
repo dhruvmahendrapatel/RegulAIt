@@ -3,7 +3,9 @@ import {
   eq,
   inArray,
   revocations,
+  roleAgentGrants,
   roleAssignments,
+  roleConnectorGrants,
   roleServerGrants,
   roleToolGrants,
   roles,
@@ -12,7 +14,11 @@ import {
   toolGrants,
   type Db,
 } from "@regulait/db";
-import type { Entitlements } from "@regulait/policy-kernel";
+import type {
+  Entitlements,
+  RoleAgentGrant,
+  RoleConnectorGrant,
+} from "@regulait/policy-kernel";
 
 /**
  * PILLAR 1 rule scoping: the subject memberships that decide which widened
@@ -99,4 +105,63 @@ export async function loadEntitlements(
     roleServerGrants: rsGrants.map((g) => ({ ...g, roleName: roleName.get(g.roleId) ?? null })),
     revocations: revs,
   };
+}
+
+/**
+ * §5 role-bundled AGENT grants for a user (ADR-0014). Mirrors loadEntitlements'
+ * roleAssignments → roleIds → role-grant pre-filter, kept SEPARATE from
+ * loadEntitlements (which is MCP/server-scoped). The kernel receives the grants
+ * pre-filtered to the user's assigned roles, with the role display name riding
+ * along for reason prose. Returns [] when the user has no role assignments.
+ */
+export async function loadRoleAgentGrants(db: Db, userId: string): Promise<RoleAgentGrant[]> {
+  const assignments = await db
+    .select({ roleId: roleAssignments.roleId })
+    .from(roleAssignments)
+    .where(eq(roleAssignments.userId, userId));
+  const roleIds = assignments.map((a) => a.roleId);
+  if (roleIds.length === 0) return [];
+
+  const [grants, roleRows] = await Promise.all([
+    db.select().from(roleAgentGrants).where(inArray(roleAgentGrants.roleId, roleIds)),
+    db.select({ id: roles.id, name: roles.name }).from(roles).where(inArray(roles.id, roleIds)),
+  ]);
+  const roleName = new Map(roleRows.map((r) => [r.id, r.name]));
+  return grants.map((g) => ({
+    id: g.id,
+    roleId: g.roleId,
+    roleName: roleName.get(g.roleId) ?? null,
+    agentId: g.agentId,
+    allowedModes: g.allowedModes,
+  }));
+}
+
+/**
+ * §5 role-bundled CONNECTOR grants for a user (ADR-0014). Same pre-filter shape
+ * as loadRoleAgentGrants. Returns [] when the user has no role assignments.
+ */
+export async function loadRoleConnectorGrants(
+  db: Db,
+  userId: string,
+): Promise<RoleConnectorGrant[]> {
+  const assignments = await db
+    .select({ roleId: roleAssignments.roleId })
+    .from(roleAssignments)
+    .where(eq(roleAssignments.userId, userId));
+  const roleIds = assignments.map((a) => a.roleId);
+  if (roleIds.length === 0) return [];
+
+  const [grants, roleRows] = await Promise.all([
+    db.select().from(roleConnectorGrants).where(inArray(roleConnectorGrants.roleId, roleIds)),
+    db.select({ id: roles.id, name: roles.name }).from(roles).where(inArray(roles.id, roleIds)),
+  ]);
+  const roleName = new Map(roleRows.map((r) => [r.id, r.name]));
+  return grants.map((g) => ({
+    id: g.id,
+    roleId: g.roleId,
+    roleName: roleName.get(g.roleId) ?? null,
+    connectorId: g.connectorId,
+    mode: g.mode,
+    allowedObjects: g.allowedObjects,
+  }));
 }

@@ -508,3 +508,166 @@ export function selectTools(input: SelectToolsInput): ToolSelectionDecision {
     estimationBasis: TOOL_BASIS,
   };
 }
+
+// ---------------------------------------------------------------------------
+// §8 edit vs rewrite: when the user asks to MODIFY existing content, detecting
+// a targeted EDIT (vs a wholesale rewrite) lets the gateway instruct the model
+// to return a compact DIFF instead of re-emitting the whole file — saving
+// OUTPUT tokens. The baseline (existing content) must be sent to the model
+// either way (you can't edit what the model can't see), so the baseline's
+// INPUT cost is NOT attributable here — the saving is purely OUTPUT (a small
+// diff vs a full rewrite ≈ the whole baseline re-emitted). This is the PURE
+// decision — whether to diff — and an ESTIMATE of the output tokens saved; the
+// gateway injects the diff directive + baseline and writes the cost_events
+// estimate.
+// ---------------------------------------------------------------------------
+
+/** Below this many baseline tokens a diff saves too little output to bother —
+ * a full rewrite of a tiny file is already cheap. */
+export const DEFAULT_MIN_EDITABLE_BASELINE_TOKENS = 200;
+/** Estimated size of an edit DIFF as a fraction of the baseline it edits — a
+ * targeted edit re-emits only the changed lines plus a little context. Used to
+ * estimate the OUTPUT tokens a diff saves vs a full rewrite. */
+export const EDIT_DIFF_FRACTION = 0.25;
+
+export type EditIntent = "edit" | "rewrite" | "unknown";
+
+const EDIT_VERBS = new Set([
+  "fix", "rename", "add", "remove", "change", "update", "tweak",
+  "adjust", "correct", "replace", "insert", "delete",
+]);
+const REWRITE_VERBS = new Set(["rewrite", "redo", "regenerate", "rework", "recreate"]);
+const REWRITE_PHRASES = ["from scratch", "start over"];
+
+/** Keyword heuristic over the request text. "edit" = targeted-change verbs
+ * (fix, rename, add, remove, change, update, tweak, adjust, correct, replace,
+ * insert, delete a…); "rewrite" = wholesale verbs (rewrite, redo, regenerate,
+ * rework, "from scratch", start over, recreate). Rewrite signals WIN when both
+ * appear (a rewrite is the safe, non-optimizing default — never diff when the
+ * user asked for a full rewrite). No signal => "unknown". */
+export function classifyEditIntent(text: string | null | undefined): EditIntent {
+  const t = text?.toLowerCase();
+  if (!t || !t.trim()) return "unknown";
+  const words = new Set(t.split(/[^a-z0-9]+/).filter((w) => w.length > 0));
+  const hasRewrite =
+    REWRITE_PHRASES.some((p) => t.includes(p)) || [...REWRITE_VERBS].some((v) => words.has(v));
+  if (hasRewrite) return "rewrite"; // rewrite wins when both signals appear
+  const hasEdit = [...EDIT_VERBS].some((v) => words.has(v));
+  if (hasEdit) return "edit";
+  return "unknown";
+}
+
+export interface PlanEditVsRewriteInput {
+  /** estimated token count of the baseline being modified (0/undefined = none) */
+  baselineTokens: number | null | undefined;
+  /** the user's change request text (intent is classified from it) */
+  requestText: string | null | undefined;
+  /** §12 off switch — "passthrough" disables the optimization entirely */
+  routingMode: RoutingMode;
+  /** override the min editable baseline (default DEFAULT_MIN_EDITABLE_BASELINE_TOKENS) */
+  minBaselineTokens?: number;
+}
+
+export type EditRewriteRuleName = "routing-mode" | "no-baseline" | "intent" | "baseline-size";
+
+export interface EditVsRewritePlan {
+  /** "edit" = instruct the model to return a compact diff; "rewrite" = leave the
+   * dispatch unchanged (full generation). */
+  mode: "edit" | "rewrite";
+  /** true = the gateway should inject the compact-diff directive for this dispatch */
+  applyDiffDirective: boolean;
+  ruleId: EditRewriteRuleName;
+  ruleChain: Array<{ rule: EditRewriteRuleName; outcome: string }>;
+  reason: string;
+  /** estimated OUTPUT tokens saved by a diff vs a full rewrite of the baseline */
+  estimatedTokensSaved: number;
+  estimationBasis: string;
+}
+
+const EDIT_VS_REWRITE_BASIS =
+  "edit-vs-rewrite: estimated OUTPUT tokens saved by returning a diff (~EDIT_DIFF_FRACTION of baseline) instead of re-emitting the full baseline";
+
+/** Decide whether a modification request is a targeted edit worth diffing.
+ * Like routeModel/planPromptCache, "passthrough" is the §12 off switch and the
+ * default is the non-optimizing full rewrite — a diff is only chosen on a clear
+ * edit signal over a large-enough baseline (no downgrade without a clear
+ * signal). When chosen, a rewrite would re-emit ≈ baselineTokens of output; a
+ * diff emits ≈ EDIT_DIFF_FRACTION×baseline; saved ≈ baseline×(1−fraction). */
+export function planEditVsRewrite(input: PlanEditVsRewriteInput): EditVsRewritePlan {
+  const minBaseline = input.minBaselineTokens ?? DEFAULT_MIN_EDITABLE_BASELINE_TOKENS;
+  const baselineTokens = input.baselineTokens ?? 0;
+
+  const rewrite = (
+    ruleId: EditRewriteRuleName,
+    ruleChain: Array<{ rule: EditRewriteRuleName; outcome: string }>,
+    reason: string,
+  ): EditVsRewritePlan => ({
+    mode: "rewrite",
+    applyDiffDirective: false,
+    ruleId,
+    ruleChain,
+    reason,
+    estimatedTokensSaved: 0,
+    estimationBasis: EDIT_VS_REWRITE_BASIS,
+  });
+
+  if (input.routingMode === "passthrough") {
+    return rewrite(
+      "routing-mode",
+      [{ rule: "routing-mode", outcome: "passthrough" }],
+      "edit-vs-rewrite disabled for this user (passthrough mode)",
+    );
+  }
+
+  if (baselineTokens <= 0) {
+    return rewrite(
+      "no-baseline",
+      [
+        { rule: "routing-mode", outcome: "applied" },
+        { rule: "no-baseline", outcome: "no-baseline" },
+      ],
+      "no baseline supplied; nothing to diff against",
+    );
+  }
+
+  const intent = classifyEditIntent(input.requestText);
+  if (intent !== "edit") {
+    return rewrite(
+      "intent",
+      [
+        { rule: "routing-mode", outcome: "applied" },
+        { rule: "no-baseline", outcome: "applied" },
+        { rule: "intent", outcome: intent },
+      ],
+      `request intent is '${intent}', not a targeted edit; defaulting to a full rewrite`,
+    );
+  }
+
+  if (baselineTokens < minBaseline) {
+    return rewrite(
+      "baseline-size",
+      [
+        { rule: "routing-mode", outcome: "applied" },
+        { rule: "no-baseline", outcome: "applied" },
+        { rule: "intent", outcome: "edit" },
+        { rule: "baseline-size", outcome: "too-small" },
+      ],
+      `baseline ~${baselineTokens} tokens is below the ${minBaseline}-token minimum; a full rewrite is already cheap`,
+    );
+  }
+
+  return {
+    mode: "edit",
+    applyDiffDirective: true,
+    ruleId: "baseline-size",
+    ruleChain: [
+      { rule: "routing-mode", outcome: "applied" },
+      { rule: "no-baseline", outcome: "applied" },
+      { rule: "intent", outcome: "edit" },
+      { rule: "baseline-size", outcome: "applied" },
+    ],
+    reason: `baseline ~${baselineTokens} tokens reads as a targeted edit; instructing a compact diff instead of a full rewrite`,
+    estimatedTokensSaved: Math.round(baselineTokens * (1 - EDIT_DIFF_FRACTION)),
+    estimationBasis: EDIT_VS_REWRITE_BASIS,
+  };
+}

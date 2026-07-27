@@ -1007,14 +1007,14 @@ ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecre
   (3 mock = usable with no external keys; anthropic/openai/google/xai go live
   once you add a model credential in /admin → Model Credentials, which also
   lists exactly which agents are still waiting on one), and per-user agent
-  policies with a per-run budget cap (/admin → Agent Governance).
+  policies with a per-run budget cap (/admin → Agents).
 
   No provider credential is seeded, deliberately — a placeholder key would
   make routing believe those four providers work and turn a clean 409 into a
   failed dispatch. Add a real one, or stay on the mock agents.
 
   Keys: every user above already has one. To onboard anyone else, create them
-  in /admin → Users & Roles and hit 'issue key' on their row — the plaintext
+  in /admin → Users and hit 'issue key' on their row — the plaintext
   is shown once there and never again. Users bring their own provider keys in
   /app → Settings.
 
