@@ -612,6 +612,8 @@ export const costEvents = pgTable(
         "file_preprocessing",
         "prompt_caching",
         "lazy_tool_loading",
+        "semantic_caching",
+        "request_batching",
       ],
     }).notNull(),
     requestedAgentId: uuid("requested_agent_id"),
@@ -631,6 +633,30 @@ export const costEvents = pgTable(
     index("cost_events_user_at_idx").on(t.userId, t.at),
     index("cost_events_technique_idx").on(t.technique),
   ],
+);
+
+// OPTIMIZATION §8/§10 semantic caching: a REAL exact-match response cache,
+// scoped strictly per (user, agent). A row is the CALLER'S OWN record — like
+// the rest of the ledger it carries no FKs, and the §12 governance boundary is
+// enforced at the route by scoping every lookup with BOTH userId AND agentId,
+// so a user can never be served another user's (or another agent's) cached
+// response. promptHash is the sha256 of the normalized input; normalizedInput
+// is stored beside it as a hash-collision guard (the route re-checks equality).
+export const semanticCache = pgTable(
+  "semantic_cache",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id").notNull(), // SCOPE — never cross-user
+    agentId: uuid("agent_id").notNull(), // SCOPE — never cross-agent
+    promptHash: text("prompt_hash").notNull(), // sha256 of the normalized input
+    normalizedInput: text("normalized_input").notNull(), // stored to guard against hash collision
+    outputText: text("output_text").notNull(),
+    model: text("model"),
+    inputTokens: integer("input_tokens").notNull().default(0),
+    outputTokens: integer("output_tokens").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("semantic_cache_user_agent_hash_uq").on(t.userId, t.agentId, t.promptHash)],
 );
 
 // ORCHESTRATION (EPIC-05, pillar 7): one row per run. The task graph and run

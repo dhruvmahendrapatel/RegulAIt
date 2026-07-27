@@ -209,6 +209,18 @@ export const invokeAgentSchema = z.object({
    * is instructed to return a compact diff instead of re-emitting the whole
    * thing. Absent = plain generation (byte-identical to the pre-edit contract). */
   baseline: z.string().max(200_000).optional(),
+  /** pillar-6 file preprocessing: large reference/file content attached to the
+   * dispatch. It is deterministically shrunk (redundant whitespace collapsed,
+   * long data blobs elided) before the model sees it. Absent = no reference
+   * content (byte-identical to the pre-preprocessing contract). */
+  referenceContent: z.string().max(500_000).optional(),
+  /** pillar-6 semantic caching: opt in to the REAL per-(user,agent) exact-match
+   * response cache. When true and this dispatch's normalized input matches a
+   * fresh stored row for the SAME user+agent, the stored response is served
+   * WITHOUT a provider call; on a miss the dispatch runs normally and its result
+   * is stored for later re-asks. Absent/false = no cache lookup or store
+   * (byte-identical to the pre-caching contract). Never crosses users or agents. */
+  semanticCache: z.boolean().optional(),
   costSensitivity: z.enum(["cost-sensitive", "standard", "quality-sensitive"]).optional(),
   /** true = actually execute the routed model (governed dispatch); absent/false
    * keeps the decision-only behavior */

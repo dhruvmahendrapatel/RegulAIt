@@ -640,6 +640,44 @@ dispatch only — persisted conversation history keeps the original request, so 
 re-sends. Suite 288 → 292 (edit-rewrite.test.ts); optimizer 36 → 47. No UI change. Remaining
 pillar-6 techniques: file pre-processing, semantic caching, request batching.
 
+**File preprocessing, 2026-07-27 — pillar 6's 6th technique.** NO migration (enum value existed).
+Pure `preprocessReference` deterministically shrinks attached reference/file content without
+changing meaning (collapse whitespace runs, trim, collapse 3+ blank lines, elide >512-char
+base64/data blobs) while PRESERVING fenced code blocks verbatim (idempotent). `planFilePreprocessing`
+decides whether to apply (passthrough off-switch; below a 200-token floor or a zero-reduction result
+left untouched) and estimates INPUT tokens saved. Gateway: opt-in `referenceContent` invoke field;
+reference tokens folded into the routing estimate at the ACTUAL sent size; processed content appended
+as a delimited REFERENCE block (coexists with edit-vs-rewrite's baseline in the shared dispatchInput
+composition); one file_preprocessing cost_events estimate at the served input price; persistTurns
+keeps the original turn so the reference never bloats history. Suite 297 → 302; optimizer 47 → 59.
+Remaining pillar-6: semantic caching + request batching (next slice, migration 0031).
+
+**Semantic caching + request batching, 2026-07-27 — pillar 6's 7th & final techniques (migration
+0031).** Semantic caching is a REAL opt-in per-(user,agent) exact-match response cache: an
+identical (whitespace/case-normalized) single-turn re-ask within a 1h TTL is served straight from
+the `semantic_cache` table, skipping the provider entirely — no usage_events, one `semantic_caching`
+cost_events row for the whole-call saving. The lookup runs INSIDE the governance allow-gate and is
+scoped by BOTH userId AND agentId (with a normalizedInput collision guard), so a user is never served
+another user's — or another agent's — cached response (§12); misses store the result (refreshing the
+TTL, never caching refusals/empty/PII-withheld). Request batching is an ESTIMATE only: on an
+orchestration auto-pass with ≥2 ready nodes on the same model, one `request_batching` cost_events row
+books the per-request overhead batching would amortize — dispatch is unchanged (true async
+Batches-API batching doesn't fit the synchronous interactive path). Suite 302 → 307; optimizer 59 →
+69. **All seven pillar-6 optimization techniques now shipped**: model routing, context compaction,
+lazy tool-loading, prompt caching, edit-vs-rewrite, file preprocessing, semantic caching (+ the
+request-batching estimator).
+
+**Admin console UX polish, 2026-07-27.** The deferred follow-ups from the console restructure:
+`dataTable()` with free-text filter + keyboard-operable sortable headers (aria-sort, numeric-aware)
++ pagination (adopted on Users/Audit/Approvals/Projects/Findings); `humanizeKey` so th labels read
+"Cost Center"/"Alert %" not camelCase; raw-JSON operator views replaced with formatted UI
+(Simulation decision = effect badge + numbered rule chain, Compliance = badges + kv list, Infra
+posture = inline counts, each with raw behind a `<details>`); and an a11y pass (focus-after-render on
+the panel h1, nav aria-current, sortable-th keyboard, text badges for status not color-only, contrast
+bump). Browser-verified (filter/sort/paginate on Audit, humanized headers, no console errors beyond
+pre-auth 401s). This closes the "review the whole UI/UX" thread except the intentionally-open items
+(nothing further deferred beyond what the deeper-a11y sweep would add).
+
 **Agent-driven task decomposition, 2026-07-26 — pillar 7's headline lands, human-gated.**
 `POST /v1/runs/decompose` {goal, projectId?, leadAgentId?}: a Team-Lead agent (leadAgentId ??
 user default ?? cheapest granted mock, entitlement-checked under mode "plan") drafts a

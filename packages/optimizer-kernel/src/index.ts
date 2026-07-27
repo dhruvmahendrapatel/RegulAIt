@@ -671,3 +671,297 @@ export function planEditVsRewrite(input: PlanEditVsRewriteInput): EditVsRewriteP
     estimationBasis: EDIT_VS_REWRITE_BASIS,
   };
 }
+
+// ---------------------------------------------------------------------------
+// §8/§10 semantic caching: an EXACT-MATCH response cache scoped per
+// (user, agent). This kernel owns only the PURE key normalization + the TTL
+// default — the gateway holds the real cache (a Postgres table), does the
+// scoped lookup/store, and enforces the §12 governance boundary (a hit is only
+// ever served to the SAME user+agent that stored it, never across users or
+// agents). normalizeCacheInput is the deterministic key: two requests that
+// differ only in surrounding/interior whitespace or letter case collapse to the
+// same key, so a re-ask served from cache skips the provider entirely.
+// ---------------------------------------------------------------------------
+
+/** Default cache validity window: a stored response older than this is a MISS
+ * (the gateway re-dispatches and refreshes the row). 1 hour. */
+export const DEFAULT_SEMANTIC_CACHE_TTL_SECONDS = 3600;
+
+/** Deterministic normalization for the semantic-cache key: trim the ends,
+ * lowercase, and collapse every run of whitespace to a single space. Pure and
+ * idempotent (f(f(x)) === f(x)). The gateway hashes the RESULT for the stored
+ * key and keeps the normalized form beside it as a collision guard. */
+export function normalizeCacheInput(text: string): string {
+  return text.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+// ---------------------------------------------------------------------------
+// §8 request batching (ESTIMATE-ONLY): on an orchestration auto-pass the READY
+// set may contain several nodes owned by the SAME model. A real Batches API
+// would amortize the per-request framing (system re-send, tool manifest, HTTP
+// overhead) N same-model requests each pay individually. We do NOT actually
+// batch in the synchronous interactive path — nodes still dispatch one at a
+// time — so this is purely the ESTIMATE of what batching those same-model
+// requests WOULD save, recorded for the savings dashboard. Pure like the other
+// planners: "passthrough" is the §12 off switch and produces no saving.
+// ---------------------------------------------------------------------------
+
+/** Per-request framing/overhead tokens (system re-send, tool manifest, request
+ * scaffolding) that batching amortizes across a same-model group — saved once
+ * per request beyond the first. A conservative default. */
+export const DEFAULT_BATCH_OVERHEAD_TOKENS = 200;
+
+const REQUEST_BATCHING_BASIS =
+  "request-batching: ESTIMATE of per-request framing tokens (system re-send / request scaffolding) that batching same-model dispatches would amortize — nodes still dispatch individually in the synchronous path";
+
+export type RequestBatchingRuleName = "routing-mode" | "group-size";
+
+export interface PlanRequestBatchingInput {
+  /** the owner model of each READY node this pass (order/duplicates matter —
+   * one entry per node; an unpriced/absent model can be any stable label) */
+  models: readonly string[];
+  /** §12 off switch — "passthrough" disables the estimate entirely */
+  routingMode: RoutingMode;
+  /** override the amortized per-request overhead (default DEFAULT_BATCH_OVERHEAD_TOKENS) */
+  perRequestOverheadTokens?: number;
+}
+
+export interface RequestBatchingPlan {
+  /** true = at least one same-model group of size ≥2 exists this pass */
+  batchable: boolean;
+  /** every model group and its ready-node count, in stable (count desc, model) order */
+  groups: Array<{ model: string; count: number }>;
+  /** Σ over groups of size n≥2 of (n − 1) × perRequestOverheadTokens */
+  estimatedTokensSaved: number;
+  estimationBasis: string;
+  ruleChain: Array<{ rule: RequestBatchingRuleName; outcome: "passthrough" | "applied" | "batchable" | "no-batchable-group" }>;
+}
+
+/** Group the ready-node owner models; a group of ≥2 same-model nodes is
+ * batchable and would save (count − 1) × overhead tokens (the first request
+ * still pays its framing; each additional same-model request amortizes it).
+ * "passthrough" and a set with no repeated model both yield batchable:false, 0.
+ * Pure — the gateway records the estimate, dispatch behaviour is unchanged. */
+export function planRequestBatching(input: PlanRequestBatchingInput): RequestBatchingPlan {
+  const overhead = input.perRequestOverheadTokens ?? DEFAULT_BATCH_OVERHEAD_TOKENS;
+
+  if (input.routingMode === "passthrough") {
+    return {
+      batchable: false,
+      groups: [],
+      estimatedTokensSaved: 0,
+      estimationBasis: REQUEST_BATCHING_BASIS,
+      ruleChain: [{ rule: "routing-mode", outcome: "passthrough" }],
+    };
+  }
+
+  const counts = new Map<string, number>();
+  for (const model of input.models) counts.set(model, (counts.get(model) ?? 0) + 1);
+  const groups = [...counts.entries()]
+    .map(([model, count]) => ({ model, count }))
+    .sort((a, b) => b.count - a.count || a.model.localeCompare(b.model));
+
+  const estimatedTokensSaved = groups.reduce(
+    (sum, g) => sum + (g.count >= 2 ? (g.count - 1) * overhead : 0),
+    0,
+  );
+  const batchable = estimatedTokensSaved > 0;
+
+  return {
+    batchable,
+    groups,
+    estimatedTokensSaved,
+    estimationBasis: REQUEST_BATCHING_BASIS,
+    ruleChain: [
+      { rule: "routing-mode", outcome: "applied" },
+      { rule: "group-size", outcome: batchable ? "batchable" : "no-batchable-group" },
+    ],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// §8 file preprocessing: when a caller attaches large reference/file content to
+// a dispatch, deterministically pre-processing it (collapse redundant
+// whitespace, dedupe blank lines, trim trailing spaces, elide very long inlined
+// data/base64 blobs) shrinks the INPUT tokens the model sees WITHOUT changing
+// meaning. The reduced content is really what's sent (like edit-vs-rewrite
+// transforms the dispatch), so the saving is a real INPUT-token reduction. This
+// is the PURE transform + decision — whether it's worth preprocessing and an
+// ESTIMATE of the input tokens saved; the gateway attaches the processed
+// content and writes the cost_events estimate.
+// ---------------------------------------------------------------------------
+
+/** Below this many tokens of reference content, preprocessing saves too little to bother. */
+export const DEFAULT_MIN_PREPROCESS_TOKENS = 200;
+
+/** Elision marker substituted for very long unbroken tokens (base64/data URIs).
+ * Contains no whitespace and is far shorter than the elision threshold, so
+ * preprocessing stays idempotent. */
+const LONG_TOKEN_ELISION = "[…elided-long-token…]";
+
+/** Deterministically shrink reference/file content WITHOUT changing meaning:
+ * collapse runs of 3+ blank lines to 1, collapse runs of spaces/tabs to a single
+ * space (but NOT inside fenced code blocks ```...```), trim trailing whitespace
+ * per line, and replace very long unbroken tokens (>512 chars, e.g. base64/data
+ * URIs) with a short elision marker. Returns the reduced text. Pure + idempotent
+ * (f(f(x)) === f(x)). */
+export function preprocessReference(text: string): string {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  let inFence = false;
+  let blankRun = 0;
+  const flushBlanks = () => {
+    if (blankRun > 0) {
+      // collapse a run of 3+ blank lines to a single blank line; keep 1–2 as-is
+      const keep = blankRun >= 3 ? 1 : blankRun;
+      for (let i = 0; i < keep; i++) out.push("");
+      blankRun = 0;
+    }
+  };
+  for (const raw of lines) {
+    if (/^\s*```/.test(raw)) {
+      // fence delimiter: flush pending blanks, toggle, emit (trailing-trim only)
+      flushBlanks();
+      inFence = !inFence;
+      out.push(raw.replace(/[ \t]+$/, ""));
+      continue;
+    }
+    if (inFence) {
+      // inside a fenced code block: preserve the line verbatim (no whitespace
+      // collapse, no blank-line collapse, no elision — code meaning is exact)
+      out.push(raw);
+      continue;
+    }
+    // outside a fence: collapse space/tab runs, trim trailing whitespace, elide
+    // very long unbroken tokens
+    const line = raw
+      .replace(/[ \t]+/g, " ")
+      .replace(/[ \t]+$/, "")
+      .replace(/\S{513,}/g, LONG_TOKEN_ELISION);
+    if (line === "") {
+      blankRun++;
+      continue;
+    }
+    flushBlanks();
+    out.push(line);
+  }
+  flushBlanks();
+  return out.join("\n");
+}
+
+export interface PlanFilePreprocessingInput {
+  /** the reference/file content attached to the dispatch (null/undefined/"" = none) */
+  referenceText: string | null | undefined;
+  /** §12 off switch — "passthrough" disables preprocessing entirely */
+  routingMode: RoutingMode;
+  /** override the min reference size (default DEFAULT_MIN_PREPROCESS_TOKENS) */
+  minTokens?: number;
+}
+
+export type FilePreprocessRuleName = "routing-mode" | "no-content" | "content-size" | "no-reduction";
+
+export interface FilePreprocessingPlan {
+  /** true = send the preprocessed content + book the estimate */
+  apply: boolean;
+  /** the reduced text (=== input when apply is false) */
+  processedText: string;
+  ruleId: FilePreprocessRuleName;
+  ruleChain: Array<{ rule: FilePreprocessRuleName; outcome: string }>;
+  reason: string;
+  /** estimated INPUT tokens saved by sending the reduced reference */
+  estimatedTokensSaved: number;
+  estimationBasis: string;
+}
+
+const FILE_PREPROCESSING_BASIS =
+  "file-preprocessing: estimated INPUT tokens saved by collapsing redundant whitespace / eliding long data blobs before the model sees the reference";
+
+/** Decide whether attached reference content is worth preprocessing. Like
+ * routeModel/planPromptCache/planEditVsRewrite, "passthrough" is the §12 off
+ * switch and the default is to leave the reference unchanged — the reduced
+ * content is only sent when preprocessing a large-enough reference actually
+ * shrinks it (no change without a clear signal). When applied, the estimate is
+ * the INPUT tokens the smaller reference saves; the gateway converts it to USD
+ * at the served agent's input price. */
+export function planFilePreprocessing(input: PlanFilePreprocessingInput): FilePreprocessingPlan {
+  const minTokens = input.minTokens ?? DEFAULT_MIN_PREPROCESS_TOKENS;
+  const text = input.referenceText ?? "";
+
+  const skip = (
+    ruleId: FilePreprocessRuleName,
+    ruleChain: Array<{ rule: FilePreprocessRuleName; outcome: string }>,
+    reason: string,
+    processedText = text,
+  ): FilePreprocessingPlan => ({
+    apply: false,
+    processedText,
+    ruleId,
+    ruleChain,
+    reason,
+    estimatedTokensSaved: 0,
+    estimationBasis: FILE_PREPROCESSING_BASIS,
+  });
+
+  if (input.routingMode === "passthrough") {
+    return skip(
+      "routing-mode",
+      [{ rule: "routing-mode", outcome: "passthrough" }],
+      "file preprocessing disabled for this user (passthrough mode)",
+    );
+  }
+
+  if (!text) {
+    return skip(
+      "no-content",
+      [
+        { rule: "routing-mode", outcome: "applied" },
+        { rule: "no-content", outcome: "no-content" },
+      ],
+      "no reference content supplied; nothing to preprocess",
+    );
+  }
+
+  const contentTokens = Math.ceil(text.length / 4);
+  if (contentTokens < minTokens) {
+    return skip(
+      "content-size",
+      [
+        { rule: "routing-mode", outcome: "applied" },
+        { rule: "no-content", outcome: "applied" },
+        { rule: "content-size", outcome: "too-small" },
+      ],
+      `reference ~${contentTokens} tokens is below the ${minTokens}-token minimum; preprocessing saves too little to bother`,
+    );
+  }
+
+  const processedText = preprocessReference(text);
+  const saved = Math.max(0, Math.ceil((text.length - processedText.length) / 4));
+  if (saved <= 0) {
+    return skip(
+      "no-reduction",
+      [
+        { rule: "routing-mode", outcome: "applied" },
+        { rule: "no-content", outcome: "applied" },
+        { rule: "content-size", outcome: "applied" },
+        { rule: "no-reduction", outcome: "no-reduction" },
+      ],
+      "preprocessing produced no meaningful reduction; sending the reference unchanged",
+      processedText,
+    );
+  }
+
+  return {
+    apply: true,
+    processedText,
+    ruleId: "no-reduction",
+    ruleChain: [
+      { rule: "routing-mode", outcome: "applied" },
+      { rule: "no-content", outcome: "applied" },
+      { rule: "content-size", outcome: "applied" },
+      { rule: "no-reduction", outcome: "applied" },
+    ],
+    reason: `reference ~${contentTokens} tokens preprocessed; ~${saved} input tokens saved by collapsing redundant whitespace / eliding long data blobs before the model sees it`,
+    estimatedTokensSaved: saved,
+    estimationBasis: FILE_PREPROCESSING_BASIS,
+  };
+}

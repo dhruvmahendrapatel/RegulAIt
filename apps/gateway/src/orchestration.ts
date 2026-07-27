@@ -34,7 +34,12 @@ import {
   type TaskGraph,
   type TaskNode,
 } from "@regulait/orchestration-kernel";
-import { classifyComplexity, estimateTokens, routeModel } from "@regulait/optimizer-kernel";
+import {
+  classifyComplexity,
+  estimateTokens,
+  planRequestBatching,
+  routeModel,
+} from "@regulait/optimizer-kernel";
 import {
   isModelProviderKind,
   type ModelChatMessage,
@@ -1491,6 +1496,11 @@ export function registerOrchestrationRoutes(
     let stoppedReason = "max_nodes_reached";
     let dispatched = 0;
     let iterations = 0;
+    // PILLAR 6 §8 REQUEST BATCHING (ESTIMATE-ONLY): recorded ONCE per auto pass,
+    // on the first non-empty READY set. See the estimate block below — nodes
+    // still dispatch individually; true batching (an async Batches API) is out
+    // of scope for this synchronous interactive path.
+    let batchingEstimated = false;
 
     while (dispatched < body.maxNodes) {
       if (++iterations > body.maxNodes * 3 + 10) {
@@ -1516,6 +1526,57 @@ export function registerOrchestrationRoutes(
               : "no_ready_nodes";
         break;
       }
+
+      // PILLAR 6 §8 REQUEST BATCHING (ESTIMATE-ONLY): the READY set may hold
+      // several nodes owned by the SAME model. A real Batches API would amortize
+      // the per-request framing (system re-send, request scaffolding) each
+      // individual dispatch pays; we do NOT batch in this synchronous
+      // interactive path — nodes still dispatch one at a time below — so this is
+      // purely the ESTIMATE of that opportunity, recorded once per auto pass in
+      // the same per-technique savings ledger. It NEVER changes dispatch
+      // behaviour. "passthrough" (the initiator's §12 off switch) yields no
+      // estimate. True async batching is out of scope here.
+      if (!batchingEstimated) {
+        batchingEstimated = true;
+        const owners = ready
+          .map((nodeId) => {
+            const node = graph.nodes.find((n) => n.id === nodeId);
+            return node ? (state.owners[node.id] ?? node.ownerAgentId) : null;
+          })
+          .filter((id): id is string => !!id);
+        const ownerAgents = owners.length
+          ? await db.select().from(agents).where(inArray(agents.id, owners))
+          : [];
+        // group by served model; fall back to the agent id as a stable label so
+        // distinct unpriced/no-model owners don't spuriously batch together
+        const modelById = new Map(ownerAgents.map((a) => [a.id, a.model ?? a.id]));
+        const models = owners.map((id) => modelById.get(id) ?? id);
+        const [initPolicy] = await db
+          .select()
+          .from(userAgentPolicies)
+          .where(eq(userAgentPolicies.userId, run.initiatingUserId));
+        const plan = planRequestBatching({
+          models,
+          routingMode: initPolicy?.routingMode ?? "automatic",
+        });
+        if (plan.batchable) {
+          await db.insert(costEvents).values({
+            userId: run.initiatingUserId,
+            objectType: "run",
+            objectId: run.id,
+            technique: "request_batching",
+            estimatedTokensSaved: plan.estimatedTokensSaved,
+            // an amortized-overhead estimate, not a priced substitution — left
+            // null rather than invent a dollar figure
+            estimatedCostSavedUsd: null,
+            estimationBasis: plan.estimationBasis,
+            ruleId: "request-batching",
+            ...(run.projectId ? { projectId: run.projectId } : {}),
+            detail: { groups: plan.groups },
+          });
+        }
+      }
+
       // One WAVE = the whole ready set (capped by the pass budget). Each wave
       // node is started (through its own §5.2 gates) and dispatched before
       // any submission lands, so independent branches overlap in the recorded

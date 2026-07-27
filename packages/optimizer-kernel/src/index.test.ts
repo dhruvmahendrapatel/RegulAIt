@@ -12,6 +12,13 @@ import {
   planEditVsRewrite,
   DEFAULT_MIN_EDITABLE_BASELINE_TOKENS,
   EDIT_DIFF_FRACTION,
+  preprocessReference,
+  planFilePreprocessing,
+  DEFAULT_MIN_PREPROCESS_TOKENS,
+  normalizeCacheInput,
+  DEFAULT_SEMANTIC_CACHE_TTL_SECONDS,
+  planRequestBatching,
+  DEFAULT_BATCH_OVERHEAD_TOKENS,
   selectTools,
   estimateTokens,
   routeModel,
@@ -36,6 +43,83 @@ function base(overrides: Partial<RouteModelInput> = {}): RouteModelInput {
     ...overrides,
   };
 }
+
+describe("normalizeCacheInput", () => {
+  it("trims, lowercases, and collapses whitespace runs to a single space", () => {
+    expect(normalizeCacheInput("  Hello   World\n\tGoodbye  ")).toBe("hello world goodbye");
+  });
+
+  it("is idempotent (f(f(x)) === f(x))", () => {
+    const raw = "\t Summarize   THE  Attached\n\n reference  ";
+    const once = normalizeCacheInput(raw);
+    expect(normalizeCacheInput(once)).toBe(once);
+  });
+
+  it("collapses case/whitespace-only differences to the same key", () => {
+    expect(normalizeCacheInput("Fix the BUG")).toBe(normalizeCacheInput("fix   the\tbug"));
+  });
+
+  it("keeps a sane default TTL", () => {
+    expect(DEFAULT_SEMANTIC_CACHE_TTL_SECONDS).toBe(3600);
+  });
+});
+
+describe("planRequestBatching", () => {
+  it("fewer than 2 same-model nodes is not batchable (0 saved)", () => {
+    const plan = planRequestBatching({ models: ["mock-balanced"], routingMode: "automatic" });
+    expect(plan.batchable).toBe(false);
+    expect(plan.estimatedTokensSaved).toBe(0);
+    expect(plan.groups).toEqual([{ model: "mock-balanced", count: 1 }]);
+  });
+
+  it("3 same-model nodes save (count - 1) * overhead", () => {
+    const plan = planRequestBatching({
+      models: ["m", "m", "m"],
+      routingMode: "automatic",
+    });
+    expect(plan.batchable).toBe(true);
+    expect(plan.estimatedTokensSaved).toBe(2 * DEFAULT_BATCH_OVERHEAD_TOKENS);
+    expect(plan.groups).toEqual([{ model: "m", count: 3 }]);
+  });
+
+  it("honours a custom per-request overhead", () => {
+    const plan = planRequestBatching({
+      models: ["m", "m"],
+      routingMode: "automatic",
+      perRequestOverheadTokens: 500,
+    });
+    expect(plan.estimatedTokensSaved).toBe(500);
+  });
+
+  it("passthrough disables the estimate entirely (§12 off switch)", () => {
+    const plan = planRequestBatching({ models: ["m", "m", "m"], routingMode: "passthrough" });
+    expect(plan.batchable).toBe(false);
+    expect(plan.estimatedTokensSaved).toBe(0);
+    expect(plan.groups).toEqual([]);
+    expect(plan.ruleChain[0]!.outcome).toBe("passthrough");
+  });
+
+  it("groups mixed models correctly and only counts batchable groups", () => {
+    // a:3 (batchable, saves 2*overhead), b:2 (batchable, saves 1*overhead), c:1 (not)
+    const plan = planRequestBatching({
+      models: ["a", "b", "a", "c", "b", "a"],
+      routingMode: "automatic",
+    });
+    expect(plan.batchable).toBe(true);
+    expect(plan.estimatedTokensSaved).toBe(3 * DEFAULT_BATCH_OVERHEAD_TOKENS); // 2 + 1
+    expect(plan.groups).toEqual([
+      { model: "a", count: 3 },
+      { model: "b", count: 2 },
+      { model: "c", count: 1 },
+    ]);
+  });
+
+  it("all-distinct models is not batchable", () => {
+    const plan = planRequestBatching({ models: ["a", "b", "c"], routingMode: "automatic" });
+    expect(plan.batchable).toBe(false);
+    expect(plan.estimatedTokensSaved).toBe(0);
+  });
+});
 
 describe("classifyComplexity", () => {
   it("treats missing input as high (no signal, no downgrade)", () => {
@@ -480,5 +564,128 @@ describe("planEditVsRewrite (edit vs rewrite §8)", () => {
   it("exposes the documented default constants", () => {
     expect(DEFAULT_MIN_EDITABLE_BASELINE_TOKENS).toBe(200);
     expect(EDIT_DIFF_FRACTION).toBe(0.25);
+  });
+});
+
+describe("preprocessReference (file preprocessing §8)", () => {
+  it("collapses redundant whitespace, blank-line runs, and trailing spaces in prose", () => {
+    const out = preprocessReference("hello    world  \n\n\n\n\nfoo\t\tbar   ");
+    expect(out).toBe("hello world\n\nfoo bar");
+  });
+
+  it("preserves fenced code blocks verbatim (no space or blank-line collapse inside)", () => {
+    const src = [
+      "prose   with    spaces",
+      "```ts",
+      "const  x   =   1;", // multiple spaces inside a fence must survive
+      "",
+      "",
+      "",
+      "const  y = 2;",
+      "```",
+      "more     prose",
+    ].join("\n");
+    const out = preprocessReference(src);
+    expect(out).toContain("const  x   =   1;"); // exact spacing preserved
+    expect(out).toContain("\n\n\n"); // the 3 blank lines inside the fence survive
+    expect(out.startsWith("prose with spaces")).toBe(true); // outside collapsed
+    expect(out.endsWith("more prose")).toBe(true);
+  });
+
+  it("elides very long unbroken tokens (base64/data URIs) but keeps normal words", () => {
+    const blob = "A".repeat(2000);
+    const out = preprocessReference(`before ${blob} after`);
+    expect(out).not.toContain(blob);
+    expect(out).toContain("before");
+    expect(out).toContain("after");
+    expect(out.length).toBeLessThan(`before ${blob} after`.length);
+  });
+
+  it("is idempotent: f(f(x)) === f(x)", () => {
+    const src = [
+      "a    b   c   ",
+      "",
+      "",
+      "",
+      "",
+      "```py",
+      "x  =  " + "Z".repeat(1000),
+      "```",
+      "tail   " + "Q".repeat(900),
+    ].join("\n");
+    const once = preprocessReference(src);
+    expect(preprocessReference(once)).toBe(once);
+  });
+
+  it("leaves already-clean prose unchanged", () => {
+    const clean = "the quick brown fox\n\njumps over the lazy dog";
+    expect(preprocessReference(clean)).toBe(clean);
+  });
+});
+
+describe("planFilePreprocessing (file preprocessing §8)", () => {
+  // > 200 tokens (chars/4) of redundant content that really shrinks.
+  const REDUNDANT = ("word     word     word     word\n\n\n\n\n".repeat(40));
+
+  it("passthrough disables preprocessing entirely (§12 off switch)", () => {
+    const p = planFilePreprocessing({ referenceText: REDUNDANT, routingMode: "passthrough" });
+    expect(p.apply).toBe(false);
+    expect(p.ruleId).toBe("routing-mode");
+    expect(p.processedText).toBe(REDUNDANT);
+    expect(p.estimatedTokensSaved).toBe(0);
+    expect(p.reason).toContain("passthrough");
+  });
+
+  it("no reference content (null/undefined/empty) means nothing to preprocess", () => {
+    for (const referenceText of [null, undefined, ""]) {
+      const p = planFilePreprocessing({ referenceText, routingMode: "automatic" });
+      expect(p.apply).toBe(false);
+      expect(p.ruleId).toBe("no-content");
+      expect(p.estimatedTokensSaved).toBe(0);
+    }
+  });
+
+  it("a below-minimum reference is left unchanged (too small to bother)", () => {
+    const small = "a   b\n\n\n\nc"; // well under 200 tokens
+    const p = planFilePreprocessing({ referenceText: small, routingMode: "automatic" });
+    expect(p.apply).toBe(false);
+    expect(p.ruleId).toBe("content-size");
+    expect(p.ruleChain.at(-1)!.outcome).toBe("too-small");
+    expect(p.processedText).toBe(small);
+    expect(p.estimatedTokensSaved).toBe(0);
+  });
+
+  it("a large redundant reference is preprocessed, saving >0 input tokens and shrinking the text", () => {
+    const p = planFilePreprocessing({ referenceText: REDUNDANT, routingMode: "automatic" });
+    expect(p.apply).toBe(true);
+    expect(p.ruleId).toBe("no-reduction");
+    expect(p.ruleChain.at(-1)!.outcome).toBe("applied");
+    expect(p.estimatedTokensSaved).toBeGreaterThan(0);
+    expect(p.estimatedTokensSaved).toBe(
+      Math.max(0, Math.ceil((REDUNDANT.length - p.processedText.length) / 4)),
+    );
+    expect(p.processedText.length).toBeLessThan(REDUNDANT.length);
+    expect(p.estimationBasis).toContain("file-preprocessing");
+  });
+
+  it("a large reference with nothing to strip yields no reduction (apply:false)", () => {
+    // clean prose, over the minimum, with no redundant whitespace to collapse
+    const clean = ("the quick brown fox jumps over the lazy dog\n").repeat(40);
+    const p = planFilePreprocessing({ referenceText: clean, routingMode: "automatic" });
+    expect(p.apply).toBe(false);
+    expect(p.ruleId).toBe("no-reduction");
+    expect(p.ruleChain.at(-1)!.outcome).toBe("no-reduction");
+    expect(p.estimatedTokensSaved).toBe(0);
+  });
+
+  it("honors a custom minTokens threshold", () => {
+    const mid = "x    y\n\n\n\nz    w\n".repeat(20); // between the two thresholds
+    const below = planFilePreprocessing({ referenceText: mid, routingMode: "automatic", minTokens: 10_000 });
+    expect(below.apply).toBe(false);
+    expect(below.ruleId).toBe("content-size");
+  });
+
+  it("exposes the documented default constant", () => {
+    expect(DEFAULT_MIN_PREPROCESS_TOKENS).toBe(200);
   });
 });
