@@ -671,3 +671,190 @@ export function planEditVsRewrite(input: PlanEditVsRewriteInput): EditVsRewriteP
     estimationBasis: EDIT_VS_REWRITE_BASIS,
   };
 }
+
+// ---------------------------------------------------------------------------
+// §8 file preprocessing: when a caller attaches large reference/file content to
+// a dispatch, deterministically pre-processing it (collapse redundant
+// whitespace, dedupe blank lines, trim trailing spaces, elide very long inlined
+// data/base64 blobs) shrinks the INPUT tokens the model sees WITHOUT changing
+// meaning. The reduced content is really what's sent (like edit-vs-rewrite
+// transforms the dispatch), so the saving is a real INPUT-token reduction. This
+// is the PURE transform + decision — whether it's worth preprocessing and an
+// ESTIMATE of the input tokens saved; the gateway attaches the processed
+// content and writes the cost_events estimate.
+// ---------------------------------------------------------------------------
+
+/** Below this many tokens of reference content, preprocessing saves too little to bother. */
+export const DEFAULT_MIN_PREPROCESS_TOKENS = 200;
+
+/** Elision marker substituted for very long unbroken tokens (base64/data URIs).
+ * Contains no whitespace and is far shorter than the elision threshold, so
+ * preprocessing stays idempotent. */
+const LONG_TOKEN_ELISION = "[…elided-long-token…]";
+
+/** Deterministically shrink reference/file content WITHOUT changing meaning:
+ * collapse runs of 3+ blank lines to 1, collapse runs of spaces/tabs to a single
+ * space (but NOT inside fenced code blocks ```...```), trim trailing whitespace
+ * per line, and replace very long unbroken tokens (>512 chars, e.g. base64/data
+ * URIs) with a short elision marker. Returns the reduced text. Pure + idempotent
+ * (f(f(x)) === f(x)). */
+export function preprocessReference(text: string): string {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  let inFence = false;
+  let blankRun = 0;
+  const flushBlanks = () => {
+    if (blankRun > 0) {
+      // collapse a run of 3+ blank lines to a single blank line; keep 1–2 as-is
+      const keep = blankRun >= 3 ? 1 : blankRun;
+      for (let i = 0; i < keep; i++) out.push("");
+      blankRun = 0;
+    }
+  };
+  for (const raw of lines) {
+    if (/^\s*```/.test(raw)) {
+      // fence delimiter: flush pending blanks, toggle, emit (trailing-trim only)
+      flushBlanks();
+      inFence = !inFence;
+      out.push(raw.replace(/[ \t]+$/, ""));
+      continue;
+    }
+    if (inFence) {
+      // inside a fenced code block: preserve the line verbatim (no whitespace
+      // collapse, no blank-line collapse, no elision — code meaning is exact)
+      out.push(raw);
+      continue;
+    }
+    // outside a fence: collapse space/tab runs, trim trailing whitespace, elide
+    // very long unbroken tokens
+    const line = raw
+      .replace(/[ \t]+/g, " ")
+      .replace(/[ \t]+$/, "")
+      .replace(/\S{513,}/g, LONG_TOKEN_ELISION);
+    if (line === "") {
+      blankRun++;
+      continue;
+    }
+    flushBlanks();
+    out.push(line);
+  }
+  flushBlanks();
+  return out.join("\n");
+}
+
+export interface PlanFilePreprocessingInput {
+  /** the reference/file content attached to the dispatch (null/undefined/"" = none) */
+  referenceText: string | null | undefined;
+  /** §12 off switch — "passthrough" disables preprocessing entirely */
+  routingMode: RoutingMode;
+  /** override the min reference size (default DEFAULT_MIN_PREPROCESS_TOKENS) */
+  minTokens?: number;
+}
+
+export type FilePreprocessRuleName = "routing-mode" | "no-content" | "content-size" | "no-reduction";
+
+export interface FilePreprocessingPlan {
+  /** true = send the preprocessed content + book the estimate */
+  apply: boolean;
+  /** the reduced text (=== input when apply is false) */
+  processedText: string;
+  ruleId: FilePreprocessRuleName;
+  ruleChain: Array<{ rule: FilePreprocessRuleName; outcome: string }>;
+  reason: string;
+  /** estimated INPUT tokens saved by sending the reduced reference */
+  estimatedTokensSaved: number;
+  estimationBasis: string;
+}
+
+const FILE_PREPROCESSING_BASIS =
+  "file-preprocessing: estimated INPUT tokens saved by collapsing redundant whitespace / eliding long data blobs before the model sees the reference";
+
+/** Decide whether attached reference content is worth preprocessing. Like
+ * routeModel/planPromptCache/planEditVsRewrite, "passthrough" is the §12 off
+ * switch and the default is to leave the reference unchanged — the reduced
+ * content is only sent when preprocessing a large-enough reference actually
+ * shrinks it (no change without a clear signal). When applied, the estimate is
+ * the INPUT tokens the smaller reference saves; the gateway converts it to USD
+ * at the served agent's input price. */
+export function planFilePreprocessing(input: PlanFilePreprocessingInput): FilePreprocessingPlan {
+  const minTokens = input.minTokens ?? DEFAULT_MIN_PREPROCESS_TOKENS;
+  const text = input.referenceText ?? "";
+
+  const skip = (
+    ruleId: FilePreprocessRuleName,
+    ruleChain: Array<{ rule: FilePreprocessRuleName; outcome: string }>,
+    reason: string,
+    processedText = text,
+  ): FilePreprocessingPlan => ({
+    apply: false,
+    processedText,
+    ruleId,
+    ruleChain,
+    reason,
+    estimatedTokensSaved: 0,
+    estimationBasis: FILE_PREPROCESSING_BASIS,
+  });
+
+  if (input.routingMode === "passthrough") {
+    return skip(
+      "routing-mode",
+      [{ rule: "routing-mode", outcome: "passthrough" }],
+      "file preprocessing disabled for this user (passthrough mode)",
+    );
+  }
+
+  if (!text) {
+    return skip(
+      "no-content",
+      [
+        { rule: "routing-mode", outcome: "applied" },
+        { rule: "no-content", outcome: "no-content" },
+      ],
+      "no reference content supplied; nothing to preprocess",
+    );
+  }
+
+  const contentTokens = Math.ceil(text.length / 4);
+  if (contentTokens < minTokens) {
+    return skip(
+      "content-size",
+      [
+        { rule: "routing-mode", outcome: "applied" },
+        { rule: "no-content", outcome: "applied" },
+        { rule: "content-size", outcome: "too-small" },
+      ],
+      `reference ~${contentTokens} tokens is below the ${minTokens}-token minimum; preprocessing saves too little to bother`,
+    );
+  }
+
+  const processedText = preprocessReference(text);
+  const saved = Math.max(0, Math.ceil((text.length - processedText.length) / 4));
+  if (saved <= 0) {
+    return skip(
+      "no-reduction",
+      [
+        { rule: "routing-mode", outcome: "applied" },
+        { rule: "no-content", outcome: "applied" },
+        { rule: "content-size", outcome: "applied" },
+        { rule: "no-reduction", outcome: "no-reduction" },
+      ],
+      "preprocessing produced no meaningful reduction; sending the reference unchanged",
+      processedText,
+    );
+  }
+
+  return {
+    apply: true,
+    processedText,
+    ruleId: "no-reduction",
+    ruleChain: [
+      { rule: "routing-mode", outcome: "applied" },
+      { rule: "no-content", outcome: "applied" },
+      { rule: "content-size", outcome: "applied" },
+      { rule: "no-reduction", outcome: "applied" },
+    ],
+    reason: `reference ~${contentTokens} tokens preprocessed; ~${saved} input tokens saved by collapsing redundant whitespace / eliding long data blobs before the model sees it`,
+    estimatedTokensSaved: saved,
+    estimationBasis: FILE_PREPROCESSING_BASIS,
+  };
+}

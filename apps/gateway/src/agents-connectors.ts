@@ -30,6 +30,7 @@ import {
   CACHE_READ_DISCOUNT,
   planEditVsRewrite,
   classifyEditIntent,
+  planFilePreprocessing,
   type RoutingDecision,
 } from "@regulait/optimizer-kernel";
 import {
@@ -960,6 +961,20 @@ export function registerAgentConnectorRoutes(
       // (like conversation history above) BEFORE routing/budget/cost see it.
       const baselineTokens = body.baseline ? Math.ceil(body.baseline.length / 4) : 0;
       if (baselineTokens) estimate.in += baselineTokens;
+      // PILLAR 6 §8 file preprocessing: large reference/file content attached to
+      // the dispatch is deterministically shrunk before the model sees it. The
+      // model only ever receives the PROCESSED content, so fold the PROCESSED
+      // size into the routing estimate (the original size when preprocessing
+      // doesn't apply) — routing, budget, and cost must reflect the ACTUAL sent
+      // size, exactly like the baseline above.
+      const fpp = planFilePreprocessing({
+        referenceText: body.referenceContent,
+        routingMode: policy?.routingMode ?? "automatic",
+      });
+      const referenceTokens = Math.ceil(
+        (fpp.apply ? fpp.processedText.length : (body.referenceContent?.length ?? 0)) / 4,
+      );
+      if (referenceTokens) estimate.in += referenceTokens;
       routing = routeModel({
         requestedAgentId: agent.id,
         candidates,
@@ -1127,12 +1142,56 @@ export function registerAgentConnectorRoutes(
         });
       }
 
+      // PILLAR 6 §8 FILE PREPROCESSING — a pure cost annotation on this
+      // ALREADY-authorized dispatch: the kernel deterministically shrinks the
+      // attached reference content (collapse redundant whitespace, elide long
+      // data blobs) WITHOUT changing meaning; the reduced content is what the
+      // model actually receives (composed below), and one estimate row lands in
+      // the SAME per-technique ledger. It NEVER changes the served agent, model,
+      // entitlement, budget, or output — guarded on `routing` like the caching
+      // and edit-vs-rewrite blocks. "passthrough" is the per-user off switch.
+      // The saving is INPUT tokens (a smaller reference sent to the model), so
+      // dollars = saved tokens at the SERVED agent's INPUT list price. Written
+      // only when preprocessing actually reduces the content.
+      if (body.dispatch && fpp.apply && routing) {
+        const routed = routing;
+        const servedRow = registry.find((a) => a.id === routed.selectedAgentId);
+        const estimatedCostSavedUsd =
+          servedRow?.costPerMTokIn != null
+            ? Number(((fpp.estimatedTokensSaved / 1e6) * servedRow.costPerMTokIn).toFixed(6))
+            : null;
+        await db.insert(costEvents).values({
+          userId,
+          objectType: "agent",
+          objectId: agent.id,
+          technique: "file_preprocessing",
+          requestedAgentId: agent.id,
+          servedAgentId: routing.selectedAgentId,
+          baselineAgentId: routing.baselineAgentId,
+          estimatedTokensIn: estimate.in,
+          estimatedTokensOut: estimate.out,
+          estimatedTokensSaved: fpp.estimatedTokensSaved,
+          estimatedCostSavedUsd,
+          estimationBasis: fpp.estimationBasis,
+          ruleId: "file-preprocessing",
+          projectId,
+          detail: {
+            referenceChars: body.referenceContent?.length ?? 0,
+            savedTokens: fpp.estimatedTokensSaved,
+            mode: body.mode,
+          },
+        });
+      }
+
       // Compose the OUTGOING system + input. Both are ADDITIVE: with neither
       // technique active they are byte-identical to today. Prompt caching
       // supplies the stable `system`; edit-vs-rewrite (when applied) appends a
       // compact-diff directive to that system and the supplied baseline to the
       // input, so the model actually receives the diff instruction + the
-      // content it must edit (not just an accounting row).
+      // content it must edit (not just an accounting row); file preprocessing
+      // (when reference content is supplied) appends the PROCESSED reference to
+      // the input the same additive way — after the baseline block if both are
+      // present.
       let dispatchSystem = systemPrompt;
       let dispatchInput = body.input ?? "";
       if (editPlan.applyDiffDirective && body.baseline) {
@@ -1142,6 +1201,15 @@ export function registerAgentConnectorRoutes(
           "unified diff (the changed hunks with a little surrounding context), NOT " +
           "the full rewritten content.";
         dispatchInput = dispatchInput + "\n\n----- BASELINE -----\n" + body.baseline;
+      }
+      if (body.referenceContent) {
+        // The model sees the PROCESSED reference when preprocessing applied, the
+        // original otherwise (fpp.processedText === original in that case).
+        // Absent referenceContent → byte-identical to today.
+        dispatchInput =
+          dispatchInput +
+          "\n\n----- REFERENCE -----\n" +
+          (fpp.apply ? fpp.processedText : body.referenceContent);
       }
 
       // MULTI-TURN: a conversation dispatch sends the model-bound history —
