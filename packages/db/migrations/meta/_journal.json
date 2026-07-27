@@ -218,6 +218,13 @@
       "when": 1784966000000,
       "tag": "0030_role_agent_connector_grants",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1784967000000,
+      "tag": "0031_semantic_cache",
+      "breakpoints": true
     }
   ]
 }

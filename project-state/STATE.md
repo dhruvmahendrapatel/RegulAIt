@@ -652,6 +652,21 @@ composition); one file_preprocessing cost_events estimate at the served input pr
 keeps the original turn so the reference never bloats history. Suite 297 → 302; optimizer 47 → 59.
 Remaining pillar-6: semantic caching + request batching (next slice, migration 0031).
 
+**Semantic caching + request batching, 2026-07-27 — pillar 6's 7th & final techniques (migration
+0031).** Semantic caching is a REAL opt-in per-(user,agent) exact-match response cache: an
+identical (whitespace/case-normalized) single-turn re-ask within a 1h TTL is served straight from
+the `semantic_cache` table, skipping the provider entirely — no usage_events, one `semantic_caching`
+cost_events row for the whole-call saving. The lookup runs INSIDE the governance allow-gate and is
+scoped by BOTH userId AND agentId (with a normalizedInput collision guard), so a user is never served
+another user's — or another agent's — cached response (§12); misses store the result (refreshing the
+TTL, never caching refusals/empty/PII-withheld). Request batching is an ESTIMATE only: on an
+orchestration auto-pass with ≥2 ready nodes on the same model, one `request_batching` cost_events row
+books the per-request overhead batching would amortize — dispatch is unchanged (true async
+Batches-API batching doesn't fit the synchronous interactive path). Suite 302 → 307; optimizer 59 →
+69. **All seven pillar-6 optimization techniques now shipped**: model routing, context compaction,
+lazy tool-loading, prompt caching, edit-vs-rewrite, file preprocessing, semantic caching (+ the
+request-batching estimator).
+
 **Admin console UX polish, 2026-07-27.** The deferred follow-ups from the console restructure:
 `dataTable()` with free-text filter + keyboard-operable sortable headers (aria-sort, numeric-aware)
 + pagination (adopted on Users/Audit/Approvals/Projects/Findings); `humanizeKey` so th labels read

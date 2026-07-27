@@ -673,6 +673,113 @@ export function planEditVsRewrite(input: PlanEditVsRewriteInput): EditVsRewriteP
 }
 
 // ---------------------------------------------------------------------------
+// §8/§10 semantic caching: an EXACT-MATCH response cache scoped per
+// (user, agent). This kernel owns only the PURE key normalization + the TTL
+// default — the gateway holds the real cache (a Postgres table), does the
+// scoped lookup/store, and enforces the §12 governance boundary (a hit is only
+// ever served to the SAME user+agent that stored it, never across users or
+// agents). normalizeCacheInput is the deterministic key: two requests that
+// differ only in surrounding/interior whitespace or letter case collapse to the
+// same key, so a re-ask served from cache skips the provider entirely.
+// ---------------------------------------------------------------------------
+
+/** Default cache validity window: a stored response older than this is a MISS
+ * (the gateway re-dispatches and refreshes the row). 1 hour. */
+export const DEFAULT_SEMANTIC_CACHE_TTL_SECONDS = 3600;
+
+/** Deterministic normalization for the semantic-cache key: trim the ends,
+ * lowercase, and collapse every run of whitespace to a single space. Pure and
+ * idempotent (f(f(x)) === f(x)). The gateway hashes the RESULT for the stored
+ * key and keeps the normalized form beside it as a collision guard. */
+export function normalizeCacheInput(text: string): string {
+  return text.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+// ---------------------------------------------------------------------------
+// §8 request batching (ESTIMATE-ONLY): on an orchestration auto-pass the READY
+// set may contain several nodes owned by the SAME model. A real Batches API
+// would amortize the per-request framing (system re-send, tool manifest, HTTP
+// overhead) N same-model requests each pay individually. We do NOT actually
+// batch in the synchronous interactive path — nodes still dispatch one at a
+// time — so this is purely the ESTIMATE of what batching those same-model
+// requests WOULD save, recorded for the savings dashboard. Pure like the other
+// planners: "passthrough" is the §12 off switch and produces no saving.
+// ---------------------------------------------------------------------------
+
+/** Per-request framing/overhead tokens (system re-send, tool manifest, request
+ * scaffolding) that batching amortizes across a same-model group — saved once
+ * per request beyond the first. A conservative default. */
+export const DEFAULT_BATCH_OVERHEAD_TOKENS = 200;
+
+const REQUEST_BATCHING_BASIS =
+  "request-batching: ESTIMATE of per-request framing tokens (system re-send / request scaffolding) that batching same-model dispatches would amortize — nodes still dispatch individually in the synchronous path";
+
+export type RequestBatchingRuleName = "routing-mode" | "group-size";
+
+export interface PlanRequestBatchingInput {
+  /** the owner model of each READY node this pass (order/duplicates matter —
+   * one entry per node; an unpriced/absent model can be any stable label) */
+  models: readonly string[];
+  /** §12 off switch — "passthrough" disables the estimate entirely */
+  routingMode: RoutingMode;
+  /** override the amortized per-request overhead (default DEFAULT_BATCH_OVERHEAD_TOKENS) */
+  perRequestOverheadTokens?: number;
+}
+
+export interface RequestBatchingPlan {
+  /** true = at least one same-model group of size ≥2 exists this pass */
+  batchable: boolean;
+  /** every model group and its ready-node count, in stable (count desc, model) order */
+  groups: Array<{ model: string; count: number }>;
+  /** Σ over groups of size n≥2 of (n − 1) × perRequestOverheadTokens */
+  estimatedTokensSaved: number;
+  estimationBasis: string;
+  ruleChain: Array<{ rule: RequestBatchingRuleName; outcome: "passthrough" | "applied" | "batchable" | "no-batchable-group" }>;
+}
+
+/** Group the ready-node owner models; a group of ≥2 same-model nodes is
+ * batchable and would save (count − 1) × overhead tokens (the first request
+ * still pays its framing; each additional same-model request amortizes it).
+ * "passthrough" and a set with no repeated model both yield batchable:false, 0.
+ * Pure — the gateway records the estimate, dispatch behaviour is unchanged. */
+export function planRequestBatching(input: PlanRequestBatchingInput): RequestBatchingPlan {
+  const overhead = input.perRequestOverheadTokens ?? DEFAULT_BATCH_OVERHEAD_TOKENS;
+
+  if (input.routingMode === "passthrough") {
+    return {
+      batchable: false,
+      groups: [],
+      estimatedTokensSaved: 0,
+      estimationBasis: REQUEST_BATCHING_BASIS,
+      ruleChain: [{ rule: "routing-mode", outcome: "passthrough" }],
+    };
+  }
+
+  const counts = new Map<string, number>();
+  for (const model of input.models) counts.set(model, (counts.get(model) ?? 0) + 1);
+  const groups = [...counts.entries()]
+    .map(([model, count]) => ({ model, count }))
+    .sort((a, b) => b.count - a.count || a.model.localeCompare(b.model));
+
+  const estimatedTokensSaved = groups.reduce(
+    (sum, g) => sum + (g.count >= 2 ? (g.count - 1) * overhead : 0),
+    0,
+  );
+  const batchable = estimatedTokensSaved > 0;
+
+  return {
+    batchable,
+    groups,
+    estimatedTokensSaved,
+    estimationBasis: REQUEST_BATCHING_BASIS,
+    ruleChain: [
+      { rule: "routing-mode", outcome: "applied" },
+      { rule: "group-size", outcome: batchable ? "batchable" : "no-batchable-group" },
+    ],
+  };
+}
+
+// ---------------------------------------------------------------------------
 // §8 file preprocessing: when a caller attaches large reference/file content to
 // a dispatch, deterministically pre-processing it (collapse redundant
 // whitespace, dedupe blank lines, trim trailing spaces, elide very long inlined

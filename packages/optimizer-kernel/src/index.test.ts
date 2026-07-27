@@ -15,6 +15,10 @@ import {
   preprocessReference,
   planFilePreprocessing,
   DEFAULT_MIN_PREPROCESS_TOKENS,
+  normalizeCacheInput,
+  DEFAULT_SEMANTIC_CACHE_TTL_SECONDS,
+  planRequestBatching,
+  DEFAULT_BATCH_OVERHEAD_TOKENS,
   selectTools,
   estimateTokens,
   routeModel,
@@ -39,6 +43,83 @@ function base(overrides: Partial<RouteModelInput> = {}): RouteModelInput {
     ...overrides,
   };
 }
+
+describe("normalizeCacheInput", () => {
+  it("trims, lowercases, and collapses whitespace runs to a single space", () => {
+    expect(normalizeCacheInput("  Hello   World\n\tGoodbye  ")).toBe("hello world goodbye");
+  });
+
+  it("is idempotent (f(f(x)) === f(x))", () => {
+    const raw = "\t Summarize   THE  Attached\n\n reference  ";
+    const once = normalizeCacheInput(raw);
+    expect(normalizeCacheInput(once)).toBe(once);
+  });
+
+  it("collapses case/whitespace-only differences to the same key", () => {
+    expect(normalizeCacheInput("Fix the BUG")).toBe(normalizeCacheInput("fix   the\tbug"));
+  });
+
+  it("keeps a sane default TTL", () => {
+    expect(DEFAULT_SEMANTIC_CACHE_TTL_SECONDS).toBe(3600);
+  });
+});
+
+describe("planRequestBatching", () => {
+  it("fewer than 2 same-model nodes is not batchable (0 saved)", () => {
+    const plan = planRequestBatching({ models: ["mock-balanced"], routingMode: "automatic" });
+    expect(plan.batchable).toBe(false);
+    expect(plan.estimatedTokensSaved).toBe(0);
+    expect(plan.groups).toEqual([{ model: "mock-balanced", count: 1 }]);
+  });
+
+  it("3 same-model nodes save (count - 1) * overhead", () => {
+    const plan = planRequestBatching({
+      models: ["m", "m", "m"],
+      routingMode: "automatic",
+    });
+    expect(plan.batchable).toBe(true);
+    expect(plan.estimatedTokensSaved).toBe(2 * DEFAULT_BATCH_OVERHEAD_TOKENS);
+    expect(plan.groups).toEqual([{ model: "m", count: 3 }]);
+  });
+
+  it("honours a custom per-request overhead", () => {
+    const plan = planRequestBatching({
+      models: ["m", "m"],
+      routingMode: "automatic",
+      perRequestOverheadTokens: 500,
+    });
+    expect(plan.estimatedTokensSaved).toBe(500);
+  });
+
+  it("passthrough disables the estimate entirely (§12 off switch)", () => {
+    const plan = planRequestBatching({ models: ["m", "m", "m"], routingMode: "passthrough" });
+    expect(plan.batchable).toBe(false);
+    expect(plan.estimatedTokensSaved).toBe(0);
+    expect(plan.groups).toEqual([]);
+    expect(plan.ruleChain[0]!.outcome).toBe("passthrough");
+  });
+
+  it("groups mixed models correctly and only counts batchable groups", () => {
+    // a:3 (batchable, saves 2*overhead), b:2 (batchable, saves 1*overhead), c:1 (not)
+    const plan = planRequestBatching({
+      models: ["a", "b", "a", "c", "b", "a"],
+      routingMode: "automatic",
+    });
+    expect(plan.batchable).toBe(true);
+    expect(plan.estimatedTokensSaved).toBe(3 * DEFAULT_BATCH_OVERHEAD_TOKENS); // 2 + 1
+    expect(plan.groups).toEqual([
+      { model: "a", count: 3 },
+      { model: "b", count: 2 },
+      { model: "c", count: 1 },
+    ]);
+  });
+
+  it("all-distinct models is not batchable", () => {
+    const plan = planRequestBatching({ models: ["a", "b", "c"], routingMode: "automatic" });
+    expect(plan.batchable).toBe(false);
+    expect(plan.estimatedTokensSaved).toBe(0);
+  });
+});
 
 describe("classifyComplexity", () => {
   it("treats missing input as high (no signal, no downgrade)", () => {
