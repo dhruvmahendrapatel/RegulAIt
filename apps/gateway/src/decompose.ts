@@ -32,7 +32,7 @@ import { validateGraph } from "@regulait/orchestration-kernel";
 import { isModelProviderKind, TASK_DECOMPOSITION_SENTINEL } from "@regulait/model-provider";
 import { decomposeGoalSchema, decompositionPlanSchema } from "@regulait/shared";
 import { configuredProviders, executeGovernedDispatch, type AgentRow } from "./agents-connectors.js";
-import { loadEntitlements } from "./entitlements.js";
+import { loadEntitlements, loadRoleAgentGrants } from "./entitlements.js";
 import { assertProjectAttribution } from "./projects.js";
 import { z } from "zod";
 
@@ -283,8 +283,11 @@ export function registerDecomposeRoutes(
       }
     }
 
-    const [grants, [policy], registry] = await Promise.all([
+    const [grants, roleAgentGrantsForUser, [policy], registry] = await Promise.all([
       db.select().from(agentGrants).where(eq(agentGrants.userId, userId)),
+      // §5 role-bundled grants (ADR-0014) — a role-granted agent must be a
+      // valid worker in a decomposed plan, not just on the direct invoke path.
+      loadRoleAgentGrants(db, userId),
       db.select().from(userAgentPolicies).where(eq(userAgentPolicies.userId, userId)),
       db.select().from(agents),
     ]);
@@ -298,6 +301,7 @@ export function registerDecomposeRoutes(
         agent: { id: a.id, name: a.name, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
         mode,
         agentGrants: grants,
+        roleAgentGrants: roleAgentGrantsForUser,
         ceilingTier,
       });
 

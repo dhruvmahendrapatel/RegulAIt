@@ -52,6 +52,7 @@ import {
   type SkippedCandidate,
 } from "./agents-connectors.js";
 import { executeGovernedToolCall, resolveNodeToolContext } from "./mcp-proxy.js";
+import { loadRoleAgentGrants } from "./entitlements.js";
 import { assertProjectAttribution } from "./projects.js";
 import { mirrorNodeStatus } from "./pm.js";
 import { handleNestedRunCompletion } from "./workflows.js";
@@ -743,8 +744,11 @@ async function evaluateNodeOwner(
 ): Promise<{ decision: AgentDecision | null; unknownAgent: boolean }> {
   const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
   if (!agent) return { decision: null, unknownAgent: true };
-  const [grants, [policy]] = await Promise.all([
+  const [grants, roleAgentGrantsForUser, [policy]] = await Promise.all([
     db.select().from(agentGrants).where(eq(agentGrants.userId, userId)),
+    // §5 role-bundled grants (ADR-0014) — a worker node running under the
+    // initiating user's entitlements must see their role-derived agent grants.
+    loadRoleAgentGrants(db, userId),
     db.select().from(userAgentPolicies).where(eq(userAgentPolicies.userId, userId)),
   ]);
   let ceilingTier: number | null = null;
@@ -761,6 +765,7 @@ async function evaluateNodeOwner(
       agent: { id: agent.id, tier: agent.tier, enabled: agent.enabled, modes: agent.modes ?? null },
       mode,
       agentGrants: grants,
+      roleAgentGrants: roleAgentGrantsForUser,
       ceilingTier,
       ceilingAgentIds,
     }),
@@ -985,8 +990,11 @@ export async function planRun(
     }
   }
 
-  const [grants, [policy], agentRows] = await Promise.all([
+  const [grants, roleAgentGrantsForUser, [policy], agentRows] = await Promise.all([
     db.select().from(agentGrants).where(eq(agentGrants.userId, userId)),
+    // §5 role-bundled grants (ADR-0014) — the plan-time per-node envelope check
+    // must honour role-derived agent grants, exactly as dispatch/reassign does.
+    loadRoleAgentGrants(db, userId),
     db.select().from(userAgentPolicies).where(eq(userAgentPolicies.userId, userId)),
     db.select().from(agents),
   ]);
@@ -1007,6 +1015,7 @@ export async function planRun(
         agent: { id: agent.id, tier: agent.tier, enabled: agent.enabled, modes: agent.modes ?? null },
         mode,
         agentGrants: grants,
+        roleAgentGrants: roleAgentGrantsForUser,
         ceilingTier,
         ceilingAgentIds,
       });

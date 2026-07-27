@@ -460,6 +460,45 @@ export const connectorGrants = pgTable(
   (t) => [uniqueIndex("connector_grants_user_connector_uq").on(t.userId, t.connectorId)],
 );
 
+// §5 role-bundled agent/connector grants: the AGENT/CONNECTOR twins of
+// roleToolGrants/roleServerGrants. Assigning a role confers these to a user
+// exactly as a direct agentGrant/connectorGrant would — same field shape, so a
+// role grant can never exceed a direct grant. Purely additive (UNION-MAX with
+// direct grants); per-user revocation of role-derived agent/connector grants
+// is deferred (the revocations table is MCP-only today). See ADR-0014.
+export const roleAgentGrants = pgTable(
+  "role_agent_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    roleId: uuid("role_id")
+      .notNull()
+      .references(() => roles.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    allowedModes: jsonb("allowed_modes").$type<string[]>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("role_agent_grants_role_agent_uq").on(t.roleId, t.agentId)],
+);
+
+export const roleConnectorGrants = pgTable(
+  "role_connector_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    roleId: uuid("role_id")
+      .notNull()
+      .references(() => roles.id, { onDelete: "cascade" }),
+    connectorId: uuid("connector_id")
+      .notNull()
+      .references(() => connectors.id, { onDelete: "cascade" }),
+    mode: text("mode", { enum: ["read", "readwrite"] }).notNull(),
+    allowedObjects: jsonb("allowed_objects").$type<string[]>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("role_connector_grants_role_connector_uq").on(t.roleId, t.connectorId)],
+);
+
 // EPIC-03 workflow engine (WORKFLOW_ENGINE_SPEC.md). Templates are the
 // declarative §3 definitions; instances snapshot their merged definition at
 // start so a template edit never mutates an in-flight run.

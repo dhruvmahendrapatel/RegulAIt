@@ -144,6 +144,19 @@ export const createRoleServerGrantSchema = z.object({
   readOnlyAll: z.boolean(),
 });
 
+// §5 role-bundled AGENT/CONNECTOR grants — shape-identical to the direct
+// agent/connector grant bodies so a role grant can never exceed a direct one.
+export const createRoleAgentGrantSchema = z.object({
+  agentId: z.string().uuid(),
+  allowedModes: z.array(z.string().min(1)).nullable().optional(),
+});
+
+export const createRoleConnectorGrantSchema = z.object({
+  connectorId: z.string().uuid(),
+  mode: z.enum(["read", "readwrite"]),
+  allowedObjects: z.array(z.string().min(1)).nullable().optional(),
+});
+
 export const assignRoleSchema = z.object({
   roleId: z.string().uuid(),
 });

@@ -19,3 +19,4 @@ superseding a decision means a new ADR plus a status flip on the old one.
 | [0011](0011-shared-projects-on-one-project-entity.md) | Shared Projects extend the one `projects` entity; conflicts ride the one approvals queue | Accepted | 2026-07-25 |
 | [0012](0012-admin-portal-single-file-api-client.md) | Admin portal MVP: dependency-free single-file web app, strictly an API client | Accepted | 2026-07-25 |
 | [0013](0013-dev-app-deploy-single-ec2-compose.md) | Dev app deployment: one EC2 box running docker compose, SSM-only, separate Terraform state | Accepted | 2026-07-25 |
+| [0014](0014-role-bundled-agent-connector-grants.md) | Role-bundled agent + connector grants (UNION-MAX, additive; per-user revocation deferred) | Accepted | 2026-07-27 |

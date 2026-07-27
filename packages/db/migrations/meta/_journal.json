@@ -211,6 +211,13 @@
       "when": 1784965000000,
       "tag": "0029_initiatives",
       "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1784966000000,
+      "tag": "0030_role_agent_connector_grants",
+      "breakpoints": true
     }
   ]
 }

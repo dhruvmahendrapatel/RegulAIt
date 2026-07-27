@@ -3,10 +3,12 @@ import {
   and,
   desc,
   eq,
+  agents,
   apiKeys,
   approvalRules,
   approvals,
   auditLog,
+  connectors,
   dataScopeRules,
   inArray,
   isNull,
@@ -17,7 +19,9 @@ import {
   projects,
   rateLimits,
   revocations,
+  roleAgentGrants,
   roleAssignments,
+  roleConnectorGrants,
   roleServerGrants,
   roleToolGrants,
   roles,
@@ -38,6 +42,8 @@ import {
   createDataScopeRuleSchema,
   createRateLimitSchema,
   createRevocationSchema,
+  createRoleAgentGrantSchema,
+  createRoleConnectorGrantSchema,
   createRoleSchema,
   createRoleServerGrantSchema,
   createRoleToolGrantSchema,
@@ -388,6 +394,107 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       .values({ roleId, serverId: body.serverId, readOnlyAll: body.readOnlyAll })
       .returning();
     return reply.status(201).send(row);
+  });
+
+  // §5 role-bundled AGENT/CONNECTOR grants (ADR-0014) — the agent/connector
+  // twins of the MCP role-grant POSTs above. Admin-only via the default gate.
+  app.post("/v1/roles/:roleId/grants/agents", async (req, reply) => {
+    const { roleId } = z.object({ roleId: z.string().uuid() }).parse(req.params);
+    const body = createRoleAgentGrantSchema.parse(req.body);
+    const [row] = await db
+      .insert(roleAgentGrants)
+      .values({ roleId, agentId: body.agentId, allowedModes: body.allowedModes ?? null })
+      .returning();
+    return reply.status(201).send(row);
+  });
+
+  app.post("/v1/roles/:roleId/grants/connectors", async (req, reply) => {
+    const { roleId } = z.object({ roleId: z.string().uuid() }).parse(req.params);
+    const body = createRoleConnectorGrantSchema.parse(req.body);
+    const [row] = await db
+      .insert(roleConnectorGrants)
+      .values({
+        roleId,
+        connectorId: body.connectorId,
+        mode: body.mode,
+        allowedObjects: body.allowedObjects ?? null,
+      })
+      .returning();
+    return reply.status(201).send(row);
+  });
+
+  // §5 admin read-back: every grant this role bundles, across all four object
+  // types, joined to names where useful (the role builder / access preview).
+  app.get("/v1/roles/:roleId/grants", async (req) => {
+    const { roleId } = z.object({ roleId: z.string().uuid() }).parse(req.params);
+    const [tools, servers, roleAgents, roleConnectors] = await Promise.all([
+      db
+        .select({
+          grantId: roleToolGrants.id,
+          serverId: roleToolGrants.serverId,
+          serverName: mcpServers.name,
+          toolName: roleToolGrants.toolName,
+        })
+        .from(roleToolGrants)
+        .leftJoin(mcpServers, eq(roleToolGrants.serverId, mcpServers.id))
+        .where(eq(roleToolGrants.roleId, roleId)),
+      db
+        .select({
+          grantId: roleServerGrants.id,
+          serverId: roleServerGrants.serverId,
+          serverName: mcpServers.name,
+          readOnlyAll: roleServerGrants.readOnlyAll,
+        })
+        .from(roleServerGrants)
+        .leftJoin(mcpServers, eq(roleServerGrants.serverId, mcpServers.id))
+        .where(eq(roleServerGrants.roleId, roleId)),
+      db
+        .select({
+          grantId: roleAgentGrants.id,
+          agentId: roleAgentGrants.agentId,
+          agentName: agents.name,
+          allowedModes: roleAgentGrants.allowedModes,
+        })
+        .from(roleAgentGrants)
+        .leftJoin(agents, eq(roleAgentGrants.agentId, agents.id))
+        .where(eq(roleAgentGrants.roleId, roleId)),
+      db
+        .select({
+          grantId: roleConnectorGrants.id,
+          connectorId: roleConnectorGrants.connectorId,
+          connectorName: connectors.name,
+          mode: roleConnectorGrants.mode,
+          allowedObjects: roleConnectorGrants.allowedObjects,
+        })
+        .from(roleConnectorGrants)
+        .leftJoin(connectors, eq(roleConnectorGrants.connectorId, connectors.id))
+        .where(eq(roleConnectorGrants.roleId, roleId)),
+    ]);
+    return { tools, servers, agents: roleAgents, connectors: roleConnectors };
+  });
+
+  app.delete("/v1/roles/:roleId/grants/agents/:grantId", async (req, reply) => {
+    const { roleId, grantId } = z
+      .object({ roleId: z.string().uuid(), grantId: z.string().uuid() })
+      .parse(req.params);
+    const deleted = await db
+      .delete(roleAgentGrants)
+      .where(and(eq(roleAgentGrants.id, grantId), eq(roleAgentGrants.roleId, roleId)))
+      .returning({ id: roleAgentGrants.id });
+    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_grant" });
+    return { removed: true };
+  });
+
+  app.delete("/v1/roles/:roleId/grants/connectors/:grantId", async (req, reply) => {
+    const { roleId, grantId } = z
+      .object({ roleId: z.string().uuid(), grantId: z.string().uuid() })
+      .parse(req.params);
+    const deleted = await db
+      .delete(roleConnectorGrants)
+      .where(and(eq(roleConnectorGrants.id, grantId), eq(roleConnectorGrants.roleId, roleId)))
+      .returning({ id: roleConnectorGrants.id });
+    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_grant" });
+    return { removed: true };
   });
 
   app.post("/v1/users/:userId/roles", async (req, reply) => {
