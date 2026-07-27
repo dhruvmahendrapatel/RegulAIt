@@ -19,6 +19,7 @@ export const ADMIN_PORTAL_HTML = `<!doctype html>
 </head>
 <body>
 <div id="root"></div>
+<div id="toast-region" aria-live="polite"></div>
 <script>
 "use strict";
 ${UI_ERRORS_JS}
@@ -27,6 +28,19 @@ const $ = (s, el) => (el ?? document).querySelector(s);
 const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const fmtUsd = (v) => v == null ? "—" : "$" + Number(v).toFixed(4).replace(/0+$/,"").replace(/\\.$/,"");
 let KEY = sessionStorage.getItem("regulait.admin.key") ?? "";
+
+// Transient feedback that survives a render(): the region lives OUTSIDE #root
+// (see the body markup) so re-rendering the shell never wipes a toast mid-flight.
+// kind "ok" | "err" tints the left border; auto-hides after ~3s.
+function toast(msg, kind) {
+  const region = $("#toast-region");
+  if (!region) return;
+  const t = document.createElement("div");
+  t.className = "toast " + (kind === "err" ? "err" : "ok");
+  t.textContent = msg;
+  region.appendChild(t);
+  setTimeout(() => t.remove(), 3000);
+}
 
 async function api(method, path, body) {
   const res = await fetch(path, {
@@ -80,22 +94,26 @@ function table(rows, actions) {
 // An option is either a bare string (value === label) or {v,l} — the second
 // form is what lets every id field become a name the operator recognizes
 // instead of a UUID they have to copy in from somewhere else.
+let fieldSeq = 0;
 function field(f) {
-  const lbl = "<label class='f'>" + esc(f.label ?? f.name) + "</label>";
+  // a unique id per field wires <label for> to its control, so the label is
+  // programmatically associated and clickable (name stays for FormData/query)
+  const fid = "fld-" + f.name + "-" + (++fieldSeq);
+  const lbl = "<label class='f' for='" + fid + "'>" + esc(f.label ?? f.name) + "</label>";
   if (f.options) {
     // multi:true renders a multiple select; leaving it empty just omits the
     // field, so it never needs the "— none —" placeholder row
     const opts = (f.req === false && !f.multi ? [{ v: "", l: f.ph ?? "— none —" }] : [])
       .concat(f.options.map((o) => (typeof o === "object" ? o : { v: o, l: o })));
     if (opts.length === 0) opts.push({ v: "", l: "— none available —" });
-    return "<div>" + lbl + "<select name='" + f.name + "'"
+    return "<div>" + lbl + "<select id='" + fid + "' name='" + f.name + "'"
       + (f.multi ? " multiple size='" + Math.min(4, Math.max(2, opts.length)) + "'" : "")
       + (f.req === false ? " data-optional='true'" : " required")
       + ">" + opts.map((o) => "<option value='" + esc(o.v) + "'>" + esc(o.l) + "</option>").join("")
       + "</select></div>";
   }
   return "<div" + (f.grow ? " class='grow'" : "") + ">" + lbl
-    + "<input name='" + f.name + "' type='" + esc(f.type ?? "text") + "'"
+    + "<input id='" + fid + "' name='" + f.name + "' type='" + esc(f.type ?? "text") + "'"
     + (f.type === "number" ? " step='any'" : "")
     + " placeholder='" + esc(f.ph ?? f.name) + "'" + (f.req === false ? "" : " required") + "></div>";
 }
@@ -201,7 +219,22 @@ function wire(id, fn, keep) {
       if (v === "") continue;
       data[k] = k in data ? [].concat(data[k], v) : v;
     }
-    try { await fn(data); if (!keep) render(); } catch (ex) { err.textContent = ex.message; }
+    // disable the submit button for the duration of the request so a slow POST
+    // can't be double-submitted; re-enable in finally (harmless if the form was
+    // re-rendered away by then — it's a detached node)
+    const btn = e.target.querySelector("button");
+    if (btn) btn.disabled = true;
+    try {
+      await fn(data);
+      // "view" forms (keep=true) are reads — a "Saved" toast would be a lie, so
+      // only write forms announce success; errors always toast.
+      if (!keep) { toast("Saved", "ok"); render(); }
+    } catch (ex) {
+      err.textContent = ex.message;
+      toast(ex.message, "err");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
   });
 }
 
@@ -249,7 +282,7 @@ function budgetGauge(spent, cap, overageApproved, opts) {
 // authed CSV download via a transient blob URL (endpoint sets Content-Disposition)
 async function downloadCsv(path, filename) {
   const res = await fetch(path, { headers: { authorization: "Bearer " + KEY } });
-  if (!res.ok) { alert("CSV download failed (" + res.status + ")"); return; }
+  if (!res.ok) { toast("CSV download failed (" + res.status + ")", "err"); return; }
   const url = URL.createObjectURL(await res.blob());
   const a = document.createElement("a");
   a.href = url; a.download = filename;
@@ -259,9 +292,9 @@ async function downloadCsv(path, filename) {
 
 // --- §6's eight functional surfaces + the §10.4 cost surface -------------
 const TABS = [
-["Users & Roles", async (el) => {
-  const [u, r, rev, srv, k] = await Promise.all([
-    get("/v1/users"), get("/v1/roles"), get("/v1/revocations"), get("/v1/servers"), get("/v1/keys"),
+["Users", async (el) => {
+  const [u, rev, srv, k] = await Promise.all([
+    get("/v1/users"), get("/v1/revocations"), get("/v1/servers"), get("/v1/keys"),
   ]);
   const tools = await toolIndex(srv.servers);
   const uOpts = userOpts(u.users), sOpts = serverOpts(srv.servers);
@@ -279,9 +312,6 @@ const TABS = [
       })), (row) => row.status === "active"
         ? "<button class='small danger' data-revoke='" + row.id + "'>revoke</button>" : "")
     + "</div>"
-    + "<h2>Roles</h2><div class='card'>" + form("f-role", [{name:"name"},{name:"description",req:false}], "Create role")
-    + form("f-assign", [{name:"userId",label:"user",options:uOpts},{name:"roleId",label:"role",options:roleOpts(r.roles)}], "Assign role")
-    + table(r.roles) + "</div>"
     + "<h2>Per-user overrides — revocations, visibly flagged deviations</h2><div class='card'>"
     + form("f-revoke", [{name:"userId",label:"user",options:uOpts},{name:"serverId",label:"server",options:sOpts},{name:"toolName",label:"tool",options:[],req:false}], "Add revocation")
     + table(rev.revocations) + "</div>";
@@ -292,18 +322,111 @@ const TABS = [
       revealSecret("#keyreveal", "API key for " + (email[b.dataset.key] ?? "this user"), issued.token,
         "Hand it to them over a channel you trust; if it is lost, revoke it and issue another.");
       $("#keyreveal").scrollIntoView({ block: "nearest" });
-    } catch (ex) { alert(ex.message); }
+    } catch (ex) { toast(ex.message, "err"); }
   }));
   el.querySelectorAll("[data-revoke]").forEach((b) => b.addEventListener("click", async () => {
-    try { await post("/v1/keys/" + b.dataset.revoke + "/revoke", {}); render(); }
-    catch (ex) { alert(ex.message); }
+    if (!confirm("Revoke this API key? The holder can no longer authenticate with it. This cannot be undone.")) return;
+    try { await post("/v1/keys/" + b.dataset.revoke + "/revoke", {}); toast("Key revoked", "ok"); render(); }
+    catch (ex) { toast(ex.message, "err"); }
   }));
   wire("f-user", (d) => post("/v1/users", { ...d, isAdmin: d.isAdmin === "true" }));
-  wire("f-role", (d) => post("/v1/roles", d));
-  wire("f-assign", (d) => post("/v1/users/" + d.userId + "/roles", { roleId: d.roleId }));
   wire("f-revoke", (d) => post("/v1/revocations", { ...d, toolName: d.toolName ?? null }));
 }],
-["Agent Governance", async (el) => {
+["Roles", async (el) => {
+  // The Roles page owns the whole role lifecycle: create, assign to users, and
+  // — the point of a role — define WHAT it grants. Fetch the four grantable
+  // object catalogs so the grant sub-forms can name things, not show UUIDs.
+  const [u, r, a, c, s] = await Promise.all([
+    get("/v1/users"), get("/v1/roles"), get("/v1/agents"), get("/v1/connectors"), get("/v1/servers"),
+  ]);
+  const tools = await toolIndex(s.servers);
+  const uOpts = userOpts(u.users), rOpts = roleOpts(r.roles);
+  const aOpts = agentOpts(a.agents), cOpts = connectorOpts(c.connectors), sOpts = serverOpts(s.servers);
+  el.innerHTML = "<h2>Roles</h2><div class='card'>"
+    + form("f-role", [{name:"name"},{name:"description",req:false}], "Create role")
+    + form("f-assign", [{name:"userId",label:"user",options:uOpts},{name:"roleId",label:"role",options:rOpts}], "Assign role")
+    + table(r.roles) + "</div>"
+    // §5 (ADR-0014): a role is a provisioning bundle. Pick a role, see what it
+    // grants, add/adjust grants — all POSTing to the ROLE endpoints (roleId in
+    // the path), then assigned to users via the assign-role form above.
+    + "<h2>Role grants — what this role provisions</h2><div class='card'>"
+    + form("f-rolepick", [{name:"roleId",label:"active role",options:rOpts,req:false,ph:"— select a role —"}], "Load grants")
+    + "<div id='rolegrants'><div class='empty'>Select a role to view and edit its grants</div></div>"
+    + "</div>";
+  wire("f-role", (d) => post("/v1/roles", d));
+  wire("f-assign", (d) => post("/v1/users/" + d.userId + "/roles", { roleId: d.roleId }));
+
+  let activeRoleId = "";
+  const renderGrants = async () => {
+    const host = $("#rolegrants");
+    if (!host) return;
+    if (!activeRoleId) { host.innerHTML = "<div class='empty'>Select a role to view and edit its grants</div>"; return; }
+    const g = await get("/v1/roles/" + activeRoleId + "/grants");
+    host.innerHTML =
+      "<div class='grid2'>"
+      + "<div>" + form("f-r-agrant", [{name:"agentId",label:"agent",options:aOpts}], "Grant agent") + "</div>"
+      + "<div>" + form("f-r-cgrant", [
+          {name:"connectorId",label:"connector",options:cOpts},
+          {name:"mode",options:["read","readwrite"]},
+          {name:"allowedObjects",label:"object scope",req:false,ph:"comma,separated (blank = all)"},
+        ], "Grant connector") + "</div>"
+      + "<div>" + form("f-r-tgrant", [{name:"serverId",label:"server",options:sOpts},{name:"toolName",label:"tool",options:[]}], "Grant MCP tool") + "</div>"
+      + "<div>" + form("f-r-sgrant", [{name:"serverId",label:"server",options:sOpts},{name:"readOnlyAll",label:"read-only all",options:["true","false"]}], "Grant MCP server") + "</div>"
+      + "</div>"
+      + "<h2>Agents</h2>" + table((g.agents ?? []).map((x) => ({ agent: x.agentName ?? x.agentId, modes: (x.allowedModes ?? []).join(", ") || "all" })))
+      + "<h2>Connectors</h2>" + table((g.connectors ?? []).map((x) => ({ connector: x.connectorName ?? x.connectorId, mode: x.mode, objects: (x.allowedObjects ?? []).join(", ") || "all" })))
+      + "<h2>MCP servers</h2>" + table((g.servers ?? []).map((x) => ({ server: x.serverName ?? x.serverId, readOnlyAll: x.readOnlyAll })))
+      + "<h2>MCP tools</h2>" + table((g.tools ?? []).map((x) => ({ server: x.serverName ?? x.serverId, tool: x.toolName })));
+    linkTools("f-r-tgrant", tools);
+    // keep=true: don't re-render the whole tab (that would drop the picker) —
+    // refresh only the bundle and toast success ourselves.
+    wire("f-r-agrant", async (d) => { await post("/v1/roles/" + activeRoleId + "/grants/agents", { agentId: d.agentId }); toast("Agent granted", "ok"); await renderGrants(); }, true);
+    wire("f-r-cgrant", async (d) => {
+      await post("/v1/roles/" + activeRoleId + "/grants/connectors", {
+        connectorId: d.connectorId, mode: d.mode,
+        ...(d.allowedObjects ? { allowedObjects: String(d.allowedObjects).split(",").map((x) => x.trim()).filter(Boolean) } : {}),
+      });
+      toast("Connector granted", "ok"); await renderGrants();
+    }, true);
+    wire("f-r-tgrant", async (d) => { await post("/v1/roles/" + activeRoleId + "/grants/tools", { serverId: d.serverId, toolName: d.toolName }); toast("Tool granted", "ok"); await renderGrants(); }, true);
+    wire("f-r-sgrant", async (d) => { await post("/v1/roles/" + activeRoleId + "/grants/servers", { serverId: d.serverId, readOnlyAll: d.readOnlyAll === "true" }); toast("Server granted", "ok"); await renderGrants(); }, true);
+  };
+  // the picker is a live control; wire it so Enter doesn't GET-submit + reboot,
+  // and react to change immediately.
+  wire("f-rolepick", async (d) => { activeRoleId = d.roleId ?? ""; await renderGrants(); }, true);
+  const pick = $("#f-rolepick [name=roleId]");
+  if (pick) pick.addEventListener("change", async () => { activeRoleId = pick.value; await renderGrants(); });
+}],
+["Teams", async (el) => {
+  const [u, t, cp] = await Promise.all([
+    get("/v1/users"), get("/v1/teams"), get("/v1/compliance/profiles"),
+  ]);
+  const uOpts = userOpts(u.users);
+  const teamOpts = t.teams.map((x) => ({ v: x.id, l: x.name }));
+  const tagOpts = cp.profiles.map((x) => x.tag);
+  el.innerHTML = "<h2>Teams</h2><div class='card'>"
+    + form("f-team", [
+        {name:"name",ph:"team name"},
+        {name:"defaultClassifications",label:"default classifications",options:tagOpts,req:false,multi:true},
+      ], "Create team")
+    + form("f-tmadd", [
+        {name:"teamId",label:"team",options:teamOpts},
+        {name:"userId",label:"user",options:uOpts},
+      ], "Add member")
+    + table(t.teams.map((x) => ({
+        name: x.name,
+        members: (x.members ?? []).map((m) => m.name).join(", ") || "—",
+        defaultClassifications: (x.defaultClassifications ?? []).join(", "),
+        created: x.createdAt,
+      })))
+    + "<p class='dim' style='font-size:12px'>Team membership is flat — per-user roles (owner/contributor/viewer) live on Shared-Project membership, not here. A team's default classifications are surfaced (never silently resolved) when a member joins a project whose tags don't cover them.</p></div>";
+  wire("f-team", (d) => post("/v1/teams", {
+    name: d.name,
+    ...(d.defaultClassifications ? { defaultClassifications: [].concat(d.defaultClassifications) } : {}),
+  }));
+  wire("f-tmadd", (d) => post("/v1/teams/" + d.teamId + "/members", { userId: d.userId }));
+}],
+["Agents", async (el) => {
   const [a, u] = await Promise.all([get("/v1/agents"), get("/v1/users")]);
   const uOpts = userOpts(u.users), aOpts = agentOpts(a.agents);
   const agentName = Object.fromEntries(a.agents.map((x) => [x.id, x.name]));
@@ -382,8 +505,9 @@ const TABS = [
     + "<p class='dim' style='font-size:12px'>Users add their own keys from /app → Settings. A user's own key wins over the platform's for their dispatches.</p>"
     + "<div id='ucred'></div></div>";
   el.querySelectorAll("[data-mcred]").forEach((b) => b.addEventListener("click", async () => {
-    try { await del("/v1/model-credentials/" + encodeURIComponent(b.dataset.mcred)); render(); }
-    catch (ex) { alert(ex.message); }
+    if (!confirm("Remove the platform credential for " + b.dataset.mcred + "? Non-BYO dispatches on this provider will 409 until a new key is added.")) return;
+    try { await del("/v1/model-credentials/" + encodeURIComponent(b.dataset.mcred)); toast("Credential removed", "ok"); render(); }
+    catch (ex) { toast(ex.message, "err"); }
   }));
   wire("f-mcred", (d) => post("/v1/model-credentials", d));
   wire("f-ucred", async (d) => {
@@ -393,14 +517,16 @@ const TABS = [
           (r) => "<button class='small danger' data-ucred='" + esc(r.provider) + "' data-uid='" + esc(d.userId) + "'>remove</button>")
       : "<div class='empty'>this user has no keys of their own — their dispatches use the platform credential</div>");
     $("#ucred").querySelectorAll("[data-ucred]").forEach((b) => b.addEventListener("click", async () => {
+      if (!confirm("Remove this user's own " + b.dataset.ucred + " key? Their dispatches will fall back to the platform credential.")) return;
       try {
         await del("/v1/users/" + b.dataset.uid + "/model-credentials/" + encodeURIComponent(b.dataset.ucred));
+        toast("Key removed", "ok");
         $("#f-ucred").requestSubmit();
-      } catch (ex) { alert(ex.message); }
+      } catch (ex) { toast(ex.message, "err"); }
     }));
   }, true);
 }],
-["Connector Governance", async (el) => {
+["Connectors", async (el) => {
   const [c, u] = await Promise.all([get("/v1/connectors"), get("/v1/users")]);
   const uOpts = userOpts(u.users);
   el.innerHTML = "<h2>Connector catalog</h2><div class='card'>" + form("f-conn", [{name:"name"},{name:"kind"}], "Create") + table(c.connectors) + "</div>"
@@ -415,7 +541,7 @@ const TABS = [
     $("#cview").innerHTML = table(v.connectors);
   }, true);
 }],
-["MCP Server Governance", async (el) => {
+["MCP Servers", async (el) => {
   const [s, u] = await Promise.all([get("/v1/servers"), get("/v1/users")]);
   const tools = await toolIndex(s.servers);
   const uOpts = userOpts(u.users), sOpts = serverOpts(s.servers);
@@ -439,7 +565,7 @@ const TABS = [
   wire("f-tgrant", (d) => post("/v1/grants/tools", d));
   wire("f-sgrant", (d) => post("/v1/grants/servers", { ...d, readOnlyAll: d.readOnlyAll === "true" }));
 }],
-["Policy & Rules Engine", async (el) => {
+["Rules Engine", async (el) => {
   // PILLAR 1 rule scoping: a rule can target one user, an assigned role, a
   // team, or the whole fleet — on one server or all of them. Fetch roles and
   // teams alongside users/servers so every scope has a named target select.
@@ -606,8 +732,9 @@ const TABS = [
     catch (ex) { err.textContent = ex.message; }
   });
   el.querySelectorAll("[data-rdel]").forEach((b) => b.addEventListener("click", async () => {
-    try { await del("/v1/workflows/assignment-rules/" + b.dataset.rdel); render(); }
-    catch (ex) { alert(ex.message); }
+    if (!confirm("Delete this assignment rule? Routing stops; in-flight instances keep their snapshotted definition.")) return;
+    try { await del("/v1/workflows/assignment-rules/" + b.dataset.rdel); toast("Rule deleted", "ok"); render(); }
+    catch (ex) { toast(ex.message, "err"); }
   }));
   wire("f-wfrule", (d) => post("/v1/workflows/assignment-rules", d));
   wire("f-git", (d) => post("/v1/git/connections", d));
@@ -649,7 +776,7 @@ const TABS = [
     $("#pmreveal").scrollIntoView({ block: "nearest" });
   }, true);
 }],
-["Audit & Activity Log", async (el) => {
+["Audit Log", async (el) => {
   const [u, ret] = await Promise.all([get("/v1/users"), get("/v1/audit/retention")]);
   // the users list is already here for the filter — reuse it so the table
   // says who acted by name (an unknown id still renders as a truncated chip)
@@ -678,9 +805,9 @@ const TABS = [
     if (!confirm("Delete " + ret.prunable + " audit row(s) older than " + ret.retainedDays + " days? This cannot be undone.")) return;
     try {
       const r = await post("/v1/audit/prune", {});
-      alert("Pruned " + r.deleted + " audit row(s) — floor " + r.retainedDays + "d from " + (r.floorSource || []).join(", ") + ".");
+      toast("Pruned " + r.deleted + " audit row(s) — floor " + r.retainedDays + "d from " + (r.floorSource || []).join(", ") + ".", "ok");
       render();
-    } catch (ex) { alert(ex.message); }
+    } catch (ex) { toast(ex.message, "err"); }
   });
   const load = async (userId) => {
     const a = await get("/v1/audit" + (userId ? "?userId=" + userId : ""));
@@ -720,8 +847,8 @@ const TABS = [
       }) + "</div>";
   el.querySelectorAll("[data-dec]").forEach((b) => b.addEventListener("click", async () => {
     const reason = (el.querySelector("[data-reason='" + b.dataset.id + "']")?.value ?? "").trim();
-    try { await post("/v1/approvals/" + b.dataset.id + "/decide", { decision: b.dataset.dec, ...(reason ? { reason } : {}) }); render(); }
-    catch (ex) { alert(ex.message); }
+    try { await post("/v1/approvals/" + b.dataset.id + "/decide", { decision: b.dataset.dec, ...(reason ? { reason } : {}) }); toast("Decision recorded", "ok"); render(); }
+    catch (ex) { toast(ex.message, "err"); }
   }));
 }],
 ["Simulation / Access preview", async (el) => {
@@ -736,8 +863,8 @@ const TABS = [
   }, true);
 }],
 ["Cost & Projects", async (el) => {
-  const [p, u, cp, t, ini] = await Promise.all([
-    get("/v1/projects"), get("/v1/users"), get("/v1/compliance/profiles"), get("/v1/teams"), get("/v1/initiatives"),
+  const [p, u, cp, ini] = await Promise.all([
+    get("/v1/projects"), get("/v1/users"), get("/v1/compliance/profiles"), get("/v1/initiatives"),
   ]);
   const uOpts = userOpts(u.users);
   const uname = Object.fromEntries(u.users.map((x) => [x.id, x.displayName || x.email]));
@@ -745,7 +872,6 @@ const TABS = [
   const iname = Object.fromEntries((ini.initiatives ?? []).map((x) => [x.id, x.name]));
   const tagOpts = cp.profiles.map((x) => x.tag);
   const pOpts = p.projects.map((x) => ({ v: x.id, l: x.name }));
-  const teamOpts = t.teams.map((x) => ({ v: x.id, l: x.name }));
   const iniOpts = (ini.initiatives ?? []).map((x) => ({ v: x.id, l: x.name }));
   const KEEP = { v: "", l: "— leave unchanged —" }, CLEAR = { v: "__clear__", l: "— clear —" };
   el.innerHTML = "<h2>Create a project</h2><div class='card'>"
@@ -774,7 +900,7 @@ const TABS = [
       ], "Create initiative")
     + table((ini.initiatives ?? []).map((r) => ({ name: r.name, "cost center": r.costCenter ?? "—", projects: r.projectCount ?? 0, "rolled-up spend": fmtUsd(r.spentUsd) })))
     + "<p class='dim' style='font-size:12px'>An initiative is a flat, reporting-only grouping of projects for cross-team cost attribution — no initiative-level budget or enforcement; each project keeps its own budget and governance. Group a project under one on the edit form below.</p></div>"
-    + "<h2>Edit a project — budget, approver, arbiter, cost center, name</h2><div class='card'>"
+    + "<h2>Edit a project — budget, approver, arbiter, cost center, name</h2><div class='card'>" // NB: Teams moved to the Identity & Access section
     + form("f-pedit", [
         {name:"projectId",label:"project",options:pOpts},
         {name:"name",label:"new name",req:false,ph:"leave unchanged"},
@@ -786,23 +912,7 @@ const TABS = [
         {name:"arbiterUserId",label:"arbiter",options:[CLEAR].concat(uOpts),req:false,ph:KEEP.l},
         {name:"initiativeId",label:"initiative",options:[CLEAR].concat(iniOpts),req:false,ph:KEEP.l},
       ], "Save changes")
-    + "<p class='dim' style='font-size:12px'>Only the fields you fill in change. A budget still requires a named approver after the edit — the API holds the invariant against the merged result. Classifications are absent on purpose: reclassification is a governed diff-then-approve change with its own flow.</p></div>"
-    + "<h2>Teams</h2><div class='card'>"
-    + form("f-team", [
-        {name:"name",ph:"team name"},
-        {name:"defaultClassifications",label:"default classifications",options:tagOpts,req:false,multi:true},
-      ], "Create team")
-    + form("f-tmadd", [
-        {name:"teamId",label:"team",options:teamOpts},
-        {name:"userId",label:"user",options:uOpts},
-      ], "Add member")
-    + table(t.teams.map((x) => ({
-        name: x.name,
-        members: (x.members ?? []).map((m) => m.name).join(", ") || "—",
-        defaultClassifications: (x.defaultClassifications ?? []).join(", "),
-        created: x.createdAt,
-      })))
-    + "<p class='dim' style='font-size:12px'>Team membership is flat — per-user roles (owner/contributor/viewer) live on Shared-Project membership, not here. A team's default classifications are surfaced (never silently resolved) when a member joins a project whose tags don't cover them.</p></div>";
+    + "<p class='dim' style='font-size:12px'>Only the fields you fill in change. A budget still requires a named approver after the edit — the API holds the invariant against the merged result. Classifications are absent on purpose: reclassification is a governed diff-then-approve change with its own flow.</p></div>";
   el.querySelectorAll("[data-pedit]").forEach((b) => b.addEventListener("click", () => {
     const f = $("#f-pedit");
     f.querySelector("[name=projectId]").value = b.dataset.pedit;
@@ -838,11 +948,6 @@ const TABS = [
     name: d.name,
     ...(d.costCenter ? { costCenter: d.costCenter } : {}),
   }));
-  wire("f-team", (d) => post("/v1/teams", {
-    name: d.name,
-    ...(d.defaultClassifications ? { defaultClassifications: [].concat(d.defaultClassifications) } : {}),
-  }));
-  wire("f-tmadd", (d) => post("/v1/teams/" + d.teamId + "/members", { userId: d.userId }));
   el.querySelectorAll("[data-proj]").forEach((b) => b.addEventListener("click", async () => {
     const [costs, compliance] = await Promise.all([
       get("/v1/projects/" + b.dataset.proj + "/costs"),
@@ -872,7 +977,7 @@ const TABS = [
       downloadCsv("/v1/projects/" + b.dataset.proj + "/costs.csv", (costs.project?.name ?? "project") + "-costs.csv"));
   }));
 }],
-["Infrastructure / Operations", async (el) => {
+["Infrastructure", async (el) => {
   // PILLAR 3 §8.2: monitored resources + operational policies + detected
   // findings + governed remediation. Findings are inert until governed — a new
   // one is auto-remediated (audited) only under a permissive policy, else it is
@@ -966,14 +1071,15 @@ const TABS = [
     + "</table></div></div>";
 
   $("#infra-scan").addEventListener("click", async () => {
-    try { const r = await post("/v1/infra/scan", {}); alert("Scan complete — " + r.created + " new, " + r.autoRemediated + " auto-remediated, " + r.refreshed + " refreshed."); render(); }
-    catch (ex) { alert(ex.message); }
+    try { const r = await post("/v1/infra/scan", {}); toast("Scan complete — " + r.created + " new, " + r.autoRemediated + " auto-remediated, " + r.refreshed + " refreshed.", "ok"); render(); }
+    catch (ex) { toast(ex.message, "err"); }
   });
   el.querySelectorAll("[data-remediate]").forEach((b) => b.addEventListener("click", async () => {
     const approver = $("#f-remapprover")?.querySelector("[name=approverUserId]")?.value;
-    if (!approver) { alert("Pick a remediation approver first."); return; }
-    try { await post("/v1/infra/findings/" + b.dataset.remediate + "/remediate", { approverUserId: approver }); render(); }
-    catch (ex) { alert(ex.message); }
+    if (!approver) { toast("Pick a remediation approver first.", "err"); return; }
+    if (!confirm("Propose remediation for this finding? It lands in the Approvals Queue for the named approver to decide.")) return;
+    try { await post("/v1/infra/findings/" + b.dataset.remediate + "/remediate", { approverUserId: approver }); toast("Remediation proposed", "ok"); render(); }
+    catch (ex) { toast(ex.message, "err"); }
   }));
   // the approver select is a live control, not a submit — stop it rebooting the SPA
   $("#f-remapprover")?.addEventListener("submit", (e) => e.preventDefault());
@@ -998,23 +1104,55 @@ const TABS = [
 }],
 ];
 
-let active = 0;
-function shell(content) {
+// The nav is grouped into labelled sections; each entry names a tab by its
+// title and is resolved to its TABS index at render time — so the physical
+// order of the TABS array is independent of the sidebar's grouping/order.
+const NAV = [
+  ["Identity & Access", ["Users", "Roles", "Teams"]],
+  ["AI Governance", ["Agents", "Model Credentials", "Connectors", "MCP Servers"]],
+  ["Policy", ["Rules Engine", "Simulation / Access preview"]],
+  ["Delivery", ["Workflows", "PM Connections"]],
+  ["Cost", ["Cost & Projects"]],
+  ["Operations", ["Infrastructure", "Approvals Queue", "Audit Log"]],
+];
+const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+const tabIndex = (title) => TABS.findIndex(([t]) => t === title);
+function navHtml() {
+  let out = "";
+  for (const [sec, titles] of NAV) {
+    out += "<div class='sec'>" + esc(sec) + "</div>";
+    for (const title of titles) {
+      const i = tabIndex(title);
+      if (i < 0) continue;
+      out += "<button class='nav-item" + (i === active ? " active" : "") + "' data-tab='" + i + "'>"
+        + "<span class='dot'></span>" + esc(title) + "</button>";
+    }
+  }
+  return out;
+}
+// deep-linking: the tab is derived from location.hash (a slug of its title), so
+// a reload or a shared link lands on the same page; an unknown hash falls back
+// to the first tab.
+function tabFromHash() {
+  const h = (location.hash || "").replace(/^#/, "");
+  const i = TABS.findIndex(([name]) => slug(name) === h);
+  return i >= 0 ? i : 0;
+}
+let active = tabFromHash();
+window.addEventListener("hashchange", () => { active = tabFromHash(); render(); });
+function shell() {
   return \`
   <div class="shell">
-    <aside class="side">
+    <aside class="side" id="side">
       <div class="brand"><span class="word">regul<em>ai</em>t</span><span class="tag">admin</span></div>
-      <div class="sec">Governance</div>
-      \${TABS.map(([name], i) => \`
-        <button class="nav-item \${i === active ? "active" : ""}" data-tab="\${i}">
-          <span class="dot"></span>\${name}
-        </button>\`).join("")}
+      \${navHtml()}
       <div class="foot">
         <div class="who">admin console</div>
         <button class="ghost small" id="signout" style="margin-top:8px;padding-left:0">Sign out</button>
       </div>
     </aside>
     <main class="main">
+      <button class="hamburger" id="navtoggle" aria-label="Toggle navigation" aria-expanded="false">☰ Menu</button>
       <h1>\${TABS[active][0]}</h1>
       <div id="panel"><div class="empty">loading…</div></div>
     </main>
@@ -1042,8 +1180,18 @@ async function render() {
     return;
   }
   root.innerHTML = shell();
+  // nav clicks route through the hash so the current page survives a reload and
+  // is shareable; the hashchange listener re-renders. (Re-clicking the active
+  // tab leaves the hash unchanged, so nothing re-renders — which is correct.)
   document.querySelectorAll("[data-tab]").forEach((b) =>
-    b.addEventListener("click", () => { active = Number(b.dataset.tab); render(); }));
+    b.addEventListener("click", () => { location.hash = slug(TABS[Number(b.dataset.tab)][0]); }));
+  const toggle = $("#navtoggle");
+  if (toggle) toggle.addEventListener("click", () => {
+    const side = $("#side");
+    if (!side) return;
+    const open = side.classList.toggle("open");
+    toggle.setAttribute("aria-expanded", open ? "true" : "false");
+  });
   $("#signout").addEventListener("click", () => { sessionStorage.removeItem("regulait.admin.key"); KEY = ""; render(); });
   const panel = $("#panel");
   try { await TABS[active][1](panel); }
