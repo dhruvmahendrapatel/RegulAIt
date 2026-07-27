@@ -8,6 +8,10 @@ import {
   planPromptCache,
   CACHE_READ_DISCOUNT,
   DEFAULT_MIN_CACHEABLE_TOKENS,
+  classifyEditIntent,
+  planEditVsRewrite,
+  DEFAULT_MIN_EDITABLE_BASELINE_TOKENS,
+  EDIT_DIFF_FRACTION,
   selectTools,
   estimateTokens,
   routeModel,
@@ -359,5 +363,122 @@ describe("planPromptCache (prompt caching §8/§10)", () => {
   it("exposes the documented default constants", () => {
     expect(DEFAULT_MIN_CACHEABLE_TOKENS).toBe(1024);
     expect(CACHE_READ_DISCOUNT).toBe(0.9);
+  });
+});
+
+describe("classifyEditIntent (edit vs rewrite §8)", () => {
+  it("reads targeted-change verbs as an edit", () => {
+    for (const t of [
+      "fix the typo in the return statement",
+      "rename the helper to parseInput",
+      "add a null check before the loop",
+      "update the copyright year",
+    ]) {
+      expect(classifyEditIntent(t)).toBe("edit");
+    }
+  });
+
+  it("reads wholesale verbs (and phrases) as a rewrite", () => {
+    for (const t of [
+      "rewrite this module",
+      "redo the whole thing",
+      "regenerate the file",
+      "start over from a blank slate",
+      "please recreate this from scratch",
+    ]) {
+      expect(classifyEditIntent(t)).toBe("rewrite");
+    }
+  });
+
+  it("no signal (or empty/missing) reads as unknown", () => {
+    for (const t of [null, undefined, "", "   ", "the quick brown fox"]) {
+      expect(classifyEditIntent(t)).toBe("unknown");
+    }
+  });
+
+  it("rewrite wins when both an edit and a rewrite signal appear", () => {
+    expect(classifyEditIntent("fix the bug, actually just rewrite the file")).toBe("rewrite");
+    expect(classifyEditIntent("add the field, or start over if easier")).toBe("rewrite");
+  });
+});
+
+describe("planEditVsRewrite (edit vs rewrite §8)", () => {
+  const editReq = "fix the typo in the return statement";
+
+  it("passthrough disables the optimization entirely (§12 off switch)", () => {
+    const p = planEditVsRewrite({ baselineTokens: 5000, requestText: editReq, routingMode: "passthrough" });
+    expect(p.mode).toBe("rewrite");
+    expect(p.applyDiffDirective).toBe(false);
+    expect(p.ruleId).toBe("routing-mode");
+    expect(p.estimatedTokensSaved).toBe(0);
+    expect(p.reason).toContain("passthrough");
+  });
+
+  it("no baseline (null/undefined/0) means a full rewrite — nothing to diff", () => {
+    for (const baselineTokens of [null, undefined, 0]) {
+      const p = planEditVsRewrite({ baselineTokens, requestText: editReq, routingMode: "automatic" });
+      expect(p.mode).toBe("rewrite");
+      expect(p.applyDiffDirective).toBe(false);
+      expect(p.ruleId).toBe("no-baseline");
+      expect(p.reason).toContain("nothing to diff");
+    }
+  });
+
+  it("a rewrite or unknown intent stays a full rewrite even with a big baseline", () => {
+    for (const requestText of ["rewrite this from scratch", "the quick brown fox"]) {
+      const p = planEditVsRewrite({ baselineTokens: 5000, requestText, routingMode: "automatic" });
+      expect(p.mode).toBe("rewrite");
+      expect(p.applyDiffDirective).toBe(false);
+      expect(p.ruleId).toBe("intent");
+      expect(p.estimatedTokensSaved).toBe(0);
+    }
+  });
+
+  it("an edit intent over a too-small baseline stays a full rewrite (already cheap)", () => {
+    const p = planEditVsRewrite({
+      baselineTokens: DEFAULT_MIN_EDITABLE_BASELINE_TOKENS - 1,
+      requestText: editReq,
+      routingMode: "automatic",
+    });
+    expect(p.mode).toBe("rewrite");
+    expect(p.applyDiffDirective).toBe(false);
+    expect(p.ruleId).toBe("baseline-size");
+    expect(p.ruleChain.at(-1)!.outcome).toBe("too-small");
+    expect(p.estimatedTokensSaved).toBe(0);
+  });
+
+  it("an edit intent over a large baseline diffs, saving round(baseline*(1-fraction)) output tokens", () => {
+    const p = planEditVsRewrite({ baselineTokens: 4000, requestText: editReq, routingMode: "automatic" });
+    expect(p.mode).toBe("edit");
+    expect(p.applyDiffDirective).toBe(true);
+    expect(p.ruleId).toBe("baseline-size");
+    expect(p.ruleChain.at(-1)!.outcome).toBe("applied");
+    expect(p.estimatedTokensSaved).toBe(Math.round(4000 * (1 - EDIT_DIFF_FRACTION)));
+    expect(p.estimatedTokensSaved).toBe(3000); // 4000 * 0.75
+    expect(p.estimationBasis).toContain("edit-vs-rewrite");
+  });
+
+  it("honors a custom minBaselineTokens threshold", () => {
+    const below = planEditVsRewrite({
+      baselineTokens: 300,
+      requestText: editReq,
+      routingMode: "automatic",
+      minBaselineTokens: 500,
+    });
+    expect(below.mode).toBe("rewrite");
+    expect(below.ruleId).toBe("baseline-size");
+    const above = planEditVsRewrite({
+      baselineTokens: 600,
+      requestText: editReq,
+      routingMode: "automatic",
+      minBaselineTokens: 500,
+    });
+    expect(above.mode).toBe("edit");
+    expect(above.estimatedTokensSaved).toBe(Math.round(600 * 0.75));
+  });
+
+  it("exposes the documented default constants", () => {
+    expect(DEFAULT_MIN_EDITABLE_BASELINE_TOKENS).toBe(200);
+    expect(EDIT_DIFF_FRACTION).toBe(0.25);
   });
 });

@@ -27,6 +27,8 @@ import {
   routeModel,
   planPromptCache,
   CACHE_READ_DISCOUNT,
+  planEditVsRewrite,
+  classifyEditIntent,
   type RoutingDecision,
 } from "@regulait/optimizer-kernel";
 import {
@@ -426,6 +428,10 @@ async function performDispatch(
     projectId: string | null;
     /** multi-turn history including the newest turn (conversation dispatches) */
     messages?: ModelChatMessage[] | undefined;
+    /** pillar-6 edit-vs-rewrite: the single-turn user input to send, overriding
+     * `body.input` when the caller has composed a baseline-augmented input.
+     * Absent = the plain `body.input` (byte-identical to the pre-edit path). */
+    input?: string | undefined;
     /** pillar-6 prompt caching: the stable system prefix to send, and whether
      * to mark it cacheable (the kernel's planPromptCache decision). */
     system?: string | undefined;
@@ -439,7 +445,7 @@ async function performDispatch(
     served: registry.find((a) => a.id === routing.selectedAgentId),
     requestedAgentId,
     baseline: registry.find((a) => a.id === routing.baselineAgentId) ?? null,
-    input: body.input ?? "",
+    input: args.input ?? body.input ?? "",
     messages: args.messages,
     ...(args.system ? { system: args.system } : {}),
     ...(args.cacheSystem ? { cacheSystem: true } : {}),
@@ -891,6 +897,12 @@ export function registerAgentConnectorRoutes(
       const estimate = estimateTokens(body.input, complexity);
       const boundChars = convoContext ? convoContext.modelBoundChars : (convo?.historyChars ?? 0);
       if (convo && boundChars > 0) estimate.in += Math.ceil(boundChars / 4);
+      // PILLAR 6 §8 edit-vs-rewrite: when the caller supplies a baseline to
+      // edit, the model must SEE it either way, so its input tokens are a real
+      // part of this dispatch's payload — fold them into the routing estimate
+      // (like conversation history above) BEFORE routing/budget/cost see it.
+      const baselineTokens = body.baseline ? Math.ceil(body.baseline.length / 4) : 0;
+      if (baselineTokens) estimate.in += baselineTokens;
       routing = routeModel({
         requestedAgentId: agent.id,
         candidates,
@@ -1014,6 +1026,67 @@ export function registerAgentConnectorRoutes(
         });
       }
 
+      // PILLAR 6 §8 EDIT VS REWRITE — a pure cost annotation on this
+      // ALREADY-authorized dispatch: the kernel decides whether the caller's
+      // change request reads as a targeted EDIT over a large-enough baseline;
+      // if so the gateway (a) injects a compact-diff directive into the
+      // dispatch system and the supplied baseline into the input so the OUTPUT
+      // saving is real, and (b) lands one estimate row in the SAME
+      // per-technique ledger. It NEVER changes the served agent, model,
+      // entitlement, budget, or output contract (the §12 "can never widen
+      // entitlement" invariant) — guarded on `routing` like the caching and
+      // compaction blocks. "passthrough" is the per-user off switch. The saving
+      // is OUTPUT tokens (a small diff vs re-emitting the whole baseline), so
+      // dollars = saved tokens at the SERVED agent's OUTPUT list price. Written
+      // only when the edit path actually applies.
+      const editPlan = planEditVsRewrite({
+        baselineTokens,
+        requestText: body.input,
+        routingMode: policy?.routingMode ?? "automatic",
+      });
+      if (body.dispatch && editPlan.mode === "edit" && routing) {
+        const routed = routing;
+        const servedRow = registry.find((a) => a.id === routed.selectedAgentId);
+        const estimatedCostSavedUsd =
+          servedRow?.costPerMTokOut != null
+            ? Number(((editPlan.estimatedTokensSaved / 1e6) * servedRow.costPerMTokOut).toFixed(6))
+            : null;
+        await db.insert(costEvents).values({
+          userId,
+          objectType: "agent",
+          objectId: agent.id,
+          technique: "edit_vs_rewrite",
+          requestedAgentId: agent.id,
+          servedAgentId: routing.selectedAgentId,
+          baselineAgentId: routing.baselineAgentId,
+          estimatedTokensIn: estimate.in,
+          estimatedTokensOut: estimate.out,
+          estimatedTokensSaved: editPlan.estimatedTokensSaved,
+          estimatedCostSavedUsd,
+          estimationBasis: editPlan.estimationBasis,
+          ruleId: "edit-vs-rewrite",
+          projectId,
+          detail: { baselineTokens, intent: classifyEditIntent(body.input), mode: body.mode },
+        });
+      }
+
+      // Compose the OUTGOING system + input. Both are ADDITIVE: with neither
+      // technique active they are byte-identical to today. Prompt caching
+      // supplies the stable `system`; edit-vs-rewrite (when applied) appends a
+      // compact-diff directive to that system and the supplied baseline to the
+      // input, so the model actually receives the diff instruction + the
+      // content it must edit (not just an accounting row).
+      let dispatchSystem = systemPrompt;
+      let dispatchInput = body.input ?? "";
+      if (editPlan.applyDiffDirective && body.baseline) {
+        dispatchSystem =
+          (systemPrompt ? systemPrompt + "\n\n" : "") +
+          "The user is editing the BASELINE content below. Return ONLY a minimal " +
+          "unified diff (the changed hunks with a little surrounding context), NOT " +
+          "the full rewritten content.";
+        dispatchInput = dispatchInput + "\n\n----- BASELINE -----\n" + body.baseline;
+      }
+
       // MULTI-TURN: a conversation dispatch sends the model-bound history —
       // [summary context] + recent verbatim turns when a summary exists, the
       // FULL ordered history otherwise — plus the newest user turn as the
@@ -1024,7 +1097,7 @@ export function registerAgentConnectorRoutes(
         convo && body.dispatch
           ? [
               ...(convoContext ? convoContext.modelBound : convo.history),
-              { role: "user" as const, content: body.input ?? "" },
+              { role: "user" as const, content: dispatchInput },
             ]
           : undefined;
       // One persistence rule for the streaming and non-streaming paths —
@@ -1079,7 +1152,8 @@ export function registerAgentConnectorRoutes(
           body,
           projectId,
           messages,
-          system: systemPrompt,
+          input: dispatchInput,
+          system: dispatchSystem,
           cacheSystem: promptCache.cacheSystem,
           onText: (delta) => send("delta", { text: delta }),
         });
@@ -1135,7 +1209,8 @@ export function registerAgentConnectorRoutes(
           body,
           projectId,
           messages,
-          system: systemPrompt,
+          input: dispatchInput,
+          system: dispatchSystem,
           cacheSystem: promptCache.cacheSystem,
         });
         await persistTurns(dispatchOutcome);

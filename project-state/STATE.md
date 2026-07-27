@@ -601,6 +601,25 @@ migration this slice). Suite 284 → 288 (prompt-caching.test.ts); optimizer 31 
 57 → 60. No UI change (savings-by-technique chart is technique-generic). Remaining pillar-6
 techniques: edit-vs-rewrite, file pre-processing, semantic caching, request batching.
 
+**Edit-vs-rewrite, 2026-07-27 — pillar 6's 5th technique.** NO migration (the `edit_vs_rewrite`
+cost_events enum value already existed). Pure kernel: `classifyEditIntent` (edit / rewrite /
+unknown keyword heuristic — a REWRITE signal WINS when both appear, so a full rewrite is the safe
+non-optimizing default and we never diff on an ambiguous ask) + `planEditVsRewrite` (guard order
+mirrors planPromptCache: passthrough → no baseline → non-edit intent → baseline below the
+200-token floor → else edit). When the request reads as a targeted edit over a large-enough
+baseline, the gateway injects a compact-diff directive into the dispatch `system` and the
+caller-supplied baseline (delimited) into the dispatch `input`, so the model returns a small diff
+instead of re-emitting the whole file — the OUTPUT saving is real (not just accounting), the same
+way prompt caching actually emits `cache_control`. Opt-in via a new `baseline` field on the invoke
+body; baseline tokens are folded into the routing estimate BEFORE routeModel (the model must see
+the file either way, so routing/budget/cost reflect the real payload); one `edit_vs_rewrite`
+cost_events estimate is written, priced at the served agent's OUTPUT list price (saving ≈ baseline
+× 0.75 output tokens). Pure cost annotation — never changes the served agent/model/entitlement/
+budget/output; passthrough is the off switch. The baseline rides the model input for that one
+dispatch only — persisted conversation history keeps the original request, so it never bloats or
+re-sends. Suite 288 → 292 (edit-rewrite.test.ts); optimizer 36 → 47. No UI change. Remaining
+pillar-6 techniques: file pre-processing, semantic caching, request batching.
+
 **Agent-driven task decomposition, 2026-07-26 — pillar 7's headline lands, human-gated.**
 `POST /v1/runs/decompose` {goal, projectId?, leadAgentId?}: a Team-Lead agent (leadAgentId ??
 user default ?? cheapest granted mock, entitlement-checked under mode "plan") drafts a
