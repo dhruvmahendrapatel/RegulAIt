@@ -25,6 +25,8 @@ import {
   classifyComplexity,
   estimateTokens,
   routeModel,
+  planPromptCache,
+  CACHE_READ_DISCOUNT,
   type RoutingDecision,
 } from "@regulait/optimizer-kernel";
 import {
@@ -141,6 +143,10 @@ export async function executeGovernedDispatch(
     messages?: ModelChatMessage[] | undefined;
     /** system context (e.g. a nested run's signed-off workflow artifacts) */
     system?: string | undefined;
+    /** pillar-6 prompt caching: mark `system` cacheable on the outgoing request
+     * (Anthropic ephemeral breakpoint). Purely a cost annotation — the served
+     * agent, model, entitlement, and output are unchanged. */
+    cacheSystem?: boolean | undefined;
     /** pillar 7: tools the worker may call this turn. When absent the request
      * is byte-identical to the tool-free dispatch. */
     tools?: ModelToolDef[] | undefined;
@@ -256,6 +262,7 @@ export async function executeGovernedDispatch(
       input: args.input,
       ...(args.messages ? { messages: args.messages } : {}),
       ...(args.system ? { system: args.system } : {}),
+      ...(args.cacheSystem ? { cacheSystem: true } : {}),
       ...(args.tools ? { tools: args.tools } : {}),
       ...(args.maxTokens ? { maxTokens: args.maxTokens } : {}),
       ...(args.onText ? { onText: args.onText } : {}),
@@ -419,6 +426,10 @@ async function performDispatch(
     projectId: string | null;
     /** multi-turn history including the newest turn (conversation dispatches) */
     messages?: ModelChatMessage[] | undefined;
+    /** pillar-6 prompt caching: the stable system prefix to send, and whether
+     * to mark it cacheable (the kernel's planPromptCache decision). */
+    system?: string | undefined;
+    cacheSystem?: boolean | undefined;
     onText?: ((delta: string) => void) | undefined;
   },
 ): Promise<DispatchOutcome> {
@@ -430,6 +441,8 @@ async function performDispatch(
     baseline: registry.find((a) => a.id === routing.baselineAgentId) ?? null,
     input: body.input ?? "",
     messages: args.messages,
+    ...(args.system ? { system: args.system } : {}),
+    ...(args.cacheSystem ? { cacheSystem: true } : {}),
     maxTokens: body.maxTokens,
     projectId: args.projectId,
     onText: args.onText,
@@ -951,6 +964,56 @@ export function registerAgentConnectorRoutes(
         });
       }
 
+      // PILLAR 6 §8/§10 PROMPT CACHING — a pure cost annotation on this
+      // ALREADY-authorized dispatch: the kernel decides whether the stable
+      // system prefix clears the provider's minimum cacheable size, the
+      // Anthropic adapter emits the real ephemeral breakpoint (cacheSystem
+      // threaded into the dispatch below), and one estimate row lands in the
+      // SAME per-technique ledger. It NEVER changes the served agent, model,
+      // entitlement, budget, or output (the §12 "can never widen entitlement"
+      // invariant). "passthrough" is the per-user off switch, exactly as for
+      // routing/compaction. Estimated tokens saved = the full cached prefix
+      // served from cache on each reuse; dollars = those tokens at the SERVED
+      // agent's input list price × the ephemeral cache-read discount. Written
+      // only when caching actually applies (like context_compaction).
+      const systemPrompt = body.system ?? undefined;
+      const systemTokens = systemPrompt ? Math.ceil(systemPrompt.length / 4) : 0;
+      const promptCache = planPromptCache({
+        systemTokens,
+        routingMode: policy?.routingMode ?? "automatic",
+      });
+      if (body.dispatch && promptCache.cacheSystem && routing) {
+        const routed = routing;
+        const servedRow = registry.find((a) => a.id === routed.selectedAgentId);
+        const estimatedCostSavedUsd =
+          servedRow?.costPerMTokIn != null
+            ? Number(
+                (
+                  (promptCache.estimatedTokensSaved / 1e6) *
+                  servedRow.costPerMTokIn *
+                  CACHE_READ_DISCOUNT
+                ).toFixed(6),
+              )
+            : null;
+        await db.insert(costEvents).values({
+          userId,
+          objectType: "agent",
+          objectId: agent.id,
+          technique: "prompt_caching",
+          requestedAgentId: agent.id,
+          servedAgentId: routing.selectedAgentId,
+          baselineAgentId: routing.baselineAgentId,
+          estimatedTokensIn: estimate.in,
+          estimatedTokensOut: estimate.out,
+          estimatedTokensSaved: promptCache.estimatedTokensSaved,
+          estimatedCostSavedUsd,
+          estimationBasis: promptCache.estimationBasis,
+          ruleId: "prompt-caching",
+          projectId,
+          detail: { systemTokens, mode: body.mode },
+        });
+      }
+
       // MULTI-TURN: a conversation dispatch sends the model-bound history —
       // [summary context] + recent verbatim turns when a summary exists, the
       // FULL ordered history otherwise — plus the newest user turn as the
@@ -1016,6 +1079,8 @@ export function registerAgentConnectorRoutes(
           body,
           projectId,
           messages,
+          system: systemPrompt,
+          cacheSystem: promptCache.cacheSystem,
           onText: (delta) => send("delta", { text: delta }),
         });
         await persistTurns(outcome);
@@ -1070,6 +1135,8 @@ export function registerAgentConnectorRoutes(
           body,
           projectId,
           messages,
+          system: systemPrompt,
+          cacheSystem: promptCache.cacheSystem,
         });
         await persistTurns(dispatchOutcome);
       }
