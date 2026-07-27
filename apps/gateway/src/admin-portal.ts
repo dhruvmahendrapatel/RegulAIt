@@ -69,7 +69,7 @@ const ISO_RE = /^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}/;
 function table(rows, actions) {
   if (!rows || rows.length === 0) return "<div class='empty'>none yet</div>";
   const cols = [...new Set(rows.flatMap((r) => Object.keys(r)))].filter((c) => c !== "ruleChain");
-  let h = "<div class='tblwrap'><table><tr>" + cols.map((c) => "<th>" + esc(c) + "</th>").join("") + (actions ? "<th></th>" : "") + "</tr>";
+  let h = "<div class='tblwrap'><table><tr>" + cols.map((c) => "<th>" + esc(humanizeKey(c)) + "</th>").join("") + (actions ? "<th></th>" : "") + "</tr>";
   for (const r of rows) {
     h += "<tr>" + cols.map((c) => {
       let v = r[c];
@@ -90,6 +90,261 @@ function table(rows, actions) {
     h += "</tr>";
   }
   return h + "</table></div>";
+}
+
+// --- human column labels ------------------------------------------------
+// camelCase / snake_case DB keys -> Title Case, with a small override map so
+// domain acronyms read right ("budgetApproverUserId" -> "Budget Approver User
+// ID", "alertThresholdPct" -> "Alert Threshold %"). Row keys never change —
+// only the <th> label. Used by table() above and dataTable() below.
+const HUMAN_OVERRIDES = {
+  id:"ID", ids:"IDs", usd:"USD", pct:"%", url:"URL", uri:"URI", api:"API",
+  mcp:"MCP", pii:"PII", cve:"CVE", byo:"BYO", eom:"EOM", csv:"CSV", pm:"PM",
+  ok:"OK", ttl:"TTL", eod:"EOD",
+};
+function humanizeKey(key) {
+  return String(key)
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[_\\s]+/g, " ")
+    .trim()
+    .split(" ")
+    .filter(Boolean)
+    .map((w) => HUMAN_OVERRIDES[w.toLowerCase()] ?? (w.charAt(0).toUpperCase() + w.slice(1)))
+    .join(" ") || String(key);
+}
+// a status/label pill; kind is a .badge modifier (ok/warn/bad/info/accent) or ""
+function badge(text, kind) {
+  return "<span class='badge" + (kind ? " " + kind : "") + "'>" + esc(text) + "</span>";
+}
+// an object -> definition list (.kv) with humanized keys; labels overrides keys
+function kvList(obj, labels) {
+  labels = labels || {};
+  const entries = Object.entries(obj || {});
+  if (!entries.length) return "<div class='empty'>none</div>";
+  return "<div class='kv'>" + entries.map((e) => {
+    const k = e[0]; let val = e[1];
+    if (val === null || val === undefined || val === "") val = "—";
+    else if (Array.isArray(val)) val = val.length ? val.join(", ") : "—";
+    else if (typeof val === "object") val = JSON.stringify(val);
+    return "<span class='k'>" + esc(labels[k] ?? humanizeKey(k)) + "</span><span>" + esc(val) + "</span>";
+  }).join("") + "</div>";
+}
+// small count map -> "cve 2 · drift 1" inline labeled counts (no raw JSON)
+function inlineCounts(obj) {
+  const entries = Object.entries(obj || {});
+  if (!entries.length) return "<span class='dim'>none</span>";
+  return entries.map((e) => esc(e[0]) + " <span class='num'>" + esc(e[1]) + "</span>")
+    .join(" <span class='faint'>·</span> ");
+}
+
+// --- dataTable: sortable headers + free-text filter + pagination ---------
+// A richer renderer for long administrative tables. Keeps table()'s UUID-chip,
+// ISO-date compaction and NOWRAP behaviors. opts: { actions?, labels?, cells?,
+// pageSize? } — cells is an optional per-column HTML renderer (value,row)=>html
+// (used for the findings severity/status badges). Per-instance state lives in
+// DT keyed by a fresh id; the document-level listeners re-render just the one
+// wrapper on sort/filter/page. State is per render() (reset when a tab loads).
+let dtSeq = 0;
+const DT = new Map();
+function dtCell(c, r, cells) {
+  if (cells && cells[c]) return "<td>" + cells[c](r[c], r) + "</td>";
+  let v = r[c];
+  if (typeof v === "object" && v !== null) v = JSON.stringify(v);
+  if (typeof v === "string" && UUID_RE.test(v)) return "<td class='nowrap'>" + idChip(v) + "</td>";
+  if (typeof v === "string" && ISO_RE.test(v)) {
+    return "<td class='mono dim nowrap' title='" + esc(v) + "'>" + esc(v.slice(0, 10) + " " + v.slice(11, 16)) + "</td>";
+  }
+  const cls = c === "id" || String(c).endsWith("Id") || c === "at" || c === "createdAt" ? " class='mono dim'"
+    : c === "stage" ? " class='label'"
+    : NOWRAP_COLS.has(c) ? " class='nowrap'" : "";
+  return "<td" + cls + ">" + esc(v) + "</td>";
+}
+function dtCompare(a, b, t) {
+  const ae = a === null || a === undefined || a === "";
+  const be = b === null || b === undefined || b === "";
+  if (ae && be) return 0;
+  if (ae) return 1;
+  if (be) return -1;
+  if (t === "num") return Number(a) - Number(b);
+  const sa = String(a).toLowerCase(), sb = String(b).toLowerCase();
+  return sa < sb ? -1 : sa > sb ? 1 : 0;
+}
+function dataTable(rows, opts) {
+  opts = opts || {};
+  const id = "dt-" + (++dtSeq);
+  const list = rows || [];
+  const cols = [...new Set(list.flatMap((r) => Object.keys(r)))].filter((c) => c !== "ruleChain");
+  const colType = {};
+  for (const c of cols) {
+    let allNum = true, any = false;
+    for (const r of list) {
+      const v = r[c];
+      if (v === null || v === undefined || v === "") continue;
+      any = true;
+      const isNum = typeof v === "number" || (typeof v === "string" && v.trim() !== "" && !isNaN(Number(v)));
+      if (!isNum) { allNum = false; break; }
+    }
+    colType[c] = any && allNum ? "num" : "str";
+  }
+  DT.set(id, {
+    rows: list, cols, colType,
+    actions: opts.actions || null, labels: opts.labels || {}, cells: opts.cells || null,
+    pageSize: opts.pageSize || 25, sortCol: null, sortDir: 1, filter: "", page: 0,
+  });
+  return "<div class='dtwrap' data-dt='" + id + "'>" + dtRender(id) + "</div>";
+}
+function dtRender(id) {
+  const st = DT.get(id);
+  if (!st) return "";
+  // a genuinely empty table shows no filter/paging chrome, like table()
+  if (st.rows.length === 0) return "<div class='empty'>none yet</div>";
+  const label = (c) => esc(st.labels[c] ?? humanizeKey(c));
+  const f = st.filter.trim().toLowerCase();
+  let rows = st.rows;
+  if (f) rows = rows.filter((r) => st.cols.some((c) => {
+    let v = r[c];
+    if (v === null || v === undefined) return false;
+    if (typeof v === "object") v = JSON.stringify(v);
+    return String(v).toLowerCase().indexOf(f) !== -1;
+  }));
+  if (st.sortCol != null) {
+    const c = st.sortCol, t = st.colType[c], dir = st.sortDir;
+    rows = rows.map((r, i) => [r, i]).sort((a, b) => {
+      const cmp = dtCompare(a[0][c], b[0][c], t);
+      return cmp !== 0 ? cmp * dir : a[1] - b[1];
+    }).map((x) => x[0]);
+  }
+  const total = rows.length;
+  const pages = Math.max(1, Math.ceil(total / st.pageSize));
+  if (st.page >= pages) st.page = pages - 1;
+  if (st.page < 0) st.page = 0;
+  const start = st.page * st.pageSize;
+  const pageRows = rows.slice(start, start + st.pageSize);
+  let h = "<div class='dtbar'><input type='text' class='dtfilter' aria-label='Filter table rows' placeholder='Filter…' " + 'value="' + esc(st.filter) + '"' + "></div>";
+  if (total === 0) return h + "<div class='empty'>" + (st.filter ? "no matches" : "none yet") + "</div>";
+  h += "<div class='tblwrap'><table><tr>";
+  for (const c of st.cols) {
+    const on = st.sortCol === c;
+    const ind = on ? (st.sortDir === 1 ? " ▲" : " ▼") : "";
+    const asort = on ? (st.sortDir === 1 ? "ascending" : "descending") : "none";
+    h += "<th class='dtsort' role='button' tabindex='0' data-col='" + esc(c) + "' aria-sort='" + asort + "' title='Sort by " + label(c) + "'>" + label(c) + ind + "</th>";
+  }
+  if (st.actions) h += "<th></th>";
+  h += "</tr>";
+  for (const r of pageRows) {
+    h += "<tr>" + st.cols.map((c) => dtCell(c, r, st.cells)).join("");
+    if (st.actions) h += "<td class='act'>" + st.actions(r) + "</td>";
+    h += "</tr>";
+  }
+  h += "</table></div>";
+  const from = start + 1, to = Math.min(total, start + st.pageSize);
+  h += "<div class='dtpage'><span class='dim'>showing " + from + "–" + to + " of " + total + "</span>";
+  if (pages > 1) h += "<span class='grow'></span>"
+    + "<button type='button' class='small dtprev'" + (st.page === 0 ? " disabled" : "") + ">Prev</button>"
+    + "<span class='dim' style='padding:0 6px'>page " + (st.page + 1) + " / " + pages + "</span>"
+    + "<button type='button' class='small dtnext'" + (st.page >= pages - 1 ? " disabled" : "") + ">Next</button>";
+  h += "</div>";
+  return h;
+}
+function dtRerender(wrap) {
+  const focused = document.activeElement;
+  const inFilter = focused && focused.classList && focused.classList.contains("dtfilter") && wrap.contains(focused);
+  const sortCol = (focused && focused.classList && focused.classList.contains("dtsort") && wrap.contains(focused)) ? focused.dataset.col : null;
+  const caret = inFilter ? focused.selectionStart : null;
+  wrap.innerHTML = dtRender(wrap.dataset.dt);
+  if (inFilter) {
+    const inp = wrap.querySelector(".dtfilter");
+    if (inp) { inp.focus(); try { inp.setSelectionRange(caret, caret); } catch (e) { /* not selectable */ } }
+  } else if (sortCol != null) {
+    const th = wrap.querySelector(".dtsort[data-col='" + sortCol + "']");
+    if (th) th.focus();
+  }
+}
+document.addEventListener("click", (e) => {
+  const wrap = e.target && e.target.closest ? e.target.closest("[data-dt]") : null;
+  if (!wrap) return;
+  const st = DT.get(wrap.dataset.dt);
+  if (!st) return;
+  const th = e.target.closest(".dtsort");
+  if (th) {
+    const c = th.dataset.col;
+    if (st.sortCol === c) st.sortDir = -st.sortDir; else { st.sortCol = c; st.sortDir = 1; }
+    st.page = 0; dtRerender(wrap); return;
+  }
+  if (e.target.closest(".dtprev")) { st.page -= 1; dtRerender(wrap); return; }
+  if (e.target.closest(".dtnext")) { st.page += 1; dtRerender(wrap); return; }
+});
+document.addEventListener("input", (e) => {
+  if (!e.target || !e.target.classList || !e.target.classList.contains("dtfilter")) return;
+  const wrap = e.target.closest("[data-dt]");
+  if (!wrap) return;
+  const st = DT.get(wrap.dataset.dt);
+  if (!st) return;
+  st.filter = e.target.value; st.page = 0; dtRerender(wrap);
+});
+document.addEventListener("keydown", (e) => {
+  const th = e.target && e.target.closest ? e.target.closest(".dtsort") : null;
+  if (!th) return;
+  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); th.click(); }
+});
+
+// --- formatted operator views (replace raw <pre>JSON dumps) --------------
+const EFFECT_KIND = { allow: "ok", deny: "bad", require_approval: "warn" };
+const OUTCOME_KIND = {
+  allow: "ok", "satisfied-by-approval": "ok", deny: "bad", revoked: "bad",
+  "require-approval": "warn", "no-match": "",
+};
+// a policy Decision -> effect badge + rule-chain table + reason prose, raw JSON
+// tucked behind a <details> toggle for power users.
+function renderDecision(d) {
+  d = d || {};
+  const eff = String(d.effect ?? "unknown");
+  const chain = Array.isArray(d.ruleChain) ? d.ruleChain : [];
+  let h = "<div class='row' style='align-items:center'>"
+    + badge(eff.replace(/_/g, " "), EFFECT_KIND[eff] ?? "")
+    + (d.ruleId ? "<span class='dim'>matched</span><span class='mono'>" + esc(d.ruleId) + "</span>" : "")
+    + "</div>";
+  if (d.reason) h += "<p style='margin:10px 0 0'>" + esc(d.reason) + "</p>";
+  if (eff === "require_approval" && (d.approverName || d.approverUserId))
+    h += "<p class='dim' style='margin:6px 0 0'>Requires sign-off from " + esc(d.approverName ?? d.approverUserId) + "</p>";
+  h += "<h2>Rule chain — every rule evaluated, in order</h2>";
+  if (chain.length) {
+    h += "<div class='tblwrap'><table><tr><th>#</th><th>Rule</th><th>Outcome</th><th>Grant / rule ID</th></tr>";
+    chain.forEach((t, i) => {
+      const gid = t.grantId
+        ? (UUID_RE.test(t.grantId) ? idChip(t.grantId) : "<span class='mono dim'>" + esc(t.grantId) + "</span>")
+        : "<span class='faint'>—</span>";
+      h += "<tr><td class='num'>" + (i + 1) + "</td><td class='nowrap'>" + esc(t.rule) + "</td>"
+        + "<td class='nowrap'>" + badge(String(t.outcome).replace(/-/g, " "), OUTCOME_KIND[t.outcome] ?? "") + "</td>"
+        + "<td>" + gid + "</td></tr>";
+    });
+    h += "</table></div>";
+  } else h += "<div class='empty'>no rules recorded</div>";
+  h += "<details style='margin-top:12px'><summary class='dim' style='cursor:pointer'>Raw decision JSON</summary>"
+    + "<pre style='margin-top:8px'>" + esc(JSON.stringify(d, null, 2)) + "</pre></details>";
+  return h;
+}
+// a project compliance profile -> classification badges + effective/enforcement
+// key-value lists, raw JSON behind a <details> toggle.
+function renderCompliance(c) {
+  c = c || {};
+  const tags = Array.isArray(c.classifications) ? c.classifications : [];
+  const pend = Array.isArray(c.pendingClassifications) ? c.pendingClassifications
+    : (c.pendingClassifications ? [c.pendingClassifications] : []);
+  let h = "<div class='row' style='align-items:center'><span class='dim'>classifications:</span> "
+    + (tags.length ? tags.map((t) => badge(t, "accent")).join(" ") : "<span class='faint'>none</span>")
+    + "</div>";
+  if (pend.length) h += "<div class='row' style='margin-top:6px;align-items:center'><span class='dim'>pending reclassification:</span> "
+    + pend.map((t) => badge(t, "warn")).join(" ") + "</div>";
+  h += "<h2>Effective policy (cascaded)</h2>" + kvList(c.effective || {}, {
+    requiredTemplateIds: "Required workflow templates", mcpDefaultMode: "MCP default mode",
+    auditRetentionDays: "Audit retention (days)", piiMode: "PII mode",
+    backupRetentionDays: "Backup retention (days)", patchCadenceDays: "Patch cadence (days)",
+  });
+  h += "<h2>Enforcement</h2>" + kvList(c.enforcement || {});
+  h += "<details style='margin-top:12px'><summary class='dim' style='cursor:pointer'>Raw compliance JSON</summary>"
+    + "<pre style='margin-top:8px'>" + esc(JSON.stringify(c, null, 2)) + "</pre></details>";
+  return h;
 }
 // An option is either a bare string (value === label) or {v,l} — the second
 // form is what lets every id field become a name the operator recognizes
@@ -301,34 +556,41 @@ const TABS = [
   const email = Object.fromEntries(u.users.map((x) => [x.id, x.email]));
   el.innerHTML = "<h2>Users</h2><div class='card'>"
     + form("f-user", [{name:"email"},{name:"displayName"},{name:"isAdmin",label:"admin",options:["false","true"]}], "Create user")
-    + table(u.users, (row) => "<button class='small' data-key='" + row.id + "'>issue key</button>") + "</div>"
+    + dataTable(u.users, { actions: (row) => "<button class='small' data-key='" + row.id + "'>issue key</button>" }) + "</div>"
     + "<div id='keyreveal'></div>"
     // A user with no API key cannot sign in to anything — issuing one is part
     // of creating them, not a separate API-only chore.
     + "<h2>API keys — plaintext returned exactly once, sha256 at rest</h2><div class='card'>"
-    + table(k.keys.map((x) => ({
+    + dataTable(k.keys.map((x) => ({
         id: x.id, name: x.name, user: email[x.userId] ?? x.userId, created: x.createdAt,
         lastUsed: x.lastUsedAt ?? "never", status: x.revokedAt ? "revoked" : "active",
-      })), (row) => row.status === "active"
-        ? "<button class='small danger' data-revoke='" + row.id + "'>revoke</button>" : "")
+      })), { actions: (row) => row.status === "active"
+        ? "<button class='small danger' data-revoke='" + row.id + "'>revoke</button>" : "" })
     + "</div>"
     + "<h2>Per-user overrides — revocations, visibly flagged deviations</h2><div class='card'>"
     + form("f-revoke", [{name:"userId",label:"user",options:uOpts},{name:"serverId",label:"server",options:sOpts},{name:"toolName",label:"tool",options:[],req:false}], "Add revocation")
     + table(rev.revocations) + "</div>";
   linkTools("f-revoke", tools);
-  el.querySelectorAll("[data-key]").forEach((b) => b.addEventListener("click", async () => {
-    try {
-      const issued = await post("/v1/users/" + b.dataset.key + "/keys", { name: "portal" });
-      revealSecret("#keyreveal", "API key for " + (email[b.dataset.key] ?? "this user"), issued.token,
-        "Hand it to them over a channel you trust; if it is lost, revoke it and issue another.");
-      $("#keyreveal").scrollIntoView({ block: "nearest" });
-    } catch (ex) { toast(ex.message, "err"); }
-  }));
-  el.querySelectorAll("[data-revoke]").forEach((b) => b.addEventListener("click", async () => {
-    if (!confirm("Revoke this API key? The holder can no longer authenticate with it. This cannot be undone.")) return;
-    try { await post("/v1/keys/" + b.dataset.revoke + "/revoke", {}); toast("Key revoked", "ok"); render(); }
-    catch (ex) { toast(ex.message, "err"); }
-  }));
+  // delegate on el (stable during the tab's life) so the handlers survive a
+  // dataTable sort/filter/paginate re-render, which rebuilds the button nodes.
+  el.addEventListener("click", async (e) => {
+    const keyBtn = e.target.closest("[data-key]");
+    if (keyBtn) {
+      try {
+        const issued = await post("/v1/users/" + keyBtn.dataset.key + "/keys", { name: "portal" });
+        revealSecret("#keyreveal", "API key for " + (email[keyBtn.dataset.key] ?? "this user"), issued.token,
+          "Hand it to them over a channel you trust; if it is lost, revoke it and issue another.");
+        $("#keyreveal").scrollIntoView({ block: "nearest" });
+      } catch (ex) { toast(ex.message, "err"); }
+      return;
+    }
+    const revBtn = e.target.closest("[data-revoke]");
+    if (revBtn) {
+      if (!confirm("Revoke this API key? The holder can no longer authenticate with it. This cannot be undone.")) return;
+      try { await post("/v1/keys/" + revBtn.dataset.revoke + "/revoke", {}); toast("Key revoked", "ok"); render(); }
+      catch (ex) { toast(ex.message, "err"); }
+    }
+  });
   wire("f-user", (d) => post("/v1/users", { ...d, isAdmin: d.isAdmin === "true" }));
   wire("f-revoke", (d) => post("/v1/revocations", { ...d, toolName: d.toolName ?? null }));
 }],
@@ -790,7 +1052,7 @@ const TABS = [
     : "Global floor <b>" + ret.retainedDays + " days</b> (from " + esc((ret.floorSource || []).join(", ") || "—")
       + ") · <b>" + ret.prunable + "</b> row(s) older than the floor";
   el.innerHTML = "<div class='card'>"
-    + "<h3 style='margin:0 0 4px'>Audit-log retention (§8.4)</h3>"
+    + "<h2 style='margin:0 0 4px'>Audit-log retention (§8.4)</h2>"
     + "<p class='sub'>Retention is a single global floor: the longest auditRetentionDays across every compliance profile (longest-floor-wins). Pruning deletes audit rows older than that floor; the prune itself is audited.</p>"
     + "<p>" + retLine + "</p>"
     + (ret.retainedDays != null
@@ -811,7 +1073,7 @@ const TABS = [
   });
   const load = async (userId) => {
     const a = await get("/v1/audit" + (userId ? "?userId=" + userId : ""));
-    $("#auditout").innerHTML = table(a.entries.map((e) => ({
+    $("#auditout").innerHTML = dataTable(a.entries.map((e) => ({
       at: e.at, user: uname[e.userId] ?? e.userId, object: e.objectType, effect: e.effect, rule: e.ruleId, reason: e.reason,
     })));
   };
@@ -823,7 +1085,7 @@ const TABS = [
   // is an OVERRIDE — the endpoint requires a reason and audit-marks it.
   const [a, me] = await Promise.all([get("/v1/approvals"), get("/v1/me").catch(() => ({ userId: null }))]);
   el.innerHTML = "<p class='sub'>The one inbox: MCP pauses, workflow sign-offs, run escalations, budget overages, context conflicts, reclassifications. The named approver decides; an admin may decide in their place only with a recorded reason (audit-marked as an override).</p><div class='card'>"
-    + table(a.approvals.map((r) => ({
+    + dataTable(a.approvals.map((r) => ({
         id: r.id, type: r.objectType,
         // internal sentinel stages read as their human labels (shared with
         // /app's inbox) — '__context_conflict__:<uuid>' never reaches a cell
@@ -836,7 +1098,7 @@ const TABS = [
         ...(r.decisionReason ? { reason: r.decisionReason } : {}),
         requestedAt: r.requestedAt,
       })),
-      (r) => {
+      { actions: (r) => {
         const row = a.approvals.find((x) => x.id === r.id);
         if (row.status !== "pending") return "";
         const override = me.userId !== row.approverUserId;
@@ -844,22 +1106,26 @@ const TABS = [
           + "<button class='small primary' data-dec='approved' data-id='" + row.id + "'>approve</button> "
           + "<button class='small danger' data-dec='denied' data-id='" + row.id + "'>deny</button>"
           + (override ? " <span class='badge warn'>override</span>" : "");
-      }) + "</div>";
-  el.querySelectorAll("[data-dec]").forEach((b) => b.addEventListener("click", async () => {
+      } }) + "</div>";
+  // delegate on el so decide buttons survive a dataTable sort/filter/page
+  // re-render (note: an unsaved reason typed into a row resets on re-render).
+  el.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-dec]");
+    if (!b) return;
     const reason = (el.querySelector("[data-reason='" + b.dataset.id + "']")?.value ?? "").trim();
     try { await post("/v1/approvals/" + b.dataset.id + "/decide", { decision: b.dataset.dec, ...(reason ? { reason } : {}) }); toast("Decision recorded", "ok"); render(); }
     catch (ex) { toast(ex.message, "err"); }
-  }));
+  });
 }],
 ["Simulation / Access preview", async (el) => {
   const [u, s] = await Promise.all([get("/v1/users"), get("/v1/servers")]);
   const tools = await toolIndex(s.servers);
   el.innerHTML = "<p class='sub'>Would this call be allowed right now? Evaluates live policy without executing anything.</p><div class='card'>"
     + form("f-sim", [{name:"userId",label:"user",options:userOpts(u.users)},{name:"serverId",label:"server",options:serverOpts(s.servers)},{name:"toolName",label:"tool",options:[]}], "Evaluate")
-    + "<pre id='simout'>—</pre></div>";
+    + "<div id='simout'><div class='empty'>Run an evaluation to see the decision.</div></div></div>";
   linkTools("f-sim", tools);
   wire("f-sim", async (d) => {
-    $("#simout").textContent = JSON.stringify(await post("/v1/evaluate", d), null, 2);
+    $("#simout").innerHTML = renderDecision(await post("/v1/evaluate", d));
   }, true);
 }],
 ["Cost & Projects", async (el) => {
@@ -887,11 +1153,11 @@ const TABS = [
       ], "Create project")
     + "<p class='dim' style='font-size:12px'>A budget only exists together with its named budget approver — set both or neither; the API refuses one without the other. Classifications (ctrl/cmd-click for several) come from the compliance profiles and cascade that framework's required workflows, PII mode and retention onto everything the project governs — changing them later goes through the reclassification review, never a plain edit.</p></div>"
     + "<h2>Projects — fleet spend</h2><div class='card'>"
-    + table(p.projects.map((r) => ({ name: r.name, costCenter: r.costCenter, initiative: iname[r.initiativeId] ?? "—", spent: fmtUsd(r.spentUsd), budget: fmtUsd(r.budgetUsd), period: r.budgetPeriod ?? "none", "alert %": r.alertThresholdPct ?? 100, classifications: (r.classifications ?? []).join(", ") })),
-      (r) => {
+    + dataTable(p.projects.map((r) => ({ name: r.name, costCenter: r.costCenter, initiative: iname[r.initiativeId] ?? "—", spent: fmtUsd(r.spentUsd), budget: fmtUsd(r.budgetUsd), period: r.budgetPeriod ?? "none", "alert %": r.alertThresholdPct ?? 100, classifications: (r.classifications ?? []).join(", ") })),
+      { actions: (r) => {
         const id = p.projects.find((x) => x.name === r.name).id;
         return "<button class='small' data-proj='" + id + "'>rollup</button> <button class='small' data-pedit='" + id + "'>edit</button>";
-      })
+      } })
     + "</div><div id='projout'></div>"
     + "<h2>Initiatives — cross-team rollup</h2><div class='card'>"
     + form("f-ini", [
@@ -913,11 +1179,15 @@ const TABS = [
         {name:"initiativeId",label:"initiative",options:[CLEAR].concat(iniOpts),req:false,ph:KEEP.l},
       ], "Save changes")
     + "<p class='dim' style='font-size:12px'>Only the fields you fill in change. A budget still requires a named approver after the edit — the API holds the invariant against the merged result. Classifications are absent on purpose: reclassification is a governed diff-then-approve change with its own flow.</p></div>";
-  el.querySelectorAll("[data-pedit]").forEach((b) => b.addEventListener("click", () => {
+  // delegate on el so the fleet dataTable can re-render (sort/filter/page)
+  // without dropping the row-action handlers.
+  el.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-pedit]");
+    if (!b) return;
     const f = $("#f-pedit");
     f.querySelector("[name=projectId]").value = b.dataset.pedit;
     f.scrollIntoView({ block: "center" });
-  }));
+  });
   wire("f-proj", (d) => {
     // the schema's budget-requires-approver rule, surfaced before the POST
     if (d.budgetUsd && !d.budgetApproverUserId) {
@@ -948,7 +1218,9 @@ const TABS = [
     name: d.name,
     ...(d.costCenter ? { costCenter: d.costCenter } : {}),
   }));
-  el.querySelectorAll("[data-proj]").forEach((b) => b.addEventListener("click", async () => {
+  el.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-proj]");
+    if (!b) return;
     const [costs, compliance] = await Promise.all([
       get("/v1/projects/" + b.dataset.proj + "/costs"),
       get("/v1/projects/" + b.dataset.proj + "/compliance"),
@@ -971,11 +1243,11 @@ const TABS = [
       + "<h2>Showback by team</h2><div class='card'>" + barChart(costs.byTeam ?? [], "costUsd", (i) => i.name ?? "(no team)") + "</div>"
       + "<h2>By agent / model</h2><div class='card'>" + barChart(costs.byAgent, "costUsd", (i) => i.model) + "</div>"
       + "<h2>Estimated savings by technique</h2><div class='card'>" + barChart(costs.estimatedSavings, "estimatedCostSavedUsd", (i) => i.technique) + "</div>"
-      + "<h2>Compliance — effective policy + enforcement labels</h2><div class='card'><pre>" + esc(JSON.stringify(compliance, null, 2)) + "</pre></div>";
+      + "<h2>Compliance — effective policy + enforcement labels</h2><div class='card'>" + renderCompliance(compliance) + "</div>";
     const csvBtn = $("#proj-csv");
     if (csvBtn) csvBtn.addEventListener("click", () =>
       downloadCsv("/v1/projects/" + b.dataset.proj + "/costs.csv", (costs.project?.name ?? "project") + "-costs.csv"));
-  }));
+  });
 }],
 ["Infrastructure", async (el) => {
   // PILLAR 3 §8.2: monitored resources + operational policies + detected
@@ -1003,9 +1275,9 @@ const TABS = [
     + "<div class='card stat'><div class='v'>" + (p.backup?.missed ?? 0) + " / " + (p.backup?.targets ?? 0) + "</div><div class='l'>backups missed / targets</div></div>"
     + "</div>"
     + "<div class='card'><div class='kv'>"
-    + "<span class='k'>by kind</span><span>" + esc(JSON.stringify(p.byKind ?? {})) + "</span>"
-    + "<span class='k'>by severity</span><span>" + esc(JSON.stringify(p.bySeverity ?? {})) + "</span>"
-    + "<span class='k'>by status</span><span>" + esc(JSON.stringify(p.byStatus ?? {})) + "</span>"
+    + "<span class='k'>by kind</span><span>" + inlineCounts(p.byKind ?? {}) + "</span>"
+    + "<span class='k'>by severity</span><span>" + inlineCounts(p.bySeverity ?? {}) + "</span>"
+    + "<span class='k'>by status</span><span>" + inlineCounts(p.byStatus ?? {}) + "</span>"
     + "</div><div class='row' style='margin-top:12px'><button class='small primary' id='infra-scan'>Scan now</button>"
     + "<span class='dim' style='font-size:12px'>Scanning detects findings idempotently, then auto-remediates any that a policy permits (audited) — everything else waits for a governed remediation.</span></div></div>"
 
@@ -1052,35 +1324,44 @@ const TABS = [
     + "<h2>Findings — severity-sorted posture inbox</h2><div class='card'>"
     + form("f-remapprover", [{name:"approverUserId",label:"remediation approver",options:uOpts}], "Set approver")
     + "<p class='dim' style='font-size:12px'>Pick the named approver, then 'propose remediation' on any open finding — it lands in the Approvals Queue (objectType infra_operation). Auto-remediated findings are already fixed; only 'open' findings can be proposed.</p>"
-    + "<div class='tblwrap'><table><tr><th>resource</th><th>kind</th><th>severity</th><th>status</th><th>summary</th><th>detected</th><th></th></tr>"
-    + fin.findings.map((f) => {
-        const sev = "<span class='badge " + (SEV[f.severity] ?? "") + "'>" + esc(f.severity) + "</span>";
-        const st = "<span class='badge " + (STATUS_BADGE[f.status] ?? "") + "'>" + esc(f.status) + "</span>";
-        const act = f.status === "open"
-          ? "<button class='small primary' data-remediate='" + f.id + "'>propose remediation</button>"
-          : f.status === "auto_remediated" ? "<span class='dim'>auto-fixed</span>"
-          : f.status === "remediated" ? "<span class='dim'>remediated</span>"
-          : f.status === "remediation_proposed" ? "<span class='dim'>awaiting approval</span>"
-          : f.status === "accepted_risk" ? "<span class='dim'>accepted risk</span>" : "";
-        return "<tr><td>" + esc(f.resourceName ?? "—") + "</td><td class='nowrap'>" + esc(f.kind) + "</td>"
-          + "<td class='nowrap'>" + sev + "</td><td class='nowrap'>" + st + "</td>"
-          + "<td>" + esc((f.detail && f.detail.summary) ? f.detail.summary : "") + "</td>"
-          + "<td class='mono dim nowrap' title='" + esc(f.detectedAt) + "'>" + esc(String(f.detectedAt).slice(0, 16).replace("T", " ")) + "</td>"
-          + "<td class='act'>" + act + "</td></tr>";
-      }).join("")
-    + "</table></div></div>";
+    // color+text severity/status: badges carry the word AND a title, so status
+    // is never signalled by color alone. Sort/filter/paginate via dataTable.
+    + dataTable(fin.findings.map((f) => ({
+        id: f.id,
+        resource: f.resourceName ?? "—",
+        kind: f.kind,
+        severity: f.severity,
+        status: f.status,
+        summary: (f.detail && f.detail.summary) ? f.detail.summary : "",
+        detected: f.detectedAt,
+      })), {
+        cells: {
+          severity: (v) => "<span class='badge " + (SEV[v] ?? "") + "' title='severity: " + esc(v) + "'>" + esc(v) + "</span>",
+          status: (v) => "<span class='badge " + (STATUS_BADGE[v] ?? "") + "' title='status: " + esc(v) + "'>" + esc(v) + "</span>",
+        },
+        actions: (r) => r.status === "open"
+          ? "<button class='small primary' data-remediate='" + r.id + "'>propose remediation</button>"
+          : r.status === "auto_remediated" ? "<span class='dim'>auto-fixed</span>"
+          : r.status === "remediated" ? "<span class='dim'>remediated</span>"
+          : r.status === "remediation_proposed" ? "<span class='dim'>awaiting approval</span>"
+          : r.status === "accepted_risk" ? "<span class='dim'>accepted risk</span>" : "",
+      })
+    + "</div>";
 
   $("#infra-scan").addEventListener("click", async () => {
     try { const r = await post("/v1/infra/scan", {}); toast("Scan complete — " + r.created + " new, " + r.autoRemediated + " auto-remediated, " + r.refreshed + " refreshed.", "ok"); render(); }
     catch (ex) { toast(ex.message, "err"); }
   });
-  el.querySelectorAll("[data-remediate]").forEach((b) => b.addEventListener("click", async () => {
+  // delegate so the remediate buttons survive a findings dataTable re-render
+  el.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-remediate]");
+    if (!b) return;
     const approver = $("#f-remapprover")?.querySelector("[name=approverUserId]")?.value;
     if (!approver) { toast("Pick a remediation approver first.", "err"); return; }
     if (!confirm("Propose remediation for this finding? It lands in the Approvals Queue for the named approver to decide.")) return;
     try { await post("/v1/infra/findings/" + b.dataset.remediate + "/remediate", { approverUserId: approver }); toast("Remediation proposed", "ok"); render(); }
     catch (ex) { toast(ex.message, "err"); }
-  }));
+  });
   // the approver select is a live control, not a submit — stop it rebooting the SPA
   $("#f-remapprover")?.addEventListener("submit", (e) => e.preventDefault());
   wire("f-ires", (d) => {
@@ -1124,8 +1405,12 @@ function navHtml() {
     for (const title of titles) {
       const i = tabIndex(title);
       if (i < 0) continue;
-      out += "<button class='nav-item" + (i === active ? " active" : "") + "' data-tab='" + i + "'>"
-        + "<span class='dot'></span>" + esc(title) + "</button>";
+      const on = i === active;
+      // aria-current marks the active tab for assistive tech; the dot is
+      // decorative (aria-hidden) since the label already names the tab.
+      out += "<button class='nav-item" + (on ? " active" : "") + "' data-tab='" + i + "'"
+        + " aria-label='" + esc(title) + "'" + (on ? " aria-current='page'" : "") + ">"
+        + "<span class='dot' aria-hidden='true'></span>" + esc(title) + "</button>";
     }
   }
   return out;
@@ -1153,7 +1438,7 @@ function shell() {
     </aside>
     <main class="main">
       <button class="hamburger" id="navtoggle" aria-label="Toggle navigation" aria-expanded="false">☰ Menu</button>
-      <h1>\${TABS[active][0]}</h1>
+      <h1 tabindex="-1">\${TABS[active][0]}</h1>
       <div id="panel"><div class="empty">loading…</div></div>
     </main>
   </div>\`;
@@ -1161,6 +1446,9 @@ function shell() {
 
 async function render() {
   const root = $("#root");
+  // dataTable state is per-render — drop last render's instances so the Map
+  // doesn't grow across tab switches.
+  DT.clear();
   if (!KEY) {
     root.innerHTML = \`
     <div class="gate"><div class="card">
@@ -1196,6 +1484,10 @@ async function render() {
   const panel = $("#panel");
   try { await TABS[active][1](panel); }
   catch (ex) { panel.innerHTML = "<div class='empty'>Couldn’t load — " + esc(ex.message) + "</div>"; }
+  // move keyboard focus to the panel heading after a (re)render so a tab switch
+  // doesn't dump keyboard/AT users back at <body>.
+  const h1 = $(".main h1");
+  if (h1) h1.focus({ preventScroll: false });
 }
 render();
 </script>

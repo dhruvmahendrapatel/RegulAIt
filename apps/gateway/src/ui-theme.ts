@@ -68,6 +68,9 @@ a { color: var(--accent); text-decoration: none; }
 
 /* ---- primitives ---------------------------------------------------- */
 h1 { font-size: 19px; font-weight: 600; margin: 0 0 2px; letter-spacing: -.01em; }
+/* h1 is made programmatically focusable (tabindex=-1) so render() can move
+   keyboard focus to the panel heading — suppress the ring on that focus */
+h1[tabindex]:focus { outline: none; }
 .sub { color: var(--text-dim); font-size: 13px; margin: 0 0 22px; }
 h2 { font-size: 11.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--text-dim); font-weight: 600; margin: 26px 0 10px; }
 .card { background: var(--bg-raised); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; }
@@ -129,6 +132,14 @@ td.label { min-width: 150px; overflow-wrap: normal; }
 .dim { color: var(--text-dim); }
 .faint { color: var(--text-faint); }
 .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+/* ---- data table: sortable / filterable / paginated (dataTable helper) ---- */
+.dtbar { margin: 0 0 10px; }
+.dtfilter { width: 100%; max-width: 320px; }
+th.dtsort { cursor: pointer; user-select: none; white-space: nowrap; }
+th.dtsort:hover { color: var(--text); }
+th.dtsort:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 4px; }
+th.dtsort[aria-sort="ascending"], th.dtsort[aria-sort="descending"] { color: var(--text); }
+.dtpage { display: flex; align-items: center; gap: 4px; margin-top: 10px; font-size: 12.5px; }
 
 .badge {
   display: inline-block; font-size: 10.5px; font-weight: 600; letter-spacing: .05em;
@@ -147,7 +158,7 @@ pre, .codeblock {
   margin: 0; white-space: pre-wrap;
 }
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 18px; font-size: 13px; }
-.kv .k { color: var(--text-faint); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; padding-top: 2px; }
+.kv .k { color: var(--text-dim); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; padding-top: 2px; }
 .hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
 .empty { color: var(--text-faint); padding: 26px 0; text-align: center; font-size: 13px; }
 .err-line { color: var(--bad); font-size: 12.5px; }
@@ -172,7 +183,7 @@ pre, .codeblock {
 }
 .stat { padding: 14px 16px; }
 .stat .v { font-family: var(--mono); font-size: 21px; font-weight: 600; }
-.stat .l { font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-faint); margin-top: 2px; }
+.stat .l { font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-dim); margin-top: 2px; }
 .bar { height: 6px; border-radius: 3px; background: #ffffff10; overflow: hidden; }
 .bar > i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
 .bar > i.over { background: var(--bad); }
