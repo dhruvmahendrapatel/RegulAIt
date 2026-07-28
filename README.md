@@ -33,7 +33,9 @@ Then open **http://localhost:3000/app** and sign in:
 - **avery** (approver) — the **Inbox** has a real sign-off waiting.
 - **admin** — **http://localhost:3000/admin** for the governance console and the
   Cost & Projects dashboard. Add a model credential there (anthropic/openai/google/xai)
-  and the corresponding seeded agents start doing real dispatches.
+  and the corresponding seeded agents start doing real dispatches. On a self-hosted box
+  you can skip the paste and set the provider's API-key env var instead (below) — the
+  Playground then defaults to Claude automatically.
 
 Without Docker:
 
@@ -43,6 +45,11 @@ pnpm install && pnpm -r build
 export DATABASE_URL=postgres://user:pass@localhost:5432/regulait
 export REGULAIT_DATA_KEY=$(openssl rand -hex 32)
 export REGULAIT_BOOTSTRAP_TOKEN=dev-bootstrap
+# Optional — activate a real model provider platform-wide with no admin-UI paste
+# and no key stored in the DB (read at dispatch time only). Any of:
+export ANTHROPIC_API_KEY=sk-ant-...   # (optional ANTHROPIC_BASE_URL) → Claude goes live
+#   OPENAI_API_KEY / OPENAI_BASE_URL, GOOGLE_API_KEY (or GEMINI_API_KEY), XAI_API_KEY
+# A stored per-user or platform credential still takes precedence over the env var.
 pnpm --filter @regulait/gateway seed    # idempotent demo data, prints keys once
 pnpm --filter @regulait/gateway start   # migrations run on boot
 ```

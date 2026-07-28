@@ -251,17 +251,37 @@ export async function executeGovernedDispatch(
       ? [undefined]
       : await db.select().from(modelCredentials).where(eq(modelCredentials.provider, served.provider));
     const cred = userCred ?? platformCred;
-    if (!cred) {
-      return {
-        ok: false,
-        status: 409,
-        error: "no_model_credential",
-        detail: `no stored credential (user or platform) for provider '${served.provider}'`,
-      };
+    if (cred) {
+      credentialSource = userCred ? "user" : "platform";
+      apiKey = decryptSecret(dataKey, cred.keyCiphertext);
+      baseUrl = cred.baseUrl;
+    } else {
+      // PLATFORM CREDENTIAL VIA ENVIRONMENT — the last-resort fallback. With no
+      // stored user OR platform credential, a self-hosted / single-tenant box
+      // can still activate a real provider by exporting its conventional
+      // API-key env var (e.g. ANTHROPIC_API_KEY). Read here at dispatch time
+      // only, never stored. Same trust level as a stored platform credential:
+      // it's the operator's key, applied on every user's behalf. Precedence is
+      // strict — a stored user or platform credential above already won; this
+      // engages ONLY when both are absent.
+      const envKey = platformEnvKey(served.provider);
+      if (envKey) {
+        credentialSource = "platform";
+        apiKey = envKey.apiKey;
+        baseUrl = envKey.baseUrl;
+      } else {
+        const envHint = platformEnvKeyName(served.provider);
+        return {
+          ok: false,
+          status: 409,
+          error: "no_model_credential",
+          detail:
+            `no stored credential (user or platform) for provider '${served.provider}'` +
+            ` — an admin can add one in Model Credentials` +
+            (envHint ? `, or set the ${envHint} environment variable on the server` : ``),
+        };
+      }
     }
-    credentialSource = userCred ? "user" : "platform";
-    apiKey = decryptSecret(dataKey, cred.keyCiphertext);
-    baseUrl = cred.baseUrl;
   }
 
   let result;
@@ -464,19 +484,78 @@ async function performDispatch(
   });
 }
 
+/**
+ * Platform credential via environment. A self-hosted / single-tenant deploy can
+ * activate a real provider by exporting its conventional API-key env var instead
+ * of pasting a key into the admin portal — no admin-UI paste, no key material in
+ * the DB. Read at dispatch time only, never persisted. This is the SAME trust
+ * level as a stored PLATFORM credential (see modelCredentials): it is the
+ * platform operator's key, applied on every user's behalf, and it is the LAST
+ * resort — a stored user or platform credential always takes precedence.
+ *
+ * Returns null when the provider has no env-key convention or the var is unset.
+ */
+export function platformEnvKey(
+  provider: string,
+): { apiKey: string; baseUrl: string | null } | null {
+  // provider -> [api-key env names (first non-empty wins), base-url env names]
+  const map: Record<string, { key: readonly string[]; base: readonly string[] }> = {
+    anthropic: { key: ["ANTHROPIC_API_KEY"], base: ["ANTHROPIC_BASE_URL"] },
+    openai: { key: ["OPENAI_API_KEY"], base: ["OPENAI_BASE_URL"] },
+    google: { key: ["GOOGLE_API_KEY", "GEMINI_API_KEY"], base: ["GOOGLE_BASE_URL", "GEMINI_BASE_URL"] },
+    xai: { key: ["XAI_API_KEY"], base: ["XAI_BASE_URL"] },
+  };
+  const entry = map[provider];
+  if (!entry) return null;
+  const firstSet = (names: readonly string[]): string | null => {
+    for (const name of names) {
+      const v = process.env[name];
+      if (v && v.length > 0) return v;
+    }
+    return null;
+  };
+  const apiKey = firstSet(entry.key);
+  if (!apiKey) return null;
+  return { apiKey, baseUrl: firstSet(entry.base) };
+}
+
+/** The primary env-var NAME a provider's platform key is read from — for the
+ * 409 detail message only (never the value). Null when the provider has no
+ * env-key convention. */
+export function platformEnvKeyName(provider: string): string | null {
+  const names: Record<string, string> = {
+    anthropic: "ANTHROPIC_API_KEY",
+    openai: "OPENAI_API_KEY",
+    google: "GOOGLE_API_KEY",
+    xai: "XAI_API_KEY",
+  };
+  return names[provider] ?? null;
+}
+
+/** The non-mock providers that support the platform-key env fallback, i.e. the
+ * provider kinds `platformEnvKey` can resolve. */
+export const ENV_FALLBACK_PROVIDERS = ["anthropic", "openai", "google", "xai"] as const;
+
 /** Providers this user could actually dispatch to right now: "mock" needs no
  * key at all, everything else needs a stored credential — the caller's own
- * (BYO key) or the platform's — and a data key to decrypt it with. Exported
- * so orchestration's re-plan routing filters candidates exactly like the
- * invoke path does — routing anywhere may only land on a servable agent. */
+ * (BYO key) or the platform's — and a data key to decrypt it with, OR a
+ * platform-key env var set for that provider (the env fallback, which needs no
+ * data key since it is not encrypted at rest). Exported so orchestration's
+ * re-plan routing filters candidates exactly like the invoke path does —
+ * routing anywhere may only land on a servable agent. */
 export async function configuredProviders(
   db: Db,
   dataKey: string | undefined,
   userId: string,
 ): Promise<Set<string>> {
-  // Without REGULAIT_DATA_KEY no stored credential can be decrypted, so mock
-  // is the only thing that can be served (executeGovernedDispatch agrees).
-  if (!dataKey) return new Set(["mock"]);
+  const set = new Set<string>(["mock"]);
+  // The env fallback is decrypted-key-free, so it counts even without a data key.
+  for (const provider of ENV_FALLBACK_PROVIDERS) {
+    if (platformEnvKey(provider)) set.add(provider);
+  }
+  // Without REGULAIT_DATA_KEY no STORED credential can be decrypted, so mock +
+  // any env-configured provider is all that can be served.
+  if (!dataKey) return set;
   const [userCreds, platformCreds] = await Promise.all([
     db
       .select({ provider: userModelCredentials.provider })
@@ -484,11 +563,9 @@ export async function configuredProviders(
       .where(eq(userModelCredentials.userId, userId)),
     db.select({ provider: modelCredentials.provider }).from(modelCredentials),
   ]);
-  return new Set([
-    "mock",
-    ...userCreds.map((c) => c.provider),
-    ...platformCreds.map((c) => c.provider),
-  ]);
+  for (const c of userCreds) set.add(c.provider);
+  for (const c of platformCreds) set.add(c.provider);
+  return set;
 }
 
 /** §2/§4: agent registry + entitlements, connector catalog + grants, and the
@@ -554,6 +631,29 @@ export function registerAgentConnectorRoutes(
       })
       .from(modelCredentials),
   }));
+
+  // Which providers are LIVE platform-wide, so the /app playground can guide a
+  // user ("Anthropic: not configured") without ever seeing key material. A
+  // provider is `configured` when a PLATFORM stored credential exists OR the
+  // platform-key env var is set (the env fallback); "mock" is always true.
+  // Booleans + provider names ONLY — no keys, no ciphertext, no base URLs.
+  // Any authenticated user may read it (NON_ADMIN_ROUTES); it exposes no secret.
+  app.get("/v1/model-providers/status", async () => {
+    const stored = new Set(
+      (await db.select({ provider: modelCredentials.provider }).from(modelCredentials)).map(
+        (r) => r.provider,
+      ),
+    );
+    const providers: Record<string, { configured: boolean }> = {
+      mock: { configured: true },
+    };
+    for (const provider of ENV_FALLBACK_PROVIDERS) {
+      providers[provider] = {
+        configured: stored.has(provider) || platformEnvKey(provider) !== null,
+      };
+    }
+    return { providers };
+  });
 
   // Rotation is the POST above (upsert on provider); this is the way OUT — a
   // platform key that must stop being used has to be removable without a
@@ -731,6 +831,7 @@ export function registerAgentConnectorRoutes(
           name: agents.name,
           provider: agents.provider,
           tier: agents.tier,
+          model: agents.model,
           enabled: agents.enabled,
           allowedModes: agentGrants.allowedModes,
           grantId: agentGrants.id,
@@ -761,6 +862,7 @@ export function registerAgentConnectorRoutes(
             name: agents.name,
             provider: agents.provider,
             tier: agents.tier,
+            model: agents.model,
             enabled: agents.enabled,
           })
           .from(agents)
@@ -781,6 +883,7 @@ export function registerAgentConnectorRoutes(
           name: meta.name,
           provider: meta.provider,
           tier: meta.tier,
+          model: meta.model,
           enabled: meta.enabled,
           allowedModes: primary.allowedModes,
           grantId: primary.id,

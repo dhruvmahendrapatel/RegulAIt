@@ -197,6 +197,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "GET /",
     "GET /health",
     "GET /v1/me",
+    "GET /v1/model-providers/status",
     "GET /v1/runs",
     "GET /v1/workflows/instances",
     "GET /v1/projects",

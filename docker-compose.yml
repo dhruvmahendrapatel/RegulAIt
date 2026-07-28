@@ -27,6 +27,11 @@ services:
       REGULAIT_DATA_KEY: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
       REGULAIT_BOOTSTRAP_TOKEN: dev-bootstrap
       SEED_DEMO: "1"
+      # Optional — set a provider's API key here (or in a .env / secret) to
+      # activate real model dispatch platform-wide, no admin-UI paste, no key in
+      # the DB. Read at dispatch time only; a stored credential still wins.
+      # ANTHROPIC_API_KEY: sk-ant-...   # (optional ANTHROPIC_BASE_URL) → Claude live
+      # OPENAI_API_KEY / GOOGLE_API_KEY (or GEMINI_API_KEY) / XAI_API_KEY likewise
     ports:
       - "3000:3000"
 

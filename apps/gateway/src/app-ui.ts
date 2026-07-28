@@ -41,6 +41,7 @@ let DEFAULT_AGENT_ID = null; // my policy's default agent (lead-agent preselect)
 let PROJECTS = [];      // my member projects
 let INBOX_COUNT = 0;
 let MY_PROVIDERS = []; // providers I hold my own key for (never the key itself)
+let PROVIDER_STATUS = {}; // provider kind -> { configured } platform-wide (stored cred OR env key), no secrets
 
 async function api(method, path, body) {
   const res = await fetch(path, {
@@ -163,16 +164,18 @@ window.addEventListener("hashchange", () => render());
 async function bootstrap() {
   ME = await get("/v1/me");
   if (!ME.userId) throw new Error("this key has no user identity");
-  const [mine, projects, creds] = await Promise.all([
+  const [mine, projects, creds, providerStatus] = await Promise.all([
     get("/v1/users/" + ME.userId + "/agents"),
     get("/v1/projects").catch(() => ({ projects: [] })),
     get("/v1/users/" + ME.userId + "/model-credentials").catch(() => ({ credentials: [] })),
+    get("/v1/model-providers/status").catch(() => ({ providers: {} })),
   ]);
   AGENTS = mine.agents ?? [];
   AGENT_NAMES = Object.fromEntries(AGENTS.map((a) => [a.agentId, a.name]));
   DEFAULT_AGENT_ID = mine.defaultAgentId ?? null;
   PROJECTS = projects.projects ?? [];
   MY_PROVIDERS = (creds.credentials ?? []).map((c) => c.provider);
+  PROVIDER_STATUS = providerStatus.providers ?? {};
   const inbox = await get("/v1/approvals").catch(() => ({ approvals: [] }));
   INBOX_COUNT = (inbox.approvals ?? []).filter((a) => a.status === "pending").length;
 }
@@ -263,6 +266,53 @@ function keyHint(agent) {
     : "No " + esc(agent.provider) + " key of your own — this uses the platform credential if an admin has configured one. <a href='#/settings'>Add your key</a>";
 }
 
+// A provider is "live" platform-wide when a stored platform credential exists OR
+// its platform-key env var is set — read from /v1/model-providers/status (never
+// the key itself). Unknown providers read as not-configured; "mock" is always on.
+function providerConfigured(provider) {
+  if (provider === "mock") return true;
+  return !!(PROVIDER_STATUS[provider] && PROVIDER_STATUS[provider].configured);
+}
+
+// Which agent a FRESH chat opens on: prefer a real, LIVE provider so the box
+// defaults to Claude the moment an Anthropic key is configured — highest-tier
+// configured non-mock agent, anthropic/Claude winning ties. Falls back to the
+// user's policy default, then the first granted agent. (A thread opened from the
+// rail still overrides this with its own stored agent via PG_PREFILL.)
+function pickDefaultAgentId() {
+  if (!AGENTS.length) return null;
+  const live = AGENTS.filter((a) => a.provider !== "mock" && providerConfigured(a.provider));
+  if (live.length) {
+    const best = live.slice().sort((a, b) => {
+      const ap = a.provider === "anthropic" ? 1 : 0;
+      const bp = b.provider === "anthropic" ? 1 : 0;
+      if (ap !== bp) return bp - ap;        // anthropic/Claude first
+      return (b.tier ?? 0) - (a.tier ?? 0); // then highest tier
+    })[0];
+    return best.agentId;
+  }
+  if (DEFAULT_AGENT_ID && AGENTS.some((a) => a.agentId === DEFAULT_AGENT_ID)) return DEFAULT_AGENT_ID;
+  return AGENTS[0].agentId;
+}
+
+// The credential banner above the composer: a clear warning when the selected
+// agent's real provider isn't configured (it WILL error on send), a subtle
+// "live" indicator when it is. Mock agents show nothing here (keyHint covers
+// them). Dependency-free — inline styles on the theme's own vars.
+function providerBanner(agent) {
+  if (!agent || agent.provider === "mock") return "";
+  const label = agent.provider.charAt(0).toUpperCase() + agent.provider.slice(1);
+  if (providerConfigured(agent.provider)) {
+    const model = agent.model ? " (" + esc(agent.model) + ")" : "";
+    return '<div style="font-size:11.5px;color:var(--ok);margin-top:8px">● Live: ' + esc(agent.name) + model + "</div>";
+  }
+  return '<div style="font-size:12px;margin-top:8px;padding:8px 10px;border:1px solid #d9a44144;'
+    + 'border-left:3px solid var(--warn);border-radius:6px;background:#d9a44114;color:var(--warn)">'
+    + "\\u26A0\\uFE0E " + esc(label) + " isn\\u2019t configured yet — this agent will error on send. "
+    + "Add a key in <a href='#/settings'>Settings</a> (your own) or ask an admin to configure it. "
+    + "Pick a mock agent to try the flow now.</div>";
+}
+
 // The conversations rail: newest-updated first, active highlight, delete
 // affordance. Rendered into #convo-rail so refreshRail() can update it after
 // a turn lands without re-rendering the whole page (a stream may be open).
@@ -336,8 +386,13 @@ async function playgroundPage() {
   // No grants means no agent to invoke — without this guard the select is
   // empty, Send POSTs to /v1/agents//invoke, and the user gets Fastify's 404.
   const noAgents = AGENTS.length === 0;
+  // Fresh chats open on the highest-tier LIVE real provider (Claude first) so a
+  // configured Anthropic key defaults the box to Claude; a thread opened from
+  // the rail overrides this post-render via PG_PREFILL.
+  const preselectId = pickDefaultAgentId();
+  const selAgent = AGENTS.find((a) => a.agentId === preselectId) ?? AGENTS[0];
   const agentOpts = AGENTS.map((a) =>
-    \`<option value="\${a.agentId}">\${esc(a.name)} · \${esc(a.provider)} · tier \${a.tier}</option>\`).join("");
+    \`<option value="\${a.agentId}"\${a.agentId === preselectId ? " selected" : ""}>\${esc(a.name)} · \${esc(a.provider)} · tier \${a.tier}</option>\`).join("");
   const agentField = noAgents
     ? '<div class="grow"><label class="f">Agent</label><div class="dim" style="font-size:12.5px">No agents are granted to your account — ask an admin to grant you one.</div></div>'
     : \`<div><label class="f">Agent</label><select id="pg-agent">\${agentOpts}</select></div>\`;
@@ -361,7 +416,7 @@ async function playgroundPage() {
             </select>
           </div>
         </div>
-        \${noAgents ? "" : '<hr class="hr"><div class="faint" style="font-size:11.5px" id="pg-key">' + keyHint(AGENTS[0]) + "</div>"}
+        \${noAgents ? "" : '<hr class="hr"><div class="faint" style="font-size:11.5px" id="pg-key">' + keyHint(selAgent) + '</div><div id="pg-banner">' + providerBanner(selAgent) + "</div>"}
       </div>
       <div class="card" style="margin-top:12px">
         <div class="chat-log" id="chat-log">
@@ -2057,7 +2112,9 @@ async function render() {
       const ag = $("#pg-agent");
       if (ag && PG_PREFILL.agentId && AGENTS.some((a) => a.agentId === PG_PREFILL.agentId)) {
         ag.value = PG_PREFILL.agentId;
-        if ($("#pg-key")) $("#pg-key").innerHTML = keyHint(AGENTS.find((a) => a.agentId === PG_PREFILL.agentId));
+        const pa = AGENTS.find((a) => a.agentId === PG_PREFILL.agentId);
+        if ($("#pg-key")) $("#pg-key").innerHTML = keyHint(pa);
+        if ($("#pg-banner")) $("#pg-banner").innerHTML = providerBanner(pa);
       }
       const pr = $("#pg-project");
       if (pr) pr.value = PG_PREFILL.projectId && PROJECTS.some((p) => p.id === PG_PREFILL.projectId) ? PG_PREFILL.projectId : "";
@@ -2071,6 +2128,7 @@ async function render() {
     $("#pg-agent")?.addEventListener("change", (e) => {
       const a = AGENTS.find((x) => x.agentId === e.target.value);
       if ($("#pg-key")) $("#pg-key").innerHTML = keyHint(a);
+      if ($("#pg-banner")) $("#pg-banner").innerHTML = providerBanner(a);
     });
     $("#pg-input")?.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendPrompt(); }
