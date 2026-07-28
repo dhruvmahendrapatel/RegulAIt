@@ -21,6 +21,12 @@ export const EXECUTABLE_STAGE_TYPES = [
   "automated_build",
   "automated_check",
   "git_operation",
+  // §2 the pipeline tail: a governed deploy (gated on a configured deploy target
+  // and an optional condition, else a manual handoff) and a rollback that
+  // reverses it. A post-deploy verify is an automated_check with
+  // onFailure:"rollback" that routes straight to the rollback stage on failure.
+  "deployment",
+  "rollback",
 ] as const;
 
 export const GIT_ACTIONS = ["create_branch", "open_pr", "merge"] as const;
@@ -59,6 +65,24 @@ const stageSchema = z.object({
   branchPrefix: z.string().min(1).optional(),
   /** git_operation merge: merge strategy (default merge) */
   strategy: z.enum(["merge", "squash", "rebase"]).optional(),
+  /** deployment/rollback: the registered deploy target to act on (reuses the
+   * `connection` field name; validated to exist at the gateway). */
+  // (connection is declared above and shared with git_operation)
+  /** deployment: the target environment being deployed to (audit + condition). */
+  environment: z.string().min(1).optional(),
+  /** deployment: an optional gate — the deploy runs only if the change's field
+   * matches; otherwise the stage parks at a manual handoff. Absent = always
+   * deploy (subject only to the deploy target existing). */
+  condition: z
+    .object({ field: z.enum(["environment", "changeType"]), equals: z.string().min(1) })
+    .optional(),
+  /** automated_check: what a FAILED required check does — "block" (default:
+   * park at blocked_on_check pending remediation) or "rollback" (route straight
+   * to `rollbackStageId`, the post-deploy self-heal path). */
+  onFailure: z.enum(["block", "rollback"]).optional(),
+  /** automated_check with onFailure:"rollback": the id of the rollback stage to
+   * jump to when this check fails. */
+  rollbackStageId: z.string().min(1).optional(),
 });
 export type Stage = z.infer<typeof stageSchema>;
 
@@ -138,6 +162,31 @@ export const workflowDefinitionSchema = z
           code: z.ZodIssueCode.custom,
           message: `merge stage '${s.id}' needs an earlier open_pr stage`,
         });
+      }
+    }
+    // §2 deploy / rollback / post-deploy-verify structural checks
+    for (const s of def.stages) {
+      if ((s.type === "deployment" || s.type === "rollback") && !s.connection) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `${s.type} stage '${s.id}' needs a deploy target (connection)`,
+        });
+      }
+      if (s.type === "automated_check" && s.onFailure === "rollback") {
+        if (!s.rollbackStageId) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `check stage '${s.id}' has onFailure:rollback but no rollbackStageId`,
+          });
+        } else {
+          const target = def.stages.find((o) => o.id === s.rollbackStageId);
+          if (!target || target.type !== "rollback") {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: `check stage '${s.id}' rollbackStageId '${s.rollbackStageId}' is not a rollback stage`,
+            });
+          }
+        }
       }
     }
     if (def.stages[0]!.type !== "trigger") {
@@ -257,9 +306,18 @@ export type InstanceStatus =
   | "blocked_on_artifact"
   | "awaiting_trigger"
   | "awaiting_execution"
+  // §2 automated checks that actually FAIL: a required check reported a failing
+  // result, so the pipeline is parked here (NOT advanced) pending remediation
+  // and a re-check — the failure path the deploy/rollback stages build on.
+  | "blocked_on_check"
+  // §2 a deploy stage could not proceed (no configured target, or its condition
+  // was not met) — parked for a manual handoff decision (override or abort).
+  | "blocked_on_deploy"
   | "completed"
   | "aborted"
-  | "denied";
+  | "denied"
+  // §2 terminal: a post-deploy verify failed and the deploy was reversed.
+  | "rolled_back";
 
 export interface InstanceState {
   status: InstanceStatus;
@@ -278,6 +336,19 @@ export type WorkflowEvent =
   | { kind: "stage_completed"; stageId: string }
   | { kind: "execution_succeeded"; stageId: string }
   | { kind: "execution_failed"; stageId: string; error: string }
+  // §2 a required automated check reported a FAILING result — distinct from a
+  // transient execution_failed (which stays retryable): this parks the instance
+  // at blocked_on_check pending remediation. `failures` names the failing checks.
+  | { kind: "check_failed"; stageId: string; failures: string[] }
+  // §2 remediation done — re-run the parked check stage against fresh results.
+  | { kind: "recheck"; stageId: string }
+  // §2 a deploy stage cannot proceed (no target / condition unmet) → manual handoff.
+  | { kind: "deploy_blocked"; stageId: string; reason: string }
+  // §2 operator resolves a manual-handoff deploy (deployed out-of-band / condition
+  // accepted) → advance past the deploy stage.
+  | { kind: "deploy_override"; stageId: string }
+  // §2 a rollback stage finished reversing the deployment → terminal rolled_back.
+  | { kind: "rolled_back"; stageId: string }
   | { kind: "abort" };
 
 /** side effects the caller (gateway) must perform after a transition */
@@ -286,6 +357,13 @@ export type Effect =
   | { kind: "await_artifact"; stageId: string; output: string }
   | { kind: "await_human_trigger"; stageId: string }
   | { kind: "execute_stage"; stageId: string }
+  // §2 a required check failed — the gateway surfaces this (audit + PM mirror +
+  // dashboard) exactly like the other blocking effects; `failures` names them.
+  | { kind: "check_failed"; stageId: string; failures: string[] }
+  // §2 a deploy stage is parked for a manual handoff; `reason` says why.
+  | { kind: "await_manual_deploy"; stageId: string; reason: string }
+  // §2 the deployment was reversed — the instance ended in rolled_back.
+  | { kind: "instance_rolled_back"; stageId: string }
   | { kind: "instance_completed" }
   | { kind: "instance_denied" }
   | { kind: "instance_aborted" };
@@ -334,6 +412,14 @@ function runForward(def: WorkflowDefinition, state: InstanceState): TransitionRe
       effects.push({ kind: "instance_completed" });
       return { state: s, effects };
     }
+    // §2 a rollback stage is a FAILURE-ONLY target: it runs only when a
+    // post-deploy verify jumps to it (that jump bypasses runForward). In the
+    // normal forward flow it is skipped, so a passing deploy never reverses
+    // itself. It stays "pending" — it was never entered.
+    if (stage.type === "rollback") {
+      s.currentStageIndex += 1;
+      continue;
+    }
     s.stageStatuses[s.currentStageIndex] = "active";
 
     if (stage.type === "trigger" || stage.type === "planning") {
@@ -364,11 +450,14 @@ function runForward(def: WorkflowDefinition, state: InstanceState): TransitionRe
     }
     if (
       stage.type === "git_operation" ||
+      stage.type === "deployment" ||
       (stage.type === "automated_build" && stage.run !== undefined) ||
       (stage.type === "automated_check" && (stage.checks?.length ?? 0) > 0)
     ) {
-      // executed by the gateway (git executor / nested orchestration run /
-      // check executor); retryable on failure
+      // executed by the gateway (git executor / deploy executor / nested
+      // orchestration run / check executor); retryable on failure. (A rollback
+      // stage is reached only via the post-deploy-verify jump, which sets
+      // awaiting_execution directly and never passes through here.)
       s.status = "awaiting_execution";
       effects.push({ kind: "execute_stage", stageId: stage.id });
       return { state: s, effects };
@@ -386,7 +475,12 @@ export function transition(
   state: InstanceState,
   event: WorkflowEvent,
 ): TransitionResult {
-  if (state.status === "completed" || state.status === "aborted" || state.status === "denied") {
+  if (
+    state.status === "completed" ||
+    state.status === "aborted" ||
+    state.status === "denied" ||
+    state.status === "rolled_back"
+  ) {
     throw new WorkflowStateError(`instance is terminal (${state.status}) and accepts no events`);
   }
 
@@ -461,6 +555,7 @@ export function transition(
   if (event.kind === "execution_succeeded" || event.kind === "execution_failed") {
     const executable =
       current?.type === "git_operation" ||
+      current?.type === "deployment" ||
       (current?.type === "automated_build" && current.run !== undefined) ||
       (current?.type === "automated_check" && (current.checks?.length ?? 0) > 0);
     if (!current || current.id !== event.stageId || !executable) {
@@ -479,6 +574,104 @@ export function transition(
     s.stageStatuses[s.currentStageIndex] = "completed";
     s.currentStageIndex += 1;
     return runForward(def, s);
+  }
+
+  if (event.kind === "check_failed") {
+    // only the currently-executing named-check stage can fail this way
+    const executable =
+      current?.type === "automated_check" && (current.checks?.length ?? 0) > 0;
+    if (!current || current.id !== event.stageId || !executable) {
+      throw new WorkflowStateError(`instance is not running checks for stage '${event.stageId}'`);
+    }
+    // §2 self-heal: a post-deploy verify with onFailure:"rollback" routes STRAIGHT
+    // to its rollback stage (jump the index, run the rollback executor) instead
+    // of parking — a failed deploy reverses itself. Any other check blocks.
+    if (current.onFailure === "rollback" && current.rollbackStageId) {
+      const rbIndex = def.stages.findIndex((o) => o.id === current.rollbackStageId);
+      // the schema guarantees this points at a real rollback stage; be defensive
+      if (rbIndex >= 0) {
+        const s: InstanceState = {
+          ...state,
+          status: "awaiting_execution",
+          stageStatuses: [...state.stageStatuses],
+          artifactVersions: { ...state.artifactVersions },
+        };
+        s.stageStatuses[s.currentStageIndex] = "completed";
+        s.currentStageIndex = rbIndex;
+        s.stageStatuses[rbIndex] = "active";
+        return {
+          state: s,
+          effects: [
+            { kind: "check_failed", stageId: current.id, failures: event.failures },
+            { kind: "execute_stage", stageId: current.rollbackStageId },
+          ],
+        };
+      }
+    }
+    // park at blocked_on_check WITHOUT advancing — the stage stays active so a
+    // recheck re-runs THIS stage. Surfaced via the check_failed effect.
+    return {
+      state: { ...state, status: "blocked_on_check" },
+      effects: [{ kind: "check_failed", stageId: current.id, failures: event.failures }],
+    };
+  }
+
+  if (event.kind === "recheck") {
+    if (state.status !== "blocked_on_check") {
+      throw new WorkflowStateError("instance is not blocked on a failed check");
+    }
+    if (!current || current.id !== event.stageId) {
+      throw new WorkflowStateError(`instance is not parked on check stage '${event.stageId}'`);
+    }
+    // re-run the same check stage against freshly-reported results
+    return {
+      state: { ...state, status: "awaiting_execution" },
+      effects: [{ kind: "execute_stage", stageId: current.id }],
+    };
+  }
+
+  if (event.kind === "deploy_blocked") {
+    if (!current || current.id !== event.stageId || current.type !== "deployment") {
+      throw new WorkflowStateError(`instance is not deploying stage '${event.stageId}'`);
+    }
+    // manual handoff: no configured target or the condition was not met — park.
+    return {
+      state: { ...state, status: "blocked_on_deploy" },
+      effects: [{ kind: "await_manual_deploy", stageId: current.id, reason: event.reason }],
+    };
+  }
+
+  if (event.kind === "deploy_override") {
+    if (state.status !== "blocked_on_deploy") {
+      throw new WorkflowStateError("instance is not blocked on a manual deploy handoff");
+    }
+    if (!current || current.id !== event.stageId) {
+      throw new WorkflowStateError(`instance is not parked on deploy stage '${event.stageId}'`);
+    }
+    // operator resolved the handoff — advance past the deploy stage
+    const s: InstanceState = {
+      ...state,
+      status: "running",
+      stageStatuses: [...state.stageStatuses],
+      artifactVersions: { ...state.artifactVersions },
+    };
+    s.stageStatuses[s.currentStageIndex] = "completed";
+    s.currentStageIndex += 1;
+    return runForward(def, s);
+  }
+
+  if (event.kind === "rolled_back") {
+    if (!current || current.id !== event.stageId || current.type !== "rollback") {
+      throw new WorkflowStateError(`instance is not rolling back stage '${event.stageId}'`);
+    }
+    // terminal: the deployment was reversed. The stage is done and the run ends.
+    const s: InstanceState = {
+      ...state,
+      status: "rolled_back",
+      stageStatuses: [...state.stageStatuses],
+    };
+    s.stageStatuses[s.currentStageIndex] = "completed";
+    return { state: s, effects: [{ kind: "instance_rolled_back", stageId: current.id }] };
   }
 
   if (event.kind === "human_trigger" || event.kind === "stage_completed") {

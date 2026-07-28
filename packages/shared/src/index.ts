@@ -419,6 +419,46 @@ export const advanceStageSchema = z.object({
   stageId: z.string().min(1),
 });
 
+/** §2 report per-check outcomes into an automated_check stage. A real CI posts
+ * pass/fail (+ optional severity/detail) here; the demo/seed does too. A failing
+ * required check parks the instance at blocked_on_check. Only names declared on
+ * the stage are honoured (the gateway ignores unknown checks). */
+export const reportChecksSchema = z.object({
+  stageId: z.string().min(1),
+  results: z
+    .array(
+      z.object({
+        check: z.string().min(1),
+        status: z.enum(["passed", "failed"]),
+        severity: z.enum(["low", "medium", "high", "critical"]).optional(),
+        detail: z.string().max(2000).optional(),
+      }),
+    )
+    .min(1),
+});
+
+/** §2 re-run a check stage that is parked at blocked_on_check, after the failing
+ * checks have been remediated and fresh passing results reported. */
+export const recheckSchema = z.object({
+  stageId: z.string().min(1),
+});
+
+/** §2 a governed deploy target a deployment/rollback stage acts on. Credentials
+ * are optional (a mock target needs none) and, when given, stored encrypted. */
+export const createDeployTargetSchema = z.object({
+  name: z.string().min(1).max(120),
+  provider: z.enum(["mock", "aws", "azure", "gcp", "kubernetes"]),
+  environment: z.string().min(1).max(80).optional(),
+  baseUrl: z.string().url().max(2000).optional(),
+  credential: z.string().min(1).max(8000).optional(),
+});
+
+/** §2 resolve a deploy stage parked at blocked_on_deploy: the operator confirms
+ * they deployed out-of-band (or accepts the condition) and the pipeline advances. */
+export const deployOverrideSchema = z.object({
+  stageId: z.string().min(1),
+});
+
 export const createGitConnectionSchema = z.object({
   name: z.string().min(1),
   provider: z.enum(["github", "gitlab", "bitbucket", "azure_devops", "mock"]),

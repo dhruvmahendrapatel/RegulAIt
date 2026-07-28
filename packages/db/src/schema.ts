@@ -590,6 +590,24 @@ export const gitConnections = pgTable("git_connections", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+// §2 pillar-2 deploy targets: a governed destination a `deployment`/`rollback`
+// stage acts on. Provider-agnostic (mock now; AWS/Azure/GCP/k8s later — the
+// BYOC/air-gapped angle of pillar 3). Credentials are optional (mock needs
+// none) and, when present, encrypted at rest exactly like a git connection
+// token. A deploy stage naming a target that doesn't exist parks at a manual
+// handoff — that's the "connector-availability" gate.
+export const deployTargets = pgTable("deploy_targets", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull().unique(),
+  provider: text("provider", {
+    enum: ["mock", "aws", "azure", "gcp", "kubernetes"],
+  }).notNull(),
+  environment: text("environment"),
+  baseUrl: text("base_url"),
+  credentialCiphertext: text("credential_ciphertext"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 // OPTIMIZATION §7: the savings ledger — one row per optimization decision at
 // the interception point, per technique, dashboard-ready for pillar 5's
 // rollup. Like audit_log it carries no FKs: cost history must survive

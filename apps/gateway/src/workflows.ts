@@ -25,8 +25,9 @@ import {
   type WorkflowDefinition,
   type WorkflowEvent,
 } from "@regulait/workflow-kernel";
-import { users, gitConnections, orchestrationRuns } from "@regulait/db";
+import { users, gitConnections, deployTargets, orchestrationRuns } from "@regulait/db";
 import { resolveProvider, GitProviderError } from "@regulait/git-provider";
+import { resolveDeployProvider, DeployProviderError } from "./deploy.js";
 import { validateGraph } from "@regulait/orchestration-kernel";
 import { inTransaction, planRun, type ApprovalPostCommit, type DbOrTx } from "./orchestration.js";
 import { assertProjectAttribution, requiredTemplateIdsFor } from "./projects.js";
@@ -34,8 +35,12 @@ import { decryptSecret, encryptSecret as encryptTokenOnce } from "./secrets.js";
 import {
   advanceStageSchema,
   createAssignmentRuleSchema,
+  createDeployTargetSchema,
   createGitConnectionSchema,
   createWorkflowTemplateSchema,
+  deployOverrideSchema,
+  recheckSchema,
+  reportChecksSchema,
   startInstanceSchema,
   submitArtifactSchema,
 } from "@regulait/shared";
@@ -47,6 +52,24 @@ type InstanceRow = typeof workflowInstances.$inferSelect;
 
 function resolveApprover(approver: string, initiatorUserId: string): string {
   return approver === "requesting_user" ? initiatorUserId : approver;
+}
+
+/** A per-check outcome reported into a check stage (real CI, or the demo). */
+type CheckReport = {
+  check: string;
+  status: "passed" | "failed";
+  severity?: string | null;
+  detail?: string | null;
+};
+/** Defensive read of context[`reported:<stageId>`] — tolerate anything and keep
+ * only well-formed pass/fail rows, so a malformed context value can never crash
+ * the executor or smuggle a third status. */
+function normalizeCheckReports(v: unknown): CheckReport[] {
+  return Array.isArray(v)
+    ? (v as CheckReport[]).filter(
+        (r) => r && typeof r.check === "string" && (r.status === "passed" || r.status === "failed"),
+      )
+    : [];
 }
 
 /**
@@ -339,11 +362,15 @@ async function runGitExecutions(
       break; // stage stays awaiting_execution until the run completes
     }
 
-    // §2 stage 8: the check executor. Deterministic and offline in this
-    // slice — each named check "runs" against the built artifacts (the
-    // signed-off outputs this instance produced) and records a pass result
-    // into instance.context, so the rail and the audit trail both show WHAT
-    // was checked, not just that something advanced.
+    // §2 stage 8: the check executor. Each named check resolves to a result:
+    // if a result was REPORTED for it (via POST .../checks — a real CI posts
+    // here; the seed/tests post here for the demo) that result wins, PASS or
+    // FAIL; otherwise it falls back to the deterministic offline auto-pass
+    // (byte-identical to the pre-fail-routing contract, so existing templates
+    // still sail through). A required check that FAILED parks the instance at
+    // blocked_on_check instead of advancing — the failure path deploy/rollback
+    // build on. Every result lands in instance.context so the rail and audit
+    // trail show WHAT was checked and how it fared, not just that it advanced.
     if (stage.type === "automated_check") {
       const artifacts = await db
         .select()
@@ -354,23 +381,165 @@ async function runGitExecutions(
       for (const a of artifacts) if (!latestByOutput.has(a.output)) latestByOutput.set(a.output, a);
       const subjects = [...latestByOutput.values()].map((a) => `${a.output} v${a.version}`);
       const against = subjects.length ? subjects.join(", ") : "the built change set";
-      context[`checks:${stage.id}`] = (stage.checks ?? []).map((name) => ({
-        check: name,
-        status: "passed",
-        detail: `ran against ${against}`,
-      }));
+      const reported = normalizeCheckReports(context[`reported:${stage.id}`]);
+      const byName = new Map(reported.map((r) => [r.check, r]));
+      const results = (stage.checks ?? []).map((name) => {
+        const rep = byName.get(name);
+        return rep
+          ? {
+              check: name,
+              status: rep.status,
+              severity: rep.severity ?? null,
+              detail: rep.detail ?? `reported ${rep.status}`,
+            }
+          : { check: name, status: "passed" as const, severity: null, detail: `ran against ${against}` };
+      });
+      context[`checks:${stage.id}`] = results;
       delete context.executing;
       delete context.lastError;
       await db
         .update(workflowInstances)
         .set({ context })
         .where(eq(workflowInstances.id, instance.id));
+      const failures = results.filter((r) => r.status === "failed").map((r) => r.check);
+      const r =
+        failures.length > 0
+          ? await applyEvent(
+              db,
+              instanceId,
+              { kind: "check_failed", stageId: stage.id, failures },
+              actorUserId,
+            )
+          : await applyEvent(
+              db,
+              instanceId,
+              { kind: "execution_succeeded", stageId: stage.id },
+              actorUserId,
+            );
+      lastEffects = r.effects;
+      pending = r.effects.filter((e) => e.kind === "execute_stage");
+      continue;
+    }
+
+    // §2 the DEPLOY executor. Gated on (a) a configured deploy target existing
+    // and (b) an optional stage condition matching the change; if either fails,
+    // the stage parks at blocked_on_deploy (a manual handoff) instead of
+    // deploying. Otherwise it deploys via the (mock/pluggable) adapter and
+    // records the deployment in context so a later rollback can reverse it.
+    // Idempotent: an existing deployment for this stage is never duplicated.
+    if (stage.type === "deployment") {
+      const [target] = stage.connection
+        ? await db.select().from(deployTargets).where(eq(deployTargets.name, stage.connection))
+        : [];
+      const cond = stage.condition;
+      const change = instance.change as { environment?: string; changeType?: string };
+      const condValue = cond
+        ? cond.field === "environment"
+          ? change.environment
+          : change.changeType
+        : undefined;
+      const condMet = !cond || condValue === cond.equals;
+      const handoff = !target
+        ? `no deploy target '${stage.connection}' is configured`
+        : !condMet
+          ? `condition not met: change ${cond!.field} is '${condValue ?? "unset"}', target requires '${cond!.equals}'`
+          : null;
+      if (handoff) {
+        delete context.executing;
+        await db.update(workflowInstances).set({ context }).where(eq(workflowInstances.id, instance.id));
+        const r = await applyEvent(
+          db,
+          instanceId,
+          { kind: "deploy_blocked", stageId: stage.id, reason: handoff },
+          actorUserId,
+        );
+        lastEffects = r.effects;
+        pending = [];
+        continue;
+      }
+      let deployErr: string | null = null;
+      try {
+        if (context[`deploy:${stage.id}`] === undefined) {
+          const provider = resolveDeployProvider({
+            provider: target!.provider,
+            credential:
+              dataKey && target!.credentialCiphertext
+                ? decryptSecret(dataKey, target!.credentialCiphertext)
+                : undefined,
+            baseUrl: target!.baseUrl,
+          });
+          const res = provider.deploy(target!.name, target!.environment, instance.id);
+          context[`deploy:${stage.id}`] = { ...res, target: target!.name, environment: target!.environment };
+          context.deployUrl = res.url;
+        }
+      } catch (err) {
+        deployErr = err instanceof Error ? err.message : String(err);
+      }
+      delete context.executing;
+      if (deployErr === null) delete context.lastError;
+      else context.lastError = `${stage.id}: ${deployErr}`;
+      await db.update(workflowInstances).set({ context }).where(eq(workflowInstances.id, instance.id));
+      // a provider that isn't integrated yet → manual handoff (not a hard fail)
+      if (deployErr !== null) {
+        const r = await applyEvent(
+          db,
+          instanceId,
+          { kind: "deploy_blocked", stageId: stage.id, reason: deployErr },
+          actorUserId,
+        );
+        lastEffects = r.effects;
+        pending = [];
+        continue;
+      }
       const r = await applyEvent(
         db,
         instanceId,
         { kind: "execution_succeeded", stageId: stage.id },
         actorUserId,
       );
+      lastEffects = r.effects;
+      pending = r.effects.filter((e) => e.kind === "execute_stage");
+      continue;
+    }
+
+    // §2 the ROLLBACK executor — reached only via the post-deploy-verify jump.
+    // Reverses the recorded deployment (the most recent deploy:* in context) and
+    // ends the run at the terminal rolled_back.
+    if (stage.type === "rollback") {
+      const [target] = stage.connection
+        ? await db.select().from(deployTargets).where(eq(deployTargets.name, stage.connection))
+        : [];
+      // the deployment to reverse: the newest recorded deploy in context
+      const deployKeys = Object.keys(context).filter((k) => k.startsWith("deploy:"));
+      const priorDeploy = deployKeys.length
+        ? (context[deployKeys[deployKeys.length - 1]!] as { deployId?: string; target?: string })
+        : undefined;
+      let rbErr: string | null = null;
+      try {
+        if (context[`rollback:${stage.id}`] === undefined) {
+          if (!target) throw new DeployProviderError(`no deploy target '${stage.connection}'`);
+          const provider = resolveDeployProvider({
+            provider: target.provider,
+            credential:
+              dataKey && target.credentialCiphertext
+                ? decryptSecret(dataKey, target.credentialCiphertext)
+                : undefined,
+            baseUrl: target.baseUrl,
+          });
+          const res = provider.rollback(target.name, priorDeploy?.deployId ?? "unknown");
+          context[`rollback:${stage.id}`] = { ...res, target: target.name };
+        }
+      } catch (err) {
+        rbErr = err instanceof Error ? err.message : String(err);
+      }
+      delete context.executing;
+      if (rbErr === null) delete context.lastError;
+      else context.lastError = `${stage.id}: ${rbErr}`;
+      await db.update(workflowInstances).set({ context }).where(eq(workflowInstances.id, instance.id));
+      // a rollback that itself FAILS is a serious operator situation — it stays
+      // awaiting_execution (retryable via /advance), never silently terminal.
+      if (rbErr !== null) break;
+      const r = await applyEvent(db, instanceId, { kind: "rolled_back", stageId: stage.id }, actorUserId);
       lastEffects = r.effects;
       pending = r.effects.filter((e) => e.kind === "execute_stage");
       continue;
@@ -505,6 +674,49 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       })
       .from(gitConnections),
   }));
+
+  // §2 deploy targets: admin-only; credentials (when given) encrypted at rest,
+  // never returned. A deployment/rollback stage names one of these; a stage
+  // naming a target that doesn't exist parks at a manual handoff.
+  const deployTargetView = {
+    id: deployTargets.id,
+    name: deployTargets.name,
+    provider: deployTargets.provider,
+    environment: deployTargets.environment,
+    baseUrl: deployTargets.baseUrl,
+    createdAt: deployTargets.createdAt,
+  };
+  app.post("/v1/deploy/targets", async (req, reply) => {
+    const body = createDeployTargetSchema.parse(req.body);
+    if (body.credential && !opts.dataKey) {
+      return reply.status(503).send({ error: "no_data_key", detail: "set REGULAIT_DATA_KEY to store a deploy credential" });
+    }
+    const [row] = await db
+      .insert(deployTargets)
+      .values({
+        name: body.name,
+        provider: body.provider,
+        environment: body.environment ?? null,
+        baseUrl: body.baseUrl ?? null,
+        credentialCiphertext:
+          body.credential && opts.dataKey ? encryptTokenOnce(opts.dataKey, body.credential) : null,
+      })
+      .returning(deployTargetView);
+    return reply.status(201).send(row);
+  });
+  app.get("/v1/deploy/targets", async () => ({
+    targets: await db.select(deployTargetView).from(deployTargets),
+  }));
+  app.delete("/v1/deploy/targets/:name", async (req, reply) => {
+    const { name } = z.object({ name: z.string().min(1) }).parse(req.params);
+    const deleted = await db
+      .delete(deployTargets)
+      .where(eq(deployTargets.name, name))
+      .returning({ id: deployTargets.id });
+    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_target" });
+    return { removed: true };
+  });
+
   // --- templates + assignment rules (admin) ---
 
   app.post("/v1/workflows/templates", async (req, reply) => {
@@ -755,6 +967,8 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const targetStage = def.stages.find((st) => st.id === body.stageId);
     if (
       targetStage?.type === "git_operation" ||
+      targetStage?.type === "deployment" ||
+      targetStage?.type === "rollback" ||
       (targetStage?.type === "automated_build" && targetStage.run !== undefined) ||
       (targetStage?.type === "automated_check" && (targetStage.checks?.length ?? 0) > 0)
     ) {
@@ -774,6 +988,118 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       );
       await runGitExecutions(db, loaded.instance.id, r.effects, req.authCtx.userId, opts.dataKey);
     }
+    const [fresh] = await db
+      .select()
+      .from(workflowInstances)
+      .where(eq(workflowInstances.id, loaded.instance.id));
+    return { status: fresh!.status, state: fresh!.state, context: fresh!.context };
+  });
+
+  // §2 report per-check results into an automated_check stage. A real CI posts
+  // pass/fail here; the seed/tests do too. Results merge by check name (latest
+  // wins) and only checks DECLARED on the stage are kept. If the stage is
+  // currently executing, evaluating happens immediately (a failing required
+  // check → blocked_on_check); otherwise the results are stored for when the
+  // stage runs (or for the next recheck).
+  app.post("/v1/workflows/instances/:instanceId/checks", async (req, reply) => {
+    const { instanceId } = instanceIdParam.parse(req.params);
+    const body = reportChecksSchema.parse(req.body);
+    const loaded = await loadInstanceFor(req, instanceId);
+    if (loaded.error) return reply.status(loaded.error).send({ error: "unavailable" });
+    if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_drive" });
+    const def = loaded.instance.definition as WorkflowDefinition;
+    const stage = def.stages.find((st) => st.id === body.stageId);
+    if (!stage || stage.type !== "automated_check" || (stage.checks?.length ?? 0) === 0) {
+      return reply.status(422).send({ error: "not_a_check_stage" });
+    }
+    const declared = new Set(stage.checks ?? []);
+    const accepted = body.results.filter((r) => declared.has(r.check));
+    if (accepted.length === 0) return reply.status(422).send({ error: "no_declared_checks_reported" });
+
+    // locked read-modify-write of context[reported:<stageId>] so a concurrent
+    // executor claim serializes with the report instead of racing it
+    await db.transaction(async (tx) => {
+      const [row] = await tx
+        .select()
+        .from(workflowInstances)
+        .where(eq(workflowInstances.id, instanceId))
+        .for("update");
+      if (!row) throw new WorkflowStateError("instance disappeared");
+      const ctx = { ...(row.context as Record<string, unknown>) };
+      const merged = new Map(
+        normalizeCheckReports(ctx[`reported:${body.stageId}`]).map((r) => [r.check, r]),
+      );
+      for (const r of accepted) {
+        merged.set(r.check, { check: r.check, status: r.status, severity: r.severity ?? null, detail: r.detail ?? null });
+      }
+      ctx[`reported:${body.stageId}`] = [...merged.values()];
+      await tx.update(workflowInstances).set({ context: ctx }).where(eq(workflowInstances.id, row.id));
+    });
+
+    // evaluate now only if this stage is the one currently executing
+    const [afterWrite] = await db
+      .select()
+      .from(workflowInstances)
+      .where(eq(workflowInstances.id, instanceId));
+    const cur = (afterWrite!.definition as WorkflowDefinition).stages[
+      (afterWrite!.state as InstanceState).currentStageIndex
+    ];
+    if (afterWrite!.status === "awaiting_execution" && cur?.id === body.stageId) {
+      await runGitExecutions(
+        db,
+        instanceId,
+        [{ kind: "execute_stage", stageId: body.stageId }],
+        req.authCtx.userId,
+        opts.dataKey,
+      );
+    }
+    const [fresh] = await db
+      .select()
+      .from(workflowInstances)
+      .where(eq(workflowInstances.id, instanceId));
+    return { status: fresh!.status, state: fresh!.state, context: fresh!.context };
+  });
+
+  // §2 re-run a check stage parked at blocked_on_check, after the failing checks
+  // were remediated and fresh passing results reported. The kernel guards that
+  // the instance is actually blocked on THIS stage.
+  app.post("/v1/workflows/instances/:instanceId/recheck", async (req, reply) => {
+    const { instanceId } = instanceIdParam.parse(req.params);
+    const body = recheckSchema.parse(req.body);
+    const loaded = await loadInstanceFor(req, instanceId);
+    if (loaded.error) return reply.status(loaded.error).send({ error: "unavailable" });
+    if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_drive" });
+    const r = await applyEvent(
+      db,
+      loaded.instance.id,
+      { kind: "recheck", stageId: body.stageId },
+      req.authCtx.userId,
+    );
+    await runGitExecutions(db, loaded.instance.id, r.effects, req.authCtx.userId, opts.dataKey);
+    const [fresh] = await db
+      .select()
+      .from(workflowInstances)
+      .where(eq(workflowInstances.id, loaded.instance.id));
+    return { status: fresh!.status, state: fresh!.state, context: fresh!.context };
+  });
+
+  // §2 resolve a deploy stage parked at blocked_on_deploy — the operator confirms
+  // the deploy happened out-of-band (or accepts the condition). The kernel guards
+  // that the instance is actually blocked on that deploy stage; advancing may
+  // cascade straight into the post-deploy verify.
+  app.post("/v1/workflows/instances/:instanceId/deploy-override", async (req, reply) => {
+    const { instanceId } = instanceIdParam.parse(req.params);
+    const body = deployOverrideSchema.parse(req.body);
+    const loaded = await loadInstanceFor(req, instanceId);
+    if (loaded.error) return reply.status(loaded.error).send({ error: "unavailable" });
+    if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_drive" });
+    const r = await applyEvent(
+      db,
+      loaded.instance.id,
+      { kind: "deploy_override", stageId: body.stageId },
+      req.authCtx.userId,
+    );
+    await runGitExecutions(db, loaded.instance.id, r.effects, req.authCtx.userId, opts.dataKey);
     const [fresh] = await db
       .select()
       .from(workflowInstances)
