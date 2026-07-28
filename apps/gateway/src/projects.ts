@@ -1391,6 +1391,68 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     };
   });
 
+  // Whole-project context as GRAPH-READY data in ONE call: every revision of
+  // every key (incl. retained conflicts) as nodes, with the accepted head per
+  // key for grouping. Version lineage is baseRevision -> revision; a conflict
+  // (accepted=false) forks off its baseRevision. Viewer/member-gated exactly
+  // like the other context endpoints. Content is truncated to a light preview.
+  app.get("/v1/projects/:projectId/context/graph", async (req, reply) => {
+    const { projectId } = projectIdParam.parse(req.params);
+    const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
+    if (!project) return reply.status(404).send({ error: "unknown_project" });
+    const gate = await requireRole(req, projectId, "viewer");
+    if (!gate.ok) return reply.status(gate.status).send({ error: gate.error });
+
+    const rows = await db
+      .select()
+      .from(projectContextItems)
+      .where(eq(projectContextItems.projectId, projectId))
+      .orderBy(projectContextItems.key, projectContextItems.revision);
+
+    const [names, pendingMap] = await Promise.all([
+      nameMaps(
+        rows.map((r) => r.contributedByUserId),
+        rows.map((r) => r.contributedByTeamId),
+      ),
+      pendingConflictApprovals(
+        projectId,
+        rows.filter((r) => !r.accepted).map((r) => r.id),
+      ),
+    ]);
+
+    // accepted head per key = highest accepted revision (rows are asc by rev)
+    const currentByKey = new Map<string, number>();
+    for (const r of rows) if (r.accepted) currentByKey.set(r.key, r.revision);
+
+    const PREVIEW_LEN = 240;
+    return {
+      project: { id: project.id, name: project.name },
+      nodes: rows.map((r) => ({
+        id: r.id,
+        key: r.key,
+        revision: r.revision,
+        baseRevision: r.baseRevision,
+        accepted: r.accepted,
+        pending: pendingMap.has(r.id),
+        content:
+          r.content.length > PREVIEW_LEN ? `${r.content.slice(0, PREVIEW_LEN)}…` : r.content,
+        contributor: {
+          userId: r.contributedByUserId,
+          name: names.userName.get(r.contributedByUserId) ?? null,
+          teamId: r.contributedByTeamId,
+          teamName: r.contributedByTeamId
+            ? (names.teamName.get(r.contributedByTeamId) ?? null)
+            : null,
+        },
+        at: r.createdAt,
+      })),
+      keys: [...currentByKey.entries()].map(([key, currentRevision]) => ({
+        key,
+        currentRevision,
+      })),
+    };
+  });
+
   // --- §8.3 compliance profiles (admin; policy-as-code via API) ---
 
   app.post("/v1/compliance/profiles", async (req, reply) => {

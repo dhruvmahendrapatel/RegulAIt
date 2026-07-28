@@ -51,7 +51,7 @@ async function makeUser(email: string) {
     method: "POST",
     headers: AUTH,
     url: "/v1/users",
-    payload: { email, displayName: email },
+    payload: { email, displayName: email.split("@")[0] },
   });
   expect(user.statusCode).toBe(201);
   const key = await app.inject({

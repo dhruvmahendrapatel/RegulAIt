@@ -254,6 +254,71 @@ describe("AnthropicProvider (injectable fetch, no network)", () => {
   });
 });
 
+describe("multimodal attachments: image/document content blocks", () => {
+  const okMessage = {
+    id: "msg_mm_1",
+    type: "message",
+    role: "assistant",
+    model: "claude-opus-5",
+    content: [{ type: "text", text: "I see a red square." }],
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    usage: { input_tokens: 20, output_tokens: 6 },
+  };
+  const IMG64 = "iVBORw0KGgoAAAANSU"; // truncated base64 stand-in — never sent to a network
+  const PDF64 = "JVBERi0xLjQKJ";
+
+  it("Anthropic maps image + document blocks to native base64 source blocks", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new AnthropicProvider({
+      apiKey: "test-key",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return anthropicJson(okMessage);
+      },
+    });
+    await provider.dispatch({
+      model: "claude-opus-5",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "what's in these?" },
+            { type: "image", mediaType: "image/png", dataBase64: IMG64, name: "square.png" },
+            { type: "document", mediaType: "application/pdf", dataBase64: PDF64, name: "spec.pdf" },
+          ],
+        },
+      ],
+    });
+    const blocks = (captured as { messages: { content: unknown[] }[] }).messages[0].content;
+    expect(blocks).toEqual([
+      { type: "text", text: "what's in these?" },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: IMG64 } },
+      { type: "document", source: { type: "base64", media_type: "application/pdf", data: PDF64 } },
+    ]);
+  });
+
+  it("providers without native vision degrade attachments to a named text placeholder, never dropping them", async () => {
+    const mock = new MockModelProvider();
+    const res = await mock.dispatch({
+      model: "mock-1",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "describe" },
+            { type: "image", mediaType: "image/png", dataBase64: IMG64, name: "square.png" },
+          ],
+        },
+      ],
+    });
+    // the mock echoes the flattened turn text — the image is named, not silently lost
+    expect(res.outputText).toContain("[attached image: square.png]");
+    // the base64 bytes never appear in a non-vision provider's view of the turn
+    expect(res.outputText).not.toContain(IMG64);
+  });
+});
+
 describe("prompt caching (pillar 6): system-prefix cache_control", () => {
   const okMessage = {
     id: "msg_pc_1",

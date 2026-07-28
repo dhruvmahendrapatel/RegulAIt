@@ -41,6 +41,7 @@ let DEFAULT_AGENT_ID = null; // my policy's default agent (lead-agent preselect)
 let PROJECTS = [];      // my member projects
 let INBOX_COUNT = 0;
 let MY_PROVIDERS = []; // providers I hold my own key for (never the key itself)
+let PROVIDER_STATUS = {}; // provider kind -> { configured } platform-wide (stored cred OR env key), no secrets
 
 async function api(method, path, body) {
   const res = await fetch(path, {
@@ -149,6 +150,7 @@ const PAGES = [
   { id: "workflows", label: "Workflows" },
   { id: "inbox", label: "Inbox" },
   { id: "projects", label: "Projects" },
+  { id: "context-graph", label: "Context Graph" },
   { id: "spend", label: "Spend & savings" },
   { id: "settings", label: "Settings" },
 ];
@@ -163,16 +165,18 @@ window.addEventListener("hashchange", () => render());
 async function bootstrap() {
   ME = await get("/v1/me");
   if (!ME.userId) throw new Error("this key has no user identity");
-  const [mine, projects, creds] = await Promise.all([
+  const [mine, projects, creds, providerStatus] = await Promise.all([
     get("/v1/users/" + ME.userId + "/agents"),
     get("/v1/projects").catch(() => ({ projects: [] })),
     get("/v1/users/" + ME.userId + "/model-credentials").catch(() => ({ credentials: [] })),
+    get("/v1/model-providers/status").catch(() => ({ providers: {} })),
   ]);
   AGENTS = mine.agents ?? [];
   AGENT_NAMES = Object.fromEntries(AGENTS.map((a) => [a.agentId, a.name]));
   DEFAULT_AGENT_ID = mine.defaultAgentId ?? null;
   PROJECTS = projects.projects ?? [];
   MY_PROVIDERS = (creds.credentials ?? []).map((c) => c.provider);
+  PROVIDER_STATUS = providerStatus.providers ?? {};
   const inbox = await get("/v1/approvals").catch(() => ({ approvals: [] }));
   INBOX_COUNT = (inbox.approvals ?? []).filter((a) => a.status === "pending").length;
 }
@@ -211,6 +215,67 @@ let CONVO_ID = sessionStorage.getItem("regulait.convo") || null; // active threa
 let CONVOS = [];            // conversations rail cache (newest-updated first, from the server)
 let CHAT_LOADED_FOR = null; // which conversation chatHistory mirrors (null = fresh unsaved chat)
 let PG_PREFILL = null;      // agent/project selects to apply right after opening a thread
+
+// ---- composer attachments (mimics Claude's native attach) ---------------
+// Images/PDFs ride the dispatch as base64 attachments (a vision-capable
+// agent sees the bytes); text/code files ride the referenceContent field where
+// the pillar-6 preprocessor can shrink them. Both are bounded before they ever
+// leave the browser: <= 8 files, <= 6 MB each.
+let PG_ATTACH = [];         // pending attachments for the NEXT send — cleared after
+let PG_ATTACH_SEQ = 0;      // stable local ids for tray remove buttons
+const PG_IMG_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+const PG_MAX_ATTACH = 8;
+const PG_MAX_BYTES = 6 * 1024 * 1024;
+
+function fmtBytes(n) {
+  return n < 1024 ? n + " B" : n < 1048576 ? Math.round(n / 1024) + " KB" : (n / 1048576).toFixed(1) + " MB";
+}
+function readAs(file, how) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result);
+    r.onerror = () => rej(r.error || new Error("read failed"));
+    if (how === "text") r.readAsText(file); else r.readAsDataURL(file);
+  });
+}
+async function pgAddFiles(files) {
+  for (const file of Array.from(files)) {
+    if (PG_ATTACH.length >= PG_MAX_ATTACH) { toast("Up to " + PG_MAX_ATTACH + " files per message.", "err"); break; }
+    if (file.size > PG_MAX_BYTES) { toast("\\u2717 " + file.name + " is over the 6 MB limit.", "err"); continue; }
+    const isImg = PG_IMG_TYPES.includes(file.type);
+    const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+    try {
+      if (isImg || isPdf) {
+        const dataUrl = String(await readAs(file, "dataurl"));
+        const base64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
+        PG_ATTACH.push({ id: ++PG_ATTACH_SEQ, mode: "attachment", kind: isImg ? "image" : "document",
+          name: file.name, mediaType: isImg ? file.type : "application/pdf",
+          dataBase64: base64, thumb: isImg ? dataUrl : null, size: file.size });
+      } else {
+        const text = String(await readAs(file, "text"));
+        PG_ATTACH.push({ id: ++PG_ATTACH_SEQ, mode: "text", name: file.name, text: text, size: file.size });
+      }
+    } catch (e) { toast("\\u2717 couldn\\u2019t read " + file.name, "err"); }
+  }
+  renderAttachTray();
+}
+function pgRemoveAttach(id) { PG_ATTACH = PG_ATTACH.filter((a) => a.id !== Number(id)); renderAttachTray(); }
+function renderAttachTray() {
+  const tray = $("#pg-tray");
+  if (!tray) return;
+  if (!PG_ATTACH.length) { tray.style.display = "none"; tray.innerHTML = ""; return; }
+  tray.style.display = "flex";
+  tray.innerHTML = PG_ATTACH.map((a) => {
+    const icon = a.mode === "attachment" && a.kind === "image"
+      ? '<img class="thumb" src="' + a.thumb + '" alt="">'
+      : '<span class="ico">' + (a.mode === "attachment" ? "\\uD83D\\uDCC4" : "\\uD83D\\uDCDD") + "</span>";
+    const kindLabel = a.mode === "attachment" ? a.kind : "text \\u2192 reference";
+    return '<div class="attach-chip">' + icon
+      + '<div style="min-width:0"><div class="an">' + esc(a.name) + '</div><div class="as">' + esc(fmtBytes(a.size)) + " \\u00B7 " + kindLabel + "</div></div>"
+      + '<button class="rm" data-rma="' + a.id + '" title="remove" aria-label="Remove ' + esc(a.name) + '">\\u00D7</button></div>';
+  }).join("");
+  tray.querySelectorAll("[data-rma]").forEach((b) => b.addEventListener("click", () => pgRemoveAttach(b.dataset.rma)));
+}
 
 function setConvo(id) {
   CONVO_ID = id;
@@ -261,6 +326,53 @@ function keyHint(agent) {
   return MY_PROVIDERS.includes(agent.provider)
     ? "Runs on your own " + esc(agent.provider) + " key. <a href='#/settings'>Manage keys</a>"
     : "No " + esc(agent.provider) + " key of your own — this uses the platform credential if an admin has configured one. <a href='#/settings'>Add your key</a>";
+}
+
+// A provider is "live" platform-wide when a stored platform credential exists OR
+// its platform-key env var is set — read from /v1/model-providers/status (never
+// the key itself). Unknown providers read as not-configured; "mock" is always on.
+function providerConfigured(provider) {
+  if (provider === "mock") return true;
+  return !!(PROVIDER_STATUS[provider] && PROVIDER_STATUS[provider].configured);
+}
+
+// Which agent a FRESH chat opens on: prefer a real, LIVE provider so the box
+// defaults to Claude the moment an Anthropic key is configured — highest-tier
+// configured non-mock agent, anthropic/Claude winning ties. Falls back to the
+// user's policy default, then the first granted agent. (A thread opened from the
+// rail still overrides this with its own stored agent via PG_PREFILL.)
+function pickDefaultAgentId() {
+  if (!AGENTS.length) return null;
+  const live = AGENTS.filter((a) => a.provider !== "mock" && providerConfigured(a.provider));
+  if (live.length) {
+    const best = live.slice().sort((a, b) => {
+      const ap = a.provider === "anthropic" ? 1 : 0;
+      const bp = b.provider === "anthropic" ? 1 : 0;
+      if (ap !== bp) return bp - ap;        // anthropic/Claude first
+      return (b.tier ?? 0) - (a.tier ?? 0); // then highest tier
+    })[0];
+    return best.agentId;
+  }
+  if (DEFAULT_AGENT_ID && AGENTS.some((a) => a.agentId === DEFAULT_AGENT_ID)) return DEFAULT_AGENT_ID;
+  return AGENTS[0].agentId;
+}
+
+// The credential banner above the composer: a clear warning when the selected
+// agent's real provider isn't configured (it WILL error on send), a subtle
+// "live" indicator when it is. Mock agents show nothing here (keyHint covers
+// them). Dependency-free — inline styles on the theme's own vars.
+function providerBanner(agent) {
+  if (!agent || agent.provider === "mock") return "";
+  const label = agent.provider.charAt(0).toUpperCase() + agent.provider.slice(1);
+  if (providerConfigured(agent.provider)) {
+    const model = agent.model ? " (" + esc(agent.model) + ")" : "";
+    return '<div style="font-size:11.5px;color:var(--ok);margin-top:8px">● Live: ' + esc(agent.name) + model + "</div>";
+  }
+  return '<div style="font-size:12px;margin-top:8px;padding:8px 10px;border:1px solid #d9a44144;'
+    + 'border-left:3px solid var(--warn);border-radius:6px;background:#d9a44114;color:var(--warn)">'
+    + "\\u26A0\\uFE0E " + esc(label) + " isn\\u2019t configured yet — this agent will error on send. "
+    + "Add a key in <a href='#/settings'>Settings</a> (your own) or ask an admin to configure it. "
+    + "Pick a mock agent to try the flow now.</div>";
 }
 
 // The conversations rail: newest-updated first, active highlight, delete
@@ -336,8 +448,13 @@ async function playgroundPage() {
   // No grants means no agent to invoke — without this guard the select is
   // empty, Send POSTs to /v1/agents//invoke, and the user gets Fastify's 404.
   const noAgents = AGENTS.length === 0;
+  // Fresh chats open on the highest-tier LIVE real provider (Claude first) so a
+  // configured Anthropic key defaults the box to Claude; a thread opened from
+  // the rail overrides this post-render via PG_PREFILL.
+  const preselectId = pickDefaultAgentId();
+  const selAgent = AGENTS.find((a) => a.agentId === preselectId) ?? AGENTS[0];
   const agentOpts = AGENTS.map((a) =>
-    \`<option value="\${a.agentId}">\${esc(a.name)} · \${esc(a.provider)} · tier \${a.tier}</option>\`).join("");
+    \`<option value="\${a.agentId}"\${a.agentId === preselectId ? " selected" : ""}>\${esc(a.name)} · \${esc(a.provider)} · tier \${a.tier}</option>\`).join("");
   const agentField = noAgents
     ? '<div class="grow"><label class="f">Agent</label><div class="dim" style="font-size:12.5px">No agents are granted to your account — ask an admin to grant you one.</div></div>'
     : \`<div><label class="f">Agent</label><select id="pg-agent">\${agentOpts}</select></div>\`;
@@ -361,7 +478,7 @@ async function playgroundPage() {
             </select>
           </div>
         </div>
-        \${noAgents ? "" : '<hr class="hr"><div class="faint" style="font-size:11.5px" id="pg-key">' + keyHint(AGENTS[0]) + "</div>"}
+        \${noAgents ? "" : '<hr class="hr"><div class="faint" style="font-size:11.5px" id="pg-key">' + keyHint(selAgent) + '</div><div id="pg-banner">' + providerBanner(selAgent) + "</div>"}
       </div>
       <div class="card" style="margin-top:12px">
         <div class="chat-log" id="chat-log">
@@ -370,10 +487,16 @@ async function playgroundPage() {
             : '<div class="empty">Pick an agent and say something — the first message starts a conversation. Mock agents reply instantly with no external keys; type «&lt;&lt;refuse&gt;&gt;» to see refusal handling.</div>')}
         </div>
         <hr class="hr">
-        <div class="row">
-          <textarea id="pg-input" class="grow" rows="2" placeholder="\${noAgents ? "No agent granted to your account yet…" : (CONVO_ID ? "Continue the conversation…" : "Ask the agent to do something…")}"\${noAgents ? " disabled" : ""}></textarea>
-          <button class="primary" id="pg-send"\${noAgents ? " disabled" : ""}>Send</button>
-          <button id="pg-stop" style="display:none" title="close the stream — the dispatch already ran, anything streamed stays">Stop</button>
+        <div class="composer" id="pg-composer">
+          <div class="attach-tray" id="pg-tray" style="display:none"></div>
+          <div class="row">
+            <input type="file" id="pg-file" multiple accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/*,.md,.markdown,.csv,.json,.yaml,.yml,.txt,.log,.ts,.tsx,.js,.jsx,.py,.go,.rb,.java,.rs,.c,.h,.cpp,.sql,.sh,.html,.css" style="display:none">
+            <button class="attach-btn" id="pg-attach" title="Attach images, PDFs, or text/code files"\${noAgents ? " disabled" : ""} aria-label="Attach files">📎</button>
+            <textarea id="pg-input" class="grow" rows="2" placeholder="\${noAgents ? "No agent granted to your account yet…" : (CONVO_ID ? "Continue the conversation…" : "Ask the agent to do something…")}"\${noAgents ? " disabled" : ""}></textarea>
+            <button class="primary" id="pg-send"\${noAgents ? " disabled" : ""}>Send</button>
+            <button id="pg-stop" style="display:none" title="close the stream — the dispatch already ran, anything streamed stays">Stop</button>
+          </div>
+          <div class="faint" style="font-size:11px;margin-top:6px">Attach images &amp; PDFs (a vision-capable agent like Claude reads them), or text/code files (fed as reference). Up to 8 files · 6 MB each.</div>
         </div>
       </div>
     </div>
@@ -453,8 +576,19 @@ function renderExchange(x, i) {
         <pre style="margin-top:6px;white-space:pre-wrap">\${esc(x.compactedBoundary.summary ?? "")}</pre></details>
       </div>\`
     : "";
+  // attachments the user sent with this turn — thumbnails for images, a labelled
+  // pill for PDFs/text files. Never renders base64: the render list carries only
+  // name/kind/thumb (a live send has the thumb; a replayed thread shows the pill).
+  const attRow = (x.attachments && x.attachments.length)
+    ? '<div class="att-row">' + x.attachments.map((a) =>
+        a.thumb
+          ? '<span class="att-pill"><img src="' + a.thumb + '" alt="">' + esc(a.name) + "</span>"
+          : '<span class="att-pill">' + (a.kind === "document" ? "\\uD83D\\uDCC4" : "\\uD83D\\uDCDD") + " " + esc(a.name) + "</span>",
+      ).join("") + "</div>"
+    : "";
+  const userBubble = x.prompt ? \`<div class="bubble">\${esc(x.prompt)}</div>\` : "";
   return \`
-    <div class="msg user"><div class="who">\${esc(ME.user.displayName)}</div><div class="bubble">\${esc(x.prompt)}</div></div>
+    <div class="msg user"><div class="who">\${esc(ME.user.displayName)}</div>\${attRow}\${userBubble}</div>
     <div class="msg agent">
       <div class="who">\${esc(x.agentName)}</div>
       <div class="bubble">\${esc(x.text)}\${x.streaming ? '<span class="caret"></span>' : ""}</div>
@@ -492,7 +626,9 @@ async function sendPrompt() {
   if (PG_ABORT) return; // one stream at a time — Send is disabled anyway
   const input = $("#pg-input");
   const prompt = input.value.trim();
-  if (!prompt) return;
+  // A message may be attachments-only (an image with no words), exactly like
+  // Claude's composer — but never fully empty.
+  if (!prompt && !PG_ATTACH.length) return;
   const agentId = $("#pg-agent")?.value;
   if (!agentId) { toast("No agents granted to your account — ask an admin."); return; }
   const projectId = $("#pg-project").value || undefined;
@@ -511,7 +647,24 @@ async function sendPrompt() {
   }
   const conversationId = CONVO_ID;
   input.value = "";
-  const x = { prompt, agentName: AGENT_NAMES[agentId] ?? "agent", text: "", streaming: true };
+  // Snapshot and clear the composer's attachments: the images/PDFs go up as
+  // base64 attachments (the model sees the bytes), the text/code files are
+  // concatenated into referenceContent (the pillar-6 preprocessor shrinks them
+  // server-side). A small render list rides the user bubble so the thread shows
+  // what was sent — never the base64.
+  const pending = PG_ATTACH;
+  PG_ATTACH = []; renderAttachTray();
+  const attachments = pending
+    .filter((a) => a.mode === "attachment")
+    .map((a) => ({ kind: a.kind, name: a.name, mediaType: a.mediaType, dataBase64: a.dataBase64 }));
+  const textFiles = pending.filter((a) => a.mode === "text");
+  const referenceContent = textFiles.length
+    ? textFiles.map((a) => "----- FILE: " + a.name + " -----\\n" + a.text).join("\\n\\n")
+    : undefined;
+  const attachViews = pending.map((a) => ({
+    name: a.name, kind: a.mode === "attachment" ? a.kind : "text", thumb: a.thumb || null,
+  }));
+  const x = { prompt, agentName: AGENT_NAMES[agentId] ?? "agent", text: "", streaming: true, attachments: attachViews };
   chatHistory.push(x); drawChat();
   const ctrl = new AbortController();
   PG_ABORT = ctrl;
@@ -521,7 +674,7 @@ async function sendPrompt() {
     const res = await fetch("/v1/agents/" + agentId + "/invoke", {
       method: "POST",
       headers: { authorization: "Bearer " + KEY, "content-type": "application/json" },
-      body: JSON.stringify({ mode: "execute", input: prompt, dispatch: true, stream: true, costSensitivity, conversationId, ...(projectId ? { projectId } : {}) }),
+      body: JSON.stringify({ mode: "execute", input: prompt, dispatch: true, stream: true, costSensitivity, conversationId, ...(projectId ? { projectId } : {}), ...(attachments.length ? { attachments } : {}), ...(referenceContent ? { referenceContent } : {}) }),
       signal: ctrl.signal,
     });
     if (!res.ok || !res.headers.get("content-type")?.includes("event-stream")) {
@@ -1832,6 +1985,194 @@ function wireProjects() {
     b.addEventListener("click", () => promoteArtifact(b.dataset.pid, b.dataset.promote)));
 }
 
+// ------------------------------------------------------- context graph --
+// Pillar 4 made visual: the whole project's shared-context store as a version
+// graph from GET /v1/projects/:id/context/graph — one COLUMN per key, revisions
+// stacked top→bottom, an edge from each revision's baseRevision to it (version
+// lineage), conflicts (accepted=false) forking off into an amber side-lane.
+// Dependency-free: inline SVG + vanilla DOM, deterministic column/row math (no
+// physics). The graph card scrolls (overflow:auto) so a big graph never breaks
+// the page layout.
+let CG_DATA = null; // the loaded { project, nodes, keys } for the open project
+let CG_SEL = null;  // the selected node id (drives the detail panel)
+
+const cgClip = (s, n) => { s = String(s ?? ""); return s.length > n ? s.slice(0, n - 1) + "\\u2026" : s; };
+const cgShort = (name) => name ? cgClip(name, 18) : "unknown";
+
+async function contextGraphPage() {
+  if (!PROJECTS.length)
+    return '<h1>Context Graph</h1><p class="sub">The shared-project context store, drawn as a version graph.</p><div class="empty">You are not a member of any project yet.</div>';
+  const picker = PROJECTS.map((p) => \`<button class="small" data-cgproj="\${p.id}">\${esc(p.name)}</button>\`).join("");
+  return \`
+  <h1>Context Graph</h1>
+  <p class="sub">The shared-project context store as a version graph — one column per key, revisions top-to-bottom, version lineage as edges, and conflict forks in amber. Pick a project you're a member of.</p>
+  <div class="card"><div class="row">\${picker}</div></div>
+  <div id="cg-out" style="margin-top:14px"></div>\`;
+}
+
+// One small legend swatch — a themed box + label. Amber/dashed for conflicts.
+function cgLegendItem(fill, fillOp, stroke, dashed, label) {
+  return \`<span style="display:inline-flex;align-items:center;gap:6px;color:var(--text-dim)">
+    <span style="width:16px;height:12px;border-radius:3px;background:\${fill};opacity:\${fillOp};border:1.5px \${dashed ? "dashed" : "solid"} \${stroke}"></span>\${esc(label)}</span>\`;
+}
+
+// The detail side-panel for the selected node — key, revision, state,
+// contributor (user + team), based-on revision, timestamp, content preview.
+function cgDetailHtml(n) {
+  if (!n) return '<div class="faint" style="font-size:12.5px">Select a node to see its revision detail. Nodes are keyboard-focusable — Tab to a node and press Enter.</div>';
+  const state = n.accepted
+    ? (n.isHead
+        ? '<span class="badge accent">accepted · current head</span>'
+        : '<span class="badge ok">accepted · prior revision</span>')
+    : (n.pending
+        ? '<span class="badge warn">conflict · awaiting arbiter \\u23F3</span>'
+        : '<span class="badge bad">conflict · retained (never current)</span>');
+  const c = n.contributor ?? {};
+  return \`<div style="font-size:12.5px;line-height:1.7">
+    <div><span class="mono">\${esc(n.key)}</span> <span class="badge">rev \${n.revision}</span></div>
+    <div style="margin:6px 0">\${state}</div>
+    <div class="dim">by \${esc(c.name ?? "unknown")}\${c.teamName ? " · " + esc(c.teamName) : " · no team"}</div>
+    <div class="dim">based on \${n.baseRevision != null ? "rev " + n.baseRevision : "— (first write of this key)"}</div>
+    <div class="dim">\${ago(n.at)}</div>
+    <details style="margin-top:8px" open><summary class="faint" style="cursor:pointer;font-size:11.5px">content preview</summary><pre style="margin-top:6px;white-space:pre-wrap">\${esc(n.content)}</pre></details>
+  </div>\`;
+}
+
+// Pure column/row layout → SVG. Columns = keys (order of first appearance),
+// rows = revisions ascending within a key. Accepted revisions sit in the
+// column's mainline lane; conflicts shift into an amber side-lane so a fork off
+// a shared baseRevision is visually distinct. Edges run baseRevision→revision.
+function cgViewHtml(data) {
+  const NODE_W = 172, NODE_H = 56, ROW_H = 88, COL_W = 236, LANE_SHIFT = 30, HEADER_H = 30, PAD = 24;
+  // group nodes into ordered columns by key (nodes arrive ordered key,revision)
+  const cols = [];
+  const colIndex = {};
+  for (const nd of data.nodes) {
+    if (colIndex[nd.key] === undefined) { colIndex[nd.key] = cols.length; cols.push({ key: nd.key, nodes: [] }); }
+    cols[colIndex[nd.key]].nodes.push(nd);
+  }
+  let maxRows = 1;
+  const geo = {};      // id -> geometry
+  const revIndex = {}; // key -> { revision -> nodeId }
+  cols.forEach((col, c) => {
+    if (col.nodes.length > maxRows) maxRows = col.nodes.length;
+    revIndex[col.key] = {};
+    const baseX = PAD + c * COL_W;
+    col.nodes.forEach((nd, r) => {
+      const x = baseX + (nd.accepted ? 0 : LANE_SHIFT);
+      const y = HEADER_H + PAD + r * ROW_H;
+      geo[nd.id] = { x, y, cx: x + NODE_W / 2, topY: y, botY: y + NODE_H };
+      revIndex[col.key][nd.revision] = nd.id;
+    });
+  });
+  const width = PAD * 2 + cols.length * COL_W;
+  const height = HEADER_H + PAD + maxRows * ROW_H + PAD;
+
+  // edges: baseRevision node (same key) -> this node, as a soft vertical bezier
+  const edges = data.nodes.map((nd) => {
+    if (nd.baseRevision == null) return "";
+    const baseId = revIndex[nd.key][nd.baseRevision];
+    if (!baseId || !geo[baseId] || !geo[nd.id]) return "";
+    const b = geo[baseId], g = geo[nd.id];
+    const dy = Math.max(18, (g.topY - b.botY) / 2);
+    const stroke = nd.accepted ? "var(--border-strong)" : "var(--warn)";
+    const dash = nd.accepted ? "" : ' stroke-dasharray="4 3"';
+    return \`<path d="M \${b.cx} \${b.botY} C \${b.cx} \${b.botY + dy} \${g.cx} \${g.topY - dy} \${g.cx} \${g.topY}" fill="none" stroke="\${stroke}" stroke-width="1.5"\${dash} opacity="0.85"/>\`;
+  }).join("");
+
+  // column headers (the key labels)
+  const headers = cols.map((col, c) =>
+    \`<text x="\${PAD + c * COL_W}" y="20" font-family="var(--mono)" font-size="12" font-weight="600" fill="var(--text-dim)">\${esc(cgClip(col.key, 24))}</text>\`
+  ).join("");
+
+  // nodes
+  const nodesM = data.nodes.map((nd) => {
+    const g = geo[nd.id];
+    let fill, fillOp, stroke, dash, tcol, tdim;
+    if (nd.accepted && nd.isHead) {
+      fill = "var(--accent)"; fillOp = "1"; stroke = "var(--accent)"; dash = ""; tcol = "#1b120d"; tdim = "#1b120dcc";
+    } else if (nd.accepted) {
+      fill = "var(--bg-inset)"; fillOp = "1"; stroke = "var(--border-strong)"; dash = ""; tcol = "var(--text)"; tdim = "var(--text-dim)";
+    } else {
+      fill = "var(--warn)"; fillOp = "0.15"; stroke = "var(--warn)"; dash = ' stroke-dasharray="5 3"'; tcol = "var(--text)"; tdim = "var(--text-dim)";
+    }
+    const marker = nd.pending ? " \\u23F3" : "";
+    const aria = esc(nd.key) + " revision " + nd.revision + (nd.accepted ? (nd.isHead ? " current head" : " accepted") : (nd.pending ? " conflict awaiting arbiter" : " conflict retained")) + " by " + esc(cgShort(nd.contributor && nd.contributor.name));
+    return \`<g class="cg-node" data-node="\${esc(nd.id)}" tabindex="0" role="button" aria-label="\${aria}" style="cursor:pointer;outline:none">
+      <rect data-nrect="\${esc(nd.id)}" x="\${g.x}" y="\${g.y}" width="\${NODE_W}" height="\${NODE_H}" rx="9" fill="\${fill}" fill-opacity="\${fillOp}" stroke="\${stroke}" stroke-width="1.5"\${dash}/>
+      <text x="\${g.x + 12}" y="\${g.y + 23}" font-family="var(--mono)" font-size="12" font-weight="600" fill="\${tcol}">\${esc(cgClip(nd.key, 15))}@\${nd.revision}\${marker}</text>
+      <text x="\${g.x + 12}" y="\${g.y + 41}" font-size="11" fill="\${tdim}">\${esc(cgShort(nd.contributor && nd.contributor.name))}</text>
+    </g>\`;
+  }).join("");
+
+  const legend = \`<div class="row" style="gap:16px;font-size:11.5px;flex-wrap:wrap;margin-bottom:10px">
+    \${cgLegendItem("var(--accent)", "1", "var(--accent)", false, "accepted head")}
+    \${cgLegendItem("var(--bg-inset)", "1", "var(--border-strong)", false, "prior revision")}
+    \${cgLegendItem("var(--warn)", "0.15", "var(--warn)", true, "conflict / retained")}
+    \${cgLegendItem("var(--warn)", "0.15", "var(--warn)", true, "pending arbiter \\u23F3")}
+  </div>\`;
+
+  return \`
+  <div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap">
+    <div style="flex:1 1 520px;min-width:0">
+      <div class="row" style="margin-bottom:8px"><strong>\${esc(data.project.name)}</strong><span class="dim" style="font-size:12px">\${data.nodes.length} revision\${data.nodes.length === 1 ? "" : "s"} across \${cols.length} key\${cols.length === 1 ? "" : "s"}</span></div>
+      \${legend}
+      <div class="card" style="overflow:auto;max-height:72vh;padding:12px">
+        <svg width="\${width}" height="\${height}" viewBox="0 0 \${width} \${height}" xmlns="http://www.w3.org/2000/svg" style="display:block">
+          \${headers}\${edges}\${nodesM}
+        </svg>
+      </div>
+    </div>
+    <div class="card" style="flex:0 0 280px;max-width:100%;align-self:stretch">
+      <h2 style="margin-top:0">Revision detail</h2>
+      <div id="cg-detail">\${cgDetailHtml(null)}</div>
+    </div>
+  </div>\`;
+}
+
+function cgSelect(id) {
+  CG_SEL = id;
+  document.querySelectorAll("[data-nrect]").forEach((r) => r.setAttribute("stroke-width", r.dataset.nrect === id ? "3" : "1.5"));
+  const n = (CG_DATA && CG_DATA.nodes || []).find((x) => x.id === id);
+  const d = $("#cg-detail");
+  if (d) d.innerHTML = cgDetailHtml(n);
+}
+
+async function cgRender(pid) {
+  const out = $("#cg-out");
+  if (!out) return;
+  out.innerHTML = '<div class="empty">loading…</div>';
+  document.querySelectorAll("[data-cgproj]").forEach((b) =>
+    b.classList.toggle("primary", b.dataset.cgproj === pid));
+  try {
+    const data = await get("/v1/projects/" + pid + "/context/graph");
+    const head = {};
+    for (const k of data.keys || []) head[k.key] = k.currentRevision;
+    for (const nd of data.nodes || []) nd.isHead = nd.accepted && nd.revision === head[nd.key];
+    CG_DATA = data; CG_SEL = null;
+    if (!(data.nodes || []).length) {
+      out.innerHTML = '<div class="empty">No shared context yet for this project — contribute context to see the graph.</div>';
+      return;
+    }
+    out.innerHTML = cgViewHtml(data);
+    out.querySelectorAll("[data-node]").forEach((g) => {
+      const id = g.dataset.node;
+      g.addEventListener("click", () => cgSelect(id));
+      g.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); cgSelect(id); }
+      });
+    });
+  } catch (e) { out.innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; }
+}
+
+function wireContextGraph() {
+  document.querySelectorAll("[data-cgproj]").forEach((b) =>
+    b.addEventListener("click", () => cgRender(b.dataset.cgproj)));
+  // deep-link / preselect: #/context-graph/<projectId> auto-loads that project
+  const { id } = route();
+  if (id && PROJECTS.some((p) => p.id === id)) cgRender(id);
+}
+
 // ------------------------------------------------------------------ spend --
 // Pillars 5 + 6 where the work happens: the SAME self-scoped ledgers the
 // admin dashboard rolls up — measured actuals from usage_events, estimated
@@ -2037,6 +2378,7 @@ async function render() {
     else if (page === "workflows") content = await workflowsPage();
     else if (page === "inbox") content = await inboxPage();
     else if (page === "projects") content = await projectsPage();
+    else if (page === "context-graph") content = await contextGraphPage();
     else if (page === "spend") content = await spendPage();
     else if (page === "settings") content = await settingsPage();
     else content = await playgroundPage();
@@ -2057,7 +2399,9 @@ async function render() {
       const ag = $("#pg-agent");
       if (ag && PG_PREFILL.agentId && AGENTS.some((a) => a.agentId === PG_PREFILL.agentId)) {
         ag.value = PG_PREFILL.agentId;
-        if ($("#pg-key")) $("#pg-key").innerHTML = keyHint(AGENTS.find((a) => a.agentId === PG_PREFILL.agentId));
+        const pa = AGENTS.find((a) => a.agentId === PG_PREFILL.agentId);
+        if ($("#pg-key")) $("#pg-key").innerHTML = keyHint(pa);
+        if ($("#pg-banner")) $("#pg-banner").innerHTML = providerBanner(pa);
       }
       const pr = $("#pg-project");
       if (pr) pr.value = PG_PREFILL.projectId && PROJECTS.some((p) => p.id === PG_PREFILL.projectId) ? PG_PREFILL.projectId : "";
@@ -2071,9 +2415,42 @@ async function render() {
     $("#pg-agent")?.addEventListener("change", (e) => {
       const a = AGENTS.find((x) => x.agentId === e.target.value);
       if ($("#pg-key")) $("#pg-key").innerHTML = keyHint(a);
+      if ($("#pg-banner")) $("#pg-banner").innerHTML = providerBanner(a);
     });
     $("#pg-input")?.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendPrompt(); }
+    });
+    // ---- attachments: click-to-pick, drag-and-drop, paste-image ----
+    renderAttachTray();
+    const fileEl = $("#pg-file");
+    $("#pg-attach")?.addEventListener("click", () => fileEl?.click());
+    fileEl?.addEventListener("change", (e) => {
+      if (e.target.files?.length) pgAddFiles(e.target.files);
+      e.target.value = ""; // let the same file be re-picked after removal
+    });
+    const composer = $("#pg-composer");
+    if (composer) {
+      // dragover/leave toggle the drop affordance; drop reads the files
+      ["dragenter", "dragover"].forEach((ev) => composer.addEventListener(ev, (e) => {
+        if (!e.dataTransfer?.types?.includes("Files")) return;
+        e.preventDefault(); composer.classList.add("dragover");
+      }));
+      ["dragleave", "dragend"].forEach((ev) => composer.addEventListener(ev, (e) => {
+        if (e.target === composer) composer.classList.remove("dragover");
+      }));
+      composer.addEventListener("drop", (e) => {
+        composer.classList.remove("dragover");
+        if (!e.dataTransfer?.files?.length) return;
+        e.preventDefault(); pgAddFiles(e.dataTransfer.files);
+      });
+    }
+    // paste an image straight from the clipboard (screenshot workflow)
+    $("#pg-input")?.addEventListener("paste", (e) => {
+      const files = Array.from(e.clipboardData?.items || [])
+        .filter((it) => it.kind === "file")
+        .map((it) => it.getAsFile())
+        .filter(Boolean);
+      if (files.length) { e.preventDefault(); pgAddFiles(files); }
     });
   }
   if (page === "spend") wireSpend();
@@ -2084,6 +2461,7 @@ async function render() {
   if (page === "workflows" && id) wireWorkflowDetail(id);
   if (page === "inbox") wireInbox();
   if (page === "projects") wireProjects();
+  if (page === "context-graph") wireContextGraph();
 }
 render();
 </script>

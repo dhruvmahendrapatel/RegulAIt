@@ -1,6 +1,6 @@
 ---
 phase: governance-mvp-in-progress
-last_updated: 2026-07-27
+last_updated: 2026-07-28
 active_epics: [EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
 last_session: sessions/2026-07-24-session-02.md
@@ -677,6 +677,24 @@ the panel h1, nav aria-current, sortable-th keyboard, text badges for status not
 bump). Browser-verified (filter/sort/paginate on Audit, humanized headers, no console errors beyond
 pre-auth 401s). This closes the "review the whole UI/UX" thread except the intentionally-open items
 (nothing further deferred beyond what the deeper-a11y sweep would add).
+
+**Chat→Claude + visual context graph + multimodal attachments, 2026-07-28 (three prioritized
+product asks, see session-02 addendum 27).** (1) **Chat routes to Claude**: a platform API-key
+ENV fallback (ANTHROPIC_API_KEY etc., last-resort after stored user/platform creds, read at
+dispatch only) lets a self-hosted box go live with no admin-UI paste; a read-only
+`GET /v1/model-providers/status` (booleans only) drives the composer's not-configured banner, and
+a fresh chat now defaults to the highest-tier live non-mock agent (Claude wins ties). (2)
+**Visual Context Graph** (pillar 4): new /app page rendering the shared-context store as a
+dependency-free SVG version graph — one column per key, baseRevision→revision lineage edges,
+conflict forks amber/dashed, click-for-detail with contributor/team provenance; backed by
+`GET /v1/projects/:projectId/context/graph` (viewer-gated, 240-char preview). (3) **Multimodal
+attachments** (mimics Claude native): 📎 + drag-drop + paste-image composer with a thumbnail/chip
+tray (<= 8 files, <= 6 MB each) — images/PDFs ride the dispatch as base64 `attachments`
+(`ModelContentBlock` gained image/document variants; Anthropic maps to native source blocks,
+other adapters degrade to a named placeholder), text/code files ride `referenceContent`; history
+stores only a named marker (never bytes, never re-billed), and attachments never widen
+entitlement. Suite 307 → 318 (attachments.test.ts); model-provider 60 → 62. Browser-verified both
+new surfaces, zero console errors.
 
 **Agent-driven task decomposition, 2026-07-26 — pillar 7's headline lands, human-gated.**
 `POST /v1/runs/decompose` {goal, projectId?, leadAgentId?}: a Team-Lead agent (leadAgentId ??

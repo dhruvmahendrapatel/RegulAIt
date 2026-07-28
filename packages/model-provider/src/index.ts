@@ -48,12 +48,25 @@ export interface ModelToolDef {
 
 /** A block inside a multi-turn message's content. Text is the ordinary case;
  * tool_use is what an assistant turn appends when it calls a tool; tool_result
- * is the following user turn carrying that tool's output back into history.
+ * is the following user turn carrying that tool's output back into history;
+ * image / document carry a user-uploaded attachment (base64) so a turn can be
+ * multimodal — a photo/screenshot the model sees as vision, or a PDF it reads
+ * as a document. Providers without native vision degrade these to a short text
+ * placeholder rather than dropping them silently.
  * Together they let a tool-using loop append turns across iterations. */
 export type ModelContentBlock =
   | { type: "text"; text: string }
+  | { type: "image"; mediaType: string; dataBase64: string; name?: string }
+  | { type: "document"; mediaType: string; dataBase64: string; name?: string }
   | { type: "tool_use"; id: string; name: string; input: unknown }
   | { type: "tool_result"; toolUseId: string; content: string; isError?: boolean };
+
+/** A short human-readable stand-in for an attachment on providers that can't
+ * take the bytes natively (mock, and the chat-completions/Gemini text join).
+ * Never fabricates content — it only names what was attached. */
+function attachmentPlaceholder(b: Extract<ModelContentBlock, { type: "image" | "document" }>): string {
+  return `[attached ${b.type}${b.name ? `: ${b.name}` : ""}]`;
+}
 
 /** One turn of a multi-turn conversation. `system` is deliberately NOT a
  * role here — it stays a separate ModelDispatchRequest field, because two of
@@ -256,6 +269,24 @@ function anthropicContent(
   if (typeof content === "string") return content;
   return content.map((b): Anthropic.ContentBlockParam => {
     if (b.type === "text") return { type: "text", text: b.text };
+    // Native multimodal: Claude takes images (vision) and PDFs (documents) as
+    // base64 source blocks. This is the one provider that sees the real bytes.
+    if (b.type === "image") {
+      return {
+        type: "image",
+        source: {
+          type: "base64",
+          media_type: b.mediaType as "image/jpeg" | "image/png" | "image/gif" | "image/webp",
+          data: b.dataBase64,
+        },
+      };
+    }
+    if (b.type === "document") {
+      return {
+        type: "document",
+        source: { type: "base64", media_type: "application/pdf", data: b.dataBase64 },
+      };
+    }
     if (b.type === "tool_use") {
       return { type: "tool_use", id: b.id, name: b.name, input: b.input };
     }
@@ -315,8 +346,13 @@ function openAiMessages(
       continue;
     }
     const text = m.content
-      .filter((b): b is Extract<ModelContentBlock, { type: "text" }> => b.type === "text")
-      .map((b) => b.text)
+      .map((b) =>
+        b.type === "text"
+          ? b.text
+          : b.type === "image" || b.type === "document"
+            ? attachmentPlaceholder(b)
+            : "",
+      )
       .join("");
     const toolUses = m.content.filter(
       (b): b is Extract<ModelContentBlock, { type: "tool_use" }> => b.type === "tool_use",
@@ -562,6 +598,7 @@ function googleParts(content: string | ModelContentBlock[]): Record<string, unkn
   if (typeof content === "string") return [{ text: content }];
   return content.map((b) => {
     if (b.type === "text") return { text: b.text };
+    if (b.type === "image" || b.type === "document") return { text: attachmentPlaceholder(b) };
     if (b.type === "tool_use") return { functionCall: { name: b.name, args: b.input } };
     return {
       functionResponse: { name: b.toolUseId, response: { content: b.content, isError: b.isError ?? false } },
@@ -1369,7 +1406,15 @@ function mockDecompositionReply(goal: string, system: string, tier: MockTier): s
 function mockBlockText(content: string | ModelContentBlock[]): string {
   if (typeof content === "string") return content;
   return content
-    .map((b) => (b.type === "text" ? b.text : b.type === "tool_result" ? b.content : ""))
+    .map((b) =>
+      b.type === "text"
+        ? b.text
+        : b.type === "tool_result"
+          ? b.content
+          : b.type === "image" || b.type === "document"
+            ? attachmentPlaceholder(b)
+            : "",
+    )
     .join(" ");
 }
 
