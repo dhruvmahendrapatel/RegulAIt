@@ -214,6 +214,27 @@ export const invokeAgentSchema = z.object({
    * long data blobs elided) before the model sees it. Absent = no reference
    * content (byte-identical to the pre-preprocessing contract). */
   referenceContent: z.string().max(500_000).optional(),
+  /** multimodal uploads (mimics Claude's native attach): images the model sees
+   * as vision and PDFs it reads as documents, carried base64 on the newest user
+   * turn. Bounded in count and per-file size so a dispatch can't be used to
+   * smuggle an unbounded payload; only providers with native vision (Claude)
+   * see the bytes — others get a short "[attached image: name]" placeholder.
+   * Text/code files are NOT attachments — they ride `referenceContent` instead,
+   * where the pillar-6 preprocessor can shrink them. Absent = a text-only turn
+   * (byte-identical to the pre-attachment contract). */
+  attachments: z
+    .array(
+      z.object({
+        kind: z.enum(["image", "document"]),
+        name: z.string().min(1).max(256),
+        mediaType: z.string().min(1).max(128),
+        /** base64 (no data: prefix). ~9M chars ≈ 6.7MB decoded — a per-file
+         * ceiling that keeps a single dispatch bounded. */
+        dataBase64: z.string().min(1).max(9_000_000),
+      }),
+    )
+    .max(8)
+    .optional(),
   /** pillar-6 semantic caching: opt in to the REAL per-(user,agent) exact-match
    * response cache. When true and this dispatch's normalized input matches a
    * fresh stored row for the SAME user+agent, the stored response is served

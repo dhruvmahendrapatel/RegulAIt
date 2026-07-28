@@ -220,6 +220,25 @@ pre, .codeblock {
 .caret { display: inline-block; width: 7px; height: 14px; background: var(--accent); animation: blink 1s steps(1) infinite; vertical-align: text-bottom; }
 @keyframes blink { 50% { opacity: 0; } }
 
+/* ---- chat attachments (mimics Claude's native attach) -------------- */
+.composer { position: relative; }
+.composer.dragover { outline: 2px dashed var(--accent); outline-offset: 3px; border-radius: 10px; }
+.composer.dragover::after { content: "Drop files to attach"; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: var(--accent-soft); color: var(--text); font-size: 13px; border-radius: 10px; pointer-events: none; z-index: 2; }
+.attach-btn { padding: 8px 11px; font-size: 16px; line-height: 1; background: #ffffff0d; border: 1px solid var(--border-strong); border-radius: 8px; color: var(--text-dim); cursor: pointer; flex: none; }
+.attach-btn:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
+.attach-tray { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+.attach-chip { display: flex; align-items: center; gap: 8px; background: var(--bg-inset); border: 1px solid var(--border-strong); border-radius: 8px; padding: 6px 8px; max-width: 240px; }
+.attach-chip .thumb { width: 34px; height: 34px; border-radius: 5px; object-fit: cover; flex: none; background: #ffffff0d; }
+.attach-chip .ico { width: 34px; height: 34px; border-radius: 5px; flex: none; display: flex; align-items: center; justify-content: center; font-size: 17px; background: #ffffff0d; }
+.attach-chip .an { font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attach-chip .as { font-size: 10.5px; color: var(--text-faint); }
+.attach-chip .rm { margin-left: 2px; background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 15px; line-height: 1; padding: 2px 4px; flex: none; }
+.attach-chip .rm:hover { color: var(--bad); }
+.msg .att-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.msg.user .att-row { justify-content: flex-end; }
+.att-pill { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-dim); background: var(--bg-inset); border: 1px solid var(--border); border-radius: 6px; padding: 3px 7px; }
+.att-pill img { width: 20px; height: 20px; border-radius: 3px; object-fit: cover; }
+
 /* ---- run graph ----------------------------------------------------- */
 .node-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
 .node-row:last-child { border-bottom: none; }

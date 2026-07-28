@@ -216,6 +216,67 @@ let CONVOS = [];            // conversations rail cache (newest-updated first, f
 let CHAT_LOADED_FOR = null; // which conversation chatHistory mirrors (null = fresh unsaved chat)
 let PG_PREFILL = null;      // agent/project selects to apply right after opening a thread
 
+// ---- composer attachments (mimics Claude's native attach) ---------------
+// Images/PDFs ride the dispatch as base64 attachments (a vision-capable
+// agent sees the bytes); text/code files ride the referenceContent field where
+// the pillar-6 preprocessor can shrink them. Both are bounded before they ever
+// leave the browser: <= 8 files, <= 6 MB each.
+let PG_ATTACH = [];         // pending attachments for the NEXT send — cleared after
+let PG_ATTACH_SEQ = 0;      // stable local ids for tray remove buttons
+const PG_IMG_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+const PG_MAX_ATTACH = 8;
+const PG_MAX_BYTES = 6 * 1024 * 1024;
+
+function fmtBytes(n) {
+  return n < 1024 ? n + " B" : n < 1048576 ? Math.round(n / 1024) + " KB" : (n / 1048576).toFixed(1) + " MB";
+}
+function readAs(file, how) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result);
+    r.onerror = () => rej(r.error || new Error("read failed"));
+    if (how === "text") r.readAsText(file); else r.readAsDataURL(file);
+  });
+}
+async function pgAddFiles(files) {
+  for (const file of Array.from(files)) {
+    if (PG_ATTACH.length >= PG_MAX_ATTACH) { toast("Up to " + PG_MAX_ATTACH + " files per message.", "err"); break; }
+    if (file.size > PG_MAX_BYTES) { toast("\\u2717 " + file.name + " is over the 6 MB limit.", "err"); continue; }
+    const isImg = PG_IMG_TYPES.includes(file.type);
+    const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+    try {
+      if (isImg || isPdf) {
+        const dataUrl = String(await readAs(file, "dataurl"));
+        const base64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
+        PG_ATTACH.push({ id: ++PG_ATTACH_SEQ, mode: "attachment", kind: isImg ? "image" : "document",
+          name: file.name, mediaType: isImg ? file.type : "application/pdf",
+          dataBase64: base64, thumb: isImg ? dataUrl : null, size: file.size });
+      } else {
+        const text = String(await readAs(file, "text"));
+        PG_ATTACH.push({ id: ++PG_ATTACH_SEQ, mode: "text", name: file.name, text: text, size: file.size });
+      }
+    } catch (e) { toast("\\u2717 couldn\\u2019t read " + file.name, "err"); }
+  }
+  renderAttachTray();
+}
+function pgRemoveAttach(id) { PG_ATTACH = PG_ATTACH.filter((a) => a.id !== Number(id)); renderAttachTray(); }
+function renderAttachTray() {
+  const tray = $("#pg-tray");
+  if (!tray) return;
+  if (!PG_ATTACH.length) { tray.style.display = "none"; tray.innerHTML = ""; return; }
+  tray.style.display = "flex";
+  tray.innerHTML = PG_ATTACH.map((a) => {
+    const icon = a.mode === "attachment" && a.kind === "image"
+      ? '<img class="thumb" src="' + a.thumb + '" alt="">'
+      : '<span class="ico">' + (a.mode === "attachment" ? "\\uD83D\\uDCC4" : "\\uD83D\\uDCDD") + "</span>";
+    const kindLabel = a.mode === "attachment" ? a.kind : "text \\u2192 reference";
+    return '<div class="attach-chip">' + icon
+      + '<div style="min-width:0"><div class="an">' + esc(a.name) + '</div><div class="as">' + esc(fmtBytes(a.size)) + " \\u00B7 " + kindLabel + "</div></div>"
+      + '<button class="rm" data-rma="' + a.id + '" title="remove" aria-label="Remove ' + esc(a.name) + '">\\u00D7</button></div>';
+  }).join("");
+  tray.querySelectorAll("[data-rma]").forEach((b) => b.addEventListener("click", () => pgRemoveAttach(b.dataset.rma)));
+}
+
 function setConvo(id) {
   CONVO_ID = id;
   if (id) sessionStorage.setItem("regulait.convo", id);
@@ -426,10 +487,16 @@ async function playgroundPage() {
             : '<div class="empty">Pick an agent and say something — the first message starts a conversation. Mock agents reply instantly with no external keys; type «&lt;&lt;refuse&gt;&gt;» to see refusal handling.</div>')}
         </div>
         <hr class="hr">
-        <div class="row">
-          <textarea id="pg-input" class="grow" rows="2" placeholder="\${noAgents ? "No agent granted to your account yet…" : (CONVO_ID ? "Continue the conversation…" : "Ask the agent to do something…")}"\${noAgents ? " disabled" : ""}></textarea>
-          <button class="primary" id="pg-send"\${noAgents ? " disabled" : ""}>Send</button>
-          <button id="pg-stop" style="display:none" title="close the stream — the dispatch already ran, anything streamed stays">Stop</button>
+        <div class="composer" id="pg-composer">
+          <div class="attach-tray" id="pg-tray" style="display:none"></div>
+          <div class="row">
+            <input type="file" id="pg-file" multiple accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/*,.md,.markdown,.csv,.json,.yaml,.yml,.txt,.log,.ts,.tsx,.js,.jsx,.py,.go,.rb,.java,.rs,.c,.h,.cpp,.sql,.sh,.html,.css" style="display:none">
+            <button class="attach-btn" id="pg-attach" title="Attach images, PDFs, or text/code files"\${noAgents ? " disabled" : ""} aria-label="Attach files">📎</button>
+            <textarea id="pg-input" class="grow" rows="2" placeholder="\${noAgents ? "No agent granted to your account yet…" : (CONVO_ID ? "Continue the conversation…" : "Ask the agent to do something…")}"\${noAgents ? " disabled" : ""}></textarea>
+            <button class="primary" id="pg-send"\${noAgents ? " disabled" : ""}>Send</button>
+            <button id="pg-stop" style="display:none" title="close the stream — the dispatch already ran, anything streamed stays">Stop</button>
+          </div>
+          <div class="faint" style="font-size:11px;margin-top:6px">Attach images &amp; PDFs (a vision-capable agent like Claude reads them), or text/code files (fed as reference). Up to 8 files · 6 MB each.</div>
         </div>
       </div>
     </div>
@@ -509,8 +576,19 @@ function renderExchange(x, i) {
         <pre style="margin-top:6px;white-space:pre-wrap">\${esc(x.compactedBoundary.summary ?? "")}</pre></details>
       </div>\`
     : "";
+  // attachments the user sent with this turn — thumbnails for images, a labelled
+  // pill for PDFs/text files. Never renders base64: the render list carries only
+  // name/kind/thumb (a live send has the thumb; a replayed thread shows the pill).
+  const attRow = (x.attachments && x.attachments.length)
+    ? '<div class="att-row">' + x.attachments.map((a) =>
+        a.thumb
+          ? '<span class="att-pill"><img src="' + a.thumb + '" alt="">' + esc(a.name) + "</span>"
+          : '<span class="att-pill">' + (a.kind === "document" ? "\\uD83D\\uDCC4" : "\\uD83D\\uDCDD") + " " + esc(a.name) + "</span>",
+      ).join("") + "</div>"
+    : "";
+  const userBubble = x.prompt ? \`<div class="bubble">\${esc(x.prompt)}</div>\` : "";
   return \`
-    <div class="msg user"><div class="who">\${esc(ME.user.displayName)}</div><div class="bubble">\${esc(x.prompt)}</div></div>
+    <div class="msg user"><div class="who">\${esc(ME.user.displayName)}</div>\${attRow}\${userBubble}</div>
     <div class="msg agent">
       <div class="who">\${esc(x.agentName)}</div>
       <div class="bubble">\${esc(x.text)}\${x.streaming ? '<span class="caret"></span>' : ""}</div>
@@ -548,7 +626,9 @@ async function sendPrompt() {
   if (PG_ABORT) return; // one stream at a time — Send is disabled anyway
   const input = $("#pg-input");
   const prompt = input.value.trim();
-  if (!prompt) return;
+  // A message may be attachments-only (an image with no words), exactly like
+  // Claude's composer — but never fully empty.
+  if (!prompt && !PG_ATTACH.length) return;
   const agentId = $("#pg-agent")?.value;
   if (!agentId) { toast("No agents granted to your account — ask an admin."); return; }
   const projectId = $("#pg-project").value || undefined;
@@ -567,7 +647,24 @@ async function sendPrompt() {
   }
   const conversationId = CONVO_ID;
   input.value = "";
-  const x = { prompt, agentName: AGENT_NAMES[agentId] ?? "agent", text: "", streaming: true };
+  // Snapshot and clear the composer's attachments: the images/PDFs go up as
+  // base64 attachments (the model sees the bytes), the text/code files are
+  // concatenated into referenceContent (the pillar-6 preprocessor shrinks them
+  // server-side). A small render list rides the user bubble so the thread shows
+  // what was sent — never the base64.
+  const pending = PG_ATTACH;
+  PG_ATTACH = []; renderAttachTray();
+  const attachments = pending
+    .filter((a) => a.mode === "attachment")
+    .map((a) => ({ kind: a.kind, name: a.name, mediaType: a.mediaType, dataBase64: a.dataBase64 }));
+  const textFiles = pending.filter((a) => a.mode === "text");
+  const referenceContent = textFiles.length
+    ? textFiles.map((a) => "----- FILE: " + a.name + " -----\\n" + a.text).join("\\n\\n")
+    : undefined;
+  const attachViews = pending.map((a) => ({
+    name: a.name, kind: a.mode === "attachment" ? a.kind : "text", thumb: a.thumb || null,
+  }));
+  const x = { prompt, agentName: AGENT_NAMES[agentId] ?? "agent", text: "", streaming: true, attachments: attachViews };
   chatHistory.push(x); drawChat();
   const ctrl = new AbortController();
   PG_ABORT = ctrl;
@@ -577,7 +674,7 @@ async function sendPrompt() {
     const res = await fetch("/v1/agents/" + agentId + "/invoke", {
       method: "POST",
       headers: { authorization: "Bearer " + KEY, "content-type": "application/json" },
-      body: JSON.stringify({ mode: "execute", input: prompt, dispatch: true, stream: true, costSensitivity, conversationId, ...(projectId ? { projectId } : {}) }),
+      body: JSON.stringify({ mode: "execute", input: prompt, dispatch: true, stream: true, costSensitivity, conversationId, ...(projectId ? { projectId } : {}), ...(attachments.length ? { attachments } : {}), ...(referenceContent ? { referenceContent } : {}) }),
       signal: ctrl.signal,
     });
     if (!res.ok || !res.headers.get("content-type")?.includes("event-stream")) {
@@ -2322,6 +2419,38 @@ async function render() {
     });
     $("#pg-input")?.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendPrompt(); }
+    });
+    // ---- attachments: click-to-pick, drag-and-drop, paste-image ----
+    renderAttachTray();
+    const fileEl = $("#pg-file");
+    $("#pg-attach")?.addEventListener("click", () => fileEl?.click());
+    fileEl?.addEventListener("change", (e) => {
+      if (e.target.files?.length) pgAddFiles(e.target.files);
+      e.target.value = ""; // let the same file be re-picked after removal
+    });
+    const composer = $("#pg-composer");
+    if (composer) {
+      // dragover/leave toggle the drop affordance; drop reads the files
+      ["dragenter", "dragover"].forEach((ev) => composer.addEventListener(ev, (e) => {
+        if (!e.dataTransfer?.types?.includes("Files")) return;
+        e.preventDefault(); composer.classList.add("dragover");
+      }));
+      ["dragleave", "dragend"].forEach((ev) => composer.addEventListener(ev, (e) => {
+        if (e.target === composer) composer.classList.remove("dragover");
+      }));
+      composer.addEventListener("drop", (e) => {
+        composer.classList.remove("dragover");
+        if (!e.dataTransfer?.files?.length) return;
+        e.preventDefault(); pgAddFiles(e.dataTransfer.files);
+      });
+    }
+    // paste an image straight from the clipboard (screenshot workflow)
+    $("#pg-input")?.addEventListener("paste", (e) => {
+      const files = Array.from(e.clipboardData?.items || [])
+        .filter((it) => it.kind === "file")
+        .map((it) => it.getAsFile())
+        .filter(Boolean);
+      if (files.length) { e.preventDefault(); pgAddFiles(files); }
     });
   }
   if (page === "spend") wireSpend();

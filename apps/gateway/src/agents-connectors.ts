@@ -43,6 +43,7 @@ import {
   ModelProviderError,
   resolveModelProvider,
   type ModelChatMessage,
+  type ModelContentBlock,
   type ModelToolDef,
 } from "@regulait/model-provider";
 import {
@@ -1202,6 +1203,21 @@ export function registerAgentConnectorRoutes(
         (fpp.apply ? fpp.processedText.length : (body.referenceContent?.length ?? 0)) / 4,
       );
       if (referenceTokens) estimate.in += referenceTokens;
+      // MULTIMODAL ATTACHMENTS: images the model sees as vision and PDFs it
+      // reads as documents are real input the dispatch must pay for, so fold a
+      // bounded per-attachment estimate into the routing/budget/cost input the
+      // same additive way. An image is a flat ~1.2k-token allowance (a rough
+      // upper bound for a resized vision tile); a PDF is estimated from its
+      // decoded byte size at the usual ~4 chars/token, since Claude reads its
+      // extracted text. Non-vision providers only see the tiny placeholder, but
+      // charging the upper bound keeps the estimate conservative regardless of
+      // which agent routing lands on. Absent attachments → no change.
+      const attachmentTokens = (body.attachments ?? []).reduce((sum, a) => {
+        if (a.kind === "image") return sum + 1_200;
+        // base64 is ~4/3 the decoded size; decoded/4 ≈ base64Length * 3 / 16
+        return sum + Math.ceil((a.dataBase64.length * 3) / 16);
+      }, 0);
+      if (attachmentTokens) estimate.in += attachmentTokens;
       routing = routeModel({
         requestedAgentId: agent.id,
         candidates,
@@ -1439,27 +1455,56 @@ export function registerAgentConnectorRoutes(
           (fpp.apply ? fpp.processedText : body.referenceContent);
       }
 
+      // MULTIMODAL: when the caller attached images/PDFs, the newest user turn
+      // is an ordered block array — the composed text first, then each
+      // attachment as an image/document block — instead of a plain string. Only
+      // Claude sees the bytes; other providers get a short placeholder. A turn
+      // with no attachments stays a plain string (byte-identical to before).
+      const attachmentBlocks: ModelContentBlock[] = (body.attachments ?? []).map((a) => ({
+        type: a.kind,
+        mediaType: a.mediaType,
+        dataBase64: a.dataBase64,
+        name: a.name,
+      }));
+      const userTurnContent: string | ModelContentBlock[] = attachmentBlocks.length
+        ? [
+            ...(dispatchInput ? [{ type: "text" as const, text: dispatchInput }] : []),
+            ...attachmentBlocks,
+          ]
+        : dispatchInput;
+
       // MULTI-TURN: a conversation dispatch sends the model-bound history —
       // [summary context] + recent verbatim turns when a summary exists, the
       // FULL ordered history otherwise — plus the newest user turn as the
       // provider messages array; the governed pipeline around it (policy,
       // routing, budget, attribution, audit, usage ledger) is exactly the
-      // single-turn one.
+      // single-turn one. A single-turn dispatch WITH attachments also needs a
+      // messages array (a bare `input` string can't carry blocks), so build a
+      // one-turn array in that case; a plain single turn keeps riding `input`.
       const messages: ModelChatMessage[] | undefined =
         convo && body.dispatch
           ? [
               ...(convoContext ? convoContext.modelBound : convo.history),
-              { role: "user" as const, content: dispatchInput },
+              { role: "user" as const, content: userTurnContent },
             ]
-          : undefined;
+          : attachmentBlocks.length && body.dispatch
+            ? [{ role: "user" as const, content: userTurnContent }]
+            : undefined;
       // One persistence rule for the streaming and non-streaming paths —
       // the exact contract lives in conversations.ts. A failed outcome
       // persists nothing (never a half-written turn).
+      // Stored history keeps a NAMED marker for each attachment, never the
+      // base64 bytes: the thread stays small and, crucially, a later turn does
+      // NOT re-send (or re-bill) the image/PDF — it only records that one was
+      // attached at that turn.
+      const attachmentMarker = body.attachments?.length
+        ? `\n\n${body.attachments.map((a) => `[attached ${a.kind}: ${a.name}]`).join(" ")}`
+        : "";
       const persistTurns = async (outcome: DispatchOutcome) => {
         if (!convo || !outcome.ok) return;
         const r = outcome.result;
         await recordConversationTurns(db, convo.conversation, {
-          userContent: body.input ?? "",
+          userContent: (body.input ?? "") + attachmentMarker,
           assistant: {
             content: r.refusal
               ? r.outputText || "[the model declined to answer this request]"
