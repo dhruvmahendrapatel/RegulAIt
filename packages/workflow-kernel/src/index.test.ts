@@ -236,6 +236,103 @@ describe("instance state machine", () => {
     expect(r.state.status).toBe("blocked_on_approval"); // reached the ship gate
   });
 
+  it("deploy → verify(pass) completes; a deploy stage runs via the executor", () => {
+    const dep = validateDefinition({
+      workflow: "deploy-ok",
+      stages: [
+        { id: "intake", type: "trigger" },
+        { id: "deploy", type: "deployment", connection: "prod-target", environment: "production" },
+        { id: "verify", type: "automated_check", checks: ["smoke"], onFailure: "rollback", rollbackStageId: "undo" },
+        { id: "undo", type: "rollback", connection: "prod-target" },
+      ],
+    });
+    let r = transition(dep, initialState(dep), { kind: "start" });
+    // parks awaiting the deploy executor
+    expect(r.state.status).toBe("awaiting_execution");
+    expect(r.effects).toContainEqual({ kind: "execute_stage", stageId: "deploy" });
+    r = transition(dep, r.state, { kind: "execution_succeeded", stageId: "deploy" });
+    // advances into the verify check
+    expect(r.state.status).toBe("awaiting_execution");
+    expect(r.effects).toContainEqual({ kind: "execute_stage", stageId: "verify" });
+    r = transition(dep, r.state, { kind: "execution_succeeded", stageId: "verify" });
+    expect(r.state.status).toBe("completed");
+  });
+
+  it("a post-deploy verify FAILURE with onFailure:rollback jumps straight to the rollback stage → rolled_back", () => {
+    const dep = validateDefinition({
+      workflow: "deploy-rollback",
+      stages: [
+        { id: "intake", type: "trigger" },
+        { id: "deploy", type: "deployment", connection: "prod-target" },
+        { id: "verify", type: "automated_check", checks: ["smoke"], onFailure: "rollback", rollbackStageId: "undo" },
+        { id: "undo", type: "rollback", connection: "prod-target" },
+        { id: "done", type: "human_approval", approvers: ["requesting_user"] },
+      ],
+    });
+    let r = transition(dep, initialState(dep), { kind: "start" });
+    r = transition(dep, r.state, { kind: "execution_succeeded", stageId: "deploy" });
+    // verify fails → NOT blocked_on_check; it routes to the rollback executor
+    r = transition(dep, r.state, { kind: "check_failed", stageId: "verify", failures: ["smoke"] });
+    expect(r.state.status).toBe("awaiting_execution");
+    expect(r.effects).toContainEqual({ kind: "execute_stage", stageId: "undo" });
+    expect(r.effects).toContainEqual({ kind: "check_failed", stageId: "verify", failures: ["smoke"] });
+    // the rollback executor finishing ends the run at the terminal rolled_back
+    r = transition(dep, r.state, { kind: "rolled_back", stageId: "undo" });
+    expect(r.state.status).toBe("rolled_back");
+    expect(r.effects).toContainEqual({ kind: "instance_rolled_back", stageId: "undo" });
+    // terminal: no further events
+    expect(() => transition(dep, r.state, { kind: "recheck", stageId: "verify" })).toThrow(/terminal/);
+  });
+
+  it("a deploy that cannot proceed parks at blocked_on_deploy; an override advances past it", () => {
+    const dep = validateDefinition({
+      workflow: "deploy-handoff",
+      stages: [
+        { id: "intake", type: "trigger" },
+        { id: "deploy", type: "deployment", connection: "missing-target" },
+        { id: "done", type: "human_approval", approvers: ["requesting_user"] },
+      ],
+    });
+    let r = transition(dep, initialState(dep), { kind: "start" });
+    r = transition(dep, r.state, { kind: "deploy_blocked", stageId: "deploy", reason: "no deploy target 'missing-target'" });
+    expect(r.state.status).toBe("blocked_on_deploy");
+    expect(r.effects).toContainEqual({ kind: "await_manual_deploy", stageId: "deploy", reason: "no deploy target 'missing-target'" });
+    // override → advances to the final gate
+    r = transition(dep, r.state, { kind: "deploy_override", stageId: "deploy" });
+    expect(r.state.status).toBe("blocked_on_approval");
+  });
+
+  it("rejects a deploy/rollback stage without a target, and onFailure:rollback without a rollback stage", () => {
+    expect(() =>
+      validateDefinition({
+        workflow: "bad-deploy",
+        stages: [
+          { id: "intake", type: "trigger" },
+          { id: "deploy", type: "deployment" },
+        ],
+      }),
+    ).toThrow(/needs a deploy target/);
+    expect(() =>
+      validateDefinition({
+        workflow: "bad-rollback-link",
+        stages: [
+          { id: "intake", type: "trigger" },
+          { id: "verify", type: "automated_check", checks: ["x"], onFailure: "rollback" },
+        ],
+      }),
+    ).toThrow(/no rollbackStageId/);
+    expect(() =>
+      validateDefinition({
+        workflow: "rollback-points-at-nonrollback",
+        stages: [
+          { id: "intake", type: "trigger" },
+          { id: "verify", type: "automated_check", checks: ["x"], onFailure: "rollback", rollbackStageId: "done" },
+          { id: "done", type: "human_approval", approvers: ["requesting_user"] },
+        ],
+      }),
+    ).toThrow(/not a rollback stage/);
+  });
+
   it("check_failed is rejected unless the named-check stage is the one executing; recheck needs blocked_on_check", () => {
     const checked = validateDefinition({
       workflow: "check-guard",

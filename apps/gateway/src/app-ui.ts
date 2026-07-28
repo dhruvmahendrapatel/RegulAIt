@@ -86,7 +86,7 @@ const statusBadge = (s) => {
   const map = { completed: "ok", done: "ok", running: "info", in_progress: "info",
     planned: "", not_started: "", blocked_on_approval: "warn", blocked_on_artifact: "warn",
     awaiting_trigger: "warn", awaiting_execution: "info", in_review: "warn", blocked: "bad",
-    blocked_on_check: "bad", failed: "bad",
+    blocked_on_check: "bad", failed: "bad", blocked_on_deploy: "warn", rolled_back: "bad",
     aborted: "bad", denied: "bad", pending: "warn", approved: "ok" };
   return '<span class="badge ' + (map[s] ?? "") + '">' + esc(String(s).replaceAll("_", " ")) + "</span>";
 };
@@ -1470,6 +1470,18 @@ async function workflowDetailPage(id) {
       <div class="row" style="margin-top:12px"><button class="primary" id="wf-recheck" data-stage="\${esc(current.id)}">Re-run checks</button>
         <span class="err-line" id="wf-derr"></span></div>
     </div>\`;
+  } else if (inst.status === "blocked_on_deploy" && current) {
+    // §2 the deploy couldn't proceed (no target, or its condition wasn't met) —
+    // a manual handoff. Name the reason; let the operator confirm and advance.
+    action = \`<div class="card">
+      <div class="row" style="align-items:center"><span class="badge warn">deploy on hold</span>
+        <span class="dim">\${esc(inst.context?.lastError ?? "this deploy needs a manual handoff before it can proceed.")}</span></div>
+      <div class="row" style="margin-top:12px"><button class="primary" id="wf-deployoverride" data-stage="\${esc(current.id)}" title="confirm the deploy was handled out-of-band (or the condition is acceptable) and advance">Mark deployed &amp; continue</button>
+        <span class="err-line" id="wf-derr"></span></div>
+    </div>\`;
+  } else if (inst.status === "rolled_back") {
+    const rb = Object.keys(inst.context ?? {}).filter((k) => k.startsWith("rollback:")).map((k) => inst.context[k])[0];
+    action = '<div class="card"><span class="badge bad">rolled back</span> <span class="dim">a post-deploy check failed and the deployment was reversed' + (rb?.reverted ? " (" + esc(rb.reverted) + ")" : "") + ". This run is closed.</span></div>";
   }
   // §9.4: an artifact of a project-billed instance can be promoted into that
   // project's shared context — opt-in, by the artifact's own initiator only
@@ -1498,11 +1510,15 @@ async function workflowDetailPage(id) {
     }).join("");
   // Delivery: everything the git stages produced — branch, PR, merge sha.
   const ctx2 = inst.context ?? {};
-  const delivery = ctx2.branch || ctx2.prUrl || ctx2.mergeSha
+  // §2 the deployment(s) this run produced, newest first, with any rollback.
+  const deployRow = Object.keys(ctx2).filter((k) => k.startsWith("deploy:")).map((k) => ctx2[k])[0];
+  const rollbackRow = Object.keys(ctx2).filter((k) => k.startsWith("rollback:")).map((k) => ctx2[k])[0];
+  const delivery = ctx2.branch || ctx2.prUrl || ctx2.mergeSha || deployRow
     ? '<h2>Delivery</h2><div class="card">'
       + (ctx2.branch ? '<div class="row"><span class="faint" style="font-size:11px;text-transform:uppercase;letter-spacing:.06em">branch</span><span class="mono">' + esc(ctx2.branch) + "</span></div>" : "")
       + (ctx2.prUrl ? '<div class="row" style="margin-top:6px"><span class="faint" style="font-size:11px;text-transform:uppercase;letter-spacing:.06em">pull request</span><a href="' + esc(ctx2.prUrl) + '" class="mono">' + esc(ctx2.prUrl) + "</a>" + (ctx2.prId ? ' <span class="badge">#' + esc(ctx2.prId) + "</span>" : "") + "</div>" : "")
       + (ctx2.mergeSha ? '<div class="row" style="margin-top:6px"><span class="faint" style="font-size:11px;text-transform:uppercase;letter-spacing:.06em">merged</span><span class="mono">' + esc(ctx2.mergeSha) + '</span><span class="badge ok">merged</span></div>' : "")
+      + (deployRow ? '<div class="row" style="margin-top:6px"><span class="faint" style="font-size:11px;text-transform:uppercase;letter-spacing:.06em">deployed</span><span class="mono">' + esc(deployRow.target) + (deployRow.environment ? " · " + esc(deployRow.environment) : "") + "</span>" + (rollbackRow ? '<span class="badge bad">rolled back</span>' : '<span class="badge ok">live</span>') + "</div>" : "")
       + "</div>"
     : "";
   return \`
@@ -1569,6 +1585,12 @@ function wireWorkflowDetail(id, inst) {
     try {
       await post("/v1/workflows/instances/" + id + "/recheck", { stageId: $("#wf-recheck").dataset.stage });
       toast("Re-ran checks"); render();
+    } catch (e) { $("#wf-derr").textContent = e.message; }
+  });
+  $("#wf-deployoverride")?.addEventListener("click", async () => {
+    try {
+      await post("/v1/workflows/instances/" + id + "/deploy-override", { stageId: $("#wf-deployoverride").dataset.stage });
+      toast("Deploy handed off — continuing"); render();
     } catch (e) { $("#wf-derr").textContent = e.message; }
   });
   wirePmStrip("workflow_instance", id);

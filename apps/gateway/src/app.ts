@@ -164,6 +164,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "POST /v1/workflows/instances/:instanceId/advance",
     "POST /v1/workflows/instances/:instanceId/checks",
     "POST /v1/workflows/instances/:instanceId/recheck",
+    "POST /v1/workflows/instances/:instanceId/deploy-override",
     "POST /v1/workflows/instances/:instanceId/abort",
     "GET /v1/workflows/instances/:instanceId",
     "GET /v1/approvals",
