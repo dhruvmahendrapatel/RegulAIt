@@ -86,6 +86,7 @@ const statusBadge = (s) => {
   const map = { completed: "ok", done: "ok", running: "info", in_progress: "info",
     planned: "", not_started: "", blocked_on_approval: "warn", blocked_on_artifact: "warn",
     awaiting_trigger: "warn", awaiting_execution: "info", in_review: "warn", blocked: "bad",
+    blocked_on_check: "bad", failed: "bad",
     aborted: "bad", denied: "bad", pending: "warn", approved: "ok" };
   return '<span class="badge ' + (map[s] ?? "") + '">' + esc(String(s).replaceAll("_", " ")) + "</span>";
 };
@@ -1456,6 +1457,19 @@ async function workflowDetailPage(id) {
     action = \`<div class="card"><div class="row"><button class="primary" id="wf-advance">Run \${esc(current.id)}</button><span class="err-line" id="wf-derr"></span></div></div>\`;
   } else if (inst.status === "awaiting_execution") {
     action = '<div class="card"><span class="badge info">executing</span> <span class="dim">a nested run or git operation is in flight' + (inst.context?.["runId:" + (current?.id ?? "")] ? ' — <a href="#/runs/' + inst.context["runId:" + current.id] + '">watch the run</a>' : "") + "</span>" + (inst.context?.lastError ? '<div class="err-line" style="margin-top:6px">' + esc(inst.context.lastError) + "</div>" : "") + "</div>";
+  } else if (inst.status === "blocked_on_check" && current) {
+    // §2 a required check failed — the pipeline is parked here. Name the
+    // failing checks, let the initiator mark one remediated (report a pass),
+    // and re-run the stage. A real CI would POST the results instead.
+    const failed = (inst.context?.["checks:" + current.id] ?? []).filter((c) => c.status === "failed");
+    action = \`<div class="card">
+      <div class="row" style="align-items:center"><span class="badge bad">checks failed</span>
+        <span class="dim">\${failed.map((c) => esc(c.check)).join(", ") || "a required check"} must pass before this can proceed.</span></div>
+      \${failed.map((c) => \`<div class="row" style="margin-top:8px"><span class="mono">\${esc(c.check)}</span>\${c.severity ? ' <span class="badge warn">' + esc(c.severity) + "</span>" : ""}
+        <button class="small" data-passcheck="\${esc(c.check)}" data-stage="\${esc(current.id)}" title="record this check as remediated (reports a passing result)">mark passing</button></div>\`).join("")}
+      <div class="row" style="margin-top:12px"><button class="primary" id="wf-recheck" data-stage="\${esc(current.id)}">Re-run checks</button>
+        <span class="err-line" id="wf-derr"></span></div>
+    </div>\`;
   }
   // §9.4: an artifact of a project-billed instance can be promoted into that
   // project's shared context — opt-in, by the artifact's own initiator only
@@ -1476,6 +1490,7 @@ async function workflowDetailPage(id) {
       return \`<h2>Checks · \${esc(s.id)}</h2><div class="card">\`
         + results.map((c) => \`<div class="node-row">
             <div class="grow"><span class="mono">\${esc(c.check)}</span>
+              \${c.severity ? '<span class="badge warn" style="margin-left:6px">' + esc(c.severity) + "</span>" : ""}
               <span class="dim" style="font-size:12px"> · \${esc(c.detail ?? "")}</span></div>
             \${c.status === "passed" ? '<span class="badge ok">passed</span>' : statusBadge(c.status)}
           </div>\`).join("")
@@ -1538,6 +1553,24 @@ function wireWorkflowDetail(id, inst) {
   });
   document.querySelectorAll("[data-promote]").forEach((b) =>
     b.addEventListener("click", () => promoteArtifact(b.dataset.pid, b.dataset.promote)));
+  // §2 remediate a failing check: report it as passing (a real CI would POST
+  // the passing result instead), then Re-run checks resumes the pipeline.
+  document.querySelectorAll("[data-passcheck]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      try {
+        await post("/v1/workflows/instances/" + id + "/checks", {
+          stageId: b.dataset.stage,
+          results: [{ check: b.dataset.passcheck, status: "passed", detail: "remediated" }],
+        });
+        toast("Marked " + b.dataset.passcheck + " passing — re-run checks to proceed");
+      } catch (e) { toast("✗ " + e.message); }
+    }));
+  $("#wf-recheck")?.addEventListener("click", async () => {
+    try {
+      await post("/v1/workflows/instances/" + id + "/recheck", { stageId: $("#wf-recheck").dataset.stage });
+      toast("Re-ran checks"); render();
+    } catch (e) { $("#wf-derr").textContent = e.message; }
+  });
   wirePmStrip("workflow_instance", id);
 }
 

@@ -36,6 +36,8 @@ import {
   createAssignmentRuleSchema,
   createGitConnectionSchema,
   createWorkflowTemplateSchema,
+  recheckSchema,
+  reportChecksSchema,
   startInstanceSchema,
   submitArtifactSchema,
 } from "@regulait/shared";
@@ -47,6 +49,24 @@ type InstanceRow = typeof workflowInstances.$inferSelect;
 
 function resolveApprover(approver: string, initiatorUserId: string): string {
   return approver === "requesting_user" ? initiatorUserId : approver;
+}
+
+/** A per-check outcome reported into a check stage (real CI, or the demo). */
+type CheckReport = {
+  check: string;
+  status: "passed" | "failed";
+  severity?: string | null;
+  detail?: string | null;
+};
+/** Defensive read of context[`reported:<stageId>`] — tolerate anything and keep
+ * only well-formed pass/fail rows, so a malformed context value can never crash
+ * the executor or smuggle a third status. */
+function normalizeCheckReports(v: unknown): CheckReport[] {
+  return Array.isArray(v)
+    ? (v as CheckReport[]).filter(
+        (r) => r && typeof r.check === "string" && (r.status === "passed" || r.status === "failed"),
+      )
+    : [];
 }
 
 /**
@@ -339,11 +359,15 @@ async function runGitExecutions(
       break; // stage stays awaiting_execution until the run completes
     }
 
-    // §2 stage 8: the check executor. Deterministic and offline in this
-    // slice — each named check "runs" against the built artifacts (the
-    // signed-off outputs this instance produced) and records a pass result
-    // into instance.context, so the rail and the audit trail both show WHAT
-    // was checked, not just that something advanced.
+    // §2 stage 8: the check executor. Each named check resolves to a result:
+    // if a result was REPORTED for it (via POST .../checks — a real CI posts
+    // here; the seed/tests post here for the demo) that result wins, PASS or
+    // FAIL; otherwise it falls back to the deterministic offline auto-pass
+    // (byte-identical to the pre-fail-routing contract, so existing templates
+    // still sail through). A required check that FAILED parks the instance at
+    // blocked_on_check instead of advancing — the failure path deploy/rollback
+    // build on. Every result lands in instance.context so the rail and audit
+    // trail show WHAT was checked and how it fared, not just that it advanced.
     if (stage.type === "automated_check") {
       const artifacts = await db
         .select()
@@ -354,23 +378,41 @@ async function runGitExecutions(
       for (const a of artifacts) if (!latestByOutput.has(a.output)) latestByOutput.set(a.output, a);
       const subjects = [...latestByOutput.values()].map((a) => `${a.output} v${a.version}`);
       const against = subjects.length ? subjects.join(", ") : "the built change set";
-      context[`checks:${stage.id}`] = (stage.checks ?? []).map((name) => ({
-        check: name,
-        status: "passed",
-        detail: `ran against ${against}`,
-      }));
+      const reported = normalizeCheckReports(context[`reported:${stage.id}`]);
+      const byName = new Map(reported.map((r) => [r.check, r]));
+      const results = (stage.checks ?? []).map((name) => {
+        const rep = byName.get(name);
+        return rep
+          ? {
+              check: name,
+              status: rep.status,
+              severity: rep.severity ?? null,
+              detail: rep.detail ?? `reported ${rep.status}`,
+            }
+          : { check: name, status: "passed" as const, severity: null, detail: `ran against ${against}` };
+      });
+      context[`checks:${stage.id}`] = results;
       delete context.executing;
       delete context.lastError;
       await db
         .update(workflowInstances)
         .set({ context })
         .where(eq(workflowInstances.id, instance.id));
-      const r = await applyEvent(
-        db,
-        instanceId,
-        { kind: "execution_succeeded", stageId: stage.id },
-        actorUserId,
-      );
+      const failures = results.filter((r) => r.status === "failed").map((r) => r.check);
+      const r =
+        failures.length > 0
+          ? await applyEvent(
+              db,
+              instanceId,
+              { kind: "check_failed", stageId: stage.id, failures },
+              actorUserId,
+            )
+          : await applyEvent(
+              db,
+              instanceId,
+              { kind: "execution_succeeded", stageId: stage.id },
+              actorUserId,
+            );
       lastEffects = r.effects;
       pending = r.effects.filter((e) => e.kind === "execute_stage");
       continue;
@@ -774,6 +816,94 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       );
       await runGitExecutions(db, loaded.instance.id, r.effects, req.authCtx.userId, opts.dataKey);
     }
+    const [fresh] = await db
+      .select()
+      .from(workflowInstances)
+      .where(eq(workflowInstances.id, loaded.instance.id));
+    return { status: fresh!.status, state: fresh!.state, context: fresh!.context };
+  });
+
+  // §2 report per-check results into an automated_check stage. A real CI posts
+  // pass/fail here; the seed/tests do too. Results merge by check name (latest
+  // wins) and only checks DECLARED on the stage are kept. If the stage is
+  // currently executing, evaluating happens immediately (a failing required
+  // check → blocked_on_check); otherwise the results are stored for when the
+  // stage runs (or for the next recheck).
+  app.post("/v1/workflows/instances/:instanceId/checks", async (req, reply) => {
+    const { instanceId } = instanceIdParam.parse(req.params);
+    const body = reportChecksSchema.parse(req.body);
+    const loaded = await loadInstanceFor(req, instanceId);
+    if (loaded.error) return reply.status(loaded.error).send({ error: "unavailable" });
+    if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_drive" });
+    const def = loaded.instance.definition as WorkflowDefinition;
+    const stage = def.stages.find((st) => st.id === body.stageId);
+    if (!stage || stage.type !== "automated_check" || (stage.checks?.length ?? 0) === 0) {
+      return reply.status(422).send({ error: "not_a_check_stage" });
+    }
+    const declared = new Set(stage.checks ?? []);
+    const accepted = body.results.filter((r) => declared.has(r.check));
+    if (accepted.length === 0) return reply.status(422).send({ error: "no_declared_checks_reported" });
+
+    // locked read-modify-write of context[reported:<stageId>] so a concurrent
+    // executor claim serializes with the report instead of racing it
+    await db.transaction(async (tx) => {
+      const [row] = await tx
+        .select()
+        .from(workflowInstances)
+        .where(eq(workflowInstances.id, instanceId))
+        .for("update");
+      if (!row) throw new WorkflowStateError("instance disappeared");
+      const ctx = { ...(row.context as Record<string, unknown>) };
+      const merged = new Map(
+        normalizeCheckReports(ctx[`reported:${body.stageId}`]).map((r) => [r.check, r]),
+      );
+      for (const r of accepted) {
+        merged.set(r.check, { check: r.check, status: r.status, severity: r.severity ?? null, detail: r.detail ?? null });
+      }
+      ctx[`reported:${body.stageId}`] = [...merged.values()];
+      await tx.update(workflowInstances).set({ context: ctx }).where(eq(workflowInstances.id, row.id));
+    });
+
+    // evaluate now only if this stage is the one currently executing
+    const [afterWrite] = await db
+      .select()
+      .from(workflowInstances)
+      .where(eq(workflowInstances.id, instanceId));
+    const cur = (afterWrite!.definition as WorkflowDefinition).stages[
+      (afterWrite!.state as InstanceState).currentStageIndex
+    ];
+    if (afterWrite!.status === "awaiting_execution" && cur?.id === body.stageId) {
+      await runGitExecutions(
+        db,
+        instanceId,
+        [{ kind: "execute_stage", stageId: body.stageId }],
+        req.authCtx.userId,
+        opts.dataKey,
+      );
+    }
+    const [fresh] = await db
+      .select()
+      .from(workflowInstances)
+      .where(eq(workflowInstances.id, instanceId));
+    return { status: fresh!.status, state: fresh!.state, context: fresh!.context };
+  });
+
+  // §2 re-run a check stage parked at blocked_on_check, after the failing checks
+  // were remediated and fresh passing results reported. The kernel guards that
+  // the instance is actually blocked on THIS stage.
+  app.post("/v1/workflows/instances/:instanceId/recheck", async (req, reply) => {
+    const { instanceId } = instanceIdParam.parse(req.params);
+    const body = recheckSchema.parse(req.body);
+    const loaded = await loadInstanceFor(req, instanceId);
+    if (loaded.error) return reply.status(loaded.error).send({ error: "unavailable" });
+    if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_drive" });
+    const r = await applyEvent(
+      db,
+      loaded.instance.id,
+      { kind: "recheck", stageId: body.stageId },
+      req.authCtx.userId,
+    );
+    await runGitExecutions(db, loaded.instance.id, r.effects, req.authCtx.userId, opts.dataKey);
     const [fresh] = await db
       .select()
       .from(workflowInstances)

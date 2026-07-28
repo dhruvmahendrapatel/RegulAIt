@@ -213,6 +213,48 @@ describe("instance state machine", () => {
     expect(r.state.status).toBe("completed");
   });
 
+  it("a REPORTED check failure parks at blocked_on_check (not retryable-in-place, not advanced)", () => {
+    const checked = validateDefinition({
+      workflow: "check-fail",
+      stages: [
+        { id: "intake", type: "trigger" },
+        { id: "checks", type: "automated_check", checks: ["ci_tests"] },
+        { id: "ship", type: "human_approval", approvers: ["requesting_user"] },
+      ],
+    });
+    let r = transition(checked, initialState(checked), { kind: "start" });
+    expect(r.state.status).toBe("awaiting_execution");
+    r = transition(checked, r.state, { kind: "check_failed", stageId: "checks", failures: ["ci_tests"] });
+    expect(r.state.status).toBe("blocked_on_check");
+    // it did NOT advance to the ship gate, and it surfaced the named failures
+    expect(r.effects).toContainEqual({ kind: "check_failed", stageId: "checks", failures: ["ci_tests"] });
+    // recheck resumes the SAME stage; a clean pass then advances past it
+    r = transition(checked, r.state, { kind: "recheck", stageId: "checks" });
+    expect(r.state.status).toBe("awaiting_execution");
+    expect(r.effects).toContainEqual({ kind: "execute_stage", stageId: "checks" });
+    r = transition(checked, r.state, { kind: "execution_succeeded", stageId: "checks" });
+    expect(r.state.status).toBe("blocked_on_approval"); // reached the ship gate
+  });
+
+  it("check_failed is rejected unless the named-check stage is the one executing; recheck needs blocked_on_check", () => {
+    const checked = validateDefinition({
+      workflow: "check-guard",
+      stages: [
+        { id: "intake", type: "trigger" },
+        { id: "checks", type: "automated_check", checks: ["ci_tests"] },
+      ],
+    });
+    const started = transition(checked, initialState(checked), { kind: "start" });
+    // recheck when not blocked → rejected
+    expect(() => transition(checked, started.state, { kind: "recheck", stageId: "checks" })).toThrow(
+      /not blocked/,
+    );
+    // check_failed naming the wrong stage → rejected
+    expect(() =>
+      transition(checked, started.state, { kind: "check_failed", stageId: "intake", failures: [] }),
+    ).toThrow(/not running checks/);
+  });
+
   it("rejects out-of-order events", () => {
     const r = transition(standard, initialState(standard), { kind: "start" });
     expect(() => transition(standard, r.state, { kind: "approval_granted", stageId: "requirements_signoff" })).toThrow(

@@ -257,6 +257,10 @@ export type InstanceStatus =
   | "blocked_on_artifact"
   | "awaiting_trigger"
   | "awaiting_execution"
+  // §2 automated checks that actually FAIL: a required check reported a failing
+  // result, so the pipeline is parked here (NOT advanced) pending remediation
+  // and a re-check — the failure path the deploy/rollback stages build on.
+  | "blocked_on_check"
   | "completed"
   | "aborted"
   | "denied";
@@ -278,6 +282,12 @@ export type WorkflowEvent =
   | { kind: "stage_completed"; stageId: string }
   | { kind: "execution_succeeded"; stageId: string }
   | { kind: "execution_failed"; stageId: string; error: string }
+  // §2 a required automated check reported a FAILING result — distinct from a
+  // transient execution_failed (which stays retryable): this parks the instance
+  // at blocked_on_check pending remediation. `failures` names the failing checks.
+  | { kind: "check_failed"; stageId: string; failures: string[] }
+  // §2 remediation done — re-run the parked check stage against fresh results.
+  | { kind: "recheck"; stageId: string }
   | { kind: "abort" };
 
 /** side effects the caller (gateway) must perform after a transition */
@@ -286,6 +296,9 @@ export type Effect =
   | { kind: "await_artifact"; stageId: string; output: string }
   | { kind: "await_human_trigger"; stageId: string }
   | { kind: "execute_stage"; stageId: string }
+  // §2 a required check failed — the gateway surfaces this (audit + PM mirror +
+  // dashboard) exactly like the other blocking effects; `failures` names them.
+  | { kind: "check_failed"; stageId: string; failures: string[] }
   | { kind: "instance_completed" }
   | { kind: "instance_denied" }
   | { kind: "instance_aborted" };
@@ -479,6 +492,35 @@ export function transition(
     s.stageStatuses[s.currentStageIndex] = "completed";
     s.currentStageIndex += 1;
     return runForward(def, s);
+  }
+
+  if (event.kind === "check_failed") {
+    // only the currently-executing named-check stage can fail this way
+    const executable =
+      current?.type === "automated_check" && (current.checks?.length ?? 0) > 0;
+    if (!current || current.id !== event.stageId || !executable) {
+      throw new WorkflowStateError(`instance is not running checks for stage '${event.stageId}'`);
+    }
+    // park at blocked_on_check WITHOUT advancing — the stage stays active so a
+    // recheck re-runs THIS stage. Surfaced via the check_failed effect.
+    return {
+      state: { ...state, status: "blocked_on_check" },
+      effects: [{ kind: "check_failed", stageId: current.id, failures: event.failures }],
+    };
+  }
+
+  if (event.kind === "recheck") {
+    if (state.status !== "blocked_on_check") {
+      throw new WorkflowStateError("instance is not blocked on a failed check");
+    }
+    if (!current || current.id !== event.stageId) {
+      throw new WorkflowStateError(`instance is not parked on check stage '${event.stageId}'`);
+    }
+    // re-run the same check stage against freshly-reported results
+    return {
+      state: { ...state, status: "awaiting_execution" },
+      effects: [{ kind: "execute_stage", stageId: current.id }],
+    };
   }
 
   if (event.kind === "human_trigger" || event.kind === "stage_completed") {
