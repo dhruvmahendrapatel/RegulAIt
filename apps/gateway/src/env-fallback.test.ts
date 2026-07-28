@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -51,14 +51,27 @@ let userId: string;
 let userAuth: { authorization: string };
 let agentId: string;
 
-// Env hygiene — capture whatever the runner had and restore it verbatim.
-const ORIG_KEY = process.env.ANTHROPIC_API_KEY;
-const ORIG_BASE = process.env.ANTHROPIC_BASE_URL;
-const ORIG_GEMINI = process.env.GEMINI_API_KEY;
+// Env hygiene — every provider env var this suite (or the status endpoint) reads
+// must be cleared, or an ambient key in the runner's shell makes a `configured`
+// assertion flip. Capture whatever the runner had and restore it verbatim in
+// afterAll; clear the full set before each test so every case is hermetic
+// regardless of the shell that launched vitest.
+const PROVIDER_ENV_VARS = [
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_BASE_URL",
+  "OPENAI_API_KEY",
+  "OPENAI_BASE_URL",
+  "GOOGLE_API_KEY",
+  "GOOGLE_BASE_URL",
+  "GEMINI_API_KEY",
+  "GEMINI_BASE_URL",
+  "XAI_API_KEY",
+  "XAI_BASE_URL",
+] as const;
+const ORIG_ENV: Record<string, string | undefined> = {};
+for (const name of PROVIDER_ENV_VARS) ORIG_ENV[name] = process.env[name];
 function clearEnv() {
-  delete process.env.ANTHROPIC_API_KEY;
-  delete process.env.ANTHROPIC_BASE_URL;
-  delete process.env.GEMINI_API_KEY;
+  for (const name of PROVIDER_ENV_VARS) delete process.env[name];
 }
 
 async function invokeAnthropic(auth: { authorization: string }) {
@@ -119,14 +132,17 @@ beforeAll(async () => {
   });
 });
 
+// Every test starts from a known-empty provider env, independent of the shell.
+beforeEach(clearEnv);
+
 afterAll(async () => {
   // leave the shared DB and the process env exactly as they were found
   await db.delete(userModelCredentials).where(eq(userModelCredentials.userId, userId));
   await db.delete(modelCredentials).where(eq(modelCredentials.provider, "anthropic"));
   clearEnv();
-  if (ORIG_KEY !== undefined) process.env.ANTHROPIC_API_KEY = ORIG_KEY;
-  if (ORIG_BASE !== undefined) process.env.ANTHROPIC_BASE_URL = ORIG_BASE;
-  if (ORIG_GEMINI !== undefined) process.env.GEMINI_API_KEY = ORIG_GEMINI;
+  for (const name of PROVIDER_ENV_VARS) {
+    if (ORIG_ENV[name] !== undefined) process.env[name] = ORIG_ENV[name];
+  }
 });
 
 describe("platformEnvKey helper", () => {
@@ -205,8 +221,13 @@ describe("GET /v1/model-providers/status", () => {
     const off = await app.inject({ method: "GET", headers: userAuth, url: "/v1/model-providers/status" });
     expect(off.statusCode).toBe(200); // readable by a non-admin (NON_ADMIN_ROUTES)
     expect(off.json().providers.mock.configured).toBe(true);
+    // anthropic is the provider THIS suite controls end-to-end: beforeAll wipes
+    // its stored platform credential and clearEnv() wipes its env var, so it is
+    // the reliable "unconfigured -> false" signal. We deliberately do NOT assert
+    // on other providers here — a sibling adapter suite may leave a stored
+    // openai/xai credential in the shared DB, and the endpoint counts stored
+    // credentials as well as env vars, so those would be flaky to assert on.
     expect(off.json().providers.anthropic.configured).toBe(false);
-    expect(off.json().providers.openai.configured).toBe(false);
 
     process.env.ANTHROPIC_API_KEY = DUMMY_KEY;
     const on = await app.inject({ method: "GET", headers: userAuth, url: "/v1/model-providers/status" });

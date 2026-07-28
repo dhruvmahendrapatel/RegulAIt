@@ -176,6 +176,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "DELETE /v1/projects/:projectId/members/:userId",
     "POST /v1/projects/:projectId/context",
     "GET /v1/projects/:projectId/context",
+    "GET /v1/projects/:projectId/context/graph",
     "POST /v1/projects/:projectId/context/promote",
     "GET /v1/projects/:projectId/compliance",
     "GET /v1/projects/:projectId/costs",

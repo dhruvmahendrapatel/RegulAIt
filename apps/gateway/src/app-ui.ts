@@ -150,6 +150,7 @@ const PAGES = [
   { id: "workflows", label: "Workflows" },
   { id: "inbox", label: "Inbox" },
   { id: "projects", label: "Projects" },
+  { id: "context-graph", label: "Context Graph" },
   { id: "spend", label: "Spend & savings" },
   { id: "settings", label: "Settings" },
 ];
@@ -1887,6 +1888,194 @@ function wireProjects() {
     b.addEventListener("click", () => promoteArtifact(b.dataset.pid, b.dataset.promote)));
 }
 
+// ------------------------------------------------------- context graph --
+// Pillar 4 made visual: the whole project's shared-context store as a version
+// graph from GET /v1/projects/:id/context/graph — one COLUMN per key, revisions
+// stacked top→bottom, an edge from each revision's baseRevision to it (version
+// lineage), conflicts (accepted=false) forking off into an amber side-lane.
+// Dependency-free: inline SVG + vanilla DOM, deterministic column/row math (no
+// physics). The graph card scrolls (overflow:auto) so a big graph never breaks
+// the page layout.
+let CG_DATA = null; // the loaded { project, nodes, keys } for the open project
+let CG_SEL = null;  // the selected node id (drives the detail panel)
+
+const cgClip = (s, n) => { s = String(s ?? ""); return s.length > n ? s.slice(0, n - 1) + "\\u2026" : s; };
+const cgShort = (name) => name ? cgClip(name, 18) : "unknown";
+
+async function contextGraphPage() {
+  if (!PROJECTS.length)
+    return '<h1>Context Graph</h1><p class="sub">The shared-project context store, drawn as a version graph.</p><div class="empty">You are not a member of any project yet.</div>';
+  const picker = PROJECTS.map((p) => \`<button class="small" data-cgproj="\${p.id}">\${esc(p.name)}</button>\`).join("");
+  return \`
+  <h1>Context Graph</h1>
+  <p class="sub">The shared-project context store as a version graph — one column per key, revisions top-to-bottom, version lineage as edges, and conflict forks in amber. Pick a project you're a member of.</p>
+  <div class="card"><div class="row">\${picker}</div></div>
+  <div id="cg-out" style="margin-top:14px"></div>\`;
+}
+
+// One small legend swatch — a themed box + label. Amber/dashed for conflicts.
+function cgLegendItem(fill, fillOp, stroke, dashed, label) {
+  return \`<span style="display:inline-flex;align-items:center;gap:6px;color:var(--text-dim)">
+    <span style="width:16px;height:12px;border-radius:3px;background:\${fill};opacity:\${fillOp};border:1.5px \${dashed ? "dashed" : "solid"} \${stroke}"></span>\${esc(label)}</span>\`;
+}
+
+// The detail side-panel for the selected node — key, revision, state,
+// contributor (user + team), based-on revision, timestamp, content preview.
+function cgDetailHtml(n) {
+  if (!n) return '<div class="faint" style="font-size:12.5px">Select a node to see its revision detail. Nodes are keyboard-focusable — Tab to a node and press Enter.</div>';
+  const state = n.accepted
+    ? (n.isHead
+        ? '<span class="badge accent">accepted · current head</span>'
+        : '<span class="badge ok">accepted · prior revision</span>')
+    : (n.pending
+        ? '<span class="badge warn">conflict · awaiting arbiter \\u23F3</span>'
+        : '<span class="badge bad">conflict · retained (never current)</span>');
+  const c = n.contributor ?? {};
+  return \`<div style="font-size:12.5px;line-height:1.7">
+    <div><span class="mono">\${esc(n.key)}</span> <span class="badge">rev \${n.revision}</span></div>
+    <div style="margin:6px 0">\${state}</div>
+    <div class="dim">by \${esc(c.name ?? "unknown")}\${c.teamName ? " · " + esc(c.teamName) : " · no team"}</div>
+    <div class="dim">based on \${n.baseRevision != null ? "rev " + n.baseRevision : "— (first write of this key)"}</div>
+    <div class="dim">\${ago(n.at)}</div>
+    <details style="margin-top:8px" open><summary class="faint" style="cursor:pointer;font-size:11.5px">content preview</summary><pre style="margin-top:6px;white-space:pre-wrap">\${esc(n.content)}</pre></details>
+  </div>\`;
+}
+
+// Pure column/row layout → SVG. Columns = keys (order of first appearance),
+// rows = revisions ascending within a key. Accepted revisions sit in the
+// column's mainline lane; conflicts shift into an amber side-lane so a fork off
+// a shared baseRevision is visually distinct. Edges run baseRevision→revision.
+function cgViewHtml(data) {
+  const NODE_W = 172, NODE_H = 56, ROW_H = 88, COL_W = 236, LANE_SHIFT = 30, HEADER_H = 30, PAD = 24;
+  // group nodes into ordered columns by key (nodes arrive ordered key,revision)
+  const cols = [];
+  const colIndex = {};
+  for (const nd of data.nodes) {
+    if (colIndex[nd.key] === undefined) { colIndex[nd.key] = cols.length; cols.push({ key: nd.key, nodes: [] }); }
+    cols[colIndex[nd.key]].nodes.push(nd);
+  }
+  let maxRows = 1;
+  const geo = {};      // id -> geometry
+  const revIndex = {}; // key -> { revision -> nodeId }
+  cols.forEach((col, c) => {
+    if (col.nodes.length > maxRows) maxRows = col.nodes.length;
+    revIndex[col.key] = {};
+    const baseX = PAD + c * COL_W;
+    col.nodes.forEach((nd, r) => {
+      const x = baseX + (nd.accepted ? 0 : LANE_SHIFT);
+      const y = HEADER_H + PAD + r * ROW_H;
+      geo[nd.id] = { x, y, cx: x + NODE_W / 2, topY: y, botY: y + NODE_H };
+      revIndex[col.key][nd.revision] = nd.id;
+    });
+  });
+  const width = PAD * 2 + cols.length * COL_W;
+  const height = HEADER_H + PAD + maxRows * ROW_H + PAD;
+
+  // edges: baseRevision node (same key) -> this node, as a soft vertical bezier
+  const edges = data.nodes.map((nd) => {
+    if (nd.baseRevision == null) return "";
+    const baseId = revIndex[nd.key][nd.baseRevision];
+    if (!baseId || !geo[baseId] || !geo[nd.id]) return "";
+    const b = geo[baseId], g = geo[nd.id];
+    const dy = Math.max(18, (g.topY - b.botY) / 2);
+    const stroke = nd.accepted ? "var(--border-strong)" : "var(--warn)";
+    const dash = nd.accepted ? "" : ' stroke-dasharray="4 3"';
+    return \`<path d="M \${b.cx} \${b.botY} C \${b.cx} \${b.botY + dy} \${g.cx} \${g.topY - dy} \${g.cx} \${g.topY}" fill="none" stroke="\${stroke}" stroke-width="1.5"\${dash} opacity="0.85"/>\`;
+  }).join("");
+
+  // column headers (the key labels)
+  const headers = cols.map((col, c) =>
+    \`<text x="\${PAD + c * COL_W}" y="20" font-family="var(--mono)" font-size="12" font-weight="600" fill="var(--text-dim)">\${esc(cgClip(col.key, 24))}</text>\`
+  ).join("");
+
+  // nodes
+  const nodesM = data.nodes.map((nd) => {
+    const g = geo[nd.id];
+    let fill, fillOp, stroke, dash, tcol, tdim;
+    if (nd.accepted && nd.isHead) {
+      fill = "var(--accent)"; fillOp = "1"; stroke = "var(--accent)"; dash = ""; tcol = "#1b120d"; tdim = "#1b120dcc";
+    } else if (nd.accepted) {
+      fill = "var(--bg-inset)"; fillOp = "1"; stroke = "var(--border-strong)"; dash = ""; tcol = "var(--text)"; tdim = "var(--text-dim)";
+    } else {
+      fill = "var(--warn)"; fillOp = "0.15"; stroke = "var(--warn)"; dash = ' stroke-dasharray="5 3"'; tcol = "var(--text)"; tdim = "var(--text-dim)";
+    }
+    const marker = nd.pending ? " \\u23F3" : "";
+    const aria = esc(nd.key) + " revision " + nd.revision + (nd.accepted ? (nd.isHead ? " current head" : " accepted") : (nd.pending ? " conflict awaiting arbiter" : " conflict retained")) + " by " + esc(cgShort(nd.contributor && nd.contributor.name));
+    return \`<g class="cg-node" data-node="\${esc(nd.id)}" tabindex="0" role="button" aria-label="\${aria}" style="cursor:pointer;outline:none">
+      <rect data-nrect="\${esc(nd.id)}" x="\${g.x}" y="\${g.y}" width="\${NODE_W}" height="\${NODE_H}" rx="9" fill="\${fill}" fill-opacity="\${fillOp}" stroke="\${stroke}" stroke-width="1.5"\${dash}/>
+      <text x="\${g.x + 12}" y="\${g.y + 23}" font-family="var(--mono)" font-size="12" font-weight="600" fill="\${tcol}">\${esc(cgClip(nd.key, 15))}@\${nd.revision}\${marker}</text>
+      <text x="\${g.x + 12}" y="\${g.y + 41}" font-size="11" fill="\${tdim}">\${esc(cgShort(nd.contributor && nd.contributor.name))}</text>
+    </g>\`;
+  }).join("");
+
+  const legend = \`<div class="row" style="gap:16px;font-size:11.5px;flex-wrap:wrap;margin-bottom:10px">
+    \${cgLegendItem("var(--accent)", "1", "var(--accent)", false, "accepted head")}
+    \${cgLegendItem("var(--bg-inset)", "1", "var(--border-strong)", false, "prior revision")}
+    \${cgLegendItem("var(--warn)", "0.15", "var(--warn)", true, "conflict / retained")}
+    \${cgLegendItem("var(--warn)", "0.15", "var(--warn)", true, "pending arbiter \\u23F3")}
+  </div>\`;
+
+  return \`
+  <div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap">
+    <div style="flex:1 1 520px;min-width:0">
+      <div class="row" style="margin-bottom:8px"><strong>\${esc(data.project.name)}</strong><span class="dim" style="font-size:12px">\${data.nodes.length} revision\${data.nodes.length === 1 ? "" : "s"} across \${cols.length} key\${cols.length === 1 ? "" : "s"}</span></div>
+      \${legend}
+      <div class="card" style="overflow:auto;max-height:72vh;padding:12px">
+        <svg width="\${width}" height="\${height}" viewBox="0 0 \${width} \${height}" xmlns="http://www.w3.org/2000/svg" style="display:block">
+          \${headers}\${edges}\${nodesM}
+        </svg>
+      </div>
+    </div>
+    <div class="card" style="flex:0 0 280px;max-width:100%;align-self:stretch">
+      <h2 style="margin-top:0">Revision detail</h2>
+      <div id="cg-detail">\${cgDetailHtml(null)}</div>
+    </div>
+  </div>\`;
+}
+
+function cgSelect(id) {
+  CG_SEL = id;
+  document.querySelectorAll("[data-nrect]").forEach((r) => r.setAttribute("stroke-width", r.dataset.nrect === id ? "3" : "1.5"));
+  const n = (CG_DATA && CG_DATA.nodes || []).find((x) => x.id === id);
+  const d = $("#cg-detail");
+  if (d) d.innerHTML = cgDetailHtml(n);
+}
+
+async function cgRender(pid) {
+  const out = $("#cg-out");
+  if (!out) return;
+  out.innerHTML = '<div class="empty">loading…</div>';
+  document.querySelectorAll("[data-cgproj]").forEach((b) =>
+    b.classList.toggle("primary", b.dataset.cgproj === pid));
+  try {
+    const data = await get("/v1/projects/" + pid + "/context/graph");
+    const head = {};
+    for (const k of data.keys || []) head[k.key] = k.currentRevision;
+    for (const nd of data.nodes || []) nd.isHead = nd.accepted && nd.revision === head[nd.key];
+    CG_DATA = data; CG_SEL = null;
+    if (!(data.nodes || []).length) {
+      out.innerHTML = '<div class="empty">No shared context yet for this project — contribute context to see the graph.</div>';
+      return;
+    }
+    out.innerHTML = cgViewHtml(data);
+    out.querySelectorAll("[data-node]").forEach((g) => {
+      const id = g.dataset.node;
+      g.addEventListener("click", () => cgSelect(id));
+      g.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); cgSelect(id); }
+      });
+    });
+  } catch (e) { out.innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; }
+}
+
+function wireContextGraph() {
+  document.querySelectorAll("[data-cgproj]").forEach((b) =>
+    b.addEventListener("click", () => cgRender(b.dataset.cgproj)));
+  // deep-link / preselect: #/context-graph/<projectId> auto-loads that project
+  const { id } = route();
+  if (id && PROJECTS.some((p) => p.id === id)) cgRender(id);
+}
+
 // ------------------------------------------------------------------ spend --
 // Pillars 5 + 6 where the work happens: the SAME self-scoped ledgers the
 // admin dashboard rolls up — measured actuals from usage_events, estimated
@@ -2092,6 +2281,7 @@ async function render() {
     else if (page === "workflows") content = await workflowsPage();
     else if (page === "inbox") content = await inboxPage();
     else if (page === "projects") content = await projectsPage();
+    else if (page === "context-graph") content = await contextGraphPage();
     else if (page === "spend") content = await spendPage();
     else if (page === "settings") content = await settingsPage();
     else content = await playgroundPage();
@@ -2142,6 +2332,7 @@ async function render() {
   if (page === "workflows" && id) wireWorkflowDetail(id);
   if (page === "inbox") wireInbox();
   if (page === "projects") wireProjects();
+  if (page === "context-graph") wireContextGraph();
 }
 render();
 </script>
