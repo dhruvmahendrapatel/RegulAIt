@@ -678,6 +678,18 @@ bump). Browser-verified (filter/sort/paginate on Audit, humanized headers, no co
 pre-auth 401s). This closes the "review the whole UI/UX" thread except the intentionally-open items
 (nothing further deferred beyond what the deeper-a11y sweep would add).
 
+**Pillar 2 — automated checks that FAIL and route, 2026-07-28 (session-02 addendum 28).** First
+"workflow depth" slice after the 3-ask batch. Before this, every named automated_check auto-passed
+— the pipeline had no failure path at all. Now a REPORTED failing check parks the instance at a new
+`blocked_on_check` state (kernel: `check_failed`/`recheck` events + surfacing effect, guarded)
+instead of advancing; a remediate-then-recheck loop resumes it. The gateway check executor resolves
+each named check from reported results (`POST .../checks` — a real CI posts them, seed/tests too),
+falling back to the deterministic auto-pass when none are reported (existing templates byte-
+identical); a failure is audited `workflow:check_failed`. `POST .../recheck` re-runs a parked stage.
+The /app workflow detail surfaces the block, per-check severity, "mark passing", and "Re-run checks".
+No migration (free-text status; results in JSONB context). Gateway 318 → 322, kernel 26 → 29. This
+is the failure primitive the conditional deploy + post-deploy rollback stages (next slice) build on.
+
 **Chat→Claude + visual context graph + multimodal attachments, 2026-07-28 (three prioritized
 product asks, see session-02 addendum 27).** (1) **Chat routes to Claude**: a platform API-key
 ENV fallback (ANTHROPIC_API_KEY etc., last-resort after stored user/platform creds, read at
