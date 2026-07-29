@@ -678,6 +678,18 @@ bump). Browser-verified (filter/sort/paginate on Audit, humanized headers, no co
 pre-auth 401s). This closes the "review the whole UI/UX" thread except the intentionally-open items
 (nothing further deferred beyond what the deeper-a11y sweep would add).
 
+**Pillar 3 — BYOC deploy targets: modes + AWS assume-role adapter + data boundary, 2026-07-28
+(session-02 addendum 30, migration 0033, ADR-0015).** First pillar-3 slice, extending the pillar-2
+deploy tail into customer-owned cloud. A deploy target gains a `mode` (hosted / byoc / air_gapped)
+plus, for AWS BYOC, a `roleArn` + `region`. The `AwsDeployProvider` models STS AssumeRole into the
+customer's role (short-lived creds, no static key) then deploy in their region — execution is a
+deterministic **dry-run** (no real cloud call, no prod resource without explicit sign-off; `// REAL:`
+markers show where the @aws-sdk calls go). The disclosed control-plane / agent-execution-plane data
+boundary is **enforced in the executor by mode**: air_gapped keeps METADATA ONLY in the control
+plane (never the deploy URL / provider detail), hosted/byoc keep the full record — a testable
+property (air-gapped e2e asserts nothing crosses back), not prose. Gateway 327 → 332. Deferred: real
+@aws-sdk execution, azure/gcp/k8s adapters, admin mode UI (ADR-0015).
+
 **Pillar 2 — deploy → verify → auto-rollback, 2026-07-28 (session-02 addendum 29, migration
 0032).** Completes the workflow pipeline's tail, on top of the check fail→route primitive. The
 kernel gains executable `deployment` + `rollback` stages, a `blocked_on_deploy` manual-handoff

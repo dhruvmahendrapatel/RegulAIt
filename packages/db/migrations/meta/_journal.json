@@ -232,6 +232,13 @@
       "when": 1784968000000,
       "tag": "0032_deploy_targets",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1784969000000,
+      "tag": "0033_deploy_target_byoc",
+      "breakpoints": true
     }
   ]
 }

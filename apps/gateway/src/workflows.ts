@@ -467,10 +467,20 @@ async function runGitExecutions(
                 ? decryptSecret(dataKey, target!.credentialCiphertext)
                 : undefined,
             baseUrl: target!.baseUrl,
+            roleArn: target!.roleArn,
+            region: target!.region,
           });
           const res = provider.deploy(target!.name, target!.environment, instance.id);
-          context[`deploy:${stage.id}`] = { ...res, target: target!.name, environment: target!.environment };
-          context.deployUrl = res.url;
+          // §3 the control-plane / agent-execution-plane data boundary: in
+          // AIR_GAPPED mode NOTHING that could carry execution-plane detail
+          // (the deploy URL, the provider detail string) is retained in the
+          // control plane — only metadata (id, target, env, mode) is kept, so
+          // the disclosed boundary holds. hosted/byoc keep the full record.
+          context[`deploy:${stage.id}`] =
+            target!.mode === "air_gapped"
+              ? { deployId: res.deployId, target: target!.name, environment: target!.environment, mode: "air_gapped" }
+              : { ...res, target: target!.name, environment: target!.environment, mode: target!.mode };
+          if (target!.mode !== "air_gapped") context.deployUrl = res.url;
         }
       } catch (err) {
         deployErr = err instanceof Error ? err.message : String(err);
@@ -525,9 +535,16 @@ async function runGitExecutions(
                 ? decryptSecret(dataKey, target.credentialCiphertext)
                 : undefined,
             baseUrl: target.baseUrl,
+            roleArn: target.roleArn,
+            region: target.region,
           });
           const res = provider.rollback(target.name, priorDeploy?.deployId ?? "unknown");
-          context[`rollback:${stage.id}`] = { ...res, target: target.name };
+          // §3 air-gapped boundary: keep only which deploy was reversed, not the
+          // provider detail string (which could carry execution-plane info).
+          context[`rollback:${stage.id}`] =
+            target.mode === "air_gapped"
+              ? { reverted: res.reverted, target: target.name, mode: "air_gapped" }
+              : { ...res, target: target.name };
         }
       } catch (err) {
         rbErr = err instanceof Error ? err.message : String(err);
@@ -678,12 +695,17 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
   // §2 deploy targets: admin-only; credentials (when given) encrypted at rest,
   // never returned. A deployment/rollback stage names one of these; a stage
   // naming a target that doesn't exist parks at a manual handoff.
+  // roleArn is an identifier, not a secret, so it is safe to return; the
+  // credential ciphertext is never selected.
   const deployTargetView = {
     id: deployTargets.id,
     name: deployTargets.name,
     provider: deployTargets.provider,
     environment: deployTargets.environment,
     baseUrl: deployTargets.baseUrl,
+    mode: deployTargets.mode,
+    roleArn: deployTargets.roleArn,
+    region: deployTargets.region,
     createdAt: deployTargets.createdAt,
   };
   app.post("/v1/deploy/targets", async (req, reply) => {
@@ -698,6 +720,9 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
         provider: body.provider,
         environment: body.environment ?? null,
         baseUrl: body.baseUrl ?? null,
+        mode: body.mode ?? "hosted",
+        roleArn: body.roleArn ?? null,
+        region: body.region ?? null,
         credentialCiphertext:
           body.credential && opts.dataKey ? encryptTokenOnce(opts.dataKey, body.credential) : null,
       })
