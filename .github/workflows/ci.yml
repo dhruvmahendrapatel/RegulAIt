@@ -1,9 +1,17 @@
 name: CI
 
+# PAUSED (2026-07-30): the account's GitHub Actions minutes are exhausted, so
+# every auto-triggered run instant-fails (log download 404s) before any step —
+# pure red noise on PRs. Triggers are set to manual-only (workflow_dispatch)
+# until minutes are topped up. Local verification (`pnpm -r build`,
+# `node scripts/check-ui-syntax.mjs`, `pnpm -r test`) is the gate meanwhile.
+# TO RE-ENABLE: restore the `pull_request:` and `push: branches: [main]` triggers
+# below (they are kept commented for a clean revert).
 on:
-  pull_request:
-  push:
-    branches: [main]
+  workflow_dispatch:
+  # pull_request:
+  # push:
+  #   branches: [main]
 
 # Rapid follow-up pushes cancel the older in-flight run for the same ref.
 concurrency:
