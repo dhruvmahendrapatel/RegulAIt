@@ -133,7 +133,11 @@ individual task seems to imply — always ask before crossing that line.
 
 ## graphify
 
-This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+This project may have a **locally-generated** knowledge graph at graphify-out/ (god nodes,
+community structure, cross-file relationships). The directory is `.gitignore`'d by design — a
+fresh clone will NOT have it. Regenerate with `graphify update . --code-only` (the ADR-0005
+`--code-only` constraint below stands); until it exists, the query/path/explain rules below are
+no-ops, so don't waste a session hunting for it.
 
 Rules:
 - For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
