@@ -680,6 +680,29 @@ pre-auth 401s). This closes the "review the whole UI/UX" thread except the inten
 
 **Pillar 7 — Team-Lead transitive per-node budget ceiling, 2026-07-30 (session-02 addendum 31, ADR-0016).** A mapping pass found the AGENT-entitlement narrowing already shipped (§5.1 lead ceiling: allowedAgentIds/toolRefs → computeNodeCeiling transitive intersection → policy kernel agent-lead-ceiling), so this slice built the missing BUDGET half. A task node gains `budgetCapUsd`; `computeNodeBudgetCeiling` folds the MIN of the node's own cap and every lead ancestor's — symmetric with the agent ceiling (delegation only ever TIGHTENS). Enforced at node_started on top of the run cap: a node over its ceiling escalates into the one Approvals Queue (node-budget-cap). No migration. Gateway 332 → 336, orchestration-kernel 23 → 27. Remaining in the sequence: pillar 3 infra-ops automation.
 
+**AWS redeploy of PRs #34–#37 + a Docker-build fix + CI paused, 2026-07-30 (session-02 addendum
+32, PR #38 merged).** The user asked to redeploy the merged work (chat multimodal, pillar-2
+deploy/verify/rollback, pillar-3 BYOC, pillar-7 sub-budget) to the dev stack and to stop burning
+CI. The redeploy SURFACED a real break: merged `main` did not build in Docker, because the image
+runs `pnpm -r build` which type-checks the test files too (each package tsconfig `include:["src"]`)
+and two test files that shipped via merged PRs carried type errors CI never caught — the account's
+GitHub Actions minutes are exhausted, so every run instant-fails on a 404 log download before the
+build gate ever runs. Fixed both (`model-provider/index.test.ts`: two block-array `dispatch()`
+calls omitted the required-but-ignored `input` field + a null-narrow; `gateway/node-budget.test.ts`:
+two inject helpers returned `app.inject(...)` un-awaited, yielding the overload-intersection type
+without `.statusCode`/`.json` — awaited inside, matching sibling helpers). **CI paused** —
+`.github/workflows/ci.yml` triggers switched to `workflow_dispatch` only (the `pull_request`/`push`
+triggers kept commented for a one-line revert once minutes top up); local verification
+(`pnpm -r build` + `check-ui-syntax` + `pnpm -r test`) is the gate meanwhile. PR #38 carries both
+and is MERGED — `main` builds again. The dev stack was redeployed from the branch HEAD (= `main` +
+those two commits, byte-identical app to post-merge main) because `main` itself didn't build until
+#38 merged: `docker compose up -d --build` on `i-013c62adc887c76bb`, gateway container recreated,
+the Postgres volume (pgdata) + per-boot secrets override preserved, migrations 0030–0033 applied
+(`deploy_targets` present), `/app` + `/admin` 200 on-box at `http://3.237.199.248:3000`. Still
+dev-grade, NOT production. The user then directed the four remaining open-item areas in parallel:
+pillar-3 infra-ops AUTOMATION (drift/CVE/cert/backup — the operational half beyond the §8.2
+governed-ops layer), clearing the ADR-0015/0016 + pillar-2 deferrals, and a deeper UX/a11y pass.
+
 **Pillar 3 — BYOC deploy targets: modes + AWS assume-role adapter + data boundary, 2026-07-28
 (session-02 addendum 30, migration 0033, ADR-0015).** First pillar-3 slice, extending the pillar-2
 deploy tail into customer-owned cloud. A deploy target gains a `mode` (hosted / byoc / air_gapped)

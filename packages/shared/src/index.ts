@@ -690,6 +690,20 @@ export const proposeInfraRemediationSchema = z.object({
   approverUserId: z.string().uuid(),
 });
 
+// ADR-0017 — the three operator verbs. Each is a thin wrapper that funnels a
+// ledger row into the SAME governed approval path (objectType infra_operation)
+// as proposeInfraRemediation: a named approver gates it, nothing mutates infra
+// state until the approval is decided.
+export const rotateCertSchema = z.object({
+  approverUserId: z.string().uuid(),
+});
+export const applyPatchSchema = z.object({
+  approverUserId: z.string().uuid(),
+});
+export const restoreBackupSchema = z.object({
+  approverUserId: z.string().uuid(),
+});
+
 // §8.3 reclassification: a diff-then-approve change to a project's tags.
 export const reclassifySchema = z.object({
   classifications: z.array(z.string().min(1).max(64)).max(16),

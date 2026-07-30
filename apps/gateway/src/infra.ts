@@ -25,19 +25,27 @@ import {
   and,
   approvals,
   auditLog,
+  backupRuns,
+  certInventory,
+  certRotations,
+  deployTargets,
   desc,
   eq,
   infraFindings,
   infraPolicies,
   infraResources,
+  patchRecords,
   users,
   sql,
   type Db,
 } from "@regulait/db";
 import {
+  applyPatchSchema,
   createInfraPolicySchema,
   createInfraResourceSchema,
   proposeInfraRemediationSchema,
+  restoreBackupSchema,
+  rotateCertSchema,
   scanInfraSchema,
 } from "@regulait/shared";
 import {
@@ -60,7 +68,133 @@ type InfraFindingRow = typeof infraFindings.$inferSelect;
  * trick projects.ts uses for context conflicts). */
 const INFRA_REMEDIATION_PREFIX = "__infra_remediation__:";
 
+/** ADR-0017 action sentinel: the three operator verbs (cert_rotate | patch_apply
+ * | backup_restore) ride the SAME one approvals queue as a plain remediation.
+ * stageId carries `__infra_action__:<action>:<ledgerRowId>` — /decide dispatches
+ * on it exactly like the remediation prefix, so no new decision path exists. */
+const INFRA_ACTION_PREFIX = "__infra_action__:";
+type InfraAction = "cert_rotate" | "patch_apply" | "backup_restore";
+
 const findingIdParam = z.object({ findingId: z.string().uuid() });
+const certIdParam = z.object({ certId: z.string().uuid() });
+const patchIdParam = z.object({ patchId: z.string().uuid() });
+const backupIdParam = z.object({ backupId: z.string().uuid() });
+
+/** ADR-0017 — after a finding is upserted on scan, upsert its durable ledger
+ * row and stamp the finding's ref_table/ref_id back-link. Idempotent by
+ * construction (patch via UNIQUE(resource,cve); cert by (resource,commonName);
+ * backup by (finding, missed)), so a re-scan never duplicates a ledger row.
+ * drift has no ledger — its ref stays null. */
+async function syncFindingLedger(
+  db: Db,
+  resource: InfraResourceRow,
+  findingId: string,
+  report: InfraFindingReport,
+): Promise<void> {
+  const d = report.detail ?? {};
+  if (report.kind === "cve") {
+    const cve = String(d.cve ?? report.signature.replace(/^cve:/, ""));
+    const [row] = await db
+      .insert(patchRecords)
+      .values({
+        resourceId: resource.id,
+        findingId,
+        cve,
+        package: d.package != null ? String(d.package) : null,
+        installedVersion: d.installedVersion != null ? String(d.installedVersion) : null,
+        fixedVersion: d.fixedVersion != null ? String(d.fixedVersion) : null,
+        cvss: d.cvss != null ? String(d.cvss) : null,
+        severity: report.severity,
+      })
+      .onConflictDoUpdate({
+        target: [patchRecords.resourceId, patchRecords.cve],
+        set: {
+          findingId,
+          severity: report.severity,
+          fixedVersion: d.fixedVersion != null ? String(d.fixedVersion) : null,
+        },
+      })
+      .returning({ id: patchRecords.id });
+    await db
+      .update(infraFindings)
+      .set({ refTable: "patch_records", refId: row!.id })
+      .where(eq(infraFindings.id, findingId));
+    return;
+  }
+  if (report.kind === "cert_expiring") {
+    const commonName = String(d.commonName ?? resource.name);
+    const notAfter = d.notAfter ? new Date(String(d.notAfter)) : new Date();
+    const [existing] = await db
+      .select()
+      .from(certInventory)
+      .where(and(eq(certInventory.resourceId, resource.id), eq(certInventory.commonName, commonName)));
+    let certId: string;
+    if (existing) {
+      certId = existing.id;
+      // never clobber a rotated cert's advanced not_after; only refresh an
+      // active row's observed expiry.
+      if (existing.status === "active") {
+        await db
+          .update(certInventory)
+          .set({ notAfter, serial: d.serial != null ? String(d.serial) : existing.serial })
+          .where(eq(certInventory.id, certId));
+      }
+    } else {
+      const [row] = await db
+        .insert(certInventory)
+        .values({
+          resourceId: resource.id,
+          commonName,
+          issuer: d.issuer != null ? String(d.issuer) : null,
+          serial: d.serial != null ? String(d.serial) : null,
+          notAfter,
+          status: "active",
+        })
+        .returning({ id: certInventory.id });
+      certId = row!.id;
+    }
+    await db
+      .update(infraFindings)
+      .set({ refTable: "cert_inventory", refId: certId })
+      .where(eq(infraFindings.id, findingId));
+    return;
+  }
+  if (report.kind === "backup_missed") {
+    // one 'missed' run per finding — idempotent on re-scan.
+    const [existing] = await db
+      .select({ id: backupRuns.id })
+      .from(backupRuns)
+      .where(
+        and(
+          eq(backupRuns.findingId, findingId),
+          eq(backupRuns.kind, "backup"),
+          eq(backupRuns.status, "missed"),
+        ),
+      );
+    let runId: string;
+    if (existing) {
+      runId = existing.id;
+    } else {
+      const [row] = await db
+        .insert(backupRuns)
+        .values({
+          resourceId: resource.id,
+          findingId,
+          kind: "backup",
+          status: "missed",
+          retentionUntil: d.retentionUntil ? new Date(String(d.retentionUntil)) : null,
+        })
+        .returning({ id: backupRuns.id });
+      runId = row!.id;
+    }
+    await db
+      .update(infraFindings)
+      .set({ refTable: "backup_runs", refId: runId })
+      .where(eq(infraFindings.id, findingId));
+    return;
+  }
+  // drift (and any future ledgerless kind): no back-link.
+}
 
 function maxNullable(...vals: Array<number | null | undefined>): number | null {
   const nums = vals.filter((v): v is number => typeof v === "number");
@@ -128,12 +262,19 @@ async function resolveActor(db: Db, userId: string | null): Promise<string> {
  * 'accepted_risk' (audit deny). Both outcomes audited — never a silent path. */
 export async function applyInfraApprovalDecision(
   tx: Db,
-  approvalRow: { stageId: string | null },
+  approvalRow: { id?: string; stageId: string | null },
   decision: "approved" | "denied",
   deciderUserId: string,
 ): Promise<void> {
-  if (!approvalRow.stageId?.startsWith(INFRA_REMEDIATION_PREFIX)) return;
-  const findingId = approvalRow.stageId.slice(INFRA_REMEDIATION_PREFIX.length);
+  const stageId = approvalRow.stageId ?? "";
+  // ADR-0017: the three operator verbs share this same hook via a distinct
+  // sentinel — dispatched to applyInfraActionDecision, still one decision path.
+  if (stageId.startsWith(INFRA_ACTION_PREFIX)) {
+    await applyInfraActionDecision(tx, approvalRow, decision, deciderUserId);
+    return;
+  }
+  if (!stageId.startsWith(INFRA_REMEDIATION_PREFIX)) return;
+  const findingId = stageId.slice(INFRA_REMEDIATION_PREFIX.length);
   const [finding] = await tx.select().from(infraFindings).where(eq(infraFindings.id, findingId));
   if (!finding) return;
   const [resource] = await tx
@@ -174,6 +315,166 @@ export async function applyInfraApprovalDecision(
       ruleId: "infra-remediation-denied",
       ruleChain: [],
       reason: `governed remediation denied; ${finding.kind}/${finding.severity} on ${resource?.name ?? finding.resourceId} logged as accepted risk`,
+    });
+  }
+}
+
+/** ADR-0015 boundary check: is this resource pinned to a customer-hosted,
+ * air-gapped deploy target? If so, no execution-plane detail (provider result
+ * strings/URLs) may be retained in the control plane — only metadata. */
+async function isAirGapped(tx: Db, deployTargetId: string | null): Promise<boolean> {
+  if (!deployTargetId) return false;
+  const [t] = await tx
+    .select({ mode: deployTargets.mode })
+    .from(deployTargets)
+    .where(eq(deployTargets.id, deployTargetId));
+  return t?.mode === "air_gapped";
+}
+
+const ACTION_TO_KIND: Record<InfraAction, InfraFindingRow["kind"]> = {
+  cert_rotate: "cert_expiring",
+  patch_apply: "cve",
+  backup_restore: "backup_missed",
+};
+
+/** ADR-0017 — apply an approved/denied operator VERB (cert_rotate | patch_apply
+ * | backup_restore) inside the /decide txn. On approve: run the provider action
+ * then write the ledger OUTCOME (cert_rotations row + advanced cert; patch
+ * patched; backup restore row) and flip the linked finding to 'remediated'. On
+ * deny: revert the proposed state and log accepted_risk. Both audited. In
+ * air_gapped mode only metadata is retained — no provider detail crosses back. */
+async function applyInfraActionDecision(
+  tx: Db,
+  approvalRow: { id?: string; stageId: string | null },
+  decision: "approved" | "denied",
+  deciderUserId: string,
+): Promise<void> {
+  const rest = (approvalRow.stageId ?? "").slice(INFRA_ACTION_PREFIX.length);
+  const sep = rest.indexOf(":");
+  if (sep < 0) return;
+  const action = rest.slice(0, sep) as InfraAction;
+  const ledgerId = rest.slice(sep + 1);
+  if (!ACTION_TO_KIND[action]) return;
+  const now = new Date();
+
+  // resolve the ledger row (for provider + boundary) and the linked finding.
+  let certRow: typeof certInventory.$inferSelect | undefined;
+  let patchRow: typeof patchRecords.$inferSelect | undefined;
+  let backupRow: typeof backupRuns.$inferSelect | undefined;
+  let resourceId: string | null = null;
+  if (action === "cert_rotate") {
+    [certRow] = await tx.select().from(certInventory).where(eq(certInventory.id, ledgerId));
+    if (!certRow) return;
+    resourceId = certRow.resourceId;
+  } else if (action === "patch_apply") {
+    [patchRow] = await tx.select().from(patchRecords).where(eq(patchRecords.id, ledgerId));
+    if (!patchRow) return;
+    resourceId = patchRow.resourceId;
+  } else {
+    [backupRow] = await tx.select().from(backupRuns).where(eq(backupRuns.id, ledgerId));
+    if (!backupRow) return;
+    resourceId = backupRow.resourceId;
+  }
+  const [resource] = await tx.select().from(infraResources).where(eq(infraResources.id, resourceId!));
+  const refTable =
+    action === "cert_rotate" ? "cert_inventory" : action === "patch_apply" ? "patch_records" : "backup_runs";
+  const [finding] = await tx
+    .select()
+    .from(infraFindings)
+    .where(and(eq(infraFindings.refTable, refTable), eq(infraFindings.refId, ledgerId)));
+  const airGapped = await isAirGapped(tx, resource?.deployTargetId ?? null);
+  const signature = String(finding?.detail?.signature ?? `${action}:${ledgerId}`);
+
+  if (decision === "approved") {
+    let providerDetail: Record<string, unknown> = {};
+    if (resource) {
+      const provider = resolveInfraProvider(providerConfig(resource));
+      const res = await provider.remediate({
+        id: finding?.id ?? ledgerId,
+        resourceId: resource.id,
+        kind: ACTION_TO_KIND[action],
+        signature,
+        detail: finding?.detail ?? null,
+      });
+      providerDetail = res.detail;
+    }
+    // write the durable OUTCOME per action
+    if (action === "cert_rotate") {
+      const newSerial = `SER-rot-${now.getTime()}`;
+      const newNotAfter = new Date(now.getTime() + 365 * 86_400_000);
+      await tx.insert(certRotations).values({
+        certId: certRow!.id,
+        findingId: finding?.id ?? null,
+        approvalId: approvalRow.id ?? null,
+        oldSerial: certRow!.serial ?? null,
+        newSerial,
+        newNotAfter,
+        status: "rotated",
+        rotatedAt: now,
+      });
+      await tx
+        .update(certInventory)
+        .set({ notAfter: newNotAfter, lastRotatedAt: now, serial: newSerial, status: "rotated" })
+        .where(eq(certInventory.id, certRow!.id));
+    } else if (action === "patch_apply") {
+      await tx
+        .update(patchRecords)
+        .set({ status: "patched", patchedAt: now })
+        .where(eq(patchRecords.id, patchRow!.id));
+    } else {
+      await tx.insert(backupRuns).values({
+        resourceId: resource!.id,
+        findingId: finding?.id ?? null,
+        kind: "restore",
+        status: "restored",
+        startedAt: now,
+        finishedAt: now,
+        retentionUntil: backupRow!.retentionUntil ?? null,
+      });
+    }
+    if (finding) {
+      await tx.update(infraFindings).set({ status: "remediated" }).where(eq(infraFindings.id, finding.id));
+    }
+    await tx.insert(auditLog).values({
+      userId: deciderUserId,
+      objectType: "infra_operation",
+      objectId: finding?.id ?? null,
+      detail: {
+        phase: "action-decision",
+        action,
+        decision,
+        ledgerId,
+        signature,
+        // §3 data boundary: never retain execution-plane detail for an
+        // air-gapped resource — only metadata crosses back.
+        ...(airGapped ? { boundary: "air_gapped", metadataOnly: true } : { providerDetail }),
+      },
+      effect: "allow",
+      ruleId: "infra-action-applied",
+      ruleChain: [],
+      reason: `governed ${action} approved by the named approver on ${resource?.name ?? resourceId}${airGapped ? " (air-gapped: metadata-only record retained)" : ""}`,
+    });
+  } else {
+    // deny — revert the proposed state; the finding is the single accepted-risk surface.
+    if (action === "cert_rotate") {
+      await tx.update(certInventory).set({ status: "active" }).where(eq(certInventory.id, certRow!.id));
+    } else if (action === "patch_apply") {
+      await tx.update(patchRecords).set({ status: "accepted_risk" }).where(eq(patchRecords.id, patchRow!.id));
+    } else {
+      await tx.update(backupRuns).set({ status: "missed" }).where(eq(backupRuns.id, backupRow!.id));
+    }
+    if (finding) {
+      await tx.update(infraFindings).set({ status: "accepted_risk" }).where(eq(infraFindings.id, finding.id));
+    }
+    await tx.insert(auditLog).values({
+      userId: deciderUserId,
+      objectType: "infra_operation",
+      objectId: finding?.id ?? null,
+      detail: { phase: "action-decision", action, decision, ledgerId, signature },
+      effect: "deny",
+      ruleId: "infra-action-denied",
+      ruleChain: [],
+      reason: `governed ${action} denied on ${resource?.name ?? resourceId}; logged as accepted risk, infra state unchanged`,
     });
   }
 }
@@ -242,6 +543,8 @@ async function scanResource(
         .update(infraFindings)
         .set({ detectedAt: new Date(), detail: report.detail, severity: report.severity })
         .where(eq(infraFindings.id, existing.id));
+      // keep the durable ledger + back-link current (idempotent — no dup rows)
+      await syncFindingLedger(db, resource, existing.id, report);
       await auditDetection(db, actorId, resource, report, existing.id);
       refreshed++;
       continue;
@@ -257,6 +560,8 @@ async function scanResource(
       })
       .returning();
     created++;
+    // materialize the durable ledger row + stamp the finding's ref back-link
+    await syncFindingLedger(db, resource, inserted!.id, report);
     await auditDetection(db, actorId, resource, report, inserted!.id);
 
     // THE AUTO-VS-GATE DECISION on a NEW finding. critical is never auto (the
@@ -298,6 +603,64 @@ async function scanResource(
     }
   }
   return { created, autoRemediated, refreshed };
+}
+
+/** ADR-0017 — the shared propose path for the three operator verbs. Mirrors the
+ * finding/:id/remediate propose EXACTLY: a named approver gates it, the linked
+ * finding flips to 'remediation_proposed', and a require_approval audit row is
+ * written. The only difference is the action-tagged sentinel on the approval. */
+async function proposeInfraAction(
+  db: Db,
+  action: InfraAction,
+  ledger: { id: string; resourceId: string; refTable: string },
+  approverUserId: string,
+  actorId: string,
+): Promise<string> {
+  const [finding] = await db
+    .select()
+    .from(infraFindings)
+    .where(and(eq(infraFindings.refTable, ledger.refTable), eq(infraFindings.refId, ledger.id)));
+  const [resource] = await db
+    .select()
+    .from(infraResources)
+    .where(eq(infraResources.id, ledger.resourceId));
+  const [approval] = await db
+    .insert(approvals)
+    .values({
+      userId: actorId,
+      objectType: "infra_operation",
+      stageId: `${INFRA_ACTION_PREFIX}${action}:${ledger.id}`,
+      approverUserId,
+    })
+    .returning({ id: approvals.id });
+  if (finding && finding.status === "open") {
+    await db
+      .update(infraFindings)
+      .set({ status: "remediation_proposed" })
+      .where(eq(infraFindings.id, finding.id));
+  }
+  await db.insert(auditLog).values({
+    userId: actorId,
+    objectType: "infra_operation",
+    objectId: finding?.id ?? ledger.id,
+    detail: {
+      phase: "action-proposed",
+      action,
+      ledgerId: ledger.id,
+      approverUserId,
+      resource: resource?.name ?? ledger.resourceId,
+    },
+    effect: "require_approval",
+    ruleId: "infra-action-proposed",
+    ruleChain: [],
+    reason: `governed ${action} on ${resource?.name ?? ledger.resourceId} pends the named approver — infra state unchanged until approval`,
+  });
+  return approval!.id;
+}
+
+async function requireApprover(db: Db, approverUserId: string): Promise<boolean> {
+  const [approver] = await db.select({ id: users.id }).from(users).where(eq(users.id, approverUserId));
+  return Boolean(approver);
 }
 
 const SEVERITY_ORDER: InfraSeverity[] = ["low", "medium", "high", "critical"];
@@ -495,5 +858,116 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
       reason: `governed remediation for ${finding.kind}/${finding.severity} on ${resource?.name ?? finding.resourceId} pends the named approver — infra state unchanged until approval`,
     });
     return reply.status(202).send({ pending: true, approvalId: approval!.id });
+  });
+
+  // === ADR-0017 automation ledgers ======================================
+  // All read + verb routes below are admin-only (NOT in NON_ADMIN_ROUTES); the
+  // shared /decide route stays the one non-admin touchpoint. The verb POSTs are
+  // thin wrappers funnelling into the ONE governed approval path above.
+
+  // --- certificates -----------------------------------------------------
+  app.get("/v1/infra/certs", async () => {
+    const [certs, resources] = await Promise.all([
+      db.select().from(certInventory).orderBy(desc(certInventory.createdAt)),
+      db.select({ id: infraResources.id, name: infraResources.name }).from(infraResources),
+    ]);
+    const nameOf = new Map(resources.map((r) => [r.id, r.name]));
+    return { certs: certs.map((c) => ({ ...c, resourceName: nameOf.get(c.resourceId) ?? null })) };
+  });
+
+  app.get("/v1/infra/certs/:certId/rotations", async (req, reply) => {
+    const { certId } = certIdParam.parse(req.params);
+    const [cert] = await db.select({ id: certInventory.id }).from(certInventory).where(eq(certInventory.id, certId));
+    if (!cert) return reply.status(404).send({ error: "unknown_cert" });
+    return {
+      rotations: await db
+        .select()
+        .from(certRotations)
+        .where(eq(certRotations.certId, certId))
+        .orderBy(desc(certRotations.createdAt)),
+    };
+  });
+
+  app.post("/v1/infra/certs/:certId/rotate", async (req, reply) => {
+    const { certId } = certIdParam.parse(req.params);
+    const body = rotateCertSchema.parse(req.body);
+    const [cert] = await db.select().from(certInventory).where(eq(certInventory.id, certId));
+    if (!cert) return reply.status(404).send({ error: "unknown_cert" });
+    if (cert.status !== "active") {
+      return reply.status(409).send({ error: "not_rotatable", detail: `cert is '${cert.status}'` });
+    }
+    if (!(await requireApprover(db, body.approverUserId))) return reply.status(422).send({ error: "unknown_approver" });
+    const actorId = await resolveActor(db, req.authCtx.userId);
+    await db.update(certInventory).set({ status: "rotation_proposed" }).where(eq(certInventory.id, certId));
+    const approvalId = await proposeInfraAction(
+      db,
+      "cert_rotate",
+      { id: certId, resourceId: cert.resourceId, refTable: "cert_inventory" },
+      body.approverUserId,
+      actorId,
+    );
+    return reply.status(202).send({ pending: true, approvalId });
+  });
+
+  // --- CVE patches ------------------------------------------------------
+  app.get("/v1/infra/patches", async () => {
+    const [patches, resources] = await Promise.all([
+      db.select().from(patchRecords).orderBy(desc(patchRecords.createdAt)),
+      db.select({ id: infraResources.id, name: infraResources.name }).from(infraResources),
+    ]);
+    const nameOf = new Map(resources.map((r) => [r.id, r.name]));
+    return { patches: patches.map((p) => ({ ...p, resourceName: nameOf.get(p.resourceId) ?? null })) };
+  });
+
+  app.post("/v1/infra/patches/:patchId/apply", async (req, reply) => {
+    const { patchId } = patchIdParam.parse(req.params);
+    const body = applyPatchSchema.parse(req.body);
+    const [patch] = await db.select().from(patchRecords).where(eq(patchRecords.id, patchId));
+    if (!patch) return reply.status(404).send({ error: "unknown_patch" });
+    if (patch.status !== "open") {
+      return reply.status(409).send({ error: "not_applicable", detail: `patch is '${patch.status}'` });
+    }
+    if (!(await requireApprover(db, body.approverUserId))) return reply.status(422).send({ error: "unknown_approver" });
+    const actorId = await resolveActor(db, req.authCtx.userId);
+    await db.update(patchRecords).set({ status: "patch_proposed" }).where(eq(patchRecords.id, patchId));
+    const approvalId = await proposeInfraAction(
+      db,
+      "patch_apply",
+      { id: patchId, resourceId: patch.resourceId, refTable: "patch_records" },
+      body.approverUserId,
+      actorId,
+    );
+    return reply.status(202).send({ pending: true, approvalId });
+  });
+
+  // --- backups ----------------------------------------------------------
+  app.get("/v1/infra/backups", async () => {
+    const [runs, resources] = await Promise.all([
+      db.select().from(backupRuns).orderBy(desc(backupRuns.createdAt)),
+      db.select({ id: infraResources.id, name: infraResources.name }).from(infraResources),
+    ]);
+    const nameOf = new Map(resources.map((r) => [r.id, r.name]));
+    return { backups: runs.map((r) => ({ ...r, resourceName: nameOf.get(r.resourceId) ?? null })) };
+  });
+
+  app.post("/v1/infra/backups/:backupId/restore", async (req, reply) => {
+    const { backupId } = backupIdParam.parse(req.params);
+    const body = restoreBackupSchema.parse(req.body);
+    const [run] = await db.select().from(backupRuns).where(eq(backupRuns.id, backupId));
+    if (!run) return reply.status(404).send({ error: "unknown_backup" });
+    if (run.status !== "missed") {
+      return reply.status(409).send({ error: "not_restorable", detail: `backup run is '${run.status}'` });
+    }
+    if (!(await requireApprover(db, body.approverUserId))) return reply.status(422).send({ error: "unknown_approver" });
+    const actorId = await resolveActor(db, req.authCtx.userId);
+    await db.update(backupRuns).set({ status: "restore_proposed" }).where(eq(backupRuns.id, backupId));
+    const approvalId = await proposeInfraAction(
+      db,
+      "backup_restore",
+      { id: backupId, resourceId: run.resourceId, refTable: "backup_runs" },
+      body.approverUserId,
+      actorId,
+    );
+    return reply.status(202).send({ pending: true, approvalId });
   });
 }

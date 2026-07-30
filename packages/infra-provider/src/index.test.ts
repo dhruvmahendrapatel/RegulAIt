@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   InfraProviderError,
   MockInfraProvider,
+  certSeverity,
+  compareDrift,
+  cvssToSeverity,
+  evaluateBackupSchedule,
   isInfraProviderKind,
   resolveInfraProvider,
   severityRank,
@@ -115,5 +119,99 @@ describe("registry", () => {
     expect(isInfraProviderKind("mock")).toBe(true);
     expect(isInfraProviderKind("aws")).toBe(true);
     expect(isInfraProviderKind("heroku")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0017 — the extracted pure detection math.
+// ---------------------------------------------------------------------------
+
+describe("compareDrift", () => {
+  it("no diff => empty drifted + low", () => {
+    expect(compareDrift({ a: 1, b: 2 }, { a: 1, b: 2 })).toEqual({ drifted: [], severity: "low" });
+  });
+  it("one key diff => low (sorted keys)", () => {
+    expect(compareDrift({ a: 1 }, { a: 2 })).toEqual({ drifted: ["a"], severity: "low" });
+  });
+  it("two key diff => medium", () => {
+    const r = compareDrift({ a: 1, b: 1, c: 1 }, { a: 2, b: 2, c: 1 });
+    expect(r.drifted).toEqual(["a", "b"]);
+    expect(r.severity).toBe("medium");
+  });
+  it("three or more key diff => high", () => {
+    expect(compareDrift({ a: 1, b: 1, c: 1 }, { a: 2, b: 2, c: 2 }).severity).toBe("high");
+  });
+  it("a security-critical key drifting => high regardless of count", () => {
+    expect(compareDrift({ iam: "x" }, { iam: "y" }).severity).toBe("high");
+  });
+  it("added / removed keys count as drift", () => {
+    expect(compareDrift({ a: 1 }, { a: 1, b: 2 }).drifted).toEqual(["b"]);
+  });
+});
+
+describe("cvssToSeverity — band boundaries", () => {
+  it.each([
+    [3.9, "low"],
+    [4.0, "medium"],
+    [6.9, "medium"],
+    [7.0, "high"],
+    [8.9, "high"],
+    [9.0, "critical"],
+  ])("cvss %s => %s", (cvss, sev) => {
+    expect(cvssToSeverity(cvss as number)).toBe(sev);
+  });
+});
+
+describe("certSeverity — real date math", () => {
+  const now = new Date("2026-07-30T00:00:00Z");
+  const inDays = (d: number) => new Date(now.getTime() + d * 86_400_000);
+  it("already expired => critical + shouldRotate", () => {
+    const r = certSeverity(inDays(-3), now, 30);
+    expect(r.severity).toBe("critical");
+    expect(r.shouldRotate).toBe(true);
+    expect(r.daysUntilExpiry).toBe(-3);
+  });
+  it("expiring today (0 days) => critical + shouldRotate", () => {
+    expect(certSeverity(now, now, 30).severity).toBe("critical");
+  });
+  it("inside the rotation window (7 days) => high + shouldRotate", () => {
+    const r = certSeverity(inDays(7), now, 30);
+    expect(r.severity).toBe("high");
+    expect(r.shouldRotate).toBe(true);
+  });
+  it("20 days => medium, and shouldRotate under a 30-day window", () => {
+    const r = certSeverity(inDays(20), now, 30);
+    expect(r.severity).toBe("medium");
+    expect(r.shouldRotate).toBe(true);
+  });
+  it("comfortable (90 days) => low + not shouldRotate", () => {
+    const r = certSeverity(inDays(90), now, 30);
+    expect(r.severity).toBe("low");
+    expect(r.shouldRotate).toBe(false);
+  });
+});
+
+describe("evaluateBackupSchedule", () => {
+  const now = new Date("2026-07-30T00:00:00Z");
+  const hoursAgo = (h: number) => new Date(now.getTime() - h * 3_600_000);
+  it("fresh (2h, daily) => not due, not missed, low", () => {
+    const r = evaluateBackupSchedule("daily", hoursAgo(2), now, 30);
+    expect(r).toMatchObject({ due: false, missed: false, severity: "low" });
+  });
+  it("stale (30h, daily) => due, not missed, medium", () => {
+    const r = evaluateBackupSchedule("daily-0200", hoursAgo(30), now, 30);
+    expect(r).toMatchObject({ due: true, missed: false, severity: "medium" });
+  });
+  it("missed (100h, daily) => due, missed, high", () => {
+    const r = evaluateBackupSchedule("daily", hoursAgo(100), now, 30);
+    expect(r).toMatchObject({ due: true, missed: true, severity: "high" });
+  });
+  it("never backed up => due, missed, high", () => {
+    const r = evaluateBackupSchedule("daily", null, now, 30);
+    expect(r).toMatchObject({ due: true, missed: true, severity: "high" });
+  });
+  it("retentionUntil = now + retentionDays", () => {
+    const r = evaluateBackupSchedule("daily", hoursAgo(2), now, 10);
+    expect(r.retentionUntil.getTime()).toBe(now.getTime() + 10 * 86_400_000);
   });
 });

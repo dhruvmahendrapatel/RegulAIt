@@ -1254,9 +1254,10 @@ const TABS = [
   // findings + governed remediation. Findings are inert until governed — a new
   // one is auto-remediated (audited) only under a permissive policy, else it is
   // approval-gated; every 'critical' is always approval-gated.
-  const [res, pol, fin, posture, u, cp] = await Promise.all([
+  const [res, pol, fin, posture, u, cp, certs, patches, backups] = await Promise.all([
     get("/v1/infra/resources"), get("/v1/infra/policies"), get("/v1/infra/findings"),
     get("/v1/infra/posture"), get("/v1/users"), get("/v1/compliance/profiles"),
+    get("/v1/infra/certs"), get("/v1/infra/patches"), get("/v1/infra/backups"),
   ]);
   const uOpts = userOpts(u.users);
   const tagOpts = cp.profiles.map((x) => x.tag);
@@ -1346,7 +1347,61 @@ const TABS = [
           : r.status === "remediation_proposed" ? "<span class='dim'>awaiting approval</span>"
           : r.status === "accepted_risk" ? "<span class='dim'>accepted risk</span>" : "",
       })
-    + "</div>";
+    + "</div>"
+
+    // ADR-0017 automation ledgers: durable domain records that hang off the
+    // findings above. Each governed verb funnels into the SAME Approvals Queue
+    // (objectType infra_operation) via the shared #f-remapprover approver.
+    + "<h2>Certificates — rotation ledger</h2><div class='card'>"
+    + dataTable((certs.certs || []).map((c) => ({
+        id: c.id,
+        resource: c.resourceName || "—",
+        commonName: c.commonName,
+        notAfter: c.notAfter,
+        status: c.status,
+        serial: c.serial || "—",
+      })), {
+        cells: { status: (v) => "<span class='badge' title='status: " + esc(v) + "'>" + esc(v) + "</span>" },
+        actions: (r) => r.status === "active"
+          ? "<button class='small primary' data-rotate='" + r.id + "'>propose rotation</button>"
+          : "<span class='dim'>" + esc(r.status) + "</span>",
+      })
+    + "<p class='dim' style='font-size:12px'>A governed rotation advances not-after / last-rotated and writes a cert_rotations outcome row — only after the named approver approves.</p></div>"
+
+    + "<h2>CVE patches — remediation ledger</h2><div class='card'>"
+    + dataTable((patches.patches || []).map((p) => ({
+        id: p.id,
+        resource: p.resourceName || "—",
+        cve: p.cve,
+        severity: p.severity,
+        package: p.package || "—",
+        fixedVersion: p.fixedVersion || "—",
+        status: p.status,
+      })), {
+        cells: {
+          severity: (v) => "<span class='badge " + (SEV[v] || "") + "' title='severity: " + esc(v) + "'>" + esc(v) + "</span>",
+          status: (v) => "<span class='badge' title='status: " + esc(v) + "'>" + esc(v) + "</span>",
+        },
+        actions: (r) => r.status === "open"
+          ? "<button class='small primary' data-apply='" + r.id + "'>propose patch</button>"
+          : "<span class='dim'>" + esc(r.status) + "</span>",
+      })
+    + "<p class='dim' style='font-size:12px'>Applying a patch marks the CVE patched only after approval; denying it records accepted risk.</p></div>"
+
+    + "<h2>Backups — run / restore ledger</h2><div class='card'>"
+    + dataTable((backups.backups || []).map((r) => ({
+        id: r.id,
+        resource: r.resourceName || "—",
+        kind: r.kind,
+        status: r.status,
+        retentionUntil: r.retentionUntil || "—",
+      })), {
+        cells: { status: (v) => "<span class='badge' title='status: " + esc(v) + "'>" + esc(v) + "</span>" },
+        actions: (r) => r.status === "missed"
+          ? "<button class='small primary' data-restore='" + r.id + "'>propose restore</button>"
+          : "<span class='dim'>" + esc(r.status) + "</span>",
+      })
+    + "<p class='dim' style='font-size:12px'>A governed restore appends a kind=restore, status=restored run — only after approval.</p></div>";
 
   $("#infra-scan").addEventListener("click", async () => {
     try { const r = await post("/v1/infra/scan", {}); toast("Scan complete — " + r.created + " new, " + r.autoRemediated + " auto-remediated, " + r.refreshed + " refreshed.", "ok"); render(); }
@@ -1360,6 +1415,26 @@ const TABS = [
     if (!approver) { toast("Pick a remediation approver first.", "err"); return; }
     if (!confirm("Propose remediation for this finding? It lands in the Approvals Queue for the named approver to decide.")) return;
     try { await post("/v1/infra/findings/" + b.dataset.remediate + "/remediate", { approverUserId: approver }); toast("Remediation proposed", "ok"); render(); }
+    catch (ex) { toast(ex.message, "err"); }
+  });
+  // ADR-0017 verbs — same delegated pattern, same #f-remapprover approver, each
+  // confirm()-gated. cert_rotate / patch_apply / backup_restore all POST into
+  // the one governed approval path.
+  el.addEventListener("click", async (e) => {
+    const rot = e.target.closest("[data-rotate]");
+    const app_ = e.target.closest("[data-apply]");
+    const rst = e.target.closest("[data-restore]");
+    const hit = rot || app_ || rst;
+    if (!hit) return;
+    const approver = $("#f-remapprover") && $("#f-remapprover").querySelector("[name=approverUserId]") ? $("#f-remapprover").querySelector("[name=approverUserId]").value : "";
+    if (!approver) { toast("Pick a remediation approver first.", "err"); return; }
+    let url = "";
+    let msg = "";
+    if (rot) { url = "/v1/infra/certs/" + rot.dataset.rotate + "/rotate"; msg = "Propose a governed certificate rotation? It lands in the Approvals Queue for the named approver."; }
+    else if (app_) { url = "/v1/infra/patches/" + app_.dataset.apply + "/apply"; msg = "Propose applying this CVE patch? It lands in the Approvals Queue for the named approver."; }
+    else { url = "/v1/infra/backups/" + rst.dataset.restore + "/restore"; msg = "Propose a governed restore of this backup? It lands in the Approvals Queue for the named approver."; }
+    if (!confirm(msg)) return;
+    try { await post(url, { approverUserId: approver }); toast("Proposed — awaiting approval", "ok"); render(); }
     catch (ex) { toast(ex.message, "err"); }
   });
   // the approver select is a live control, not a submit — stop it rebooting the SPA
