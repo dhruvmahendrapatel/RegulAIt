@@ -208,7 +208,10 @@ async function bootstrap() {
     get("/v1/users/" + ME.userId + "/model-credentials").catch(() => ({ credentials: [] })),
     get("/v1/model-providers/status").catch(() => ({ providers: {} })),
   ]);
-  AGENTS = mine.agents ?? [];
+  // ADR-0019: an agent revoked for this user is denied by the kernel at invoke,
+  // so offering it in the picker is a broken affordance. Display-only filtering
+  // — the server default-denies regardless; this never confers anything.
+  AGENTS = (mine.agents ?? []).filter((a) => !a.revoked);
   AGENT_NAMES = Object.fromEntries(AGENTS.map((a) => [a.agentId, a.name]));
   DEFAULT_AGENT_ID = mine.defaultAgentId ?? null;
   PROJECTS = projects.projects ?? [];
@@ -645,12 +648,17 @@ function renderExchange(x, i) {
           : '<span class="att-pill">' + (a.kind === "document" ? "\\uD83D\\uDCC4" : "\\uD83D\\uDCDD") + " " + esc(a.name) + "</span>",
       ).join("") + "</div>"
     : "";
+  // a plain-language note about how this turn was handled (e.g. §8.4 streaming
+  // suppressed on a block-mode project) — governance told honestly, in the flow
+  const note = x.note
+    ? \`<div class="faint" style="font-size:11.5px;margin-top:6px">\${esc(x.note)}</div>\`
+    : "";
   const userBubble = x.prompt ? \`<div class="bubble">\${esc(x.prompt)}</div>\` : "";
   return \`
     <div class="msg user"><div class="who">\${esc(ME.user.displayName)}</div>\${attRow}\${userBubble}</div>
     <div class="msg agent">
       <div class="who">\${esc(x.agentName)}</div>
-      <div class="bubble">\${esc(x.text)}\${x.streaming ? '<span class="caret"></span>' : ""}</div>
+      <div class="bubble">\${esc(x.text)}\${x.streaming ? '<span class="caret"></span>' : ""}</div>\${note}
       <div class="meta">\${meta.join("")}\${tools}</div>\${trace}
     </div>\${divider}\`;
 }
@@ -744,6 +752,18 @@ async function sendPrompt() {
       try { j = await res.json(); } catch { j = null; }
       x.streaming = false;
       if (j && j.decision && j.decision.effect !== "allow") { x.denied = j.decision; x.text = j.decision.reason; }
+      // ADR-0019 §8.4: a block-mode PII project SUPPRESSES streaming — the same
+      // governed dispatch ran fully buffered and came back as ordinary JSON, so
+      // this is a success, not an error. Render it exactly like a completed
+      // stream and say plainly why nothing streamed.
+      else if (res.ok && j && j.dispatch) {
+        x.result = j;
+        x.text = j.dispatch.refusal ? "The model declined this request." : (j.dispatch.outputText ?? "");
+        if (j.dispatch.pii) x.pii = j.dispatch.pii;
+        if (j.streamingSuppressed) {
+          x.note = "Streaming is disabled for this project: its compliance classification sets PII mode to block, so output is checked in full before any of it is sent.";
+        }
+      }
       else { x.error = (j && j.error) ?? ("HTTP " + res.status); x.text = errMessage(res.status, j ?? {}); }
       if (j && j.pii) x.pii = j.pii;
       drawChat(); return;
@@ -2394,6 +2414,9 @@ function wireSpend() {
           + '<h2>Showback by team</h2><div class="card">' + barChart(c.byTeam ?? [], "costUsd", (i) => i.name ?? "(no team)") + "</div>"
           + '<h2>By agent / model</h2><div class="card">' + barChart(c.byAgent, "costUsd", (i) => AGENT_NAMES[i.agentId] ?? i.model) + "</div>"
           + '<h2>Spend by connector</h2><div class="card">' + ((c.byConnector ?? []).length ? barChart(c.byConnector, "costUsd", (i) => (i.name ?? "connector") + " · " + (i.operation ?? "")) : '<div class="empty">No metered connector calls for this project.</div>') + "</div>"
+          // ADR-0019: MCP tool spend rides the same ledger, so it is already
+          // inside the measured total — named here so it is not an unexplained gap
+          + '<h2>Spend by MCP tool</h2><div class="card">' + ((c.byMcpTool ?? []).length ? barChart(c.byMcpTool, "costUsd", (i) => i.toolName ?? "tool") : '<div class="empty">No project-attributed MCP tool calls for this project.</div>') + "</div>"
           + '<h2>Estimated savings by technique</h2><div class="card">' + barChart(c.estimatedSavings, "estimatedCostSavedUsd", (i) => i.technique) + "</div>";
         const csvBtn = out.querySelector("[data-csv]");
         if (csvBtn) csvBtn.addEventListener("click", () =>

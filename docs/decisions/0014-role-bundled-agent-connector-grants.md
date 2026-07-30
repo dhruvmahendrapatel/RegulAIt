@@ -63,3 +63,22 @@ role-derived agent/connector grant is future work.
 - **Follow-up**: per-user revocation of role-derived agent/connector grants (subtractive override)
   when the product needs to carve a single user out of a role's agent/connector bundle without
   unassigning the whole role.
+
+---
+
+## Addendum — 2026-07-30 (per-user revocation is no longer deferred)
+
+This ADR's deferral of per-user revocation for role-bundled agent/connector grants is closed by
+[ADR-0019](0019-per-user-revocation-and-full-attribution.md). `agent_revocations` and
+`connector_revocations` (migration 0036) give the additive UNION-MAX composition described above a
+**subtractive bound**: one agent or connector can now be taken away from one user without touching
+their roles.
+
+The one place ADR-0019 deviates from the MCP `revocations` precedent is deliberate and worth
+restating here, because it is a direct consequence of THIS ADR's union semantics: an MCP revocation
+suppresses **role-derived entitlements only** (a direct MCP grant is itself the per-user override,
+so the two must not fight), whereas an agent/connector revocation beats **both** the direct and the
+role grant. Under UNION-MAX, a revocation that spared direct grants would leave an admin unable to
+subtract an object from a user whenever a direct grant also existed — it has to bound the whole
+union or it does not close the hole. The invariant is unchanged in spirit: a revocation is consulted
+strictly on the allow path and can only ever turn an allow into a deny.

@@ -80,7 +80,12 @@ import {
   prepareConversationContext,
   type PreparedConversationContext,
 } from "./compaction.js";
-import { loadRoleAgentGrants, loadRoleConnectorGrants } from "./entitlements.js";
+import {
+  loadAgentRevocations,
+  loadConnectorRevocations,
+  loadRoleAgentGrants,
+  loadRoleConnectorGrants,
+} from "./entitlements.js";
 
 const userIdParam = z.object({ userId: z.string().uuid() });
 const agentIdParam = z.object({ agentId: z.string().uuid() });
@@ -825,7 +830,7 @@ export function registerAgentConnectorRoutes(
     if (!req.authCtx.isAdmin && req.authCtx.userId !== userId) {
       return reply.status(403).send({ error: "forbidden" });
     }
-    const [grants, roleGrants, [policy]] = await Promise.all([
+    const [grants, roleGrants, revoked, [policy]] = await Promise.all([
       db
         .select({
           agentId: agents.id,
@@ -843,17 +848,28 @@ export function registerAgentConnectorRoutes(
       // §5 role-bundled grants (ADR-0014) — folded into the Access-preview so
       // Simulation shows a role-granted agent, tagged with its provenance.
       loadRoleAgentGrants(db, userId),
+      // ADR-0019 — the per-user override made VISIBLE, not silent (§5): a row
+      // reads "granted via role X, REVOKED" instead of quietly disappearing.
+      loadAgentRevocations(db, userId),
       db.select().from(userAgentPolicies).where(eq(userAgentPolicies.userId, userId)),
     ]);
+    const revokedById = new Map(revoked.map((r) => [r.agentId, r]));
 
     // Direct grants win the displayed entry; a role that also grants the same
     // agent surfaces as provenance on that row (roles[]). A role-ONLY agent
     // becomes its own source:"role" row so the Access-preview is complete.
     const directIds = new Set(grants.map((g) => g.agentId));
+    const revocationView = (agentId: string) => {
+      const rev = revokedById.get(agentId);
+      return rev
+        ? { revoked: true as const, revocationId: rev.id, revocationReason: rev.reason ?? null }
+        : { revoked: false as const };
+    };
     const direct = grants.map((g) => ({
       ...g,
       source: "direct" as const,
       roles: roleGrants.filter((r) => r.agentId === g.agentId).map((r) => r.roleName ?? r.roleId),
+      ...revocationView(g.agentId),
     }));
     const roleOnlyIds = [...new Set(roleGrants.map((r) => r.agentId).filter((id) => !directIds.has(id)))];
     const roleAgentMeta = roleOnlyIds.length
@@ -890,6 +906,7 @@ export function registerAgentConnectorRoutes(
           grantId: primary.id,
           source: "role" as const,
           roles: granting.map((r) => r.roleName ?? r.roleId),
+          ...revocationView(agentId),
         };
       })
       .filter((r): r is NonNullable<typeof r> => r !== null);
@@ -938,11 +955,32 @@ export function registerAgentConnectorRoutes(
       if (!attribution.ok) return reply.status(attribution.status).send({ error: attribution.error });
     }
 
-    const [grants, roleAgentGrantsForUser, [policy]] = await Promise.all([
+    // §8.4 STREAMING SUPPRESSION (ADR-0019, closing the recorded known limit).
+    // The output PII check can only run once the full text exists, so on a
+    // block-mode project an SSE delta stream would flash raw model output at
+    // the client before the result event could overwrite it with the withheld
+    // marker — the bytes are already on the wire and out of our control. So a
+    // block-mode project gets NO delta stream at all: the same governed
+    // dispatch runs fully buffered and returns the ordinary JSON payload, with
+    // the output check applied before a single byte leaves. This is disclosed,
+    // not silent — `streamingSuppressed: true` rides the response and the audit
+    // detail, so a client that asked for SSE learns why it got JSON instead.
+    // Input-block stays exactly as it was: pre-call, no dispatch, no cost.
+    // Only computed when the caller actually asked to stream, so the
+    // non-streaming path takes no extra query.
+    const streamSuppressed =
+      body.stream === true && (await projectPiiMode(db, projectId)) === "block";
+    const useStream = body.stream === true && !streamSuppressed;
+    const suppressionFlag = streamSuppressed ? { streamingSuppressed: true as const } : {};
+
+    const [grants, roleAgentGrantsForUser, agentRevocationsForUser, [policy]] = await Promise.all([
       db.select().from(agentGrants).where(eq(agentGrants.userId, userId)),
       // §5 role-bundled grants (ADR-0014) — a role-granted agent must invoke
       // just like a directly granted one.
       loadRoleAgentGrants(db, userId),
+      // ADR-0019 — and a per-user revocation must take it away again, whether
+      // the grant came from a role or directly.
+      loadAgentRevocations(db, userId),
       db.select().from(userAgentPolicies).where(eq(userAgentPolicies.userId, userId)),
     ]);
     let ceilingTier: number | null = null;
@@ -968,6 +1006,7 @@ export function registerAgentConnectorRoutes(
       mode: body.mode,
       agentGrants: grants,
       roleAgentGrants: roleAgentGrantsForUser,
+      agentRevocations: agentRevocationsForUser,
       ceilingTier,
     });
 
@@ -1078,7 +1117,7 @@ export function registerAgentConnectorRoutes(
             ruleChain: decision.ruleChain,
             reason: decision.reason,
           });
-          if (body.stream) {
+          if (useStream) {
             reply.hijack();
             reply.raw.writeHead(200, {
               "content-type": "text/event-stream",
@@ -1094,7 +1133,7 @@ export function registerAgentConnectorRoutes(
             reply.raw.end();
             return reply;
           }
-          return reply.send({ decision, cached: true, dispatch: cachedDispatch });
+          return reply.send({ decision, cached: true, dispatch: cachedDispatch, ...suppressionFlag });
         }
       }
 
@@ -1107,6 +1146,10 @@ export function registerAgentConnectorRoutes(
             mode: body.mode,
             agentGrants: grants,
             roleAgentGrants: roleAgentGrantsForUser,
+            // ADR-0019: the routing roster is exactly what evaluateAgent would
+            // allow, so a revoked agent must not be a routing candidate either
+            // — otherwise the optimizer could serve an agent governance denies.
+            agentRevocations: agentRevocationsForUser,
             ceilingTier,
           }).effect === "allow",
       );
@@ -1569,7 +1612,7 @@ export function registerAgentConnectorRoutes(
       // the payload the JSON path returns. Denials never reach this branch
       // (they respond as plain JSON before any stream opens), and the audit
       // row + usage ledger are written identically after completion.
-      if (body.dispatch && body.stream) {
+      if (body.dispatch && useStream) {
         reply.hijack();
         reply.raw.writeHead(200, {
           "content-type": "text/event-stream",
@@ -1663,6 +1706,9 @@ export function registerAgentConnectorRoutes(
         ...(routing ? { servedAgentId: routing.selectedAgentId } : {}),
         ...(routing?.skippedCandidates ? { routingSkippedCandidates: routing.skippedCandidates } : {}),
         ...(convoContext?.publicDetail ? { compaction: convoContext.publicDetail } : {}),
+        // §8.4: the caller asked for SSE and got a buffered JSON reply instead
+        // because the project's PII mode is 'block' — recorded, never silent.
+        ...suppressionFlag,
         ...(dispatchOutcome
           ? {
               dispatch: dispatchOutcome.ok
@@ -1700,6 +1746,7 @@ export function registerAgentConnectorRoutes(
         error: dispatchOutcome.error,
         ...(dispatchOutcome.detail ? { detail: dispatchOutcome.detail } : {}),
         ...(dispatchOutcome.pii ? { pii: dispatchOutcome.pii } : {}),
+        ...suppressionFlag,
       });
     }
     return reply.send({
@@ -1707,6 +1754,7 @@ export function registerAgentConnectorRoutes(
       routing,
       ...(dispatchOutcome ? { dispatch: dispatchOutcome.result } : {}),
       ...(convoContext?.publicDetail ? { compaction: convoContext.publicDetail } : {}),
+      ...suppressionFlag,
     });
   });
 
@@ -1792,7 +1840,7 @@ export function registerAgentConnectorRoutes(
     if (!req.authCtx.isAdmin && req.authCtx.userId !== userId) {
       return reply.status(403).send({ error: "forbidden" });
     }
-    const [rows, roleGrants] = await Promise.all([
+    const [rows, roleGrants, revoked] = await Promise.all([
       db
         .select({
           connectorId: connectors.id,
@@ -1807,7 +1855,16 @@ export function registerAgentConnectorRoutes(
         .where(eq(connectorGrants.userId, userId)),
       // §5 role-bundled grants (ADR-0014), folded into the Access-preview.
       loadRoleConnectorGrants(db, userId),
+      // ADR-0019 — per-user revocations, flagged rather than silently hidden.
+      loadConnectorRevocations(db, userId),
     ]);
+    const revokedById = new Map(revoked.map((r) => [r.connectorId, r]));
+    const revocationView = (connectorId: string) => {
+      const rev = revokedById.get(connectorId);
+      return rev
+        ? { revoked: true as const, revocationId: rev.id, revocationReason: rev.reason ?? null }
+        : { revoked: false as const };
+    };
 
     const directIds = new Set(rows.map((r) => r.connectorId));
     const direct = rows.map((r) => ({
@@ -1816,6 +1873,7 @@ export function registerAgentConnectorRoutes(
       roles: roleGrants
         .filter((g) => g.connectorId === r.connectorId)
         .map((g) => g.roleName ?? g.roleId),
+      ...revocationView(r.connectorId),
     }));
     const roleOnlyIds = [
       ...new Set(roleGrants.map((g) => g.connectorId).filter((id) => !directIds.has(id))),
@@ -1843,6 +1901,7 @@ export function registerAgentConnectorRoutes(
           grantId: primary.id,
           source: "role" as const,
           roles: granting.map((g) => g.roleName ?? g.roleId),
+          ...revocationView(connectorId),
         };
       })
       .filter((r): r is NonNullable<typeof r> => r !== null);
@@ -1868,11 +1927,13 @@ export function registerAgentConnectorRoutes(
       if (!attribution.ok) return reply.status(attribution.status).send({ error: attribution.error });
     }
 
-    const [grants, roleConnectorGrantsForUser] = await Promise.all([
+    const [grants, roleConnectorGrantsForUser, connectorRevocationsForUser] = await Promise.all([
       db.select().from(connectorGrants).where(eq(connectorGrants.userId, userId)),
       // §5 role-bundled grants (ADR-0014): unioned in the kernel so a narrow
       // direct grant cannot mask a broader role grant.
       loadRoleConnectorGrants(db, userId),
+      // ADR-0019: the subtractive bound on that union.
+      loadConnectorRevocations(db, userId),
     ]);
 
     const decision = evaluateConnector({
@@ -1883,6 +1944,7 @@ export function registerAgentConnectorRoutes(
       object: body.object ?? null,
       connectorGrants: grants,
       roleConnectorGrants: roleConnectorGrantsForUser,
+      connectorRevocations: connectorRevocationsForUser,
     });
 
     // THE ONE AUDIT ROW — unchanged, written for every decision (allow or deny).

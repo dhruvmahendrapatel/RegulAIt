@@ -218,8 +218,22 @@ describe("(a) a granted tool drives the loop end-to-end, governed + metered per 
     expect(runRows).toHaveLength(2);
     expect(runRows.every((e: { projectId: string | null }) => e.projectId === projectId)).toBe(true);
 
+    // ADR-0019: the worker's MCP TOOL call now bills to the run's project too,
+    // on the same ledger — so the project total is the two model turns PLUS the
+    // one governed tool call. Its cost is null here (the server has no
+    // price_per_call_usd), which is the honest "unpriced, never invented" case.
+    const mcpRows = ledger.json().events.filter(
+      (e: { objectType: string; operation: string | null; projectId: string | null }) =>
+        e.objectType === "mcp_tool" && e.operation === "get_time" && e.projectId === projectId,
+    );
+    expect(mcpRows).toHaveLength(1);
+    expect(mcpRows[0].costUsd).toBeNull();
+
     const costs = await app.inject({ method: "GET", headers: uAuth, url: `/v1/projects/${projectId}/costs` });
-    expect(costs.json().measured.events).toBe(2);
+    expect(costs.json().measured.events).toBe(3);
+    expect(costs.json().byMcpTool).toEqual([
+      { toolName: "get_time", costUsd: 0, events: 1 },
+    ]);
   });
 });
 

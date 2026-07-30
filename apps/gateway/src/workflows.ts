@@ -30,7 +30,11 @@ import { resolveProvider, GitProviderError } from "@regulait/git-provider";
 import { resolveDeployProvider, DeployProviderError } from "./deploy.js";
 import { validateGraph } from "@regulait/orchestration-kernel";
 import { inTransaction, planRun, type ApprovalPostCommit, type DbOrTx } from "./orchestration.js";
-import { assertProjectAttribution, requiredTemplateIdsFor } from "./projects.js";
+import {
+  assertProjectAttribution,
+  projectClassifications,
+  requiredTemplateIdsFor,
+} from "./projects.js";
 import { decryptSecret, encryptSecret as encryptTokenOnce } from "./secrets.js";
 import {
   advanceStageSchema,
@@ -810,6 +814,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
         environment: body.environment ?? null,
         targetSystem: body.targetSystem ?? null,
         initiatorRole: body.initiatorRole ?? null,
+        dataSensitivity: body.dataSensitivity ?? null,
       })
       .returning();
     return reply.status(201).send(row);
@@ -851,10 +856,22 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       .innerJoin(roles, eq(roles.id, roleAssignments.roleId))
       .where(eq(roleAssignments.userId, userId));
     const initiatorRoles = initiatorRoleRows.map((r) => r.name);
-    // targetSystem is a legitimate client-supplied change attribute; initiatorRoles
-    // is authoritative server truth. A client-sent initiatorRoles could never reach
-    // here — changeDescriptorSchema does not accept it — but rebuild explicitly.
-    const change = { ...body.change, initiatorRoles };
+    // ADR-0018 addendum (ADR-0019) — the 6th dim, resolved SERVER-SIDE like the
+    // 5th: a change's data sensitivity is the set of compliance classification
+    // tags its ATTRIBUTED PROJECT carries, i.e. the exact same source
+    // effectiveCompliancePolicy cascades from. That is the only
+    // server-authoritative sensitivity signal in the model, and it means the
+    // dim cannot be asserted by a client. No project, or a project with no
+    // classifications, yields [] — a sensitivity-scoped rule then simply does
+    // not fire (matches as absent; never an invented sensitivity).
+    const dataSensitivities = body.projectId
+      ? await projectClassifications(db, body.projectId)
+      : [];
+    // targetSystem is a legitimate client-supplied change attribute;
+    // initiatorRoles and dataSensitivities are authoritative server truth.
+    // Neither could ever reach here from a client — changeDescriptorSchema
+    // accepts neither — but rebuild explicitly.
+    const change = { ...body.change, initiatorRoles, dataSensitivities };
 
     let templateIds: string[];
     if (body.templateId) {

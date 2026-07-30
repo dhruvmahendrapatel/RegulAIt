@@ -32,7 +32,7 @@ import { validateGraph } from "@regulait/orchestration-kernel";
 import { isModelProviderKind, TASK_DECOMPOSITION_SENTINEL } from "@regulait/model-provider";
 import { decomposeGoalSchema, decompositionPlanSchema } from "@regulait/shared";
 import { configuredProviders, executeGovernedDispatch, type AgentRow } from "./agents-connectors.js";
-import { loadEntitlements, loadRoleAgentGrants } from "./entitlements.js";
+import { loadAgentRevocations, loadEntitlements, loadRoleAgentGrants } from "./entitlements.js";
 import { assertProjectAttribution } from "./projects.js";
 import { z } from "zod";
 
@@ -289,14 +289,19 @@ export function registerDecomposeRoutes(
       }
     }
 
-    const [grants, roleAgentGrantsForUser, [policy], registry] = await Promise.all([
-      db.select().from(agentGrants).where(eq(agentGrants.userId, userId)),
-      // §5 role-bundled grants (ADR-0014) — a role-granted agent must be a
-      // valid worker in a decomposed plan, not just on the direct invoke path.
-      loadRoleAgentGrants(db, userId),
-      db.select().from(userAgentPolicies).where(eq(userAgentPolicies.userId, userId)),
-      db.select().from(agents),
-    ]);
+    const [grants, roleAgentGrantsForUser, agentRevocationsForUser, [policy], registry] =
+      await Promise.all([
+        db.select().from(agentGrants).where(eq(agentGrants.userId, userId)),
+        // §5 role-bundled grants (ADR-0014) — a role-granted agent must be a
+        // valid worker in a decomposed plan, not just on the direct invoke path.
+        loadRoleAgentGrants(db, userId),
+        // ADR-0019 — and a revoked agent must NOT be suggested as a worker: a
+        // revocation honoured at invoke but not here would let the same user
+        // reach the same agent by asking a lead to delegate to it.
+        loadAgentRevocations(db, userId),
+        db.select().from(userAgentPolicies).where(eq(userAgentPolicies.userId, userId)),
+        db.select().from(agents),
+      ]);
     let ceilingTier: number | null = null;
     if (policy?.ceilingAgentId) {
       ceilingTier = registry.find((a) => a.id === policy.ceilingAgentId)?.tier ?? null;
@@ -308,6 +313,7 @@ export function registerDecomposeRoutes(
         mode,
         agentGrants: grants,
         roleAgentGrants: roleAgentGrantsForUser,
+        agentRevocations: agentRevocationsForUser,
         ceilingTier,
       });
 

@@ -578,6 +578,35 @@ export interface RoleAgentGrant {
   allowedModes: string[] | null;
 }
 
+/**
+ * ADR-0019 §5 subtractive per-user override for AGENTS — the agent twin of the
+ * MCP `Revocation`. A revocation is TOTAL for its (user, agent): it beats a
+ * direct grant AND every role-derived grant, because agent entitlement composes
+ * as UNION-MAX (ADR-0014) and there would otherwise be no way to subtract one
+ * agent from one user short of unassigning the whole role.
+ *
+ * THE INVARIANT: a revocation can ONLY turn an allow into a deny. It is
+ * consulted strictly on the allow path (after a grant has been found), so it
+ * can never rescue an ungranted call — that is default-denied first and the
+ * revocation is never even looked at.
+ */
+export interface AgentRevocation {
+  id: string;
+  userId: string;
+  agentId: string;
+  /** admin's justification — reason prose only, never a policy input */
+  reason?: string | null;
+}
+
+/** ADR-0019: the CONNECTOR twin of AgentRevocation. Same total semantics, same
+ * allow-path-only invariant. */
+export interface ConnectorRevocation {
+  id: string;
+  userId: string;
+  connectorId: string;
+  reason?: string | null;
+}
+
 export interface EvaluateAgentInput {
   userId: string;
   /** optional display name for the user — reason prose only */
@@ -588,6 +617,9 @@ export interface EvaluateAgentInput {
   agentGrants: readonly AgentGrant[];
   /** role-derived agent grants, pre-filtered by the gateway to the user's assigned roles */
   roleAgentGrants?: readonly RoleAgentGrant[];
+  /** ADR-0019 per-user revocations, pre-filtered by the gateway to this user.
+   * Consulted ONLY after a grant was found, so it can only ever deny. */
+  agentRevocations?: readonly AgentRevocation[];
   /** tier of the user's ceiling agent (§4); null/undefined = no ceiling set */
   ceilingTier?: number | null;
   /**
@@ -604,6 +636,7 @@ export type AgentRuleName =
   | "agent-registry-enabled"
   | "agent-allow-list"
   | "role-agent-allow-list"
+  | "agent-revoked"
   | "agent-mode"
   | "agent-ceiling"
   | "agent-lead-ceiling"
@@ -612,6 +645,7 @@ export type AgentRuleName =
 export interface AgentRuleTrace {
   rule: AgentRuleName;
   outcome: "allow" | "deny" | "no-match";
+  /** the matched grant id — or, for an "agent-revoked" deny, the revocation id */
   grantId?: string;
 }
 
@@ -658,9 +692,9 @@ export function evaluateAgent(input: EvaluateAgentInput): AgentDecision {
   // role-derived grant consulted (pre-filtered by the gateway to the user's
   // assigned roles). A role grant is purely ADDITIVE — the mode check and the
   // per-user tier ceiling below still run against it unchanged, so it can never
-  // confer more than a direct grant would. Per-user revocation of role-derived
-  // AGENT grants is deferred (the revocations table is MCP-only today; this
-  // evaluator has no revocation input), so "revocations win" holds vacuously.
+  // confer more than a direct grant would. ADR-0019: a per-user AGENT
+  // revocation then bounds the result — see the revocation check below the
+  // default-deny return, where it can only ever subtract.
   const direct = input.agentGrants.find((g) => g.userId === userId && g.agentId === agent.id);
   const roleGrant = direct
     ? undefined
@@ -681,6 +715,31 @@ export function evaluateAgent(input: EvaluateAgentInput): AgentDecision {
       ? { rule: "role-agent-allow-list", outcome: "allow", grantId: grant.id }
       : { rule: "agent-allow-list", outcome: "allow", grantId: grant.id },
   );
+
+  // ADR-0019 PER-USER REVOCATION. Reached ONLY on the allow path — an agent
+  // with no grant at all already returned default-deny above, so this can
+  // never rescue an ungranted call; it can only subtract. It beats BOTH the
+  // direct and the role grant (unlike the MCP `revocations` table, which is
+  // role-only): agent entitlement composes as UNION-MAX (ADR-0014), so a
+  // revocation that spared direct grants would leave an admin unable to take
+  // one agent away from one user. Precedence mirrors the lead ceiling: checked
+  // before mode/tier/lead, because a revoked agent is revoked regardless.
+  // Absent input = no revocations = byte-identical to the pre-ADR-0019 path.
+  const agentRevocation = (input.agentRevocations ?? []).find(
+    (r) => r.userId === userId && r.agentId === agent.id,
+  );
+  if (agentRevocation) {
+    chain.push({ rule: "agent-revoked", outcome: "deny", grantId: agentRevocation.id });
+    return {
+      effect: "deny",
+      ruleId: "agent-revoked",
+      ruleChain: chain,
+      reason:
+        `agent ${agentRef} is granted to user ${refLabel(userId, input.userName)} ` +
+        `but revoked for them by per-user revocation ${refLabel(agentRevocation.id)}` +
+        (agentRevocation.reason ? ` — ${agentRevocation.reason}` : ""),
+    };
+  }
 
   if (grant.allowedModes !== null && !grant.allowedModes.includes(mode)) {
     chain.push({ rule: "agent-mode", outcome: "deny", grantId: grant.id });
@@ -779,11 +838,15 @@ export interface EvaluateConnectorInput {
   connectorGrants: readonly ConnectorGrant[];
   /** role-derived connector grants, pre-filtered by the gateway to the user's assigned roles */
   roleConnectorGrants?: readonly RoleConnectorGrant[];
+  /** ADR-0019 per-user revocations, pre-filtered by the gateway to this user.
+   * Consulted ONLY after a candidate grant was found, so it can only deny. */
+  connectorRevocations?: readonly ConnectorRevocation[];
 }
 
 export type ConnectorRuleName =
   | "connector-allow-list"
   | "role-connector-allow-list"
+  | "connector-revoked"
   | "connector-mode"
   | "connector-object-scope"
   | "default-deny";
@@ -791,6 +854,7 @@ export type ConnectorRuleName =
 export interface ConnectorRuleTrace {
   rule: ConnectorRuleName;
   outcome: "allow" | "deny" | "no-match";
+  /** the matched grant id — or, for a "connector-revoked" deny, the revocation id */
   grantId?: string;
 }
 
@@ -821,10 +885,8 @@ export function evaluateConnector(input: EvaluateConnectorInput): ConnectorDecis
   // are passed there is exactly one candidate and every trace/return below is
   // byte-identical to the pre-§5 direct-only path.
   //
-  // Per-user revocation of role-derived CONNECTOR grants is deferred (the
-  // revocations table is MCP-only today; this evaluator has no revocation
-  // input), so role grants override nothing and "revocations win" holds
-  // vacuously.
+  // ADR-0019: a per-user CONNECTOR revocation then bounds the union — checked
+  // below, strictly after a candidate was found, so it can only subtract.
   type ConnectorCandidate = { grant: ConnectorGrant; role?: RoleConnectorGrant };
   const candidates: ConnectorCandidate[] = [
     ...input.connectorGrants
@@ -852,6 +914,30 @@ export function evaluateConnector(input: EvaluateConnectorInput): ConnectorDecis
       ruleId: DEFAULT_DENY_RULE_ID,
       ruleChain: chain,
       reason: `connector ${connectorRef} is not on user ${refLabel(userId, input.userName)}'s allow-list — default-deny`,
+    };
+  }
+
+  // ADR-0019 PER-USER REVOCATION. Reached ONLY after at least one candidate
+  // grant exists (the candidate-free case default-denied above), so it can
+  // never rescue an ungranted connector — only subtract. It beats BOTH direct
+  // and role grants, for the same UNION-MAX reason as the agent path. A
+  // revocation is TOTAL: there is no partial (read-only) revocation, because
+  // narrowing a grant is what editing the grant is for — a revocation must be
+  // an unambiguous, auditable "this user may not use this connector at all".
+  // Absent input = byte-identical to the pre-ADR-0019 path.
+  const connectorRevocation = (input.connectorRevocations ?? []).find(
+    (r) => r.userId === userId && r.connectorId === connectorId,
+  );
+  if (connectorRevocation) {
+    chain.push({ rule: "connector-revoked", outcome: "deny", grantId: connectorRevocation.id });
+    return {
+      effect: "deny",
+      ruleId: "connector-revoked",
+      ruleChain: chain,
+      reason:
+        `connector ${connectorRef} is granted to user ${refLabel(userId, input.userName)} ` +
+        `but revoked for them by per-user revocation ${refLabel(connectorRevocation.id)}` +
+        (connectorRevocation.reason ? ` — ${connectorRevocation.reason}` : ""),
     };
   }
 

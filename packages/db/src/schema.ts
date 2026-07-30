@@ -26,6 +26,11 @@ export const mcpServers = pgTable("mcp_servers", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: text("name").notNull().unique(),
   url: text("url").notNull(),
+  // PILLAR 5 (ADR-0019): flat list price per ALLOWED tool call on this server —
+  // the MCP twin of connectors.pricePerCallUsd. Null = unpriced → cost null,
+  // never invented (agents' costPerMTok null-safety). A tool call is a discrete
+  // governed unit of work, so it is priced per call rather than per token.
+  pricePerCallUsd: doublePrecision("price_per_call_usd"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -465,9 +470,11 @@ export const connectorGrants = pgTable(
 // §5 role-bundled agent/connector grants: the AGENT/CONNECTOR twins of
 // roleToolGrants/roleServerGrants. Assigning a role confers these to a user
 // exactly as a direct agentGrant/connectorGrant would — same field shape, so a
-// role grant can never exceed a direct grant. Purely additive (UNION-MAX with
-// direct grants); per-user revocation of role-derived agent/connector grants
-// is deferred (the revocations table is MCP-only today). See ADR-0014.
+// role grant can never exceed a direct grant. Additive (UNION-MAX with direct
+// grants), and — since ADR-0019 — BOUNDED by the subtractive per-user
+// agentRevocations/connectorRevocations below, so a role-derived agent or
+// connector can be taken away from ONE user without unassigning the role. See
+// ADR-0014, ADR-0019.
 export const roleAgentGrants = pgTable(
   "role_agent_grants",
   {
@@ -501,6 +508,55 @@ export const roleConnectorGrants = pgTable(
   (t) => [uniqueIndex("role_connector_grants_role_connector_uq").on(t.roleId, t.connectorId)],
 );
 
+// ADR-0019 — the AGENT/CONNECTOR twins of the MCP `revocations` table, closing
+// pillar 1's "role builder + PER-USER OVERRIDE" promise for the two object
+// types that had no subtractive override. Unlike the MCP revocation (which is
+// role-only, because a direct MCP grant is itself the per-user override), an
+// agent/connector revocation is TOTAL for that (user, object): it beats a
+// direct grant AND every role-derived grant, because the UNION-MAX composition
+// of ADR-0014 otherwise leaves an admin no way to subtract one object from one
+// user. A revocation can ONLY ever turn an allow into a deny — the kernel
+// consults it strictly on the allow path, so it can never rescue an ungranted
+// call. Deleting the row reverses the override, exactly like `revocations`.
+export const agentRevocations = pgTable(
+  "agent_revocations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    /** admin's free-text justification — audit prose only, never a policy input */
+    reason: text("reason"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("agent_revocations_user_agent_uq").on(t.userId, t.agentId),
+    index("agent_revocations_user_idx").on(t.userId),
+  ],
+);
+
+export const connectorRevocations = pgTable(
+  "connector_revocations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    connectorId: uuid("connector_id")
+      .notNull()
+      .references(() => connectors.id, { onDelete: "cascade" }),
+    reason: text("reason"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("connector_revocations_user_connector_uq").on(t.userId, t.connectorId),
+    index("connector_revocations_user_idx").on(t.userId),
+  ],
+);
+
 // EPIC-03 workflow engine (WORKFLOW_ENGINE_SPEC.md). Templates are the
 // declarative §3 definitions; instances snapshot their merged definition at
 // start so a template edit never mutates an in-flight run.
@@ -527,6 +583,12 @@ export const workflowAssignmentRules = pgTable("workflow_assignment_rules", {
   // never a client-supplied value.
   targetSystem: text("target_system"),
   initiatorRole: text("initiator_role"),
+  // ADR-0018 addendum (ADR-0019): the 6th and final dim. SERVER-RESOLVED like
+  // initiator_role — matched against the compliance classification tags of the
+  // change's attributed project (the same source effectiveCompliancePolicy
+  // cascades from), never a client-supplied value. No project / no
+  // classifications = matches as absent.
+  dataSensitivity: text("data_sensitivity"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

@@ -1,5 +1,7 @@
 import {
+  agentRevocations,
   and,
+  connectorRevocations,
   eq,
   inArray,
   revocations,
@@ -15,6 +17,8 @@ import {
   type Db,
 } from "@regulait/db";
 import type {
+  AgentRevocation,
+  ConnectorRevocation,
   Entitlements,
   RoleAgentGrant,
   RoleConnectorGrant,
@@ -163,5 +167,44 @@ export async function loadRoleConnectorGrants(
     connectorId: g.connectorId,
     mode: g.mode,
     allowedObjects: g.allowedObjects,
+  }));
+}
+
+/**
+ * ADR-0019 per-user AGENT revocations. The subtractive half of the entitlement
+ * picture, loaded beside loadRoleAgentGrants at EVERY evaluateAgent site — a
+ * revocation honoured on direct invoke but not in orchestration would be a
+ * security hole, so the two loaders always travel together. Returns [] when the
+ * user has no revocations, which makes the kernel call byte-identical to the
+ * pre-ADR-0019 behaviour.
+ */
+export async function loadAgentRevocations(db: Db, userId: string): Promise<AgentRevocation[]> {
+  const rows = await db
+    .select()
+    .from(agentRevocations)
+    .where(eq(agentRevocations.userId, userId));
+  return rows.map((r) => ({
+    id: r.id,
+    userId: r.userId,
+    agentId: r.agentId,
+    reason: r.reason,
+  }));
+}
+
+/** ADR-0019 per-user CONNECTOR revocations — the connector twin of
+ * loadAgentRevocations, same discipline. */
+export async function loadConnectorRevocations(
+  db: Db,
+  userId: string,
+): Promise<ConnectorRevocation[]> {
+  const rows = await db
+    .select()
+    .from(connectorRevocations)
+    .where(eq(connectorRevocations.userId, userId));
+  return rows.map((r) => ({
+    id: r.id,
+    userId: r.userId,
+    connectorId: r.connectorId,
+    reason: r.reason,
   }));
 }

@@ -56,3 +56,37 @@ request body, any caller could self-route onto (or away from) a stricter templat
 - **Negative / deferred:** data-sensitivity remains a 6th, unwired dim pending a per-change
   sensitivity signal; initiator-role matches on role NAME (a rename would need rule updates), an
   acceptable trade for keeping the kernel subject-free.
+
+---
+
+## Addendum — 2026-07-30 (the matrix is complete: 6/6 wired)
+
+Decision point 4 above deferred `data_sensitivity` on the reasoning that "there is no per-change
+data-sensitivity signal to match on yet". That reasoning was wrong, and [ADR-0019](0019-per-user-revocation-and-full-attribution.md)
+corrects it: a change attributed to a project inherits that project's **compliance classification
+tags**, and those tags are exactly what `effectiveCompliancePolicy` already cascades from. There was
+a signal — it just lived one hop away, on the project rather than on the change descriptor.
+
+- **The 6th dim is wired** (migration 0036): a nullable `data_sensitivity` column on
+  `workflow_assignment_rules`, `dataSensitivity` on the kernel's `AssignmentRule`, and
+  `dataSensitivities?: string[]` on `ChangeDescriptor`. A rule matches when its `dataSensitivity` is
+  one of the change's sensitivities — the same one-value-against-a-list shape `initiatorRole` uses.
+  The "a rule with no conditions matches nothing" guard now includes it.
+- **Server-resolved, exactly like `initiatorRole`.** The gateway reads the ATTRIBUTED project's
+  `classifications` at instance start and injects them; `changeDescriptorSchema` deliberately does
+  **not** accept `dataSensitivity`/`dataSensitivities`, so a client cannot assert a sensitivity to
+  self-route onto (or away from) a stricter template. Covered by a gateway e2e that sends one in the
+  body and proves it is ignored.
+- **Absent means absent.** No project, or a project with no classifications, yields `[]` — a
+  sensitivity-scoped rule simply does not fire. No sensitivity is ever invented, and no default
+  ("internal", "public", …) is assumed on a change's behalf.
+- **Admin UI:** the Workflows tab's rule form gains a data-sensitivity picker populated from the
+  existing compliance profiles (so an admin cannot type a tag no profile defines, and therefore no
+  project could carry), the condition summary renders it, and the "a sixth dim stays deferred" note
+  is replaced with an accurate description of all six.
+
+**Status of the matrix: 6 of 6 dims wired** — path, change type, environment, target system,
+initiator role, data sensitivity. The last two are server-authoritative; the first four are
+legitimate client-supplied change attributes. Nothing about this dimension remains deferred. The
+name/tag-matching trade-off noted in the original Consequences now applies to `dataSensitivity` too:
+renaming a compliance tag requires updating the rules that reference it.

@@ -217,6 +217,14 @@ export interface ChangeDescriptor {
    * kernel stays subject-free. A rule's initiatorRole matches when it is one of
    * these. Absent/empty = the user holds no roles. */
   initiatorRoles?: string[];
+  /** ADR-0018 addendum (ADR-0019) — the 6th and final dim: the data-sensitivity
+   * markers of the change, resolved SERVER-SIDE by the gateway from the
+   * attributed project's compliance classification tags (the same source the
+   * §8.3 cascade reads) and passed in so the kernel stays subject-free. A
+   * rule's dataSensitivity matches when it is one of these. Absent/empty = the
+   * change carries no server-known sensitivity — a sensitivity-scoped rule
+   * simply does not fire (no invented sensitivity). */
+  dataSensitivities?: string[];
 }
 
 export interface AssignmentRule {
@@ -230,6 +238,11 @@ export interface AssignmentRule {
   targetSystem: string | null;
   /** ADR-0018 §4 dim: the role the initiating user must hold for this rule */
   initiatorRole: string | null;
+  /** ADR-0018 addendum §4 dim: the data-sensitivity tag the change's project
+   * must carry for this rule. Optional on the interface so a caller built
+   * before the 6th dim (an older fixture) still type-checks and behaves as
+   * unconstrained. */
+  dataSensitivity?: string | null;
 }
 
 function pathMatches(pattern: string, path: string): boolean {
@@ -269,12 +282,22 @@ export function matchTemplates(
       !(change.initiatorRoles ?? []).includes(rule.initiatorRole)
     )
       continue;
+    // ADR-0018 addendum: the 6th dim. Server-resolved on both sides — the rule
+    // names one sensitivity tag, the change carries the tags its project is
+    // classified with. No project / no classifications = no match (absent).
+    const dataSensitivity = rule.dataSensitivity ?? null;
+    if (
+      dataSensitivity !== null &&
+      !(change.dataSensitivities ?? []).includes(dataSensitivity)
+    )
+      continue;
     if (
       rule.pathPattern === null &&
       rule.changeType === null &&
       rule.environment === null &&
       rule.targetSystem === null &&
-      rule.initiatorRole === null
+      rule.initiatorRole === null &&
+      dataSensitivity === null
     )
       continue; // a rule with no conditions matches nothing rather than everything
     if (!matched.includes(rule.templateId)) matched.push(rule.templateId);
