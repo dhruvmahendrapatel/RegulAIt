@@ -705,8 +705,37 @@ dev-grade, NOT production. The user then directed the four remaining open-item a
 pillar-3 infra-ops AUTOMATION (drift/CVE/cert/backup — the operational half beyond the §8.2
 governed-ops layer), clearing the ADR-0015/0016 + pillar-2 deferrals, and a deeper UX/a11y pass.
 
-**IDE / existing-agent interception identified as a SCOPE gap, 2026-07-30 (planning only, no code —
-ROADMAP Batch H).** The owner raised that most developers use AI agents inside VS Code / Cursor /
+**Batch H SHIPPED — IDE interception is real, 2026-07-30 (migration 0037, ADR-0020).** The plan
+below became code the same day, on the owner's "whatever is most comprehensive — need to give
+options for the admins to choose from what to use on their end." Two provider-shaped
+**translation shims** over the ONE governed dispatch core: `POST /v1/messages` (Anthropic shape,
+also accepting `x-api-key`, so `ANTHROPIC_BASE_URL`-based tools like Claude Code just work) and
+`POST /v1/chat/completions` (OpenAI shape, for Cursor/Cline/Roo/Continue/Zed), both with real
+provider-native SSE. THE INVARIANT, tested against `/invoke` as a control: **the compat surface
+creates NO privilege path** — an unentitled user is 403 on both, a revocation denies through them,
+and an unresolvable model is 403 default-deny that writes ZERO usage rows, never a silent
+pass-through to the vendor. Everything is an ADMIN CHOICE (migration 0037's singleton
+`interception_settings`): which surfaces exist (`anthropic_compat_enabled` / `openai_compat_enabled`
+default **FALSE**, `mcp_interception_enabled` default true and genuinely wired — false 404s the MCP
+proxy too); `resolution_mode` (`map_by_model` | `require_agent` | `router_decides`, the owner's
+decision that the admin picks rather than us); declared `enforcement_posture` (observe | voluntary |
+managed | key_custody | network, driving honest honor-system warnings in the UI); and
+`require_project_attribution`, the admin's lever to guarantee pillar-5 coverage by rejecting
+unattributed calls. A disabled surface returns **404, not 501** — we never advertise something the
+admin declined. New admin "Client Access" tab (Identity & Access) with a per-client config
+generator built from `location.origin` and an honest coverage table naming Copilot and Eclipse as
+NOT covered. Unsupported request fields **fail loudly with a 400 naming the field** rather than
+being silently dropped (`temperature` included — `ModelDispatchRequest` cannot carry it, so real
+clients that send it unconditionally will 400; documented). Streams open LAZILY so a PII-input
+block or budget gate raised inside dispatch still returns a real HTTP error rather than a 200
+carrying a failure. `docs/product/IDE_INTEGRATION.md` written. Gateway 386 → **426** (40 new).
+**Honest limit, restated in ADR-0020:** this makes interception real but NOT universal — at the
+`voluntary` rung it is an honor system, and `CLAUDE.md`/`VISION.md` still promise governance over
+"every agent/model call" on the assumption calls arrive at us. Key custody is the cheapest
+non-bypassable rung and is policy, not code. Those two files deliberately NOT edited — owner's text.
+
+**IDE / existing-agent interception identified as a SCOPE gap, 2026-07-30 (planning — the batch
+above is the implementation; ROADMAP Batch H).** The owner raised that most developers use AI agents inside VS Code / Cursor /
 JetBrains rather than through a governed portal, and RegulAIt never accounted for it. This is a hole
 in the product thesis, not the backlog: every spec in `docs/product/` governs agents that come **to**
 our gateway, so a developer running Copilot never touches it and the governance is invisible to

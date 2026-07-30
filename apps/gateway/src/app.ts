@@ -78,6 +78,14 @@ export interface BuildAppOptions {
 import { z } from "zod";
 import { registerMcpProxy } from "./mcp-proxy.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
+import {
+  API_KEY_HEADER_ROUTES,
+  interceptionSurfaceEnabled,
+  notFoundBody,
+  registerInterceptionRoutes,
+} from "./compat-core.js";
+import { registerAnthropicCompat } from "./compat-anthropic.js";
+import { registerOpenAiCompat } from "./compat-openai.js";
 import { registerConversationRoutes } from "./conversations.js";
 import { applyProjectApprovalDecision, registerProjectRoutes } from "./projects.js";
 import { applyInfraApprovalDecision, registerInfraRoutes } from "./infra.js";
@@ -138,12 +146,35 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "/",
     "/health",
   ]);
+  // ADR-0020 INTERCEPTION GATE. Runs in the onRequest phase — BEFORE auth — so
+  // a surface the admin has not enabled answers Fastify's own 404 body and is
+  // indistinguishable from a route that was never registered. Doing this after
+  // auth would leak the surface's existence via a 401. Only the three
+  // interception routes are consulted; every other route short-circuits with no
+  // query at all.
+  app.addHook("onRequest", async (req, reply) => {
+    const route = `${req.method} ${req.routeOptions.url ?? ""}`;
+    const enabled = await interceptionSurfaceEnabled(db, route);
+    if (enabled === false) {
+      return reply.status(404).send(notFoundBody(req.method, req.url));
+    }
+  });
+
   app.addHook("preHandler", async (req, reply) => {
     if (AUTH_EXEMPT_ROUTES.has(req.routeOptions.url ?? "")) {
       req.authCtx = { userId: null, isAdmin: false, via: "api-key" };
       return;
     }
-    const ctx = await authenticate(db, opts.bootstrapToken, req.headers.authorization);
+    // ADR-0020: the Anthropic-shaped compat endpoint additionally accepts the
+    // key in `x-api-key`, because that is the header Anthropic clients send.
+    // It is the SAME RegulAIt API key resolved by the SAME authenticate() —
+    // a second header name, never a second credential or a weaker path.
+    let authorization = req.headers.authorization;
+    if (!authorization && API_KEY_HEADER_ROUTES.has(`${req.method} ${req.routeOptions.url ?? ""}`)) {
+      const alt = req.headers["x-api-key"];
+      if (typeof alt === "string" && alt.length > 0) authorization = `Bearer ${alt}`;
+    }
+    const ctx = await authenticate(db, opts.bootstrapToken, authorization);
     if (!ctx) return reply.status(401).send({ error: "unauthenticated" });
     req.authCtx = ctx;
   });
@@ -156,6 +187,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "GET /v1/users/:userId/servers/:serverId/tools",
     "POST /mcp/:serverId",
     "POST /v1/agents/:agentId/invoke",
+    // ADR-0020: the provider-shaped compatibility surfaces are the DEVELOPER's
+    // path — a non-admin calling from their IDE — exactly like the MCP proxy
+    // above. Their governance is the ordinary evaluateAgent entitlement check
+    // inside the shim, not admin-ness. The interception SETTINGS endpoints are
+    // deliberately NOT here: writing the posture stays admin-only.
+    "POST /v1/messages",
+    "POST /v1/chat/completions",
     "POST /v1/connectors/:connectorId/invoke",
     "POST /v1/conversations",
     "GET /v1/conversations",
@@ -1177,6 +1215,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerWorkflowRoutes(app, db, { dataKey: opts.dataKey });
 
   registerMcpProxy(app, db);
+
+  // ADR-0020 (Batch H) — IDE / existing-agent interception. The two
+  // provider-shaped shims are OFF by default and gated by the onRequest hook
+  // above; the settings routes that flip them are admin-only.
+  registerInterceptionRoutes(app, db);
+  registerAnthropicCompat(app, db, { dataKey: opts.dataKey });
+  registerOpenAiCompat(app, db, { dataKey: opts.dataKey });
 
   app.get("/v1/audit", async (req) => {
     const { userId } = auditQuery.parse(req.query);
