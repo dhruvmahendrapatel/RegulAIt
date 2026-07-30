@@ -279,6 +279,9 @@ describe("multimodal attachments: image/document content blocks", () => {
     });
     await provider.dispatch({
       model: "claude-opus-5",
+      // `input` is required by the contract but ignored whenever `messages` is
+      // present (the newest turn rides inside `messages`); "" documents that.
+      input: "",
       messages: [
         {
           role: "user",
@@ -290,7 +293,7 @@ describe("multimodal attachments: image/document content blocks", () => {
         },
       ],
     });
-    const blocks = (captured as { messages: { content: unknown[] }[] }).messages[0].content;
+    const blocks = (captured! as { messages: { content: unknown[] }[] }).messages[0]!.content;
     expect(blocks).toEqual([
       { type: "text", text: "what's in these?" },
       { type: "image", source: { type: "base64", media_type: "image/png", data: IMG64 } },
@@ -302,6 +305,7 @@ describe("multimodal attachments: image/document content blocks", () => {
     const mock = new MockModelProvider();
     const res = await mock.dispatch({
       model: "mock-1",
+      input: "",
       messages: [
         {
           role: "user",

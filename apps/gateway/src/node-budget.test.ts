@@ -43,11 +43,11 @@ const mkNode = (id: string, agentId: string, extra: Record<string, unknown> = {}
   estimate: { in: 100_000, out: 100_000 }, ...extra,
 });
 async function createRun(name: string, nodes: unknown[]) {
-  return app.inject({ method: "POST", headers: benAuth, url: "/v1/runs",
+  return await app.inject({ method: "POST", headers: benAuth, url: "/v1/runs",
     payload: { graph: { run: name, escalationApproverUserId: approverId, nodes } } });
 }
-async function event(runId: string, body: unknown) {
-  return app.inject({ method: "POST", headers: benAuth, url: `/v1/runs/${runId}/events`, payload: body });
+async function event(runId: string, body: Record<string, unknown>) {
+  return await app.inject({ method: "POST", headers: benAuth, url: `/v1/runs/${runId}/events`, payload: body });
 }
 
 beforeAll(async () => {
