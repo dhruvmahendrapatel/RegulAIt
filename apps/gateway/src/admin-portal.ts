@@ -266,11 +266,15 @@ async function downloadCsv(path, filename) {
 // --- §6's eight functional surfaces + the §10.4 cost surface -------------
 const TABS = [
 ["Users", async (el) => {
-  const [u, rev, srv, k] = await Promise.all([
+  const [u, rev, srv, k, ag, cn] = await Promise.all([
     get("/v1/users"), get("/v1/revocations"), get("/v1/servers"), get("/v1/keys"),
+    // ADR-0019: the agent/connector catalogs, so the two new revocation forms
+    // name objects instead of asking for UUIDs (like every other grant form).
+    get("/v1/agents"), get("/v1/connectors"),
   ]);
   const tools = await toolIndex(srv.servers);
   const uOpts = userOpts(u.users), sOpts = serverOpts(srv.servers);
+  const aOpts = agentOpts(ag.agents), cOpts = connectorOpts(cn.connectors);
   const email = Object.fromEntries(u.users.map((x) => [x.id, x.email]));
   el.innerHTML = "<h2>Users</h2><div class='card'>"
     + form("f-user", [{name:"email"},{name:"displayName"},{name:"isAdmin",label:"admin",options:["false","true"]}], "Create user")
@@ -287,7 +291,26 @@ const TABS = [
     + "</div>"
     + "<h2>Per-user overrides — revocations, visibly flagged deviations</h2><div class='card'>"
     + form("f-revoke", [{name:"userId",label:"user",options:uOpts},{name:"serverId",label:"server",options:sOpts},{name:"toolName",label:"tool",options:[],req:false}], "Add revocation")
-    + table(rev.revocations) + "</div>";
+    + table(rev.revocations) + "</div>"
+    // ADR-0019: the AGENT/CONNECTOR half of "role builder + per-user override".
+    // Role-bundled agent/connector grants compose additively (ADR-0014), so
+    // without these an admin could only take an object away by unassigning the
+    // whole role. A revocation here is total for that (user, object) and beats
+    // both the direct and the role grant — and it can only ever DENY.
+    + "<h2>Per-user overrides — agent &amp; connector revocations</h2><div class='card'>"
+    + form("f-revpick", [{name:"userId",label:"user",options:uOpts,req:false,ph:"— select a user —"}], "Load revocations")
+    + "<div class='grid2' style='margin-top:10px'>"
+    + "<div>" + form("f-arevoke", [
+        {name:"agentId",label:"agent",options:aOpts},
+        {name:"reason",req:false,ph:"why (optional, recorded)"},
+      ], "Revoke agent") + "</div>"
+    + "<div>" + form("f-crevoke", [
+        {name:"connectorId",label:"connector",options:cOpts},
+        {name:"reason",req:false,ph:"why (optional, recorded)"},
+      ], "Revoke connector") + "</div>"
+    + "</div>"
+    + "<div id='objrevs'><div class='empty'>Select a user to view and edit their agent/connector revocations</div></div>"
+    + "<p class='dim' style='font-size:12px'>A revocation takes ONE agent or connector away from ONE user without touching their roles — it beats both a direct grant and every role-derived grant, and it applies everywhere that user's entitlements are evaluated (direct invoke, decomposition, and every orchestration worker). It can only ever deny: revoking something the user was never granted changes nothing. Lifting the revocation restores whatever the grants already said.</p></div>";
   linkTools("f-revoke", tools);
   // delegate on el (stable during the tab's life) so the handlers survive a
   // dataTable sort/filter/paginate re-render, which rebuilds the button nodes.
@@ -307,10 +330,69 @@ const TABS = [
       if (!confirm("Revoke this API key? The holder can no longer authenticate with it. This cannot be undone.")) return;
       try { await post("/v1/keys/" + revBtn.dataset.revoke + "/revoke", {}); toast("Key revoked", "ok"); render(); }
       catch (ex) { toast(ex.message, "err"); }
+      return;
+    }
+    // ADR-0019: lifting an agent/connector revocation — the override is
+    // independently reversible, exactly like the MCP one.
+    const aLift = e.target.closest("[data-arev]");
+    if (aLift) {
+      try {
+        await del("/v1/users/" + revUserId + "/revocations/agents/" + aLift.dataset.arev);
+        toast("Agent revocation lifted", "ok"); await renderObjRevs();
+      } catch (ex) { toast(ex.message, "err"); }
+      return;
+    }
+    const cLift = e.target.closest("[data-crev]");
+    if (cLift) {
+      try {
+        await del("/v1/users/" + revUserId + "/revocations/connectors/" + cLift.dataset.crev);
+        toast("Connector revocation lifted", "ok"); await renderObjRevs();
+      } catch (ex) { toast(ex.message, "err"); }
     }
   });
   wire("f-user", (d) => post("/v1/users", { ...d, isAdmin: d.isAdmin === "true" }));
   wire("f-revoke", (d) => post("/v1/revocations", { ...d, toolName: d.toolName ?? null }));
+
+  // ADR-0019 per-user agent/connector revocation editor. The picked user is
+  // held in a closure (not the URL) exactly like the Roles tab's active role,
+  // so the two revoke forms and the listing all act on one subject.
+  let revUserId = "";
+  const renderObjRevs = async () => {
+    const host = $("#objrevs");
+    if (!host) return;
+    if (!revUserId) {
+      host.innerHTML = "<div class='empty'>Select a user to view and edit their agent/connector revocations</div>";
+      return;
+    }
+    const [ar, cr] = await Promise.all([
+      get("/v1/users/" + revUserId + "/revocations/agents"),
+      get("/v1/users/" + revUserId + "/revocations/connectors"),
+    ]);
+    host.innerHTML =
+      "<h2>Revoked agents</h2>"
+      + dataTable((ar.revocations ?? []).map((x) => ({
+          id: x.id, agent: x.agentName, reason: x.reason ?? "—", created: x.createdAt,
+        })), { actions: (row) => "<button class='small' data-arev='" + row.id + "'>lift</button>" })
+      + "<h2>Revoked connectors</h2>"
+      + dataTable((cr.revocations ?? []).map((x) => ({
+          id: x.id, connector: x.connectorName, reason: x.reason ?? "—", created: x.createdAt,
+        })), { actions: (row) => "<button class='small' data-crev='" + row.id + "'>lift</button>" });
+  };
+  wire("f-revpick", async (d) => { revUserId = d.userId ?? ""; await renderObjRevs(); }, true);
+  wire("f-arevoke", async (d) => {
+    if (!revUserId) throw new Error("select a user above first");
+    await post("/v1/users/" + revUserId + "/revocations/agents",
+      { agentId: d.agentId, ...(d.reason ? { reason: d.reason } : {}) });
+    toast("Agent revoked for this user", "ok");
+    await renderObjRevs();
+  }, true);
+  wire("f-crevoke", async (d) => {
+    if (!revUserId) throw new Error("select a user above first");
+    await post("/v1/users/" + revUserId + "/revocations/connectors",
+      { connectorId: d.connectorId, ...(d.reason ? { reason: d.reason } : {}) });
+    toast("Connector revoked for this user", "ok");
+    await renderObjRevs();
+  }, true);
 }],
 ["Roles", async (el) => {
   // The Roles page owns the whole role lifecycle: create, assign to users, and
@@ -606,11 +688,16 @@ const TABS = [
   // Pillar 2's admin home: templates (with their stage chain), the assignment
   // rules that route changes to them, and the git connections their
   // git_operation stages execute against.
-  const [t, r, g] = await Promise.all([
+  const [t, r, g, cp] = await Promise.all([
     get("/v1/workflows/templates"),
     get("/v1/workflows/assignment-rules"),
     get("/v1/git/connections").catch(() => ({ connections: [] })),
+    // ADR-0018 addendum: the 6th dim matches a compliance classification tag,
+    // so the picker offers exactly the tags that exist — an admin can never
+    // type a sensitivity no profile defines (and so no project can carry).
+    get("/v1/compliance/profiles").catch(() => ({ profiles: [] })),
   ]);
+  const sensOpts = (cp.profiles ?? []).map((p) => ({ v: p.tag, l: p.tag }));
   const tplName = Object.fromEntries(t.templates.map((x) => [x.id, x.name]));
   const tplOpts = t.templates.map((x) => ({ v: x.id, l: x.name }));
   const rail = (def) => "<div class='stage-rail' style='margin-top:6px'>"
@@ -623,6 +710,7 @@ const TABS = [
     x.environment ? "env " + x.environment : null,
     x.targetSystem ? "target " + x.targetSystem : null,
     x.initiatorRole ? "role " + x.initiatorRole : null,
+    x.dataSensitivity ? "sensitivity " + x.dataSensitivity : null,
   ].filter(Boolean).join(" + ");
   const tplRows = t.templates.map((tpl) => {
     const assigned = r.rules.filter((x) => x.templateId === tpl.id);
@@ -681,12 +769,13 @@ const TABS = [
         {name:"environment",label:"environment",req:false,ph:"e.g. production (optional)"},
         {name:"targetSystem",label:"target system",req:false,ph:"e.g. checkout-svc (optional)"},
         {name:"initiatorRole",label:"initiator role",req:false,ph:"e.g. release-manager (optional)"},
+        {name:"dataSensitivity",label:"data sensitivity",options:sensOpts,req:false,ph:"— any sensitivity —"},
       ], "Add rule")
     + table(r.rules.map((x) => ({
         id: x.id, template: tplName[x.templateId] ?? x.templateId,
         matches: conds(x), created: x.createdAt,
       })), (row) => "<button class='small danger' data-rdel='" + row.id + "'>delete</button>")
-    + "<p class='dim' style='font-size:12px'>Conditions AND together; set at least one. Five dims are wired: path, change type, environment, target system, and initiator role (matched against the initiator's SERVER-derived roles — never a client-supplied value). A sixth dim, data-sensitivity, stays deferred (ADR-0018). Every rule that matches a change contributes its template — the merged flow keeps every sign-off. Deleting a rule stops the routing; in-flight instances keep their snapshotted definition.</p></div>"
+    + "<p class='dim' style='font-size:12px'>Conditions AND together; set at least one. All six dims are now wired: path, change type, environment, target system, initiator role (matched against the initiator's SERVER-derived roles), and data sensitivity (matched against the compliance classifications of the change's attributed project). The last two are server-resolved — never a client-supplied value — so a rule can only fire for a genuine role holder or a genuinely classified project; a change with no project matches as having no sensitivity. Every rule that matches a change contributes its template — the merged flow keeps every sign-off. Deleting a rule stops the routing; in-flight instances keep their snapshotted definition.</p></div>"
     + "<h2>Git connections — what git_operation stages execute against</h2><div class='card'>"
     + form("f-git", [
         {name:"name",ph:"e.g. demo-git"},

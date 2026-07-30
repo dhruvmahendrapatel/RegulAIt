@@ -167,6 +167,25 @@ export const createRevocationSchema = z.object({
   toolName: z.string().min(1).nullable().optional(),
 });
 
+/**
+ * ADR-0019 per-user AGENT/CONNECTOR revocation — the subtractive override that
+ * bounds ADR-0014's additive UNION-MAX role grants. The user is the path
+ * parameter (mirroring the per-user model-credential routes), so the body
+ * carries only the object and an optional admin justification. A revocation is
+ * TOTAL for that (user, object): there is no partial-mode field, because a
+ * narrower entitlement is what editing the grant is for, while a revocation
+ * must be an unambiguous "not for this user".
+ */
+export const createAgentRevocationSchema = z.object({
+  agentId: z.string().uuid(),
+  reason: z.string().min(1).max(500).nullable().optional(),
+});
+
+export const createConnectorRevocationSchema = z.object({
+  connectorId: z.string().uuid(),
+  reason: z.string().min(1).max(500).nullable().optional(),
+});
+
 export const createAgentSchema = z.object({
   name: z.string().min(1),
   provider: z.string().min(1),
@@ -388,7 +407,9 @@ export const changeDescriptorSchema = z.object({
    * or environment name). Client-supplied like the other change attributes. The
    * OTHER new dim — initiatorRole — is deliberately NOT accepted here: it is
    * derived server-side from the authenticated initiator and can never be set by
-   * the client. */
+   * the client. The 6th dim, dataSensitivity, is likewise NOT accepted: it is
+   * derived server-side from the attributed project's compliance
+   * classifications (ADR-0018 addendum / ADR-0019). */
   targetSystem: z.string().min(1).max(200).optional(),
 });
 
@@ -408,10 +429,19 @@ export const createAssignmentRuleSchema = z
      * roles of the initiating user at instance start. */
     targetSystem: z.string().min(1).max(200).nullable().optional(),
     initiatorRole: z.string().min(1).max(200).nullable().optional(),
+    /** ADR-0018 addendum §4 dim (the 6th): a compliance classification tag. Like
+     * initiatorRole it is a plain rule condition here, but matched against the
+     * SERVER-derived classifications of the change's attributed project. */
+    dataSensitivity: z.string().min(1).max(200).nullable().optional(),
   })
   .refine(
     (r) =>
-      r.pathPattern || r.changeType || r.environment || r.targetSystem || r.initiatorRole,
+      r.pathPattern ||
+      r.changeType ||
+      r.environment ||
+      r.targetSystem ||
+      r.initiatorRole ||
+      r.dataSensitivity,
     { message: "an assignment rule needs at least one condition" },
   );
 

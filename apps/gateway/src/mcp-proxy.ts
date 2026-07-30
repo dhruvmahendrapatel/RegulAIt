@@ -18,17 +18,46 @@ import {
   eq,
   mcpServers,
   mcpTools,
+  usageEvents,
   userAgentPolicies,
   type Db,
 } from "@regulait/db";
 import { visibleTools, type Decision, type ToolRef } from "@regulait/policy-kernel";
 import { selectTools } from "@regulait/optimizer-kernel";
 import type { ModelToolDef } from "@regulait/model-provider";
+import type { PiiHit } from "@regulait/shared";
 import { governedEvaluate } from "./governed-evaluate.js";
 import { loadEntitlements } from "./entitlements.js";
+import {
+  assertProjectAttribution,
+  enforcePII,
+  piiCategoryList,
+  piiWithheldMarker,
+  projectPiiMode,
+  type PiiMode,
+} from "./projects.js";
 import { z } from "zod";
 
 const proxyParams = z.object({ serverId: z.string().uuid() });
+/**
+ * ADR-0019 pillar-5 attribution for the MCP entry point. The project rides an
+ * HTTP HEADER rather than the JSON-RPC body, deliberately:
+ *  - the body is the MCP protocol's own envelope; smuggling a RegulAIt field
+ *    into `params` would make our proxy a non-conformant MCP server and would
+ *    have to be re-injected by every client's SDK call site, per tool call;
+ *  - `StreamableHTTPClientTransport` takes `requestInit.headers`, so a client
+ *    sets it ONCE when constructing the transport and every tools/call on that
+ *    session is attributed — which matches how a session belongs to a project;
+ *  - it keeps attribution at the same layer as authorization (the API key is
+ *    already a header), so both are validated before the transport is hijacked.
+ * Absent header = an unattributed call, byte-identical to the pre-ADR-0019
+ * behaviour (no usage row, no PII enforcement — there is no project policy to
+ * enforce).
+ */
+export const PROJECT_HEADER = "x-regulait-project-id";
+const proxyHeaders = z.object({
+  [PROJECT_HEADER]: z.string().uuid().optional(),
+});
 // OPTIMIZATION §8: an optional declared intent for lazy tool-loading. MCP's
 // tools/list carries no request text, so the signal rides on the proxy URL.
 const proxyQuery = z.object({ intent: z.string().max(2000).optional() });
@@ -61,11 +90,23 @@ export async function connectUpstream(url: string): Promise<Client> {
  * core; MCP upstreams authenticate via their registered URL, so it is unused
  * today. */
 export type GovernedToolCallOutcome =
-  | { kind: "allowed"; content: unknown }
+  | { kind: "allowed"; content: unknown; pii?: McpPii; costUsd?: number | null }
   | { kind: "unknown_tool" }
   | { kind: "denied"; decision: Decision }
+  | { kind: "pii_blocked"; reason: string; pii: McpPii }
   | { kind: "approval_required"; approvalId: string; decision: Decision }
   | { kind: "approval_consumed_race"; approvalId: string };
+
+/** §8.4 PII outcome on an MCP tool call. COUNTS ONLY — inputHits/outputHits are
+ * per-category counts, never the matched substrings (the same contract the
+ * model and connector paths hold). */
+export interface McpPii {
+  mode: PiiMode;
+  action: "block" | "warn" | "log";
+  inputHits: PiiHit[];
+  outputHits: PiiHit[];
+  withheld: boolean;
+}
 
 export async function executeGovernedToolCall(
   db: Db,
@@ -80,9 +121,15 @@ export async function executeGovernedToolCall(
      * Only ever narrows — a granted tool outside the ceiling is denied with
      * ruleId `lead-ceiling`, which flows into the audit trail distinctly. */
     ceilingTools?: readonly string[] | null;
+    /** ADR-0019 pillar-5 attribution: the project this tool call bills to. The
+     * CALLER validates it (assertProjectAttribution) before getting here.
+     * null/undefined = unattributed — no usage row and no PII enforcement,
+     * byte-identical to the pre-ADR-0019 behaviour. */
+    projectId?: string | null;
   },
 ): Promise<GovernedToolCallOutcome> {
   const { userId, serverId, toolName } = args;
+  const projectId = args.projectId ?? null;
   const [serverRow] = await db.select().from(mcpServers).where(eq(mcpServers.id, serverId));
   if (!serverRow) return { kind: "unknown_tool" };
 
@@ -161,6 +208,49 @@ export async function executeGovernedToolCall(
       return { kind: "approval_required", approvalId, decision };
     }
 
+    // §8.4 PII ENFORCEMENT (pillar 3), MCP path — the third governed entry
+    // point, now held to the same contract as the model and connector paths.
+    // The effective piiMode comes from the ATTRIBUTED project's compliance
+    // cascade; an unattributed or unclassified call yields null and every check
+    // below is a no-op. The INPUT check runs on the tool ARGUMENTS, before the
+    // approval is consumed and before the upstream is contacted, so a block
+    // executes nothing, consumes no approval and bills nothing.
+    const piiMode: PiiMode | null = projectId ? await projectPiiMode(db, projectId) : null;
+    let inputHits: PiiHit[] = [];
+    if (piiMode) {
+      const chk = enforcePII(piiMode, { input: JSON.stringify(args.arguments ?? null) });
+      inputHits = chk.hits;
+      if (chk.action === "block") {
+        const reason = `input contains PII: ${piiCategoryList(chk.hits)}`;
+        await db.insert(auditLog).values({
+          userId,
+          serverId,
+          toolName,
+          detail: {
+            phase: "pii",
+            // COUNTS ONLY — never the matched substrings
+            pii: { mode: piiMode, action: "block", phase: "input", inputHits: chk.hits, outputHits: [] },
+            projectId,
+          },
+          effect: "deny",
+          ruleId: "pii-blocked",
+          ruleChain: [],
+          reason,
+        });
+        return {
+          kind: "pii_blocked",
+          reason,
+          pii: {
+            mode: piiMode,
+            action: "block",
+            inputHits: chk.hits,
+            outputHits: [],
+            withheld: false,
+          },
+        };
+      }
+    }
+
     if (approvedApprovalId) {
       // Atomically consume the approval; losing the race means another call
       // already spent it, so this call must go back through the queue.
@@ -175,8 +265,100 @@ export async function executeGovernedToolCall(
     }
 
     if (!upstream) upstream = await connectUpstream(serverRow.url);
+    // An upstream FAILURE throws out of here before any metering — a failed
+    // call bills nothing, exactly like a failed model dispatch or connector
+    // invoke.
     const content = await upstream.callTool({ name: toolName, arguments: args.arguments });
-    return { kind: "allowed", content };
+
+    // §8.4 OUTPUT check: the tool already ran, so a block here is BILL-AND-
+    // WITHHOLD — the usage row below records the honest spend, but the result
+    // content is replaced by the withheld marker.
+    let outputHits: PiiHit[] = [];
+    let resultContent: unknown = content;
+    let withheld = false;
+    if (piiMode) {
+      const chk = enforcePII(piiMode, { output: JSON.stringify(content ?? null) });
+      outputHits = chk.hits;
+      if (chk.action === "block") {
+        withheld = true;
+        resultContent = {
+          content: [{ type: "text", text: piiWithheldMarker(chk.hits) }],
+          isError: true,
+        };
+      }
+    }
+    const anyHits = inputHits.length > 0 || outputHits.length > 0;
+    const piiAction: McpPii["action"] = withheld ? "block" : piiMode === "warn" ? "warn" : "log";
+    const pii: McpPii | null =
+      piiMode && anyHits
+        ? { mode: piiMode, action: piiAction, inputHits, outputHits, withheld }
+        : null;
+
+    // PILLAR 5 (ADR-0019): an ALLOWED, EXECUTED, ATTRIBUTED tool call bills the
+    // server's flat per-call list price onto the SAME usage ledger the model and
+    // connector paths write, so MCP spend rolls up in the project dashboard with
+    // no separate reporting path. Unpriced server → null, never an invented
+    // figure. UNATTRIBUTED calls write NOTHING — there is no project to bill,
+    // and back-compat for the existing proxy behaviour is exact.
+    if (projectId) {
+      await db.insert(usageEvents).values({
+        userId,
+        objectType: "mcp_tool",
+        // usage_events has no server column; `operation` carries the tool name
+        // (as it carries the operation on connector rows) and the server id
+        // rides the detail jsonb.
+        operation: toolName,
+        costUsd: serverRow.pricePerCallUsd ?? null,
+        projectId,
+        detail: {
+          serverId,
+          toolName,
+          // §8.4 COUNTS ONLY — never the matched substrings
+          ...(pii ? { pii: { mode: pii.mode, action: pii.action, inputHits, outputHits } } : {}),
+        },
+      });
+    }
+    // §8.4 audit rows for a PII event (never for a clean payload): an OUTPUT
+    // block is a deny; a warn is an allow with 'pii-warned'; log stays silent
+    // (its counts are already in the usage detail above).
+    if (withheld) {
+      await db.insert(auditLog).values({
+        userId,
+        serverId,
+        toolName,
+        detail: {
+          phase: "pii",
+          pii: { mode: piiMode, action: "block", phase: "output", inputHits, outputHits },
+          projectId,
+        },
+        effect: "deny",
+        ruleId: "pii-blocked",
+        ruleChain: [],
+        reason: `output contains PII: ${piiCategoryList(outputHits)} — billed and withheld`,
+      });
+    } else if (piiMode === "warn" && anyHits) {
+      await db.insert(auditLog).values({
+        userId,
+        serverId,
+        toolName,
+        detail: {
+          phase: "pii",
+          pii: { mode: piiMode, action: "warn", inputHits, outputHits },
+          projectId,
+        },
+        effect: "allow",
+        ruleId: "pii-warned",
+        ruleChain: [],
+        reason: `PII detected (${piiCategoryList([...inputHits, ...outputHits])}) — warned, tool call proceeded`,
+      });
+    }
+
+    return {
+      kind: "allowed",
+      content: resultContent,
+      ...(pii ? { pii } : {}),
+      ...(projectId ? { costUsd: serverRow.pricePerCallUsd ?? null } : {}),
+    };
   } finally {
     await closeUpstream();
   }
@@ -286,6 +468,29 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
       return reply.status(404).send({ error: "unknown_server" });
     }
 
+    // ADR-0019 pillar-5 attribution. Validated EXACTLY like the invoke paths
+    // validate `projectId` — a malformed id is 400, and a project the caller
+    // may not bill to is 403 — and validated HERE, before the reply is hijacked
+    // into an MCP transport, so the caller gets an ordinary HTTP error rather
+    // than a JSON-RPC one. No header = unattributed = today's behaviour.
+    let projectId: string | null = null;
+    const headerParse = proxyHeaders.safeParse(req.headers);
+    if (!headerParse.success) {
+      return reply.status(400).send({ error: "invalid_project_id" });
+    }
+    projectId = headerParse.data[PROJECT_HEADER] ?? null;
+    if (projectId) {
+      const attribution = await assertProjectAttribution(
+        db,
+        projectId,
+        userId,
+        req.authCtx.isAdmin,
+      );
+      if (!attribution.ok) {
+        return reply.status(attribution.status).send({ error: attribution.error });
+      }
+    }
+
     const upstream = await connectUpstream(serverRow.url);
 
     const proxy = new Server(
@@ -351,6 +556,7 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
         serverId,
         toolName,
         arguments: request.params.arguments,
+        projectId,
       });
 
       switch (outcome.kind) {
@@ -361,6 +567,10 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
             ErrorCode.InvalidRequest,
             `Denied by policy: ${outcome.decision.reason}`,
           );
+        // §8.4 input block: denied pre-call, nothing executed, nothing billed.
+        // The message names CATEGORIES only, never the matched content.
+        case "pii_blocked":
+          throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${outcome.reason}`);
         case "approval_required": {
           // name the approver by display name when the kernel carried one — the
           // approval id keeps the full UUID (a caller retries with it)

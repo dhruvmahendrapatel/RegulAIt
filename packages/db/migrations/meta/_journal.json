@@ -253,6 +253,13 @@
       "when": 1784971000000,
       "tag": "0035_assignment_rule_dims",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1784972000000,
+      "tag": "0036_per_user_revocations_mcp_attribution",
+      "breakpoints": true
     }
   ]
 }

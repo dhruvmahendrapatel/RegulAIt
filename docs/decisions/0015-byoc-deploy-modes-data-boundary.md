@@ -96,3 +96,28 @@ explicitly defers the one remaining item (A4) with its design.
     scope restrictions (e.g. air-gapped forbidding certain data scopes); enforce the tightest of
     {global floor, framework floor, per-mode override} at prune time. This is a migration + policy
     change, out of scope for a UI/adapter cleanup, and is left for a dedicated slice.
+
+---
+
+## Addendum — 2026-07-30 (A4 re-assessed, still deferred — sharper reasoning)
+
+A4 was re-examined fresh during the ADR-0019 governance batch, including the cheapest-looking
+option (deriving a deploy mode at prune time instead of adding a column). It was deliberately NOT
+implemented, and the original "needs a schema change" note is superseded by three concrete findings
+recorded in [ADR-0019](0019-per-user-revocation-and-full-attribution.md) §5:
+
+1. There is nothing to derive a mode FROM. The deploy executor writes the target's mode into the
+   **workflow instance's `context`**, never into an audit row — and >99% of `audit_log` rows (tool
+   calls, agent invokes, connector calls, approvals, membership changes) have no deployment mode at
+   all. Mode-aware retention over such a table is a special case, not a policy.
+2. The only safe cascade composition is a no-op. MIN would **shorten** retention and delete audit
+   evidence earlier than a framework requires — never acceptable. MAX (longest-floor-wins) is safe
+   but adds nothing over raising the existing global floor, which is what ships today.
+3. A4's real value is per-mode **policy**, not retention — and that belongs in pillar 1's
+   rule-scoping model (`scope: user | role | team | fleet` gaining a mode-derived scope), as its own
+   slice with its own ADR.
+
+A4 therefore remains open, with the requirements now stated precisely: a populated
+mode/`deploy_context` dimension on `audit_log` (including an honest story for pre-existing rows that
+have no mode to backfill), a **MAX-only** per-mode retention override so retention can never be
+shortened, and mode-scoped restriction rules in the pillar-1 rule model.

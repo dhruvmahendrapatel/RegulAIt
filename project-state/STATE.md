@@ -1,9 +1,11 @@
 ---
-phase: governance-mvp-in-progress
+phase: eight-pillars-shipped-hardening
 last_updated: 2026-07-30
-active_epics: [EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
+active_epics: []
+completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
 last_session: sessions/2026-07-24-session-02.md
+roadmap: ../docs/product/ROADMAP.md
 ---
 
 # RegulAIt — Project State
@@ -1059,11 +1061,11 @@ with a real in-process upstream MCP server and real MCP client (26 tests total).
 | ID | Name | Status | Related |
 |---|---|---|---|
 | EPIC-01 | Bootstrap: AWS foundation + GitHub repo + session-continuity scaffold | **done** | ADR-0001–0004 |
-| EPIC-02 | Governance layer MVP (now includes infra-ops/compliance-cascade/deploy-model, Shared Projects, cost dashboard — §1–§10) | **in progress** — stack chosen (ADR-0009), first slice = MCP-server governance vertical | GOVERNANCE_LAYER_SPEC.md, ADR-0007, ADR-0009 |
-| EPIC-03 | Workflow engine MVP (now includes optional Design/Architecture sign-off stage type) | **in progress** — first slice merged (PR #9) | WORKFLOW_ENGINE_SPEC.md, ADR-0007 |
-| EPIC-04 | Token/cost optimization MVP (escalated to P0) | **in progress** — routing kernel + cost_events ledger (PR #12), lazy tool-loading (PR #13), §9 workflow cost-sensitivity tag merged; real model dispatch built (model-provider + measured usage_events ledger — savings now measured, not just estimated) | TOKEN_OPTIMIZATION_SPEC.md, ADR-0007 |
-| EPIC-05 | Multi-agent orchestration MVP (PM/Team-Lead/Worker delegation) | **in progress** — slices 1–2 merged (kernel/runs/escalations, §5.2 budget caps); worker-node dispatch merged (PR #18); auto-dispatch merged (PR #19); workflow build-stage nesting built (§8: automated_build spawns a governed nested run) | MULTI_AGENT_ORCHESTRATION_SPEC.md, ADR-0008 |
-| EPIC-06 | PM-tool integration MVP (Azure DevOps/Jira/etc.) | **in progress** — slice 1 merged (PR #15); slices 2–4 built (§5 approval mirroring; §4 decision records; ADR-0010 inbound sync with drift detection) | PM_TOOL_INTEGRATION_SPEC.md, ADR-0008, ADR-0010 |
+| EPIC-02 | Governance layer MVP (§1–§10: MCP/agent/connector governance, infra-ops, compliance cascade, deploy model, Shared Projects, cost dashboard) | **MVP shipped** — all §1–§10 surfaces built and deployed; remaining work is depth, not first-build (see [ROADMAP.md](../docs/product/ROADMAP.md)) | GOVERNANCE_LAYER_SPEC.md, ADR-0007, ADR-0009, ADR-0014 |
+| EPIC-03 | Workflow engine MVP | **MVP shipped** — declarative templates, stage machine, executable git/build/check/deploy/rollback stages, 6-dimension assignment matching | WORKFLOW_ENGINE_SPEC.md, ADR-0007, ADR-0018 |
+| EPIC-04 | Token/cost optimization MVP (escalated to P0) | **MVP shipped** — all seven techniques live (routing, compaction, lazy tool-loading, prompt caching, edit-vs-rewrite, file preprocessing, semantic caching) + a request-batching estimator; savings measured, not just estimated | TOKEN_OPTIMIZATION_SPEC.md, ADR-0007 |
+| EPIC-05 | Multi-agent orchestration MVP (PM/Team-Lead/Worker delegation) | **MVP shipped** — task-graph DAG, governed worker dispatch + auto-advance, tool-using multi-turn workers, transitive entitlement AND budget ceilings | MULTI_AGENT_ORCHESTRATION_SPEC.md, ADR-0008, ADR-0016 |
+| EPIC-06 | PM-tool integration MVP (Azure DevOps/Jira/etc.) | **MVP shipped** — the full adapter matrix (ADO, Jira, Linear, Asana, monday, generic webhook) + approval mirroring, decision records, inbound sync; deferral list is empty | PM_TOOL_INTEGRATION_SPEC.md, ADR-0008, ADR-0010 |
 
 ## Components
 | ID | Name | Status | Related |
@@ -1073,15 +1075,22 @@ with a real in-process upstream MCP server and real MCP client (26 tests total).
 | COMPONENT-03 | GitHub OIDC CI role | Terraform authored, intentionally not wired into main.tf/applied (no workload to deploy yet) | EPIC-01 |
 | COMPONENT-04 | RegulAIt GitHub repo | **live and private**: https://github.com/dhruvmahendrapatel/RegulAIt | EPIC-01 |
 | COMPONENT-05 | Admin portal | **MVP shipped** — single-file API-client portal at /admin (ADR-0012), §6's eight panels + §10.4 cost surface | EPIC-02, ADR-0012 |
-| COMPONENT-06 | Policy/allow-list engine | not started | EPIC-02 |
+| COMPONENT-06 | Policy/allow-list engine (`packages/policy-kernel`) | **shipped** — default-deny kernel over MCP tools, agents, connectors; role grants (UNION-MAX, ADR-0014), per-user revocations, scoped rules, lead ceilings; pure, no I/O | EPIC-02, ADR-0009, ADR-0014 |
 | COMPONENT-07 | Dev demo stack on AWS (`regulait-dev-app`) | **live** — EC2 `i-013c62adc887c76bb`, http://3.237.199.248:3000, dev-grade only; teardown = `terraform destroy` | ADR-0013 |
-| COMPONENT-07 | Workflow orchestrator | not started | EPIC-03 |
+| COMPONENT-10 | Workflow orchestrator (`packages/workflow-kernel` + gateway) | **shipped** — declarative templates, stage state machine, executable git/build/check/deploy/rollback stages, assignment matching | EPIC-03 |
+| COMPONENT-11 | Orchestration engine (`packages/orchestration-kernel` + gateway) | **shipped** — task-graph DAG, PM/Team-Lead/Worker delegation, transitive entitlement + budget ceilings | EPIC-05, ADR-0016 |
+| COMPONENT-12 | Optimizer (`packages/optimizer-kernel`) | **shipped** — all seven pillar-6 techniques (routing, compaction, lazy tools, prompt caching, edit-vs-rewrite, file preprocessing, semantic caching + batching estimator) | EPIC-04 |
+| COMPONENT-13 | Provider packages (model / pm / git / connector / infra) | **partial** — model + PM matrices complete; git is GitHub-only, infra-ops mock-only, several connector kinds 501. See [ROADMAP.md](../docs/product/ROADMAP.md) | — |
+| COMPONENT-14 | End-user app (`/app`) | **shipped** — playground, runs, workflows, inbox, projects, spend | EPIC-02 |
 | COMPONENT-08 | caveman (output token compression, Claude Code plugin) | **installed**, user scope, no restrictions (verified fully local) | ADR-0005 |
 | COMPONENT-09 | graphify (code knowledge graph, Claude Code skill) | **installed**, project scope, restricted to `--code-only` (verified) | ADR-0005 |
 
 ## Decisions
-See [docs/decisions/README.md](../docs/decisions/README.md) for the full ADR index. All nine
-ADRs (0001–0009) are Accepted. ADR-0009 (2026-07-24) chose the product stack: TypeScript
+See [docs/decisions/README.md](../docs/decisions/README.md) for the full ADR index — that index is
+the authority on how many exist and their status; do not restate a count here (this line claimed
+"all nine ADRs" long after there were eighteen). All ADRs to date are Accepted; superseding a
+decision means a new ADR plus a status flip on the old one, never an edit in place.
+ADR-0009 (2026-07-24) chose the product stack: TypeScript
 end-to-end — Fastify gateway + official MCP SDK, hand-rolled pure policy kernel (typed
 `Decision` object, no OPA/Cedar), Postgres + Drizzle, pnpm-workspace monorepo
 (`apps/gateway`, `packages/policy-kernel`, `packages/db`, `packages/shared`).

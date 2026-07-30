@@ -3,11 +3,13 @@ import {
   and,
   desc,
   eq,
+  agentRevocations,
   agents,
   apiKeys,
   approvalRules,
   approvals,
   auditLog,
+  connectorRevocations,
   connectors,
   dataScopeRules,
   inArray,
@@ -37,9 +39,11 @@ import {
 import { visibleTools, type ToolRef } from "@regulait/policy-kernel";
 import {
   assignRoleSchema,
+  createAgentRevocationSchema,
   createApiKeySchema,
   createApprovalRuleSchema,
   createDataScopeRuleSchema,
+  createConnectorRevocationSchema,
   createRateLimitSchema,
   createRevocationSchema,
   createRoleAgentGrantSchema,
@@ -543,6 +547,98 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       .delete(revocations)
       .where(eq(revocations.id, revocationId))
       .returning({ id: revocations.id });
+    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_revocation" });
+    return { removed: true };
+  });
+
+  // --- ADR-0019: per-user AGENT / CONNECTOR revocations -------------------
+  // Pillar 1 promises "role builder + per-user override". Role-bundled agent
+  // and connector grants (ADR-0014) composed additively with no way to subtract
+  // one object from one user — an admin could only unassign the whole role.
+  // These four writes close that hole. Admin-only (deliberately NOT in
+  // NON_ADMIN_ROUTES): a subtractive override on someone else's entitlement is
+  // an administrative act. Deleting the row reverses it, exactly like the MCP
+  // revocation routes above. The kernel consults revocations on the allow path
+  // ONLY, so creating one can never grant anything.
+
+  const revocationUserParam = z.object({ userId: z.string().uuid() });
+  const revocationIdParams = z.object({
+    userId: z.string().uuid(),
+    revocationId: z.string().uuid(),
+  });
+
+  app.post("/v1/users/:userId/revocations/agents", async (req, reply) => {
+    const { userId } = revocationUserParam.parse(req.params);
+    const body = createAgentRevocationSchema.parse(req.body);
+    const [row] = await db
+      .insert(agentRevocations)
+      .values({ userId, agentId: body.agentId, reason: body.reason ?? null })
+      .returning();
+    return reply.status(201).send(row);
+  });
+
+  app.get("/v1/users/:userId/revocations/agents", async (req) => {
+    const { userId } = revocationUserParam.parse(req.params);
+    const rows = await db
+      .select({
+        id: agentRevocations.id,
+        userId: agentRevocations.userId,
+        agentId: agentRevocations.agentId,
+        agentName: agents.name,
+        reason: agentRevocations.reason,
+        createdAt: agentRevocations.createdAt,
+      })
+      .from(agentRevocations)
+      .innerJoin(agents, eq(agentRevocations.agentId, agents.id))
+      .where(eq(agentRevocations.userId, userId));
+    return { revocations: rows };
+  });
+
+  app.delete("/v1/users/:userId/revocations/agents/:revocationId", async (req, reply) => {
+    const { userId, revocationId } = revocationIdParams.parse(req.params);
+    const deleted = await db
+      .delete(agentRevocations)
+      .where(and(eq(agentRevocations.id, revocationId), eq(agentRevocations.userId, userId)))
+      .returning({ id: agentRevocations.id });
+    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_revocation" });
+    return { removed: true };
+  });
+
+  app.post("/v1/users/:userId/revocations/connectors", async (req, reply) => {
+    const { userId } = revocationUserParam.parse(req.params);
+    const body = createConnectorRevocationSchema.parse(req.body);
+    const [row] = await db
+      .insert(connectorRevocations)
+      .values({ userId, connectorId: body.connectorId, reason: body.reason ?? null })
+      .returning();
+    return reply.status(201).send(row);
+  });
+
+  app.get("/v1/users/:userId/revocations/connectors", async (req) => {
+    const { userId } = revocationUserParam.parse(req.params);
+    const rows = await db
+      .select({
+        id: connectorRevocations.id,
+        userId: connectorRevocations.userId,
+        connectorId: connectorRevocations.connectorId,
+        connectorName: connectors.name,
+        reason: connectorRevocations.reason,
+        createdAt: connectorRevocations.createdAt,
+      })
+      .from(connectorRevocations)
+      .innerJoin(connectors, eq(connectorRevocations.connectorId, connectors.id))
+      .where(eq(connectorRevocations.userId, userId));
+    return { revocations: rows };
+  });
+
+  app.delete("/v1/users/:userId/revocations/connectors/:revocationId", async (req, reply) => {
+    const { userId, revocationId } = revocationIdParams.parse(req.params);
+    const deleted = await db
+      .delete(connectorRevocations)
+      .where(
+        and(eq(connectorRevocations.id, revocationId), eq(connectorRevocations.userId, userId)),
+      )
+      .returning({ id: connectorRevocations.id });
     if (deleted.length === 0) return reply.status(404).send({ error: "unknown_revocation" });
     return { removed: true };
   });

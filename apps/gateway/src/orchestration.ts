@@ -58,7 +58,7 @@ import {
   type SkippedCandidate,
 } from "./agents-connectors.js";
 import { executeGovernedToolCall, resolveNodeToolContext } from "./mcp-proxy.js";
-import { loadRoleAgentGrants } from "./entitlements.js";
+import { loadAgentRevocations, loadRoleAgentGrants } from "./entitlements.js";
 import { assertProjectAttribution } from "./projects.js";
 import { mirrorNodeStatus } from "./pm.js";
 import { handleNestedRunCompletion } from "./workflows.js";
@@ -708,6 +708,11 @@ async function dispatchRunNode(
           // §5.1 hard enforcement: even if a tool leaked into context, the lead
           // ceiling denies the call with ruleId `lead-ceiling`.
           ceilingTools: ceiling.toolRefs,
+          // ADR-0019 pillar-5: a worker's tool calls bill to the run's project,
+          // on the same ledger as its model dispatches — the run's projectId was
+          // already attribution-checked when the run was created, so no second
+          // membership check is needed here.
+          projectId: run.projectId ?? null,
         });
         switch (toolOut.kind) {
           case "allowed":
@@ -722,6 +727,18 @@ async function dispatchRunNode(
               isError: true,
             };
             traceStatus = "denied";
+            break;
+          // ADR-0019 §8.4: the run's project is block-mode and the tool
+          // ARGUMENTS carried PII — denied pre-call, nothing billed. Reported
+          // back to the worker by CATEGORY, never by content.
+          case "pii_blocked":
+            block = {
+              type: "tool_result",
+              toolUseId: tc.id,
+              content: `blocked by governance: ${toolOut.reason}`,
+              isError: true,
+            };
+            traceStatus = "pii_blocked";
             break;
           case "approval_required":
             block = {
@@ -887,11 +904,14 @@ async function evaluateNodeOwner(
 ): Promise<{ decision: AgentDecision | null; unknownAgent: boolean }> {
   const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
   if (!agent) return { decision: null, unknownAgent: true };
-  const [grants, roleAgentGrantsForUser, [policy]] = await Promise.all([
+  const [grants, roleAgentGrantsForUser, agentRevocationsForUser, [policy]] = await Promise.all([
     db.select().from(agentGrants).where(eq(agentGrants.userId, userId)),
     // §5 role-bundled grants (ADR-0014) — a worker node running under the
     // initiating user's entitlements must see their role-derived agent grants.
     loadRoleAgentGrants(db, userId),
+    // ADR-0019 — and their per-user revocations, or "inherit never escalate"
+    // would leak: a worker could run an agent the initiating user is denied.
+    loadAgentRevocations(db, userId),
     db.select().from(userAgentPolicies).where(eq(userAgentPolicies.userId, userId)),
   ]);
   let ceilingTier: number | null = null;
@@ -909,6 +929,7 @@ async function evaluateNodeOwner(
       mode,
       agentGrants: grants,
       roleAgentGrants: roleAgentGrantsForUser,
+      agentRevocations: agentRevocationsForUser,
       ceilingTier,
       ceilingAgentIds,
     }),
@@ -1140,14 +1161,18 @@ export async function planRun(
     }
   }
 
-  const [grants, roleAgentGrantsForUser, [policy], agentRows] = await Promise.all([
-    db.select().from(agentGrants).where(eq(agentGrants.userId, userId)),
-    // §5 role-bundled grants (ADR-0014) — the plan-time per-node envelope check
-    // must honour role-derived agent grants, exactly as dispatch/reassign does.
-    loadRoleAgentGrants(db, userId),
-    db.select().from(userAgentPolicies).where(eq(userAgentPolicies.userId, userId)),
-    db.select().from(agents),
-  ]);
+  const [grants, roleAgentGrantsForUser, agentRevocationsForUser, [policy], agentRows] =
+    await Promise.all([
+      db.select().from(agentGrants).where(eq(agentGrants.userId, userId)),
+      // §5 role-bundled grants (ADR-0014) — the plan-time per-node envelope check
+      // must honour role-derived agent grants, exactly as dispatch/reassign does.
+      loadRoleAgentGrants(db, userId),
+      // ADR-0019 — and per-user revocations, so a revoked agent fails the
+      // envelope check at PLAN time rather than surfacing only at dispatch.
+      loadAgentRevocations(db, userId),
+      db.select().from(userAgentPolicies).where(eq(userAgentPolicies.userId, userId)),
+      db.select().from(agents),
+    ]);
     const agentById = new Map(agentRows.map((a) => [a.id, a]));
     let ceilingTier: number | null = null;
     if (policy?.ceilingAgentId) {
@@ -1166,6 +1191,7 @@ export async function planRun(
         mode,
         agentGrants: grants,
         roleAgentGrants: roleAgentGrantsForUser,
+        agentRevocations: agentRevocationsForUser,
         ceilingTier,
         ceilingAgentIds,
       });

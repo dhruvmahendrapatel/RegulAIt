@@ -136,6 +136,48 @@ describe("assignment matching + merge (§4)", () => {
     expect(matchTemplates({ ...holder, changeType: "bugfix" }, r)).toEqual([]);
   });
 
+  // --- ADR-0018 addendum (ADR-0019): the 6th and final dim ---
+
+  it("a data-sensitivity-scoped rule fires only when the change carries that classification", () => {
+    const r: AssignmentRule[] = [
+      { id: "ds", templateId: "tpl-ds", pathPattern: null, changeType: null, environment: null, targetSystem: null, initiatorRole: null, dataSensitivity: "pci" },
+    ];
+    // the gateway resolves these from the attributed project's classifications
+    expect(matchTemplates({ ...change, dataSensitivities: ["internal", "pci"] }, r)).toEqual(["tpl-ds"]);
+    // a differently-classified project does not match
+    expect(matchTemplates({ ...change, dataSensitivities: ["internal"] }, r)).toEqual([]);
+    // ABSENT means absent: an unclassified project, or no project at all, never
+    // matches a sensitivity condition — no sensitivity is ever invented
+    expect(matchTemplates({ ...change, dataSensitivities: [] }, r)).toEqual([]);
+    expect(matchTemplates(change, r)).toEqual([]);
+  });
+
+  it("the 6th dim ANDs with the other five, and an all-null rule still matches nothing", () => {
+    const r: AssignmentRule[] = [
+      { id: "all", templateId: "tpl-all", pathPattern: null, changeType: "feature", environment: null, targetSystem: null, initiatorRole: "release-manager", dataSensitivity: "pci" },
+    ];
+    const full = { ...change, changeType: "feature", initiatorRoles: ["release-manager"], dataSensitivities: ["pci"] };
+    expect(matchTemplates(full, r)).toEqual(["tpl-all"]);
+    expect(matchTemplates({ ...full, dataSensitivities: ["hipaa"] }, r)).toEqual([]);
+
+    const empty: AssignmentRule[] = [
+      { id: "none", templateId: "tpl-none", pathPattern: null, changeType: null, environment: null, targetSystem: null, initiatorRole: null, dataSensitivity: null },
+    ];
+    expect(matchTemplates(full, empty)).toEqual([]);
+  });
+
+  it("an omitted dataSensitivity is unconstrained — a pre-6th-dim rule keeps matching exactly as before", () => {
+    // the field is optional on the interface, so an older fixture/rule that
+    // never mentions it behaves identically (back-compat, not a silent deny)
+    const r: AssignmentRule[] = [
+      { id: "legacy", templateId: "tpl-legacy", pathPattern: null, changeType: "feature", environment: null, targetSystem: null, initiatorRole: null },
+    ];
+    expect(matchTemplates({ ...change, changeType: "feature" }, r)).toEqual(["tpl-legacy"]);
+    expect(
+      matchTemplates({ ...change, changeType: "feature", dataSensitivities: ["pci"] }, r),
+    ).toEqual(["tpl-legacy"]);
+  });
+
   it("merges multiple templates keeping every approval stage, single trigger", () => {
     const stricter: WorkflowDefinition = validateDefinition({
       workflow: "prod-extra",

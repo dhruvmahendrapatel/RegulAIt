@@ -337,6 +337,16 @@ export function enforcePII(
   return { action, hits, phase };
 }
 
+/** ADR-0018 addendum (ADR-0019): a project's compliance classification tags —
+ * the SERVER-AUTHORITATIVE data-sensitivity signal the 6th workflow assignment
+ * dimension matches against. Same source `effectiveCompliancePolicy` cascades
+ * from, so the routing dim and the policy cascade can never disagree. An
+ * unknown or unclassified project yields [] (matches as absent). */
+export async function projectClassifications(db: Db, projectId: string): Promise<string[]> {
+  const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
+  return ((project?.classifications ?? []) as string[]).slice();
+}
+
 /** §8.3 workflow cascade — the ENFORCED consumer. Returns the workflow
  * template ids a project's classifications force into every governed change
  * ("no manual per-control setup"). */
@@ -1705,8 +1715,14 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     // connector spend rolls up automatically without double-counting.
     const agentWhere = and(where, eq(usageEvents.objectType, "agent"));
     const connectorWhere = and(where, eq(usageEvents.objectType, "connector"));
+    // ADR-0019: MCP tool spend is a THIRD object type on the same ledger. It is
+    // already inside `measured`/`byUser` (both span every object type), so this
+    // breakdown only names it — without it, MCP spend would show up as an
+    // unexplained gap between the total and agent+connector.
+    const mcpWhere = and(where, eq(usageEvents.objectType, "mcp_tool"));
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 3600 * 1000);
-    const [[measured], byUser, byAgent, byConnector, byTeam, estimated, [recent]] = await Promise.all([
+    const [[measured], byUser, byAgent, byConnector, byMcpTool, byTeam, estimated, [recent]] =
+      await Promise.all([
       db
         .select({
           events: count(),
@@ -1748,6 +1764,17 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         .leftJoin(connectors, eq(usageEvents.connectorId, connectors.id))
         .where(connectorWhere)
         .groupBy(usageEvents.connectorId, connectors.name, usageEvents.operation),
+      // MCP tool calls: `operation` carries the tool name (usage_events has no
+      // server column; the server id rides the detail jsonb).
+      db
+        .select({
+          toolName: usageEvents.operation,
+          costUsd: sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8`,
+          events: count(),
+        })
+        .from(usageEvents)
+        .where(mcpWhere)
+        .groupBy(usageEvents.operation),
       // Cross-team rollup WITHIN this project: attribute each spending user's
       // cost to the team they contribute under HERE (project_members.teamId),
       // not their home team. A member with no team on this project — or spend
@@ -1833,6 +1860,7 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       byUser,
       byAgent,
       byConnector,
+      byMcpTool,
       byTeam,
       estimatedSavings: estimated,
       budget: {

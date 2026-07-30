@@ -1189,3 +1189,202 @@ describe("rule scoping (pillar 1): fleet/role/team restrictions", () => {
     expect(d.effect).toBe("allow");
   });
 });
+
+// --- ADR-0019: per-user AGENT / CONNECTOR revocations ---------------------
+// The headline invariant, stated once and proved four ways below:
+//   a revocation can ONLY turn an allow into a deny.
+// It beats a direct grant AND a role grant, and it can NEVER rescue an
+// ungranted call — an ungranted call keeps its ORIGINAL default-deny ruleId,
+// because the kernel never even looks at revocations on that path.
+
+import type { AgentRevocation, ConnectorRevocation } from "./index.js";
+
+function agentRevocation(overrides: Partial<AgentRevocation> = {}): AgentRevocation {
+  return { id: "arev-1", userId: USER, agentId: "agent-claude", reason: null, ...overrides };
+}
+
+function connectorRevocation(
+  overrides: Partial<ConnectorRevocation> = {},
+): ConnectorRevocation {
+  return { id: "crev-1", userId: USER, connectorId: CONNECTOR, reason: null, ...overrides };
+}
+
+describe("per-user agent revocation (ADR-0019)", () => {
+  it("(a) a ROLE-granted agent + a revocation denies with ruleId 'agent-revoked'", () => {
+    const d = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "execute",
+      agentGrants: [],
+      roleAgentGrants: [roleAgentGrant()],
+      agentRevocations: [agentRevocation()],
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe("agent-revoked");
+    // the trace names the REVOCATION id, not the grant id
+    expect(d.ruleChain).toContainEqual({
+      rule: "agent-revoked", outcome: "deny", grantId: "arev-1",
+    });
+    // the role grant is still traced as found — the deviation is visible, not silent
+    expect(d.ruleChain).toContainEqual({
+      rule: "role-agent-allow-list", outcome: "allow", grantId: "rag-1",
+    });
+  });
+
+  it("(b) a DIRECT grant + a revocation also denies — a revocation beats both grant kinds", () => {
+    const d = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "execute",
+      agentGrants: [agentGrant()],
+      agentRevocations: [agentRevocation()],
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe("agent-revoked");
+  });
+
+  it("(c) THE INVARIANT: a revocation with NO grant still denies with the ORIGINAL default-deny ruleId — never 'rescued', never re-labelled", () => {
+    const withRevocation = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "execute",
+      agentGrants: [],
+      agentRevocations: [agentRevocation()],
+    });
+    expect(withRevocation.effect).toBe("deny");
+    expect(withRevocation.ruleId).toBe(DEFAULT_DENY_RULE_ID);
+    expect(withRevocation.ruleChain).not.toContainEqual(
+      expect.objectContaining({ rule: "agent-revoked" }),
+    );
+    // and it is byte-identical to the same call with no revocation at all
+    const without = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "execute", agentGrants: [],
+    });
+    expect(withRevocation).toEqual(without);
+  });
+
+  it("(d) NO revocation input is byte-identical to the pre-ADR-0019 evaluation", () => {
+    const before = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "execute", agentGrants: [agentGrant()],
+    });
+    const emptyList = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "execute", agentGrants: [agentGrant()],
+      agentRevocations: [],
+    });
+    expect(emptyList).toEqual(before);
+    // a revocation for a DIFFERENT agent, or a DIFFERENT user, changes nothing
+    const otherAgent = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "execute", agentGrants: [agentGrant()],
+      agentRevocations: [agentRevocation({ agentId: "agent-other" })],
+    });
+    expect(otherAgent).toEqual(before);
+    const otherUser = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "execute", agentGrants: [agentGrant()],
+      agentRevocations: [agentRevocation({ userId: OTHER_USER })],
+    });
+    expect(otherUser).toEqual(before);
+  });
+
+  it("(e) the deny reason names the revocation and carries the admin's stated reason", () => {
+    const d = evaluateAgent({
+      userId: USER, agent: AGENT, mode: "execute",
+      agentGrants: [agentGrant()],
+      agentRevocations: [agentRevocation({ reason: "left the payments team" })],
+    });
+    expect(d.reason).toContain("arev-1");
+    expect(d.reason).toContain("revoked");
+    expect(d.reason).toContain("left the payments team");
+  });
+
+  it("(f) a revocation cannot rescue a platform-disabled agent either — registry check still wins", () => {
+    const d = evaluateAgent({
+      userId: USER, agent: { ...AGENT, enabled: false }, mode: "execute",
+      agentGrants: [agentGrant()],
+      agentRevocations: [agentRevocation()],
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe("agent-registry-enabled");
+  });
+});
+
+describe("per-user connector revocation (ADR-0019)", () => {
+  it("(a) a ROLE-granted connector + a revocation denies with ruleId 'connector-revoked'", () => {
+    const d = evaluateConnector({
+      userId: USER, connectorId: CONNECTOR, operation: "read",
+      connectorGrants: [],
+      roleConnectorGrants: [roleConnectorGrant()],
+      connectorRevocations: [connectorRevocation()],
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe("connector-revoked");
+    expect(d.ruleChain).toContainEqual({
+      rule: "connector-revoked", outcome: "deny", grantId: "crev-1",
+    });
+  });
+
+  it("(b) a DIRECT grant + a revocation also denies — including a readwrite grant", () => {
+    const d = evaluateConnector({
+      userId: USER, connectorId: CONNECTOR, operation: "write",
+      connectorGrants: [connectorGrant({ mode: "readwrite" })],
+      connectorRevocations: [connectorRevocation()],
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe("connector-revoked");
+  });
+
+  it("(c) THE INVARIANT: a revocation with NO grant still denies with the ORIGINAL default-deny ruleId", () => {
+    const withRevocation = evaluateConnector({
+      userId: USER, connectorId: CONNECTOR, operation: "read",
+      connectorGrants: [],
+      connectorRevocations: [connectorRevocation()],
+    });
+    expect(withRevocation.effect).toBe("deny");
+    expect(withRevocation.ruleId).toBe(DEFAULT_DENY_RULE_ID);
+    expect(withRevocation.ruleChain).not.toContainEqual(
+      expect.objectContaining({ rule: "connector-revoked" }),
+    );
+    const without = evaluateConnector({
+      userId: USER, connectorId: CONNECTOR, operation: "read", connectorGrants: [],
+    });
+    expect(withRevocation).toEqual(without);
+  });
+
+  it("(d) NO revocation input is byte-identical to the pre-ADR-0019 evaluation", () => {
+    const before = evaluateConnector({
+      userId: USER, connectorId: CONNECTOR, operation: "read",
+      connectorGrants: [connectorGrant()],
+    });
+    expect(
+      evaluateConnector({
+        userId: USER, connectorId: CONNECTOR, operation: "read",
+        connectorGrants: [connectorGrant()], connectorRevocations: [],
+      }),
+    ).toEqual(before);
+    expect(
+      evaluateConnector({
+        userId: USER, connectorId: CONNECTOR, operation: "read",
+        connectorGrants: [connectorGrant()],
+        connectorRevocations: [connectorRevocation({ connectorId: "connector-other" })],
+      }),
+    ).toEqual(before);
+    expect(
+      evaluateConnector({
+        userId: USER, connectorId: CONNECTOR, operation: "read",
+        connectorGrants: [connectorGrant()],
+        connectorRevocations: [connectorRevocation({ userId: OTHER_USER })],
+      }),
+    ).toEqual(before);
+  });
+
+  it("(e) a revocation bounds ADR-0014's UNION-MAX: a broad role grant beside a narrow direct one is revoked too", () => {
+    // without the revocation the union allows a write via the role grant
+    const allowed = evaluateConnector({
+      userId: USER, connectorId: CONNECTOR, operation: "write",
+      connectorGrants: [connectorGrant({ mode: "read" })],
+      roleConnectorGrants: [roleConnectorGrant({ mode: "readwrite" })],
+    });
+    expect(allowed.effect).toBe("allow");
+    const revoked = evaluateConnector({
+      userId: USER, connectorId: CONNECTOR, operation: "write",
+      connectorGrants: [connectorGrant({ mode: "read" })],
+      roleConnectorGrants: [roleConnectorGrant({ mode: "readwrite" })],
+      connectorRevocations: [connectorRevocation()],
+    });
+    expect(revoked.effect).toBe("deny");
+    expect(revoked.ruleId).toBe("connector-revoked");
+  });
+});
