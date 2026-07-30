@@ -12,6 +12,7 @@
     "seed": "node dist/seed.js"
   },
   "dependencies": {
+    "@aws-sdk/client-sts": "^3.700.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@regulait/db": "workspace:*",
     "@regulait/policy-kernel": "workspace:*",

@@ -25,7 +25,7 @@ import {
   type WorkflowDefinition,
   type WorkflowEvent,
 } from "@regulait/workflow-kernel";
-import { users, gitConnections, deployTargets, orchestrationRuns } from "@regulait/db";
+import { users, roles, roleAssignments, gitConnections, deployTargets, orchestrationRuns } from "@regulait/db";
 import { resolveProvider, GitProviderError } from "@regulait/git-provider";
 import { resolveDeployProvider, DeployProviderError } from "./deploy.js";
 import { validateGraph } from "@regulait/orchestration-kernel";
@@ -808,6 +808,8 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
         pathPattern: body.pathPattern ?? null,
         changeType: body.changeType ?? null,
         environment: body.environment ?? null,
+        targetSystem: body.targetSystem ?? null,
+        initiatorRole: body.initiatorRole ?? null,
       })
       .returning();
     return reply.status(201).send(row);
@@ -839,6 +841,21 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_initiate" });
 
+    // ADR-0018 §4 dim: the INITIATING user's role names are resolved SERVER-SIDE
+    // (never from the request body) and passed on the change descriptor so a
+    // role-scoped assignment rule can only ever fire for a genuine role holder.
+    // The kernel stays subject-free — it just matches these strings.
+    const initiatorRoleRows = await db
+      .select({ name: roles.name })
+      .from(roleAssignments)
+      .innerJoin(roles, eq(roles.id, roleAssignments.roleId))
+      .where(eq(roleAssignments.userId, userId));
+    const initiatorRoles = initiatorRoleRows.map((r) => r.name);
+    // targetSystem is a legitimate client-supplied change attribute; initiatorRoles
+    // is authoritative server truth. A client-sent initiatorRoles could never reach
+    // here — changeDescriptorSchema does not accept it — but rebuild explicitly.
+    const change = { ...body.change, initiatorRoles };
+
     let templateIds: string[];
     if (body.templateId) {
       if (!req.authCtx.isAdmin) {
@@ -850,7 +867,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
         .select()
         .from(workflowAssignmentRules)
         .orderBy(workflowAssignmentRules.createdAt);
-      templateIds = matchTemplates(body.change, rules);
+      templateIds = matchTemplates(change, rules);
     }
     // §8.3 cascade — the ENFORCED consumer: a classified project's required
     // templates are unioned in with no manual per-control setup (and can
@@ -886,7 +903,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
         templateIds,
         definition: merged,
         initiatorUserId: userId,
-        change: body.change,
+        change,
         projectId: body.projectId ?? null,
         state: initialState(merged),
         status: "running",

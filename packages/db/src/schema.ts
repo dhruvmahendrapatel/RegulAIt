@@ -521,6 +521,12 @@ export const workflowAssignmentRules = pgTable("workflow_assignment_rules", {
   pathPattern: text("path_pattern"),
   changeType: text("change_type"),
   environment: text("environment"),
+  // ADR-0018 (§4 6-dim matching): the target system a change lands on, and the
+  // role the initiating user must hold for this rule to apply. initiator_role is
+  // matched against the SERVER-derived roles of the authenticated initiator —
+  // never a client-supplied value.
+  targetSystem: text("target_system"),
+  initiatorRole: text("initiator_role"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

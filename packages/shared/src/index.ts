@@ -384,6 +384,12 @@ export const changeDescriptorSchema = z.object({
   paths: z.array(z.string().min(1)),
   changeType: z.string().min(1),
   environment: z.string().min(1),
+  /** ADR-0018 §4 dim: the target system this change lands on (a service, repo,
+   * or environment name). Client-supplied like the other change attributes. The
+   * OTHER new dim — initiatorRole — is deliberately NOT accepted here: it is
+   * derived server-side from the authenticated initiator and can never be set by
+   * the client. */
+  targetSystem: z.string().min(1).max(200).optional(),
 });
 
 export const createWorkflowTemplateSchema = z.object({
@@ -397,10 +403,17 @@ export const createAssignmentRuleSchema = z
     pathPattern: z.string().min(1).nullable().optional(),
     changeType: z.string().min(1).nullable().optional(),
     environment: z.string().min(1).nullable().optional(),
+    /** ADR-0018 §4 dims: target system + initiator role (a role name). Both are
+     * plain rule conditions; initiatorRole is matched against the SERVER-derived
+     * roles of the initiating user at instance start. */
+    targetSystem: z.string().min(1).max(200).nullable().optional(),
+    initiatorRole: z.string().min(1).max(200).nullable().optional(),
   })
-  .refine((r) => r.pathPattern || r.changeType || r.environment, {
-    message: "an assignment rule needs at least one condition",
-  });
+  .refine(
+    (r) =>
+      r.pathPattern || r.changeType || r.environment || r.targetSystem || r.initiatorRole,
+    { message: "an assignment rule needs at least one condition" },
+  );
 
 export const startInstanceSchema = z.object({
   /** pillar 5: the instance and any nested runs bill to this project */
@@ -542,6 +555,12 @@ export const decompositionPlanSchema = z.object({
         /** §5.1: when this task is itself a LEAD, the tool NAMES a worker under
          * it may call — a ceiling narrowed to the caller's entitled tools. */
         allowedTools: z.array(z.string().min(1).max(128)).optional(),
+        /** §5.2 (B2): a SUGGESTED per-node budget cap in USD the lead proposes
+         * for this task. Optional; carried into the submittable graph as the
+         * node's budgetCapUsd. It is only ever a suggestion — the run's real
+         * authority (the initiator's per-run budget + the transitive ceiling)
+         * still enforces downstream, so a suggested cap can never grant spend. */
+        budgetCapUsd: z.number().positive().optional(),
       }),
     )
     .min(2)

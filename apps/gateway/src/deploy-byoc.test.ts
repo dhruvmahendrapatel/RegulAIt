@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb, runMigrations, type Db } from "@regulait/db";
-import { resolveDeployProvider, DeployProviderError } from "./deploy.js";
+import { resolveDeployProvider, DeployProviderError, type AwsLiveDeployClient } from "./deploy.js";
 import { buildApp } from "./app.js";
 
 /**
@@ -93,6 +93,110 @@ describe("AWS deploy adapter (assume-role shape, dry-run)", () => {
   it("an aws provider without roleArn/region is a clear error", () => {
     const p = resolveDeployProvider({ provider: "aws", roleArn: "", region: "" });
     expect(() => p.deploy("x", null, "seed")).toThrow(DeployProviderError);
+  });
+});
+
+describe("A2 — azure/gcp/kubernetes deploy adapter shapes (deterministic dry-run)", () => {
+  it("azure: deterministic dry-run deploy + rollback, config-missing throws", () => {
+    const p = resolveDeployProvider({ provider: "azure", roleArn: "sub-1234", region: "eastus" });
+    const res = p.deploy("web", "prod", "abcdef1234");
+    expect(res.deployId).toMatch(/^azure_/);
+    expect(res.url).toContain("portal.azure.com");
+    expect(res.detail).toContain("[dry-run]");
+    expect(p.rollback("web", res.deployId).reverted).toBe(res.deployId);
+    expect(() =>
+      resolveDeployProvider({ provider: "azure", roleArn: "", region: "" }).deploy("x", null, "s"),
+    ).toThrow(DeployProviderError);
+  });
+  it("gcp: deterministic dry-run deploy + rollback, config-missing throws", () => {
+    const p = resolveDeployProvider({ provider: "gcp", roleArn: "proj-1234", region: "us-central1" });
+    const res = p.deploy("svc", "prod", "abcdef1234");
+    expect(res.deployId).toMatch(/^gcp_/);
+    expect(res.url).toContain("console.cloud.google.com");
+    expect(res.detail).toContain("[dry-run]");
+    expect(p.rollback("svc", res.deployId).reverted).toBe(res.deployId);
+    expect(() =>
+      resolveDeployProvider({ provider: "gcp", roleArn: "", region: "" }).deploy("x", null, "s"),
+    ).toThrow(DeployProviderError);
+  });
+  it("kubernetes: deterministic dry-run deploy + rollback, missing kubeconfig throws", () => {
+    const p = resolveDeployProvider({ provider: "kubernetes", credential: "kubeconfig-yaml", region: "team-ns" });
+    const res = p.deploy("api", "prod", "abcdef1234");
+    expect(res.deployId).toMatch(/^k8s_/);
+    expect(res.url).toContain("k8s://team-ns/");
+    expect(res.detail).toContain("[dry-run]");
+    expect(p.rollback("api", res.deployId).reverted).toBe(res.deployId);
+    expect(() =>
+      resolveDeployProvider({ provider: "kubernetes", credential: "" }).deploy("x", null, "s"),
+    ).toThrow(DeployProviderError);
+  });
+  it("resolveDeployProvider resolves all five provider kinds", () => {
+    const kinds = ["mock", "aws", "azure", "gcp", "kubernetes"] as const;
+    for (const kind of kinds) {
+      const cfg =
+        kind === "kubernetes"
+          ? ({ provider: kind, credential: "kc" } as const)
+          : ({ provider: kind, roleArn: ROLE, region: "us-east-1" } as const);
+      expect(resolveDeployProvider(cfg).kind).toBe(kind);
+    }
+  });
+});
+
+describe("A1 — real @aws-sdk STS path behind REGULAIT_DEPLOY_LIVE (off by default)", () => {
+  it("flag OFF: the aws adapter is a deterministic dry-run, no live client touched", () => {
+    delete process.env.REGULAIT_DEPLOY_LIVE;
+    let touched = false;
+    const fake: AwsLiveDeployClient = {
+      assumeRole() { touched = true; return { sessionId: "x" }; },
+      deploy() { touched = true; return { deployId: "x", url: "x" }; },
+      rollback() { touched = true; return { reverted: "x" }; },
+    };
+    const p = resolveDeployProvider({ provider: "aws", roleArn: ROLE, region: "us-east-1", awsLiveClient: fake });
+    const res = p.deploy("checkout", "production", "abcdef1234");
+    expect(touched).toBe(false);
+    expect(res.deployId).toMatch(/^aws_sess_/);
+    expect(res.detail).toContain("[dry-run]");
+  });
+
+  it("flag ON: constructs a real AssumeRoleCommand (RoleArn/RoleSessionName/region) against the fake and captures a deploy id — never the network", () => {
+    process.env.REGULAIT_DEPLOY_LIVE = "true";
+    try {
+      const captured: Record<string, unknown> = {};
+      const fake: AwsLiveDeployClient = {
+        assumeRole(command, region) {
+          captured.roleArn = (command.input as { RoleArn?: string }).RoleArn;
+          captured.sessionName = (command.input as { RoleSessionName?: string }).RoleSessionName;
+          captured.duration = (command.input as { DurationSeconds?: number }).DurationSeconds;
+          captured.region = region;
+          return { sessionId: "live-sess-1" };
+        },
+        deploy(params) { captured.deployParams = params; return { deployId: "live-dep-1", url: "https://live/checkout" }; },
+        rollback(params) { captured.rollbackParams = params; return { reverted: params.deployId }; },
+      };
+      const p = resolveDeployProvider({ provider: "aws", roleArn: ROLE, region: "eu-west-1", awsLiveClient: fake });
+      const res = p.deploy("checkout", "production", "seed1234abcd");
+      expect(captured.roleArn).toBe(ROLE);
+      expect(captured.sessionName).toMatch(/^regulait-/);
+      expect(captured.duration).toBe(3600);
+      expect(captured.region).toBe("eu-west-1");
+      expect(res.deployId).toBe("live-dep-1");
+      expect(res.url).toBe("https://live/checkout");
+      expect(res.detail).toContain("[live]");
+      const rb = p.rollback("checkout", res.deployId);
+      expect(rb.reverted).toBe("live-dep-1");
+    } finally {
+      delete process.env.REGULAIT_DEPLOY_LIVE;
+    }
+  });
+
+  it("flag ON with NO injected client is an explicit error — no live path runs unwired", () => {
+    process.env.REGULAIT_DEPLOY_LIVE = "1";
+    try {
+      const p = resolveDeployProvider({ provider: "aws", roleArn: ROLE, region: "us-east-1" });
+      expect(() => p.deploy("checkout", "production", "seed")).toThrow(DeployProviderError);
+    } finally {
+      delete process.env.REGULAIT_DEPLOY_LIVE;
+    }
   });
 });
 

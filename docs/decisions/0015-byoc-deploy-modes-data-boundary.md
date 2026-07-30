@@ -49,3 +49,50 @@ boundary** — not just prose.
   policy is not yet wired.
 - **Guardrail restated:** no `prod`/production designation and no deploy to a real account without
   the user's direct, explicit in-session sign-off.
+
+---
+
+## Addendum — 2026-07-30 (deploy-tail follow-through: A1/A2/A3; A4 deferred)
+
+The original decision left the AWS adapter as a dry-run shape, azure/gcp/kubernetes declared-only,
+and no admin CRUD UI. This addendum records the follow-through shipped in the deferrals cleanup, and
+explicitly defers the one remaining item (A4) with its design.
+
+- **A2 — azure/gcp/kubernetes adapter shapes shipped.** Each is a deterministic, offline **dry-run**
+  provider mirroring `AwsDeployProvider`: seeded ids, config validation (a missing subscription/
+  project/kubeconfig is a clear `DeployProviderError`), and `// REAL:` markers at every SDK call
+  site (`@azure/arm-*` slot-swap / container-app revision; Google Cloud Deploy / Cloud Run;
+  `@kubernetes/client-node` rollout). `resolveDeployProvider` now resolves all five kinds; naming an
+  unwired future provider stays an honest failure → manual handoff. No network, no cloud mutation.
+
+- **A1 — real `@aws-sdk` STS path behind an off-by-default flag.** `REGULAIT_DEPLOY_LIVE` (default
+  OFF) gates the AWS adapter's real path. `AwsDeployProvider` takes an OPTIONAL injected STS/deploy
+  client (injectable-client discipline). Flag OFF → today's dry-run, **byte-identical** (existing
+  tests pass untouched). Flag ON → the `// REAL:` markers construct a genuine
+  `@aws-sdk/client-sts` `AssumeRoleCommand` (correct `RoleArn`/`RoleSessionName`/`DurationSeconds`)
+  and drive a deploy through the injected client — unit-tested against a **FAKE** injected client,
+  **never the network, never a live mutation**. Flag ON with no injected client is an explicit
+  error, so no live path ever runs unwired. `@aws-sdk/client-sts` added to `apps/gateway` deps. The
+  standing guardrail is unchanged: no deploy to a real account without the user's explicit
+  in-session sign-off.
+
+- **A3 — admin deploy-target management UI.** A "Deploy Targets" tab under the NAV **Delivery**
+  group: a create form (name, provider, mode hosted/byoc/air_gapped, environment, baseUrl,
+  role/account, region, optional credential → `POST /v1/deploy/targets`), a list
+  (`GET /v1/deploy/targets`) built with the shared `dataTable`/`field`/`idChip` helpers, and per-row
+  delete (`DELETE /v1/deploy/targets/:name`). All endpoints already existed; admin-only,
+  credentials AES-256-GCM at rest and never returned.
+
+- **A4 — per-mode policy + mode-aware audit retention: DEFERRED (design recorded).** Not
+  implemented in this slice, deliberately, because the substrate for it does not yet exist:
+  - The `audit_log` table has **no mode dimension** — a deploy audit row records object/effect/
+    rule/reason but not the deployment mode (hosted/byoc/air_gapped) it happened under, so a
+    mode-aware retention or per-mode policy would have nothing to key on without a schema change.
+  - Audit retention today is a **single global floor** (the longest `auditRetentionDays` across
+    compliance profiles; §8.4/`/admin → Audit` prunes to it), not a per-record or per-mode policy.
+  - **Recorded design for when A4 is picked up:** add a nullable `mode` (or a structured
+    `deploy_context`) column to `audit_log` populated by the deploy/rollback executor; extend the
+    compliance-profile shape with an optional per-mode retention override and per-mode connector/MCP
+    scope restrictions (e.g. air-gapped forbidding certain data scopes); enforce the tightest of
+    {global floor, framework floor, per-mode override} at prune time. This is a migration + policy
+    change, out of scope for a UI/adapter cleanup, and is left for a dedicated slice.

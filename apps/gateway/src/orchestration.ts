@@ -79,6 +79,11 @@ interface RunBudget {
   /** MEASURED spend accumulated as nodes actually dispatch (absent on runs
    * planned before real dispatch existed — read with ?? 0) */
   measuredSpentUsd?: number;
+  /** §5.2 measured per-node running total: provider-measured actuals summed PER
+   * NODE, so a node's own transitive budget ceiling can be enforced on measured
+   * dollars the same way the run cap is. Absent/missing key = $0 for that node.
+   * Rides the run JSONB — no migration. */
+  measuredPerNodeUsd?: Record<string, number>;
   /** a decided __budget__ approval lifts cap enforcement for this run */
   overageApproved: boolean;
   replanned: boolean;
@@ -285,6 +290,7 @@ type NodeDispatchOutcome =
   | { kind: "not_in_progress"; status: string | null }
   | { kind: "entitlement_denied"; decision: AgentDecision }
   | { kind: "budget_blocked_measured"; measuredSpentUsd: number; capUsd: number }
+  | { kind: "node_budget_blocked_measured"; nodeId: string; measuredNodeUsd: number; nodeCapUsd: number }
   | { kind: "dispatch_failed"; status: number; error: string; detail?: string }
   | {
       kind: "ok";
@@ -306,6 +312,9 @@ type NodeDispatchOutcome =
       };
       measuredSpentUsd: number;
       budgetBreached: boolean;
+      /** §5.2 measured per-node ceiling was crossed on this dispatch (first
+       * crossing allowed-but-escalated; the next turn is pre-gated) */
+      nodeBudgetBreached: boolean;
     };
 
 /** §2 scope-lock made real for nested runs: workers execute against exactly
@@ -462,6 +471,13 @@ async function dispatchRunNode(
   // dispatch. No path increases privilege entering the loop.
   let runningMeasured = measuredSpent;
   let budgetBreached = false;
+  // §5.2 measured per-node ceiling (transitive MIN up the lead chain): enforced
+  // on MEASURED dollars exactly like the run cap. null = no per-node cap (flat/
+  // uncapped run) → this whole block is inert and byte-identical to before.
+  const nodeCeiling = computeNodeBudgetCeiling(graph, nodeId);
+  const measuredPerNode: Record<string, number> = { ...(budget?.measuredPerNodeUsd ?? {}) };
+  let runningNodeMeasured = measuredPerNode[nodeId] ?? 0;
+  let nodeBudgetBreached = false;
   let turnCount = 0;
   let toolCallCount = 0;
   let toolApprovalPending = false;
@@ -476,6 +492,26 @@ async function dispatchRunNode(
     if (budget && budget.capUsd !== null && !budget.overageApproved && runningMeasured >= budget.capUsd) {
       if (turn === 0) {
         return { kind: "budget_blocked_measured", measuredSpentUsd: runningMeasured, capUsd: budget.capUsd };
+      }
+      break;
+    }
+    // §5.2 PER-TURN measured NODE pre-gate: a node already at/over its own
+    // transitive ceiling stops before spending more. On turn 0 (a re-dispatch of
+    // an already-breached node) this surfaces as node_budget_blocked_measured;
+    // mid-loop it just halts the loop with the escalation already queued.
+    if (
+      budget &&
+      nodeCeiling !== null &&
+      !budget.overageApproved &&
+      runningNodeMeasured >= nodeCeiling
+    ) {
+      if (turn === 0) {
+        return {
+          kind: "node_budget_blocked_measured",
+          nodeId,
+          measuredNodeUsd: runningNodeMeasured,
+          nodeCapUsd: nodeCeiling,
+        };
       }
       break;
     }
@@ -532,10 +568,60 @@ async function dispatchRunNode(
     // pre-gate above then blocks the next turn. Never silently exceeded (§7).
     if (budget) {
       runningMeasured = Number((runningMeasured + (outcome.result.costUsd ?? 0)).toFixed(6));
+      // §5.2 accumulate this node's OWN measured spend alongside the run total.
+      runningNodeMeasured = Number((runningNodeMeasured + (outcome.result.costUsd ?? 0)).toFixed(6));
+      measuredPerNode[nodeId] = runningNodeMeasured;
       await db
         .update(orchestrationRuns)
-        .set({ budget: { ...budget, measuredSpentUsd: runningMeasured } })
+        .set({ budget: { ...budget, measuredSpentUsd: runningMeasured, measuredPerNodeUsd: measuredPerNode } })
         .where(eq(orchestrationRuns.id, run.id));
+      // §5.2 first-crossing escalate on the NODE's transitive ceiling — the same
+      // pattern as the run cap, into the SAME approvals queue, with a DISTINCT
+      // sentinel and ruleId so it is never confused with a run-cap breach.
+      if (
+        nodeCeiling !== null &&
+        !budget.overageApproved &&
+        runningNodeMeasured > nodeCeiling &&
+        !nodeBudgetBreached
+      ) {
+        nodeBudgetBreached = true;
+        const [pendingNode] = await db
+          .select({ id: approvals.id })
+          .from(approvals)
+          .where(
+            and(
+              eq(approvals.runId, run.id),
+              eq(approvals.stageId, `__nodebudget_measured__:${nodeId}`),
+              eq(approvals.status, "pending"),
+            ),
+          )
+          .limit(1);
+        if (!pendingNode) {
+          await db.insert(approvals).values({
+            userId: run.initiatingUserId,
+            objectType: "run",
+            runId: run.id,
+            stageId: `__nodebudget_measured__:${nodeId}`,
+            approverUserId: graph.escalationApproverUserId,
+          });
+        }
+        await db.insert(auditLog).values({
+          userId: actorUserId,
+          objectType: "run",
+          objectId: run.id,
+          detail: {
+            phase: "node-budget-breach-measured",
+            nodeId,
+            turn,
+            measuredNodeUsd: runningNodeMeasured,
+            nodeCapUsd: nodeCeiling,
+          },
+          effect: "require_approval",
+          ruleId: "node-budget-cap-measured",
+          ruleChain: [],
+          reason: `node '${nodeId}' measured spend $${runningNodeMeasured} exceeds its delegated per-node cap of $${nodeCeiling}; approval required to continue`,
+        });
+      }
       if (
         budget.capUsd !== null &&
         !budget.overageApproved &&
@@ -761,6 +847,7 @@ async function dispatchRunNode(
     },
     measuredSpentUsd: runningMeasured,
     budgetBreached,
+    nodeBudgetBreached,
   };
 }
 
@@ -962,7 +1049,14 @@ export async function applyRunApprovalDecision(
   const runId = approvalRow.runId;
   // §5.2 budget approvals: approving lifts cap enforcement for this run
   // (the overage is now sanctioned); denying aborts it. Never a silent path.
-  if (approvalRow.stageId.startsWith("__budget__")) {
+  // Covers both the run-cap `__budget__[:node]` and the measured per-node
+  // ceiling `__nodebudget_measured__:<node>` escalations — both sanction the
+  // overage for this run so the pre-gates (which check overageApproved) let the
+  // node proceed on a re-dispatch.
+  if (
+    approvalRow.stageId.startsWith("__budget__") ||
+    approvalRow.stageId.startsWith("__nodebudget_measured__")
+  ) {
     if (decision === "approved") {
       const [run] = await dbx
         .select()
@@ -1486,6 +1580,13 @@ export function registerOrchestrationRoutes(
           measuredSpentUsd: out.measuredSpentUsd,
           capUsd: out.capUsd,
         });
+      case "node_budget_blocked_measured":
+        return reply.status(409).send({
+          error: "node_budget_exceeded_measured",
+          nodeId: out.nodeId,
+          measuredNodeUsd: out.measuredNodeUsd,
+          nodeCapUsd: out.nodeCapUsd,
+        });
       case "dispatch_failed":
         return reply.status(out.status).send({
           error: out.error,
@@ -1496,6 +1597,7 @@ export function registerOrchestrationRoutes(
           dispatch: out.result,
           measuredSpentUsd: out.measuredSpentUsd,
           ...(out.budgetBreached ? { budgetBreached: true } : {}),
+          ...(out.nodeBudgetBreached ? { nodeBudgetBreached: true } : {}),
         };
     }
   });
@@ -1695,6 +1797,21 @@ export function registerOrchestrationRoutes(
           );
           break;
         }
+        if (out.kind === "node_budget_blocked_measured") {
+          // this node's own measured ceiling was already reached on a prior pass
+          // — its escalation is queued; fail it (blocked, retryable once the
+          // overage is approved) and stop the pass rather than strand it.
+          waveStop = "node_budget_exceeded_measured";
+          steps.push({ nodeId, action: "blocked_node_budget_measured", measuredNodeUsd: out.measuredNodeUsd });
+          await applyRunEvent(
+            db,
+            runId,
+            { kind: "node_failed", nodeId, error: "per-node budget ceiling reached before this node could dispatch" },
+            actor,
+            opts.dataKey,
+          );
+          break;
+        }
         if (out.kind === "entitlement_denied" || out.kind === "dispatch_failed" || out.kind === "unknown_agent") {
           // node-level problem: fail THIS node (blocked, §3 retry/reassign/
           // escalate applies), keep driving independent branches
@@ -1731,6 +1848,10 @@ export function registerOrchestrationRoutes(
             waveStop = "budget_exceeded_measured";
             break;
           }
+          if (out.nodeBudgetBreached) {
+            waveStop = "node_budget_exceeded_measured";
+            break;
+          }
           continue;
         }
 
@@ -1742,6 +1863,13 @@ export function registerOrchestrationRoutes(
         });
         if (out.budgetBreached) {
           waveStop = "budget_exceeded_measured";
+          break;
+        }
+        // §5.2 a node's measured ceiling crossing (first crossing allowed +
+        // escalated) stops the pass, mirroring the run-cap stop, so no further
+        // node dispatches while the per-node overage sits in the queue.
+        if (out.nodeBudgetBreached) {
+          waveStop = "node_budget_exceeded_measured";
           break;
         }
       }

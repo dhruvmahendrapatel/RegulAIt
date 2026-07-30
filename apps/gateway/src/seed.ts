@@ -937,6 +937,100 @@ if (!averyInstances.some((i: Json) => i.change?.description === AVERY_CHANGE)) {
   );
 }
 
+// --- deploy-verify-rollback pipeline (pillar 2 tail, ADR-0015) -------------
+// A governed MOCK deploy target + a deploy→verify→rollback template, driven to
+// rest at the three newer workflow statuses so every state has a live example
+// on first open: blocked_on_check (a pre-deploy check failed), blocked_on_deploy
+// (the deploy condition was unmet → manual handoff), and rolled_back (a
+// post-deploy verify failed → the deployment auto-reversed, terminal). Mock
+// provider = zero external credentials; idempotent by name/description.
+{
+  const deployTargets = (await call("GET", "/v1/deploy/targets")).targets ?? [];
+  if (!deployTargets.some((t: Json) => t.name === "demo-deploy")) {
+    await call("POST", "/v1/deploy/targets", { name: "demo-deploy", provider: "mock", mode: "hosted", environment: "production" });
+  }
+  const deployTpl = await ensureTemplate("deploy-verify-pipeline", {
+    workflow: "deploy-verify-pipeline",
+    stages: [
+      { id: "intake", type: "trigger" },
+      { id: "gate", type: "human_approval", approvers: [averyId] },
+      // a pre-deploy gate check (default onFailure: block) — a failure here rests
+      // the instance at blocked_on_check
+      { id: "precheck", type: "automated_check", checks: ["preflight"] },
+      // the governed deploy, conditioned on environment==production; a staging
+      // change fails the condition and rests at blocked_on_deploy
+      { id: "deploy", type: "deployment", connection: "demo-deploy", environment: "production", condition: { field: "environment", equals: "production" } },
+      // the post-deploy verify: onFailure rollback routes straight to `undo`
+      { id: "verify", type: "automated_check", checks: ["smoke"], onFailure: "rollback", rollbackStageId: "undo" },
+      { id: "undo", type: "rollback", connection: "demo-deploy" },
+      { id: "done", type: "human_approval", approvers: [averyId] },
+    ],
+  });
+  const deployRules = (await call("GET", "/v1/workflows/assignment-rules")).rules ?? [];
+  if (!deployRules.some((r: Json) => r.templateId === deployTpl)) {
+    await call("POST", "/v1/workflows/assignment-rules", { templateId: deployTpl, changeType: "deploy-demo" });
+  }
+
+  // approve the (single) gate on an instance as Avery, so the seed can drive the
+  // instance past intake into the deploy tail deterministically.
+  async function approveInstanceGate(instId: string): Promise<void> {
+    const view = await call("GET", `/v1/workflows/instances/${instId}`, undefined, averyAuth);
+    const gate = (view.pendingApprovals ?? []).find((a: Json) => a.stageId === "gate");
+    if (gate) await call("POST", `/v1/approvals/${gate.id}/decide`, { decision: "approved" }, averyAuth);
+  }
+  async function ensureDeployInstance(
+    description: string,
+    environment: string,
+    prep: (instId: string) => Promise<void>,
+  ): Promise<void> {
+    const existing = (await call("GET", "/v1/workflows/instances", undefined, danaAuth)).instances ?? [];
+    if (existing.some((i: Json) => i.change?.description === description)) return;
+    const inst = await call(
+      "POST",
+      "/v1/workflows/instances",
+      { change: { description, paths: ["src/checkout/deploy.ts"], changeType: "deploy-demo", environment } },
+      danaAuth,
+    );
+    await prep(inst.id);
+    await approveInstanceGate(inst.id);
+  }
+
+  // 1) blocked_on_check — the pre-deploy 'preflight' check fails
+  await ensureDeployInstance(
+    "Deploy checkout to production (pre-check fails)",
+    "production",
+    async (id) => {
+      await call(
+        "POST",
+        `/v1/workflows/instances/${id}/checks`,
+        { stageId: "precheck", results: [{ check: "preflight", status: "failed", severity: "high" }] },
+        danaAuth,
+      );
+    },
+  );
+  // 2) blocked_on_deploy — precheck passes, but the deploy condition
+  //    (environment==production) is unmet for a staging change → manual handoff
+  await ensureDeployInstance(
+    "Deploy checkout to staging (condition unmet)",
+    "staging",
+    async () => {},
+  );
+  // 3) rolled_back — precheck passes, deploy runs, the post-deploy 'smoke' verify
+  //    fails → auto-rollback → terminal rolled_back
+  await ensureDeployInstance(
+    "Deploy checkout to production (verify fails → rollback)",
+    "production",
+    async (id) => {
+      await call(
+        "POST",
+        `/v1/workflows/instances/${id}/checks`,
+        { stageId: "verify", results: [{ check: "smoke", status: "failed", severity: "critical" }] },
+        danaAuth,
+      );
+    },
+  );
+}
+
 // --- PM links + a decision record on the demo objects (pillar 8) ----------
 // checkout-refactor's task graph maps onto mock work items in REGULAIT-DEMO
 // and carries one recorded decision, and Dana's workflow instance gets its
