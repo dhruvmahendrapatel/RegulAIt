@@ -21,6 +21,7 @@ import type { WorkflowDefinition } from "@regulait/workflow-kernel";
 import { evaluateAgent, type AgentDecision } from "@regulait/policy-kernel";
 import {
   computeNodeCeiling,
+  computeNodeBudgetCeiling,
   estimateGraphCost,
   estimateNodeCost,
   initialRunState,
@@ -169,6 +170,56 @@ async function gateNodeStartBudget(
       : undefined,
     tokensFor(node),
   );
+  // §5.2 Team-Lead SUB-BUDGET: the transitive per-node ceiling (min of this
+  // node's own cap and every lead ancestor's) is enforced ON TOP OF the
+  // run-level cap. A node whose estimated cost exceeds the ceiling delegation
+  // assigned it pauses and escalates into the SAME queue — a lead can cap a
+  // worker's spend below the run cap, and that cap only ever tightens down the
+  // chain. Absent cap = only the run cap applies (byte-identical to before).
+  const nodeCapUsd = computeNodeBudgetCeiling(graph, node.id);
+  if (
+    nodeCapUsd !== null &&
+    !budget.overageApproved &&
+    (nodeCost === null || nodeCost > nodeCapUsd)
+  ) {
+    const [pending] = await db
+      .select({ id: approvals.id })
+      .from(approvals)
+      .where(
+        and(
+          eq(approvals.runId, run.id),
+          eq(approvals.stageId, `__nodebudget__:${node.id}`),
+          eq(approvals.status, "pending"),
+        ),
+      )
+      .limit(1);
+    if (!pending) {
+      await db.insert(approvals).values({
+        userId: run.initiatingUserId,
+        objectType: "run",
+        runId: run.id,
+        stageId: `__nodebudget__:${node.id}`,
+        approverUserId: graph.escalationApproverUserId,
+      });
+    }
+    await db.insert(auditLog).values({
+      userId: actorUserId,
+      objectType: "run",
+      objectId: run.id,
+      detail: { phase: "node-budget-breach", nodeId: node.id, estimatedNodeUsd: nodeCost, nodeCapUsd },
+      effect: "require_approval",
+      ruleId: "node-budget-cap",
+      ruleChain: [],
+      reason:
+        nodeCost === null
+          ? `node '${node.id}' has an unpriced owner under a per-node budget cap; approval required`
+          : `node '${node.id}' estimated at $${nodeCost.toFixed(6)} exceeds its delegated per-node cap of $${nodeCapUsd}`,
+    });
+    return {
+      blocked: { error: "node_budget_exceeded", nodeId: node.id, estimatedNodeUsd: nodeCost, nodeCapUsd },
+      nodeCost,
+    };
+  }
   if (
     budget.capUsd !== null &&
     !budget.overageApproved &&

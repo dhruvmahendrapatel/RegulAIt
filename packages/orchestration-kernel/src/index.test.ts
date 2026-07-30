@@ -208,7 +208,7 @@ describe("graph cost estimation (§5.2)", () => {
 // ---------------------------------------------------------------------------
 // §5.1 Team-Lead entitlement-narrowing ceiling
 // ---------------------------------------------------------------------------
-import { computeNodeCeiling } from "./index.js";
+import { computeNodeCeiling, computeNodeBudgetCeiling } from "./index.js";
 
 const AG_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const AG_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -280,5 +280,36 @@ describe("computeNodeCeiling (§5.1)", () => {
       node("grand", { leadNodeId: "child", ownerAgentId: AG_A }),
     ]);
     expect(computeNodeCeiling(g, "grand").agentIds).toEqual([]);
+  });
+});
+
+describe("computeNodeBudgetCeiling (§5.2 Team-Lead sub-budget)", () => {
+  it("no cap anywhere → null (only the run cap applies; flat runs unchanged)", () => {
+    const g = graph([node("a")]);
+    expect(computeNodeBudgetCeiling(g, "a")).toBeNull();
+  });
+  it("a node's OWN cap applies to itself", () => {
+    const g = graph([node("a", { budgetCapUsd: 2.5 })]);
+    expect(computeNodeBudgetCeiling(g, "a")).toBe(2.5);
+  });
+  it("a worker is capped by its lead even with no cap of its own", () => {
+    const g = graph([
+      node("lead", { budgetCapUsd: 3 }),
+      node("w", { leadNodeId: "lead", ownerAgentId: AG_A }),
+    ]);
+    expect(computeNodeBudgetCeiling(g, "w")).toBe(3);
+  });
+  it("transitive MIN: the tightest cap up the chain wins", () => {
+    const g = graph([
+      node("lead", { budgetCapUsd: 10 }),
+      node("child", { leadNodeId: "lead", budgetCapUsd: 4 }),
+      node("grand", { leadNodeId: "child", ownerAgentId: AG_A, budgetCapUsd: 8 }),
+    ]);
+    // grand's own 8 vs child 4 vs lead 10 → 4 (delegation can only tighten)
+    expect(computeNodeBudgetCeiling(g, "grand")).toBe(4);
+    // child sees its own 4 vs lead 10 → 4
+    expect(computeNodeBudgetCeiling(g, "child")).toBe(4);
+    // the lead itself is bounded only by its own cap
+    expect(computeNodeBudgetCeiling(g, "lead")).toBe(10);
   });
 });
