@@ -42,6 +42,7 @@ import {
 import { loadAgentRevocations, loadRoleAgentGrants } from "./entitlements.js";
 import { assertProjectAttribution, projectPiiMode } from "./projects.js";
 import { PROJECT_HEADER } from "./mcp-proxy.js";
+import { effectiveTechniqueMode, loadOrgSettings } from "./org-settings.js";
 
 export { PROJECT_HEADER };
 
@@ -260,6 +261,24 @@ export async function prepareCompatCall(
   }
   const settings = await loadInterceptionSettings(db);
 
+  // ADR-0021 strict field rejection: when the admin turned the
+  // COMPAT_IGNORED_FIELDS accept-and-disclose tier OFF, a present-but-ignorable
+  // field (temperature) is a 400 again — the strict pre-#47 posture. Enforced
+  // here (before entitlement or dispatch) so both shims inherit it without a
+  // change of their own.
+  if (settings.strictFieldRejection && (args.ignoredFields?.length ?? 0) > 0) {
+    const fields = (args.ignoredFields ?? []).join(", ");
+    return {
+      ok: false,
+      status: 400,
+      error: "unsupported_field",
+      detail:
+        `'${fields}' is not supported by this RegulAIt-compatible endpoint, and this deployment's ` +
+        `strict field rejection is ON — the accept-and-disclose tier is disabled, so an ` +
+        `unsupported field fails the call instead of being ignored.`,
+    };
+  }
+
   // --- pillar 5 attribution, validated exactly as the MCP proxy validates it
   const headerParse = projectHeaderSchema.safeParse(req.headers);
   if (!headerParse.success) {
@@ -405,6 +424,10 @@ export async function prepareCompatCall(
   }
 
   // --- pillar-6 routing, ONLY in router_decides ------------------------------
+  // ADR-0021: the org routingEnabled toggle is the ceiling — off forces
+  // passthrough (and writes no ledger row); on defers to the user's own
+  // routingMode, else the org default for unset users.
+  const org = await loadOrgSettings(db);
   let served = requested;
   let routerOverrode = false;
   if (mode === "router_decides") {
@@ -423,7 +446,7 @@ export async function prepareCompatCall(
         costPerMTokIn: a.costPerMTokIn ?? null,
         costPerMTokOut: a.costPerMTokOut ?? null,
       })),
-      routingMode: policy?.routingMode ?? "automatic",
+      routingMode: effectiveTechniqueMode(org, org.routingEnabled, policy?.routingMode ?? null),
       complexity,
       ceilingTier,
       estimate,
@@ -432,29 +455,44 @@ export async function prepareCompatCall(
     routerOverrode = served.id !== requested.id;
     // Same per-technique ledger the invoke path writes, so the Spend page and
     // the savings-by-technique chart pick intercepted traffic up unchanged.
-    await db.insert(costEvents).values({
-      userId,
-      objectType: "agent",
-      objectId: requested.id,
-      technique: "model_routing",
-      requestedAgentId: requested.id,
-      servedAgentId: routing.selectedAgentId,
-      baselineAgentId: routing.baselineAgentId,
-      estimatedTokensIn: estimate.in,
-      estimatedTokensOut: estimate.out,
-      estimatedTokensSaved: routing.estimatedTokensSaved,
-      estimatedCostSavedUsd: routing.estimatedCostSavedUsd,
-      estimationBasis: routing.estimationBasis,
-      ruleId: routing.ruleId,
-      projectId,
-      detail: { effect: routing.effect, complexity, surface: "compat", mode: COMPAT_MODE },
-    });
+    // ADR-0021: with the ORG toggle off the technique does not run — no row.
+    if (org.routingEnabled) {
+      await db.insert(costEvents).values({
+        userId,
+        objectType: "agent",
+        objectId: requested.id,
+        technique: "model_routing",
+        requestedAgentId: requested.id,
+        servedAgentId: routing.selectedAgentId,
+        baselineAgentId: routing.baselineAgentId,
+        estimatedTokensIn: estimate.in,
+        estimatedTokensOut: estimate.out,
+        estimatedTokensSaved: routing.estimatedTokensSaved,
+        estimatedCostSavedUsd: routing.estimatedCostSavedUsd,
+        estimationBasis: routing.estimationBasis,
+        ruleId: routing.ruleId,
+        projectId,
+        detail: { effect: routing.effect, complexity, surface: "compat", mode: COMPAT_MODE },
+      });
+    }
   }
 
   // --- ADR-0019 streaming suppression ---------------------------------------
   // Reused verbatim, not re-derived: on a block-mode project the OUTPUT PII
   // check can only run once the full text exists, so no delta may leave.
   const streamingSuppressed = args.stream && (await projectPiiMode(db, projectId)) === "block";
+  // ADR-0021: 'reject' refuses the stream request instead of quietly buffering
+  // — the same admin choice the invoke path honours, held here so both shims
+  // inherit it.
+  if (streamingSuppressed && settings.streamingOnBlockMode === "reject") {
+    return {
+      ok: false,
+      status: 400,
+      error: "streaming_rejected_on_block_project",
+      detail:
+        "this project's PII mode is 'block' and this deployment rejects streaming on such projects — retry without stream:true",
+    };
+  }
 
   return {
     ok: true,

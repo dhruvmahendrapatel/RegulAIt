@@ -30,12 +30,10 @@ import {
   estimateTokens,
   routeModel,
   planPromptCache,
-  CACHE_READ_DISCOUNT,
   planEditVsRewrite,
   classifyEditIntent,
   planFilePreprocessing,
   normalizeCacheInput,
-  DEFAULT_SEMANTIC_CACHE_TTL_SECONDS,
   type RoutingDecision,
 } from "@regulait/optimizer-kernel";
 import {
@@ -86,6 +84,12 @@ import {
   loadRoleAgentGrants,
   loadRoleConnectorGrants,
 } from "./entitlements.js";
+import {
+  effectiveTechniqueMode,
+  envFallbackAllowed,
+  loadOrgSettings,
+} from "./org-settings.js";
+import { loadInterceptionSettings } from "./compat-core.js";
 
 const userIdParam = z.object({ userId: z.string().uuid() });
 const agentIdParam = z.object({ agentId: z.string().uuid() });
@@ -269,14 +273,20 @@ export async function executeGovernedDispatch(
       // only, never stored. Same trust level as a stored platform credential:
       // it's the operator's key, applied on every user's behalf. Precedence is
       // strict — a stored user or platform credential above already won; this
-      // engages ONLY when both are absent.
-      const envKey = platformEnvKey(served.provider);
+      // engages ONLY when both are absent. ADR-0021: the fallback is itself an
+      // ADMIN CHOICE (envKeyFallbackEnabled + the per-provider allow-list) —
+      // a regulated org can force every credential through the encrypted store.
+      const org = await loadOrgSettings(db);
+      const fallbackAllowed = envFallbackAllowed(org, served.provider);
+      const envKey = fallbackAllowed ? platformEnvKey(served.provider) : null;
       if (envKey) {
         credentialSource = "platform";
         apiKey = envKey.apiKey;
         baseUrl = envKey.baseUrl;
       } else {
-        const envHint = platformEnvKeyName(served.provider);
+        // only hint at the env var when the fallback could actually engage —
+        // advertising a disabled path would send the operator down a dead end
+        const envHint = fallbackAllowed ? platformEnvKeyName(served.provider) : null;
         return {
           ok: false,
           status: 409,
@@ -555,9 +565,11 @@ export async function configuredProviders(
   userId: string,
 ): Promise<Set<string>> {
   const set = new Set<string>(["mock"]);
-  // The env fallback is decrypted-key-free, so it counts even without a data key.
+  // The env fallback is decrypted-key-free, so it counts even without a data
+  // key — but only when the ADR-0021 org gate allows it for that provider.
+  const org = await loadOrgSettings(db);
   for (const provider of ENV_FALLBACK_PROVIDERS) {
-    if (platformEnvKey(provider)) set.add(provider);
+    if (envFallbackAllowed(org, provider) && platformEnvKey(provider)) set.add(provider);
   }
   // Without REGULAIT_DATA_KEY no STORED credential can be decrypted, so mock +
   // any env-configured provider is all that can be served.
@@ -645,17 +657,23 @@ export function registerAgentConnectorRoutes(
   // Booleans + provider names ONLY — no keys, no ciphertext, no base URLs.
   // Any authenticated user may read it (NON_ADMIN_ROUTES); it exposes no secret.
   app.get("/v1/model-providers/status", async () => {
-    const stored = new Set(
-      (await db.select({ provider: modelCredentials.provider }).from(modelCredentials)).map(
-        (r) => r.provider,
-      ),
-    );
+    const [stored, org] = await Promise.all([
+      db
+        .select({ provider: modelCredentials.provider })
+        .from(modelCredentials)
+        .then((rows) => new Set(rows.map((r) => r.provider))),
+      loadOrgSettings(db),
+    ]);
     const providers: Record<string, { configured: boolean }> = {
       mock: { configured: true },
     };
     for (const provider of ENV_FALLBACK_PROVIDERS) {
       providers[provider] = {
-        configured: stored.has(provider) || platformEnvKey(provider) !== null,
+        configured:
+          stored.has(provider) ||
+          // ADR-0021: a disabled env fallback means an env-only provider is
+          // honestly NOT configured — its dispatches will 409.
+          (envFallbackAllowed(org, provider) && platformEnvKey(provider) !== null),
       };
     }
     return { providers };
@@ -935,6 +953,30 @@ export function registerAgentConnectorRoutes(
     const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
     if (!agent) return reply.status(404).send({ error: "unknown_agent" });
 
+    // ADR-0021: the org-wide functional defaults, loaded ONCE per request
+    // (the interception-settings pattern) and threaded to every consumption
+    // point below. A fresh row is behaviour-preserving by construction.
+    const org = await loadOrgSettings(db);
+
+    // ADR-0021 size ceilings — each narrows BELOW the zod wall (which stays
+    // the absolute maximum). Defaults equal the shipped composer's own
+    // clamps, so nothing changes until an admin narrows them.
+    if ((body.attachments?.length ?? 0) > org.maxAttachmentsPerDispatch) {
+      return reply.status(422).send({
+        error: "too_many_attachments",
+        detail: `this deployment allows at most ${org.maxAttachmentsPerDispatch} attachment(s) per dispatch`,
+      });
+    }
+    for (const a of body.attachments ?? []) {
+      const decodedBytes = Math.floor((a.dataBase64.length * 3) / 4);
+      if (decodedBytes > org.maxAttachmentBytes) {
+        return reply.status(422).send({
+          error: "attachment_too_large",
+          detail: `attachment '${a.name}' is ~${decodedBytes} bytes decoded; this deployment allows at most ${org.maxAttachmentBytes} bytes per attachment`,
+        });
+      }
+    }
+
     // MULTI-TURN: resolve the conversation before anything can bill or
     // dispatch — unknown is 404, someone else's is 403 (admins included;
     // conversations are personal, see conversations.ts).
@@ -970,6 +1012,19 @@ export function registerAgentConnectorRoutes(
     // non-streaming path takes no extra query.
     const streamSuppressed =
       body.stream === true && (await projectPiiMode(db, projectId)) === "block";
+    // ADR-0021: 'suppress' (default) keeps ADR-0019's buffer-and-disclose;
+    // 'reject' refuses the stream request outright so a client that REQUIRES
+    // streaming learns immediately instead of receiving an unasked-for shape.
+    if (streamSuppressed) {
+      const iset = await loadInterceptionSettings(db);
+      if (iset.streamingOnBlockMode === "reject") {
+        return reply.status(400).send({
+          error: "streaming_rejected_on_block_project",
+          detail:
+            "this project's PII mode is 'block' and this deployment rejects streaming on such projects — retry without stream:true",
+        });
+      }
+    }
     const useStream = body.stream === true && !streamSuppressed;
     const suppressionFlag = streamSuppressed ? { streamingSuppressed: true as const } : {};
 
@@ -1028,9 +1083,24 @@ export function registerAgentConnectorRoutes(
       // byte-identical to today — no lookup, no store. The lookup is scoped by
       // BOTH userId AND agentId: a user can NEVER be served another user's (or
       // another agent's) cached response (§12).
-      const routingModeForCache = policy?.routingMode ?? "automatic";
+      // ADR-0021: the CEILING MODEL for every pillar-6 technique — org toggle
+      // off forces passthrough; org on defers to the user's own routingMode
+      // (their passthrough still wins), else the org default for unset users.
+      const userRoutingMode = policy?.routingMode ?? null;
+      const modeFor = (techniqueEnabled: boolean) =>
+        effectiveTechniqueMode(org, techniqueEnabled, userRoutingMode);
+      // ADR-0021 semantic-cache POLICY: 'off' beats a caller's opt-in; 'opt_in'
+      // (default) = today's caller-opt-in; 'always' caches every eligible
+      // dispatch. A passthrough user (or org default) still disables it.
+      const routingModeForCache = modeFor(true);
+      const cachePolicyWants =
+        org.semanticCachePolicy === "always"
+          ? true
+          : org.semanticCachePolicy === "opt_in"
+            ? body.semanticCache === true
+            : false;
       const wantCache =
-        body.semanticCache === true &&
+        cachePolicyWants &&
         body.dispatch === true &&
         !!body.input &&
         !convo &&
@@ -1040,7 +1110,7 @@ export function registerAgentConnectorRoutes(
       if (wantCache && body.input) {
         cacheNorm = normalizeCacheInput(body.input);
         cacheHash = createHash("sha256").update(cacheNorm).digest("hex");
-        const ttlCutoff = new Date(Date.now() - DEFAULT_SEMANTIC_CACHE_TTL_SECONDS * 1000);
+        const ttlCutoff = new Date(Date.now() - org.semanticCacheTtlSeconds * 1000);
         // THE GOVERNANCE BOUNDARY: userId AND agentId (the invoked agent) AND a
         // fresh row; the stored normalizedInput is re-checked as a hash-collision
         // guard before anything is served.
@@ -1197,10 +1267,11 @@ export function registerAgentConnectorRoutes(
       // dispatches instead (fail-open, noted in the trace). Stored messages
       // are never touched. "passthrough" is §12's per-user optimization off
       // switch and disables compaction exactly like it disables routing —
-      // the full stored history dispatches verbatim. Threshold/window stay
-      // the kernel defaults: the agent-policy row has no natural home for
-      // per-user dials without a migration, deferred deliberately.
-      if (convo && body.dispatch && (policy?.routingMode ?? "automatic") !== "passthrough") {
+      // the full stored history dispatches verbatim. ADR-0021: the org
+      // compactionEnabled toggle is the ceiling above that, and the
+      // threshold/window dials + failure mode + summarizer selection ride the
+      // org settings row into the compactor.
+      if (convo && body.dispatch && modeFor(org.compactionEnabled) !== "passthrough") {
         convoContext = await prepareConversationContext(db, opts.dataKey, {
           userId,
           conversation: convo.conversation,
@@ -1208,7 +1279,18 @@ export function registerAgentConnectorRoutes(
           candidates: compactionCandidates,
           projectId,
           execute: executeGovernedDispatch,
+          org,
         });
+        // ADR-0021 fail_closed: a failed compaction fails the TURN instead of
+        // silently dispatching the full history — for orgs whose posture is
+        // "never send what we decided to compact away un-summarized".
+        if (convoContext.failClosed) {
+          return reply.status(502).send({
+            error: "compaction_failed",
+            detail: `context compaction failed (${convoContext.failClosed.error}) and this deployment's compaction failure mode is fail_closed`,
+            ...suppressionFlag,
+          });
+        }
       }
 
       const candidates = candidateRows.map((a) => ({
@@ -1240,7 +1322,8 @@ export function registerAgentConnectorRoutes(
       // size, exactly like the baseline above.
       const fpp = planFilePreprocessing({
         referenceText: body.referenceContent,
-        routingMode: policy?.routingMode ?? "automatic",
+        routingMode: modeFor(org.filePreprocessingEnabled),
+        minTokens: org.minPreprocessTokens,
       });
       const referenceTokens = Math.ceil(
         (fpp.apply ? fpp.processedText.length : (body.referenceContent?.length ?? 0)) / 4,
@@ -1256,7 +1339,7 @@ export function registerAgentConnectorRoutes(
       // charging the upper bound keeps the estimate conservative regardless of
       // which agent routing lands on. Absent attachments → no change.
       const attachmentTokens = (body.attachments ?? []).reduce((sum, a) => {
-        if (a.kind === "image") return sum + 1_200;
+        if (a.kind === "image") return sum + org.imageTokenEstimateTokens;
         // base64 is ~4/3 the decoded size; decoded/4 ≈ base64Length * 3 / 16
         return sum + Math.ceil((a.dataBase64.length * 3) / 16);
       }, 0);
@@ -1264,7 +1347,7 @@ export function registerAgentConnectorRoutes(
       routing = routeModel({
         requestedAgentId: agent.id,
         candidates,
-        routingMode: policy?.routingMode ?? "automatic",
+        routingMode: modeFor(org.routingEnabled),
         complexity,
         costSensitivity: body.costSensitivity,
         ceilingTier,
@@ -1274,28 +1357,34 @@ export function registerAgentConnectorRoutes(
       // exactly what they meant, and the agents it never got to weigh are
       // listed beside them with the reason each was withheld.
       if (skippedCandidates.length > 0) routing = { ...routing, skippedCandidates };
-      await db.insert(costEvents).values({
-        userId,
-        objectType: "agent",
-        objectId: agent.id,
-        technique: "model_routing",
-        requestedAgentId: agent.id,
-        servedAgentId: routing.selectedAgentId,
-        baselineAgentId: routing.baselineAgentId,
-        estimatedTokensIn: estimate.in,
-        estimatedTokensOut: estimate.out,
-        estimatedTokensSaved: routing.estimatedTokensSaved,
-        estimatedCostSavedUsd: routing.estimatedCostSavedUsd,
-        estimationBasis: routing.estimationBasis,
-        ruleId: routing.ruleId,
-        projectId,
-        detail: {
-          effect: routing.effect,
-          complexity,
-          mode: body.mode,
-          ...(body.conversationId ? { conversationId: body.conversationId } : {}),
-        },
-      });
+      // ADR-0021: with the ORG routing toggle off the technique does not run
+      // at all — no model_routing ledger row is written (a per-user
+      // passthrough, org toggle on, still records its passthrough decision,
+      // exactly as today).
+      if (org.routingEnabled) {
+        await db.insert(costEvents).values({
+          userId,
+          objectType: "agent",
+          objectId: agent.id,
+          technique: "model_routing",
+          requestedAgentId: agent.id,
+          servedAgentId: routing.selectedAgentId,
+          baselineAgentId: routing.baselineAgentId,
+          estimatedTokensIn: estimate.in,
+          estimatedTokensOut: estimate.out,
+          estimatedTokensSaved: routing.estimatedTokensSaved,
+          estimatedCostSavedUsd: routing.estimatedCostSavedUsd,
+          estimationBasis: routing.estimationBasis,
+          ruleId: routing.ruleId,
+          projectId,
+          detail: {
+            effect: routing.effect,
+            complexity,
+            mode: body.mode,
+            ...(body.conversationId ? { conversationId: body.conversationId } : {}),
+          },
+        });
+      }
 
       // PILLAR 6 §5 savings accounting: a dispatch that rode a summary in
       // place of the omitted older turns lands one context_compaction row in
@@ -1350,7 +1439,8 @@ export function registerAgentConnectorRoutes(
       const systemTokens = systemPrompt ? Math.ceil(systemPrompt.length / 4) : 0;
       const promptCache = planPromptCache({
         systemTokens,
-        routingMode: policy?.routingMode ?? "automatic",
+        routingMode: modeFor(org.promptCachingEnabled),
+        minCacheableTokens: org.minCacheableTokens,
       });
       if (body.dispatch && promptCache.cacheSystem && routing) {
         const routed = routing;
@@ -1361,7 +1451,9 @@ export function registerAgentConnectorRoutes(
                 (
                   (promptCache.estimatedTokensSaved / 1e6) *
                   servedRow.costPerMTokIn *
-                  CACHE_READ_DISCOUNT
+                  // ADR-0021: the cache-read discount is an org dial (default =
+                  // the kernel's Anthropic-ephemeral 0.9)
+                  org.cacheReadDiscount
                 ).toFixed(6),
               )
             : null;
@@ -1400,7 +1492,8 @@ export function registerAgentConnectorRoutes(
       const editPlan = planEditVsRewrite({
         baselineTokens,
         requestText: body.input,
-        routingMode: policy?.routingMode ?? "automatic",
+        routingMode: modeFor(org.editVsRewriteEnabled),
+        minBaselineTokens: org.minEditableBaselineTokens,
       });
       if (body.dispatch && editPlan.mode === "edit" && routing) {
         const routed = routing;

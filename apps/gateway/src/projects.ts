@@ -12,7 +12,6 @@ import {
   eq,
   gte,
   initiatives,
-  lt,
   projectContextItems,
   projectMembers,
   projects,
@@ -43,6 +42,7 @@ import {
   type PiiHit,
 } from "@regulait/shared";
 import { z } from "zod";
+import { loadOrgSettings, orgDefaultPiiMode, retentionFloor, runAuditPruneOnce } from "./org-settings.js";
 
 type ProjectRow = typeof projects.$inferSelect;
 
@@ -277,11 +277,13 @@ async function profilesForTags(db: Db, tags: string[]): Promise<ComplianceProfil
 
 export type PiiMode = "block" | "warn" | "log";
 
-/** The effective piiMode a project's classifications force, or null when the
- * project is unclassified / has no matching compliance profile (in which case
- * PII enforcement is a no-op — unchanged behaviour). A profile always carries
- * a piiMode (the upsert defaults it to 'log'), so a matched project always
- * resolves to one of the three modes. */
+/** The effective piiMode a project's classifications force. When the project
+ * is unclassified / has no matching compliance profile, the ORG DEFAULT
+ * (ADR-0021 defaultPiiMode) applies — 'none' (the default) maps to null and
+ * keeps today's no-enforcement behaviour byte-identical. A classified,
+ * matched project keeps its cascade's mode: the org default fills the gap,
+ * it never overrides a compliance framework. Unattributed calls (no
+ * projectId) stay unenforced — there is no project policy to enforce. */
 export async function projectPiiMode(
   db: Db,
   projectId: string | null | undefined,
@@ -289,10 +291,11 @@ export async function projectPiiMode(
   if (!projectId) return null;
   const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
   if (!project) return null;
+  const fallback = async () => orgDefaultPiiMode(await loadOrgSettings(db));
   const tags = (project.classifications ?? []) as string[];
-  if (tags.length === 0) return null;
+  if (tags.length === 0) return fallback();
   const profiles = await profilesForTags(db, tags);
-  if (profiles.length === 0) return null;
+  if (profiles.length === 0) return fallback();
   return effectiveCompliancePolicy(profiles).piiMode;
 }
 
@@ -382,13 +385,26 @@ export async function preDispatchProjectGate(
     return { ok: true, project, spentUsd: 0 };
   }
   const spentUsd = await projectSpendUsd(db, projectId, { monthly: isMonthly(project), now });
-  if (spentUsd >= project.budgetUsd) {
+  // ADR-0021: WHERE the hard block engages (budgetHardBlockPct of the budget,
+  // 100 = today) and WHETHER it blocks at all (budgetEnforcement 'warn_only'
+  // escalates into the one approvals queue + audits, but lets the dispatch
+  // through). Defaults are byte-identical to the pre-0038 behaviour.
+  const org = await loadOrgSettings(db);
+  const blockAtUsd = (project.budgetUsd * org.budgetHardBlockPct) / 100;
+  if (spentUsd >= blockAtUsd) {
     await escalateProjectBudget(db, project, userId, spentUsd);
+    if (org.budgetEnforcement === "warn_only") {
+      // enforcement is advisory: the crossing is escalated + audited above,
+      // the call itself proceeds and its measured cost still lands.
+      return { ok: true, project, spentUsd };
+    }
     return {
       ok: false,
       status: 409,
       error: "project_budget_exceeded",
-      detail: `measured spend $${spentUsd.toFixed(6)} >= budget $${project.budgetUsd}`,
+      detail:
+        `measured spend $${spentUsd.toFixed(6)} >= hard-block threshold $${blockAtUsd.toFixed(6)}` +
+        ` (${org.budgetHardBlockPct}% of budget $${project.budgetUsd})`,
     };
   }
   return { ok: true, project, spentUsd };
@@ -1500,84 +1516,28 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
   // §8.4 audit-log retention: audit_log has NO projectId column, so retention
   // is a single GLOBAL floor = the MAX auditRetentionDays across ALL compliance
   // profiles (longest-floor-wins, the same discipline the infra backup floor
-  // uses). A framework with a shorter retention can never shorten another
-  // framework's audit trail. Both endpoints are admin-only (the global gate).
-
-  /** Compute the global retention floor + how many rows currently sit below
-   * it — the admin's before-you-prune view. maxDays null = no profile sets a
-   * retention, so nothing is ever eligible for pruning (fail-safe: keep all). */
-  async function retentionFloor(): Promise<{
-    retainedDays: number | null;
-    floorSource: string[];
-    cutoff: Date | null;
-    prunable: number;
-  }> {
-    const profiles = await db.select().from(complianceProfiles);
-    const withDays = profiles.filter(
-      (p): p is typeof p & { auditRetentionDays: number } => p.auditRetentionDays != null,
-    );
-    if (withDays.length === 0) {
-      return { retainedDays: null, floorSource: [], cutoff: null, prunable: 0 };
-    }
-    const retainedDays = withDays.reduce((m, p) => Math.max(m, p.auditRetentionDays), 0);
-    const floorSource = withDays
-      .filter((p) => p.auditRetentionDays === retainedDays)
-      .map((p) => p.tag);
-    const cutoff = new Date(Date.now() - retainedDays * 24 * 3600 * 1000);
-    const [row] = await db
-      .select({ n: count() })
-      .from(auditLog)
-      .where(lt(auditLog.at, cutoff));
-    return { retainedDays, floorSource, cutoff, prunable: row?.n ?? 0 };
-  }
+  // uses), now composed with the ADR-0021 org default (which only ADDS a
+  // retention where no profile set one — a framework floor always wins upward).
+  // The shared computation lives in org-settings.ts so the auto-prune
+  // scheduler and these two admin endpoints can never disagree.
 
   app.get("/v1/audit/retention", async () => {
-    const f = await retentionFloor();
+    const f = await retentionFloor(db);
     return {
       retainedDays: f.retainedDays,
       floorSource: f.floorSource,
       cutoff: f.cutoff,
       prunable: f.prunable,
-      basis: "global max auditRetentionDays across all compliance profiles (longest-floor-wins)",
+      basis:
+        "global max auditRetentionDays across all compliance profiles (longest-floor-wins), composed with the org default (defaultAuditRetentionDays; profile floor always wins upward)",
     };
   });
 
   app.post("/v1/audit/prune", async (req, reply) => {
-    const f = await retentionFloor();
-    if (f.retainedDays == null || f.cutoff == null) {
-      // no framework sets a retention -> nothing is eligible; keep everything
-      return reply.status(200).send({ deleted: 0, retainedDays: null, floorSource: [] });
-    }
-    const deleted = await db
-      .delete(auditLog)
-      .where(lt(auditLog.at, f.cutoff))
-      .returning({ id: auditLog.id });
-    // The prune action is itself audited — a meta row that, by construction,
-    // is newer than the cutoff and so survives its own and every future prune.
     // audit_log.userId is a non-null uuid with no FK; the deploy-time admin
-    // token has no user id, so fall back to the nil uuid (a valid uuid shape).
-    const actorId = req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000";
-    await db.insert(auditLog).values({
-      userId: actorId,
-      objectType: "project",
-      objectId: null,
-      detail: {
-        phase: "audit-retention-prune",
-        deleted: deleted.length,
-        retainedDays: f.retainedDays,
-        floorSource: f.floorSource,
-        cutoff: f.cutoff,
-      },
-      effect: "allow",
-      ruleId: "audit-log-pruned",
-      ruleChain: [],
-      reason: `pruned ${deleted.length} audit row(s) older than ${f.retainedDays}d (global floor from [${f.floorSource.join(", ")}])`,
-    });
-    return reply.status(200).send({
-      deleted: deleted.length,
-      retainedDays: f.retainedDays,
-      floorSource: f.floorSource,
-    });
+    // token has no user id, so runAuditPruneOnce falls back to the nil uuid.
+    const r = await runAuditPruneOnce(db, req.authCtx.userId, false);
+    return reply.status(200).send(r);
   });
 
   // §8.3: what a project's tags currently drive — with HONEST enforcement

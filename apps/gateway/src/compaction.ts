@@ -26,7 +26,7 @@
  *   summarizer included.
  */
 
-import { auditLog, conversations, eq, type Db } from "@regulait/db";
+import { auditLog, conversations, eq, type Db, type OrgSettingsRow } from "@regulait/db";
 import {
   compactionSavings,
   planCompaction,
@@ -78,6 +78,11 @@ export interface PreparedConversationContext {
   savedTokensEst: number;
   /** null when no summary is in play and nothing was attempted this turn */
   publicDetail: CompactionPublicDetail | null;
+  /** ADR-0021 fail_closed: present when the compaction dispatch failed AND the
+   * org's compactionFailureMode is 'fail_closed' — the CALLER must fail the
+   * turn instead of dispatching the full history. Absent under fail_open
+   * (default), where the turn proceeds exactly as before. */
+  failClosed?: { error: string };
 }
 
 const asChat = (m: StoredConversationMessage): ModelChatMessage => ({
@@ -117,9 +122,13 @@ export async function prepareConversationContext(
     candidates: readonly AgentRow[];
     projectId: string | null;
     execute: typeof executeGovernedDispatch;
+    /** ADR-0021 org settings: threshold/window dials, failure mode, summarizer
+     * selection. Optional so standalone callers/tests keep the kernel
+     * defaults (= the org defaults) with no extra load. */
+    org?: OrgSettingsRow | undefined;
   },
 ): Promise<PreparedConversationContext> {
-  const { conversation, messages } = args;
+  const { conversation, messages, org } = args;
 
   // --- current summary state -----------------------------------------------
   let summary = conversation.summary;
@@ -138,17 +147,31 @@ export async function prepareConversationContext(
   let postBound = messages.slice(boundaryIdx + 1).filter((m) => !isDenied(m));
 
   // --- pure decision --------------------------------------------------------
+  // ADR-0021: the threshold/window dials come from the org settings when the
+  // caller supplies them; absent (standalone callers/tests) the kernel
+  // defaults apply — which are exactly the org-settings defaults.
   const plan = planCompaction({
     messageTokens: postBound.map((m) => estimateMessageTokens(m.content)),
     summaryTokens,
+    ...(org ? { thresholdTokens: org.compactionThresholdTokens } : {}),
+    ...(org ? { recentWindowMessages: org.compactionRecentWindow } : {}),
   });
 
   let compacted = false;
   let failOpen: { error: string } | undefined;
+  const failClosedMode = org?.compactionFailureMode === "fail_closed";
 
   if (plan.shouldCompact) {
     const toCompact = postBound.slice(0, plan.compactThroughIndex + 1);
-    const summarizer = cheapestSummarizer(args.candidates);
+    // ADR-0021 summarizer selection: 'cheapest' (default, today) picks the
+    // lowest-priced dispatchable candidate; 'fixed_agent' pins the org's named
+    // agent — but only from within the caller's OWN entitled+dispatchable
+    // roster, so a fixed pick can never widen entitlement. A fixed agent that
+    // is not in the roster yields no summarizer (handled as a failure below).
+    const summarizer =
+      org?.summarizerSelection === "fixed_agent"
+        ? args.candidates.find((a) => a.id === org.summarizerAgentId)
+        : cheapestSummarizer(args.candidates);
     const failOpenAudit = async (error: string) => {
       failOpen = { error };
       await db.insert(auditLog).values({
@@ -158,18 +181,22 @@ export async function prepareConversationContext(
         detail: {
           purpose: "compact",
           conversationId: conversation.id,
-          failOpen: true,
+          ...(failClosedMode ? { failClosed: true } : { failOpen: true }),
           error,
         },
         effect: "allow",
-        ruleId: "context-compaction-failed-open",
+        ruleId: failClosedMode ? "context-compaction-failed-closed" : "context-compaction-failed-open",
         ruleChain: [],
-        reason: `context compaction failed (${error}); the user's turn proceeds with the full history — fail-open, stored messages untouched`,
+        reason: failClosedMode
+          ? `context compaction failed (${error}); this deployment's failure mode is fail_closed, so the turn is refused — stored messages untouched`
+          : `context compaction failed (${error}); the user's turn proceeds with the full history — fail-open, stored messages untouched`,
       });
     };
 
     if (!summarizer) {
-      await failOpenAudit("no_compaction_agent");
+      await failOpenAudit(
+        org?.summarizerSelection === "fixed_agent" ? "fixed_summarizer_unavailable" : "no_compaction_agent",
+      );
     } else {
       const transcript = toCompact.map((m) => `${m.role}: ${m.content}`).join("\n\n");
       const input = summary
@@ -245,6 +272,7 @@ export async function prepareConversationContext(
       publicDetail: failOpen
         ? { active: false, summaryTokens: 0, omittedMessages: 0, savedTokensEst: 0, failOpen }
         : null,
+      ...(failOpen && failClosedMode ? { failClosed: failOpen } : {}),
     };
   }
 
@@ -268,5 +296,6 @@ export async function prepareConversationContext(
       ...(compacted ? { compacted: true } : {}),
       ...(failOpen ? { failOpen } : {}),
     },
+    ...(failOpen && failClosedMode ? { failClosed: failOpen } : {}),
   };
 }
