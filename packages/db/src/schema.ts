@@ -20,6 +20,11 @@ export const users = pgTable("users", {
   email: text("email").notNull().unique(),
   displayName: text("display_name").notNull(),
   isAdmin: boolean("is_admin").notNull().default(false),
+  /** ADR-0022 identity lifecycle: a DISABLED user (offboarding, suspension).
+   * Deactivate ≠ delete — every FK, audit row and history survives; only
+   * authentication (401 user_disabled) and dispatch-as stop. Null = active.
+   * Reactivation clears it. There is deliberately NO hard-delete route. */
+  disabledAt: timestamp("disabled_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -113,6 +118,15 @@ export const auditLog = pgTable(
         // ADR-0021: an admin change to the org-wide functional defaults
         // (org_settings singleton). Plain text column — no DDL needed.
         "org_settings",
+        // ADR-0022 identity lifecycle: admin acts on users (deactivate/
+        // reactivate/rename/admin-flag), roles (force-delete), teams
+        // (member-remove/delete), workflow templates (retire) and approver
+        // delegations. Plain text column — no DDL needed.
+        "user",
+        "role",
+        "team",
+        "workflow_template",
+        "approval_delegation",
       ],
     })
       .notNull()
@@ -572,6 +586,13 @@ export const workflowTemplates = pgTable("workflow_templates", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: text("name").notNull().unique(),
   definition: jsonb("definition").notNull(),
+  /** ADR-0022 retire (soft-disable): a retired template starts NO new
+   * instances (creation is refused loudly, never silently skipped — a
+   * compliance-required template dropping out silently would ungovern the
+   * change); in-flight instances keep their snapshotted definition and are
+   * untouched. Not versioning — just an off switch with a recorded why. */
+  retiredAt: timestamp("retired_at", { withTimezone: true }),
+  retiredReason: text("retired_reason"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -1185,6 +1206,37 @@ export const projectContextItems = pgTable(
   ],
 );
 
+// ADR-0022 — approver delegation (vacation/offboarding coverage). While a
+// delegation window is ACTIVE (starts_at <= now < ends_at), every PENDING
+// approval naming from_user as approver ALSO appears in to_user's inbox, and
+// to_user may decide it. The decision records the REAL decider (decidedBy)
+// plus an on-behalf-of audit row naming the delegator and the delegation —
+// both sides of the act are in the one trail. Admin-managed; the rows are
+// windows, not standing grants — expiry needs no cleanup, the time check does
+// it. Deleting a row ends the delegation immediately.
+export const approvalDelegations = pgTable(
+  "approval_delegations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    fromUserId: uuid("from_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    toUserId: uuid("to_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    startsAt: timestamp("starts_at", { withTimezone: true }).notNull(),
+    endsAt: timestamp("ends_at", { withTimezone: true }).notNull(),
+    reason: text("reason"),
+    /** the admin who set it up (audit prose; FK-free so history survives) */
+    createdBy: uuid("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("approval_delegations_to_idx").on(t.toUserId),
+    index("approval_delegations_from_idx").on(t.fromUserId),
+  ],
+);
+
 // PILLAR 3 (§8.2): a GOVERNED-OPERATIONS layer — monitored resources +
 // operational policies + detected findings + governed remediation. NOT a real
 // infra patcher: findings are inert reports; a remediation is a governed action
@@ -1576,6 +1628,16 @@ export const orgSettings = pgTable(
      * approver must approve; 'any' = the first approval advances the stage and
      * supersedes the rest. */
     approvalQuorum: text("approval_quorum", { enum: APPROVAL_QUORUMS }).notNull().default("all"),
+    /** ADR-0022: master switch for approver delegation. ON (default) = active
+     * delegation windows widen the delegate's inbox and let them decide
+     * on-behalf-of. OFF = a strict separation-of-duties org: creating
+     * delegations is refused and existing windows stop applying immediately. */
+    approvalDelegationEnabled: boolean("approval_delegation_enabled").notNull().default(true),
+    /** ADR-0022 (portal defect fix): the org's default infra-remediation
+     * approver. Persisted so the Infrastructure page's approver pick survives
+     * reloads and admins; each propose call still names its approver
+     * explicitly (this is the prefill/default, never a hidden actor). */
+    infraApproverUserId: uuid("infra_approver_user_id"),
 
     // --- audit retention ----------------------------------------------------
     autoPruneEnabled: boolean("auto_prune_enabled").notNull().default(false),

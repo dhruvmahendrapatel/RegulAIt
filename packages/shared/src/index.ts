@@ -21,6 +21,61 @@ export const createUserSchema = z.object({
   isAdmin: z.boolean().optional(),
 });
 
+// ADR-0022 identity lifecycle -------------------------------------------------
+/** rename — DISPLAY fields only, deliberately: the email is an identity anchor
+ * (unique, credential-adjacent) and changing it is out of scope here. */
+export const updateUserSchema = z
+  .object({ displayName: z.string().min(1) })
+  .strict();
+/** promote/demote the admin flag; a demotion of the last active admin is
+ * refused server-side (lockout guard). */
+export const setUserAdminSchema = z
+  .object({ isAdmin: z.boolean(), reason: z.string().min(1).max(2000).optional() })
+  .strict();
+/** deactivate carries an optional recorded reason; reactivate takes none. */
+export const deactivateUserSchema = z
+  .object({ reason: z.string().min(1).max(2000).optional() })
+  .strict();
+/** approver delegation window (admin-managed). */
+export const createDelegationSchema = z
+  .object({
+    fromUserId: z.string().uuid(),
+    toUserId: z.string().uuid(),
+    startsAt: z.coerce.date(),
+    endsAt: z.coerce.date(),
+    reason: z.string().min(1).max(2000).optional(),
+  })
+  .strict()
+  .superRefine((v, ctx) => {
+    if (v.fromUserId === v.toUserId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "a delegation to oneself is meaningless",
+        path: ["toUserId"],
+      });
+    }
+    if (v.endsAt.getTime() <= v.startsAt.getTime()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "endsAt must be after startsAt",
+        path: ["endsAt"],
+      });
+    }
+  });
+/** retire a workflow template — the why is required (it is the record). */
+export const retireTemplateSchema = z
+  .object({ reason: z.string().min(1).max(2000) })
+  .strict();
+/** delete a role: force is required when the role is still held, and force
+ * requires a recorded reason (audited). */
+export const deleteRoleSchema = z
+  .object({ force: z.boolean().optional(), reason: z.string().min(1).max(2000).optional() })
+  .strict();
+/** delete a team: same force-with-reason contract when shared context blocks. */
+export const deleteTeamSchema = z
+  .object({ force: z.boolean().optional(), reason: z.string().min(1).max(2000).optional() })
+  .strict();
+
 export const createServerSchema = z.object({
   name: z.string().min(1),
   url: z.string().url(),
@@ -886,6 +941,10 @@ export const updateOrgSettingsSchema = z
     budgetHardBlockPct: z.number().int().min(1).max(100).optional(),
     // approvals
     approvalQuorum: approvalQuorumSchema.optional(),
+    // ADR-0022: approver-delegation master switch + persisted default
+    // infra-remediation approver (null clears it)
+    approvalDelegationEnabled: z.boolean().optional(),
+    infraApproverUserId: z.string().uuid().nullable().optional(),
     // audit retention
     autoPruneEnabled: z.boolean().optional(),
     pruneIntervalHours: z.number().int().min(1).max(24 * 30).optional(),

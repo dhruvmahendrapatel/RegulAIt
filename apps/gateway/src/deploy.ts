@@ -30,6 +30,17 @@ export interface DeployResult {
   deployId: string;
   url: string;
   detail: string;
+  /**
+   * #79c honesty: true whenever this adapter did NOT actually mutate the
+   * target it claims to have deployed to — i.e. every deterministic dry-run
+   * SHAPE (aws without a live client, azure, gcp, kubernetes). The workflow
+   * engine persists it in the stage context, the UI badges it, and a dry-run
+   * may NEVER satisfy a production deploy gate. The mock provider reports
+   * false on purpose: mock is the demo/test double whose deploys ARE its
+   * (self-describing, mock:// -addressed) contract, not a pretend run of a
+   * real one — see ADR-0022.
+   */
+  dryRun: boolean;
 }
 export interface RollbackResult {
   reverted: string; // the deployId that was reversed
@@ -60,6 +71,7 @@ class MockDeployProvider implements DeployProvider {
       deployId,
       url: `mock://deploy/${target}/${env}/${deployId}`,
       detail: `mock deploy to ${target} (${env})`,
+      dryRun: false, // the mock deploy IS the mock provider's real contract
     };
   }
   rollback(_target: string, deployId: string): RollbackResult {
@@ -168,6 +180,7 @@ class AwsDeployProvider implements DeployProvider {
         deployId: out.deployId,
         url: out.url,
         detail: `assume-role ${this.roleArn} → deploy to ${target} (${env}) in ${this.region} [live]`,
+        dryRun: false,
       };
     }
     // Dry-run: deterministic session marker, no credentials, no network.
@@ -178,6 +191,7 @@ class AwsDeployProvider implements DeployProvider {
       deployId,
       url: `https://${this.region}.console.aws.amazon.com/deploy/${acct}/${target}/${deployId}`,
       detail: `assume-role ${this.roleArn} → deploy to ${target} (${env}) in ${this.region} [dry-run]`,
+      dryRun: true,
     };
   }
 
@@ -235,6 +249,7 @@ class AzureDeployProvider implements DeployProvider {
       deployId,
       url: `https://portal.azure.com/#@/resource/subscriptions/${this.subscription}/deploy/${target}/${deployId}`,
       detail: `azure login sub ${this.subscription} → deploy to ${target} (${env}) in ${this.region} [dry-run]`,
+      dryRun: true,
     };
   }
 
@@ -279,6 +294,7 @@ class GcpDeployProvider implements DeployProvider {
       deployId,
       url: `https://console.cloud.google.com/deploy/${this.project}/${this.region}/${target}/${deployId}`,
       detail: `gcp wif project ${this.project} → deploy to ${target} (${env}) in ${this.region} [dry-run]`,
+      dryRun: true,
     };
   }
 
@@ -325,6 +341,7 @@ class KubernetesDeployProvider implements DeployProvider {
       deployId,
       url: `k8s://${ns}/deployments/${target}#${deployId}`,
       detail: `kubeconfig apply → rollout ${target} in namespace ${ns} (${env}) [dry-run]`,
+      dryRun: true,
     };
   }
 

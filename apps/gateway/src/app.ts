@@ -6,9 +6,15 @@ import {
   agentRevocations,
   agents,
   apiKeys,
+  approvalDelegations,
   approvalRules,
   approvals,
   auditLog,
+  backupRuns,
+  certInventory,
+  infraFindings,
+  infraResources,
+  patchRecords,
   connectorRevocations,
   connectors,
   dataScopeRules,
@@ -16,6 +22,7 @@ import {
   isNull,
   mcpServers,
   mcpTools,
+  or,
   orchestrationRuns,
   projectContextItems,
   projects,
@@ -56,12 +63,18 @@ import {
   createToolGrantSchema,
   createToolSchema,
   createUserSchema,
+  createDelegationSchema,
+  deactivateUserSchema,
   decideApprovalSchema,
+  deleteRoleSchema,
   evaluateRequestSchema,
+  setUserAdminSchema,
+  updateUserSchema,
 } from "@regulait/shared";
 import { governedEvaluate } from "./governed-evaluate.js";
 import { loadEntitlements } from "./entitlements.js";
 import { authenticate, generateToken, type AuthContext } from "./auth.js";
+import { activeDelegatorsFor, activeDelegationFrom } from "./delegations.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -110,6 +123,7 @@ const visibleToolsParams = z.object({
   serverId: z.string().uuid(),
 });
 const auditQuery = z.object({ userId: z.string().uuid().optional() });
+const UUID_ANY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   const app = Fastify({ logger: false });
@@ -180,6 +194,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       if (typeof alt === "string" && alt.length > 0) authorization = `Bearer ${alt}`;
     }
     const ctx = await authenticate(db, opts.bootstrapToken, authorization);
+    // ADR-0022: a valid key whose user is DEACTIVATED gets its own reason —
+    // the holder should learn "your account is disabled", not "bad token".
+    if (ctx === "disabled") {
+      return reply.status(401).send({
+        error: "user_disabled",
+        detail: "this account has been deactivated — an admin can reactivate it",
+      });
+    }
     if (!ctx) return reply.status(401).send({ error: "unauthenticated" });
     req.authCtx = ctx;
   });
@@ -296,7 +318,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   });
 
   // ADR-0012: portal-driven API-parity gap fill — the bulk user table needs
-  // a list endpoint, not only POST.
+  // a list endpoint, not only POST. disabledAt rides along (ADR-0022) so the
+  // portal can grey deactivated accounts and offer Reactivate.
   app.get("/v1/users", async () => ({
     users: await db
       .select({
@@ -304,10 +327,149 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         email: users.email,
         displayName: users.displayName,
         isAdmin: users.isAdmin,
+        disabledAt: users.disabledAt,
         createdAt: users.createdAt,
       })
       .from(users),
   }));
+
+  // --- ADR-0022 identity lifecycle (admin-only via the default gate) --------
+  // Deactivate ≠ delete: nothing is removed, audit history and FKs survive;
+  // only authentication and dispatch-as stop. There is deliberately NO
+  // hard-delete route.
+
+  const userIdParam = z.object({ userId: z.string().uuid() });
+  const loadUser = async (userId: string) => {
+    const [row] = await db.select().from(users).where(eq(users.id, userId));
+    return row ?? null;
+  };
+  /** lockout guard: true when the org would be left with NO active admin */
+  const wouldOrphanAdmins = async (exceptUserId: string): Promise<boolean> => {
+    const admins = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(and(eq(users.isAdmin, true), isNull(users.disabledAt)));
+    return admins.every((a) => a.id === exceptUserId);
+  };
+  const auditUserAct = (
+    actorId: string | null,
+    targetId: string,
+    ruleId: string,
+    reason: string,
+    detail: Record<string, unknown>,
+  ) =>
+    db.insert(auditLog).values({
+      userId: actorId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "user",
+      objectId: targetId,
+      detail,
+      effect: "allow",
+      ruleId,
+      ruleChain: [],
+      reason,
+    });
+
+  app.post("/v1/users/:userId/deactivate", async (req, reply) => {
+    const { userId } = userIdParam.parse(req.params);
+    const body = deactivateUserSchema.parse(req.body ?? {});
+    const target = await loadUser(userId);
+    if (!target) return reply.status(404).send({ error: "unknown_user" });
+    if (target.disabledAt) return reply.status(409).send({ error: "already_disabled" });
+    // an admin cannot deactivate THEMSELVES (no self-lockout), and the org
+    // must never be left without an active admin
+    if (req.authCtx.userId === userId) {
+      return reply.status(409).send({
+        error: "cannot_deactivate_self",
+        detail: "deactivating your own account would lock you out — another admin must do it",
+      });
+    }
+    if (target.isAdmin && (await wouldOrphanAdmins(userId))) {
+      return reply.status(409).send({
+        error: "last_active_admin",
+        detail: "this is the last active admin — promote another admin before deactivating them",
+      });
+    }
+    const [row] = await db
+      .update(users)
+      .set({ disabledAt: new Date() })
+      .where(eq(users.id, userId))
+      .returning({ id: users.id, disabledAt: users.disabledAt });
+    await auditUserAct(
+      req.authCtx.userId,
+      userId,
+      "user-deactivated",
+      `user '${target.email}' deactivated${body.reason ? `: ${body.reason}` : ""}`,
+      { phase: "deactivate", email: target.email, ...(body.reason ? { reason: body.reason } : {}) },
+    );
+    return row;
+  });
+
+  app.post("/v1/users/:userId/reactivate", async (req, reply) => {
+    const { userId } = userIdParam.parse(req.params);
+    const target = await loadUser(userId);
+    if (!target) return reply.status(404).send({ error: "unknown_user" });
+    if (!target.disabledAt) return reply.status(409).send({ error: "not_disabled" });
+    const [row] = await db
+      .update(users)
+      .set({ disabledAt: null })
+      .where(eq(users.id, userId))
+      .returning({ id: users.id, disabledAt: users.disabledAt });
+    await auditUserAct(req.authCtx.userId, userId, "user-reactivated", `user '${target.email}' reactivated`, {
+      phase: "reactivate",
+      email: target.email,
+    });
+    return row;
+  });
+
+  // rename — display fields only, deliberately (the email is an identity
+  // anchor and stays immutable here)
+  app.patch("/v1/users/:userId", async (req, reply) => {
+    const { userId } = userIdParam.parse(req.params);
+    const body = updateUserSchema.parse(req.body);
+    const target = await loadUser(userId);
+    if (!target) return reply.status(404).send({ error: "unknown_user" });
+    const [row] = await db
+      .update(users)
+      .set({ displayName: body.displayName })
+      .where(eq(users.id, userId))
+      .returning({ id: users.id, displayName: users.displayName });
+    await auditUserAct(
+      req.authCtx.userId,
+      userId,
+      "user-renamed",
+      `user '${target.email}' renamed '${target.displayName}' → '${body.displayName}'`,
+      { phase: "rename", from: target.displayName, to: body.displayName },
+    );
+    return row;
+  });
+
+  // promote/demote the admin flag — same lockout guard as deactivation
+  app.post("/v1/users/:userId/admin", async (req, reply) => {
+    const { userId } = userIdParam.parse(req.params);
+    const body = setUserAdminSchema.parse(req.body);
+    const target = await loadUser(userId);
+    if (!target) return reply.status(404).send({ error: "unknown_user" });
+    if (target.isAdmin === body.isAdmin) return reply.status(409).send({ error: "no_change" });
+    if (!body.isAdmin && target.isAdmin && !target.disabledAt && (await wouldOrphanAdmins(userId))) {
+      return reply.status(409).send({
+        error: "last_active_admin",
+        detail: "this is the last active admin — promote another admin before demoting them",
+      });
+    }
+    const [row] = await db
+      .update(users)
+      .set({ isAdmin: body.isAdmin })
+      .where(eq(users.id, userId))
+      .returning({ id: users.id, isAdmin: users.isAdmin });
+    await auditUserAct(
+      req.authCtx.userId,
+      userId,
+      body.isAdmin ? "user-promoted-admin" : "user-demoted-admin",
+      `user '${target.email}' ${body.isAdmin ? "promoted to" : "demoted from"} admin${body.reason ? `: ${body.reason}` : ""}`,
+      { phase: "admin-flag", isAdmin: body.isAdmin, ...(body.reason ? { reason: body.reason } : {}) },
+    );
+    return row;
+  });
 
   // Names-only directory for the /app pickers (add a project member, name an
   // approver) — the gap slices 3–4 kept hitting: non-admins cannot read the
@@ -340,6 +502,18 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   app.post("/v1/users/:userId/keys", async (req, reply) => {
     const { userId } = z.object({ userId: z.string().uuid() }).parse(req.params);
     const body = createApiKeySchema.parse(req.body);
+    // ADR-0022: a deactivated user cannot be handed a fresh credential — the
+    // key would 401 anyway; refuse loudly instead of minting a dead secret.
+    const [keyTarget] = await db
+      .select({ disabledAt: users.disabledAt })
+      .from(users)
+      .where(eq(users.id, userId));
+    if (keyTarget?.disabledAt) {
+      return reply.status(409).send({
+        error: "user_disabled",
+        detail: "this account is deactivated — reactivate it before issuing keys",
+      });
+    }
     const { token, tokenHash } = generateToken();
     const [row] = await db
       .insert(apiKeys)
@@ -581,6 +755,100 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       )
       .returning({ id: roleAssignments.id });
     if (deleted.length === 0) return reply.status(404).send({ error: "not_assigned" });
+    return { removed: true };
+  });
+
+  // ADR-0022: who holds a role — the missing read that makes assignments
+  // manageable (unassign is the DELETE above; this names the holders).
+  app.get("/v1/roles/:roleId/assignments", async (req) => {
+    const { roleId } = z.object({ roleId: z.string().uuid() }).parse(req.params);
+    const rows = await db
+      .select({
+        userId: roleAssignments.userId,
+        displayName: users.displayName,
+        email: users.email,
+        disabledAt: users.disabledAt,
+        assignedAt: roleAssignments.createdAt,
+      })
+      .from(roleAssignments)
+      .innerJoin(users, eq(users.id, roleAssignments.userId))
+      .where(eq(roleAssignments.roleId, roleId));
+    return { assignments: rows };
+  });
+
+  // ADR-0022: delete an unused role. A role still HELD by users is refused
+  // (409 naming the holders) unless force+reason — then the deletion cascades
+  // the assignments and its bundled grants, and the audit row records who
+  // held it and why it went anyway.
+  app.delete("/v1/roles/:roleId", async (req, reply) => {
+    const { roleId } = z.object({ roleId: z.string().uuid() }).parse(req.params);
+    const body = deleteRoleSchema.parse(req.body ?? {});
+    const [role] = await db.select().from(roles).where(eq(roles.id, roleId));
+    if (!role) return reply.status(404).send({ error: "unknown_role" });
+    const holders = await db
+      .select({ userId: roleAssignments.userId, email: users.email })
+      .from(roleAssignments)
+      .innerJoin(users, eq(users.id, roleAssignments.userId))
+      .where(eq(roleAssignments.roleId, roleId));
+    if (holders.length > 0 && !body.force) {
+      return reply.status(409).send({
+        error: "role_held",
+        holders: holders.map((h) => h.email),
+        detail: `role '${role.name}' is held by ${holders.length} user(s) — unassign them, or force-delete with a recorded reason`,
+      });
+    }
+    if (holders.length > 0 && !body.reason?.trim()) {
+      return reply.status(422).send({
+        error: "force_reason_required",
+        detail: "force-deleting a held role requires a recorded reason",
+      });
+    }
+    await db.delete(roles).where(eq(roles.id, roleId));
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "role",
+      objectId: roleId,
+      detail: {
+        phase: "role-deleted",
+        name: role.name,
+        holders: holders.map((h) => h.email),
+        ...(body.force ? { force: true } : {}),
+        ...(body.reason ? { reason: body.reason } : {}),
+      },
+      effect: "allow",
+      ruleId: "role-deleted",
+      ruleChain: [],
+      reason:
+        holders.length > 0
+          ? `role '${role.name}' force-deleted while held by ${holders.length} user(s): ${body.reason}`
+          : `unused role '${role.name}' deleted`,
+    });
+    return { removed: true, unassigned: holders.length };
+  });
+
+  // ADR-0022: the MCP twins of the agent/connector role-grant DELETEs below —
+  // every role grant is now removable, all four object types.
+  app.delete("/v1/roles/:roleId/grants/tools/:grantId", async (req, reply) => {
+    const { roleId, grantId } = z
+      .object({ roleId: z.string().uuid(), grantId: z.string().uuid() })
+      .parse(req.params);
+    const deleted = await db
+      .delete(roleToolGrants)
+      .where(and(eq(roleToolGrants.id, grantId), eq(roleToolGrants.roleId, roleId)))
+      .returning({ id: roleToolGrants.id });
+    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_grant" });
+    return { removed: true };
+  });
+
+  app.delete("/v1/roles/:roleId/grants/servers/:grantId", async (req, reply) => {
+    const { roleId, grantId } = z
+      .object({ roleId: z.string().uuid(), grantId: z.string().uuid() })
+      .parse(req.params);
+    const deleted = await db
+      .delete(roleServerGrants)
+      .where(and(eq(roleServerGrants.id, grantId), eq(roleServerGrants.roleId, roleId)))
+      .returning({ id: roleServerGrants.id });
+    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_grant" });
     return { removed: true };
   });
 
@@ -898,17 +1166,128 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     return reply.status(201).send(row);
   });
 
+  // --- ADR-0022 approver delegation (admin-managed) -------------------------
+  // A delegation is a WINDOW: while active, every PENDING approval naming
+  // from_user ALSO appears in to_user's inbox and to_user may decide it — the
+  // decision records the real decider plus an on-behalf-of audit row. The org
+  // master switch (org_settings.approval_delegation_enabled) turns the whole
+  // mechanism off for strict separation-of-duties orgs.
+
+  app.post("/v1/delegations", async (req, reply) => {
+    const body = createDelegationSchema.parse(req.body);
+    const org = await loadOrgSettings(db);
+    if (!org.approvalDelegationEnabled) {
+      return reply.status(409).send({
+        error: "delegation_disabled",
+        detail: "approver delegation is disabled for this organization (org settings)",
+      });
+    }
+    const named = await db
+      .select({ id: users.id, disabledAt: users.disabledAt })
+      .from(users)
+      .where(inArray(users.id, [body.fromUserId, body.toUserId]));
+    if (named.length !== 2) return reply.status(422).send({ error: "unknown_user" });
+    // delegating TO a deactivated user creates an inbox no one can open
+    const to = named.find((u) => u.id === body.toUserId);
+    if (to?.disabledAt) {
+      return reply.status(422).send({ error: "delegate_disabled", detail: "the delegate account is deactivated" });
+    }
+    const [row] = await db
+      .insert(approvalDelegations)
+      .values({
+        fromUserId: body.fromUserId,
+        toUserId: body.toUserId,
+        startsAt: body.startsAt,
+        endsAt: body.endsAt,
+        reason: body.reason ?? null,
+        createdBy: req.authCtx.userId,
+      })
+      .returning();
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "approval_delegation",
+      objectId: row!.id,
+      detail: {
+        phase: "delegation-created",
+        fromUserId: body.fromUserId,
+        toUserId: body.toUserId,
+        startsAt: body.startsAt,
+        endsAt: body.endsAt,
+        ...(body.reason ? { reason: body.reason } : {}),
+      },
+      effect: "allow",
+      ruleId: "approval-delegation-created",
+      ruleChain: [],
+      reason: `approval delegation created (${body.startsAt.toISOString()} → ${body.endsAt.toISOString()})${body.reason ? `: ${body.reason}` : ""}`,
+    });
+    return reply.status(201).send(row);
+  });
+
+  app.get("/v1/delegations", async () => {
+    const rows = await db.select().from(approvalDelegations);
+    const ids = [...new Set(rows.flatMap((r) => [r.fromUserId, r.toUserId]))];
+    const userRows = ids.length
+      ? await db
+          .select({ id: users.id, displayName: users.displayName, email: users.email })
+          .from(users)
+          .where(inArray(users.id, ids))
+      : [];
+    const nameOf = new Map(userRows.map((u) => [u.id, u.displayName || u.email]));
+    const now = Date.now();
+    return {
+      delegations: rows.map((r) => ({
+        ...r,
+        fromName: nameOf.get(r.fromUserId) ?? null,
+        toName: nameOf.get(r.toUserId) ?? null,
+        active: r.startsAt.getTime() <= now && now < r.endsAt.getTime(),
+      })),
+    };
+  });
+
+  app.delete("/v1/delegations/:delegationId", async (req, reply) => {
+    const { delegationId } = z.object({ delegationId: z.string().uuid() }).parse(req.params);
+    const deleted = await db
+      .delete(approvalDelegations)
+      .where(eq(approvalDelegations.id, delegationId))
+      .returning();
+    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_delegation" });
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "approval_delegation",
+      objectId: delegationId,
+      detail: { phase: "delegation-ended", fromUserId: deleted[0]!.fromUserId, toUserId: deleted[0]!.toUserId },
+      effect: "allow",
+      ruleId: "approval-delegation-ended",
+      ruleChain: [],
+      reason: "approval delegation ended by an admin",
+    });
+    return { removed: true };
+  });
+
   // §6 Approvals Queue — one inbox for every paused call. Admins see all;
-  // a non-admin sees exactly the approvals naming them as approver, so named
-  // approvers can discover what awaits their sign-off.
+  // a non-admin sees exactly the approvals naming them as approver — PLUS,
+  // while a delegation window to them is active (ADR-0022), the pending
+  // approvals of their delegator(s), marked delegatedFrom.
   app.get("/v1/approvals", async (req) => {
     const { status } = z
       .object({ status: z.enum(["pending", "approved", "denied", "consumed", "superseded"]).optional() })
       .parse(req.query);
-    const conditions = [
-      status ? eq(approvals.status, status) : undefined,
-      req.authCtx.isAdmin ? undefined : eq(approvals.approverUserId, req.authCtx.userId ?? ""),
-    ].filter((c) => c !== undefined);
+    // ADR-0022 delegation widening: a non-admin sees their own rows PLUS the
+    // PENDING rows of anyone actively delegating to them (pending only — a
+    // delegate covers live decisions, they don't inherit the archive).
+    const me = req.authCtx.userId ?? "";
+    const delegators = !req.authCtx.isAdmin && me ? await activeDelegatorsFor(db, me) : [];
+    const scopeCondition = req.authCtx.isAdmin
+      ? undefined
+      : delegators.length
+        ? or(
+            eq(approvals.approverUserId, me),
+            and(inArray(approvals.approverUserId, delegators), eq(approvals.status, "pending")),
+          )
+        : eq(approvals.approverUserId, me);
+    const conditions = [status ? eq(approvals.status, status) : undefined, scopeCondition].filter(
+      (c) => c !== undefined,
+    );
     const rows = await db
       .select()
       .from(approvals)
@@ -996,6 +1375,79 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     );
     const runLabel = new Map(runRows.map((r) => [r.id, r.name]));
     const projectLabel = new Map(projectRows.map((p) => [p.id, p.name]));
+    // ADR-0022 UX: infra_operation rows finally say WHAT they govern. Their
+    // stageId sentinel carries the finding/ledger id — resolve it to the
+    // resource plus a one-line finding/action summary, same enrichment
+    // discipline as the workflow/run/project labels above.
+    const REMEDIATION_PREFIX = "__infra_remediation__:";
+    const ACTION_PREFIX = "__infra_action__:";
+    const uuidOk = (s: string) => UUID_ANY_RE.test(s);
+    const findingIds = ids(
+      rows.map((r) =>
+        r.stageId?.startsWith(REMEDIATION_PREFIX) && uuidOk(r.stageId.slice(REMEDIATION_PREFIX.length))
+          ? r.stageId.slice(REMEDIATION_PREFIX.length)
+          : null,
+      ),
+    );
+    const actionRef = (stageId: string | null) => {
+      if (!stageId?.startsWith(ACTION_PREFIX)) return null;
+      const rest = stageId.slice(ACTION_PREFIX.length);
+      const sep = rest.indexOf(":");
+      if (sep < 0) return null;
+      const ref = { action: rest.slice(0, sep), id: rest.slice(sep + 1) };
+      return uuidOk(ref.id) ? ref : null;
+    };
+    const actionRefs = rows.map((r) => actionRef(r.stageId)).filter((x): x is { action: string; id: string } => x !== null);
+    const certIds = ids(actionRefs.map((a) => (a.action === "cert_rotate" ? a.id : null)));
+    const patchIds = ids(actionRefs.map((a) => (a.action === "patch_apply" ? a.id : null)));
+    const backupIds = ids(actionRefs.map((a) => (a.action === "backup_restore" ? a.id : null)));
+    const [findingRows, certRows, patchRows, backupRows] = await Promise.all([
+      findingIds.length ? db.select().from(infraFindings).where(inArray(infraFindings.id, findingIds)) : [],
+      certIds.length ? db.select().from(certInventory).where(inArray(certInventory.id, certIds)) : [],
+      patchIds.length ? db.select().from(patchRecords).where(inArray(patchRecords.id, patchIds)) : [],
+      backupIds.length ? db.select().from(backupRuns).where(inArray(backupRuns.id, backupIds)) : [],
+    ]);
+    const resourceIds = ids([
+      ...findingRows.map((f) => f.resourceId),
+      ...certRows.map((c) => c.resourceId),
+      ...patchRows.map((p) => p.resourceId),
+      ...backupRows.map((b) => b.resourceId),
+    ]);
+    const resourceRows = resourceIds.length
+      ? await db
+          .select({ id: infraResources.id, name: infraResources.name })
+          .from(infraResources)
+          .where(inArray(infraResources.id, resourceIds))
+      : [];
+    const resourceName = new Map(resourceRows.map((r) => [r.id, r.name]));
+    const findingById = new Map(findingRows.map((f) => [f.id, f]));
+    const certById = new Map(certRows.map((c) => [c.id, c]));
+    const patchById = new Map(patchRows.map((p) => [p.id, p]));
+    const backupById = new Map(backupRows.map((b) => [b.id, b]));
+    const infraLabelFor = (stageId: string | null): string | null => {
+      if (stageId?.startsWith(REMEDIATION_PREFIX)) {
+        const f = findingById.get(stageId.slice(REMEDIATION_PREFIX.length));
+        if (!f) return null;
+        const summary = (f.detail as { summary?: string } | null)?.summary;
+        return `${resourceName.get(f.resourceId) ?? "resource"} · ${f.kind} (${f.severity})${summary ? ` — ${summary}` : ""}`;
+      }
+      const ref = actionRef(stageId ?? null);
+      if (!ref) return null;
+      if (ref.action === "cert_rotate") {
+        const c = certById.get(ref.id);
+        return c ? `${resourceName.get(c.resourceId) ?? "resource"} · rotate cert ${c.commonName}` : null;
+      }
+      if (ref.action === "patch_apply") {
+        const p = patchById.get(ref.id);
+        return p ? `${resourceName.get(p.resourceId) ?? "resource"} · patch ${p.cve} (${p.severity})` : null;
+      }
+      if (ref.action === "backup_restore") {
+        const b = backupById.get(ref.id);
+        return b ? `${resourceName.get(b.resourceId) ?? "resource"} · restore ${b.kind} (${b.status})` : null;
+      }
+      return null;
+    };
+    const delegatedFor = new Set(delegators);
     const contextConflictFor = (r: (typeof rows)[number]) => {
       if (!r.stageId?.startsWith(CONFLICT_PREFIX)) return {};
       const item = conflictByItemId.get(r.stageId.slice(CONFLICT_PREFIX.length));
@@ -1030,8 +1482,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           (r.instanceId ? instanceLabel.get(r.instanceId) : null) ??
           (r.runId ? runLabel.get(r.runId) : null) ??
           (r.projectId ? projectLabel.get(r.projectId) : null) ??
+          (r.objectType === "infra_operation" ? infraLabelFor(r.stageId) : null) ??
           r.toolName ??
           null,
+        // ADR-0022: this row reached the caller via an active delegation —
+        // the UI badges it and the decide endpoint records on-behalf-of.
+        ...(r.approverUserId !== me && delegatedFor.has(r.approverUserId)
+          ? { delegatedFrom: nameOf.get(r.approverUserId) ?? r.approverUserId }
+          : {}),
         ...contextConflictFor(r),
       })),
     };
@@ -1057,11 +1515,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         detail: "this approval was superseded (its node, run, or stage moved on) and can no longer be decided",
       });
     }
-    // Only the rule's named approver may decide (§3) — with one escape hatch:
-    // an org ADMIN may decide in the approver's place to unblock a stuck
-    // queue, but only with a recorded reason, and the override is written to
-    // the one audit trail as exactly what it is.
-    const adminOverride = row.approverUserId !== deciderUserId;
+    // Only the rule's named approver may decide (§3) — with two sanctioned
+    // widenings: (a) ADR-0022 delegation — an ACTIVE delegation window from
+    // the named approver lets the delegate decide, recorded as the real
+    // decider acting on-behalf-of; (b) an org ADMIN may decide in the
+    // approver's place to unblock a stuck queue, but only with a recorded
+    // reason, audit-marked as the override it is.
+    const delegation =
+      row.approverUserId !== deciderUserId
+        ? await activeDelegationFrom(db, row.approverUserId, deciderUserId)
+        : null;
+    const adminOverride = row.approverUserId !== deciderUserId && !delegation;
     if (adminOverride) {
       if (!req.authCtx.isAdmin) {
         return reply.status(403).send({ error: "not_the_named_approver" });
@@ -1141,6 +1605,30 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           reason: `self-review: the approver is the requesting user; decided with recorded reason: ${body.reason}`,
         });
       }
+      // ADR-0022: a delegated decision audits BOTH sides — decidedBy already
+      // records the REAL decider on the approval row; this row records that
+      // it was on-behalf-of the named approver, under which delegation.
+      if (delegation) {
+        await tx.insert(auditLog).values({
+          userId: deciderUserId,
+          objectType: updated.objectType,
+          objectId: updated.instanceId ?? updated.runId ?? updated.projectId ?? null,
+          serverId: updated.serverId,
+          toolName: updated.toolName,
+          detail: {
+            approvalId: updated.id,
+            delegated: true,
+            onBehalfOfUserId: row.approverUserId,
+            delegationId: delegation.id,
+            decision: body.decision,
+            stageId: updated.stageId,
+          },
+          effect: body.decision === "approved" ? "allow" : "deny",
+          ruleId: "approval-delegated-decision",
+          ruleChain: [],
+          reason: `decided on behalf of the named approver under an active delegation${delegation.reason ? ` (${delegation.reason})` : ""}`,
+        });
+      }
       let postCommit: ((d: Db) => Promise<void>) | null = null;
       // Workflow sign-offs advance their instance through the same one inbox (§5).
       if (updated.objectType === "workflow") {
@@ -1195,6 +1683,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     return {
       ...outcome.updated,
       ...(adminOverride ? { adminOverride: true } : {}),
+      ...(delegation ? { onBehalfOf: row.approverUserId, delegationId: delegation.id } : {}),
       ...(selfReview ? { selfReview: true } : {}),
       ...(pmMirror ? { pmMirror } : {}),
       ...(executionError ? { executionError } : {}),
@@ -1255,6 +1744,53 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       .orderBy(desc(auditLog.at))
       .limit(100);
     return { entries: rows };
+  });
+
+  // ADR-0022: CSV export of the (filtered) audit trail — the compliance
+  // deliverable auditors actually ask for. Admin-only via the default gate;
+  // same download pattern as the per-project costs CSV. Unlike the 100-row
+  // screen view, the export carries the FULL filtered trail.
+  app.get("/v1/audit.csv", async (req, reply) => {
+    const { userId } = auditQuery.parse(req.query);
+    const [rows, userRows] = await Promise.all([
+      db
+        .select()
+        .from(auditLog)
+        .where(userId ? eq(auditLog.userId, userId) : undefined)
+        .orderBy(desc(auditLog.at)),
+      db.select({ id: users.id, displayName: users.displayName, email: users.email }).from(users),
+    ]);
+    const nameOf = new Map(userRows.map((u) => [u.id, u.displayName || u.email]));
+    const csvCell = (v: unknown): string => {
+      if (v === null || v === undefined) return "";
+      const s = typeof v === "object" ? JSON.stringify(v) : String(v);
+      return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const header = ["at", "userId", "userName", "objectType", "objectId", "serverId", "toolName", "effect", "ruleId", "reason", "detail"];
+    const lines = [header.join(",")];
+    for (const r of rows) {
+      lines.push(
+        [
+          r.at.toISOString(),
+          r.userId,
+          nameOf.get(r.userId) ?? "",
+          r.objectType,
+          r.objectId,
+          r.serverId,
+          r.toolName,
+          r.effect,
+          r.ruleId,
+          r.reason,
+          r.detail,
+        ]
+          .map(csvCell)
+          .join(","),
+      );
+    }
+    return reply
+      .header("content-type", "text/csv; charset=utf-8")
+      .header("content-disposition", `attachment; filename="audit-log${userId ? `-${userId.slice(0, 8)}` : ""}.csv"`)
+      .send(lines.join("\n") + "\n");
   });
 
   return app;

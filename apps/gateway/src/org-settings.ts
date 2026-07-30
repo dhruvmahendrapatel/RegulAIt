@@ -25,6 +25,7 @@ import {
   count,
   orgSettings,
   ORG_SETTINGS_ID,
+  users,
   type Db,
   type OrgSettingsRow,
 } from "@regulait/db";
@@ -233,6 +234,22 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db) {
 
   app.put("/v1/org/settings", async (req, reply) => {
     const body = updateOrgSettingsSchema.parse(req.body);
+    // ADR-0022: the default infra-remediation approver must be a real, ACTIVE
+    // user — a disabled or unknown default would silently dead-letter every
+    // proposed remediation.
+    if (body.infraApproverUserId) {
+      const [approver] = await db
+        .select({ id: users.id, disabledAt: users.disabledAt })
+        .from(users)
+        .where(eq(users.id, body.infraApproverUserId));
+      if (!approver) return reply.status(422).send({ error: "unknown_approver" });
+      if (approver.disabledAt) {
+        return reply.status(422).send({
+          error: "approver_disabled",
+          detail: "the chosen infra approver account is deactivated",
+        });
+      }
+    }
     const before = await loadOrgSettings(db);
     const [row] = await db
       .update(orgSettings)
