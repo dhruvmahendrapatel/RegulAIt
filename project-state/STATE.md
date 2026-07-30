@@ -703,6 +703,40 @@ dev-grade, NOT production. The user then directed the four remaining open-item a
 pillar-3 infra-ops AUTOMATION (drift/CVE/cert/backup — the operational half beyond the §8.2
 governed-ops layer), clearing the ADR-0015/0016 + pillar-2 deferrals, and a deeper UX/a11y pass.
 
+**Four-area cleanup batch shipped, 2026-07-30 (session-02 addendum 33; migrations 0034 + 0035;
+ADR-0017, ADR-0018 + ADR-0015/0016 addenda; PRs #40/#41/#42, all merged).** The four directed
+areas landed as three per-chunk PRs on fresh branches (branch-per-PR adopted this session so the
+mobile app's PR chip tracks the current PR, not an old merged one). **(1) Pillar-3 infra-ops
+automation (migration 0034, ADR-0017):** automation DEPTH on the existing §8.2 detect→remediate
+spine — durable domain ledgers (`cert_inventory` + `cert_rotations`, `patch_records`
+UNIQUE(resource,cve), `backup_runs`) that hang off `infra_resources` and link back to the inert
+`infra_findings` via `ref_table`/`ref_id`; the pure detection math (`compareDrift`,
+`cvssToSeverity`, `certSeverity`, `evaluateBackupSchedule`) extracted + unit-tested; governed
+operator verbs (rotate / patch / restore) that flow through the ONE Approvals Queue via an
+action-tagged sentinel `__infra_action__:<action>:<id>` — approve runs the provider action + writes
+the ledger outcome in the same /decide txn, deny → linked finding `accepted_risk`; air-gapped
+resources reuse the ADR-0015 boundary (metadata-only). `infra_resources.deploy_target_id` ties
+customer-hosted resources to their BYOC target. No live cloud mutation. **(2) Deferral cleanup
+(migration 0035, ADR-0018 + addenda):** azure/gcp/kubernetes deploy adapter SHAPES (dry-run + //
+REAL: markers; all five kinds resolve); real @aws-sdk STS AssumeRole behind an off-by-default
+`REGULAIT_DEPLOY_LIVE` flag (injectable client, fake in tests, no live mutation); admin Deploy
+Targets management UI; MEASURED per-node budget running total (`measuredPerNodeUsd`,
+`__nodebudget_measured__` escalation) + decompose auto-suggesting per-node caps + a per-node cap
+chip in /app — clearing all three ADR-0016 deferrals; assignment matching gained target-system +
+initiator-role dims (3→5 of 6 wired; data-sensitivity still deferred; `initiatorRole` server-
+resolved, never client-supplied); seed now drives instances to rest at blocked_on_check /
+blocked_on_deploy / rolled_back. A4 (per-mode policy + mode-aware audit retention) recorded as
+design-only in the ADR-0015 addendum. **(3) Deeper UX/a11y:** shared render helpers hoisted into
+`ui-theme.ts` (`UI_TABLE_JS`) so both UIs + every table reuse them; `table()` delegates to
+`dataTable()` above 8 rows (the new Deploy Targets + infra cards inherit sort/filter/paginate free);
+/app parity (renderDecision for the Playground trace, aria-live toast region, heading focus, mobile
+hamburger, idChip sweep); a real WCAG contrast fix (`--text-faint` ~3.3:1 → ~4.9:1 + a `--decor`
+token) + global :focus-visible rings + keyboard-copyable idChips. Verified per PR on a fresh DB
+(build + check-ui-syntax + suites) — full gateway suite 345 → 361; UX PR added a headless-Chromium
+drive (0 console errors, axe color-contrast serious+ = 0). CI stays paused; local verification was
+the gate. Deploy note: also caught + fixed a pre-existing main build break (two test-file type
+errors CI never saw while Actions minutes are exhausted) as part of the redeploy — see addendum 32.
+
 **Pillar 3 — BYOC deploy targets: modes + AWS assume-role adapter + data boundary, 2026-07-28
 (session-02 addendum 30, migration 0033, ADR-0015).** First pillar-3 slice, extending the pillar-2
 deploy tail into customer-owned cloud. A deploy target gains a `mode` (hosted / byoc / air_gapped)
