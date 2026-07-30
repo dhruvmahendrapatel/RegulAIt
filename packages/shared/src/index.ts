@@ -443,15 +443,34 @@ export const recheckSchema = z.object({
   stageId: z.string().min(1),
 });
 
-/** §2 a governed deploy target a deployment/rollback stage acts on. Credentials
- * are optional (a mock target needs none) and, when given, stored encrypted. */
-export const createDeployTargetSchema = z.object({
-  name: z.string().min(1).max(120),
-  provider: z.enum(["mock", "aws", "azure", "gcp", "kubernetes"]),
-  environment: z.string().min(1).max(80).optional(),
-  baseUrl: z.string().url().max(2000).optional(),
-  credential: z.string().min(1).max(8000).optional(),
-});
+/** §2/§3 a governed deploy target a deployment/rollback stage acts on.
+ * Credentials are optional (a mock/AWS-assume-role target needs none) and, when
+ * given, stored encrypted. §3 BYOC: `mode` picks hosted / byoc / air_gapped, and
+ * an aws target carries the customer role to assume + region. */
+export const createDeployTargetSchema = z
+  .object({
+    name: z.string().min(1).max(120),
+    provider: z.enum(["mock", "aws", "azure", "gcp", "kubernetes"]),
+    environment: z.string().min(1).max(80).optional(),
+    baseUrl: z.string().url().max(2000).optional(),
+    credential: z.string().min(1).max(8000).optional(),
+    mode: z.enum(["hosted", "byoc", "air_gapped"]).optional(),
+    /** aws: the customer IAM role to assume (arn:aws:iam::<acct>:role/<name>) */
+    roleArn: z
+      .string()
+      .regex(/^arn:aws:iam::\d{12}:role\/.+/, "must be an arn:aws:iam::<account>:role/<name>")
+      .max(2048)
+      .optional(),
+    region: z.string().min(1).max(64).optional(),
+  })
+  .superRefine((v, ctx) => {
+    if (v.provider === "aws" && (!v.roleArn || !v.region)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "an aws deploy target needs a roleArn and region",
+      });
+    }
+  });
 
 /** §2 resolve a deploy stage parked at blocked_on_deploy: the operator confirms
  * they deployed out-of-band (or accepts the condition) and the pipeline advances. */

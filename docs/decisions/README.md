@@ -20,3 +20,4 @@ superseding a decision means a new ADR plus a status flip on the old one.
 | [0012](0012-admin-portal-single-file-api-client.md) | Admin portal MVP: dependency-free single-file web app, strictly an API client | Accepted | 2026-07-25 |
 | [0013](0013-dev-app-deploy-single-ec2-compose.md) | Dev app deployment: one EC2 box running docker compose, SSM-only, separate Terraform state | Accepted | 2026-07-25 |
 | [0014](0014-role-bundled-agent-connector-grants.md) | Role-bundled agent + connector grants (UNION-MAX, additive; per-user revocation deferred) | Accepted | 2026-07-27 |
+| [0015](0015-byoc-deploy-modes-data-boundary.md) | BYOC deploy targets: hosted/BYOC/air-gapped modes + AWS assume-role adapter + air-gapped control-plane data boundary | Accepted | 2026-07-28 |

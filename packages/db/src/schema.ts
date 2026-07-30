@@ -605,6 +605,14 @@ export const deployTargets = pgTable("deploy_targets", {
   environment: text("environment"),
   baseUrl: text("base_url"),
   credentialCiphertext: text("credential_ciphertext"),
+  // §3 BYOC deployment mode: hosted (we run it), byoc (customer's own cloud
+  // account/IAM), or air_gapped (customer-hosted, no execution-plane data ever
+  // returns to the control plane — the deploy record we keep is metadata-only).
+  mode: text("mode", { enum: ["hosted", "byoc", "air_gapped"] }).notNull().default("hosted"),
+  // §3 aws BYOC: the customer IAM role we assume (short-lived creds, no static
+  // keys) and the region to deploy in. Null for the mock/hosted provider.
+  roleArn: text("role_arn"),
+  region: text("region"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

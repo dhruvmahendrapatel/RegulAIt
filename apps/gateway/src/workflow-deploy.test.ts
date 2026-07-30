@@ -110,7 +110,10 @@ async function registerTemplate(name: string, changeType: string, deployTarget: 
   expect(rule.statusCode).toBe(201);
 }
 
-async function start(changeType: string, environment = "production") {
+// NB: a suite-unique change environment ("wd-env"), never the shared
+// "production", so a leftover assignment rule keyed on environment=production
+// in another suite (mcp-proxy) can't merge its template into these instances.
+async function start(changeType: string, environment = "wd-env") {
   const res = await app.inject({
     method: "POST",
     headers: piaAuth,
