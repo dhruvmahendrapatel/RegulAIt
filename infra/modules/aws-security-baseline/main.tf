@@ -192,6 +192,45 @@ resource "aws_securityhub_organization_configuration" "org" {
   depends_on = [aws_securityhub_account.management, aws_securityhub_organization_admin_account.this]
 }
 
+# CIS-noise suppression (STATE.md "Known follow-ups" item a).
+# `enable_default_standards = true` above made AWS auto-subscribe BOTH the
+# Foundational Security Best Practices standard AND CIS AWS Foundations
+# Benchmark v1.2.0 (the latter never explicitly requested). Those
+# subscriptions are NOT in Terraform state, so Terraform cannot disable CIS
+# by omission. These resources make the CIS subscription explicitly managed
+# in both accounts, so turning it off becomes a variable flip instead of a
+# console click.
+#
+# TODO (one-time adoption, needs AWS credentials — cannot be done offline):
+# import the existing auto-enabled subscriptions BEFORE the first apply of
+# this change, otherwise Terraform will try to re-subscribe an
+# already-enabled standard:
+#   terraform import \
+#     'module.security_baseline.aws_securityhub_standards_subscription.cis_management[0]' \
+#     arn:aws:securityhub:::ruleset/cis-aws-foundations-benchmark/v/1.2.0
+#   terraform import \
+#     'module.security_baseline.aws_securityhub_standards_subscription.cis_workload[0]' \
+#     arn:aws:securityhub:::ruleset/cis-aws-foundations-benchmark/v/1.2.0   # (workload provider)
+# Then, when CIS findings become noise, set `enable_cis_standard = false`
+# and apply — destroying the resource unsubscribes the standard. FSBP is
+# untouched either way.
+resource "aws_securityhub_standards_subscription" "cis_management" {
+  count         = var.enable_cis_standard ? 1 : 0
+  provider      = aws.management
+  standards_arn = "arn:aws:securityhub:::ruleset/cis-aws-foundations-benchmark/v/1.2.0"
+  depends_on    = [aws_securityhub_account.management]
+}
+
+resource "aws_securityhub_standards_subscription" "cis_workload" {
+  count         = var.enable_cis_standard ? 1 : 0
+  provider      = aws.workload
+  standards_arn = "arn:aws:securityhub:::ruleset/cis-aws-foundations-benchmark/v/1.2.0"
+  # Security Hub in the workload account is auto-enabled by the org
+  # configuration above, not by a Terraform-managed resource, hence no
+  # explicit depends_on is available for it here.
+  depends_on = [aws_securityhub_organization_configuration.org]
+}
+
 ### AWS Config — recorder + delivery channel in both accounts, aggregator in Management ###
 
 resource "aws_s3_bucket" "config" {
@@ -329,10 +368,30 @@ resource "aws_config_configuration_recorder_status" "workload" {
 # Account-based aggregation requires the source account to explicitly
 # authorize the aggregator account first — without this, the aggregator
 # is created but silently never receives the workload account's data.
+#
+# STATE.md "Known follow-ups" item b: this authorization used to cover
+# var.aws_region (us-east-1) only. It now covers every SCP-allowed region,
+# so the authorization side no longer assumes us-east-1 if the aggregator
+# ever moves or a second-region aggregator is added. NOTE the remaining,
+# deliberate gap: the Config RECORDERS above exist only in the providers'
+# region (us-east-1) — resources landing in us-east-2 are not recorded at
+# all. Fixing that requires second-region provider aliases
+# (aws.management_use2 / aws.workload_use2) threaded through this module's
+# configuration_aliases plus duplicate recorder/delivery-channel resources.
+# TODO: add those the day anything actually lands in us-east-2; not added
+# speculatively while the region is empty.
 resource "aws_config_aggregate_authorization" "workload_to_management" {
+  for_each              = toset(var.allowed_regions)
   provider              = aws.workload
   account_id            = var.management_account_id
-  authorized_aws_region = var.aws_region
+  authorized_aws_region = each.value
+}
+
+# The pre-for_each single authorization was applied as an unkeyed resource;
+# map it onto its keyed successor so the apply is a no-op for us-east-1.
+moved {
+  from = aws_config_aggregate_authorization.workload_to_management
+  to   = aws_config_aggregate_authorization.workload_to_management["us-east-1"]
 }
 
 resource "aws_config_configuration_aggregator" "org" {
@@ -369,6 +428,14 @@ resource "aws_s3_account_public_access_block" "workload" {
 
 ### Budgets — staged thresholds, org-wide (created in Management, covers consolidated billing) ###
 
+# STATE.md "Known follow-ups" item c: the dev app stack (ADR-0013) runs
+# ~$15–30/mo, so at the current $5 cap (OQ-002) the ACTUAL-spend alerts
+# below WILL fire every month. That is expected and documented — the alerts
+# are doing their job. Raising the cap changes what the owner agreed to
+# spend and is therefore an owner decision (re-open OQ-002), not something
+# a session adjusts on its own. The FORECASTED notification added below
+# gives earlier warning: it fires when the month's projected spend crosses
+# the cap, typically days before the ACTUAL 100% alert.
 resource "aws_budgets_budget" "monthly" {
   provider     = aws.management
   name         = "${var.project}-monthly-budget"
@@ -386,6 +453,15 @@ resource "aws_budgets_budget" "monthly" {
       notification_type          = "ACTUAL"
       subscriber_email_addresses = var.budget_notification_emails
     }
+  }
+
+  # Early warning on projected (not yet incurred) spend.
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 100
+    threshold_type             = "PERCENTAGE"
+    notification_type          = "FORECASTED"
+    subscriber_email_addresses = var.budget_notification_emails
   }
 }
 
