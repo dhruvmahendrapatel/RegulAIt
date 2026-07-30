@@ -6,7 +6,7 @@
  * would make.
  */
 
-import { UI_CSS, UI_DISPLAY_JS, UI_ERRORS_JS } from "./ui-theme.js";
+import { UI_CSS, UI_DISPLAY_JS, UI_ERRORS_JS, UI_TABLE_JS } from "./ui-theme.js";
 
 export const APP_HTML = `<!doctype html>
 <html lang="en">
@@ -18,10 +18,12 @@ export const APP_HTML = `<!doctype html>
 </head>
 <body>
 <div id="root"></div>
+<div id="toast-region" aria-live="polite"></div>
 <script>
 "use strict";
 ${UI_ERRORS_JS}
 ${UI_DISPLAY_JS}
+${UI_TABLE_JS}
 const $ = (s, el) => (el ?? document).querySelector(s);
 const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const fmtUsd = (v) => v == null ? "—" : "$" + Number(v).toFixed(4).replace(/0+$/,"").replace(/\\.$/,"");
@@ -73,9 +75,12 @@ async function downloadCsv(path, filename) {
 const del = (p) => api("DELETE", p);
 
 function toast(msg, ms) {
+  // the region lives OUTSIDE #root (see the body markup) so a render() mid-flight
+  // never wipes a toast; it carries aria-live=polite so AT announces it.
+  const region = $("#toast-region") || document.body;
   const el = document.createElement("div");
   el.className = "toast"; el.textContent = msg;
-  document.body.appendChild(el);
+  region.appendChild(el);
   setTimeout(() => el.remove(), ms ?? 3600);
 }
 function signOut() {
@@ -216,7 +221,7 @@ async function bootstrap() {
 function shell(content, active) {
   return \`
   <div class="shell">
-    <aside class="side">
+    <aside class="side" id="side">
       <div class="brand"><span class="word">regul<em>ai</em>t</span><span class="tag">governed</span></div>
       <div class="sec">Workspace</div>
       \${PAGES.map((p) => \`
@@ -230,7 +235,10 @@ function shell(content, active) {
         <button class="ghost small" id="signout" style="margin-top:8px;padding-left:0">Sign out</button>
       </div>
     </aside>
-    <main class="main">\${content}</main>
+    <main class="main">
+      <button class="hamburger" id="navtoggle" aria-label="Toggle navigation" aria-expanded="false">☰ Menu</button>
+      \${content}
+    </main>
   </div>\`;
 }
 
@@ -589,10 +597,29 @@ function renderExchange(x, i) {
   // §8.4 input-block: the pii ships on the error/denial payload, not on a
   // dispatch result — render it here if it wasn't already shown above
   if (x.pii && !(x.result && x.result.dispatch && x.result.dispatch.pii)) meta.push(piiBadge(x.pii));
-  // replayed exchanges carry no decision/routing payload — no empty expander
-  const trace = x.denied || (x.result && (x.result.decision || x.result.routing || x.result.compaction))
+  // replayed exchanges carry no decision/routing payload — no empty expander.
+  // The trace now renders the policy Decision through the shared renderDecision()
+  // (effect badge + rule-chain table + reason), with routing/compaction summarized
+  // as a kvList and the full raw JSON kept behind a nested <details>.
+  const dec = x.denied ?? (x.result && x.result.decision);
+  const routing = x.result && x.result.routing;
+  const compaction = x.result && x.result.compaction;
+  const routeKv = {};
+  if (routing) {
+    if (routing.effect) routeKv.effect = routing.effect;
+    if (routing.selectedAgentId) routeKv.routedTo = AGENT_NAMES[routing.selectedAgentId] ?? routing.selectedAgentId;
+    if (routing.estimatedCostSavedUsd != null) routeKv.estSaved = fmtUsd(routing.estimatedCostSavedUsd);
+  }
+  if (compaction) {
+    if (compaction.active) routeKv.contextCompaction = "active · ~" + (compaction.savedTokensEst ?? 0) + " tok saved";
+    else if (compaction.compacted) routeKv.contextCompaction = "compacted this turn";
+    if (compaction.failOpen) routeKv.compactionFailOpen = compaction.failOpen.error ?? "yes";
+  }
+  const traceObj = x.denied ?? { decision: x.result && x.result.decision, routing: routing, ...(compaction ? { compaction: compaction } : {}) };
+  const trace = x.denied || (x.result && (x.result.decision || routing || compaction))
     ? \`<details style="margin-top:6px"><summary class="faint" style="cursor:pointer;font-size:11.5px">governance trace</summary>
-       <pre style="margin-top:6px">\${esc(JSON.stringify(x.denied ?? { decision: x.result.decision, routing: x.result.routing, ...(x.result.compaction ? { compaction: x.result.compaction } : {}) }, null, 2))}</pre></details>\`
+       <div style="margin-top:8px">\${dec ? renderDecision(dec) : ""}\${Object.keys(routeKv).length ? "<h2>Routing & optimization</h2>" + kvList(routeKv) : ""}
+       <details style="margin-top:10px"><summary class="faint" style="cursor:pointer;font-size:11.5px">raw JSON</summary><pre style="margin-top:6px">\${esc(JSON.stringify(traceObj, null, 2))}</pre></details></div></details>\`
     : "";
   // per-exchange handoffs: copy the reply, or carry the prompt into the New
   // Run form as the first node's work order (pillar 7 starts where the
@@ -2410,7 +2437,7 @@ async function settingsPage() {
   <div class="card"><div class="kv">
     <span class="k">name</span><span>\${esc(ME.user?.displayName ?? "")}</span>
     <span class="k">email</span><span>\${esc(ME.user?.email ?? "")}</span>
-    <span class="k">user id</span><span class="mono">\${esc(ME.userId)}</span>
+    <span class="k">user id</span><span>\${idChip(ME.userId)}</span>
     <span class="k">role</span><span>\${ME.isAdmin ? '<span class="badge accent">admin</span>' : "member"}</span>
   </div></div>\`;
 }
@@ -2487,6 +2514,14 @@ async function render() {
   document.querySelectorAll("[data-go]").forEach((el) =>
     el.addEventListener("click", () => { location.hash = "#/" + el.dataset.go; }));
   $("#signout")?.addEventListener("click", signOut);
+  // mobile nav: the hamburger opens the off-canvas .side and flips aria-expanded
+  const navtoggle = $("#navtoggle");
+  if (navtoggle) navtoggle.addEventListener("click", () => {
+    const side = $("#side");
+    if (!side) return;
+    const open = side.classList.toggle("open");
+    navtoggle.setAttribute("aria-expanded", open ? "true" : "false");
+  });
 
   if (page === "playground") {
     // a thread was just opened — reflect its own defaults in the selects once
@@ -2557,6 +2592,11 @@ async function render() {
   if (page === "inbox") wireInbox();
   if (page === "projects") wireProjects();
   if (page === "context-graph") wireContextGraph();
+  // move keyboard focus to the panel heading after a (re)render so a nav switch
+  // doesn't dump keyboard/AT users back at <body> (mirrors /admin). Each page's
+  // first <h1> is made programmatically focusable; CSS suppresses its ring.
+  const h1 = $(".main h1");
+  if (h1) { h1.setAttribute("tabindex", "-1"); h1.focus({ preventScroll: false }); }
 }
 render();
 </script>
