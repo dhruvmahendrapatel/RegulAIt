@@ -17,6 +17,15 @@ importers:
 
   apps/gateway:
     dependencies:
+      '@aws-sdk/client-acm':
+        specifier: ^3.700.0
+        version: 3.1099.0
+      '@aws-sdk/client-backup':
+        specifier: ^3.700.0
+        version: 3.1099.0
+      '@aws-sdk/client-ssm':
+        specifier: ^3.700.0
+        version: 3.1099.0
       '@aws-sdk/client-sts':
         specifier: ^3.700.0
         version: 3.1098.0
@@ -187,6 +196,18 @@ packages:
     peerDependenciesMeta:
       zod:
         optional: true
+
+  '@aws-sdk/client-acm@3.1099.0':
+    resolution: {integrity: sha512-mtZRRoFB9X3od3Dx/Hr3WPFkbqMYdGIJEfoTjmhonvIcLribYi8PxAspeHOKY72yrFdn1tNWFRZ+gMV4KAx4bw==}
+    engines: {node: '>=20.0.0'}
+
+  '@aws-sdk/client-backup@3.1099.0':
+    resolution: {integrity: sha512-X98HmRnzWn6VeiSrG8zCPIjyi5RtbyCjTettiZnW3t3CdZSpIMA1Tfo/b7YRWdKne4xXxe6RO0u5dGTsD/1k8g==}
+    engines: {node: '>=20.0.0'}
+
+  '@aws-sdk/client-ssm@3.1099.0':
+    resolution: {integrity: sha512-fdgb6NPYw+QmnowyXyakQYJ2osoUYJvGBSpOLlyjuhrDcVxlgjm4eiaX2YR4r8jfusLbo4kKcCnAEGkmcUFp/w==}
+    engines: {node: '>=20.0.0'}
 
   '@aws-sdk/client-sts@3.1098.0':
     resolution: {integrity: sha512-sUJG66pXP6TU7KVReLuoDTXsbpjq8nkF1S8ORg42I2/HGRQKm+r7eXXKA1M2DGBkM6/oaGYusGsR+1RrODkD/Q==}
@@ -1877,6 +1898,39 @@ snapshots:
       standardwebhooks: 1.0.0
     optionalDependencies:
       zod: 3.25.76
+
+  '@aws-sdk/client-acm@3.1099.0':
+    dependencies:
+      '@aws-sdk/core': 3.977.3
+      '@aws-sdk/credential-provider-node': 3.972.75
+      '@aws-sdk/types': 3.974.2
+      '@smithy/core': 3.31.1
+      '@smithy/fetch-http-handler': 5.6.13
+      '@smithy/node-http-handler': 4.9.13
+      '@smithy/types': 4.16.1
+      tslib: 2.8.1
+
+  '@aws-sdk/client-backup@3.1099.0':
+    dependencies:
+      '@aws-sdk/core': 3.977.3
+      '@aws-sdk/credential-provider-node': 3.972.75
+      '@aws-sdk/types': 3.974.2
+      '@smithy/core': 3.31.1
+      '@smithy/fetch-http-handler': 5.6.13
+      '@smithy/node-http-handler': 4.9.13
+      '@smithy/types': 4.16.1
+      tslib: 2.8.1
+
+  '@aws-sdk/client-ssm@3.1099.0':
+    dependencies:
+      '@aws-sdk/core': 3.977.3
+      '@aws-sdk/credential-provider-node': 3.972.75
+      '@aws-sdk/types': 3.974.2
+      '@smithy/core': 3.31.1
+      '@smithy/fetch-http-handler': 5.6.13
+      '@smithy/node-http-handler': 4.9.13
+      '@smithy/types': 4.16.1
+      tslib: 2.8.1
 
   '@aws-sdk/client-sts@3.1098.0':
     dependencies:

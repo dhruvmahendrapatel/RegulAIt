@@ -49,6 +49,7 @@ import {
   scanInfraSchema,
 } from "@regulait/shared";
 import {
+  infraLiveEnabled,
   resolveInfraProvider,
   severityRank,
   InfraProviderError,
@@ -57,6 +58,7 @@ import {
   type InfraSeverity,
 } from "@regulait/infra-provider";
 import { z } from "zod";
+import { buildAwsInfraLiveClient } from "./infra-aws-client.js";
 import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects.js";
 
 type InfraResourceRow = typeof infraResources.$inferSelect;
@@ -205,8 +207,48 @@ function minNullable(...vals: Array<number | null | undefined>): number | null {
   return nums.length ? Math.min(...nums) : null;
 }
 
-function providerConfig(resource: InfraResourceRow): InfraProviderConfig {
-  return { kind: resource.provider as InfraProviderConfig["kind"] };
+/** first non-empty string wins (row config value, then env fallback) */
+function firstString(...vals: unknown[]): string | null {
+  for (const v of vals) if (typeof v === "string" && v.length > 0) return v;
+  return null;
+}
+
+/**
+ * Build the provider config for a monitored resource. Exported for tests.
+ *
+ * REGULAIT_INFRA_LIVE OFF (the default): returns the bare `{ kind }` —
+ * byte-identical to the pre-live behavior; resolveInfraProvider's own 501 gate
+ * stays the second lock and no AWS SDK code is ever touched.
+ *
+ * Flag ON for an aws resource: threads roleArn/region and injects the real
+ * lazily-loading AwsInfraLiveClient (see ./infra-aws-client.ts, the factory
+ * contract in @regulait/infra-provider aws.ts — the same injected-live-client
+ * discipline as deploy.ts's REGULAIT_DEPLOY_LIVE/awsLiveClient).
+ *
+ * roleArn/region source — the resource row's existing `config` jsonb, the same
+ * provider-specific home the aws adapter already reads (baseline,
+ * backupVaultName, resourceArn, iamRoleArn, …): `config.roleArn` /
+ * `config.region`. Env vars REGULAIT_INFRA_ROLE_ARN / REGULAIT_INFRA_REGION
+ * are the fleet-wide fallback; a value on the resource row always overrides
+ * the env. (An admin-UI field for setting config.roleArn/config.region on a
+ * resource is deferred to the UI-track agent — the API's free-form `config`
+ * object already accepts them today via POST /v1/infra/resources.)
+ */
+export function providerConfig(
+  resource: InfraResourceRow,
+  env: NodeJS.ProcessEnv = process.env,
+): InfraProviderConfig {
+  const kind = resource.provider as InfraProviderConfig["kind"];
+  if (kind !== "aws" || !infraLiveEnabled(env)) return { kind };
+  const cfg = resource.config ?? {};
+  const roleArn = firstString(cfg.roleArn, env.REGULAIT_INFRA_ROLE_ARN);
+  const region = firstString(cfg.region, env.REGULAIT_INFRA_REGION);
+  return {
+    kind,
+    roleArn,
+    region,
+    awsLiveClient: buildAwsInfraLiveClient(region ?? undefined),
+  };
 }
 
 /** The base policy for a resource: its own resource-scoped policy if any, else
