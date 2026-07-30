@@ -10,6 +10,10 @@ roadmap: ../docs/product/ROADMAP.md
 
 # RegulAIt — Project State
 
+> Front-matter note (2026-07-30): the narrative addenda below run through **2026-07-30**, while
+> `last_session` points at `sessions/2026-07-24-session-02.md`. That is accurate, not drift — the
+> 07-24 file is the most recent session log written; no newer session file exists yet.
+
 ## Where we are (read this paragraph first)
 The infrastructure bootstrap phase (EPIC-01) is **complete**. The private GitHub repo
 [dhruvmahendrapatel/RegulAIt](https://github.com/dhruvmahendrapatel/RegulAIt) is live with the
@@ -733,6 +737,24 @@ carrying a failure. `docs/product/IDE_INTEGRATION.md` written. Gateway 386 → *
 `voluntary` rung it is an honor system, and `CLAUDE.md`/`VISION.md` still promise governance over
 "every agent/model call" on the assumption calls arrive at us. Key custody is the cheapest
 non-bypassable rung and is policy, not code. Those two files deliberately NOT edited — owner's text.
+
+**Housekeeping addendum, 2026-07-30 (doc-reconciliation batch — amends, does not rewrite, the
+entries around it).** (1) **Temperature amendment to Batch H:** the entry above says unsupported
+compat fields 400 loudly, `temperature` included. Amended the same day (`fdfeff1`, PR #47,
+ADR-0020 §5): `temperature` is now **accepted-and-disclosed** — ignored, with the disclosure via
+an `x-regulait-ignored-fields` response header plus an audit row — because real IDE clients send
+it unconditionally and 400ing it defeated the very interception the batch exists for. All other
+unsupported fields still 400 by name. (2) **Governance-gaps batch is MERGED** (PR #44, migration
+0036, ADR-0019) — per-user revocation of role-derived grants, MCP attribution + PII, streaming
+suppression for block-mode projects, and the `data_sensitivity` 6th assignment dimension; ROADMAP
+§1 described it as in-flight. Current gateway suite after Batch H + governance-gaps + the
+temperature merge: **432**. (3) **A parallel build wave is in flight** per the owner's directive
+(batches A–D+C, the enterprise/UX track, and the admin-configurability mandate): org-settings
+(claiming **migration 0038**) + git-provider adapters + connector adapters + infra AWS +
+model-provider depth, each on its own branch. Migration coordination note: the next free
+migration number is 0038 and org-settings is taking it — check `packages/db/migrations/` AND
+`meta/_journal.json` before claiming a number, since the journal is what `migrate()` actually
+reads.
 
 **IDE / existing-agent interception identified as a SCOPE gap, 2026-07-30 (planning — the batch
 above is the implementation; ROADMAP Batch H).** The owner raised that most developers use AI agents inside VS Code / Cursor /
