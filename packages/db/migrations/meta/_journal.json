@@ -267,6 +267,13 @@
       "when": 1784973000000,
       "tag": "0037_interception_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1784974000000,
+      "tag": "0038_org_settings",
+      "breakpoints": true
     }
   ]
 }

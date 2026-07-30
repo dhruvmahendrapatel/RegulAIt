@@ -36,6 +36,7 @@ import {
   requiredTemplateIdsFor,
 } from "./projects.js";
 import { decryptSecret, encryptSecret as encryptTokenOnce } from "./secrets.js";
+import { loadOrgSettings } from "./org-settings.js";
 import {
   advanceStageSchema,
   createAssignmentRuleSchema,
@@ -176,16 +177,39 @@ export async function applyWorkflowApprovalDecision(
     return null;
   }
 
-  // All-must-approve: the pending count is evaluated INSIDE applyEvent's
-  // instance lock, so a re-open that inserts fresh rows (or another approver)
-  // serializes with the grant instead of racing it. A stale or wrong-stage
-  // decision is additionally rejected by the kernel's stage check.
+  // ADR-0021 approval quorum: 'all' (default, today) = every named approver
+  // must approve before the stage advances; 'any' = the FIRST approval
+  // advances it and the remaining pending rows are superseded (a dead gate is
+  // never left decidable). Org-level only for now: the workflow kernel's
+  // stage schema strips unknown keys, so a per-template stage-level override
+  // would need a kernel change — recorded as deferred in ADR-0021.
+  const quorum = (await loadOrgSettings(dbx as Db)).approvalQuorum;
+
+  // The quorum test is evaluated INSIDE applyEvent's instance lock, so a
+  // re-open that inserts fresh rows (or another approver) serializes with the
+  // grant instead of racing it. A stale or wrong-stage decision is
+  // additionally rejected by the kernel's stage check.
   const r = await applyEvent(
     dbx,
     instanceId,
     { kind: "approval_granted", stageId },
     deciderUserId,
     async (tx) => {
+      if (quorum === "any") {
+        // first-approval-wins: supersede the stage's other pending rows so no
+        // ghost gate outlives the advance, then let the grant through.
+        await tx
+          .update(approvals)
+          .set({ status: "superseded" })
+          .where(
+            and(
+              eq(approvals.instanceId, instanceId),
+              eq(approvals.stageId, stageId),
+              eq(approvals.status, "pending"),
+            ),
+          );
+        return true;
+      }
       const pending = await tx
         .select({ id: approvals.id })
         .from(approvals)

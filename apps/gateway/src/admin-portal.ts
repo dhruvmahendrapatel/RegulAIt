@@ -1345,8 +1345,13 @@ const TABS = [
         {name:"resolutionMode",label:"model to agent resolution",options:["map_by_model","require_agent","router_decides"]},
         {name:"enforcementPosture",label:"declared ladder rung",options:["observe","voluntary","managed","key_custody","network"]},
         {name:"requireProjectAttribution",label:"require project attribution",options:["false","true"]},
+        {name:"streamingOnBlockMode",label:"stream on PII-block project",options:[{v:"suppress",l:"suppress (buffer + disclose)"},{v:"reject",l:"reject (400 the stream request)"}]},
+        {name:"strictFieldRejection",label:"strict field rejection",options:[{v:"false",l:"off — accept & disclose (temperature ignored)"},{v:"true",l:"on — unsupported fields 400"}]},
       ], "Save posture")
     + "<div class='kv' style='margin-top:10px'>"
+    + "<span class='k'>Stream on block</span><span>'suppress' (default) answers a stream request on a block-mode PII project with the same governed call fully buffered as JSON, disclosed via streamingSuppressed. 'reject' refuses it with a 400 so a client that requires streaming fails fast instead of getting a shape it did not ask for.</span>"
+    + "<span class='k'>Strict fields</span><span>Off (default): an unsupported-but-harmless field like temperature is accepted, NOT honoured, and disclosed in x-regulait-ignored-fields. On: any unsupported field is a 400 — the strict posture some compliance programs require.</span>"
+    + "</div><div class='kv' style='margin-top:10px'>"
     + "<span class='k'>map_by_model</span><span>Resolve to the governed agent whose model id matches the request. Several matches tie-break on lowest tier, then oldest. Least developer friction.</span>"
     + "<span class='k'>require_agent</span><span>The caller MUST send x-regulait-agent-id; the model string is advisory. Missing header is a 400. Strictest, explicit attribution per call.</span>"
     + "<span class='k'>router_decides</span><span>The requested model is a HINT the pillar-6 router may override for cost. The response always carries the model actually served, and the audit row records requested-vs-served.</span>"
@@ -1392,7 +1397,7 @@ const TABS = [
   // selects with no value binding, so bind them here)
   const pf = $("#f-intercept");
   if (pf) {
-    for (const k of ["anthropicCompatEnabled","openaiCompatEnabled","mcpInterceptionEnabled","resolutionMode","enforcementPosture","requireProjectAttribution"]) {
+    for (const k of ["anthropicCompatEnabled","openaiCompatEnabled","mcpInterceptionEnabled","resolutionMode","enforcementPosture","requireProjectAttribution","streamingOnBlockMode","strictFieldRejection"]) {
       const c = pf.querySelector("[name=" + k + "]");
       if (c) c.value = String(cur[k]);
     }
@@ -1404,6 +1409,8 @@ const TABS = [
     resolutionMode: d.resolutionMode,
     enforcementPosture: d.enforcementPosture,
     requireProjectAttribution: d.requireProjectAttribution === "true",
+    streamingOnBlockMode: d.streamingOnBlockMode,
+    strictFieldRejection: d.strictFieldRejection === "true",
   }));
 
   wire("f-client", (d) => {
@@ -1485,6 +1492,191 @@ const TABS = [
       + (notes.length ? "<ul class='dim' style='font-size:12px'>" + notes.map((n) => "<li>" + esc(n) + "</li>").join("") + "</ul>" : "");
   }, true);
 }],
+["Organization", async (el) => {
+  // ADR-0021: org-wide functional defaults (the org_settings singleton). One
+  // page, five sections, each its own PARTIAL PUT — an admin can change one
+  // dial without restating the rest. Every default equals the shipped
+  // behaviour, so an untouched page IS the previous release.
+  const [s, ag] = await Promise.all([
+    get("/v1/org/settings"),
+    get("/v1/agents").catch(() => ({ agents: [] })),
+  ]);
+  const cur = s.settings;
+  const aOpts = agentOpts(ag.agents || []);
+  const ON_OFF = [{v:"true",l:"enabled"},{v:"false",l:"disabled"}];
+  const CLEAR = { v: "__clear__", l: "— clear (use cheapest) —" };
+
+  el.innerHTML =
+    "<p class='sub'>Org-wide functional defaults (ADR-0021). Everything here used to be a hardcoded constant; now it is your choice. Org settings are CEILINGS: they only ever narrow what happens below them — a per-user passthrough still wins, and turning a technique off here cannot be undone per-user. Every save is audited with exactly which keys changed.</p>"
+
+    // --- Optimization -----------------------------------------------------
+    + "<h2>Optimization — pillar-6 techniques (org-wide ceilings)</h2><div class='card'>"
+    + form("f-org-opt", [
+        {name:"routingEnabled",label:"model routing",options:ON_OFF},
+        {name:"compactionEnabled",label:"context compaction",options:ON_OFF},
+        {name:"promptCachingEnabled",label:"prompt caching",options:ON_OFF},
+        {name:"editVsRewriteEnabled",label:"edit vs rewrite",options:ON_OFF},
+        {name:"filePreprocessingEnabled",label:"file preprocessing",options:ON_OFF},
+        {name:"lazyToolLoadingEnabled",label:"lazy tool loading",options:ON_OFF},
+        {name:"defaultRoutingMode",label:"default for unset users",options:[{v:"automatic",l:"automatic (optimize)"},{v:"passthrough",l:"passthrough (never optimize)"}]},
+      ], "Save toggles")
+    + "<p class='dim' style='font-size:12px'>Each toggle is the org CEILING for one cost-optimization technique: disabled means it never runs for anyone, and no savings ledger row is written for it. Enabled (the default — today's behaviour) defers to each user's own routing mode; 'default for unset users' is what a user with no per-user setting gets. A user's explicit passthrough always wins; an explicit automatic only works while the technique is enabled here.</p>"
+    + form("f-org-cache", [
+        {name:"semanticCachePolicy",label:"semantic cache",options:[{v:"opt_in",l:"opt-in (caller asks — default)"},{v:"off",l:"off (even if the caller asks)"},{v:"always",l:"always (every eligible dispatch)"}]},
+        {name:"semanticCacheTtlSeconds",label:"cache TTL seconds",type:"number"},
+        {name:"compactionFailureMode",label:"compaction failure",options:[{v:"fail_open",l:"fail open (turn proceeds, full history)"},{v:"fail_closed",l:"fail closed (turn is refused)"}]},
+        {name:"summarizerSelection",label:"summarizer",options:[{v:"cheapest",l:"cheapest entitled agent (default)"},{v:"fixed_agent",l:"a fixed agent"}]},
+        {name:"summarizerAgentId",label:"fixed summarizer agent",options:[CLEAR].concat(aOpts),req:false,ph:"— leave unchanged —"},
+      ], "Save cache & compaction policy")
+    + "<p class='dim' style='font-size:12px'>Semantic cache 'off' beats a caller's semanticCache:true — nothing is stored or served. 'always' caches every eligible single-turn dispatch even when the caller didn't ask. Compaction 'fail closed' refuses the user's turn when summarization fails, for orgs whose posture is never to send un-summarized history the system decided to compact. A fixed summarizer must still be in the calling user's own entitled roster — it can never widen entitlement; if unavailable, compaction fails per the failure mode.</p>"
+    + form("f-org-dials", [
+        {name:"compactionThresholdTokens",label:"compaction threshold (tokens)",type:"number"},
+        {name:"compactionRecentWindow",label:"verbatim window (messages)",type:"number"},
+        {name:"minCacheableTokens",label:"min cacheable prefix (tokens)",type:"number"},
+        {name:"cacheReadDiscount",label:"cache read discount (0..1)",type:"number"},
+        {name:"maxToolsInManifest",label:"max tools in manifest",type:"number"},
+        {name:"minEditableBaselineTokens",label:"min editable baseline (tokens)",type:"number"},
+        {name:"batchOverheadTokens",label:"batch overhead (tokens)",type:"number"},
+        {name:"minPreprocessTokens",label:"min preprocess size (tokens)",type:"number"},
+      ], "Save dials")
+    + "<p class='dim' style='font-size:12px'>The numeric dials behind the techniques, previously hardcoded kernel constants. Defaults: compact past 1600 tokens keeping the 4 newest messages verbatim; mark a system prefix cacheable at 1024+ tokens with a 0.9 read discount; lazy-load at most 20 tools; diff edits over 200-token baselines; estimate 200 framing tokens per batched request; preprocess references over 200 tokens.</p>"
+    + "</div>"
+
+    // --- Compliance defaults ---------------------------------------------
+    + "<h2>Compliance defaults</h2><div class='card'>"
+    + form("f-org-comp", [
+        {name:"defaultPiiMode",label:"default PII mode (unclassified projects)",options:[{v:"none",l:"none — no enforcement (default)"},{v:"log",l:"log — record category counts"},{v:"warn",l:"warn — proceed with warning"},{v:"block",l:"block — deny / withhold"}]},
+        {name:"envKeyFallbackEnabled",label:"env-var key fallback",options:ON_OFF},
+        {name:"envFallbackProviders",label:"providers allowed to fall back",options:["anthropic","openai","google","xai"],req:false,multi:true},
+      ], "Save compliance defaults")
+    + "<p class='dim' style='font-size:12px'>Default PII mode applies wherever a project-attributed call resolves to NO compliance-cascade PII policy (an unclassified project, or tags with no profile). A classified project's own cascade always wins — this fills the gap, it never overrides a framework. The env-var fallback lets a dispatch use ANTHROPIC_API_KEY-style server env vars when no credential is stored; regulated orgs can turn it off to force every key through the encrypted store, or narrow which providers may use it (leaving the multi-select empty keeps the stored list unchanged).</p>"
+    + "<h2 style='margin-top:14px'>Env keys currently present on this server</h2>"
+    + table((s.envKeys || []).map((k) => ({
+        provider: k.provider, envVar: k.envVar,
+        present: k.present ? "present" : "not set",
+        allowed: (cur.envKeyFallbackEnabled && (cur.envFallbackProviders || []).indexOf(k.provider) !== -1) ? "fallback allowed" : "fallback blocked",
+      })))
+    + "<p class='dim' style='font-size:12px'>Names and presence only — a key's value is never read back by any endpoint. 'fallback blocked' means the var may exist but dispatches will not use it.</p>"
+    + "</div>"
+
+    // --- Budgets & limits --------------------------------------------------
+    + "<h2>Budgets &amp; limits</h2><div class='card'>"
+    + form("f-org-budget", [
+        {name:"budgetEnforcement",label:"project budget enforcement",options:[{v:"block",l:"block (409 past the threshold — default)"},{v:"warn_only",l:"warn only (escalate + audit, let it run)"}]},
+        {name:"budgetHardBlockPct",label:"hard-block at % of budget",type:"number"},
+      ], "Save budget policy")
+    + "<p class='dim' style='font-size:12px'>'Block' (default) refuses attributed dispatches once measured spend reaches the hard-block threshold, until the named approver sanctions the overage. 'Warn only' still files the overage into the Approvals Queue and audits every crossing, but lets the calls run — showback without enforcement. The threshold defaults to 100% of the project budget; setting e.g. 90 blocks earlier. The per-project alert threshold stays the softer, non-blocking warning.</p>"
+    + form("f-org-workers", [
+        {name:"defaultWorkerMaxTurns",label:"worker default max turns",type:"number"},
+        {name:"maxWorkerTurns",label:"worker hard turn ceiling",type:"number"},
+        {name:"maxAttachmentsPerDispatch",label:"max attachments / dispatch",type:"number"},
+        {name:"maxAttachmentBytes",label:"max attachment bytes",type:"number"},
+        {name:"imageTokenEstimateTokens",label:"image token estimate",type:"number"},
+        {name:"sharedContextMaxChars",label:"node instruction max chars",type:"number"},
+        {name:"nodeOutputMaxChars",label:"stored node output max chars",type:"number"},
+      ], "Save limits")
+    + "<p class='dim' style='font-size:12px'>Worker caps bound the pillar-7 tool-using loop: a node with no declared cap runs up to the default (6); nothing may exceed the ceiling (20 is also the absolute API wall — this can only narrow below it). The size ceilings narrow below their API walls too: at most 8 attachments of 6 MiB each (the shipped composer's own clamps), a flat 1200-token estimate per image for routing/budget, 100k-char node instructions, 20k chars of stored node output.</p>"
+    + "</div>"
+
+    // --- Approvals ----------------------------------------------------------
+    + "<h2>Approvals</h2><div class='card'>"
+    + form("f-org-approvals", [
+        {name:"approvalQuorum",label:"human-approval quorum",options:[{v:"all",l:"all named approvers (default)"},{v:"any",l:"any one approver advances"}]},
+      ], "Save approval policy")
+    + "<p class='dim' style='font-size:12px'>Applies to workflow human_approval stages. 'All' (default — today's behaviour): the stage advances only when every named approver has approved; any denial denies it. 'Any': the first approval advances the stage and the remaining pending approvals are superseded so no dead gate lingers. Denials behave identically in both modes. Org-wide for now — a per-template stage override is recorded as deferred in ADR-0021.</p>"
+    + "</div>"
+
+    // --- Retention -----------------------------------------------------------
+    + "<h2>Audit retention</h2><div class='card'>"
+    + form("f-org-retention", [
+        {name:"autoPruneEnabled",label:"scheduled auto-prune",options:[{v:"false",l:"off (manual prune only — default)"},{v:"true",l:"on (prune on a schedule)"}]},
+        {name:"pruneIntervalHours",label:"prune interval (hours)",type:"number"},
+        {name:"defaultAuditRetentionDays",label:"org default retention (days, 0 = none)",type:"number"},
+      ], "Save retention policy")
+    + "<p class='dim' style='font-size:12px'>Off by default: pruning only happens when an admin presses the button on the Audit Log page. When on, the gateway prunes on the configured interval under the SAME floor the manual button uses. The org default retention only fills the gap when no compliance profile sets one — a profile floor always wins upward, so this can never shorten a framework's audit trail. Enter 0 to clear the org default (never prune without a profile floor — today's behaviour). Every prune, manual or scheduled, is itself audited.</p>"
+    + "</div>";
+
+  // prefill every form from the stored row (field() renders unbound controls)
+  const setVals = (formId, keys) => {
+    const f = $("#" + formId);
+    if (!f) return;
+    for (const k of keys) {
+      const c = f.querySelector("[name=" + k + "]");
+      if (!c) continue;
+      if (c.multiple) {
+        const vals = (cur[k] || []).map(String);
+        for (const o of c.options) o.selected = vals.indexOf(o.value) !== -1;
+      } else if (cur[k] !== null && cur[k] !== undefined) {
+        c.value = String(cur[k]);
+      }
+    }
+  };
+  setVals("f-org-opt", ["routingEnabled","compactionEnabled","promptCachingEnabled","editVsRewriteEnabled","filePreprocessingEnabled","lazyToolLoadingEnabled","defaultRoutingMode"]);
+  setVals("f-org-cache", ["semanticCachePolicy","semanticCacheTtlSeconds","compactionFailureMode","summarizerSelection","summarizerAgentId"]);
+  setVals("f-org-dials", ["compactionThresholdTokens","compactionRecentWindow","minCacheableTokens","cacheReadDiscount","maxToolsInManifest","minEditableBaselineTokens","batchOverheadTokens","minPreprocessTokens"]);
+  setVals("f-org-comp", ["defaultPiiMode","envKeyFallbackEnabled","envFallbackProviders"]);
+  setVals("f-org-budget", ["budgetEnforcement","budgetHardBlockPct"]);
+  setVals("f-org-workers", ["defaultWorkerMaxTurns","maxWorkerTurns","maxAttachmentsPerDispatch","maxAttachmentBytes","imageTokenEstimateTokens","sharedContextMaxChars","nodeOutputMaxChars"]);
+  setVals("f-org-approvals", ["approvalQuorum"]);
+  setVals("f-org-retention", ["autoPruneEnabled","pruneIntervalHours","defaultAuditRetentionDays"]);
+  // the retention-days number input has no stored 0; show blank when null
+  const retIn = $("#f-org-retention [name=defaultAuditRetentionDays]");
+  if (retIn && cur.defaultAuditRetentionDays == null) retIn.value = "0";
+
+  // each section PUTs only its own keys (a PARTIAL update server-side)
+  const putOrg = (body) => api("PUT", "/v1/org/settings", body);
+  const asBool = (v) => v === "true";
+  wire("f-org-opt", (d) => putOrg({
+    routingEnabled: asBool(d.routingEnabled),
+    compactionEnabled: asBool(d.compactionEnabled),
+    promptCachingEnabled: asBool(d.promptCachingEnabled),
+    editVsRewriteEnabled: asBool(d.editVsRewriteEnabled),
+    filePreprocessingEnabled: asBool(d.filePreprocessingEnabled),
+    lazyToolLoadingEnabled: asBool(d.lazyToolLoadingEnabled),
+    defaultRoutingMode: d.defaultRoutingMode,
+  }));
+  wire("f-org-cache", (d) => putOrg({
+    semanticCachePolicy: d.semanticCachePolicy,
+    semanticCacheTtlSeconds: Number(d.semanticCacheTtlSeconds),
+    compactionFailureMode: d.compactionFailureMode,
+    summarizerSelection: d.summarizerSelection,
+    ...(d.summarizerAgentId ? { summarizerAgentId: d.summarizerAgentId === "__clear__" ? null : d.summarizerAgentId } : {}),
+  }));
+  wire("f-org-dials", (d) => putOrg({
+    compactionThresholdTokens: Number(d.compactionThresholdTokens),
+    compactionRecentWindow: Number(d.compactionRecentWindow),
+    minCacheableTokens: Number(d.minCacheableTokens),
+    cacheReadDiscount: Number(d.cacheReadDiscount),
+    maxToolsInManifest: Number(d.maxToolsInManifest),
+    minEditableBaselineTokens: Number(d.minEditableBaselineTokens),
+    batchOverheadTokens: Number(d.batchOverheadTokens),
+    minPreprocessTokens: Number(d.minPreprocessTokens),
+  }));
+  wire("f-org-comp", (d) => putOrg({
+    defaultPiiMode: d.defaultPiiMode,
+    envKeyFallbackEnabled: asBool(d.envKeyFallbackEnabled),
+    ...(d.envFallbackProviders ? { envFallbackProviders: [].concat(d.envFallbackProviders) } : {}),
+  }));
+  wire("f-org-budget", (d) => putOrg({
+    budgetEnforcement: d.budgetEnforcement,
+    budgetHardBlockPct: Number(d.budgetHardBlockPct),
+  }));
+  wire("f-org-workers", (d) => putOrg({
+    defaultWorkerMaxTurns: Number(d.defaultWorkerMaxTurns),
+    maxWorkerTurns: Number(d.maxWorkerTurns),
+    maxAttachmentsPerDispatch: Number(d.maxAttachmentsPerDispatch),
+    maxAttachmentBytes: Number(d.maxAttachmentBytes),
+    imageTokenEstimateTokens: Number(d.imageTokenEstimateTokens),
+    sharedContextMaxChars: Number(d.sharedContextMaxChars),
+    nodeOutputMaxChars: Number(d.nodeOutputMaxChars),
+  }));
+  wire("f-org-approvals", (d) => putOrg({ approvalQuorum: d.approvalQuorum }));
+  wire("f-org-retention", (d) => putOrg({
+    autoPruneEnabled: asBool(d.autoPruneEnabled),
+    pruneIntervalHours: Number(d.pruneIntervalHours),
+    defaultAuditRetentionDays: Number(d.defaultAuditRetentionDays) === 0 ? null : Number(d.defaultAuditRetentionDays),
+  }));
+}],
 ];
 
 // The nav is grouped into labelled sections; each entry names a tab by its
@@ -1498,7 +1690,12 @@ const NAV = [
   // authenticate — rather than a day-2 operational concern.
   ["Identity & Access", ["Users", "Roles", "Teams", "Client Access"]],
   ["AI Governance", ["Agents", "Model Credentials", "Connectors", "MCP Servers"]],
-  ["Policy", ["Rules Engine", "Simulation / Access preview"]],
+  // "Organization" sits in Policy: org_settings is the layer of org-wide
+  // functional DEFAULTS beneath every specific rule — the same "what does this
+  // org allow / default to" question the Rules Engine answers per-object,
+  // answered once for the whole deployment. A separate top-level group for one
+  // tab would fragment the nav without adding meaning.
+  ["Policy", ["Rules Engine", "Simulation / Access preview", "Organization"]],
   ["Delivery", ["Workflows", "Deploy Targets", "PM Connections"]],
   ["Cost", ["Cost & Projects"]],
   ["Operations", ["Infrastructure", "Approvals Queue", "Audit Log"]],

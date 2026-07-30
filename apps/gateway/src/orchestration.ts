@@ -41,6 +41,7 @@ import {
   planRequestBatching,
   routeModel,
 } from "@regulait/optimizer-kernel";
+import { effectiveTechniqueMode, loadOrgSettings } from "./org-settings.js";
 import {
   isModelProviderKind,
   type ModelChatMessage,
@@ -110,7 +111,7 @@ function nodeInstruction(node: TaskNode): string | undefined {
   return typeof instruction === "string" && instruction.trim() ? instruction : undefined;
 }
 
-function attachInstructions(graph: TaskGraph, graphRaw: unknown): void {
+function attachInstructions(graph: TaskGraph, graphRaw: unknown, maxChars = 100_000): void {
   const rawNodes = (graphRaw as { nodes?: unknown } | null)?.nodes;
   if (!Array.isArray(rawNodes)) return;
   const byId = new Map<string, string>();
@@ -119,8 +120,9 @@ function attachInstructions(graph: TaskGraph, graphRaw: unknown): void {
     const { id, instruction } = raw as { id?: unknown; instruction?: unknown };
     if (typeof id !== "string" || typeof instruction !== "string") continue;
     const text = instruction.trim();
-    // same ceiling as an explicit dispatch-time input override
-    if (text) byId.set(id, text.slice(0, 100_000));
+    // same ceiling as an explicit dispatch-time input override; ADR-0021: the
+    // org sharedContextMaxChars dial can narrow it (default 100_000 = today)
+    if (text) byId.set(id, text.slice(0, maxChars));
   }
   for (const node of graph.nodes) {
     const instruction = byId.get(node.id);
@@ -457,8 +459,15 @@ async function dispatchRunNode(
           ceiling.toolRefs,
         )
       : { toolDefs: [], serverByTool: new Map<string, string>() };
+  // ADR-0021 worker caps: the default and the hard ceiling are org dials
+  // (defaults 6/20 = the previous constants). The zod/kernel wall of 20 stays
+  // the absolute maximum — the org ceiling can only narrow below it.
+  const orgForNode = await loadOrgSettings(db);
   const maxTurnsDecl = args.maxTurns ?? node.maxTurns;
-  const maxTurns = Math.min(Math.max(maxTurnsDecl ?? DEFAULT_WORKER_MAX_TURNS, 1), MAX_WORKER_TURNS);
+  const maxTurns = Math.min(
+    Math.max(maxTurnsDecl ?? orgForNode.defaultWorkerMaxTurns, 1),
+    orgForNode.maxWorkerTurns,
+  );
 
   const firstInput = args.input ?? nodeInstruction(node) ?? node.title;
   const messages: ModelChatMessage[] = [{ role: "user", content: firstInput }];
@@ -821,7 +830,8 @@ async function dispatchRunNode(
       // §6 traceability: exactly which signed-off artifact versions framed
       // this execution
       ...(nested ? { contextArtifacts: nested.artifacts } : {}),
-      outputText: last.result.outputText.slice(0, 20_000),
+      // ADR-0021: the stored-output ceiling is an org dial (default 20_000)
+      outputText: last.result.outputText.slice(0, orgForNode.nodeOutputMaxChars),
     },
     actorUserId,
   });
@@ -868,9 +878,9 @@ async function dispatchRunNode(
   };
 }
 
-/** default and hard ceiling for a worker node's tool-using loop turns */
-const DEFAULT_WORKER_MAX_TURNS = 6;
-const MAX_WORKER_TURNS = 20;
+// The worker-turn default (6) and hard ceiling (20) moved to org_settings
+// (ADR-0021: defaultWorkerMaxTurns / maxWorkerTurns) — the previous constants
+// live on as the migration's column defaults.
 
 /** Flatten an MCP callTool result to text for a tool_result block — join text
  * content parts, else stringify. Keeps the model's view of the tool output
@@ -1146,7 +1156,7 @@ export async function planRun(
     }
     throw err;
   }
-  attachInstructions(graph, graphRaw);
+  attachInstructions(graph, graphRaw, (await loadOrgSettings(db)).sharedContextMaxChars);
 
   const [approver] = await db
     .select({ id: users.id })
@@ -1730,13 +1740,16 @@ export function registerOrchestrationRoutes(
         // distinct unpriced/no-model owners don't spuriously batch together
         const modelById = new Map(ownerAgents.map((a) => [a.id, a.model ?? a.id]));
         const models = owners.map((id) => modelById.get(id) ?? id);
-        const [initPolicy] = await db
-          .select()
-          .from(userAgentPolicies)
-          .where(eq(userAgentPolicies.userId, run.initiatingUserId));
+        const [[initPolicy], orgForBatch] = await Promise.all([
+          db.select().from(userAgentPolicies).where(eq(userAgentPolicies.userId, run.initiatingUserId)),
+          loadOrgSettings(db),
+        ]);
         const plan = planRequestBatching({
           models,
-          routingMode: initPolicy?.routingMode ?? "automatic",
+          // ADR-0021: the org default routing mode fills in for unset users;
+          // the batchOverheadTokens dial rides into the kernel (default 200)
+          routingMode: effectiveTechniqueMode(orgForBatch, true, initPolicy?.routingMode ?? null),
+          perRequestOverheadTokens: orgForBatch.batchOverheadTokens,
         });
         if (plan.batchable) {
           await db.insert(costEvents).values({

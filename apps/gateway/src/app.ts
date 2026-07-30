@@ -97,6 +97,11 @@ import { registerDecomposeRoutes } from "./decompose.js";
 import { mirrorApprovalDecision, registerPmRoutes } from "./pm.js";
 import { RunStateError } from "@regulait/orchestration-kernel";
 import { applyWorkflowApprovalDecision, registerWorkflowRoutes } from "./workflows.js";
+import {
+  loadOrgSettings,
+  registerOrgSettingsRoutes,
+  startAuditPruneScheduler,
+} from "./org-settings.js";
 import { MergeConflictError, WorkflowStateError } from "@regulait/workflow-kernel";
 
 const uuidParam = z.object({ serverId: z.string().uuid() });
@@ -256,7 +261,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     }
   });
 
-  // identity echo for UI clients — who am I, what may I see
+  // identity echo for UI clients — who am I, what may I see. Additively
+  // carries the ADR-0021 org size ceilings any authenticated client needs to
+  // pre-validate uploads (numbers only — no admin-only configuration leaks).
   app.get("/v1/me", async (req) => {
     const userId = req.authCtx.userId;
     let user = null;
@@ -267,7 +274,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         .where(eq(users.id, userId));
       user = row ?? null;
     }
-    return { userId, isAdmin: req.authCtx.isAdmin, user };
+    const org = await loadOrgSettings(db);
+    return {
+      userId,
+      isAdmin: req.authCtx.isAdmin,
+      user,
+      limits: {
+        maxAttachmentsPerDispatch: org.maxAttachmentsPerDispatch,
+        maxAttachmentBytes: org.maxAttachmentBytes,
+      },
+    };
   });
 
   app.post("/v1/users", async (req, reply) => {
@@ -1220,6 +1236,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // provider-shaped shims are OFF by default and gated by the onRequest hook
   // above; the settings routes that flip them are admin-only.
   registerInterceptionRoutes(app, db);
+
+  // ADR-0021 — org-wide functional defaults (org_settings singleton). The
+  // GET/PUT routes are admin-only (deliberately NOT in NON_ADMIN_ROUTES); the
+  // audit auto-prune scheduler is OFF by default and unref'd, stopped on close.
+  registerOrgSettingsRoutes(app, db);
+  const stopAuditPruneScheduler = startAuditPruneScheduler(db);
+  app.addHook("onClose", async () => stopAuditPruneScheduler());
   registerAnthropicCompat(app, db, { dataKey: opts.dataKey });
   registerOpenAiCompat(app, db, { dataKey: opts.dataKey });
 

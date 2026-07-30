@@ -28,6 +28,7 @@ import type { ModelToolDef } from "@regulait/model-provider";
 import type { PiiHit } from "@regulait/shared";
 import { governedEvaluate } from "./governed-evaluate.js";
 import { loadEntitlements } from "./entitlements.js";
+import { effectiveTechniqueMode, loadOrgSettings } from "./org-settings.js";
 import {
   assertProjectAttribution,
   enforcePII,
@@ -515,6 +516,13 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
       // what the user MAY see; this decides what is WORTH sending for the
       // declared intent. Withheld tools remain fully callable — tools/call
       // never consults this selection (§12: entitlements never shrink).
+      // ADR-0021: the org lazyToolLoadingEnabled toggle is the ceiling — off
+      // returns the full entitled manifest with no selection pass and no
+      // ledger row; the maxToolsInManifest dial rides into the kernel.
+      const org = await loadOrgSettings(db);
+      if (!org.lazyToolLoadingEnabled) {
+        return { tools: entitled };
+      }
       const [policy] = await db
         .select({ routingMode: userAgentPolicies.routingMode })
         .from(userAgentPolicies)
@@ -526,7 +534,8 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
           description: t.description ?? null,
           manifestChars: JSON.stringify(t).length,
         })),
-        routingMode: policy?.routingMode ?? "automatic",
+        routingMode: effectiveTechniqueMode(org, org.lazyToolLoadingEnabled, policy?.routingMode ?? null),
+        maxTools: org.maxToolsInManifest,
       });
       await db.insert(costEvents).values({
         userId,
