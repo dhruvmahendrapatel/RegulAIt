@@ -7,7 +7,9 @@ import {
   OpenAiProvider,
   XaiProvider,
   CONVERSATION_COMPACTION_SENTINEL,
+  OPENAI_RESPONSES_ONLY_MODELS,
   TASK_DECOMPOSITION_SENTINEL,
+  openAiUsesResponsesApi,
   resolveModelProvider,
 } from "./index.js";
 
@@ -1263,5 +1265,729 @@ describe("tool-using dispatch (pillar 7): wire shape, tool_use parsing, mock loo
     expect(r.refusal).toBe(true);
     expect(r.stopReason).toBe("refusal");
     expect(r.toolCalls).toBeUndefined();
+  });
+});
+
+describe("OpenAI Responses API surface (Responses-only models)", () => {
+  /** a complete terminal Response object as the Responses API returns it */
+  const responsesResult = (overrides: Record<string, unknown> = {}) => ({
+    id: "resp_1",
+    object: "response",
+    created_at: 1,
+    status: "completed",
+    error: null,
+    incomplete_details: null,
+    instructions: null,
+    metadata: null,
+    model: "o3-pro",
+    output: [
+      { type: "reasoning", id: "rs_1", summary: [] },
+      {
+        type: "message",
+        id: "msg_1",
+        status: "completed",
+        role: "assistant",
+        content: [{ type: "output_text", text: "42", annotations: [] }],
+      },
+    ],
+    parallel_tool_calls: true,
+    temperature: null,
+    tool_choice: "auto",
+    tools: [],
+    top_p: null,
+    usage: {
+      input_tokens: 17,
+      input_tokens_details: { cached_tokens: 0 },
+      output_tokens: 20,
+      output_tokens_details: { reasoning_tokens: 12 },
+      total_tokens: 37,
+    },
+    ...overrides,
+  });
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+
+  it("selection rule: only the static Responses-only list routes to Responses, incl. dated variants", () => {
+    for (const m of OPENAI_RESPONSES_ONLY_MODELS) expect(openAiUsesResponsesApi(m)).toBe(true);
+    expect(openAiUsesResponsesApi("o3-pro-2025-06-10")).toBe(true);
+    expect(openAiUsesResponsesApi("gpt-5-pro-2025-10-06")).toBe(true);
+    // everything chat-capable today stays on chat completions — behavior-preserving
+    for (const m of ["gpt-5", "gpt-5-mini", "gpt-4o", "gpt-4.1", "o1", "o1-preview", "o3", "o3-mini", "o4-mini", "grok-4"]) {
+      expect(openAiUsesResponsesApi(m)).toBe(false);
+    }
+  });
+
+  it("dispatches a Responses-only model via /responses with instructions, input items, and store:false", async () => {
+    let captured: { url: string; body: Record<string, unknown> } | null = null;
+    const provider = new OpenAiProvider({
+      apiKey: "sk-test",
+      fetchImpl: async (url, init) => {
+        captured = { url: String(url), body: JSON.parse(String(init?.body)) };
+        return json(responsesResult());
+      },
+    });
+    const result = await provider.dispatch({
+      model: "o3-pro",
+      input: "what is 6*7?",
+      system: "answer tersely",
+      maxTokens: 64,
+    });
+    expect(captured!.url).toContain("/responses");
+    expect(captured!.url).not.toContain("/chat/completions");
+    expect(captured!.body).toMatchObject({
+      model: "o3-pro",
+      max_output_tokens: 64,
+      instructions: "answer tersely",
+      input: [{ type: "message", role: "user", content: "what is 6*7?" }],
+      store: false,
+    });
+    expect(result.outputText).toBe("42");
+    expect(result.stopReason).toBe("end_turn");
+    expect(result.refusal).toBe(false);
+    expect(result.providerMessageId).toBe("resp_1");
+  });
+
+  it("usage extraction: outputTokens stays the provider's billed total; reasoning tokens surface distinctly", async () => {
+    const provider = new OpenAiProvider({
+      apiKey: "sk-test",
+      fetchImpl: async () => json(responsesResult()),
+    });
+    const r = await provider.dispatch({ model: "o3-pro", input: "x" });
+    // OpenAI's output_tokens already INCLUDES reasoning; never folded twice
+    expect(r.usage.inputTokens).toBe(17);
+    expect(r.usage.outputTokens).toBe(20);
+    expect(r.usage.reasoningTokens).toBe(12);
+  });
+
+  it("zero reasoning tokens leaves the reasoningTokens field absent (other adapters' shape unchanged)", async () => {
+    const provider = new OpenAiProvider({
+      apiKey: "sk-test",
+      fetchImpl: async () =>
+        json(
+          responsesResult({
+            usage: {
+              input_tokens: 9,
+              input_tokens_details: { cached_tokens: 0 },
+              output_tokens: 3,
+              output_tokens_details: { reasoning_tokens: 0 },
+              total_tokens: 12,
+            },
+          }),
+        ),
+    });
+    const r = await provider.dispatch({ model: "o3-pro", input: "x" });
+    expect(r.usage).toEqual({ inputTokens: 9, outputTokens: 3 });
+    expect("reasoningTokens" in r.usage).toBe(false);
+  });
+
+  it("regression: a chat-capable model keeps the existing chat-completions path, byte-identical", async () => {
+    let captured: { url: string; body: Record<string, unknown> } | null = null;
+    const provider = new OpenAiProvider({
+      apiKey: "sk-test",
+      fetchImpl: async (url, init) => {
+        captured = { url: String(url), body: JSON.parse(String(init?.body)) };
+        return json({
+          id: "chatcmpl-keep",
+          object: "chat.completion",
+          created: 1,
+          model: "gpt-5",
+          choices: [{ index: 0, message: { role: "assistant", content: "ok", refusal: null }, finish_reason: "stop", logprobs: null }],
+          usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 },
+        });
+      },
+    });
+    const r = await provider.dispatch({ model: "gpt-5", input: "hi", system: "s" });
+    expect(captured!.url).toContain("/chat/completions");
+    // the chat request shape is untouched: messages + max_completion_tokens, no Responses fields
+    expect(captured!.body).toMatchObject({
+      model: "gpt-5",
+      messages: [
+        { role: "system", content: "s" },
+        { role: "user", content: "hi" },
+      ],
+    });
+    expect("input" in captured!.body).toBe(false);
+    expect("instructions" in captured!.body).toBe(false);
+    expect(r.providerMessageId).toBe("chatcmpl-keep");
+  });
+
+  it("xai never consults the Responses list — even a Responses-only id rides chat completions there", async () => {
+    let url = "";
+    const provider = new XaiProvider({
+      apiKey: "xk",
+      fetchImpl: async (u) => {
+        url = String(u);
+        return json({
+          id: "chatcmpl-x",
+          object: "chat.completion",
+          created: 1,
+          model: "o3-pro",
+          choices: [{ index: 0, message: { role: "assistant", content: "ok", refusal: null }, finish_reason: "stop", logprobs: null }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        });
+      },
+    });
+    await provider.dispatch({ model: "o3-pro", input: "x" });
+    expect(url).toContain("/chat/completions");
+    expect(url).not.toMatch(/\/responses$/);
+  });
+
+  it("tool defs flatten to the Responses tool format and a function_call item parses into toolCalls", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new OpenAiProvider({
+      apiKey: "sk-test",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return json(
+          responsesResult({
+            output: [
+              { type: "function_call", id: "fc_1", call_id: "call_1", name: "get_time", arguments: '{"tz":"utc"}', status: "completed" },
+            ],
+          }),
+        );
+      },
+    });
+    const r = await provider.dispatch({
+      model: "o3-pro",
+      input: "what time is it?",
+      tools: [{ name: "get_time", description: "Returns a fixed time", inputSchema: { type: "object", properties: {} } }],
+    });
+    // flattened: no nested `function` object, unlike chat completions
+    expect(captured!.tools).toEqual([
+      {
+        type: "function",
+        name: "get_time",
+        description: "Returns a fixed time",
+        parameters: { type: "object", properties: {} },
+        strict: false,
+      },
+    ]);
+    expect(r.stopReason).toBe("tool_use");
+    expect(r.toolCalls).toEqual([{ id: "call_1", name: "get_time", arguments: { tz: "utc" } }]);
+  });
+
+  it("tool round-trip history translates to function_call / function_call_output input items", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new OpenAiProvider({
+      apiKey: "sk-test",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return json(
+          responsesResult({
+            output: [
+              {
+                type: "message",
+                id: "msg_2",
+                status: "completed",
+                role: "assistant",
+                content: [{ type: "output_text", text: "it is 12:00", annotations: [] }],
+              },
+            ],
+          }),
+        );
+      },
+    });
+    const r = await provider.dispatch({
+      model: "o3-pro",
+      input: "IGNORED",
+      messages: [
+        { role: "user", content: "what time is it?" },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "let me check" },
+            { type: "tool_use", id: "call_1", name: "get_time", input: { tz: "utc" } },
+          ],
+        },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "call_1", content: "12:00" }] },
+      ],
+    });
+    expect(captured!.input).toEqual([
+      { type: "message", role: "user", content: "what time is it?" },
+      { type: "message", role: "assistant", content: "let me check" },
+      { type: "function_call", call_id: "call_1", name: "get_time", arguments: '{"tz":"utc"}' },
+      { type: "function_call_output", call_id: "call_1", output: "12:00" },
+    ]);
+    expect(JSON.stringify(captured)).not.toContain("IGNORED");
+    expect(r.outputText).toBe("it is 12:00");
+    expect(r.stopReason).toBe("end_turn");
+  });
+
+  it("streams output_text deltas onto onText and normalizes the terminal response.completed snapshot", async () => {
+    const chunk = (c: unknown) => "data: " + JSON.stringify(c) + "\n\n";
+    const final = responsesResult({
+      id: "resp_s1",
+      output: [
+        {
+          type: "message",
+          id: "msg_s1",
+          status: "completed",
+          role: "assistant",
+          content: [{ type: "output_text", text: "Hello world", annotations: [] }],
+        },
+      ],
+      usage: {
+        input_tokens: 12,
+        input_tokens_details: { cached_tokens: 0 },
+        output_tokens: 9,
+        output_tokens_details: { reasoning_tokens: 4 },
+        total_tokens: 21,
+      },
+    });
+    const sse =
+      chunk({ type: "response.created", response: responsesResult({ id: "resp_s1", status: "in_progress", output: [], usage: null }), sequence_number: 0 }) +
+      chunk({ type: "response.output_text.delta", delta: "Hello ", content_index: 0, item_id: "msg_s1", output_index: 0, logprobs: [], sequence_number: 1 }) +
+      chunk({ type: "response.output_text.delta", delta: "world", content_index: 0, item_id: "msg_s1", output_index: 0, logprobs: [], sequence_number: 2 }) +
+      chunk({ type: "response.completed", response: final, sequence_number: 3 });
+    let sawStreamFlag = false;
+    const provider = new OpenAiProvider({
+      apiKey: "sk-test",
+      fetchImpl: async (_url, init) => {
+        sawStreamFlag = JSON.parse(String(init?.body)).stream === true;
+        return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+      },
+    });
+    const deltas: string[] = [];
+    const result = await provider.dispatch({ model: "o3-pro", input: "greet", onText: (d) => deltas.push(d) });
+    expect(sawStreamFlag).toBe(true);
+    expect(deltas).toEqual(["Hello ", "world"]);
+    expect(result.outputText).toBe("Hello world");
+    expect(result.stopReason).toBe("end_turn");
+    expect(result.usage).toEqual({ inputTokens: 12, outputTokens: 9, reasoningTokens: 4 });
+    expect(result.providerMessageId).toBe("resp_s1");
+  });
+
+  it("incomplete_details max_output_tokens maps to max_tokens without suppressing partial text", async () => {
+    const provider = new OpenAiProvider({
+      apiKey: "sk-test",
+      fetchImpl: async () =>
+        json(
+          responsesResult({
+            status: "incomplete",
+            incomplete_details: { reason: "max_output_tokens" },
+            output: [
+              {
+                type: "message",
+                id: "msg_3",
+                status: "incomplete",
+                role: "assistant",
+                content: [{ type: "output_text", text: "partial", annotations: [] }],
+              },
+            ],
+          }),
+        ),
+    });
+    const r = await provider.dispatch({ model: "o3-pro", input: "x" });
+    expect(r.stopReason).toBe("max_tokens");
+    expect(r.refusal).toBe(false);
+    expect(r.outputText).toBe("partial");
+  });
+
+  it("a refusal content part or a content_filter incomplete never surfaces content as an answer", async () => {
+    const refusalPart = new OpenAiProvider({
+      apiKey: "sk-test",
+      fetchImpl: async () =>
+        json(
+          responsesResult({
+            output: [
+              {
+                type: "message",
+                id: "msg_4",
+                status: "completed",
+                role: "assistant",
+                content: [
+                  { type: "output_text", text: "partial before refusal", annotations: [] },
+                  { type: "refusal", refusal: "I cannot help with that" },
+                ],
+              },
+            ],
+          }),
+        ),
+    });
+    const a = await refusalPart.dispatch({ model: "o3-pro", input: "x" });
+    expect(a.refusal).toBe(true);
+    expect(a.stopReason).toBe("refusal");
+    expect(a.outputText).toBe("");
+
+    const filtered = new OpenAiProvider({
+      apiKey: "sk-test",
+      fetchImpl: async () =>
+        json(
+          responsesResult({
+            status: "incomplete",
+            incomplete_details: { reason: "content_filter" },
+          }),
+        ),
+    });
+    const b = await filtered.dispatch({ model: "o3-pro", input: "x" });
+    expect(b.refusal).toBe(true);
+    expect(b.outputText).toBe("");
+  });
+
+  it("wraps Responses API errors as ModelProviderError with status", async () => {
+    const provider = new OpenAiProvider({
+      apiKey: "sk-bad",
+      fetchImpl: async () =>
+        json({ error: { message: "Incorrect API key", type: "invalid_request_error" } }, 401),
+    });
+    await expect(provider.dispatch({ model: "o3-pro", input: "x" })).rejects.toThrowError(
+      ModelProviderError,
+    );
+    await expect(provider.dispatch({ model: "o3-pro", input: "x" })).rejects.toMatchObject({
+      status: 401,
+    });
+  });
+});
+
+describe("Google tool-use mapping (functionDeclarations / functionCall / functionResponse)", () => {
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  const okText = (text: string) => ({
+    responseId: "resp-gt1",
+    candidates: [{ content: { role: "model", parts: [{ text }] }, finishReason: "STOP" }],
+    usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 2 },
+  });
+  const capture = (body: unknown = okText("ok")) => {
+    const box: { body: Record<string, unknown> | null } = { body: null };
+    const provider = new GoogleProvider({
+      apiKey: "gk",
+      fetchImpl: async (_url, init) => {
+        box.body = JSON.parse(String(init?.body));
+        return json(body);
+      },
+    });
+    return { box, provider };
+  };
+
+  it("translates a nested JSON schema (objects/arrays/enum/required) into Gemini's dialect", async () => {
+    const { box, provider } = capture();
+    await provider.dispatch({
+      model: "gemini-2.5-pro",
+      input: "book it",
+      tools: [
+        {
+          name: "book_meeting",
+          description: "Books a meeting",
+          inputSchema: {
+            $schema: "http://json-schema.org/draft-07/schema#",
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              title: { type: "string", description: "Meeting title" },
+              attendees: {
+                type: "array",
+                minItems: 1,
+                items: {
+                  type: "object",
+                  properties: {
+                    email: { type: "string", format: "email" },
+                    role: { type: "string", enum: ["organizer", "guest"] },
+                  },
+                  required: ["email"],
+                  additionalProperties: false,
+                },
+              },
+            },
+            required: ["title", "attendees"],
+          },
+        },
+      ],
+    });
+    const decls = (box.body!.tools as Array<{ functionDeclarations: unknown[] }>)[0]!
+      .functionDeclarations as Array<Record<string, unknown>>;
+    expect(decls[0]!.name).toBe("book_meeting");
+    expect(decls[0]!.description).toBe("Books a meeting");
+    // Gemini's dialect: uppercase type enums, required preserved, unknown
+    // keywords ($schema, additionalProperties) dropped so proto parsing
+    // cannot 400 — at every nesting level
+    expect(decls[0]!.parameters).toEqual({
+      type: "OBJECT",
+      required: ["title", "attendees"],
+      properties: {
+        title: { type: "STRING", description: "Meeting title" },
+        attendees: {
+          type: "ARRAY",
+          minItems: 1,
+          items: {
+            type: "OBJECT",
+            required: ["email"],
+            properties: {
+              email: { type: "STRING", format: "email" },
+              role: { type: "STRING", enum: ["organizer", "guest"] },
+            },
+          },
+        },
+      },
+    });
+  });
+
+  it("handles nullable, const, and oneOf: union-with-null becomes nullable, const becomes enum, oneOf becomes anyOf", async () => {
+    const { box, provider } = capture();
+    await provider.dispatch({
+      model: "gemini-2.5-pro",
+      input: "go",
+      tools: [
+        {
+          name: "configure",
+          inputSchema: {
+            type: "object",
+            properties: {
+              note: { type: ["string", "null"] },
+              mode: { type: "string", const: "fast" },
+              limit: { oneOf: [{ type: "integer" }, { type: "null" }] },
+            },
+            required: ["mode"],
+          },
+        },
+      ],
+    });
+    const decl = (box.body!.tools as Array<{ functionDeclarations: Array<Record<string, unknown>> }>)[0]!
+      .functionDeclarations[0]!;
+    const props = (decl.parameters as { properties: Record<string, unknown> }).properties;
+    expect(props.note).toEqual({ type: "STRING", nullable: true });
+    expect(props.mode).toEqual({ type: "STRING", enum: ["fast"] });
+    expect(props.limit).toEqual({ anyOf: [{ type: "INTEGER" }, { nullable: true }] });
+  });
+
+  it("a no-arg tool omits `parameters` entirely — Gemini rejects an empty OBJECT schema", async () => {
+    const { box, provider } = capture();
+    await provider.dispatch({
+      model: "gemini-2.5-pro",
+      input: "time?",
+      tools: [{ name: "get_time", description: "Returns the time", inputSchema: { type: "object", properties: {} } }],
+    });
+    const decl = (box.body!.tools as Array<{ functionDeclarations: Array<Record<string, unknown>> }>)[0]!
+      .functionDeclarations[0]!;
+    expect(decl).toEqual({ name: "get_time", description: "Returns the time" });
+    expect("parameters" in decl).toBe(false);
+  });
+
+  it("an assistant tool_use turn becomes a model-role functionCall part; non-object args coerce to {}", async () => {
+    const { box, provider } = capture();
+    await provider.dispatch({
+      model: "gemini-2.5-pro",
+      input: "IGNORED",
+      messages: [
+        { role: "user", content: "what time is it in utc?" },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "checking" },
+            { type: "tool_use", id: "fc-0", name: "get_time", input: { tz: "utc" } },
+            { type: "tool_use", id: "fc-1", name: "get_time", input: "not-an-object" },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", toolUseId: "fc-0", content: "12:00" },
+            { type: "tool_result", toolUseId: "fc-1", content: "13:00" },
+          ],
+        },
+      ],
+    });
+    const contents = box.body!.contents as Array<{ role: string; parts: unknown[] }>;
+    expect(contents[1]).toEqual({
+      role: "model",
+      parts: [
+        { text: "checking" },
+        { functionCall: { name: "get_time", args: { tz: "utc" } } },
+        { functionCall: { name: "get_time", args: {} } },
+      ],
+    });
+  });
+
+  it("tool_result turns become user-role functionResponse parts paired by tool NAME, in call order", async () => {
+    const { box, provider } = capture();
+    await provider.dispatch({
+      model: "gemini-2.5-pro",
+      input: "IGNORED",
+      messages: [
+        { role: "user", content: "weather and time please" },
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "resp-1-fc-0", name: "get_weather", input: { city: "Oslo" } },
+            { type: "tool_use", id: "resp-1-fc-1", name: "get_time", input: {} },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", toolUseId: "resp-1-fc-0", content: "rainy" },
+            { type: "tool_result", toolUseId: "resp-1-fc-1", content: "12:00" },
+          ],
+        },
+      ],
+    });
+    const contents = box.body!.contents as Array<{ role: string; parts: unknown[] }>;
+    // Gemini requires the role/name pairing exactly: functionResponses ride in
+    // a USER turn, each named after the tool that was CALLED — never the call id
+    expect(contents[2]).toEqual({
+      role: "user",
+      parts: [
+        { functionResponse: { name: "get_weather", response: { output: "rainy" } } },
+        { functionResponse: { name: "get_time", response: { output: "12:00" } } },
+      ],
+    });
+  });
+
+  it("an isError tool_result maps to the documented { error: … } response convention", async () => {
+    const { box, provider } = capture();
+    await provider.dispatch({
+      model: "gemini-2.5-pro",
+      input: "IGNORED",
+      messages: [
+        { role: "user", content: "look this up" },
+        { role: "assistant", content: [{ type: "tool_use", id: "c1", name: "lookup", input: {} }] },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "c1", content: "boom: upstream 500", isError: true }] },
+      ],
+    });
+    const contents = box.body!.contents as Array<{ role: string; parts: unknown[] }>;
+    expect(contents[2]!.parts).toEqual([
+      { functionResponse: { name: "lookup", response: { error: "boom: upstream 500" } } },
+    ]);
+  });
+
+  it("a tool_result with no matching tool_use in history degrades to the raw id as name, never dropped", async () => {
+    const { box, provider } = capture();
+    await provider.dispatch({
+      model: "gemini-2.5-pro",
+      input: "IGNORED",
+      messages: [
+        { role: "user", content: [{ type: "tool_result", toolUseId: "orphan-1", content: "data" }] },
+      ],
+    });
+    const contents = box.body!.contents as Array<{ role: string; parts: unknown[] }>;
+    expect(contents[0]!.parts).toEqual([
+      { functionResponse: { name: "orphan-1", response: { output: "data" } } },
+    ]);
+  });
+
+  it("parallel functionCall parts in one candidate become distinct toolCalls with stopReason tool_use", async () => {
+    const provider = new GoogleProvider({
+      apiKey: "gk",
+      fetchImpl: async () =>
+        json({
+          responseId: "resp-par1",
+          candidates: [
+            {
+              content: {
+                role: "model",
+                parts: [
+                  { functionCall: { name: "get_weather", args: { city: "Oslo" } } },
+                  { functionCall: { name: "get_time", args: {} } },
+                ],
+              },
+              finishReason: "STOP",
+            },
+          ],
+          usageMetadata: { promptTokenCount: 11, candidatesTokenCount: 6 },
+        }),
+    });
+    const r = await provider.dispatch({
+      model: "gemini-2.5-pro",
+      input: "weather and time please",
+      tools: [
+        { name: "get_weather", inputSchema: { type: "object", properties: { city: { type: "string" } } } },
+        { name: "get_time", inputSchema: { type: "object", properties: {} } },
+      ],
+    });
+    // the model stopped TO CALL TOOLS: finishReason STOP + functionCall parts
+    expect(r.stopReason).toBe("tool_use");
+    expect(r.refusal).toBe(false);
+    expect(r.toolCalls).toHaveLength(2);
+    expect(r.toolCalls![0]).toMatchObject({ name: "get_weather", arguments: { city: "Oslo" } });
+    expect(r.toolCalls![1]).toMatchObject({ name: "get_time", arguments: {} });
+    expect(r.toolCalls![0]!.id).not.toBe(r.toolCalls![1]!.id);
+    expect(r.usage).toEqual({ inputTokens: 11, outputTokens: 6 });
+  });
+
+  it("full round trip: call → result → follow-up turn keeps every wire shape exact", async () => {
+    const { box, provider } = capture({
+      responseId: "resp-rt2",
+      candidates: [
+        { content: { role: "model", parts: [{ text: "It is rainy in Oslo." }] }, finishReason: "STOP" },
+      ],
+      usageMetadata: { promptTokenCount: 40, candidatesTokenCount: 7 },
+    });
+    const r = await provider.dispatch({
+      model: "gemini-2.5-pro",
+      input: "IGNORED",
+      system: "be brief",
+      tools: [{ name: "get_weather", inputSchema: { type: "object", properties: { city: { type: "string" } } } }],
+      messages: [
+        { role: "user", content: "what's the weather in Oslo?" },
+        { role: "assistant", content: [{ type: "tool_use", id: "resp-rt1-fc-0", name: "get_weather", input: { city: "Oslo" } }] },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "resp-rt1-fc-0", content: "rainy" }] },
+      ],
+    });
+    expect(box.body!.contents).toEqual([
+      { role: "user", parts: [{ text: "what's the weather in Oslo?" }] },
+      { role: "model", parts: [{ functionCall: { name: "get_weather", args: { city: "Oslo" } } }] },
+      { role: "user", parts: [{ functionResponse: { name: "get_weather", response: { output: "rainy" } } }] },
+    ]);
+    expect(box.body!.systemInstruction).toEqual({ parts: [{ text: "be brief" }] });
+    // the follow-up finalizes as plain text — a normal end_turn answer
+    expect(r.outputText).toBe("It is rainy in Oslo.");
+    expect(r.stopReason).toBe("end_turn");
+    expect(r.toolCalls).toBeUndefined();
+    expect(r.usage).toEqual({ inputTokens: 40, outputTokens: 7 });
+  });
+
+  it("streamed functionCall parts accumulate into toolCalls exactly like the non-streaming path", async () => {
+    const chunk = (c: unknown) => "data: " + JSON.stringify(c) + "\n\n";
+    const sse =
+      chunk({ responseId: "resp-st1", candidates: [{ content: { parts: [{ text: "checking " }] } }] }) +
+      chunk({
+        candidates: [
+          {
+            content: { parts: [{ functionCall: { name: "get_time", args: { tz: "utc" } } }] },
+            finishReason: "STOP",
+          },
+        ],
+        usageMetadata: { promptTokenCount: 8, candidatesTokenCount: 3 },
+      });
+    const provider = new GoogleProvider({
+      apiKey: "gk",
+      fetchImpl: async () =>
+        new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+    });
+    const deltas: string[] = [];
+    const r = await provider.dispatch({
+      model: "gemini-2.5-pro",
+      input: "time?",
+      tools: [{ name: "get_time", inputSchema: { type: "object", properties: { tz: { type: "string" } } } }],
+      onText: (d) => deltas.push(d),
+    });
+    expect(deltas).toEqual(["checking "]);
+    expect(r.stopReason).toBe("tool_use");
+    expect(r.toolCalls).toEqual([
+      { id: "resp-st1-fc-0", name: "get_time", arguments: { tz: "utc" } },
+    ]);
+  });
+
+  it("a Gemini error shape mid-tool-flow still wraps as ModelProviderError with status", async () => {
+    const provider = new GoogleProvider({
+      apiKey: "gk",
+      fetchImpl: async () =>
+        json(
+          {
+            error: {
+              code: 400,
+              message: 'Invalid JSON payload received. Unknown name "additionalProperties"',
+              status: "INVALID_ARGUMENT",
+            },
+          },
+          400,
+        ),
+    });
+    await expect(
+      provider.dispatch({
+        model: "gemini-2.5-pro",
+        input: "x",
+        tools: [{ name: "t", inputSchema: { type: "object", properties: { a: { type: "string" } } } }],
+      }),
+    ).rejects.toMatchObject({ status: 400 });
   });
 });

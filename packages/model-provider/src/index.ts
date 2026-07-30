@@ -121,8 +121,14 @@ export interface ModelDispatchResult {
    * wants executed, in the provider-neutral shape the caller re-governs and
    * runs before feeding results back as the next turn. */
   toolCalls?: Array<{ id: string; name: string; arguments: unknown }>;
-  /** MEASURED by the provider, never estimated here */
-  usage: { inputTokens: number; outputTokens: number };
+  /** MEASURED by the provider, never estimated here. `reasoningTokens` is
+   * present only when the provider reports a distinct reasoning-token count
+   * (OpenAI Responses API `output_tokens_details.reasoning_tokens`). Honesty
+   * note: OpenAI's own `output_tokens` already INCLUDES reasoning tokens —
+   * that is the provider's billed output total, so `outputTokens` carries it
+   * unchanged, and `reasoningTokens` surfaces the reasoning SUBSET distinctly
+   * rather than folding it in silently. Never add the two together. */
+  usage: { inputTokens: number; outputTokens: number; reasoningTokens?: number };
   /** provider-side message/request identifier for cross-system audit joins */
   providerMessageId: string | null;
 }
@@ -509,6 +515,211 @@ async function dispatchChatCompletions(
   }
 }
 
+// ---------------------------------------------------------------------------
+// OpenAI Responses API surface.
+//
+// Selection rule (explicit and conservative, behavior-preserving): a request
+// routes to `client.responses.create` ONLY when its model id is on the static
+// OPENAI_RESPONSES_ONLY_MODELS list below — the ids OpenAI serves EXCLUSIVELY
+// through the Responses API, which today 404 on chat.completions and therefore
+// cannot have been working on the existing path. Every other model id —
+// including every chat-capable gpt-4*/gpt-5*/o1/o3/o4-mini id currently in
+// use — keeps the EXISTING chat-completions path byte-for-byte; no model that
+// works today changes path silently. Extending Responses coverage to a
+// chat-capable model is a deliberate future edit to this list, never an
+// inference. The xAI adapter never consults this list: Grok speaks
+// chat-completions only.
+// ---------------------------------------------------------------------------
+
+/** Model ids (exact, or `<id>-` dated/variant prefixes) that OpenAI serves
+ * only via the Responses API. Deliberately narrow — see the selection rule
+ * above before adding anything chat-capable. */
+export const OPENAI_RESPONSES_ONLY_MODELS = [
+  "o1-pro",
+  "o3-pro",
+  "gpt-5-pro",
+  "gpt-5-codex",
+  "o3-deep-research",
+  "o4-mini-deep-research",
+  "codex-mini-latest",
+  "computer-use-preview",
+] as const;
+
+/** The selection predicate: exact id or a dated/variant suffix of a listed id
+ * (e.g. "o3-pro-2025-06-10"). Everything else stays on chat completions. */
+export function openAiUsesResponsesApi(model: string): boolean {
+  return OPENAI_RESPONSES_ONLY_MODELS.some((m) => model === m || model.startsWith(`${m}-`));
+}
+
+/** Flatten our neutral turns onto Responses-API input items. A text turn maps
+ * to a `message` item (role preserved — user/assistant both exist here). A
+ * block-array turn can expand: its text rides as a message item, each
+ * tool_use block becomes a top-level `function_call` item, and each
+ * tool_result block becomes a `function_call_output` item keyed by the same
+ * call_id — the Responses API carries tool traffic as sibling items, not as
+ * message content. Attachments degrade to the same named text placeholder as
+ * the chat-completions path. */
+function openAiResponsesInput(turns: ModelChatMessage[]): OpenAI.Responses.ResponseInputItem[] {
+  const out: OpenAI.Responses.ResponseInputItem[] = [];
+  for (const m of turns) {
+    if (typeof m.content === "string") {
+      out.push({ type: "message", role: m.role, content: m.content });
+      continue;
+    }
+    const text = m.content
+      .map((b) =>
+        b.type === "text"
+          ? b.text
+          : b.type === "image" || b.type === "document"
+            ? attachmentPlaceholder(b)
+            : "",
+      )
+      .join("");
+    if (text) out.push({ type: "message", role: m.role, content: text });
+    for (const b of m.content) {
+      if (b.type === "tool_use") {
+        out.push({
+          type: "function_call",
+          call_id: b.id,
+          name: b.name,
+          arguments: JSON.stringify(b.input ?? {}),
+        });
+      } else if (b.type === "tool_result") {
+        out.push({ type: "function_call_output", call_id: b.toolUseId, output: b.content });
+      }
+    }
+  }
+  return out;
+}
+
+/** Normalize a terminal Responses-API `Response` object onto the neutral
+ * result — shared by the non-streaming path and the streaming path's final
+ * snapshot so both agree exactly.
+ *
+ * Stop-reason mapping: a refusal content part or `incomplete_details.reason
+ * = "content_filter"` → refusal (content suppressed, as everywhere else);
+ * any `function_call` output item → tool_use; `incomplete_details.reason =
+ * "max_output_tokens"` → max_tokens; status "completed" → end_turn;
+ * anything else → other. */
+function normalizeOpenAiResponse(res: OpenAI.Responses.Response): ModelDispatchResult {
+  let text = "";
+  let refusal = false;
+  const toolCalls: Array<{ id: string; name: string; arguments: unknown }> = [];
+  for (const item of res.output ?? []) {
+    if (item.type === "message") {
+      for (const part of item.content) {
+        if (part.type === "output_text") text += part.text;
+        else if (part.type === "refusal") refusal = true;
+      }
+    } else if (item.type === "function_call") {
+      toolCalls.push({ id: item.call_id, name: item.name, arguments: parseJsonArgs(item.arguments) });
+    }
+  }
+  const incompleteReason = res.incomplete_details?.reason;
+  if (incompleteReason === "content_filter") refusal = true;
+  const stopReason: ModelDispatchResult["stopReason"] = refusal
+    ? "refusal"
+    : toolCalls.length > 0
+      ? "tool_use"
+      : incompleteReason === "max_output_tokens"
+        ? "max_tokens"
+        : res.status === "completed"
+          ? "end_turn"
+          : "other";
+  // usage honesty: output_tokens is OpenAI's billed output total (reasoning
+  // INCLUDED, per their own accounting); reasoning_tokens is surfaced as the
+  // distinct subset — never folded, never double-counted.
+  const reasoningTokens = res.usage?.output_tokens_details?.reasoning_tokens ?? 0;
+  return {
+    // a refusal's content must never be surfaced as an answer
+    outputText: refusal ? "" : text,
+    stopReason,
+    refusal,
+    ...(toolCalls.length > 0 ? { toolCalls } : {}),
+    usage: {
+      inputTokens: res.usage?.input_tokens ?? 0,
+      outputTokens: res.usage?.output_tokens ?? 0,
+      ...(reasoningTokens > 0 ? { reasoningTokens } : {}),
+    },
+    providerMessageId: res.id ?? null,
+  };
+}
+
+/** The Responses-API dispatch core. Same contract and discipline as
+ * `dispatchChatCompletions`: complete result either way, refusals never
+ * surfaced as answers, usage is the provider's own accounting, errors wrap
+ * as ModelProviderError. `req.cacheSystem` stays a no-op here for the same
+ * reason as the chat path — OpenAI auto-caches long prompt prefixes and
+ * exposes no explicit cache-control breakpoint. */
+async function dispatchResponses(
+  client: OpenAI,
+  req: ModelDispatchRequest,
+  label: string,
+): Promise<ModelDispatchResult> {
+  const maxTokens = req.maxTokens ?? DEFAULT_MAX_TOKENS;
+  const params = {
+    model: req.model,
+    max_output_tokens: maxTokens,
+    // system rides as `instructions` — the Responses API's native out-of-band
+    // system slot, mirroring how Anthropic/Google carry it
+    ...(req.system ? { instructions: req.system } : {}),
+    input: openAiResponsesInput(chatTurns(req)),
+    ...(req.tools
+      ? {
+          // Responses flattens the function fields (no nested `function`
+          // object, unlike chat completions); strict:false because governed
+          // MCP manifests carry arbitrary JSON Schema, not the strict subset
+          tools: req.tools.map((t) => ({
+            type: "function" as const,
+            name: t.name,
+            ...(t.description ? { description: t.description } : {}),
+            parameters: t.inputSchema,
+            strict: false,
+          })),
+        }
+      : {}),
+    // data minimization (pillar 1): the Responses API persists request/
+    // response state server-side BY DEFAULT (store:true); this gateway is the
+    // system of record for audit, so provider-side retention is opted out
+    store: false,
+  };
+  try {
+    if (req.onText !== undefined || maxTokens > STREAM_THRESHOLD_TOKENS) {
+      const stream = await client.responses.create({ ...params, stream: true });
+      let final: OpenAI.Responses.Response | null = null;
+      for await (const event of stream) {
+        if (event.type === "response.output_text.delta") {
+          req.onText?.(event.delta);
+        } else if (
+          event.type === "response.completed" ||
+          event.type === "response.incomplete" ||
+          event.type === "response.failed"
+        ) {
+          // the terminal event carries the complete Response snapshot —
+          // normalizing that keeps streaming and non-streaming byte-identical
+          final = event.response;
+        }
+      }
+      if (!final) {
+        throw new ModelProviderError(
+          `${label} dispatch failed: response stream ended without a terminal event`,
+        );
+      }
+      return normalizeOpenAiResponse(final);
+    }
+    const res = await client.responses.create(params);
+    return normalizeOpenAiResponse(res);
+  } catch (err) {
+    if (err instanceof OpenAI.APIError) {
+      throw new ModelProviderError(
+        `${label} dispatch failed: ${err.message}`,
+        typeof err.status === "number" ? err.status : undefined,
+      );
+    }
+    throw err;
+  }
+}
+
 export class OpenAiProvider implements ModelProvider {
   readonly kind = "openai" as const;
   private readonly client: OpenAI;
@@ -523,7 +734,11 @@ export class OpenAiProvider implements ModelProvider {
   }
 
   dispatch(req: ModelDispatchRequest): Promise<ModelDispatchResult> {
-    return dispatchChatCompletions(this.client, req, "openai");
+    // Responses-only models take the Responses surface; everything else keeps
+    // the existing chat-completions path (see the selection rule above)
+    return openAiUsesResponsesApi(req.model)
+      ? dispatchResponses(this.client, req, "openai")
+      : dispatchChatCompletions(this.client, req, "openai");
   }
 }
 
@@ -588,20 +803,134 @@ interface GeminiChunk {
   usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
 }
 
+/** JSON-Schema keywords Gemini's Schema dialect shares verbatim — everything
+ * else must be translated or DROPPED, because generateContent's strict proto
+ * parsing rejects unknown fields with a 400 (so `additionalProperties`,
+ * `$schema`, `$defs`/`$ref`, `allOf`, … cannot pass through). `nullable`,
+ * `type`, `const`, and the structural keywords are handled explicitly in
+ * googleSchema. */
+const GOOGLE_SCHEMA_PASSTHROUGH_KEYS = [
+  "description",
+  "format",
+  "title",
+  "enum",
+  "required",
+  "minimum",
+  "maximum",
+  "minItems",
+  "maxItems",
+  "minLength",
+  "maxLength",
+  "minProperties",
+  "maxProperties",
+  "pattern",
+  "default",
+  "example",
+  "propertyOrdering",
+] as const;
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/** Translate a JSON-Schema object (the MCP-manifest dialect our ModelToolDef
+ * carries) into Gemini's Schema dialect (an OpenAPI-3.0 subset):
+ * - `type` becomes the uppercase enum Gemini's proto expects (OBJECT, STRING,
+ *   …). A JSON-Schema union type `["string","null"]` — which Gemini cannot
+ *   express as a type — becomes the single non-null type plus
+ *   `nullable: true`, Gemini's own nullability mechanism; a bare
+ *   `type:"null"` degrades to `nullable: true` alone.
+ * - `properties` / `items` / `anyOf` recurse; a JSON-Schema tuple `items`
+ *   array collapses to its first schema (Gemini has no tuple form); `oneOf`
+ *   approximates as `anyOf` (the closest Gemini construct).
+ * - `const` becomes a single-value `enum` (Gemini has no const).
+ * - `required`, `enum`, and the shared scalar keywords pass through; every
+ *   unsupported keyword is dropped so the request cannot 400 on an unknown
+ *   field. Caveat: Gemini only supports `enum` on STRING-typed schemas —
+ *   values pass through untouched, so non-string enums remain the caller's
+ *   responsibility. */
+function googleSchema(schema: unknown): Record<string, unknown> {
+  if (!isRecord(schema)) return {};
+  const out: Record<string, unknown> = {};
+  let type = schema.type;
+  let nullable = schema.nullable === true;
+  if (Array.isArray(type)) {
+    const nonNull = type.filter((t) => t !== "null");
+    if (nonNull.length < type.length) nullable = true;
+    type = nonNull[0];
+  }
+  if (type === "null") {
+    nullable = true;
+  } else if (typeof type === "string") {
+    out.type = type.toUpperCase();
+  }
+  if (nullable) out.nullable = true;
+  for (const k of GOOGLE_SCHEMA_PASSTHROUGH_KEYS) {
+    if (schema[k] !== undefined) out[k] = schema[k];
+  }
+  if (schema.const !== undefined && out.enum === undefined) out.enum = [schema.const];
+  if (isRecord(schema.properties)) {
+    out.properties = Object.fromEntries(
+      Object.entries(schema.properties).map(([k, v]) => [k, googleSchema(v)]),
+    );
+  }
+  if (Array.isArray(schema.items)) {
+    out.items = googleSchema(schema.items[0]);
+  } else if (isRecord(schema.items)) {
+    out.items = googleSchema(schema.items);
+  }
+  const variants = Array.isArray(schema.anyOf)
+    ? schema.anyOf
+    : Array.isArray(schema.oneOf)
+      ? schema.oneOf
+      : null;
+  if (variants) out.anyOf = variants.map(googleSchema);
+  return out;
+}
+
+/** Gemini pairs a functionResponse with its functionCall by the tool NAME
+ * (and, for parallel calls, by part order within the turn). Our tool_result
+ * block carries only the call id, so the id→name pairing is recovered from
+ * the tool_use blocks earlier in the SAME history — the loop contract always
+ * replays the assistant's tool_use turn before the tool_result turn. */
+function googleToolNames(turns: ModelChatMessage[]): Map<string, string> {
+  const names = new Map<string, string>();
+  for (const m of turns) {
+    if (!Array.isArray(m.content)) continue;
+    for (const b of m.content) {
+      if (b.type === "tool_use") names.set(b.id, b.name);
+    }
+  }
+  return names;
+}
+
 /** Map our neutral content onto Gemini parts. A string stays one text part
- * (byte-identical to the tool-free path). tool_use → functionCall, tool_result
- * → functionResponse. Gemini keys a functionResponse by the tool NAME, which
- * our tool_result block does not carry — the loop's providers of record are
- * Anthropic + the OpenAI family, so this mapping is best-effort and not
- * exercised by the tool-loop tests. */
-function googleParts(content: string | ModelContentBlock[]): Record<string, unknown>[] {
+ * (byte-identical to the tool-free path). An assistant turn's tool_use blocks
+ * become functionCall parts (role "model" upstream); a user turn's
+ * tool_result blocks become functionResponse parts (role "user" upstream —
+ * the role Gemini requires function responses to ride in), keyed by the tool
+ * NAME resolved via `toolNames`; parallel calls answer as multiple
+ * functionResponse parts in the same turn, in call order. The functionResponse
+ * body follows Gemini's documented convention: `{output: …}` for a success,
+ * `{error: …}` for a failed call. An id with no matching tool_use in history
+ * falls back to the raw id as the name (degraded, but never dropped). */
+function googleParts(
+  content: string | ModelContentBlock[],
+  toolNames: Map<string, string>,
+): Record<string, unknown>[] {
   if (typeof content === "string") return [{ text: content }];
   return content.map((b) => {
     if (b.type === "text") return { text: b.text };
     if (b.type === "image" || b.type === "document") return { text: attachmentPlaceholder(b) };
-    if (b.type === "tool_use") return { functionCall: { name: b.name, args: b.input } };
+    if (b.type === "tool_use") {
+      // Gemini's args is a Struct — always an object, never a scalar/array
+      return { functionCall: { name: b.name, args: isRecord(b.input) ? b.input : {} } };
+    }
     return {
-      functionResponse: { name: b.toolUseId, response: { content: b.content, isError: b.isError ?? false } },
+      functionResponse: {
+        name: toolNames.get(b.toolUseId) ?? b.toolUseId,
+        response: b.isError ? { error: b.content } : { output: b.content },
+      },
     };
   });
 }
@@ -635,11 +964,17 @@ export class GoogleProvider implements ModelProvider {
         method: "POST",
         headers: { "x-goog-api-key": this.apiKey, "content-type": "application/json" },
         body: JSON.stringify({
-          // Gemini's assistant role is "model"
-          contents: chatTurns(req).map((m) => ({
-            role: m.role === "assistant" ? "model" : "user",
-            parts: googleParts(m.content),
-          })),
+          // Gemini's assistant role is "model"; tool_result turns stay role
+          // "user" (the role Gemini requires functionResponse parts to ride
+          // in), with each functionResponse re-keyed by tool NAME via the
+          // id→name pairing recovered from the history's tool_use blocks
+          contents: (() => {
+            const toolNames = googleToolNames(chatTurns(req));
+            return chatTurns(req).map((m) => ({
+              role: m.role === "assistant" ? "model" : "user",
+              parts: googleParts(m.content, toolNames),
+            }));
+          })(),
           // pillar-6 prompt caching: `req.cacheSystem` is intentionally ignored
           // here — the Gemini generateContent surface exposes no per-request
           // ephemeral cache-control breakpoint, so the systemInstruction is sent
@@ -649,11 +984,21 @@ export class GoogleProvider implements ModelProvider {
             ? {
                 tools: [
                   {
-                    functionDeclarations: req.tools.map((t) => ({
-                      name: t.name,
-                      ...(t.description ? { description: t.description } : {}),
-                      parameters: t.inputSchema,
-                    })),
+                    // JSON Schema → Gemini's Schema dialect (see googleSchema).
+                    // Gemini quirk: an OBJECT schema with no properties is
+                    // rejected — a no-arg tool must OMIT `parameters` entirely.
+                    functionDeclarations: req.tools.map((t) => {
+                      const parameters = googleSchema(t.inputSchema);
+                      const noArgs =
+                        parameters.type === "OBJECT" &&
+                        (!isRecord(parameters.properties) ||
+                          Object.keys(parameters.properties).length === 0);
+                      return {
+                        name: t.name,
+                        ...(t.description ? { description: t.description } : {}),
+                        ...(noArgs ? {} : { parameters }),
+                      };
+                    }),
                   },
                 ],
               }
