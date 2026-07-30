@@ -110,6 +110,9 @@ export const auditLog = pgTable(
         // (which compat surfaces exist, how models resolve, whether
         // attribution is mandatory). Plain text column — no DDL needed.
         "interception_settings",
+        // ADR-0021: an admin change to the org-wide functional defaults
+        // (org_settings singleton). Plain text column — no DDL needed.
+        "org_settings",
       ],
     })
       .notNull()
@@ -1421,6 +1424,10 @@ export const ENFORCEMENT_POSTURES = [
 ] as const;
 export type EnforcementPosture = (typeof ENFORCEMENT_POSTURES)[number];
 
+/** ADR-0021: what a stream=true call on a block-mode PII project gets.
+ * Declared before the table literal below uses it (module evaluation order). */
+export const STREAMING_ON_BLOCK_MODES = ["suppress", "reject"] as const;
+
 export const interceptionSettings = pgTable(
   "interception_settings",
   {
@@ -1442,6 +1449,19 @@ export const interceptionSettings = pgTable(
     // call with no x-regulait-project-id is REJECTED rather than run
     // unattributed.
     requireProjectAttribution: boolean("require_project_attribution").notNull().default(false),
+    // ADR-0021 (migration 0038): what a stream=true call on a block-mode PII
+    // project gets. 'suppress' (default, today's ADR-0019 behaviour) runs the
+    // same governed dispatch fully buffered and answers plain JSON with a
+    // disclosure; 'reject' refuses the call with a 400 so a client that
+    // REQUIRES streaming learns immediately rather than getting a shape it
+    // did not ask for.
+    streamingOnBlockMode: text("streaming_on_block_mode", { enum: STREAMING_ON_BLOCK_MODES })
+      .notNull()
+      .default("suppress"),
+    // ADR-0021: when true, the COMPAT_IGNORED_FIELDS accept-and-disclose tier
+    // is disabled — an unsupported-but-ignorable field (temperature) is a 400
+    // again, restoring the strict pre-#47 posture for orgs that want it.
+    strictFieldRejection: boolean("strict_field_rejection").notNull().default(false),
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1450,3 +1470,139 @@ export const interceptionSettings = pgTable(
 );
 
 export type InterceptionSettingsRow = typeof interceptionSettings.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0021 (migration 0038) — ORG SETTINGS: the single home for org-wide
+// functional defaults. The owner's mandate: "admins must have options to
+// enable/disable features whenever there is a functional or technical choice
+// feasible." Every column is a choice the code previously hardcoded (a kernel
+// constant, a wired-in default, an always-on technique).
+//
+// TWO INVARIANTS, held by construction:
+// 1. BEHAVIOUR-PRESERVING DEFAULTS — every default equals the pre-0038
+//    behaviour, so applying the migration is invisible until an admin acts.
+// 2. THE CEILING MODEL — org settings only ever NARROW what happens below
+//    them. A per-user setting can narrow further (a user's passthrough always
+//    wins) but can never re-enable a technique the org turned off; a zod max
+//    stays the absolute wall an org ceiling can only move DOWN from.
+//
+// ONE ROW ever, exactly like interception_settings: fixed primary key plus a
+// CHECK, so a second row is a database error rather than a second policy.
+// ---------------------------------------------------------------------------
+export const ORG_SETTINGS_ID = "singleton";
+
+export const ORG_ROUTING_MODES = ["automatic", "passthrough"] as const;
+export const SEMANTIC_CACHE_POLICIES = ["off", "opt_in", "always"] as const;
+export const COMPACTION_FAILURE_MODES = ["fail_open", "fail_closed"] as const;
+export const SUMMARIZER_SELECTIONS = ["cheapest", "fixed_agent"] as const;
+/** 'none' = no org default — an unclassified project stays unenforced (today). */
+export const ORG_PII_MODES = ["none", "log", "warn", "block"] as const;
+export const BUDGET_ENFORCEMENTS = ["block", "warn_only"] as const;
+export const APPROVAL_QUORUMS = ["all", "any"] as const;
+
+export const orgSettings = pgTable(
+  "org_settings",
+  {
+    id: text("id").primaryKey().default(ORG_SETTINGS_ID),
+
+    // --- pillar-6 technique toggles (org-wide ceilings; all ON = today) ----
+    routingEnabled: boolean("routing_enabled").notNull().default(true),
+    compactionEnabled: boolean("compaction_enabled").notNull().default(true),
+    promptCachingEnabled: boolean("prompt_caching_enabled").notNull().default(true),
+    editVsRewriteEnabled: boolean("edit_vs_rewrite_enabled").notNull().default(true),
+    filePreprocessingEnabled: boolean("file_preprocessing_enabled").notNull().default(true),
+    lazyToolLoadingEnabled: boolean("lazy_tool_loading_enabled").notNull().default(true),
+    /** the org DEFAULT for users with no per-user routingMode. A user's own
+     * setting still wins either way (it can only narrow, and 'automatic' is
+     * only reachable when the technique toggles above allow it). */
+    defaultRoutingMode: text("default_routing_mode", { enum: ORG_ROUTING_MODES })
+      .notNull()
+      .default("automatic"),
+
+    // --- pillar-6 numeric dials (kernel override params, finally wired) ----
+    compactionThresholdTokens: integer("compaction_threshold_tokens").notNull().default(1600),
+    compactionRecentWindow: integer("compaction_recent_window").notNull().default(4),
+    minCacheableTokens: integer("min_cacheable_tokens").notNull().default(1024),
+    cacheReadDiscount: doublePrecision("cache_read_discount").notNull().default(0.9),
+    maxToolsInManifest: integer("max_tools_in_manifest").notNull().default(20),
+    minEditableBaselineTokens: integer("min_editable_baseline_tokens").notNull().default(200),
+    batchOverheadTokens: integer("batch_overhead_tokens").notNull().default(200),
+    minPreprocessTokens: integer("min_preprocess_tokens").notNull().default(200),
+
+    // --- semantic cache policy ---------------------------------------------
+    /** off = never cache (wins over a caller's semanticCache:true); opt_in =
+     * today's caller-opt-in; always = cache every eligible dispatch. */
+    semanticCachePolicy: text("semantic_cache_policy", { enum: SEMANTIC_CACHE_POLICIES })
+      .notNull()
+      .default("opt_in"),
+    semanticCacheTtlSeconds: integer("semantic_cache_ttl_seconds").notNull().default(3600),
+
+    // --- compaction behaviour ----------------------------------------------
+    compactionFailureMode: text("compaction_failure_mode", { enum: COMPACTION_FAILURE_MODES })
+      .notNull()
+      .default("fail_open"),
+    summarizerSelection: text("summarizer_selection", { enum: SUMMARIZER_SELECTIONS })
+      .notNull()
+      .default("cheapest"),
+    /** fixed_agent only: the agent every compaction summarization runs on. It
+     * must still be in the caller's own entitled+dispatchable roster — a fixed
+     * pick can never widen entitlement, only pin a choice inside it. */
+    summarizerAgentId: uuid("summarizer_agent_id"),
+
+    // --- governance / compliance behavioural defaults ----------------------
+    /** effective piiMode for a project whose classifications resolve to none.
+     * 'none' (default) = today's no-enforcement. */
+    defaultPiiMode: text("default_pii_mode", { enum: ORG_PII_MODES }).notNull().default("none"),
+    /** platform-key-via-environment fallback (ANTHROPIC_API_KEY etc.). ON =
+     * today; a regulated org can force every credential through the encrypted
+     * store. envFallbackProviders narrows WHICH providers may fall back. */
+    envKeyFallbackEnabled: boolean("env_key_fallback_enabled").notNull().default(true),
+    envFallbackProviders: jsonb("env_fallback_providers")
+      .$type<string[]>()
+      .notNull()
+      .default(["anthropic", "openai", "google", "xai"]),
+
+    // --- budgets ------------------------------------------------------------
+    budgetEnforcement: text("budget_enforcement", { enum: BUDGET_ENFORCEMENTS })
+      .notNull()
+      .default("block"),
+    /** where the hard block engages, as % of the project budget (100 = today).
+     * Distinct from the per-project alertThresholdPct, which stays the softer
+     * non-blocking warning. */
+    budgetHardBlockPct: integer("budget_hard_block_pct").notNull().default(100),
+
+    // --- approvals ----------------------------------------------------------
+    /** workflow human_approval stages: 'all' (default, today) = every named
+     * approver must approve; 'any' = the first approval advances the stage and
+     * supersedes the rest. */
+    approvalQuorum: text("approval_quorum", { enum: APPROVAL_QUORUMS }).notNull().default("all"),
+
+    // --- audit retention ----------------------------------------------------
+    autoPruneEnabled: boolean("auto_prune_enabled").notNull().default(false),
+    pruneIntervalHours: integer("prune_interval_hours").notNull().default(24),
+    /** org-wide retention when NO compliance profile sets one. null (default) =
+     * never prune without a profile floor. A profile floor always wins upward:
+     * effective retention = max(profile floor, this) — an org default can never
+     * SHORTEN what a compliance framework demands. */
+    defaultAuditRetentionDays: integer("default_audit_retention_days"),
+
+    // --- orchestration worker caps -----------------------------------------
+    defaultWorkerMaxTurns: integer("default_worker_max_turns").notNull().default(6),
+    maxWorkerTurns: integer("max_worker_turns").notNull().default(20),
+
+    // --- size ceilings (each narrows BELOW its zod/schema wall) -------------
+    maxAttachmentsPerDispatch: integer("max_attachments_per_dispatch").notNull().default(8),
+    /** decoded bytes per attachment. 6 MiB = the shipped composer's own clamp. */
+    maxAttachmentBytes: integer("max_attachment_bytes").notNull().default(6 * 1024 * 1024),
+    imageTokenEstimateTokens: integer("image_token_estimate_tokens").notNull().default(1200),
+    sharedContextMaxChars: integer("shared_context_max_chars").notNull().default(100_000),
+    nodeOutputMaxChars: integer("node_output_max_chars").notNull().default(20_000),
+
+    updatedBy: uuid("updated_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [check("org_settings_singleton", sql`${t.id} = 'singleton'`)],
+);
+
+export type OrgSettingsRow = typeof orgSettings.$inferSelect;

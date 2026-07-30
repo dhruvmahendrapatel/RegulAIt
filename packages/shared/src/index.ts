@@ -821,6 +821,109 @@ export const updateInterceptionSettingsSchema = z
     resolutionMode: resolutionModeSchema.optional(),
     enforcementPosture: enforcementPostureSchema.optional(),
     requireProjectAttribution: z.boolean().optional(),
+    /** ADR-0021: a stream=true call on a block-mode PII project — 'suppress'
+     * (default) buffers and answers JSON with a disclosure; 'reject' 400s. */
+    streamingOnBlockMode: z.enum(["suppress", "reject"]).optional(),
+    /** ADR-0021: true disables the COMPAT_IGNORED_FIELDS accept-and-disclose
+     * tier — an ignorable field (temperature) is a 400 again. */
+    strictFieldRejection: z.boolean().optional(),
   })
   .strict();
 export type UpdateInterceptionSettings = z.infer<typeof updateInterceptionSettingsSchema>;
+
+// ---------------------------------------------------------------------------
+// ADR-0021 — ORG SETTINGS: org-wide functional defaults (migration 0038).
+// A PUT is a PARTIAL update exactly like the interception posture: omitted
+// fields keep their stored value, so an admin can flip one dial without
+// restating the whole configuration. Every bound below either mirrors an
+// existing zod wall (which stays the absolute maximum — an org setting can
+// only narrow BELOW it) or a sane physical range for the dial.
+// ---------------------------------------------------------------------------
+
+export const orgRoutingModeSchema = z.enum(["automatic", "passthrough"]);
+export const semanticCachePolicySchema = z.enum(["off", "opt_in", "always"]);
+export const compactionFailureModeSchema = z.enum(["fail_open", "fail_closed"]);
+export const summarizerSelectionSchema = z.enum(["cheapest", "fixed_agent"]);
+export const orgPiiModeSchema = z.enum(["none", "log", "warn", "block"]);
+export const budgetEnforcementSchema = z.enum(["block", "warn_only"]);
+export const approvalQuorumSchema = z.enum(["all", "any"]);
+
+export const updateOrgSettingsSchema = z
+  .object({
+    // pillar-6 technique toggles + org default routing mode
+    routingEnabled: z.boolean().optional(),
+    compactionEnabled: z.boolean().optional(),
+    promptCachingEnabled: z.boolean().optional(),
+    editVsRewriteEnabled: z.boolean().optional(),
+    filePreprocessingEnabled: z.boolean().optional(),
+    lazyToolLoadingEnabled: z.boolean().optional(),
+    defaultRoutingMode: orgRoutingModeSchema.optional(),
+    // pillar-6 numeric dials
+    compactionThresholdTokens: z.number().int().min(100).max(1_000_000).optional(),
+    compactionRecentWindow: z.number().int().min(1).max(100).optional(),
+    minCacheableTokens: z.number().int().min(1).max(1_000_000).optional(),
+    cacheReadDiscount: z.number().min(0).max(1).optional(),
+    maxToolsInManifest: z.number().int().min(1).max(500).optional(),
+    minEditableBaselineTokens: z.number().int().min(1).max(1_000_000).optional(),
+    batchOverheadTokens: z.number().int().min(0).max(100_000).optional(),
+    minPreprocessTokens: z.number().int().min(1).max(1_000_000).optional(),
+    // semantic cache
+    semanticCachePolicy: semanticCachePolicySchema.optional(),
+    semanticCacheTtlSeconds: z.number().int().min(1).max(30 * 24 * 3600).optional(),
+    // compaction behaviour
+    compactionFailureMode: compactionFailureModeSchema.optional(),
+    summarizerSelection: summarizerSelectionSchema.optional(),
+    summarizerAgentId: z.string().uuid().nullable().optional(),
+    // governance / compliance defaults
+    defaultPiiMode: orgPiiModeSchema.optional(),
+    envKeyFallbackEnabled: z.boolean().optional(),
+    envFallbackProviders: z
+      .array(z.enum(["anthropic", "openai", "google", "xai"]))
+      .max(4)
+      .optional(),
+    // budgets
+    budgetEnforcement: budgetEnforcementSchema.optional(),
+    budgetHardBlockPct: z.number().int().min(1).max(100).optional(),
+    // approvals
+    approvalQuorum: approvalQuorumSchema.optional(),
+    // audit retention
+    autoPruneEnabled: z.boolean().optional(),
+    pruneIntervalHours: z.number().int().min(1).max(24 * 30).optional(),
+    defaultAuditRetentionDays: z.number().int().positive().nullable().optional(),
+    // orchestration worker caps — 20 is the zod wall the kernel/API already hold
+    defaultWorkerMaxTurns: z.number().int().min(1).max(20).optional(),
+    maxWorkerTurns: z.number().int().min(1).max(20).optional(),
+    // size ceilings — each capped at its existing schema/UI wall
+    maxAttachmentsPerDispatch: z.number().int().min(1).max(8).optional(),
+    maxAttachmentBytes: z
+      .number()
+      .int()
+      .min(1024)
+      .max(6_750_000) // ≈ the 9M-base64-char zod wall, decoded
+      .optional(),
+    imageTokenEstimateTokens: z.number().int().min(1).max(100_000).optional(),
+    sharedContextMaxChars: z.number().int().min(100).max(100_000).optional(),
+    nodeOutputMaxChars: z.number().int().min(100).max(20_000).optional(),
+  })
+  .strict()
+  .superRefine((v, ctx) => {
+    if (
+      v.defaultWorkerMaxTurns !== undefined &&
+      v.maxWorkerTurns !== undefined &&
+      v.defaultWorkerMaxTurns > v.maxWorkerTurns
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "defaultWorkerMaxTurns cannot exceed maxWorkerTurns",
+        path: ["defaultWorkerMaxTurns"],
+      });
+    }
+    if (v.summarizerSelection === "fixed_agent" && v.summarizerAgentId === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "summarizerSelection 'fixed_agent' needs a summarizerAgentId",
+        path: ["summarizerAgentId"],
+      });
+    }
+  });
+export type UpdateOrgSettings = z.infer<typeof updateOrgSettingsSchema>;
