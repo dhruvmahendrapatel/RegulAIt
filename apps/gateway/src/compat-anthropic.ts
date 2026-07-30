@@ -306,9 +306,10 @@ export function registerAnthropicCompat(app: FastifyInstance, db: Db, opts: { da
     let messages: ModelChatMessage[];
     let system: { text: string | undefined; cacheSystem: boolean };
     let tools: ModelToolDef[] | undefined;
+    let ignoredFields: string[] = [];
     try {
       const raw = (req.body ?? {}) as Record<string, unknown>;
-      rejectUnsupportedFields(raw, ANTHROPIC_SUPPORTED_FIELDS, "Anthropic");
+      ignoredFields = rejectUnsupportedFields(raw, ANTHROPIC_SUPPORTED_FIELDS, "Anthropic");
       body = anthropicRequestSchema.parse(raw);
       messages = toModelMessages(body.messages);
       system = toSystem(body.system);
@@ -337,6 +338,7 @@ export function registerAnthropicCompat(app: FastifyInstance, db: Db, opts: { da
       requestedModel: body.model,
       stream: body.stream === true,
       text: flatText,
+      ignoredFields,
     });
     if (!prep.ok) {
       return reply.status(prep.status).send(anthropicError(prep.status, prep.error, prep.detail));
