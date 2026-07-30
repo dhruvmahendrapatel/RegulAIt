@@ -202,6 +202,11 @@ window.addEventListener("hashchange", () => render());
 async function bootstrap() {
   ME = await get("/v1/me");
   if (!ME.userId) throw new Error("this key has no user identity");
+  // ADR-0021: the composer's attachment clamps are org settings, not constants
+  if (ME.limits) {
+    if (ME.limits.maxAttachmentsPerDispatch) PG_MAX_ATTACH = ME.limits.maxAttachmentsPerDispatch;
+    if (ME.limits.maxAttachmentBytes) PG_MAX_BYTES = ME.limits.maxAttachmentBytes;
+  }
   const [mine, projects, creds, providerStatus] = await Promise.all([
     get("/v1/users/" + ME.userId + "/agents"),
     get("/v1/projects").catch(() => ({ projects: [] })),
@@ -267,8 +272,10 @@ let PG_PREFILL = null;      // agent/project selects to apply right after openin
 let PG_ATTACH = [];         // pending attachments for the NEXT send — cleared after
 let PG_ATTACH_SEQ = 0;      // stable local ids for tray remove buttons
 const PG_IMG_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
-const PG_MAX_ATTACH = 8;
-const PG_MAX_BYTES = 6 * 1024 * 1024;
+// ADR-0021: the org-configured ceilings ride /v1/me (bootstrap() applies them);
+// the literals here are only the pre-fetch fallback = the org defaults.
+let PG_MAX_ATTACH = 8;
+let PG_MAX_BYTES = 6 * 1024 * 1024;
 
 function fmtBytes(n) {
   return n < 1024 ? n + " B" : n < 1048576 ? Math.round(n / 1024) + " KB" : (n / 1048576).toFixed(1) + " MB";
@@ -284,7 +291,7 @@ function readAs(file, how) {
 async function pgAddFiles(files) {
   for (const file of Array.from(files)) {
     if (PG_ATTACH.length >= PG_MAX_ATTACH) { toast("Up to " + PG_MAX_ATTACH + " files per message.", "err"); break; }
-    if (file.size > PG_MAX_BYTES) { toast("\\u2717 " + file.name + " is over the 6 MB limit.", "err"); continue; }
+    if (file.size > PG_MAX_BYTES) { toast("\\u2717 " + file.name + " is over the " + fmtBytes(PG_MAX_BYTES) + " limit.", "err"); continue; }
     const isImg = PG_IMG_TYPES.includes(file.type);
     const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
     try {
