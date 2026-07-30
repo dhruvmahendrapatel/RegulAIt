@@ -15,11 +15,15 @@
  * at the same interception point that enforces pillar 1 and attributes pillar 5.
  *
  * "No silent promises" rule (same as connector-provider): kinds that are
- * interface-ready but not implemented (aws/azure/gcp) throw an explicit "not
- * implemented yet" from the registry rather than pretending.
+ * interface-ready but not implemented (azure/gcp) throw an explicit "not
+ * implemented yet" from the registry rather than pretending. The aws kind now
+ * has a REAL adapter (src/aws.ts) behind the OFF-by-default REGULAIT_INFRA_LIVE
+ * flag + an injected AwsInfraLiveClient; unflagged/unwired it stays a
+ * structured 501 — never a fabricated scan.
  */
 
 import { z } from "zod";
+import { AwsInfraProvider, infraLiveEnabled, type AwsInfraLiveClient } from "./aws.js";
 
 export const INFRA_PROVIDER_KINDS = ["mock", "aws", "azure", "gcp"] as const;
 export type InfraProviderKind = (typeof INFRA_PROVIDER_KINDS)[number];
@@ -385,13 +389,25 @@ export interface InfraProviderConfig {
   endpoint?: string | null;
   /** bearer/credential handle; keyless kinds (mock) omit it */
   token?: string | null;
+  /** aws: the customer IAM role scan/remediation assumes (BYOC boundary) */
+  roleArn?: string | null;
+  /** aws: the customer region every call is driven in */
+  region?: string | null;
+  /** aws, NEVER persisted — the injected live client (injectable-client
+   * discipline, same as deploy.ts's awsLiveClient): a fake in tests, a real
+   * @aws-sdk-backed impl built per the AwsInfraLiveClient factory contract in
+   * a live deployment. Absent (or REGULAIT_INFRA_LIVE off) = structured 501. */
+  awsLiveClient?: AwsInfraLiveClient;
 }
 
-/** validates the persisted provider config before an adapter is built */
+/** validates the persisted provider config before an adapter is built
+ * (awsLiveClient is injected at resolve time, never persisted — not here) */
 export const infraProviderConfigSchema = z.object({
   kind: z.enum(INFRA_PROVIDER_KINDS),
   endpoint: z.string().min(1).nullable().optional(),
   token: z.string().min(1).nullable().optional(),
+  roleArn: z.string().min(1).nullable().optional(),
+  region: z.string().min(1).nullable().optional(),
 });
 
 /** shared mock instance so recorded remediations persist across resolutions in
@@ -405,20 +421,41 @@ export function resolveInfraProvider(
   switch (config.kind) {
     case "mock":
       return sharedMock;
-    // Declared, interface-ready, but not built yet — an explicit failure, never
-    // a silent success (the connector/model-provider discipline). The real
-    // adapters will take `_fetchImpl` + the cloud credential here.
-    case "aws":
-      // REAL: for a customer-hosted (BYOC) AWS resource, assume the customer's
-      // roleArn via STS AssumeRole (short-lived creds, NEVER a static key — the
-      // same no-static-keys rule as apps/gateway/src/deploy.ts AwsDeployProvider),
-      // then drive scan/remediate (SSM patch, ACM rotate, Backup start-restore)
-      // in the target region. Until built it stays a hard 501 — no live cloud
-      // mutation, no silent success.
-      throw new InfraProviderError(
-        `infra provider kind '${config.kind}' is not implemented yet`,
-        501,
-      );
+    case "aws": {
+      // REAL adapter (src/aws.ts): STS AssumeRole into the customer's roleArn
+      // (short-lived creds, NEVER a static key — the same no-static-keys rule
+      // as apps/gateway/src/deploy.ts AwsDeployProvider), then SSM
+      // DescribeInstanceInformation / patch states for drift+CVE posture, ACM
+      // List/DescribeCertificate for cert expiry, AWS Backup recovery points
+      // for backup verification, and governed SSM-patch / ACM-rotate /
+      // Backup-start remediations in the target region. Gated twice: the
+      // OFF-by-default REGULAIT_INFRA_LIVE flag AND an injected
+      // AwsInfraLiveClient — either missing is a structured 501, because this
+      // adapter has no dry-run (a fabricated scan would be fake data,
+      // ADR-0017). Never a silent success.
+      if (!infraLiveEnabled()) {
+        throw new InfraProviderError(
+          `infra provider kind 'aws' is implemented but not live-enabled: REGULAIT_INFRA_LIVE is off ` +
+            `and the adapter has no dry-run — enable the flag and inject an AwsInfraLiveClient to go live`,
+          501,
+        );
+      }
+      if (!config.awsLiveClient) {
+        throw new InfraProviderError(
+          `REGULAIT_INFRA_LIVE is on but no live AWS infra client was injected — wire an AwsInfraLiveClient ` +
+            `(see the factory contract in @regulait/infra-provider aws.ts) and pass it as config.awsLiveClient`,
+          501,
+        );
+      }
+      return new AwsInfraProvider({
+        roleArn: config.roleArn ?? "",
+        region: config.region ?? "",
+        client: config.awsLiveClient,
+        live: true,
+      });
+    }
+    // Declared, interface-ready, but not built yet — an explicit failure,
+    // never a silent success (the connector/model-provider discipline).
     case "azure":
     case "gcp":
       throw new InfraProviderError(
@@ -427,3 +464,6 @@ export function resolveInfraProvider(
       );
   }
 }
+
+// The real AWS adapter + its injectable-client contract (ADR-0017 follow-through).
+export * from "./aws.js";

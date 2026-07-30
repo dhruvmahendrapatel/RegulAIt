@@ -99,8 +99,22 @@ describe("registry", () => {
     expect(a.kind).toBe("mock");
   });
 
+  it("aws stays a structured 501 while REGULAIT_INFRA_LIVE is off (implemented, but never silently live)", () => {
+    const err = (() => {
+      try {
+        resolveInfraProvider({ kind: "aws", roleArn: "arn:aws:iam::123456789012:role/x", region: "us-east-1" });
+        return null;
+      } catch (e) {
+        return e as InfraProviderError;
+      }
+    })();
+    expect(err).toBeInstanceOf(InfraProviderError);
+    expect(err!.status).toBe(501);
+    expect(err!.message).toContain("not live-enabled");
+  });
+
   it("rejects declared-but-unimplemented cloud kinds explicitly (no silent promise)", () => {
-    for (const kind of ["aws", "azure", "gcp"] as const) {
+    for (const kind of ["azure", "gcp"] as const) {
       const err = (() => {
         try {
           resolveInfraProvider({ kind, endpoint: "https://x.example", token: "t" });
