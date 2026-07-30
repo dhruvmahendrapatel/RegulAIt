@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
   bigint,
+  check,
   integer,
   boolean,
   doublePrecision,
@@ -105,6 +106,10 @@ export const auditLog = pgTable(
         "project",
         "initiative",
         "infra_operation",
+        // ADR-0020: an admin change to the deployment's interception posture
+        // (which compat surfaces exist, how models resolve, whether
+        // attribution is mandatory). Plain text column — no DDL needed.
+        "interception_settings",
       ],
     })
       .notNull()
@@ -1377,3 +1382,71 @@ export const backupRuns = pgTable(
   },
   (t) => [index("backup_runs_resource_idx").on(t.resourceId)],
 );
+
+// ---------------------------------------------------------------------------
+// ADR-0020 — IDE / existing-agent INTERCEPTION posture (Batch H).
+//
+// RegulAIt governs calls that ARRIVE at it. Whether a developer's IDE sends
+// its calls here is an ADMIN choice, not a product constant, so every axis of
+// the interception surface is configuration rather than hardcoded behaviour:
+// which provider-shaped compatibility surfaces exist at all, how an IDE's
+// `model` string resolves onto a governed agent, whether attribution is
+// mandatory, and which rung of the enforcement ladder the org declares it is
+// on. ONE ROW, ever — the posture is deployment-wide, exactly like the
+// control plane it describes. The singleton is enforced by a fixed primary
+// key plus a CHECK, so a second row is a database error rather than a silent
+// second policy.
+//
+// DEFAULT-DENY POSTURE: both compat surfaces default to FALSE. A new
+// interception surface is something an admin opts INTO; until then the
+// endpoints answer 404 and are indistinguishable from not existing.
+// ---------------------------------------------------------------------------
+export const INTERCEPTION_SETTINGS_ID = "singleton";
+
+/** How an IDE's `model` string resolves onto a governed agent (ADR-0020). */
+export const RESOLUTION_MODES = ["map_by_model", "require_agent", "router_decides"] as const;
+export type ResolutionMode = (typeof RESOLUTION_MODES)[number];
+
+/** The rung of Batch H's interception ladder the org DECLARES it is on. This
+ * is descriptive, not enforcing: it drives the honest warnings the admin UI
+ * shows. `observe` and `voluntary` are honor systems; `key_custody` and
+ * `network` are the non-bypassable rungs, and both are customer IT policy /
+ * infrastructure rather than gateway code. */
+export const ENFORCEMENT_POSTURES = [
+  "observe",
+  "voluntary",
+  "managed",
+  "key_custody",
+  "network",
+] as const;
+export type EnforcementPosture = (typeof ENFORCEMENT_POSTURES)[number];
+
+export const interceptionSettings = pgTable(
+  "interception_settings",
+  {
+    id: text("id").primaryKey().default(INTERCEPTION_SETTINGS_ID),
+    // OFF by default: an admin opts INTO exposing a provider-shaped surface.
+    anthropicCompatEnabled: boolean("anthropic_compat_enabled").notNull().default(false),
+    openaiCompatEnabled: boolean("openai_compat_enabled").notNull().default(false),
+    // ON by default: POST /mcp/:serverId already ships and is already governed
+    // (allow-lists, data scope, rate limits, approvals, audit, attribution).
+    // Turning it OFF makes it 404 exactly like a disabled compat surface.
+    mcpInterceptionEnabled: boolean("mcp_interception_enabled").notNull().default(true),
+    resolutionMode: text("resolution_mode", { enum: RESOLUTION_MODES })
+      .notNull()
+      .default("map_by_model"),
+    enforcementPosture: text("enforcement_posture", { enum: ENFORCEMENT_POSTURES })
+      .notNull()
+      .default("voluntary"),
+    // The admin's lever to guarantee pillar-5 coverage: when true a compat
+    // call with no x-regulait-project-id is REJECTED rather than run
+    // unattributed.
+    requireProjectAttribution: boolean("require_project_attribution").notNull().default(false),
+    updatedBy: uuid("updated_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [check("interception_settings_singleton", sql`${t.id} = 'singleton'`)],
+);
+
+export type InterceptionSettingsRow = typeof interceptionSettings.$inferSelect;

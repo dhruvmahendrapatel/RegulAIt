@@ -1297,13 +1297,206 @@ const TABS = [
     return post("/v1/infra/policies", body);
   });
 }],
+// ADR-0020 (Batch H) — IDE / existing-agent interception. Two jobs: choose the
+// deployment's INTERCEPTION POSTURE (which surfaces exist, how a model string
+// resolves, whether attribution is mandatory, which ladder rung the org
+// declares) and hand a developer a copy-paste config for their own IDE built
+// from THIS deployment's origin.
+["Client Access", async (el) => {
+  const [s, srv, prj] = await Promise.all([
+    get("/v1/interception/settings"),
+    get("/v1/servers").catch(() => ({ servers: [] })),
+    get("/v1/projects").catch(() => ({ projects: [] })),
+  ]);
+  const cur = s.settings;
+  const BASE = location.origin;
+  // The ladder, verbatim from ROADMAP Batch H. Honesty is the product here:
+  // two of these rungs are honor systems and the UI says so in plain language.
+  const LADDER = {
+    observe: { bypass: "n/a — no enforcement", note: "Telemetry only. Nothing stops a developer calling the vendor directly; you will see what they choose to emit." },
+    voluntary: { bypass: "trivially bypassable", note: "HONOR SYSTEM. A developer points their IDE at RegulAIt, and nothing prevents them from pointing it straight back at the vendor. Key custody or network egress is what makes interception non-bypassable — not this setting." },
+    managed: { bypass: "developer can undo locally", note: "Pushed by IDE policy / managed settings / MDM. Better than voluntary, still reversible on the developer's own machine." },
+    key_custody: { bypass: "no — no key, no call", note: "NON-BYPASSABLE. The org never issues raw vendor keys, only RegulAIt keys. Almost entirely IT policy rather than product code — RegulAIt stores platform and per-user credentials AES-256-GCM and never returns them." },
+    network: { bypass: "no", note: "NON-BYPASSABLE. RegulAIt is the only sanctioned egress to the vendor APIs. A genuine infrastructure project; it belongs with BYOC (pillar 3), not with this toggle." },
+  };
+  const rung = LADDER[cur.enforcementPosture] || LADDER.voluntary;
+  const honorSystem = cur.enforcementPosture === "observe" || cur.enforcementPosture === "voluntary";
+  const sOpts = (srv.servers || []).map((x) => ({ v: x.id, l: x.name }));
+  const pOpts = (prj.projects || []).map((x) => ({ v: x.id, l: x.name }));
+
+  el.innerHTML =
+    "<p class='sub'>Batch H / ADR-0020. RegulAIt governs calls that ARRIVE at it. These settings decide which arrival surfaces exist, how an IDE's model string resolves onto a governed agent, and which rung of the interception ladder this organisation declares it is on. Both provider-shaped surfaces are OFF until you turn them on; while off they answer 404 and are indistinguishable from not existing.</p>"
+    + "<h2>Declared enforcement posture</h2><div class='card'>"
+    + "<div class='kv'>"
+    + "<span class='k'>Rung</span><span>" + badge(cur.enforcementPosture, honorSystem ? "warn" : "ok") + "</span>"
+    + "<span class='k'>Bypassable?</span><span>" + esc(rung.bypass) + "</span>"
+    + "<span class='k'>What that means</span><span>" + esc(rung.note) + "</span>"
+    + "</div>"
+    + (honorSystem
+        ? "<p class='dim' style='font-size:12px'>This rung is an <strong>honor system</strong>. Pointing an IDE here is a request, not an enforcement. If an enterprise buyer asks what stops a developer from simply not doing it, the honest answer at this rung is: nothing. Key custody (the org holds the vendor keys, developers hold only RegulAIt keys) is the cheapest non-bypassable answer; network egress control is the airtight one.</p>"
+        : "<p class='dim' style='font-size:12px'>This rung is non-bypassable — but note that what makes it so is your IT policy or network, not this setting. Declaring it here only changes what this portal tells you.</p>")
+    + "</div>"
+
+    + "<h2>Interception surfaces &amp; resolution policy</h2><div class='card'>"
+    + form("f-intercept", [
+        {name:"anthropicCompatEnabled",label:"POST /v1/messages (Anthropic-shaped)",options:["false","true"]},
+        {name:"openaiCompatEnabled",label:"POST /v1/chat/completions (OpenAI-shaped)",options:["false","true"]},
+        {name:"mcpInterceptionEnabled",label:"POST /mcp/:serverId (MCP tool calls)",options:["true","false"]},
+        {name:"resolutionMode",label:"model to agent resolution",options:["map_by_model","require_agent","router_decides"]},
+        {name:"enforcementPosture",label:"declared ladder rung",options:["observe","voluntary","managed","key_custody","network"]},
+        {name:"requireProjectAttribution",label:"require project attribution",options:["false","true"]},
+      ], "Save posture")
+    + "<div class='kv' style='margin-top:10px'>"
+    + "<span class='k'>map_by_model</span><span>Resolve to the governed agent whose model id matches the request. Several matches tie-break on lowest tier, then oldest. Least developer friction.</span>"
+    + "<span class='k'>require_agent</span><span>The caller MUST send x-regulait-agent-id; the model string is advisory. Missing header is a 400. Strictest, explicit attribution per call.</span>"
+    + "<span class='k'>router_decides</span><span>The requested model is a HINT the pillar-6 router may override for cost. The response always carries the model actually served, and the audit row records requested-vs-served.</span>"
+    + "<span class='k'>Unmapped model</span><span>Always <strong>403 default-deny</strong>, in every mode. RegulAIt never passes an ungoverned call through to the vendor.</span>"
+    + "<span class='k'>Attribution</span><span>Turning 'require project attribution' ON rejects any compat call without an x-regulait-project-id header, rather than running it as untracked spend. It guarantees pillar-5 coverage — but only enable it for clients that can send custom headers (see the matrix below).</span>"
+    + "</div></div>"
+
+    + "<h2>Connect a client</h2><div class='card'>"
+    + "<p class='dim' style='font-size:12px'>Generated from this page's own origin (" + esc(BASE) + "). The snippet uses a placeholder for the API key on purpose — issue the developer their own key in Identity &amp; Access &rarr; Users, never paste yours.</p>"
+    + form("f-client", [
+        {name:"client",label:"client",options:[
+          {v:"claude-code",l:"Claude Code"},
+          {v:"cursor",l:"Cursor"},
+          {v:"cline",l:"Cline"},
+          {v:"roo",l:"Roo Code"},
+          {v:"continue",l:"Continue"},
+          {v:"zed",l:"Zed"},
+          {v:"generic-anthropic",l:"Generic Anthropic-compatible"},
+          {v:"generic-openai",l:"Generic OpenAI-compatible"},
+        ]},
+        {name:"serverId",label:"MCP server",options:sOpts,req:false,ph:"— none / placeholder —"},
+        {name:"projectId",label:"project (attribution)",options:pOpts,req:false,ph:"— unattributed —"},
+        {name:"model",label:"model id",req:false,ph:"claude-opus-5"},
+      ], "Generate")
+    + "<div id='clientsnip'></div></div>"
+
+    + "<h2>Honest coverage</h2><div class='card'>"
+    + table([
+        {client:"Claude Code", modelCalls:"ANTHROPIC_BASE_URL -> /v1/messages", toolCalls:"MCP proxy (claude mcp add)", customHeaders:"yes"},
+        {client:"Cursor", modelCalls:"OpenAI-compatible base URL -> /v1/chat/completions", toolCalls:"MCP proxy (.cursor/mcp.json)", customHeaders:"MCP only"},
+        {client:"Cline", modelCalls:"OpenAI- or Anthropic-compatible base URL", toolCalls:"MCP proxy", customHeaders:"MCP only"},
+        {client:"Roo Code", modelCalls:"OpenAI- or Anthropic-compatible base URL", toolCalls:"MCP proxy", customHeaders:"MCP only"},
+        {client:"Continue", modelCalls:"apiBase override", toolCalls:"MCP proxy", customHeaders:"MCP only"},
+        {client:"Zed", modelCalls:"language_models api_url override", toolCalls:"MCP (context servers)", customHeaders:"MCP only"},
+        {client:"VS Code (built-in MCP)", modelCalls:"not applicable", toolCalls:"MCP proxy", customHeaders:"yes"},
+        {client:"GitHub Copilot", modelCalls:"NOT SUPPORTED — largely locked down; enterprise proxy path or nothing", toolCalls:"not via this proxy", customHeaders:"n/a"},
+        {client:"Eclipse", modelCalls:"no first-party agent; third-party plugins vary and are often not configurable", toolCalls:"varies by plugin", customHeaders:"n/a"},
+      ])
+    + "<p class='dim' style='font-size:12px'>&quot;Works with every IDE&quot; would be a false claim. What is true: any client that accepts a custom Anthropic- or OpenAI-compatible base URL can have its <strong>model calls</strong> governed here, and any MCP-capable client can have its <strong>tool calls</strong> governed here. Those are two independent halves — enabling one does not cover the other.</p>"
+    + "</div>";
+
+  // prefill the posture form from the stored settings (field() renders plain
+  // selects with no value binding, so bind them here)
+  const pf = $("#f-intercept");
+  if (pf) {
+    for (const k of ["anthropicCompatEnabled","openaiCompatEnabled","mcpInterceptionEnabled","resolutionMode","enforcementPosture","requireProjectAttribution"]) {
+      const c = pf.querySelector("[name=" + k + "]");
+      if (c) c.value = String(cur[k]);
+    }
+  }
+  wire("f-intercept", (d) => api("PUT", "/v1/interception/settings", {
+    anthropicCompatEnabled: d.anthropicCompatEnabled === "true",
+    openaiCompatEnabled: d.openaiCompatEnabled === "true",
+    mcpInterceptionEnabled: d.mcpInterceptionEnabled === "true",
+    resolutionMode: d.resolutionMode,
+    enforcementPosture: d.enforcementPosture,
+    requireProjectAttribution: d.requireProjectAttribution === "true",
+  }));
+
+  wire("f-client", (d) => {
+    const KEYPH = "<REGULAIT_API_KEY>";
+    const sid = d.serverId || "<MCP_SERVER_ID>";
+    const pid = d.projectId || "";
+    const model = d.model || "claude-opus-5";
+    const mcpUrl = BASE + "/mcp/" + sid;
+    const hdrJson = '"Authorization": "Bearer ' + KEYPH + '"' + (pid ? ',\\n        "x-regulait-project-id": "' + pid + '"' : "");
+    const mcpJson = "{\\n  \\"mcpServers\\": {\\n    \\"regulait\\": {\\n      \\"url\\": \\"" + mcpUrl + "\\",\\n      \\"headers\\": {\\n        " + hdrJson + "\\n      }\\n    }\\n  }\\n}";
+    const notes = [];
+    let snip = "";
+    if (d.client === "claude-code") {
+      snip = "# Model calls -> RegulAIt (Anthropic-shaped)\\n"
+        + "export ANTHROPIC_BASE_URL=\\"" + BASE + "\\"\\n"
+        + "export ANTHROPIC_API_KEY=\\"" + KEYPH + "\\"\\n"
+        + (pid ? "export ANTHROPIC_CUSTOM_HEADERS=\\"x-regulait-project-id: " + pid + "\\"\\n" : "")
+        + "\\n# Tool calls -> RegulAIt (governed MCP proxy)\\n"
+        + "claude mcp add --transport http regulait " + mcpUrl + " --header \\"Authorization: Bearer " + KEYPH + "\\"" + (pid ? " --header \\"x-regulait-project-id: " + pid + "\\"" : "") + "\\n"
+        + "\\n# or as .mcp.json in the repo root\\n" + mcpJson;
+      notes.push("Claude Code sends the key as x-api-key; POST /v1/messages accepts that header name for exactly this reason.");
+      notes.push("ANTHROPIC_BASE_URL takes the ORIGIN — the client appends /v1/messages itself.");
+    } else if (d.client === "cursor") {
+      snip = "# Cursor -> Settings -> Models -> OpenAI API Key -> Override base URL\\n"
+        + "Base URL:  " + BASE + "/v1\\n"
+        + "API key:   " + KEYPH + "\\n"
+        + "Model:     " + model + "\\n"
+        + "\\n# .cursor/mcp.json (tool calls)\\n" + mcpJson;
+      notes.push("Cursor takes an OpenAI-compatible endpoint, so enable POST /v1/chat/completions above.");
+      notes.push("Cursor sends no custom headers on MODEL calls — with 'require project attribution' ON its completions would be rejected. Attribute its TOOL calls via the MCP header instead.");
+    } else if (d.client === "cline" || d.client === "roo") {
+      const nm = d.client === "cline" ? "Cline" : "Roo Code";
+      snip = "# " + nm + " -> Settings -> API Provider: OpenAI Compatible\\n"
+        + "Base URL:  " + BASE + "/v1\\n"
+        + "API key:   " + KEYPH + "\\n"
+        + "Model ID:  " + model + "\\n"
+        + "\\n# or API Provider: Anthropic, with a custom base URL\\n"
+        + "Base URL:  " + BASE + "\\n"
+        + "API key:   " + KEYPH + "\\n"
+        + "\\n# MCP settings JSON (tool calls)\\n" + mcpJson;
+      notes.push(nm + " accepts either shape — enable whichever surface above matches the provider you pick.");
+    } else if (d.client === "continue") {
+      snip = "# ~/.continue/config.yaml\\n"
+        + "models:\\n"
+        + "  - name: regulait\\n"
+        + "    provider: openai\\n"
+        + "    model: " + model + "\\n"
+        + "    apiKey: " + KEYPH + "\\n"
+        + "    apiBase: " + BASE + "/v1\\n"
+        + "\\n# MCP (tool calls)\\n" + mcpJson;
+      notes.push("For the Anthropic shape instead, use provider: anthropic and apiBase: " + BASE + " .");
+    } else if (d.client === "zed") {
+      snip = "// Zed settings.json\\n"
+        + "{\\n  \\"language_models\\": {\\n    \\"anthropic\\": { \\"api_url\\": \\"" + BASE + "\\" },\\n"
+        + "    \\"openai\\": { \\"api_url\\": \\"" + BASE + "/v1\\" }\\n  },\\n"
+        + "  \\"context_servers\\": {\\n    \\"regulait\\": { \\"source\\": \\"custom\\", \\"url\\": \\"" + mcpUrl + "\\" }\\n  }\\n}\\n"
+        + "\\n// the API key is entered in Zed's agent panel, not in settings.json";
+      notes.push("Zed cannot attach custom headers to model calls — leave 'require project attribution' off for it.");
+    } else if (d.client === "generic-anthropic") {
+      snip = "curl " + BASE + "/v1/messages \\n"
+        + "  -H \\"x-api-key: " + KEYPH + "\\"\\n"
+        + (pid ? "  -H \\"x-regulait-project-id: " + pid + "\\"\\n" : "")
+        + "  -H \\"content-type: application/json\\"\\n"
+        + "  -d '{\\"model\\":\\"" + model + "\\",\\"max_tokens\\":256,\\"messages\\":[{\\"role\\":\\"user\\",\\"content\\":\\"hello\\"}]}'\\n"
+        + "\\n# base URL for any Anthropic SDK: " + BASE;
+      notes.push("Authorization: Bearer <key> works identically — x-api-key is the alias Anthropic clients send.");
+    } else {
+      snip = "curl " + BASE + "/v1/chat/completions \\n"
+        + "  -H \\"Authorization: Bearer " + KEYPH + "\\"\\n"
+        + (pid ? "  -H \\"x-regulait-project-id: " + pid + "\\"\\n" : "")
+        + "  -H \\"content-type: application/json\\"\\n"
+        + "  -d '{\\"model\\":\\"" + model + "\\",\\"messages\\":[{\\"role\\":\\"user\\",\\"content\\":\\"hello\\"}]}'\\n"
+        + "\\n# base URL for any OpenAI SDK: " + BASE + "/v1";
+    }
+    if (!d.serverId) notes.push("No MCP server selected — the snippet carries a placeholder. Register one under AI Governance -> MCP Servers.");
+    if (!pid) notes.push("No project selected — these calls run UNATTRIBUTED and land no per-project cost row. With 'require project attribution' ON they would be rejected outright.");
+    $("#clientsnip").innerHTML = "<h2 style='margin-top:14px'>Copy-paste config</h2>"
+      + "<pre class='mono' style='white-space:pre-wrap;overflow-x:auto'>" + esc(snip) + "</pre>"
+      + (notes.length ? "<ul class='dim' style='font-size:12px'>" + notes.map((n) => "<li>" + esc(n) + "</li>").join("") + "</ul>" : "");
+  }, true);
+}],
 ];
 
 // The nav is grouped into labelled sections; each entry names a tab by its
 // title and is resolved to its TABS index at render time — so the physical
 // order of the TABS array is independent of the sidebar's grouping/order.
 const NAV = [
-  ["Identity & Access", ["Users", "Roles", "Teams"]],
+  // "Client Access" sits in Identity & Access, not Operations: its two jobs are
+  // (a) deciding which arrival surfaces exist at all and (b) handing a named
+  // developer the base URL + key that lets their IDE reach one. That is the same
+  // question Users/Roles/Teams answer — who may reach what, and how they
+  // authenticate — rather than a day-2 operational concern.
+  ["Identity & Access", ["Users", "Roles", "Teams", "Client Access"]],
   ["AI Governance", ["Agents", "Model Credentials", "Connectors", "MCP Servers"]],
   ["Policy", ["Rules Engine", "Simulation / Access preview"]],
   ["Delivery", ["Workflows", "Deploy Targets", "PM Connections"]],

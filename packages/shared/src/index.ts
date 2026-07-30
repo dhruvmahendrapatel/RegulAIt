@@ -790,3 +790,37 @@ export const promoteContextSchema = z.object({
   /** the team-local workflow artifact to promote into shared context */
   artifactId: z.string().uuid(),
 });
+
+// ---------------------------------------------------------------------------
+// ADR-0020 (Batch H) — IDE / existing-agent interception posture.
+// Every axis is an ADMIN CHOICE. A PUT is a partial update: omitted fields keep
+// their stored value, so an admin can flip one toggle without restating the
+// whole posture.
+// ---------------------------------------------------------------------------
+
+/** How an IDE's `model` string resolves onto a governed agent. */
+export const resolutionModeSchema = z.enum(["map_by_model", "require_agent", "router_decides"]);
+export type ResolutionModeValue = z.infer<typeof resolutionModeSchema>;
+
+/** The rung of the interception ladder the org DECLARES it is on. Descriptive,
+ * not enforcing — it drives the honest warnings the admin UI shows. */
+export const enforcementPostureSchema = z.enum([
+  "observe",
+  "voluntary",
+  "managed",
+  "key_custody",
+  "network",
+]);
+export type EnforcementPostureValue = z.infer<typeof enforcementPostureSchema>;
+
+export const updateInterceptionSettingsSchema = z
+  .object({
+    anthropicCompatEnabled: z.boolean().optional(),
+    openaiCompatEnabled: z.boolean().optional(),
+    mcpInterceptionEnabled: z.boolean().optional(),
+    resolutionMode: resolutionModeSchema.optional(),
+    enforcementPosture: enforcementPostureSchema.optional(),
+    requireProjectAttribution: z.boolean().optional(),
+  })
+  .strict();
+export type UpdateInterceptionSettings = z.infer<typeof updateInterceptionSettingsSchema>;
