@@ -17,8 +17,26 @@
  * and bills nothing (the gateway mirrors the model path).
  *
  * "No silent promises" rule (same as model-provider): kinds that are
- * interface-ready but not implemented (slack/github/jira/snowflake) throw an
+ * interface-ready but not implemented (snowflake — deferred pending a schema
+ * decision on its key-pair credential shape, see the registry comment) throw an
  * explicit "not implemented yet" from the registry rather than pretending.
+ *
+ * Data-scope semantics (shared by every adapter here): the invocation's
+ * `object` string is the SAME string pillar 1's `allowedObjects` grant field is
+ * compared against (policy-kernel `connector-object-scope` rule) — enforcement
+ * happens in the gateway BEFORE this package is ever invoked, exactly as it
+ * does for the http/generic adapters (whose `object` is the URL path). Each
+ * adapter therefore only has to define what its `object` MEANS, and must route
+ * every upstream call through that object so the upstream reach never exceeds
+ * the authorized object:
+ *   - slack  → a channel ID (e.g. "C0123456789")
+ *   - github → an "owner/repo" slug (e.g. "acme/billing")
+ *   - jira   → a project key (e.g. "PLAT")
+ * Read/write classification is likewise the interface's own: `operation:
+ * "read"` may only ever produce non-mutating upstream calls (GET / query),
+ * `operation: "write"` only mutating ones — that is what makes pillar 1's
+ * read-only grant mode meaningful, so adapters hard-fail on any op that
+ * disagrees with its operation rather than quietly reclassifying.
  */
 
 import { z } from "zod";
@@ -48,6 +66,26 @@ export class ConnectorProviderError extends Error {
   }
 }
 
+/**
+ * The abstraction's typed rate-limit error — distinct from a generic upstream
+ * failure so the gateway (and pillar 1's rate-limit machinery) can tell "the
+ * upstream throttled us, retry after N seconds" apart from "the call is
+ * broken". `status` is always the canonical 429 even when the upstream spells
+ * throttling differently (GitHub's 403-with-rate-limit-headers, Slack's
+ * HTTP-200 `ok:false error:ratelimited`); the upstream's own status is kept in
+ * `upstreamStatus` for the audit trail.
+ */
+export class ConnectorRateLimitError extends ConnectorProviderError {
+  constructor(
+    message: string,
+    /** seconds the upstream asked us to wait (Retry-After / reset headers), when it said */
+    readonly retryAfterSeconds?: number,
+    readonly upstreamStatus?: number,
+  ) {
+    super(message, 429);
+  }
+}
+
 /** A single governed connector call: read fetches the named object, write
  * pushes the payload to it. `object` and `payload` are optional — a bare
  * read/write against the connection root is valid. */
@@ -71,7 +109,10 @@ export interface ConnectorProvider {
 }
 
 // The same injectable-fetch shape the pm-provider adapters use, so unit tests
-// never touch the network.
+// never touch the network. `headers` is optional (additive — pre-existing fake
+// fetches without it still typecheck) because the GitHub/Slack adapters need
+// response headers to recognize throttling (Retry-After, x-ratelimit-*);
+// the real global fetch always provides it.
 type FetchLike = (
   url: string,
   init?: {
@@ -79,7 +120,41 @@ type FetchLike = (
     headers?: Record<string, string>;
     body?: string;
   },
-) => Promise<{ status: number; json(): Promise<unknown>; text(): Promise<string> }>;
+) => Promise<{
+  status: number;
+  headers?: { get(name: string): string | null };
+  json(): Promise<unknown>;
+  text(): Promise<string>;
+}>;
+
+/** shared: decode a 2xx body the way every adapter here does — empty → null,
+ * JSON when it parses, raw text otherwise (a non-JSON 2xx is data, not a throw) */
+function decodeBody(status: number, text: string): ConnectorInvokeResult {
+  if (!text) return { status, body: null };
+  try {
+    return { status, body: JSON.parse(text) };
+  } catch {
+    return { status, body: text };
+  }
+}
+
+/** shared: parse an integer Retry-After header (seconds form) when present */
+function retryAfterSeconds(headers?: { get(name: string): string | null }): number | undefined {
+  const raw = headers?.get("retry-after");
+  if (!raw) return undefined;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : undefined;
+}
+
+/** shared: build a ?query string from defined params only */
+function query(params: Record<string, string | number | undefined>): string {
+  const pairs = Object.entries(params).filter(([, v]) => v !== undefined) as Array<
+    [string, string | number]
+  >;
+  if (pairs.length === 0) return "";
+  const qs = new URLSearchParams(pairs.map(([k, v]) => [k, String(v)]));
+  return `?${qs.toString()}`;
+}
 
 // ---------------------------------------------------------------------------
 // Generic HTTP/REST adapter — serves both the "generic" and "http" kinds.
@@ -202,6 +277,607 @@ export class WebhookConnectorProvider implements ConnectorProvider {
 }
 
 // ---------------------------------------------------------------------------
+// Slack adapter — Slack Web API with a Bearer bot token (xoxb-…).
+//
+// Object semantics: `object` is a CHANNEL ID (e.g. "C0123456789") — the natural
+// unit an admin scopes a Slack grant to via `allowedObjects`. Every
+// channel-touching call takes its channel from `object`, never from the
+// payload, so the upstream reach can never exceed the authorized object.
+//
+// Operation surface (representative, per ROADMAP Batch B):
+//   read,  object=null                → conversations.list   (enumerate channels;
+//                                       the "connection root" read, mirroring the
+//                                       generic adapter's bare read)
+//   read,  object=<channel>           → conversations.history for that channel
+//                                       (payload may carry limit/oldest/latest/cursor)
+//   read,  payload.op=
+//          "users.lookupByEmail"      → users.lookupByEmail (payload.email).
+//                                       NOT channel-scoped — so under a
+//                                       channel-scoped grant it is invoked with
+//                                       object=null and the kernel's
+//                                       object-scope rule fails it closed, which
+//                                       is exactly the fail-closed semantic the
+//                                       http/generic adapters already live with.
+//   write, object=<channel> (required),
+//          payload={text,…}           → chat.postMessage to that channel
+//
+// Error taxonomy: Slack answers HTTP 200 with an `{ok:false, error:"…"}`
+// envelope for most failures, so HTTP status alone is meaningless — the
+// envelope's error code is mapped to a typed ConnectorProviderError with a
+// conventional HTTP status (auth codes→401, permission codes→403, not-found
+// codes→404, anything unrecognized→502 upstream-failure). `ratelimited` (and a
+// real HTTP 429 + Retry-After) map to ConnectorRateLimitError, never a generic
+// failure.
+// ---------------------------------------------------------------------------
+
+export const SLACK_DEFAULT_BASE_URL = "https://slack.com/api";
+
+export interface SlackAdapterOptions {
+  /** Slack bot token (xoxb-…), sent as `Authorization: Bearer` */
+  token: string;
+  /** override for tests/proxies; defaults to https://slack.com/api */
+  baseUrl?: string | null;
+  fetchImpl?: FetchLike;
+}
+
+/** Slack `ok:false` error code → conventional HTTP status for the typed error */
+const SLACK_ERROR_STATUS: Record<string, number> = {
+  invalid_auth: 401,
+  not_authed: 401,
+  account_inactive: 401,
+  token_revoked: 401,
+  token_expired: 401,
+  missing_scope: 403,
+  access_denied: 403,
+  not_allowed_token_type: 403,
+  restricted_action: 403,
+  ekm_access_denied: 403,
+  channel_not_found: 404,
+  user_not_found: 404,
+  users_not_found: 404,
+  thread_not_found: 404,
+  is_archived: 404,
+};
+
+export class SlackConnectorProvider implements ConnectorProvider {
+  readonly kind = "slack" as const;
+  private readonly base: string;
+  private readonly token: string;
+  private readonly fetchImpl: FetchLike;
+
+  constructor(opts: SlackAdapterOptions) {
+    this.base = (opts.baseUrl ?? SLACK_DEFAULT_BASE_URL).replace(/\/$/, "");
+    this.token = opts.token;
+    this.fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
+  }
+
+  private headers(withBody: boolean): Record<string, string> {
+    const h: Record<string, string> = {
+      accept: "application/json",
+      authorization: `Bearer ${this.token}`,
+    };
+    if (withBody) h["content-type"] = "application/json; charset=utf-8";
+    return h;
+  }
+
+  async invoke(invocation: ConnectorInvocation): Promise<ConnectorInvokeResult> {
+    const payload = invocation.payload ?? {};
+    const op = typeof payload.op === "string" ? payload.op : null;
+    const channel = invocation.object ?? null;
+
+    let method: string;
+    let apiCall: string;
+    let body: string | undefined;
+    let qs = "";
+
+    if (invocation.operation === "write") {
+      // the ONLY mutating op on this surface — a read-mode grant can never
+      // reach it because the kernel's mode rule runs before we do, and we never
+      // mutate on operation:"read"
+      if (op !== null && op !== "chat.postMessage") {
+        throw new ConnectorProviderError(
+          `slack write supports only 'chat.postMessage' (got op '${op}')`,
+          400,
+        );
+      }
+      if (!channel) {
+        throw new ConnectorProviderError(
+          "slack write requires an object (the target channel ID) — chat.postMessage without a channel is meaningless",
+          400,
+        );
+      }
+      const { op: _op, ...rest } = payload;
+      method = "POST";
+      apiCall = "chat.postMessage";
+      // channel comes from the governed object, never the payload
+      body = JSON.stringify({ ...rest, channel });
+    } else if (op === "users.lookupByEmail") {
+      if (typeof payload.email !== "string" || !payload.email) {
+        throw new ConnectorProviderError(
+          "slack users.lookupByEmail requires payload.email",
+          400,
+        );
+      }
+      method = "GET";
+      apiCall = "users.lookupByEmail";
+      qs = query({ email: payload.email });
+    } else if (op !== null && op !== "conversations.list" && op !== "conversations.history") {
+      throw new ConnectorProviderError(
+        `slack read supports 'conversations.list', 'conversations.history', 'users.lookupByEmail' (got op '${op}')`,
+        400,
+      );
+    } else if (channel) {
+      method = "GET";
+      apiCall = "conversations.history";
+      qs = query({
+        channel,
+        limit: typeof payload.limit === "number" ? payload.limit : undefined,
+        oldest: typeof payload.oldest === "string" ? payload.oldest : undefined,
+        latest: typeof payload.latest === "string" ? payload.latest : undefined,
+        cursor: typeof payload.cursor === "string" ? payload.cursor : undefined,
+      });
+    } else {
+      method = "GET";
+      apiCall = "conversations.list";
+      qs = query({
+        limit: typeof payload.limit === "number" ? payload.limit : undefined,
+        cursor: typeof payload.cursor === "string" ? payload.cursor : undefined,
+        types: typeof payload.types === "string" ? payload.types : undefined,
+      });
+    }
+
+    const url = `${this.base}/${apiCall}${qs}`;
+    const res = await this.fetchImpl(url, {
+      method,
+      headers: this.headers(body !== undefined),
+      ...(body !== undefined ? { body } : {}),
+    });
+
+    // transport-level throttle: HTTP 429 + Retry-After
+    if (res.status === 429) {
+      throw new ConnectorRateLimitError(
+        `slack ${apiCall} rate-limited (HTTP 429)`,
+        retryAfterSeconds(res.headers),
+        429,
+      );
+    }
+    const text = await res.text();
+    if (res.status < 200 || res.status >= 300) {
+      throw new ConnectorProviderError(`slack ${apiCall} failed: ${text}`, res.status);
+    }
+    // envelope-level failure: HTTP 200 with ok:false
+    const decoded = decodeBody(res.status, text);
+    const envelope = decoded.body as { ok?: boolean; error?: string } | null;
+    if (envelope && typeof envelope === "object" && envelope.ok === false) {
+      const code = envelope.error ?? "unknown_error";
+      if (code === "ratelimited" || code === "rate_limited") {
+        throw new ConnectorRateLimitError(
+          `slack ${apiCall} rate-limited (ok:false '${code}')`,
+          retryAfterSeconds(res.headers),
+          res.status,
+        );
+      }
+      throw new ConnectorProviderError(
+        `slack ${apiCall} failed: ${code}`,
+        SLACK_ERROR_STATUS[code] ?? 502,
+      );
+    }
+    return decoded;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// GitHub adapter — the CONNECTOR data plane over the GitHub REST API (distinct
+// from packages/git-provider, which is pillar 2's git_operation plane).
+// Bearer token (fine-grained PAT / classic PAT / app installation token).
+//
+// Object semantics: `object` is an "owner/repo" slug — the natural unit an
+// admin scopes a GitHub grant to via `allowedObjects`. Every repo-touching
+// call derives its /repos/{owner}/{repo}/ prefix from `object`; issue/PR
+// numbers inside the payload are repo-scoped by GitHub itself, so they cannot
+// escape the authorized repo.
+//
+// Operation surface (representative):
+//   read,  object=null                    → GET /user/repos (repos the token
+//                                           can see — the connection-root read)
+//   read,  object=o/r  (no op|"repo.get") → GET /repos/{o}/{r}
+//   read,  op="issues.list"               → GET /repos/{o}/{r}/issues
+//   read,  op="issues.get"  + number      → GET /repos/{o}/{r}/issues/{n}
+//   read,  op="pulls.list"                → GET /repos/{o}/{r}/pulls
+//   read,  op="pulls.get"   + number      → GET /repos/{o}/{r}/pulls/{n}
+//   write, op="issues.create" (default)   → POST /repos/{o}/{r}/issues
+//   write, op="issues.comment" + number   → POST /repos/{o}/{r}/issues/{n}/comments
+//
+// baseUrl override: defaults to https://api.github.com; a GitHub Enterprise
+// Server host passes its API root (https://ghe.example.com/api/v3) as the
+// connection baseUrl and every path is appended under it.
+//
+// Rate limiting: GitHub signals primary-limit exhaustion as **403 (or 429)
+// with x-ratelimit-remaining: 0** — that shape maps to
+// ConnectorRateLimitError (canonical 429), never a generic 403 failure.
+// retry-after wins when present; otherwise x-ratelimit-reset (epoch seconds)
+// minus now.
+// ---------------------------------------------------------------------------
+
+export const GITHUB_DEFAULT_BASE_URL = "https://api.github.com";
+
+export interface GitHubAdapterOptions {
+  /** PAT or installation token, sent as `Authorization: Bearer` */
+  token: string;
+  /** defaults to https://api.github.com; set your GHE API root (…/api/v3) to override */
+  baseUrl?: string | null;
+  fetchImpl?: FetchLike;
+}
+
+export class GitHubConnectorProvider implements ConnectorProvider {
+  readonly kind = "github" as const;
+  private readonly base: string;
+  private readonly token: string;
+  private readonly fetchImpl: FetchLike;
+
+  constructor(opts: GitHubAdapterOptions) {
+    this.base = (opts.baseUrl ?? GITHUB_DEFAULT_BASE_URL).replace(/\/$/, "");
+    this.token = opts.token;
+    this.fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
+  }
+
+  private headers(withBody: boolean): Record<string, string> {
+    const h: Record<string, string> = {
+      accept: "application/vnd.github+json",
+      "x-github-api-version": "2022-11-28",
+      authorization: `Bearer ${this.token}`,
+    };
+    if (withBody) h["content-type"] = "application/json";
+    return h;
+  }
+
+  /** "owner/repo" → validated slug; anything else is a caller error, not an upstream one */
+  private repoPath(object: string | null): string {
+    if (!object || !/^[^/\s]+\/[^/\s]+$/.test(object)) {
+      throw new ConnectorProviderError(
+        `github object must be an "owner/repo" slug (got ${object === null ? "none" : `'${object}'`})`,
+        400,
+      );
+    }
+    return `/repos/${object}`;
+  }
+
+  private issueNumber(payload: Record<string, unknown>, op: string): number {
+    const n = payload.number;
+    if (typeof n !== "number" || !Number.isInteger(n) || n <= 0) {
+      throw new ConnectorProviderError(`github ${op} requires payload.number (a positive integer)`, 400);
+    }
+    return n;
+  }
+
+  async invoke(invocation: ConnectorInvocation): Promise<ConnectorInvokeResult> {
+    const payload = invocation.payload ?? {};
+    const op = typeof payload.op === "string" ? payload.op : null;
+    const object = invocation.object ?? null;
+
+    let method: string;
+    let path: string;
+    let body: string | undefined;
+
+    if (invocation.operation === "write") {
+      const repo = this.repoPath(object);
+      if (op === null || op === "issues.create") {
+        if (typeof payload.title !== "string" || !payload.title) {
+          throw new ConnectorProviderError("github issues.create requires payload.title", 400);
+        }
+        method = "POST";
+        path = `${repo}/issues`;
+        body = JSON.stringify({
+          title: payload.title,
+          ...(payload.body !== undefined ? { body: payload.body } : {}),
+          ...(payload.labels !== undefined ? { labels: payload.labels } : {}),
+          ...(payload.assignees !== undefined ? { assignees: payload.assignees } : {}),
+        });
+      } else if (op === "issues.comment") {
+        const n = this.issueNumber(payload, op);
+        if (typeof payload.body !== "string" || !payload.body) {
+          throw new ConnectorProviderError("github issues.comment requires payload.body", 400);
+        }
+        method = "POST";
+        path = `${repo}/issues/${n}/comments`;
+        body = JSON.stringify({ body: payload.body });
+      } else {
+        throw new ConnectorProviderError(
+          `github write supports 'issues.create', 'issues.comment' (got op '${op}')`,
+          400,
+        );
+      }
+    } else if (object === null) {
+      if (op !== null) {
+        throw new ConnectorProviderError(
+          `github read op '${op}' requires an object (an "owner/repo" slug)`,
+          400,
+        );
+      }
+      method = "GET";
+      path = "/user/repos";
+    } else {
+      const repo = this.repoPath(object);
+      method = "GET";
+      switch (op) {
+        case null:
+        case "repo.get":
+          path = repo;
+          break;
+        case "issues.list":
+          path = `${repo}/issues${query({
+            state: typeof payload.state === "string" ? payload.state : undefined,
+            per_page: typeof payload.per_page === "number" ? payload.per_page : undefined,
+            page: typeof payload.page === "number" ? payload.page : undefined,
+          })}`;
+          break;
+        case "issues.get":
+          path = `${repo}/issues/${this.issueNumber(payload, op)}`;
+          break;
+        case "pulls.list":
+          path = `${repo}/pulls${query({
+            state: typeof payload.state === "string" ? payload.state : undefined,
+            per_page: typeof payload.per_page === "number" ? payload.per_page : undefined,
+            page: typeof payload.page === "number" ? payload.page : undefined,
+          })}`;
+          break;
+        case "pulls.get":
+          path = `${repo}/pulls/${this.issueNumber(payload, op)}`;
+          break;
+        default:
+          throw new ConnectorProviderError(
+            `github read supports 'repo.get', 'issues.list', 'issues.get', 'pulls.list', 'pulls.get' (got op '${op}')`,
+            400,
+          );
+      }
+    }
+
+    const url = `${this.base}${path}`;
+    const res = await this.fetchImpl(url, {
+      method,
+      headers: this.headers(body !== undefined),
+      ...(body !== undefined ? { body } : {}),
+    });
+
+    // GitHub's rate-limit shape: 429, or 403 with x-ratelimit-remaining: 0
+    const remaining = res.headers?.get("x-ratelimit-remaining");
+    if (res.status === 429 || (res.status === 403 && remaining === "0")) {
+      let wait = retryAfterSeconds(res.headers);
+      if (wait === undefined) {
+        const reset = res.headers?.get("x-ratelimit-reset");
+        if (reset) {
+          const resetEpoch = Number.parseInt(reset, 10);
+          if (Number.isFinite(resetEpoch)) {
+            wait = Math.max(0, resetEpoch - Math.floor(Date.now() / 1000));
+          }
+        }
+      }
+      throw new ConnectorRateLimitError(
+        `github ${method} ${path} rate-limited (HTTP ${res.status}, x-ratelimit-remaining=${remaining ?? "?"})`,
+        wait,
+        res.status,
+      );
+    }
+    const text = await res.text();
+    if (res.status < 200 || res.status >= 300) {
+      // GitHub error bodies carry a `message` — surface it, not the raw JSON.
+      // Note: a token that cannot see a repo gets a 404 (GitHub hides
+      // existence), so "scope-denied at the upstream" surfaces here as 404/403
+      // with GitHub's own message.
+      let detail = text;
+      try {
+        const parsed = JSON.parse(text) as { message?: string };
+        if (parsed && typeof parsed.message === "string") detail = parsed.message;
+      } catch {
+        /* keep raw text */
+      }
+      throw new ConnectorProviderError(`github ${method} ${path} failed: ${detail}`, res.status);
+    }
+    return decodeBody(res.status, text);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Jira adapter — Jira REST API v2 (plain-string fields) on the connection's
+// baseUrl (https://<site>.atlassian.net or a self-hosted Jira base).
+//
+// Credential format: the connection's single `token` is the Jira Cloud Basic
+// convention **"email:api_token"** (e.g. "jane@corp.com:ATATT3xFf…") — the
+// adapter base64s the whole string into `Authorization: Basic …`, exactly as
+// the pm-provider Jira adapter does. A token with no ":" is rejected at
+// construction with an actionable message rather than producing opaque 401s.
+//
+// Object semantics: `object` is a PROJECT KEY (e.g. "PLAT") — the natural unit
+// an admin scopes a Jira grant to via `allowedObjects`. Search is forced to
+// `project = "<key>"` (caller JQL is ANDed inside it, never replacing it), and
+// issue-keyed ops (get/comment) require the issue key to carry the authorized
+// project's prefix — an issue from another project is refused locally, before
+// any network call, so an authorized object can never be used to reach past
+// itself.
+//
+// Operation surface (representative):
+//   read,  object=null                    → GET /rest/api/2/project (the
+//                                           connection-root read: list projects)
+//   read,  object=KEY (no op|"issues.search")
+//                                         → GET /rest/api/2/search?jql=project = "KEY"
+//                                           (payload.jql ANDed, payload.maxResults honored)
+//   read,  op="issue.get"    + key        → GET /rest/api/2/issue/{key}
+//   write, op="issue.create" (default)    → POST /rest/api/2/issue
+//                                           (fields.project.key forced to `object`)
+//   write, op="issue.comment" + key+body  → POST /rest/api/2/issue/{key}/comment
+//
+// Error taxonomy: Jira failures carry the error-collection body
+// `{errorMessages: string[], errors: {field: string}}` — both halves are
+// flattened into one actionable message ("summary: You must specify a
+// summary") instead of surfacing raw JSON. 429 + Retry-After maps to
+// ConnectorRateLimitError.
+// ---------------------------------------------------------------------------
+
+export interface JiraAdapterOptions {
+  /** the Jira site root, e.g. https://yourco.atlassian.net */
+  baseUrl: string;
+  /** "email:api_token" (Jira Cloud Basic-auth convention) */
+  token: string;
+  fetchImpl?: FetchLike;
+}
+
+export class JiraConnectorProvider implements ConnectorProvider {
+  readonly kind = "jira" as const;
+  private readonly base: string;
+  private readonly auth: string;
+  private readonly fetchImpl: FetchLike;
+
+  constructor(opts: JiraAdapterOptions) {
+    if (!opts.token.includes(":")) {
+      throw new ConnectorProviderError(
+        "jira token must be 'email:api_token' (Jira Cloud Basic-auth convention) — got a token with no ':'",
+        400,
+      );
+    }
+    this.base = opts.baseUrl.replace(/\/$/, "");
+    this.auth = `Basic ${Buffer.from(opts.token).toString("base64")}`;
+    this.fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
+  }
+
+  private headers(withBody: boolean): Record<string, string> {
+    const h: Record<string, string> = { accept: "application/json", authorization: this.auth };
+    if (withBody) h["content-type"] = "application/json";
+    return h;
+  }
+
+  /** issue-keyed ops must stay inside the authorized project — checked locally,
+   * before any network call, mirroring how the object bounds search/create */
+  private issueKey(payload: Record<string, unknown>, project: string | null, op: string): string {
+    const key = payload.key;
+    if (typeof key !== "string" || !/^[A-Za-z][A-Za-z0-9_]*-\d+$/.test(key)) {
+      throw new ConnectorProviderError(
+        `jira ${op} requires payload.key (an issue key like "PLAT-42")`,
+        400,
+      );
+    }
+    if (project !== null && !key.toUpperCase().startsWith(`${project.toUpperCase()}-`)) {
+      throw new ConnectorProviderError(
+        `jira ${op} on '${key}' is outside the authorized project '${project}' — refused before any upstream call`,
+        403,
+      );
+    }
+    return key;
+  }
+
+  async invoke(invocation: ConnectorInvocation): Promise<ConnectorInvokeResult> {
+    const payload = invocation.payload ?? {};
+    const op = typeof payload.op === "string" ? payload.op : null;
+    const project = invocation.object ?? null;
+
+    let method: string;
+    let path: string;
+    let body: string | undefined;
+
+    if (invocation.operation === "write") {
+      if (!project) {
+        throw new ConnectorProviderError(
+          "jira write requires an object (the target project key)",
+          400,
+        );
+      }
+      if (op === null || op === "issue.create") {
+        if (typeof payload.summary !== "string" || !payload.summary) {
+          throw new ConnectorProviderError("jira issue.create requires payload.summary", 400);
+        }
+        method = "POST";
+        path = "/rest/api/2/issue";
+        body = JSON.stringify({
+          fields: {
+            // the governed object is authoritative — a payload-supplied project
+            // could not widen scope anyway, so we simply never read one
+            project: { key: project },
+            summary: payload.summary,
+            issuetype: { name: typeof payload.issuetype === "string" ? payload.issuetype : "Task" },
+            ...(typeof payload.description === "string" ? { description: payload.description } : {}),
+          },
+        });
+      } else if (op === "issue.comment") {
+        const key = this.issueKey(payload, project, op);
+        if (typeof payload.body !== "string" || !payload.body) {
+          throw new ConnectorProviderError("jira issue.comment requires payload.body", 400);
+        }
+        method = "POST";
+        path = `/rest/api/2/issue/${key}/comment`;
+        body = JSON.stringify({ body: payload.body });
+      } else {
+        throw new ConnectorProviderError(
+          `jira write supports 'issue.create', 'issue.comment' (got op '${op}')`,
+          400,
+        );
+      }
+    } else if (op === "issue.get") {
+      const key = this.issueKey(payload, project, op);
+      method = "GET";
+      path = `/rest/api/2/issue/${key}`;
+    } else if (op !== null && op !== "issues.search") {
+      throw new ConnectorProviderError(
+        `jira read supports 'issues.search', 'issue.get' (got op '${op}')`,
+        400,
+      );
+    } else if (project === null) {
+      method = "GET";
+      path = "/rest/api/2/project";
+    } else {
+      // scoped JQL search: the project clause comes from the governed object;
+      // caller-supplied JQL narrows WITHIN it (parenthesized AND), never widens
+      const scoped = `project = "${project.replace(/"/g, "")}"`;
+      const extra = typeof payload.jql === "string" && payload.jql ? ` AND (${payload.jql})` : "";
+      method = "GET";
+      path = `/rest/api/2/search${query({
+        jql: `${scoped}${extra}`,
+        maxResults: typeof payload.maxResults === "number" ? payload.maxResults : undefined,
+        startAt: typeof payload.startAt === "number" ? payload.startAt : undefined,
+      })}`;
+    }
+
+    const url = `${this.base}${path}`;
+    const res = await this.fetchImpl(url, {
+      method,
+      headers: this.headers(body !== undefined),
+      ...(body !== undefined ? { body } : {}),
+    });
+
+    if (res.status === 429) {
+      throw new ConnectorRateLimitError(
+        `jira ${method} ${path} rate-limited (HTTP 429)`,
+        retryAfterSeconds(res.headers),
+        429,
+      );
+    }
+    const text = await res.text();
+    if (res.status < 200 || res.status >= 300) {
+      // flatten Jira's error-collection body into one actionable line
+      let detail = text;
+      try {
+        const parsed = JSON.parse(text) as {
+          errorMessages?: unknown;
+          errors?: Record<string, unknown>;
+        };
+        const parts: string[] = [];
+        if (Array.isArray(parsed.errorMessages)) {
+          parts.push(...parsed.errorMessages.filter((m): m is string => typeof m === "string"));
+        }
+        if (parsed.errors && typeof parsed.errors === "object") {
+          for (const [field, msg] of Object.entries(parsed.errors)) {
+            parts.push(`${field}: ${String(msg)}`);
+          }
+        }
+        if (parts.length > 0) detail = parts.join("; ");
+      } catch {
+        /* keep raw text */
+      }
+      throw new ConnectorProviderError(`jira ${method} ${path} failed: ${detail}`, res.status);
+    }
+    return decodeBody(res.status, text);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Mock adapter — in-memory, keyless, deterministic: for tests and air-gapped
 // development. `read` returns a canned object keyed by the requested object;
 // `write` records the payload and echoes it back. The whole execution layer is
@@ -295,11 +971,55 @@ export function resolveConnectorProvider(
         token: config.token ?? null,
         ...(fetchImpl ? { fetchImpl } : {}),
       });
-    // Declared, interface-ready, but not built yet — an explicit failure, never
-    // a silent success (the model-provider discipline).
     case "slack":
+      // token = bot token; baseUrl optional (defaults to https://slack.com/api,
+      // override only for proxies/tests)
+      if (!config.token) {
+        throw new ConnectorProviderError(
+          "slack connector requires a token (a bot token, xoxb-…)",
+        );
+      }
+      return new SlackConnectorProvider({
+        token: config.token,
+        baseUrl: config.baseUrl ?? null,
+        ...(fetchImpl ? { fetchImpl } : {}),
+      });
     case "github":
+      // token = PAT/installation token; baseUrl optional (defaults to
+      // https://api.github.com; a GHE deployment sets its …/api/v3 root)
+      if (!config.token) {
+        throw new ConnectorProviderError(
+          "github connector requires a token (a PAT or installation token)",
+        );
+      }
+      return new GitHubConnectorProvider({
+        token: config.token,
+        baseUrl: config.baseUrl ?? null,
+        ...(fetchImpl ? { fetchImpl } : {}),
+      });
     case "jira":
+      // baseUrl = the Jira site root (required — there is no global default);
+      // token = "email:api_token" (validated in the adapter constructor)
+      if (!config.baseUrl) {
+        throw new ConnectorProviderError(
+          "jira connector requires a baseUrl (https://<site>.atlassian.net)",
+        );
+      }
+      if (!config.token) {
+        throw new ConnectorProviderError(
+          "jira connector requires a token ('email:api_token', Jira Cloud Basic-auth convention)",
+        );
+      }
+      return new JiraConnectorProvider({
+        baseUrl: config.baseUrl,
+        token: config.token,
+        ...(fetchImpl ? { fetchImpl } : {}),
+      });
+    // Declared, interface-ready, but not built yet — an explicit failure, never
+    // a silent success (the model-provider discipline). Snowflake is DEFERRED:
+    // its key-pair credential shape may not fit the single-ciphertext
+    // `connector_credentials` column (ROADMAP Batch B), and that schema
+    // decision is owned elsewhere — do not build it here until it lands.
     case "snowflake":
       throw new ConnectorProviderError(
         `connector kind '${config.kind}' is not implemented yet`,
