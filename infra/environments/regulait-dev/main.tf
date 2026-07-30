@@ -13,6 +13,7 @@ module "security_baseline" {
   aws_region                 = var.aws_region
   monthly_budget_usd         = var.monthly_budget_usd
   budget_notification_emails = var.budget_notification_emails
+  enable_cis_standard        = var.enable_cis_standard
 }
 
 module "identity_center" {

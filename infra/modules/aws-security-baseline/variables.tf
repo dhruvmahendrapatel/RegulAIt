@@ -46,3 +46,9 @@ variable "budget_notification_emails" {
   description = "Email addresses notified at each budget threshold."
   type        = list(string)
 }
+
+variable "enable_cis_standard" {
+  description = "Keep the CIS AWS Foundations Benchmark v1.2.0 Security Hub subscription enabled (AWS auto-enabled it alongside FSBP). Set false to unsubscribe it once its findings become noise — requires the one-time terraform import documented next to the resource in main.tf before the first apply of this toggle."
+  type        = bool
+  default     = true
+}

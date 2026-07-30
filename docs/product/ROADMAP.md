@@ -2,7 +2,11 @@
 
 > **Status:** planning document, not a decision record. Nothing here is committed until the
 > owner picks an order. Written 2026-07-30, immediately after the four-area cleanup batch
-> (addendum 33) and *during* the in-flight governance-gaps batch described below.
+> (addendum 33) and *during* the then-in-flight governance-gaps batch described below.
+> **Refreshed 2026-07-30 (housekeeping batch)** after governance-gaps (migration 0036,
+> ADR-0019), Batch H (migration 0037, ADR-0020) and the temperature amendment (`fdfeff1`)
+> all merged: counts, migration numbers and batch statuses below reflect that state, and §6
+> (orphaned deferrals) was added.
 >
 > **Audience:** the project owner, and any future Claude session picking this up cold.
 > Read `CLAUDE.md` → `project-state/STATE.md` → this file, in that order.
@@ -25,8 +29,9 @@ also a narrower claim than it sounds. Precisely:
   survives every path; the optimizer can never widen entitlement; delegation only ever
   tightens (agent ceiling ADR-0016 + budget ceiling); one audit trail, one approvals queue;
   measured spend is distinct from estimated spend and neither invents a dollar.
-- ~36k lines across 11 packages + the gateway; suite ≈ 361 gateway tests plus per-package
-  suites (STATE.md addendum 33). All green locally at last verification.
+- ~36k lines across 11 packages + the gateway; suite = **432 gateway tests** as of the
+  Batch H + temperature-amendment merges (was ≈361 at STATE.md addendum 33) plus per-package
+  suites. All green locally at last verification.
 
 **What it does NOT mean**
 - It does not mean the pillars are *complete*. Several pillars have a full spine and a thin
@@ -40,15 +45,16 @@ also a narrower claim than it sounds. Precisely:
   governing agents that come *to* our gateway; a developer using Copilot or Cursor never touches
   it. Raised by the owner 2026-07-30 and written up as **Batch H**, which is a scope gap in the
   product thesis rather than an item of backlog. Half of it — tool calls over MCP — already works
-  and is simply not marketed.
+  and is simply not marketed. **Since SHIPPED the same day** (migration 0037, ADR-0020) — see
+  Batch H below, now a record of what shipped rather than a proposal.
 
-**In flight right now (on branch `claude/governance-gaps`, another agent):** per-user
-revocation of role-derived agent/connector grants (clears the ADR-0014 deferral); MCP-proxy
-project attribution + PII enforcement (clears the last "mcp path honestly DEFERRED" note from
-the compliance-enforcement slice); suppressing streaming for block-mode PII projects (clears
-the KNOWN LIMIT recorded in STATE.md — output-block could transiently flash raw text); and
-the `data_sensitivity` 6th assignment dimension (clears the ADR-0018 deferral). **Treat all
-four as done.** Everything in this roadmap starts *after* them.
+**Since MERGED (PR #44, migration 0036, ADR-0019 — was in flight when this was written):**
+per-user revocation of role-derived agent/connector grants (clears the ADR-0014 deferral);
+MCP-proxy project attribution + PII enforcement (clears the last "mcp path honestly DEFERRED"
+note from the compliance-enforcement slice); suppressing streaming for block-mode PII projects
+(clears the KNOWN LIMIT recorded in STATE.md — output-block could transiently flash raw text);
+and the `data_sensitivity` 6th assignment dimension (clears the ADR-0018 deferral). All four
+are done. Everything in this roadmap starts *after* them.
 
 ---
 
@@ -144,12 +150,12 @@ multi-session, or gated on an external decision.
 | | |
 |---|---|
 | **Goal** | Move pillar 3 from "governed operations over a mock" to "governed operations over a real cloud", starting with AWS. |
-| **Work items** | (1) `AwsInfraProvider` — the `// REAL:` plan already written into `packages/infra-provider/src/index.ts` L~410: STS AssumeRole into the customer role, then SSM Patch Manager (CVE), ACM (cert rotation), AWS Backup (restore) driving `scan()`/`remediate()`. (2) Azure + GCP infra adapters. (3) Real execution for the `azure`/`gcp`/`kubernetes` deploy adapters, following the AWS pattern from ADR-0015 A1 — injected client, off-by-default flag. (4) ADR-0015 **A4** (currently design-only, recorded in the ADR addendum): per-mode policy + mode-aware audit retention. |
+| **Work items** | (1) `AwsInfraProvider` — the `// REAL:` plan already written into `packages/infra-provider/src/index.ts` L~410: STS AssumeRole into the customer role, then SSM Patch Manager (CVE), ACM (cert rotation), AWS Backup (restore) driving `scan()`/`remediate()`. (2) Azure + GCP infra adapters. (3) Real execution for the `azure`/`gcp`/`kubernetes` deploy adapters, following the AWS pattern from ADR-0015 A1 — injected client, off-by-default flag. (4) ADR-0015 **A4** (design-only; the sharpest record of what it actually is now lives in ADR-0019's "A4 stays deferred" section): per-mode policy + mode-aware audit retention. |
 | **Files** | `packages/infra-provider/src/index.ts`, `apps/gateway/src/deploy.ts`, `apps/gateway/src/infra.ts`, tests |
 | **Migration?** | Not for (1)–(3). **Yes for A4** (a nullable `mode` column or structured policy — the ADR-0015 addendum records the design). |
 | **Size** | **L** |
 | **Risk / deps** | **Highest risk in the roadmap.** This is the only batch that can mutate real cloud resources. It must keep the existing safety architecture: off-by-default flag, injected client, fake in tests, no live mutation in any test path. It also touches the standing guardrail — patching or rotating a cert on a real account is exactly the kind of thing that needs explicit sign-off. Depends on nothing else technically, but depends on a *conversation* about which account it may touch. |
-| **Worth doing?** | **Wait.** The governed spine (detect → propose → approve → remediate → ledger) is the intellectually hard part and it is *done* (ADR-0017, migrations 0027 + 0034). The remaining work is cloud-SDK plumbing with real blast radius and no customer asking for it yet. The mock demonstrates the whole spectrum keylessly. Revisit when there is a specific account, a specific resource, and explicit sign-off. **A4 alone is small and safe** and could be pulled forward into Batch D. |
+| **Worth doing?** | **Wait.** The governed spine (detect → propose → approve → remediate → ledger) is the intellectually hard part and it is *done* (ADR-0017, migrations 0027 + 0034). The remaining work is cloud-SDK plumbing with real blast radius and no customer asking for it yet. The mock demonstrates the whole spectrum keylessly. Revisit when there is a specific account, a specific resource, and explicit sign-off. **On A4, use ADR-0019's precise decomposition, not the old "small and safe, pull into Batch D" line:** A4 = (a) a populated mode/`deploy_context` dimension on `audit_log` — with an honest story for pre-existing rows, which have no mode and cannot be backfilled; (b) a **MAX-only** per-mode retention override, so retention can never be shortened; and (c) mode-scoped restriction rules extending migration 0026's rule-scoping model. (a)+(b) are genuinely small and could be pulled forward; (c) is a change to the pillar-1 policy model and deserves its own slice + ADR. |
 
 ---
 
@@ -167,14 +173,13 @@ multi-session, or gated on an external decision.
 | Per-provider tool-use nuances (Google is currently *best-effort* in the agentic loop) | STATE.md tool-using-workers addendum | `packages/model-provider/src/index.ts` | No | S–M |
 | **Context-compaction per-user dials** (threshold + recent-window are module constants today: `DEFAULT_COMPACTION_THRESHOLD_TOKENS = 1600`, `COMPACTION_RECENT_WINDOW_MESSAGES = 4`) | STATE.md compaction addendum — explicitly "deferred pending an agent-policy migration home" | `packages/optimizer-kernel/src/index.ts`, `packages/db/src/schema.ts` (`user_agent_policies`, ~L391 — the natural home, it already hosts `routing_mode` and `run_budget_usd`), `apps/gateway/src/agents-connectors.ts` | **Yes** — two nullable columns on `user_agent_policies` | S |
 | `agents.systemPrompt` column (prompt caching currently sources the cacheable prefix from an optional request field because the column doesn't exist) | STATE.md prompt-caching addendum | `packages/db/src/schema.ts` | **Yes** | S |
-| PM webhook **payload adapters** + signature schemes beyond a shared secret | **ADR-0010 deferral** (`docs/decisions/0010-…md:42`). *Partially superseded* — `packages/pm-provider/src/inbound.ts` shipped per-provider parsing + real HMAC schemes. Remaining: monday sends no signature (URL-token only) and Jira Cloud manual webhooks can't sign — both documented limitations, not bugs. **Verify before scheduling; this may already be closed.** | `packages/pm-provider/src/inbound.ts` | No | S |
-| Admin portal **ADR-0012 deferrals**: SPA rewrite, SCIM/SSO status, SIEM export, dry-run of *unsaved* policy, bulk actions, CSV export | ADR-0012 §4. Note: **CSV export shipped** for costs/usage-events (migration 0028 slice); the audit-log CSV/SIEM path did not. SCIM/SSO have **no backend at all** — grep finds zero `SCIM`/`SAML`/`SIEM` references in `apps/gateway/src/`, only in the specs. | `apps/gateway/src/admin-portal.ts` (1321 lines — **the serialization chokepoint**) | Varies | see below |
+| Admin portal **ADR-0012 deferrals**: SPA rewrite, SCIM/SSO status, SIEM export, dry-run of *unsaved* policy, bulk actions, CSV export | ADR-0012 §4. Note: **CSV export shipped** for costs/usage-events (migration 0028 slice); the audit-log CSV/SIEM path did not. SCIM/SSO have **no backend at all** — grep finds zero `SCIM`/`SAML`/`SIEM` references in `apps/gateway/src/`, only in the specs. | `apps/gateway/src/admin-portal.ts` (1603 lines — **the serialization chokepoint**) | Varies | see below |
 | Compliance: `mcpDefaultMode` still labeled `declared-not-enforced` (`apps/gateway/src/projects.ts:1591`) | Compliance-cascade addendum. **Check after the in-flight batch** — the MCP-proxy PII/attribution work may close this. | `apps/gateway/src/projects.ts` | No | S |
-| ADR-0015 **A4** (per-mode policy + mode-aware audit retention) | ADR-0015 addendum, design recorded | `apps/gateway/src/deploy.ts`, schema | **Yes** | S |
+| ADR-0015 **A4** (per-mode policy + mode-aware audit retention) | ADR-0015 addendum; sharpest record now in ADR-0019 ("A4 stays deferred") — see Batch C for the (a)/(b)/(c) decomposition; only (a)+(b) belong in this batch | `apps/gateway/src/deploy.ts`, schema | **Yes** | S |
 
 | | |
 |---|---|
-| **Risk / deps** | Low per item. **The dependency that matters:** several items touch `packages/db/src/schema.ts` and `apps/gateway/src/admin-portal.ts`. Those must be **serialized** (see §4). Each migration must own a distinct number — next free is **0036**. |
+| **Risk / deps** | Low per item. **The dependency that matters:** several items touch `packages/db/src/schema.ts` and `apps/gateway/src/admin-portal.ts`. Those must be **serialized** (see §4). Each migration must own a distinct number — highest applied is **0037**, next free is **0038**, and **0038 is being claimed by the org-settings batch in flight** — check the directory AND `packages/db/migrations/meta/_journal.json` before taking a number. |
 | **Worth doing?** | **This is the best value-per-risk in the roadmap.** Every item is small, well-understood, in a surface that already has tests, and closes a documented promise. The compaction dials and the `agents.systemPrompt` column in particular remove "we hardcoded it" caveats from two pillar-6 techniques. **Recommend doing a selected subset of this first.** The SPA rewrite is the exception — see §5. |
 
 ---
@@ -189,9 +194,9 @@ multi-session, or gated on an external decision.
 |---|---|---|
 | **Re-enable CI** | `.github/workflows/ci.yml` is `workflow_dispatch:`-only because the account's GitHub Actions minutes are exhausted (addendum 32). The `pull_request:` / `push: branches: [main]` triggers are kept **commented immediately below** for a one-line revert. Do this the moment minutes are topped up. | XS |
 | **While CI is paused, the ONLY gate is a clean `pnpm -r build` on the MERGED state** | This is the hard-won lesson and it deserves to be loud. `pnpm -r test` does **not** catch type errors in test files, but the Docker image build runs `pnpm -r build`, which type-checks them (each package tsconfig is `include: ["src"]`). **This actually happened** — merged `main` did not build in Docker, discovered only during a redeploy (addendum 32, PR #38). Two test files had shipped through merges with type errors. **Every merge must be followed by `pnpm -r build` + `node scripts/check-ui-syntax.mjs` on the merged tree, not just on the branch.** | — |
-| **STATE.md Epics/Components tables are stale** | EPIC-02..06 all still read "in progress" with slice-1-era descriptions, though their MVPs shipped and (for EPIC-06) the deferral list is empty. Worse, the **Components** table says `COMPONENT-06 Policy/allow-list engine — not started` and `COMPONENT-07 Workflow orchestrator — not started`, both of which are flatly wrong; `COMPONENT-07` is also **duplicated** (dev demo stack and workflow orchestrator share the ID). The Decisions section says "All nine ADRs (0001–0009) are Accepted" — there are 18. Front-matter `last_session` points at `2026-07-24-session-02.md` while addenda run to 2026-07-30. *(Recommendation only — this roadmap does not edit STATE.md.)* | S |
-| **The graphify knowledge graph does not exist** | `CLAUDE.md` instructs every session to run `graphify query` first "when `graphify-out/graph.json` exists" and to use `graphify-out/wiki/index.md` for navigation. **`graphify-out/` is not present in the repo at all.** So the instruction is currently a no-op that costs a session a wasted check. Either run `graphify update . --code-only` to create it (**never** against `docs/product/` — ADR-0005 security constraint: prose files trigger a semantic-extraction pass that auto-sends content to whichever LLM API key is in the environment) **or** soften the `CLAUDE.md` wording. *(Recommendation only.)* | S |
-| **AWS follow-ups from STATE.md** | (a) Security Hub enabled CIS v1.2.0 alongside FSBP by default — disable the CIS subscription if its findings become noise. (b) The Config aggregator in `infra/modules/aws-security-baseline` assumes `us-east-1` only — revisit if resources land in `us-east-2`. (c) Forecast spend was ~$1.21/mo (mostly two KMS CMKs) against the $5 cap — but the dev app stack is ~$15–30/mo and **will** trip that alert; expected, per ADR-0013. Worth a glance. | S |
+| **STATE.md Epics/Components tables are stale** | **DONE — already fixed.** The Epics/Components tables now carry shipped statuses, the COMPONENT-07 duplication is resolved (workflow orchestrator re-IDed COMPONENT-10), and the Decisions section defers to `docs/decisions/README.md` as the authority on ADR count instead of restating a number. The front-matter `last_session` / addenda-date mismatch is documented in STATE.md itself as accurate (no newer session file exists). Kept here only so a reader of an old copy knows it closed. | — |
+| **The graphify knowledge graph does not exist** | **DONE — CLAUDE.md wording softened** (housekeeping batch): it now says the graph is locally generated, absent in fresh clones (`graphify-out/` is `.gitignore`'d by design), and regenerable via `graphify update . --code-only`; the ADR-0005 `--code-only` security constraint stands unchanged. | — |
+| **AWS follow-ups from STATE.md** | **Terraform AUTHORED (housekeeping batch), deliberately NOT applied.** (a) CIS v1.2.0 Security Hub subscription is now an explicitly managed, variable-gated resource (`enable_cis_standard`) in both accounts — flipping it off needs a one-time `terraform import` (documented in the module) since the auto-enabled subscriptions were never in state. (b) The Config aggregate authorization now covers all `allowed_regions` (for_each + `moved` block); the deeper gap — recorders exist only in `us-east-1`, so `us-east-2` resources go unrecorded — is a documented TODO until anything lands there. (c) Budget gained a FORECASTED 100% notification; the $5 cap tripping on the ~$15–30/mo dev stack is expected (ADR-0013), and raising it re-opens OQ-002 — owner's call. `terraform validate` passes; apply is a separate, credentialed step. | S |
 
 | | |
 |---|---|
@@ -230,14 +235,30 @@ multi-session, or gated on an external decision.
 
 ---
 
-### Batch H — IDE / existing-agent interception (**a gap in the product thesis, not just the backlog**)
+### Batch H — IDE / existing-agent interception — **SHIPPED 2026-07-30**
 
-> Raised by the owner, 2026-07-30: *"most developers will be using AI agents directly on existing
-> coding platforms like VS Code, Eclipse etc — can our tool latch onto those?"* This is the
-> largest single hole found so far, and it is a **scope** hole rather than a defect: every spec in
-> `docs/product/` describes governing agents that come **to** our gateway. A developer running
-> Copilot or Cursor never touches it, so the governance is invisible to precisely the population
-> it exists to cover.
+> **Status: SHIPPED** (migration 0037, ADR-0020; `apps/gateway/src/compat-anthropic.ts` /
+> `compat-openai.ts` / `compat-core.ts`; a 46-test `ide-interception.test.ts` suite; amended
+> same day by `fdfeff1` — `temperature` is **accepted-and-disclosed** via
+> `x-regulait-ignored-fields` + an audit row instead of 400ing, per ADR-0020 §5, because real
+> IDE clients send it unconditionally). What shipped: `POST /v1/messages` (Anthropic shape) and
+> `POST /v1/chat/completions` (OpenAI shape) as translation shims over the one
+> `executeGovernedDispatch` core, with real SSE; the singleton `interception_settings` row
+> making every surface an admin choice (compat surfaces default **off**, disabled = 404 not
+> 501); the three-mode model→agent resolution policy below; a declared `enforcement_posture`;
+> `require_project_attribution`; and the admin "Client Access" tab with per-client config
+> generation and an honest coverage table. Invariant proven in tests: the compat surface creates
+> **no privilege path** — unentitled 403s, revocations deny through it, and an unresolvable
+> model is default-deny with zero usage rows. The rest of this section is kept as the **record
+> of the design that shipped** and of the follow-ons that did not (OTel observe rung, per-role/
+> project resolution overrides, key-custody/network rungs, the compat long tail — see §6).
+>
+> Originally raised by the owner, 2026-07-30: *"most developers will be using AI agents directly
+> on existing coding platforms like VS Code, Eclipse etc — can our tool latch onto those?"* This
+> was the largest single hole found so far, and it was a **scope** hole rather than a defect:
+> every spec in `docs/product/` describes governing agents that come **to** our gateway. A
+> developer running Copilot or Cursor never touched it, so the governance was invisible to
+> precisely the population it exists to cover.
 
 **The honest framing.** RegulAIt today governs *calls that arrive at it*. Nothing enforces that a
 developer's IDE sends its calls here. Until that is closed, "default-deny governance over every
@@ -299,14 +320,14 @@ silent pass-through to the vendor. That is the whole point of the batch.
 | | |
 |---|---|
 | **Goal** | An IDE-based agent (Cursor, Cline, Continue, Zed, Claude Code…) becomes a governed client of RegulAIt for **both** tool calls and model calls. |
-| **Work items** | (1) `POST /v1/messages` — Anthropic-shaped shim over `executeGovernedDispatch`, incl. SSE streaming and content-block/tool_use round-tripping. (2) `POST /v1/chat/completions` — OpenAI-shaped shim over the same core. (3) The three-mode resolution policy above + admin UI. (4) An admin "Connect your IDE" surface emitting per-tool copy-paste config (base URL, key, MCP entry). (5) Docs for the MCP path that already works. (6) OTel ingestion (optional, observe-rung). |
-| **Files** | new `apps/gateway/src/compat-*.ts`; `agents-connectors.ts` (reuse only); `schema.ts` + migration (resolution-mode setting); `admin-portal.ts` (new tab); `shared/src/index.ts` |
-| **Migration?** | Yes — one, for the resolution-mode policy |
-| **Size** | **L** for the full batch; **M** for the `/v1/messages` shim alone, which is where nearly all the coverage is |
-| **Risk / deps** | The compatibility surface has a **long tail** — thinking blocks, tool_use round-trips, prompt caching headers, streaming event shapes, `anthropic-version` negotiation. Aim for a documented, tested subset that fails loudly on the unsupported rest, exactly as the provider registries do; do **not** silently drop fields. |
+| **Work items** | **(1)–(5) SHIPPED**: (1) `POST /v1/messages` — Anthropic-shaped shim over `executeGovernedDispatch`, incl. SSE streaming and content-block/tool_use round-tripping. (2) `POST /v1/chat/completions` — OpenAI-shaped shim over the same core. (3) The three-mode resolution policy above + admin UI. (4) The admin "Client Access" tab emitting per-tool copy-paste config (base URL, key, MCP entry). (5) `docs/product/IDE_INTEGRATION.md` for the MCP path that already worked. **(6) NOT shipped**: OTel ingestion (observe-rung) — now homed in §6. |
+| **Files** | `apps/gateway/src/compat-anthropic.ts`, `compat-openai.ts`, `compat-core.ts` (+ `ide-interception.test.ts`, 46 tests); `agents-connectors.ts` (reuse only); `schema.ts` + migration 0037 (`interception_settings`); `admin-portal.ts` (Client Access tab); `shared/src/index.ts` |
+| **Migration?** | **Done** — 0037 |
+| **Size** | Was **L**; landed in one batch plus the `fdfeff1` temperature amendment |
+| **Risk / deps** | The compatibility surface has a **long tail** — `tool_choice`, thinking blocks, structured outputs, prompt caching headers, `anthropic-version` negotiation. The shipped subset fails loudly (400 naming the field) on the unsupported rest, exactly as the provider registries do — with one deliberate exception: `temperature` is accepted-and-disclosed (ADR-0020 §5, `fdfeff1`) because rejecting it broke real clients. The remaining long tail is homed in §6. |
 | **Coverage caveat — state this honestly, do not oversell** | Base-URL override is cleanly supported by Continue, Cline, Roo, Zed and Claude Code (`ANTHROPIC_BASE_URL`); Cursor takes an OpenAI-compatible endpoint. **GitHub Copilot is largely locked down** and would need its enterprise proxy path or nothing. **Eclipse** has no first-party AI agent of note — its ecosystem is third-party plugins, each with its own (often absent) configurability. "Works with every IDE" would be a false claim. |
-| **Worth doing?** | **Yes — this is the highest-leverage unbuilt item in the roadmap**, ahead of every provider-breadth batch. Breadth batches add vendors to a surface developers may never touch; this batch puts the surface where the developers already are. It also makes the *existing* pillars pay off retroactively: every completion it intercepts is instantly attributed (5), optimized (6), PII-checked (3) and audited (1) with no further work. |
-| **Doc debt it creates** | `CLAUDE.md` and `VISION.md` promise governance over "every agent/model, connector, and MCP-server-tool call" — written on the assumption that calls arrive at our gateway. If this batch is adopted, that claim needs restating as an explicit **interception** story, and this becomes a pillar-level concern rather than a feature. Flagged, not edited. |
+| **Worth doing?** | **Done — it was the highest-leverage unbuilt item in the roadmap and it shipped the day it was raised.** The reasoning stands as the record of why it jumped the queue: breadth batches add vendors to a surface developers may never touch; this batch put the surface where the developers already are, and it makes the *existing* pillars pay off retroactively — every completion it intercepts is instantly attributed (5), optimized (6), PII-checked (3) and audited (1) with no further work. |
+| **Doc debt it creates** | `CLAUDE.md` and `VISION.md` promise governance over "every agent/model, connector, and MCP-server-tool call" — written on the assumption that calls arrive at our gateway. Now that this batch has shipped, that claim needs restating as an explicit **interception** story, and this becomes a pillar-level concern rather than a feature. **Still flagged, still not edited — owner's text.** |
 
 ---
 
@@ -315,16 +336,17 @@ silent pass-through to the vendor. That is the whole point of the batch.
 ### Order
 
 ```
-  (in flight: governance-gaps batch — revocation, MCP attribution+PII, streaming suppression, data_sensitivity)
+  (MERGED: governance-gaps batch — revocation, MCP attribution+PII, streaming suppression,
+   data_sensitivity — PR #44, migration 0036, ADR-0019)
         │
    1.  BATCH E (hygiene)          ── do first, it is cheap and it protects everything after
         │                            └─ CI revert the moment minutes exist; STATE.md accuracy pass
    2.  BATCH G (Anthropic key)    ── the moment the owner has it; zero engineering, maximum demo delta
         │
-   3.  BATCH H (IDE interception) ── PROMOTED 2026-07-30. The /v1/messages shim alone (M) buys
-        │                            more real-world coverage than every breadth batch combined,
-        │                            because it puts the gateway where developers already work.
-        │                            Ship the MCP docs first — that half already works, free.
+   3.  BATCH H (IDE interception) ── SHIPPED 2026-07-30 (migration 0037, ADR-0020 + fdfeff1).
+        │                            Promoted and landed the same day it was raised; follow-ons
+        │                            (OTel rung, per-role/project overrides, compat long tail,
+        │                            key-custody/network rungs) are homed in §6.
         │
    4.  BATCH D (depth & polish)   ── best value/risk; pick a subset, see the serialization rules
         │
@@ -358,10 +380,10 @@ ours to schedule.
 
 | Shared file | Who touches it |
 |---|---|
-| `packages/db/src/schema.ts` + `packages/db/migrations/` | compaction dials, `agents.systemPrompt`, ADR-0015 A4, any connector-credential reshape |
-| `apps/gateway/src/admin-portal.ts` (1321 lines) | every admin-UI item across D and A |
-| `apps/gateway/src/app-ui.ts` (2605 lines) | every end-user-UI item |
-| `apps/gateway/src/orchestration.ts` (1976 lines) | worker-node streaming, any pillar-7 work |
+| `packages/db/src/schema.ts` + `packages/db/migrations/` **incl. `meta/_journal.json`** | compaction dials, `agents.systemPrompt`, ADR-0015 A4, any connector-credential reshape |
+| `apps/gateway/src/admin-portal.ts` (1603 lines) | every admin-UI item across D and A |
+| `apps/gateway/src/app-ui.ts` (2628 lines) | every end-user-UI item |
+| `apps/gateway/src/orchestration.ts` (2002 lines) | worker-node streaming, any pillar-7 work |
 
 **The lesson, stated plainly:** builds that share `schema.ts`, a migration, or either single-file
 UI **must be serialized**. Two agents editing a 2600-line template-literal UI file produce
@@ -369,11 +391,16 @@ merge conflicts that are painful to resolve and that `tsc` will not catch (the i
 those files is a string as far as the compiler is concerned — which is exactly why
 `scripts/check-ui-syntax.mjs` exists; run it).
 
-**And: each migration must own a distinct number.** The highest applied is **0035**
-(`0035_assignment_rule_dims.sql`). The in-flight governance batch is expected to claim **0036**
-for `data_sensitivity`. Any batch scheduled after it must **check the directory first**, not
-assume. Two parallel branches both writing `0036_*.sql` is a silent, ugly failure — the second
-one to merge never runs.
+**And: each migration must own a distinct number.** The highest applied is **0037**
+(`0037_interception_settings.sql`); the next free is **0038**, and **0038 is being claimed by
+the org-settings batch in flight** — any batch scheduled after it must **check the directory
+first**, not assume. Two parallel branches both writing the same `00NN_*.sql` is a silent, ugly
+failure — the second one to merge never runs. **And the directory is not even the real
+chokepoint: `packages/db/migrations/meta/_journal.json` is.** Drizzle's `migrate()` reads the
+journal, not the directory — so two branches with perfectly distinct filenames still conflict in
+the journal's entries array, and a bad journal merge (dropped or mis-ordered entry) makes
+`migrate()` silently skip a migration with no error at all. Treat `_journal.json` as a
+serialized, merge-with-eyes-open file exactly like `schema.ts`.
 
 **Branch discipline** (adopted in session 02): branch-per-PR, so the mobile app's PR chip
 tracks the current PR rather than an old merged one.
@@ -415,7 +442,7 @@ in this roadmap. **A Claude session cannot start this on its own; it needs the o
 **3. SPA rewrite, or keep the single-file portal?**
 ADR-0012 deliberately chose one dependency-free HTML+JS file with zero toolchain — an explicit
 supply-chain argument in a governance product ("no React/Vite dependency tree to govern"). That
-file is now 1321 lines and is the #1 serialization chokepoint in §4. *Keep:* zero deps, zero
+file is now 1603 lines and is the #1 serialization chokepoint in §4. *Keep:* zero deps, zero
 build step, the ADR's reasoning still holds, and the recent `dataTable()`/`UI_TABLE_JS`
 refactor bought real runway. *Rewrite:* unblocks parallel UI work and the deferred SCIM/SIEM/
 bulk-action surfaces. **My read, offered as a read and not a decision: keep it for now.** The
@@ -439,3 +466,31 @@ governance product should not let an admin configure something that cannot work.
 This roadmap is assembled from what the repo and STATE.md say is unfinished. It contains no
 *new* product ideas. If the direction is now "make one pillar excellent" rather than "even out
 all eight", the batch structure above is the wrong shape and should be rebuilt around that.
+
+---
+
+## 6. Orphaned deferred items — batch-homed so they are never lost
+
+*(Added 2026-07-30 by the doc-reconciliation review.)* These sixteen deferrals are each recorded
+somewhere — an ADR consequences section, a STATE.md addendum, a spec — but before this section
+none of them had a home in any batch above, which is exactly how deferrals die. One line each;
+the cited source holds the detail. This is an index, not a commitment to build any of them.
+
+| # | Item | Where it was deferred | Batch home |
+|---|---|---|---|
+| 1 | Reapply-on-reclassification — re-running the compliance cascade over in-flight workflow instances when a project's tag changes (today: diff covers policy only, in-flight instances keep merged definitions) | compliance-cascade addendum (STATE.md) | **D** |
+| 2 | Per-framework cost policies — compliance frameworks driving cost/budget defaults, not just workflow/scope/retention/PII | compliance-cascade addendum (STATE.md) | **D** |
+| 3 | SCIM team sync (and SSO status surface — no backend at all today, grep finds zero references) | ADR-0012 §4; Shared-Projects addendum | **D** (admin-portal serial) |
+| 4 | Rule *exemptions* object — cross-scope override for scoped policy rules, rejected in v1 because it widens | rule-scoping slice (migration 0026, STATE.md) | **D** |
+| 5 | Backup **scheduler** — `backup_runs` ledger exists, nothing actually schedules runs | ADR-0017 | **C** |
+| 6 | Cert-rotation **lifecycle** — rotation verbs exist; no expiry-driven auto-proposal loop | ADR-0017 | **C** |
+| 7 | PM drift auto-resolution — drift is detected + surfaced, resolution is manual | pillar-8 slices (STATE.md) | **D** |
+| 8 | PM budget-approval mirroring — budget escalations don't mirror into the PM tool as linked records | pillar-8 slices (STATE.md) | **D** |
+| 9 | Partial revocations — revocations are total; "read-only from now on" means editing the grant | ADR-0019 consequences | **D** |
+| 10 | Per-tool MCP pricing — price is flat per call on the *server*; an additive per-tool column when a customer needs it | ADR-0019 consequences | **D** |
+| 11 | Docs honesty: unattributed MCP calls are unmetered/unenforced, so pillar 5's claim is precisely "every *attributed* gateway call" — the docs should say so | ADR-0019 consequences | **E** |
+| 12 | OTel ingestion (the interception ladder's *observe* rung) | Batch H work item (6), unshipped | **H follow-on** |
+| 13 | Per-role/per-project interception-setting overrides (resolution mode etc., mirroring migration-0026 scoping) | ADR-0020 (named plausible, deferred) | **H follow-on** |
+| 14 | Compat long tail — `tool_choice`, thinking blocks, structured outputs (today: loud 400s; `temperature` alone is accept-and-disclose) | ADR-0020 §5 | **H follow-on** |
+| 15 | `key_custody` + `network` enforcement rungs — today *declared* postures driving UI warnings, not enforced mechanisms | ADR-0020 / Batch H ladder | **H follow-on** (network fits Batch C/BYOC) |
+| 16 | Deeper a11y — beyond the shipped contrast/focus/aria-live pass (full keyboard-nav audit, screen-reader flows) | UX/a11y pass (STATE.md addendum 33) | **D** |

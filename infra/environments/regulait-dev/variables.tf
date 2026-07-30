@@ -44,6 +44,12 @@ variable "budget_notification_emails" {
   type = list(string)
 }
 
+variable "enable_cis_standard" {
+  description = "Set false to unsubscribe the AWS-auto-enabled CIS v1.2.0 Security Hub standard (noise suppression). One-time terraform import required first — see infra/modules/aws-security-baseline/main.tf."
+  type        = bool
+  default     = true
+}
+
 variable "user_principal_id" {
   description = "Identity Center user ID (aws identitystore list-users) to assign all three permission sets to."
   type        = string
