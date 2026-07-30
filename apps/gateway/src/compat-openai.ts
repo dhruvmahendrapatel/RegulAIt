@@ -322,9 +322,10 @@ export function registerOpenAiCompat(app: FastifyInstance, db: Db, opts: { dataK
     let body: z.infer<typeof openaiRequestSchema>;
     let translated: OpenAiTranslation;
     let tools: ModelToolDef[] | undefined;
+    let ignoredFields: string[] = [];
     try {
       const raw = (req.body ?? {}) as Record<string, unknown>;
-      rejectUnsupportedFields(raw, OPENAI_SUPPORTED_FIELDS, "OpenAI");
+      ignoredFields = rejectUnsupportedFields(raw, OPENAI_SUPPORTED_FIELDS, "OpenAI");
       body = openaiRequestSchema.parse(raw);
       translated = toModelMessages(body.messages);
       tools = toTools(body.tools);
@@ -352,6 +353,7 @@ export function registerOpenAiCompat(app: FastifyInstance, db: Db, opts: { dataK
       requestedModel: body.model,
       stream: body.stream === true,
       text: flatText,
+      ignoredFields,
     });
     if (!prep.ok) {
       return reply.status(prep.status).send(openaiError(prep.status, prep.error, prep.detail));

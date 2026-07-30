@@ -271,19 +271,36 @@ not a model-endpoint one.
 ## Supported request fields, and what fails loudly
 
 RegulAIt **will not silently drop a field that changes what the model does** — a dropped
-`temperature` or `tool_choice` would alter the completion without the caller ever learning. Any
-field outside the supported subset is a **400 naming the field**, in the provider's own error
-envelope.
+`tool_choice` or `thinking` would alter the completion without the caller ever learning. Fields fall
+into three tiers:
+
+| Tier | Behaviour |
+|---|---|
+| **Supported** | honoured normally |
+| **Accepted but not honoured** | request succeeds; the field is reported back in the `x-regulait-ignored-fields` response header **and** recorded on the audit row |
+| **Rejected** | **400 naming the field**, in the provider's own error envelope |
+
+The middle tier is deliberately narrow. A field qualifies only when ignoring it cannot change
+whether an output is safe, governed, priced or attributed. Today it contains exactly one entry:
+
+- **`temperature`** — IDE clients (Cursor, Continue, Cline) send it on every request from a settings
+  default the developer never consciously chose, so a 400 bounced the whole call over a field nobody
+  meaningfully asked for. Rejecting it protected nothing and blocked the interception this feature
+  exists to enable. It nudges sampling; it cannot make an ungoverned action possible.
+
+`tool_choice` and `thinking` stay rejected precisely because they change what the model is *able to
+do*, not merely how it samples.
 
 **`POST /v1/messages`**
 
 - Supported: `model`, `messages`, `system`, `max_tokens`, `stream`, `tools`; content blocks `text`,
   `image` (base64), `document` (base64), `tool_use`, `tool_result`. A `cache_control` marker on a
   **system** block maps onto pillar-6 prompt caching.
-- Rejected: `temperature`, `top_p`, `top_k`, `stop_sequences`, `metadata`, `tool_choice`,
-  `thinking`, `service_tier`, `container`, `mcp_servers`, any other unknown top-level key; block
-  types other than the five above; non-base64 image/document sources; per-message `cache_control`;
-  non-`custom` tool types; roles other than `user`/`assistant`.
+- Accepted but not honoured: `temperature`.
+- Rejected: `top_p`, `top_k`, `stop_sequences`, `metadata`, `tool_choice`, `thinking`,
+  `service_tier`, `container`, `mcp_servers`, any other unknown top-level key; block types other
+  than the five above; non-base64 image/document sources; per-message `cache_control`; non-`custom`
+  tool types; roles other than `user`/`assistant`.
 - `anthropic-version` and similar protocol headers are accepted and ignored.
 
 **`POST /v1/chat/completions`**
@@ -291,13 +308,16 @@ envelope.
 - Supported: `model`, `messages`, `stream`, `tools`, `max_tokens`, `max_completion_tokens`; roles
   `system`/`developer` (hoisted into the dispatch's system field), `user`, `assistant` (with
   `tool_calls`), `tool`; user content parts `text` and `image_url` with a base64 `data:` URI.
-- Rejected: `temperature`, `top_p`, `n`, `stop`, `presence_penalty`, `frequency_penalty`,
-  `logit_bias`, `logprobs`, `seed`, `response_format`, `tool_choice`, `parallel_tool_calls`,
-  `stream_options`, `reasoning_effort`, `store`, `metadata`, `user`, any other unknown top-level
-  key; remote image URLs; non-`function` tool types; unknown roles.
+- Accepted but not honoured: `temperature`.
+- Rejected: `top_p`, `n`, `stop`, `presence_penalty`, `frequency_penalty`, `logit_bias`, `logprobs`,
+  `seed`, `response_format`, `tool_choice`, `parallel_tool_calls`, `stream_options`,
+  `reasoning_effort`, `store`, `metadata`, `user`, any other unknown top-level key; remote image
+  URLs; non-`function` tool types; unknown roles.
 
-Many clients send `temperature` unconditionally and will get a 400 until configured not to. That is
-the deliberate trade: a loud failure beats a silently different completion.
+**`top_p`, `top_k` and `stop_sequences` are still a 400.** They are the same *class* of field as
+`temperature` and some clients send them unconditionally too; they were left rejected because only
+`temperature` was observed causing the problem. If a client in your fleet trips over one, widening
+the accept-and-ignore tier is a one-line change — the disclosure machinery already covers it.
 
 ---
 

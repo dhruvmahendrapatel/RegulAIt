@@ -140,10 +140,28 @@ implying universal enforcement.
 
 ### 5. The supported request-field subset is documented, and everything outside it fails loudly
 
-A dropped `temperature` or `tool_choice` would change what the model does without the caller ever
-learning — the opposite of a governance product's job. So an unsupported field is a **400 naming
-the field**, never a silent shrug. `ModelDispatchRequest` is the boundary: a field it cannot carry
-is a field we will not pretend to honour.
+A dropped `tool_choice` would change what the model does without the caller ever learning — the
+opposite of a governance product's job. So an unsupported field is a **400 naming the field**, never
+a silent shrug. `ModelDispatchRequest` is the boundary: a field it cannot carry is a field we will
+not pretend to honour.
+
+**Amended after first deployment — a third tier: accepted but not honoured.** The strict two-tier
+rule had a false positive that mattered. IDE clients send `temperature` on every request from a
+settings default the developer never consciously chose, so a 400 bounced the entire call over a
+field nobody meaningfully asked for — rejecting it protected nothing while blocking the very
+interception this ADR exists to enable. `temperature` is now accepted and ignored.
+
+The honesty requirement did not disappear, it **moved**: an ignored field is reported back on the
+`x-regulait-ignored-fields` response header *and* recorded on the audit row, so "the caller asked
+for this and we did not apply it" stays a fact both the client and an auditor can see. That is the
+distinction that matters — accept-and-**disclose** is not the silent drop this decision forbids.
+
+The tier is deliberately narrow: a field qualifies only when ignoring it cannot change whether an
+output is safe, governed, priced or attributed. `temperature` nudges sampling. `tool_choice` and
+`thinking` change what the model is *able to do*, so they stay a 400. `top_p`/`top_k`/
+`stop_sequences` are arguably the same class as `temperature` and were left rejected only because
+`temperature` alone was observed causing the problem; widening the tier is one line if a real client
+trips over them.
 
 **`POST /v1/messages` (Anthropic shape)**
 
@@ -152,7 +170,8 @@ is a field we will not pretend to honour.
   `tool_use`, `tool_result` (string content or an array of text parts).
 - `system` accepts a string or an array of text blocks; a `cache_control` marker on a system block
   is a **real mapping** onto pillar-6 prompt caching (`cacheSystem`), not a dropped field.
-- Rejected with a 400 naming the field: `temperature`, `top_p`, `top_k`, `stop_sequences`,
+- Accepted but not honoured (disclosed via `x-regulait-ignored-fields` + audit row): `temperature`.
+- Rejected with a 400 naming the field: `top_p`, `top_k`, `stop_sequences`,
   `metadata`, `tool_choice`, `thinking`, `service_tier`, `container`, `mcp_servers` and any other
   unknown top-level key; content blocks of any other type (`thinking`, `redacted_thinking`,
   `server_tool_use`, …); non-`base64` image/document sources (url/file/text); per-message
@@ -168,7 +187,8 @@ is a field we will not pretend to honour.
   `system` field), `user`, `assistant` (including `tool_calls`), `tool` (mapped to a user turn
   carrying one `tool_result` block).
 - Supported user content parts: `text`, and `image_url` when the URL is a base64 `data:` URI.
-- Rejected with a 400 naming the field: `temperature`, `top_p`, `n`, `stop`, `presence_penalty`,
+- Accepted but not honoured (disclosed via `x-regulait-ignored-fields` + audit row): `temperature`.
+- Rejected with a 400 naming the field: `top_p`, `n`, `stop`, `presence_penalty`,
   `frequency_penalty`, `logit_bias`, `logprobs`, `seed`, `response_format`, `tool_choice`,
   `parallel_tool_calls`, `stream_options`, `reasoning_effort`, `store`, `metadata`, `user` and any
   other unknown top-level key; remote (`https://`) image URLs; non-`function` tool types; unknown
@@ -214,9 +234,9 @@ already worked, is now documented and has an admin-facing config generator.
 
 - The compatibility surface has a long tail we deliberately do **not** cover: thinking blocks,
   prompt-caching headers beyond the system mapping, `tool_choice`, sampling parameters, structured
-  outputs. Clients that hard-code `temperature` (many do) will get a 400 until they stop. That is
-  the chosen trade: a loud failure beats a silently different completion. Widening the subset is
-  incremental follow-up work, one field at a time, each with a real mapping.
+  outputs. Widening the subset is incremental follow-up work, one field at a time, each with a real
+  mapping. `temperature` was the first amendment (see §5) — accepted-and-disclosed rather than
+  rejected, because a 400 there blocked real clients without protecting anything.
 - Two more entry points now share the singleton posture row. A misconfigured `resolution_mode`
   affects both surfaces at once; there is no per-role or per-project override yet (ROADMAP notes
   one as plausible, mirroring migration 0026's rule scoping — deferred).

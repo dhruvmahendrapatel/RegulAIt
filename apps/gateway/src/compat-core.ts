@@ -128,9 +128,9 @@ export async function interceptionSurfaceEnabled(db: Db, route: string): Promise
 /**
  * ROADMAP Batch H: "Aim for a documented, tested subset that fails loudly on
  * the unsupported rest … do NOT silently drop fields." A dropped
- * `temperature`/`tool_choice`/`thinking` would change what the model does
- * without the caller ever learning — the opposite of a governance product's
- * job. So an unsupported field is a 400 naming it, never a shrug.
+ * `tool_choice`/`thinking` would change what the model does without the caller
+ * ever learning — the opposite of a governance product's job. So an unsupported
+ * field is a 400 naming it, never a shrug.
  */
 export class CompatFieldError extends Error {
   constructor(
@@ -141,23 +141,58 @@ export class CompatFieldError extends Error {
   }
 }
 
-/** Rejects any key present in `body` that is not in `supported`. */
+/**
+ * Fields we ACCEPT and then do not honour. A deliberate third tier between
+ * "supported" and "400", added because the strict rule had a false positive
+ * that mattered in practice: IDE clients (Cursor, Continue, Cline) send
+ * `temperature` on every request from a settings default the developer never
+ * chose, so a 400 bounced the whole call over a field the caller did not
+ * meaningfully ask for. Rejecting it protected nothing and blocked the
+ * interception this batch exists to enable.
+ *
+ * The honesty requirement does NOT go away, it moves: an ignored field is
+ * recorded on the audit row AND disclosed on the response via
+ * `x-regulait-ignored-fields`, so "we dropped this" stays a fact the caller
+ * and the auditor can both see. That is the difference between accept-and-
+ * disclose and a silent shrug — only the latter is the thing Batch H forbids.
+ *
+ * Deliberately NARROW. A field only belongs here when ignoring it cannot
+ * change whether an output is safe, governed, priced or attributed —
+ * `temperature` nudges sampling; `tool_choice` or `thinking` would change what
+ * the model is *able to do*, so those stay a 400.
+ */
+export const COMPAT_IGNORED_FIELDS = ["temperature"] as const;
+
+/**
+ * Rejects any key present in `body` that is neither supported nor in the
+ * accept-and-ignore tier. Returns the ignored keys that were actually present,
+ * for the caller to thread into the audit row and the disclosure header.
+ */
 export function rejectUnsupportedFields(
   body: Record<string, unknown>,
   supported: readonly string[],
   surface: string,
-): void {
+): string[] {
   const allowed = new Set(supported);
+  const ignorable = new Set<string>(COMPAT_IGNORED_FIELDS);
+  const ignored: string[] = [];
   for (const key of Object.keys(body)) {
     if (allowed.has(key)) continue;
     if (body[key] === undefined || body[key] === null) continue;
+    if (ignorable.has(key)) {
+      ignored.push(key);
+      continue;
+    }
     throw new CompatFieldError(
       key,
       `'${key}' is not supported by the RegulAIt ${surface}-compatible endpoint. ` +
         `RegulAIt governs, prices and audits every dispatch, so it will not silently ignore a ` +
-        `field that changes what the model does. Supported: ${supported.join(", ")}.`,
+        `field that changes what the model does. Supported: ${supported.join(", ")}. ` +
+        `Accepted but not honoured (reported back in x-regulait-ignored-fields): ` +
+        `${COMPAT_IGNORED_FIELDS.join(", ")}.`,
     );
   }
+  return ignored;
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +226,9 @@ export interface CompatPrepared {
   /** ADR-0019: a block-mode PII project never streams */
   streamingSuppressed: boolean;
   useStream: boolean;
+  /** COMPAT_IGNORED_FIELDS actually present on this request — accepted, not
+   * honoured, and disclosed rather than dropped in silence. */
+  ignoredFields: string[];
 }
 
 export type CompatError = { status: number; error: string; detail: string };
@@ -209,7 +247,7 @@ export async function prepareCompatCall(
   db: Db,
   dataKey: string | undefined,
   req: FastifyRequest,
-  args: { requestedModel: string; stream: boolean; text: string },
+  args: { requestedModel: string; stream: boolean; text: string; ignoredFields?: string[] },
 ): Promise<CompatPrepareResult> {
   const userId = req.authCtx.userId;
   if (!userId) {
@@ -438,6 +476,7 @@ export async function prepareCompatCall(
       },
       streamingSuppressed,
       useStream: args.stream && !streamingSuppressed,
+      ignoredFields: args.ignoredFields ?? [],
     },
   };
 }
@@ -506,6 +545,10 @@ export async function executeCompatCall(
       servedAgentId: prepared.served.id,
       stream: !!args.onText,
       ...(prepared.streamingSuppressed ? { streamingSuppressed: true } : {}),
+      // accepted-but-not-honoured fields are a FACT on the audit row, not a
+      // silent drop — an auditor reconstructing this call can see the caller
+      // asked for something we did not apply.
+      ...(prepared.ignoredFields.length ? { ignoredFields: prepared.ignoredFields } : {}),
       ...(prepared.projectId ? { projectId: prepared.projectId } : {}),
       dispatch: outcome.ok
         ? {
@@ -537,6 +580,10 @@ export function disclosureHeaders(reply: FastifyReply, prepared: CompatPrepared)
   reply.header("x-regulait-resolution-mode", r.mode);
   if (prepared.projectId) reply.header("x-regulait-project-id", prepared.projectId);
   if (prepared.streamingSuppressed) reply.header("x-regulait-streaming-suppressed", "true");
+  // the caller sent it, we did not honour it, and we say so — this header is
+  // what keeps accept-and-ignore from being the silent drop Batch H forbids.
+  if (prepared.ignoredFields.length)
+    reply.header("x-regulait-ignored-fields", prepared.ignoredFields.join(","));
 }
 
 /** The same disclosure for a hijacked SSE response, as raw header pairs. */

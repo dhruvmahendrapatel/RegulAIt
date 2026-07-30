@@ -6,6 +6,7 @@ import {
   auditLog,
   costEvents,
   createDb,
+  desc,
   eq,
   interceptionSettings,
   INTERCEPTION_SETTINGS_ID,
@@ -370,12 +371,79 @@ describe("POST /v1/messages — Anthropic-shaped translation shim", () => {
       method: "POST",
       headers: devAuth,
       url: "/v1/messages",
-      payload: anthropicBody("ide-premium", "hi", { temperature: 0.4 }),
+      payload: anthropicBody("ide-premium", "hi", { tool_choice: { type: "any" } }),
     });
     expect(r.statusCode).toBe(400);
     expect(r.json().type).toBe("error");
     expect(r.json().error.type).toBe("invalid_request_error");
-    expect(r.json().error.message).toContain("temperature");
+    expect(r.json().error.message).toContain("tool_choice");
+  });
+
+  // temperature moved from "400" to "accepted, not honoured": IDE clients send
+  // it from a settings default the developer never chose, so rejecting it
+  // bounced the call over a field nobody meaningfully asked for. The honesty
+  // requirement moved rather than disappeared — see the disclosure assertions.
+  it("ACCEPTS temperature instead of 400ing, and does not honour it", async () => {
+    const r = await app.inject({
+      method: "POST",
+      headers: devAuth,
+      url: "/v1/messages",
+      payload: anthropicBody("ide-premium", "hi", { temperature: 0.4 }),
+    });
+    expect(r.statusCode).toBe(200);
+    expect(r.json().type).toBe("message");
+  });
+
+  it("DISCLOSES an ignored temperature on the response header", async () => {
+    const r = await app.inject({
+      method: "POST",
+      headers: devAuth,
+      url: "/v1/messages",
+      payload: anthropicBody("ide-premium", "hi", { temperature: 0.4 }),
+    });
+    expect(r.headers["x-regulait-ignored-fields"]).toBe("temperature");
+  });
+
+  it("omits the ignored-fields header when nothing was dropped", async () => {
+    const r = await app.inject({
+      method: "POST",
+      headers: devAuth,
+      url: "/v1/messages",
+      payload: anthropicBody("ide-premium", "hi"),
+    });
+    expect(r.statusCode).toBe(200);
+    expect(r.headers["x-regulait-ignored-fields"]).toBeUndefined();
+  });
+
+  it("RECORDS the ignored field on the audit row, so a drop is never silent", async () => {
+    await app.inject({
+      method: "POST",
+      headers: devAuth,
+      url: "/v1/messages",
+      payload: anthropicBody("ide-premium", "audit the ignored field", { temperature: 0.9 }),
+    });
+    const rows = await db
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.ruleId, "compat-dispatch"))
+      .orderBy(desc(auditLog.at))
+      .limit(5);
+    const withIgnored = rows.find(
+      (row) => Array.isArray((row.detail as { ignoredFields?: string[] }).ignoredFields),
+    );
+    expect(withIgnored).toBeDefined();
+    expect((withIgnored!.detail as { ignoredFields: string[] }).ignoredFields).toEqual(["temperature"]);
+  });
+
+  it("still 400s a field that would change what the model CAN do", async () => {
+    const r = await app.inject({
+      method: "POST",
+      headers: devAuth,
+      url: "/v1/messages",
+      payload: anthropicBody("ide-premium", "hi", { thinking: { type: "enabled" } }),
+    });
+    expect(r.statusCode).toBe(400);
+    expect(r.json().error.message).toContain("thinking");
   });
 
   it("FAILS LOUDLY on an unsupported content-block type", async () => {
@@ -493,16 +561,28 @@ describe("POST /v1/chat/completions — OpenAI-shaped translation shim", () => {
     expect(r.statusCode).toBe(200);
   });
 
-  it("FAILS LOUDLY on an unsupported field, naming it", async () => {
+  it("ACCEPTS temperature and discloses that it was not honoured", async () => {
     const r = await app.inject({
       method: "POST",
       headers: devAuth,
       url: "/v1/chat/completions",
       payload: openaiBody("ide-premium", "hi", { temperature: 0.2 }),
     });
+    expect(r.statusCode).toBe(200);
+    expect(r.json().object).toBe("chat.completion");
+    expect(r.headers["x-regulait-ignored-fields"]).toBe("temperature");
+  });
+
+  it("FAILS LOUDLY on an unsupported field, naming it", async () => {
+    const r = await app.inject({
+      method: "POST",
+      headers: devAuth,
+      url: "/v1/chat/completions",
+      payload: openaiBody("ide-premium", "hi", { response_format: { type: "json_object" } }),
+    });
     expect(r.statusCode).toBe(400);
     expect(r.json().error.type).toBe("invalid_request_error");
-    expect(r.json().error.message).toContain("temperature");
+    expect(r.json().error.message).toContain("response_format");
   });
 
   it("round-trips assistant tool_calls and a tool result turn", async () => {
