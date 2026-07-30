@@ -22,3 +22,4 @@ superseding a decision means a new ADR plus a status flip on the old one.
 | [0014](0014-role-bundled-agent-connector-grants.md) | Role-bundled agent + connector grants (UNION-MAX, additive; per-user revocation deferred) | Accepted | 2026-07-27 |
 | [0015](0015-byoc-deploy-modes-data-boundary.md) | BYOC deploy targets: hosted/BYOC/air-gapped modes + AWS assume-role adapter + air-gapped control-plane data boundary | Accepted | 2026-07-28 |
 | [0016](0016-transitive-per-node-budget-ceiling.md) | Team-Lead transitive per-node budget ceiling (MIN up the lead chain; delegation only tightens) | Accepted | 2026-07-30 |
+| [0017](0017-infra-ops-automation-ledgers.md) | Infra-ops automation ledgers (cert rotation, CVE patching, backup/restore) behind the one findings surface + one Approvals Queue | Accepted | 2026-07-30 |

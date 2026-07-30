@@ -19,7 +19,7 @@
 
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createDb, runMigrations } from "@regulait/db";
+import { createDb, runMigrations, backupRuns, eq } from "@regulait/db";
 import { buildApp } from "./app.js";
 
 const connectionString =
@@ -584,7 +584,30 @@ await ensureInfraPolicy(runtimeResId, { autoRemediateMaxSeverity: "low", patchCa
 await ensureInfraPolicy(backupResId, { backupRetentionDays: 30, backupSchedule: "daily-0200" });
 // One scan: detects the mix and auto-remediates only what the policy permits.
 // Idempotent — a re-run refreshes detected_at, never duplicates a finding.
+// ADR-0017: the scan also materializes the automation ledgers — cert_inventory
+// (from the two certs), a patch_records CVE (from the control plane), and a
+// 'missed' backup_runs row (from the phi backup target).
 await call("POST", "/v1/infra/scan", {});
+
+// ADR-0017: seed one SUCCESSFUL backup run so the run/restore ledger shows real
+// history alongside the scan-detected 'missed' row. Direct insert (there is no
+// success-run API surface); idempotent by the deterministic size marker.
+{
+  const existing = (await db.select().from(backupRuns).where(eq(backupRuns.resourceId, backupResId)))
+    .filter((r) => r.status === "success");
+  if (existing.length === 0) {
+    const now = Date.now();
+    await db.insert(backupRuns).values({
+      resourceId: backupResId,
+      kind: "backup",
+      status: "success",
+      startedAt: new Date(now - 26 * 3600_000),
+      finishedAt: new Date(now - 26 * 3600_000 + 240_000),
+      sizeBytes: 4_294_967_296,
+      retentionUntil: new Date(now + 2555 * 86_400_000),
+    });
+  }
+}
 
 // --- PM connection (mock provider) ---------------------------------------
 // EPIC-06 against the in-memory MOCK provider: no external service, no real

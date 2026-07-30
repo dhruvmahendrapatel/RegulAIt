@@ -1,10 +1,12 @@
 import { sql } from "drizzle-orm";
 import {
+  bigint,
   integer,
   boolean,
   doublePrecision,
   index,
   jsonb,
+  numeric,
   pgTable,
   text,
   timestamp,
@@ -1126,6 +1128,13 @@ export const infraResources = pgTable("infra_resources", {
   config: jsonb("config").$type<Record<string, unknown>>(),
   /** §8.3 compliance tags — the cascade applies backup/patch floors */
   classifications: jsonb("classifications").$type<string[]>(),
+  /** ADR-0017 — a monitored resource MAY live in a customer-hosted deploy
+   * target; an air_gapped target forces metadata-only remediation records
+   * (the ADR-0015 control-plane data boundary). ON DELETE SET NULL: dropping a
+   * target must never cascade-delete the monitored resource. */
+  deployTargetId: uuid("deploy_target_id").references(() => deployTargets.id, {
+    onDelete: "set null",
+  }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -1166,6 +1175,11 @@ export const infraFindings = pgTable(
     kind: text("kind", { enum: ["drift", "cve", "cert_expiring", "backup_missed"] }).notNull(),
     severity: text("severity", { enum: ["low", "medium", "high", "critical"] }).notNull(),
     detail: jsonb("detail").$type<Record<string, unknown>>().notNull(),
+    /** ADR-0017 — a finding stays the single inert alert surface but now links
+     * to its durable domain ledger row (FK-less soft link: which table + id).
+     * null for drift, which has no ledger. */
+    refTable: text("ref_table"),
+    refId: uuid("ref_id"),
     detectedAt: timestamp("detected_at", { withTimezone: true }).notNull().defaultNow(),
     status: text("status", {
       enum: [
@@ -1189,4 +1203,109 @@ export const infraFindings = pgTable(
       sql`(${t.detail}->>'signature')`,
     ),
   ],
+);
+
+// ---------------------------------------------------------------------------
+// ADR-0017 — infra-ops automation ledgers (pillar 3 §8.2 automation depth).
+// Durable domain records hang off infra_resources and link back to the inert
+// infra_findings alert surface via ref_table/ref_id. Remediation still flows
+// through the ONE Approvals Queue (objectType infra_operation) — these tables
+// record OUTCOMES, they never introduce a second decision path.
+// ---------------------------------------------------------------------------
+
+// Certificate inventory — one row per tracked certificate on a resource. A
+// cert_expiring finding upserts the matching inventory row; a governed rotation
+// advances not_after/last_rotated_at/status.
+export const certInventory = pgTable(
+  "cert_inventory",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    resourceId: uuid("resource_id")
+      .notNull()
+      .references(() => infraResources.id, { onDelete: "cascade" }),
+    commonName: text("common_name").notNull(),
+    issuer: text("issuer"),
+    serial: text("serial"),
+    notAfter: timestamp("not_after", { withTimezone: true }).notNull(),
+    lastRotatedAt: timestamp("last_rotated_at", { withTimezone: true }),
+    // active | rotation_proposed | rotated | expired — text (no DB CHECK), like
+    // infra_findings, so drizzle owns the enum.
+    status: text("status", {
+      enum: ["active", "rotation_proposed", "rotated", "expired"],
+    })
+      .notNull()
+      .default("active"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("cert_inventory_resource_idx").on(t.resourceId)],
+);
+
+// A governed cert rotation OUTCOME. Written inside the /decide txn on approve.
+export const certRotations = pgTable("cert_rotations", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  certId: uuid("cert_id")
+    .notNull()
+    .references(() => certInventory.id, { onDelete: "cascade" }),
+  findingId: uuid("finding_id"),
+  approvalId: uuid("approval_id"),
+  oldSerial: text("old_serial"),
+  newSerial: text("new_serial"),
+  newNotAfter: timestamp("new_not_after", { withTimezone: true }),
+  status: text("status", { enum: ["proposed", "rotated", "failed"] })
+    .notNull()
+    .default("proposed"),
+  rotatedAt: timestamp("rotated_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// CVE patch ledger — one row per (resource, CVE). A cve finding upserts on the
+// UNIQUE(resource_id, cve); a governed patch advances status/patched_at.
+export const patchRecords = pgTable(
+  "patch_records",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    resourceId: uuid("resource_id")
+      .notNull()
+      .references(() => infraResources.id, { onDelete: "cascade" }),
+    findingId: uuid("finding_id"),
+    cve: text("cve").notNull(),
+    package: text("package"),
+    installedVersion: text("installed_version"),
+    fixedVersion: text("fixed_version"),
+    cvss: numeric("cvss"),
+    severity: text("severity", { enum: ["low", "medium", "high", "critical"] }).notNull(),
+    // open | patch_proposed | patched | accepted_risk
+    status: text("status", {
+      enum: ["open", "patch_proposed", "patched", "accepted_risk"],
+    })
+      .notNull()
+      .default("open"),
+    patchedAt: timestamp("patched_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("patch_records_resource_cve_uq").on(t.resourceId, t.cve)],
+);
+
+// Backup / restore run ledger. A backup_missed finding appends a 'missed' row;
+// a governed restore appends a kind='restore' status='restored' row.
+export const backupRuns = pgTable(
+  "backup_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    resourceId: uuid("resource_id")
+      .notNull()
+      .references(() => infraResources.id, { onDelete: "cascade" }),
+    findingId: uuid("finding_id"),
+    kind: text("kind", { enum: ["backup", "restore"] }).notNull().default("backup"),
+    // success | failed | missed | restore_proposed | restored
+    status: text("status", {
+      enum: ["success", "failed", "missed", "restore_proposed", "restored"],
+    }).notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    sizeBytes: bigint("size_bytes", { mode: "number" }),
+    retentionUntil: timestamp("retention_until", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("backup_runs_resource_idx").on(t.resourceId)],
 );

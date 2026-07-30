@@ -57,6 +57,117 @@ export function severityRank(s: InfraSeverity): number {
   return INFRA_SEVERITIES.indexOf(s);
 }
 
+// ---------------------------------------------------------------------------
+// ADR-0017 — the pure detection math. These are the exported, unit-tested
+// functions the mock (and, later, the real cloud adapters) call. Keeping the
+// arithmetic out of the adapters means the ladder is provable in isolation and
+// the mock is a thin, deterministic shell over it.
+// ---------------------------------------------------------------------------
+
+const MS_PER_DAY = 86_400_000;
+
+/** deterministic stable stringify for scalar/array/object values */
+function stableStr(v: unknown): string {
+  return JSON.stringify(v ?? null);
+}
+
+/** Certain keys are security-critical: any drift on one raises the finding to
+ * high regardless of count. Deliberately DISJOINT from the mock's demo keys so
+ * the demo drift ladder (config-baseline=medium, runtime-labels=low) is stable. */
+const CRITICAL_DRIFT_KEYS = new Set(["encryption", "iam", "network_exposure"]);
+
+/** compareDrift — key-diff a declared baseline against the observed config.
+ * Severity by count + criticality: any critical key drifted => high; else
+ * >=3 keys => high, 2 => medium, 1 => low, 0 => low (no drift). */
+export function compareDrift(
+  baseline: Record<string, unknown> | null | undefined,
+  observed: Record<string, unknown> | null | undefined,
+): { drifted: string[]; severity: InfraSeverity } {
+  const b = baseline ?? {};
+  const o = observed ?? {};
+  const keys = new Set([...Object.keys(b), ...Object.keys(o)]);
+  const drifted: string[] = [];
+  for (const k of keys) {
+    if (stableStr(b[k]) !== stableStr(o[k])) drifted.push(k);
+  }
+  drifted.sort();
+  let severity: InfraSeverity;
+  if (drifted.length === 0) severity = "low";
+  else if (drifted.some((k) => CRITICAL_DRIFT_KEYS.has(k))) severity = "high";
+  else if (drifted.length >= 3) severity = "high";
+  else if (drifted.length === 2) severity = "medium";
+  else severity = "low";
+  return { drifted, severity };
+}
+
+/** cvssToSeverity — CVSS v3 band → our severity ladder.
+ * >=9 critical, >=7 high, >=4 medium, else low. */
+export function cvssToSeverity(cvss: number): InfraSeverity {
+  if (cvss >= 9) return "critical";
+  if (cvss >= 7) return "high";
+  if (cvss >= 4) return "medium";
+  return "low";
+}
+
+/** certSeverity — real date math on a cert's not-after.
+ * expired (<=0 days) => critical + shouldRotate; <14 => high; <30 => medium;
+ * else low. shouldRotate is true whenever inside the rotation window. */
+export function certSeverity(
+  notAfter: Date,
+  now: Date,
+  rotationWindowDays: number,
+): { daysUntilExpiry: number; severity: InfraSeverity; shouldRotate: boolean } {
+  const daysUntilExpiry = Math.floor((notAfter.getTime() - now.getTime()) / MS_PER_DAY);
+  let severity: InfraSeverity;
+  if (daysUntilExpiry <= 0) severity = "critical";
+  else if (daysUntilExpiry < 14) severity = "high";
+  else if (daysUntilExpiry < 30) severity = "medium";
+  else severity = "low";
+  const shouldRotate = daysUntilExpiry <= rotationWindowDays;
+  return { daysUntilExpiry, severity, shouldRotate };
+}
+
+/** Parse a backup schedule string ("daily-0200", "weekly", "hourly", …) into a
+ * cadence expressed in days. Unknown/blank defaults to daily. */
+export function scheduleIntervalDays(schedule: string | null | undefined): number {
+  const cadence = String(schedule ?? "daily").toLowerCase().split(/[-_ ]/)[0];
+  switch (cadence) {
+    case "hourly":
+      return 1 / 24;
+    case "weekly":
+      return 7;
+    case "monthly":
+      return 30;
+    case "daily":
+    default:
+      return 1;
+  }
+}
+
+/** evaluateBackupSchedule — is a backup due/missed given the last successful
+ * run? due at >=1 interval since last; missed at >=2 intervals; severity high
+ * at >=3 intervals (or never-backed-up), medium at >=1, else low. retentionUntil
+ * is now + retentionDays (the floor the §8.3 cascade may raise). */
+export function evaluateBackupSchedule(
+  schedule: string | null | undefined,
+  lastBackupAt: Date | null | undefined,
+  now: Date,
+  retentionDays: number,
+): { due: boolean; missed: boolean; severity: InfraSeverity; retentionUntil: Date } {
+  const intervalDays = scheduleIntervalDays(schedule);
+  const daysSince = lastBackupAt
+    ? (now.getTime() - lastBackupAt.getTime()) / MS_PER_DAY
+    : Number.POSITIVE_INFINITY;
+  const due = daysSince >= intervalDays;
+  const missed = daysSince >= intervalDays * 2;
+  let severity: InfraSeverity;
+  if (daysSince >= intervalDays * 3) severity = "high";
+  else if (daysSince >= intervalDays) severity = "medium";
+  else severity = "low";
+  const retentionUntil = new Date(now.getTime() + retentionDays * MS_PER_DAY);
+  return { due, missed, severity, retentionUntil };
+}
+
 /** What the gateway hands `scan`: an already-persisted monitored resource. */
 export interface InfraResourceRef {
   id: string;
@@ -133,49 +244,66 @@ export class MockInfraProvider implements InfraProvider {
 
   async scan(resource: InfraResourceRef): Promise<InfraFindingReport[]> {
     const cfg = resource.config ?? {};
+    const now = new Date();
     switch (resource.kind) {
-      case "control_plane":
+      case "control_plane": {
+        // drift severity via compareDrift (a 2-key diff => medium); cve severity
+        // via cvssToSeverity (7.8 => high). Both derived, never hardcoded.
+        const drift = compareDrift(
+          { log_retention: "30d", tls_min_version: "1.2", region: "us-east-1" },
+          { log_retention: "7d", tls_min_version: "1.0", region: "us-east-1" },
+        );
+        const cvss = 7.8;
         return [
           {
             kind: "drift",
-            severity: "medium",
+            severity: drift.severity,
             signature: "drift:config-baseline",
             detail: {
               signature: "drift:config-baseline",
               summary: "runtime configuration has drifted from the declared baseline",
-              drifted: ["log_retention", "tls_min_version"],
+              drifted: drift.drifted,
             },
           },
           {
             kind: "cve",
-            severity: "high",
+            severity: cvssToSeverity(cvss),
             signature: "cve:CVE-2026-0001",
             detail: {
               signature: "cve:CVE-2026-0001",
               cve: "CVE-2026-0001",
               summary: "a high-severity CVE affects a control-plane dependency",
+              package: "libregul-core",
+              installedVersion: "1.4.1",
+              fixedVersion: "1.4.2",
               fixedIn: "1.4.2",
+              cvss,
             },
           },
         ];
-      case "agent_runtime":
-        // a LOW drift — this is the finding a permissive policy auto-remediates
+      }
+      case "agent_runtime": {
+        // a LOW drift (single-key diff) — the finding a permissive policy auto-remediates
+        const drift = compareDrift({ labels: "declared" }, { labels: "observed" });
         return [
           {
             kind: "drift",
-            severity: "low",
+            severity: drift.severity,
             signature: "drift:runtime-labels",
             detail: {
               signature: "drift:runtime-labels",
               summary: "agent-runtime pod labels drifted from the declared set",
-              drifted: ["labels"],
+              drifted: drift.drifted,
             },
           },
         ];
+      }
       case "cert": {
         const days = Number(cfg.daysUntilExpiry ?? 30);
-        const severity: InfraSeverity =
-          days <= 0 ? "critical" : days < 14 ? "high" : days < 30 ? "medium" : "low";
+        const notAfter = new Date(now.getTime() + days * 86_400_000);
+        const rotationWindowDays = Number(cfg.rotationWindowDays ?? 30);
+        const { severity, daysUntilExpiry } = certSeverity(notAfter, now, rotationWindowDays);
+        const serial = `SER-${Math.abs(days)}-${resource.name}`;
         return [
           {
             kind: "cert_expiring",
@@ -183,18 +311,29 @@ export class MockInfraProvider implements InfraProvider {
             signature: `cert_expiring:${resource.name}`,
             detail: {
               signature: `cert_expiring:${resource.name}`,
-              daysUntilExpiry: days,
+              daysUntilExpiry,
+              commonName: resource.name,
+              issuer: "RegulAIt-CA",
+              serial,
+              notAfter: notAfter.toISOString(),
               summary:
-                days <= 0
+                daysUntilExpiry <= 0
                   ? "certificate has ALREADY EXPIRED — service-affecting"
-                  : `certificate expires in ${days} day(s)`,
+                  : `certificate expires in ${daysUntilExpiry} day(s)`,
             },
           },
         ];
       }
       case "backup_target": {
         const hours = Number(cfg.hoursSinceLastBackup ?? 48);
-        const severity: InfraSeverity = hours >= 72 ? "high" : hours >= 24 ? "medium" : "low";
+        const lastBackupAt = new Date(now.getTime() - hours * 3_600_000);
+        const retentionDays = Number(cfg.retentionDays ?? 30);
+        const { severity, retentionUntil } = evaluateBackupSchedule(
+          String(cfg.backupSchedule ?? "daily"),
+          lastBackupAt,
+          now,
+          retentionDays,
+        );
         return [
           {
             kind: "backup_missed",
@@ -203,6 +342,8 @@ export class MockInfraProvider implements InfraProvider {
             detail: {
               signature: `backup_missed:${resource.name}`,
               hoursSinceLastBackup: hours,
+              lastBackupAt: lastBackupAt.toISOString(),
+              retentionUntil: retentionUntil.toISOString(),
               summary: `no successful backup in ${hours} hour(s)`,
             },
           },
@@ -268,6 +409,16 @@ export function resolveInfraProvider(
     // a silent success (the connector/model-provider discipline). The real
     // adapters will take `_fetchImpl` + the cloud credential here.
     case "aws":
+      // REAL: for a customer-hosted (BYOC) AWS resource, assume the customer's
+      // roleArn via STS AssumeRole (short-lived creds, NEVER a static key — the
+      // same no-static-keys rule as apps/gateway/src/deploy.ts AwsDeployProvider),
+      // then drive scan/remediate (SSM patch, ACM rotate, Backup start-restore)
+      // in the target region. Until built it stays a hard 501 — no live cloud
+      // mutation, no silent success.
+      throw new InfraProviderError(
+        `infra provider kind '${config.kind}' is not implemented yet`,
+        501,
+      );
     case "azure":
     case "gcp":
       throw new InfraProviderError(
