@@ -209,6 +209,14 @@ export interface ChangeDescriptor {
   paths: string[];
   changeType: string;
   environment: string;
+  /** ADR-0018 §4 dim: the target system the change lands on (e.g. a service or
+   * repo). Absent = unconstrained by a rule's targetSystem condition. */
+  targetSystem?: string;
+  /** ADR-0018 §4 dim: the role NAMES the INITIATING user holds — resolved
+   * SERVER-SIDE by the gateway (never client-supplied) and passed in so the
+   * kernel stays subject-free. A rule's initiatorRole matches when it is one of
+   * these. Absent/empty = the user holds no roles. */
+  initiatorRoles?: string[];
 }
 
 export interface AssignmentRule {
@@ -218,6 +226,10 @@ export interface AssignmentRule {
   pathPattern: string | null;
   changeType: string | null;
   environment: string | null;
+  /** ADR-0018 §4 dim: the change's target system this rule requires */
+  targetSystem: string | null;
+  /** ADR-0018 §4 dim: the role the initiating user must hold for this rule */
+  initiatorRole: string | null;
 }
 
 function pathMatches(pattern: string, path: string): boolean {
@@ -250,7 +262,20 @@ export function matchTemplates(
       continue;
     if (rule.changeType !== null && rule.changeType !== change.changeType) continue;
     if (rule.environment !== null && rule.environment !== change.environment) continue;
-    if (rule.pathPattern === null && rule.changeType === null && rule.environment === null)
+    // ADR-0018 §4 dims: target system + initiator role, ANDed like the rest.
+    if (rule.targetSystem !== null && rule.targetSystem !== change.targetSystem) continue;
+    if (
+      rule.initiatorRole !== null &&
+      !(change.initiatorRoles ?? []).includes(rule.initiatorRole)
+    )
+      continue;
+    if (
+      rule.pathPattern === null &&
+      rule.changeType === null &&
+      rule.environment === null &&
+      rule.targetSystem === null &&
+      rule.initiatorRole === null
+    )
       continue; // a rule with no conditions matches nothing rather than everything
     if (!matched.includes(rule.templateId)) matched.push(rule.templateId);
   }

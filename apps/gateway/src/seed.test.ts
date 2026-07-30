@@ -21,6 +21,7 @@ import {
   eq,
   sql,
   users,
+  workflowInstances,
   type Db,
 } from "@regulait/db";
 
@@ -111,5 +112,21 @@ describe("seed script", () => {
       expect(typeof detail.costUsd).toBe("number");
       expect(detail.refusal).toBe(false);
     }
+  });
+
+  it("seeds the deploy-verify pipeline resting at each newer workflow status", async () => {
+    // ADR-0015 / C2: one instance apiece at blocked_on_check, blocked_on_deploy
+    // and rolled_back — the three states the deploy tail introduced.
+    const rows = await scratch.select().from(workflowInstances);
+    const statuses = new Set(rows.map((r) => r.status));
+    for (const want of ["blocked_on_check", "blocked_on_deploy", "rolled_back"]) {
+      expect(statuses.has(want), `expected a seeded instance at ${want}`).toBe(true);
+    }
+    // the rolled_back instance actually recorded a deploy then reversed it
+    const rolled = rows.find((r) => r.status === "rolled_back");
+    expect(rolled).toBeDefined();
+    const ctx = rolled!.context as Record<string, { reverted?: string; deployId?: string }>;
+    expect(ctx["deploy:deploy"]?.deployId).toBeDefined();
+    expect(ctx["rollback:undo"]?.reverted).toBe(ctx["deploy:deploy"]!.deployId);
   });
 });

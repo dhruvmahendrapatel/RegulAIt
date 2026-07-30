@@ -39,3 +39,29 @@ a lead capped at $1 is capped at $1 even if its own node names a looser $50. Abs
 - **Deferred:** letting the decompose LLM lead *suggest* per-node caps (the `ProposalNode` schema);
   a measured (not just estimate) per-node running total; UI surfacing of the per-node cap on the
   run detail.
+
+## Addendum — 2026-07-30 (all three deferrals cleared)
+
+The deferrals cleanup shipped all three items above; none required a migration (everything rides
+the run's JSONB):
+
+- **B1 — measured per-node running total.** `RunBudget` gains `measuredPerNodeUsd:
+  Record<string,number>`. `dispatchRunNode` accumulates each node's OWN provider-measured spend and
+  applies the same first-crossing-escalate pattern used for the run cap, against
+  `computeNodeBudgetCeiling(graph,nodeId)`, under a **distinct** sentinel
+  `__nodebudget_measured__:<node>` and ruleId `node-budget-cap-measured` (escalated to
+  `graph.escalationApproverUserId`). First crossing is allowed-but-escalated; the per-turn pre-gate
+  blocks the next turn/dispatch; the /auto loop stops the pass on the crossing. Deciding the
+  escalation (approve) lifts enforcement for the run; a flat no-cap run is byte-identical (no new
+  approvals).
+
+- **B2 — lead may suggest per-node caps at decompose.** `ProposalNode` + `decompositionPlanSchema`
+  gain an optional `budgetCapUsd`; the planning prompt invites the lead to suggest one; it carries
+  into the submittable graph (the kernel node schema already has `budgetCapUsd`) and is echoed
+  through kernel validation. The New-Run editor gains a per-node "cap $" input. A suggestion can
+  only ever TIGHTEN spend — the caller's per-run budget + transitive ceiling still govern, so a
+  suggested cap grants no new authority.
+
+- **B3 — per-node cap surfaced in the run UI.** The run-view node row renders a `cap $X` chip when
+  a node has a `budgetCapUsd` / a transitive ceiling (reusing the existing badge classes), amber
+  once measured (preferred) or estimated spend approaches the cap. `ui-theme.ts` was not touched.

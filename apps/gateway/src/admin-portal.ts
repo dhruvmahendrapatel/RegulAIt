@@ -903,6 +903,8 @@ const TABS = [
     x.pathPattern ? "path " + x.pathPattern : null,
     x.changeType ? "type " + x.changeType : null,
     x.environment ? "env " + x.environment : null,
+    x.targetSystem ? "target " + x.targetSystem : null,
+    x.initiatorRole ? "role " + x.initiatorRole : null,
   ].filter(Boolean).join(" + ");
   const tplRows = t.templates.map((tpl) => {
     const assigned = r.rules.filter((x) => x.templateId === tpl.id);
@@ -959,12 +961,14 @@ const TABS = [
         {name:"pathPattern",label:"path pattern",req:false,ph:"e.g. src/** (optional)"},
         {name:"changeType",label:"change type",req:false,ph:"e.g. feature (optional)"},
         {name:"environment",label:"environment",req:false,ph:"e.g. production (optional)"},
+        {name:"targetSystem",label:"target system",req:false,ph:"e.g. checkout-svc (optional)"},
+        {name:"initiatorRole",label:"initiator role",req:false,ph:"e.g. release-manager (optional)"},
       ], "Add rule")
     + table(r.rules.map((x) => ({
         id: x.id, template: tplName[x.templateId] ?? x.templateId,
         matches: conds(x), created: x.createdAt,
       })), (row) => "<button class='small danger' data-rdel='" + row.id + "'>delete</button>")
-    + "<p class='dim' style='font-size:12px'>Conditions AND together; set at least one. Every rule that matches a change contributes its template — the merged flow keeps every sign-off. Deleting a rule stops the routing; in-flight instances keep their snapshotted definition.</p></div>"
+    + "<p class='dim' style='font-size:12px'>Conditions AND together; set at least one. Five dims are wired: path, change type, environment, target system, and initiator role (matched against the initiator's SERVER-derived roles — never a client-supplied value). A sixth dim, data-sensitivity, stays deferred (ADR-0018). Every rule that matches a change contributes its template — the merged flow keeps every sign-off. Deleting a rule stops the routing; in-flight instances keep their snapshotted definition.</p></div>"
     + "<h2>Git connections — what git_operation stages execute against</h2><div class='card'>"
     + form("f-git", [
         {name:"name",ph:"e.g. demo-git"},
@@ -1000,6 +1004,34 @@ const TABS = [
   }));
   wire("f-wfrule", (d) => post("/v1/workflows/assignment-rules", d));
   wire("f-git", (d) => post("/v1/git/connections", d));
+}],
+["Deploy Targets", async (el) => {
+  // Pillar 2/3's deploy destinations: the governed targets a deployment /
+  // rollback stage acts on. mock runs everywhere with no credential; aws/azure/
+  // gcp/kubernetes are the BYOC dry-run shapes (A2). A credential, when given,
+  // is AES-256-GCM encrypted at rest and never returned. Admin-only.
+  const d = await get("/v1/deploy/targets").catch(() => ({ targets: [] }));
+  el.innerHTML = "<h2>Deploy targets — where a deployment/rollback stage acts</h2><div class='card'>"
+    + form("f-deploy", [
+        {name:"name",ph:"e.g. prod-us"},
+        {name:"provider",options:["mock","aws","azure","gcp","kubernetes"]},
+        {name:"mode",options:["hosted","byoc","air_gapped"]},
+        {name:"environment",label:"environment",req:false,ph:"e.g. production (optional)"},
+        {name:"baseUrl",label:"base url",req:false,ph:"optional"},
+        {name:"roleArn",label:"role / account",req:false,ph:"aws role arn / azure sub / gcp project"},
+        {name:"region",label:"region / namespace",req:false,ph:"e.g. us-east-1 (optional)"},
+        {name:"credential",label:"credential",type:"password",req:false,ph:"kubeconfig etc. — never shown again"},
+      ], "Add target")
+    + dataTable(d.targets, {
+        actions: (row) => "<button class='small danger' data-tdel='" + esc(row.name) + "'>delete</button>",
+      })
+    + "<p class='dim' style='font-size:12px'>Credentials are AES-256-GCM encrypted at rest and never returned. An aws target needs a role arn (arn:aws:iam::&lt;acct&gt;:role/&lt;name&gt;) and region; azure/gcp reuse the role/account field for their subscription/project; kubernetes needs a kubeconfig credential. aws/azure/gcp/kubernetes run as deterministic dry-run shapes (no live cloud mutation).</p></div>";
+  el.querySelectorAll("[data-tdel]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm("Delete this deploy target? A stage naming it will park at a manual handoff.")) return;
+    try { await del("/v1/deploy/targets/" + encodeURIComponent(b.dataset.tdel)); toast("Target deleted", "ok"); render(); }
+    catch (ex) { toast(ex.message, "err"); }
+  }));
+  wire("f-deploy", (dd) => post("/v1/deploy/targets", dd));
 }],
 ["PM Connections", async (el) => {
   // Pillar 8's admin home: the customer's PM tool stays the source of truth
@@ -1467,7 +1499,7 @@ const NAV = [
   ["Identity & Access", ["Users", "Roles", "Teams"]],
   ["AI Governance", ["Agents", "Model Credentials", "Connectors", "MCP Servers"]],
   ["Policy", ["Rules Engine", "Simulation / Access preview"]],
-  ["Delivery", ["Workflows", "PM Connections"]],
+  ["Delivery", ["Workflows", "Deploy Targets", "PM Connections"]],
   ["Cost", ["Cost & Projects"]],
   ["Operations", ["Infrastructure", "Approvals Queue", "Audit Log"]],
 ];

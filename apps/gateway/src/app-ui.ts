@@ -143,6 +143,37 @@ function budgetGauge(spent, cap, overageApproved, opts) {
   return \`<div class="row"><span class="num">\${fmtUsd(spent)}</span><span class="dim">of \${fmtUsd(cap)}\${periodLabel}</span>\${badge}</div>
     <div class="bar" style="margin-top:8px;position:relative"><i class="\${fill}" style="width:\${pct}%"></i>\${marker}</div>\`;
 }
+// §5.2 (B3): the effective transitive per-node budget ceiling — the MIN of a
+// node's own budgetCapUsd and every lead ancestor's, mirroring the kernel's
+// computeNodeBudgetCeiling. null = no per-node cap (only the run cap applies).
+function effNodeCap(graph, id) {
+  const byId = {};
+  for (const n of graph.nodes) byId[n.id] = n;
+  const start = byId[id];
+  let cap = (start && start.budgetCapUsd != null) ? start.budgetCapUsd : null;
+  const seen = {}; seen[id] = true;
+  let cur = start && start.leadNodeId;
+  while (cur && !seen[cur]) {
+    seen[cur] = true;
+    const lead = byId[cur];
+    if (!lead) break;
+    if (lead.budgetCapUsd != null) cap = (cap === null) ? lead.budgetCapUsd : Math.min(cap, lead.budgetCapUsd);
+    cur = lead.leadNodeId;
+  }
+  return cap;
+}
+// §5.2 (B3): a "cap $X" chip for a node under a per-node ceiling — amber (warn)
+// once measured (preferred) or estimated spend approaches (>=80% of) the cap,
+// info otherwise. Reuses the existing badge classes.
+function nodeCapChip(graph, id, budget) {
+  const cap = effNodeCap(graph, id);
+  if (cap == null) return "";
+  const measured = (budget.measuredPerNodeUsd || {})[id];
+  const est = (budget.perNodeUsd || {})[id];
+  const spend = (measured != null) ? measured : (est != null ? est : 0);
+  const near = spend >= cap * 0.8;
+  return ' <span class="badge ' + (near ? "warn" : "info") + '" title="per-node budget ceiling (transitive MIN up the lead chain) — measured/estimated spend vs cap">cap ' + fmtUsd(cap) + "</span>";
+}
 
 // ---------------------------------------------------------------- shell --
 const PAGES = [
@@ -843,12 +874,15 @@ const nrProposalRowsHtml = () => { const allIds = NR_PROPOSAL.nodes.map((x) => x
     <textarea data-ninstr="\${esc(n.id)}" rows="3" style="width:100%;margin-top:4px" spellcheck="false" title="this node's worker is prompted with exactly this instruction">\${esc(n.instruction)}</textarea></div>
   <div><label class="f">Agent</label>\${nrAgentSel(n.id, n.ownerAgentId)}</div>
   \${nrToolsCtl(n.id, n.toolServers, n.maxTurns)}
+  <div><label class="f">Cap $</label><input type="number" min="0" step="0.01" data-ncap="\${esc(n.id)}" value="\${n.budgetCapUsd != null ? n.budgetCapUsd : ""}" style="width:70px" title="optional per-node budget ceiling (USD) — a suggestion only; your per-run budget still governs and can never be exceeded"></div>
   \${nrLeadCtl(n.id, allIds, n.leadNodeId, n.allowedAgentIds, n.allowedToolRefs)}
   <button class="ghost small" data-ndel="\${esc(n.id)}" title="drop this task from the plan">×</button>
 </div>\`).join(""); };
 // read a node's tool controls out of the DOM
 const nrToolServers = (id) => (($('[data-ntools="' + id + '"]')?.value ?? "").split(",").map((s) => s.trim()).filter(Boolean));
 const nrMaxTurns = (id) => { const v = parseInt($('[data-nturns="' + id + '"]')?.value ?? "", 10); return Number.isFinite(v) && v > 0 ? v : null; };
+// §5.2 (B2): read a node's suggested per-node budget cap out of the DOM
+const nrCap = (id) => { const v = parseFloat($('[data-ncap="' + id + '"]')?.value ?? ""); return Number.isFinite(v) && v > 0 ? v : null; };
 // carry any in-DOM edits back into the proposal before a partial re-render
 function nrSyncProposal() {
   if (!NR_PROPOSAL) return;
@@ -865,6 +899,8 @@ function nrSyncProposal() {
     if (aAgents.length) n.allowedAgentIds = aAgents; else delete n.allowedAgentIds;
     const aTools = nrAllowedTools(n.id);
     if (aTools.length) n.allowedToolRefs = aTools; else delete n.allowedToolRefs;
+    const cap = nrCap(n.id);
+    if (cap) n.budgetCapUsd = cap; else delete n.budgetCapUsd;
   }
 }
 function nrWireProposalRows() {
@@ -920,6 +956,7 @@ function nrGraph() {
           ...(lead ? { leadNodeId: lead } : {}),
           ...(aAgents.length ? { allowedAgentIds: aAgents } : {}),
           ...(aTools.length ? { allowedToolRefs: aTools } : {}),
+          ...(nrCap(n.id) ? { budgetCapUsd: nrCap(n.id) } : {}),
         };
       }),
     };
@@ -1293,7 +1330,7 @@ async function runDetailPage(id) {
       <span class="node-dot \${st}"></span>
       <div class="grow">
         <div>\${esc(n.title)} <span class="faint mono" style="font-size:11px">\${esc(n.id)}</span></div>
-        <div class="dim" style="font-size:12px">\${esc(AGENT_NAMES[state.owners[n.id]] ?? "agent")}\${n.dependsOn?.length ? " · after " + n.dependsOn.join(", ") : ""}\${elapsed ? ' · <span class="num">' + elapsed + "</span>" : ""}\${parallel ? ' <span class="badge info" title="its execution window overlapped another node&#39;s — they ran concurrently">∥ parallel</span>' : ""}</div>
+        <div class="dim" style="font-size:12px">\${esc(AGENT_NAMES[state.owners[n.id]] ?? "agent")}\${n.dependsOn?.length ? " · after " + n.dependsOn.join(", ") : ""}\${elapsed ? ' · <span class="num">' + elapsed + "</span>" : ""}\${nodeCapChip(graph, n.id, budget)}\${parallel ? ' <span class="badge info" title="its execution window overlapped another node&#39;s — they ran concurrently">∥ parallel</span>' : ""}</div>
         \${out ? \`<details style="margin-top:4px"><summary class="faint" style="cursor:pointer;font-size:11.5px">output · \${fmtUsd(out.costUsd)} · \${esc(out.model)}\${out.toolCalls ? ' · <span class="badge info" title="pillar 7: this worker ran a governed tool-using loop — each tool call was re-checked under your entitlements">' + out.turns + ' turn' + (out.turns === 1 ? "" : "s") + ' · ' + out.toolCalls + ' tool call' + (out.toolCalls === 1 ? "" : "s") + '</span>' : ""}\${out.toolApprovalPending ? ' <span class="badge warn" title="the loop paused on a tool approval now pending in the queue">tool approval pending</span>' : ""}</summary><pre style="margin-top:6px">\${esc(out.outputText)}</pre></details>\` : ""}
         \${state.lastError?.[n.id] ? '<div class="err-line">' + esc(state.lastError[n.id]) + "</div>" : ""}
         \${blockedCtl}
@@ -1424,6 +1461,7 @@ async function workflowsPage() {
     <div class="row">
       <div class="grow"><label class="f">Describe the change</label><input id="wf-desc" placeholder="Add rate limiting to the public API" style="width:100%"></div>
       \${typeField}
+      <div><label class="f">Target system</label><input id="wf-target" placeholder="optional" style="width:130px" title="ADR-0018 §4: the target system this change lands on — an assignment rule can route on it"></div>
       <div><label class="f">Bill to</label><select id="wf-project">\${projectOpts}</select></div>
       <div style="align-self:flex-end"><button class="primary" id="wf-new"\${(changeTypes ?? []).length ? "" : " disabled"}>Start workflow</button></div>
     </div>
@@ -1537,6 +1575,7 @@ function wireWorkflows() {
   $("#wf-new")?.addEventListener("click", async () => {
     try {
       const projectId = $("#wf-project").value || undefined;
+      const targetSystem = ($("#wf-target")?.value || "").trim() || undefined;
       const r = await post("/v1/workflows/instances", {
         ...(projectId ? { projectId } : {}),
         change: {
@@ -1544,6 +1583,7 @@ function wireWorkflows() {
           paths: ["src/"],
           changeType: $("#wf-type")?.value || "feature",
           environment: "staging",
+          ...(targetSystem ? { targetSystem } : {}),
         },
       });
       location.hash = "#/workflows/" + r.id;

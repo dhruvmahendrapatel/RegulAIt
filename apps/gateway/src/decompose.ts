@@ -127,9 +127,10 @@ function planningPrompt(roster: AgentRow[], toolServers: ToolServerInfo[]): stri
     ...toolLines,
     "You MAY optionally produce a TWO-LEVEL plan: designate one or more tasks as a LEAD, and have other tasks delegate to it by setting their \"leadId\" to the lead task's id. A lead declares \"allowedAgents\" (a SUBSET of the roster names above) and optionally \"allowedTools\" — a CEILING that every worker under it is bound by. A worker under a lead must be assigned an agent from that lead's allowedAgents. Keep it optional: a flat plan with no leadId is equally valid.",
     "A ceiling can only NARROW — never assign a worker an agent or tool outside its lead's allow-list; the gateway will drop anything over-broad and the plan should not rely on it.",
+    "You MAY optionally suggest a per-task budget cap in US dollars via \"budgetCapUsd\" (a small positive number, e.g. 0.5) for a task you expect to be cheap — it caps THAT task's spend. It is only a suggestion: the caller's own per-run budget still governs, so a cap can never grant more spend than the caller already has. Omit it when you have no reason to cap a task.",
     "Return ONLY a JSON object of exactly this shape, with no prose around it:",
-    '{"name": string, "nodes": [{"id": "kebab-case-slug", "title": string, "instruction": string, "agent": "<roster name>", "dependsOn": ["ids"], "toolServers": ["<server name>"], "maxTurns": number, "leadId": "<lead task id>", "allowedAgents": ["<roster name>"], "allowedTools": ["<tool name>"]}]}',
-    "toolServers, maxTurns, leadId, allowedAgents, and allowedTools are ALL OPTIONAL — omit them for ordinary flat single-turn tasks.",
+    '{"name": string, "nodes": [{"id": "kebab-case-slug", "title": string, "instruction": string, "agent": "<roster name>", "dependsOn": ["ids"], "toolServers": ["<server name>"], "maxTurns": number, "leadId": "<lead task id>", "allowedAgents": ["<roster name>"], "allowedTools": ["<tool name>"], "budgetCapUsd": number}]}',
+    "toolServers, maxTurns, leadId, allowedAgents, allowedTools, and budgetCapUsd are ALL OPTIONAL — omit them for ordinary flat single-turn tasks.",
   ].join("\n");
 }
 
@@ -163,6 +164,10 @@ interface ProposalNode {
   droppedAllowedAgents?: string[];
   /** §5.1: tool NAMES named for the ceiling the caller isn't entitled to */
   droppedAllowedTools?: string[];
+  /** §5.2 (B2): a per-node budget cap in USD the lead suggested for this task —
+   * carried into the submittable graph as the node's budgetCapUsd. A suggestion
+   * only: the run's per-run budget + transitive ceiling still enforce downstream. */
+  budgetCapUsd?: number;
 }
 
 type ParseOutcome =
@@ -248,6 +253,7 @@ function parseProposal(
       ...(allowedToolRefs.length > 0 ? { allowedToolRefs } : {}),
       ...(droppedAllowedAgents.length > 0 ? { droppedAllowedAgents } : {}),
       ...(droppedAllowedTools.length > 0 ? { droppedAllowedTools } : {}),
+      ...(n.budgetCapUsd ? { budgetCapUsd: n.budgetCapUsd } : {}),
       ...(suggested
         ? {}
         : {
@@ -425,6 +431,7 @@ export function registerDecomposeRoutes(
             ...(n.leadNodeId ? { leadNodeId: n.leadNodeId } : {}),
             ...(n.allowedAgentIds ? { allowedAgentIds: n.allowedAgentIds } : {}),
             ...(n.allowedToolRefs ? { allowedToolRefs: n.allowedToolRefs } : {}),
+            ...(n.budgetCapUsd ? { budgetCapUsd: n.budgetCapUsd } : {}),
           })),
         });
         return [];

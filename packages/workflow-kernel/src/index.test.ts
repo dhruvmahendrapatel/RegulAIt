@@ -81,10 +81,10 @@ describe("assignment matching + merge (§4)", () => {
     environment: "production",
   };
   const rules: AssignmentRule[] = [
-    { id: "r1", templateId: "tpl-db", pathPattern: "**.sql", changeType: null, environment: null },
-    { id: "r2", templateId: "tpl-prod", pathPattern: null, changeType: null, environment: "production" },
-    { id: "r3", templateId: "tpl-fe", pathPattern: "frontend/**", changeType: null, environment: null },
-    { id: "r4", templateId: "tpl-any", pathPattern: null, changeType: null, environment: null },
+    { id: "r1", templateId: "tpl-db", pathPattern: "**.sql", changeType: null, environment: null, targetSystem: null, initiatorRole: null },
+    { id: "r2", templateId: "tpl-prod", pathPattern: null, changeType: null, environment: "production", targetSystem: null, initiatorRole: null },
+    { id: "r3", templateId: "tpl-fe", pathPattern: "frontend/**", changeType: null, environment: null, targetSystem: null, initiatorRole: null },
+    { id: "r4", templateId: "tpl-any", pathPattern: null, changeType: null, environment: null, targetSystem: null, initiatorRole: null },
   ];
 
   it("matches on path glob and environment, ANDs conditions, ignores unconditioned rules", () => {
@@ -93,12 +93,47 @@ describe("assignment matching + merge (§4)", () => {
 
   it("path patterns respect segment boundaries for single *", () => {
     const r: AssignmentRule[] = [
-      { id: "x", templateId: "t", pathPattern: "infra/*", changeType: null, environment: null },
+      { id: "x", templateId: "t", pathPattern: "infra/*", changeType: null, environment: null, targetSystem: null, initiatorRole: null },
     ];
     expect(
       matchTemplates({ ...change, paths: ["infra/main.tf"] }, r),
     ).toEqual(["t"]);
     expect(matchTemplates({ ...change, paths: ["infra/modules/x.tf"] }, r)).toEqual([]);
+  });
+
+  // ADR-0018 §4 — the two newly-wired dims: target-system and initiator-role.
+  it("matches on targetSystem and rejects a mismatch (ANDed like the rest)", () => {
+    const r: AssignmentRule[] = [
+      { id: "ts", templateId: "tpl-ts", pathPattern: null, changeType: null, environment: null, targetSystem: "checkout-svc", initiatorRole: null },
+    ];
+    expect(matchTemplates({ ...change, targetSystem: "checkout-svc" }, r)).toEqual(["tpl-ts"]);
+    expect(matchTemplates({ ...change, targetSystem: "billing-svc" }, r)).toEqual([]);
+    // unset on the change → a targetSystem condition can't match
+    expect(matchTemplates(change, r)).toEqual([]);
+  });
+
+  it("an initiator-role-scoped rule fires only for a role holder", () => {
+    const r: AssignmentRule[] = [
+      { id: "ir", templateId: "tpl-ir", pathPattern: null, changeType: null, environment: null, targetSystem: null, initiatorRole: "release-manager" },
+    ];
+    // holder: the server-derived initiatorRoles carries the role
+    expect(matchTemplates({ ...change, initiatorRoles: ["dev", "release-manager"] }, r)).toEqual(["tpl-ir"]);
+    // non-holder: role absent → rule does not fire
+    expect(matchTemplates({ ...change, initiatorRoles: ["dev"] }, r)).toEqual([]);
+    // no roles at all
+    expect(matchTemplates(change, r)).toEqual([]);
+  });
+
+  it("multi-dim AND: every set condition must hold (target-system + initiator-role together)", () => {
+    const r: AssignmentRule[] = [
+      { id: "m", templateId: "tpl-m", pathPattern: null, changeType: "feature", environment: null, targetSystem: "checkout-svc", initiatorRole: "release-manager" },
+    ];
+    const holder = { ...change, changeType: "feature", targetSystem: "checkout-svc", initiatorRoles: ["release-manager"] };
+    expect(matchTemplates(holder, r)).toEqual(["tpl-m"]);
+    // drop any single dim and it stops matching
+    expect(matchTemplates({ ...holder, targetSystem: "other" }, r)).toEqual([]);
+    expect(matchTemplates({ ...holder, initiatorRoles: [] }, r)).toEqual([]);
+    expect(matchTemplates({ ...holder, changeType: "bugfix" }, r)).toEqual([]);
   });
 
   it("merges multiple templates keeping every approval stage, single trigger", () => {
