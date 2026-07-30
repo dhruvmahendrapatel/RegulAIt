@@ -36,6 +36,11 @@ also a narrower claim than it sounds. Precisely:
   single EC2 box, container Postgres, demo data (ADR-0013).
 - It does not mean the **provider-agnostic standing principle** is satisfied. That is the
   headline gap and it gets its own section.
+- **It does not mean the governance reaches the developers it is for.** Every spec here describes
+  governing agents that come *to* our gateway; a developer using Copilot or Cursor never touches
+  it. Raised by the owner 2026-07-30 and written up as **Batch H**, which is a scope gap in the
+  product thesis rather than an item of backlog. Half of it — tool calls over MCP — already works
+  and is simply not marketed.
 
 **In flight right now (on branch `claude/governance-gaps`, another agent):** per-user
 revocation of role-derived agent/connector grants (clears the ADR-0014 deferral); MCP-proxy
@@ -225,6 +230,86 @@ multi-session, or gated on an external decision.
 
 ---
 
+### Batch H — IDE / existing-agent interception (**a gap in the product thesis, not just the backlog**)
+
+> Raised by the owner, 2026-07-30: *"most developers will be using AI agents directly on existing
+> coding platforms like VS Code, Eclipse etc — can our tool latch onto those?"* This is the
+> largest single hole found so far, and it is a **scope** hole rather than a defect: every spec in
+> `docs/product/` describes governing agents that come **to** our gateway. A developer running
+> Copilot or Cursor never touches it, so the governance is invisible to precisely the population
+> it exists to cover.
+
+**The honest framing.** RegulAIt today governs *calls that arrive at it*. Nothing enforces that a
+developer's IDE sends its calls here. Until that is closed, "default-deny governance over every
+agent/model call" is true of our surface and untrue of the developer's day.
+
+**What already works, today, with zero build.** `POST /mcp/:serverId` (`apps/gateway/src/mcp-proxy.ts:455`)
+is a spec-compliant streamable-HTTP MCP proxy with the full kernel behind it — allow-lists,
+data-scope, rate limits, approvals, audit, and (since ADR-0019) project attribution + PII. Any
+MCP-capable client can point at it right now: Claude Code, Cursor, Cline, Windsurf, Zed, VS Code's
+MCP support. That governs **tool calls** — file writes, repo access, DB queries — which is
+arguably the higher-blast-radius half. It is done and it is not being marketed.
+
+**The actual gap.** There is **no provider-shaped endpoint**. The gateway exposes
+`/v1/agents/:agentId/invoke` — our own shape, which no IDE speaks. There is no `/v1/messages`
+(Anthropic shape) and no `/v1/chat/completions` (OpenAI shape), so every **model completion** an
+IDE agent makes goes straight to the vendor, taking with it the spend (pillar 5), the token
+optimization (pillar 6), the PII enforcement, and the audit trail.
+
+The fix is smaller than it sounds: `executeGovernedDispatch` (`apps/gateway/src/agents-connectors.ts:146`)
+is already a reusable core taking `{userId, served agent, input|messages, system, tools, …}` and
+running governance → routing → optimization → dispatch → PII → ledger. A provider-compatible
+endpoint is a **translation shim in front of it**, not a second engine — the same shape that let
+the OpenAI, Google and xAI adapters land with zero gateway changes.
+
+#### The interception ladder — pick a rung deliberately
+
+This determines whether the product is real governance or an honor system.
+
+| Rung | Mechanism | Bypassable? | Cost |
+|---|---|---|---|
+| **Observe** | ingest the OpenTelemetry that Claude Code and others already emit | n/a — no enforcement | S |
+| **Voluntary (tools)** | developer adds our MCP server | trivially | **none — already shipped** |
+| **Voluntary (models)** | developer sets the IDE's base URL to us | trivially | **one shim (this batch)** |
+| **Managed** | admin pushes IDE policy / managed settings / MDM env vars | developer can undo locally | M |
+| **Enforced — key custody** | org never issues raw provider keys, only RegulAIt keys | **no — no key, no call** | **~none; it is policy, not code** |
+| **Enforced — network** | RegulAIt is the only sanctioned egress to `api.anthropic.com` et al | no | L (fits BYOC, pillar 3) |
+
+**Key custody is the row to underline.** It needs almost no code — platform and per-user
+credentials are already stored AES-256-GCM and never returned — and it is the cheapest path to
+*non-bypassable* governance. If developers never hold a raw vendor key, pointing the IDE at
+RegulAIt stops being a request and becomes the only way to get a completion.
+
+#### Decided design — model→agent resolution is an ADMIN POLICY, not a constant
+
+The owner's call (2026-07-30), and a better answer than any single mode: an IDE sends
+`model: "claude-opus-5"`, not an agentId, so the admin **chooses the resolution mode** rather than
+inheriting ours. All three ship, selectable per deployment (and plausibly overridable per
+role/project, mirroring the rule-scoping model of migration 0026):
+
+| Mode | Behavior | Suits |
+|---|---|---|
+| `map_by_model` | resolve to the governed agent whose `agents.model` matches; entitlement, tier ceiling and pricing then apply exactly as in `/app` | least developer friction; the sensible default |
+| `require_agent` | the caller must name the agent (`x-regulait-agent-id`); the model name is advisory | strictest; explicit attribution per call |
+| `router_decides` | treat the requested model as a **hint** the pillar-6 router may override for cost | maximum optimization; the IDE may get a different model than it asked for — must be disclosed in the response, never silent |
+
+**Invariant that binds all three:** an unmapped or unresolvable model is **default-deny**, never a
+silent pass-through to the vendor. That is the whole point of the batch.
+
+| | |
+|---|---|
+| **Goal** | An IDE-based agent (Cursor, Cline, Continue, Zed, Claude Code…) becomes a governed client of RegulAIt for **both** tool calls and model calls. |
+| **Work items** | (1) `POST /v1/messages` — Anthropic-shaped shim over `executeGovernedDispatch`, incl. SSE streaming and content-block/tool_use round-tripping. (2) `POST /v1/chat/completions` — OpenAI-shaped shim over the same core. (3) The three-mode resolution policy above + admin UI. (4) An admin "Connect your IDE" surface emitting per-tool copy-paste config (base URL, key, MCP entry). (5) Docs for the MCP path that already works. (6) OTel ingestion (optional, observe-rung). |
+| **Files** | new `apps/gateway/src/compat-*.ts`; `agents-connectors.ts` (reuse only); `schema.ts` + migration (resolution-mode setting); `admin-portal.ts` (new tab); `shared/src/index.ts` |
+| **Migration?** | Yes — one, for the resolution-mode policy |
+| **Size** | **L** for the full batch; **M** for the `/v1/messages` shim alone, which is where nearly all the coverage is |
+| **Risk / deps** | The compatibility surface has a **long tail** — thinking blocks, tool_use round-trips, prompt caching headers, streaming event shapes, `anthropic-version` negotiation. Aim for a documented, tested subset that fails loudly on the unsupported rest, exactly as the provider registries do; do **not** silently drop fields. |
+| **Coverage caveat — state this honestly, do not oversell** | Base-URL override is cleanly supported by Continue, Cline, Roo, Zed and Claude Code (`ANTHROPIC_BASE_URL`); Cursor takes an OpenAI-compatible endpoint. **GitHub Copilot is largely locked down** and would need its enterprise proxy path or nothing. **Eclipse** has no first-party AI agent of note — its ecosystem is third-party plugins, each with its own (often absent) configurability. "Works with every IDE" would be a false claim. |
+| **Worth doing?** | **Yes — this is the highest-leverage unbuilt item in the roadmap**, ahead of every provider-breadth batch. Breadth batches add vendors to a surface developers may never touch; this batch puts the surface where the developers already are. It also makes the *existing* pillars pay off retroactively: every completion it intercepts is instantly attributed (5), optimized (6), PII-checked (3) and audited (1) with no further work. |
+| **Doc debt it creates** | `CLAUDE.md` and `VISION.md` promise governance over "every agent/model, connector, and MCP-server-tool call" — written on the assumption that calls arrive at our gateway. If this batch is adopted, that claim needs restating as an explicit **interception** story, and this becomes a pillar-level concern rather than a feature. Flagged, not edited. |
+
+---
+
 ## 4. Recommended order, and what can run in parallel
 
 ### Order
@@ -236,13 +321,18 @@ multi-session, or gated on an external decision.
         │                            └─ CI revert the moment minutes exist; STATE.md accuracy pass
    2.  BATCH G (Anthropic key)    ── the moment the owner has it; zero engineering, maximum demo delta
         │
-   3.  BATCH D (depth & polish)   ── best value/risk; pick a subset, see the serialization rules
+   3.  BATCH H (IDE interception) ── PROMOTED 2026-07-30. The /v1/messages shim alone (M) buys
+        │                            more real-world coverage than every breadth batch combined,
+        │                            because it puts the gateway where developers already work.
+        │                            Ship the MCP docs first — that half already works, free.
         │
-   4.  BATCH B (connectors)       ── only the kind you can actually demo (Slack first)
+   4.  BATCH D (depth & polish)   ── best value/risk; pick a subset, see the serialization rules
         │
-   5.  BATCH A (git breadth)      ── only when a real non-GitHub repo is named
+   5.  BATCH B (connectors)       ── only the kind you can actually demo (Slack first)
         │
-   6.  BATCH C (infra/BYOC real)  ── needs a named account + explicit sign-off
+   6.  BATCH A (git breadth)      ── only when a real non-GitHub repo is named
+        │
+   7.  BATCH C (infra/BYOC real)  ── needs a named account + explicit sign-off
    6'. BATCH F (production)       ── needs the owner's explicit in-session go-ahead; not schedulable otherwise
 ```
 
@@ -294,6 +384,17 @@ tracks the current PR rather than an old merged one.
 
 These are genuine forks. The answer changes the plan; I am not pre-deciding them except where
 noted.
+
+**0. How far up the interception ladder does RegulAIt intend to go?** *(added 2026-07-30, and it
+now outranks the rest)*
+Batch H's table has six rungs. The product's honesty depends on naming the target rung out loud.
+*Voluntary* (developer points their IDE at us) is a fine v1 and costs one shim — but it is an
+honor system, and an enterprise buyer will ask what stops a developer from just… not. *Key
+custody* is the cheapest real answer and is almost entirely policy rather than code: the org holds
+the vendor keys, developers hold RegulAIt keys, and bypassing means having no key at all. *Network
+egress* is the airtight answer and is a genuine infrastructure project that belongs with BYOC.
+**Trade-off in one line: how much of the enforcement story is our code versus the customer's IT
+policy — and are we willing to say so plainly in the pitch?**
 
 **1. Is provider breadth needed speculatively, or only on demand?**
 *Option A — build it now:* the `CLAUDE.md` principle becomes literally true, and a prospect

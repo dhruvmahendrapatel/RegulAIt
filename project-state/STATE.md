@@ -705,6 +705,30 @@ dev-grade, NOT production. The user then directed the four remaining open-item a
 pillar-3 infra-ops AUTOMATION (drift/CVE/cert/backup — the operational half beyond the §8.2
 governed-ops layer), clearing the ADR-0015/0016 + pillar-2 deferrals, and a deeper UX/a11y pass.
 
+**IDE / existing-agent interception identified as a SCOPE gap, 2026-07-30 (planning only, no code —
+ROADMAP Batch H).** The owner raised that most developers use AI agents inside VS Code / Cursor /
+JetBrains rather than through a governed portal, and RegulAIt never accounted for it. This is a hole
+in the product thesis, not the backlog: every spec in `docs/product/` governs agents that come **to**
+our gateway, so a developer running Copilot never touches it and the governance is invisible to
+exactly the population it exists for. Findings: (a) **half already works, unmarketed** — the
+streamable-HTTP MCP proxy (`POST /mcp/:serverId`) is a fully governed tool-call interception point
+any MCP-capable IDE can use today with zero build; (b) **the gap is model calls** — there is no
+provider-shaped endpoint (no `/v1/messages`, no `/v1/chat/completions`), only our proprietary
+`/v1/agents/:id/invoke`, so IDE completions bypass attribution, optimization, PII and audit
+entirely; (c) the fix is a translation shim over the existing `executeGovernedDispatch`, not a
+second engine — the same zero-gateway-change shape that landed the OpenAI/Google/xAI adapters.
+**Decision recorded (owner, 2026-07-30): model→agent resolution is an ADMIN-SELECTABLE POLICY, not
+a constant** — `map_by_model` / `require_agent` / `router_decides` all ship and the admin picks,
+bound by the invariant that an unresolvable model is **default-deny, never a silent pass-through to
+the vendor**. Also recorded: the six-rung interception ladder (observe → voluntary → managed →
+enforced), where **key custody** (the org holds vendor keys, developers hold only RegulAIt keys) is
+the cheapest non-bypassable enforcement and is almost entirely policy rather than code. Becomes an
+ADR when the batch is scheduled. Honest coverage note: base-URL override works for Continue/Cline/
+Roo/Zed/Claude Code, Cursor takes OpenAI-compatible, **Copilot is largely locked down and Eclipse
+has no first-party agent** — "works with every IDE" would be false. Doc debt flagged, not edited:
+`CLAUDE.md`/`VISION.md` promise governance over "every agent/model call" on the assumption calls
+arrive at us; adopting Batch H means restating that as an explicit interception story.
+
 **Four-area cleanup batch shipped, 2026-07-30 (session-02 addendum 33; migrations 0034 + 0035;
 ADR-0017, ADR-0018 + ADR-0015/0016 addenda; PRs #40/#41/#42, all merged).** The four directed
 areas landed as three per-chunk PRs on fresh branches (branch-per-PR adopted this session so the
