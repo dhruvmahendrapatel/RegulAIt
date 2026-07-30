@@ -15,7 +15,12 @@ export const UI_CSS = `
   --border-strong: #ffffff26;
   --text: #ece7df;
   --text-dim: #a89f92;
-  --text-faint: #6f675c;
+  /* essential-but-secondary text (.sub/.empty/.faint/.sec/.foot/timestamps):
+     bumped from #6f675c (~3.3:1, a real WCAG fail) to ~5:1 */
+  --text-faint: #8f8578;
+  /* the OLD faint value, kept for purely-decorative faint uses (nav dot,
+     scrollbar) so the text bump above doesn't wash them out */
+  --decor: #6f675c;
   --accent: #d97757;
   --accent-soft: #d9775726;
   --ok: #7fa650;
@@ -58,7 +63,7 @@ a { color: var(--accent); text-decoration: none; }
 .nav-item:hover { color: var(--text); background: #ffffff08; }
 .nav-item.active { color: var(--text); background: var(--accent-soft); }
 .nav-item.active .dot { background: var(--accent); }
-.nav-item .dot { width: 6px; height: 6px; border-radius: 3px; background: var(--text-faint); flex: none; }
+.nav-item .dot { width: 6px; height: 6px; border-radius: 3px; background: var(--decor); flex: none; }
 .nav-item .badge { margin-left: auto; }
 .side .foot { margin-top: auto; padding: 10px 8px 0; font-size: 11.5px; color: var(--text-faint); border-top: 1px solid var(--border); }
 .side .foot .who { color: var(--text-dim); font-family: var(--mono); font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
@@ -108,6 +113,17 @@ input, select, textarea {
   border: 1px solid var(--border-strong); border-radius: 8px; padding: 8px 11px; outline: none;
 }
 input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+/* one keyboard focus ring for every interactive element — visible, accent, and
+   never shown on mere mouse focus (:focus-visible). An outset ring for controls
+   that have room for it; an inset ring (offset -2px) for form fields, whose own
+   border/background would otherwise clip an outset outline. */
+button:focus-visible, .nav-item:focus-visible, .convo-item:focus-visible,
+.id-chip:focus-visible, a:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: -2px;
+}
 textarea { resize: vertical; font-family: var(--mono); font-size: 12.5px; }
 label.f { display: block; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--text-dim); margin: 0 0 4px; }
 
@@ -203,7 +219,9 @@ pre, .codeblock {
 .convo-item:hover { background: #ffffff08; color: var(--text); }
 .convo-item.active { background: var(--accent-soft); color: var(--text); }
 .convo-item .t { font-size: 12.5px; line-height: 1.35; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
-.convo-item .m { font-size: 10.5px; color: var(--text-faint); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* the meta line sits on the lighter active (accent-soft) / rail surface, where
+   --text-faint dips under 4.5:1 — use --text-dim so it clears AA there too */
+.convo-item .m { font-size: 10.5px; color: var(--text-dim); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .convo-item .x { flex: none; background: none; border: none; color: var(--text-faint); cursor: pointer; font: inherit; font-size: 14px; line-height: 1; padding: 2px 4px; border-radius: 4px; visibility: hidden; }
 .convo-item:hover .x { visibility: visible; }
 .convo-item .x:hover { color: var(--bad); background: #cd5b5214; }
@@ -317,9 +335,11 @@ function approvalStageLabel(a) {
 }
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const shortId = (id) => String(id).slice(0, 8) + "…";
-// truncated id chip: full id in the tooltip, click to copy
+// truncated id chip: full id in the tooltip, click (or Enter/Space) to copy.
+// role=button + tabindex=0 make it a real keyboard-reachable control, mirroring
+// the dataTable sort headers.
 function idChip(id) {
-  return "<span class='mono dim id-chip' data-copyid='" + esc(id) + "' title='" + esc(id) + " — click to copy'>" + esc(shortId(id)) + "</span>";
+  return "<span class='mono dim id-chip' role='button' tabindex='0' data-copyid='" + esc(id) + "' title='" + esc(id) + " — click to copy'>" + esc(shortId(id)) + "</span>";
 }
 document.addEventListener("click", async (e) => {
   const chip = e.target && e.target.closest ? e.target.closest("[data-copyid]") : null;
@@ -331,4 +351,315 @@ document.addEventListener("click", async (e) => {
     setTimeout(() => { chip.textContent = orig; }, 900);
   } catch { /* clipboard unavailable — the tooltip still shows the full id */ }
 });
+// Enter/Space on a focused chip triggers the same copy path as a click.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" && e.key !== " ") return;
+  const chip = e.target && e.target.closest ? e.target.closest("[data-copyid]") : null;
+  if (!chip) return;
+  e.preventDefault();
+  chip.click();
+});
+`;
+
+/**
+ * The shared table + formatting layer both UIs interpolate AFTER UI_DISPLAY_JS
+ * (so idChip/UUID_RE/shortId already exist). One source for:
+ * - table(): the bare renderer for short lists, which DELEGATES to dataTable()
+ *   once a list runs long (>8 rows), so every call site inherits sort/filter/
+ *   paginate + human labels + UUID chips for free;
+ * - dataTable(): sortable/filterable/paginated, keyboard-operable headers;
+ * - humanizeKey/badge/kvList/inlineCounts and the renderDecision/renderCompliance
+ *   operator views that replace raw <pre>JSON dumps.
+ * These were previously inlined in the admin portal; relocated here verbatim so
+ * /app reaches parity with /admin with no per-page copy. All are hoisted
+ * declarations called at render time — esc() (page-local) resolves then.
+ */
+export const UI_TABLE_JS = `
+// short enum-ish cells that must never wrap into a vertical smear
+const NOWRAP_COLS = new Set(["status", "type", "effect", "kind", "provider", "mode", "role"]);
+const ISO_RE = /^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}/;
+function table(rows, actions) {
+  if (!rows || rows.length === 0) return "<div class='empty'>none yet</div>";
+  // once a list runs long, hand off to dataTable so it gains sort/filter/paging
+  // (and the same UUID-chip / ISO-date / human-label treatment) for free; short
+  // lists stay bare, with no filter/paging chrome.
+  if (rows.length > 8) return dataTable(rows, actions ? { actions: actions } : {});
+  const cols = [...new Set(rows.flatMap((r) => Object.keys(r)))].filter((c) => c !== "ruleChain");
+  let h = "<div class='tblwrap'><table><tr>" + cols.map((c) => "<th>" + esc(humanizeKey(c)) + "</th>").join("") + (actions ? "<th></th>" : "") + "</tr>";
+  for (const r of rows) {
+    h += "<tr>" + cols.map((c) => {
+      let v = r[c];
+      if (typeof v === "object" && v !== null) v = JSON.stringify(v);
+      // any raw UUID renders as a truncated chip — full id in the tooltip,
+      // click to copy — never as thirteen stacked fragments
+      if (typeof v === "string" && UUID_RE.test(v)) return "<td class='nowrap'>" + idChip(v) + "</td>";
+      // ISO timestamps compact to date + minute, full precision in the tooltip
+      if (typeof v === "string" && ISO_RE.test(v)) {
+        return "<td class='mono dim nowrap' title='" + esc(v) + "'>" + esc(v.slice(0, 10) + " " + v.slice(11, 16)) + "</td>";
+      }
+      const cls = c === "id" || String(c).endsWith("Id") || c === "at" || c === "createdAt" ? " class='mono dim'"
+        : c === "stage" ? " class='label'"
+        : NOWRAP_COLS.has(c) ? " class='nowrap'" : "";
+      return "<td" + cls + ">" + esc(v) + "</td>";
+    }).join("");
+    if (actions) h += "<td class='act'>" + actions(r) + "</td>";
+    h += "</tr>";
+  }
+  return h + "</table></div>";
+}
+
+// --- human column labels ------------------------------------------------
+// camelCase / snake_case DB keys -> Title Case, with a small override map so
+// domain acronyms read right ("budgetApproverUserId" -> "Budget Approver User
+// ID", "alertThresholdPct" -> "Alert Threshold %"). Row keys never change —
+// only the <th> label. Used by table() above and dataTable() below.
+const HUMAN_OVERRIDES = {
+  id:"ID", ids:"IDs", usd:"USD", pct:"%", url:"URL", uri:"URI", api:"API",
+  mcp:"MCP", pii:"PII", cve:"CVE", byo:"BYO", eom:"EOM", csv:"CSV", pm:"PM",
+  ok:"OK", ttl:"TTL", eod:"EOD",
+};
+function humanizeKey(key) {
+  return String(key)
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[_\\s]+/g, " ")
+    .trim()
+    .split(" ")
+    .filter(Boolean)
+    .map((w) => HUMAN_OVERRIDES[w.toLowerCase()] ?? (w.charAt(0).toUpperCase() + w.slice(1)))
+    .join(" ") || String(key);
+}
+// a status/label pill; kind is a .badge modifier (ok/warn/bad/info/accent) or ""
+function badge(text, kind) {
+  return "<span class='badge" + (kind ? " " + kind : "") + "'>" + esc(text) + "</span>";
+}
+// an object -> definition list (.kv) with humanized keys; labels overrides keys
+function kvList(obj, labels) {
+  labels = labels || {};
+  const entries = Object.entries(obj || {});
+  if (!entries.length) return "<div class='empty'>none</div>";
+  return "<div class='kv'>" + entries.map((e) => {
+    const k = e[0]; let val = e[1];
+    if (val === null || val === undefined || val === "") val = "—";
+    else if (Array.isArray(val)) val = val.length ? val.join(", ") : "—";
+    else if (typeof val === "object") val = JSON.stringify(val);
+    return "<span class='k'>" + esc(labels[k] ?? humanizeKey(k)) + "</span><span>" + esc(val) + "</span>";
+  }).join("") + "</div>";
+}
+// small count map -> "cve 2 · drift 1" inline labeled counts (no raw JSON)
+function inlineCounts(obj) {
+  const entries = Object.entries(obj || {});
+  if (!entries.length) return "<span class='dim'>none</span>";
+  return entries.map((e) => esc(e[0]) + " <span class='num'>" + esc(e[1]) + "</span>")
+    .join(" <span class='faint'>·</span> ");
+}
+
+// --- dataTable: sortable headers + free-text filter + pagination ---------
+// A richer renderer for long administrative tables. Keeps table()'s UUID-chip,
+// ISO-date compaction and NOWRAP behaviors. opts: { actions?, labels?, cells?,
+// pageSize? } — cells is an optional per-column HTML renderer (value,row)=>html
+// (used for the findings severity/status badges). Per-instance state lives in
+// DT keyed by a fresh id; the document-level listeners re-render just the one
+// wrapper on sort/filter/page. State is per render() (reset when a tab loads).
+let dtSeq = 0;
+const DT = new Map();
+function dtCell(c, r, cells) {
+  if (cells && cells[c]) return "<td>" + cells[c](r[c], r) + "</td>";
+  let v = r[c];
+  if (typeof v === "object" && v !== null) v = JSON.stringify(v);
+  if (typeof v === "string" && UUID_RE.test(v)) return "<td class='nowrap'>" + idChip(v) + "</td>";
+  if (typeof v === "string" && ISO_RE.test(v)) {
+    return "<td class='mono dim nowrap' title='" + esc(v) + "'>" + esc(v.slice(0, 10) + " " + v.slice(11, 16)) + "</td>";
+  }
+  const cls = c === "id" || String(c).endsWith("Id") || c === "at" || c === "createdAt" ? " class='mono dim'"
+    : c === "stage" ? " class='label'"
+    : NOWRAP_COLS.has(c) ? " class='nowrap'" : "";
+  return "<td" + cls + ">" + esc(v) + "</td>";
+}
+function dtCompare(a, b, t) {
+  const ae = a === null || a === undefined || a === "";
+  const be = b === null || b === undefined || b === "";
+  if (ae && be) return 0;
+  if (ae) return 1;
+  if (be) return -1;
+  if (t === "num") return Number(a) - Number(b);
+  const sa = String(a).toLowerCase(), sb = String(b).toLowerCase();
+  return sa < sb ? -1 : sa > sb ? 1 : 0;
+}
+function dataTable(rows, opts) {
+  opts = opts || {};
+  const id = "dt-" + (++dtSeq);
+  const list = rows || [];
+  const cols = [...new Set(list.flatMap((r) => Object.keys(r)))].filter((c) => c !== "ruleChain");
+  const colType = {};
+  for (const c of cols) {
+    let allNum = true, any = false;
+    for (const r of list) {
+      const v = r[c];
+      if (v === null || v === undefined || v === "") continue;
+      any = true;
+      const isNum = typeof v === "number" || (typeof v === "string" && v.trim() !== "" && !isNaN(Number(v)));
+      if (!isNum) { allNum = false; break; }
+    }
+    colType[c] = any && allNum ? "num" : "str";
+  }
+  DT.set(id, {
+    rows: list, cols, colType,
+    actions: opts.actions || null, labels: opts.labels || {}, cells: opts.cells || null,
+    pageSize: opts.pageSize || 25, sortCol: null, sortDir: 1, filter: "", page: 0,
+  });
+  return "<div class='dtwrap' data-dt='" + id + "'>" + dtRender(id) + "</div>";
+}
+function dtRender(id) {
+  const st = DT.get(id);
+  if (!st) return "";
+  // a genuinely empty table shows no filter/paging chrome, like table()
+  if (st.rows.length === 0) return "<div class='empty'>none yet</div>";
+  const label = (c) => esc(st.labels[c] ?? humanizeKey(c));
+  const f = st.filter.trim().toLowerCase();
+  let rows = st.rows;
+  if (f) rows = rows.filter((r) => st.cols.some((c) => {
+    let v = r[c];
+    if (v === null || v === undefined) return false;
+    if (typeof v === "object") v = JSON.stringify(v);
+    return String(v).toLowerCase().indexOf(f) !== -1;
+  }));
+  if (st.sortCol != null) {
+    const c = st.sortCol, t = st.colType[c], dir = st.sortDir;
+    rows = rows.map((r, i) => [r, i]).sort((a, b) => {
+      const cmp = dtCompare(a[0][c], b[0][c], t);
+      return cmp !== 0 ? cmp * dir : a[1] - b[1];
+    }).map((x) => x[0]);
+  }
+  const total = rows.length;
+  const pages = Math.max(1, Math.ceil(total / st.pageSize));
+  if (st.page >= pages) st.page = pages - 1;
+  if (st.page < 0) st.page = 0;
+  const start = st.page * st.pageSize;
+  const pageRows = rows.slice(start, start + st.pageSize);
+  let h = "<div class='dtbar'><input type='text' class='dtfilter' aria-label='Filter table rows' placeholder='Filter…' " + 'value="' + esc(st.filter) + '"' + "></div>";
+  if (total === 0) return h + "<div class='empty'>" + (st.filter ? "no matches" : "none yet") + "</div>";
+  h += "<div class='tblwrap'><table><tr>";
+  for (const c of st.cols) {
+    const on = st.sortCol === c;
+    const ind = on ? (st.sortDir === 1 ? " ▲" : " ▼") : "";
+    const asort = on ? (st.sortDir === 1 ? "ascending" : "descending") : "none";
+    h += "<th class='dtsort' role='button' tabindex='0' data-col='" + esc(c) + "' aria-sort='" + asort + "' title='Sort by " + label(c) + "'>" + label(c) + ind + "</th>";
+  }
+  if (st.actions) h += "<th></th>";
+  h += "</tr>";
+  for (const r of pageRows) {
+    h += "<tr>" + st.cols.map((c) => dtCell(c, r, st.cells)).join("");
+    if (st.actions) h += "<td class='act'>" + st.actions(r) + "</td>";
+    h += "</tr>";
+  }
+  h += "</table></div>";
+  const from = start + 1, to = Math.min(total, start + st.pageSize);
+  h += "<div class='dtpage'><span class='dim'>showing " + from + "–" + to + " of " + total + "</span>";
+  if (pages > 1) h += "<span class='grow'></span>"
+    + "<button type='button' class='small dtprev'" + (st.page === 0 ? " disabled" : "") + ">Prev</button>"
+    + "<span class='dim' style='padding:0 6px'>page " + (st.page + 1) + " / " + pages + "</span>"
+    + "<button type='button' class='small dtnext'" + (st.page >= pages - 1 ? " disabled" : "") + ">Next</button>";
+  h += "</div>";
+  return h;
+}
+function dtRerender(wrap) {
+  const focused = document.activeElement;
+  const inFilter = focused && focused.classList && focused.classList.contains("dtfilter") && wrap.contains(focused);
+  const sortCol = (focused && focused.classList && focused.classList.contains("dtsort") && wrap.contains(focused)) ? focused.dataset.col : null;
+  const caret = inFilter ? focused.selectionStart : null;
+  wrap.innerHTML = dtRender(wrap.dataset.dt);
+  if (inFilter) {
+    const inp = wrap.querySelector(".dtfilter");
+    if (inp) { inp.focus(); try { inp.setSelectionRange(caret, caret); } catch (e) { /* not selectable */ } }
+  } else if (sortCol != null) {
+    const th = wrap.querySelector(".dtsort[data-col='" + sortCol + "']");
+    if (th) th.focus();
+  }
+}
+document.addEventListener("click", (e) => {
+  const wrap = e.target && e.target.closest ? e.target.closest("[data-dt]") : null;
+  if (!wrap) return;
+  const st = DT.get(wrap.dataset.dt);
+  if (!st) return;
+  const th = e.target.closest(".dtsort");
+  if (th) {
+    const c = th.dataset.col;
+    if (st.sortCol === c) st.sortDir = -st.sortDir; else { st.sortCol = c; st.sortDir = 1; }
+    st.page = 0; dtRerender(wrap); return;
+  }
+  if (e.target.closest(".dtprev")) { st.page -= 1; dtRerender(wrap); return; }
+  if (e.target.closest(".dtnext")) { st.page += 1; dtRerender(wrap); return; }
+});
+document.addEventListener("input", (e) => {
+  if (!e.target || !e.target.classList || !e.target.classList.contains("dtfilter")) return;
+  const wrap = e.target.closest("[data-dt]");
+  if (!wrap) return;
+  const st = DT.get(wrap.dataset.dt);
+  if (!st) return;
+  st.filter = e.target.value; st.page = 0; dtRerender(wrap);
+});
+document.addEventListener("keydown", (e) => {
+  const th = e.target && e.target.closest ? e.target.closest(".dtsort") : null;
+  if (!th) return;
+  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); th.click(); }
+});
+
+// --- formatted operator views (replace raw <pre>JSON dumps) --------------
+const EFFECT_KIND = { allow: "ok", deny: "bad", require_approval: "warn" };
+const OUTCOME_KIND = {
+  allow: "ok", "satisfied-by-approval": "ok", deny: "bad", revoked: "bad",
+  "require-approval": "warn", "no-match": "",
+};
+// a policy Decision -> effect badge + rule-chain table + reason prose, raw JSON
+// tucked behind a <details> toggle for power users.
+function renderDecision(d) {
+  d = d || {};
+  const eff = String(d.effect ?? "unknown");
+  const chain = Array.isArray(d.ruleChain) ? d.ruleChain : [];
+  let h = "<div class='row' style='align-items:center'>"
+    + badge(eff.replace(/_/g, " "), EFFECT_KIND[eff] ?? "")
+    + (d.ruleId ? "<span class='dim'>matched</span><span class='mono'>" + esc(d.ruleId) + "</span>" : "")
+    + "</div>";
+  if (d.reason) h += "<p style='margin:10px 0 0'>" + esc(d.reason) + "</p>";
+  if (eff === "require_approval" && (d.approverName || d.approverUserId))
+    h += "<p class='dim' style='margin:6px 0 0'>Requires sign-off from " + esc(d.approverName ?? d.approverUserId) + "</p>";
+  h += "<h2>Rule chain — every rule evaluated, in order</h2>";
+  if (chain.length) {
+    h += "<div class='tblwrap'><table><tr><th>#</th><th>Rule</th><th>Outcome</th><th>Grant / rule ID</th></tr>";
+    chain.forEach((t, i) => {
+      const gid = t.grantId
+        ? (UUID_RE.test(t.grantId) ? idChip(t.grantId) : "<span class='mono dim'>" + esc(t.grantId) + "</span>")
+        : "<span class='faint'>—</span>";
+      h += "<tr><td class='num'>" + (i + 1) + "</td><td class='nowrap'>" + esc(t.rule) + "</td>"
+        + "<td class='nowrap'>" + badge(String(t.outcome).replace(/-/g, " "), OUTCOME_KIND[t.outcome] ?? "") + "</td>"
+        + "<td>" + gid + "</td></tr>";
+    });
+    h += "</table></div>";
+  } else h += "<div class='empty'>no rules recorded</div>";
+  h += "<details style='margin-top:12px'><summary class='dim' style='cursor:pointer'>Raw decision JSON</summary>"
+    + "<pre style='margin-top:8px'>" + esc(JSON.stringify(d, null, 2)) + "</pre></details>";
+  return h;
+}
+// a project compliance profile -> classification badges + effective/enforcement
+// key-value lists, raw JSON behind a <details> toggle.
+function renderCompliance(c) {
+  c = c || {};
+  const tags = Array.isArray(c.classifications) ? c.classifications : [];
+  const pend = Array.isArray(c.pendingClassifications) ? c.pendingClassifications
+    : (c.pendingClassifications ? [c.pendingClassifications] : []);
+  let h = "<div class='row' style='align-items:center'><span class='dim'>classifications:</span> "
+    + (tags.length ? tags.map((t) => badge(t, "accent")).join(" ") : "<span class='faint'>none</span>")
+    + "</div>";
+  if (pend.length) h += "<div class='row' style='margin-top:6px;align-items:center'><span class='dim'>pending reclassification:</span> "
+    + pend.map((t) => badge(t, "warn")).join(" ") + "</div>";
+  h += "<h2>Effective policy (cascaded)</h2>" + kvList(c.effective || {}, {
+    requiredTemplateIds: "Required workflow templates", mcpDefaultMode: "MCP default mode",
+    auditRetentionDays: "Audit retention (days)", piiMode: "PII mode",
+    backupRetentionDays: "Backup retention (days)", patchCadenceDays: "Patch cadence (days)",
+  });
+  h += "<h2>Enforcement</h2>" + kvList(c.enforcement || {});
+  h += "<details style='margin-top:12px'><summary class='dim' style='cursor:pointer'>Raw compliance JSON</summary>"
+    + "<pre style='margin-top:8px'>" + esc(JSON.stringify(c, null, 2)) + "</pre></details>";
+  return h;
+}
 `;
