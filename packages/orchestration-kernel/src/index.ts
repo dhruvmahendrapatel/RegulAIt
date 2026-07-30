@@ -76,6 +76,16 @@ export const taskNodeSchema = z.object({
    * tool NAMES a worker under it may call (same shape as `toolNames`). Absent =
    * "no tool constraint at this hop". */
   allowedToolRefs: z.array(z.string().min(1).max(128)).optional(),
+  /** §5.2 Team-Lead SUB-BUDGET: a per-node USD ceiling on this node's own
+   * estimated spend, enforced at node start ON TOP OF the run-level cap. It
+   * composes transitively as a MIN up the lead chain — a worker can never carry
+   * a higher effective cap than any lead above it, mirroring how
+   * `allowedAgentIds` narrows agents (delegation can only ever tighten a
+   * budget, never loosen it). Unlike the agent ceiling, a node's OWN cap does
+   * apply to itself (it is that node's spending limit); each lead ancestor's
+   * cap lowers it further. Absent = no per-node cap at this hop (only the run
+   * cap applies), so flat runs behave exactly as before. */
+  budgetCapUsd: z.number().positive().optional(),
 });
 export type TaskNode = z.infer<typeof taskNodeSchema>;
 
@@ -245,6 +255,31 @@ export function computeNodeCeiling(graph: TaskGraph, nodeId: string): NodeCeilin
     cur = lead.leadNodeId;
   }
   return { agentIds, toolRefs };
+}
+
+/**
+ * PURE (no I/O): the effective per-node BUDGET ceiling for `nodeId` — the MIN of
+ * the node's OWN `budgetCapUsd` and every lead ancestor's `budgetCapUsd`. `null`
+ * = no per-node cap (only the run-level cap applies). Like the agent ceiling it
+ * can only ever LOWER as the lead chain lengthens, so a delegated worker can
+ * never be granted a looser budget than a lead above it. Cycle-guarded.
+ */
+export function computeNodeBudgetCeiling(graph: TaskGraph, nodeId: string): number | null {
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  const start = byId.get(nodeId);
+  let cap: number | null = start?.budgetCapUsd ?? null;
+  const seen = new Set<string>([nodeId]);
+  let cur = start?.leadNodeId;
+  while (cur && !seen.has(cur)) {
+    seen.add(cur);
+    const lead = byId.get(cur);
+    if (!lead) break;
+    if (lead.budgetCapUsd != null) {
+      cap = cap === null ? lead.budgetCapUsd : Math.min(cap, lead.budgetCapUsd);
+    }
+    cur = lead.leadNodeId;
+  }
+  return cap;
 }
 
 // ---------------------------------------------------------------------------

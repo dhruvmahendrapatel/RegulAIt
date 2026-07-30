@@ -1,6 +1,6 @@
 ---
 phase: governance-mvp-in-progress
-last_updated: 2026-07-28
+last_updated: 2026-07-30
 active_epics: [EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
 last_session: sessions/2026-07-24-session-02.md
@@ -677,6 +677,8 @@ the panel h1, nav aria-current, sortable-th keyboard, text badges for status not
 bump). Browser-verified (filter/sort/paginate on Audit, humanized headers, no console errors beyond
 pre-auth 401s). This closes the "review the whole UI/UX" thread except the intentionally-open items
 (nothing further deferred beyond what the deeper-a11y sweep would add).
+
+**Pillar 7 — Team-Lead transitive per-node budget ceiling, 2026-07-30 (session-02 addendum 31, ADR-0016).** A mapping pass found the AGENT-entitlement narrowing already shipped (§5.1 lead ceiling: allowedAgentIds/toolRefs → computeNodeCeiling transitive intersection → policy kernel agent-lead-ceiling), so this slice built the missing BUDGET half. A task node gains `budgetCapUsd`; `computeNodeBudgetCeiling` folds the MIN of the node's own cap and every lead ancestor's — symmetric with the agent ceiling (delegation only ever TIGHTENS). Enforced at node_started on top of the run cap: a node over its ceiling escalates into the one Approvals Queue (node-budget-cap). No migration. Gateway 332 → 336, orchestration-kernel 23 → 27. Remaining in the sequence: pillar 3 infra-ops automation.
 
 **Pillar 3 — BYOC deploy targets: modes + AWS assume-role adapter + data boundary, 2026-07-28
 (session-02 addendum 30, migration 0033, ADR-0015).** First pillar-3 slice, extending the pillar-2
