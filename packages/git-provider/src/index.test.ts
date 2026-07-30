@@ -34,6 +34,35 @@ describe("MockGitProvider", () => {
     ).rejects.toThrow(/unknown head/);
     await expect(p.mergePullRequest("r", "99", "merge")).rejects.toThrow(/unknown pr/);
   });
+
+  it("exposes PR details and seedable checks", async () => {
+    const p = new MockGitProvider();
+    await p.createBranch("org/repo", "feature-1", "main");
+    const ref = await p.openPullRequest("org/repo", {
+      head: "feature-1",
+      base: "main",
+      title: "t",
+      body: "b",
+    });
+    const pr = await p.getPullRequest("org/repo", ref.id);
+    expect(pr).toEqual({
+      id: ref.id,
+      url: `mock://org/repo/pull/${ref.id}`,
+      state: "open",
+      head: "feature-1",
+      base: "main",
+      title: "t",
+      headSha: "sha-feature-1-0",
+    });
+    expect(await p.listChecks("org/repo", ref.id)).toEqual([]);
+    p.setChecks("org/repo", ref.id, [{ name: "ci", status: "success", url: null }]);
+    expect(await p.listChecks("org/repo", ref.id)).toEqual([
+      { name: "ci", status: "success", url: null },
+    ]);
+    await p.mergePullRequest("org/repo", ref.id, "merge");
+    expect((await p.getPullRequest("org/repo", ref.id)).state).toBe("merged");
+    await expect(p.getPullRequest("org/repo", "99")).rejects.toThrow(/unknown pr/);
+  });
 });
 
 describe("GitHubProvider", () => {
@@ -85,6 +114,72 @@ describe("GitHubProvider", () => {
     expect(calls[1]!.body).toEqual({ merge_method: "squash" });
   });
 
+  it("gets PR details with merged-state mapping", async () => {
+    const { impl } = stubFetch({
+      "GET https://api.github.com/repos/o/r/pulls/7": {
+        status: 200,
+        body: {
+          number: 7,
+          html_url: "https://github.com/o/r/pull/7",
+          state: "closed",
+          merged: true,
+          title: "T",
+          head: { ref: "h", sha: "headsha" },
+          base: { ref: "main" },
+        },
+      },
+    });
+    const p = new GitHubProvider({ token: "t", fetchImpl: impl });
+    const pr = await p.getPullRequest("o/r", "7");
+    expect(pr).toEqual({
+      id: "7",
+      url: "https://github.com/o/r/pull/7",
+      state: "merged",
+      head: "h",
+      base: "main",
+      title: "T",
+      headSha: "headsha",
+    });
+  });
+
+  it("lists checks from the head sha's check-runs with status/conclusion mapping", async () => {
+    const { impl } = stubFetch({
+      "GET https://api.github.com/repos/o/r/pulls/7": {
+        status: 200,
+        body: {
+          number: 7,
+          html_url: "u",
+          state: "open",
+          title: "T",
+          head: { ref: "h", sha: "headsha" },
+          base: { ref: "main" },
+        },
+      },
+      "GET https://api.github.com/repos/o/r/commits/headsha/check-runs": {
+        status: 200,
+        body: {
+          check_runs: [
+            { name: "build", status: "completed", conclusion: "success", html_url: "https://ci/1" },
+            { name: "lint", status: "completed", conclusion: "failure" },
+            { name: "e2e", status: "in_progress", conclusion: null },
+            { name: "docs", status: "completed", conclusion: "skipped" },
+            { name: "old", status: "completed", conclusion: "cancelled" },
+            { name: "queued", status: "queued", conclusion: null },
+          ],
+        },
+      },
+    });
+    const p = new GitHubProvider({ token: "t", fetchImpl: impl });
+    expect(await p.listChecks("o/r", "7")).toEqual([
+      { name: "build", status: "success", url: "https://ci/1" },
+      { name: "lint", status: "failure", url: null },
+      { name: "e2e", status: "running", url: null },
+      { name: "docs", status: "skipped", url: null },
+      { name: "old", status: "canceled", url: null },
+      { name: "queued", status: "pending", url: null },
+    ]);
+  });
+
   it("wraps provider errors with status codes", async () => {
     const { impl } = stubFetch({
       "POST https://api.github.com/repos/o/r/pulls": { status: 422, body: { message: "no diff" } },
@@ -97,8 +192,23 @@ describe("GitHubProvider", () => {
 });
 
 describe("resolveProvider", () => {
-  it("rejects interface-ready but unimplemented providers explicitly", () => {
-    expect(() => resolveProvider({ provider: "gitlab", token: "t" })).toThrow(/not implemented/);
+  it("resolves every real provider kind to an adapter of that kind (ROADMAP Batch A)", () => {
+    expect(resolveProvider({ provider: "github", token: "t" }).kind).toBe("github");
+    expect(resolveProvider({ provider: "gitlab", token: "t" }).kind).toBe("gitlab");
+    expect(resolveProvider({ provider: "bitbucket", token: "t" }).kind).toBe("bitbucket");
+    expect(
+      resolveProvider({
+        provider: "azure_devops",
+        token: "t",
+        baseUrl: "https://dev.azure.com/acme",
+      }).kind,
+    ).toBe("azure_devops");
+  });
+
+  it("rejects an azure_devops connection without an organization baseUrl", () => {
+    expect(() => resolveProvider({ provider: "azure_devops", token: "t" })).toThrow(
+      /requires a baseUrl.*dev\.azure\.com/,
+    );
   });
 
   it("returns a shared mock so state persists across resolutions", async () => {
