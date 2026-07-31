@@ -261,6 +261,7 @@ const chatHistory = []; // the open thread's exchanges — persists across rende
 let PG_ABORT = null;    // AbortController while a stream is open — one at a time
 let CONVO_ID = sessionStorage.getItem("regulait.convo") || null; // active thread — tab-scoped
 let CONVOS = [];            // conversations rail cache (newest-updated first, from the server)
+let PG_FRESH = false;       // the user explicitly asked for a fresh chat — don't auto-reopen
 let CHAT_LOADED_FOR = null; // which conversation chatHistory mirrors (null = fresh unsaved chat)
 let PG_PREFILL = null;      // agent/project selects to apply right after opening a thread
 
@@ -457,18 +458,20 @@ async function refreshRail() {
 function wireRail() {
   $("#convo-new")?.addEventListener("click", () => {
     if (PG_ABORT) { toast("A reply is still streaming — Stop it or let it finish first."); return; }
+    PG_FRESH = true; // an explicit fresh chat beats the auto-open-newest default
     setConvo(null); chatHistory.length = 0; CHAT_LOADED_FOR = null; render();
   });
   document.querySelectorAll("[data-convo]").forEach((el) =>
     el.addEventListener("click", () => {
       if (PG_ABORT) { toast("A reply is still streaming — Stop it or let it finish first."); return; }
       if (el.dataset.convo === CONVO_ID) return;
+      PG_FRESH = false;
       setConvo(el.dataset.convo); CHAT_LOADED_FOR = null; render();
     }));
   document.querySelectorAll("[data-delconvo]").forEach((b) =>
     b.addEventListener("click", async (e) => {
       e.stopPropagation(); // the row click underneath would open the thread
-      if (!confirm("Delete this conversation? Its full history is removed — this cannot be undone.")) return;
+      if (!confirmClick(b, "\u00D7?")) return;
       try {
         await del("/v1/conversations/" + b.dataset.delconvo);
         if (CONVO_ID === b.dataset.delconvo) { setConvo(null); chatHistory.length = 0; CHAT_LOADED_FOR = null; }
@@ -480,6 +483,10 @@ function wireRail() {
 
 async function playgroundPage() {
   try { CONVOS = (await get("/v1/conversations")).conversations ?? []; } catch { CONVOS = []; }
+  // Fresh sign-in lands in the NEWEST thread, not an empty pane — unless the
+  // user explicitly clicked "+ New conversation" (PG_FRESH), which always
+  // wins. A stale stored id falls through to the same auto-open.
+  if (!CONVO_ID && !PG_FRESH && !PG_ABORT && CONVOS.length) setConvo(CONVOS[0].id);
   // Restore the open thread (sessionStorage) or load a just-clicked one.
   // A stale id — deleted elsewhere, another account's — clears silently
   // instead of erroring the page. Never reload under an open stream.
@@ -715,6 +722,7 @@ async function sendPrompt() {
   if (!CONVO_ID) {
     try {
       const row = await post("/v1/conversations", { agentId, ...(projectId ? { projectId } : {}) });
+      PG_FRESH = false; // the fresh chat became a real thread
       setConvo(row.id);
       CHAT_LOADED_FOR = row.id; // what's on screen (nothing yet) IS this thread
     } catch (e) { toast("✗ couldn’t start a conversation — " + e.message); return; }
@@ -792,6 +800,11 @@ async function sendPrompt() {
         if (ev === "delta") { x.text += payload.text; drawChat(); }
         if (ev === "result") {
           x.result = payload; x.streaming = false;
+          // requested-vs-served: the bubble is labelled with the agent that
+          // ACTUALLY served (routing may have moved the request); the
+          // requested agent stays visible in the governance trace.
+          const servedId = payload.routing?.selectedAgentId ?? payload.dispatch?.servedAgentId;
+          if (servedId && AGENT_NAMES[servedId]) x.agentName = AGENT_NAMES[servedId];
           if (payload.dispatch?.refusal) x.text = "The model declined this request.";
           // §8.4 output bill-and-withhold: the model streamed deltas, but the
           // final output was withheld — replace the bubble with the marker so
@@ -1433,8 +1446,8 @@ async function wireRunDetail(id) {
   };
   $("#run-start")?.addEventListener("click", () =>
     act(() => post("/v1/runs/" + id + "/events", { kind: "start" }), "Run started"));
-  $("#run-abort")?.addEventListener("click", () => {
-    if (!confirm("Abort this run? It cannot resume — unfinished nodes stay where they are, and the abort is audited.")) return;
+  $("#run-abort")?.addEventListener("click", (e) => {
+    if (!confirmClick(e.currentTarget, "Abort for good?")) return;
     act(() => post("/v1/runs/" + id + "/events", { kind: "abort" }), "Run aborted");
   });
   $("#run-auto")?.addEventListener("click", () =>
@@ -1494,8 +1507,11 @@ async function wireRunDetail(id) {
 }
 
 // -------------------------------------------------------------- workflows --
+let WF_ROUTES = {}; // changeType -> [template names] (names only, from the API)
 async function workflowsPage() {
-  const { instances, changeTypes } = await get("/v1/workflows/instances");
+  const { instances, changeTypes, routes } = await get("/v1/workflows/instances");
+  WF_ROUTES = {};
+  for (const r of routes ?? []) WF_ROUTES[r.changeType] = r.templates ?? [];
   const rows = instances.map((i) => \`<tr class="click" data-go="workflows/\${i.id}">
     <td>\${esc(i.change?.description ?? "")}</td>
     <td>\${statusBadge(i.status)}</td>
@@ -1506,7 +1522,8 @@ async function workflowsPage() {
   // Only changeTypes an assignment rule actually routes are offered — a
   // free-text type was a guaranteed no_workflow_matches_change dead end.
   const typeField = (changeTypes ?? []).length
-    ? \`<div><label class="f">Type</label><select id="wf-type">\${(changeTypes ?? []).map((t) => \`<option value="\${esc(t)}">\${esc(t)}</option>\`).join("")}</select></div>\`
+    ? \`<div><label class="f">Type</label><select id="wf-type">\${(changeTypes ?? []).map((t) => \`<option value="\${esc(t)}">\${esc(t)}</option>\`).join("")}</select>
+       <div class="faint" style="font-size:11px;margin-top:3px;max-width:230px" id="wf-route" aria-live="polite"></div></div>\`
     : '<div><label class="f">Type</label><div class="dim" style="font-size:12.5px;padding-top:8px">no routable change types — an admin must add an assignment rule</div></div>';
   return \`
   <h1>Workflows</h1>
@@ -1610,7 +1627,9 @@ async function workflowDetailPage(id) {
       + (ctx2.branch ? '<div class="row"><span class="faint" style="font-size:11px;text-transform:uppercase;letter-spacing:.06em">branch</span><span class="mono">' + esc(ctx2.branch) + "</span></div>" : "")
       + (ctx2.prUrl ? '<div class="row" style="margin-top:6px"><span class="faint" style="font-size:11px;text-transform:uppercase;letter-spacing:.06em">pull request</span><a href="' + esc(ctx2.prUrl) + '" class="mono">' + esc(ctx2.prUrl) + "</a>" + (ctx2.prId ? ' <span class="badge">#' + esc(ctx2.prId) + "</span>" : "") + "</div>" : "")
       + (ctx2.mergeSha ? '<div class="row" style="margin-top:6px"><span class="faint" style="font-size:11px;text-transform:uppercase;letter-spacing:.06em">merged</span><span class="mono">' + esc(ctx2.mergeSha) + '</span><span class="badge ok">merged</span></div>' : "")
-      + (deployRow ? '<div class="row" style="margin-top:6px"><span class="faint" style="font-size:11px;text-transform:uppercase;letter-spacing:.06em">deployed</span><span class="mono">' + esc(deployRow.target) + (deployRow.environment ? " · " + esc(deployRow.environment) : "") + "</span>" + (rollbackRow ? '<span class="badge bad">rolled back</span>' : '<span class="badge ok">live</span>') + "</div>" : "")
+      + (deployRow ? '<div class="row" style="margin-top:6px"><span class="faint" style="font-size:11px;text-transform:uppercase;letter-spacing:.06em">deployed</span><span class="mono">' + esc(deployRow.target) + (deployRow.environment ? " · " + esc(deployRow.environment) : "") + "</span>"
+          + (deployRow.dryRun ? '<span class="badge warn" title="#79c honesty: the deploy adapter ran in dry-run mode — nothing was actually mutated on the target. A dry-run never satisfies a production deploy gate.">dry-run</span>' : "")
+          + (rollbackRow ? '<span class="badge bad">rolled back</span>' : (deployRow.dryRun ? "" : '<span class="badge ok">live</span>')) + "</div>" : "")
       + "</div>"
     : "";
   return \`
@@ -1626,6 +1645,18 @@ async function workflowDetailPage(id) {
 }
 
 function wireWorkflows() {
+  // the resolved template(s) are shown LIVE beside the Type select — never a
+  // silent route to whatever happens to match first
+  const showRoute = () => {
+    const out = $("#wf-route");
+    if (!out) return;
+    const tpls = WF_ROUTES[$("#wf-type")?.value] ?? [];
+    out.textContent = tpls.length
+      ? "\\u2192 runs the \\u201C" + tpls.join("\\u201D + \\u201C") + "\\u201D workflow" + (tpls.length > 1 ? "s (merged)" : "")
+      : "";
+  };
+  showRoute();
+  $("#wf-type")?.addEventListener("change", showRoute);
   $("#wf-new")?.addEventListener("click", async () => {
     try {
       const projectId = $("#wf-project").value || undefined;
@@ -1719,11 +1750,35 @@ async function inboxPage() {
     .map(async (id) => { try { instances[id] = await get("/v1/workflows/instances/" + id); } catch {} }));
   const preview = (a) => {
     const v = a.instanceId && instances[a.instanceId];
-    if (!v || !(v.artifacts ?? []).length) return "";
+    if (!v) return "";
+    let h = "";
     const latest = {};
-    for (const art of v.artifacts) if (!latest[art.output] || art.version > latest[art.output].version) latest[art.output] = art;
-    return Object.values(latest).map((art) =>
+    for (const art of v.artifacts ?? []) if (!latest[art.output] || art.version > latest[art.output].version) latest[art.output] = art;
+    h += Object.values(latest).map((art) =>
       \`<details style="margin-top:6px"><summary class="faint" style="cursor:pointer;font-size:11.5px">submitted \${esc(art.output)} v\${art.version}</summary><pre style="margin-top:6px">\${esc(art.content)}</pre></details>\`).join("");
+    // MERGE-GATE context: the approver decides on the CHANGE, so the change's
+    // evidence sits in the row — the PR link and the recorded check results
+    // from the stage context (fresher data would need git credentials the
+    // approver may not hold; the stage context is what the pipeline saw).
+    const ctx = v.instance?.context ?? {};
+    if (ctx.prUrl || ctx.branch) {
+      h += '<div class="row" style="margin-top:6px;font-size:12px">'
+        + (ctx.prUrl ? '<a href="' + esc(ctx.prUrl) + '" class="mono" target="_blank" rel="noopener">' + esc(ctx.prUrl) + "</a>" + (ctx.prId ? ' <span class="badge">#' + esc(ctx.prId) + "</span>" : "") : "")
+        + (ctx.branch ? '<span class="mono dim">' + esc(ctx.branch) + "</span>" : "")
+        + "</div>";
+    }
+    const checkRows = Object.keys(ctx).filter((k) => k.indexOf("checks:") === 0)
+      .flatMap((k) => Array.isArray(ctx[k]) ? ctx[k] : []);
+    if (checkRows.length) {
+      h += '<div class="row" style="margin-top:6px;flex-wrap:wrap">'
+        + checkRows.map((c) => '<span class="badge ' + (c.status === "passed" ? "ok" : "bad") + '" title="' + esc(c.detail ?? "") + '">' + esc(c.check) + " \\u00B7 " + esc(c.status) + "</span>").join(" ")
+        + "</div>";
+    }
+    const deploys = Object.keys(ctx).filter((k) => k.indexOf("deploy:") === 0).map((k) => ctx[k]);
+    if (deploys.some((d) => d && d.dryRun)) {
+      h += '<div class="row" style="margin-top:6px"><span class="badge warn" title="#79c: the recorded deploy was a dry-run — nothing was actually mutated">deploy was a dry-run</span></div>';
+    }
+    return h;
   };
   // §9 arbitration is a choice between two TEXTS — both sides sit in the row,
   // visible, so the arbiter never decides blind.
@@ -1742,9 +1797,17 @@ async function inboxPage() {
   // who the decision is waiting on.
   const controls = (a) => {
     const named = ME.userId === a.approverUserId;
-    if (!named && !ME.isAdmin) return '<span class="dim" style="font-size:12px">awaiting ' + esc(a.approverName ?? "the named approver") + "</span>";
-    return (named ? "" : '<span class="badge warn" title="you are not the named approver — a reason is required">override</span>')
-      + \`<input data-reason="\${a.id}" placeholder="\${named ? "reason (optional)" : "reason (required — admin override)"}" style="font-size:12px;max-width:\${named ? 170 : 210}px">
+    // ADR-0022: a row that reached this inbox via an active delegation is
+    // decidable by the delegate — recorded as them, on-behalf-of the named
+    // approver, both audited.
+    const delegated = Boolean(a.delegatedFrom);
+    if (!named && !delegated && !ME.isAdmin) return '<span class="dim" style="font-size:12px">awaiting ' + esc(a.approverName ?? "the named approver") + "</span>";
+    const badge = named ? ""
+      : delegated ? '<span class="badge info" title="delegated to you — your decision is recorded on behalf of ' + esc(a.delegatedFrom) + '">for ' + esc(a.delegatedFrom) + "</span>"
+      : '<span class="badge warn" title="you are not the named approver — a reason is required">override</span>';
+    const ph = named || delegated ? "reason (optional)" : "reason (required — admin override)";
+    return badge
+      + \`<input data-reason="\${a.id}" placeholder="\${ph}" style="font-size:12px;max-width:\${named ? 170 : 210}px">
       <button class="small primary" data-decide="approved" data-id="\${a.id}">Approve</button>
       <button class="small danger" data-decide="denied" data-id="\${a.id}">Deny</button>\`;
   };
@@ -2118,7 +2181,7 @@ function wireProjects() {
   document.querySelectorAll("[data-mremove]").forEach((b) =>
     b.addEventListener("click", async () => {
       const pid = b.dataset.pid, userId = b.dataset.mremove;
-      if (!confirm("Remove this member? They lose context visibility and spend attribution for this project.")) return;
+      if (!confirmClick(b, "Remove?")) return;
       const err = $('[data-merr="' + pid + '"]');
       if (err) err.textContent = "";
       try {
@@ -2535,7 +2598,10 @@ async function render() {
     else if (page === "settings") content = await settingsPage();
     else content = await playgroundPage();
   } catch (e) {
-    content = '<div class="empty">Couldn’t load this view — ' + esc(e.message) + "</div>";
+    // a 403 is an ACCESS answer, not an outage — say so in access words
+    content = e.status === 403
+      ? '<div class="empty">You don’t have access to this view — ' + esc(e.message) + "</div>"
+      : '<div class="empty">Couldn’t load this view — ' + esc(e.message) + "</div>";
   }
   root.innerHTML = shell(content, page);
 

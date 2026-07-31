@@ -32,6 +32,7 @@ import {
   createInitiativeSchema,
   createProjectSchema,
   createTeamSchema,
+  deleteTeamSchema,
   detectPII,
   patchProjectMemberSchema,
   promoteContextSchema,
@@ -940,6 +941,87 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     const body = addTeamMemberSchema.parse(req.body);
     const [row] = await db.insert(teamMembers).values({ teamId, userId: body.userId }).returning();
     return reply.status(201).send(row);
+  });
+
+  // ADR-0022: remove a team member. Project memberships keep their provenance
+  // teamId (SET NULL only on team deletion); context provenance is FK-free and
+  // survives regardless — removal changes future defaults, never history.
+  app.delete("/v1/teams/:teamId/members/:userId", async (req, reply) => {
+    const params = z.object({ teamId: z.string().uuid(), userId: z.string().uuid() }).parse(req.params);
+    const deleted = await db
+      .delete(teamMembers)
+      .where(and(eq(teamMembers.teamId, params.teamId), eq(teamMembers.userId, params.userId)))
+      .returning({ id: teamMembers.id });
+    if (deleted.length === 0) return reply.status(404).send({ error: "not_a_member" });
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? params.userId,
+      objectType: "team",
+      objectId: params.teamId,
+      detail: { phase: "team-member-removed", memberUserId: params.userId },
+      effect: "allow",
+      ruleId: "team-member-removed",
+      ruleChain: [],
+      reason: "team member removed",
+    });
+    return { removed: true };
+  });
+
+  // ADR-0022: delete a team. When the team is the recorded contributor of
+  // shared-context revisions, the deletion is refused with EXACTLY what
+  // blocks (item count + the projects involved) — force+reason overrides,
+  // audited. Context provenance itself is FK-free, so even a forced deletion
+  // never rewrites history; project-member provenance FKs go SET NULL.
+  app.delete("/v1/teams/:teamId", async (req, reply) => {
+    const { teamId } = z.object({ teamId: z.string().uuid() }).parse(req.params);
+    const body = deleteTeamSchema.parse(req.body ?? {});
+    const [team] = await db.select().from(teams).where(eq(teams.id, teamId));
+    if (!team) return reply.status(404).send({ error: "unknown_team" });
+    const owned = await db
+      .select({ projectId: projectContextItems.projectId })
+      .from(projectContextItems)
+      .where(eq(projectContextItems.contributedByTeamId, teamId));
+    if (owned.length > 0) {
+      const projIds = [...new Set(owned.map((o) => o.projectId))];
+      const projRows = await db
+        .select({ id: projects.id, name: projects.name })
+        .from(projects)
+        .where(inArray(projects.id, projIds));
+      if (!body.force) {
+        return reply.status(409).send({
+          error: "team_owns_shared_context",
+          contextItems: owned.length,
+          projects: projRows.map((p) => p.name),
+          detail: `team '${team.name}' is the recorded contributor of ${owned.length} shared-context revision(s) in project(s) ${projRows.map((p) => `'${p.name}'`).join(", ")} — provenance survives deletion, but confirm with force + a recorded reason`,
+        });
+      }
+      if (!body.reason?.trim()) {
+        return reply.status(422).send({
+          error: "force_reason_required",
+          detail: "force-deleting a team that owns shared context requires a recorded reason",
+        });
+      }
+    }
+    await db.delete(teams).where(eq(teams.id, teamId));
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "team",
+      objectId: teamId,
+      detail: {
+        phase: "team-deleted",
+        name: team.name,
+        contextItems: owned.length,
+        ...(body.force ? { force: true } : {}),
+        ...(body.reason ? { reason: body.reason } : {}),
+      },
+      effect: "allow",
+      ruleId: "team-deleted",
+      ruleChain: [],
+      reason:
+        owned.length > 0
+          ? `team '${team.name}' force-deleted while owning ${owned.length} shared-context revision(s): ${body.reason}`
+          : `team '${team.name}' deleted`,
+    });
+    return { removed: true, contextItems: owned.length };
   });
 
   // --- Shared-Project membership (§9.2/§9.3, ADR-0011) ---

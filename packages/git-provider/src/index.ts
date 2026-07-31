@@ -24,6 +24,23 @@ import { BitbucketProvider } from "./bitbucket.js";
 import { AzureDevOpsProvider } from "./azure-devops.js";
 
 export * from "./types.js";
+
+/**
+ * #79b honesty: the kinds resolveProvider() can actually construct an adapter
+ * for TODAY. All five current kinds are implemented — the set exists so that
+ * the NEXT kind added to the schema/DB enum fails loudly at CONNECTION
+ * CREATION (a 400 with the kind named) instead of at stage execution, deep
+ * inside a workflow. Gateways validate against this set before persisting a
+ * git connection. Keep it in lockstep with the switch in resolveProvider.
+ */
+export const IMPLEMENTED_GIT_PROVIDERS: ReadonlySet<string> = new Set([
+  "github",
+  "gitlab",
+  "bitbucket",
+  "azure_devops",
+  "mock",
+]);
+
 export { GitLabProvider, type GitLabAdapterOptions } from "./gitlab.js";
 export { BitbucketProvider, type BitbucketAdapterOptions } from "./bitbucket.js";
 export { AzureDevOpsProvider, type AzureDevOpsAdapterOptions } from "./azure-devops.js";

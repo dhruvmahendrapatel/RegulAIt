@@ -25,8 +25,15 @@ import {
   type WorkflowDefinition,
   type WorkflowEvent,
 } from "@regulait/workflow-kernel";
-import { users, roles, roleAssignments, gitConnections, deployTargets, orchestrationRuns } from "@regulait/db";
-import { resolveProvider, GitProviderError } from "@regulait/git-provider";
+import {
+  users,
+  roles,
+  roleAssignments,
+  gitConnections,
+  deployTargets,
+  orchestrationRuns,
+} from "@regulait/db";
+import { resolveProvider, GitProviderError, IMPLEMENTED_GIT_PROVIDERS } from "@regulait/git-provider";
 import { resolveDeployProvider, DeployProviderError } from "./deploy.js";
 import { validateGraph } from "@regulait/orchestration-kernel";
 import { inTransaction, planRun, type ApprovalPostCommit, type DbOrTx } from "./orchestration.js";
@@ -37,6 +44,7 @@ import {
 } from "./projects.js";
 import { decryptSecret, encryptSecret as encryptTokenOnce } from "./secrets.js";
 import { loadOrgSettings } from "./org-settings.js";
+import { activeDelegatorsFor } from "./delegations.js";
 import {
   advanceStageSchema,
   createAssignmentRuleSchema,
@@ -46,6 +54,7 @@ import {
   deployOverrideSchema,
   recheckSchema,
   reportChecksSchema,
+  retireTemplateSchema,
   startInstanceSchema,
   submitArtifactSchema,
 } from "@regulait/shared";
@@ -504,9 +513,12 @@ async function runGitExecutions(
           // (the deploy URL, the provider detail string) is retained in the
           // control plane — only metadata (id, target, env, mode) is kept, so
           // the disclosed boundary holds. hosted/byoc keep the full record.
+          // #79c honesty: dryRun is persisted in BOTH branches. It is pure
+          // metadata (a boolean about how the control plane's own adapter
+          // ran), so it does not cross the ADR-0015 air-gapped data boundary.
           context[`deploy:${stage.id}`] =
             target!.mode === "air_gapped"
-              ? { deployId: res.deployId, target: target!.name, environment: target!.environment, mode: "air_gapped" }
+              ? { deployId: res.deployId, target: target!.name, environment: target!.environment, mode: "air_gapped", dryRun: res.dryRun }
               : { ...res, target: target!.name, environment: target!.environment, mode: target!.mode };
           if (target!.mode !== "air_gapped") context.deployUrl = res.url;
         }
@@ -528,6 +540,31 @@ async function runGitExecutions(
         lastEffects = r.effects;
         pending = [];
         continue;
+      }
+      // #79c: a DRY-RUN must never satisfy a PRODUCTION deploy gate. The
+      // recorded (possibly replayed) deployment carries dryRun; when the
+      // target or the change names production, the stage parks at
+      // blocked_on_deploy with the reason spelled out — an operator may
+      // deploy-override after a real out-of-band deploy, exactly like any
+      // other manual handoff. Non-production dry-runs advance (dev/staging
+      // rehearsal stays useful) with the flag persisted and badged.
+      {
+        const recorded = context[`deploy:${stage.id}`] as { dryRun?: boolean } | undefined;
+        const prodGate = target!.environment === "production" || change.environment === "production";
+        if (recorded?.dryRun === true && prodGate) {
+          const reason = `dry-run deploy cannot satisfy a production deploy gate: the '${target!.provider}' adapter ran in dry-run mode (no live mutation happened) — wire a live deploy client, or confirm an out-of-band production deploy via deploy-override`;
+          context.lastError = `${stage.id}: ${reason}`;
+          await db.update(workflowInstances).set({ context }).where(eq(workflowInstances.id, instance.id));
+          const r = await applyEvent(
+            db,
+            instanceId,
+            { kind: "deploy_blocked", stageId: stage.id, reason },
+            actorUserId,
+          );
+          lastEffects = r.effects;
+          pending = [];
+          continue;
+        }
       }
       const r = await applyEvent(
         db,
@@ -687,6 +724,17 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
   // Git connections: admin-only; tokens encrypted at rest, never returned.
   app.post("/v1/git/connections", async (req, reply) => {
     const body = createGitConnectionSchema.parse(req.body);
+    // #79b honesty: a git-connection kind must have a real adapter TODAY.
+    // Every kind in the current schema enum is implemented, so this never
+    // fires right now — it exists so the NEXT kind added to the enum fails
+    // here, at creation, with the kind named, instead of at stage execution
+    // deep inside someone's workflow.
+    if (!IMPLEMENTED_GIT_PROVIDERS.has(body.provider)) {
+      return reply.status(400).send({
+        error: "unimplemented_git_provider",
+        detail: `git provider '${body.provider}' has no adapter yet — implemented: ${[...IMPLEMENTED_GIT_PROVIDERS].join(", ")}`,
+      });
+    }
     if (!opts.dataKey) {
       return reply.status(503).send({ error: "no_data_key", detail: "set REGULAIT_DATA_KEY" });
     }
@@ -827,6 +875,34 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     templates: await db.select().from(workflowTemplates),
   }));
 
+  // ADR-0022 retire (soft-disable). Not edit-in-place versioning: the template
+  // simply stops starting NEW instances; in-flight instances keep their
+  // snapshotted definition and are untouched; assignment rules pointing at it
+  // stay visible (and now refuse loudly). The why is required and audited.
+  app.post("/v1/workflows/templates/:templateId/retire", async (req, reply) => {
+    const { templateId } = z.object({ templateId: z.string().uuid() }).parse(req.params);
+    const body = retireTemplateSchema.parse(req.body);
+    const [tpl] = await db.select().from(workflowTemplates).where(eq(workflowTemplates.id, templateId));
+    if (!tpl) return reply.status(404).send({ error: "unknown_template" });
+    if (tpl.retiredAt) return reply.status(409).send({ error: "already_retired" });
+    const [row] = await db
+      .update(workflowTemplates)
+      .set({ retiredAt: new Date(), retiredReason: body.reason })
+      .where(eq(workflowTemplates.id, templateId))
+      .returning();
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "workflow_template",
+      objectId: templateId,
+      detail: { phase: "template-retired", name: tpl.name, reason: body.reason },
+      effect: "allow",
+      ruleId: "workflow-template-retired",
+      ruleChain: [],
+      reason: `workflow template '${tpl.name}' retired: ${body.reason}`,
+    });
+    return row;
+  });
+
   app.post("/v1/workflows/assignment-rules", async (req, reply) => {
     const body = createAssignmentRuleSchema.parse(req.body);
     const [row] = await db
@@ -929,6 +1005,17 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     if (templates.length !== templateIds.length) {
       return reply.status(400).send({ error: "invalid_reference" });
     }
+    // ADR-0022 retire: a RETIRED template starting a new instance is refused
+    // LOUDLY, never silently skipped — silently dropping a routed (possibly
+    // compliance-required) template would let the change through ungoverned.
+    const retired = templates.filter((t) => t.retiredAt !== null);
+    if (retired.length > 0) {
+      return reply.status(422).send({
+        error: "template_retired",
+        templates: retired.map((t) => t.name),
+        detail: `workflow template(s) ${retired.map((t) => `'${t.name}'`).join(", ")} are retired and start no new instances — an admin must route this change to an active template`,
+      });
+    }
     // merge in matched order (deterministic: matchTemplates preserves rule order)
     const ordered = templateIds.map((id) => templates.find((t) => t.id === id)!);
     const merged = mergeDefinitions(ordered.map((t) => t.definition as WorkflowDefinition));
@@ -966,7 +1053,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
   const loadInstanceFor = async (
     req: { authCtx: { userId: string | null; isAdmin: boolean } },
     instanceId: string,
-    access?: { allowPendingApprover?: boolean },
+    access?: { allowParticipant?: boolean },
   ): Promise<LoadResult> => {
     const [instance] = await db
       .select()
@@ -974,11 +1061,16 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       .where(eq(workflowInstances.id, instanceId));
     if (!instance) return { error: 404 };
     if (!req.authCtx.isAdmin && req.authCtx.userId !== instance.initiatorUserId) {
-      // Read-only widening: the named approver of a PENDING approval on this
-      // instance may view what they are being asked to sign off — deciding
-      // blind is not governance. Only the GET route passes the flag; every
-      // driving route keeps the admin/initiator gate.
-      if (access?.allowPendingApprover && req.authCtx.userId) {
+      // ADR-0022 read-only widening — "party to the instance": anyone NAMED as
+      // approver on ANY approval row of this instance (pending OR already
+      // decided) may READ it. Deciding a merge gate blind is not governance,
+      // and an approver reviewing what they signed off yesterday is part of
+      // the same accountability. An ACTIVE delegate of a user with a PENDING
+      // approval here may read too — they can decide it, so they must see it.
+      // Scoped read only: the flag is passed by the GET route alone; every
+      // driving route (artifacts/advance/checks/recheck/deploy-override/abort)
+      // keeps the strict admin/initiator gate.
+      if (access?.allowParticipant && req.authCtx.userId) {
         const [naming] = await db
           .select({ id: approvals.id })
           .from(approvals)
@@ -986,22 +1078,46 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
             and(
               eq(approvals.instanceId, instanceId),
               eq(approvals.approverUserId, req.authCtx.userId),
-              eq(approvals.status, "pending"),
             ),
           )
           .limit(1);
         if (naming) return { instance };
+        const delegators = await activeDelegatorsFor(db, req.authCtx.userId);
+        if (delegators.length > 0) {
+          const [viaDelegation] = await db
+            .select({ id: approvals.id })
+            .from(approvals)
+            .where(
+              and(
+                eq(approvals.instanceId, instanceId),
+                inArray(approvals.approverUserId, delegators),
+                eq(approvals.status, "pending"),
+              ),
+            )
+            .limit(1);
+          if (viaDelegation) return { instance };
+        }
       }
       return { error: 403 };
     }
     return { instance };
   };
+  // A 403 must read as an ACCESS problem, never as an outage: the body says
+  // plainly that the caller lacks access (the UIs surface `detail` verbatim).
+  const sendLoadError = (reply: { status: (code: number) => { send: (body: unknown) => unknown } }, code: 403 | 404) =>
+    code === 404
+      ? reply.status(404).send({ error: "not_found", detail: "no such workflow instance" })
+      : reply.status(403).send({
+          error: "forbidden",
+          detail:
+            "you don't have access to this workflow instance — it is visible to its initiator, admins, and its named approvers",
+        });
 
   app.post("/v1/workflows/instances/:instanceId/artifacts", async (req, reply) => {
     const { instanceId } = instanceIdParam.parse(req.params);
     const body = submitArtifactSchema.parse(req.body);
     const loaded = await loadInstanceFor(req, instanceId);
-    if (loaded.error) return reply.status(loaded.error).send({ error: "unavailable" });
+    if (loaded.error) return sendLoadError(reply, loaded.error);
     const { instance } = loaded;
 
     const def = instance.definition as WorkflowDefinition;
@@ -1040,7 +1156,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const { instanceId } = instanceIdParam.parse(req.params);
     const body = advanceStageSchema.parse(req.body);
     const loaded = await loadInstanceFor(req, instanceId);
-    if (loaded.error) return reply.status(loaded.error).send({ error: "unavailable" });
+    if (loaded.error) return sendLoadError(reply, loaded.error);
     if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_drive" });
     // Retrying a failed git stage, a build stage with a nested run, or a
     // check stage with named checks: re-run the executor instead of a human
@@ -1088,7 +1204,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const { instanceId } = instanceIdParam.parse(req.params);
     const body = reportChecksSchema.parse(req.body);
     const loaded = await loadInstanceFor(req, instanceId);
-    if (loaded.error) return reply.status(loaded.error).send({ error: "unavailable" });
+    if (loaded.error) return sendLoadError(reply, loaded.error);
     if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_drive" });
     const def = loaded.instance.definition as WorkflowDefinition;
     const stage = def.stages.find((st) => st.id === body.stageId);
@@ -1150,7 +1266,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const { instanceId } = instanceIdParam.parse(req.params);
     const body = recheckSchema.parse(req.body);
     const loaded = await loadInstanceFor(req, instanceId);
-    if (loaded.error) return reply.status(loaded.error).send({ error: "unavailable" });
+    if (loaded.error) return sendLoadError(reply, loaded.error);
     if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_drive" });
     const r = await applyEvent(
       db,
@@ -1174,7 +1290,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const { instanceId } = instanceIdParam.parse(req.params);
     const body = deployOverrideSchema.parse(req.body);
     const loaded = await loadInstanceFor(req, instanceId);
-    if (loaded.error) return reply.status(loaded.error).send({ error: "unavailable" });
+    if (loaded.error) return sendLoadError(reply, loaded.error);
     if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_drive" });
     const r = await applyEvent(
       db,
@@ -1193,7 +1309,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
   app.post("/v1/workflows/instances/:instanceId/abort", async (req, reply) => {
     const { instanceId } = instanceIdParam.parse(req.params);
     const loaded = await loadInstanceFor(req, instanceId);
-    if (loaded.error) return reply.status(loaded.error).send({ error: "unavailable" });
+    if (loaded.error) return sendLoadError(reply, loaded.error);
     if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_drive" });
     const { state } = await applyEvent(db, loaded.instance.id, { kind: "abort" }, req.authCtx.userId);
     return { status: state.status };
@@ -1202,8 +1318,8 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
   // §5 dashboard: one instance in full…
   app.get("/v1/workflows/instances/:instanceId", async (req, reply) => {
     const { instanceId } = instanceIdParam.parse(req.params);
-    const loaded = await loadInstanceFor(req, instanceId, { allowPendingApprover: true });
-    if (loaded.error) return reply.status(loaded.error).send({ error: "unavailable" });
+    const loaded = await loadInstanceFor(req, instanceId, { allowParticipant: true });
+    if (loaded.error) return sendLoadError(reply, loaded.error);
     const [events, artifacts, pendingApprovals] = await Promise.all([
       db
         .select()
@@ -1263,12 +1379,40 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     // because this endpoint is the one non-admins can read. The /app intake
     // form offers exactly these, so a requester can never type a changeType
     // that dead-ends in no_workflow_matches_change.
-    const ruleRows = await db
-      .select({ changeType: workflowAssignmentRules.changeType })
-      .from(workflowAssignmentRules);
-    const changeTypes = [
-      ...new Set(ruleRows.map((r) => r.changeType).filter((c): c is string => c !== null)),
-    ].sort();
-    return { instances: rows, changeTypes };
+    const [ruleRows, tplRows] = await Promise.all([
+      db
+        .select({
+          changeType: workflowAssignmentRules.changeType,
+          templateId: workflowAssignmentRules.templateId,
+        })
+        .from(workflowAssignmentRules),
+      db
+        .select({
+          id: workflowTemplates.id,
+          name: workflowTemplates.name,
+          retiredAt: workflowTemplates.retiredAt,
+        })
+        .from(workflowTemplates),
+    ]);
+    const tplById = new Map(tplRows.map((t) => [t.id, t]));
+    // ADR-0022 UX: the intake form shows, LIVE, which template(s) a change
+    // type routes to — names only (no rule internals leak to non-admins). A
+    // retired template is labelled so the requester learns BEFORE submitting
+    // that this type currently dead-ends.
+    const routesByType = new Map<string, Set<string>>();
+    for (const r of ruleRows) {
+      if (r.changeType === null) continue;
+      const tpl = tplById.get(r.templateId);
+      const label = tpl ? tpl.name + (tpl.retiredAt ? " (retired)" : "") : "unknown template";
+      const set = routesByType.get(r.changeType) ?? new Set<string>();
+      set.add(label);
+      routesByType.set(r.changeType, set);
+    }
+    const changeTypes = [...routesByType.keys()].sort();
+    const routes = changeTypes.map((t) => ({
+      changeType: t,
+      templates: [...(routesByType.get(t) ?? [])].sort(),
+    }));
+    return { instances: rows, changeTypes, routes };
   });
 }

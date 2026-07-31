@@ -274,6 +274,13 @@
       "when": 1784974000000,
       "tag": "0038_org_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1784975000000,
+      "tag": "0039_identity_lifecycle",
+      "breakpoints": true
     }
   ]
 }
