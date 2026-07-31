@@ -1,6 +1,9 @@
 # One command to a usable product:  docker compose up --build
-# Then open http://localhost:3000/app — the demo API keys are printed once in
-# the gateway container log (docker compose logs gateway | grep rgl_).
+# Then open http://localhost:3000/ui (the React SPA — ADR-0026; the legacy
+# shells stay at /app and /admin). Demo API keys and one-time passwords are
+# printed once in the gateway container log (docker compose logs gateway).
+# The image build stage runs `pnpm -r build`, which includes the web bundle,
+# so /ui is always built inside the container.
 services:
   db:
     image: postgres:16

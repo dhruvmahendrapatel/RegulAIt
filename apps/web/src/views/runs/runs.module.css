@@ -1,0 +1,47 @@
+.dagWrap {
+  overflow-x: auto;
+  padding: var(--s1) 0;
+}
+
+.nodeRow {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+  padding: var(--s1) 0;
+  border-bottom: 1px solid var(--border);
+}
+.nodeRow:last-child {
+  border-bottom: none;
+}
+
+.nodeTitle {
+  font-size: var(--text-sm);
+  font-weight: 550;
+}
+
+.livePane {
+  margin-top: var(--s1);
+}
+.livePre {
+  margin: var(--s0) 0 0;
+  max-height: 200px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--s1) var(--s2);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+}
+
+.output {
+  margin-top: var(--s0);
+  font-size: var(--text-xs);
+}
+.output summary {
+  cursor: pointer;
+  color: var(--text-faint);
+}

@@ -1,0 +1,413 @@
+/**
+ * Workflow detail — the stage rail, the action the current stage wants
+ * (artifact submit / sign-off wait / trigger / failed checks / deploy hold),
+ * artifacts, recorded check results, and the delivery card (branch, PR,
+ * merge, deploy — dry-run badged honestly).
+ */
+import { useState } from "react";
+import { Link, useParams } from "react-router-dom";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { api } from "../../api/client";
+import type { CheckResult, WorkflowDetailResponse } from "../../api/types";
+import { ago } from "../../api/format";
+import { PageHeader } from "../../shell/AppShell";
+import {
+  Badge,
+  Button,
+  Card,
+  CodeBlock,
+  ErrorState,
+  IdChip,
+  SkeletonBlock,
+  StatusBadge,
+} from "../../ui/kit";
+import { useToast } from "../../ui/toast";
+import v from "../views.module.css";
+import s from "./workflows.module.css";
+
+export default function WorkflowDetailPage() {
+  const { instanceId } = useParams<{ instanceId: string }>();
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const [artifactText, setArtifactText] = useState("");
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const q = useQuery({
+    queryKey: ["workflow", instanceId],
+    enabled: Boolean(instanceId),
+    queryFn: () => api.get<WorkflowDetailResponse>(`/v1/workflows/instances/${instanceId}`),
+  });
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ["workflow", instanceId] });
+
+  if (q.isLoading) {
+    return (
+      <>
+        <PageHeader title="Workflow" />
+        <Card>
+          <SkeletonBlock lines={6} />
+        </Card>
+      </>
+    );
+  }
+  if (q.isError || !q.data) {
+    const err = q.error as { status?: number; message?: string } | null;
+    return (
+      <>
+        <PageHeader title="Workflow" />
+        <Card>
+          <ErrorState
+            message={err?.message ?? "unknown error"}
+            access={err?.status === 403}
+            onRetry={() => void q.refetch()}
+          />
+        </Card>
+      </>
+    );
+  }
+
+  const { instance: inst, artifacts, pendingApprovals } = q.data;
+  const def = inst.definition;
+  const state = inst.state;
+  const current = def.stages[state.currentStageIndex];
+  const ctx = inst.context ?? {};
+  const terminal = ["completed", "denied", "aborted"].includes(inst.status);
+
+  const act = async (fn: () => Promise<unknown>, label: string) => {
+    setActionError(null);
+    try {
+      await fn();
+      toast(label, "success");
+      void refresh();
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const failedChecks: CheckResult[] =
+    current && inst.status === "blocked_on_check"
+      ? ((ctx[`checks:${current.id}`] as CheckResult[] | undefined) ?? []).filter(
+          (c) => c.status === "failed",
+        )
+      : [];
+
+  const checkCards = def.stages
+    .filter((st) => st.type === "automated_check" && ctx[`checks:${st.id}`])
+    .map((st) => ({
+      stage: st,
+      results: (ctx[`checks:${st.id}`] as CheckResult[] | undefined) ?? [],
+    }));
+
+  const deployRow = Object.keys(ctx)
+    .filter((k) => k.startsWith("deploy:"))
+    .map((k) => ctx[k] as { target?: string; environment?: string; dryRun?: boolean })[0];
+  const rollbackRow = Object.keys(ctx)
+    .filter((k) => k.startsWith("rollback:"))
+    .map((k) => ctx[k] as { reverted?: string })[0];
+  const hasDelivery = Boolean(ctx.branch || ctx.prUrl || ctx.mergeSha || deployRow);
+
+  return (
+    <>
+      <div style={{ marginBottom: "var(--s1)" }}>
+        <Link to="/workflows">← All workflows</Link>
+      </div>
+      <PageHeader
+        title={inst.change?.description ?? "untitled change"}
+        sub={
+          <span className={v.rowTight}>
+            <StatusBadge status={inst.status} />
+            <span>
+              {inst.change?.changeType ?? ""} · {inst.change?.environment ?? ""} · created{" "}
+              {ago(inst.createdAt)}
+            </span>
+            <IdChip id={inst.id} />
+          </span>
+        }
+      />
+
+      <div className={v.stack}>
+        <Card title="Pipeline">
+          <div className={s.stageRail}>
+            {def.stages.map((stage, i) => {
+              const st = String(state.stageStatuses[i] ?? "");
+              const cls =
+                i === state.currentStageIndex && !terminal
+                  ? s.stageActive
+                  : st === "completed" || st === "done"
+                    ? s.stageDone
+                    : st === "failed"
+                      ? s.stageFailed
+                      : s.stage;
+              return (
+                <span key={stage.id} className={cls}>
+                  {stage.id}
+                  <span className={s.stageType}>{stage.type}</span>
+                </span>
+              );
+            })}
+          </div>
+        </Card>
+
+        {inst.status === "blocked_on_artifact" && current && (
+          <Card title={`Submit ${current.output ?? "artifact"}`}>
+            <textarea
+              className={v.grow}
+              style={{
+                width: "100%",
+                minHeight: 130,
+                padding: "var(--s1)",
+                borderRadius: "var(--radius-sm)",
+                border: "1px solid var(--border)",
+                background: "var(--surface-1)",
+                color: "var(--text)",
+                font: "inherit",
+                fontSize: "var(--text-sm)",
+              }}
+              placeholder={`Write the ${current.output ?? "artifact"} content…`}
+              value={artifactText}
+              onChange={(e) => setArtifactText(e.target.value)}
+              aria-label="Artifact content"
+            />
+            <div className={v.row} style={{ marginTop: "var(--s1)" }}>
+              <Button
+                variant="primary"
+                onClick={() =>
+                  void act(
+                    () =>
+                      api.post(`/v1/workflows/instances/${inst.id}/artifacts`, {
+                        stageId: current.id,
+                        content: artifactText,
+                      }),
+                    "Artifact submitted — sign-off requested",
+                  )
+                }
+              >
+                Submit for sign-off
+              </Button>
+            </div>
+          </Card>
+        )}
+
+        {inst.status === "blocked_on_approval" && (
+          <Card>
+            <span className={v.rowTight}>
+              <Badge tone="warn">waiting for sign-off</Badge>
+              <span className={v.dim}>
+                awaiting{" "}
+                {[...new Set((pendingApprovals ?? []).map((a) => a.approverName ?? "the named approver"))].join(
+                  ", ",
+                ) || "the named approver"}{" "}
+                — it is in their inbox
+              </span>
+            </span>
+          </Card>
+        )}
+
+        {inst.status === "awaiting_trigger" && current && (
+          <Card>
+            <Button
+              variant="primary"
+              onClick={() =>
+                void act(
+                  () => api.post(`/v1/workflows/instances/${inst.id}/advance`, { stageId: current.id }),
+                  "Stage advanced",
+                )
+              }
+            >
+              Run {current.id}
+            </Button>
+          </Card>
+        )}
+
+        {inst.status === "awaiting_execution" && (
+          <Card>
+            <span className={v.rowTight}>
+              <Badge tone="info">executing</Badge>
+              <span className={v.dim}>a nested run or git operation is in flight</span>
+              {current && typeof ctx[`runId:${current.id}`] === "string" && (
+                <Link to={`/runs/${ctx[`runId:${current.id}`]}`}>watch the run</Link>
+              )}
+            </span>
+            {typeof ctx.lastError === "string" && ctx.lastError && (
+              <div className={v.errLine} style={{ marginTop: "var(--s0)" }}>
+                {ctx.lastError}
+              </div>
+            )}
+          </Card>
+        )}
+
+        {inst.status === "blocked_on_check" && current && (
+          <Card>
+            <span className={v.rowTight}>
+              <Badge tone="danger">checks failed</Badge>
+              <span className={v.dim}>
+                {failedChecks.map((c) => c.check).join(", ") || "a required check"} must pass before
+                this can proceed.
+              </span>
+            </span>
+            {failedChecks.map((c) => (
+              <div key={c.check} className={v.row} style={{ marginTop: "var(--s1)" }}>
+                <span className={v.mono}>{c.check}</span>
+                {c.severity && <Badge tone="warn">{c.severity}</Badge>}
+                <Button
+                  size="sm"
+                  title="Record this check as remediated (reports a passing result)"
+                  onClick={() =>
+                    void act(
+                      () =>
+                        api.post(`/v1/workflows/instances/${inst.id}/checks`, {
+                          stageId: current.id,
+                          results: [{ check: c.check, status: "passed", detail: "remediated" }],
+                        }),
+                      `Marked ${c.check} passing — re-run checks to proceed`,
+                    )
+                  }
+                >
+                  mark passing
+                </Button>
+              </div>
+            ))}
+            <div className={v.row} style={{ marginTop: "var(--s2)" }}>
+              <Button
+                variant="primary"
+                onClick={() =>
+                  void act(
+                    () => api.post(`/v1/workflows/instances/${inst.id}/recheck`, { stageId: current.id }),
+                    "Re-ran checks",
+                  )
+                }
+              >
+                Re-run checks
+              </Button>
+            </div>
+          </Card>
+        )}
+
+        {inst.status === "blocked_on_deploy" && current && (
+          <Card>
+            <span className={v.rowTight}>
+              <Badge tone="warn">deploy on hold</Badge>
+              <span className={v.dim}>
+                {typeof ctx.lastError === "string" && ctx.lastError
+                  ? ctx.lastError
+                  : "this deploy needs a manual handoff before it can proceed."}
+              </span>
+            </span>
+            <div className={v.row} style={{ marginTop: "var(--s2)" }}>
+              <Button
+                variant="primary"
+                title="Confirm the deploy was handled out-of-band (or the condition is acceptable) and advance"
+                onClick={() =>
+                  void act(
+                    () =>
+                      api.post(`/v1/workflows/instances/${inst.id}/deploy-override`, {
+                        stageId: current.id,
+                      }),
+                    "Deploy handed off — continuing",
+                  )
+                }
+              >
+                Mark deployed &amp; continue
+              </Button>
+            </div>
+          </Card>
+        )}
+
+        {inst.status === "rolled_back" && (
+          <Card>
+            <span className={v.rowTight}>
+              <Badge tone="danger">rolled back</Badge>
+              <span className={v.dim}>
+                a post-deploy check failed and the deployment was reversed
+                {rollbackRow?.reverted ? ` (${rollbackRow.reverted})` : ""}. This run is closed.
+              </span>
+            </span>
+          </Card>
+        )}
+
+        {actionError && (
+          <div className={v.errLine} role="alert">
+            {actionError}
+          </div>
+        )}
+
+        {(artifacts?.length ?? 0) > 0 && (
+          <Card title="Artifacts">
+            {artifacts!.map((a) => (
+              <details key={a.id} style={{ marginBottom: "var(--s1)" }}>
+                <summary className={v.dim} style={{ cursor: "pointer" }}>
+                  {a.output} v{a.version}
+                </summary>
+                <div style={{ marginTop: "var(--s0)" }}>
+                  <CodeBlock maxHeight="260px">{a.content}</CodeBlock>
+                </div>
+              </details>
+            ))}
+          </Card>
+        )}
+
+        {checkCards.map(({ stage, results }) => (
+          <Card key={stage.id} title={`Checks · ${stage.id}`}>
+            {results.map((c) => (
+              <div key={c.check} className={v.listRow} style={{ alignItems: "center" }}>
+                <span className={v.mono}>{c.check}</span>
+                {c.severity && <Badge tone="warn">{c.severity}</Badge>}
+                <span className={v.faint}>{c.detail ?? ""}</span>
+                <span className={v.grow} />
+                <StatusBadge status={c.status} />
+              </div>
+            ))}
+          </Card>
+        ))}
+
+        {hasDelivery && (
+          <Card title="Delivery">
+            {typeof ctx.branch === "string" && ctx.branch && (
+              <div className={v.row}>
+                <span className={s.deliveryKey}>branch</span>
+                <span className={v.mono}>{ctx.branch}</span>
+              </div>
+            )}
+            {typeof ctx.prUrl === "string" && ctx.prUrl && (
+              <div className={v.row} style={{ marginTop: "var(--s0)" }}>
+                <span className={s.deliveryKey}>pull request</span>
+                <a className={v.mono} href={ctx.prUrl} target="_blank" rel="noopener noreferrer">
+                  {ctx.prUrl}
+                </a>
+                {ctx.prId != null && <Badge>#{String(ctx.prId)}</Badge>}
+              </div>
+            )}
+            {typeof ctx.mergeSha === "string" && ctx.mergeSha && (
+              <div className={v.row} style={{ marginTop: "var(--s0)" }}>
+                <span className={s.deliveryKey}>merged</span>
+                <span className={v.mono}>{ctx.mergeSha}</span>
+                <Badge tone="ok">merged</Badge>
+              </div>
+            )}
+            {deployRow && (
+              <div className={v.row} style={{ marginTop: "var(--s0)" }}>
+                <span className={s.deliveryKey}>deployed</span>
+                <span className={v.mono}>
+                  {deployRow.target}
+                  {deployRow.environment ? ` · ${deployRow.environment}` : ""}
+                </span>
+                {deployRow.dryRun && (
+                  <Badge
+                    tone="warn"
+                    title="The deploy adapter ran in dry-run mode — nothing was actually mutated on the target. A dry-run never satisfies a production deploy gate."
+                  >
+                    dry-run
+                  </Badge>
+                )}
+                {rollbackRow ? (
+                  <Badge tone="danger">rolled back</Badge>
+                ) : deployRow.dryRun ? null : (
+                  <Badge tone="ok">live</Badge>
+                )}
+              </div>
+            )}
+          </Card>
+        )}
+      </div>
+    </>
+  );
+}

@@ -1,0 +1,165 @@
+/**
+ * RegulAIt design tokens — the single source of visual truth for the SPA.
+ *
+ * Rules of the system:
+ *  - 8px spacing scale (--s1..--s8), no ad-hoc margins.
+ *  - One neutral surface ramp + one primary (indigo) + three semantic hues.
+ *  - Light AND dark are token swaps only; components never branch on theme.
+ *  - All text/surface pairs meet WCAG AA (4.5:1 body, 3:1 large/UI).
+ */
+
+:root {
+  /* spacing — 8px scale (plus a 4px half-step for tight UI) */
+  --s0: 4px;
+  --s1: 8px;
+  --s2: 16px;
+  --s3: 24px;
+  --s4: 32px;
+  --s5: 40px;
+  --s6: 48px;
+  --s7: 56px;
+  --s8: 64px;
+
+  /* type */
+  --font-sans: "Inter", "Inter var", -apple-system, BlinkMacSystemFont, "Segoe UI",
+    Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo,
+    Consolas, monospace;
+  --text-xs: 11.5px;
+  --text-sm: 12.5px;
+  --text-md: 13.5px;
+  --text-lg: 15px;
+  --text-xl: 19px;
+  --text-2xl: 24px;
+
+  /* radii + shadows */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --shadow-sm: 0 1px 2px rgba(16, 20, 32, 0.06);
+  --shadow-md: 0 4px 16px rgba(16, 20, 32, 0.1);
+  --shadow-lg: 0 12px 40px rgba(16, 20, 32, 0.18);
+
+  --focus-ring: 0 0 0 2px var(--surface-0), 0 0 0 4px var(--primary);
+
+  /* ---- light theme (default) ---- */
+  /* neutral surface ramp: page → raised → inset → borders */
+  --surface-0: #f6f7f9;      /* page background */
+  --surface-1: #ffffff;      /* cards, panels */
+  --surface-2: #eef0f4;      /* inset wells, table headers */
+  --surface-3: #e3e6ec;      /* hover fills */
+  --border: #d8dce4;
+  --border-strong: #b9bfcc;
+
+  --text: #1a1f2b;           /* 14.9:1 on surface-1 */
+  --text-dim: #4b5265;       /* 7.6:1 */
+  --text-faint: #6b7285;     /* 4.9:1 — still AA for body */
+  --text-invert: #ffffff;
+
+  /* primary — restrained indigo */
+  --primary: #3b5bdb;        /* 5.2:1 on white */
+  --primary-strong: #2f4bc4;
+  --primary-soft: #e8ecfb;
+  --primary-soft-text: #2c46b5;
+
+  /* semantic */
+  --ok: #1d7a46;             /* 4.6:1 on white */
+  --ok-soft: #e0f2e7;
+  --ok-soft-text: #185f38;
+  --warn: #a06a00;           /* amber, 4.7:1 */
+  --warn-soft: #faefd7;
+  --warn-soft-text: #7c5200;
+  --danger: #c0343c;         /* 4.9:1 */
+  --danger-soft: #fbe6e7;
+  --danger-soft-text: #9d272e;
+  --info: #0d6aa8;           /* 4.8:1 */
+  --info-soft: #e0eff9;
+  --info-soft-text: #0a557f;
+
+  --scrim: rgba(20, 24, 34, 0.45);
+  --skeleton-a: #e8eaf0;
+  --skeleton-b: #f3f5f8;
+
+  color-scheme: light;
+}
+
+/* ---- dark theme ---- */
+:root[data-theme="dark"] {
+  --surface-0: #12151c;
+  --surface-1: #1a1e28;
+  --surface-2: #222735;
+  --surface-3: #2b3142;
+  --border: #313849;
+  --border-strong: #454e63;
+
+  --text: #e8eaf1;           /* 13.9:1 on surface-1 */
+  --text-dim: #aab1c2;       /* 7.2:1 */
+  --text-faint: #8a91a5;     /* 4.7:1 */
+  --text-invert: #12151c;
+
+  --primary: #7b96f4;        /* 6.3:1 on surface-1 */
+  --primary-strong: #92a9f7;
+  --primary-soft: #232c4d;
+  --primary-soft-text: #aebef8;
+
+  --ok: #52c98a;
+  --ok-soft: #16301f;
+  --ok-soft-text: #7cd9a6;
+  --warn: #e0aa3e;
+  --warn-soft: #33280e;
+  --warn-soft-text: #ecc36a;
+  --danger: #ee7b81;
+  --danger-soft: #3a1a1c;
+  --danger-soft-text: #f4a3a7;
+  --info: #5bb1e8;
+  --info-soft: #10293a;
+  --info-soft-text: #8ac8f0;
+
+  --scrim: rgba(0, 0, 0, 0.6);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.55);
+  --skeleton-a: #232837;
+  --skeleton-b: #2b3142;
+
+  color-scheme: dark;
+}
+
+/* No stored choice → follow the OS. Mirrors the dark block above. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --surface-0: #12151c;
+    --surface-1: #1a1e28;
+    --surface-2: #222735;
+    --surface-3: #2b3142;
+    --border: #313849;
+    --border-strong: #454e63;
+    --text: #e8eaf1;
+    --text-dim: #aab1c2;
+    --text-faint: #8a91a5;
+    --text-invert: #12151c;
+    --primary: #7b96f4;
+    --primary-strong: #92a9f7;
+    --primary-soft: #232c4d;
+    --primary-soft-text: #aebef8;
+    --ok: #52c98a;
+    --ok-soft: #16301f;
+    --ok-soft-text: #7cd9a6;
+    --warn: #e0aa3e;
+    --warn-soft: #33280e;
+    --warn-soft-text: #ecc36a;
+    --danger: #ee7b81;
+    --danger-soft: #3a1a1c;
+    --danger-soft-text: #f4a3a7;
+    --info: #5bb1e8;
+    --info-soft: #10293a;
+    --info-soft-text: #8ac8f0;
+    --scrim: rgba(0, 0, 0, 0.6);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.45);
+    --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.55);
+    --skeleton-a: #232837;
+    --skeleton-b: #2b3142;
+    color-scheme: dark;
+  }
+}
