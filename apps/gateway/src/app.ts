@@ -131,6 +131,7 @@ import {
   startAuditPruneScheduler,
 } from "./org-settings.js";
 import { registerSetupStatusRoutes } from "./setup-status.js";
+import { WEB_UI_ROUTES, registerWebServing } from "./web-serving.js";
 import { MergeConflictError, WorkflowStateError } from "@regulait/workflow-kernel";
 
 const uuidParam = z.object({ serverId: z.string().uuid() });
@@ -191,6 +192,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "/auth/oidc/providers",
     "/auth/oidc/:providerId/start",
     "/auth/oidc/callback",
+    // the /ui SPA shell (ADR-0026): a static, zero-data page like /app and
+    // /admin above — the browser hits it before it has any credential; every
+    // API call the page makes still authenticates normally.
+    ...WEB_UI_ROUTES,
   ]);
   // ADR-0020 INTERCEPTION GATE. Runs in the onRequest phase — BEFORE auth — so
   // a surface the admin has not enabled answers Fastify's own 404 body and is
@@ -404,6 +409,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "GET /app",
     "GET /",
     "GET /health",
+    // ADR-0026: the SPA shell, same static-page reasoning as /app above
+    ...WEB_UI_ROUTES.map((r) => `GET ${r}`),
     // ADR-0025: the auth surface — login endpoints are pre-identity, the
     // self-service endpoints (me/change-password/TOTP) are every signed-in
     // human's own account. Admin-ness is not the point of any of them.
@@ -1849,6 +1856,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // talks to the same REST API as any script — policy-as-code by construction.
   app.get("/admin", async (_req, reply) => reply.type("text/html").send(ADMIN_PORTAL_HTML));
   app.get("/app", async (_req, reply) => reply.type("text/html").send(APP_HTML));
+
+  // ADR-0026: the React SPA at /ui (built bundle from apps/web/dist —
+  // assets, SPA fallback, 503 when unbuilt). Registered like the two legacy
+  // shells above; the API surface is never shadowed.
+  registerWebServing(app);
 
   // The two things anything pointed at the bare origin expects to find: a
   // human landing on / gets the app, a load balancer or uptime check gets a
