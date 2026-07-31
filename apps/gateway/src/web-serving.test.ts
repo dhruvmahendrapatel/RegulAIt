@@ -136,11 +136,21 @@ describe("no auth bypass — /ui serving never shadows the API surface", () => {
     expect(res.json().isAdmin).toBe(true);
   });
 
-  it("legacy shells stay served — /app and /admin are untouched", async () => {
-    for (const url of ["/app", "/admin"]) {
+  it("phase-2 swap: / , /app and /admin all redirect to the SPA at /ui", async () => {
+    for (const url of ["/", "/app", "/admin"]) {
+      const res = await app.inject({ method: "GET", url });
+      expect(res.statusCode).toBe(302);
+      expect(res.headers.location).toBe("/ui");
+    }
+  });
+
+  it("legacy shells stay reachable for one release at /legacy/*, labeled deprecated", async () => {
+    for (const url of ["/legacy/app", "/legacy/admin"]) {
       const res = await app.inject({ method: "GET", url });
       expect(res.statusCode).toBe(200);
       expect(res.headers["content-type"]).toContain("text/html");
+      expect(res.body).toContain("Deprecated");
+      expect(res.body).toContain('href="/ui"');
       expect(res.body).not.toBe(INDEX_HTML);
     }
   });
