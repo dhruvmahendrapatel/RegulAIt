@@ -85,6 +85,14 @@ function field(f) {
       + ">" + opts.map((o) => "<option value='" + esc(o.v) + "'>" + esc(o.l) + "</option>").join("")
       + "</select></div>";
   }
+  // type:"textarea" renders a real <textarea> (multi-line prose like an
+  // agent's system prompt); FormData picks it up by name exactly like an input
+  if (f.type === "textarea") {
+    return "<div" + (f.grow ? " class='grow'" : "") + ">" + lbl
+      + "<textarea id='" + fid + "' name='" + f.name + "' rows='" + (f.rows ?? 4) + "'"
+      + " placeholder='" + esc(f.ph ?? f.name) + "'" + (f.req === false ? "" : " required")
+      + " style='width:100%;resize:vertical'></textarea></div>";
+  }
   return "<div" + (f.grow ? " class='grow'" : "") + ">" + lbl
     + "<input id='" + fid + "' name='" + f.name + "' type='" + esc(f.type ?? "text") + "'"
     + (f.type === "number" ? " step='any'" : "")
@@ -682,10 +690,27 @@ const TABS = [
   // untouched); "clear" is the only way to actually null one out, so it has
   // to be a distinct choice rather than an empty box.
   const KEEP = { v: "", l: "— leave unchanged —" }, CLEAR = { v: "__clear__", l: "— clear —" };
+  // the catalog stays scannable: a stored system prompt shows as a compact
+  // "set (n chars)" marker (the full text is edited via the form below, and
+  // its current value is what you last saved — there is no partial view)
+  const catalogRows = a.agents.map((x) => Object.assign({}, x, {
+    systemPrompt: x.systemPrompt ? "set (" + x.systemPrompt.length + " chars)" : "—",
+  }));
   el.innerHTML = "<h2>Agent catalog</h2><div class='card'>"
-    + table(a.agents, (r) => "<button class='small' data-agent='" + r.id + "' data-en='" + !r.enabled + "'>" + (r.enabled ? "disable" : "enable") + "</button>") + "</div>"
+    + table(catalogRows, (r) => "<button class='small' data-agent='" + r.id + "' data-en='" + !r.enabled + "'>" + (r.enabled ? "disable" : "enable") + "</button>") + "</div>"
     + "<h2>Grant an agent</h2><div class='card'>"
     + form("f-agrant", [{name:"userId",label:"user",options:uOpts},{name:"agentId",label:"agent",options:aOpts}], "Grant") + "</div>"
+    // ADR-0023: the admin-authored BASE system prompt — a governance artifact
+    // applied on every dispatch of the agent; a caller-supplied system is
+    // appended after it, never replacing it. Leaving the textarea empty clears.
+    + "<h2>System prompt — admin base (governance artifact)</h2><div class='card'>"
+    + form("f-asys", [
+        {name:"agentId",label:"agent",options:aOpts},
+        {name:"systemPrompt",label:"system prompt",type:"textarea",req:false,grow:true,
+         ph:"e.g. You are the billing-support agent. Never quote raw account numbers. (empty = clear)"},
+      ], "Save prompt")
+    + "<p class='dim' style='font-size:12px'>Applied as the system BASE on every governed dispatch of this agent — direct invokes, orchestration workers, and intercepted IDE calls alike. A caller-supplied system prompt is appended after it and can never replace it. Saving with an empty box clears the prompt.</p>"
+    + "</div>"
     // §4 default + ceiling, §12 routing off-switch, ORCH §5.2 run budget —
     // one row in user_agent_policies, so one form.
     + "<h2>Per-user agent policy — default, ceiling, routing, run budget</h2><div class='card'>"
@@ -705,6 +730,10 @@ const TABS = [
     await post("/v1/agents/" + b.dataset.agent + "/enabled", { enabled: b.dataset.en === "true" }); render();
   }));
   wire("f-agrant", (d) => post("/v1/grants/agents", d));
+  // empty textarea = an explicit clear (wire() drops empty values, so an
+  // absent systemPrompt key means the operator emptied the box)
+  wire("f-asys", (d) => post("/v1/agents/" + d.agentId + "/system-prompt",
+    { systemPrompt: d.systemPrompt ?? null }));
   wire("f-apolicy", (d) => {
     const body = {};
     for (const k of ["defaultAgentId", "ceilingAgentId"]) if (k in d) body[k] = d[k] === "__clear__" ? null : d[k];

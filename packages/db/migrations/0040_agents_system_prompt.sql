@@ -1,0 +1,14 @@
+-- ADR-0023 — agents.system_prompt: the admin-authored per-agent BASE system
+-- prompt, a governance artifact applied on every governed dispatch of that
+-- agent (direct invoke, orchestration workers, and both compat shims — they
+-- all flow through the one dispatch core).
+--
+-- Behaviour-preserving default, per the 0038 invariant: the column is nullable
+-- and null means "no admin base prompt" — nothing changes until an admin sets
+-- one. A caller-supplied `system` is APPENDED after this base, never replaces
+-- it (the enforcement lives in executeGovernedDispatch; see ADR-0023).
+--
+-- NOTE deliberately absent here: the Snowflake key-pair credential needs NO
+-- DDL — ADR-0023 chose a structured-JSON convention INSIDE the existing single
+-- connector_credentials.token_ciphertext over per-kind columns.
+ALTER TABLE "agents" ADD COLUMN "system_prompt" text;

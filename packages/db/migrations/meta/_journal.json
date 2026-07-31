@@ -281,6 +281,13 @@
       "when": 1784975000000,
       "tag": "0039_identity_lifecycle",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1784976000000,
+      "tag": "0040_agents_system_prompt",
+      "breakpoints": true
     }
   ]
 }

@@ -395,6 +395,14 @@ export const agents = pgTable("agents", {
   // MODEL DISPATCH: provider-native model id this registry entry executes as
   // (e.g. claude-opus-5). null = decision/routing-only, not dispatchable.
   model: text("model"),
+  // ADR-0023: the admin-authored per-agent BASE system prompt — a GOVERNANCE
+  // ARTIFACT, not a caller convenience. When set, every governed dispatch of
+  // this agent sends it as the system field's base; a caller-supplied system is
+  // APPENDED after it, never replaces it (enforced in executeGovernedDispatch,
+  // so direct invokes, orchestration workers, and both compat shims inherit
+  // the invariant from the one shared core). null = no base prompt (today's
+  // behaviour, byte-identical).
+  systemPrompt: text("system_prompt"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
