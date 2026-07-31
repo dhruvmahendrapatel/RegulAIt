@@ -1,0 +1,51 @@
+.stageRail {
+  display: flex;
+  gap: var(--s1);
+  flex-wrap: wrap;
+  align-items: stretch;
+}
+.stage {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--s0) var(--s1);
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  background: var(--surface-2);
+  min-width: 84px;
+}
+.stageType {
+  font-size: 9.5px;
+  color: var(--text-faint);
+  font-family: var(--font-sans);
+}
+.stageActive {
+  composes: stage;
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary-soft-text);
+}
+.stageDone {
+  composes: stage;
+  border-color: var(--ok);
+  color: var(--ok-soft-text);
+  background: var(--ok-soft);
+}
+.stageFailed {
+  composes: stage;
+  border-color: var(--danger);
+  color: var(--danger-soft-text);
+  background: var(--danger-soft);
+}
+
+.deliveryKey {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-faint);
+  min-width: 96px;
+  display: inline-block;
+}

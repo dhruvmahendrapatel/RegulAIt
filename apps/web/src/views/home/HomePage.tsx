@@ -1,0 +1,396 @@
+/**
+ * Home. Admins see org readiness (the setup checklist), the approval queue
+ * pulse, a spend snapshot and recent audit lines; everyone else sees their
+ * own pending approvals, recent runs and spend. Every card links somewhere
+ * real — nothing decorative.
+ */
+import { Link, useNavigate } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "../../api/client";
+import type {
+  Approval,
+  AuditEntry,
+  RunSummary,
+  SetupStatusResponse,
+  UsageEventsResponse,
+} from "../../api/types";
+import { ago, approvalStageLabel, fmtUsd } from "../../api/format";
+import { useSession } from "../../session/SessionContext";
+import { PageHeader } from "../../shell/AppShell";
+import {
+  Badge,
+  Button,
+  Card,
+  EmptyState,
+  ErrorState,
+  Meter,
+  SkeletonBlock,
+  StatusBadge,
+  StatusDot,
+} from "../../ui/kit";
+import v from "../views.module.css";
+
+export default function HomePage() {
+  const { auth } = useSession();
+  const firstName = auth?.user?.displayName?.split(/\s+/)[0];
+  return (
+    <>
+      <PageHeader
+        title={firstName ? `Welcome back, ${firstName}` : "Welcome back"}
+        sub="Your governed AI delivery workspace — everything below is live."
+      />
+      <div className={v.stack}>
+        {auth?.isAdmin && <SetupCard />}
+        <div className={v.grid2}>
+          <ApprovalsCard />
+          <SpendCard />
+        </div>
+        <div className={v.grid2}>
+          <RecentRunsCard />
+          {auth?.isAdmin ? <AuditCard /> : <WorkflowNudgeCard />}
+        </div>
+      </div>
+    </>
+  );
+}
+
+function SetupCard() {
+  const q = useQuery({
+    queryKey: ["setup-status"],
+    queryFn: () => api.get<SetupStatusResponse>("/v1/setup/status"),
+  });
+  if (q.isLoading)
+    return (
+      <Card title="Getting started">
+        <SkeletonBlock lines={4} />
+      </Card>
+    );
+  if (q.isError)
+    return (
+      <Card title="Getting started">
+        <ErrorState message={(q.error as Error).message} onRetry={() => void q.refetch()} />
+      </Card>
+    );
+  const d = q.data!;
+  if (d.complete) {
+    return (
+      <Card title="Getting started">
+        <div className={v.row}>
+          <StatusDot tone="ok" />
+          <span className={v.dim}>
+            All {d.totalCount} setup steps are complete — this deployment is fully wired.
+          </span>
+          <span className={v.grow} />
+          <a href="/admin#getting-started">Review in the classic console ↗</a>
+        </div>
+      </Card>
+    );
+  }
+  return (
+    <Card
+      title={
+        <span className={v.row}>
+          Getting started
+          <Badge tone="primary">
+            {d.doneCount}/{d.totalCount} done
+          </Badge>
+        </span>
+      }
+      actions={<a href="/admin#getting-started">Open checklist ↗</a>}
+    >
+      <div>
+        {d.steps.map((step) => (
+          <div key={step.key} className={v.listRow}>
+            <StatusDot tone={step.done ? "ok" : "neutral"} title={step.done ? "done" : "pending"} />
+            <span className={v.grow} style={{ fontSize: "var(--text-sm)" }}>
+              {step.title}
+            </span>
+            {step.done ? (
+              <Badge tone="ok">done</Badge>
+            ) : (
+              <a
+                className={v.faint}
+                href="/admin#getting-started"
+                title="Complete this step in the classic admin console"
+              >
+                complete ↗
+              </a>
+            )}
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+function ApprovalsCard() {
+  const { auth } = useSession();
+  const navigate = useNavigate();
+  const q = useQuery({
+    queryKey: ["approvals"],
+    queryFn: () => api.get<{ approvals: Approval[] }>("/v1/approvals"),
+  });
+  if (q.isLoading)
+    return (
+      <Card title="Approvals">
+        <SkeletonBlock lines={3} />
+      </Card>
+    );
+  if (q.isError)
+    return (
+      <Card title="Approvals">
+        <ErrorState message={(q.error as Error).message} onRetry={() => void q.refetch()} />
+      </Card>
+    );
+  const pending = (q.data?.approvals ?? []).filter((a) => a.status === "pending");
+  return (
+    <Card
+      title={auth?.isAdmin ? "Pending approvals — org-wide" : "Waiting on you"}
+      actions={<Link to="/inbox">Open inbox</Link>}
+    >
+      {pending.length === 0 ? (
+        <EmptyState
+          title="Nothing waiting"
+          body="Sign-offs, escalations and budget overages appear here the moment they pause."
+        />
+      ) : (
+        <>
+          <div className={v.stat} style={{ marginBottom: "var(--s1)" }}>
+            <span className={v.statValue}>{pending.length}</span>
+            <span className={v.statLabel}>pending decision{pending.length === 1 ? "" : "s"}</span>
+          </div>
+          {pending.slice(0, 4).map((a) => (
+            <div key={a.id} className={v.listRow} style={{ cursor: "pointer" }} onClick={() => navigate("/inbox")}>
+              <span className={v.grow} style={{ fontSize: "var(--text-sm)" }}>
+                {approvalStageLabel(a) ?? a.objectLabel ?? a.objectType}
+                <span className={v.faint}> · requested by {a.requestedByName ?? "unknown"}</span>
+              </span>
+              <span className={v.faint}>{ago(a.requestedAt)}</span>
+            </div>
+          ))}
+        </>
+      )}
+    </Card>
+  );
+}
+
+function SpendCard() {
+  const { auth } = useSession();
+  const q = useQuery({
+    queryKey: ["usage-events"],
+    queryFn: () => api.get<UsageEventsResponse>("/v1/usage-events?limit=100"),
+  });
+  if (q.isLoading)
+    return (
+      <Card title="Spend">
+        <SkeletonBlock lines={3} />
+      </Card>
+    );
+  if (q.isError)
+    return (
+      <Card title="Spend">
+        <ErrorState message={(q.error as Error).message} onRetry={() => void q.refetch()} />
+      </Card>
+    );
+  const t = q.data?.totals ?? {};
+  return (
+    <Card
+      title={auth?.isAdmin ? "Spend snapshot" : "My spend"}
+      actions={
+        auth?.isAdmin ? <a href="/admin#cost-projects">Cost dashboard ↗</a> : <Link to="/projects">Projects</Link>
+      }
+    >
+      {(t.events ?? 0) === 0 ? (
+        <EmptyState
+          title="No metered calls yet"
+          body="Send a message in Chat — every dispatch is governed, metered and attributed."
+          action={
+            <Button size="sm" onClick={() => (window.location.href = "/ui/chat")}>
+              Open Chat
+            </Button>
+          }
+        />
+      ) : (
+        <div className={v.grid3}>
+          <div className={v.stat}>
+            <span className={v.statValue}>{fmtUsd(t.costUsd)}</span>
+            <span className={v.statLabel}>measured · {t.events} calls</span>
+          </div>
+          <div className={v.stat}>
+            <span className={v.statValue}>
+              {t.inputTokens ?? 0}→{t.outputTokens ?? 0}
+            </span>
+            <span className={v.statLabel}>tokens in → out</span>
+          </div>
+          <div className={v.stat}>
+            <span className={v.statValue}>{fmtUsd(t.measuredCostSavedUsd)}</span>
+            <span className={v.statLabel}>measured savings</span>
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function RecentRunsCard() {
+  const navigate = useNavigate();
+  const q = useQuery({
+    queryKey: ["runs"],
+    queryFn: () => api.get<{ runs: RunSummary[] }>("/v1/runs"),
+  });
+  if (q.isLoading)
+    return (
+      <Card title="Recent runs">
+        <SkeletonBlock lines={3} />
+      </Card>
+    );
+  if (q.isError)
+    return (
+      <Card title="Recent runs">
+        <ErrorState message={(q.error as Error).message} onRetry={() => void q.refetch()} />
+      </Card>
+    );
+  const runs = (q.data?.runs ?? []).slice(0, 5);
+  return (
+    <Card title="Recent runs" actions={<Link to="/runs">All runs</Link>}>
+      {runs.length === 0 ? (
+        <EmptyState
+          title="No runs yet"
+          body="Plan a multi-agent task graph and watch independent branches execute in parallel."
+          action={
+            <Button size="sm" onClick={() => navigate("/runs")}>
+              Plan a run
+            </Button>
+          }
+        />
+      ) : (
+        runs.map((r) => {
+          const st = r.state?.nodeStatuses ?? {};
+          const total = Object.keys(st).length;
+          const done = Object.values(st).filter((x) => x === "done").length;
+          return (
+            <div
+              key={r.id}
+              className={v.listRow}
+              style={{ cursor: "pointer", alignItems: "center" }}
+              onClick={() => navigate(`/runs/${r.id}`)}
+            >
+              <span className={v.grow} style={{ fontSize: "var(--text-sm)", fontWeight: 550 }}>
+                {r.name}
+              </span>
+              <span className={v.faint}>
+                {done}/{total} nodes
+              </span>
+              <StatusBadge status={r.status} />
+            </div>
+          );
+        })
+      )}
+    </Card>
+  );
+}
+
+function AuditCard() {
+  const q = useQuery({
+    queryKey: ["audit"],
+    queryFn: () => api.get<{ entries: AuditEntry[] }>("/v1/audit"),
+  });
+  if (q.isLoading)
+    return (
+      <Card title="Recent audit trail">
+        <SkeletonBlock lines={3} />
+      </Card>
+    );
+  if (q.isError)
+    return (
+      <Card title="Recent audit trail">
+        <ErrorState message={(q.error as Error).message} onRetry={() => void q.refetch()} />
+      </Card>
+    );
+  const entries = (q.data?.entries ?? []).slice(0, 6);
+  return (
+    <Card title="Recent audit trail" actions={<a href="/admin#audit-log">Full log ↗</a>}>
+      {entries.length === 0 ? (
+        <EmptyState title="No audit entries yet" body="Every governed decision lands here as it happens." />
+      ) : (
+        entries.map((e, i) => (
+          <div key={e.id ?? i} className={v.listRow} style={{ alignItems: "center" }}>
+            <StatusDot tone={e.effect === "allow" ? "ok" : "danger"} title={e.effect} />
+            <span className={v.grow} style={{ fontSize: "var(--text-xs)", color: "var(--text-dim)" }}>
+              {e.reason ?? e.ruleId}
+            </span>
+            <span className={v.faint}>{ago(e.at)}</span>
+          </div>
+        ))
+      )}
+    </Card>
+  );
+}
+
+function WorkflowNudgeCard() {
+  const navigate = useNavigate();
+  const q = useQuery({
+    queryKey: ["workflows"],
+    queryFn: () => api.get<{ instances: Array<{ id: string; status: string; change?: { description?: string } }> }>("/v1/workflows/instances"),
+  });
+  const open = (q.data?.instances ?? []).filter(
+    (i) => !["completed", "denied", "aborted"].includes(i.status),
+  );
+  return (
+    <Card title="Open workflows" actions={<Link to="/workflows">All workflows</Link>}>
+      {q.isLoading ? (
+        <SkeletonBlock lines={3} />
+      ) : open.length === 0 ? (
+        <EmptyState
+          title="No open change requests"
+          body="Start a governed change — intake, plan, sign-off, build, checks, PR and merge."
+          action={
+            <Button size="sm" onClick={() => navigate("/workflows")}>
+              Start a workflow
+            </Button>
+          }
+        />
+      ) : (
+        open.slice(0, 5).map((i) => (
+          <div
+            key={i.id}
+            className={v.listRow}
+            style={{ cursor: "pointer", alignItems: "center" }}
+            onClick={() => navigate(`/workflows/${i.id}`)}
+          >
+            <span className={v.grow} style={{ fontSize: "var(--text-sm)" }}>
+              {i.change?.description ?? "untitled change"}
+            </span>
+            <StatusBadge status={i.status} />
+          </div>
+        ))
+      )}
+    </Card>
+  );
+}
+
+/** shared small budget row used by projects list/detail */
+export function BudgetRow(props: {
+  spent: number;
+  cap: number | null | undefined;
+  overageApproved?: boolean;
+}) {
+  if (props.cap == null) return <span className={v.faint}>no budget set</span>;
+  const over = props.spent > props.cap;
+  return (
+    <div className={v.stack} style={{ gap: "var(--s0)" }}>
+      <div className={v.row}>
+        <span className={v.num} style={{ fontWeight: 650 }}>
+          {fmtUsd(props.spent)}
+        </span>
+        <span className={v.faint}>of {fmtUsd(props.cap)}</span>
+        {over && (
+          <Badge tone={props.overageApproved ? "warn" : "danger"}>
+            {props.overageApproved ? "overage approved" : "over budget"}
+          </Badge>
+        )}
+      </div>
+      <Meter value={props.spent} max={props.cap} over={over} label="budget vs actual" />
+    </div>
+  );
+}
