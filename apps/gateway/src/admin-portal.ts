@@ -1252,8 +1252,9 @@ const TABS = [
   }, true);
 }],
 ["Cost & Projects", async (el) => {
-  const [p, u, cp, ini] = await Promise.all([
+  const [p, u, cp, ini, unattr] = await Promise.all([
     get("/v1/projects"), get("/v1/users"), get("/v1/compliance/profiles"), get("/v1/initiatives"),
+    get("/v1/costs/unattributed").catch(() => null),
   ]);
   const uOpts = userOpts(u.users);
   const uname = Object.fromEntries(u.users.map((x) => [x.id, x.displayName || x.email]));
@@ -1282,6 +1283,27 @@ const TABS = [
         return "<button class='small' data-proj='" + id + "'>rollup</button> <button class='small' data-pedit='" + id + "'>edit</button>";
       } })
     + "</div><div id='projout'></div>"
+    // ADR-0024 (O11): the EXPLICIT Unattributed bucket — visible and labeled,
+    // never hidden inside any project's totals. An admin has to SEE the
+    // attribution leak to close it (the require-attribution toggles in
+    // Client Access close it entirely).
+    + "<h2>Unattributed spend — calls with no project header</h2><div class='card'>"
+    + (unattr && unattr.measured
+        ? "<div class='grid2'>"
+          + "<div class='card stat'><div class='v'>" + fmtUsd(unattr.measured.costUsd) + "</div><div class='l'>unattributed spend · " + (unattr.measured.events ?? 0) + " calls</div></div>"
+          + "<div class='card stat'><div class='v'>" + (unattr.measured.inputTokens ?? 0) + " → " + (unattr.measured.outputTokens ?? 0) + "</div><div class='l'>tokens in → out</div></div>"
+          + "</div>"
+          + ((unattr.byUser ?? []).length
+              ? "<h3>By user</h3>" + barChart(unattr.byUser, "costUsd", (i) => uname[i.userId] ?? i.userId)
+              : "")
+          + ((unattr.byMcpTool ?? []).length
+              ? "<h3>By MCP tool</h3>" + barChart(unattr.byMcpTool, "costUsd", (i) => i.toolName ?? "tool")
+              : "")
+          + ((unattr.measured.events ?? 0) === 0
+              ? "<div class='empty'>Nothing unattributed — every metered call carried a project.</div>"
+              : "<p class='dim' style='font-size:12px'>These calls arrived without an x-regulait-project-id header. They are metered on the same ledger but can never count against any project budget. Close the gap in Client Access: 'require project attribution' (compat surfaces) and 'require MCP attribution' (MCP proxy).</p>")
+        : "<div class='empty'>Unattributed rollup unavailable.</div>")
+    + "</div>"
     + "<h2>Initiatives — cross-team rollup</h2><div class='card'>"
     + form("f-ini", [
         {name:"name",ph:"e.g. Platform Modernization"},
@@ -1598,38 +1620,51 @@ const TABS = [
 // declares) and hand a developer a copy-paste config for their own IDE built
 // from THIS deployment's origin.
 ["Client Access", async (el) => {
-  const [s, srv, prj] = await Promise.all([
+  const [s, srv, prj, u, rl, rules] = await Promise.all([
     get("/v1/interception/settings"),
     get("/v1/servers").catch(() => ({ servers: [] })),
     get("/v1/projects").catch(() => ({ projects: [] })),
+    get("/v1/users").catch(() => ({ users: [] })),
+    get("/v1/roles").catch(() => ({ roles: [] })),
+    get("/v1/interception/scope-rules").catch(() => ({ rules: [] })),
   ]);
   const cur = s.settings;
   const BASE = location.origin;
-  // The ladder, verbatim from ROADMAP Batch H. Honesty is the product here:
-  // two of these rungs are honor systems and the UI says so in plain language.
+  // ADR-0024 (O15): the HONEST per-rung status comes from the server
+  // (postureStatus) so this page can never imply enforcement that does not
+  // exist. Per-rung reference notes stay here for the ladder table.
   const LADDER = {
-    observe: { bypass: "n/a — no enforcement", note: "Telemetry only. Nothing stops a developer calling the vendor directly; you will see what they choose to emit." },
-    voluntary: { bypass: "trivially bypassable", note: "HONOR SYSTEM. A developer points their IDE at RegulAIt, and nothing prevents them from pointing it straight back at the vendor. Key custody or network egress is what makes interception non-bypassable — not this setting." },
-    managed: { bypass: "developer can undo locally", note: "Pushed by IDE policy / managed settings / MDM. Better than voluntary, still reversible on the developer's own machine." },
-    key_custody: { bypass: "no — no key, no call", note: "NON-BYPASSABLE. The org never issues raw vendor keys, only RegulAIt keys. Almost entirely IT policy rather than product code — RegulAIt stores platform and per-user credentials AES-256-GCM and never returns them." },
-    network: { bypass: "no", note: "NON-BYPASSABLE. RegulAIt is the only sanctioned egress to the vendor APIs. A genuine infrastructure project; it belongs with BYOC (pillar 3), not with this toggle." },
+    observe: { bypass: "n/a — no enforcement", status: "honor system", note: "Telemetry only. Nothing stops a developer calling the vendor directly; you will see what they choose to emit." },
+    voluntary: { bypass: "trivially bypassable", status: "honor system", note: "HONOR SYSTEM. A developer points their IDE at RegulAIt, and nothing prevents them from pointing it straight back at the vendor. Key custody or network egress is what makes interception non-bypassable — not this setting." },
+    managed: { bypass: "developer can undo locally", status: "policy", note: "Pushed by IDE policy / managed settings / MDM. Better than voluntary, still reversible on the developer's own machine." },
+    key_custody: { bypass: "no — no key, no call (when ENFORCED below)", status: cur.keyCustodyEnforced ? "ENFORCED by this deployment" : "declared — NOT enforced", note: "The org never issues raw vendor keys, only RegulAIt keys. With 'enforce key custody' ON this deployment makes it real: per-user BYO credentials are refused (409) and dispatch uses org/platform credentials only. Declared without the toggle, it is a statement — not a mechanism." },
+    network: { bypass: "no", status: "requires egress control at your network boundary — see docs", note: "RegulAIt is the only sanctioned egress to the vendor APIs. Enforced by YOUR network (egress allowlist), never by this product — the recipe is in docs/product/IDE_INTEGRATION.md (Network rung)." },
   };
+  const posture = s.posture || {};
   const rung = LADDER[cur.enforcementPosture] || LADDER.voluntary;
-  const honorSystem = cur.enforcementPosture === "observe" || cur.enforcementPosture === "voluntary";
+  const postureWarn = posture.status === "honor_system" || posture.status === "declared_not_enforced";
   const sOpts = (srv.servers || []).map((x) => ({ v: x.id, l: x.name }));
   const pOpts = (prj.projects || []).map((x) => ({ v: x.id, l: x.name }));
+  const uOpts = userOpts(u.users || []);
+  const rOpts = roleOpts(rl.roles || []);
 
   el.innerHTML =
-    "<p class='sub'>Batch H / ADR-0020. RegulAIt governs calls that ARRIVE at it. These settings decide which arrival surfaces exist, how an IDE's model string resolves onto a governed agent, and which rung of the interception ladder this organisation declares it is on. Both provider-shaped surfaces are OFF until you turn them on; while off they answer 404 and are indistinguishable from not existing.</p>"
-    + "<h2>Declared enforcement posture</h2><div class='card'>"
+    "<p class='sub'>Batch H / ADR-0020, deepened by ADR-0024. RegulAIt governs calls that ARRIVE at it. These settings decide which arrival surfaces exist, how an IDE's model string resolves onto a governed agent, and which rung of the interception ladder this organisation is on — labeled honestly as enforced, policy, or honor system. Both provider-shaped surfaces are OFF until you turn them on; while off they answer 404 and are indistinguishable from not existing.</p>"
+    + "<h2>Enforcement posture — declared vs enforced</h2><div class='card'>"
     + "<div class='kv'>"
-    + "<span class='k'>Rung</span><span>" + badge(cur.enforcementPosture, honorSystem ? "warn" : "ok") + "</span>"
+    + "<span class='k'>Rung</span><span>" + badge(cur.enforcementPosture, postureWarn ? "warn" : "ok") + " " + badge(posture.label || rung.status, posture.status === "enforced" ? "ok" : postureWarn ? "warn" : "ok") + "</span>"
     + "<span class='k'>Bypassable?</span><span>" + esc(rung.bypass) + "</span>"
-    + "<span class='k'>What that means</span><span>" + esc(rung.note) + "</span>"
+    + "<span class='k'>What that means</span><span>" + esc(posture.detail || rung.note) + "</span>"
     + "</div>"
-    + (honorSystem
-        ? "<p class='dim' style='font-size:12px'>This rung is an <strong>honor system</strong>. Pointing an IDE here is a request, not an enforcement. If an enterprise buyer asks what stops a developer from simply not doing it, the honest answer at this rung is: nothing. Key custody (the org holds the vendor keys, developers hold only RegulAIt keys) is the cheapest non-bypassable answer; network egress control is the airtight one.</p>"
-        : "<p class='dim' style='font-size:12px'>This rung is non-bypassable — but note that what makes it so is your IT policy or network, not this setting. Declaring it here only changes what this portal tells you.</p>")
+    + (posture.status === "honor_system"
+        ? "<p class='dim' style='font-size:12px'>This rung is an <strong>honor system</strong>. Pointing an IDE here is a request, not an enforcement. If an enterprise buyer asks what stops a developer from simply not doing it, the honest answer at this rung is: nothing. Key custody (the org holds the vendor keys, developers hold only RegulAIt keys) is the cheapest non-bypassable answer — and this deployment CAN enforce it: turn on 'enforce key custody' below. Network egress control is the airtight one (see docs).</p>"
+        : posture.status === "declared_not_enforced"
+          ? "<p class='dim' style='font-size:12px'><strong>Warning:</strong> key custody is DECLARED but the enforcement toggle is OFF — per-user BYO credentials still work, so nothing currently stops a developer using their own vendor key through this gateway or outside it. Turn on 'enforce key custody' below to make the declaration true.</p>"
+          : posture.status === "external_infrastructure"
+            ? "<p class='dim' style='font-size:12px'>The network rung is enforced at your <strong>network boundary</strong>, not by this product: an egress allowlist that blocks api.anthropic.com / api.openai.com etc. and allows only the RegulAIt gateway. The concrete recipe is documented in docs/product/IDE_INTEGRATION.md (Network rung). Declaring it here only changes what this portal tells you.</p>"
+            : posture.status === "enforced"
+              ? "<p class='dim' style='font-size:12px'>Key custody is <strong>enforced by this deployment</strong>: per-user BYO model credentials are refused with a 409 and dispatch resolution skips any stored user credential — the org's platform credentials are the only way to a vendor. Existing user credential rows are kept inert (turning the toggle off restores them).</p>"
+              : "<p class='dim' style='font-size:12px'>This rung is pushed by IDE policy / managed settings / MDM — better than voluntary, still reversible on the developer's own machine.</p>")
     + "</div>"
 
     + "<h2>Interception surfaces &amp; resolution policy</h2><div class='card'>"
@@ -1639,7 +1674,9 @@ const TABS = [
         {name:"mcpInterceptionEnabled",label:"POST /mcp/:serverId (MCP tool calls)",options:["true","false"]},
         {name:"resolutionMode",label:"model to agent resolution",options:["map_by_model","require_agent","router_decides"]},
         {name:"enforcementPosture",label:"declared ladder rung",options:["observe","voluntary","managed","key_custody","network"]},
-        {name:"requireProjectAttribution",label:"require project attribution",options:["false","true"]},
+        {name:"requireProjectAttribution",label:"require project attribution (compat)",options:["false","true"]},
+        {name:"requireMcpAttribution",label:"require MCP attribution",options:["false","true"]},
+        {name:"keyCustodyEnforced",label:"enforce key custody",options:[{v:"false",l:"off — BYO user keys allowed"},{v:"true",l:"on — org/platform keys only"}]},
         {name:"streamingOnBlockMode",label:"stream on PII-block project",options:[{v:"suppress",l:"suppress (buffer + disclose)"},{v:"reject",l:"reject (400 the stream request)"}]},
         {name:"strictFieldRejection",label:"strict field rejection",options:[{v:"false",l:"off — accept & disclose (temperature ignored)"},{v:"true",l:"on — unsupported fields 400"}]},
       ], "Save posture")
@@ -1651,8 +1688,42 @@ const TABS = [
     + "<span class='k'>require_agent</span><span>The caller MUST send x-regulait-agent-id; the model string is advisory. Missing header is a 400. Strictest, explicit attribution per call.</span>"
     + "<span class='k'>router_decides</span><span>The requested model is a HINT the pillar-6 router may override for cost. The response always carries the model actually served, and the audit row records requested-vs-served.</span>"
     + "<span class='k'>Unmapped model</span><span>Always <strong>403 default-deny</strong>, in every mode. RegulAIt never passes an ungoverned call through to the vendor.</span>"
-    + "<span class='k'>Attribution</span><span>Turning 'require project attribution' ON rejects any compat call without an x-regulait-project-id header, rather than running it as untracked spend. It guarantees pillar-5 coverage — but only enable it for clients that can send custom headers (see the matrix below).</span>"
+    + "<span class='k'>Attribution (compat)</span><span>Turning 'require project attribution' ON rejects any compat call without an x-regulait-project-id header, rather than running it as untracked spend — but only enable it for clients that can send custom headers (see the matrix below).</span>"
+    + "<span class='k'>Attribution (MCP)</span><span>Every MCP tool call is METERED whether or not it is attributed; an unattributed call lands in the explicit 'Unattributed' bucket (Cost &amp; Projects) instead of a project. 'Require MCP attribution' rejects unattributed MCP calls outright — together the two require-toggles close the unattributed gap entirely.</span>"
+    + "<span class='k'>Key custody</span><span>ON: per-user BYO model credentials are refused (409, audited) and dispatch resolution skips stored user credentials — org/platform credentials only. Existing user rows are kept but inert; turning it back off restores them. This is what turns the key_custody rung from a declaration into a mechanism.</span>"
     + "</div></div>"
+
+    + "<h2>Staged rollout — per-scope overrides (ADR-0024)</h2><div class='card'>"
+    + "<p class='dim' style='font-size:12px'>Pilot a compat surface with one user, project, or role instead of flipping the org-wide switch. Precedence: <strong>user &gt; project &gt; role &gt; org</strong>; the first non-inherit value per field wins; ties inside one kind go to the most recently created rule. A rule that enables a surface grants NOTHING — every dispatch still passes the same per-user entitlement check, and a surface disabled by resolution answers the same indistinguishable 404.</p>"
+    + form("f-scope-rule", [
+        {name:"scopeKind",label:"scope",options:[{v:"user",l:"user (strongest)"},{v:"project",l:"project"},{v:"role",l:"role"}]},
+        {name:"scopeId",label:"target",options:[]},
+        {name:"anthropicCompatEnabled",label:"/v1/messages",options:[{v:"",l:"inherit"},{v:"true",l:"enabled"},{v:"false",l:"disabled"}],req:false,ph:"inherit"},
+        {name:"openaiCompatEnabled",label:"/v1/chat/completions",options:[{v:"",l:"inherit"},{v:"true",l:"enabled"},{v:"false",l:"disabled"}],req:false,ph:"inherit"},
+        {name:"resolutionMode",label:"resolution mode",options:[{v:"",l:"inherit"},{v:"map_by_model",l:"map_by_model"},{v:"require_agent",l:"require_agent"},{v:"router_decides",l:"router_decides"}],req:false,ph:"inherit"},
+        {name:"note",label:"note",req:false,ph:"e.g. anthropic pilot, platform team"},
+      ], "Create rule")
+    + "<div id='scoperules'>"
+    + ((rules.rules || []).length
+        ? table((rules.rules || []).map((r) => ({
+            id: r.id,
+            scope: r.scopeKind + " · " + (r.scopeName ?? r.scopeId),
+            "/v1/messages": r.anthropicCompatEnabled === null ? "inherit" : String(r.anthropicCompatEnabled),
+            "/v1/chat/completions": r.openaiCompatEnabled === null ? "inherit" : String(r.openaiCompatEnabled),
+            resolution: r.resolutionMode ?? "inherit",
+            note: r.note ?? "—",
+            created: r.createdAt,
+          })), (row) => "<button class='small' data-ruledel='" + row.id + "'>delete</button>")
+        : "<div class='empty'>No scope rules — the org singleton applies to everyone.</div>")
+    + "</div>"
+    + "<h3 style='margin-top:14px'>Effective values — live preview</h3>"
+    + "<p class='dim' style='font-size:12px'>What would this user get right now? Runs the exact resolver the request gate uses, so the preview cannot drift from enforcement.</p>"
+    + form("f-scope-preview", [
+        {name:"userId",label:"user",options:uOpts},
+        {name:"projectId",label:"project (attribution header)",options:pOpts,req:false,ph:"— none —"},
+      ], "Preview")
+    + "<div id='scopepreview'></div>"
+    + "</div>"
 
     + "<h2>Connect a client</h2><div class='card'>"
     + "<p class='dim' style='font-size:12px'>Generated from this page's own origin (" + esc(BASE) + "). The snippet uses a placeholder for the API key on purpose — issue the developer their own key in Identity &amp; Access &rarr; Users, never paste yours.</p>"
@@ -1692,7 +1763,7 @@ const TABS = [
   // selects with no value binding, so bind them here)
   const pf = $("#f-intercept");
   if (pf) {
-    for (const k of ["anthropicCompatEnabled","openaiCompatEnabled","mcpInterceptionEnabled","resolutionMode","enforcementPosture","requireProjectAttribution","streamingOnBlockMode","strictFieldRejection"]) {
+    for (const k of ["anthropicCompatEnabled","openaiCompatEnabled","mcpInterceptionEnabled","resolutionMode","enforcementPosture","requireProjectAttribution","requireMcpAttribution","keyCustodyEnforced","streamingOnBlockMode","strictFieldRejection"]) {
       const c = pf.querySelector("[name=" + k + "]");
       if (c) c.value = String(cur[k]);
     }
@@ -1704,9 +1775,56 @@ const TABS = [
     resolutionMode: d.resolutionMode,
     enforcementPosture: d.enforcementPosture,
     requireProjectAttribution: d.requireProjectAttribution === "true",
+    requireMcpAttribution: d.requireMcpAttribution === "true",
+    keyCustodyEnforced: d.keyCustodyEnforced === "true",
     streamingOnBlockMode: d.streamingOnBlockMode,
     strictFieldRejection: d.strictFieldRejection === "true",
   }));
+
+  // --- ADR-0024 scope rules: kind-driven target select, create, delete,
+  // and the live effective-value preview -----------------------------------
+  const SCOPE_TARGETS = { user: uOpts, project: pOpts, role: rOpts };
+  const srf = $("#f-scope-rule");
+  function fillScopeTargets() {
+    const kind = srf.querySelector("[name=scopeKind]").value || "user";
+    const sel = srf.querySelector("[name=scopeId]");
+    const opts = SCOPE_TARGETS[kind] || [];
+    sel.innerHTML = opts.length
+      ? opts.map((o) => "<option value='" + esc(o.v) + "'>" + esc(o.l) + "</option>").join("")
+      : "<option value=''>— none available —</option>";
+  }
+  if (srf) {
+    fillScopeTargets();
+    srf.querySelector("[name=scopeKind]").addEventListener("change", fillScopeTargets);
+  }
+  const tri = (v) => (v === "true" ? true : v === "false" ? false : undefined);
+  wire("f-scope-rule", (d) => post("/v1/interception/scope-rules", {
+    scopeKind: d.scopeKind,
+    scopeId: d.scopeId,
+    ...(tri(d.anthropicCompatEnabled) !== undefined ? { anthropicCompatEnabled: tri(d.anthropicCompatEnabled) } : {}),
+    ...(tri(d.openaiCompatEnabled) !== undefined ? { openaiCompatEnabled: tri(d.openaiCompatEnabled) } : {}),
+    ...(d.resolutionMode ? { resolutionMode: d.resolutionMode } : {}),
+    ...(d.note ? { note: d.note } : {}),
+  }));
+  el.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-ruledel]");
+    if (!b) return;
+    try {
+      await del("/v1/interception/scope-rules/" + b.dataset.ruledel);
+      toast("Rule deleted — the scope falls back to inheritance", "ok");
+      render();
+    } catch (ex) { toast(ex.message, "err"); }
+  });
+  wire("f-scope-preview", async (d) => {
+    const eff = await get("/v1/interception/effective?userId=" + d.userId + (d.projectId ? "&projectId=" + d.projectId : ""));
+    const srcLabel = (s) => s.level === "org" ? "org singleton" : s.level + " rule (" + s.ruleId.slice(0, 8) + "…)";
+    $("#scopepreview").innerHTML = "<div class='kv' style='margin-top:8px'>"
+      + "<span class='k'>/v1/messages</span><span>" + badge(String(eff.effective.anthropicCompatEnabled), eff.effective.anthropicCompatEnabled ? "ok" : "warn") + " <span class='dim'>from " + esc(srcLabel(eff.sources.anthropicCompatEnabled)) + " (org: " + eff.org.anthropicCompatEnabled + ")</span></span>"
+      + "<span class='k'>/v1/chat/completions</span><span>" + badge(String(eff.effective.openaiCompatEnabled), eff.effective.openaiCompatEnabled ? "ok" : "warn") + " <span class='dim'>from " + esc(srcLabel(eff.sources.openaiCompatEnabled)) + " (org: " + eff.org.openaiCompatEnabled + ")</span></span>"
+      + "<span class='k'>resolution mode</span><span>" + badge(eff.effective.resolutionMode, "info") + " <span class='dim'>from " + esc(srcLabel(eff.sources.resolutionMode)) + " (org: " + esc(eff.org.resolutionMode) + ")</span></span>"
+      + "</div>"
+      + "<p class='dim' style='font-size:12px'>Surface exposure is NOT entitlement: an enabled surface only means the route exists for this user — every dispatch still runs the same per-user entitlement check.</p>";
+  }, true);
 
   wire("f-client", (d) => {
     const KEYPH = "<REGULAIT_API_KEY>";
