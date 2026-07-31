@@ -300,6 +300,36 @@ export async function projectPiiMode(
   return effectiveCompliancePolicy(profiles).piiMode;
 }
 
+// --- §8.3 mcpDefaultMode enforcement (ADR-0023) ----------------------------
+// The compliance cascade's mcpDefaultMode dimension, turned from a declared
+// policy into a real enforcement point on ATTRIBUTED MCP tool calls.
+
+/** The effective MCP mode a project's classifications force, plus the naming
+ * needed for an actionable denial: the project's name and the compliance
+ * profile tag(s) whose `read_only` governs. Null when the call is
+ * unattributed, the project is unknown/unclassified, or no profile matches —
+ * today's behaviour stays byte-identical in every one of those cases (the
+ * unattributed honesty gap is O11, tracked separately). Composition matches
+ * effectiveCompliancePolicy exactly: ANY read_only profile tightens the whole
+ * project to read_only. */
+export async function projectMcpMode(
+  db: Db,
+  projectId: string | null | undefined,
+): Promise<{ mode: "read_only" | "read_write"; projectName: string; governingTags: string[] } | null> {
+  if (!projectId) return null;
+  const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
+  if (!project) return null;
+  const tags = (project.classifications ?? []) as string[];
+  if (tags.length === 0) return null;
+  const profiles = await profilesForTags(db, tags);
+  if (profiles.length === 0) return null;
+  return {
+    mode: effectiveCompliancePolicy(profiles).mcpDefaultMode,
+    projectName: project.name,
+    governingTags: profiles.filter((p) => p.mcpDefaultMode === "read_only").map((p) => p.tag),
+  };
+}
+
 export interface PiiEnforcement {
   action: "allow" | "warn" | "block";
   hits: PiiHit[];
@@ -1640,7 +1670,12 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       effective: effectiveCompliancePolicy(profiles),
       enforcement: {
         requiredWorkflowTemplates: "enforced-at-instance-creation",
-        mcpDefaultMode: "declared-not-enforced",
+        // ADR-0023: read_only now DENIES write-classified tools on every
+        // PROJECT-ATTRIBUTED MCP tool call (proxy + worker loop), before any
+        // upstream dispatch, with an audited denial. Unattributed calls carry
+        // no project and keep today's behaviour — the disclosed O11 gap.
+        mcpDefaultMode:
+          "enforced-on-attributed-mcp-tool-calls (unattributed calls carry no project — disclosed gap O11)",
         // §8.3 -> §8.2: auditRetentionDays FEEDS the pillar-3 infra backup
         // floor AND now drives audit-log pruning: POST /v1/audit/prune deletes
         // rows older than the GLOBAL max retention across all profiles
@@ -1654,12 +1689,13 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         // ceiling from them at scan time (see /v1/infra).
         backupRetentionDays: "enforced-as-infra-floor (pillar 3)",
         patchCadenceDays: "enforced-as-infra-ceiling (pillar 3)",
-        // §8.4: piiMode is enforced at every PROJECT-ATTRIBUTED model and
-        // connector dispatch — input blocks BEFORE the provider call (no
-        // cost), output blocks bill-and-withhold, warn attaches a warning,
-        // log records category counts. The MCP-proxy tool path is NOT yet
-        // enforced (it carries no projectId) — a disclosed follow-up.
-        piiMode: "enforced-on-model-and-connector-dispatch (mcp deferred)",
+        // §8.4: piiMode is enforced at every PROJECT-ATTRIBUTED model,
+        // connector, and (since ADR-0019) MCP tool dispatch — input blocks
+        // BEFORE the provider call (no cost), output blocks bill-and-withhold,
+        // warn attaches a warning, log records category counts. Unattributed
+        // MCP calls carry no project — the same disclosed O11 gap as
+        // mcpDefaultMode above.
+        piiMode: "enforced-on-attributed-model-connector-and-mcp-dispatch",
       },
     };
   });

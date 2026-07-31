@@ -250,9 +250,19 @@ export const createAgentSchema = z.object({
   costPerMTokOut: z.number().nonnegative().nullable().optional(),
   /** provider-native model id (e.g. claude-opus-5); null = not dispatchable */
   model: z.string().min(1).nullable().optional(),
+  /** ADR-0023: admin-authored BASE system prompt — a governance artifact. When
+   * set, every governed dispatch of this agent sends it as the system base; a
+   * caller-supplied system is APPENDED after it, never replaces it. */
+  systemPrompt: z.string().min(1).max(20_000).nullable().optional(),
 });
 
 export const setAgentEnabledSchema = z.object({ enabled: z.boolean() });
+
+/** ADR-0023: set/clear an existing agent's admin base system prompt (null
+ * clears — an explicit choice, mirroring the agent-policy clear semantics) */
+export const setAgentSystemPromptSchema = z.object({
+  systemPrompt: z.string().min(1).max(20_000).nullable(),
+});
 
 export const createAgentGrantSchema = z.object({
   userId: z.string().uuid(),
@@ -431,9 +441,12 @@ export const createConnectorSchema = z.object({
   pricePerCallUsd: z.number().nonnegative().nullable().optional(),
 });
 
-/** platform connector credential (mirrors createModelCredentialSchema) */
+/** platform connector credential (mirrors createModelCredentialSchema).
+ * The ceiling fits ADR-0023's structured-JSON convention — a multi-field
+ * credential (snowflake: {account, user, privateKey, passphrase?} with a
+ * 4096-bit PEM key ≈ 3.4k chars) rides the SAME single token field. */
 export const createConnectorCredentialSchema = z.object({
-  token: z.string().min(1).max(2048),
+  token: z.string().min(1).max(16_384),
   baseUrl: z.string().url().nullable().optional(),
 });
 

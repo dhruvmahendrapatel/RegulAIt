@@ -34,6 +34,7 @@ import {
   enforcePII,
   piiCategoryList,
   piiWithheldMarker,
+  projectMcpMode,
   projectPiiMode,
   type PiiMode,
 } from "./projects.js";
@@ -177,6 +178,48 @@ export async function executeGovernedToolCall(
     });
 
     if (decision.effect === "deny") return { kind: "denied", decision };
+
+    // ADR-0023 — §8.3 mcpDefaultMode ENFORCEMENT. An ATTRIBUTED call whose
+    // project's compliance cascade tightens to read_only may not execute a
+    // WRITE-classified tool: denied HERE, strictly before any approval is
+    // queued/consumed and before the upstream is contacted, so a forbidden
+    // write executes nothing, consumes nothing and bills nothing. The denial
+    // is decision-shaped (ruleId `mcp-default-mode`) so both consumers of this
+    // primitive — the MCP proxy and the pillar-7 worker loop — surface it
+    // through their existing `denied` handling, and it is audited like every
+    // other governed deny. Compliance beats approval: a write that a rule
+    // would have sent to the queue is refused outright instead — an approver
+    // cannot sign away a framework's read_only posture. Unattributed calls
+    // (projectId null) keep today's behaviour byte-identical — that honesty
+    // gap is O11, tracked separately.
+    if (kind === "write" && projectId) {
+      const mcpMode = await projectMcpMode(db, projectId);
+      if (mcpMode?.mode === "read_only") {
+        const reason =
+          `write tool '${toolName}' denied: project '${mcpMode.projectName}' (${projectId}) ` +
+          `is read_only under compliance profile(s) ${mcpMode.governingTags.map((t) => `'${t}'`).join(", ")} (mcpDefaultMode)`;
+        await db.insert(auditLog).values({
+          userId,
+          serverId,
+          toolName,
+          detail: {
+            phase: "compliance",
+            mcpDefaultMode: "read_only",
+            toolKind: kind,
+            projectId,
+            governingTags: mcpMode.governingTags,
+          },
+          effect: "deny",
+          ruleId: "mcp-default-mode",
+          ruleChain: [],
+          reason,
+        });
+        return {
+          kind: "denied",
+          decision: { effect: "deny", ruleId: "mcp-default-mode", ruleChain: [], reason },
+        };
+      }
+    }
 
     if (decision.effect === "require_approval") {
       // Reuse an existing pending entry rather than piling up duplicates.

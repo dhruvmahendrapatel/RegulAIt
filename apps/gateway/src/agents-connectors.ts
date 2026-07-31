@@ -23,6 +23,7 @@ import { evaluateAgent, evaluateConnector } from "@regulait/policy-kernel";
 import {
   ConnectorProviderError,
   isConnectorProviderKind,
+  parseSnowflakeCredential,
   resolveConnectorProvider,
 } from "@regulait/connector-provider";
 import {
@@ -55,6 +56,7 @@ import {
   invokeConnectorSchema,
   setAgentEnabledSchema,
   setAgentPolicySchema,
+  setAgentSystemPromptSchema,
 } from "@regulait/shared";
 import type { PiiHit } from "@regulait/shared";
 import { z } from "zod";
@@ -300,6 +302,17 @@ export async function executeGovernedDispatch(
     }
   }
 
+  // ADR-0023 `agents.systemPrompt` INVARIANT — enforced here in the ONE shared
+  // dispatch core so the direct invoke path, orchestration workers, and both
+  // compat shims inherit it without reimplementation: when the SERVED agent
+  // carries an admin-authored system prompt, that prompt is the dispatch's
+  // system BASE, and a caller-supplied system is APPENDED after it — it never
+  // replaces it. The admin prompt is a governance artifact (what the admin
+  // decided this agent IS), so no caller-side field may displace it.
+  const dispatchSystem = served.systemPrompt
+    ? served.systemPrompt + (args.system ? `\n\n${args.system}` : "")
+    : args.system;
+
   let result;
   try {
     const provider = resolveModelProvider({ provider: served.provider, apiKey, baseUrl });
@@ -307,7 +320,7 @@ export async function executeGovernedDispatch(
       model: served.model,
       input: args.input,
       ...(args.messages ? { messages: args.messages } : {}),
-      ...(args.system ? { system: args.system } : {}),
+      ...(dispatchSystem ? { system: dispatchSystem } : {}),
       ...(args.cacheSystem ? { cacheSystem: true } : {}),
       ...(args.tools ? { tools: args.tools } : {}),
       ...(args.maxTokens ? { maxTokens: args.maxTokens } : {}),
@@ -608,9 +621,27 @@ export function registerAgentConnectorRoutes(
         costPerMTokIn: body.costPerMTokIn ?? null,
         costPerMTokOut: body.costPerMTokOut ?? null,
         model: body.model ?? null,
+        systemPrompt: body.systemPrompt ?? null,
       })
       .returning();
     return reply.status(201).send(row);
+  });
+
+  // ADR-0023: set/clear an agent's admin-authored BASE system prompt — a
+  // governance artifact, so writing it is admin-only (the global gate; this
+  // route is deliberately NOT in NON_ADMIN_ROUTES). It is not a secret: it
+  // rides the agent row that admins already read, and it is disclosed policy
+  // context applied to every dispatch of the agent, not key material.
+  app.post("/v1/agents/:agentId/system-prompt", async (req, reply) => {
+    const { agentId } = agentIdParam.parse(req.params);
+    const body = setAgentSystemPromptSchema.parse(req.body);
+    const [row] = await db
+      .update(agents)
+      .set({ systemPrompt: body.systemPrompt })
+      .where(eq(agents.id, agentId))
+      .returning();
+    if (!row) return reply.status(404).send({ error: "unknown_agent" });
+    return row;
   });
 
   // --- model credentials (admin-only via the global gate) ---
@@ -1881,6 +1912,23 @@ export function registerAgentConnectorRoutes(
     }
     const [connector] = await db.select().from(connectors).where(eq(connectors.id, connectorId));
     if (!connector) return reply.status(404).send({ error: "unknown_connector" });
+    // ADR-0023: multi-field credentials ride a structured-JSON convention
+    // INSIDE the one token (kind=snowflake: {account, user, privateKey,
+    // passphrase?}). Validate the shape HERE, at connection-create time, so a
+    // malformed credential 400s with an actionable message instead of failing
+    // opaquely at first invoke. Single-field kinds are untouched.
+    if (connector.providerKind === "snowflake") {
+      try {
+        parseSnowflakeCredential(body.token);
+      } catch (err) {
+        if (err instanceof ConnectorProviderError) {
+          return reply
+            .status(400)
+            .send({ error: "invalid_connector_credential", detail: err.message });
+        }
+        throw err;
+      }
+    }
     const values = {
       connectorId,
       tokenCiphertext: encryptSecret(opts.dataKey, body.token),
