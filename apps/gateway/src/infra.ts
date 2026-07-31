@@ -59,6 +59,8 @@ import {
 } from "@regulait/infra-provider";
 import { z } from "zod";
 import { buildAwsInfraLiveClient } from "./infra-aws-client.js";
+import { buildAzureInfraLiveClient } from "./infra-azure-client.js";
+import { buildGcpInfraLiveClient } from "./infra-gcp-client.js";
 import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects.js";
 
 type InfraResourceRow = typeof infraResources.$inferSelect;
@@ -220,35 +222,66 @@ function firstString(...vals: unknown[]): string | null {
  * byte-identical to the pre-live behavior; resolveInfraProvider's own 501 gate
  * stays the second lock and no AWS SDK code is ever touched.
  *
- * Flag ON for an aws resource: threads roleArn/region and injects the real
- * lazily-loading AwsInfraLiveClient (see ./infra-aws-client.ts, the factory
- * contract in @regulait/infra-provider aws.ts — the same injected-live-client
- * discipline as deploy.ts's REGULAIT_DEPLOY_LIVE/awsLiveClient).
+ * Flag ON for an aws/azure/gcp resource: threads the per-cloud config fields
+ * the adapter reads and injects the real lazily-loading live client (see
+ * ./infra-aws-client.ts / ./infra-azure-client.ts / ./infra-gcp-client.ts,
+ * the factory contracts in @regulait/infra-provider aws.ts/azure.ts/gcp.ts —
+ * the same injected-live-client discipline as deploy.ts's
+ * REGULAIT_DEPLOY_LIVE/awsLiveClient). The factories are lazy, so injecting
+ * one never loads an SDK module — that only happens on the first live call.
  *
- * roleArn/region source — the resource row's existing `config` jsonb, the same
- * provider-specific home the aws adapter already reads (baseline,
- * backupVaultName, resourceArn, iamRoleArn, …): `config.roleArn` /
- * `config.region`. Env vars REGULAIT_INFRA_ROLE_ARN / REGULAIT_INFRA_REGION
- * are the fleet-wide fallback; a value on the resource row always overrides
- * the env. (An admin-UI field for setting config.roleArn/config.region on a
- * resource is deferred to the UI-track agent — the API's free-form `config`
- * object already accepts them today via POST /v1/infra/resources.)
+ * Config-field source — the resource row's existing `config` jsonb, the same
+ * provider-specific home each adapter already reads (baseline,
+ * backupVaultName, resourceArn, iamRoleArn, vaultUrl, …), with env vars as
+ * the fleet-wide fallback; a value on the resource row always overrides the
+ * env (aws roleArn/region precedence, applied uniformly per cloud):
+ *   aws   → `config.roleArn` / `config.region`
+ *           (env REGULAIT_INFRA_ROLE_ARN / REGULAIT_INFRA_REGION)
+ *   azure → `config.subscriptionId` / `config.resourceGroup`
+ *           (env REGULAIT_INFRA_SUBSCRIPTION_ID / REGULAIT_INFRA_RESOURCE_GROUP)
+ *   gcp   → `config.projectId` / `config.zone` / `config.location`
+ *           (env REGULAIT_INFRA_PROJECT_ID / REGULAIT_INFRA_ZONE /
+ *           REGULAIT_INFRA_LOCATION)
+ * (An admin-UI field for setting these on a resource is deferred to the
+ * UI-track agent — the API's free-form `config` object already accepts them
+ * today via POST /v1/infra/resources.)
  */
 export function providerConfig(
   resource: InfraResourceRow,
   env: NodeJS.ProcessEnv = process.env,
 ): InfraProviderConfig {
   const kind = resource.provider as InfraProviderConfig["kind"];
-  if (kind !== "aws" || !infraLiveEnabled(env)) return { kind };
+  if (!infraLiveEnabled(env)) return { kind };
   const cfg = resource.config ?? {};
-  const roleArn = firstString(cfg.roleArn, env.REGULAIT_INFRA_ROLE_ARN);
-  const region = firstString(cfg.region, env.REGULAIT_INFRA_REGION);
-  return {
-    kind,
-    roleArn,
-    region,
-    awsLiveClient: buildAwsInfraLiveClient(region ?? undefined),
-  };
+  if (kind === "aws") {
+    const roleArn = firstString(cfg.roleArn, env.REGULAIT_INFRA_ROLE_ARN);
+    const region = firstString(cfg.region, env.REGULAIT_INFRA_REGION);
+    return {
+      kind,
+      roleArn,
+      region,
+      awsLiveClient: buildAwsInfraLiveClient(region ?? undefined),
+    };
+  }
+  if (kind === "azure") {
+    return {
+      kind,
+      subscriptionId: firstString(cfg.subscriptionId, env.REGULAIT_INFRA_SUBSCRIPTION_ID),
+      resourceGroup: firstString(cfg.resourceGroup, env.REGULAIT_INFRA_RESOURCE_GROUP),
+      azureLiveClient: buildAzureInfraLiveClient(),
+    };
+  }
+  if (kind === "gcp") {
+    return {
+      kind,
+      projectId: firstString(cfg.projectId, env.REGULAIT_INFRA_PROJECT_ID),
+      zone: firstString(cfg.zone, env.REGULAIT_INFRA_ZONE),
+      location: firstString(cfg.location, env.REGULAIT_INFRA_LOCATION),
+      gcpLiveClient: buildGcpInfraLiveClient(),
+    };
+  }
+  // mock (and any future keyless kind): the bare { kind }, live flag or not.
+  return { kind };
 }
 
 /** The base policy for a resource: its own resource-scoped policy if any, else
