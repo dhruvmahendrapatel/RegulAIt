@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { InfraProviderError, resolveInfraProvider } from "@regulait/infra-provider";
 import { buildGcpInfraLiveClient, type GcpInfraSdk } from "./infra-gcp-client.js";
+import { providerConfig } from "./infra.js";
 
 /**
  * The REAL GCP infra live path — gateway wiring (Batch C breadth). Proves,
@@ -319,5 +321,108 @@ describe("buildGcpInfraLiveClient — executePatchJob instance-URI honesty", () 
         instances: ["111"],
       }),
     ).rejects.toThrow(/no PatchJob.name/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// infra.ts providerConfig — the gcp branch of the REGULAIT_INFRA_LIVE gate
+// (mirrors the aws gate tests in infra-aws-client.test.ts exactly)
+// ---------------------------------------------------------------------------
+
+function fakeGcpResource(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: "00000000-0000-0000-0000-0000000000c3",
+    kind: "agent_runtime",
+    name: "igcc-resource",
+    provider: "gcp",
+    config: null,
+    classifications: null,
+    deployTargetId: null,
+    createdAt: new Date(),
+    ...overrides,
+  } as Parameters<typeof providerConfig>[0];
+}
+
+afterEach(() => {
+  delete process.env.REGULAIT_INFRA_LIVE;
+  delete process.env.REGULAIT_INFRA_PROJECT_ID;
+  delete process.env.REGULAIT_INFRA_ZONE;
+  delete process.env.REGULAIT_INFRA_LOCATION;
+});
+
+describe("infra.ts providerConfig — gcp under the REGULAIT_INFRA_LIVE gate", () => {
+  it("flag OFF: byte-identical to the pre-live contract — a bare { kind }, no client, no SDK", () => {
+    delete process.env.REGULAIT_INFRA_LIVE;
+    const cfg = providerConfig(
+      fakeGcpResource({ config: { projectId: PROJECT, zone: ZONE, location: "us-central1" } }),
+    );
+    // deep-equal: no projectId/zone/location/gcpLiveClient keys at all
+    expect(cfg).toEqual({ kind: "gcp" });
+    // and the resolver behaves exactly as today: the adapter's own 501 gate
+    expect(() => resolveInfraProvider(cfg)).toThrow(InfraProviderError);
+    try {
+      resolveInfraProvider(cfg);
+    } catch (err) {
+      expect((err as InfraProviderError).status).toBe(501);
+    }
+  });
+
+  it("flag ON: threads projectId/zone/location from the resource row's config jsonb and injects a live client", () => {
+    process.env.REGULAIT_INFRA_LIVE = "1";
+    const cfg = providerConfig(
+      fakeGcpResource({ config: { projectId: PROJECT, zone: ZONE, location: "us-central1" } }),
+    );
+    expect(cfg.projectId).toBe(PROJECT);
+    expect(cfg.zone).toBe(ZONE);
+    expect(cfg.location).toBe("us-central1");
+    expect(cfg.gcpLiveClient).toBeDefined();
+    // the injected client implements the full 7-method GcpInfraLiveClient contract
+    for (const method of [
+      "openSession",
+      "listInventories",
+      "listVulnerabilities",
+      "listCertificates",
+      "listBackups",
+      "executePatchJob",
+      "triggerBackup",
+    ] as const) {
+      expect(typeof cfg.gcpLiveClient![method]).toBe("function");
+    }
+    // and resolveInfraProvider now passes it through to a real gcp adapter
+    expect(resolveInfraProvider(cfg).kind).toBe("gcp");
+  });
+
+  it("flag ON: env vars are the fallback, the resource row overrides them (row > env)", () => {
+    process.env.REGULAIT_INFRA_LIVE = "true";
+    process.env.REGULAIT_INFRA_PROJECT_ID = "env-fallback-project";
+    process.env.REGULAIT_INFRA_ZONE = "europe-west1-b";
+    process.env.REGULAIT_INFRA_LOCATION = "europe-west1";
+    // no row config → env fallback
+    const envCfg = providerConfig(fakeGcpResource({ config: null }));
+    expect(envCfg.projectId).toBe("env-fallback-project");
+    expect(envCfg.zone).toBe("europe-west1-b");
+    expect(envCfg.location).toBe("europe-west1");
+    // row config present → it wins over the env
+    const rowCfg = providerConfig(
+      fakeGcpResource({ config: { projectId: PROJECT, zone: ZONE, location: "us-central1" } }),
+    );
+    expect(rowCfg.projectId).toBe(PROJECT);
+    expect(rowCfg.zone).toBe(ZONE);
+    expect(rowCfg.location).toBe("us-central1");
+    // partial row config → per-field precedence
+    const mixed = providerConfig(fakeGcpResource({ config: { zone: ZONE } }));
+    expect(mixed.projectId).toBe("env-fallback-project");
+    expect(mixed.zone).toBe(ZONE);
+    expect(mixed.location).toBe("europe-west1");
+  });
+
+  it("flag ON with no projectId anywhere still resolves — the adapter's own needs-config error is the guard", () => {
+    process.env.REGULAIT_INFRA_LIVE = "1";
+    const cfg = providerConfig(fakeGcpResource({ config: null }));
+    expect(cfg.projectId).toBeNull();
+    expect(cfg.zone).toBeNull();
+    expect(cfg.location).toBeNull();
+    const provider = resolveInfraProvider(cfg);
+    expect(provider.kind).toBe("gcp");
   });
 });

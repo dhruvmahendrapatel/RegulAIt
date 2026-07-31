@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { InfraProviderError, resolveInfraProvider } from "@regulait/infra-provider";
 import { buildAzureInfraLiveClient, type AzureInfraSdk } from "./infra-azure-client.js";
+import { providerConfig } from "./infra.js";
 
 /**
  * The REAL Azure infra live path — gateway wiring (Batch C breadth). Proves,
@@ -494,5 +496,104 @@ describe("buildAzureInfraLiveClient — installPatches OS-oneof honesty", () => 
         osType: "Linux",
       }),
     ).rejects.toThrow(/no installationActivityId/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// infra.ts providerConfig — the azure branch of the REGULAIT_INFRA_LIVE gate
+// (mirrors the aws gate tests in infra-aws-client.test.ts exactly)
+// ---------------------------------------------------------------------------
+
+function fakeAzureResource(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: "00000000-0000-0000-0000-0000000000a2",
+    kind: "agent_runtime",
+    name: "iazc-resource",
+    provider: "azure",
+    config: null,
+    classifications: null,
+    deployTargetId: null,
+    createdAt: new Date(),
+    ...overrides,
+  } as Parameters<typeof providerConfig>[0];
+}
+
+afterEach(() => {
+  delete process.env.REGULAIT_INFRA_LIVE;
+  delete process.env.REGULAIT_INFRA_SUBSCRIPTION_ID;
+  delete process.env.REGULAIT_INFRA_RESOURCE_GROUP;
+});
+
+describe("infra.ts providerConfig — azure under the REGULAIT_INFRA_LIVE gate", () => {
+  it("flag OFF: byte-identical to the pre-live contract — a bare { kind }, no client, no SDK", () => {
+    delete process.env.REGULAIT_INFRA_LIVE;
+    const cfg = providerConfig(
+      fakeAzureResource({ config: { subscriptionId: SUB, resourceGroup: "rg-prod" } }),
+    );
+    // deep-equal: no subscriptionId/resourceGroup/azureLiveClient keys at all
+    expect(cfg).toEqual({ kind: "azure" });
+    // and the resolver behaves exactly as today: the adapter's own 501 gate
+    expect(() => resolveInfraProvider(cfg)).toThrow(InfraProviderError);
+    try {
+      resolveInfraProvider(cfg);
+    } catch (err) {
+      expect((err as InfraProviderError).status).toBe(501);
+    }
+  });
+
+  it("flag ON: threads subscriptionId/resourceGroup from the resource row's config jsonb and injects a live client", () => {
+    process.env.REGULAIT_INFRA_LIVE = "1";
+    const cfg = providerConfig(
+      fakeAzureResource({ config: { subscriptionId: SUB, resourceGroup: "rg-prod" } }),
+    );
+    expect(cfg.subscriptionId).toBe(SUB);
+    expect(cfg.resourceGroup).toBe("rg-prod");
+    expect(cfg.azureLiveClient).toBeDefined();
+    // the injected client implements the full 10-method AzureInfraLiveClient contract
+    for (const method of [
+      "openSession",
+      "listVirtualMachines",
+      "listPatchAssessments",
+      "listMissingPatches",
+      "listKeyVaultCertificates",
+      "getKeyVaultCertificate",
+      "listRecoveryPoints",
+      "installPatches",
+      "renewKeyVaultCertificate",
+      "triggerBackup",
+    ] as const) {
+      expect(typeof cfg.azureLiveClient![method]).toBe("function");
+    }
+    // and resolveInfraProvider now passes it through to a real azure adapter
+    expect(resolveInfraProvider(cfg).kind).toBe("azure");
+  });
+
+  it("flag ON: env vars are the fallback, the resource row overrides them (row > env)", () => {
+    process.env.REGULAIT_INFRA_LIVE = "true";
+    process.env.REGULAIT_INFRA_SUBSCRIPTION_ID = "99999999-0000-0000-0000-999999999999";
+    process.env.REGULAIT_INFRA_RESOURCE_GROUP = "rg-env-fallback";
+    // no row config → env fallback
+    const envCfg = providerConfig(fakeAzureResource({ config: null }));
+    expect(envCfg.subscriptionId).toBe("99999999-0000-0000-0000-999999999999");
+    expect(envCfg.resourceGroup).toBe("rg-env-fallback");
+    // row config present → it wins over the env
+    const rowCfg = providerConfig(
+      fakeAzureResource({ config: { subscriptionId: SUB, resourceGroup: "rg-row" } }),
+    );
+    expect(rowCfg.subscriptionId).toBe(SUB);
+    expect(rowCfg.resourceGroup).toBe("rg-row");
+    // partial row config → per-field precedence
+    const mixed = providerConfig(fakeAzureResource({ config: { resourceGroup: "rg-mixed" } }));
+    expect(mixed.subscriptionId).toBe("99999999-0000-0000-0000-999999999999");
+    expect(mixed.resourceGroup).toBe("rg-mixed");
+  });
+
+  it("flag ON with no subscriptionId anywhere still resolves — the adapter's own needs-config error is the guard", () => {
+    process.env.REGULAIT_INFRA_LIVE = "1";
+    const cfg = providerConfig(fakeAzureResource({ config: null }));
+    expect(cfg.subscriptionId).toBeNull();
+    expect(cfg.resourceGroup).toBeNull();
+    const provider = resolveInfraProvider(cfg);
+    expect(provider.kind).toBe("azure");
   });
 });
