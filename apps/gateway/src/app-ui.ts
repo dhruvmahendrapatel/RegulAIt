@@ -1444,45 +1444,159 @@ async function wireRunDetail(id) {
     try { const out = await fn(); toast(typeof out === "string" ? out : label); render(); }
     catch (e) { toast("✗ " + e.message); }
   };
+  // --- live worker streaming (pillar 7) ----------------------------------
+  // The dispatch/auto endpoints accept stream:true and reply as SSE — the
+  // node route with the invoke framing (delta/result/error), the auto route
+  // with a MULTIPLEXED per-node envelope: node_start {nodeId, agent},
+  // node_delta {nodeId, text}, node_complete {nodeId, status[, usage,
+  // costUsd]}, run_complete {status, stoppedReason, dispatched,
+  // measuredSpentUsd}. Every event is keyed by nodeId, so parallel-wave
+  // deltas interleave safely into one pane per active node. A non-SSE reply
+  // (block-mode PII project suppresses streaming — disclosed via
+  // streamingSuppressed — or any error) degrades to the buffered JSON flow.
+  const ssePost = (path, payload) => fetch(path, {
+    method: "POST",
+    headers: { authorization: "Bearer " + KEY, "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const readSse = async (res, onEvent) => {
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\\n\\n")) !== -1) {
+        const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
+        const ev = /event: (.+)/.exec(chunk)?.[1];
+        const data = /data: (.+)/.exec(chunk)?.[1];
+        if (ev && data) onEvent(ev, JSON.parse(data));
+      }
+    }
+  };
+  // one live pane per actively-streaming node — created on node_start (or
+  // first delta), appended in place, badge finalized on completion; the
+  // post-stream render() replaces panes with the recorded node output
+  const livePane = (host, nodeId, agentName) => {
+    let pane = $('[data-nlive="' + nodeId + '"]');
+    if (pane || !host) return pane;
+    const wrap = document.createElement("div");
+    wrap.style.marginTop = "6px";
+    wrap.innerHTML = '<div class="dim" style="font-size:11.5px"><span class="badge info" data-nlivebadge="' + esc(nodeId) + '">streaming</span> <span class="mono">' + esc(nodeId) + "</span>" + (agentName ? " · " + esc(agentName) : "") + '</div><pre data-nlive="' + esc(nodeId) + '" style="margin-top:4px;max-height:200px;overflow:auto;white-space:pre-wrap"></pre>';
+    host.appendChild(wrap);
+    return $('[data-nlive="' + nodeId + '"]');
+  };
+  const liveAppend = (host, nodeId, text) => {
+    const pane = livePane(host, nodeId);
+    if (!pane) return;
+    pane.textContent += text;
+    pane.scrollTop = pane.scrollHeight;
+  };
+  const liveDone = (nodeId, status) => {
+    const b = $('[data-nlivebadge="' + nodeId + '"]');
+    if (b) { b.textContent = status; b.className = "badge" + (status === "failed" || status === "refused" ? " bad" : ""); }
+  };
   $("#run-start")?.addEventListener("click", () =>
     act(() => post("/v1/runs/" + id + "/events", { kind: "start" }), "Run started"));
   $("#run-abort")?.addEventListener("click", (e) => {
     if (!confirmClick(e.currentTarget, "Abort for good?")) return;
     act(() => post("/v1/runs/" + id + "/events", { kind: "abort" }), "Run aborted");
   });
-  $("#run-auto")?.addEventListener("click", () =>
-    act(async () => {
-      // any edited per-node instruction rides along as that node's input
-      const inputs = {};
-      document.querySelectorAll("[data-ninput]").forEach((t) => {
-        const v = t.value.trim();
-        if (v && v !== t.dataset.def) inputs[t.dataset.ninput] = v;
-      });
-      const r = await post("/v1/runs/" + id + "/auto", {
-        acceptReviews: $("#run-accept")?.checked ?? true,
-        ...(Object.keys(inputs).length ? { inputs } : {}),
-      });
-      // honest completion: say WHY the pass stopped, not just that it ran
-      const label = STOP_LABELS[r.stoppedReason] ?? ("stopped: " + String(r.stoppedReason).replaceAll("_", " "));
-      return "Auto-advance took " + r.steps.length + " step" + (r.steps.length === 1 ? "" : "s") + " — " + label;
-    }, "Auto-advance pass complete"));
+  $("#run-auto")?.addEventListener("click", async () => {
+    const btn = $("#run-auto");
+    // any edited per-node instruction rides along as that node's input
+    const inputs = {};
+    document.querySelectorAll("[data-ninput]").forEach((t) => {
+      const v = t.value.trim();
+      if (v && v !== t.dataset.def) inputs[t.dataset.ninput] = v;
+    });
+    const payload = {
+      stream: true,
+      acceptReviews: $("#run-accept")?.checked ?? true,
+      ...(Object.keys(inputs).length ? { inputs } : {}),
+    };
+    if (btn) btn.disabled = true;
+    try {
+      const res = await ssePost("/v1/runs/" + id + "/auto", payload);
+      if (res.ok && res.headers.get("content-type")?.includes("event-stream")) {
+        // live panel: one pane per active node — parallel-wave nodes stream
+        // together, each delta appended to ITS node's pane by nodeId
+        let panel = $("#auto-live");
+        if (!panel) {
+          panel = document.createElement("div");
+          panel.id = "auto-live";
+          panel.className = "card";
+          panel.innerHTML = '<div class="dim" style="font-size:12px">Live worker output — one pane per active node; ∥ nodes stream together.</div>';
+          (btn?.closest(".row") ?? $("#root"))?.insertAdjacentElement("afterend", panel);
+        }
+        let final = null;
+        await readSse(res, (ev, data) => {
+          if (ev === "node_start") livePane(panel, data.nodeId, AGENT_NAMES[data.agent] ?? "worker");
+          if (ev === "node_delta") liveAppend(panel, data.nodeId, data.text);
+          if (ev === "node_complete") liveDone(data.nodeId, data.status);
+          if (ev === "run_complete") final = data;
+        });
+        // honest completion: say WHY the pass stopped, not just that it ran
+        const label = final
+          ? (STOP_LABELS[final.stoppedReason] ?? ("stopped: " + String(final.stoppedReason).replaceAll("_", " ")))
+          : "stream ended early";
+        toast("Auto-advance — " + label);
+        render();
+        return;
+      }
+      // graceful degrade: the buffered JSON pass (block-mode PII projects
+      // suppress streaming — the server disclosed it; or an HTTP error)
+      let j = null;
+      try { j = await res.json(); } catch { j = null; }
+      if (!res.ok) { toast("✗ " + errMessage(res.status, j ?? {})); render(); return; }
+      if (j?.streamingSuppressed) toast("Streaming is disabled for this project: its PII mode is block, so worker output is checked in full before it is shown.");
+      const label = STOP_LABELS[j.stoppedReason] ?? ("stopped: " + String(j.stoppedReason).replaceAll("_", " "));
+      toast("Auto-advance took " + j.steps.length + " step" + (j.steps.length === 1 ? "" : "s") + " — " + label);
+      render();
+    } catch (e) { toast("✗ " + e.message); render(); }
+  });
   document.querySelectorAll("[data-nedit]").forEach((b) =>
     b.addEventListener("click", () => {
       const box = $('[data-nedbox="' + b.dataset.nedit + '"]');
       if (box) box.style.display = box.style.display === "none" ? "" : "none";
     }));
   // manual dispatch of an in_progress node (e.g. one a failed pass stranded):
-  // dispatch with the adjusted instructions, then submit the output for
-  // review — the same two steps an auto-advance pass takes.
+  // dispatch with the adjusted instructions — live-streaming the worker's
+  // tokens into a pane under the editor — then submit the output for review,
+  // the same two steps an auto-advance pass takes.
   document.querySelectorAll("[data-dispatch]").forEach((b) =>
-    b.addEventListener("click", () =>
-      act(async () => {
-        const t = $('[data-ninput="' + b.dataset.dispatch + '"]');
-        const v = (t?.value ?? "").trim();
-        await post("/v1/runs/" + id + "/nodes/" + b.dataset.dispatch + "/dispatch",
-          v && v !== t.dataset.def ? { input: v } : {});
-        await post("/v1/runs/" + id + "/events", { kind: "node_submitted", nodeId: b.dataset.dispatch });
-      }, "Node dispatched — output submitted for review")));
+    b.addEventListener("click", async () => {
+      const nodeId = b.dataset.dispatch;
+      const t = $('[data-ninput="' + nodeId + '"]');
+      const v = (t?.value ?? "").trim();
+      const host = $('[data-nedbox="' + nodeId + '"]') ?? b.parentElement;
+      b.disabled = true;
+      try {
+        const res = await ssePost("/v1/runs/" + id + "/nodes/" + nodeId + "/dispatch",
+          { stream: true, ...(v && v !== t.dataset.def ? { input: v } : {}) });
+        if (res.ok && res.headers.get("content-type")?.includes("event-stream")) {
+          let failed = null;
+          await readSse(res, (ev, data) => {
+            if (ev === "delta") liveAppend(host, nodeId, data.text);
+            if (ev === "error") failed = data;
+          });
+          liveDone(nodeId, failed ? "failed" : "done");
+          if (failed) { toast("✗ " + (failed.detail ?? failed.error ?? "dispatch failed")); render(); return; }
+        } else {
+          // graceful degrade: buffered JSON (block-mode PII projects suppress
+          // streaming — the server disclosed it; or an HTTP error)
+          let j = null;
+          try { j = await res.json(); } catch { j = null; }
+          if (!res.ok) { toast("✗ " + errMessage(res.status, j ?? {})); render(); return; }
+          if (j?.streamingSuppressed) toast("Streaming is disabled for this project: its PII mode is block, so worker output is checked in full before it is shown.");
+        }
+        await post("/v1/runs/" + id + "/events", { kind: "node_submitted", nodeId });
+        toast("Node dispatched — output submitted for review");
+        render();
+      } catch (e) { toast("✗ " + e.message); render(); }
+    }));
   document.querySelectorAll("[data-accept]").forEach((b) =>
     b.addEventListener("click", () =>
       act(() => post("/v1/runs/" + id + "/events", { kind: "node_accepted", nodeId: b.dataset.accept }), "Accepted")));
