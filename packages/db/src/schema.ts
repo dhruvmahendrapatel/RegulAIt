@@ -217,6 +217,9 @@ export const auditLog = pgTable(
         // ADR-0021: an admin change to the org-wide functional defaults
         // (org_settings singleton). Plain text column — no DDL needed.
         "org_settings",
+        // A4 (ADR-0027): an admin set/clear of the deploy-mode scope on a
+        // pillar-1 restriction rule. Plain text column — no DDL needed.
+        "restriction_rule",
         // ADR-0022 identity lifecycle: admin acts on users (deactivate/
         // reactivate/rename/admin-flag), roles (force-delete), teams
         // (member-remove/delete), workflow templates (retire) and approver
@@ -243,6 +246,12 @@ export const auditLog = pgTable(
     ruleId: text("rule_id").notNull(),
     ruleChain: jsonb("rule_chain").notNull(),
     reason: text("reason").notNull(),
+    // A4 (migration 0044): the deploy mode of the target a deploy-mode-scoped
+    // action acted on (workflow deploy/rollback events, infra operations on
+    // target-pinned resources). NULL = unknown/not-applicable — pre-0044 rows
+    // are honestly un-backfillable (they never recorded a mode, ADR-0019),
+    // and most rows (MCP calls, membership changes, …) have no mode at all.
+    deployMode: text("deploy_mode", { enum: ["hosted", "byoc", "air_gapped"] }),
   },
   (t) => [index("audit_log_user_at_idx").on(t.userId, t.at)],
 );
@@ -268,6 +277,9 @@ export const approvalRules = pgTable(
       .notNull()
       .default("user"),
     serverScope: text("server_scope", { enum: ["server", "all"] }).notNull().default("server"),
+    // A4 (migration 0044): optional deploy-mode scope — null (every pre-0044
+    // row, and the default) = mode-unscoped = today's behaviour.
+    deployMode: text("deploy_mode", { enum: ["hosted", "byoc", "air_gapped"] }),
     toolName: text("tool_name"),
     writeOnly: boolean("write_only").notNull().default(false),
     approverUserId: uuid("approver_user_id")
@@ -300,6 +312,8 @@ export const rateLimits = pgTable(
       .notNull()
       .default("user"),
     serverScope: text("server_scope", { enum: ["server", "all"] }).notNull().default("server"),
+    // A4 (migration 0044): optional deploy-mode scope — null = today.
+    deployMode: text("deploy_mode", { enum: ["hosted", "byoc", "air_gapped"] }),
     toolName: text("tool_name"),
     maxCalls: integer("max_calls").notNull(),
     windowSeconds: integer("window_seconds").notNull(),
@@ -372,6 +386,8 @@ export const dataScopeRules = pgTable(
       .notNull()
       .default("user"),
     serverScope: text("server_scope", { enum: ["server", "all"] }).notNull().default("server"),
+    // A4 (migration 0044): optional deploy-mode scope — null = today.
+    deployMode: text("deploy_mode", { enum: ["hosted", "byoc", "air_gapped"] }),
     toolName: text("tool_name"),
     argPath: text("arg_path").notNull(),
     allowedValues: jsonb("allowed_values").$type<string[]>().notNull(),
@@ -1489,10 +1505,26 @@ export const certInventory = pgTable(
     serial: text("serial"),
     notAfter: timestamp("not_after", { withTimezone: true }).notNull(),
     lastRotatedAt: timestamp("last_rotated_at", { withTimezone: true }),
-    // active | rotation_proposed | rotated | expired — text (no DB CHECK), like
-    // infra_findings, so drizzle owns the enum.
+    // O6 (ADR-0027) cert-rotation LIFECYCLE — text (no DB CHECK), like
+    // infra_findings, so drizzle owns the enum:
+    //   active → rotation_proposed → (approve) rotating* → rotated
+    //                              ↘ (deny)             → rotation_denied
+    //                              ↘ (provider failure) → rotation_failed
+    // (*rotating is the in-txn provider call, not a persisted checkpoint —
+    // there is no async boundary to observe it across.) rotation_denied and
+    // rotation_failed are RE-PROPOSABLE (the rotate endpoint accepts them);
+    // the denial/failure marker + reason live on the cert_rotations ledger
+    // row of that attempt. Pre-O6 rows only ever held
+    // active/rotation_proposed/rotated/expired — all still valid states.
     status: text("status", {
-      enum: ["active", "rotation_proposed", "rotated", "expired"],
+      enum: [
+        "active",
+        "rotation_proposed",
+        "rotation_denied",
+        "rotation_failed",
+        "rotated",
+        "expired",
+      ],
     })
       .notNull()
       .default("active"),
@@ -1501,7 +1533,11 @@ export const certInventory = pgTable(
   (t) => [index("cert_inventory_resource_idx").on(t.resourceId)],
 );
 
-// A governed cert rotation OUTCOME. Written inside the /decide txn on approve.
+// O6 (ADR-0027): one row PER ROTATION ATTEMPT, created at PROPOSE time
+// (status 'proposed') and advanced by the /decide hook to rotated / denied /
+// failed — the durable record of every attempt, including the ones that were
+// refused or blew up. `reason` carries the approver's denial reason or the
+// provider's failure message. (Pre-O6, a row only ever appeared on approve.)
 export const certRotations = pgTable("cert_rotations", {
   id: uuid("id").primaryKey().defaultRandom(),
   certId: uuid("cert_id")
@@ -1512,9 +1548,11 @@ export const certRotations = pgTable("cert_rotations", {
   oldSerial: text("old_serial"),
   newSerial: text("new_serial"),
   newNotAfter: timestamp("new_not_after", { withTimezone: true }),
-  status: text("status", { enum: ["proposed", "rotated", "failed"] })
+  status: text("status", { enum: ["proposed", "rotated", "denied", "failed"] })
     .notNull()
     .default("proposed"),
+  /** O6: the approver's denial reason, or the provider's failure message */
+  reason: text("reason"),
   rotatedAt: timestamp("rotated_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
@@ -1843,6 +1881,18 @@ export const orgSettings = pgTable(
      * effective retention = max(profile floor, this) — an org default can never
      * SHORTEN what a compliance framework demands. */
     defaultAuditRetentionDays: integer("default_audit_retention_days"),
+    /** A4 (migration 0044): MAX-ONLY per-deploy-mode retention overrides —
+     * a map mode -> days ({} = none = today). Composition per audit row:
+     * effective retention = max(global floor, override[row.deployMode]). An
+     * override can only EXTEND retention for its mode's rows; one below the
+     * global floor is inert (MAX keeps the floor) — retention can never
+     * shorten below any applicable floor, by construction. Rows with a null
+     * deployMode (unknown/not-deploy-scoped, incl. every pre-0044 row) always
+     * use the global floor. */
+    modeAuditRetention: jsonb("mode_audit_retention")
+      .$type<Partial<Record<"hosted" | "byoc" | "air_gapped", number>>>()
+      .notNull()
+      .default({}),
 
     // --- orchestration worker caps -----------------------------------------
     defaultWorkerMaxTurns: integer("default_worker_max_turns").notNull().default(6),

@@ -357,6 +357,8 @@ export async function applyInfraApprovalDecision(
     .from(infraResources)
     .where(eq(infraResources.id, finding.resourceId));
   const signature = String(finding.detail?.signature ?? "");
+  // A4: stamp the target-pinned resource's mode onto the decision audit rows
+  const deployMode = await resourceDeployMode(tx, resource?.deployTargetId ?? null);
   if (decision === "approved") {
     if (resource) {
       const provider = resolveInfraProvider(providerConfig(resource));
@@ -378,6 +380,7 @@ export async function applyInfraApprovalDecision(
       ruleId: "infra-remediated",
       ruleChain: [],
       reason: `governed remediation approved by the named approver; ${finding.kind}/${finding.severity} on ${resource?.name ?? finding.resourceId} remediated`,
+      deployMode, // A4
     });
   } else {
     await tx.update(infraFindings).set({ status: "accepted_risk" }).where(eq(infraFindings.id, finding.id));
@@ -390,20 +393,32 @@ export async function applyInfraApprovalDecision(
       ruleId: "infra-remediation-denied",
       ruleChain: [],
       reason: `governed remediation denied; ${finding.kind}/${finding.severity} on ${resource?.name ?? finding.resourceId} logged as accepted risk`,
+      deployMode, // A4
     });
   }
+}
+
+/** A4 (migration 0044): the deploy mode of the target a resource is pinned to
+ * — stamped onto the audit rows of governed infra mutations so the mode
+ * dimension (and per-mode retention) covers infra operations too. Null = the
+ * resource is not target-pinned (not a deploy-scoped action). */
+async function resourceDeployMode(
+  tx: Db,
+  deployTargetId: string | null,
+): Promise<"hosted" | "byoc" | "air_gapped" | null> {
+  if (!deployTargetId) return null;
+  const [t] = await tx
+    .select({ mode: deployTargets.mode })
+    .from(deployTargets)
+    .where(eq(deployTargets.id, deployTargetId));
+  return t?.mode ?? null;
 }
 
 /** ADR-0015 boundary check: is this resource pinned to a customer-hosted,
  * air-gapped deploy target? If so, no execution-plane detail (provider result
  * strings/URLs) may be retained in the control plane — only metadata. */
 async function isAirGapped(tx: Db, deployTargetId: string | null): Promise<boolean> {
-  if (!deployTargetId) return false;
-  const [t] = await tx
-    .select({ mode: deployTargets.mode })
-    .from(deployTargets)
-    .where(eq(deployTargets.id, deployTargetId));
-  return t?.mode === "air_gapped";
+  return (await resourceDeployMode(tx, deployTargetId)) === "air_gapped";
 }
 
 const ACTION_TO_KIND: Record<InfraAction, InfraFindingRow["kind"]> = {
@@ -457,7 +472,9 @@ async function applyInfraActionDecision(
     .select()
     .from(infraFindings)
     .where(and(eq(infraFindings.refTable, refTable), eq(infraFindings.refId, ledgerId)));
-  const airGapped = await isAirGapped(tx, resource?.deployTargetId ?? null);
+  // A4: one lookup serves both the boundary check and the audit-mode stamp
+  const deployMode = await resourceDeployMode(tx, resource?.deployTargetId ?? null);
+  const airGapped = deployMode === "air_gapped";
   const signature = String(finding?.detail?.signature ?? `${action}:${ledgerId}`);
 
   if (decision === "approved") {
@@ -528,6 +545,7 @@ async function applyInfraActionDecision(
       ruleId: "infra-action-applied",
       ruleChain: [],
       reason: `governed ${action} approved by the named approver on ${resource?.name ?? resourceId}${airGapped ? " (air-gapped: metadata-only record retained)" : ""}`,
+      deployMode, // A4: null when the resource is not target-pinned
     });
   } else {
     // deny — revert the proposed state; the finding is the single accepted-risk surface.
@@ -550,6 +568,7 @@ async function applyInfraActionDecision(
       ruleId: "infra-action-denied",
       ruleChain: [],
       reason: `governed ${action} denied on ${resource?.name ?? resourceId}; logged as accepted risk, infra state unchanged`,
+      deployMode, // A4
     });
   }
 }
@@ -729,6 +748,8 @@ async function proposeInfraAction(
     ruleId: "infra-action-proposed",
     ruleChain: [],
     reason: `governed ${action} on ${resource?.name ?? ledger.resourceId} pends the named approver — infra state unchanged until approval`,
+    // A4: proposals on a target-pinned resource carry the target's mode too
+    deployMode: await resourceDeployMode(db, resource?.deployTargetId ?? null),
   });
   return approval!.id;
 }

@@ -98,6 +98,11 @@ async function applyEvent(
   event: WorkflowEvent,
   actorUserId: string | null,
   precondition?: (tx: Parameters<Parameters<Db["transaction"]>[0]>[0]) => Promise<boolean>,
+  /** A4 (migration 0044): the mode of the deploy target a deploy-scoped event
+   * acted on — stamped onto the audit row so per-mode audit retention and the
+   * mode dimension are real. Only the deploy/rollback executors pass it; every
+   * other event keeps null (= not a deploy-scoped action). */
+  deployMode?: "hosted" | "byoc" | "air_gapped" | null,
 ): Promise<{ state: InstanceState; effects: Effect[]; skipped?: boolean }> {
   // One transaction with the instance row locked: concurrent decisions,
   // re-opens, and aborts serialize instead of racing read-modify-write. When
@@ -133,6 +138,9 @@ async function applyEvent(
       ruleId: `workflow:${event.kind}`,
       ruleChain: [],
       reason: `workflow instance event '${event.kind}' (status → ${state.status})`,
+      // A4: deploy-scoped events carry their target's mode; everything else
+      // stays null (unknown/not-applicable — honestly un-backfillable).
+      deployMode: deployMode ?? null,
     });
 
     // A re-open stales EVERY outstanding gate downstream, and a terminal
@@ -490,6 +498,9 @@ async function runGitExecutions(
           instanceId,
           { kind: "deploy_blocked", stageId: stage.id, reason: handoff },
           actorUserId,
+          undefined,
+          // A4: the target may be missing here (that IS one of the handoffs)
+          target?.mode ?? null,
         );
         lastEffects = r.effects;
         pending = [];
@@ -548,6 +559,8 @@ async function runGitExecutions(
           instanceId,
           { kind: "deploy_blocked", stageId: stage.id, reason: deployErr },
           actorUserId,
+          undefined,
+          target!.mode, // A4: the deploy-scoped audit row carries the target's mode
         );
         lastEffects = r.effects;
         pending = [];
@@ -572,6 +585,8 @@ async function runGitExecutions(
             instanceId,
             { kind: "deploy_blocked", stageId: stage.id, reason },
             actorUserId,
+            undefined,
+            target!.mode, // A4
           );
           lastEffects = r.effects;
           pending = [];
@@ -583,6 +598,8 @@ async function runGitExecutions(
         instanceId,
         { kind: "execution_succeeded", stageId: stage.id },
         actorUserId,
+        undefined,
+        target!.mode, // A4: the successful deploy's audit row carries the mode
       );
       lastEffects = r.effects;
       pending = r.effects.filter((e) => e.kind === "execute_stage");
@@ -640,7 +657,14 @@ async function runGitExecutions(
       // a rollback that itself FAILS is a serious operator situation — it stays
       // awaiting_execution (retryable via /advance), never silently terminal.
       if (rbErr !== null) break;
-      const r = await applyEvent(db, instanceId, { kind: "rolled_back", stageId: stage.id }, actorUserId);
+      const r = await applyEvent(
+        db,
+        instanceId,
+        { kind: "rolled_back", stageId: stage.id },
+        actorUserId,
+        undefined,
+        target?.mode ?? null, // A4
+      );
       lastEffects = r.effects;
       pending = r.effects.filter((e) => e.kind === "execute_stage");
       continue;

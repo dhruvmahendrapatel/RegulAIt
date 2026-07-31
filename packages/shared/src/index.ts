@@ -1105,6 +1105,13 @@ export const updateOrgSettingsSchema = z
     autoPruneEnabled: z.boolean().optional(),
     pruneIntervalHours: z.number().int().min(1).max(24 * 30).optional(),
     defaultAuditRetentionDays: z.number().int().positive().nullable().optional(),
+    /** A4 (migration 0044): MAX-only per-deploy-mode retention overrides —
+     * a full replacement map mode -> days ({} clears every override). An
+     * override below the global floor is accepted but inert: composition is
+     * max(floor, override), so retention can never shorten. */
+    modeAuditRetention: z
+      .record(z.enum(["hosted", "byoc", "air_gapped"]), z.number().int().positive())
+      .optional(),
     // orchestration worker caps — 20 is the zod wall the kernel/API already hold
     defaultWorkerMaxTurns: z.number().int().min(1).max(20).optional(),
     maxWorkerTurns: z.number().int().min(1).max(20).optional(),
@@ -1152,6 +1159,14 @@ export const updateOrgSettingsSchema = z
     }
   });
 export type UpdateOrgSettings = z.infer<typeof updateOrgSettingsSchema>;
+
+/** A4 (ADR-0027): set/clear the deploy-mode scope on one pillar-1 restriction
+ * rule (approval / rate-limit / data-scope). null clears the scope back to
+ * mode-unscoped (= today's semantics for that rule). */
+export const setRuleDeployModeSchema = z.object({
+  deployMode: z.enum(["hosted", "byoc", "air_gapped"]).nullable(),
+});
+export const ruleKindParamSchema = z.enum(["approvals", "rate-limits", "data-scopes"]);
 
 // ---------------------------------------------------------------------------
 // ADR-0025 — REAL HUMAN AUTHENTICATION (migration 0042): password + session

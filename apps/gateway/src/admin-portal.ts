@@ -1107,6 +1107,8 @@ const TABS = [
   const serverOf = (row) => row.serverScope === "all" ? "all servers" : (sName.get(row.serverId) ?? row.serverId);
   const rulesView = (rows) => (rows ?? []).map((row) => {
     const o = { id: row.id, target: targetOf(row), server: serverOf(row), tool: row.toolName ?? "— any —" };
+    // A4: surface the deploy-mode scope (blank = every call, today's default)
+    o.deployMode = row.deployMode ?? "— any —";
     if (row.writeOnly !== undefined) o.writeOnly = row.writeOnly;
     if (row.approverUserId) o.approver = uName.get(row.approverUserId) ?? row.approverUserId;
     if (row.argPath !== undefined) o.argPath = row.argPath;
@@ -1121,11 +1123,24 @@ const TABS = [
     + "<h2>Data-scope rules</h2><div class='card'>"
     + form("f-dsr", subject.concat([{name:"argPath",label:"arg path",ph:"e.g. database"},{name:"allowedValues",label:"allowed values",ph:"comma,separated"}]), "Add") + table(rulesView(ds.rules)) + "</div>"
     + "<h2>Rate limits</h2><div class='card'>"
-    + form("f-rlr", subject.concat([{name:"maxCalls",label:"max calls",type:"number"},{name:"windowSeconds",label:"window seconds",type:"number"}]), "Add") + table(rulesView(rl.rules)) + "</div>";
+    + form("f-rlr", subject.concat([{name:"maxCalls",label:"max calls",type:"number"},{name:"windowSeconds",label:"window seconds",type:"number"}]), "Add") + table(rulesView(rl.rules)) + "</div>"
+    // A4 (ADR-0027): scope an EXISTING rule to one deploy mode. Default (and
+    // 'clear') = mode-unscoped = the rule applies to every call, exactly as
+    // before — a mode-scoped rule binds only to calls whose attributed work is
+    // in flight toward a deploy target of that mode (server-derived context).
+    + "<h2>Deploy-mode scope (A4)</h2><div class='card'>"
+    + form("f-rmode", [
+        {name:"kind",label:"rule kind",options:[{v:"approvals",l:"approval rule"},{v:"rate-limits",l:"rate limit"},{v:"data-scopes",l:"data-scope rule"}]},
+        {name:"ruleId",label:"rule id",ph:"paste the rule id from the tables above"},
+        {name:"deployMode",label:"deploy mode",options:[{v:"__clear__",l:"— clear (every call) —"},{v:"hosted",l:"hosted"},{v:"byoc",l:"byoc"},{v:"air_gapped",l:"air_gapped"}]},
+      ], "Set scope")
+    + "<p class='dim' style='font-size:12px'>A mode-scoped restriction applies only to calls whose attributed project has in-flight workflow instances landing on a deploy target of that mode. The context is derived server-side — never client-asserted — and an unattributed call (or one with no in-flight deploy-bound work) never matches a mode-scoped rule. Mode scoping only narrows WHICH restrictions apply; it can never mint an allow. Every change here is audited.</p></div>";
   for (const id of ["f-apr", "f-dsr", "f-rlr"]) { linkTools(id, tools); linkScope(id); }
   wire("f-apr", (d) => post("/v1/rules/approvals", d));
   wire("f-dsr", (d) => post("/v1/rules/data-scopes", { ...d, allowedValues: String(d.allowedValues).split(",") }));
   wire("f-rlr", (d) => post("/v1/rules/rate-limits", { ...d, maxCalls: Number(d.maxCalls), windowSeconds: Number(d.windowSeconds) }));
+  wire("f-rmode", (d) => api("PATCH", "/v1/rules/" + d.kind + "/" + encodeURIComponent(d.ruleId) + "/deploy-mode",
+    { deployMode: d.deployMode === "__clear__" ? null : d.deployMode }));
 }],
 ["Workflows", async (el) => {
   // Pillar 2's admin home: templates (with their stage chain), the assignment
@@ -2249,6 +2264,10 @@ const TABS = [
         {name:"autoPruneEnabled",label:"scheduled auto-prune",options:[{v:"false",l:"off (manual prune only — default)"},{v:"true",l:"on (prune on a schedule)"}]},
         {name:"pruneIntervalHours",label:"prune interval (hours)",type:"number"},
         {name:"defaultAuditRetentionDays",label:"org default retention (days, 0 = none)",type:"number"},
+        // A4: MAX-only per-deploy-mode overrides — 0/blank = no override
+        {name:"modeRetHosted",label:"hosted rows: keep at least (days, 0 = none)",type:"number",req:false},
+        {name:"modeRetByoc",label:"byoc rows: keep at least (days, 0 = none)",type:"number",req:false},
+        {name:"modeRetAirGapped",label:"air-gapped rows: keep at least (days, 0 = none)",type:"number",req:false},
       ], "Save retention policy")
     + "<p class='dim' style='font-size:12px'>Off by default: pruning only happens when an admin presses the button on the Audit Log page. When on, the gateway prunes on the configured interval under the SAME floor the manual button uses. The org default retention only fills the gap when no compliance profile sets one — a profile floor always wins upward, so this can never shorten a framework's audit trail. Enter 0 to clear the org default (never prune without a profile floor — today's behaviour). Every prune, manual or scheduled, is itself audited.</p>"
     + "</div>"
@@ -2296,6 +2315,12 @@ const TABS = [
   // the retention-days number input has no stored 0; show blank when null
   const retIn = $("#f-org-retention [name=defaultAuditRetentionDays]");
   if (retIn && cur.defaultAuditRetentionDays == null) retIn.value = "0";
+  // A4: prefill the per-mode override inputs from the stored map
+  const modeMap = cur.modeAuditRetention || {};
+  for (const [nm, key] of [["modeRetHosted","hosted"],["modeRetByoc","byoc"],["modeRetAirGapped","air_gapped"]]) {
+    const inp = $("#f-org-retention [name=" + nm + "]");
+    if (inp) inp.value = String(modeMap[key] ?? 0);
+  }
 
   // each section PUTs only its own keys (a PARTIAL update server-side)
   const putOrg = (body) => api("PUT", "/v1/org/settings", body);
@@ -2345,11 +2370,20 @@ const TABS = [
     nodeOutputMaxChars: Number(d.nodeOutputMaxChars),
   }));
   wire("f-org-approvals", (d) => putOrg({ approvalQuorum: d.approvalQuorum, approvalDelegationEnabled: asBool(d.approvalDelegationEnabled) }));
-  wire("f-org-retention", (d) => putOrg({
-    autoPruneEnabled: asBool(d.autoPruneEnabled),
-    pruneIntervalHours: Number(d.pruneIntervalHours),
-    defaultAuditRetentionDays: Number(d.defaultAuditRetentionDays) === 0 ? null : Number(d.defaultAuditRetentionDays),
-  }));
+  wire("f-org-retention", (d) => {
+    // A4: compose the full per-mode override map (0/blank = no override)
+    const modeMap = {};
+    for (const [nm, key] of [["modeRetHosted","hosted"],["modeRetByoc","byoc"],["modeRetAirGapped","air_gapped"]]) {
+      const v = Number(d[nm] || 0);
+      if (v > 0) modeMap[key] = v;
+    }
+    return putOrg({
+      autoPruneEnabled: asBool(d.autoPruneEnabled),
+      pruneIntervalHours: Number(d.pruneIntervalHours),
+      defaultAuditRetentionDays: Number(d.defaultAuditRetentionDays) === 0 ? null : Number(d.defaultAuditRetentionDays),
+      modeAuditRetention: modeMap,
+    });
+  });
   wire("f-org-auth", (d) => putOrg({
     passwordMinLength: Number(d.passwordMinLength),
     passwordRequireClasses: Number(d.passwordRequireClasses),

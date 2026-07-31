@@ -170,6 +170,9 @@ export async function executeGovernedToolCall(
       { serverId, name: toolName, kind },
       args.arguments,
       args.ceilingTools ?? null,
+      // A4: attribution feeds the deploy-context derivation for mode-scoped
+      // rules (lazily — no mode-scoped rules loaded = no extra queries).
+      projectId,
     );
 
     await db.insert(auditLog).values({
