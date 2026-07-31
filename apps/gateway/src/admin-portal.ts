@@ -1296,14 +1296,23 @@ const TABS = [
         {name:"mode",options:["hosted","byoc","air_gapped"]},
         {name:"environment",label:"environment",req:false,ph:"e.g. production (optional)"},
         {name:"baseUrl",label:"base url",req:false,ph:"optional"},
-        {name:"roleArn",label:"role / account",req:false,ph:"aws role arn / azure sub / gcp project"},
-        {name:"region",label:"region / namespace",req:false,ph:"e.g. us-east-1 (optional)"},
+        {name:"roleArn",label:"role arn (aws)",req:false,ph:"arn:aws:iam::<acct>:role/<name>"},
+        {name:"region",label:"region",req:false,ph:"e.g. us-east-1 / eastus / us-central1"},
         {name:"credential",label:"credential",type:"password",req:false,ph:"kubeconfig etc. — never shown again"},
+        // migration 0043 per-kind config — fill only the fields of the chosen
+        // provider; the API rejects a field on the wrong kind loudly
+        {name:"cluster",label:"ecs cluster (aws)",req:false,ph:"optional"},
+        {name:"subscriptionId",label:"subscription (azure)",req:false,ph:"azure subscription id"},
+        {name:"resourceGroup",label:"resource group (azure)",req:false,ph:"optional"},
+        {name:"templateUri",label:"template uri (azure)",req:false,ph:"https://… (optional)"},
+        {name:"projectId",label:"project (gcp)",req:false,ph:"gcp project id"},
+        {name:"blueprintGcs",label:"blueprint (gcp)",req:false,ph:"gs://… (optional)"},
+        {name:"namespace",label:"namespace (k8s)",req:false,ph:"optional"},
       ], "Add target")
     + dataTable(d.targets, {
         actions: (row) => "<button class='small danger' data-tdel='" + esc(row.name) + "'>delete</button>",
       })
-    + "<p class='dim' style='font-size:12px'>Credentials are AES-256-GCM encrypted at rest and never returned. An aws target needs a role arn (arn:aws:iam::&lt;acct&gt;:role/&lt;name&gt;) and region; azure/gcp reuse the role/account field for their subscription/project; kubernetes needs a kubeconfig credential. aws/azure/gcp/kubernetes run as deterministic dry-run shapes (no live cloud mutation) — a dry-run deploy is recorded and badged as such, and it can never satisfy a production deploy gate (#79c).</p></div>";
+    + "<p class='dim' style='font-size:12px'>Credentials are AES-256-GCM encrypted at rest and never returned. Per-kind config (migration 0043): aws needs a role arn (arn:aws:iam::&lt;acct&gt;:role/&lt;name&gt;) + region and may name the ecs cluster; azure needs a subscription + region and may name the resource group / template uri; gcp needs a project + region and may name the gs:// blueprint; kubernetes needs a kubeconfig credential and may name the namespace. Fields set here are row-first — they beat the matching gateway env vars. aws/azure/gcp/kubernetes run as deterministic dry-run shapes (no live cloud mutation) — a dry-run deploy is recorded and badged as such, and it can never satisfy a production deploy gate (#79c).</p></div>";
   el.querySelectorAll("[data-tdel]").forEach((b) => b.addEventListener("click", async () => {
     if (!confirmClick(b, "Delete target?")) return;
     try { await del("/v1/deploy/targets/" + encodeURIComponent(b.dataset.tdel)); toast("Target deleted", "ok"); render(); }

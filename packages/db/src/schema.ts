@@ -824,6 +824,27 @@ export const deployTargets = pgTable("deploy_targets", {
   // keys) and the region to deploy in. Null for the mock/hosted provider.
   roleArn: text("role_arn"),
   region: text("region"),
+  // Migration 0043 (the #64 flagged gap): per-provider-kind config, validated
+  // per kind at the API boundary (shared's createDeployTargetSchema). A jsonb
+  // rather than one column per field, deliberately: the table stays
+  // provider-agnostic (the standing principle) — a future provider adds keys,
+  // not DDL — while the zod per-kind validation is every bit as strict as a
+  // column CHECK would be. Null = a pre-0043 row = the legacy behaviour
+  // (roleArn doubles as the azure subscription / gcp project handle, live
+  // clients fall back to their env vars).
+  //   aws:        { cluster? }                                (roleArn/region stay columns)
+  //   azure:      { subscriptionId?, resourceGroup?, templateUri? }
+  //   gcp:        { projectId?, blueprintGcs? }
+  //   kubernetes: { namespace? }                              (kubeconfig stays the credential)
+  providerConfig: jsonb("provider_config").$type<{
+    cluster?: string;
+    subscriptionId?: string;
+    resourceGroup?: string;
+    templateUri?: string;
+    projectId?: string;
+    blueprintGcs?: string;
+    namespace?: string;
+  } | null>(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

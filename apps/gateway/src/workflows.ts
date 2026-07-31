@@ -49,6 +49,7 @@ import {
   advanceStageSchema,
   createAssignmentRuleSchema,
   createDeployTargetSchema,
+  deployTargetProviderConfig,
   createGitConnectionSchema,
   createWorkflowTemplateSchema,
   deployOverrideSchema,
@@ -506,9 +507,12 @@ async function runGitExecutions(
             baseUrl: target!.baseUrl,
             roleArn: target!.roleArn,
             region: target!.region,
+            // migration 0043: the row's validated per-kind config — row-first
+            // over the legacy roleArn reuse and the gateway-wide env vars.
+            providerConfig: target!.providerConfig,
             // REGULAIT_DEPLOY_LIVE wiring: flag off = {} (dry-run, byte-
             // identical); flag on = the real lazily-loading per-cloud client.
-            ...liveDeployClients(target!.provider),
+            ...liveDeployClients(target!.provider, process.env, target!.providerConfig),
           });
           // ASYNC-DEPLOY: awaited like every other async stage executor (git
           // ops, nested runs). The stage claim was taken in its own committed
@@ -610,8 +614,10 @@ async function runGitExecutions(
             baseUrl: target.baseUrl,
             roleArn: target.roleArn,
             region: target.region,
+            // migration 0043: row-first per-kind config, as in the deploy executor
+            providerConfig: target.providerConfig,
             // same REGULAIT_DEPLOY_LIVE wiring as the deploy executor
-            ...liveDeployClients(target.provider),
+            ...liveDeployClients(target.provider, process.env, target.providerConfig),
           });
           // ASYNC-DEPLOY: awaited outside any transaction (same claim/release
           // semantics as the deploy executor); a rejection lands in this catch
@@ -795,6 +801,10 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     mode: deployTargets.mode,
     roleArn: deployTargets.roleArn,
     region: deployTargets.region,
+    // migration 0043: identifiers/locations only (cluster, subscription,
+    // resource group, template/blueprint URIs, namespace) — never a secret, so
+    // safe to return like roleArn
+    providerConfig: deployTargets.providerConfig,
     createdAt: deployTargets.createdAt,
   };
   app.post("/v1/deploy/targets", async (req, reply) => {
@@ -812,6 +822,8 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
         mode: body.mode ?? "hosted",
         roleArn: body.roleArn ?? null,
         region: body.region ?? null,
+        // migration 0043: the validated per-kind config (null = none given)
+        providerConfig: deployTargetProviderConfig(body),
         credentialCiphertext:
           body.credential && opts.dataKey ? encryptTokenOnce(opts.dataKey, body.credential) : null,
       })

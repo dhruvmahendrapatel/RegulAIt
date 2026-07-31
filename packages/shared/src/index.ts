@@ -554,10 +554,52 @@ export const recheckSchema = z.object({
   stageId: z.string().min(1),
 });
 
+/** Migration 0043: the per-provider-kind slice of a deploy target's config —
+ * validated per kind by createDeployTargetSchema's superRefine and stored as
+ * the deploy_targets.provider_config jsonb. Keys are flat (the provider column
+ * is the discriminant, so no nesting is needed). */
+export interface DeployTargetProviderConfig {
+  /** aws: the ECS cluster rollbacks act on (was env REGULAIT_DEPLOY_AWS_CLUSTER only) */
+  cluster?: string;
+  /** azure: the customer subscription — replaces the roleArn-field reuse */
+  subscriptionId?: string;
+  /** azure: the resource group ARM deployments run in (was env-only) */
+  resourceGroup?: string;
+  /** azure: the templateLink URI ARM deployments deploy (was env-only) */
+  templateUri?: string;
+  /** gcp: the customer project — replaces the roleArn-field reuse */
+  projectId?: string;
+  /** gcp: the gs:// Terraform blueprint Infra Manager deploys (was env-only) */
+  blueprintGcs?: string;
+  /** kubernetes: the target namespace (environment doubles as it when unset) */
+  namespace?: string;
+}
+
+/** which providerConfig keys each provider kind may carry — anything else on
+ * that kind is rejected loudly (a typo'd or misplaced field must never be
+ * silently ignored into a broken deploy) */
+export const DEPLOY_TARGET_CONFIG_KEYS: Record<string, ReadonlyArray<keyof DeployTargetProviderConfig>> = {
+  mock: [],
+  aws: ["cluster"],
+  azure: ["subscriptionId", "resourceGroup", "templateUri"],
+  gcp: ["projectId", "blueprintGcs"],
+  kubernetes: ["namespace"],
+};
+
 /** §2/§3 a governed deploy target a deployment/rollback stage acts on.
  * Credentials are optional (a mock/AWS-assume-role target needs none) and, when
  * given, stored encrypted. §3 BYOC: `mode` picks hosted / byoc / air_gapped, and
- * an aws target carries the customer role to assume + region. */
+ * an aws target carries the customer role to assume + region.
+ *
+ * Migration 0043 (the #64 flagged gap): the AWS ARN grammar now applies to
+ * roleArn ONLY when the provider is aws — pre-0043 it applied to every
+ * provider, which made a real azure subscription or gcp project id fail
+ * validation unless it happened to look like an AWS ARN. azure/gcp grow their
+ * own named fields (subscriptionId / projectId — roleArn is still accepted as
+ * the legacy account handle), and each kind's extra config
+ * (cluster / resourceGroup / templateUri / blueprintGcs / namespace) is
+ * validated per kind and stored on the row, so a target is configured where it
+ * is defined instead of via gateway-wide env vars. */
 export const createDeployTargetSchema = z
   .object({
     name: z.string().min(1).max(120),
@@ -566,22 +608,81 @@ export const createDeployTargetSchema = z
     baseUrl: z.string().url().max(2000).optional(),
     credential: z.string().min(1).max(8000).optional(),
     mode: z.enum(["hosted", "byoc", "air_gapped"]).optional(),
-    /** aws: the customer IAM role to assume (arn:aws:iam::<acct>:role/<name>) */
-    roleArn: z
-      .string()
-      .regex(/^arn:aws:iam::\d{12}:role\/.+/, "must be an arn:aws:iam::<account>:role/<name>")
-      .max(2048)
-      .optional(),
+    /** aws: the customer IAM role to assume (arn:aws:iam::<acct>:role/<name>).
+     * azure/gcp legacy: the account handle (subscription / project) — prefer
+     * the named subscriptionId / projectId fields. */
+    roleArn: z.string().min(1).max(2048).optional(),
     region: z.string().min(1).max(64).optional(),
+    // --- migration 0043 per-kind config (flat; provider is the discriminant) ---
+    /** aws: the ECS cluster rollbacks act on */
+    cluster: z.string().min(1).max(255).optional(),
+    /** azure: the customer subscription id */
+    subscriptionId: z.string().min(1).max(128).optional(),
+    /** azure: the resource group ARM deployments run in */
+    resourceGroup: z.string().min(1).max(90).optional(),
+    /** azure: the templateLink URI ARM deployments deploy */
+    templateUri: z.string().url().max(2000).optional(),
+    /** gcp: the customer project id */
+    projectId: z
+      .string()
+      .regex(/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/, "must be a valid gcp project id")
+      .optional(),
+    /** gcp: the gs:// Terraform blueprint Infra Manager deploys */
+    blueprintGcs: z
+      .string()
+      .regex(/^gs:\/\/.+/, "must be a gs:// URI")
+      .max(2000)
+      .optional(),
+    /** kubernetes: the target namespace */
+    namespace: z
+      .string()
+      .regex(/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/, "must be a valid kubernetes namespace")
+      .optional(),
   })
   .superRefine((v, ctx) => {
-    if (v.provider === "aws" && (!v.roleArn || !v.region)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "an aws deploy target needs a roleArn and region",
-      });
+    const issue = (message: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+    // per-kind key discipline: a config field on the wrong kind is a loud 400,
+    // never silently dropped into a target that then fails at deploy time
+    const allowed = new Set(DEPLOY_TARGET_CONFIG_KEYS[v.provider] ?? []);
+    const configKeys: ReadonlyArray<keyof DeployTargetProviderConfig> = [
+      "cluster", "subscriptionId", "resourceGroup", "templateUri", "projectId", "blueprintGcs", "namespace",
+    ];
+    for (const key of configKeys) {
+      if (v[key] !== undefined && !allowed.has(key)) {
+        issue(`'${key}' is not a config field of a ${v.provider} deploy target`);
+      }
+    }
+    if (v.provider === "aws") {
+      if (!v.roleArn || !v.region) issue("an aws deploy target needs a roleArn and region");
+      // #64: the ARN grammar binds to aws ONLY — azure/gcp reuse roleArn as a
+      // plain account handle and must not be forced through AWS's grammar
+      if (v.roleArn && !/^arn:aws:iam::\d{12}:role\/.+/.test(v.roleArn)) {
+        issue("roleArn must be an arn:aws:iam::<account>:role/<name>");
+      }
+    }
+    if (v.provider === "azure" && (!(v.subscriptionId || v.roleArn) || !v.region)) {
+      issue("an azure deploy target needs a subscriptionId (or legacy roleArn) and region");
+    }
+    if (v.provider === "gcp" && (!(v.projectId || v.roleArn) || !v.region)) {
+      issue("a gcp deploy target needs a projectId (or legacy roleArn) and region");
+    }
+    if (v.provider === "kubernetes" && !v.credential) {
+      issue("a kubernetes deploy target needs a kubeconfig credential");
     }
   });
+
+/** assemble the validated flat per-kind fields into the provider_config jsonb
+ * (null when none were given — a legacy-shaped row) */
+export function deployTargetProviderConfig(
+  v: z.infer<typeof createDeployTargetSchema>,
+): DeployTargetProviderConfig | null {
+  const out: DeployTargetProviderConfig = {};
+  for (const key of DEPLOY_TARGET_CONFIG_KEYS[v.provider] ?? []) {
+    const value = v[key];
+    if (value !== undefined) out[key] = value;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
 
 /** §2 resolve a deploy stage parked at blocked_on_deploy: the operator confirms
  * they deployed out-of-band (or accepts the condition) and the pipeline advances. */
