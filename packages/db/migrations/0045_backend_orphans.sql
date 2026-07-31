@@ -30,3 +30,9 @@ ALTER TABLE "org_settings" ADD COLUMN "backup_verify_interval_hours" integer DEF
 ALTER TABLE "revocations" ADD COLUMN "scope" text DEFAULT 'full' NOT NULL;
 --> statement-breakpoint
 ALTER TABLE "connector_revocations" ADD COLUMN "scope" text DEFAULT 'full' NOT NULL;
+--> statement-breakpoint
+
+-- O10 per-tool MCP pricing: an optional per-tool override on the inventory
+-- row; resolution is tool-first, server-flat-price fallback. Null (every
+-- existing and auto-synced row) = no override = today's flat server price.
+ALTER TABLE "mcp_tools" ADD COLUMN "price_per_call_usd" double precision;

@@ -1183,6 +1183,12 @@ export const setRevocationScopeSchema = z.object({
 });
 export const revocationKindParamSchema = z.enum(["mcp", "connectors"]);
 
+/** O10 (ADR-0027): set/clear the per-tool price override on an MCP tool.
+ * null clears it back to the server's flat price (today's behaviour). */
+export const setToolPriceSchema = z.object({
+  pricePerCallUsd: z.number().min(0).max(10_000).nullable(),
+});
+
 // ---------------------------------------------------------------------------
 // ADR-0025 — REAL HUMAN AUTHENTICATION (migration 0042): password + session
 // login, TOTP MFA, OIDC SSO. Request shapes only — hashing/verification live

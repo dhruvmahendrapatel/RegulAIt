@@ -146,6 +146,15 @@ export const mcpTools = pgTable(
     name: text("name").notNull(),
     kind: text("kind", { enum: ["read", "write"] }).notNull(),
     description: text("description"),
+    /** O10 (migration 0045): optional PER-TOOL price override. Resolution is
+     * tool-first, server-flat-price fallback (ADR-0019 recorded the flat
+     * price as "an additive column when a customer needs it" — this is it).
+     * A column on the inventory row rather than a jsonb map on the server:
+     * the inventory row is the identity the proxy already resolves per call,
+     * so no name drift between a map key and the manifest is possible, and
+     * the manifest re-sync upsert (kind/description only) provably never
+     * clobbers an admin-set price. Null = no override = the server price. */
+    pricePerCallUsd: doublePrecision("price_per_call_usd"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex("mcp_tools_server_name_uq").on(t.serverId, t.name)],

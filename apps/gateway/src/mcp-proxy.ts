@@ -27,7 +27,7 @@ import {
 import { visibleTools, type Decision, type ToolRef } from "@regulait/policy-kernel";
 import { selectTools } from "@regulait/optimizer-kernel";
 import type { ModelToolDef } from "@regulait/model-provider";
-import type { PiiHit } from "@regulait/shared";
+import { setToolPriceSchema, type PiiHit } from "@regulait/shared";
 import { governedEvaluate } from "./governed-evaluate.js";
 import { loadEntitlements } from "./entitlements.js";
 import { effectiveTechniqueMode, loadOrgSettings } from "./org-settings.js";
@@ -144,6 +144,12 @@ export async function executeGovernedToolCall(
     .select()
     .from(mcpTools)
     .where(and(eq(mcpTools.serverId, serverId), eq(mcpTools.name, toolName)));
+  // O10 (ADR-0027): pricing resolves TOOL-FIRST with the server's flat price
+  // as the fallback. A newly discovered (just-synced) tool has no override
+  // yet, so it bills at the server price; unpriced everywhere = null, never
+  // an invented figure. Attributed and unattributed calls both ride this —
+  // there is exactly one metering site below.
+  const pricePerCallUsd = toolRow?.pricePerCallUsd ?? serverRow.pricePerCallUsd ?? null;
   // Unknown tool: sync the manifest once in case it's newly added upstream.
   let kind = toolRow?.kind;
   let upstream: Client | null = null;
@@ -363,7 +369,8 @@ export async function executeGovernedToolCall(
       // (as it carries the operation on connector rows) and the server id
       // rides the detail jsonb.
       operation: toolName,
-      costUsd: serverRow.pricePerCallUsd ?? null,
+      // O10: tool-first price, server-flat fallback (resolved above)
+      costUsd: pricePerCallUsd,
       projectId,
       detail: {
         serverId,
@@ -412,8 +419,8 @@ export async function executeGovernedToolCall(
       content: resultContent,
       ...(pii ? { pii } : {}),
       // ADR-0024 (O11): every executed call is metered, so the cost is always
-      // reported back — attributed or not.
-      costUsd: serverRow.pricePerCallUsd ?? null,
+      // reported back — attributed or not. O10: tool-first resolution.
+      costUsd: pricePerCallUsd,
     };
   } finally {
     await closeUpstream();
@@ -508,6 +515,48 @@ export async function resolveNodeToolContext(
 }
 
 export function registerMcpProxy(app: FastifyInstance, db: Db) {
+  // O10 (ADR-0027): admin-only per-tool price override (NOT in
+  // NON_ADMIN_ROUTES — the default gate keeps it admin-only, like the server
+  // registry writes). Set on the INVENTORY row so a manifest re-sync (which
+  // upserts kind/description only) can never clobber it; null clears the
+  // override back to the server's flat price. Audited.
+  app.patch("/v1/servers/:serverId/tools/:toolName/price", async (req, reply) => {
+    const { serverId, toolName } = z
+      .object({ serverId: z.string().uuid(), toolName: z.string().min(1) })
+      .parse(req.params);
+    const body = setToolPriceSchema.parse(req.body);
+    const [before] = await db
+      .select()
+      .from(mcpTools)
+      .where(and(eq(mcpTools.serverId, serverId), eq(mcpTools.name, toolName)));
+    if (!before) return reply.status(404).send({ error: "unknown_tool" });
+    const [row] = await db
+      .update(mcpTools)
+      .set({ pricePerCallUsd: body.pricePerCallUsd })
+      .where(eq(mcpTools.id, before.id))
+      .returning();
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      serverId,
+      toolName,
+      objectType: "mcp_tool",
+      objectId: before.id,
+      detail: {
+        phase: "tool-price",
+        before: before.pricePerCallUsd,
+        after: body.pricePerCallUsd,
+      },
+      effect: "allow",
+      ruleId: "mcp-tool-price-set",
+      ruleChain: [],
+      reason:
+        body.pricePerCallUsd == null
+          ? `per-tool price override cleared for '${toolName}' — the server's flat price applies again`
+          : `per-tool price override for '${toolName}' set to $${body.pricePerCallUsd}/call (tool-first, server-flat fallback)`,
+    });
+    return reply.send(row);
+  });
+
   app.post("/mcp/:serverId", async (req, reply) => {
     const { serverId } = proxyParams.parse(req.params);
     const { intent } = proxyQuery.parse(req.query);

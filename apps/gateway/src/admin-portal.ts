@@ -1056,7 +1056,10 @@ const TABS = [
     // to be buildable here — not only as a side effect of proxy traffic.
     + "<h2>Tool inventory</h2><div class='card'>"
     + form("f-tool", [{name:"serverId",label:"server",options:sOpts},{name:"name",ph:"tool name"},{name:"kind",options:["read","write"]},{name:"description",req:false}], "Register tool")
-    + "<p class='dim' style='font-size:12px'>Registered here, or auto-discovered on first proxy use. Pick a server above to list what it already has.</p></div>"
+    + "<p class='dim' style='font-size:12px'>Registered here, or auto-discovered on first proxy use. Pick a server above to list what it already has.</p>"
+    // O10 (ADR-0027): per-tool price override — tool-first, server-flat fallback
+    + form("f-tprice", [{name:"serverId",label:"server",options:sOpts},{name:"toolName",label:"tool",options:[]},{name:"pricePerCallUsd",label:"price per call ($, 0 allowed; blank clears)",type:"number",req:false}], "Set tool price")
+    + "<p class='dim' style='font-size:12px'>O10: a tool with an override bills at ITS price; every other tool on the server bills at the server's flat price. Leaving the price blank clears the override. Attributed and unattributed metering both honour the tool-first resolution; a manifest re-sync never clobbers an override. Every change is audited.</p></div>"
     + "<h2>Tool-level allow-list grants</h2><div class='card'>"
     + form("f-tgrant", [{name:"userId",label:"user",options:uOpts},{name:"serverId",label:"server",options:sOpts},{name:"toolName",label:"tool",options:[]}], "Grant tool")
     + form("f-sgrant", [{name:"userId",label:"user",options:uOpts},{name:"serverId",label:"server",options:sOpts},{name:"readOnlyAll",label:"read-only all",options:["true","false"]}], "Grant server") + "</div>";
@@ -1065,6 +1068,9 @@ const TABS = [
     $("#srvtools").innerHTML = "<h2>Tools on this server</h2>" + table(t.tools);
   }));
   linkTools("f-tgrant", tools);
+  linkTools("f-tprice", tools);
+  wire("f-tprice", (d) => api("PATCH", "/v1/servers/" + d.serverId + "/tools/" + encodeURIComponent(d.toolName) + "/price",
+    { pricePerCallUsd: d.pricePerCallUsd === undefined || d.pricePerCallUsd === "" ? null : Number(d.pricePerCallUsd) }));
   wire("f-srv", (d) => post("/v1/servers", d));
   wire("f-tool", (d) => post("/v1/servers/" + d.serverId + "/tools", { name: d.name, kind: d.kind, description: d.description }));
   wire("f-tgrant", (d) => post("/v1/grants/tools", d));
