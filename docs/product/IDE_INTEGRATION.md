@@ -358,31 +358,57 @@ whether an output is safe, governed, priced or attributed. Today it contains exa
   meaningfully asked for. Rejecting it protected nothing and blocked the interception this feature
   exists to enable. It nudges sampling; it cannot make an ungoverned action possible.
 
-`tool_choice` and `thinking` stay rejected precisely because they change what the model is *able to
-do*, not merely how it samples.
+`tool_choice`, `response_format` and `thinking` could never join that tier — they change what the
+model is *able to do*, not merely how it samples. Since 2026-07-31 (ADR-0020 §5 amendment) they are
+**supported** instead, each with a real end-to-end mapping into every provider adapter that can
+express it. One consequence to know about: a field can be valid in the endpoint's dialect yet
+un-honourable by the **served** agent's provider (resolution — including `router_decides` — picks
+the agent). That mismatch is a **400 naming the field and the provider**, never a silent drop:
+
+- `thinking` is honoured on Anthropic-provider (and mock) agents only.
+- `response_format` is honoured on OpenAI-, xAI-, Google- and mock-provider agents. **The Anthropic
+  adapter deliberately has no mapping** — the Messages API offers no native structured-output
+  mechanism, and a system-prompt nudge is not a guarantee, so RegulAIt refuses rather than
+  pretends. Each surface honours what its dialect and the served provider can really express; this
+  asymmetry is a decision, documented here and in ADR-0020.
+- `tool_choice` maps on all four real providers (Anthropic `{type:auto|none|any|tool}`,
+  OpenAI/xAI `auto|none|required|{type:function,…}`, Google `functionCallingConfig`
+  `AUTO|NONE|ANY`+`allowedFunctionNames`) and the mock.
 
 **`POST /v1/messages`**
 
-- Supported: `model`, `messages`, `system`, `max_tokens`, `stream`, `tools`; content blocks `text`,
-  `image` (base64), `document` (base64), `tool_use`, `tool_result`. A `cache_control` marker on a
-  **system** block maps onto pillar-6 prompt caching.
+- Supported: `model`, `messages`, `system`, `max_tokens`, `stream`, `tools`, `tool_choice`,
+  `thinking`; content blocks `text`, `image` (base64), `document` (base64), `tool_use`,
+  `tool_result`, plus `thinking`/`redacted_thinking` on **assistant** turns (a prior response
+  replayed into history — round-tripped natively, signature intact). A `cache_control` marker on a
+  **system** block maps onto pillar-6 prompt caching. `thinking: {type:"enabled", budget_tokens}`
+  returns thinking blocks first in the response and streams them as vendor-framed
+  `thinking_delta`/`signature_delta` blocks; `{type:"disabled"}` maps to absent. Thinking tokens
+  are billed as output tokens (Anthropic's own accounting) and land unchanged in the measured
+  ledger.
 - Accepted but not honoured: `temperature`.
-- Rejected: `top_p`, `top_k`, `stop_sequences`, `metadata`, `tool_choice`, `thinking`,
-  `service_tier`, `container`, `mcp_servers`, any other unknown top-level key; block types other
-  than the five above; non-base64 image/document sources; per-message `cache_control`; non-`custom`
-  tool types; roles other than `user`/`assistant`.
+- Rejected: `top_p`, `top_k`, `stop_sequences`, `metadata`, `service_tier`, `container`,
+  `mcp_servers`, any other unknown top-level key; unknown block types; `thinking` blocks on
+  non-assistant turns; non-base64 image/document sources; per-message `cache_control`;
+  non-`custom` tool types; roles other than `user`/`assistant`; `tool_choice` naming a tool absent
+  from the request's `tools` list; `tool_choice.disable_parallel_tool_use: true` and any unknown
+  `tool_choice`/`thinking` variant (the 400 names the exact variant); `thinking` when the served
+  agent's provider has no mapping.
 - `anthropic-version` and similar protocol headers are accepted and ignored.
 
 **`POST /v1/chat/completions`**
 
-- Supported: `model`, `messages`, `stream`, `tools`, `max_tokens`, `max_completion_tokens`; roles
+- Supported: `model`, `messages`, `stream`, `tools`, `max_tokens`, `max_completion_tokens`,
+  `tool_choice`, `response_format` (`text` = the default, `json_object`, `json_schema`); roles
   `system`/`developer` (hoisted into the dispatch's system field), `user`, `assistant` (with
   `tool_calls`), `tool`; user content parts `text` and `image_url` with a base64 `data:` URI.
 - Accepted but not honoured: `temperature`.
 - Rejected: `top_p`, `n`, `stop`, `presence_penalty`, `frequency_penalty`, `logit_bias`, `logprobs`,
-  `seed`, `response_format`, `tool_choice`, `parallel_tool_calls`, `stream_options`,
+  `seed`, `thinking`, `parallel_tool_calls`, `stream_options`,
   `reasoning_effort`, `store`, `metadata`, `user`, any other unknown top-level key; remote image
-  URLs; non-`function` tool types; unknown roles.
+  URLs; non-`function` tool types; unknown roles; `tool_choice` naming a tool absent from the
+  request's `tools` list; unknown `tool_choice`/`response_format` variants (the 400 names the
+  exact variant); `response_format` when the served agent's provider is Anthropic (see above).
 
 **`top_p`, `top_k` and `stop_sequences` are still a 400.** They are the same *class* of field as
 `temperature` and some clients send them unconditionally too; they were left rejected because only
