@@ -1175,9 +1175,10 @@ ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecre
   failed dispatch. Add a real one (stored credential or the *_API_KEY env var),
   or stay on the mock agents.
 
-  Keys: every user above already has one. To onboard anyone else, create them
-  in /admin → Users and hit 'issue key' on their row — the plaintext
-  is shown once there and never again. Users bring their own provider keys in
+  Onboarding anyone else (ADR-0025): create them in /admin → Users, hit
+  'set one-time pw' for their browser sign-in (shown once, must-change on
+  first use) and/or 'issue key' for programmatic access — each plaintext is
+  shown once there and never again. Users bring their own provider keys in
   /app → Settings.
 
   Projects: demo-project and hipaa-project (classification-forced sign-off),
