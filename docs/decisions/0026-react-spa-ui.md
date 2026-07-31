@@ -93,3 +93,73 @@ and a screenshot per view.
   @playwright/test). Accepted deliberately for a surface developers live in.
 - ADR-0012 remains accepted for what it decided then; its "single-file, dependency-free"
   implementation detail is superseded for surfaces the SPA has absorbed.
+
+---
+
+## Phase-2 amendment (2026-07-31) — the admin surface is native; the default swaps to /ui
+
+- **Status of this amendment**: Accepted (phase 2 complete)
+
+### What phase 2 shipped
+
+Every admin group is now a set of REAL routes inside the same shell, same kit, same tokens —
+the "classic ↗" bridges are gone from the nav:
+
+- **Identity & Access**: Users (full ADR-0022/0025 lifecycle: create, rename, deactivate/
+  reactivate with last-admin guards, promote/demote, one-time password issue/reset with
+  one-time reveal, MFA clear with audited reason, live sessions list + revoke-all, API keys
+  issue/revoke with one-time reveal, per-user MCP/agent/connector revocations), Roles (CRUD,
+  holders, all four grant kinds, 409 `role_held` → force-delete with reason), Teams (members,
+  409 `team_owns_shared_context` → force-delete with reason), Client access (posture form with
+  honest rung labels, ADR-0024 scope rules CRUD + live effective preview, per-client config
+  generator with copy, honest coverage matrix), SSO & sessions (OIDC CRUD secrets-write-only +
+  the sign-in/session policy — the "five sections" of Organization stay five because sign-in
+  policy lives here, beside the identity surface it governs).
+- **Governance**: Rules engine (approval/data-scope/rate-limit rules across user/role/team/
+  fleet × server/all with discriminant-safe forms), Simulation (the flagship precedence-chain
+  visualizer: effect banner, numbered chain with outcome badges, the deciding step highlighted,
+  per-rule plain-language gloss, raw JSON), Approvals queue (fleet-wide decide with reasons,
+  self-review + override guards, delegation windows CRUD), Audit log (filter, full-trail CSV,
+  §8.4 retention + governed prune), Workflow templates (starters, retire-with-reason,
+  six-dimension assignment rules).
+- **Integrations**: Agents (create with provider/tier/model/pricing, enable/disable, ADR-0023
+  base system prompt, grants, per-user policy + entitlement view), Model credentials
+  (write-only platform credentials, provider/env presence, waiting agents, BYO keys), Connectors
+  (create with providerKind + per-call price, Snowflake's structured multi-field credential
+  assembled client-side and shape-validated server-side, grants, entitlement view), MCP servers
+  (registry, tool inventory, tool/server grants), Git connections (per-provider credential
+  hints), PM connections (webhook secret one-time reveal), Deploy targets (per-provider fields).
+- **Cost & Optimization**: the cost dashboard (fleet meters, per-project rollup with forecast +
+  showback SVG charts + CSV, the explicit Unattributed bucket, initiatives, project
+  create/edit), Optimization (savings-by-technique, cost + usage event ledgers, usage CSV).
+- **Compliance & Infra**: Compliance profiles (upsert-by-tag CRUD, live cascade preview with
+  honest enforcement labels and multi-profile composition notes, governed reclassification with
+  the pending diff), Infrastructure (posture, resources with cascade floors, policies, findings
+  with owned confirm modals + the persisted org approver, cert/patch/backup ledgers).
+- **Settings**: Organization (the org_settings singleton in five sections, each a partial PUT,
+  plain-language help), Getting started (the live checklist moved here with deep links to the
+  new views; the dashboard card stays and now links here instead of the legacy console).
+
+Charting stayed owned: the same hand-rolled SVG bar charts the legacy portal used, tokenized
+for both themes. **Zero new dependencies** in phase 2.
+
+### The swap decision
+
+Playwright proved parity on every group (25 phase-2 journeys + the 7 phase-1 journeys, one
+seeded real gateway, zero console errors per page), so the default swapped:
+
+- `GET /`, `GET /app`, `GET /admin` → **302 `/ui`**.
+- The legacy shells stay served for **one release** at **`/legacy/app`** and
+  **`/legacy/admin`**, each carrying a visible "Deprecated … the product now lives at /ui"
+  banner; the SPA footer links them. OIDC's server-side `returnTo` whitelist (`/app`, `/admin`)
+  is untouched — both targets now bounce to /ui, so SSO users land signed-in in the SPA.
+- **Removal plan**: next release deletes `/legacy/*`, `admin-portal.ts`, `app-ui.ts` and the
+  `ui-theme.ts` blocks only they consume, plus the legacy-shell tests; ADR-0012's
+  implementation is then fully superseded (the "UIs are strict API clients" principle lives on
+  in the SPA).
+
+### Verification (phase 2)
+
+`pnpm -r build` green; frozen lockfile clean; gateway suite green including the new redirect +
+/legacy alias tests; 32 Playwright journeys green with zero console errors and light + dark
+screenshots of every admin view.
