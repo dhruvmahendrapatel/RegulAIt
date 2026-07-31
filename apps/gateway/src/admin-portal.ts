@@ -276,22 +276,56 @@ const TABS = [
   const uOpts = userOpts(u.users), sOpts = serverOpts(srv.servers);
   const aOpts = agentOpts(ag.agents), cOpts = connectorOpts(cn.connectors);
   const email = Object.fromEntries(u.users.map((x) => [x.id, x.email]));
+  const uname = Object.fromEntries(u.users.map((x) => [x.id, x.displayName || x.email]));
+  const sname = Object.fromEntries(srv.servers.map((x) => [x.id, x.name]));
+  const activeAdmins = u.users.filter((x) => x.isAdmin && !x.disabledAt).length;
+  // ADR-0022 lifecycle: greyed disabled rows, reactivate control, guarded
+  // admin promote/demote — the last active admin's demote/deactivate buttons
+  // are pre-disabled with the reason in the tooltip (the server enforces it
+  // regardless).
+  const userRow = (x) => ({
+    id: x.id,
+    name: x.displayName,
+    email: x.email,
+    role: x.isAdmin ? "admin" : "member",
+    status: x.disabledAt ? "disabled" : "active",
+    created: x.createdAt,
+  });
+  const userActions = (row) => {
+    const x = u.users.find((usr) => usr.id === row.id);
+    if (!x) return "";
+    const lastAdmin = x.isAdmin && !x.disabledAt && activeAdmins <= 1;
+    const guard = lastAdmin ? " disabled title='last active admin — promote another admin first'" : "";
+    if (x.disabledAt) return "<button class='small primary' data-uact='reactivate' data-uid='" + x.id + "'>reactivate</button>";
+    return "<button class='small' data-key='" + x.id + "'>issue key</button> "
+      + (x.isAdmin
+          ? "<button class='small' data-uact='demote' data-uid='" + x.id + "'" + guard + ">demote</button> "
+          : "<button class='small' data-uact='promote' data-uid='" + x.id + "'>make admin</button> ")
+      + "<button class='small danger' data-uact='deactivate' data-uid='" + x.id + "'" + guard + ">deactivate</button>";
+  };
   el.innerHTML = "<h2>Users</h2><div class='card'>"
     + form("f-user", [{name:"email"},{name:"displayName"},{name:"isAdmin",label:"admin",options:["false","true"]}], "Create user")
-    + dataTable(u.users, { actions: (row) => "<button class='small' data-key='" + row.id + "'>issue key</button>" }) + "</div>"
+    + form("f-rename", [{name:"userId",label:"user",options:uOpts},{name:"displayName",label:"new display name",grow:true}], "Rename")
+    + dataTable(u.users.map(userRow), {
+        cells: {
+          status: (v) => "<span class='badge " + (v === "disabled" ? "bad" : "ok") + "'>" + esc(v) + "</span>",
+          role: (v) => v === "admin" ? "<span class='badge accent'>admin</span>" : "<span class='badge'>member</span>",
+          name: (v, row) => "<span" + (row.status === "disabled" ? " class='faint'" : "") + ">" + esc(v) + "</span>",
+        },
+        actions: userActions,
+      })
+    + "<p class='dim' style='font-size:12px'>Deactivate is not delete: the account's audit history, grants and keys all survive; its keys just stop authenticating (a distinct 401) until an admin reactivates. You cannot deactivate yourself, and the last active admin can be neither deactivated nor demoted.</p></div>"
     + "<div id='keyreveal'></div>"
     // A user with no API key cannot sign in to anything — issuing one is part
     // of creating them, not a separate API-only chore.
-    + "<h2>API keys — plaintext returned exactly once, sha256 at rest</h2><div class='card'>"
-    + dataTable(k.keys.map((x) => ({
-        id: x.id, name: x.name, user: email[x.userId] ?? x.userId, created: x.createdAt,
-        lastUsed: x.lastUsedAt ?? "never", status: x.revokedAt ? "revoked" : "active",
-      })), { actions: (row) => row.status === "active"
-        ? "<button class='small danger' data-revoke='" + row.id + "'>revoke</button>" : "" })
-    + "</div>"
+    + "<h2>API keys — plaintext returned exactly once, sha256 at rest</h2><div class='card'><div id='keyscard'>"
+    + "</div></div>"
     + "<h2>Per-user overrides — revocations, visibly flagged deviations</h2><div class='card'>"
     + form("f-revoke", [{name:"userId",label:"user",options:uOpts},{name:"serverId",label:"server",options:sOpts},{name:"toolName",label:"tool",options:[],req:false}], "Add revocation")
-    + table(rev.revocations) + "</div>"
+    + table(rev.revocations.map((x) => ({
+        id: x.id, user: uname[x.userId] ?? x.userId, server: sname[x.serverId] ?? x.serverId,
+        tool: x.toolName ?? "— all role-derived —", created: x.createdAt,
+      }))) + "</div>"
     // ADR-0019: the AGENT/CONNECTOR half of "role builder + per-user override".
     // Role-bundled agent/connector grants compose additively (ADR-0014), so
     // without these an admin could only take an object away by unassigning the
@@ -312,6 +346,24 @@ const TABS = [
     + "<div id='objrevs'><div class='empty'>Select a user to view and edit their agent/connector revocations</div></div>"
     + "<p class='dim' style='font-size:12px'>A revocation takes ONE agent or connector away from ONE user without touching their roles — it beats both a direct grant and every role-derived grant, and it applies everywhere that user's entitlements are evaluated (direct invoke, decomposition, and every orchestration worker). It can only ever deny: revoking something the user was never granted changes nothing. Lifting the revocation restores whatever the grants already said.</p></div>";
   linkTools("f-revoke", tools);
+  // The keys table renders (and REFRESHES) from its own fetch, so issuing a
+  // key updates it immediately without a full tab re-render — which would
+  // wipe the one-time key reveal.
+  const renderKeys = async () => {
+    const host = $("#keyscard");
+    if (!host) return;
+    const fresh = await get("/v1/keys");
+    host.innerHTML = dataTable(fresh.keys.map((x) => ({
+      id: x.id, name: x.name, user: email[x.userId] ?? x.userId, created: x.createdAt,
+      lastUsed: x.lastUsedAt ?? "never", status: x.revokedAt ? "revoked" : "active",
+    })), {
+      cells: { status: (v) => "<span class='badge " + (v === "revoked" ? "bad" : "ok") + "'>" + esc(v) + "</span>" },
+      actions: (row) => row.status === "active"
+        ? "<button class='small danger' data-revoke='" + row.id + "'>revoke</button>" : "",
+    });
+  };
+  void k; // initial payload superseded by renderKeys' own fetch (kept for the email map's Promise.all)
+  await renderKeys();
   // delegate on el (stable during the tab's life) so the handlers survive a
   // dataTable sort/filter/paginate re-render, which rebuilds the button nodes.
   el.addEventListener("click", async (e) => {
@@ -322,14 +374,40 @@ const TABS = [
         revealSecret("#keyreveal", "API key for " + (email[keyBtn.dataset.key] ?? "this user"), issued.token,
           "Hand it to them over a channel you trust; if it is lost, revoke it and issue another.");
         $("#keyreveal").scrollIntoView({ block: "nearest" });
+        await renderKeys(); // the new key appears in the table immediately
       } catch (ex) { toast(ex.message, "err"); }
       return;
     }
     const revBtn = e.target.closest("[data-revoke]");
     if (revBtn) {
-      if (!confirm("Revoke this API key? The holder can no longer authenticate with it. This cannot be undone.")) return;
-      try { await post("/v1/keys/" + revBtn.dataset.revoke + "/revoke", {}); toast("Key revoked", "ok"); render(); }
+      if (!confirmClick(revBtn, "Revoke for good?")) return;
+      try { await post("/v1/keys/" + revBtn.dataset.revoke + "/revoke", {}); toast("Key revoked — the holder can no longer authenticate with it", "ok"); await renderKeys(); }
       catch (ex) { toast(ex.message, "err"); }
+      return;
+    }
+    // ADR-0022 lifecycle actions — deactivate is confirm-armed (destructive
+    // for the holder's access), the rest act immediately with a toast.
+    const uBtn = e.target.closest("[data-uact]");
+    if (uBtn) {
+      const act = uBtn.dataset.uact, uid = uBtn.dataset.uid;
+      try {
+        if (act === "deactivate") {
+          if (!confirmClick(uBtn, "Deactivate?")) return;
+          await post("/v1/users/" + uid + "/deactivate", {});
+          toast("User deactivated — their keys stop authenticating until reactivated", "ok");
+        } else if (act === "reactivate") {
+          await post("/v1/users/" + uid + "/reactivate", {});
+          toast("User reactivated — their existing keys work again", "ok");
+        } else if (act === "promote") {
+          await post("/v1/users/" + uid + "/admin", { isAdmin: true });
+          toast("Promoted to admin", "ok");
+        } else if (act === "demote") {
+          if (!confirmClick(uBtn, "Demote?")) return;
+          await post("/v1/users/" + uid + "/admin", { isAdmin: false });
+          toast("Demoted to member", "ok");
+        }
+        render();
+      } catch (ex) { toast(ex.message, "err"); }
       return;
     }
     // ADR-0019: lifting an agent/connector revocation — the override is
@@ -351,6 +429,7 @@ const TABS = [
     }
   });
   wire("f-user", (d) => post("/v1/users", { ...d, isAdmin: d.isAdmin === "true" }));
+  wire("f-rename", (d) => api("PATCH", "/v1/users/" + d.userId, { displayName: d.displayName }));
   wire("f-revoke", (d) => post("/v1/revocations", { ...d, toolName: d.toolName ?? null }));
 
   // ADR-0019 per-user agent/connector revocation editor. The picked user is
@@ -407,25 +486,70 @@ const TABS = [
   el.innerHTML = "<h2>Roles</h2><div class='card'>"
     + form("f-role", [{name:"name"},{name:"description",req:false}], "Create role")
     + form("f-assign", [{name:"userId",label:"user",options:uOpts},{name:"roleId",label:"role",options:rOpts}], "Assign role")
-    + table(r.roles) + "</div>"
+    + table(r.roles, (row) => "<button class='small danger' data-roledel='" + row.id + "'>delete</button>")
+    + "<div id='roledel-force'></div>"
+    + "<p class='dim' style='font-size:12px'>Deleting a role that is still held is refused with the holders named; force-deleting it (with a recorded, audited reason) unassigns everyone and removes its bundled grants.</p></div>"
     // §5 (ADR-0014): a role is a provisioning bundle. Pick a role, see what it
-    // grants, add/adjust grants — all POSTing to the ROLE endpoints (roleId in
-    // the path), then assigned to users via the assign-role form above.
-    + "<h2>Role grants — what this role provisions</h2><div class='card'>"
+    // grants and who holds it, add/adjust/remove grants, unassign holders —
+    // all against the ROLE endpoints (roleId in the path).
+    + "<h2>Role grants &amp; holders — what this role provisions, and for whom</h2><div class='card'>"
     + form("f-rolepick", [{name:"roleId",label:"active role",options:rOpts,req:false,ph:"— select a role —"}], "Load grants")
-    + "<div id='rolegrants'><div class='empty'>Select a role to view and edit its grants</div></div>"
+    + "<div id='rolegrants'><div class='empty'>Select a role to view and edit its grants and holders</div></div>"
     + "</div>";
   wire("f-role", (d) => post("/v1/roles", d));
   wire("f-assign", (d) => post("/v1/users/" + d.userId + "/roles", { roleId: d.roleId }));
+
+  // ADR-0022: delete role — refused when held (409 names the holders), then
+  // the inline force-with-reason card appears; force posts the audited reason.
+  el.addEventListener("click", async (e) => {
+    const delBtn = e.target.closest("[data-roledel]");
+    if (!delBtn) return;
+    if (!confirmClick(delBtn, "Delete role?")) return;
+    const roleId = delBtn.dataset.roledel;
+    try {
+      await del("/v1/roles/" + roleId);
+      toast("Role deleted", "ok"); render();
+    } catch (ex) {
+      if (ex.status === 409 && ex.payload && ex.payload.error === "role_held") {
+        const host = $("#roledel-force");
+        host.innerHTML = "<div class='card' style='margin-top:10px;border-color:#cd5b5266'>"
+          + "<div class='row'><span class='badge bad'>role held</span><span class='dim' style='font-size:12.5px'>held by " + esc((ex.payload.holders || []).join(", ")) + " — unassign them, or force-delete with a recorded reason.</span></div>"
+          + "<div class='row' style='margin-top:8px'><input id='roledel-reason' class='grow' placeholder='reason (required, audited)'>"
+          + "<button class='small danger' id='roledel-go' data-rid='" + esc(roleId) + "'>Force delete</button>"
+          + "<button class='ghost small' id='roledel-cancel'>Cancel</button></div></div>";
+        $("#roledel-cancel").addEventListener("click", () => { host.innerHTML = ""; });
+        $("#roledel-go").addEventListener("click", async () => {
+          const reason = ($("#roledel-reason")?.value ?? "").trim();
+          if (!reason) { toast("A reason is required to force-delete a held role.", "err"); return; }
+          try {
+            await api("DELETE", "/v1/roles/" + roleId, { force: true, reason });
+            toast("Role force-deleted — holders unassigned, reason audited", "ok"); render();
+          } catch (e2) { toast(e2.message, "err"); }
+        });
+      } else { toast(ex.message, "err"); }
+    }
+  });
 
   let activeRoleId = "";
   const renderGrants = async () => {
     const host = $("#rolegrants");
     if (!host) return;
-    if (!activeRoleId) { host.innerHTML = "<div class='empty'>Select a role to view and edit its grants</div>"; return; }
-    const g = await get("/v1/roles/" + activeRoleId + "/grants");
+    if (!activeRoleId) { host.innerHTML = "<div class='empty'>Select a role to view and edit its grants and holders</div>"; return; }
+    const [g, asg] = await Promise.all([
+      get("/v1/roles/" + activeRoleId + "/grants"),
+      get("/v1/roles/" + activeRoleId + "/assignments").catch(() => ({ assignments: [] })),
+    ]);
+    const rmBtn = (kind, id) => "<button class='ghost small' data-grantdel='" + kind + ":" + id + "' title='remove this grant from the role'>remove</button>";
     host.innerHTML =
-      "<div class='grid2'>"
+      "<h2>Held by</h2>"
+      + table((asg.assignments ?? []).map((x) => ({
+          user: (x.displayName || x.email) + (x.disabledAt ? " (disabled)" : ""),
+          email: x.email, assigned: x.assignedAt,
+        })), (row) => {
+          const a = (asg.assignments ?? []).find((x) => x.email === row.email);
+          return a ? "<button class='small' data-unassign='" + a.userId + "'>unassign</button>" : "";
+        })
+      + "<div class='grid2' style='margin-top:14px'>"
       + "<div>" + form("f-r-agrant", [{name:"agentId",label:"agent",options:aOpts}], "Grant agent") + "</div>"
       + "<div>" + form("f-r-cgrant", [
           {name:"connectorId",label:"connector",options:cOpts},
@@ -435,11 +559,27 @@ const TABS = [
       + "<div>" + form("f-r-tgrant", [{name:"serverId",label:"server",options:sOpts},{name:"toolName",label:"tool",options:[]}], "Grant MCP tool") + "</div>"
       + "<div>" + form("f-r-sgrant", [{name:"serverId",label:"server",options:sOpts},{name:"readOnlyAll",label:"read-only all",options:["true","false"]}], "Grant MCP server") + "</div>"
       + "</div>"
-      + "<h2>Agents</h2>" + table((g.agents ?? []).map((x) => ({ agent: x.agentName ?? x.agentId, modes: (x.allowedModes ?? []).join(", ") || "all" })))
-      + "<h2>Connectors</h2>" + table((g.connectors ?? []).map((x) => ({ connector: x.connectorName ?? x.connectorId, mode: x.mode, objects: (x.allowedObjects ?? []).join(", ") || "all" })))
-      + "<h2>MCP servers</h2>" + table((g.servers ?? []).map((x) => ({ server: x.serverName ?? x.serverId, readOnlyAll: x.readOnlyAll })))
-      + "<h2>MCP tools</h2>" + table((g.tools ?? []).map((x) => ({ server: x.serverName ?? x.serverId, tool: x.toolName })));
+      + "<h2>Agents</h2>" + table((g.agents ?? []).map((x) => ({ agent: x.agentName ?? x.agentId, modes: (x.allowedModes ?? []).join(", ") || "all", id: x.grantId })), (row) => rmBtn("agents", row.id))
+      + "<h2>Connectors</h2>" + table((g.connectors ?? []).map((x) => ({ connector: x.connectorName ?? x.connectorId, mode: x.mode, objects: (x.allowedObjects ?? []).join(", ") || "all", id: x.grantId })), (row) => rmBtn("connectors", row.id))
+      + "<h2>MCP servers</h2>" + table((g.servers ?? []).map((x) => ({ server: x.serverName ?? x.serverId, readOnlyAll: x.readOnlyAll, id: x.grantId })), (row) => rmBtn("servers", row.id))
+      + "<h2>MCP tools</h2>" + table((g.tools ?? []).map((x) => ({ server: x.serverName ?? x.serverId, tool: x.toolName, id: x.grantId })), (row) => rmBtn("tools", row.id));
     linkTools("f-r-tgrant", tools);
+    host.querySelectorAll("[data-unassign]").forEach((b) => b.addEventListener("click", async () => {
+      if (!confirmClick(b, "Unassign?")) return;
+      try {
+        await del("/v1/users/" + b.dataset.unassign + "/roles/" + activeRoleId);
+        toast("Role unassigned", "ok"); await renderGrants();
+      } catch (ex) { toast(ex.message, "err"); }
+    }));
+    host.querySelectorAll("[data-grantdel]").forEach((b) => b.addEventListener("click", async () => {
+      if (!confirmClick(b, "Remove?")) return;
+      const sep = b.dataset.grantdel.indexOf(":");
+      const kind = b.dataset.grantdel.slice(0, sep), gid = b.dataset.grantdel.slice(sep + 1);
+      try {
+        await del("/v1/roles/" + activeRoleId + "/grants/" + kind + "/" + gid);
+        toast("Grant removed from the role", "ok"); await renderGrants();
+      } catch (ex) { toast(ex.message, "err"); }
+    }));
     // keep=true: don't re-render the whole tab (that would drop the picker) —
     // refresh only the bundle and toast success ourselves.
     wire("f-r-agrant", async (d) => { await post("/v1/roles/" + activeRoleId + "/grants/agents", { agentId: d.agentId }); toast("Agent granted", "ok"); await renderGrants(); }, true);
@@ -475,18 +615,64 @@ const TABS = [
         {name:"teamId",label:"team",options:teamOpts},
         {name:"userId",label:"user",options:uOpts},
       ], "Add member")
-    + table(t.teams.map((x) => ({
-        name: x.name,
-        members: (x.members ?? []).map((m) => m.name).join(", ") || "—",
-        defaultClassifications: (x.defaultClassifications ?? []).join(", "),
-        created: x.createdAt,
-      })))
-    + "<p class='dim' style='font-size:12px'>Team membership is flat — per-user roles (owner/contributor/viewer) live on Shared-Project membership, not here. A team's default classifications are surfaced (never silently resolved) when a member joins a project whose tags don't cover them.</p></div>";
+    + t.teams.map((x) => "<div class='node-row' style='align-items:flex-start'><div class='grow'>"
+        + "<div><strong>" + esc(x.name) + "</strong> "
+        + (x.defaultClassifications ?? []).map((c) => "<span class='badge info'>" + esc(c) + "</span>").join(" ")
+        + "</div>"
+        + "<div class='row' style='margin-top:6px'>"
+        + ((x.members ?? []).map((m) => "<span class='att-pill'>" + esc(m.name)
+            + " <button class='ghost small' style='padding:0 4px' data-tmrm='" + x.id + ":" + m.userId + "' title='remove " + esc(m.name) + " from " + esc(x.name) + "' aria-label='Remove member'>×</button></span>").join("")
+          || "<span class='faint' style='font-size:12px'>no members</span>")
+        + "</div></div>"
+        + "<button class='small danger' data-teamdel='" + x.id + "'>delete team</button>"
+        + "</div>").join("")
+    + "<div id='teamdel-force'></div>"
+    + "<p class='dim' style='font-size:12px'>Team membership is flat — per-user roles (owner/contributor/viewer) live on Shared-Project membership, not here. A team's default classifications are surfaced (never silently resolved) when a member joins a project whose tags don't cover them. Deleting a team that is the recorded contributor of shared context is refused with what blocks; provenance history survives even a forced deletion.</p></div>";
   wire("f-team", (d) => post("/v1/teams", {
     name: d.name,
     ...(d.defaultClassifications ? { defaultClassifications: [].concat(d.defaultClassifications) } : {}),
   }));
   wire("f-tmadd", (d) => post("/v1/teams/" + d.teamId + "/members", { userId: d.userId }));
+  el.addEventListener("click", async (e) => {
+    const rm = e.target.closest("[data-tmrm]");
+    if (rm) {
+      if (!confirmClick(rm, "×?")) return;
+      const sep = rm.dataset.tmrm.indexOf(":");
+      try {
+        await del("/v1/teams/" + rm.dataset.tmrm.slice(0, sep) + "/members/" + rm.dataset.tmrm.slice(sep + 1));
+        toast("Member removed from the team", "ok"); render();
+      } catch (ex) { toast(ex.message, "err"); }
+      return;
+    }
+    const td = e.target.closest("[data-teamdel]");
+    if (td) {
+      if (!confirmClick(td, "Delete team?")) return;
+      const teamId = td.dataset.teamdel;
+      try {
+        await del("/v1/teams/" + teamId);
+        toast("Team deleted", "ok"); render();
+      } catch (ex) {
+        if (ex.status === 409 && ex.payload && ex.payload.error === "team_owns_shared_context") {
+          const host = $("#teamdel-force");
+          host.innerHTML = "<div class='card' style='margin-top:10px;border-color:#d9a44166'>"
+            + "<div class='row'><span class='badge warn'>owns shared context</span>"
+            + "<span class='dim' style='font-size:12.5px'>" + ex.payload.contextItems + " context revision(s) in " + esc((ex.payload.projects || []).join(", ")) + " name this team as contributor. Provenance survives deletion, but confirm deliberately.</span></div>"
+            + "<div class='row' style='margin-top:8px'><input id='teamdel-reason' class='grow' placeholder='reason (required, audited)'>"
+            + "<button class='small danger' id='teamdel-go'>Force delete</button>"
+            + "<button class='ghost small' id='teamdel-cancel'>Cancel</button></div></div>";
+          $("#teamdel-cancel").addEventListener("click", () => { host.innerHTML = ""; });
+          $("#teamdel-go").addEventListener("click", async () => {
+            const reason = ($("#teamdel-reason")?.value ?? "").trim();
+            if (!reason) { toast("A reason is required to force-delete this team.", "err"); return; }
+            try {
+              await api("DELETE", "/v1/teams/" + teamId, { force: true, reason });
+              toast("Team force-deleted — reason audited; context provenance retained", "ok"); render();
+            } catch (e2) { toast(e2.message, "err"); }
+          });
+        } else { toast(ex.message, "err"); }
+      }
+    }
+  });
 }],
 ["Agents", async (el) => {
   const [a, u] = await Promise.all([get("/v1/agents"), get("/v1/users")]);
@@ -567,7 +753,7 @@ const TABS = [
     + "<p class='dim' style='font-size:12px'>Users add their own keys from /app → Settings. A user's own key wins over the platform's for their dispatches.</p>"
     + "<div id='ucred'></div></div>";
   el.querySelectorAll("[data-mcred]").forEach((b) => b.addEventListener("click", async () => {
-    if (!confirm("Remove the platform credential for " + b.dataset.mcred + "? Non-BYO dispatches on this provider will 409 until a new key is added.")) return;
+    if (!confirmClick(b, "Remove?")) return;
     try { await del("/v1/model-credentials/" + encodeURIComponent(b.dataset.mcred)); toast("Credential removed", "ok"); render(); }
     catch (ex) { toast(ex.message, "err"); }
   }));
@@ -579,7 +765,7 @@ const TABS = [
           (r) => "<button class='small danger' data-ucred='" + esc(r.provider) + "' data-uid='" + esc(d.userId) + "'>remove</button>")
       : "<div class='empty'>this user has no keys of their own — their dispatches use the platform credential</div>");
     $("#ucred").querySelectorAll("[data-ucred]").forEach((b) => b.addEventListener("click", async () => {
-      if (!confirm("Remove this user's own " + b.dataset.ucred + " key? Their dispatches will fall back to the platform credential.")) return;
+      if (!confirmClick(b, "Remove?")) return;
       try {
         await del("/v1/users/" + b.dataset.uid + "/model-credentials/" + encodeURIComponent(b.dataset.ucred));
         toast("Key removed", "ok");
@@ -699,7 +885,9 @@ const TABS = [
   ]);
   const sensOpts = (cp.profiles ?? []).map((p) => ({ v: p.tag, l: p.tag }));
   const tplName = Object.fromEntries(t.templates.map((x) => [x.id, x.name]));
-  const tplOpts = t.templates.map((x) => ({ v: x.id, l: x.name }));
+  // ADR-0022: retired templates start no new instances — routing a NEW rule
+  // at one would only mint refusals, so the rule form offers active ones.
+  const tplOpts = t.templates.filter((x) => !x.retiredAt).map((x) => ({ v: x.id, l: x.name }));
   const rail = (def) => "<div class='stage-rail' style='margin-top:6px'>"
     + (def.stages ?? []).map((s) => "<span class='stage'>" + esc(s.id)
       + "<span class='faint' style='font-size:10px'>" + esc(s.type) + "</span></span>").join("")
@@ -715,12 +903,19 @@ const TABS = [
   const tplRows = t.templates.map((tpl) => {
     const assigned = r.rules.filter((x) => x.templateId === tpl.id);
     return "<div class='node-row' style='align-items:flex-start'><div class='grow'>"
-      + "<div><strong>" + esc(tpl.name) + "</strong>"
+      + "<div><strong" + (tpl.retiredAt ? " class='faint'" : "") + ">" + esc(tpl.name) + "</strong>"
+      + (tpl.retiredAt ? " <span class='badge bad' title='retired " + esc(String(tpl.retiredAt).slice(0, 10)) + (tpl.retiredReason ? " — " + esc(tpl.retiredReason) : "") + "'>retired</span>" : "")
       + (tpl.definition.costSensitivity ? " <span class='badge'>" + esc(tpl.definition.costSensitivity) + "</span>" : "") + "</div>"
       + rail(tpl.definition)
       + "<div class='dim' style='font-size:12px;margin-top:6px'>"
-      + (assigned.length ? "routed when: " + esc(assigned.map(conds).join("  |  ")) : "no assignment rule routes here — reachable only via compliance cascade or an admin's explicit pick")
-      + "</div></div></div>";
+      + (tpl.retiredAt
+          ? "retired — starts no new instances; in-flight instances keep their snapshotted definition" + (tpl.retiredReason ? ". Why: " + esc(tpl.retiredReason) : "")
+          : (assigned.length ? "routed when: " + esc(assigned.map(conds).join("  |  ")) : "no assignment rule routes here — reachable only via compliance cascade or an admin's explicit pick"))
+      + "</div>"
+      + "<div data-retirebox='" + tpl.id + "'></div>"
+      + "</div>"
+      + (tpl.retiredAt ? "" : "<button class='small' data-retire='" + tpl.id + "' title='soft-disable: no new instances; in-flight unaffected'>retire</button>")
+      + "</div>";
   }).join("") || "<div class='empty'>no templates yet — author one below</div>";
 
   // Starter definitions match the exact shape the template zod schema
@@ -783,10 +978,10 @@ const TABS = [
         {name:"baseUrl",label:"base url",req:false,ph:"optional (e.g. GHE)"},
         {name:"token",type:"password",ph:"never shown again",grow:true},
       ], "Add connection")
-    + table(g.connections.map((c) => ({
+    + dataTable(g.connections.map((c) => ({
         name: c.name, provider: c.provider, baseUrl: c.baseUrl ?? "provider default", created: c.createdAt,
-      })))
-    + "<p class='dim' style='font-size:12px'>Tokens are AES-256-GCM encrypted at rest and never returned by any endpoint. Templates reference a connection by name. The demo runs entirely on the mock provider — no external service is touched.</p></div>";
+      })), { cells: { provider: (v) => badge(v, v === "mock" ? "" : "info") } })
+    + "<p class='dim' style='font-size:12px'>Tokens are AES-256-GCM encrypted at rest and never returned by any endpoint. Templates reference a connection by name. Every listed kind has a real adapter — a kind without one is refused at creation (400), never discovered mid-workflow. The demo runs entirely on the mock provider — no external service is touched.</p></div>";
 
   const fillStarter = () => {
     const s = STARTERS.find((x) => x.id === $("#wft-starter").value) ?? STARTERS[0];
@@ -805,9 +1000,28 @@ const TABS = [
     catch (ex) { err.textContent = ex.message; }
   });
   el.querySelectorAll("[data-rdel]").forEach((b) => b.addEventListener("click", async () => {
-    if (!confirm("Delete this assignment rule? Routing stops; in-flight instances keep their snapshotted definition.")) return;
-    try { await del("/v1/workflows/assignment-rules/" + b.dataset.rdel); toast("Rule deleted", "ok"); render(); }
+    if (!confirmClick(b, "Delete rule?")) return;
+    try { await del("/v1/workflows/assignment-rules/" + b.dataset.rdel); toast("Rule deleted — routing stops; in-flight instances keep their snapshotted definition", "ok"); render(); }
     catch (ex) { toast(ex.message, "err"); }
+  }));
+  // ADR-0022 retire: the button opens an inline reason box (the why is the
+  // record — required); confirm posts the retire and re-renders.
+  el.querySelectorAll("[data-retire]").forEach((b) => b.addEventListener("click", () => {
+    const box = el.querySelector("[data-retirebox='" + b.dataset.retire + "']");
+    if (!box || box.childElementCount) return;
+    box.innerHTML = "<div class='row' style='margin-top:8px'>"
+      + "<input class='grow' data-retirereason='" + b.dataset.retire + "' placeholder='why is this template retiring? (required, recorded)'>"
+      + "<button class='small danger' data-retirego='" + b.dataset.retire + "'>Retire</button>"
+      + "<button class='ghost small' data-retirecancel='" + b.dataset.retire + "'>Cancel</button></div>";
+    box.querySelector("[data-retirecancel]").addEventListener("click", () => { box.innerHTML = ""; });
+    box.querySelector("[data-retirego]").addEventListener("click", async () => {
+      const reason = (box.querySelector("[data-retirereason]")?.value ?? "").trim();
+      if (!reason) { toast("A reason is required — it is the retirement record.", "err"); return; }
+      try {
+        await post("/v1/workflows/templates/" + b.dataset.retire + "/retire", { reason });
+        toast("Template retired — no new instances; in-flight ones are unaffected", "ok"); render();
+      } catch (ex) { toast(ex.message, "err"); }
+    });
   }));
   wire("f-wfrule", (d) => post("/v1/workflows/assignment-rules", d));
   wire("f-git", (d) => post("/v1/git/connections", d));
@@ -832,9 +1046,9 @@ const TABS = [
     + dataTable(d.targets, {
         actions: (row) => "<button class='small danger' data-tdel='" + esc(row.name) + "'>delete</button>",
       })
-    + "<p class='dim' style='font-size:12px'>Credentials are AES-256-GCM encrypted at rest and never returned. An aws target needs a role arn (arn:aws:iam::&lt;acct&gt;:role/&lt;name&gt;) and region; azure/gcp reuse the role/account field for their subscription/project; kubernetes needs a kubeconfig credential. aws/azure/gcp/kubernetes run as deterministic dry-run shapes (no live cloud mutation).</p></div>";
+    + "<p class='dim' style='font-size:12px'>Credentials are AES-256-GCM encrypted at rest and never returned. An aws target needs a role arn (arn:aws:iam::&lt;acct&gt;:role/&lt;name&gt;) and region; azure/gcp reuse the role/account field for their subscription/project; kubernetes needs a kubeconfig credential. aws/azure/gcp/kubernetes run as deterministic dry-run shapes (no live cloud mutation) — a dry-run deploy is recorded and badged as such, and it can never satisfy a production deploy gate (#79c).</p></div>";
   el.querySelectorAll("[data-tdel]").forEach((b) => b.addEventListener("click", async () => {
-    if (!confirm("Delete this deploy target? A stage naming it will park at a manual handoff.")) return;
+    if (!confirmClick(b, "Delete target?")) return;
     try { await del("/v1/deploy/targets/" + encodeURIComponent(b.dataset.tdel)); toast("Target deleted", "ok"); render(); }
     catch (ex) { toast(ex.message, "err"); }
   }));
@@ -899,11 +1113,18 @@ const TABS = [
         : "")
     + "</div>"
     + "<div class='card'>"
-    + form("f-audit", [{name:"userId",label:"filter by user",options:userOpts(u.users),req:false,ph:"— all users —"}], "Load")
+    + "<div class='row'>" + form("f-audit", [{name:"userId",label:"filter by user",options:userOpts(u.users),req:false,ph:"— all users —"}], "Load")
+    + "<span class='grow'></span><button class='small' id='audit-csv' title='download the FULL filtered trail (the table shows the latest 100 rows)'>Download CSV</button></div>"
     + "<div id='auditout'></div></div>";
+  // ADR-0022: CSV export of the CURRENT filtered view — full trail, streamed
+  // with the same authed-blob pattern as the costs CSV.
+  $("#audit-csv")?.addEventListener("click", () => {
+    const userId = $("#f-audit")?.querySelector("[name=userId]")?.value ?? "";
+    downloadCsv("/v1/audit.csv" + (userId ? "?userId=" + userId : ""), "audit-log.csv");
+  });
   const prune = $("#audit-prune");
   if (prune) prune.addEventListener("click", async () => {
-    if (!confirm("Delete " + ret.prunable + " audit row(s) older than " + ret.retainedDays + " days? This cannot be undone.")) return;
+    if (!confirmClick(prune, "Delete " + ret.prunable + " row(s)?")) return;
     try {
       const r = await post("/v1/audit/prune", {});
       toast("Pruned " + r.deleted + " audit row(s) — floor " + r.retainedDays + "d from " + (r.floorSource || []).join(", ") + ".", "ok");
@@ -922,8 +1143,14 @@ const TABS = [
 ["Approvals Queue", async (el) => {
   // /v1/me names the signed-in admin: on rows naming someone else the decide
   // is an OVERRIDE — the endpoint requires a reason and audit-marks it.
-  const [a, me] = await Promise.all([get("/v1/approvals"), get("/v1/me").catch(() => ({ userId: null }))]);
-  el.innerHTML = "<p class='sub'>The one inbox: MCP pauses, workflow sign-offs, run escalations, budget overages, context conflicts, reclassifications. The named approver decides; an admin may decide in their place only with a recorded reason (audit-marked as an override).</p><div class='card'>"
+  const [a, me, u, dg] = await Promise.all([
+    get("/v1/approvals"),
+    get("/v1/me").catch(() => ({ userId: null })),
+    get("/v1/users").catch(() => ({ users: [] })),
+    get("/v1/delegations").catch(() => ({ delegations: [] })),
+  ]);
+  const uOpts = userOpts(u.users);
+  el.innerHTML = "<p class='sub'>The one inbox: MCP pauses, workflow sign-offs, run escalations, budget overages, context conflicts, reclassifications. The named approver decides; an active delegation lets the delegate decide on-behalf-of (both audited); an admin may decide in anyone's place only with a recorded reason (audit-marked as an override).</p><div class='card'>"
     + dataTable(a.approvals.map((r) => ({
         id: r.id, type: r.objectType,
         // internal sentinel stages read as their human labels (shared with
@@ -945,7 +1172,35 @@ const TABS = [
           + "<button class='small primary' data-dec='approved' data-id='" + row.id + "'>approve</button> "
           + "<button class='small danger' data-dec='denied' data-id='" + row.id + "'>deny</button>"
           + (override ? " <span class='badge warn'>override</span>" : "");
-      } }) + "</div>";
+      } }) + "</div>"
+    // ADR-0022: approver delegation windows (admin-managed). While active,
+    // the delegate sees the delegator's pending approvals in their own inbox
+    // and may decide them — recorded as the real decider on-behalf-of.
+    + "<h2>Approver delegations — vacation / offboarding coverage</h2><div class='card'>"
+    + form("f-delegation", [
+        {name:"fromUserId",label:"delegator (from)",options:uOpts},
+        {name:"toUserId",label:"delegate (to)",options:uOpts},
+        {name:"startsAt",label:"starts",type:"datetime-local"},
+        {name:"endsAt",label:"ends",type:"datetime-local"},
+        {name:"reason",req:false,ph:"why (recorded)"},
+      ], "Create delegation")
+    + table((dg.delegations ?? []).map((x) => ({
+        id: x.id, from: x.fromName ?? x.fromUserId, to: x.toName ?? x.toUserId,
+        window: String(x.startsAt).slice(0, 16).replace("T", " ") + " \\u2192 " + String(x.endsAt).slice(0, 16).replace("T", " "),
+        status: x.active ? "active" : (new Date(x.endsAt).getTime() < Date.now() ? "expired" : "scheduled"),
+        reason: x.reason ?? "\\u2014",
+      })), (row) => "<button class='small danger' data-dgend='" + row.id + "'>end now</button>")
+    + "<p class='dim' style='font-size:12px'>While a window is active, the delegate's inbox additionally shows the delegator's PENDING approvals and the delegate may decide them; the decision records the real decider plus an on-behalf-of audit row. Ending a delegation takes effect immediately. The org-wide master switch lives in Policy \\u2192 Organization.</p></div>";
+  el.querySelectorAll("[data-dgend]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirmClick(b, "End now?")) return;
+    try { await del("/v1/delegations/" + b.dataset.dgend); toast("Delegation ended", "ok"); render(); }
+    catch (ex) { toast(ex.message, "err"); }
+  }));
+  wire("f-delegation", (d) => post("/v1/delegations", {
+    fromUserId: d.fromUserId, toUserId: d.toUserId,
+    startsAt: new Date(d.startsAt).toISOString(), endsAt: new Date(d.endsAt).toISOString(),
+    ...(d.reason ? { reason: d.reason } : {}),
+  }));
   // delegate on el so decide buttons survive a dataTable sort/filter/page
   // re-render (note: an unsaved reason typed into a row resets on re-render).
   el.addEventListener("click", async (e) => {
@@ -1093,10 +1348,11 @@ const TABS = [
   // findings + governed remediation. Findings are inert until governed — a new
   // one is auto-remediated (audited) only under a permissive policy, else it is
   // approval-gated; every 'critical' is always approval-gated.
-  const [res, pol, fin, posture, u, cp, certs, patches, backups] = await Promise.all([
+  const [res, pol, fin, posture, u, cp, certs, patches, backups, org] = await Promise.all([
     get("/v1/infra/resources"), get("/v1/infra/policies"), get("/v1/infra/findings"),
     get("/v1/infra/posture"), get("/v1/users"), get("/v1/compliance/profiles"),
     get("/v1/infra/certs"), get("/v1/infra/patches"), get("/v1/infra/backups"),
+    get("/v1/org/settings").catch(() => ({ settings: {} })),
   ]);
   const uOpts = userOpts(u.users);
   const tagOpts = cp.profiles.map((x) => x.tag);
@@ -1163,7 +1419,7 @@ const TABS = [
 
     + "<h2>Findings — severity-sorted posture inbox</h2><div class='card'>"
     + form("f-remapprover", [{name:"approverUserId",label:"remediation approver",options:uOpts}], "Set approver")
-    + "<p class='dim' style='font-size:12px'>Pick the named approver, then 'propose remediation' on any open finding — it lands in the Approvals Queue (objectType infra_operation). Auto-remediated findings are already fixed; only 'open' findings can be proposed.</p>"
+    + "<p class='dim' style='font-size:12px'>The chosen approver is a PERSISTED org default — 'Set approver' saves it (audited, in org settings) and it prefills on every visit. Each 'propose remediation'/'rotate'/'patch'/'restore' names it explicitly and lands in the Approvals Queue (objectType infra_operation). Auto-remediated findings are already fixed; only 'open' findings can be proposed.</p>"
     // color+text severity/status: badges carry the word AND a title, so status
     // is never signalled by color alone. Sort/filter/paginate via dataTable.
     + dataTable(fin.findings.map((f) => ({
@@ -1246,19 +1502,21 @@ const TABS = [
     try { const r = await post("/v1/infra/scan", {}); toast("Scan complete — " + r.created + " new, " + r.autoRemediated + " auto-remediated, " + r.refreshed + " refreshed.", "ok"); render(); }
     catch (ex) { toast(ex.message, "err"); }
   });
-  // delegate so the remediate buttons survive a findings dataTable re-render
+  // delegate so the remediate buttons survive a findings dataTable re-render.
+  // Native confirm() silently no-ops in embedded browsers, so every governed
+  // verb uses the two-step inline confirmClick instead.
   el.addEventListener("click", async (e) => {
     const b = e.target.closest("[data-remediate]");
     if (!b) return;
     const approver = $("#f-remapprover")?.querySelector("[name=approverUserId]")?.value;
     if (!approver) { toast("Pick a remediation approver first.", "err"); return; }
-    if (!confirm("Propose remediation for this finding? It lands in the Approvals Queue for the named approver to decide.")) return;
-    try { await post("/v1/infra/findings/" + b.dataset.remediate + "/remediate", { approverUserId: approver }); toast("Remediation proposed", "ok"); render(); }
+    if (!confirmClick(b, "Propose?")) return;
+    try { await post("/v1/infra/findings/" + b.dataset.remediate + "/remediate", { approverUserId: approver }); toast("Remediation proposed — awaiting the named approver in the Approvals Queue", "ok"); render(); }
     catch (ex) { toast(ex.message, "err"); }
   });
-  // ADR-0017 verbs — same delegated pattern, same #f-remapprover approver, each
-  // confirm()-gated. cert_rotate / patch_apply / backup_restore all POST into
-  // the one governed approval path.
+  // ADR-0017 verbs — same delegated pattern, same #f-remapprover approver,
+  // each confirm-armed inline. cert_rotate / patch_apply / backup_restore all
+  // POST into the one governed approval path.
   el.addEventListener("click", async (e) => {
     const rot = e.target.closest("[data-rotate]");
     const app_ = e.target.closest("[data-apply]");
@@ -1267,17 +1525,25 @@ const TABS = [
     if (!hit) return;
     const approver = $("#f-remapprover") && $("#f-remapprover").querySelector("[name=approverUserId]") ? $("#f-remapprover").querySelector("[name=approverUserId]").value : "";
     if (!approver) { toast("Pick a remediation approver first.", "err"); return; }
+    if (!confirmClick(hit, "Propose?")) return;
     let url = "";
-    let msg = "";
-    if (rot) { url = "/v1/infra/certs/" + rot.dataset.rotate + "/rotate"; msg = "Propose a governed certificate rotation? It lands in the Approvals Queue for the named approver."; }
-    else if (app_) { url = "/v1/infra/patches/" + app_.dataset.apply + "/apply"; msg = "Propose applying this CVE patch? It lands in the Approvals Queue for the named approver."; }
-    else { url = "/v1/infra/backups/" + rst.dataset.restore + "/restore"; msg = "Propose a governed restore of this backup? It lands in the Approvals Queue for the named approver."; }
-    if (!confirm(msg)) return;
-    try { await post(url, { approverUserId: approver }); toast("Proposed — awaiting approval", "ok"); render(); }
+    if (rot) url = "/v1/infra/certs/" + rot.dataset.rotate + "/rotate";
+    else if (app_) url = "/v1/infra/patches/" + app_.dataset.apply + "/apply";
+    else url = "/v1/infra/backups/" + rst.dataset.restore + "/restore";
+    try { await post(url, { approverUserId: approver }); toast("Proposed — awaiting approval in the Approvals Queue", "ok"); render(); }
     catch (ex) { toast(ex.message, "err"); }
   });
-  // the approver select is a live control, not a submit — stop it rebooting the SPA
-  $("#f-remapprover")?.addEventListener("submit", (e) => e.preventDefault());
+  // ADR-0022 (defect fix): "Set approver" is a REAL, persisted setting now —
+  // it PUTs org_settings.infraApproverUserId (audited like every org-settings
+  // write) and the select prefills from the stored value on every visit.
+  {
+    const sel = $("#f-remapprover")?.querySelector("[name=approverUserId]");
+    if (sel && org.settings && org.settings.infraApproverUserId) sel.value = org.settings.infraApproverUserId;
+  }
+  wire("f-remapprover", async (d) => {
+    await api("PUT", "/v1/org/settings", { infraApproverUserId: d.approverUserId });
+    toast("Default remediation approver saved (org setting, audited)", "ok");
+  }, true);
   wire("f-ires", (d) => {
     const config = {};
     if (d.daysUntilExpiry != null && d.daysUntilExpiry !== "") config.daysUntilExpiry = Number(d.daysUntilExpiry);
@@ -1487,9 +1753,15 @@ const TABS = [
     }
     if (!d.serverId) notes.push("No MCP server selected — the snippet carries a placeholder. Register one under AI Governance -> MCP Servers.");
     if (!pid) notes.push("No project selected — these calls run UNATTRIBUTED and land no per-project cost row. With 'require project attribution' ON they would be rejected outright.");
-    $("#clientsnip").innerHTML = "<h2 style='margin-top:14px'>Copy-paste config</h2>"
-      + "<pre class='mono' style='white-space:pre-wrap;overflow-x:auto'>" + esc(snip) + "</pre>"
+    // The snippet is the most copy-destined text in the product — a real Copy
+    // button beside it, not just a select-all hope.
+    $("#clientsnip").innerHTML = "<div class='row' style='margin-top:14px;align-items:center'><h2 style='margin:0'>Copy-paste config</h2><span class='grow'></span><button class='small' id='snip-copy'>Copy</button></div>"
+      + "<pre class='mono' style='white-space:pre-wrap;overflow-x:auto;margin-top:8px'>" + esc(snip) + "</pre>"
       + (notes.length ? "<ul class='dim' style='font-size:12px'>" + notes.map((n) => "<li>" + esc(n) + "</li>").join("") + "</ul>" : "");
+    $("#snip-copy").addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(snip); $("#snip-copy").textContent = "Copied"; setTimeout(() => { const b = $("#snip-copy"); if (b) b.textContent = "Copy"; }, 1500); }
+      catch { toast("Clipboard unavailable — select the text manually", "err"); }
+    });
   }, true);
 }],
 ["Organization", async (el) => {
@@ -1582,8 +1854,9 @@ const TABS = [
     + "<h2>Approvals</h2><div class='card'>"
     + form("f-org-approvals", [
         {name:"approvalQuorum",label:"human-approval quorum",options:[{v:"all",l:"all named approvers (default)"},{v:"any",l:"any one approver advances"}]},
+        {name:"approvalDelegationEnabled",label:"approver delegation",options:[{v:"true",l:"enabled (delegation windows apply)"},{v:"false",l:"disabled (strict separation of duties)"}]},
       ], "Save approval policy")
-    + "<p class='dim' style='font-size:12px'>Applies to workflow human_approval stages. 'All' (default — today's behaviour): the stage advances only when every named approver has approved; any denial denies it. 'Any': the first approval advances the stage and the remaining pending approvals are superseded so no dead gate lingers. Denials behave identically in both modes. Org-wide for now — a per-template stage override is recorded as deferred in ADR-0021.</p>"
+    + "<p class='dim' style='font-size:12px'>Applies to workflow human_approval stages. 'All' (default — today's behaviour): the stage advances only when every named approver has approved; any denial denies it. 'Any': the first approval advances the stage and the remaining pending approvals are superseded so no dead gate lingers. Denials behave identically in both modes. Org-wide for now — a per-template stage override is recorded as deferred in ADR-0021. Approver delegation (ADR-0022): when disabled, creating delegation windows is refused and existing windows stop applying immediately — for orgs whose control posture forbids deciding in another's name.</p>"
     + "</div>"
 
     // --- Retention -----------------------------------------------------------
@@ -1617,7 +1890,7 @@ const TABS = [
   setVals("f-org-comp", ["defaultPiiMode","envKeyFallbackEnabled","envFallbackProviders"]);
   setVals("f-org-budget", ["budgetEnforcement","budgetHardBlockPct"]);
   setVals("f-org-workers", ["defaultWorkerMaxTurns","maxWorkerTurns","maxAttachmentsPerDispatch","maxAttachmentBytes","imageTokenEstimateTokens","sharedContextMaxChars","nodeOutputMaxChars"]);
-  setVals("f-org-approvals", ["approvalQuorum"]);
+  setVals("f-org-approvals", ["approvalQuorum","approvalDelegationEnabled"]);
   setVals("f-org-retention", ["autoPruneEnabled","pruneIntervalHours","defaultAuditRetentionDays"]);
   // the retention-days number input has no stored 0; show blank when null
   const retIn = $("#f-org-retention [name=defaultAuditRetentionDays]");
@@ -1670,7 +1943,7 @@ const TABS = [
     sharedContextMaxChars: Number(d.sharedContextMaxChars),
     nodeOutputMaxChars: Number(d.nodeOutputMaxChars),
   }));
-  wire("f-org-approvals", (d) => putOrg({ approvalQuorum: d.approvalQuorum }));
+  wire("f-org-approvals", (d) => putOrg({ approvalQuorum: d.approvalQuorum, approvalDelegationEnabled: asBool(d.approvalDelegationEnabled) }));
   wire("f-org-retention", (d) => putOrg({
     autoPruneEnabled: asBool(d.autoPruneEnabled),
     pruneIntervalHours: Number(d.pruneIntervalHours),
@@ -1787,7 +2060,11 @@ async function render() {
   $("#signout").addEventListener("click", () => { sessionStorage.removeItem("regulait.admin.key"); KEY = ""; render(); });
   const panel = $("#panel");
   try { await TABS[active][1](panel); }
-  catch (ex) { panel.innerHTML = "<div class='empty'>Couldn’t load — " + esc(ex.message) + "</div>"; }
+  catch (ex) {
+    panel.innerHTML = ex.status === 403
+      ? "<div class='empty'>You don’t have access to this view — " + esc(ex.message) + "</div>"
+      : "<div class='empty'>Couldn’t load — " + esc(ex.message) + "</div>";
+  }
   // move keyboard focus to the panel heading after a (re)render so a tab switch
   // doesn't dump keyboard/AT users back at <body>.
   const h1 = $(".main h1");

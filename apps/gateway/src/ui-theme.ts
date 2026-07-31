@@ -359,6 +359,33 @@ document.addEventListener("keydown", (e) => {
   e.preventDefault();
   chip.click();
 });
+// Two-step INLINE confirm, replacing native confirm() — which silently
+// no-ops (returns false with no dialog) in some embedded/webview browsers,
+// leaving dead buttons. First activation ARMS the button ("Sure? …") for
+// ~4s; a second activation inside the window returns true and the caller
+// proceeds. Anything that re-renders the button simply disarms it.
+function confirmClick(btn, prompt) {
+  if (!btn) return true;
+  if (btn.dataset.cfArmed === "1") {
+    btn.dataset.cfArmed = "";
+    btn.textContent = btn.dataset.cfLabel ?? btn.textContent;
+    btn.style.borderColor = ""; btn.style.color = "";
+    return true;
+  }
+  btn.dataset.cfArmed = "1";
+  btn.dataset.cfLabel = btn.textContent;
+  btn.textContent = prompt || ("Sure? " + btn.textContent);
+  btn.style.borderColor = "var(--bad)"; btn.style.color = "var(--bad)";
+  btn.title = btn.title || "click again to confirm";
+  setTimeout(() => {
+    if (btn.isConnected && btn.dataset.cfArmed === "1") {
+      btn.dataset.cfArmed = "";
+      btn.textContent = btn.dataset.cfLabel;
+      btn.style.borderColor = ""; btn.style.color = "";
+    }
+  }, 4000);
+  return false;
+}
 `;
 
 /**
