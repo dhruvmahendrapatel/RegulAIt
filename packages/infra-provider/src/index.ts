@@ -14,16 +14,17 @@
  * package never decides whether a remediation is permitted — the gateway does,
  * at the same interception point that enforces pillar 1 and attributes pillar 5.
  *
- * "No silent promises" rule (same as connector-provider): kinds that are
- * interface-ready but not implemented (azure/gcp) throw an explicit "not
- * implemented yet" from the registry rather than pretending. The aws kind now
- * has a REAL adapter (src/aws.ts) behind the OFF-by-default REGULAIT_INFRA_LIVE
- * flag + an injected AwsInfraLiveClient; unflagged/unwired it stays a
- * structured 501 — never a fabricated scan.
+ * "No silent promises" rule (same as connector-provider): every cloud kind
+ * (aws/azure/gcp) now has a REAL adapter (src/aws.ts, src/azure.ts,
+ * src/gcp.ts) behind the same OFF-by-default REGULAIT_INFRA_LIVE flag + an
+ * injected per-cloud live client; unflagged/unwired each stays a structured
+ * 501 — never a fabricated scan.
  */
 
 import { z } from "zod";
 import { AwsInfraProvider, infraLiveEnabled, type AwsInfraLiveClient } from "./aws.js";
+import { AzureInfraProvider, type AzureInfraLiveClient } from "./azure.js";
+import { GcpInfraProvider, type GcpInfraLiveClient } from "./gcp.js";
 
 export const INFRA_PROVIDER_KINDS = ["mock", "aws", "azure", "gcp"] as const;
 export type InfraProviderKind = (typeof INFRA_PROVIDER_KINDS)[number];
@@ -393,21 +394,45 @@ export interface InfraProviderConfig {
   roleArn?: string | null;
   /** aws: the customer region every call is driven in */
   region?: string | null;
+  /** azure: the customer subscription every call is scoped to */
+  subscriptionId?: string | null;
+  /** azure: optional resource-group scoping for VM/patch queries */
+  resourceGroup?: string | null;
+  /** gcp: the customer project every call is scoped to */
+  projectId?: string | null;
+  /** gcp: the zone OS Config inventory/vulnerability calls are driven in */
+  zone?: string | null;
+  /** gcp: the Certificate Manager / Backup and DR location */
+  location?: string | null;
   /** aws, NEVER persisted — the injected live client (injectable-client
    * discipline, same as deploy.ts's awsLiveClient): a fake in tests, a real
    * @aws-sdk-backed impl built per the AwsInfraLiveClient factory contract in
    * a live deployment. Absent (or REGULAIT_INFRA_LIVE off) = structured 501. */
   awsLiveClient?: AwsInfraLiveClient;
+  /** azure, NEVER persisted — the injected live client (a fake in tests, the
+   * gateway's buildAzureInfraLiveClient in a live deployment). Absent (or
+   * REGULAIT_INFRA_LIVE off) = structured 501. */
+  azureLiveClient?: AzureInfraLiveClient;
+  /** gcp, NEVER persisted — the injected live client (a fake in tests, the
+   * gateway's buildGcpInfraLiveClient in a live deployment). Absent (or
+   * REGULAIT_INFRA_LIVE off) = structured 501. */
+  gcpLiveClient?: GcpInfraLiveClient;
 }
 
 /** validates the persisted provider config before an adapter is built
- * (awsLiveClient is injected at resolve time, never persisted — not here) */
+ * (the per-cloud live clients are injected at resolve time, never persisted —
+ * not here) */
 export const infraProviderConfigSchema = z.object({
   kind: z.enum(INFRA_PROVIDER_KINDS),
   endpoint: z.string().min(1).nullable().optional(),
   token: z.string().min(1).nullable().optional(),
   roleArn: z.string().min(1).nullable().optional(),
   region: z.string().min(1).nullable().optional(),
+  subscriptionId: z.string().min(1).nullable().optional(),
+  resourceGroup: z.string().min(1).nullable().optional(),
+  projectId: z.string().min(1).nullable().optional(),
+  zone: z.string().min(1).nullable().optional(),
+  location: z.string().min(1).nullable().optional(),
 });
 
 /** shared mock instance so recorded remediations persist across resolutions in
@@ -454,16 +479,69 @@ export function resolveInfraProvider(
         live: true,
       });
     }
-    // Declared, interface-ready, but not built yet — an explicit failure,
-    // never a silent success (the connector/model-provider discipline).
-    case "azure":
-    case "gcp":
-      throw new InfraProviderError(
-        `infra provider kind '${config.kind}' is not implemented yet`,
-        501,
-      );
+    case "azure": {
+      // REAL adapter (src/azure.ts): Entra ID federated credential via the
+      // injected client, then Resource Graph VM/patch-assessment posture, Key
+      // Vault certificate expiry, Recovery Services recovery points, and
+      // governed installPatches / Key Vault re-issue / backups.trigger
+      // remediations. Gated twice, exactly like aws: the OFF-by-default
+      // REGULAIT_INFRA_LIVE flag AND an injected AzureInfraLiveClient — either
+      // missing is a structured 501 (no dry-run scan exists, ADR-0017).
+      if (!infraLiveEnabled()) {
+        throw new InfraProviderError(
+          `infra provider kind 'azure' is implemented but not live-enabled: REGULAIT_INFRA_LIVE is off ` +
+            `and the adapter has no dry-run — enable the flag and inject an AzureInfraLiveClient to go live`,
+          501,
+        );
+      }
+      if (!config.azureLiveClient) {
+        throw new InfraProviderError(
+          `REGULAIT_INFRA_LIVE is on but no live Azure infra client was injected — wire an AzureInfraLiveClient ` +
+            `(see the factory contract in @regulait/infra-provider azure.ts) and pass it as config.azureLiveClient`,
+          501,
+        );
+      }
+      return new AzureInfraProvider({
+        subscriptionId: config.subscriptionId ?? "",
+        resourceGroup: config.resourceGroup ?? null,
+        client: config.azureLiveClient,
+        live: true,
+      });
+    }
+    case "gcp": {
+      // REAL adapter (src/gcp.ts): ADC/workload-identity via the injected
+      // client, then OS Config inventory + vulnerability-report posture (real
+      // CVSS), Certificate Manager expiry, Backup and DR backups, and governed
+      // executePatchJob / triggerBackup remediations (cert renewal is a
+      // documented structural 501 — Certificate Manager has no renew-now API).
+      // Gated twice, exactly like aws.
+      if (!infraLiveEnabled()) {
+        throw new InfraProviderError(
+          `infra provider kind 'gcp' is implemented but not live-enabled: REGULAIT_INFRA_LIVE is off ` +
+            `and the adapter has no dry-run — enable the flag and inject a GcpInfraLiveClient to go live`,
+          501,
+        );
+      }
+      if (!config.gcpLiveClient) {
+        throw new InfraProviderError(
+          `REGULAIT_INFRA_LIVE is on but no live GCP infra client was injected — wire a GcpInfraLiveClient ` +
+            `(see the factory contract in @regulait/infra-provider gcp.ts) and pass it as config.gcpLiveClient`,
+          501,
+        );
+      }
+      return new GcpInfraProvider({
+        projectId: config.projectId ?? "",
+        zone: config.zone ?? null,
+        location: config.location ?? null,
+        client: config.gcpLiveClient,
+        live: true,
+      });
+    }
   }
 }
 
-// The real AWS adapter + its injectable-client contract (ADR-0017 follow-through).
+// The real cloud adapters + their injectable-client contracts (ADR-0017
+// follow-through; Batch C breadth for azure/gcp).
 export * from "./aws.js";
+export * from "./azure.js";
+export * from "./gcp.js";

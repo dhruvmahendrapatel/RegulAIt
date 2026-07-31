@@ -113,7 +113,7 @@ describe("registry", () => {
     expect(err!.message).toContain("not live-enabled");
   });
 
-  it("rejects declared-but-unimplemented cloud kinds explicitly (no silent promise)", () => {
+  it("azure/gcp stay structured 501s while REGULAIT_INFRA_LIVE is off (implemented, never silently live)", () => {
     for (const kind of ["azure", "gcp"] as const) {
       const err = (() => {
         try {
@@ -125,7 +125,23 @@ describe("registry", () => {
       })();
       expect(err).toBeInstanceOf(InfraProviderError);
       expect(err!.status).toBe(501);
-      expect(err!.message).toContain("not implemented yet");
+      expect(err!.message).toContain("not live-enabled");
+    }
+  });
+
+  it("azure/gcp with the flag ON but no injected client stay structured 501s naming the factory contract", () => {
+    const prev = process.env.REGULAIT_INFRA_LIVE;
+    process.env.REGULAIT_INFRA_LIVE = "1";
+    try {
+      expect(() => resolveInfraProvider({ kind: "azure", subscriptionId: "sub-1" })).toThrowError(
+        /no live Azure infra client was injected/,
+      );
+      expect(() => resolveInfraProvider({ kind: "gcp", projectId: "proj-1" })).toThrowError(
+        /no live GCP infra client was injected/,
+      );
+    } finally {
+      if (prev === undefined) delete process.env.REGULAIT_INFRA_LIVE;
+      else process.env.REGULAIT_INFRA_LIVE = prev;
     }
   });
 
