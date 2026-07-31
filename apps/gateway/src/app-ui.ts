@@ -373,7 +373,13 @@ function exchangesFromMessages(v) {
 // dispatch badge on the reply stays the authoritative answer.
 function keyHint(agent) {
   if (!agent) return "";
-  if (agent.provider === "mock") return "Mock provider — runs with no credential at all.";
+  if (agent.provider === "mock") {
+    // When NO real provider is live platform-wide, say what that means and who
+    // can fix it — a non-admin can't add a platform key, but their admin can.
+    const anyReal = Object.keys(PROVIDER_STATUS).some((p) => p !== "mock" && PROVIDER_STATUS[p] && PROVIDER_STATUS[p].configured);
+    return "Mock provider — runs with no credential at all."
+      + (anyReal ? "" : " Replies are simulated and spend is $0; an admin can connect a real provider from the admin portal (Model Credentials).");
+  }
   return MY_PROVIDERS.includes(agent.provider)
     ? "Runs on your own " + esc(agent.provider) + " key. <a href='#/settings'>Manage keys</a>"
     : "No " + esc(agent.provider) + " key of your own — this uses the platform credential if an admin has configured one. <a href='#/settings'>Add your key</a>";

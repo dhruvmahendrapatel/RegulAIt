@@ -267,6 +267,12 @@ pre, .codeblock {
 .node-dot.in_review { background: var(--warn); }
 .node-dot.done { background: var(--ok); }
 
+/* ---- getting-started deep-link flash -------------------------------- */
+/* a setup-checklist deep link highlights the exact form that completes the
+   step: a brief accent pulse, removed by the portal after ~2.4s */
+.setup-flash { outline: 2px solid var(--accent); outline-offset: 6px; border-radius: 8px; animation: setupflash 2.4s ease-out; }
+@keyframes setupflash { 0% { outline-color: var(--accent); } 100% { outline-color: transparent; } }
+
 /* ---- workflow stages ---------------------------------------------- */
 .stage-rail { display: flex; gap: 6px; flex-wrap: wrap; }
 .stage {
