@@ -73,6 +73,29 @@ for (const [name, id] of [
 const danaAuth = { authorization: `Bearer ${keys.dana}` };
 const averyAuth = { authorization: `Bearer ${keys.avery}` };
 
+// --- ADR-0025: ONE-TIME passwords for the personas (browser sign-in) -------
+// Issued only while the account is still passwordless, so a re-seed never
+// overwrites a password a human set for real (the endpoint 409s without
+// force, and call() tolerates 409). Printed exactly once, like the keys;
+// must_change_password forces a real password at first sign-in.
+const passwords: Record<string, string> = {};
+{
+  const userRows = (await call("GET", "/v1/users")).users ?? [];
+  for (const [name, id] of [
+    ["admin", adminId],
+    ["dana", danaId],
+    ["avery", averyId],
+  ] as const) {
+    const row = userRows.find((u: Json) => u.id === id);
+    if (row?.hasPassword) {
+      passwords[name] = "(already set — unchanged)";
+      continue;
+    }
+    const res = await call("POST", `/v1/users/${id}/set-initial-password`);
+    passwords[name] = res.password ?? "(already set — unchanged)";
+  }
+}
+
 // --- agent catalog -------------------------------------------------------
 const AGENTS = [
   { name: "fast-mock", provider: "mock", tier: 0, costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-fast" },
@@ -1109,11 +1132,20 @@ await app.close();
 console.log(`
 RegulAIt demo data ready.
 
-  Sign in at /app (or /admin with the admin key). Keys are shown ONCE:
+  Browser sign-in (ADR-0025) at /app and /admin: email + ONE-TIME password.
+  Shown ONCE; each persona must set their own password at first sign-in.
 
-    admin  admin@regulait.local   ${keys.admin}
-    dana   dana@regulait.local    ${keys.dana}    (requester — Playground, Runs, Workflows)
-    avery  avery@regulait.local   ${keys.avery}   (approver — Inbox has a sign-off waiting)
+    admin  admin@regulait.local   ${passwords.admin}
+    dana   dana@regulait.local    ${passwords.dana}    (requester — Playground, Runs, Workflows)
+    avery  avery@regulait.local   ${passwords.avery}   (approver — Inbox has a sign-off waiting)
+
+  API keys (programmatic/IDE access — NOT the browser login; the login page
+  keeps a "sign in with an API key" fallback that exchanges one for a
+  session). Shown ONCE:
+
+    admin  ${keys.admin}
+    dana   ${keys.dana}
+    avery  ${keys.avery}
 ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecret}\n` : ""}
   Governance: 2 MCP servers with 8 tools (read + write), a 'repo-analyst' role
   granting read-only-all, per-user tool grants layered on top, 2 revocations,
