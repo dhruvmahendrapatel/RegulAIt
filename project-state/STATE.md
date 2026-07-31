@@ -4,7 +4,7 @@ last_updated: 2026-07-30
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-07-24-session-02.md
+last_session: sessions/2026-07-30-session-03.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -737,6 +737,41 @@ carrying a failure. `docs/product/IDE_INTEGRATION.md` written. Gateway 386 → *
 `voluntary` rung it is an honor system, and `CLAUDE.md`/`VISION.md` still promise governance over
 "every agent/model call" on the assumption calls arrive at us. Key custody is the cheapest
 non-bypassable rung and is policy, not code. Those two files deliberately NOT edited — owner's text.
+
+**PARALLEL WAVE LANDED — batches A, B-core, C-core, D-depth, E, org-settings, enterprise/UX,
+2026-07-30→31 (PRs #48–#56, migrations 0038+0039, ADR-0021+0022; suite 432 → 492; deployed and
+verified live).** The wave announced in the addendum below is COMPLETE. Six builder agents in
+isolated worktrees + one hands-on UI review, merged sequentially by the dispatcher with a full
+build+suite verification of each combined tree before any PR. Shipped: (A) GitLab/Bitbucket/
+Azure-DevOps git adapters, refusals-over-approximations (#52, git-provider tests 7→51, plus an
+additive `getPullRequest`/`listChecks` surface); (B-core) Slack/GitHub/Jira connectors (#49,
+8→44; **Snowflake still open** — key-pair credential vs single-ciphertext schema decision);
+(C-core) the real AWS infra adapter (#51, 33→83, injected clients, no fake success) + gateway
+live wiring behind `REGULAIT_INFRA_LIVE` with `@aws-sdk/client-ssm/-acm/-backup` deps, flag-off
+byte-identical (#55); (D-depth) OpenAI Responses API behind a behavior-preserving model list +
+correct Gemini tool-use replacing the "best-effort" mapping (#50, 62→85); (E) the doc
+reconciliation below + prepared-but-off CI + three Terraform follow-ups authored not applied
+(#53). **Org-settings (migration 0038, ADR-0021, #54): the owner's standing configurability
+mandate made real** — 37 admin controls (six optimizer technique toggles + dials wired to kernel
+params that existed unwired; semantic-cache policy `off|opt_in|always`; `default_pii_mode` for
+unclassified projects; env-key-fallback gate + visibility; budget `block|warn_only` + hard-block
+pct; approval quorum `all|any`; retention auto-prune; worker caps; attachment/truncation
+ceilings; `streaming_on_block_mode` + `strict_field_rejection` on interception_settings), every
+default behavior-preserving, org = ceiling users can only narrow, new "Organization" admin tab
+(Policy group). **Enterprise/UX (migration 0039, ADR-0022, #56): the UI review's three pilot
+blockers closed** — approvers get a narrowly-scoped read of instances they are party to (driving
+routes keep the strict gate) + merge-gate cards showing PR/checks/dry-run; full identity
+lifecycle (deactivate with last-active-admin lockout, promote/demote, role holders/unassign/
+delete, team member remove/delete, template retire, **approver delegation** with on-behalf-of
+audit rows and an org kill switch); audit CSV export; all practicality gaps (inline confirms
+replace native `confirm()`, names over UUIDs, copy buttons, live template resolution, thread
+restore); #79b unimplemented-git-kind 400s at creation; #79c `dryRun` is structural, persisted
+through the air-gapped branch, and **refuses production deploy gates**. UI review verdict
+recorded honestly: past demo-ware, pilot-evaluation-ready; day-to-day operation still gated on
+connecting real providers (model key = parked Batch G, owner's call) and the guided
+first-provider journey (open). Wave-3 backlog, per ROADMAP §6: Snowflake credential schema,
+worker streaming, `agents.systemPrompt`, `mcpDefaultMode` enforcement, O11/O13/O15 interception
+depth, Azure/GCP infra, A4.
 
 **Housekeeping addendum, 2026-07-30 (doc-reconciliation batch — amends, does not rewrite, the
 entries around it).** (1) **Temperature amendment to Batch H:** the entry above says unsupported
