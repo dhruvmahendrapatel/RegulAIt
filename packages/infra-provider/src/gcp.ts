@@ -199,10 +199,13 @@ export interface GcpInfraLiveClient {
     backupVault: string;
     dataSource: string;
   }): Promise<GcpBackup[]>;
-  /** REAL: osconfig executePatchJob against an explicit instance list */
+  /** REAL: osconfig executePatchJob against an explicit instance list. `zone`
+   * lets the real client build the full `zones/{zone}/instances/{id}` URIs
+   * PatchInstanceFilter.instances requires when bare ids are handed in. */
   executePatchJob(params: {
     sessionId: string;
     projectId: string;
+    zone?: string | null;
     instances: string[];
   }): Promise<{ patchJobName: string }>;
   /** REAL: backupdr backupPlanAssociations.triggerBackup (on-demand backup) */
@@ -688,8 +691,9 @@ export class GcpInfraProvider implements InfraProvider {
               "executePatchJob against an unknown instance set",
           );
         }
+        const zone = strField(detail, "zone") ?? this.zone;
         const { patchJobName } = await this.call("osconfig:executePatchJob", () =>
-          client.executePatchJob({ sessionId, projectId: this.projectId, instances }),
+          client.executePatchJob({ sessionId, projectId: this.projectId, zone, instances }),
         );
         return {
           ok: true,
