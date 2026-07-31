@@ -8,7 +8,7 @@ import { Brand } from "./LoginPage";
 import s from "./auth.module.css";
 
 export default function ForcedPasswordChange() {
-  const { refresh, signOut } = useSession();
+  const { auth, refresh, signOut } = useSession();
   const [currentPassword, setCurrent] = useState("");
   const [newPassword, setNew] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -43,6 +43,14 @@ export default function ForcedPasswordChange() {
     <div className={s.gate}>
       <main className={s.panel}>
         <Brand />
+        {/* Name the account. An admin-issued one-time password lands the user
+         * straight here, often on a shared machine or a second account — a
+         * password form that never says WHOSE password it is sets the wrong one. */}
+        <div className={s.identity}>
+          Setting the password for{" "}
+          <strong>{auth?.user?.email ?? "this account"}</strong>
+          {auth?.user?.displayName ? ` (${auth.user.displayName})` : ""}
+        </div>
         <div className={s.notice}>
           Your password is one-time — set your own before continuing. Every other
           session for this account will be signed out.

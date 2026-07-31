@@ -8,7 +8,7 @@ import { Brand } from "./LoginPage";
 import s from "./auth.module.css";
 
 export default function ForcedMfaEnroll() {
-  const { refresh, signOut } = useSession();
+  const { auth, refresh, signOut } = useSession();
   const [secret, setSecret] = useState<{ secret: string; otpauthUri: string } | null>(null);
   const [code, setCode] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -55,6 +55,13 @@ export default function ForcedMfaEnroll() {
     <div className={s.gate}>
       <main className={s.panel}>
         <Brand />
+        {/* Same reason as the password gate: an authenticator entry is bound to
+         * an identity forever, so the account must be named before enrolling. */}
+        <div className={s.identity}>
+          Enrolling two-factor for{" "}
+          <strong>{auth?.user?.email ?? "this account"}</strong>
+          {auth?.user?.displayName ? ` (${auth.user.displayName})` : ""}
+        </div>
         <div className={s.notice}>
           Your organization requires two-factor authentication. Enroll an
           authenticator app to continue.

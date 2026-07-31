@@ -141,3 +141,19 @@
   word-break: break-all;
   user-select: all;
 }
+
+/* Whose account is this? Shown on the forced-password-change gate, where an
+ * admin-issued one-time password drops the user in with no other context. */
+.identity {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  padding: var(--s1) var(--s2);
+  font-size: var(--text-sm);
+}
+
+.identity strong {
+  font-weight: 600;
+  word-break: break-all;
+}

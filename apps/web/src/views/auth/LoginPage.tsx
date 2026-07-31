@@ -148,6 +148,13 @@ export default function LoginPage() {
           <p className={s.sub}>
             Two-factor step — enter the 6-digit code from your authenticator app.
           </p>
+          {/* which identity this challenge belongs to — matters when several
+           * accounts share an authenticator app */}
+          {email && (
+            <div className={s.identity}>
+              Signing in as <strong>{email}</strong>
+            </div>
+          )}
           {error && <div className={s.error} role="alert">{error}</div>}
           <form className={s.form} onSubmit={submitTotp}>
             <Field label="Authenticator code">
