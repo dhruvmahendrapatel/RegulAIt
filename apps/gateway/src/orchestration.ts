@@ -1,4 +1,4 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import {
   agentGrants,
   agents,
@@ -60,7 +60,8 @@ import {
 } from "./agents-connectors.js";
 import { executeGovernedToolCall, resolveNodeToolContext } from "./mcp-proxy.js";
 import { loadAgentRevocations, loadRoleAgentGrants } from "./entitlements.js";
-import { assertProjectAttribution } from "./projects.js";
+import { assertProjectAttribution, projectPiiMode } from "./projects.js";
+import { loadInterceptionSettings } from "./compat-core.js";
 import { mirrorNodeStatus } from "./pm.js";
 import { handleNestedRunCompletion } from "./workflows.js";
 import { z } from "zod";
@@ -99,6 +100,86 @@ function tokensFor(node: TaskNode): NodeTokenEstimate {
 }
 
 const runIdParam = z.object({ runId: z.string().uuid() });
+
+// --- WORKER-NODE STREAMING (pillar 7 + ADR-0019 §8.4) ----------------------
+// The dispatch and auto-advance routes accept `stream: true` and deliver the
+// worker's tokens as SSE with EXACTLY the invoke path's guarantees, reusing
+// its exported building blocks (executeGovernedDispatch's onText,
+// projectPiiMode, loadInterceptionSettings) rather than re-deriving them:
+//  - every gate resolves BEFORE any stream byte leaves: entitlement, budget,
+//    node-state and config failures are real HTTP errors, never a 200 stream
+//    (the stream opens LAZILY on the first delta, the compat-surface pattern);
+//  - a block-mode PII project gets NO delta stream — the same governed
+//    dispatch runs fully buffered and returns ordinary JSON, disclosed via
+//    `streamingSuppressed: true` (or a 400 when the org's ADR-0021
+//    streamingOnBlockMode is 'reject');
+//  - non-stream requests take a code path with byte-identical responses.
+
+/** The `stream` opt-in, read from the RAW body — dispatchNodeSchema /
+ * autoAdvanceSchema stay untouched in @regulait/shared (they strip unknown
+ * keys, so the flag rides beside them without widening any package schema). */
+const streamFlagSchema = z.object({ stream: z.boolean().optional() });
+
+type StreamRequest =
+  | { mode: "off" }
+  | { mode: "stream" }
+  | { mode: "suppressed" }
+  | { mode: "rejected"; status: 400; body: { error: string; detail: string } };
+
+/** Resolve a caller's stream request against the run's project PII posture —
+ * the SAME ADR-0019 §8.4 suppression (and ADR-0021 'reject' escalation) the
+ * invoke path applies, evaluated BEFORE any stream could open. `stream` absent
+ * short-circuits to "off" with zero extra queries (non-stream path unchanged). */
+async function resolveStreamRequest(
+  db: Db,
+  rawBody: unknown,
+  projectId: string | null,
+): Promise<StreamRequest> {
+  const { stream } = streamFlagSchema.parse(rawBody ?? {});
+  if (stream !== true) return { mode: "off" };
+  if ((await projectPiiMode(db, projectId)) !== "block") return { mode: "stream" };
+  const iset = await loadInterceptionSettings(db);
+  if (iset.streamingOnBlockMode === "reject") {
+    return {
+      mode: "rejected",
+      status: 400,
+      body: {
+        error: "streaming_rejected_on_block_project",
+        detail:
+          "this project's PII mode is 'block' and this deployment rejects streaming on such projects — retry without stream:true",
+      },
+    };
+  }
+  return { mode: "suppressed" };
+}
+
+/** Lazily-opened SSE channel with the invoke path's exact event framing
+ * (`event: <name>\ndata: <json>\n\n`). Nothing is hijacked until the first
+ * send, so a failure raised before any delta still returns a real HTTP error
+ * instead of a 200 that carries a failure — the compat-surface pattern. */
+function sseChannel(reply: FastifyReply) {
+  let opened = false;
+  return {
+    get opened() {
+      return opened;
+    },
+    send(event: string, data: unknown) {
+      if (!opened) {
+        opened = true;
+        reply.hijack();
+        reply.raw.writeHead(200, {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+          connection: "keep-alive",
+        });
+      }
+      reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    },
+    end() {
+      if (opened) reply.raw.end();
+    },
+  };
+}
 
 /** Gateway-level node enrichment (same pattern as RunBudget living beside the
  * kernel's state): a node may carry a multi-sentence `instruction` — the
@@ -383,6 +464,11 @@ async function dispatchRunNode(
     input?: string | undefined;
     maxTokens?: number | undefined;
     maxTurns?: number | undefined;
+    /** streaming delta callback, threaded to executeGovernedDispatch's onText
+     * across every turn of the worker loop. Callers pass it ONLY after the
+     * ADR-0019 §8.4 suppression check (resolveStreamRequest) has allowed a
+     * stream; absent = byte-identical non-streaming dispatch. */
+    onDelta?: ((text: string) => void) | undefined;
   },
   actorUserId: string,
 ): Promise<NodeDispatchOutcome> {
@@ -535,6 +621,7 @@ async function dispatchRunNode(
       system: nested?.system,
       ...(toolDefs.length > 0 ? { tools: toolDefs } : {}),
       maxTokens: args.maxTokens,
+      ...(args.onDelta ? { onText: args.onDelta } : {}),
       projectId: run.projectId ?? null,
       detail: {
         runId: run.id,
@@ -876,6 +963,60 @@ async function dispatchRunNode(
     budgetBreached,
     nodeBudgetBreached,
   };
+}
+
+/** The dispatch route's one outcome→HTTP mapping, shared verbatim by the
+ * JSON, suppressed-stream and SSE deliveries so the three can never drift:
+ * SSE sends `body` inside a `result`/`error` event; the others send it as the
+ * response with `status`. */
+function nodeDispatchHttp(out: NodeDispatchOutcome): {
+  status: number;
+  body: Record<string, unknown>;
+} {
+  switch (out.kind) {
+    case "unknown_node":
+      return { status: 400, body: { error: "unknown_node" } };
+    case "unknown_agent":
+      return { status: 422, body: { error: "unknown_agent" } };
+    case "not_in_progress":
+      return { status: 409, body: { error: "node_not_in_progress", status: out.status } };
+    case "entitlement_denied":
+      return { status: 403, body: { error: "entitlement_exceeded", decision: out.decision } };
+    case "budget_blocked_measured":
+      return {
+        status: 409,
+        body: {
+          error: "budget_exceeded_measured",
+          measuredSpentUsd: out.measuredSpentUsd,
+          capUsd: out.capUsd,
+        },
+      };
+    case "node_budget_blocked_measured":
+      return {
+        status: 409,
+        body: {
+          error: "node_budget_exceeded_measured",
+          nodeId: out.nodeId,
+          measuredNodeUsd: out.measuredNodeUsd,
+          nodeCapUsd: out.nodeCapUsd,
+        },
+      };
+    case "dispatch_failed":
+      return {
+        status: out.status,
+        body: { error: out.error, ...(out.detail ? { detail: out.detail } : {}) },
+      };
+    case "ok":
+      return {
+        status: 200,
+        body: {
+          dispatch: out.result,
+          measuredSpentUsd: out.measuredSpentUsd,
+          ...(out.budgetBreached ? { budgetBreached: true } : {}),
+          ...(out.nodeBudgetBreached ? { nodeBudgetBreached: true } : {}),
+        },
+      };
+  }
 }
 
 // The worker-turn default (6) and hard ceiling (20) moved to org_settings
@@ -1591,6 +1732,16 @@ export function registerOrchestrationRoutes(
   // time, all entitlement-checked) is executed exactly as assigned. The state
   // machine stays authoritative: dispatch produces output, it never moves the
   // node; completing/reviewing remain explicit run events.
+  // STREAMING (stream: true): the SAME governed dispatch, delivered as SSE
+  // with the invoke path's event framing — `delta {text}` per worker token,
+  // then ONE `result` event carrying exactly the JSON payload, or ONE `error`
+  // event when a mid-loop turn fails after deltas already left. Every gate
+  // resolves before the stream opens (lazy open on the first delta), so
+  // entitlement/budget/config failures stay real HTTP errors; a block-mode
+  // PII project never streams — the dispatch runs buffered and returns JSON
+  // with `streamingSuppressed: true` (disclosed, never silent), or 400 under
+  // ADR-0021 'reject'. Without stream:true this route is byte-identical to
+  // its pre-streaming behaviour.
   app.post("/v1/runs/:runId/nodes/:nodeId/dispatch", async (req, reply) => {
     const { runId, nodeId } = z
       .object({ runId: z.string().uuid(), nodeId: z.string().min(1).max(64) })
@@ -1600,42 +1751,52 @@ export function registerOrchestrationRoutes(
     if (loaded.error) return reply.status(loaded.error).send({ error: "unavailable" });
     if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_drive" });
 
-    const out = await dispatchRunNode(db, opts.dataKey, loaded.run, nodeId, body, req.authCtx.userId);
-    switch (out.kind) {
-      case "unknown_node":
-        return reply.status(400).send({ error: "unknown_node" });
-      case "unknown_agent":
-        return reply.status(422).send({ error: "unknown_agent" });
-      case "not_in_progress":
-        return reply.status(409).send({ error: "node_not_in_progress", status: out.status });
-      case "entitlement_denied":
-        return reply.status(403).send({ error: "entitlement_exceeded", decision: out.decision });
-      case "budget_blocked_measured":
-        return reply.status(409).send({
-          error: "budget_exceeded_measured",
-          measuredSpentUsd: out.measuredSpentUsd,
-          capUsd: out.capUsd,
-        });
-      case "node_budget_blocked_measured":
-        return reply.status(409).send({
-          error: "node_budget_exceeded_measured",
-          nodeId: out.nodeId,
-          measuredNodeUsd: out.measuredNodeUsd,
-          nodeCapUsd: out.nodeCapUsd,
-        });
-      case "dispatch_failed":
-        return reply.status(out.status).send({
-          error: out.error,
-          ...(out.detail ? { detail: out.detail } : {}),
-        });
-      case "ok":
-        return {
-          dispatch: out.result,
-          measuredSpentUsd: out.measuredSpentUsd,
-          ...(out.budgetBreached ? { budgetBreached: true } : {}),
-          ...(out.nodeBudgetBreached ? { nodeBudgetBreached: true } : {}),
-        };
+    const streamReq = await resolveStreamRequest(db, req.body, loaded.run.projectId ?? null);
+    if (streamReq.mode === "rejected") return reply.status(streamReq.status).send(streamReq.body);
+
+    if (streamReq.mode === "stream") {
+      const sse = sseChannel(reply);
+      const out = await dispatchRunNode(
+        db,
+        opts.dataKey,
+        loaded.run,
+        nodeId,
+        { ...body, onDelta: (text) => sse.send("delta", { text }) },
+        req.authCtx.userId,
+      );
+      const r = nodeDispatchHttp(out);
+      if (out.kind !== "ok") {
+        // no delta left yet → the failure is a REAL HTTP error, exactly the
+        // non-stream response; after first delta the wire is committed, so
+        // the same body rides an `error` event instead.
+        if (!sse.opened) return reply.status(r.status).send(r.body);
+        sse.send("error", r.body);
+        sse.end();
+        return reply;
+      }
+      sse.send("result", r.body);
+      sse.end();
+      return reply;
     }
+
+    const out = await dispatchRunNode(db, opts.dataKey, loaded.run, nodeId, body, req.authCtx.userId);
+    const r = nodeDispatchHttp(out);
+    if (streamReq.mode === "suppressed") {
+      // ADR-0019 §8.4 disclosure — recorded, never silent.
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId,
+        objectType: "run",
+        objectId: runId,
+        detail: { nodeId, phase: "dispatch", streamingSuppressed: true },
+        effect: "allow",
+        ruleId: "stream-suppressed-block-project",
+        ruleChain: [],
+        reason:
+          "stream requested on a block-mode PII project — the governed dispatch ran fully buffered so the output PII check completes before any byte leaves",
+      });
+      return reply.status(r.status).send({ ...r.body, streamingSuppressed: true });
+    }
+    return reply.status(r.status).send(r.body);
   });
 
   // AUTO-ADVANCE: a self-driving pass over the run — same gates, zero new
@@ -1668,6 +1829,31 @@ export function registerOrchestrationRoutes(
     if (run.status === "completed" || run.status === "aborted") {
       return reply.status(409).send({ error: "run_terminal", status: run.status });
     }
+
+    // MULTIPLEXED STREAMING (stream: true) — one SSE stream for the WHOLE
+    // pass, with per-node ENVELOPE events so a client can render N nodes
+    // progressing at once (parallel-ready nodes may interleave deltas; the
+    // nodeId key on every event is what makes that safe):
+    //   node_start    {nodeId, agent}                    — node started, about to dispatch
+    //   node_delta    {nodeId, text}                     — one worker token chunk
+    //   node_complete {nodeId, status[, usage, costUsd]} — status: "submitted" |
+    //                  "accepted" | "refused" | "failed"; usage/costUsd ride
+    //                  only when the dispatch itself succeeded
+    //   run_complete  {status, stoppedReason, dispatched, measuredSpentUsd}
+    //                                                     — always the LAST event
+    // Emitted for every node that got a node_start; nodes blocked BEFORE their
+    // start (budget pre-gates) surface only in run_complete's stoppedReason +
+    // the audited steps, exactly like the JSON response. Run-level gates
+    // (terminal, budget_approval_pending) resolve before the stream opens and
+    // stay real HTTP errors; the stream opens lazily on the first event. A
+    // block-mode PII project never streams — the same pass runs buffered and
+    // the JSON response carries `streamingSuppressed: true` (400 under
+    // ADR-0021 'reject'). Without stream:true this route is byte-identical to
+    // its pre-streaming behaviour.
+    const streamReq = await resolveStreamRequest(db, req.body, run.projectId ?? null);
+    if (streamReq.mode === "rejected") return reply.status(streamReq.status).send(streamReq.body);
+    const sse = streamReq.mode === "stream" ? sseChannel(reply) : null;
+
     if (run.status === "planned") {
       const budget = (run.budget ?? null) as RunBudget | null;
       if (
@@ -1813,12 +1999,25 @@ export function registerOrchestrationRoutes(
             .where(eq(orchestrationRuns.id, runId));
         }
 
+        const runForDispatch = await reload();
+        if (sse) {
+          const g = runForDispatch.graph as TaskGraph;
+          const s = runForDispatch.state as RunState;
+          sse.send("node_start", {
+            nodeId,
+            agent: s.owners[nodeId] ?? g.nodes.find((n) => n.id === nodeId)?.ownerAgentId ?? null,
+          });
+        }
         const out = await dispatchRunNode(
           db,
           opts.dataKey,
-          await reload(),
+          runForDispatch,
           nodeId,
-          { input: body.inputs?.[nodeId], maxTokens: body.maxTokens },
+          {
+            input: body.inputs?.[nodeId],
+            maxTokens: body.maxTokens,
+            ...(sse ? { onDelta: (text: string) => sse.send("node_delta", { nodeId, text }) } : {}),
+          },
           actor,
         );
 
@@ -1834,6 +2033,7 @@ export function registerOrchestrationRoutes(
             actor,
             opts.dataKey,
           );
+          sse?.send("node_complete", { nodeId, status: "failed" });
           break;
         }
         if (out.kind === "node_budget_blocked_measured") {
@@ -1849,6 +2049,7 @@ export function registerOrchestrationRoutes(
             actor,
             opts.dataKey,
           );
+          sse?.send("node_complete", { nodeId, status: "failed" });
           break;
         }
         if (out.kind === "entitlement_denied" || out.kind === "dispatch_failed" || out.kind === "unknown_agent") {
@@ -1863,6 +2064,7 @@ export function registerOrchestrationRoutes(
           await applyRunEvent(db, runId, { kind: "node_failed", nodeId, error }, actor, opts.dataKey);
           await mirrorNodeStatus(db, opts.dataKey, runId, nodeId, "blocked", actor);
           steps.push({ nodeId, action: "failed", error });
+          sse?.send("node_complete", { nodeId, status: "failed" });
           continue;
         }
         if (out.kind !== "ok") {
@@ -1883,6 +2085,12 @@ export function registerOrchestrationRoutes(
           );
           await mirrorNodeStatus(db, opts.dataKey, runId, nodeId, "blocked", actor);
           steps.push({ nodeId, action: "refused" });
+          sse?.send("node_complete", {
+            nodeId,
+            status: "refused",
+            usage: out.result.usage,
+            costUsd: out.result.costUsd,
+          });
           if (out.budgetBreached) {
             waveStop = "budget_exceeded_measured";
             break;
@@ -1898,6 +2106,12 @@ export function registerOrchestrationRoutes(
         steps.push({
           nodeId,
           action: body.acceptReviews ? "accepted" : "submitted",
+          costUsd: out.result.costUsd,
+        });
+        sse?.send("node_complete", {
+          nodeId,
+          status: body.acceptReviews ? "accepted" : "submitted",
+          usage: out.result.usage,
           costUsd: out.result.costUsd,
         });
         if (out.budgetBreached) {
@@ -1943,19 +2157,31 @@ export function registerOrchestrationRoutes(
         dispatched,
         stoppedReason,
         acceptReviews: body.acceptReviews ?? false,
+        // ADR-0019 §8.4 disclosure — a stream request buffered on a
+        // block-mode project is recorded, never silent.
+        ...(streamReq.mode === "suppressed" ? { streamingSuppressed: true } : {}),
       },
       effect: "allow",
       ruleId: "run-auto-advance",
       ruleChain: [],
       reason: `auto-advance pass took ${steps.length} step(s), stopped: ${stoppedReason}`,
     });
+    const measuredSpentUsd = ((run.budget ?? null) as RunBudget | null)?.measuredSpentUsd ?? 0;
+    if (sse) {
+      // always the LAST envelope event, even when nothing was ready — the
+      // stream never ends without saying how the pass ended.
+      sse.send("run_complete", { status: run.status, stoppedReason, dispatched, measuredSpentUsd });
+      sse.end();
+      return reply;
+    }
     return {
       status: run.status,
       state: run.state,
       readyNodes: readyNodes(run.graph as TaskGraph, run.state as RunState),
       steps,
       stoppedReason,
-      measuredSpentUsd: ((run.budget ?? null) as RunBudget | null)?.measuredSpentUsd ?? 0,
+      measuredSpentUsd,
+      ...(streamReq.mode === "suppressed" ? { streamingSuppressed: true } : {}),
     };
   });
 
