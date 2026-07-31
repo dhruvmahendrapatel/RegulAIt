@@ -1,0 +1,30 @@
+-- Migration 0046 (ADR-0028) — record HOW each browser session was established.
+--
+-- The lockout it exists to fix: a user who signs in via POST
+-- /auth/login-with-key (API key -> cookie session) on an account with
+-- must_change_password = true is routed to the forced-password-change gate,
+-- which demands the CURRENT one-time password they were never given. The gate
+-- 403s every non-self-service route, so they cannot reach Users to issue
+-- themselves a new one either — a single-admin deployment is bricked.
+--
+-- `origin` is the dimension that makes the fix expressible WITHOUT weakening
+-- the steady state: the current-password requirement is relaxed ONLY for an
+-- api_key-origin session on an account that is already in a recovery state
+-- (must_change_password, or no password hash at all). An api_key session on an
+-- account with an established password and no forced change still has to prove
+-- the current password — otherwise a STOLEN API key could be escalated into a
+-- permanent password that survives revocation of that key.
+--
+-- HONEST BACKFILL (same discipline as ADR-0027's audit_log.deploy_mode): rows
+-- created before this migration have no recorded origin and it cannot be
+-- reconstructed from anything stored, so they are backfilled to 'unknown'
+-- rather than assumed to be 'password'. 'unknown' is an allowed value and
+-- never receives the bypass — pre-0046 sessions fail CLOSED.
+--
+-- The column keeps a DEFAULT so the backfill is one statement and any future
+-- insert path that forgets to state an origin lands on the fail-closed value;
+-- the drizzle model deliberately declares NO default, so every insert site in
+-- application code must name its origin at compile time.
+ALTER TABLE "auth_sessions" ADD COLUMN "origin" text DEFAULT 'unknown' NOT NULL;
+--> statement-breakpoint
+ALTER TABLE "auth_sessions" ADD CONSTRAINT "auth_sessions_origin_ck" CHECK ("auth_sessions"."origin" IN ('password', 'api_key', 'oidc', 'bootstrap', 'unknown'));

@@ -55,12 +55,30 @@ export const users = pgTable("users", {
 // (the operator exchanged the deploy-time bootstrap token for a cookie); it is
 // admin-privileged exactly like the header form and dies when the deployment's
 // bootstrap token is unset.
+/** ADR-0028 (migration 0046): HOW a session was established.
+ * - `password`  — POST /auth/login (password, no MFA required)
+ * - `api_key`   — POST /auth/login-with-key with a user's API key
+ * - `oidc`      — the OIDC callback minted it
+ * - `bootstrap` — POST /auth/login-with-key with the deploy-time bootstrap token
+ * - `unknown`   — a pre-0046 row. The true origin is unknowable and was NOT
+ *   invented at backfill time; `unknown` never receives the ADR-0028
+ *   current-password bypass (fail closed).
+ * Sessions completed through MFA are `password` — the second factor does not
+ * change WHICH credential established the session. */
+export const SESSION_ORIGINS = ["password", "api_key", "oidc", "bootstrap", "unknown"] as const;
+export type SessionOrigin = (typeof SESSION_ORIGINS)[number];
+
 export const authSessions = pgTable(
   "auth_sessions",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     tokenHash: text("token_hash").notNull().unique(),
     userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    /** see SESSION_ORIGINS. NO drizzle-side default on purpose: the DB column
+     * defaults to the fail-closed 'unknown' (that is what backfilled the
+     * pre-0046 rows), but application inserts must state an origin explicitly
+     * — a new session-creation path that forgets one is a type error. */
+    origin: text("origin", { enum: SESSION_ORIGINS }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     /** absolute lifetime wall — never slides */
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
@@ -73,7 +91,10 @@ export const authSessions = pgTable(
     userAgent: text("user_agent"),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
   },
-  (t) => [index("auth_sessions_user_idx").on(t.userId)],
+  (t) => [
+    index("auth_sessions_user_idx").on(t.userId),
+    check("auth_sessions_origin_ck", sql`${t.origin} IN ('password', 'api_key', 'oidc', 'bootstrap', 'unknown')`),
+  ],
 );
 
 /** short-lived password-accepted-awaiting-TOTP state (ADR-0025). Token hashed
