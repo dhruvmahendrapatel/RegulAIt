@@ -11,6 +11,14 @@
 // ADR-0015 addendum (A1): the AWS adapter can run its `// REAL:` path for real
 // behind the OFF-by-default REGULAIT_DEPLOY_LIVE flag, using an INJECTED STS/
 // deploy client (never the network in tests) — see AwsDeployProvider below.
+//
+// Batch C breadth: azure/gcp/kubernetes now carry the SAME live-path semantics
+// as AWS — behind the same flag, each with its own injected live client
+// (AzureLiveDeployClient / GcpLiveDeployClient / KubernetesLiveDeployClient).
+// Flag off = today's dry-run, byte-identical; flag on + injected client = a
+// genuinely live call and ONLY then dryRun:false; flag on unwired = an
+// explicit error. The ADR-0022 production gate (a dry-run may never satisfy a
+// production deploy) keeps working unchanged off the honest dryRun flag.
 
 import { AssumeRoleCommand } from "@aws-sdk/client-sts";
 
@@ -218,16 +226,66 @@ class AwsDeployProvider implements DeployProvider {
 }
 
 /**
- * BYOC Azure deploy adapter — deterministic dry-run SHAPE. Models the real
- * flow: an OIDC/service-principal auth into the customer's subscription, then a
- * deployment-slot swap / container-app revision update in the target region.
- * `// REAL:` markers sit at each @azure/arm-* SDK call site. No network.
+ * Batch C: the injectable live-Azure deploy client (identical discipline to
+ * AwsLiveDeployClient — ALWAYS supplied by the caller, a fake in unit tests;
+ * no default network client, so "flag on with nothing injected" is a clear
+ * error, never a silent mutation). Methods are synchronous to keep the
+ * DeployProvider interface synchronous; a real impl wraps the async SDK
+ * behind them.
+ *
+ * FACTORY CONTRACT for a real impl (@azure/identity + @azure/arm-resources —
+ * NOT added as deps: nothing here calls them yet, and the sync DeployProvider
+ * interface means a genuinely-async real client needs the (documented,
+ * deferred) async-deploy refactor in the workflow engine first):
+ *   deploy   → new DefaultAzureCredential() (Entra ID federated — never a
+ *              static key) → new ResourceManagementClient(cred, subscription)
+ *              .deployments.beginCreateOrUpdate(resourceGroup, target, {
+ *                properties: { mode: "Incremental", template/bicep... } })
+ *              — an ARM/Bicep deployment trigger; capture the deployment
+ *              name/id + portal URL.
+ *   rollback → deployments.beginCreateOrUpdate again with the PREVIOUS
+ *              deployment's template (deployments.exportTemplate of the prior
+ *              successful deployment), reverting to the last known-good state.
+ */
+export interface AzureLiveDeployClient {
+  /** REAL: ARM/Bicep deployment trigger in the customer's subscription. */
+  deploy(params: {
+    target: string;
+    environment: string;
+    region: string;
+    subscription: string;
+  }): { deployId: string; url: string };
+  /** REAL: re-deploy the prior known-good ARM deployment (revert). */
+  rollback(params: {
+    target: string;
+    deployId: string;
+    region: string;
+    subscription: string;
+  }): { reverted: string };
+}
+
+/**
+ * BYOC Azure deploy adapter. Models the real flow: an OIDC/service-principal
+ * auth into the customer's subscription, then an ARM/Bicep deployment in the
+ * target region.
+ *
+ * By default (REGULAIT_DEPLOY_LIVE off) this is a deterministic dry-run that
+ * touches no network — byte-identical to the pre-Batch-C contract. With the
+ * flag ON and a live client INJECTED, deploy/rollback run through that client
+ * (AzureLiveDeployClient factory contract above) and the result honestly
+ * reports dryRun:false. The flag on with no injected client is an explicit
+ * error — no live path ever runs unwired (the AWS A1 semantics exactly).
  */
 class AzureDeployProvider implements DeployProvider {
   readonly kind = "azure" as const;
   constructor(
     private readonly subscription: string,
     private readonly region: string,
+    /** injectable-client discipline: present only when a caller wired one
+     * (a fake in tests). Absent = pure dry-run regardless of the flag. */
+    private readonly liveClient?: AzureLiveDeployClient,
+    /** captured at construction so a test can flip it per-instance */
+    private readonly live: boolean = deployLiveEnabled(),
   ) {}
 
   private requireConfig(): void {
@@ -236,13 +294,42 @@ class AzureDeployProvider implements DeployProvider {
     }
   }
 
+  /** true when the real @azure/* path is both enabled AND wired */
+  private useLive(): boolean {
+    return this.live && this.liveClient !== undefined;
+  }
+
+  private requireWiredIfLive(): void {
+    if (this.live && !this.liveClient) {
+      throw new DeployProviderError(
+        "REGULAIT_DEPLOY_LIVE is on but no live Azure deploy client was injected",
+      );
+    }
+  }
+
   deploy(target: string, environment: string | null, seed: string): DeployResult {
     this.requireConfig();
+    this.requireWiredIfLive();
     const env = environment ?? "default";
-    // REAL: new DefaultAzureCredential() → federated login; then
-    // new WebSiteManagementClient(cred, this.subscription)
-    //   .webApps.beginSwapSlotAndWait(rg, target, {targetSlot: env}) OR
-    // @azure/arm-appcontainers ContainerAppsAPIClient revision update.
+    if (this.useLive()) {
+      // REAL: DefaultAzureCredential → ARM/Bicep deployment via the injected
+      // client (see the AzureLiveDeployClient factory contract). dryRun:false
+      // ONLY here — a genuinely live call happened.
+      const out = this.liveClient!.deploy({
+        target,
+        environment: env,
+        region: this.region,
+        subscription: this.subscription,
+      });
+      return {
+        deployId: out.deployId,
+        url: out.url,
+        detail: `azure login sub ${this.subscription} → deploy to ${target} (${env}) in ${this.region} [live]`,
+        dryRun: false,
+      };
+    }
+    // Dry-run: deterministic, no credentials, no network — byte-identical to
+    // the pre-Batch-C shape.
     const sessionId = `az_${seed.slice(0, 8)}`;
     const deployId = `azure_${sessionId}_${env}`;
     return {
@@ -255,24 +342,77 @@ class AzureDeployProvider implements DeployProvider {
 
   rollback(target: string, deployId: string): RollbackResult {
     this.requireConfig();
-    // REAL: @azure/arm-appservice swap back to the previous slot, or
-    // @azure/arm-appcontainers activate the prior revision, in this.region.
+    this.requireWiredIfLive();
+    if (this.useLive()) {
+      // REAL: re-deploy the prior known-good ARM deployment via the client.
+      const out = this.liveClient!.rollback({
+        target,
+        deployId,
+        region: this.region,
+        subscription: this.subscription,
+      });
+      return { reverted: out.reverted, detail: `azure rollback of ${deployId} on ${target} [live]` };
+    }
     return { reverted: deployId, detail: `azure rollback of ${deployId} on ${target} [dry-run]` };
   }
 }
 
 /**
- * BYOC GCP deploy adapter — deterministic dry-run SHAPE. Models the real flow:
- * workload-identity-federation auth into the customer's project, then a Cloud
- * Deploy rollout release / Cloud Run revision deploy in the target region.
- * `// REAL:` markers sit at each Cloud Deploy / Cloud Run SDK call site. No
- * network.
+ * Batch C: the injectable live-GCP deploy client (identical discipline to
+ * AwsLiveDeployClient / AzureLiveDeployClient). Methods are synchronous to
+ * keep the DeployProvider interface synchronous; a real impl wraps the async
+ * SDK behind them.
+ *
+ * FACTORY CONTRACT for a real impl (@google-cloud/config — Infrastructure
+ * Manager, Deployment Manager's successor — NOT added as a dep: nothing here
+ * calls it yet; same sync-interface note as AzureLiveDeployClient):
+ *   deploy   → ADC / workload identity federation (never a static SA key) →
+ *              new ConfigClient().createDeployment/updateDeployment({parent:
+ *              `projects/${project}/locations/${region}`, deploymentId:
+ *              target, deployment: { terraformBlueprint... }}) — the
+ *              infra-manager deployment trigger; capture the deployment name
+ *              + console URL.
+ *   rollback → updateDeployment back to the previous revision's blueprint
+ *              (deployments/{d}/revisions list → prior revision).
+ */
+export interface GcpLiveDeployClient {
+  /** REAL: infra-manager (Deployment Manager successor) deployment trigger. */
+  deploy(params: {
+    target: string;
+    environment: string;
+    region: string;
+    project: string;
+  }): { deployId: string; url: string };
+  /** REAL: revert to the prior infra-manager deployment revision. */
+  rollback(params: {
+    target: string;
+    deployId: string;
+    region: string;
+    project: string;
+  }): { reverted: string };
+}
+
+/**
+ * BYOC GCP deploy adapter. Models the real flow: workload-identity-federation
+ * auth into the customer's project, then an Infrastructure Manager /
+ * Deployment Manager deployment in the target region.
+ *
+ * By default (REGULAIT_DEPLOY_LIVE off) this is a deterministic dry-run that
+ * touches no network — byte-identical to the pre-Batch-C contract. With the
+ * flag ON and a live client INJECTED, deploy/rollback run through that client
+ * and the result honestly reports dryRun:false. The flag on with no injected
+ * client is an explicit error — no live path ever runs unwired.
  */
 class GcpDeployProvider implements DeployProvider {
   readonly kind = "gcp" as const;
   constructor(
     private readonly project: string,
     private readonly region: string,
+    /** injectable-client discipline: present only when a caller wired one
+     * (a fake in tests). Absent = pure dry-run regardless of the flag. */
+    private readonly liveClient?: GcpLiveDeployClient,
+    /** captured at construction so a test can flip it per-instance */
+    private readonly live: boolean = deployLiveEnabled(),
   ) {}
 
   private requireConfig(): void {
@@ -281,13 +421,42 @@ class GcpDeployProvider implements DeployProvider {
     }
   }
 
+  /** true when the real @google-cloud/* path is both enabled AND wired */
+  private useLive(): boolean {
+    return this.live && this.liveClient !== undefined;
+  }
+
+  private requireWiredIfLive(): void {
+    if (this.live && !this.liveClient) {
+      throw new DeployProviderError(
+        "REGULAIT_DEPLOY_LIVE is on but no live GCP deploy client was injected",
+      );
+    }
+  }
+
   deploy(target: string, environment: string | null, seed: string): DeployResult {
     this.requireConfig();
+    this.requireWiredIfLive();
     const env = environment ?? "default";
-    // REAL: new CloudDeployClient() (@google-cloud/deploy) →
-    //   .createRelease({parent: `projects/${project}/locations/${region}/deliveryPipelines/${target}`})
-    //   then .createRollout(...); OR @google-cloud/run ServicesClient
-    //   .updateService(...) for a Cloud Run revision.
+    if (this.useLive()) {
+      // REAL: WIF auth → infra-manager deployment via the injected client (see
+      // the GcpLiveDeployClient factory contract). dryRun:false ONLY here — a
+      // genuinely live call happened.
+      const out = this.liveClient!.deploy({
+        target,
+        environment: env,
+        region: this.region,
+        project: this.project,
+      });
+      return {
+        deployId: out.deployId,
+        url: out.url,
+        detail: `gcp wif project ${this.project} → deploy to ${target} (${env}) in ${this.region} [live]`,
+        dryRun: false,
+      };
+    }
+    // Dry-run: deterministic, no credentials, no network — byte-identical to
+    // the pre-Batch-C shape.
     const sessionId = `gc_${seed.slice(0, 8)}`;
     const deployId = `gcp_${sessionId}_${env}`;
     return {
@@ -300,17 +469,69 @@ class GcpDeployProvider implements DeployProvider {
 
   rollback(target: string, deployId: string): RollbackResult {
     this.requireConfig();
-    // REAL: @google-cloud/deploy rollback release to the prior rollout, or
-    // @google-cloud/run updateService to the previous revision, in this.region.
+    this.requireWiredIfLive();
+    if (this.useLive()) {
+      // REAL: revert to the prior deployment revision via the client.
+      const out = this.liveClient!.rollback({
+        target,
+        deployId,
+        region: this.region,
+        project: this.project,
+      });
+      return { reverted: out.reverted, detail: `gcp rollback of ${deployId} on ${target} [live]` };
+    }
     return { reverted: deployId, detail: `gcp rollback of ${deployId} on ${target} [dry-run]` };
   }
 }
 
 /**
- * Kubernetes deploy adapter — deterministic dry-run SHAPE. Models the real
- * flow: load a kubeconfig (the encrypted deploy CREDENTIAL), then apply/patch a
- * Deployment and wait for the rollout in the target namespace. `// REAL:`
- * markers sit at each @kubernetes/client-node call site. No network.
+ * Batch C: the injectable live-Kubernetes deploy client — kubeconfig-SCOPED:
+ * the decrypted kubeconfig credential is handed to every call and never held
+ * by the provider beyond its own constructor argument. Identical discipline to
+ * the other live deploy clients (fake in tests, no default network client).
+ * Methods are synchronous to keep the DeployProvider interface synchronous; a
+ * real impl wraps the async SDK behind them.
+ *
+ * FACTORY CONTRACT for a real impl (@kubernetes/client-node — NOT added as a
+ * dep: nothing here calls it yet; same sync-interface note as the azure/gcp
+ * deploy clients):
+ *   deploy   → const kc = new k8s.KubeConfig(); kc.loadFromString(kubeconfig);
+ *              const api = kc.makeApiClient(k8s.AppsV1Api);
+ *              await api.patchNamespacedDeployment({name: target, namespace,
+ *              body: patch}) (an apply/patch of the Deployment) then watch the
+ *              rollout; deployId = the observed metadata.generation /
+ *              revision annotation.
+ *   rollback → the `kubectl rollout undo` equivalent — patch the Deployment's
+ *              template back to the prior ReplicaSet revision.
+ */
+export interface KubernetesLiveDeployClient {
+  /** REAL: kubeconfig-scoped apply/patch of the Deployment + rollout watch. */
+  deploy(params: {
+    target: string;
+    environment: string;
+    namespace: string;
+    kubeconfig: string;
+  }): { deployId: string; url: string };
+  /** REAL: rollout-undo to the prior ReplicaSet revision. */
+  rollback(params: {
+    target: string;
+    deployId: string;
+    namespace: string;
+    kubeconfig: string;
+  }): { reverted: string };
+}
+
+/**
+ * Kubernetes deploy adapter. Models the real flow: load a kubeconfig (the
+ * encrypted deploy CREDENTIAL), then apply/patch a Deployment and wait for the
+ * rollout in the target namespace.
+ *
+ * By default (REGULAIT_DEPLOY_LIVE off) this is a deterministic dry-run that
+ * touches no network — byte-identical to the pre-Batch-C contract. With the
+ * flag ON and a live client INJECTED, deploy/rollback run through that
+ * kubeconfig-scoped client and the result honestly reports dryRun:false. The
+ * flag on with no injected client is an explicit error — no live path ever
+ * runs unwired.
  */
 class KubernetesDeployProvider implements DeployProvider {
   readonly kind = "kubernetes" as const;
@@ -319,6 +540,11 @@ class KubernetesDeployProvider implements DeployProvider {
     private readonly kubeconfig: string,
     /** the target namespace; environment doubles as it when unset */
     private readonly namespace: string | null,
+    /** injectable-client discipline: present only when a caller wired one
+     * (a fake in tests). Absent = pure dry-run regardless of the flag. */
+    private readonly liveClient?: KubernetesLiveDeployClient,
+    /** captured at construction so a test can flip it per-instance */
+    private readonly live: boolean = deployLiveEnabled(),
   ) {}
 
   private requireConfig(): void {
@@ -327,14 +553,43 @@ class KubernetesDeployProvider implements DeployProvider {
     }
   }
 
+  /** true when the real @kubernetes/client-node path is both enabled AND wired */
+  private useLive(): boolean {
+    return this.live && this.liveClient !== undefined;
+  }
+
+  private requireWiredIfLive(): void {
+    if (this.live && !this.liveClient) {
+      throw new DeployProviderError(
+        "REGULAIT_DEPLOY_LIVE is on but no live Kubernetes deploy client was injected",
+      );
+    }
+  }
+
   deploy(target: string, environment: string | null, seed: string): DeployResult {
     this.requireConfig();
+    this.requireWiredIfLive();
     const env = environment ?? "default";
     const ns = this.namespace ?? env;
-    // REAL: const kc = new k8s.KubeConfig(); kc.loadFromString(this.kubeconfig);
-    //   const api = kc.makeApiClient(k8s.AppsV1Api);
-    //   await api.patchNamespacedDeployment(target, ns, patch, ...) then watch
-    //   the rollout to completion (@kubernetes/client-node).
+    if (this.useLive()) {
+      // REAL: kubeconfig-scoped apply + rollout watch via the injected client
+      // (see the KubernetesLiveDeployClient factory contract). dryRun:false
+      // ONLY here — a genuinely live call happened.
+      const out = this.liveClient!.deploy({
+        target,
+        environment: env,
+        namespace: ns,
+        kubeconfig: this.kubeconfig,
+      });
+      return {
+        deployId: out.deployId,
+        url: out.url,
+        detail: `kubeconfig apply → rollout ${target} in namespace ${ns} (${env}) [live]`,
+        dryRun: false,
+      };
+    }
+    // Dry-run: deterministic, no credentials used, no network — byte-identical
+    // to the pre-Batch-C shape.
     const sessionId = `k8s_${seed.slice(0, 8)}`;
     const deployId = `k8s_${sessionId}_${env}`;
     return {
@@ -347,8 +602,20 @@ class KubernetesDeployProvider implements DeployProvider {
 
   rollback(target: string, deployId: string): RollbackResult {
     this.requireConfig();
-    // REAL: @kubernetes/client-node `kubectl rollout undo` equivalent —
-    // patch the Deployment back to the prior ReplicaSet revision.
+    this.requireWiredIfLive();
+    if (this.useLive()) {
+      // REAL: rollout-undo via the kubeconfig-scoped client. The namespace of
+      // the original deploy is carried in the recorded deployId's context by
+      // the workflow engine; the provider's own namespace (or the recorded
+      // environment at rollback time) scopes the undo.
+      const out = this.liveClient!.rollback({
+        target,
+        deployId,
+        namespace: this.namespace ?? "default",
+        kubeconfig: this.kubeconfig,
+      });
+      return { reverted: out.reverted, detail: `kubernetes rollout undo of ${deployId} on ${target} [live]` };
+    }
     return { reverted: deployId, detail: `kubernetes rollout undo of ${deployId} on ${target} [dry-run]` };
   }
 }
@@ -366,6 +633,13 @@ export interface ResolveDeployProviderConfig {
   /** A1: an injected live-AWS client (fake in tests). Present + REGULAIT_DEPLOY_LIVE
    * on = the real @aws-sdk path; absent = dry-run regardless of the flag. */
   awsLiveClient?: AwsLiveDeployClient;
+  /** Batch C: injected live-Azure deploy client — same semantics as awsLiveClient. */
+  azureLiveClient?: AzureLiveDeployClient;
+  /** Batch C: injected live-GCP deploy client — same semantics as awsLiveClient. */
+  gcpLiveClient?: GcpLiveDeployClient;
+  /** Batch C: injected kubeconfig-scoped live-Kubernetes deploy client — same
+   * semantics as awsLiveClient. */
+  k8sLiveClient?: KubernetesLiveDeployClient;
 }
 
 export function resolveDeployProvider(config: ResolveDeployProviderConfig): DeployProvider {
@@ -378,13 +652,25 @@ export function resolveDeployProvider(config: ResolveDeployProviderConfig): Depl
     );
   }
   if (config.provider === "azure") {
-    return new AzureDeployProvider(config.roleArn ?? "", config.region ?? "");
+    return new AzureDeployProvider(
+      config.roleArn ?? "",
+      config.region ?? "",
+      config.azureLiveClient,
+    );
   }
   if (config.provider === "gcp") {
-    return new GcpDeployProvider(config.roleArn ?? "", config.region ?? "");
+    return new GcpDeployProvider(
+      config.roleArn ?? "",
+      config.region ?? "",
+      config.gcpLiveClient,
+    );
   }
   if (config.provider === "kubernetes") {
-    return new KubernetesDeployProvider(config.credential ?? "", config.region ?? null);
+    return new KubernetesDeployProvider(
+      config.credential ?? "",
+      config.region ?? null,
+      config.k8sLiveClient,
+    );
   }
   // Any future provider that isn't wired stays an honest, surfaced failure
   // (→ manual handoff), never a pretend success.
