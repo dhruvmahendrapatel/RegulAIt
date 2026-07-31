@@ -1,12 +1,14 @@
 /**
  * The end-user app (/app): playground, runs, workflows, inbox, projects.
  * Same contract as /admin (ADR-0012): one dependency-free file, strictly a
- * client of the public REST API. The API key lives in sessionStorage — this
- * tab only, gone when it closes — and every call is the same call a script
- * would make.
+ * client of the public REST API. ADR-0025: the browser credential is a
+ * HttpOnly session cookie minted by /auth/login (password → optional TOTP
+ * step → session), OIDC SSO, or the transition API-key exchange — the page
+ * never holds a raw credential, and every state-changing call carries the
+ * x-regulait-csrf header.
  */
 
-import { UI_CSS, UI_DISPLAY_JS, UI_ERRORS_JS, UI_TABLE_JS } from "./ui-theme.js";
+import { UI_CSS, UI_DISPLAY_JS, UI_ERRORS_JS, UI_LOGIN_JS, UI_TABLE_JS } from "./ui-theme.js";
 
 export const APP_HTML = `<!doctype html>
 <html lang="en">
@@ -24,6 +26,7 @@ export const APP_HTML = `<!doctype html>
 ${UI_ERRORS_JS}
 ${UI_DISPLAY_JS}
 ${UI_TABLE_JS}
+${UI_LOGIN_JS}
 const $ = (s, el) => (el ?? document).querySelector(s);
 const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const fmtUsd = (v) => v == null ? "—" : "$" + Number(v).toFixed(4).replace(/0+$/,"").replace(/\\.$/,"");
@@ -35,7 +38,6 @@ const ago = (iso) => {
   return Math.floor(s/86400) + "d ago";
 };
 
-let KEY = sessionStorage.getItem("regulait.key") ?? "";
 let ME = null;
 let AGENTS = [];        // my granted agents
 let AGENT_NAMES = {};   // id -> name
@@ -46,12 +48,14 @@ let MY_PROVIDERS = []; // providers I hold my own key for (never the key itself)
 let PROVIDER_STATUS = {}; // provider kind -> { configured } platform-wide (stored cred OR env key), no secrets
 
 async function api(method, path, body) {
+  // cookie-session auth (ADR-0025): the browser attaches the HttpOnly cookie
+  // itself; the custom header is the CSRF wall on every state-changing call.
   const res = await fetch(path, {
     method,
-    headers: { authorization: "Bearer " + KEY, ...(body ? { "content-type": "application/json" } : {}) },
+    headers: { "x-regulait-csrf": "1", ...(body ? { "content-type": "application/json" } : {}) },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
-  if (res.status === 401) { signOut(); throw new Error("unauthenticated"); }
+  if (res.status === 401) { ME = null; render(); throw new Error("unauthenticated"); }
   const text = await res.text();
   let json; try { json = JSON.parse(text); } catch { json = { raw: text }; }
   if (!res.ok) { const e = new Error(errMessage(res.status, json)); e.payload = json; e.status = res.status; throw e; }
@@ -63,7 +67,7 @@ const patch = (p, b) => api("PATCH", p, b ?? {});
 // authed file download: fetch the CSV with our bearer, then trigger a browser
 // save via a transient blob URL (the endpoint sets Content-Disposition too)
 async function downloadCsv(path, filename) {
-  const res = await fetch(path, { headers: { authorization: "Bearer " + KEY } });
+  const res = await fetch(path); // session cookie rides along automatically
   if (!res.ok) { toast("CSV download failed (" + res.status + ")"); return; }
   const blob = await res.blob();
   const url = URL.createObjectURL(blob);
@@ -84,7 +88,8 @@ function toast(msg, ms) {
   setTimeout(() => el.remove(), ms ?? 3600);
 }
 function signOut() {
-  sessionStorage.removeItem("regulait.key"); KEY = ""; ME = null; render();
+  // revoke the server-side session, then drop back to the login gate
+  authCall("POST", "/auth/logout").finally(() => { ME = null; render(); });
 }
 
 const statusBadge = (s) => {
@@ -761,7 +766,7 @@ async function sendPrompt() {
   try {
     const res = await fetch("/v1/agents/" + agentId + "/invoke", {
       method: "POST",
-      headers: { authorization: "Bearer " + KEY, "content-type": "application/json" },
+      headers: { "x-regulait-csrf": "1", "content-type": "application/json" },
       body: JSON.stringify({ mode: "execute", input: prompt, dispatch: true, stream: true, costSensitivity, conversationId, ...(projectId ? { projectId } : {}), ...(attachments.length ? { attachments } : {}), ...(referenceContent ? { referenceContent } : {}) }),
       signal: ctrl.signal,
     });
@@ -1462,7 +1467,7 @@ async function wireRunDetail(id) {
   // streamingSuppressed — or any error) degrades to the buffered JSON flow.
   const ssePost = (path, payload) => fetch(path, {
     method: "POST",
-    headers: { authorization: "Bearer " + KEY, "content-type": "application/json" },
+    headers: { "x-regulait-csrf": "1", "content-type": "application/json" },
     body: JSON.stringify(payload),
   });
   const readSse = async (res, onEvent) => {
@@ -2621,8 +2626,10 @@ function wireSpend() {
 // one for — so nothing on this page can leak a secret back out.
 const PROVIDERS = ["anthropic", "openai", "google", "xai"];
 
+let AUTH_ME = null; // /auth/me snapshot for the Account security card
 async function settingsPage() {
   const { credentials } = await get("/v1/users/" + ME.userId + "/model-credentials");
+  AUTH_ME = await get("/auth/me").catch(() => null);
   const rows = credentials.map((c) => \`<div class="node-row">
     <div class="grow">
       <div>\${esc(c.provider)} <span class="badge info">your key</span></div>
@@ -2646,6 +2653,8 @@ async function settingsPage() {
     <div class="err-line" id="sk-err" style="margin-top:6px"></div>
     <p class="faint" style="font-size:11.5px;margin:8px 0 0">Encrypted at rest and never shown again — not to you, not to an admin. Saving the same provider twice replaces the stored key. Your own key takes precedence over the platform's for every request you make.</p>
   </div>
+  <h2>Account security</h2>
+  \${AUTH_ME ? accountSecurityHtml(AUTH_ME) : '<div class="card"><div class="empty">Sign-in status unavailable</div></div>'}
   <h2>Identity</h2>
   <div class="card"><div class="kv">
     <span class="k">name</span><span>\${esc(ME.user?.displayName ?? "")}</span>
@@ -2656,6 +2665,7 @@ async function settingsPage() {
 }
 
 function wireSettings() {
+  if (AUTH_ME) wireAccountSecurity(() => render());
   $("#sk-add")?.addEventListener("click", async () => {
     const key = $("#sk-key").value.trim();
     if (!key) { $("#sk-err").textContent = "apiKey: a key is required"; return; }
@@ -2683,25 +2693,35 @@ function wireSettings() {
 // ----------------------------------------------------------------- render --
 async function render() {
   const root = $("#root");
-  if (!KEY) {
-    root.innerHTML = \`
-    <div class="gate"><div class="card">
-      <div class="brand"><span class="word">regul<em>ai</em>t</span></div>
-      <p>Sign in with your API key. It stays in this browser tab and is sent only to this server.</p>
-      <input id="gate-key" type="password" placeholder="rgl_…" style="width:100%" autofocus>
-      <div class="err-line" id="gate-err" style="margin:6px 0"></div>
-      <button class="primary" id="gate-go" style="width:100%;margin-top:6px">Continue</button>
-    </div></div>\`;
-    const go = async () => {
-      KEY = $("#gate-key").value.trim();
-      try { await bootstrap(); sessionStorage.setItem("regulait.key", KEY); render(); }
-      catch (e) { KEY = ""; $("#gate-err").textContent = "That key didn’t work: " + e.message; }
-    };
-    $("#gate-go").addEventListener("click", go);
-    $("#gate-key").addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
-    return;
+  if (!ME) {
+    try {
+      await bootstrap();
+    } catch (e) {
+      // Signed in but the workspace failed to load (or a bootstrap-token
+      // session with no user identity landed on /app)? Show the failure —
+      // looping back into the login gate would spin forever.
+      const authed = await fetchAuthMe().catch(() => null);
+      if (authed && (authed.userId || authed.isAdmin)) {
+        root.innerHTML = \`
+        <div class="gate"><div class="card">
+          <div class="brand"><span class="word">regul<em>ai</em>t</span></div>
+          <p>Signed in, but the workspace failed to load — \${esc(e.message)}</p>
+          <button class="primary" id="gate-retry" style="width:100%;margin-top:6px">Retry</button>
+          <button class="ghost small" id="gate-out" style="width:100%;margin-top:6px">Sign out</button>
+        </div></div>\`;
+        $("#gate-retry").addEventListener("click", () => render());
+        $("#gate-out").addEventListener("click", signOut);
+        return;
+      }
+      renderLoginGate(root, {
+        brandHtml: '<div class="brand"><span class="word">regul<em>ai</em>t</span></div>',
+        returnTo: "/app",
+        requireAdmin: false,
+        onSignedIn: () => render(),
+      });
+      return;
+    }
   }
-  if (!ME) { try { await bootstrap(); } catch { signOut(); return; } }
 
   const { page, id } = route();
   let content = "";
