@@ -23,6 +23,7 @@ import {
   eq,
   lt,
   count,
+  oidcProviders,
   orgSettings,
   ORG_SETTINGS_ID,
   users,
@@ -247,6 +248,20 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db) {
         return reply.status(422).send({
           error: "approver_disabled",
           detail: "the chosen infra approver account is deactivated",
+        });
+      }
+    }
+    // ADR-0025 lockout guard: sso_only without a single enabled OIDC provider
+    // would strand every human login behind a door that does not exist.
+    if (body.ssoOnly === true) {
+      const enabled = await db
+        .select({ id: oidcProviders.id })
+        .from(oidcProviders)
+        .where(eq(oidcProviders.enabled, true));
+      if (enabled.length === 0) {
+        return reply.status(422).send({
+          error: "sso_only_needs_a_provider",
+          detail: "enable at least one OIDC provider before turning sso_only on — otherwise nobody can sign in",
         });
       }
     }
