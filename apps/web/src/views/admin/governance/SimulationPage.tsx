@@ -140,7 +140,23 @@ export default function SimulationPage() {
 function DecisionView(props: { decision: EvaluateDecision; label: string }) {
   const d = props.decision;
   const chain = d.ruleChain ?? [];
-  const terminalIdx = chain.length - 1;
+  // the step that decided: the last trace naming the matched rule, falling
+  // back to the last non-"no-match" outcome (default-deny chains match none)
+  let terminalIdx = -1;
+  for (let i = chain.length - 1; i >= 0; i--) {
+    if (d.ruleId && chain[i]!.rule === d.ruleId) {
+      terminalIdx = i;
+      break;
+    }
+  }
+  if (terminalIdx === -1) {
+    for (let i = chain.length - 1; i >= 0; i--) {
+      if (chain[i]!.outcome !== "no-match") {
+        terminalIdx = i;
+        break;
+      }
+    }
+  }
   const bannerClass =
     d.effect === "allow"
       ? a.effectBannerAllow

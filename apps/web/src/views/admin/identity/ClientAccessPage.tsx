@@ -189,8 +189,22 @@ function PostureForm(props: { cur: InterceptionSettings }) {
       <form
         onSubmit={(e) => {
           e.preventDefault();
+          // PUT exactly the settings keys — the GET snapshot also carries row
+          // metadata (id/timestamps) the endpoint rightly rejects
           void act.run(
-            () => api.put("/v1/interception/settings", f),
+            () =>
+              api.put("/v1/interception/settings", {
+                anthropicCompatEnabled: f.anthropicCompatEnabled,
+                openaiCompatEnabled: f.openaiCompatEnabled,
+                mcpInterceptionEnabled: f.mcpInterceptionEnabled,
+                resolutionMode: f.resolutionMode,
+                enforcementPosture: f.enforcementPosture,
+                requireProjectAttribution: f.requireProjectAttribution,
+                requireMcpAttribution: f.requireMcpAttribution,
+                keyCustodyEnforced: f.keyCustodyEnforced,
+                streamingOnBlockMode: f.streamingOnBlockMode,
+                strictFieldRejection: f.strictFieldRejection,
+              }),
             "Posture saved",
           );
         }}
