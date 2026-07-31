@@ -1,3 +1,4 @@
+import { createVerify, generateKeyPairSync } from "node:crypto";
 import { createServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { describe, expect, it } from "vitest";
@@ -9,10 +10,24 @@ import {
   JiraConnectorProvider,
   MockConnectorProvider,
   SlackConnectorProvider,
+  SnowflakeConnectorProvider,
   WebhookConnectorProvider,
+  buildSnowflakeJwt,
   isConnectorProviderKind,
+  parseSnowflakeCredential,
   resolveConnectorProvider,
 } from "./index.js";
+
+// one RSA key pair for every snowflake test (2048-bit keeps the suite fast);
+// a second, passphrase-encrypted export exercises the encrypted-PEM path
+const SNOWFLAKE_KEYS = generateKeyPairSync("rsa", { modulusLength: 2048 });
+const PRIVATE_KEY_PEM = SNOWFLAKE_KEYS.privateKey
+  .export({ type: "pkcs8", format: "pem" })
+  .toString();
+const PUBLIC_KEY_PEM = SNOWFLAKE_KEYS.publicKey.export({ type: "spki", format: "pem" }).toString();
+const ENCRYPTED_PRIVATE_KEY_PEM = SNOWFLAKE_KEYS.privateKey
+  .export({ type: "pkcs8", format: "pem", cipher: "aes-256-cbc", passphrase: "open-sesame" })
+  .toString();
 
 // ---------------------------------------------------------------------------
 // Fake-upstream harness: a real node:http server per test, hit through the
@@ -191,9 +206,16 @@ describe("registry", () => {
     expect(() => resolveConnectorProvider({ kind: "webhook" })).toThrow(/baseUrl/);
   });
 
-  it("rejects declared-but-unimplemented kinds explicitly (no silent promise) — snowflake stays deferred", () => {
-    // Snowflake is DEFERRED: its key-pair credential shape needs a schema
-    // decision owned elsewhere (ROADMAP Batch B) — it must keep 501ing.
+  it("resolves snowflake (ADR-0023: token = the JSON credential; malformed token fails actionable)", () => {
+    // The ROADMAP Batch B deferral is CLOSED: the credential rides ADR-0023's
+    // structured-JSON convention inside the one token. A non-JSON token must
+    // fail with the convention spelled out, never an opaque parse error.
+    expect(
+      resolveConnectorProvider({
+        kind: "snowflake",
+        token: JSON.stringify({ account: "acme-x1", user: "svc", privateKey: PRIVATE_KEY_PEM }),
+      }).kind,
+    ).toBe("snowflake");
     const err = (() => {
       try {
         resolveConnectorProvider({ kind: "snowflake", baseUrl: "https://x.example", token: "t" });
@@ -203,8 +225,9 @@ describe("registry", () => {
       }
     })();
     expect(err).toBeInstanceOf(ConnectorProviderError);
-    expect(err!.status).toBe(501);
-    expect(err!.message).toContain("not implemented yet");
+    expect(err!.status).toBe(400);
+    expect(err!.message).toContain("{account, user, privateKey, passphrase?}");
+    expect(() => resolveConnectorProvider({ kind: "snowflake" })).toThrow(/token/);
   });
 
   it("resolves slack/github/jira with their per-kind config requirements", () => {
@@ -809,5 +832,306 @@ describe("jira adapter (fake upstream)", () => {
         expect(up.requests.length).toBe(0);
       },
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Snowflake adapter — object = "DATABASE.SCHEMA"; key-pair JWT; SQL API v2
+// (ADR-0023). ≥10 fake-upstream tests per the wave convention.
+// ---------------------------------------------------------------------------
+
+describe("snowflake adapter (fake upstream)", () => {
+  const CRED = { account: "acme-x1", user: "svc_regulait", privateKey: PRIVATE_KEY_PEM };
+
+  it("read submits POST /api/v2/statements with database/schema taken from the governed object", async () => {
+    await withUpstream(
+      (_req, res) => reply(res, 200, { data: [["1"]], resultSetMetaData: { numRows: 1 } }),
+      async (up) => {
+        const sf = new SnowflakeConnectorProvider({ credential: CRED, baseUrl: up.url });
+        const res = await sf.invoke({
+          operation: "read",
+          object: "ANALYTICS.PUBLIC",
+          payload: { statement: "SELECT count(*) FROM orders" },
+        });
+        const req = up.requests[0]!;
+        expect(req.method).toBe("POST");
+        expect(req.url).toBe("/api/v2/statements");
+        const body = JSON.parse(req.body);
+        expect(body).toMatchObject({
+          statement: "SELECT count(*) FROM orders",
+          database: "ANALYTICS",
+          schema: "PUBLIC",
+        });
+        expect(res.status).toBe(200);
+        expect(res.body).toMatchObject({ data: [["1"]] });
+      },
+    );
+  });
+
+  it("sends the key-pair JWT headers, and the JWT carries Snowflake's fingerprint claims + a valid RS256 signature", async () => {
+    await withUpstream(
+      (_req, res) => reply(res, 200, { data: [] }),
+      async (up) => {
+        const sf = new SnowflakeConnectorProvider({ credential: CRED, baseUrl: up.url });
+        await sf.invoke({
+          operation: "read",
+          object: "ANALYTICS.PUBLIC",
+          payload: { statement: "SELECT 1" },
+        });
+        const req = up.requests[0]!;
+        expect(req.headers["x-snowflake-authorization-token-type"]).toBe("KEYPAIR_JWT");
+        const auth = String(req.headers.authorization);
+        expect(auth.startsWith("Bearer ")).toBe(true);
+        const [h, p, sig] = auth.slice("Bearer ".length).split(".");
+        expect(JSON.parse(Buffer.from(h!, "base64url").toString())).toEqual({
+          alg: "RS256",
+          typ: "JWT",
+        });
+        const claims = JSON.parse(Buffer.from(p!, "base64url").toString());
+        // Snowflake's convention: sub = UPPER(account).UPPER(user); iss adds
+        // the SHA256 public-key fingerprint
+        expect(claims.sub).toBe("ACME-X1.SVC_REGULAIT");
+        expect(String(claims.iss).startsWith("ACME-X1.SVC_REGULAIT.SHA256:")).toBe(true);
+        expect(claims.exp - claims.iat).toBe(300);
+        // the signature verifies against the real public key
+        const verified = createVerify("RSA-SHA256")
+          .update(`${h}.${p}`)
+          .verify(PUBLIC_KEY_PEM, Buffer.from(sig!, "base64url"));
+        expect(verified).toBe(true);
+      },
+    );
+  });
+
+  it("a passphrase-encrypted private key signs an equally valid JWT", () => {
+    const jwt = buildSnowflakeJwt(
+      {
+        account: "acme-x1",
+        user: "svc",
+        privateKey: ENCRYPTED_PRIVATE_KEY_PEM,
+        passphrase: "open-sesame",
+      },
+      1_784_976_000_000,
+    );
+    const [h, p, sig] = jwt.split(".");
+    const claims = JSON.parse(Buffer.from(p!, "base64url").toString());
+    expect(claims.iat).toBe(1_784_976_000);
+    expect(
+      createVerify("RSA-SHA256").update(`${h}.${p}`).verify(PUBLIC_KEY_PEM, Buffer.from(sig!, "base64url")),
+    ).toBe(true);
+    // wrong/missing passphrase fails actionable, not opaque
+    const err = (() => {
+      try {
+        buildSnowflakeJwt({ account: "a", user: "u", privateKey: ENCRYPTED_PRIVATE_KEY_PEM });
+        return null;
+      } catch (e) {
+        return e as ConnectorProviderError;
+      }
+    })();
+    expect(err).toBeInstanceOf(ConnectorProviderError);
+    expect(err!.status).toBe(400);
+    expect(err!.message).toContain("passphrase");
+  });
+
+  it("bare read (object=null) is the connection-root read: SHOW DATABASES, no database/schema fields", async () => {
+    await withUpstream(
+      (_req, res) => reply(res, 200, { data: [["ANALYTICS"], ["RAW"]] }),
+      async (up) => {
+        const sf = new SnowflakeConnectorProvider({ credential: CRED, baseUrl: up.url });
+        const res = await sf.invoke({ operation: "read" });
+        const body = JSON.parse(up.requests[0]!.body);
+        expect(body).toEqual({ statement: "SHOW DATABASES" });
+        expect(res.body).toMatchObject({ data: [["ANALYTICS"], ["RAW"]] });
+      },
+    );
+  });
+
+  it("write submits a mutating statement (INSERT) under the object's database/schema, forwarding warehouse", async () => {
+    await withUpstream(
+      (_req, res) => reply(res, 200, { statementHandle: "01b2-…", message: "Statement executed successfully." }),
+      async (up) => {
+        const sf = new SnowflakeConnectorProvider({ credential: CRED, baseUrl: up.url });
+        const res = await sf.invoke({
+          operation: "write",
+          object: "ANALYTICS.PUBLIC",
+          payload: {
+            statement: "INSERT INTO audit_notes (note) VALUES ('governed')",
+            warehouse: "WH_SMALL",
+          },
+        });
+        const body = JSON.parse(up.requests[0]!.body);
+        expect(body).toMatchObject({
+          statement: "INSERT INTO audit_notes (note) VALUES ('governed')",
+          database: "ANALYTICS",
+          schema: "PUBLIC",
+          warehouse: "WH_SMALL",
+        });
+        expect(res.status).toBe(200);
+      },
+    );
+  });
+
+  it("op/verb mismatch hard-fails BEFORE any network call: a mutating statement on operation:'read'", async () => {
+    await withUpstream(
+      (_req, res) => reply(res, 200, {}),
+      async (up) => {
+        const sf = new SnowflakeConnectorProvider({ credential: CRED, baseUrl: up.url });
+        const err = (await sf
+          .invoke({
+            operation: "read",
+            object: "ANALYTICS.PUBLIC",
+            payload: { statement: "DELETE FROM orders" },
+          })
+          .catch((e: unknown) => e)) as ConnectorProviderError;
+        expect(err).toBeInstanceOf(ConnectorProviderError);
+        expect(err.status).toBe(400);
+        expect(err.message).toContain("SELECT/WITH/SHOW/DESCRIBE");
+        expect(up.requests.length).toBe(0);
+      },
+    );
+  });
+
+  it("op/verb mismatch hard-fails the other way too: a SELECT on operation:'write'", async () => {
+    await withUpstream(
+      (_req, res) => reply(res, 200, {}),
+      async (up) => {
+        const sf = new SnowflakeConnectorProvider({ credential: CRED, baseUrl: up.url });
+        const err = (await sf
+          .invoke({
+            operation: "write",
+            object: "ANALYTICS.PUBLIC",
+            payload: { statement: "SELECT * FROM orders" },
+          })
+          .catch((e: unknown) => e)) as ConnectorProviderError;
+        expect(err.status).toBe(400);
+        expect(err.message).toContain("INSERT/UPDATE");
+        expect(up.requests.length).toBe(0);
+      },
+    );
+  });
+
+  it("multi-statement submissions are rejected locally (defense-in-depth, not a SQL parser)", async () => {
+    await withUpstream(
+      (_req, res) => reply(res, 200, {}),
+      async (up) => {
+        const sf = new SnowflakeConnectorProvider({ credential: CRED, baseUrl: up.url });
+        const err = (await sf
+          .invoke({
+            operation: "read",
+            object: "ANALYTICS.PUBLIC",
+            payload: { statement: "SELECT 1; DELETE FROM orders" },
+          })
+          .catch((e: unknown) => e)) as ConnectorProviderError;
+        expect(err.status).toBe(400);
+        expect(err.message).toContain("multi-statement");
+        expect(up.requests.length).toBe(0);
+        // a single trailing semicolon is fine (stripped, not rejected)
+        await sf.invoke({
+          operation: "read",
+          object: "ANALYTICS.PUBLIC",
+          payload: { statement: "SELECT 1;" },
+        });
+        expect(JSON.parse(up.requests[0]!.body).statement).toBe("SELECT 1");
+      },
+    );
+  });
+
+  it("the object must be a DATABASE.SCHEMA pair — anything else fails locally", async () => {
+    await withUpstream(
+      (_req, res) => reply(res, 200, {}),
+      async (up) => {
+        const sf = new SnowflakeConnectorProvider({ credential: CRED, baseUrl: up.url });
+        for (const object of ["ANALYTICS", "a.b.c", "bad name.schema"]) {
+          const err = (await sf
+            .invoke({ operation: "read", object, payload: { statement: "SELECT 1" } })
+            .catch((e: unknown) => e)) as ConnectorProviderError;
+          expect(err.status).toBe(400);
+          expect(err.message).toContain('"DATABASE.SCHEMA"');
+        }
+        // write with NO object is refused too — the object is the governed scope
+        const err = (await sf
+          .invoke({ operation: "write", payload: { statement: "INSERT INTO t VALUES (1)" } })
+          .catch((e: unknown) => e)) as ConnectorProviderError;
+        expect(err.status).toBe(400);
+        expect(up.requests.length).toBe(0);
+      },
+    );
+  });
+
+  it("a read WITH a statement but NO object is refused — caller SQL never runs unscoped", async () => {
+    await withUpstream(
+      (_req, res) => reply(res, 200, {}),
+      async (up) => {
+        const sf = new SnowflakeConnectorProvider({ credential: CRED, baseUrl: up.url });
+        const err = (await sf
+          .invoke({ operation: "read", payload: { statement: "SELECT * FROM secrets" } })
+          .catch((e: unknown) => e)) as ConnectorProviderError;
+        expect(err.status).toBe(400);
+        expect(err.message).toContain("requires an object");
+        expect(up.requests.length).toBe(0);
+      },
+    );
+  });
+
+  it("HTTP 429 + Retry-After surfaces as the typed rate-limit error", async () => {
+    await withUpstream(
+      (_req, res) => reply(res, 429, { message: "Too many requests" }, { "retry-after": "7" }),
+      async (up) => {
+        const sf = new SnowflakeConnectorProvider({ credential: CRED, baseUrl: up.url });
+        const err = (await sf
+          .invoke({ operation: "read", object: "ANALYTICS.PUBLIC", payload: { statement: "SELECT 1" } })
+          .catch((e: unknown) => e)) as ConnectorRateLimitError;
+        expect(err).toBeInstanceOf(ConnectorRateLimitError);
+        expect(err.status).toBe(429);
+        expect(err.retryAfterSeconds).toBe(7);
+        expect(err.upstreamStatus).toBe(429);
+      },
+    );
+  });
+
+  it("a non-2xx SQL API error body {message, code} flattens into one actionable line", async () => {
+    await withUpstream(
+      (_req, res) =>
+        reply(res, 422, { message: "SQL compilation error: Object 'ORDERS' does not exist.", code: "002003" }),
+      async (up) => {
+        const sf = new SnowflakeConnectorProvider({ credential: CRED, baseUrl: up.url });
+        const err = (await sf
+          .invoke({ operation: "read", object: "ANALYTICS.PUBLIC", payload: { statement: "SELECT * FROM orders" } })
+          .catch((e: unknown) => e)) as ConnectorProviderError;
+        expect(err.status).toBe(422);
+        expect(err.message).toContain("SQL compilation error");
+        expect(err.message).toContain("code 002003");
+      },
+    );
+  });
+
+  it("parseSnowflakeCredential: valid JSON parses; non-JSON / wrong-shape / extra fields fail actionable", () => {
+    expect(parseSnowflakeCredential(JSON.stringify(CRED))).toEqual(CRED);
+    for (const [token, fragment] of [
+      ["not json", "non-JSON token"],
+      [JSON.stringify({ account: "a", user: "u" }), "privateKey"],
+      [JSON.stringify({ ...CRED, extra: "field" }), "extra"],
+      [JSON.stringify({ account: "", user: "u", privateKey: "k" }), "account"],
+    ] as const) {
+      const err = (() => {
+        try {
+          parseSnowflakeCredential(token);
+          return null;
+        } catch (e) {
+          return e as ConnectorProviderError;
+        }
+      })();
+      expect(err).toBeInstanceOf(ConnectorProviderError);
+      expect(err!.status).toBe(400);
+      expect(err!.message).toContain(fragment);
+    }
+  });
+
+  it("default base URL is https://<account>.snowflakecomputing.com (lowercased); baseUrl overrides", () => {
+    const sf = new SnowflakeConnectorProvider({
+      credential: { account: "Acme-X1", user: "u", privateKey: PRIVATE_KEY_PEM },
+    });
+    expect((sf as unknown as { base: string }).base).toBe("https://acme-x1.snowflakecomputing.com");
+    const overridden = new SnowflakeConnectorProvider({ credential: CRED, baseUrl: "http://127.0.0.1:9/" });
+    expect((overridden as unknown as { base: string }).base).toBe("http://127.0.0.1:9");
   });
 });

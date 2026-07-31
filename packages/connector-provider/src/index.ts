@@ -16,10 +16,11 @@
  * and performs exactly that. A FAILED call surfaces as a ConnectorProviderError
  * and bills nothing (the gateway mirrors the model path).
  *
- * "No silent promises" rule (same as model-provider): kinds that are
- * interface-ready but not implemented (snowflake — deferred pending a schema
- * decision on its key-pair credential shape, see the registry comment) throw an
- * explicit "not implemented yet" from the registry rather than pretending.
+ * "No silent promises" rule (same as model-provider): a kind that is
+ * interface-ready but not implemented throws an explicit "not implemented yet"
+ * from the registry rather than pretending. (Every declared kind is now
+ * implemented — snowflake's ROADMAP Batch B deferral was closed by ADR-0023's
+ * structured-JSON credential convention; the rule stands for future kinds.)
  *
  * Data-scope semantics (shared by every adapter here): the invocation's
  * `object` string is the SAME string pillar 1's `allowedObjects` grant field is
@@ -29,9 +30,10 @@
  * adapter therefore only has to define what its `object` MEANS, and must route
  * every upstream call through that object so the upstream reach never exceeds
  * the authorized object:
- *   - slack  → a channel ID (e.g. "C0123456789")
- *   - github → an "owner/repo" slug (e.g. "acme/billing")
- *   - jira   → a project key (e.g. "PLAT")
+ *   - slack     → a channel ID (e.g. "C0123456789")
+ *   - github    → an "owner/repo" slug (e.g. "acme/billing")
+ *   - jira      → a project key (e.g. "PLAT")
+ *   - snowflake → a "DATABASE.SCHEMA" pair (e.g. "ANALYTICS.PUBLIC")
  * Read/write classification is likewise the interface's own: `operation:
  * "read"` may only ever produce non-mutating upstream calls (GET / query),
  * `operation: "write"` only mutating ones — that is what makes pillar 1's
@@ -39,6 +41,7 @@
  * disagrees with its operation rather than quietly reclassifying.
  */
 
+import { createHash, createPrivateKey, createPublicKey, createSign } from "node:crypto";
 import { z } from "zod";
 
 export const CONNECTOR_PROVIDER_KINDS = [
@@ -878,6 +881,300 @@ export class JiraConnectorProvider implements ConnectorProvider {
 }
 
 // ---------------------------------------------------------------------------
+// Snowflake adapter — the Snowflake SQL API v2 (POST /api/v2/statements) with
+// key-pair JWT auth (ADR-0023).
+//
+// Credential format (ADR-0023's structured-JSON-inside-the-single-ciphertext
+// convention): the connection's single `token` is a JSON document
+//   {"account":"myorg-acct","user":"SVC_REGULAIT","privateKey":"-----BEGIN…",
+//    "passphrase":"…"?}
+// serialized then encrypted exactly like every other connector token — ZERO
+// migration for the credential, and any future multi-field connector gets the
+// same convention for free. `parseSnowflakeCredential` validates the shape
+// with an actionable message; the gateway calls it at connection-create time
+// for kind=snowflake so a malformed credential 400s at write, not at first
+// invoke.
+//
+// Auth: RS256 key-pair JWT against the SQL API. Claims follow Snowflake's
+// fingerprint convention: with Q = UPPER(account).UPPER(user) and fp =
+// "SHA256:" + base64(sha256(DER-SPKI public key derived from the private
+// key)), the token carries iss = "Q.fp", sub = "Q", iat = now, exp = now+300s
+// (one short-lived token per invoke — nothing cached, nothing to revoke). Sent
+// as `Authorization: Bearer` + `X-Snowflake-Authorization-Token-Type:
+// KEYPAIR_JWT`.
+//
+// Object semantics: `object` is a **"DATABASE.SCHEMA" pair** (e.g.
+// "ANALYTICS.PUBLIC") — the governed unit an admin scopes a Snowflake grant to
+// via `allowedObjects`. Chosen over a warehouse because a warehouse is COMPUTE
+// (which cluster burns credits), not DATA REACH — pillar 1's object scope
+// exists to bound what data a user can touch, and database.schema is
+// Snowflake's own containment unit for that (the analogue of owner/repo and
+// the Jira project key). The warehouse rides `payload.warehouse` as a plain
+// execution parameter. Every statement is submitted with the SQL API's
+// `database`/`schema` fields taken from `object` — never from the payload — so
+// unqualified names in caller SQL resolve inside the authorized scope.
+//
+// Operation surface:
+//   read,  object=null                → SHOW DATABASES (the connection-root
+//                                       read, mirroring the other adapters'
+//                                       bare read; adapter-generated SQL)
+//   read,  object=DB.SCHEMA
+//          + payload.statement        → the statement, submitted with
+//                                       database/schema from the object
+//                                       (payload.warehouse / payload.timeout
+//                                       forwarded when present)
+//   write, object=DB.SCHEMA (required)
+//          + payload.statement        → same submission; mutating statements
+//
+// STATEMENT-LEVEL GUARD — defense-in-depth, NOT a SQL parser: the adapter
+// (a) rejects multi-statement submissions (any ';' beyond an optional trailing
+// one) and never sends MULTI_STATEMENT_COUNT, so the SQL API's own
+// single-statement default is the real backstop; and (b) requires the
+// statement's first keyword to match the op class — read: SELECT / WITH /
+// SHOW / DESCRIBE (non-mutating), write: INSERT / UPDATE (the mutating surface
+// this slice supports; DELETE/DDL are deliberately not offered). A ';' inside
+// a string literal is a false-positive rejection and a mutating statement
+// smuggled past the keyword check (e.g. via a CTE) is ultimately bounded by
+// the stored credential's own Snowflake role — which is why the ADR records
+// this guard as defense-in-depth on top of pillar-1 scoping + least-privilege
+// upstream roles, not as a parser. Fully-qualified names in caller SQL can
+// name other databases; the same upstream role bound applies (see ADR-0023).
+//
+// Rate limiting: the SQL API answers HTTP 429 — mapped to
+// ConnectorRateLimitError with Retry-After when present, never a generic
+// failure. Other non-2xx bodies carry {message, code} — flattened into one
+// actionable line.
+// ---------------------------------------------------------------------------
+
+/** ADR-0023 structured-JSON credential for kind=snowflake (the whole document
+ * is what gets encrypted into connector_credentials.token_ciphertext). */
+export const snowflakeCredentialSchema = z
+  .object({
+    /** account identifier, e.g. "myorg-acct123" (no .snowflakecomputing.com) */
+    account: z.string().min(1),
+    /** the Snowflake user the key pair is registered to */
+    user: z.string().min(1),
+    /** PEM-encoded RSA private key (PKCS#8 "BEGIN PRIVATE KEY" or encrypted
+     * "BEGIN ENCRYPTED PRIVATE KEY") */
+    privateKey: z.string().min(1),
+    /** passphrase for an encrypted private key; omit for an unencrypted one */
+    passphrase: z.string().min(1).optional(),
+  })
+  .strict();
+
+export type SnowflakeCredential = z.infer<typeof snowflakeCredentialSchema>;
+
+/** Parse + validate the JSON credential convention with ACTIONABLE failures
+ * (400): not-JSON, wrong shape, and unknown extra fields each get a message
+ * that says what to send instead. The gateway calls this at connection-create
+ * time for kind=snowflake; the registry calls it again at invoke time (the
+ * stored credential predating validation must still fail explicit). */
+export function parseSnowflakeCredential(token: string): SnowflakeCredential {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(token);
+  } catch {
+    throw new ConnectorProviderError(
+      "snowflake credential must be a JSON document {account, user, privateKey, passphrase?} " +
+        "(serialized then stored as the connection's single token) — got a non-JSON token",
+      400,
+    );
+  }
+  const parsed = snowflakeCredentialSchema.safeParse(raw);
+  if (!parsed.success) {
+    const issues = parsed.error.issues
+      .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
+      .join("; ");
+    throw new ConnectorProviderError(
+      `snowflake credential JSON is invalid — expected {account, user, privateKey, passphrase?}: ${issues}`,
+      400,
+    );
+  }
+  return parsed.data;
+}
+
+/** exported for tests: the RS256 key-pair JWT (Snowflake fingerprint claim
+ * convention). `nowMs` is injectable so tests can pin iat/exp. */
+export function buildSnowflakeJwt(cred: SnowflakeCredential, nowMs = Date.now()): string {
+  let privateKey;
+  try {
+    privateKey = createPrivateKey(
+      cred.passphrase ? { key: cred.privateKey, passphrase: cred.passphrase } : cred.privateKey,
+    );
+  } catch (err) {
+    throw new ConnectorProviderError(
+      "snowflake privateKey could not be parsed — provide a PEM RSA private key " +
+        "(PKCS#8), and the matching passphrase when it is encrypted: " +
+        (err instanceof Error ? err.message : String(err)),
+      400,
+    );
+  }
+  // Snowflake's public-key fingerprint: SHA256 over the DER-encoded SPKI
+  // public key derived from the private key, base64, "SHA256:"-prefixed.
+  // (Round-trips through an unencrypted in-memory PEM because the installed
+  // @types/node signature for createPublicKey doesn't accept a KeyObject.)
+  const spki = createPublicKey(privateKey.export({ type: "pkcs8", format: "pem" }) as string).export(
+    { type: "spki", format: "der" },
+  );
+  const fingerprint = `SHA256:${createHash("sha256").update(spki).digest("base64")}`;
+  const qualified = `${cred.account.toUpperCase()}.${cred.user.toUpperCase()}`;
+  const now = Math.floor(nowMs / 1000);
+  const b64url = (obj: unknown) =>
+    Buffer.from(JSON.stringify(obj)).toString("base64url");
+  const signingInput = `${b64url({ alg: "RS256", typ: "JWT" })}.${b64url({
+    iss: `${qualified}.${fingerprint}`,
+    sub: qualified,
+    iat: now,
+    exp: now + 300, // one short-lived token per invoke
+  })}`;
+  const signature = createSign("RSA-SHA256")
+    .update(signingInput)
+    .sign(privateKey)
+    .toString("base64url");
+  return `${signingInput}.${signature}`;
+}
+
+/** first keyword per op class — see the STATEMENT-LEVEL GUARD comment above */
+const SNOWFLAKE_READ_VERBS = ["SELECT", "WITH", "SHOW", "DESCRIBE"] as const;
+const SNOWFLAKE_WRITE_VERBS = ["INSERT", "UPDATE"] as const;
+
+export interface SnowflakeAdapterOptions {
+  credential: SnowflakeCredential;
+  /** defaults to https://<account>.snowflakecomputing.com; override for tests/proxies */
+  baseUrl?: string | null;
+  fetchImpl?: FetchLike;
+}
+
+export class SnowflakeConnectorProvider implements ConnectorProvider {
+  readonly kind = "snowflake" as const;
+  private readonly base: string;
+  private readonly credential: SnowflakeCredential;
+  private readonly fetchImpl: FetchLike;
+
+  constructor(opts: SnowflakeAdapterOptions) {
+    this.credential = opts.credential;
+    this.base = (
+      opts.baseUrl ?? `https://${opts.credential.account.toLowerCase()}.snowflakecomputing.com`
+    ).replace(/\/$/, "");
+    this.fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
+  }
+
+  /** "DATABASE.SCHEMA" → validated pair; anything else is a caller error */
+  private objectScope(object: string | null): { database: string; schema: string } {
+    const m = object === null ? null : /^([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)$/.exec(object);
+    if (!m) {
+      throw new ConnectorProviderError(
+        `snowflake object must be a "DATABASE.SCHEMA" pair (got ${object === null ? "none" : `'${object}'`})`,
+        400,
+      );
+    }
+    return { database: m[1]!, schema: m[2]! };
+  }
+
+  /** the statement-level guard: single statement, op-class first keyword */
+  private guardStatement(operation: "read" | "write", statement: string): string {
+    const trimmed = statement.trim().replace(/;$/, "").trim();
+    if (!trimmed) {
+      throw new ConnectorProviderError("snowflake payload.statement is empty", 400);
+    }
+    if (trimmed.includes(";")) {
+      throw new ConnectorProviderError(
+        "snowflake rejects multi-statement submissions — one statement per governed call " +
+          "(defense-in-depth; the SQL API's single-statement default is the backstop)",
+        400,
+      );
+    }
+    const verbs = operation === "read" ? SNOWFLAKE_READ_VERBS : SNOWFLAKE_WRITE_VERBS;
+    const first = (trimmed.match(/^[A-Za-z]+/) ?? [""])[0].toUpperCase();
+    if (!(verbs as readonly string[]).includes(first)) {
+      throw new ConnectorProviderError(
+        `snowflake ${operation} allows statements starting with ${verbs.join("/")} ` +
+          `(got '${first || trimmed.slice(0, 20)}') — a ${operation === "read" ? "mutating" : "non-mutating"} ` +
+          `statement must not ride operation:"${operation}"`,
+        400,
+      );
+    }
+    return trimmed;
+  }
+
+  async invoke(invocation: ConnectorInvocation): Promise<ConnectorInvokeResult> {
+    const payload = invocation.payload ?? {};
+
+    let body: Record<string, unknown>;
+    if (invocation.operation === "read" && invocation.object == null) {
+      // the connection-root read — adapter-generated, non-mutating by
+      // construction; caller-supplied SQL without an object is refused (the
+      // object is where the governed scope lives)
+      if (typeof payload.statement === "string") {
+        throw new ConnectorProviderError(
+          'snowflake read with a statement requires an object (the governed "DATABASE.SCHEMA" scope)',
+          400,
+        );
+      }
+      body = { statement: "SHOW DATABASES" };
+    } else {
+      const scope = this.objectScope(invocation.object ?? null);
+      if (typeof payload.statement !== "string") {
+        throw new ConnectorProviderError(
+          `snowflake ${invocation.operation} requires payload.statement (the SQL to run)`,
+          400,
+        );
+      }
+      const statement = this.guardStatement(invocation.operation, payload.statement);
+      body = {
+        statement,
+        // the governed object is authoritative for the session scope — the
+        // payload never carries database/schema, so it cannot widen them
+        database: scope.database,
+        schema: scope.schema,
+        ...(typeof payload.warehouse === "string" && payload.warehouse
+          ? { warehouse: payload.warehouse }
+          : {}),
+        ...(typeof payload.timeout === "number" ? { timeout: payload.timeout } : {}),
+      };
+    }
+
+    const url = `${this.base}/api/v2/statements`;
+    const res = await this.fetchImpl(url, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+        authorization: `Bearer ${buildSnowflakeJwt(this.credential)}`,
+        "x-snowflake-authorization-token-type": "KEYPAIR_JWT",
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (res.status === 429) {
+      throw new ConnectorRateLimitError(
+        "snowflake POST /api/v2/statements rate-limited (HTTP 429)",
+        retryAfterSeconds(res.headers),
+        429,
+      );
+    }
+    const text = await res.text();
+    if (res.status < 200 || res.status >= 300) {
+      // SQL API error bodies carry {message, code} — surface both, not raw JSON
+      let detail = text;
+      try {
+        const parsed = JSON.parse(text) as { message?: string; code?: string };
+        if (parsed && typeof parsed.message === "string") {
+          detail = parsed.code ? `${parsed.message} (code ${parsed.code})` : parsed.message;
+        }
+      } catch {
+        /* keep raw text */
+      }
+      throw new ConnectorProviderError(
+        `snowflake POST /api/v2/statements failed: ${detail}`,
+        res.status,
+      );
+    }
+    return decodeBody(res.status, text);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Mock adapter — in-memory, keyless, deterministic: for tests and air-gapped
 // development. `read` returns a canned object keyed by the requested object;
 // `write` records the payload and echoes it back. The whole execution layer is
@@ -1015,15 +1312,22 @@ export function resolveConnectorProvider(
         token: config.token,
         ...(fetchImpl ? { fetchImpl } : {}),
       });
-    // Declared, interface-ready, but not built yet — an explicit failure, never
-    // a silent success (the model-provider discipline). Snowflake is DEFERRED:
-    // its key-pair credential shape may not fit the single-ciphertext
-    // `connector_credentials` column (ROADMAP Batch B), and that schema
-    // decision is owned elsewhere — do not build it here until it lands.
     case "snowflake":
-      throw new ConnectorProviderError(
-        `connector kind '${config.kind}' is not implemented yet`,
-        501,
-      );
+      // ADR-0023 closed the ROADMAP Batch B deferral: token = the
+      // structured-JSON credential {account, user, privateKey, passphrase?}
+      // inside the one ciphertext (validated again here — a stored credential
+      // predating validation must fail explicit, not opaque); baseUrl optional
+      // (defaults to https://<account>.snowflakecomputing.com, override for
+      // proxies/tests).
+      if (!config.token) {
+        throw new ConnectorProviderError(
+          "snowflake connector requires a token (the JSON credential {account, user, privateKey, passphrase?})",
+        );
+      }
+      return new SnowflakeConnectorProvider({
+        credential: parseSnowflakeCredential(config.token),
+        baseUrl: config.baseUrl ?? null,
+        ...(fetchImpl ? { fetchImpl } : {}),
+      });
   }
 }
