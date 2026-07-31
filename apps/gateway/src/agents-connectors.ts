@@ -8,10 +8,13 @@ import {
   connectors,
   costEvents,
   and,
+  count,
   eq,
   gte,
   inArray,
+  isNull,
   modelCredentials,
+  sql,
   semanticCache,
   usageEvents,
   userModelCredentials,
@@ -248,17 +251,25 @@ export async function executeGovernedDispatch(
     if (!dataKey) {
       return { ok: false, status: 503, error: "no_data_key", detail: "set REGULAIT_DATA_KEY" };
     }
-    // BYO key: the BILLING user's own credential wins over the platform one —
+    // ADR-0024 (O15) KEY CUSTODY ENFORCEMENT: while keyCustodyEnforced is on,
+    // stored per-user credentials are SKIPPED ENTIRELY at dispatch — the org
+    // holds the vendor keys (platform credentials / env fallback), developers
+    // hold only RegulAIt keys. The rows are not deleted, merely inert, so
+    // flipping the toggle off restores them (reversible). Without custody:
+    // BYO key — the BILLING user's own credential wins over the platform one;
     // their spend rides their key, and the ledger records which was used.
-    const [userCred] = await db
-      .select()
-      .from(userModelCredentials)
-      .where(
-        and(
-          eq(userModelCredentials.userId, userId),
-          eq(userModelCredentials.provider, served.provider),
-        ),
-      );
+    const custody = (await loadInterceptionSettings(db)).keyCustodyEnforced;
+    const [userCred] = custody
+      ? [undefined]
+      : await db
+          .select()
+          .from(userModelCredentials)
+          .where(
+            and(
+              eq(userModelCredentials.userId, userId),
+              eq(userModelCredentials.provider, served.provider),
+            ),
+          );
     const [platformCred] = userCred
       ? [undefined]
       : await db.select().from(modelCredentials).where(eq(modelCredentials.provider, served.provider));
@@ -587,11 +598,17 @@ export async function configuredProviders(
   // Without REGULAIT_DATA_KEY no STORED credential can be decrypted, so mock +
   // any env-configured provider is all that can be served.
   if (!dataKey) return set;
+  // ADR-0024 (O15): under enforced key custody a user's own stored credential
+  // is inert at dispatch, so it must not count as a dispatchable provider
+  // here either — routing may only land on an agent that can actually serve.
+  const custody = (await loadInterceptionSettings(db)).keyCustodyEnforced;
   const [userCreds, platformCreds] = await Promise.all([
-    db
-      .select({ provider: userModelCredentials.provider })
-      .from(userModelCredentials)
-      .where(eq(userModelCredentials.userId, userId)),
+    custody
+      ? Promise.resolve([])
+      : db
+          .select({ provider: userModelCredentials.provider })
+          .from(userModelCredentials)
+          .where(eq(userModelCredentials.userId, userId)),
     db.select({ provider: modelCredentials.provider }).from(modelCredentials),
   ]);
   for (const c of userCreds) set.add(c.provider);
@@ -710,6 +727,66 @@ export function registerAgentConnectorRoutes(
     return { providers };
   });
 
+  // ADR-0024 (O11) — the EXPLICIT "Unattributed" bucket: every usage row with
+  // projectId NULL (calls that arrived without x-regulait-project-id), rolled
+  // up so an admin can SEE the attribution leak instead of it hiding as a gap
+  // between provider invoices and project totals. Admin-only (not in
+  // NON_ADMIN_ROUTES). Deliberately a separate bucket, never mixed into any
+  // project rollup — a null-project row cannot hit a project budget, and every
+  // per-project number is unchanged by its existence.
+  app.get("/v1/costs/unattributed", async () => {
+    const where = isNull(usageEvents.projectId);
+    const [[measured], byObjectType, byUser, byMcpTool] = await Promise.all([
+      db
+        .select({
+          events: count(),
+          costUsd: sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8`,
+          inputTokens: sql<number>`coalesce(sum(${usageEvents.inputTokens}), 0)::int`,
+          outputTokens: sql<number>`coalesce(sum(${usageEvents.outputTokens}), 0)::int`,
+        })
+        .from(usageEvents)
+        .where(where),
+      db
+        .select({
+          objectType: usageEvents.objectType,
+          events: count(),
+          costUsd: sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8`,
+        })
+        .from(usageEvents)
+        .where(where)
+        .groupBy(usageEvents.objectType),
+      db
+        .select({
+          userId: usageEvents.userId,
+          events: count(),
+          costUsd: sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8`,
+        })
+        .from(usageEvents)
+        .where(where)
+        .groupBy(usageEvents.userId),
+      db
+        .select({
+          toolName: usageEvents.operation,
+          events: count(),
+          costUsd: sql<number>`coalesce(sum(${usageEvents.costUsd}), 0)::float8`,
+        })
+        .from(usageEvents)
+        .where(and(where, eq(usageEvents.objectType, "mcp_tool")))
+        .groupBy(usageEvents.operation),
+    ]);
+    return {
+      bucket: "unattributed",
+      note:
+        "calls that arrived with no x-regulait-project-id header — metered on the same ledger, " +
+        "never counted against any project budget. Close the gap with requireProjectAttribution " +
+        "(compat surfaces) and requireMcpAttribution (MCP proxy).",
+      measured,
+      byObjectType,
+      byUser,
+      byMcpTool,
+    };
+  });
+
   // Rotation is the POST above (upsert on provider); this is the way OUT — a
   // platform key that must stop being used has to be removable without a
   // psql session, and there is no other route that can do it.
@@ -741,6 +818,31 @@ export function registerAgentConnectorRoutes(
       return reply.status(403).send({ error: "forbidden" });
     }
     const body = createModelCredentialSchema.parse(req.body);
+    // ADR-0024 (O15): under enforced key custody, per-user BYO credentials
+    // stop working — creation AND update (this endpoint upserts) are refused
+    // with an explanation, and every refusal is audited. Existing rows are not
+    // deleted; they are inert while the toggle is on (reversible).
+    const custody = (await loadInterceptionSettings(db)).keyCustodyEnforced;
+    if (custody) {
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+        objectType: "user",
+        objectId: userId,
+        detail: { phase: "key_custody", provider: body.provider, keyCustodyEnforced: true },
+        effect: "deny",
+        ruleId: "key-custody-enforced",
+        ruleChain: [],
+        reason: `per-user model credential for '${body.provider}' refused: key custody is enforced on this deployment`,
+      });
+      return reply.status(409).send({
+        error: "key_custody_enforced",
+        detail:
+          "this deployment enforces key custody: the organisation holds the vendor keys and " +
+          "developers hold only RegulAIt keys, so per-user BYO model credentials cannot be " +
+          "created or updated. Dispatches use the org/platform credential for each provider. " +
+          "An admin can lift this in Client Access (keyCustodyEnforced).",
+      });
+    }
     if (!opts.dataKey) {
       return reply.status(503).send({ error: "no_data_key", detail: "set REGULAIT_DATA_KEY" });
     }
@@ -1467,7 +1569,19 @@ export function registerAgentConnectorRoutes(
       // agent's input list price × the ephemeral cache-read discount. Written
       // only when caching actually applies (like context_compaction).
       const systemPrompt = body.system ?? undefined;
-      const systemTokens = systemPrompt ? Math.ceil(systemPrompt.length / 4) : 0;
+      // ADR-0024 estimation-accuracy fix: what the provider actually caches is
+      // the FULL outgoing system — the SERVED agent's admin-authored base
+      // prompt (ADR-0023, prepended in executeGovernedDispatch) PLUS the
+      // caller's system — so the cacheable-token estimate must count both.
+      // Counting only the caller's part both under-reported savings and could
+      // wrongly skip caching when the base alone cleared the provider minimum.
+      const routedForCacheEstimate = routing;
+      const servedForCacheEstimate = routedForCacheEstimate
+        ? registry.find((a) => a.id === routedForCacheEstimate.selectedAgentId)
+        : agent;
+      const adminBasePrompt = servedForCacheEstimate?.systemPrompt ?? undefined;
+      const outgoingSystem = [adminBasePrompt, systemPrompt].filter(Boolean).join("\n\n");
+      const systemTokens = outgoingSystem ? Math.ceil(outgoingSystem.length / 4) : 0;
       const promptCache = planPromptCache({
         systemTokens,
         routingMode: modeFor(org.promptCachingEnabled),

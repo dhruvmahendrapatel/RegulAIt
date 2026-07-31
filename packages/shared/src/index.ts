@@ -889,6 +889,15 @@ export const updateInterceptionSettingsSchema = z
     resolutionMode: resolutionModeSchema.optional(),
     enforcementPosture: enforcementPostureSchema.optional(),
     requireProjectAttribution: z.boolean().optional(),
+    /** ADR-0024 (O11): the MCP twin of requireProjectAttribution — true
+     * rejects an MCP tool call with no x-regulait-project-id pre-dispatch
+     * instead of running it into the Unattributed bucket. */
+    requireMcpAttribution: z.boolean().optional(),
+    /** ADR-0024 (O15): true makes the key_custody rung ENFORCED — per-user
+     * BYO credentials 409 on create/update and are skipped at dispatch
+     * (org/platform credentials only). Reversible: stored rows are inert,
+     * never deleted. */
+    keyCustodyEnforced: z.boolean().optional(),
     /** ADR-0021: a stream=true call on a block-mode PII project — 'suppress'
      * (default) buffers and answers JSON with a disclosure; 'reject' 400s. */
     streamingOnBlockMode: z.enum(["suppress", "reject"]).optional(),
@@ -898,6 +907,38 @@ export const updateInterceptionSettingsSchema = z
   })
   .strict();
 export type UpdateInterceptionSettings = z.infer<typeof updateInterceptionSettingsSchema>;
+
+// ---------------------------------------------------------------------------
+// ADR-0024 (O13) — per-scope interception overrides (migration 0041).
+// Precedence: user > project > role > org singleton; first non-NULL per field
+// wins; ties within a kind = most recently created rule wins. A rule that
+// enables a surface grants NOTHING — evaluateAgent still gates every dispatch.
+// ---------------------------------------------------------------------------
+
+export const interceptionScopeKindSchema = z.enum(["user", "project", "role"]);
+export type InterceptionScopeKindValue = z.infer<typeof interceptionScopeKindSchema>;
+
+const scopeRuleFields = {
+  /** null = inherit from the next precedence level down */
+  anthropicCompatEnabled: z.boolean().nullable().optional(),
+  openaiCompatEnabled: z.boolean().nullable().optional(),
+  resolutionMode: resolutionModeSchema.nullable().optional(),
+  note: z.string().max(2000).nullable().optional(),
+};
+
+export const createInterceptionScopeRuleSchema = z
+  .object({
+    scopeKind: interceptionScopeKindSchema,
+    scopeId: z.string().uuid(),
+    ...scopeRuleFields,
+  })
+  .strict();
+export type CreateInterceptionScopeRule = z.infer<typeof createInterceptionScopeRuleSchema>;
+
+/** PATCH is a partial update of the override fields only — a rule's scope is
+ * its identity; retargeting is delete + create. */
+export const updateInterceptionScopeRuleSchema = z.object(scopeRuleFields).strict();
+export type UpdateInterceptionScopeRule = z.infer<typeof updateInterceptionScopeRuleSchema>;
 
 // ---------------------------------------------------------------------------
 // ADR-0021 — ORG SETTINGS: org-wide functional defaults (migration 0038).

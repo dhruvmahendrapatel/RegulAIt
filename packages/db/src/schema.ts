@@ -115,6 +115,9 @@ export const auditLog = pgTable(
         // (which compat surfaces exist, how models resolve, whether
         // attribution is mandatory). Plain text column — no DDL needed.
         "interception_settings",
+        // ADR-0024 (O13): an admin create/update/delete of a per-scope
+        // interception override rule. Plain text column — no DDL needed.
+        "interception_scope_rule",
         // ADR-0021: an admin change to the org-wide functional defaults
         // (org_settings singleton). Plain text column — no DDL needed.
         "org_settings",
@@ -1509,6 +1512,17 @@ export const interceptionSettings = pgTable(
     // call with no x-regulait-project-id is REJECTED rather than run
     // unattributed.
     requireProjectAttribution: boolean("require_project_attribution").notNull().default(false),
+    // ADR-0024 (O11): the MCP twin of requireProjectAttribution. FALSE
+    // (default) = an unattributed MCP tool call runs, metered with a NULL
+    // project (the explicit "Unattributed" bucket); TRUE = it is rejected
+    // pre-dispatch with an error naming the x-regulait-project-id header.
+    requireMcpAttribution: boolean("require_mcp_attribution").notNull().default(false),
+    // ADR-0024 (O15): the key_custody rung as an ENFORCED mechanism, not a
+    // declaration. TRUE = per-user BYO model credentials stop working —
+    // creation/update is a 409 and dispatch resolution skips stored user
+    // credentials entirely (org/platform only). Rows are never deleted by the
+    // flip; they are inert while enforced, so it is reversible.
+    keyCustodyEnforced: boolean("key_custody_enforced").notNull().default(false),
     // ADR-0021 (migration 0038): what a stream=true call on a block-mode PII
     // project gets. 'suppress' (default, today's ADR-0019 behaviour) runs the
     // same governed dispatch fully buffered and answers plain JSON with a
@@ -1530,6 +1544,55 @@ export const interceptionSettings = pgTable(
 );
 
 export type InterceptionSettingsRow = typeof interceptionSettings.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0024 (migration 0041, O13) — per-role / per-project / per-user
+// interception scope rules: STAGED ROLLOUT for the compat surfaces. The
+// org-wide singleton above stays the base; a scope rule overrides individual
+// fields for one user, one project, or one role. NULL = inherit.
+//
+// PRECEDENCE (documented in ADR-0024 and pinned in tests):
+//   user > project > role > org singleton — first NON-NULL per field wins,
+//   each FIELD resolved independently. Ties within one kind (e.g. a user
+//   holding two roles with conflicting rules) resolve to the MOST RECENTLY
+//   CREATED rule.
+//
+// SURFACE EXPOSURE IS NOT ENTITLEMENT. A rule that enables a surface for a
+// role grants NOTHING: every dispatch still goes through evaluateAgent for
+// the calling user, identically. A rule only decides whether the provider-
+// shaped route exists for that caller; a disabled-by-resolution surface
+// answers the same indistinguishable 404 as the org-level gate.
+// ---------------------------------------------------------------------------
+export const INTERCEPTION_SCOPE_KINDS = ["user", "project", "role"] as const;
+export type InterceptionScopeKind = (typeof INTERCEPTION_SCOPE_KINDS)[number];
+
+export const interceptionScopeRules = pgTable(
+  "interception_scope_rules",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scopeKind: text("scope_kind", { enum: INTERCEPTION_SCOPE_KINDS }).notNull(),
+    // polymorphic: a users.id / projects.id / roles.id depending on scopeKind.
+    // No FK — existence is validated at the API; a dangling rule never matches.
+    scopeId: uuid("scope_id").notNull(),
+    // NULL on any of the three = inherit from the next precedence level down.
+    anthropicCompatEnabled: boolean("anthropic_compat_enabled"),
+    openaiCompatEnabled: boolean("openai_compat_enabled"),
+    resolutionMode: text("resolution_mode", { enum: RESOLUTION_MODES }),
+    note: text("note"),
+    createdBy: uuid("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("interception_scope_rules_scope_idx").on(t.scopeKind, t.scopeId),
+    check(
+      "interception_scope_rules_kind",
+      sql`${t.scopeKind} IN ('user', 'project', 'role')`,
+    ),
+  ],
+);
+
+export type InterceptionScopeRuleRow = typeof interceptionScopeRules.$inferSelect;
 
 // ---------------------------------------------------------------------------
 // ADR-0021 (migration 0038) — ORG SETTINGS: the single home for org-wide

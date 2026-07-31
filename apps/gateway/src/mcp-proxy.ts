@@ -16,6 +16,8 @@ import {
   auditLog,
   costEvents,
   eq,
+  interceptionSettings,
+  INTERCEPTION_SETTINGS_ID,
   mcpServers,
   mcpTools,
   usageEvents,
@@ -52,9 +54,11 @@ const proxyParams = z.object({ serverId: z.string().uuid() });
  *    session is attributed — which matches how a session belongs to a project;
  *  - it keeps attribution at the same layer as authorization (the API key is
  *    already a header), so both are validated before the transport is hijacked.
- * Absent header = an unattributed call, byte-identical to the pre-ADR-0019
- * behaviour (no usage row, no PII enforcement — there is no project policy to
- * enforce).
+ * Absent header = an UNATTRIBUTED call. Since ADR-0024 (O11) it is still
+ * METERED — the same usage/pricing row, with projectId NULL, surfaced in the
+ * explicit "Unattributed" bucket — but carries no PII enforcement (there is no
+ * project policy to enforce) and can never touch a project budget. An admin
+ * can refuse unattributed calls outright with require_mcp_attribution.
  */
 export const PROJECT_HEADER = "x-regulait-project-id";
 const proxyHeaders = z.object({
@@ -125,8 +129,9 @@ export async function executeGovernedToolCall(
     ceilingTools?: readonly string[] | null;
     /** ADR-0019 pillar-5 attribution: the project this tool call bills to. The
      * CALLER validates it (assertProjectAttribution) before getting here.
-     * null/undefined = unattributed — no usage row and no PII enforcement,
-     * byte-identical to the pre-ADR-0019 behaviour. */
+     * null/undefined = unattributed — still metered (ADR-0024 O11: the usage
+     * row lands with projectId NULL in the Unattributed bucket) but with no
+     * PII enforcement, and it can never hit a project budget. */
     projectId?: string | null;
   },
 ): Promise<GovernedToolCallOutcome> {
@@ -338,30 +343,32 @@ export async function executeGovernedToolCall(
         ? { mode: piiMode, action: piiAction, inputHits, outputHits, withheld }
         : null;
 
-    // PILLAR 5 (ADR-0019): an ALLOWED, EXECUTED, ATTRIBUTED tool call bills the
-    // server's flat per-call list price onto the SAME usage ledger the model and
-    // connector paths write, so MCP spend rolls up in the project dashboard with
-    // no separate reporting path. Unpriced server → null, never an invented
-    // figure. UNATTRIBUTED calls write NOTHING — there is no project to bill,
-    // and back-compat for the existing proxy behaviour is exact.
-    if (projectId) {
-      await db.insert(usageEvents).values({
-        userId,
-        objectType: "mcp_tool",
-        // usage_events has no server column; `operation` carries the tool name
-        // (as it carries the operation on connector rows) and the server id
-        // rides the detail jsonb.
-        operation: toolName,
-        costUsd: serverRow.pricePerCallUsd ?? null,
-        projectId,
-        detail: {
-          serverId,
-          toolName,
-          // §8.4 COUNTS ONLY — never the matched substrings
-          ...(pii ? { pii: { mode: pii.mode, action: pii.action, inputHits, outputHits } } : {}),
-        },
-      });
-    }
+    // PILLAR 5 (ADR-0019, widened by ADR-0024 O11): EVERY allowed, executed
+    // tool call bills the server's flat per-call list price onto the SAME
+    // usage ledger the model and connector paths write. Attribution decides
+    // WHERE the row lands, not WHETHER it exists: an attributed call rolls up
+    // in its project dashboard; an unattributed call lands with projectId NULL
+    // in the explicit "Unattributed" bucket (GET /v1/costs/unattributed), so
+    // the leak is visible to an admin instead of invisible. A null-project row
+    // can never hit a project budget — every project rollup and the budget
+    // gate filter on projectId. Unpriced server → null, never an invented
+    // figure. Denied calls and upstream failures still bill nothing.
+    await db.insert(usageEvents).values({
+      userId,
+      objectType: "mcp_tool",
+      // usage_events has no server column; `operation` carries the tool name
+      // (as it carries the operation on connector rows) and the server id
+      // rides the detail jsonb.
+      operation: toolName,
+      costUsd: serverRow.pricePerCallUsd ?? null,
+      projectId,
+      detail: {
+        serverId,
+        toolName,
+        // §8.4 COUNTS ONLY — never the matched substrings
+        ...(pii ? { pii: { mode: pii.mode, action: pii.action, inputHits, outputHits } } : {}),
+      },
+    });
     // §8.4 audit rows for a PII event (never for a clean payload): an OUTPUT
     // block is a deny; a warn is an allow with 'pii-warned'; log stays silent
     // (its counts are already in the usage detail above).
@@ -401,7 +408,9 @@ export async function executeGovernedToolCall(
       kind: "allowed",
       content: resultContent,
       ...(pii ? { pii } : {}),
-      ...(projectId ? { costUsd: serverRow.pricePerCallUsd ?? null } : {}),
+      // ADR-0024 (O11): every executed call is metered, so the cost is always
+      // reported back — attributed or not.
+      costUsd: serverRow.pricePerCallUsd ?? null,
     };
   } finally {
     await closeUpstream();
@@ -532,6 +541,36 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
       );
       if (!attribution.ok) {
         return reply.status(attribution.status).send({ error: attribution.error });
+      }
+    } else {
+      // ADR-0024 (O11): the admin's lever to CLOSE the unattributed gap
+      // entirely — the exact mirror of the compat surfaces'
+      // require_project_attribution. Rejected HERE, pre-dispatch and before
+      // the reply is hijacked into an MCP transport, with a plain HTTP error
+      // naming the header, and audited. Off (default) = the call runs and is
+      // metered into the Unattributed bucket.
+      const [interception] = await db
+        .select({ requireMcpAttribution: interceptionSettings.requireMcpAttribution })
+        .from(interceptionSettings)
+        .where(eq(interceptionSettings.id, INTERCEPTION_SETTINGS_ID));
+      if (interception?.requireMcpAttribution) {
+        await db.insert(auditLog).values({
+          userId,
+          serverId,
+          detail: { phase: "attribution", requireMcpAttribution: true },
+          effect: "deny",
+          ruleId: "mcp-attribution-required",
+          ruleChain: [],
+          reason:
+            `unattributed MCP call rejected: this deployment requires the ${PROJECT_HEADER} ` +
+            `header on every MCP tool call`,
+        });
+        return reply.status(400).send({
+          error: "mcp_attribution_required",
+          detail:
+            `this deployment requires every MCP call to be attributed — set the ` +
+            `${PROJECT_HEADER} header (a project you may bill to) on the MCP transport`,
+        });
       }
     }
 
