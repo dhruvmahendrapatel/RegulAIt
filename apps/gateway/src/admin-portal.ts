@@ -273,6 +273,150 @@ async function downloadCsv(path, filename) {
 
 // --- §6's eight functional surfaces + the §10.4 cost surface -------------
 const TABS = [
+// Getting started — the guided "connect your first real provider" journey.
+// FIRST tab deliberately: the portal has no home/overview page, tabFromHash()
+// falls back to index 0, so a fresh admin lands here. Status-driven, never a
+// static tutorial: every row is computed server-side from the real tables by
+// /v1/setup/status, and each pending step deep-links to the exact tab + form
+// that completes it. Once every step is done the whole card collapses to one
+// line (dismiss state in localStorage — no schema).
+["Getting started", async (el) => {
+  const DISMISS_KEY = "regulait.setup.dismissed";
+  const status = await get("/v1/setup/status");
+  // per-step: one-line WHY + the deep link (tab slug + a CSS selector to
+  // scroll/flash) to the existing surface that completes it. app:true opens
+  // /app instead (the last step is completed by a developer dispatching).
+  const META = {
+    model_provider: {
+      why: "Until a real key is configured every dispatch runs on the MOCK provider — answers are simulated and spend is $0. This is the step that makes RegulAIt real.",
+      hash: "model-credentials", sel: "#f-mcred", cta: "Add a credential",
+    },
+    git_connection: {
+      why: "Workflow build/PR stages need a real git provider. A mock connection exercises the flow but touches no repository.",
+      hash: "workflows", sel: "#f-git", cta: "Connect git",
+    },
+    pm_connection: {
+      why: "Pillar 8: work items stay the source of truth — decisions and sign-offs mirror into your own PM tool instead of a shadow copy.",
+      hash: "pm-connections", sel: "#f-pmconn", cta: "Connect a PM tool",
+    },
+    mcp_server: {
+      why: "Registering an MCP server gives the governance layer tools to allow-list — default-deny has nothing to govern until a server exists.",
+      hash: "mcp-servers", sel: "#f-srv", cta: "Register a server",
+    },
+    non_admin_user: {
+      why: "Governance is per-user. Create the first developer account and hand them an API key — admin-only orgs govern no one.",
+      hash: "users", sel: "#f-user", cta: "Create a user",
+    },
+    project: {
+      why: "Budgets and cost attribution hang off projects; calls without one land in the Unattributed bucket.",
+      hash: "cost-projects", sel: "#f-proj", cta: "Create a project",
+    },
+    compliance_profile: {
+      why: "A classification tag cascades required workflows, PII mode and retention onto everything the project governs.",
+      hash: "cost-projects", sel: "#f-proj", cta: "Classify a project",
+    },
+    interception_surface: {
+      why: "The provider-shaped compat surfaces let existing IDE/agent traffic arrive governed — both are OFF by default; the MCP proxy counts once it is actually used.",
+      hash: "client-access", sel: "#f-intercept", cta: "Open Client Access",
+    },
+    first_real_dispatch: {
+      why: "The end-to-end proof: one governed call served by a real provider, metered, attributed and audited.",
+      app: true, cta: "Open /app",
+    },
+  };
+  // evidence -> one honest dim line (mock objects are always labeled mock)
+  const evLine = (s) => {
+    const e = s.evidence || {};
+    if (s.key === "model_provider") {
+      if ((e.providers || []).length) return "Configured: " + e.providers.map((p) => p.provider + " (" + (p.source === "env" ? "env var" : "platform credential") + ")").join(", ");
+      return e.note ? e.note : "No real provider configured — only mock is live.";
+    }
+    if (s.key === "git_connection" || s.key === "pm_connection") {
+      if ((e.real || []).length) return "Connected: " + e.real.map((c) => c.name + " (" + c.provider + ")").join(", ");
+      return e.mockCount > 0 ? e.mockCount + " mock connection(s) only — labeled mock; they exercise the flow but touch nothing real." : "None yet.";
+    }
+    if (s.key === "mcp_server") return (e.servers || []).length ? "Registered: " + e.servers.map((x) => x.name).join(", ") : "None registered.";
+    if (s.key === "non_admin_user") return e.activeNonAdminUsers > 0 ? e.activeNonAdminUsers + " active non-admin user(s)." : "Only admin accounts exist so far.";
+    if (s.key === "project") return (e.projects || []).length ? "Projects: " + e.projects.join(", ") : "No project yet.";
+    if (s.key === "compliance_profile") {
+      if ((e.classifiedProjects || []).length) return "Classified: " + e.classifiedProjects.map((p) => p.name + " [" + p.tags.join(", ") + "]").join("; ");
+      return e.profilesDefined > 0 ? e.profilesDefined + " profile(s) defined but not assigned to any project." : "No compliance profile defined yet (POST /v1/compliance/profiles).";
+    }
+    if (s.key === "interception_surface") {
+      const on = [];
+      if (e.anthropicCompatEnabled) on.push("Anthropic compat on");
+      if (e.openaiCompatEnabled) on.push("OpenAI compat on");
+      if (e.scopeRulesExist) on.push("scope rules set");
+      if (e.mcpProxyCalls > 0) on.push(e.mcpProxyCalls + " MCP proxy call(s)");
+      return on.length ? on.join(" · ") : "Both compat surfaces off, MCP proxy unused.";
+    }
+    if (s.key === "first_real_dispatch") {
+      if (e.realDispatches > 0) return e.realDispatches + " real dispatch(es) served (" + e.mockDispatches + " mock).";
+      return e.mockDispatches > 0 ? e.mockDispatches + " MOCK dispatch(es) so far — the flow works, but no real model has answered yet." : "No dispatch yet.";
+    }
+    return "";
+  };
+  const dismissed = localStorage.getItem(DISMISS_KEY) === "1";
+  if (status.complete && dismissed) {
+    el.innerHTML = "<div class='card'><div class='row'>"
+      + badge("setup complete", "ok")
+      + "<span class='dim' style='font-size:13px'>All " + status.totalCount + " getting-started steps are done.</span>"
+      + "<span class='grow'></span><button class='ghost small' id='setup-undismiss'>Show details</button>"
+      + "</div></div>";
+    $("#setup-undismiss").addEventListener("click", () => { localStorage.removeItem(DISMISS_KEY); render(); });
+    return;
+  }
+  const pct = Math.round((status.doneCount / status.totalCount) * 100);
+  const stepRow = (s) => {
+    const m = META[s.key] || { why: "", cta: "Open" };
+    const blocked = (s.blockedBy || []).length > 0;
+    const blockedNames = (s.blockedBy || []).map((k) => (META[k] ? k.replace(/_/g, " ") : k)).join(", ");
+    const action = s.done ? ""
+      : m.app
+        ? "<button class='small' data-setup-app='1'" + (blocked ? " disabled" : "") + ">" + esc(m.cta) + "</button>"
+        : "<button class='small' data-setup-go='" + esc(m.hash) + "' data-setup-sel='" + esc(m.sel) + "'>" + esc(m.cta) + "</button>";
+    return "<div class='node-row' style='align-items:flex-start" + (blocked ? ";opacity:.6" : "") + "'>"
+      + "<span class='node-dot " + (s.done ? "done" : blocked ? "blocked" : "not_started") + "' style='margin-top:6px'></span>"
+      + "<div class='grow'><div class='row'>"
+      + "<strong>" + esc(s.title) + "</strong>"
+      + (s.done ? badge("done", "ok") : blocked ? badge("blocked", "bad") : badge("pending", "warn"))
+      + "</div>"
+      + "<div class='dim' style='font-size:12.5px;margin-top:2px'>" + esc(m.why) + "</div>"
+      + "<div class='faint' style='font-size:12px;margin-top:3px'>" + esc(evLine(s)) + "</div>"
+      + (blocked ? "<div class='faint' style='font-size:12px;margin-top:2px'>Blocked by: " + esc(blockedNames) + "</div>" : "")
+      + "</div>"
+      + "<div style='flex:none'>" + action + "</div>"
+      + "</div>";
+  };
+  el.innerHTML = "<p class='sub'>A live checklist, recomputed from the real objects on every load (and whenever this tab regains focus) — never a tutorial that can drift. Each pending step links to the exact form that completes it.</p>"
+    + (status.complete
+        ? "<div class='card' style='border-color:#7fa65066'><div class='row'>" + badge("setup complete", "ok")
+          + "<span class='dim'>All " + status.totalCount + " steps are done — this page collapses to one line once dismissed.</span>"
+          + "<span class='grow'></span><button class='small primary' id='setup-dismiss'>Dismiss</button></div></div>"
+        : "")
+    + "<div class='card'>"
+    + "<div class='row'><span class='num'>" + status.doneCount + " / " + status.totalCount + "</span>"
+    + "<span class='dim' style='font-size:12.5px'>steps done</span><span class='grow'></span>"
+    + "<button class='ghost small' id='setup-refresh'>Re-check</button></div>"
+    + "<div class='bar' style='margin:10px 0 14px'><i style='width:" + pct + "%'></i></div>"
+    + status.steps.map(stepRow).join("")
+    + "</div>"
+    + "<p class='dim' style='font-size:12px'>Honest by design: mock providers/connections are labeled mock everywhere — a green flow on mock objects proves the plumbing, not production readiness. The dispatch step only turns done when a REAL (non-mock) provider serves a governed call.</p>";
+  const dis = $("#setup-dismiss");
+  if (dis) dis.addEventListener("click", () => { localStorage.setItem(DISMISS_KEY, "1"); render(); });
+  $("#setup-refresh").addEventListener("click", () => render());
+  el.addEventListener("click", (e) => {
+    const go = e.target.closest("[data-setup-go]");
+    if (go) {
+      // hand the selector to render() via SETUP_FOCUS; the hashchange listener
+      // renders the target tab, then render() scrolls to + flashes the form.
+      SETUP_FOCUS = go.dataset.setupSel || null;
+      location.hash = go.dataset.setupGo;
+      return;
+    }
+    if (e.target.closest("[data-setup-app]")) window.open("/app", "_blank", "noopener");
+  });
+}],
 ["Users", async (el) => {
   const [u, rev, srv, k, ag, cn] = await Promise.all([
     get("/v1/users"), get("/v1/revocations"), get("/v1/servers"), get("/v1/keys"),
@@ -2103,6 +2247,10 @@ const TABS = [
 // title and is resolved to its TABS index at render time — so the physical
 // order of the TABS array is independent of the sidebar's grouping/order.
 const NAV = [
+  // The guided setup journey leads the nav: it is the portal's de-facto home
+  // (TABS index 0 = the hashless landing) and the first thing a new admin
+  // needs. One-tab section, mirroring how Cost is grouped.
+  ["Overview", ["Getting started"]],
   // "Client Access" sits in Identity & Access, not Operations: its two jobs are
   // (a) deciding which arrival surfaces exist at all and (b) handing a named
   // developer the base URL + key that lets their IDE reach one. That is the same
@@ -2149,6 +2297,14 @@ function tabFromHash() {
 }
 let active = tabFromHash();
 window.addEventListener("hashchange", () => { active = tabFromHash(); render(); });
+// Getting-started deep links: the selector of the form to scroll to + flash
+// after the target tab renders. Consumed (once) at the end of render().
+let SETUP_FOCUS = null;
+// The setup checklist recomputes when the admin comes back to the tab — they
+// typically complete a step in another tab/window (or via the API) and return.
+window.addEventListener("focus", () => {
+  if (KEY && TABS[active] && TABS[active][0] === "Getting started") render();
+});
 function shell() {
   return \`
   <div class="shell">
@@ -2216,6 +2372,17 @@ async function render() {
   // doesn't dump keyboard/AT users back at <body>.
   const h1 = $(".main h1");
   if (h1) h1.focus({ preventScroll: false });
+  // a Getting-started deep link lands here: scroll the named form into view
+  // and flash it so the admin sees exactly what completes the step.
+  if (SETUP_FOCUS) {
+    const target = $(SETUP_FOCUS);
+    SETUP_FOCUS = null;
+    if (target) {
+      target.scrollIntoView({ block: "center" });
+      target.classList.add("setup-flash");
+      setTimeout(() => target.classList.remove("setup-flash"), 2400);
+    }
+  }
 }
 render();
 </script>
