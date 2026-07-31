@@ -17,6 +17,30 @@ import InboxPage from "./views/inbox/InboxPage";
 import ProjectsPage from "./views/projects/ProjectsPage";
 import ProjectDetailPage from "./views/projects/ProjectDetailPage";
 import AccountPage from "./views/account/AccountPage";
+import { RequireAdmin } from "./views/admin/adminKit";
+import UsersPage from "./views/admin/identity/UsersPage";
+import RolesPage from "./views/admin/identity/RolesPage";
+import TeamsPage from "./views/admin/identity/TeamsPage";
+import ClientAccessPage from "./views/admin/identity/ClientAccessPage";
+import SsoPage from "./views/admin/identity/SsoPage";
+import RulesEnginePage from "./views/admin/governance/RulesEnginePage";
+import SimulationPage from "./views/admin/governance/SimulationPage";
+import ApprovalsAdminPage from "./views/admin/governance/ApprovalsAdminPage";
+import AuditLogPage from "./views/admin/governance/AuditLogPage";
+import WorkflowTemplatesPage from "./views/admin/governance/WorkflowTemplatesPage";
+import AgentsPage from "./views/admin/integrations/AgentsPage";
+import ModelCredentialsPage from "./views/admin/integrations/ModelCredentialsPage";
+import ConnectorsPage from "./views/admin/integrations/ConnectorsPage";
+import McpServersPage from "./views/admin/integrations/McpServersPage";
+import GitConnectionsPage from "./views/admin/integrations/GitConnectionsPage";
+import PmConnectionsPage from "./views/admin/integrations/PmConnectionsPage";
+import DeployTargetsPage from "./views/admin/integrations/DeployTargetsPage";
+import CostDashboardPage from "./views/admin/cost/CostDashboardPage";
+import OptimizationPage from "./views/admin/cost/OptimizationPage";
+import ComplianceProfilesPage from "./views/admin/compliance/ComplianceProfilesPage";
+import InfrastructurePage from "./views/admin/compliance/InfrastructurePage";
+import OrganizationPage from "./views/admin/settings/OrganizationPage";
+import GettingStartedPage from "./views/admin/settings/GettingStartedPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -76,6 +100,39 @@ export default function App() {
                 <Route path="/projects" element={<ProjectsPage />} />
                 <Route path="/projects/:projectId" element={<ProjectDetailPage />} />
                 <Route path="/account" element={<AccountPage />} />
+                <Route
+                  path="/admin/*"
+                  element={
+                    <RequireAdmin>
+                      <Routes>
+                        <Route path="users" element={<UsersPage />} />
+                        <Route path="roles" element={<RolesPage />} />
+                        <Route path="teams" element={<TeamsPage />} />
+                        <Route path="client-access" element={<ClientAccessPage />} />
+                        <Route path="sso" element={<SsoPage />} />
+                        <Route path="rules" element={<RulesEnginePage />} />
+                        <Route path="simulation" element={<SimulationPage />} />
+                        <Route path="approvals" element={<ApprovalsAdminPage />} />
+                        <Route path="audit" element={<AuditLogPage />} />
+                        <Route path="workflow-templates" element={<WorkflowTemplatesPage />} />
+                        <Route path="agents" element={<AgentsPage />} />
+                        <Route path="model-credentials" element={<ModelCredentialsPage />} />
+                        <Route path="connectors" element={<ConnectorsPage />} />
+                        <Route path="mcp-servers" element={<McpServersPage />} />
+                        <Route path="git-connections" element={<GitConnectionsPage />} />
+                        <Route path="pm-connections" element={<PmConnectionsPage />} />
+                        <Route path="deploy-targets" element={<DeployTargetsPage />} />
+                        <Route path="cost" element={<CostDashboardPage />} />
+                        <Route path="optimization" element={<OptimizationPage />} />
+                        <Route path="compliance" element={<ComplianceProfilesPage />} />
+                        <Route path="infrastructure" element={<InfrastructurePage />} />
+                        <Route path="organization" element={<OrganizationPage />} />
+                        <Route path="setup" element={<GettingStartedPage />} />
+                        <Route path="*" element={<Navigate to="/admin/users" replace />} />
+                      </Routes>
+                    </RequireAdmin>
+                  }
+                />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Route>
             </Routes>
