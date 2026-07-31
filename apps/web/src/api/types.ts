@@ -21,6 +21,14 @@ export interface AuthMeResponse {
   totpEnabled: boolean;
   passwordSet: boolean;
   mfaSetupRequired: boolean;
+  /** ADR-0028: false = the server will accept a new password from THIS session
+   * without the current one (API-key session on an account that is on a
+   * one-time password or has none). Server-computed with the exact rule the
+   * change-password handler enforces — the UI never derives it. Optional so an
+   * older gateway simply reads as "required" (fail closed). */
+  passwordChangeRequiresCurrent?: boolean;
+  /** how this session was established; null for header-credential requests */
+  sessionOrigin?: "password" | "api_key" | "oidc" | "bootstrap" | "unknown" | null;
 }
 
 export interface LoginResponse {
