@@ -1228,9 +1228,15 @@ export const loginWithKeySchema = z
   .strict();
 export type LoginWithKeyRequest = z.infer<typeof loginWithKeySchema>;
 
+/** ADR-0028: `currentPassword` is OPTIONAL in the SHAPE only. The server
+ * decides whether it is REQUIRED, from the session's recorded origin plus the
+ * account's state — a request that omits it outside the narrow recovery case
+ * is refused with 401 `current_password_required`. Making it optional here is
+ * what lets an api_key-origin session on a must-change / passwordless account
+ * set a password it was never told. */
 export const changePasswordSchema = z
   .object({
-    currentPassword: z.string().min(1).max(512),
+    currentPassword: z.string().min(1).max(512).optional(),
     newPassword: z.string().min(1).max(512),
   })
   .strict();

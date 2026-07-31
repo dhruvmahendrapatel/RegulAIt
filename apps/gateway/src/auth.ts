@@ -25,6 +25,7 @@ import {
   users,
   type Db,
   type OrgSettingsRow,
+  type SessionOrigin,
 } from "@regulait/db";
 import {
   changePasswordSchema,
@@ -242,6 +243,8 @@ export interface SessionAuth {
   /** user flags the gates in app.ts consult (null-user bootstrap session = all false) */
   mustChangePassword: boolean;
   totpEnabled: boolean;
+  /** ADR-0028: HOW this session was established. 'unknown' = a pre-0046 row. */
+  origin: SessionOrigin;
 }
 
 export async function createSession(
@@ -249,6 +252,9 @@ export async function createSession(
   userId: string | null,
   org: OrgSettingsRow,
   req: FastifyRequest,
+  /** ADR-0028: every creation site names the credential that established the
+   * session. There is deliberately no default — a new login path must choose. */
+  origin: SessionOrigin,
 ): Promise<{ token: string; sessionId: string; maxAgeSeconds: number }> {
   const { token, tokenHash } = generateSessionToken();
   const now = Date.now();
@@ -259,6 +265,7 @@ export async function createSession(
     .values({
       tokenHash,
       userId,
+      origin,
       expiresAt: new Date(now + lifetimeMs),
       idleExpiresAt: new Date(now + Math.min(idleMs, lifetimeMs)),
       idleMinutes: org.sessionIdleMinutes,
@@ -289,6 +296,7 @@ export async function resolveSession(
       expiresAt: authSessions.expiresAt,
       idleExpiresAt: authSessions.idleExpiresAt,
       idleMinutes: authSessions.idleMinutes,
+      origin: authSessions.origin,
       revokedAt: authSessions.revokedAt,
       isAdmin: users.isAdmin,
       disabledAt: users.disabledAt,
@@ -314,6 +322,7 @@ export async function resolveSession(
       sessionId: row.id,
       mustChangePassword: false,
       totpEnabled: false,
+      origin: row.origin,
     };
   }
   if (row.disabledAt) return "disabled";
@@ -326,7 +335,51 @@ export async function resolveSession(
     sessionId: row.id,
     mustChangePassword: row.mustChangePassword ?? false,
     totpEnabled: row.totpEnabled ?? false,
+    origin: row.origin,
   };
+}
+
+// --- ADR-0028: the current-password requirement, in ONE place ---------------
+
+/**
+ * Is the CURRENT password required to set a new one on this request?
+ *
+ * It is NOT required only in the narrow lockout case: the session was
+ * established with an API KEY and the account is in a recovery state — a
+ * one-time password it was never told (`mustChangePassword`) or no password at
+ * all (`passwordHash IS NULL`). The API key already authenticates as that
+ * user, so demanding a password they cannot obtain protects nothing and locks
+ * the account out of every non-self-service route (including Users, so they
+ * cannot even reset themselves).
+ *
+ * It IS required everywhere else — in particular for an api_key session on an
+ * account with an established password and no forced change. Relaxing THAT
+ * would let a stolen API key be escalated into a permanent password that
+ * outlives revocation of the key: a privilege-persistence path, not a
+ * convenience.
+ *
+ * `origin` 'unknown' (a pre-0046 session, origin unknowable) and every
+ * non-api_key origin fail CLOSED. A header API-key request has no session and
+ * therefore no origin — it also fails closed here.
+ */
+export function passwordChangeRequiresCurrent(
+  origin: SessionOrigin | null | undefined,
+  user: { mustChangePassword: boolean; passwordHash: string | null } | null,
+): boolean {
+  if (!user) return true;
+  if (origin !== "api_key") return true;
+  return !(user.mustChangePassword || user.passwordHash === null);
+}
+
+/** which recovery condition opened the bypass — named in the audit row so a
+ * key-session password set is never an invisible event */
+export function recoveryReason(user: {
+  mustChangePassword: boolean;
+  passwordHash: string | null;
+}): "must_change_password" | "no_password_hash" | null {
+  if (user.passwordHash === null) return "no_password_hash";
+  if (user.mustChangePassword) return "must_change_password";
+  return null;
 }
 
 // --- TOTP (RFC 6238 via HMAC-SHA1, zero deps) -------------------------------
@@ -479,8 +532,9 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     req: FastifyRequest,
     userId: string | null,
     org: OrgSettingsRow,
+    origin: SessionOrigin,
   ) => {
-    const { token, maxAgeSeconds } = await createSession(db, userId, org, req);
+    const { token, maxAgeSeconds } = await createSession(db, userId, org, req, origin);
     void reply.header("set-cookie", sessionCookie(token, requestIsSecure(req), maxAgeSeconds));
   };
 
@@ -574,7 +628,8 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       return reply.send({ mfaRequired: true, pendingToken: token });
     }
 
-    await setSession(reply, req, user.id, org);
+    // ADR-0028: password credential -> 'password' origin
+    await setSession(reply, req, user.id, org, "password");
     await auditAuth(db, user.id, user.id, "login-succeeded", "allow",
       `user '${user.email}' signed in with a password`,
       { phase: "login", email: user.email, method: "password" });
@@ -612,7 +667,9 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     await db.delete(authMfaPending).where(eq(authMfaPending.id, pending.id));
     await db.update(users).set({ totpLastUsedStep: step }).where(eq(users.id, user.id));
     const org = await loadOrgSettings(db);
-    await setSession(reply, req, user.id, org);
+    // ADR-0028: the second factor does not change WHICH credential established
+    // the session — a MFA-completed login is still 'password' origin.
+    await setSession(reply, req, user.id, org, "password");
     await auditAuth(db, user.id, user.id, "login-succeeded", "allow",
       `user '${user.email}' signed in with password + TOTP`,
       { phase: "login", email: user.email, method: "password+totp" });
@@ -641,7 +698,10 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     }
     if (!ctx) return reply.status(401).send({ error: "invalid_key" });
     const org = await loadOrgSettings(db);
-    await setSession(reply, req, ctx.userId, org);
+    // ADR-0028: the deploy-time bootstrap token and a user's API key are two
+    // different credentials and get two different origins — only 'api_key'
+    // (a real user identity) can ever open the current-password bypass.
+    await setSession(reply, req, ctx.userId, org, ctx.via === "bootstrap" ? "bootstrap" : "api_key");
     await auditAuth(db, ctx.userId, ctx.userId, "login-succeeded", "allow",
       ctx.userId ? "user exchanged an API key for a browser session" : "operator exchanged the bootstrap token for a browser session",
       { phase: "login", method: ctx.via === "bootstrap" ? "bootstrap-exchange" : "api-key-exchange" });
@@ -674,6 +734,9 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     let mustChangePassword = false;
     let totpEnabled = false;
     let passwordSet = false;
+    // ADR-0028: the UI must never infer this — it is the SAME function the
+    // change-password handler enforces with, evaluated on the same inputs.
+    let requiresCurrent = true;
     if (userId) {
       const [row] = await db.select().from(users).where(eq(users.id, userId));
       if (row) {
@@ -681,6 +744,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
         mustChangePassword = row.mustChangePassword;
         totpEnabled = row.totpEnabled;
         passwordSet = row.passwordHash !== null;
+        requiresCurrent = passwordChangeRequiresCurrent(req.sessionAuth?.origin, row);
       }
     }
     const org = await loadOrgSettings(db);
@@ -697,6 +761,13 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       totpEnabled,
       passwordSet,
       mfaSetupRequired,
+      /** ADR-0028: false = this caller may set a password WITHOUT proving the
+       * current one (api_key-origin session on a recovery-state account); the
+       * forced-change gate hides the field. Fail-closed default is true. */
+      passwordChangeRequiresCurrent: requiresCurrent,
+      /** the recorded origin of THIS session ('unknown' = pre-0046 row); null
+       * when the request authenticated with a header credential */
+      sessionOrigin: req.sessionAuth?.origin ?? null,
     };
   });
 
@@ -707,22 +778,41 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     if (!userId) return reply.status(403).send({ error: "no_user_identity" });
     const [user] = await db.select().from(users).where(eq(users.id, userId));
     if (!user) return reply.status(404).send({ error: "unknown_user" });
-    if (!user.passwordHash) {
-      return reply.status(409).send({
-        error: "no_password_set",
-        detail: "this account has no password yet — an admin must set an initial one-time password",
-      });
-    }
-    if (!verifyPassword(body.currentPassword, user.passwordHash)) {
-      await auditAuth(db, userId, userId, "password-change-rejected", "deny",
-        `user '${user.email}' failed the current-password check on a change attempt`,
-        { phase: "change-password", email: user.email });
-      return reply.status(401).send({ error: "current_password_incorrect" });
+    // ADR-0028: ONE rule, shared with /auth/me. The current password is
+    // required unless this session was established with an API KEY and the
+    // account is in a recovery state (must-change, or no password at all).
+    const origin = req.sessionAuth?.origin;
+    const requiresCurrent = passwordChangeRequiresCurrent(origin, user);
+    if (requiresCurrent) {
+      if (!user.passwordHash) {
+        return reply.status(409).send({
+          error: "no_password_set",
+          detail: "this account has no password yet — an admin must set an initial one-time password",
+        });
+      }
+      if (body.currentPassword === undefined) {
+        // burn the same scrypt cost as a wrong password so the two are
+        // indistinguishable by timing
+        verifyPassword("", null);
+        await auditAuth(db, userId, userId, "password-change-rejected", "deny",
+          `user '${user.email}' omitted the current password on a change attempt that requires it`,
+          { phase: "change-password", email: user.email, why: "current_password_required", sessionOrigin: origin ?? null });
+        return reply.status(401).send({
+          error: "current_password_required",
+          detail: "this account's current password must be supplied to set a new one",
+        });
+      }
+      if (!verifyPassword(body.currentPassword, user.passwordHash)) {
+        await auditAuth(db, userId, userId, "password-change-rejected", "deny",
+          `user '${user.email}' failed the current-password check on a change attempt`,
+          { phase: "change-password", email: user.email });
+        return reply.status(401).send({ error: "current_password_incorrect" });
+      }
     }
     const org = await loadOrgSettings(db);
     const policyError = checkPasswordPolicy(body.newPassword, org.passwordMinLength, org.passwordRequireClasses);
     if (policyError) return reply.status(422).send({ error: "password_policy", detail: policyError });
-    if (body.newPassword === body.currentPassword) {
+    if (body.currentPassword !== undefined && body.newPassword === body.currentPassword) {
       return reply.status(422).send({ error: "password_policy", detail: "the new password must differ from the current one" });
     }
     await db
@@ -743,9 +833,24 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
           ...(keepId ? [ne(authSessions.id, keepId)] : []),
         ),
       );
-    await auditAuth(db, userId, userId, "password-changed", "allow",
-      `user '${user.email}' changed their password (other sessions revoked)`,
-      { phase: "change-password", email: user.email });
+    if (requiresCurrent) {
+      await auditAuth(db, userId, userId, "password-changed", "allow",
+        `user '${user.email}' changed their password (other sessions revoked)`,
+        { phase: "change-password", email: user.email });
+    } else {
+      // ADR-0028: the bypass is NEVER invisible — it gets its own rule id and
+      // records the origin plus which recovery condition opened it.
+      const recovery = recoveryReason(user);
+      await auditAuth(db, userId, userId, "password-set-via-key-session", "allow",
+        `user '${user.email}' set a password from an API-key session without the current password (${recovery === "no_password_hash" ? "account had no password" : "account was on a one-time password"}); other sessions revoked`,
+        {
+          phase: "change-password",
+          email: user.email,
+          sessionOrigin: origin ?? null,
+          recoveryCondition: recovery,
+          currentPasswordRequired: false,
+        });
+    }
     return { ok: true };
   });
 
@@ -1065,7 +1170,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     }
 
     const org = await loadOrgSettings(db);
-    await setSession(reply, req, user.id, org);
+    await setSession(reply, req, user.id, org, "oidc"); // ADR-0028
     await auditAuth(db, user.id, user.id, "login-succeeded", "allow",
       `user '${email}' signed in via OIDC provider '${provider.name}'`,
       { phase: "login", email, method: "oidc", provider: provider.name });
