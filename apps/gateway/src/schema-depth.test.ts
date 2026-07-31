@@ -503,19 +503,27 @@ describe("S2 mcpDefaultMode is ENFORCED on attributed MCP tool calls", () => {
     }
   });
 
-  it("unattributed calls keep today's behaviour byte-identical (the disclosed O11 gap, not this slice's)", async () => {
-    const before = (await db.select().from(usageEvents)).length;
+  it("unattributed calls carry no mode enforcement (no project policy) but ARE metered with projectId NULL (ADR-0024 closed O11)", async () => {
+    const before = await db.select().from(usageEvents);
     const client = await mcpClient(); // no project header
     try {
       const res = (await client.callTool({ name: "sd_write", arguments: { key: "delta" } })) as {
         content: Array<{ type: string; text?: string }>;
       };
+      // still no mcpDefaultMode denial — there is no project to take a policy
+      // from, so the write executes
       expect(res.content[0]?.text).toBe("wrote: delta");
     } finally {
       await client.close();
     }
-    // no attribution → no usage row, and no mode denial either
-    expect((await db.select().from(usageEvents)).length).toBe(before);
+    // …but since ADR-0024 (O11) the call is METERED: exactly one NEW usage
+    // row, with projectId NULL — the explicit Unattributed bucket, never a
+    // project.
+    const after = await db.select().from(usageEvents);
+    expect(after.length).toBe(before.length + 1);
+    const row = after.find((r) => !before.some((b) => b.id === r.id))!;
+    expect(row.operation).toBe("sd_write");
+    expect(row.projectId).toBeNull();
   });
 });
 

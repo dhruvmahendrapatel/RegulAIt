@@ -12,6 +12,7 @@ import {
   auditLog,
   createDb,
   eq,
+  isNull,
   mcpServers,
   runMigrations,
   usageEvents,
@@ -500,13 +501,22 @@ describe("G2 block-mode projects never open an SSE stream", () => {
 // =========================================================================
 
 describe("G3 MCP proxy attribution", () => {
-  it("an UNATTRIBUTED call behaves exactly as before — no usage row anywhere", async () => {
-    const before = (await db.select().from(usageEvents)).length;
+  it("an UNATTRIBUTED call is METERED with projectId NULL (ADR-0024 O11) — same price, no project touched", async () => {
+    const before = await db.select().from(usageEvents).where(isNull(usageEvents.projectId));
     const client = await mcpClient(ivaKey);
     const result = await client.callTool({ name: "gg_echo", arguments: { text: "hello" } });
     await client.close();
     expect(result.content).toEqual([{ type: "text", text: "echo: hello" }]);
-    expect((await db.select().from(usageEvents)).length).toBe(before);
+    // ADR-0024 (O11) widened ADR-0019: attribution decides WHERE the row
+    // lands, not WHETHER it exists — the unattributed call writes the same
+    // priced usage row with projectId NULL (the explicit Unattributed bucket).
+    const after = await db.select().from(usageEvents).where(isNull(usageEvents.projectId));
+    expect(after.length).toBe(before.length + 1);
+    const row = after.find((r) => !before.some((b) => b.id === r.id))!;
+    expect(row.objectType).toBe("mcp_tool");
+    expect(row.operation).toBe("gg_echo");
+    expect(row.projectId).toBeNull();
+    expect(row.costUsd).toBeCloseTo(0.005, 6);
   });
 
   it("an ATTRIBUTED call writes EXACTLY ONE usage row that rolls into the project total", async () => {
@@ -518,7 +528,9 @@ describe("G3 MCP proxy attribution", () => {
 
     const after = await usageRows(plainProject);
     expect(after.length).toBe(before.length + 1);
-    const row = after[after.length - 1]!;
+    // find the NEW row by id-diff — an unordered select's "last row" is not a
+    // stable concept once the shared table has churn from other suites
+    const row = after.find((r) => !before.some((b) => b.id === r.id))!;
     expect(row.objectType).toBe("mcp_tool");
     expect(row.operation).toBe("gg_echo");
     expect(row.costUsd).toBeCloseTo(0.005, 6);

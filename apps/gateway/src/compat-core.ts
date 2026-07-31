@@ -19,19 +19,35 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   agentGrants,
   agents,
+  and,
   auditLog,
   costEvents,
+  count,
   eq,
+  inArray,
+  interceptionScopeRules,
   interceptionSettings,
   INTERCEPTION_SETTINGS_ID,
+  or,
+  projects,
+  roleAssignments,
+  roles,
   userAgentPolicies,
+  users,
   type Db,
+  type InterceptionScopeKind,
+  type InterceptionScopeRuleRow,
   type InterceptionSettingsRow,
+  type ResolutionMode,
 } from "@regulait/db";
 import { evaluateAgent } from "@regulait/policy-kernel";
 import { classifyComplexity, estimateTokens, routeModel } from "@regulait/optimizer-kernel";
 import { isModelProviderKind, type ModelChatMessage, type ModelToolDef } from "@regulait/model-provider";
-import { updateInterceptionSettingsSchema } from "@regulait/shared";
+import {
+  createInterceptionScopeRuleSchema,
+  updateInterceptionScopeRuleSchema,
+  updateInterceptionSettingsSchema,
+} from "@regulait/shared";
 import { z } from "zod";
 import {
   configuredProviders,
@@ -123,6 +139,136 @@ export async function interceptionSurfaceEnabled(db: Db, route: string): Promise
 }
 
 // ---------------------------------------------------------------------------
+// ADR-0024 (O13) — per-scope interception overrides (staged rollout)
+// ---------------------------------------------------------------------------
+
+/** The three fields a scope rule can override. Everything else on the posture
+ * singleton stays org-wide by design — the staged-rollout use case is "pilot a
+ * compat surface with one team", not a full per-user posture fork. */
+export type ScopedInterceptionField =
+  | "anthropicCompatEnabled"
+  | "openaiCompatEnabled"
+  | "resolutionMode";
+
+/** Where an effective value came from — the org singleton, or a specific
+ * scope rule. Drives the admin UI's live effective-value preview and the
+ * audit detail, so an override is never invisible. */
+export type InterceptionPolicySource =
+  | { level: "org" }
+  | { level: InterceptionScopeKind; ruleId: string; scopeId: string };
+
+export interface InterceptionPolicyContext {
+  userId: string | null;
+  projectId: string | null;
+}
+
+export interface EffectiveInterceptionPolicy {
+  settings: InterceptionSettingsRow;
+  anthropicCompatEnabled: boolean;
+  openaiCompatEnabled: boolean;
+  resolutionMode: ResolutionMode;
+  sources: Record<ScopedInterceptionField, InterceptionPolicySource>;
+}
+
+/** Cheap existence probe for the onRequest gate's fast path: with no scope
+ * rules at all, the org singleton alone decides and NO identity resolution is
+ * attempted — byte-identical to the pre-0041 gate. */
+export async function interceptionScopeRulesExist(db: Db): Promise<boolean> {
+  const [row] = await db.select({ n: count() }).from(interceptionScopeRules).limit(1);
+  return (row?.n ?? 0) > 0;
+}
+
+/** PRECEDENCE, as documented in ADR-0024: user > project > role > org, first
+ * non-NULL PER FIELD wins (each field resolves independently); ties within a
+ * kind — e.g. a user holding two roles whose rules disagree — resolve to the
+ * MOST RECENTLY CREATED rule (createdAt desc, then id desc for total order). */
+const SCOPE_PRECEDENCE: readonly InterceptionScopeKind[] = ["user", "project", "role"];
+
+function sortForPrecedence(rules: InterceptionScopeRuleRow[]): InterceptionScopeRuleRow[] {
+  return [...rules].sort((a, b) => {
+    const kind = SCOPE_PRECEDENCE.indexOf(a.scopeKind) - SCOPE_PRECEDENCE.indexOf(b.scopeKind);
+    if (kind !== 0) return kind;
+    const at = b.createdAt.getTime() - a.createdAt.getTime();
+    if (at !== 0) return at;
+    return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+  });
+}
+
+/**
+ * Resolve the EFFECTIVE interception policy for a caller. The context is
+ * whatever identity is known at the call site: the authenticated user (role
+ * rules ride the user's role assignments) and the attributed project from the
+ * x-regulait-project-id header. A null userId (unauthenticated probe,
+ * bootstrap token) resolves at the ORG level — scope rules never leak to a
+ * caller who has not proven an identity they attach to.
+ *
+ * SURFACE EXPOSURE IS NOT ENTITLEMENT: a rule enabling a surface only decides
+ * that the route exists for this caller. Every dispatch still runs the same
+ * evaluateAgent gate — org-off + role-enabled + unentitled user is still 403.
+ */
+export async function resolveInterceptionPolicy(
+  db: Db,
+  ctx: InterceptionPolicyContext,
+  preloaded?: InterceptionSettingsRow,
+): Promise<EffectiveInterceptionPolicy> {
+  const settings = preloaded ?? (await loadInterceptionSettings(db));
+  const base: EffectiveInterceptionPolicy = {
+    settings,
+    anthropicCompatEnabled: settings.anthropicCompatEnabled,
+    openaiCompatEnabled: settings.openaiCompatEnabled,
+    resolutionMode: settings.resolutionMode,
+    sources: {
+      anthropicCompatEnabled: { level: "org" },
+      openaiCompatEnabled: { level: "org" },
+      resolutionMode: { level: "org" },
+    },
+  };
+  const conditions = [];
+  if (ctx.userId) {
+    conditions.push(
+      and(eq(interceptionScopeRules.scopeKind, "user"), eq(interceptionScopeRules.scopeId, ctx.userId)),
+    );
+    const roleRows = await db
+      .select({ roleId: roleAssignments.roleId })
+      .from(roleAssignments)
+      .where(eq(roleAssignments.userId, ctx.userId));
+    const roleIds = roleRows.map((r) => r.roleId);
+    if (roleIds.length > 0) {
+      conditions.push(
+        and(eq(interceptionScopeRules.scopeKind, "role"), inArray(interceptionScopeRules.scopeId, roleIds)),
+      );
+    }
+  }
+  if (ctx.projectId) {
+    conditions.push(
+      and(
+        eq(interceptionScopeRules.scopeKind, "project"),
+        eq(interceptionScopeRules.scopeId, ctx.projectId),
+      ),
+    );
+  }
+  if (conditions.length === 0) return base;
+  const matched = await db
+    .select()
+    .from(interceptionScopeRules)
+    .where(conditions.length === 1 ? conditions[0] : or(...conditions));
+  if (matched.length === 0) return base;
+  const ordered = sortForPrecedence(matched);
+  for (const field of [
+    "anthropicCompatEnabled",
+    "openaiCompatEnabled",
+    "resolutionMode",
+  ] as const) {
+    const winner = ordered.find((r) => r[field] !== null && r[field] !== undefined);
+    if (!winner) continue;
+    if (field === "resolutionMode") base.resolutionMode = winner.resolutionMode as ResolutionMode;
+    else base[field] = winner[field] as boolean;
+    base.sources[field] = { level: winner.scopeKind, ruleId: winner.id, scopeId: winner.scopeId };
+  }
+  return base;
+}
+
+// ---------------------------------------------------------------------------
 // unsupported-field discipline
 // ---------------------------------------------------------------------------
 
@@ -202,6 +348,10 @@ export function rejectUnsupportedFields(
 
 export interface CompatResolution {
   mode: "map_by_model" | "require_agent" | "router_decides";
+  /** ADR-0024 (O13): where the resolution mode came from when a scope rule
+   * overrode the org singleton — absent when the org value applied. Rides the
+   * audit detail so an override is never invisible. */
+  modeSource?: InterceptionPolicySource;
   /** exactly what the client asked for */
   requestedModel: string;
   /** what we will actually serve — DISCLOSED, never silently substituted */
@@ -315,7 +465,13 @@ export async function prepareCompatCall(
     return { ok: false, status: 400, error: "invalid_agent_id", detail: `${AGENT_HEADER} must be a uuid` };
   }
   const namedAgentId = agentHeaderParse.data[AGENT_HEADER] ?? null;
-  const mode = settings.resolutionMode;
+  // ADR-0024 (O13): the resolution mode is the EFFECTIVE one for this caller —
+  // a user/project/role scope rule may override the org singleton (user >
+  // project > role > org, first non-NULL wins). The override's provenance
+  // rides the resolution object into the response body and the audit row.
+  const scopedPolicy = await resolveInterceptionPolicy(db, { userId, projectId }, settings);
+  const mode = scopedPolicy.resolutionMode;
+  const modeSource = scopedPolicy.sources.resolutionMode;
 
   if (mode === "require_agent" && !namedAgentId) {
     return {
@@ -504,6 +660,7 @@ export async function prepareCompatCall(
       served,
       resolution: {
         mode,
+        ...(modeSource.level !== "org" ? { modeSource } : {}),
         requestedModel: args.requestedModel,
         servedModel: served.model ?? args.requestedModel,
         requestedAgentId: requested.id,
@@ -640,14 +797,114 @@ export function disclosureHeaderPairs(prepared: CompatPrepared): Record<string, 
 // admin settings endpoints
 // ---------------------------------------------------------------------------
 
-/** GET/PUT the posture. ADMIN-ONLY — deliberately absent from
+/** ADR-0024 (O15) — the HONEST posture status. The ladder rung an org declares
+ * and what this deployment actually enforces are different facts, and the API
+ * states both so the admin UI cannot imply enforcement that does not exist:
+ *  - observe / voluntary: honor system — nothing stops a direct vendor call;
+ *  - managed: policy — pushed to machines, reversible by the developer;
+ *  - key_custody: ENFORCED only while keyCustodyEnforced is true (BYO user
+ *    credentials 409 and are skipped at dispatch); otherwise it is a DECLARED
+ *    rung with a warning — declaring custody does not implement it;
+ *  - network: enforcement lives at the customer's network boundary (egress
+ *    control), never in this product — see docs/product/IDE_INTEGRATION.md.
+ */
+export type PostureStatusKind =
+  | "honor_system"
+  | "policy"
+  | "enforced"
+  | "declared_not_enforced"
+  | "external_infrastructure";
+
+export function postureStatus(settings: InterceptionSettingsRow): {
+  rung: InterceptionSettingsRow["enforcementPosture"];
+  status: PostureStatusKind;
+  label: string;
+  detail: string;
+} {
+  const rung = settings.enforcementPosture;
+  if (rung === "observe" || rung === "voluntary") {
+    return {
+      rung,
+      status: "honor_system",
+      label: "Honor system",
+      detail:
+        "Nothing stops a developer calling the vendor directly. Pointing an IDE here is a request, not an enforcement.",
+    };
+  }
+  if (rung === "managed") {
+    return {
+      rung,
+      status: "policy",
+      label: "Policy",
+      detail:
+        "Pushed via IDE policy / managed settings / MDM. Better than voluntary, still reversible on the developer's own machine.",
+    };
+  }
+  if (rung === "key_custody") {
+    return settings.keyCustodyEnforced
+      ? {
+          rung,
+          status: "enforced",
+          label: "ENFORCED by this deployment",
+          detail:
+            "Key custody is ON: per-user BYO model credentials are rejected (409) and dispatch resolution skips stored user credentials entirely — the org holds the vendor keys, developers hold only RegulAIt keys.",
+        }
+      : {
+          rung,
+          status: "declared_not_enforced",
+          label: "DECLARED but NOT enforced",
+          detail:
+            "This deployment declares key custody but 'enforce key custody' is OFF — per-user BYO credentials still work, so the rung is currently a statement, not a mechanism. Turn the enforcement toggle on to make it true.",
+        };
+  }
+  return {
+    rung,
+    status: "external_infrastructure",
+    label: "Requires egress control at your network boundary",
+    detail:
+      "The network rung is enforced by YOUR network (an egress allowlist that blocks the vendor APIs and allows only the RegulAIt gateway), not by this product — see docs/product/IDE_INTEGRATION.md for the recipe.",
+  };
+}
+
+const scopeRuleIdParam = z.object({ ruleId: z.string().uuid() });
+const effectiveQuery = z.object({
+  userId: z.string().uuid(),
+  projectId: z.string().uuid().optional(),
+});
+
+/** Validate that a scope rule's target actually exists for its kind, so an
+ * admin typo becomes a 422 instead of a rule that silently never matches. */
+async function scopeTargetName(
+  db: Db,
+  scopeKind: InterceptionScopeKind,
+  scopeId: string,
+): Promise<string | null> {
+  if (scopeKind === "user") {
+    const [u] = await db
+      .select({ name: users.displayName, email: users.email })
+      .from(users)
+      .where(eq(users.id, scopeId));
+    return u ? (u.name ?? u.email) : null;
+  }
+  if (scopeKind === "project") {
+    const [p] = await db.select({ name: projects.name }).from(projects).where(eq(projects.id, scopeId));
+    return p?.name ?? null;
+  }
+  const [r] = await db.select({ name: roles.name }).from(roles).where(eq(roles.id, scopeId));
+  return r?.name ?? null;
+}
+
+/** GET/PUT the posture, plus the ADR-0024 scope-rule CRUD and the live
+ * effective-value preview. ALL ADMIN-ONLY — deliberately absent from
  * NON_ADMIN_ROUTES, unlike the compat endpoints themselves (which are the
  * developer's path and must be callable by a non-admin, exactly like the MCP
  * proxy). Every write is audited. */
 export function registerInterceptionRoutes(app: FastifyInstance, db: Db) {
   app.get("/v1/interception/settings", async () => {
     const settings = await loadInterceptionSettings(db);
-    return { settings };
+    // O15: the honest enforced-vs-declared status rides beside the raw row so
+    // every consumer (the Client Access tab first) renders the same truth.
+    return { settings, posture: postureStatus(settings) };
   });
 
   app.put("/v1/interception/settings", async (req, reply) => {
@@ -683,6 +940,129 @@ export function registerInterceptionRoutes(app: FastifyInstance, db: Db) {
           ? `interception posture updated: ${Object.keys(changed).join(", ")}`
           : "interception posture written with no effective change",
     });
-    return reply.send({ settings: after });
+    return reply.send({ settings: after, posture: postureStatus(after) });
+  });
+
+  // --- ADR-0024 (O13): per-scope override rules ---------------------------
+  // Admin-only CRUD (absent from NON_ADMIN_ROUTES), every write audited with
+  // objectType 'interception_scope_rule'. A rule's scope is its identity;
+  // retargeting is delete + create, so PATCH only touches the override fields.
+
+  app.get("/v1/interception/scope-rules", async () => {
+    const rows = await db.select().from(interceptionScopeRules);
+    const named = await Promise.all(
+      rows.map(async (r) => ({
+        ...r,
+        // resolved for the admin UI; null when the target was since deleted
+        // (a dangling rule matches nothing and is safe to clean up)
+        scopeName: await scopeTargetName(db, r.scopeKind, r.scopeId),
+      })),
+    );
+    return { rules: named };
+  });
+
+  app.post("/v1/interception/scope-rules", async (req, reply) => {
+    const body = createInterceptionScopeRuleSchema.parse(req.body);
+    const scopeName = await scopeTargetName(db, body.scopeKind, body.scopeId);
+    if (scopeName === null) {
+      return reply.status(422).send({
+        error: "unknown_scope_target",
+        detail: `no ${body.scopeKind} with id '${body.scopeId}' — a rule must target something that exists`,
+      });
+    }
+    const [row] = await db
+      .insert(interceptionScopeRules)
+      .values({
+        scopeKind: body.scopeKind,
+        scopeId: body.scopeId,
+        anthropicCompatEnabled: body.anthropicCompatEnabled ?? null,
+        openaiCompatEnabled: body.openaiCompatEnabled ?? null,
+        resolutionMode: body.resolutionMode ?? null,
+        note: body.note ?? null,
+        createdBy: req.authCtx.userId,
+      })
+      .returning();
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "interception_scope_rule",
+      objectId: row!.id,
+      detail: { via: req.authCtx.via, action: "created", rule: row, scopeName },
+      effect: "allow",
+      ruleId: "interception-scope-rule-created",
+      ruleChain: [],
+      reason: `interception scope rule created for ${body.scopeKind} '${scopeName}' — surface exposure only, grants no entitlement`,
+    });
+    return reply.status(201).send({ ...row, scopeName });
+  });
+
+  app.patch("/v1/interception/scope-rules/:ruleId", async (req, reply) => {
+    const { ruleId } = scopeRuleIdParam.parse(req.params);
+    const body = updateInterceptionScopeRuleSchema.parse(req.body);
+    const [row] = await db
+      .update(interceptionScopeRules)
+      .set({ ...body, updatedAt: new Date() })
+      .where(eq(interceptionScopeRules.id, ruleId))
+      .returning();
+    if (!row) return reply.status(404).send({ error: "unknown_scope_rule" });
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "interception_scope_rule",
+      objectId: row.id,
+      detail: { via: req.authCtx.via, action: "updated", changed: body, after: row },
+      effect: "allow",
+      ruleId: "interception-scope-rule-updated",
+      ruleChain: [],
+      reason: `interception scope rule ${row.id} updated: ${Object.keys(body).join(", ") || "(no fields)"}`,
+    });
+    return { ...row, scopeName: await scopeTargetName(db, row.scopeKind, row.scopeId) };
+  });
+
+  app.delete("/v1/interception/scope-rules/:ruleId", async (req, reply) => {
+    const { ruleId } = scopeRuleIdParam.parse(req.params);
+    const deleted = await db
+      .delete(interceptionScopeRules)
+      .where(eq(interceptionScopeRules.id, ruleId))
+      .returning();
+    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_scope_rule" });
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "interception_scope_rule",
+      objectId: ruleId,
+      detail: { via: req.authCtx.via, action: "deleted", rule: deleted[0] },
+      effect: "allow",
+      ruleId: "interception-scope-rule-deleted",
+      ruleChain: [],
+      reason: `interception scope rule ${ruleId} deleted — the scope falls back to inheritance`,
+    });
+    return { removed: true };
+  });
+
+  // Live effective-value preview for the admin UI: "what would THIS user (on
+  // THIS project) get right now?" — the exact resolver the request gate and
+  // prepareCompatCall run, so the preview can never drift from enforcement.
+  app.get("/v1/interception/effective", async (req, reply) => {
+    const q = effectiveQuery.safeParse(req.query);
+    if (!q.success) {
+      return reply
+        .status(400)
+        .send({ error: "invalid_query", detail: "userId (uuid) required, projectId (uuid) optional" });
+    }
+    const policy = await resolveInterceptionPolicy(db, {
+      userId: q.data.userId,
+      projectId: q.data.projectId ?? null,
+    });
+    return {
+      effective: {
+        anthropicCompatEnabled: policy.anthropicCompatEnabled,
+        openaiCompatEnabled: policy.openaiCompatEnabled,
+        resolutionMode: policy.resolutionMode,
+      },
+      sources: policy.sources,
+      org: {
+        anthropicCompatEnabled: policy.settings.anthropicCompatEnabled,
+        openaiCompatEnabled: policy.settings.openaiCompatEnabled,
+        resolutionMode: policy.settings.resolutionMode,
+      },
+    };
   });
 }

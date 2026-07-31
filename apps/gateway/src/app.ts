@@ -93,9 +93,15 @@ import { registerMcpProxy } from "./mcp-proxy.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
 import {
   API_KEY_HEADER_ROUTES,
-  interceptionSurfaceEnabled,
+  COMPAT_ANTHROPIC_ROUTE,
+  INTERCEPTION_GATED_ROUTES,
+  MCP_PROXY_ROUTE,
+  PROJECT_HEADER,
+  interceptionScopeRulesExist,
+  loadInterceptionSettings,
   notFoundBody,
   registerInterceptionRoutes,
+  resolveInterceptionPolicy,
 } from "./compat-core.js";
 import { registerAnthropicCompat } from "./compat-anthropic.js";
 import { registerOpenAiCompat } from "./compat-openai.js";
@@ -171,10 +177,51 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // auth would leak the surface's existence via a 401. Only the three
   // interception routes are consulted; every other route short-circuits with no
   // query at all.
+  //
+  // ADR-0024 (O13) makes the two COMPAT routes SCOPE-AWARE: a per-user /
+  // per-project / per-role rule can enable a surface the org singleton has off
+  // (staged rollout) or disable it for a scope the org has on. Resolution:
+  //  - no scope rules exist (the common case): the org value decides, with no
+  //    identity resolution at all — byte-identical to the pre-0041 gate;
+  //  - rules exist: the caller's identity is resolved from the SAME headers
+  //    the auth hook reads (Authorization, plus the x-api-key alias on the
+  //    Anthropic route) and the effective value is user > project > role > org.
+  //    An unauthenticated or invalid caller resolves at the ORG level, so a
+  //    credential-less probe cannot detect that scope rules exist — a
+  //    disabled-by-resolution surface answers the SAME indistinguishable 404.
+  // The MCP route stays org-only: scope rules cover the compat surfaces.
+  // SURFACE EXPOSURE IS NOT ENTITLEMENT — a rule passing this gate grants
+  // nothing; evaluateAgent still gates the dispatch identically.
   app.addHook("onRequest", async (req, reply) => {
     const route = `${req.method} ${req.routeOptions.url ?? ""}`;
-    const enabled = await interceptionSurfaceEnabled(db, route);
-    if (enabled === false) {
+    if (!INTERCEPTION_GATED_ROUTES.has(route)) return;
+    const settings = await loadInterceptionSettings(db);
+    if (route === MCP_PROXY_ROUTE) {
+      if (!settings.mcpInterceptionEnabled) {
+        return reply.status(404).send(notFoundBody(req.method, req.url));
+      }
+      return;
+    }
+    const orgEnabled =
+      route === COMPAT_ANTHROPIC_ROUTE ? settings.anthropicCompatEnabled : settings.openaiCompatEnabled;
+    if (!(await interceptionScopeRulesExist(db))) {
+      if (!orgEnabled) return reply.status(404).send(notFoundBody(req.method, req.url));
+      return;
+    }
+    let authorization = req.headers.authorization;
+    if (!authorization && API_KEY_HEADER_ROUTES.has(route)) {
+      const alt = req.headers["x-api-key"];
+      if (typeof alt === "string" && alt.length > 0) authorization = `Bearer ${alt}`;
+    }
+    const ctx = await authenticate(db, opts.bootstrapToken, authorization);
+    const userId = ctx && ctx !== "disabled" ? ctx.userId : null;
+    const projectHeader = req.headers[PROJECT_HEADER];
+    const projectId =
+      typeof projectHeader === "string" && UUID_ANY_RE.test(projectHeader) ? projectHeader : null;
+    const policy = await resolveInterceptionPolicy(db, { userId, projectId }, settings);
+    const enabled =
+      route === COMPAT_ANTHROPIC_ROUTE ? policy.anthropicCompatEnabled : policy.openaiCompatEnabled;
+    if (!enabled) {
       return reply.status(404).send(notFoundBody(req.method, req.url));
     }
   });

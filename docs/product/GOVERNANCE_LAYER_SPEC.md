@@ -344,10 +344,18 @@ with no separate instrumentation step.
 
 ### 10.3 Feature specification
 
-- **Automatic, mandatory tagging at the point of every call**: every governed agent/model
-  invocation, connector call, and MCP tool call is automatically tagged with project/Initiative,
-  team, environment, initiating user, and the specific agent/model or tool used — enforced by the
-  gateway, not left to optional developer instrumentation.
+- **Automatic, mandatory metering at the point of every call**: every governed agent/model
+  invocation, connector call, and MCP tool call is metered by the gateway — enforced there, not
+  left to optional developer instrumentation — and tagged with project/Initiative, team,
+  environment, initiating user, and the specific agent/model or tool used. **Coverage statement
+  (ADR-0024): every gateway call is metered; attribution determines *where* the cost lands.** A
+  call attributed via `x-regulait-project-id` bills its project; an unattributed call still
+  writes the same usage/pricing row and surfaces in an explicit, labeled **"Unattributed"
+  bucket** in the cost dashboard — visible to admins, never hidden inside any project's totals,
+  and never counted against any project budget. Deployments that want a hard guarantee instead
+  of visibility close the gap entirely with the two admin toggles
+  (`requireProjectAttribution` for the provider-compatibility surfaces,
+  `requireMcpAttribution` for the MCP proxy), which reject unattributed calls outright.
 - **Per-project cost dashboard**: real-time spend broken down by project/Initiative/Shared
   Project (§9), with drill-down to team, user, agent/model, and connector/MCP-server level.
 - **Budget vs. actual**: admins set a budget per project (monthly or per billing cycle); the
