@@ -1056,7 +1056,10 @@ const TABS = [
     // to be buildable here — not only as a side effect of proxy traffic.
     + "<h2>Tool inventory</h2><div class='card'>"
     + form("f-tool", [{name:"serverId",label:"server",options:sOpts},{name:"name",ph:"tool name"},{name:"kind",options:["read","write"]},{name:"description",req:false}], "Register tool")
-    + "<p class='dim' style='font-size:12px'>Registered here, or auto-discovered on first proxy use. Pick a server above to list what it already has.</p></div>"
+    + "<p class='dim' style='font-size:12px'>Registered here, or auto-discovered on first proxy use. Pick a server above to list what it already has.</p>"
+    // O10 (ADR-0027): per-tool price override — tool-first, server-flat fallback
+    + form("f-tprice", [{name:"serverId",label:"server",options:sOpts},{name:"toolName",label:"tool",options:[]},{name:"pricePerCallUsd",label:"price per call ($, 0 allowed; blank clears)",type:"number",req:false}], "Set tool price")
+    + "<p class='dim' style='font-size:12px'>O10: a tool with an override bills at ITS price; every other tool on the server bills at the server's flat price. Leaving the price blank clears the override. Attributed and unattributed metering both honour the tool-first resolution; a manifest re-sync never clobbers an override. Every change is audited.</p></div>"
     + "<h2>Tool-level allow-list grants</h2><div class='card'>"
     + form("f-tgrant", [{name:"userId",label:"user",options:uOpts},{name:"serverId",label:"server",options:sOpts},{name:"toolName",label:"tool",options:[]}], "Grant tool")
     + form("f-sgrant", [{name:"userId",label:"user",options:uOpts},{name:"serverId",label:"server",options:sOpts},{name:"readOnlyAll",label:"read-only all",options:["true","false"]}], "Grant server") + "</div>";
@@ -1065,6 +1068,9 @@ const TABS = [
     $("#srvtools").innerHTML = "<h2>Tools on this server</h2>" + table(t.tools);
   }));
   linkTools("f-tgrant", tools);
+  linkTools("f-tprice", tools);
+  wire("f-tprice", (d) => api("PATCH", "/v1/servers/" + d.serverId + "/tools/" + encodeURIComponent(d.toolName) + "/price",
+    { pricePerCallUsd: d.pricePerCallUsd === undefined || d.pricePerCallUsd === "" ? null : Number(d.pricePerCallUsd) }));
   wire("f-srv", (d) => post("/v1/servers", d));
   wire("f-tool", (d) => post("/v1/servers/" + d.serverId + "/tools", { name: d.name, kind: d.kind, description: d.description }));
   wire("f-tgrant", (d) => post("/v1/grants/tools", d));
@@ -1107,6 +1113,8 @@ const TABS = [
   const serverOf = (row) => row.serverScope === "all" ? "all servers" : (sName.get(row.serverId) ?? row.serverId);
   const rulesView = (rows) => (rows ?? []).map((row) => {
     const o = { id: row.id, target: targetOf(row), server: serverOf(row), tool: row.toolName ?? "— any —" };
+    // A4: surface the deploy-mode scope (blank = every call, today's default)
+    o.deployMode = row.deployMode ?? "— any —";
     if (row.writeOnly !== undefined) o.writeOnly = row.writeOnly;
     if (row.approverUserId) o.approver = uName.get(row.approverUserId) ?? row.approverUserId;
     if (row.argPath !== undefined) o.argPath = row.argPath;
@@ -1121,11 +1129,35 @@ const TABS = [
     + "<h2>Data-scope rules</h2><div class='card'>"
     + form("f-dsr", subject.concat([{name:"argPath",label:"arg path",ph:"e.g. database"},{name:"allowedValues",label:"allowed values",ph:"comma,separated"}]), "Add") + table(rulesView(ds.rules)) + "</div>"
     + "<h2>Rate limits</h2><div class='card'>"
-    + form("f-rlr", subject.concat([{name:"maxCalls",label:"max calls",type:"number"},{name:"windowSeconds",label:"window seconds",type:"number"}]), "Add") + table(rulesView(rl.rules)) + "</div>";
+    + form("f-rlr", subject.concat([{name:"maxCalls",label:"max calls",type:"number"},{name:"windowSeconds",label:"window seconds",type:"number"}]), "Add") + table(rulesView(rl.rules)) + "</div>"
+    // A4 (ADR-0027): scope an EXISTING rule to one deploy mode. Default (and
+    // 'clear') = mode-unscoped = the rule applies to every call, exactly as
+    // before — a mode-scoped rule binds only to calls whose attributed work is
+    // in flight toward a deploy target of that mode (server-derived context).
+    + "<h2>Deploy-mode scope (A4)</h2><div class='card'>"
+    + form("f-rmode", [
+        {name:"kind",label:"rule kind",options:[{v:"approvals",l:"approval rule"},{v:"rate-limits",l:"rate limit"},{v:"data-scopes",l:"data-scope rule"}]},
+        {name:"ruleId",label:"rule id",ph:"paste the rule id from the tables above"},
+        {name:"deployMode",label:"deploy mode",options:[{v:"__clear__",l:"— clear (every call) —"},{v:"hosted",l:"hosted"},{v:"byoc",l:"byoc"},{v:"air_gapped",l:"air_gapped"}]},
+      ], "Set scope")
+    + "<p class='dim' style='font-size:12px'>A mode-scoped restriction applies only to calls whose attributed project has in-flight workflow instances landing on a deploy target of that mode. The context is derived server-side — never client-asserted — and an unattributed call (or one with no in-flight deploy-bound work) never matches a mode-scoped rule. Mode scoping only narrows WHICH restrictions apply; it can never mint an allow. Every change here is audited.</p></div>"
+    // O9 (ADR-0027): narrow an EXISTING revocation to read_only (writes stay
+    // denied, reads allowed) or restore it to full. Creation is always full.
+    + "<h2>Revocation scope (O9)</h2><div class='card'>"
+    + form("f-rvscope", [
+        {name:"kind",label:"revocation kind",options:[{v:"mcp",l:"MCP (role-derived) revocation"},{v:"connectors",l:"connector revocation"}]},
+        {name:"revocationId",label:"revocation id",ph:"paste the revocation id"},
+        {name:"scope",label:"scope",options:[{v:"full",l:"full — everything denied (default)"},{v:"read_only",l:"read_only — writes denied, reads allowed"}]},
+      ], "Set scope")
+    + "<p class='dim' style='font-size:12px'>A revocation is created FULL (the unambiguous ADR-0019 total). Narrowing it to read_only keeps write-classified tools/operations denied while letting reads through; a full revocation always beats everything else. Agent revocations carry no scope — agents have no read/write operation classification to scope by. Every change is audited.</p></div>";
   for (const id of ["f-apr", "f-dsr", "f-rlr"]) { linkTools(id, tools); linkScope(id); }
   wire("f-apr", (d) => post("/v1/rules/approvals", d));
   wire("f-dsr", (d) => post("/v1/rules/data-scopes", { ...d, allowedValues: String(d.allowedValues).split(",") }));
   wire("f-rlr", (d) => post("/v1/rules/rate-limits", { ...d, maxCalls: Number(d.maxCalls), windowSeconds: Number(d.windowSeconds) }));
+  wire("f-rmode", (d) => api("PATCH", "/v1/rules/" + d.kind + "/" + encodeURIComponent(d.ruleId) + "/deploy-mode",
+    { deployMode: d.deployMode === "__clear__" ? null : d.deployMode }));
+  wire("f-rvscope", (d) => api("PATCH", "/v1/revocations/" + d.kind + "/" + encodeURIComponent(d.revocationId) + "/scope",
+    { scope: d.scope }));
 }],
 ["Workflows", async (el) => {
   // Pillar 2's admin home: templates (with their stage chain), the assignment
@@ -1296,14 +1328,23 @@ const TABS = [
         {name:"mode",options:["hosted","byoc","air_gapped"]},
         {name:"environment",label:"environment",req:false,ph:"e.g. production (optional)"},
         {name:"baseUrl",label:"base url",req:false,ph:"optional"},
-        {name:"roleArn",label:"role / account",req:false,ph:"aws role arn / azure sub / gcp project"},
-        {name:"region",label:"region / namespace",req:false,ph:"e.g. us-east-1 (optional)"},
+        {name:"roleArn",label:"role arn (aws)",req:false,ph:"arn:aws:iam::<acct>:role/<name>"},
+        {name:"region",label:"region",req:false,ph:"e.g. us-east-1 / eastus / us-central1"},
         {name:"credential",label:"credential",type:"password",req:false,ph:"kubeconfig etc. — never shown again"},
+        // migration 0043 per-kind config — fill only the fields of the chosen
+        // provider; the API rejects a field on the wrong kind loudly
+        {name:"cluster",label:"ecs cluster (aws)",req:false,ph:"optional"},
+        {name:"subscriptionId",label:"subscription (azure)",req:false,ph:"azure subscription id"},
+        {name:"resourceGroup",label:"resource group (azure)",req:false,ph:"optional"},
+        {name:"templateUri",label:"template uri (azure)",req:false,ph:"https://… (optional)"},
+        {name:"projectId",label:"project (gcp)",req:false,ph:"gcp project id"},
+        {name:"blueprintGcs",label:"blueprint (gcp)",req:false,ph:"gs://… (optional)"},
+        {name:"namespace",label:"namespace (k8s)",req:false,ph:"optional"},
       ], "Add target")
     + dataTable(d.targets, {
         actions: (row) => "<button class='small danger' data-tdel='" + esc(row.name) + "'>delete</button>",
       })
-    + "<p class='dim' style='font-size:12px'>Credentials are AES-256-GCM encrypted at rest and never returned. An aws target needs a role arn (arn:aws:iam::&lt;acct&gt;:role/&lt;name&gt;) and region; azure/gcp reuse the role/account field for their subscription/project; kubernetes needs a kubeconfig credential. aws/azure/gcp/kubernetes run as deterministic dry-run shapes (no live cloud mutation) — a dry-run deploy is recorded and badged as such, and it can never satisfy a production deploy gate (#79c).</p></div>";
+    + "<p class='dim' style='font-size:12px'>Credentials are AES-256-GCM encrypted at rest and never returned. Per-kind config (migration 0043): aws needs a role arn (arn:aws:iam::&lt;acct&gt;:role/&lt;name&gt;) + region and may name the ecs cluster; azure needs a subscription + region and may name the resource group / template uri; gcp needs a project + region and may name the gs:// blueprint; kubernetes needs a kubeconfig credential and may name the namespace. Fields set here are row-first — they beat the matching gateway env vars. aws/azure/gcp/kubernetes run as deterministic dry-run shapes (no live cloud mutation) — a dry-run deploy is recorded and badged as such, and it can never satisfy a production deploy gate (#79c).</p></div>";
   el.querySelectorAll("[data-tdel]").forEach((b) => b.addEventListener("click", async () => {
     if (!confirmClick(b, "Delete target?")) return;
     try { await del("/v1/deploy/targets/" + encodeURIComponent(b.dataset.tdel)); toast("Target deleted", "ok"); render(); }
@@ -1335,6 +1376,12 @@ const TABS = [
         {name:"baseUrl",label:"base url",req:false,ph:"required for jira / azure_devops / generic_webhook"},
         {name:"apiVersion",label:"api version (jira)",req:false,ph:"v2 (default)",
          options:[{v:"3",l:"v3 + ADF rich text"},{v:"2",l:"v2 (legacy plain text)"}]},
+        // O7 (ADR-0027): what a detected status drift does on this connection
+        {name:"driftResolution",label:"drift policy",options:[
+          {v:"manual",l:"manual — surface only (default)"},
+          {v:"prefer_regulait",l:"prefer RegulAIt — push expected state back"},
+          {v:"prefer_pm",l:"prefer PM tool — adopt its state on the link"},
+        ]},
         {name:"token",type:"password",ph:"never shown again",grow:true},
       ], "Add connection")
     + "<p class='dim' style='font-size:12px'>Every provider kind is implemented — generic_webhook speaks RegulAIt's signed normalized event contract (HMAC-SHA256 of the body in <span class='mono'>x-regulait-signature</span>, under the connection token) to any HTTP receiver at its base URL. jira, azure_devops and generic_webhook need their base URL (e.g. https://&lt;site&gt;.atlassian.net, https://dev.azure.com/&lt;org&gt;, your receiver endpoint). The api version select applies to jira only: v2 (default) sends plain-text descriptions/comments; v3 sends them as ADF rich-text documents (paragraphs, headings, lists, code blocks) — Atlassian's GA direction. The demo runs entirely on the mock provider — no external service is touched.</p></div>"
@@ -2240,8 +2287,21 @@ const TABS = [
         {name:"autoPruneEnabled",label:"scheduled auto-prune",options:[{v:"false",l:"off (manual prune only — default)"},{v:"true",l:"on (prune on a schedule)"}]},
         {name:"pruneIntervalHours",label:"prune interval (hours)",type:"number"},
         {name:"defaultAuditRetentionDays",label:"org default retention (days, 0 = none)",type:"number"},
+        // A4: MAX-only per-deploy-mode overrides — 0/blank = no override
+        {name:"modeRetHosted",label:"hosted rows: keep at least (days, 0 = none)",type:"number",req:false},
+        {name:"modeRetByoc",label:"byoc rows: keep at least (days, 0 = none)",type:"number",req:false},
+        {name:"modeRetAirGapped",label:"air-gapped rows: keep at least (days, 0 = none)",type:"number",req:false},
       ], "Save retention policy")
     + "<p class='dim' style='font-size:12px'>Off by default: pruning only happens when an admin presses the button on the Audit Log page. When on, the gateway prunes on the configured interval under the SAME floor the manual button uses. The org default retention only fills the gap when no compliance profile sets one — a profile floor always wins upward, so this can never shorten a framework's audit trail. Enter 0 to clear the org default (never prune without a profile floor — today's behaviour). Every prune, manual or scheduled, is itself audited.</p>"
+    + "</div>"
+
+    // --- O5 backup verification --------------------------------------------
+    + "<h2>Backup verification (O5)</h2><div class='card'>"
+    + form("f-org-backup", [
+        {name:"backupVerifyEnabled",label:"scheduled backup verification",options:[{v:"false",l:"off (seed/manual ledger rows only — default)"},{v:"true",l:"on (verify recovery points on a schedule)"}]},
+        {name:"backupVerifyIntervalHours",label:"verify interval (hours)",type:"number"},
+      ], "Save backup verification")
+    + "<p class='dim' style='font-size:12px'>Off by default (today's behaviour). When on, the gateway checks each backup-target resource's recent recovery points through its provider on the configured interval and writes an honest, source-labelled ledger row: success only when the provider's own check found no missed backup, and rows from the mock provider are labelled scheduler:mock so they can never pass for a real cloud verification. A missed backup writes no success row — the findings pipeline stays the surface for the miss. Every pass is audited.</p>"
     + "</div>"
 
     // --- Sign-in & sessions (ADR-0025) -------------------------------------
@@ -2283,10 +2343,17 @@ const TABS = [
   setVals("f-org-workers", ["defaultWorkerMaxTurns","maxWorkerTurns","maxAttachmentsPerDispatch","maxAttachmentBytes","imageTokenEstimateTokens","sharedContextMaxChars","nodeOutputMaxChars"]);
   setVals("f-org-approvals", ["approvalQuorum","approvalDelegationEnabled"]);
   setVals("f-org-retention", ["autoPruneEnabled","pruneIntervalHours","defaultAuditRetentionDays"]);
+  setVals("f-org-backup", ["backupVerifyEnabled","backupVerifyIntervalHours"]);
   setVals("f-org-auth", ["passwordMinLength","passwordRequireClasses","sessionLifetimeHours","sessionIdleMinutes","mfaRequired","ssoOnly","loginLockoutThreshold","loginLockoutWindowMinutes","loginLockoutMinutes"]);
   // the retention-days number input has no stored 0; show blank when null
   const retIn = $("#f-org-retention [name=defaultAuditRetentionDays]");
   if (retIn && cur.defaultAuditRetentionDays == null) retIn.value = "0";
+  // A4: prefill the per-mode override inputs from the stored map
+  const modeMap = cur.modeAuditRetention || {};
+  for (const [nm, key] of [["modeRetHosted","hosted"],["modeRetByoc","byoc"],["modeRetAirGapped","air_gapped"]]) {
+    const inp = $("#f-org-retention [name=" + nm + "]");
+    if (inp) inp.value = String(modeMap[key] ?? 0);
+  }
 
   // each section PUTs only its own keys (a PARTIAL update server-side)
   const putOrg = (body) => api("PUT", "/v1/org/settings", body);
@@ -2336,10 +2403,23 @@ const TABS = [
     nodeOutputMaxChars: Number(d.nodeOutputMaxChars),
   }));
   wire("f-org-approvals", (d) => putOrg({ approvalQuorum: d.approvalQuorum, approvalDelegationEnabled: asBool(d.approvalDelegationEnabled) }));
-  wire("f-org-retention", (d) => putOrg({
-    autoPruneEnabled: asBool(d.autoPruneEnabled),
-    pruneIntervalHours: Number(d.pruneIntervalHours),
-    defaultAuditRetentionDays: Number(d.defaultAuditRetentionDays) === 0 ? null : Number(d.defaultAuditRetentionDays),
+  wire("f-org-retention", (d) => {
+    // A4: compose the full per-mode override map (0/blank = no override)
+    const modeMap = {};
+    for (const [nm, key] of [["modeRetHosted","hosted"],["modeRetByoc","byoc"],["modeRetAirGapped","air_gapped"]]) {
+      const v = Number(d[nm] || 0);
+      if (v > 0) modeMap[key] = v;
+    }
+    return putOrg({
+      autoPruneEnabled: asBool(d.autoPruneEnabled),
+      pruneIntervalHours: Number(d.pruneIntervalHours),
+      defaultAuditRetentionDays: Number(d.defaultAuditRetentionDays) === 0 ? null : Number(d.defaultAuditRetentionDays),
+      modeAuditRetention: modeMap,
+    });
+  });
+  wire("f-org-backup", (d) => putOrg({
+    backupVerifyEnabled: asBool(d.backupVerifyEnabled),
+    backupVerifyIntervalHours: Number(d.backupVerifyIntervalHours),
   }));
   wire("f-org-auth", (d) => putOrg({
     passwordMinLength: Number(d.passwordMinLength),

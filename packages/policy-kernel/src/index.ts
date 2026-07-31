@@ -51,6 +51,10 @@ export interface Revocation {
   userId: string;
   serverId: string;
   toolName: string | null;
+  /** O9 (ADR-0027): 'full' (default, incl. absent = every pre-O9 rule) =
+   * suppress entirely; 'read_only' = suppress WRITE-classified tools only —
+   * reads stay allowed. A full revocation still beats everything. */
+  scope?: "full" | "read_only" | null;
 }
 
 /**
@@ -64,6 +68,15 @@ export interface Revocation {
 export type RuleScope = "user" | "role" | "team" | "fleet";
 /** whether a rule binds to one server (serverId set) or every server (all). */
 export type RuleServerScope = "server" | "all";
+
+/**
+ * A4 (ADR-0027, decomposing ADR-0019's deferred A4): the DEPLOY-MODE dimension
+ * a restriction rule may additionally bind to. A rule with deployMode set
+ * matches ONLY a call whose evaluation context carries that mode (see
+ * EvaluationInput.deployContext); null/absent = mode-unscoped = matches every
+ * call — byte-identical to the pre-A4 behaviour.
+ */
+export type RuleDeployMode = "hosted" | "byoc" | "air_gapped";
 
 /**
  * §3 approval requirement: a matching, granted call pauses for a named
@@ -82,6 +95,8 @@ export interface ApprovalRule {
   teamId?: string | null;
   scope?: RuleScope;
   serverScope?: RuleServerScope;
+  /** A4: bind this rule to one deploy mode; null/absent = every call (today) */
+  deployMode?: RuleDeployMode | null;
   toolName: string | null;
   writeOnly: boolean;
   approverUserId: string;
@@ -104,6 +119,8 @@ export interface DataScopeRule {
   teamId?: string | null;
   scope?: RuleScope;
   serverScope?: RuleServerScope;
+  /** A4: bind this rule to one deploy mode; null/absent = every call (today) */
+  deployMode?: RuleDeployMode | null;
   toolName: string | null;
   argPath: string;
   allowedValues: string[];
@@ -122,6 +139,8 @@ export interface RateLimit {
   teamId?: string | null;
   scope?: RuleScope;
   serverScope?: RuleServerScope;
+  /** A4: bind this rule to one deploy mode; null/absent = every call (today) */
+  deployMode?: RuleDeployMode | null;
   toolName: string | null;
   maxCalls: number;
   windowSeconds: number;
@@ -167,6 +186,22 @@ export interface EvaluationInput {
    * ceiling (a flat run), and behaviour is unchanged.
    */
   ceilingTools?: readonly string[] | null;
+  /**
+   * A4 (ADR-0027): the deploy modes/contexts this call executes UNDER — always
+   * SERVER-DERIVED (the gateway resolves it from the deploy targets the
+   * attributed work lands on), never client-asserted. A set (not a single
+   * value) because attributed work can be in flight toward targets of more
+   * than one mode at once. A mode-scoped restriction rule matches when its
+   * deployMode is IN this set. Null/empty = no derivable deploy context — a
+   * mode-scoped rule then does NOT match (a restriction binds to a KNOWN
+   * context), and every mode-unscoped rule behaves exactly as before, so the
+   * default is byte-identical to pre-A4. PRECEDENCE: mode scoping is a further
+   * AND-condition on the rule MATCH — it composes with subject/server/tool
+   * scoping, is additive-only (it can narrow which restrictions apply, never
+   * mint an allow), and matched rules keep their existing fixed evaluation
+   * order (data-scope → rate-limit → approval) unchanged.
+   */
+  deployContext?: readonly string[] | null;
 }
 
 export interface Decision {
@@ -247,6 +282,24 @@ function ruleAppliesToServer(
 }
 
 /**
+ * A4: the DEPLOY-MODE half of a restriction rule's match. A mode-unscoped rule
+ * (deployMode null/absent — every pre-A4 rule) matches every call, exactly as
+ * before. A mode-scoped rule matches only when the call's server-derived
+ * context set contains that mode; with no derivable context (null/empty) it
+ * does not match — a restriction binds to a KNOWN context, and the context is
+ * server-derived so "unknown" means "not deploy-scoped work", never a client
+ * dodging the rule. Additive-only by construction: consulted only while
+ * matching RESTRICTIONS, so it can never turn a deny into an allow.
+ */
+function ruleAppliesToDeployMode(
+  r: { deployMode?: RuleDeployMode | null },
+  deployContext: readonly string[] | null | undefined,
+): boolean {
+  if (r.deployMode == null) return true;
+  return (deployContext ?? []).includes(r.deployMode);
+}
+
+/**
  * Additive audit prose naming the scope a restriction matched by — empty for a
  * plain per-user, per-server rule so every legacy reason string is byte-
  * identical, non-empty for a role/team/fleet or all-servers rule.
@@ -256,6 +309,7 @@ function scopeReason(r: {
   serverScope?: RuleServerScope;
   roleId?: string | null;
   teamId?: string | null;
+  deployMode?: RuleDeployMode | null;
 }): string {
   const parts: string[] = [];
   const scope = r.scope ?? "user";
@@ -263,6 +317,9 @@ function scopeReason(r: {
   else if (scope === "role") parts.push(`role-scoped rule (role ${refLabel(r.roleId ?? "?")})`);
   else if (scope === "team") parts.push(`team-scoped rule (team ${refLabel(r.teamId ?? "?")})`);
   if ((r.serverScope ?? "server") === "all") parts.push("all servers");
+  // A4: name the deploy mode a mode-scoped restriction bound to. Mode-unscoped
+  // rules add nothing, so every legacy reason string stays byte-identical.
+  if (r.deployMode != null) parts.push(`deploy-mode ${r.deployMode}`);
   return parts.length ? ` [${parts.join(", ")}]` : "";
 }
 
@@ -297,13 +354,23 @@ export function evaluate(input: EvaluationInput): Decision {
 
   // A revocation only ever suppresses ROLE-DERIVED entitlements (§5): direct
   // user grants are themselves per-user overrides and always survive.
-  const revocationFor = (toolName: string | null): Revocation | undefined =>
-    (input.revocations ?? []).find(
+  // O9 (ADR-0027): a 'read_only'-scoped revocation suppresses WRITE-classified
+  // tools only — a read stays allowed. A FULL revocation (the default, and
+  // every pre-O9 row) beats everything, so precedence is otherwise unchanged:
+  // when both match, full governs.
+  const revocationFor = (toolName: string | null): Revocation | undefined => {
+    const matching = (input.revocations ?? []).filter(
       (r) =>
         r.userId === userId &&
         r.serverId === serverId &&
         (r.toolName === null || r.toolName === toolName),
     );
+    const full = matching.find((r) => (r.scope ?? "full") === "full");
+    if (full) return full;
+    return tool.kind === "write"
+      ? matching.find((r) => r.scope === "read_only")
+      : undefined;
+  };
 
   // Grant precedence: direct tool grant → role tool grant (minus revocations)
   // → direct read-only-all → role read-only-all (minus revocations) → deny.
@@ -417,6 +484,7 @@ export function evaluate(input: EvaluationInput): Decision {
     (r) =>
       ruleAppliesToSubject(r, userId) &&
       ruleAppliesToServer(r, serverId) &&
+      ruleAppliesToDeployMode(r, input.deployContext) &&
       matchesScope(r.toolName, tool.name),
   );
   if (scopeRules.length > 0) {
@@ -448,6 +516,7 @@ export function evaluate(input: EvaluationInput): Decision {
     (l) =>
       ruleAppliesToSubject(l, userId) &&
       ruleAppliesToServer(l, serverId) &&
+      ruleAppliesToDeployMode(l, input.deployContext) &&
       matchesScope(l.toolName, tool.name) &&
       l.currentCount >= l.maxCalls,
   );
@@ -471,6 +540,7 @@ export function evaluate(input: EvaluationInput): Decision {
     (r) =>
       ruleAppliesToSubject(r, userId) &&
       ruleAppliesToServer(r, serverId) &&
+      ruleAppliesToDeployMode(r, input.deployContext) &&
       matchesScope(r.toolName, tool.name) &&
       (!r.writeOnly || tool.kind === "write"),
   );
@@ -598,13 +668,18 @@ export interface AgentRevocation {
   reason?: string | null;
 }
 
-/** ADR-0019: the CONNECTOR twin of AgentRevocation. Same total semantics, same
- * allow-path-only invariant. */
+/** ADR-0019: the CONNECTOR twin of AgentRevocation. Same allow-path-only
+ * invariant. O9 (ADR-0027) partial scope: 'full' (default, incl. absent =
+ * every pre-O9 row) denies every operation; 'read_only' denies WRITES only —
+ * reads stay allowed. A full revocation still beats everything. Agent
+ * revocations stay total: agents carry no read/write op classification to
+ * scope by. */
 export interface ConnectorRevocation {
   id: string;
   userId: string;
   connectorId: string;
   reason?: string | null;
+  scope?: "full" | "read_only" | null;
 }
 
 export interface EvaluateAgentInput {
@@ -925,9 +1000,17 @@ export function evaluateConnector(input: EvaluateConnectorInput): ConnectorDecis
   // narrowing a grant is what editing the grant is for — a revocation must be
   // an unambiguous, auditable "this user may not use this connector at all".
   // Absent input = byte-identical to the pre-ADR-0019 path.
-  const connectorRevocation = (input.connectorRevocations ?? []).find(
+  // O9 (ADR-0027): a FULL revocation (default, incl. every pre-O9 row) denies
+  // every operation exactly as before; a 'read_only'-scoped revocation denies
+  // WRITES only — a read proceeds to the ordinary grant checks. When both
+  // exist, full governs (a full revocation still beats everything).
+  const matchingRevocations = (input.connectorRevocations ?? []).filter(
     (r) => r.userId === userId && r.connectorId === connectorId,
   );
+  const fullRevocation = matchingRevocations.find((r) => (r.scope ?? "full") === "full");
+  const partialRevocation = matchingRevocations.find((r) => r.scope === "read_only");
+  const connectorRevocation =
+    fullRevocation ?? (operation === "write" ? partialRevocation : undefined);
   if (connectorRevocation) {
     chain.push({ rule: "connector-revoked", outcome: "deny", grantId: connectorRevocation.id });
     return {
@@ -935,9 +1018,13 @@ export function evaluateConnector(input: EvaluateConnectorInput): ConnectorDecis
       ruleId: "connector-revoked",
       ruleChain: chain,
       reason:
-        `connector ${connectorRef} is granted to user ${refLabel(userId, input.userName)} ` +
-        `but revoked for them by per-user revocation ${refLabel(connectorRevocation.id)}` +
-        (connectorRevocation.reason ? ` — ${connectorRevocation.reason}` : ""),
+        connectorRevocation.scope === "read_only"
+          ? `write to connector ${connectorRef} denied: per-user revocation ` +
+            `${refLabel(connectorRevocation.id)} is scoped read_only — reads stay allowed` +
+            (connectorRevocation.reason ? ` — ${connectorRevocation.reason}` : "")
+          : `connector ${connectorRef} is granted to user ${refLabel(userId, input.userName)} ` +
+            `but revoked for them by per-user revocation ${refLabel(connectorRevocation.id)}` +
+            (connectorRevocation.reason ? ` — ${connectorRevocation.reason}` : ""),
     };
   }
 

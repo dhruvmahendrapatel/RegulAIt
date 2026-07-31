@@ -29,6 +29,7 @@ import { buildAwsLiveDeployClient } from "./deploy-aws-client.js";
 import { buildAzureLiveDeployClient } from "./deploy-azure-client.js";
 import { buildGcpLiveDeployClient } from "./deploy-gcp-client.js";
 import { buildK8sLiveDeployClient } from "./deploy-k8s-client.js";
+import type { DeployTargetProviderConfig } from "@regulait/shared";
 
 export type DeployProviderKind = "mock" | "aws" | "azure" | "gcp" | "kubernetes";
 
@@ -651,9 +652,15 @@ export interface ResolveDeployProviderConfig {
   credential?: string;
   baseUrl?: string | null;
   /** aws: the customer IAM role to assume / azure subscription / gcp project;
-   * the field is reused as the provider's account handle. */
+   * the field is reused as the provider's account handle. Migration 0043:
+   * azure/gcp prefer providerConfig.subscriptionId / .projectId — roleArn is
+   * the legacy fallback so pre-0043 rows keep working byte-identically. */
   roleArn?: string | null;
   region?: string | null;
+  /** migration 0043: the target row's validated per-kind config. Row-first —
+   * a set field beats the matching env var; null/absent = the legacy
+   * env-fallback behaviour. */
+  providerConfig?: DeployTargetProviderConfig | null;
   /** A1: an injected live-AWS client (fake in tests). Present + REGULAIT_DEPLOY_LIVE
    * on = the real @aws-sdk path; absent = dry-run regardless of the flag. */
   awsLiveClient?: AwsLiveDeployClient;
@@ -692,20 +699,68 @@ export type LiveDeployClients = Pick<
  * workflows.ts). Unit tests that construct providers directly keep injecting
  * fakes and are unaffected.
  */
+/**
+ * Migration 0043: the ROW-FIRST config resolution for the live deploy clients.
+ * The azure/gcp client factories read their resource-group / template /
+ * blueprint config from an env object at call time; a deploy target row that
+ * carries the field now WINS over the gateway-wide env var by overlaying it
+ * onto the env the factory is handed. A row without the field (every pre-0043
+ * row) falls through to the env var — byte-identical to before. Exported so
+ * the precedence is unit-testable without driving a real SDK.
+ */
+export function deployClientEnvOverlay(
+  provider: string,
+  env: NodeJS.ProcessEnv,
+  config: DeployTargetProviderConfig | null | undefined,
+): NodeJS.ProcessEnv {
+  if (!config) return env;
+  if (provider === "azure") {
+    return {
+      ...env,
+      ...(config.resourceGroup ? { REGULAIT_DEPLOY_AZURE_RESOURCE_GROUP: config.resourceGroup } : {}),
+      ...(config.templateUri ? { REGULAIT_DEPLOY_AZURE_TEMPLATE_URI: config.templateUri } : {}),
+    };
+  }
+  if (provider === "gcp") {
+    return {
+      ...env,
+      ...(config.blueprintGcs ? { REGULAIT_DEPLOY_GCP_BLUEPRINT_GCS: config.blueprintGcs } : {}),
+    };
+  }
+  return env;
+}
+
 export function liveDeployClients(
   provider: string,
   env: NodeJS.ProcessEnv = process.env,
+  /** migration 0043: the target row's per-kind config — row-first over env */
+  providerConfig?: DeployTargetProviderConfig | null,
 ): LiveDeployClients {
   if (!deployLiveEnabled(env)) return {};
   if (provider === "aws") {
     return {
       awsLiveClient: buildAwsLiveDeployClient(undefined, {
-        cluster: env.REGULAIT_DEPLOY_AWS_CLUSTER || undefined,
+        // row-first (migration 0043), env var second — the pre-0043 behaviour
+        cluster: providerConfig?.cluster || env.REGULAIT_DEPLOY_AWS_CLUSTER || undefined,
       }),
     };
   }
-  if (provider === "azure") return { azureLiveClient: buildAzureLiveDeployClient(undefined, env) };
-  if (provider === "gcp") return { gcpLiveClient: buildGcpLiveDeployClient(undefined, env) };
+  if (provider === "azure") {
+    return {
+      azureLiveClient: buildAzureLiveDeployClient(
+        undefined,
+        deployClientEnvOverlay(provider, env, providerConfig),
+      ),
+    };
+  }
+  if (provider === "gcp") {
+    return {
+      gcpLiveClient: buildGcpLiveDeployClient(
+        undefined,
+        deployClientEnvOverlay(provider, env, providerConfig),
+      ),
+    };
+  }
   if (provider === "kubernetes") return { k8sLiveClient: buildK8sLiveDeployClient() };
   return {};
 }
@@ -721,14 +776,17 @@ export function resolveDeployProvider(config: ResolveDeployProviderConfig): Depl
   }
   if (config.provider === "azure") {
     return new AzureDeployProvider(
-      config.roleArn ?? "",
+      // migration 0043: the named subscription wins; roleArn is the legacy
+      // account-handle fallback so pre-0043 rows keep working byte-identically
+      config.providerConfig?.subscriptionId ?? config.roleArn ?? "",
       config.region ?? "",
       config.azureLiveClient,
     );
   }
   if (config.provider === "gcp") {
     return new GcpDeployProvider(
-      config.roleArn ?? "",
+      // migration 0043: the named project wins; roleArn is the legacy fallback
+      config.providerConfig?.projectId ?? config.roleArn ?? "",
       config.region ?? "",
       config.gcpLiveClient,
     );
@@ -736,7 +794,8 @@ export function resolveDeployProvider(config: ResolveDeployProviderConfig): Depl
   if (config.provider === "kubernetes") {
     return new KubernetesDeployProvider(
       config.credential ?? "",
-      config.region ?? null,
+      // migration 0043: the named namespace wins; region was the legacy slot
+      config.providerConfig?.namespace ?? config.region ?? null,
       config.k8sLiveClient,
     );
   }

@@ -184,7 +184,7 @@ describe("backup_restore — propose -> approve -> restored", () => {
 });
 
 describe("deny -> accepted_risk, ledger untouched", () => {
-  it("a denied cert rotation leaves not_after unchanged and writes no rotation row", async () => {
+  it("a denied cert rotation leaves not_after unchanged and keeps a reasoned denied marker (O6)", async () => {
     const before = await certRowFor("infops-deny-cert");
     const proposed = await post(`/v1/infra/certs/${before.id}/rotate`, { approverUserId: approverId });
     const approvalId = proposed.json().approvalId;
@@ -192,11 +192,15 @@ describe("deny -> accepted_risk, ledger untouched", () => {
     expect(d.statusCode).toBe(200);
 
     const after = await certRowFor("infops-deny-cert");
-    // reverted to active; not_after byte-identical (durable ledger untouched)
-    expect(after.status).toBe("active");
+    // O6 lifecycle: the denial is a RECORDED terminal state (re-proposable),
+    // no longer a silent reset to 'active'; not_after stays byte-identical.
+    expect(after.status).toBe("rotation_denied");
     expect(after.notAfter).toBe(before.notAfter);
     const rotations = (await getJson(`/v1/infra/certs/${before.id}/rotations`)).rotations;
-    expect(rotations).toHaveLength(0);
+    expect(rotations).toHaveLength(1);
+    expect(rotations[0].status).toBe("denied");
+    expect(rotations[0].reason).toBeTruthy();
+    expect(rotations[0].newSerial).toBeNull(); // nothing rotated
 
     // the linked finding is the accepted-risk surface
     const findings = (await getJson("/v1/infra/findings")).findings;

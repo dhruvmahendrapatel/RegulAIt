@@ -5,6 +5,7 @@ import {
   auditLog,
   count,
   dataScopeRules,
+  deployTargets,
   eq,
   gte,
   inArray,
@@ -12,6 +13,7 @@ import {
   or,
   rateLimits,
   users,
+  workflowInstances,
   type Db,
   type PgColumn,
   type SQL,
@@ -59,6 +61,46 @@ export interface GovernedEvaluation {
   approvedApprovalId: string | null;
 }
 
+/** the workflow statuses under which attributed work is still "landing on" its
+ * deploy targets — terminal instances no longer bind a mode context */
+const TERMINAL_INSTANCE_STATUSES = ["completed", "denied", "aborted", "rolled_back"];
+
+/**
+ * A4 (ADR-0027): derive the SERVER-SIDE deploy context of an attributed call —
+ * the set of deploy-target modes the project's in-flight workflow instances'
+ * deployment/rollback stages name. This is "the deploy target the change lands
+ * on" from ADR-0019's A4 assessment, made concrete: never client-asserted, a
+ * SET because one project can be in flight toward targets of different modes
+ * at once. An unattributed call, a project with no in-flight instances, or
+ * instances whose stages name no (existing) deploy target all derive [] — and
+ * a mode-scoped rule then simply does not match (the kernel's documented
+ * fail-closed-for-restrictions-bound-to-a-known-context precedence).
+ * Exported for tests.
+ */
+export async function deriveDeployContext(db: Db, projectId: string): Promise<string[]> {
+  const instances = await db
+    .select({ definition: workflowInstances.definition, status: workflowInstances.status })
+    .from(workflowInstances)
+    .where(eq(workflowInstances.projectId, projectId));
+  const connections = new Set<string>();
+  for (const inst of instances) {
+    if (TERMINAL_INSTANCE_STATUSES.includes(inst.status)) continue;
+    const stages = (inst.definition as { stages?: Array<{ type?: string; connection?: string }> })
+      ?.stages;
+    for (const stage of stages ?? []) {
+      if ((stage.type === "deployment" || stage.type === "rollback") && stage.connection) {
+        connections.add(stage.connection);
+      }
+    }
+  }
+  if (connections.size === 0) return [];
+  const targets = await db
+    .select({ mode: deployTargets.mode })
+    .from(deployTargets)
+    .where(inArray(deployTargets.name, [...connections]));
+  return [...new Set(targets.map((t) => t.mode))];
+}
+
 /**
  * Full §3 evaluation: grants + rate limits (usage counted from audit-log
  * allow rows inside each limit's window) + approval rules, including any
@@ -74,6 +116,10 @@ export async function governedEvaluate(
   /** §5.1 Team-Lead ceiling: the tool NAMES this worker's lead chain permits.
    * null/undefined = no lead constraint. Only ever narrows a granted call. */
   ceilingTools?: readonly string[] | null,
+  /** A4: pillar-5 attribution of this call, used ONLY to derive the deploy
+   * context for mode-scoped rules — and only lazily, when a loaded rule
+   * actually carries a deployMode, so the default path costs nothing. */
+  projectId?: string | null,
 ): Promise<GovernedEvaluation> {
   // PILLAR 1 rule scoping: resolve the user's role/team memberships first, then
   // widen every rule load from the exact (userId, serverId) match to every
@@ -190,6 +236,15 @@ export async function governedEvaluate(
 
   const approvedApprovalId = approvedRows[0]?.id ?? null;
 
+  // A4: derive the deploy context ONLY when some loaded rule is mode-scoped —
+  // zero extra queries on the default path (no mode-scoped rules = today).
+  const anyModeScoped =
+    aRules.some((r) => r.deployMode != null) ||
+    limits.some((l) => l.deployMode != null) ||
+    scopeRules.some((r) => r.deployMode != null);
+  const deployContext =
+    anyModeScoped && projectId ? await deriveDeployContext(db, projectId) : null;
+
   const decision = evaluate({
     userId,
     serverId,
@@ -206,6 +261,7 @@ export async function governedEvaluate(
     args,
     approvedApprovalId,
     ceilingTools: ceilingTools ?? null,
+    deployContext,
   });
 
   return { decision, approvedApprovalId };

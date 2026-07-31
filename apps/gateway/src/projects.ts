@@ -43,6 +43,12 @@ import {
   type PiiHit,
 } from "@regulait/shared";
 import { z } from "zod";
+import {
+  mergeDefinitions,
+  MergeConflictError,
+  type InstanceState,
+  type WorkflowDefinition,
+} from "@regulait/workflow-kernel";
 import { loadOrgSettings, orgDefaultPiiMode, retentionFloor, runAuditPruneOnce } from "./org-settings.js";
 
 type ProjectRow = typeof projects.$inferSelect;
@@ -254,6 +260,24 @@ export function effectiveCompliancePolicy(profiles: ComplianceProfileRow[]) {
         p.patchCadenceDays == null ? m : m == null ? p.patchCadenceDays : Math.min(m, p.patchCadenceDays),
       null,
     ),
+    // O2 (ADR-0027): the project-budget CEILING — MIN composes (the strictest
+    // framework wins), matching patchCadenceDays' strictest-cadence rule.
+    maxProjectBudgetUsd: profiles.reduce<number | null>(
+      (m, p) =>
+        p.maxProjectBudgetUsd == null
+          ? m
+          : m == null
+            ? p.maxProjectBudgetUsd
+            : Math.min(m, p.maxProjectBudgetUsd),
+      null,
+    ),
+    // O2: enforcement floor — 'block' beats 'warn_only' beats no-opinion
+    // (strictest wins). A profile can only ever TIGHTEN the org setting.
+    budgetEnforcement: profiles.some((p) => p.budgetEnforcement === "block")
+      ? ("block" as const)
+      : profiles.some((p) => p.budgetEnforcement === "warn_only")
+        ? ("warn_only" as const)
+        : null,
   };
 }
 
@@ -391,6 +415,144 @@ export async function requiredTemplateIdsFor(db: Db, projectId: string): Promise
   return effectiveCompliancePolicy(profiles).requiredTemplateIds;
 }
 
+// ---------------------------------------------------------------------------
+// O1 (ADR-0027) — reclassification REAPPLY to in-flight instances.
+//
+// Pre-O1, an approved reclassification changed the cascade for FUTURE
+// instances only: in-flight instances kept their merged definitions forever.
+// Now an approved reclassification recomputes each affected in-flight
+// instance's REMAINING (not-yet-executed) stage requirements under THE
+// ADDITIVE-ONLY RULE:
+//   - STRICTLY-ADDITIVE changes apply automatically (audited): a newly
+//     required template whose merge leaves every existing stage byte-
+//     identical, in order, and only APPENDS new stages. Appended stages are
+//     by construction not-yet-executed — they run after everything already
+//     in flight, so no completed/passed stage is ever rewritten.
+//   - Anything that would RELAX (a template no longer required — its stages
+//     are never removed from a running instance) or RESTRUCTURE (a merge
+//     conflict, a changed existing stage, a retired required template) stays
+//     MANUAL: surfaced with an audit row per instance, never silently
+//     applied and never silently dropped.
+// ---------------------------------------------------------------------------
+
+const O1_TERMINAL_STATUSES = ["completed", "denied", "aborted", "rolled_back"];
+
+export async function reapplyReclassificationToInFlight(
+  db: Db,
+  projectId: string,
+  previousTags: string[],
+  deciderUserId: string,
+): Promise<{ applied: number; manual: number }> {
+  const [newRequired, oldRequired] = await Promise.all([
+    requiredTemplateIdsFor(db, projectId),
+    profilesForTags(db, previousTags).then((p) => effectiveCompliancePolicy(p).requiredTemplateIds),
+  ]);
+  const relaxed = oldRequired.filter((id) => !newRequired.includes(id));
+  const instances = (
+    await db.select().from(workflowInstances).where(eq(workflowInstances.projectId, projectId))
+  ).filter((i) => !O1_TERMINAL_STATUSES.includes(i.status));
+  let applied = 0;
+  let manual = 0;
+  const surfaceManual = async (instanceId: string, why: string) => {
+    manual++;
+    await db.insert(auditLog).values({
+      userId: deciderUserId,
+      objectType: "workflow",
+      objectId: instanceId,
+      detail: { phase: "reclassification-reapply", outcome: "manual", why, projectId },
+      effect: "allow",
+      ruleId: "reclassification-reapply-manual",
+      ruleChain: [],
+      reason: `reclassification NOT auto-applied to in-flight instance: ${why} — the additive-only rule (ADR-0027) leaves this to a human, never silent`,
+    });
+  };
+  for (const instance of instances) {
+    const have = instance.templateIds as string[];
+    const missing = newRequired.filter((id) => !have.includes(id));
+    if (relaxed.length > 0) {
+      // a RELAXATION is never applied to a running instance — its already-
+      // merged (stricter) definition stands; surfaced once per instance.
+      await surfaceManual(
+        instance.id,
+        `the new classification no longer requires template(s) [${relaxed.join(", ")}] — relaxing a running instance's requirements is manual by design`,
+      );
+    }
+    if (missing.length === 0) continue;
+    const templates = await db
+      .select()
+      .from(workflowTemplates)
+      .where(inArray(workflowTemplates.id, missing));
+    const retired = templates.filter((t) => t.retiredAt !== null);
+    if (retired.length > 0 || templates.length !== missing.length) {
+      await surfaceManual(
+        instance.id,
+        `newly required template(s) ${retired.length ? `[${retired.map((t) => t.name).join(", ")}] are retired` : "are missing"} — cannot be auto-merged`,
+      );
+      continue;
+    }
+    let merged: WorkflowDefinition;
+    try {
+      merged = mergeDefinitions([
+        instance.definition as WorkflowDefinition,
+        ...templates.map((t) => t.definition as WorkflowDefinition),
+      ]);
+    } catch (err) {
+      if (err instanceof MergeConflictError) {
+        await surfaceManual(instance.id, `merge conflict: ${err.message}`);
+        continue;
+      }
+      throw err;
+    }
+    // THE ADDITIVE-ONLY CHECK: every existing stage must survive byte-
+    // identical, in order — the merge may only APPEND. Anything else is a
+    // restructure and stays manual.
+    const before = (instance.definition as WorkflowDefinition).stages;
+    const strictlyAdditive =
+      merged.stages.length > before.length &&
+      before.every((s, i) => JSON.stringify(merged.stages[i]) === JSON.stringify(s));
+    if (!strictlyAdditive) {
+      await surfaceManual(
+        instance.id,
+        "the recomputed definition would restructure existing stages (not strictly additive)",
+      );
+      continue;
+    }
+    const addedStages = merged.stages.slice(before.length);
+    const state = instance.state as InstanceState;
+    const newState: InstanceState = {
+      ...state,
+      stageStatuses: [...state.stageStatuses, ...addedStages.map(() => "pending" as const)],
+    };
+    await db
+      .update(workflowInstances)
+      .set({
+        templateIds: [...have, ...missing],
+        definition: merged,
+        state: newState,
+        updatedAt: new Date(),
+      })
+      .where(eq(workflowInstances.id, instance.id));
+    applied++;
+    await db.insert(auditLog).values({
+      userId: deciderUserId,
+      objectType: "workflow",
+      objectId: instance.id,
+      detail: {
+        phase: "reclassification-reapply",
+        outcome: "applied",
+        projectId,
+        addedTemplateIds: missing,
+        addedStageIds: addedStages.map((s) => s.id),
+      },
+      effect: "allow",
+      ruleId: "reclassification-reapply-applied",
+      ruleChain: [],
+      reason: `reclassification auto-applied to in-flight instance: strictly-additive stage(s) [${addedStages.map((s) => s.id).join(", ")}] appended from newly required template(s) — no executed stage was touched`,
+    });
+  }
+  return { applied, manual };
+}
+
 export type ProjectGate =
   | { ok: true; project: ProjectRow | null; spentUsd: number }
   | { ok: false; status: number; error: string; detail?: string };
@@ -412,7 +574,24 @@ export async function preDispatchProjectGate(
   }
   const now = new Date();
   const periodKey = currentPeriodKey(now);
-  if (project.budgetUsd == null || overageActive(project, periodKey)) {
+  // O2 (ADR-0027): the compliance cascade's COST dimensions join the gate.
+  // A framework's maxProjectBudgetUsd is a CEILING: the effective budget is
+  // min(project budget, ceiling) — and the ceiling caps an UNBUDGETED
+  // project too (a framework cap is not opt-out-able by leaving the budget
+  // blank). A framework's budgetEnforcement 'block' forces blocking even
+  // when the org says warn_only — strictest wins; the org can never be
+  // relaxed by a profile. Unclassified projects: cascade is empty, the gate
+  // is byte-identical to before.
+  const tags = (project.classifications ?? []) as string[];
+  const cascade = effectiveCompliancePolicy(await profilesForTags(db, tags));
+  const ceilingUsd = cascade.maxProjectBudgetUsd;
+  const effectiveBudgetUsd =
+    project.budgetUsd == null
+      ? ceilingUsd
+      : ceilingUsd == null
+        ? project.budgetUsd
+        : Math.min(project.budgetUsd, ceilingUsd);
+  if (effectiveBudgetUsd == null || overageActive(project, periodKey)) {
     return { ok: true, project, spentUsd: 0 };
   }
   const spentUsd = await projectSpendUsd(db, projectId, { monthly: isMonthly(project), now });
@@ -421,21 +600,29 @@ export async function preDispatchProjectGate(
   // escalates into the one approvals queue + audits, but lets the dispatch
   // through). Defaults are byte-identical to the pre-0038 behaviour.
   const org = await loadOrgSettings(db);
-  const blockAtUsd = (project.budgetUsd * org.budgetHardBlockPct) / 100;
+  const blockAtUsd = (effectiveBudgetUsd * org.budgetHardBlockPct) / 100;
   if (spentUsd >= blockAtUsd) {
     await escalateProjectBudget(db, project, userId, spentUsd);
-    if (org.budgetEnforcement === "warn_only") {
+    // O2: strictest-wins — a framework's 'block' beats an org 'warn_only'
+    const enforcement = cascade.budgetEnforcement === "block" ? "block" : org.budgetEnforcement;
+    if (enforcement === "warn_only") {
       // enforcement is advisory: the crossing is escalated + audited above,
       // the call itself proceeds and its measured cost still lands.
       return { ok: true, project, spentUsd };
     }
+    const ceilingGoverned = ceilingUsd != null && effectiveBudgetUsd === ceilingUsd &&
+      (project.budgetUsd == null || ceilingUsd < project.budgetUsd);
     return {
       ok: false,
       status: 409,
       error: "project_budget_exceeded",
       detail:
         `measured spend $${spentUsd.toFixed(6)} >= hard-block threshold $${blockAtUsd.toFixed(6)}` +
-        ` (${org.budgetHardBlockPct}% of budget $${project.budgetUsd})`,
+        ` (${org.budgetHardBlockPct}% of ${ceilingGoverned ? `compliance ceiling $${effectiveBudgetUsd}` : `budget $${effectiveBudgetUsd}`})` +
+        (ceilingGoverned ? ` — the ceiling comes from compliance profile(s) [${tags.join(", ")}]` : "") +
+        (cascade.budgetEnforcement === "block" && org.budgetEnforcement === "warn_only"
+          ? " — blocking forced by the compliance cascade (org warn_only overridden, strictest wins)"
+          : ""),
     };
   }
   return { ok: true, project, spentUsd };
@@ -544,6 +731,15 @@ export async function applyProjectApprovalDecision(
         .update(projects)
         .set({ classifications: proposed, pendingClassifications: null })
         .where(eq(projects.id, approvalRow.projectId));
+      // O1 (ADR-0027): recompute affected in-flight instances' remaining
+      // requirements — strictly-additive changes auto-apply (audited);
+      // relaxations/restructures are surfaced manual, never silent.
+      await reapplyReclassificationToInFlight(
+        db,
+        approvalRow.projectId,
+        (project.classifications ?? []) as string[],
+        deciderUserId,
+      );
     } else {
       await db
         .update(projects)
@@ -1612,6 +1808,9 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       piiMode: body.piiMode ?? ("log" as const),
       backupRetentionDays: body.backupRetentionDays ?? null,
       patchCadenceDays: body.patchCadenceDays ?? null,
+      // O2 (ADR-0027): per-framework cost dimensions — null = no opinion
+      maxProjectBudgetUsd: body.maxProjectBudgetUsd ?? null,
+      budgetEnforcement: body.budgetEnforcement ?? null,
     };
     const [row] = await db
       .insert(complianceProfiles)
@@ -1663,11 +1862,41 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     if (!gate.ok) return reply.status(gate.status).send({ error: gate.error });
     const tags = (project.classifications ?? []) as string[];
     const profiles = await profilesForTags(db, tags);
+    const effective = effectiveCompliancePolicy(profiles);
+    // O2 (ADR-0027): surface COST-policy conflicts exactly like the existing
+    // cascade conflicts — computed and named, never silently resolved. The
+    // gate itself always applies the strictest composition regardless.
+    const org = await loadOrgSettings(db);
+    const costConflicts: string[] = [];
+    if (
+      effective.maxProjectBudgetUsd != null &&
+      project.budgetUsd != null &&
+      project.budgetUsd > effective.maxProjectBudgetUsd
+    ) {
+      costConflicts.push(
+        `project budget $${project.budgetUsd} exceeds the compliance ceiling $${effective.maxProjectBudgetUsd} — the CEILING governs (strictest wins)`,
+      );
+    }
+    if (effective.budgetEnforcement === "block" && org.budgetEnforcement === "warn_only") {
+      costConflicts.push(
+        "org budget enforcement is warn_only but a compliance profile forces block — BLOCK governs (strictest wins)",
+      );
+    }
+    if (effective.budgetEnforcement === "warn_only" && org.budgetEnforcement === "block") {
+      costConflicts.push(
+        "a compliance profile declares warn_only but the org enforces block — the profile declaration is INERT (a framework can tighten, never relax)",
+      );
+    }
     return {
       classifications: tags,
       pendingClassifications: (project.pendingClassifications ?? null) as string[] | null,
       profiles,
-      effective: effectiveCompliancePolicy(profiles),
+      effective,
+      costPolicy: {
+        maxProjectBudgetUsd: effective.maxProjectBudgetUsd,
+        budgetEnforcement: effective.budgetEnforcement,
+        conflicts: costConflicts,
+      },
       enforcement: {
         requiredWorkflowTemplates: "enforced-at-instance-creation",
         // ADR-0023: read_only now DENIES write-classified tools on every
@@ -1726,7 +1955,19 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         ruleChain: [],
         reason: `project classified [${body.classifications.join(", ")}]`,
       });
-      return reply.status(200).send({ classifications: body.classifications, applied: true });
+      // O1 (ADR-0027): a FIRST classification is applied directly (no diff to
+      // review), but instances already in flight are held to the same
+      // additive-only reapply as an approved reclassification — leaving them
+      // stale would be the exact hole O1 closes.
+      const reapplied = await reapplyReclassificationToInFlight(
+        db,
+        projectId,
+        [],
+        req.authCtx.userId ?? project.budgetApproverUserId ?? projectId,
+      );
+      return reply
+        .status(200)
+        .send({ classifications: body.classifications, applied: true, inFlight: reapplied });
     }
 
     if (!body.reviewerUserId) {
