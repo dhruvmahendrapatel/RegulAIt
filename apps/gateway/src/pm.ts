@@ -141,6 +141,15 @@ export async function mirrorApprovalDecision(
   deciderUserId: string,
 ): Promise<{ ok: boolean; action?: string; error?: string } | null> {
   if (!dataKey || !approvalRow.stageId) return null;
+  // O8 (ADR-0027): a RUN BUDGET-CAP escalation decision mirrors too — onto
+  // the RUN-LEVEL PARENT work item (which exists for exactly this), always
+  // as a COMMENT: a budget sanction is not a stage outcome, so it must never
+  // enter a customer's "Approved" state. Both directions (approved AND
+  // denied) mirror — decide-hook parity with sign-offs.
+  const isBudgetEscalation =
+    approvalRow.objectType === "run" &&
+    (approvalRow.stageId.startsWith("__budget__") ||
+      approvalRow.stageId.startsWith("__nodebudget__"));
   let linkWhere;
   if (approvalRow.objectType === "workflow" && approvalRow.instanceId) {
     linkWhere = and(
@@ -149,11 +158,13 @@ export async function mirrorApprovalDecision(
       isNull(pmLinks.nodeId),
       isNull(pmLinks.orphanedAt),
     );
-  } else if (
-    approvalRow.objectType === "run" &&
-    approvalRow.runId &&
-    !approvalRow.stageId.startsWith("__budget__")
-  ) {
+  } else if (isBudgetEscalation && approvalRow.runId) {
+    linkWhere = and(
+      eq(pmLinks.objectType, "run"),
+      eq(pmLinks.objectId, approvalRow.runId),
+      isNull(pmLinks.orphanedAt),
+    );
+  } else if (approvalRow.objectType === "run" && approvalRow.runId) {
     linkWhere = and(
       eq(pmLinks.objectType, "run_node"),
       eq(pmLinks.objectId, approvalRow.runId),
@@ -170,16 +181,21 @@ export async function mirrorApprovalDecision(
   const mapping = mappingFor(conn.provider, conn.mapping ?? undefined);
   // Sign-off decisions only transition on approval; a denial is always a
   // comment — a customer's "Approved" state must never be entered on a deny.
+  // O8: a budget escalation is ALWAYS a comment (never a transition) — a
+  // spend sanction is a first-class linked record, not a stage state.
   const action =
-    approvalRow.status === "approved"
+    approvalRow.status === "approved" && !isBudgetEscalation
       ? resolveApprovalAction(mapping, approvalRow.stageId)
       : ({ kind: "comment" } as const);
   try {
     const provider = providerFor(conn, dataKey);
     const [decider] = await db.select({ email: users.email }).from(users).where(eq(users.id, deciderUserId));
-    const note =
-      `[RegulAIt] sign-off '${approvalRow.stageId}' ${approvalRow.status} by ${decider?.email ?? deciderUserId}` +
-      (approvalRow.decisionReason ? `: ${approvalRow.decisionReason}` : "");
+    const nodeRef = isBudgetEscalation ? approvalRow.stageId.split(":")[1] : null;
+    const note = isBudgetEscalation
+      ? `[RegulAIt] budget-cap escalation${nodeRef ? ` (node '${nodeRef}')` : ""} ${approvalRow.status === "approved" ? "SANCTIONED — another attempt may run" : "DENIED — the run stays capped"} by ${decider?.email ?? deciderUserId}` +
+        (approvalRow.decisionReason ? `: ${approvalRow.decisionReason}` : "")
+      : `[RegulAIt] sign-off '${approvalRow.stageId}' ${approvalRow.status} by ${decider?.email ?? deciderUserId}` +
+        (approvalRow.decisionReason ? `: ${approvalRow.decisionReason}` : "");
     if (action.kind === "transition") {
       await provider.transitionState(conn.project, link.externalId, action.state);
     }
@@ -197,9 +213,11 @@ export async function mirrorApprovalDecision(
         ...(action.kind === "transition" ? { state: action.state } : {}),
       },
       effect: "allow",
-      ruleId: "pm-approval-mirrored",
+      ruleId: isBudgetEscalation ? "pm-budget-decision-mirrored" : "pm-approval-mirrored",
       ruleChain: [],
-      reason: `sign-off '${approvalRow.stageId}' (${approvalRow.status}) mirrored as ${action.kind}`,
+      reason: isBudgetEscalation
+        ? `budget-cap escalation decision (${approvalRow.status}) mirrored as a comment on the run's parent work item`
+        : `sign-off '${approvalRow.stageId}' (${approvalRow.status}) mirrored as ${action.kind}`,
     });
     return { ok: true, action: action.kind };
   } catch (err) {
