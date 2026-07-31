@@ -1991,3 +1991,623 @@ describe("Google tool-use mapping (functionDeclarations / functionCall / functio
     ).rejects.toMatchObject({ status: 400 });
   });
 });
+
+// ===========================================================================
+// ADR-0020 COMPAT LONG TAIL — toolChoice / responseFormat / thinking.
+// Every mapping below is a REAL wire assertion against a fake upstream (the
+// same injectable-fetch discipline as everything above): the neutral field
+// either lands as the provider's native parameter, or the adapter throws —
+// never a silent drop.
+// ===========================================================================
+
+describe("toolChoice wire mappings (ADR-0020 long tail)", () => {
+  const anthropicOk = {
+    id: "msg_tc_1",
+    type: "message",
+    role: "assistant",
+    model: "claude-opus-5",
+    content: [{ type: "text", text: "ok" }],
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    usage: { input_tokens: 5, output_tokens: 1 },
+  };
+  const openaiOk = {
+    id: "chatcmpl-tc1",
+    object: "chat.completion",
+    created: 1,
+    model: "gpt-5",
+    choices: [
+      { index: 0, message: { role: "assistant", content: "ok", refusal: null }, finish_reason: "stop", logprobs: null },
+    ],
+    usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 },
+  };
+  const TOOLS = [{ name: "lookup", inputSchema: { type: "object", properties: {} } }];
+
+  async function capturedAnthropic(toolChoice: "auto" | "none" | "required" | { name: string }) {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new AnthropicProvider({
+      apiKey: "k",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return anthropicJson(anthropicOk);
+      },
+    });
+    await provider.dispatch({ model: "claude-opus-5", input: "x", tools: TOOLS, toolChoice });
+    return captured!;
+  }
+
+  it("anthropic: auto/none map onto the native {type} shapes", async () => {
+    expect((await capturedAnthropic("auto")).tool_choice).toEqual({ type: "auto" });
+    expect((await capturedAnthropic("none")).tool_choice).toEqual({ type: "none" });
+  });
+
+  it("anthropic: 'required' maps onto {type:'any'}", async () => {
+    expect((await capturedAnthropic("required")).tool_choice).toEqual({ type: "any" });
+  });
+
+  it("anthropic: a named tool maps onto {type:'tool', name}", async () => {
+    expect((await capturedAnthropic({ name: "lookup" })).tool_choice).toEqual({
+      type: "tool",
+      name: "lookup",
+    });
+  });
+
+  it("anthropic: no toolChoice sends NO tool_choice field (byte-identical to before)", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new AnthropicProvider({
+      apiKey: "k",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return anthropicJson(anthropicOk);
+      },
+    });
+    await provider.dispatch({ model: "claude-opus-5", input: "x", tools: TOOLS });
+    expect("tool_choice" in captured!).toBe(false);
+  });
+
+  async function capturedOpenAi(toolChoice: "auto" | "none" | "required" | { name: string }) {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new OpenAiProvider({
+      apiKey: "k",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify(openaiOk), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    await provider.dispatch({ model: "gpt-5", input: "x", tools: TOOLS, toolChoice });
+    return captured!;
+  }
+
+  it("openai: the string variants pass through verbatim", async () => {
+    expect((await capturedOpenAi("auto")).tool_choice).toBe("auto");
+    expect((await capturedOpenAi("none")).tool_choice).toBe("none");
+    expect((await capturedOpenAi("required")).tool_choice).toBe("required");
+  });
+
+  it("openai: a named tool maps onto {type:'function', function:{name}}", async () => {
+    expect((await capturedOpenAi({ name: "lookup" })).tool_choice).toEqual({
+      type: "function",
+      function: { name: "lookup" },
+    });
+  });
+
+  it("openai responses API: a named tool flattens to {type:'function', name}", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new OpenAiProvider({
+      apiKey: "k",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return new Response(
+          JSON.stringify({
+            id: "resp_tc1",
+            object: "response",
+            status: "completed",
+            output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] }],
+            usage: { input_tokens: 5, output_tokens: 1 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+    await provider.dispatch({ model: "o3-pro", input: "x", tools: TOOLS, toolChoice: { name: "lookup" } });
+    expect(captured!.tool_choice).toEqual({ type: "function", name: "lookup" });
+  });
+
+  it("xai: same OpenAI-compatible shapes, pointed at api.x.ai", async () => {
+    let captured: { url: string; body: Record<string, unknown> } | null = null;
+    const provider = new XaiProvider({
+      apiKey: "k",
+      fetchImpl: async (url, init) => {
+        captured = { url: String(url), body: JSON.parse(String(init?.body)) };
+        return new Response(JSON.stringify({ ...openaiOk, model: "grok-4" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    await provider.dispatch({ model: "grok-4", input: "x", tools: TOOLS, toolChoice: { name: "lookup" } });
+    expect(captured!.url.startsWith("https://api.x.ai/v1")).toBe(true);
+    expect(captured!.body.tool_choice).toEqual({ type: "function", function: { name: "lookup" } });
+  });
+
+  async function capturedGoogle(toolChoice: "auto" | "none" | "required" | { name: string }) {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new GoogleProvider({
+      apiKey: "k",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return new Response(
+          JSON.stringify({
+            responseId: "resp-tc1",
+            candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+            usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 1 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+    await provider.dispatch({ model: "gemini-2.5-pro", input: "x", tools: TOOLS, toolChoice });
+    return captured!;
+  }
+
+  it("google: auto/none/required map onto functionCallingConfig AUTO/NONE/ANY", async () => {
+    expect((await capturedGoogle("auto")).toolConfig).toEqual({
+      functionCallingConfig: { mode: "AUTO" },
+    });
+    expect((await capturedGoogle("none")).toolConfig).toEqual({
+      functionCallingConfig: { mode: "NONE" },
+    });
+    expect((await capturedGoogle("required")).toolConfig).toEqual({
+      functionCallingConfig: { mode: "ANY" },
+    });
+  });
+
+  it("google: a named tool maps onto ANY + allowedFunctionNames", async () => {
+    expect((await capturedGoogle({ name: "lookup" })).toolConfig).toEqual({
+      functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["lookup"] },
+    });
+  });
+
+  it("mock: a named toolChoice forces that tool_use with no sentinel, observably", async () => {
+    const mock = new MockModelProvider();
+    const r = await mock.dispatch({
+      model: "mock-1",
+      input: "just answer normally",
+      tools: TOOLS,
+      toolChoice: { name: "lookup" },
+    });
+    expect(r.stopReason).toBe("tool_use");
+    expect(r.toolCalls).toEqual([expect.objectContaining({ name: "lookup" })]);
+  });
+
+  it("mock: 'required' forces the first declared tool", async () => {
+    const mock = new MockModelProvider();
+    const r = await mock.dispatch({
+      model: "mock-1",
+      input: "just answer normally",
+      tools: [{ name: "first_tool", inputSchema: {} }, { name: "second_tool", inputSchema: {} }],
+      toolChoice: "required",
+    });
+    expect(r.stopReason).toBe("tool_use");
+    expect(r.toolCalls![0]!.name).toBe("first_tool");
+  });
+
+  it("mock: 'none' suppresses even a sentinel-requested tool call", async () => {
+    const mock = new MockModelProvider();
+    const r = await mock.dispatch({
+      model: "mock-1",
+      input: "please <<use-tool:lookup>> now",
+      tools: TOOLS,
+      toolChoice: "none",
+    });
+    expect(r.stopReason).toBe("end_turn");
+    expect(r.toolCalls).toBeUndefined();
+  });
+
+  it("mock: a forced choice stops forcing once a tool_result is in history — loops terminate", async () => {
+    const mock = new MockModelProvider();
+    const r = await mock.dispatch({
+      model: "mock-1",
+      input: "",
+      messages: [
+        { role: "user", content: "look this up" },
+        { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "lookup", input: {} }] },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "t1", content: "found it" }] },
+      ],
+      tools: TOOLS,
+      toolChoice: { name: "lookup" },
+    });
+    expect(r.stopReason).toBe("end_turn");
+    expect(r.outputText).toContain("found it");
+  });
+});
+
+describe("responseFormat wire mappings (ADR-0020 long tail)", () => {
+  const openaiOk = {
+    id: "chatcmpl-rf1",
+    object: "chat.completion",
+    created: 1,
+    model: "gpt-5",
+    choices: [
+      { index: 0, message: { role: "assistant", content: '{"a":1}', refusal: null }, finish_reason: "stop", logprobs: null },
+    ],
+    usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+  };
+  const SCHEMA = { type: "object", properties: { a: { type: "number" } }, required: ["a"] };
+
+  it("openai: json_object passes through natively", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new OpenAiProvider({
+      apiKey: "k",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify(openaiOk), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    const r = await provider.dispatch({
+      model: "gpt-5",
+      input: "x",
+      responseFormat: { type: "json_object" },
+    });
+    expect(captured!.response_format).toEqual({ type: "json_object" });
+    expect(r.outputText).toBe('{"a":1}');
+  });
+
+  it("openai: json_schema passes through with name, schema and strict", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new OpenAiProvider({
+      apiKey: "k",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify(openaiOk), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    await provider.dispatch({
+      model: "gpt-5",
+      input: "x",
+      responseFormat: { type: "json_schema", name: "answer", schema: SCHEMA, strict: true },
+    });
+    expect(captured!.response_format).toEqual({
+      type: "json_schema",
+      json_schema: { name: "answer", schema: SCHEMA, strict: true },
+    });
+  });
+
+  it("openai responses API: responseFormat rides as text.format", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new OpenAiProvider({
+      apiKey: "k",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return new Response(
+          JSON.stringify({
+            id: "resp_rf1",
+            object: "response",
+            status: "completed",
+            output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "{}" }] }],
+            usage: { input_tokens: 5, output_tokens: 1 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+    await provider.dispatch({
+      model: "o3-pro",
+      input: "x",
+      responseFormat: { type: "json_schema", name: "answer", schema: SCHEMA },
+    });
+    expect(captured!.text).toEqual({
+      format: { type: "json_schema", name: "answer", schema: SCHEMA },
+    });
+  });
+
+  it("xai: response_format passes through on the OpenAI-compatible wire", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new XaiProvider({
+      apiKey: "k",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({ ...openaiOk, model: "grok-4" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    await provider.dispatch({ model: "grok-4", input: "x", responseFormat: { type: "json_object" } });
+    expect(captured!.response_format).toEqual({ type: "json_object" });
+  });
+
+  it("google: json_object maps onto responseMimeType application/json", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new GoogleProvider({
+      apiKey: "k",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return new Response(
+          JSON.stringify({
+            responseId: "resp-rf1",
+            candidates: [{ content: { parts: [{ text: "{}" }] }, finishReason: "STOP" }],
+            usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 1 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+    await provider.dispatch({
+      model: "gemini-2.5-pro",
+      input: "x",
+      responseFormat: { type: "json_object" },
+    });
+    const cfg = captured!.generationConfig as Record<string, unknown>;
+    expect(cfg.responseMimeType).toBe("application/json");
+    expect(cfg.responseSchema).toBeUndefined();
+  });
+
+  it("google: json_schema additionally maps the schema into Gemini's dialect", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new GoogleProvider({
+      apiKey: "k",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return new Response(
+          JSON.stringify({
+            responseId: "resp-rf2",
+            candidates: [{ content: { parts: [{ text: "{}" }] }, finishReason: "STOP" }],
+            usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 1 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+    await provider.dispatch({
+      model: "gemini-2.5-pro",
+      input: "x",
+      responseFormat: { type: "json_schema", name: "answer", schema: SCHEMA },
+    });
+    const cfg = captured!.generationConfig as Record<string, unknown>;
+    expect(cfg.responseMimeType).toBe("application/json");
+    // translated to the Gemini Schema dialect (uppercase types), exactly as
+    // tool input schemas are
+    expect(cfg.responseSchema).toEqual({
+      type: "OBJECT",
+      required: ["a"],
+      properties: { a: { type: "NUMBER" } },
+    });
+  });
+
+  it("anthropic: responseFormat FAILS LOUDLY — no native mechanism, no prompt-nudge pretence", async () => {
+    const provider = new AnthropicProvider({
+      apiKey: "k",
+      fetchImpl: async () => {
+        throw new Error("must not reach the wire");
+      },
+    });
+    await expect(
+      provider.dispatch({ model: "claude-opus-5", input: "x", responseFormat: { type: "json_object" } }),
+    ).rejects.toThrowError(/responseFormat/);
+  });
+
+  it("mock: echo compliance — the reply is pure parseable JSON naming the honoured format", async () => {
+    const mock = new MockModelProvider();
+    const obj = await mock.dispatch({
+      model: "mock-1",
+      input: "summarize the release notes",
+      responseFormat: { type: "json_object" },
+    });
+    expect(JSON.parse(obj.outputText)).toMatchObject({ format: "json_object" });
+
+    const schema = await mock.dispatch({
+      model: "mock-1",
+      input: "summarize the release notes",
+      responseFormat: { type: "json_schema", name: "release_summary", schema: SCHEMA },
+    });
+    expect(JSON.parse(schema.outputText)).toMatchObject({
+      format: "json_schema",
+      schema: "release_summary",
+    });
+  });
+});
+
+describe("thinking (ADR-0020 long tail): Anthropic extended thinking", () => {
+  const thinkingMessage = {
+    id: "msg_th_1",
+    type: "message",
+    role: "assistant",
+    model: "claude-opus-5",
+    content: [
+      { type: "thinking", thinking: "Let me reason about this.", signature: "sig-abc" },
+      { type: "text", text: "The answer is 42." },
+    ],
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    // per Anthropic, output_tokens INCLUDES the thinking tokens
+    usage: { input_tokens: 10, output_tokens: 57 },
+  };
+
+  it("sends the real thinking parameter and surfaces thinking blocks with signatures", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new AnthropicProvider({
+      apiKey: "k",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return anthropicJson(thinkingMessage);
+      },
+    });
+    const r = await provider.dispatch({
+      model: "claude-opus-5",
+      input: "think about it",
+      maxTokens: 2048,
+      thinking: { budgetTokens: 1024 },
+    });
+    expect(captured!.thinking).toEqual({ type: "enabled", budget_tokens: 1024 });
+    expect(r.thinking).toEqual([
+      { type: "thinking", thinking: "Let me reason about this.", signature: "sig-abc" },
+    ]);
+    expect(r.outputText).toBe("The answer is 42.");
+    // the ledger stays honest: output_tokens is the provider's billed total,
+    // thinking INCLUDED, carried unchanged
+    expect(r.usage).toEqual({ inputTokens: 10, outputTokens: 57 });
+  });
+
+  it("round-trips thinking + redacted_thinking history blocks natively, signature intact", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const provider = new AnthropicProvider({
+      apiKey: "k",
+      fetchImpl: async (_url, init) => {
+        captured = JSON.parse(String(init?.body));
+        return anthropicJson(thinkingMessage);
+      },
+    });
+    await provider.dispatch({
+      model: "claude-opus-5",
+      input: "",
+      thinking: { budgetTokens: 1024 },
+      messages: [
+        { role: "user", content: "step one" },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "prior reasoning", signature: "sig-prev" },
+            { type: "redacted_thinking", data: "opaque-bytes" },
+            { type: "text", text: "step one done" },
+          ],
+        },
+        { role: "user", content: "step two" },
+      ],
+    });
+    const assistant = (captured! as { messages: { content: unknown }[] }).messages[1]!;
+    expect(assistant.content).toEqual([
+      { type: "thinking", thinking: "prior reasoning", signature: "sig-prev" },
+      { type: "redacted_thinking", data: "opaque-bytes" },
+      { type: "text", text: "step one done" },
+    ]);
+  });
+
+  it("streams thinking_delta and signature_delta through onThinking, then text through onText", async () => {
+    const sse = [
+      `event: message_start\ndata: {"type":"message_start","message":{"id":"msg_th_s1","type":"message","role":"assistant","model":"claude-opus-5","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":1}}}\n\n`,
+      `event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}\n\n`,
+      `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Let me "}}\n\n`,
+      `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"reason."}}\n\n`,
+      `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-stream"}}\n\n`,
+      `event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n`,
+      `event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}\n\n`,
+      `event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Answer."}}\n\n`,
+      `event: content_block_stop\ndata: {"type":"content_block_stop","index":1}\n\n`,
+      `event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":42}}\n\n`,
+      `event: message_stop\ndata: {"type":"message_stop"}\n\n`,
+    ].join("");
+    const provider = new AnthropicProvider({
+      apiKey: "k",
+      fetchImpl: async () =>
+        new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+    });
+    const thinkingDeltas: string[] = [];
+    let signature = "";
+    const textDeltas: string[] = [];
+    const r = await provider.dispatch({
+      model: "claude-opus-5",
+      input: "think",
+      thinking: { budgetTokens: 1024 },
+      onThinking: (d) => {
+        if (d.thinking) thinkingDeltas.push(d.thinking);
+        if (d.signature) signature = d.signature;
+      },
+      onText: (d) => textDeltas.push(d),
+    });
+    expect(thinkingDeltas.join("")).toBe("Let me reason.");
+    expect(signature).toBe("sig-stream");
+    expect(textDeltas.join("")).toBe("Answer.");
+    expect(r.thinking).toEqual([
+      { type: "thinking", thinking: "Let me reason.", signature: "sig-stream" },
+    ]);
+    expect(r.outputText).toBe("Answer.");
+    expect(r.usage.outputTokens).toBe(42);
+  });
+
+  it("adapters WITHOUT a thinking mapping fail loudly, never dropping the budget", async () => {
+    const neverReach = async () => {
+      throw new Error("must not reach the wire");
+    };
+    const openai = new OpenAiProvider({ apiKey: "k", fetchImpl: neverReach as unknown as typeof fetch });
+    const xai = new XaiProvider({ apiKey: "k", fetchImpl: neverReach as unknown as typeof fetch });
+    const google = new GoogleProvider({ apiKey: "k", fetchImpl: neverReach as unknown as typeof fetch });
+    for (const [provider, model] of [
+      [openai, "gpt-5"],
+      [openai, "o3-pro"],
+      [xai, "grok-4"],
+      [google, "gemini-2.5-pro"],
+    ] as const) {
+      await expect(
+        provider.dispatch({ model, input: "x", thinking: { budgetTokens: 512 } }),
+      ).rejects.toThrowError(/thinking/);
+    }
+  });
+
+  it("mock: emits a deterministic thinking block, streams it, and bills it as output tokens", async () => {
+    const mock = new MockModelProvider();
+    const thinkingDeltas: string[] = [];
+    let signature = "";
+    const r = await mock.dispatch({
+      model: "mock-1",
+      input: "summarize the release notes",
+      thinking: { budgetTokens: 256 },
+      onThinking: (d) => {
+        if (d.thinking) thinkingDeltas.push(d.thinking);
+        if (d.signature) signature = d.signature;
+      },
+    });
+    expect(r.thinking).toHaveLength(1);
+    const block = r.thinking![0]!;
+    expect(block.type).toBe("thinking");
+    if (block.type === "thinking") {
+      expect(block.thinking).toContain("budget 256");
+      expect(block.signature).toBe("mock-signature");
+      expect(thinkingDeltas.join("")).toBe(block.thinking);
+      // thinking tokens are OUTPUT tokens — the mock's ledger includes them
+      const bare = await new MockModelProvider().dispatch({
+        model: "mock-1",
+        input: "summarize the release notes",
+      });
+      expect(r.usage.outputTokens).toBe(
+        bare.usage.outputTokens + Math.max(1, Math.ceil(block.thinking.length / 4)),
+      );
+    }
+    expect(signature).toBe("mock-signature");
+  });
+
+  it("mock: no thinking request, no thinking block (byte-identical to before)", async () => {
+    const mock = new MockModelProvider();
+    const r = await mock.dispatch({ model: "mock-1", input: "hello there friend" });
+    expect(r.thinking).toBeUndefined();
+  });
+
+  it("history thinking blocks never leak into a non-thinking provider's text view", async () => {
+    const mock = new MockModelProvider();
+    const r = await mock.dispatch({
+      model: "mock-1",
+      input: "",
+      messages: [
+        { role: "user", content: "first question about deployments" },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "SECRET-REASONING-TOKEN", signature: "s" },
+            { type: "text", text: "first answer" },
+          ],
+        },
+        { role: "user", content: "now shorter" },
+      ],
+    });
+    expect(r.outputText).not.toContain("SECRET-REASONING-TOKEN");
+  });
+});
