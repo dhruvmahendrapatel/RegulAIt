@@ -29,6 +29,11 @@ const AUTH = { authorization: `Bearer ${BOOT}` };
 const DATA_KEY = process.env.REGULAIT_DATA_KEY;
 
 const db = createDb(connectionString);
+// An idle pooled connection killed out from under us (e.g. a scratch database
+// dropped WITH (FORCE) right after seeding finishes) must not crash the
+// process via an unhandled 'error' event — all real query failures still
+// surface through their own awaited promises.
+(db.$client as { on: (ev: string, fn: (err: Error) => void) => void }).on("error", () => {});
 await runMigrations(
   db,
   path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations"),
@@ -1128,6 +1133,10 @@ if (DATA_KEY) {
 }
 
 await app.close();
+// end the pool so the process exits NOW instead of lingering on idle
+// connections for the pool timeout (a window in which a killed connection
+// used to crash the exit)
+await db.$client.end();
 
 console.log(`
 RegulAIt demo data ready.
