@@ -696,3 +696,232 @@ function renderCompliance(c) {
   return h;
 }
 `;
+
+/**
+ * ADR-0025 — the shared browser sign-in machinery. Both UIs render the same
+ * gate: email+password (then a TOTP code step when enabled), OIDC SSO
+ * buttons, and a details-toggled API-key fallback that EXCHANGES the key for
+ * the same session cookie (the key never lives in web storage). All
+ * state-changing calls carry the x-regulait-csrf header; the credential is a
+ * HttpOnly cookie the page can never read. Also ships the post-login
+ * "Account security" card (change password, TOTP enroll/disable) both UIs
+ * embed.
+ */
+export const UI_LOGIN_JS = `
+const CSRF_HDR = { "x-regulait-csrf": "1" };
+async function authCall(method, path, body) {
+  const res = await fetch(path, {
+    method,
+    headers: { ...CSRF_HDR, ...(body ? { "content-type": "application/json" } : {}) },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  const text = await res.text();
+  let json; try { json = JSON.parse(text); } catch { json = { raw: text }; }
+  return { status: res.status, ok: res.ok, json };
+}
+async function fetchAuthMe() {
+  const r = await authCall("GET", "/auth/me");
+  return r.ok ? r.json : null;
+}
+function authErrText(r) {
+  const j = r.json || {};
+  if (j.detail) return j.detail;
+  if (j.error === "invalid_credentials") return "Email or password is incorrect.";
+  if (j.error === "invalid_code") return "That code did not work \\u2014 codes rotate every 30s and cannot be reused.";
+  if (j.error === "invalid_key") return "That key did not work.";
+  if (j.error === "current_password_incorrect") return "The current password is incorrect.";
+  if (j.error === "sso_required") return "Password login is disabled here \\u2014 use single sign-on.";
+  return j.error ? String(j.error).replaceAll("_", " ") : ("sign-in failed (" + r.status + ")");
+}
+// renderLoginGate(rootEl, { brandHtml, returnTo, requireAdmin, onSignedIn })
+function renderLoginGate(root, cfg) {
+  let stage = { name: "login" };
+  const box = (inner) => "<div class='gate'><div class='card'>" + cfg.brandHtml + inner + "</div></div>";
+  const err = (m) => { const e = $("#lg-err"); if (e) e.textContent = m || ""; };
+  async function proceed() {
+    const me = await fetchAuthMe();
+    if (!me || (!me.userId && !me.isAdmin)) { stage = { name: "login", notice: stage.notice }; await draw(); return; }
+    if (cfg.requireAdmin && !me.isAdmin) {
+      await authCall("POST", "/auth/logout");
+      stage = { name: "login", notice: "That account is not an admin \\u2014 sign in with an admin account." };
+      await draw(); return;
+    }
+    if (me.mustChangePassword) { stage = { name: "change" }; await draw(); return; }
+    if (me.mfaSetupRequired) { stage = { name: "enroll" }; await draw(); return; }
+    cfg.onSignedIn();
+  }
+  async function draw() {
+    if (stage.name === "login") {
+      let sso = "";
+      try {
+        const p = await authCall("GET", "/auth/oidc/providers");
+        sso = ((p.json && p.json.providers) || []).map((pr) =>
+          "<button class='small' style='width:100%;margin-top:6px' data-sso='" + pr.id + "'>Continue with " + esc(pr.name) + "</button>").join("");
+      } catch (e) { /* the login form still works without the SSO list */ }
+      root.innerHTML = box(
+        "<p>Sign in with your email and password.</p>"
+        + (stage.notice ? "<div class='err-line' style='margin:6px 0'>" + esc(stage.notice) + "</div>" : "")
+        + "<label class='f' for='lg-email'>Email</label><input id='lg-email' type='email' autocomplete='username' style='width:100%' autofocus>"
+        + "<label class='f' for='lg-pass' style='margin-top:8px;display:block'>Password</label><input id='lg-pass' type='password' autocomplete='current-password' style='width:100%'>"
+        + "<div class='err-line' id='lg-err' style='margin:6px 0'></div>"
+        + "<button class='primary' id='lg-go' style='width:100%;margin-top:6px'>Sign in</button>"
+        + sso
+        + "<details style='margin-top:14px'><summary class='dim' style='cursor:pointer;font-size:12px'>Sign in with an API key instead</summary>"
+        + "<p class='dim' style='font-size:12px;margin:8px 0 6px'>For programmatic users during the transition: the key is exchanged for a session cookie \\u2014 it is sent once and never stored in this browser.</p>"
+        + "<input id='lg-key' type='password' placeholder='rgl_\\u2026' style='width:100%'>"
+        + "<div class='err-line' id='lg-keyerr' style='margin:6px 0'></div>"
+        + "<button class='small' id='lg-keygo' style='width:100%;margin-top:6px'>Exchange key for a session</button></details>"
+      );
+      const go = async () => {
+        err("");
+        const email = $("#lg-email").value.trim(), password = $("#lg-pass").value;
+        if (!email || !password) { err("Email and password are both required."); return; }
+        const r = await authCall("POST", "/auth/login", { email, password });
+        if (r.ok && r.json.mfaRequired) { stage = { name: "mfa", pendingToken: r.json.pendingToken }; await draw(); return; }
+        if (!r.ok) { err(authErrText(r)); return; }
+        proceed();
+      };
+      $("#lg-go").addEventListener("click", go);
+      ["lg-email", "lg-pass"].forEach((id) =>
+        $("#" + id).addEventListener("keydown", (e) => { if (e.key === "Enter") go(); }));
+      $("#lg-keygo").addEventListener("click", async () => {
+        const kerr = (m) => { $("#lg-keyerr").textContent = m || ""; };
+        kerr("");
+        const apiKey = $("#lg-key").value.trim();
+        if (!apiKey) { kerr("A key is required."); return; }
+        const r = await authCall("POST", "/auth/login-with-key", { apiKey });
+        if (!r.ok) { kerr(authErrText(r)); return; }
+        proceed();
+      });
+      document.querySelectorAll("[data-sso]").forEach((b) =>
+        b.addEventListener("click", () => { location.href = "/auth/oidc/" + b.dataset.sso + "/start?returnTo=" + encodeURIComponent(cfg.returnTo); }));
+      return;
+    }
+    if (stage.name === "mfa") {
+      root.innerHTML = box(
+        "<p>Two-factor authentication: enter the 6-digit code from your authenticator app.</p>"
+        + "<input id='lg-code' inputmode='numeric' autocomplete='one-time-code' placeholder='000000' style='width:100%;font-family:var(--mono);letter-spacing:.3em;text-align:center' maxlength='6' autofocus>"
+        + "<div class='err-line' id='lg-err' style='margin:6px 0'></div>"
+        + "<button class='primary' id='lg-go' style='width:100%;margin-top:6px'>Verify</button>"
+        + "<button class='ghost small' id='lg-back' style='width:100%;margin-top:6px'>Back to sign-in</button>"
+      );
+      const go = async () => {
+        err("");
+        const r = await authCall("POST", "/auth/mfa/verify", { pendingToken: stage.pendingToken, code: $("#lg-code").value.trim() });
+        if (!r.ok) { err(authErrText(r)); return; }
+        proceed();
+      };
+      $("#lg-go").addEventListener("click", go);
+      $("#lg-code").addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+      $("#lg-back").addEventListener("click", () => { stage = { name: "login" }; draw(); });
+      return;
+    }
+    if (stage.name === "change") {
+      root.innerHTML = box(
+        "<p>Your password is one-time \\u2014 set your own to continue.</p>"
+        + "<label class='f' for='lg-cur'>Current (one-time) password</label><input id='lg-cur' type='password' autocomplete='current-password' style='width:100%'>"
+        + "<label class='f' for='lg-new' style='margin-top:8px;display:block'>New password</label><input id='lg-new' type='password' autocomplete='new-password' style='width:100%'>"
+        + "<label class='f' for='lg-new2' style='margin-top:8px;display:block'>New password again</label><input id='lg-new2' type='password' autocomplete='new-password' style='width:100%'>"
+        + "<div class='err-line' id='lg-err' style='margin:6px 0'></div>"
+        + "<button class='primary' id='lg-go' style='width:100%;margin-top:6px'>Set password</button>"
+      );
+      $("#lg-go").addEventListener("click", async () => {
+        err("");
+        if ($("#lg-new").value !== $("#lg-new2").value) { err("The two new passwords do not match."); return; }
+        const r = await authCall("POST", "/auth/change-password", { currentPassword: $("#lg-cur").value, newPassword: $("#lg-new").value });
+        if (!r.ok) { err(authErrText(r)); return; }
+        proceed();
+      });
+      return;
+    }
+    if (stage.name === "enroll") {
+      const r = await authCall("POST", "/auth/totp/enroll");
+      if (!r.ok) {
+        root.innerHTML = box("<p>This organization requires two-factor authentication, but enrollment failed.</p><div class='err-line'>" + esc(authErrText(r)) + "</div>");
+        return;
+      }
+      root.innerHTML = box(
+        "<p>This organization requires two-factor authentication. Add this secret to your authenticator app \\u2014 it is shown exactly once.</p>"
+        + "<div class='card' style='padding:10px;margin:8px 0'><div style='font-family:var(--mono);word-break:break-all'>" + esc(r.json.secret) + "</div>"
+        + "<div class='dim' style='font-size:11px;word-break:break-all;margin-top:6px'>" + esc(r.json.otpauthUri) + "</div></div>"
+        + "<label class='f' for='lg-code'>Code from your app</label>"
+        + "<input id='lg-code' inputmode='numeric' autocomplete='one-time-code' placeholder='000000' style='width:100%;font-family:var(--mono);letter-spacing:.3em;text-align:center' maxlength='6'>"
+        + "<div class='err-line' id='lg-err' style='margin:6px 0'></div>"
+        + "<button class='primary' id='lg-go' style='width:100%;margin-top:6px'>Activate</button>"
+      );
+      $("#lg-go").addEventListener("click", async () => {
+        err("");
+        const a = await authCall("POST", "/auth/totp/activate", { code: $("#lg-code").value.trim() });
+        if (!a.ok) { err(authErrText(a)); return; }
+        proceed();
+      });
+      return;
+    }
+  }
+  proceed();
+}
+// The post-login "Account security" card (change password + MFA) both UIs embed.
+function accountSecurityHtml(authMe) {
+  return "<div class='card' id='acctsec'>"
+    + "<div class='kv'>"
+    + "<span class='k'>password</span><span>" + (authMe.passwordSet ? "set" : "not set \\u2014 sign-in is by API key/SSO until an admin issues a one-time password") + "</span>"
+    + "<span class='k'>two-factor</span><span>" + (authMe.totpEnabled ? "<span class='badge ok'>TOTP enabled</span>" : "<span class='badge'>off</span>") + "</span>"
+    + "</div>"
+    + (authMe.passwordSet
+      ? "<div class='row' style='margin-top:10px;align-items:flex-end'>"
+        + "<div><label class='f' for='as-cur'>Current password</label><input id='as-cur' type='password' autocomplete='current-password'></div>"
+        + "<div><label class='f' for='as-new'>New password</label><input id='as-new' type='password' autocomplete='new-password'></div>"
+        + "<button class='small primary' id='as-change'>Change password</button></div>"
+      : "")
+    + (authMe.totpEnabled
+      ? "<div class='row' style='margin-top:10px;align-items:flex-end'>"
+        + "<div><label class='f' for='as-dpass'>Password</label><input id='as-dpass' type='password'></div>"
+        + "<div><label class='f' for='as-dcode'>Current code</label><input id='as-dcode' inputmode='numeric' maxlength='6' placeholder='000000'></div>"
+        + "<button class='small danger' id='as-mfaoff'>Disable two-factor</button></div>"
+      : "<div style='margin-top:10px'><button class='small' id='as-mfaon'>Enable two-factor (TOTP)</button></div>")
+    + "<div id='as-enroll'></div>"
+    + "<div class='err-line' id='as-err' style='margin-top:6px'></div>"
+    + "<p class='faint' style='font-size:11.5px;margin:8px 0 0'>Changing your password signs out every other session. Disabling two-factor re-proves both factors. A code cannot be reused inside its 30-second window.</p>"
+    + "</div>";
+}
+function wireAccountSecurity(refresh) {
+  const asErr = (m) => { const e = $("#as-err"); if (e) e.textContent = m || ""; };
+  const chg = $("#as-change");
+  if (chg) chg.addEventListener("click", async () => {
+    asErr("");
+    const r = await authCall("POST", "/auth/change-password", { currentPassword: $("#as-cur").value, newPassword: $("#as-new").value });
+    if (!r.ok) { asErr(authErrText(r)); return; }
+    toast("Password changed \\u2014 every other session was signed out");
+    refresh();
+  });
+  const on = $("#as-mfaon");
+  if (on) on.addEventListener("click", async () => {
+    asErr("");
+    const r = await authCall("POST", "/auth/totp/enroll");
+    if (!r.ok) { asErr(authErrText(r)); return; }
+    $("#as-enroll").innerHTML =
+      "<div class='card' style='padding:10px;margin-top:8px'>"
+      + "<p class='dim' style='font-size:12px;margin:0 0 6px'>Add this secret to your authenticator app \\u2014 shown exactly once \\u2014 then confirm with a code.</p>"
+      + "<div style='font-family:var(--mono);word-break:break-all'>" + esc(r.json.secret) + "</div>"
+      + "<div class='dim' style='font-size:11px;word-break:break-all;margin-top:6px'>" + esc(r.json.otpauthUri) + "</div>"
+      + "<div class='row' style='margin-top:8px;align-items:flex-end'>"
+      + "<div><label class='f' for='as-acode'>Code</label><input id='as-acode' inputmode='numeric' maxlength='6' placeholder='000000'></div>"
+      + "<button class='small primary' id='as-activate'>Activate</button></div></div>";
+    $("#as-activate").addEventListener("click", async () => {
+      asErr("");
+      const a = await authCall("POST", "/auth/totp/activate", { code: $("#as-acode").value.trim() });
+      if (!a.ok) { asErr(authErrText(a)); return; }
+      toast("Two-factor enabled \\u2014 you will be asked for a code at sign-in");
+      refresh();
+    });
+  });
+  const off = $("#as-mfaoff");
+  if (off) off.addEventListener("click", async () => {
+    asErr("");
+    const r = await authCall("POST", "/auth/totp/disable", { password: $("#as-dpass").value, code: $("#as-dcode").value.trim() });
+    if (!r.ok) { asErr(authErrText(r)); return; }
+    toast("Two-factor disabled");
+    refresh();
+  });
+}
+`;

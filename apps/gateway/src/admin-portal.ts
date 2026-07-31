@@ -1,13 +1,15 @@
 /**
  * ADR-0012: the admin portal — one dependency-free HTML+JS page, served as a
- * static shell at GET /admin. Strictly a client of the public REST API: the
- * admin pastes an API key (held in sessionStorage for this tab only) and
- * every read/write goes through the same endpoints any script would use.
+ * static shell at GET /admin. Strictly a client of the public REST API.
+ * ADR-0025: the admin signs in with email + password (plus a TOTP step when
+ * enabled) or SSO; the credential is a HttpOnly session cookie the page never
+ * reads, every state-changing call carries the x-regulait-csrf header, and a
+ * details-toggled API-key fallback exchanges a key for the same cookie.
  * Panels use §6's names verbatim, plus the §10.4-mandated cost surface with
  * hand-rolled SVG charts (strict self-containment — no external assets).
  */
 
-import { UI_CSS, UI_DISPLAY_JS, UI_ERRORS_JS, UI_TABLE_JS } from "./ui-theme.js";
+import { UI_CSS, UI_DISPLAY_JS, UI_ERRORS_JS, UI_LOGIN_JS, UI_TABLE_JS } from "./ui-theme.js";
 
 export const ADMIN_PORTAL_HTML = `<!doctype html>
 <html lang="en">
@@ -25,10 +27,13 @@ export const ADMIN_PORTAL_HTML = `<!doctype html>
 ${UI_ERRORS_JS}
 ${UI_DISPLAY_JS}
 ${UI_TABLE_JS}
+${UI_LOGIN_JS}
 const $ = (s, el) => (el ?? document).querySelector(s);
 const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const fmtUsd = (v) => v == null ? "—" : "$" + Number(v).toFixed(4).replace(/0+$/,"").replace(/\\.$/,"");
-let KEY = sessionStorage.getItem("regulait.admin.key") ?? "";
+// ADR-0025: AUTHED holds the last /auth/me snapshot (session-cookie auth);
+// no credential ever lives in this page.
+let AUTHED = null;
 
 // Transient feedback that survives a render(): the region lives OUTSIDE #root
 // (see the body markup) so re-rendering the shell never wipes a toast mid-flight.
@@ -44,14 +49,14 @@ function toast(msg, kind) {
 }
 
 async function api(method, path, body) {
+  // cookie-session auth (ADR-0025): the browser attaches the HttpOnly cookie
+  // itself; the custom header is the CSRF wall on every state-changing call.
   const res = await fetch(path, {
     method,
-    headers: { authorization: "Bearer " + KEY, ...(body ? { "content-type": "application/json" } : {}) },
+    headers: { "x-regulait-csrf": "1", ...(body ? { "content-type": "application/json" } : {}) },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
-  if (res.status === 401 || res.status === 403) {
-    if (path === "/v1/users" && method === "GET") throw new Error("not an admin key");
-  }
+  if (res.status === 401) { AUTHED = null; render(); throw new Error("unauthenticated"); }
   const text = await res.text();
   let json; try { json = JSON.parse(text); } catch { json = { raw: text }; }
   // A write form is useless if it only ever says "400 validation" — carry the
@@ -262,7 +267,7 @@ function budgetGauge(spent, cap, overageApproved, opts) {
 }
 // authed CSV download via a transient blob URL (endpoint sets Content-Disposition)
 async function downloadCsv(path, filename) {
-  const res = await fetch(path, { headers: { authorization: "Bearer " + KEY } });
+  const res = await fetch(path); // session cookie rides along automatically
   if (!res.ok) { toast("CSV download failed (" + res.status + ")", "err"); return; }
   const url = URL.createObjectURL(await res.blob());
   const a = document.createElement("a");
@@ -418,11 +423,14 @@ const TABS = [
   });
 }],
 ["Users", async (el) => {
-  const [u, rev, srv, k, ag, cn] = await Promise.all([
+  const [u, rev, srv, k, ag, cn, oidcp, rolesRes] = await Promise.all([
     get("/v1/users"), get("/v1/revocations"), get("/v1/servers"), get("/v1/keys"),
     // ADR-0019: the agent/connector catalogs, so the two new revocation forms
     // name objects instead of asking for UUIDs (like every other grant form).
     get("/v1/agents"), get("/v1/connectors"),
+    // ADR-0025: SSO providers + the role catalog for JIT default roles
+    get("/v1/auth/oidc-providers").catch(() => ({ providers: [] })),
+    get("/v1/roles").catch(() => ({ roles: [] })),
   ]);
   const tools = await toolIndex(srv.servers);
   const uOpts = userOpts(u.users), sOpts = serverOpts(srv.servers);
@@ -440,6 +448,9 @@ const TABS = [
     name: x.displayName,
     email: x.email,
     role: x.isAdmin ? "admin" : "member",
+    // ADR-0025: how (whether) this human can sign in today
+    signIn: x.hasPassword ? (x.mustChangePassword ? "one-time pw" : "password") : "no password",
+    mfa: x.totpEnabled ? "TOTP" : "—",
     status: x.disabledAt ? "disabled" : "active",
     created: x.createdAt,
   });
@@ -450,6 +461,10 @@ const TABS = [
     const guard = lastAdmin ? " disabled title='last active admin — promote another admin first'" : "";
     if (x.disabledAt) return "<button class='small primary' data-uact='reactivate' data-uid='" + x.id + "'>reactivate</button>";
     return "<button class='small' data-key='" + x.id + "'>issue key</button> "
+      + "<button class='small' data-uact='setpw' data-uid='" + x.id + "'"
+      + (x.hasPassword ? " title='overwrites their password with a fresh one-time one (audited reset)'" : "")
+      + ">" + (x.hasPassword ? "reset pw" : "set one-time pw") + "</button> "
+      + (x.totpEnabled ? "<button class='small' data-uact='clearmfa' data-uid='" + x.id + "'>clear MFA</button> " : "")
       + (x.isAdmin
           ? "<button class='small' data-uact='demote' data-uid='" + x.id + "'" + guard + ">demote</button> "
           : "<button class='small' data-uact='promote' data-uid='" + x.id + "'>make admin</button> ")
@@ -466,8 +481,32 @@ const TABS = [
         },
         actions: userActions,
       })
-    + "<p class='dim' style='font-size:12px'>Deactivate is not delete: the account's audit history, grants and keys all survive; its keys just stop authenticating (a distinct 401) until an admin reactivates. You cannot deactivate yourself, and the last active admin can be neither deactivated nor demoted.</p></div>"
+    + "<p class='dim' style='font-size:12px'>Deactivate is not delete: the account's audit history, grants and keys all survive; its keys and browser sessions just stop authenticating (a distinct 401) until an admin reactivates. You cannot deactivate yourself, and the last active admin can be neither deactivated nor demoted. 'Set one-time pw' issues a generated password shown ONCE — the user must replace it at first sign-in; 'clear MFA' is the recovery path for a user who lost their authenticator (reason required, audited).</p></div>"
     + "<div id='keyreveal'></div>"
+    // ADR-0025: the signed-in admin's own password / MFA self-service
+    + "<h2>Your account — sign-in security</h2>" + accountSecurityHtml(AUTHED)
+    // ADR-0025: OIDC SSO provider CRUD (secrets write-only, JIT default-deny)
+    + "<h2>Single sign-on — OIDC providers</h2><div class='card'>"
+    + form("f-oidc", [
+        {name:"name",ph:"okta-prod"},
+        {name:"issuerUrl",label:"issuer URL",ph:"https://idp.example.com",grow:true},
+        {name:"clientId",label:"client id"},
+        {name:"clientSecret",label:"client secret",type:"password"},
+        {name:"allowedEmailDomains",label:"allowed email domains (comma, empty = any)",req:false,ph:"example.com, corp.example.com"},
+        {name:"defaultRoleId",label:"JIT default role",options:roleOpts(rolesRes.roles || []),req:false,ph:"— none —"},
+        {name:"jitProvisioning",label:"JIT provisioning",options:[{v:"false",l:"off — unknown users are refused (default)"},{v:"true",l:"on — first login creates the user (never admin)"}]},
+      ], "Add provider")
+    + dataTable((oidcp.providers || []).map((p) => ({
+        id: p.id, name: p.name, issuer: p.issuerUrl, clientId: p.clientId,
+        domains: (p.allowedEmailDomains || []).join(", ") || "any",
+        jit: p.jitProvisioning ? "on" : "off",
+        status: p.enabled ? "enabled" : "disabled",
+      })), {
+        cells: { status: (v) => "<span class='badge " + (v === "enabled" ? "ok" : "") + "'>" + esc(v) + "</span>" },
+        actions: (row) => "<button class='small' data-oidc-toggle='" + row.id + "' data-oidc-on='" + (row.status === "enabled" ? "0" : "1") + "'>" + (row.status === "enabled" ? "disable" : "enable") + "</button> "
+          + "<button class='small danger' data-oidc-del='" + row.id + "'>delete</button>",
+      })
+    + "<p class='dim' style='font-size:12px'>Authorization-code + PKCE; state and nonce are validated server-side and the client secret is stored encrypted, write-only — it is never returned by any endpoint. Sign-in maps the VERIFIED email claim to an existing user; with JIT off (the default-deny default) an unknown identity is refused and audited. JIT-provisioned users are never admins and get at most the default role picked here. The org 'SSO only' switch lives in Org Settings and refuses to engage while no provider here is enabled.</p></div>"
     // A user with no API key cannot sign in to anything — issuing one is part
     // of creating them, not a separate API-only chore.
     + "<h2>API keys — plaintext returned exactly once, sha256 at rest</h2><div class='card'><div id='keyscard'>"
@@ -557,9 +596,41 @@ const TABS = [
           if (!confirmClick(uBtn, "Demote?")) return;
           await post("/v1/users/" + uid + "/admin", { isAdmin: false });
           toast("Demoted to member", "ok");
+        } else if (act === "setpw") {
+          // ADR-0025: generated server-side, revealed ONCE, must-change on use
+          const hasPw = uBtn.textContent.indexOf("reset") !== -1;
+          if (hasPw && !confirmClick(uBtn, "Overwrite their password?")) return;
+          const issued = await post("/v1/users/" + uid + "/set-initial-password", hasPw ? { force: true } : {});
+          revealSecret("#keyreveal", "One-time password for " + (email[uid] ?? "this user"), issued.password,
+            "Hand it to them over a channel you trust. They must replace it at first sign-in; every prior session was signed out.");
+          $("#keyreveal").scrollIntoView({ block: "nearest" });
+          return; // no full re-render — it would wipe the one-time reveal
+        } else if (act === "clearmfa") {
+          const reason = prompt("Clearing MFA is the lost-authenticator recovery path and is audited.\\nReason:");
+          if (!reason || !reason.trim()) return;
+          await post("/v1/users/" + uid + "/mfa/clear", { reason: reason.trim() });
+          toast("MFA cleared — they can sign in with just their password and re-enroll", "ok");
         }
         render();
       } catch (ex) { toast(ex.message, "err"); }
+      return;
+    }
+    // ADR-0025 SSO provider actions
+    const oidcToggle = e.target.closest("[data-oidc-toggle]");
+    if (oidcToggle) {
+      try {
+        await api("PATCH", "/v1/auth/oidc-providers/" + oidcToggle.dataset.oidcToggle,
+          { enabled: oidcToggle.dataset.oidcOn === "1" });
+        toast("Provider " + (oidcToggle.dataset.oidcOn === "1" ? "enabled" : "disabled"), "ok");
+        render();
+      } catch (ex) { toast(ex.message, "err"); }
+      return;
+    }
+    const oidcDel = e.target.closest("[data-oidc-del]");
+    if (oidcDel) {
+      if (!confirmClick(oidcDel, "Delete provider?")) return;
+      try { await del("/v1/auth/oidc-providers/" + oidcDel.dataset.oidcDel); toast("Provider deleted", "ok"); render(); }
+      catch (ex) { toast(ex.message, "err"); }
       return;
     }
     // ADR-0019: lifting an agent/connector revocation — the override is
@@ -583,6 +654,19 @@ const TABS = [
   wire("f-user", (d) => post("/v1/users", { ...d, isAdmin: d.isAdmin === "true" }));
   wire("f-rename", (d) => api("PATCH", "/v1/users/" + d.userId, { displayName: d.displayName }));
   wire("f-revoke", (d) => post("/v1/revocations", { ...d, toolName: d.toolName ?? null }));
+  // ADR-0025: the admin's own password/MFA card + SSO provider create
+  wireAccountSecurity(() => { AUTHED = null; render(); });
+  wire("f-oidc", (d) => post("/v1/auth/oidc-providers", {
+    name: d.name,
+    issuerUrl: d.issuerUrl,
+    clientId: d.clientId,
+    clientSecret: d.clientSecret,
+    jitProvisioning: d.jitProvisioning === "true",
+    ...(d.allowedEmailDomains
+      ? { allowedEmailDomains: d.allowedEmailDomains.split(",").map((s) => s.trim()).filter(Boolean) }
+      : {}),
+    ...(d.defaultRoleId ? { defaultRoleId: d.defaultRoleId } : {}),
+  }));
 
   // ADR-0019 per-user agent/connector revocation editor. The picked user is
   // held in a closure (not the URL) exactly like the Roles tab's active role,
@@ -2158,6 +2242,22 @@ const TABS = [
         {name:"defaultAuditRetentionDays",label:"org default retention (days, 0 = none)",type:"number"},
       ], "Save retention policy")
     + "<p class='dim' style='font-size:12px'>Off by default: pruning only happens when an admin presses the button on the Audit Log page. When on, the gateway prunes on the configured interval under the SAME floor the manual button uses. The org default retention only fills the gap when no compliance profile sets one — a profile floor always wins upward, so this can never shorten a framework's audit trail. Enter 0 to clear the org default (never prune without a profile floor — today's behaviour). Every prune, manual or scheduled, is itself audited.</p>"
+    + "</div>"
+
+    // --- Sign-in & sessions (ADR-0025) -------------------------------------
+    + "<h2>Sign-in &amp; sessions</h2><div class='card'>"
+    + form("f-org-auth", [
+        {name:"passwordMinLength",label:"password min length",type:"number"},
+        {name:"passwordRequireClasses",label:"character classes required (1–4)",type:"number"},
+        {name:"sessionLifetimeHours",label:"session lifetime (hours)",type:"number"},
+        {name:"sessionIdleMinutes",label:"idle timeout (minutes)",type:"number"},
+        {name:"mfaRequired",label:"require TOTP MFA",options:[{v:"off",l:"off (self-service — default)"},{v:"admins",l:"admins must enroll"},{v:"all",l:"everyone must enroll"}]},
+        {name:"ssoOnly",label:"SSO only",options:[{v:"false",l:"off — password login allowed (default)"},{v:"true",l:"on — password login refused"}]},
+        {name:"loginLockoutThreshold",label:"lock after N failed logins",type:"number"},
+        {name:"loginLockoutWindowMinutes",label:"failure window (minutes)",type:"number"},
+        {name:"loginLockoutMinutes",label:"lockout duration (minutes)",type:"number"},
+      ], "Save sign-in policy")
+    + "<p class='dim' style='font-size:12px'>ADR-0025 password/session policy for the browser login. Defaults: 12+ characters using 2 of 4 character classes; sessions live at most 24h with a 2h idle wall (any use slides the idle wall, never the lifetime); 5 failures inside 15 minutes lock the account for 15 minutes (audited; the login answer stays the same uniform 401 so lockout leaks nothing). 'Require TOTP MFA' gates enrollment at next sign-in for the chosen population. 'SSO only' refuses password logins entirely and will not engage while zero enabled OIDC providers exist (Users tab) — no self-lockouts; API keys and the bootstrap token are unaffected (they are machine credentials, not browser logins).</p>"
     + "</div>";
 
   // prefill every form from the stored row (field() renders unbound controls)
@@ -2183,6 +2283,7 @@ const TABS = [
   setVals("f-org-workers", ["defaultWorkerMaxTurns","maxWorkerTurns","maxAttachmentsPerDispatch","maxAttachmentBytes","imageTokenEstimateTokens","sharedContextMaxChars","nodeOutputMaxChars"]);
   setVals("f-org-approvals", ["approvalQuorum","approvalDelegationEnabled"]);
   setVals("f-org-retention", ["autoPruneEnabled","pruneIntervalHours","defaultAuditRetentionDays"]);
+  setVals("f-org-auth", ["passwordMinLength","passwordRequireClasses","sessionLifetimeHours","sessionIdleMinutes","mfaRequired","ssoOnly","loginLockoutThreshold","loginLockoutWindowMinutes","loginLockoutMinutes"]);
   // the retention-days number input has no stored 0; show blank when null
   const retIn = $("#f-org-retention [name=defaultAuditRetentionDays]");
   if (retIn && cur.defaultAuditRetentionDays == null) retIn.value = "0";
@@ -2239,6 +2340,17 @@ const TABS = [
     autoPruneEnabled: asBool(d.autoPruneEnabled),
     pruneIntervalHours: Number(d.pruneIntervalHours),
     defaultAuditRetentionDays: Number(d.defaultAuditRetentionDays) === 0 ? null : Number(d.defaultAuditRetentionDays),
+  }));
+  wire("f-org-auth", (d) => putOrg({
+    passwordMinLength: Number(d.passwordMinLength),
+    passwordRequireClasses: Number(d.passwordRequireClasses),
+    sessionLifetimeHours: Number(d.sessionLifetimeHours),
+    sessionIdleMinutes: Number(d.sessionIdleMinutes),
+    mfaRequired: d.mfaRequired,
+    ssoOnly: asBool(d.ssoOnly),
+    loginLockoutThreshold: Number(d.loginLockoutThreshold),
+    loginLockoutWindowMinutes: Number(d.loginLockoutWindowMinutes),
+    loginLockoutMinutes: Number(d.loginLockoutMinutes),
   }));
 }],
 ];
@@ -2303,7 +2415,7 @@ let SETUP_FOCUS = null;
 // The setup checklist recomputes when the admin comes back to the tab — they
 // typically complete a step in another tab/window (or via the API) and return.
 window.addEventListener("focus", () => {
-  if (KEY && TABS[active] && TABS[active][0] === "Getting started") render();
+  if (AUTHED && TABS[active] && TABS[active][0] === "Getting started") render();
 });
 function shell() {
   return \`
@@ -2329,23 +2441,21 @@ async function render() {
   // dataTable state is per-render — drop last render's instances so the Map
   // doesn't grow across tab switches.
   DT.clear();
-  if (!KEY) {
-    root.innerHTML = \`
-    <div class="gate"><div class="card">
-      <div class="brand"><span class="word">regul<em>ai</em>t</span><span class="tag">admin</span></div>
-      <p>Sign in with an admin API key. It stays in this browser tab and is sent only to this server.</p>
-      <input id="gate-key" type="password" placeholder="rgl_…" style="width:100%" autofocus>
-      <div class="err-line" id="gate-err" style="margin:6px 0"></div>
-      <button class="primary" id="gate-go" style="width:100%;margin-top:6px">Continue</button>
-    </div></div>\`;
-    const go = async () => {
-      KEY = $("#gate-key").value.trim();
-      try { await get("/v1/users"); sessionStorage.setItem("regulait.admin.key", KEY); render(); }
-      catch (ex) { KEY = ""; $("#gate-err").textContent = "That key didn’t work: " + ex.message; }
-    };
-    $("#gate-go").addEventListener("click", go);
-    $("#gate-key").addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
-    return;
+  if (!AUTHED) {
+    // ADR-0025: probe the session cookie; only an ADMIN session opens the
+    // portal. Everything else lands on the shared login gate.
+    const me = await fetchAuthMe().catch(() => null);
+    if (me && me.isAdmin && !me.mustChangePassword && !me.mfaSetupRequired) {
+      AUTHED = me;
+    } else {
+      renderLoginGate(root, {
+        brandHtml: '<div class="brand"><span class="word">regul<em>ai</em>t</span><span class="tag">admin</span></div>',
+        returnTo: "/admin",
+        requireAdmin: true,
+        onSignedIn: () => render(),
+      });
+      return;
+    }
   }
   root.innerHTML = shell();
   // nav clicks route through the hash so the current page survives a reload and
@@ -2360,7 +2470,9 @@ async function render() {
     const open = side.classList.toggle("open");
     toggle.setAttribute("aria-expanded", open ? "true" : "false");
   });
-  $("#signout").addEventListener("click", () => { sessionStorage.removeItem("regulait.admin.key"); KEY = ""; render(); });
+  $("#signout").addEventListener("click", () => {
+    authCall("POST", "/auth/logout").finally(() => { AUTHED = null; render(); });
+  });
   const panel = $("#panel");
   try { await TABS[active][1](panel); }
   catch (ex) {

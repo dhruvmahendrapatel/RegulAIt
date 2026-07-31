@@ -25,7 +25,103 @@ export const users = pgTable("users", {
    * authentication (401 user_disabled) and dispatch-as stop. Null = active.
    * Reactivation clears it. There is deliberately NO hard-delete route. */
   disabledAt: timestamp("disabled_at", { withTimezone: true }),
+  // --- ADR-0025 human sign-in (migration 0042) -----------------------------
+  /** scrypt password hash, format scrypt$N$r$p$saltB64$hashB64. NULL = this
+   * user has NO password and password login is impossible for them (the 0042
+   * transition state) until an admin sets an initial one-time password. */
+  passwordHash: text("password_hash"),
+  passwordUpdatedAt: timestamp("password_updated_at", { withTimezone: true }),
+  /** true = the current password is one-time (admin-issued or seeded); every
+   * session-authenticated request except the auth self-service surface is
+   * refused until the user sets their own. */
+  mustChangePassword: boolean("must_change_password").notNull().default(false),
+  /** TOTP secret, AES-256-GCM under REGULAIT_DATA_KEY like every other stored
+   * secret. Present-but-disabled = enrollment started, not yet verified. */
+  totpSecretCiphertext: text("totp_secret_ciphertext"),
+  totpEnabled: boolean("totp_enabled").notNull().default(false),
+  /** replay guard: the highest RFC 6238 time-step already consumed — a code
+   * for a step <= this is refused even inside the ±1 validation window. */
+  totpLastUsedStep: bigint("totp_last_used_step", { mode: "number" }),
+  /** login lockout counters (org_settings dials set the thresholds) */
+  failedLoginCount: integer("failed_login_count").notNull().default(0),
+  lastFailedLoginAt: timestamp("last_failed_login_at", { withTimezone: true }),
+  lockedUntil: timestamp("locked_until", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// --- ADR-0025: server-side browser sessions ---------------------------------
+// The cookie carries a 256-bit random token; only its sha256 is stored — a DB
+// leak never yields a usable session. userId NULL = a bootstrap-token session
+// (the operator exchanged the deploy-time bootstrap token for a cookie); it is
+// admin-privileged exactly like the header form and dies when the deployment's
+// bootstrap token is unset.
+export const authSessions = pgTable(
+  "auth_sessions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tokenHash: text("token_hash").notNull().unique(),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    /** absolute lifetime wall — never slides */
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    /** idle wall — slides forward on every authenticated use */
+    idleExpiresAt: timestamp("idle_expires_at", { withTimezone: true }).notNull(),
+    /** snapshot of org sessionIdleMinutes at creation (what the slide adds) */
+    idleMinutes: integer("idle_minutes").notNull(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    ip: text("ip"),
+    userAgent: text("user_agent"),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (t) => [index("auth_sessions_user_idx").on(t.userId)],
+);
+
+/** short-lived password-accepted-awaiting-TOTP state (ADR-0025). Token hashed
+ * like a session's; consumed on success; expires in minutes either way. */
+export const authMfaPending = pgTable("auth_mfa_pending", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  tokenHash: text("token_hash").notNull().unique(),
+  userId: uuid("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+});
+
+// --- ADR-0025: OIDC SSO ------------------------------------------------------
+export const oidcProviders = pgTable("oidc_providers", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull().unique(),
+  issuerUrl: text("issuer_url").notNull(),
+  clientId: text("client_id").notNull(),
+  /** AES-256-GCM under REGULAIT_DATA_KEY; write-only at the API */
+  clientSecretCiphertext: text("client_secret_ciphertext").notNull(),
+  enabled: boolean("enabled").notNull().default(true),
+  /** NULL = any domain; else the verified email claim's domain must be listed */
+  allowedEmailDomains: jsonb("allowed_email_domains").$type<string[]>(),
+  /** role granted to JIT-provisioned users (never admin); NULL = no role */
+  defaultRoleId: uuid("default_role_id").references(() => roles.id, { onDelete: "set null" }),
+  /** default-deny: an unknown subject with JIT off is 403'd and audited */
+  jitProvisioning: boolean("jit_provisioning").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** one row per authorization redirect: state (single-use), nonce and the PKCE
+ * verifier live server-side, never in the browser. Swept by expiry. */
+export const oidcLoginStates = pgTable("oidc_login_states", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  providerId: uuid("provider_id")
+    .notNull()
+    .references(() => oidcProviders.id, { onDelete: "cascade" }),
+  state: text("state").notNull().unique(),
+  nonce: text("nonce").notNull(),
+  codeVerifier: text("code_verifier").notNull(),
+  redirectUri: text("redirect_uri").notNull(),
+  /** post-login browser destination — restricted to /app or /admin */
+  returnTo: text("return_to").notNull().default("/app"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
 });
 
 export const mcpServers = pgTable("mcp_servers", {
@@ -130,6 +226,11 @@ export const auditLog = pgTable(
         "team",
         "workflow_template",
         "approval_delegation",
+        // ADR-0025 secure auth: sign-in lifecycle events (login success/
+        // failure/lockout, password + MFA changes, session revocations) audit
+        // as objectType "user"; admin CRUD of an SSO provider audits as
+        // "oidc_provider". Plain text column — no DDL needed.
+        "oidc_provider",
       ],
     })
       .notNull()
@@ -1620,6 +1721,9 @@ export const COMPACTION_FAILURE_MODES = ["fail_open", "fail_closed"] as const;
 export const SUMMARIZER_SELECTIONS = ["cheapest", "fixed_agent"] as const;
 /** 'none' = no org default — an unclassified project stays unenforced (today). */
 export const ORG_PII_MODES = ["none", "log", "warn", "block"] as const;
+/** ADR-0025: who must have TOTP enrolled before their session leaves the
+ * auth self-service surface. off = today's behaviour. */
+export const MFA_REQUIREMENTS = ["off", "admins", "all"] as const;
 export const BUDGET_ENFORCEMENTS = ["block", "warn_only"] as const;
 export const APPROVAL_QUORUMS = ["all", "any"] as const;
 
@@ -1730,6 +1834,24 @@ export const orgSettings = pgTable(
     imageTokenEstimateTokens: integer("image_token_estimate_tokens").notNull().default(1200),
     sharedContextMaxChars: integer("shared_context_max_chars").notNull().default(100_000),
     nodeOutputMaxChars: integer("node_output_max_chars").notNull().default(20_000),
+
+    // --- ADR-0025 sign-in policy (migration 0042) --------------------------
+    // Nothing here weakens the pre-0042 posture: password login only exists
+    // for users who HAVE a password, and the defaults are the sane-secure
+    // baseline the ADR records.
+    passwordMinLength: integer("password_min_length").notNull().default(12),
+    /** how many character classes (lower/upper/digit/other) a password needs */
+    passwordRequireClasses: integer("password_require_classes").notNull().default(2),
+    sessionLifetimeHours: integer("session_lifetime_hours").notNull().default(24),
+    sessionIdleMinutes: integer("session_idle_minutes").notNull().default(120),
+    mfaRequired: text("mfa_required", { enum: MFA_REQUIREMENTS }).notNull().default("off"),
+    /** true = password login 403s (SSO or API-key exchange only). Refused
+     * while zero ENABLED OIDC providers exist — no self-lockouts. */
+    ssoOnly: boolean("sso_only").notNull().default(false),
+    /** failed password logins within the window before a temporary lockout */
+    loginLockoutThreshold: integer("login_lockout_threshold").notNull().default(5),
+    loginLockoutWindowMinutes: integer("login_lockout_window_minutes").notNull().default(15),
+    loginLockoutMinutes: integer("login_lockout_minutes").notNull().default(15),
 
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

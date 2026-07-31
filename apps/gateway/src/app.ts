@@ -73,7 +73,16 @@ import {
 } from "@regulait/shared";
 import { governedEvaluate } from "./governed-evaluate.js";
 import { loadEntitlements } from "./entitlements.js";
-import { authenticate, generateToken, type AuthContext } from "./auth.js";
+import {
+  CSRF_HEADER,
+  SESSION_COOKIE,
+  authenticate,
+  generateToken,
+  readCookie,
+  registerAuthRoutes,
+  resolveSession,
+  type AuthContext,
+} from "./auth.js";
 import { activeDelegatorsFor, activeDelegationFrom } from "./delegations.js";
 
 declare module "fastify" {
@@ -160,17 +169,28 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   app.decorateRequest("authCtx");
 
-  // Every route requires a valid Bearer token (bootstrap or API key) — except
-  // the inbound PM webhook (ADR-0010), which is called by external systems and
-  // authenticates with its per-connection secret inside the route handler, the
-  // two UI shells, and the two unauthenticated entry points a browser or a
-  // load balancer hits before it has any credential (/ and /health).
+  // Every route requires a valid Bearer token (bootstrap or API key) or an
+  // ADR-0025 session cookie — except the inbound PM webhook (ADR-0010), which
+  // is called by external systems and authenticates with its per-connection
+  // secret inside the route handler, the two UI shells, the two
+  // unauthenticated entry points a browser or a load balancer hits before it
+  // has any credential (/ and /health), and the ADR-0025 login surface itself
+  // (login/mfa/key-exchange/OIDC — a browser has no credential yet; logout is
+  // exempt so an expired session can still clear its cookie, and reads the
+  // cookie in-route).
   const AUTH_EXEMPT_ROUTES = new Set([
     "/v1/pm/webhooks/:connectionName",
     "/admin",
     "/app",
     "/",
     "/health",
+    "/auth/login",
+    "/auth/mfa/verify",
+    "/auth/login-with-key",
+    "/auth/logout",
+    "/auth/oidc/providers",
+    "/auth/oidc/:providerId/start",
+    "/auth/oidc/callback",
   ]);
   // ADR-0020 INTERCEPTION GATE. Runs in the onRequest phase — BEFORE auth — so
   // a surface the admin has not enabled answers Fastify's own 404 body and is
@@ -227,6 +247,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     }
   });
 
+  // ADR-0025: the session-authenticated auth self-service surface a user may
+  // reach while a must-change-password or must-enroll-MFA gate is closed.
+  const AUTH_SELF_SERVICE_ROUTES = new Set([
+    "GET /auth/me",
+    "POST /auth/change-password",
+    "POST /auth/totp/enroll",
+    "POST /auth/totp/activate",
+  ]);
+
   app.addHook("preHandler", async (req, reply) => {
     if (AUTH_EXEMPT_ROUTES.has(req.routeOptions.url ?? "")) {
       req.authCtx = { userId: null, isAdmin: false, via: "api-key" };
@@ -241,6 +270,64 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const alt = req.headers["x-api-key"];
       if (typeof alt === "string" && alt.length > 0) authorization = `Bearer ${alt}`;
     }
+
+    // ADR-0025: no bearer credential -> try the session cookie. Header auth
+    // ALWAYS wins when present, so the API-key request path is byte-identical
+    // to pre-0042 even when a stale cookie rides along.
+    if (!authorization) {
+      const cookieToken = readCookie(req.headers.cookie, SESSION_COOKIE);
+      if (cookieToken) {
+        const session = await resolveSession(db, cookieToken, Boolean(opts.bootstrapToken));
+        if (session === "disabled") {
+          return reply.status(401).send({
+            error: "user_disabled",
+            detail: "this account has been deactivated — an admin can reactivate it",
+          });
+        }
+        if (session) {
+          // CSRF: SameSite=Strict already blocks cross-site cookie sends in
+          // modern browsers; the custom-header requirement is the second,
+          // browser-model-independent wall — no cross-origin form or no-cors
+          // fetch can attach a custom header, so a forged state-changing
+          // request dies here even if the cookie were somehow attached.
+          // Applies ONLY to cookie-authenticated mutations: header-credential
+          // clients (API keys) are not CSRF-able and stay untouched.
+          if (req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS") {
+            if (req.headers[CSRF_HEADER] !== "1") {
+              return reply.status(403).send({
+                error: "csrf_header_required",
+                detail: `state-changing requests must carry ${CSRF_HEADER}: 1`,
+              });
+            }
+          }
+          const route = `${req.method} ${req.routeOptions.url ?? ""}`;
+          // gate 1: a one-time password must be replaced before anything else
+          if (session.mustChangePassword && !AUTH_SELF_SERVICE_ROUTES.has(route)) {
+            return reply.status(403).send({
+              error: "password_change_required",
+              detail: "this account's password is one-time — set your own via POST /auth/change-password",
+            });
+          }
+          // gate 2: org-mandated MFA enrollment (off|admins|all)
+          if (!session.totpEnabled && !AUTH_SELF_SERVICE_ROUTES.has(route) && session.ctx.userId) {
+            const org = await loadOrgSettings(db);
+            const mustEnroll =
+              org.mfaRequired === "all" || (org.mfaRequired === "admins" && session.ctx.isAdmin);
+            if (mustEnroll) {
+              return reply.status(403).send({
+                error: "mfa_enrollment_required",
+                detail: "this organization requires TOTP MFA — enroll via POST /auth/totp/enroll",
+              });
+            }
+          }
+          req.authCtx = session.ctx;
+          req.sessionAuth = session;
+          return;
+        }
+        // an invalid/expired cookie falls through to the uniform 401 below
+      }
+    }
+
     const ctx = await authenticate(db, opts.bootstrapToken, authorization);
     // ADR-0022: a valid key whose user is DEACTIVATED gets its own reason —
     // the holder should learn "your account is disabled", not "bad token".
@@ -317,6 +404,21 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "GET /app",
     "GET /",
     "GET /health",
+    // ADR-0025: the auth surface — login endpoints are pre-identity, the
+    // self-service endpoints (me/change-password/TOTP) are every signed-in
+    // human's own account. Admin-ness is not the point of any of them.
+    "POST /auth/login",
+    "POST /auth/mfa/verify",
+    "POST /auth/login-with-key",
+    "POST /auth/logout",
+    "GET /auth/me",
+    "POST /auth/change-password",
+    "POST /auth/totp/enroll",
+    "POST /auth/totp/activate",
+    "POST /auth/totp/disable",
+    "GET /auth/oidc/providers",
+    "GET /auth/oidc/:providerId/start",
+    "GET /auth/oidc/callback",
     "GET /v1/me",
     "GET /v1/model-providers/status",
     "GET /v1/runs",
@@ -377,6 +479,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         isAdmin: users.isAdmin,
         disabledAt: users.disabledAt,
         createdAt: users.createdAt,
+        // ADR-0025: sign-in posture flags for the portal (booleans only —
+        // never a hash, never a secret)
+        totpEnabled: users.totpEnabled,
+        hasPassword: sql<boolean>`${users.passwordHash} is not null`,
+        mustChangePassword: users.mustChangePassword,
       })
       .from(users),
   }));
@@ -1755,6 +1862,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     }
     return { status: "ok", database: "ok" };
   });
+
+  // ADR-0025: password/session/TOTP/OIDC login surface + the admin endpoints
+  // for one-time passwords, MFA recovery, session revocation and SSO
+  // provider CRUD.
+  registerAuthRoutes(app, db, { bootstrapToken: opts.bootstrapToken, dataKey: opts.dataKey });
 
   registerAgentConnectorRoutes(app, db, { dataKey: opts.dataKey });
   registerConversationRoutes(app, db);

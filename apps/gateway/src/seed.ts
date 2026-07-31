@@ -29,6 +29,11 @@ const AUTH = { authorization: `Bearer ${BOOT}` };
 const DATA_KEY = process.env.REGULAIT_DATA_KEY;
 
 const db = createDb(connectionString);
+// An idle pooled connection killed out from under us (e.g. a scratch database
+// dropped WITH (FORCE) right after seeding finishes) must not crash the
+// process via an unhandled 'error' event — all real query failures still
+// surface through their own awaited promises.
+(db.$client as { on: (ev: string, fn: (err: Error) => void) => void }).on("error", () => {});
 await runMigrations(
   db,
   path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations"),
@@ -72,6 +77,29 @@ for (const [name, id] of [
 }
 const danaAuth = { authorization: `Bearer ${keys.dana}` };
 const averyAuth = { authorization: `Bearer ${keys.avery}` };
+
+// --- ADR-0025: ONE-TIME passwords for the personas (browser sign-in) -------
+// Issued only while the account is still passwordless, so a re-seed never
+// overwrites a password a human set for real (the endpoint 409s without
+// force, and call() tolerates 409). Printed exactly once, like the keys;
+// must_change_password forces a real password at first sign-in.
+const passwords: Record<string, string> = {};
+{
+  const userRows = (await call("GET", "/v1/users")).users ?? [];
+  for (const [name, id] of [
+    ["admin", adminId],
+    ["dana", danaId],
+    ["avery", averyId],
+  ] as const) {
+    const row = userRows.find((u: Json) => u.id === id);
+    if (row?.hasPassword) {
+      passwords[name] = "(already set — unchanged)";
+      continue;
+    }
+    const res = await call("POST", `/v1/users/${id}/set-initial-password`);
+    passwords[name] = res.password ?? "(already set — unchanged)";
+  }
+}
 
 // --- agent catalog -------------------------------------------------------
 const AGENTS = [
@@ -1105,15 +1133,28 @@ if (DATA_KEY) {
 }
 
 await app.close();
+// end the pool so the process exits NOW instead of lingering on idle
+// connections for the pool timeout (a window in which a killed connection
+// used to crash the exit)
+await db.$client.end();
 
 console.log(`
 RegulAIt demo data ready.
 
-  Sign in at /app (or /admin with the admin key). Keys are shown ONCE:
+  Browser sign-in (ADR-0025) at /app and /admin: email + ONE-TIME password.
+  Shown ONCE; each persona must set their own password at first sign-in.
 
-    admin  admin@regulait.local   ${keys.admin}
-    dana   dana@regulait.local    ${keys.dana}    (requester — Playground, Runs, Workflows)
-    avery  avery@regulait.local   ${keys.avery}   (approver — Inbox has a sign-off waiting)
+    admin  admin@regulait.local   ${passwords.admin}
+    dana   dana@regulait.local    ${passwords.dana}    (requester — Playground, Runs, Workflows)
+    avery  avery@regulait.local   ${passwords.avery}   (approver — Inbox has a sign-off waiting)
+
+  API keys (programmatic/IDE access — NOT the browser login; the login page
+  keeps a "sign in with an API key" fallback that exchanges one for a
+  session). Shown ONCE:
+
+    admin  ${keys.admin}
+    dana   ${keys.dana}
+    avery  ${keys.avery}
 ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecret}\n` : ""}
   Governance: 2 MCP servers with 8 tools (read + write), a 'repo-analyst' role
   granting read-only-all, per-user tool grants layered on top, 2 revocations,
@@ -1134,9 +1175,10 @@ ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecre
   failed dispatch. Add a real one (stored credential or the *_API_KEY env var),
   or stay on the mock agents.
 
-  Keys: every user above already has one. To onboard anyone else, create them
-  in /admin → Users and hit 'issue key' on their row — the plaintext
-  is shown once there and never again. Users bring their own provider keys in
+  Onboarding anyone else (ADR-0025): create them in /admin → Users, hit
+  'set one-time pw' for their browser sign-in (shown once, must-change on
+  first use) and/or 'issue key' for programmatic access — each plaintext is
+  shown once there and never again. Users bring their own provider keys in
   /app → Settings.
 
   Projects: demo-project and hipaa-project (classification-forced sign-off),

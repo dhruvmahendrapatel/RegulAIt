@@ -956,6 +956,7 @@ export const summarizerSelectionSchema = z.enum(["cheapest", "fixed_agent"]);
 export const orgPiiModeSchema = z.enum(["none", "log", "warn", "block"]);
 export const budgetEnforcementSchema = z.enum(["block", "warn_only"]);
 export const approvalQuorumSchema = z.enum(["all", "any"]);
+export const mfaRequirementSchema = z.enum(["off", "admins", "all"]);
 
 export const updateOrgSettingsSchema = z
   .object({
@@ -1017,6 +1018,16 @@ export const updateOrgSettingsSchema = z
     imageTokenEstimateTokens: z.number().int().min(1).max(100_000).optional(),
     sharedContextMaxChars: z.number().int().min(100).max(100_000).optional(),
     nodeOutputMaxChars: z.number().int().min(100).max(20_000).optional(),
+    // ADR-0025 sign-in policy dials
+    passwordMinLength: z.number().int().min(8).max(128).optional(),
+    passwordRequireClasses: z.number().int().min(1).max(4).optional(),
+    sessionLifetimeHours: z.number().int().min(1).max(24 * 30).optional(),
+    sessionIdleMinutes: z.number().int().min(5).max(24 * 60).optional(),
+    mfaRequired: mfaRequirementSchema.optional(),
+    ssoOnly: z.boolean().optional(),
+    loginLockoutThreshold: z.number().int().min(3).max(100).optional(),
+    loginLockoutWindowMinutes: z.number().int().min(1).max(24 * 60).optional(),
+    loginLockoutMinutes: z.number().int().min(1).max(24 * 60).optional(),
   })
   .strict()
   .superRefine((v, ctx) => {
@@ -1040,3 +1051,105 @@ export const updateOrgSettingsSchema = z
     }
   });
 export type UpdateOrgSettings = z.infer<typeof updateOrgSettingsSchema>;
+
+// ---------------------------------------------------------------------------
+// ADR-0025 — REAL HUMAN AUTHENTICATION (migration 0042): password + session
+// login, TOTP MFA, OIDC SSO. Request shapes only — hashing/verification live
+// in the gateway; nothing here ever carries a hash.
+// ---------------------------------------------------------------------------
+
+export const loginSchema = z
+  .object({
+    email: z.string().email(),
+    password: z.string().min(1).max(512),
+  })
+  .strict();
+export type LoginRequest = z.infer<typeof loginSchema>;
+
+/** step 2 of a TOTP-enabled login: the pending token from step 1 + a code */
+export const mfaVerifySchema = z
+  .object({
+    pendingToken: z.string().min(1).max(512),
+    code: z.string().regex(/^\d{6}$/, "a TOTP code is 6 digits"),
+  })
+  .strict();
+export type MfaVerifyRequest = z.infer<typeof mfaVerifySchema>;
+
+/** browser fallback during the transition: exchange an API key (or the
+ * bootstrap token) for a session cookie, so cookies rule the browser either
+ * way and the key never has to live in web storage. */
+export const loginWithKeySchema = z
+  .object({ apiKey: z.string().min(1).max(512) })
+  .strict();
+export type LoginWithKeyRequest = z.infer<typeof loginWithKeySchema>;
+
+export const changePasswordSchema = z
+  .object({
+    currentPassword: z.string().min(1).max(512),
+    newPassword: z.string().min(1).max(512),
+  })
+  .strict();
+export type ChangePasswordRequest = z.infer<typeof changePasswordSchema>;
+
+export const totpActivateSchema = z
+  .object({ code: z.string().regex(/^\d{6}$/, "a TOTP code is 6 digits") })
+  .strict();
+export type TotpActivateRequest = z.infer<typeof totpActivateSchema>;
+
+/** disabling MFA is a sensitive act: it re-proves BOTH factors */
+export const totpDisableSchema = z
+  .object({
+    password: z.string().min(1).max(512),
+    code: z.string().regex(/^\d{6}$/, "a TOTP code is 6 digits"),
+  })
+  .strict();
+export type TotpDisableRequest = z.infer<typeof totpDisableSchema>;
+
+/** admin sets/rotates a user's initial ONE-TIME password (generated
+ * server-side, returned exactly once, must_change on first use). force is
+ * required to overwrite a password the user already set — audited either way. */
+export const setInitialPasswordSchema = z
+  .object({ force: z.boolean().optional() })
+  .strict();
+export type SetInitialPasswordRequest = z.infer<typeof setInitialPasswordSchema>;
+
+/** admin recovery for a locked-out user: clears their MFA. Reason required. */
+export const clearMfaSchema = z
+  .object({ reason: z.string().trim().min(1).max(2000) })
+  .strict();
+export type ClearMfaRequest = z.infer<typeof clearMfaSchema>;
+
+const oidcDomainSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .regex(/^[a-z0-9.-]+\.[a-z]{2,}$/, "not a domain");
+
+export const createOidcProviderSchema = z
+  .object({
+    name: z.string().trim().min(1).max(200),
+    issuerUrl: z.string().url(),
+    clientId: z.string().min(1).max(512),
+    clientSecret: z.string().min(1).max(2048),
+    enabled: z.boolean().optional(),
+    allowedEmailDomains: z.array(oidcDomainSchema).min(1).max(50).nullable().optional(),
+    defaultRoleId: z.string().uuid().nullable().optional(),
+    jitProvisioning: z.boolean().optional(),
+  })
+  .strict();
+export type CreateOidcProvider = z.infer<typeof createOidcProviderSchema>;
+
+/** partial update; clientSecret is WRITE-ONLY (rotate by writing, never read) */
+export const updateOidcProviderSchema = z
+  .object({
+    name: z.string().trim().min(1).max(200).optional(),
+    issuerUrl: z.string().url().optional(),
+    clientId: z.string().min(1).max(512).optional(),
+    clientSecret: z.string().min(1).max(2048).optional(),
+    enabled: z.boolean().optional(),
+    allowedEmailDomains: z.array(oidcDomainSchema).min(1).max(50).nullable().optional(),
+    defaultRoleId: z.string().uuid().nullable().optional(),
+    jitProvisioning: z.boolean().optional(),
+  })
+  .strict();
+export type UpdateOidcProvider = z.infer<typeof updateOidcProviderSchema>;
