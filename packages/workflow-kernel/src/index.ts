@@ -39,6 +39,13 @@ const stageSchema = z.object({
   type: z.enum(EXECUTABLE_STAGE_TYPES),
   /** human_approval: named approver user ids, or "requesting_user" */
   approvers: z.array(z.string().min(1)).min(1).optional(),
+  /** human_approval (ADR-0027, deferred from ADR-0021): per-STAGE quorum
+   * override — 'all' = every named approver must approve; 'any' = the first
+   * approval advances (remaining pending rows are superseded). Absent = the
+   * org-wide approvalQuorum default ('all' unless the admin changed it). Any
+   * other value is rejected LOUDLY at template validation (pre-ADR-0027 the
+   * object schema silently stripped an unknown quorum key). */
+  quorum: z.enum(["all", "any"]).optional(),
   /** artifact_generation: logical name of the produced artifact */
   output: z.string().min(1).optional(),
   /** automated_build: artifact (by output name) the build is scope-locked to */
@@ -114,6 +121,14 @@ export const workflowDefinitionSchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: `human_approval stage '${s.id}' needs at least one approver`,
+        });
+      }
+      // ADR-0027: quorum is a human_approval concern only — on any other
+      // stage type it is a template bug, refused loudly (never stripped).
+      if (s.quorum !== undefined && s.type !== "human_approval") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `stage '${s.id}' (${s.type}) cannot carry a quorum — only a human_approval stage can`,
         });
       }
       if (s.type === "artifact_generation" && !s.output) {

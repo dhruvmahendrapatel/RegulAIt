@@ -198,10 +198,20 @@ export async function applyWorkflowApprovalDecision(
   // ADR-0021 approval quorum: 'all' (default, today) = every named approver
   // must approve before the stage advances; 'any' = the FIRST approval
   // advances it and the remaining pending rows are superseded (a dead gate is
-  // never left decidable). Org-level only for now: the workflow kernel's
-  // stage schema strips unknown keys, so a per-template stage-level override
-  // would need a kernel change — recorded as deferred in ADR-0021.
-  const quorum = (await loadOrgSettings(dbx as Db)).approvalQuorum;
+  // never left decidable).
+  // ADR-0027 (the deferral recorded in ADR-0021, now closed): a
+  // human_approval STAGE may carry its own quorum override, which beats the
+  // org default in BOTH directions — a template can demand 'all' in an 'any'
+  // org and vice versa. Absent (every pre-ADR-0027 template) = the org
+  // default = today's behaviour.
+  const [instRow] = await dbx
+    .select({ definition: workflowInstances.definition })
+    .from(workflowInstances)
+    .where(eq(workflowInstances.id, instanceId));
+  const stageQuorum = (
+    (instRow?.definition as { stages?: Array<{ id: string; quorum?: "all" | "any" }> })?.stages ?? []
+  ).find((s) => s.id === stageId)?.quorum;
+  const quorum = stageQuorum ?? (await loadOrgSettings(dbx as Db)).approvalQuorum;
 
   // The quorum test is evaluated INSIDE applyEvent's instance lock, so a
   // re-open that inserts fresh rows (or another approver) serializes with the
