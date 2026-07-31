@@ -34,7 +34,7 @@ import {
   orchestrationRuns,
 } from "@regulait/db";
 import { resolveProvider, GitProviderError, IMPLEMENTED_GIT_PROVIDERS } from "@regulait/git-provider";
-import { resolveDeployProvider, DeployProviderError } from "./deploy.js";
+import { resolveDeployProvider, liveDeployClients, DeployProviderError } from "./deploy.js";
 import { validateGraph } from "@regulait/orchestration-kernel";
 import { inTransaction, planRun, type ApprovalPostCommit, type DbOrTx } from "./orchestration.js";
 import {
@@ -506,6 +506,9 @@ async function runGitExecutions(
             baseUrl: target!.baseUrl,
             roleArn: target!.roleArn,
             region: target!.region,
+            // REGULAIT_DEPLOY_LIVE wiring: flag off = {} (dry-run, byte-
+            // identical); flag on = the real lazily-loading per-cloud client.
+            ...liveDeployClients(target!.provider),
           });
           // ASYNC-DEPLOY: awaited like every other async stage executor (git
           // ops, nested runs). The stage claim was taken in its own committed
@@ -607,6 +610,8 @@ async function runGitExecutions(
             baseUrl: target.baseUrl,
             roleArn: target.roleArn,
             region: target.region,
+            // same REGULAIT_DEPLOY_LIVE wiring as the deploy executor
+            ...liveDeployClients(target.provider),
           });
           // ASYNC-DEPLOY: awaited outside any transaction (same claim/release
           // semantics as the deploy executor); a rejection lands in this catch

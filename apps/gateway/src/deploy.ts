@@ -21,6 +21,14 @@
 // production deploy) keeps working unchanged off the honest dryRun flag.
 
 import { AssumeRoleCommand } from "@aws-sdk/client-sts";
+// the four REAL live-client factories. Static imports are safe: each factory
+// module only lazily dynamic-imports its cloud SDK on the first actual call,
+// so a flag-off boot never evaluates @aws-sdk/client-ecs / @azure/arm-* /
+// @google-cloud/config / @kubernetes/client-node code.
+import { buildAwsLiveDeployClient } from "./deploy-aws-client.js";
+import { buildAzureLiveDeployClient } from "./deploy-azure-client.js";
+import { buildGcpLiveDeployClient } from "./deploy-gcp-client.js";
+import { buildK8sLiveDeployClient } from "./deploy-k8s-client.js";
 
 export type DeployProviderKind = "mock" | "aws" | "azure" | "gcp" | "kubernetes";
 
@@ -96,8 +104,10 @@ class MockDeployProvider implements DeployProvider {
 /**
  * A1: the injectable live-AWS client (injectable-client discipline). When
  * REGULAIT_DEPLOY_LIVE is on, AwsDeployProvider drives this instead of the
- * dry-run — and it is ALWAYS supplied by the caller (a fake in unit tests, a
- * real @aws-sdk-backed impl in a genuinely live deployment). Methods are
+ * dry-run — and it is ALWAYS supplied by the caller (a fake in unit tests;
+ * ./deploy-aws-client.ts's buildAwsLiveDeployClient — the real @aws-sdk-backed
+ * impl — via the liveDeployClients() wiring in a genuinely live deployment).
+ * Methods are
  * Promise-returning (ASYNC-DEPLOY refactor) so a real impl drives the async
  * SDK directly and is awaited to a terminal state. There is no default network
  * client, so "flag on with nothing injected" is a clear error, never a silent
@@ -654,6 +664,50 @@ export interface ResolveDeployProviderConfig {
   /** Batch C: injected kubeconfig-scoped live-Kubernetes deploy client — same
    * semantics as awsLiveClient. */
   k8sLiveClient?: KubernetesLiveDeployClient;
+}
+
+/** the client-injection slice of ResolveDeployProviderConfig */
+export type LiveDeployClients = Pick<
+  ResolveDeployProviderConfig,
+  "awsLiveClient" | "azureLiveClient" | "gcpLiveClient" | "k8sLiveClient"
+>;
+
+/**
+ * The REAL-client wiring for deploy.ts's provider construction, mirroring
+ * infra.ts's providerConfig() exactly (and the AWS STS A1 semantics):
+ *
+ *  - REGULAIT_DEPLOY_LIVE OFF (the default): returns {} — the caller's config
+ *    carries no live client, every adapter stays the deterministic dry-run,
+ *    byte-identical to before, and no SDK module is ever evaluated.
+ *  - Flag ON: returns the matching lazily-loading real client for the
+ *    provider (deploy-aws-client / deploy-azure-client / deploy-gcp-client /
+ *    deploy-k8s-client). Building a factory client loads NO SDK code — that
+ *    happens only on the first live call.
+ *  - A provider with no live factory (mock, future kinds): {} — for such a
+ *    kind the adapter's own "flag on but no client injected" explicit-error
+ *    branch (or mock's flag-independent contract) still governs, so a live
+ *    flag can never cause a silent pretend-deploy.
+ *
+ * Callers spread the result into resolveDeployProvider's config (see
+ * workflows.ts). Unit tests that construct providers directly keep injecting
+ * fakes and are unaffected.
+ */
+export function liveDeployClients(
+  provider: string,
+  env: NodeJS.ProcessEnv = process.env,
+): LiveDeployClients {
+  if (!deployLiveEnabled(env)) return {};
+  if (provider === "aws") {
+    return {
+      awsLiveClient: buildAwsLiveDeployClient(undefined, {
+        cluster: env.REGULAIT_DEPLOY_AWS_CLUSTER || undefined,
+      }),
+    };
+  }
+  if (provider === "azure") return { azureLiveClient: buildAzureLiveDeployClient(undefined, env) };
+  if (provider === "gcp") return { gcpLiveClient: buildGcpLiveDeployClient(undefined, env) };
+  if (provider === "kubernetes") return { k8sLiveClient: buildK8sLiveDeployClient() };
+  return {};
 }
 
 export function resolveDeployProvider(config: ResolveDeployProviderConfig): DeployProvider {
