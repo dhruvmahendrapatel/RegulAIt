@@ -1376,6 +1376,12 @@ const TABS = [
         {name:"baseUrl",label:"base url",req:false,ph:"required for jira / azure_devops / generic_webhook"},
         {name:"apiVersion",label:"api version (jira)",req:false,ph:"v2 (default)",
          options:[{v:"3",l:"v3 + ADF rich text"},{v:"2",l:"v2 (legacy plain text)"}]},
+        // O7 (ADR-0027): what a detected status drift does on this connection
+        {name:"driftResolution",label:"drift policy",options:[
+          {v:"manual",l:"manual — surface only (default)"},
+          {v:"prefer_regulait",l:"prefer RegulAIt — push expected state back"},
+          {v:"prefer_pm",l:"prefer PM tool — adopt its state on the link"},
+        ]},
         {name:"token",type:"password",ph:"never shown again",grow:true},
       ], "Add connection")
     + "<p class='dim' style='font-size:12px'>Every provider kind is implemented — generic_webhook speaks RegulAIt's signed normalized event contract (HMAC-SHA256 of the body in <span class='mono'>x-regulait-signature</span>, under the connection token) to any HTTP receiver at its base URL. jira, azure_devops and generic_webhook need their base URL (e.g. https://&lt;site&gt;.atlassian.net, https://dev.azure.com/&lt;org&gt;, your receiver endpoint). The api version select applies to jira only: v2 (default) sends plain-text descriptions/comments; v3 sends them as ADF rich-text documents (paragraphs, headings, lists, code blocks) — Atlassian's GA direction. The demo runs entirely on the mock provider — no external service is touched.</p></div>"

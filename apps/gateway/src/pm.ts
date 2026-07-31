@@ -272,6 +272,8 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
         apiVersion: body.apiVersion ?? null,
         webhookSecretHash: sha256(webhookSecret),
         webhookSecretCiphertext: encryptSecret(opts.dataKey, webhookSecret),
+        // O7 (ADR-0027): drift policy — manual (today) unless the admin chose
+        driftResolution: body.driftResolution ?? "manual",
       })
       .returning(CONNECTION_COLUMNS);
     return reply.status(201).send({ ...row, webhookSecret });
@@ -648,24 +650,78 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
           const nodeStatus = (run.state as RunState).nodeStatuses[link.nodeId];
           const mapping = mappingFor(conn.provider, conn.mapping ?? undefined);
           const expected = nodeStatus ? resolveStatus(mapping, nodeStatus) : null;
-          if (expected !== null && body.state !== expected) {
+          // O7: a state this connection already ADOPTED (prefer_pm) is no
+          // longer a divergence — re-reports of it are quiet.
+          if (expected !== null && body.state !== expected && body.state !== link.adoptedState) {
             drift = true;
-            await db.insert(auditLog).values({
-              userId: run.initiatingUserId,
-              objectType: "pm_work_item",
-              objectId: link.objectId,
-              detail: {
-                nodeId: link.nodeId,
-                externalId: link.externalId,
-                reportedState: body.state,
-                expectedState: expected,
-                provider: conn.provider,
-              },
-              effect: "allow",
-              ruleId: "pm-drift-detected",
-              ruleChain: [],
-              reason: `PM tool reports '${body.state}' for node '${link.nodeId}' but RegulAIt's status maps to '${expected}' — drift surfaced, state machine untouched`,
-            });
+            const auditDrift = async (extra: Record<string, unknown>, reason: string) =>
+              db.insert(auditLog).values({
+                userId: run.initiatingUserId,
+                objectType: "pm_work_item",
+                objectId: link.objectId,
+                detail: {
+                  nodeId: link.nodeId,
+                  externalId: link.externalId,
+                  reportedState: body.state,
+                  expectedState: expected,
+                  provider: conn.provider,
+                  ...extra,
+                },
+                effect: "allow",
+                ruleId: extra.resolution ? "pm-drift-auto-resolved" : "pm-drift-detected",
+                ruleChain: [],
+                reason,
+              });
+            // O7 (ADR-0027): per-connection drift policy. 'manual' (default =
+            // today) surfaces only. The two auto modes resolve in the DECLARED
+            // direction, audited with before/after; anything that cannot be
+            // safely auto-resolved falls back to the surfaced manual path.
+            if (conn.driftResolution === "prefer_regulait" && opts.dataKey) {
+              try {
+                // push RegulAIt's expected state back to the PM tool —
+                // status ownership is RegulAIt's, so this direction is safe
+                await providerFor(conn, opts.dataKey).transitionState(
+                  conn.project,
+                  link.externalId,
+                  expected,
+                );
+                await db
+                  .update(pmLinks)
+                  .set({ lastSyncedAt: new Date() })
+                  .where(eq(pmLinks.id, link.id));
+                drift = false;
+                await auditDrift(
+                  { resolution: "prefer_regulait", before: body.state, after: expected },
+                  `PM tool reported '${body.state}' for node '${link.nodeId}' but RegulAIt's status maps to '${expected}' — auto-resolved prefer_regulait: work item transitioned back to '${expected}'`,
+                );
+              } catch (err) {
+                // the push failed — the drift stays SURFACED, never hidden
+                await auditDrift(
+                  { autoResolveFailed: err instanceof Error ? err.message : String(err) },
+                  `PM tool reports '${body.state}' for node '${link.nodeId}' but RegulAIt's status maps to '${expected}' — prefer_regulait push FAILED (${err instanceof Error ? err.message : String(err)}); drift stays surfaced, state machine untouched`,
+                );
+              }
+            } else if (conn.driftResolution === "prefer_pm") {
+              // adopt the PM tool's state as authoritative FOR THE LINK. The
+              // run state machine is never driven from outside (that would
+              // not be safe — e.g. a PM 'Done' cannot complete a running
+              // node), so adoption records the declared source of truth and
+              // stops flagging this state as drift.
+              await db
+                .update(pmLinks)
+                .set({ adoptedState: body.state })
+                .where(eq(pmLinks.id, link.id));
+              drift = false;
+              await auditDrift(
+                { resolution: "prefer_pm", before: expected, after: body.state },
+                `PM tool reports '${body.state}' for node '${link.nodeId}' (RegulAIt maps to '${expected}') — auto-resolved prefer_pm: the PM state is adopted as authoritative for this item; the run state machine stays untouched`,
+              );
+            } else {
+              await auditDrift(
+                {},
+                `PM tool reports '${body.state}' for node '${link.nodeId}' but RegulAIt's status maps to '${expected}' — drift surfaced, state machine untouched`,
+              );
+            }
           }
         }
       }
@@ -1048,7 +1104,12 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
         const nodeStatus = runState.nodeStatuses[link.nodeId];
         const mapping = mappingFor(conn.provider, conn.mapping ?? undefined);
         const expected = nodeStatus ? resolveStatus(mapping, nodeStatus) : null;
-        drift = expected !== null && link.inboundState !== expected;
+        // O7: a prefer_pm-ADOPTED state is the declared truth for this item —
+        // it no longer counts as drift.
+        drift =
+          expected !== null &&
+          link.inboundState !== expected &&
+          link.inboundState !== link.adoptedState;
       }
       return { ...link, connectionName: conn?.name ?? null, drift };
     });

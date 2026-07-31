@@ -1022,6 +1022,15 @@ export const pmConnections = pgTable("pm_connections", {
    * key — stored AES-256-GCM-encrypted like the connection token. Null on
    * connections minted before this column existed (legacy-header flows only). */
   webhookSecretCiphertext: text("webhook_secret_ciphertext"),
+  /** O7 (migration 0045): what a detected drift does. 'manual' (default =
+   * today) surfaces only; 'prefer_regulait' pushes RegulAIt's expected state
+   * back to the PM tool; 'prefer_pm' adopts the PM tool's state on the link
+   * (the run state machine is never driven from outside). */
+  driftResolution: text("drift_resolution", {
+    enum: ["manual", "prefer_pm", "prefer_regulait"],
+  })
+    .notNull()
+    .default("manual"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -1047,6 +1056,10 @@ export const pmLinks = pgTable(
      * applied to the state machine; divergence surfaces as drift */
     inboundState: text("inbound_state"),
     inboundAt: timestamp("inbound_at", { withTimezone: true }),
+    /** O7 (migration 0045): the PM-reported state a prefer_pm connection has
+     * ADOPTED as authoritative for this item — an inboundState equal to it no
+     * longer counts as drift. Null = nothing adopted (today). */
+    adoptedState: text("adopted_state"),
     /** set when the PM tool reports the item deleted */
     orphanedAt: timestamp("orphaned_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

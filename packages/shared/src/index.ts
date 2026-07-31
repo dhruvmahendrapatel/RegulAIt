@@ -818,6 +818,10 @@ export const createPmConnectionSchema = z
      * 3 (ADF rich-text descriptions/comments). Coerced so the admin portal's
      * select can post "3". */
     apiVersion: z.coerce.number().int().optional(),
+    /** O7 (ADR-0027): drift policy — 'manual' (default = today's detect-only);
+     * 'prefer_regulait' pushes the expected state back to the PM tool;
+     * 'prefer_pm' adopts the PM tool's state on the link. */
+    driftResolution: z.enum(["manual", "prefer_pm", "prefer_regulait"]).optional(),
   })
   .superRefine((body, ctx) => {
     if (body.apiVersion === undefined) return;

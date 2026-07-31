@@ -48,3 +48,14 @@ ALTER TABLE "mcp_tools" ADD COLUMN "price_per_call_usd" double precision;
 ALTER TABLE "compliance_profiles" ADD COLUMN "max_project_budget_usd" double precision;
 --> statement-breakpoint
 ALTER TABLE "compliance_profiles" ADD COLUMN "budget_enforcement" text;
+--> statement-breakpoint
+
+-- O7 PM drift auto-resolution: per-connection policy. 'manual' (default =
+-- every existing row = today's detect-only). 'prefer_regulait' pushes the
+-- expected state back to the PM tool on drift; 'prefer_pm' ADOPTS the PM
+-- tool's reported state on the link (adopted_state) — the run state machine
+-- is never driven from outside. Conflicts that cannot be safely auto-resolved
+-- stay surfaced.
+ALTER TABLE "pm_connections" ADD COLUMN "drift_resolution" text DEFAULT 'manual' NOT NULL;
+--> statement-breakpoint
+ALTER TABLE "pm_links" ADD COLUMN "adopted_state" text;
