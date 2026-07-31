@@ -65,14 +65,20 @@ export class DeployProviderError extends Error {
 export interface DeployProvider {
   readonly kind: DeployProviderKind;
   /** deploy the given change to this target; `seed` makes the ids deterministic
-   * (the instance id) so a replay never mints a second deployment. */
-  deploy(target: string, environment: string | null, seed: string): DeployResult;
-  rollback(target: string, deployId: string): RollbackResult;
+   * (the instance id) so a replay never mints a second deployment.
+   * ASYNC-DEPLOY refactor: Promise-returning so a real SDK long-running
+   * operation (ARM beginCreateOrUpdate+poll, Infra Manager LRO, k8s rollout
+   * watch) can be awaited to a terminal state instead of blocking the event
+   * loop behind a sync bridge or firing-and-forgetting (which would break the
+   * ADR-0022 honesty contract — dryRun:false only after a live call actually
+   * completed). */
+  deploy(target: string, environment: string | null, seed: string): Promise<DeployResult>;
+  rollback(target: string, deployId: string): Promise<RollbackResult>;
 }
 
 class MockDeployProvider implements DeployProvider {
   readonly kind = "mock" as const;
-  deploy(target: string, environment: string | null, seed: string): DeployResult {
+  async deploy(target: string, environment: string | null, seed: string): Promise<DeployResult> {
     const env = environment ?? "default";
     const deployId = `dep_${seed.slice(0, 8)}_${env}`;
     return {
@@ -82,7 +88,7 @@ class MockDeployProvider implements DeployProvider {
       dryRun: false, // the mock deploy IS the mock provider's real contract
     };
   }
-  rollback(_target: string, deployId: string): RollbackResult {
+  async rollback(_target: string, deployId: string): Promise<RollbackResult> {
     return { reverted: deployId, detail: `mock rollback of ${deployId}` };
   }
 }
@@ -92,23 +98,26 @@ class MockDeployProvider implements DeployProvider {
  * REGULAIT_DEPLOY_LIVE is on, AwsDeployProvider drives this instead of the
  * dry-run — and it is ALWAYS supplied by the caller (a fake in unit tests, a
  * real @aws-sdk-backed impl in a genuinely live deployment). Methods are
- * synchronous to keep the DeployProvider interface synchronous; a real impl
- * wraps the async SDK behind them. There is no default network client, so
- * "flag on with nothing injected" is a clear error, never a silent mutation.
+ * Promise-returning (ASYNC-DEPLOY refactor) so a real impl drives the async
+ * SDK directly and is awaited to a terminal state. There is no default network
+ * client, so "flag on with nothing injected" is a clear error, never a silent
+ * mutation.
  */
 export interface AwsLiveDeployClient {
   /** REAL: new STSClient({region}).send(command). Returns the assumed session
    * marker. The command is a genuine @aws-sdk AssumeRoleCommand. */
-  assumeRole(command: AssumeRoleCommand, region: string): { sessionId: string };
+  assumeRole(command: AssumeRoleCommand, region: string): Promise<{ sessionId: string }>;
   /** REAL: with the assumed-role creds, drive the deploy (CodeDeploy / ECS
-   * update-service / CloudFormation deploy) in `region` and capture its id. */
+   * update-service / CloudFormation deploy) in `region`, awaited to a terminal
+   * state, and capture its id. A deploy that fails mid-way MUST throw — never
+   * return a success-shaped result. */
   deploy(params: {
     target: string;
     environment: string;
     region: string;
     roleArn: string;
     sessionId: string;
-  }): { deployId: string; url: string };
+  }): Promise<{ deployId: string; url: string }>;
   /** REAL: assumed-role rollback (CodeDeploy StopDeployment + prior revision /
    * ECS update-service to the previous task-def) in `region`. */
   rollback(params: {
@@ -117,7 +126,7 @@ export interface AwsLiveDeployClient {
     region: string;
     roleArn: string;
     sessionId: string;
-  }): { reverted: string };
+  }): Promise<{ reverted: string }>;
 }
 
 /**
@@ -155,7 +164,7 @@ class AwsDeployProvider implements DeployProvider {
     return this.live && this.liveClient !== undefined;
   }
 
-  private assumeReal(seed: string): { sessionId: string } {
+  private async assumeReal(seed: string): Promise<{ sessionId: string }> {
     // REAL: a genuine @aws-sdk/client-sts AssumeRoleCommand handed to the
     // injected client (which, in a real deployment, sends it through an
     // STSClient({region})). Never constructed against the network here.
@@ -167,7 +176,7 @@ class AwsDeployProvider implements DeployProvider {
     return this.liveClient!.assumeRole(command, this.region);
   }
 
-  deploy(target: string, environment: string | null, seed: string): DeployResult {
+  async deploy(target: string, environment: string | null, seed: string): Promise<DeployResult> {
     this.requireConfig();
     if (this.live && !this.liveClient) {
       throw new DeployProviderError(
@@ -176,8 +185,8 @@ class AwsDeployProvider implements DeployProvider {
     }
     const env = environment ?? "default";
     if (this.useLive()) {
-      const session = this.assumeReal(seed);
-      const out = this.liveClient!.deploy({
+      const session = await this.assumeReal(seed);
+      const out = await this.liveClient!.deploy({
         target,
         environment: env,
         region: this.region,
@@ -203,7 +212,7 @@ class AwsDeployProvider implements DeployProvider {
     };
   }
 
-  rollback(target: string, deployId: string): RollbackResult {
+  async rollback(target: string, deployId: string): Promise<RollbackResult> {
     this.requireConfig();
     if (this.live && !this.liveClient) {
       throw new DeployProviderError(
@@ -211,8 +220,8 @@ class AwsDeployProvider implements DeployProvider {
       );
     }
     if (this.useLive()) {
-      const session = this.assumeReal(deployId);
-      const out = this.liveClient!.rollback({
+      const session = await this.assumeReal(deployId);
+      const out = await this.liveClient!.rollback({
         target,
         deployId,
         region: this.region,
@@ -229,14 +238,12 @@ class AwsDeployProvider implements DeployProvider {
  * Batch C: the injectable live-Azure deploy client (identical discipline to
  * AwsLiveDeployClient — ALWAYS supplied by the caller, a fake in unit tests;
  * no default network client, so "flag on with nothing injected" is a clear
- * error, never a silent mutation). Methods are synchronous to keep the
- * DeployProvider interface synchronous; a real impl wraps the async SDK
- * behind them.
+ * error, never a silent mutation). Methods are Promise-returning (ASYNC-DEPLOY
+ * refactor) so the real impl awaits the ARM LRO to a terminal state.
  *
- * FACTORY CONTRACT for a real impl (@azure/identity + @azure/arm-resources —
- * NOT added as deps: nothing here calls them yet, and the sync DeployProvider
- * interface means a genuinely-async real client needs the (documented,
- * deferred) async-deploy refactor in the workflow engine first):
+ * FACTORY CONTRACT — implemented for real by ./deploy-azure-client.ts's
+ * buildAzureLiveDeployClient (@azure/identity + @azure/arm-resources, both
+ * lazily dynamic-imported on the first live call):
  *   deploy   → new DefaultAzureCredential() (Entra ID federated — never a
  *              static key) → new ResourceManagementClient(cred, subscription)
  *              .deployments.beginCreateOrUpdate(resourceGroup, target, {
@@ -248,20 +255,22 @@ class AwsDeployProvider implements DeployProvider {
  *              successful deployment), reverting to the last known-good state.
  */
 export interface AzureLiveDeployClient {
-  /** REAL: ARM/Bicep deployment trigger in the customer's subscription. */
+  /** REAL: ARM/Bicep deployment awaited to a terminal provisioning state in
+   * the customer's subscription. A non-Succeeded terminal state MUST throw —
+   * never a success-shaped result. */
   deploy(params: {
     target: string;
     environment: string;
     region: string;
     subscription: string;
-  }): { deployId: string; url: string };
+  }): Promise<{ deployId: string; url: string }>;
   /** REAL: re-deploy the prior known-good ARM deployment (revert). */
   rollback(params: {
     target: string;
     deployId: string;
     region: string;
     subscription: string;
-  }): { reverted: string };
+  }): Promise<{ reverted: string }>;
 }
 
 /**
@@ -307,15 +316,15 @@ class AzureDeployProvider implements DeployProvider {
     }
   }
 
-  deploy(target: string, environment: string | null, seed: string): DeployResult {
+  async deploy(target: string, environment: string | null, seed: string): Promise<DeployResult> {
     this.requireConfig();
     this.requireWiredIfLive();
     const env = environment ?? "default";
     if (this.useLive()) {
       // REAL: DefaultAzureCredential → ARM/Bicep deployment via the injected
       // client (see the AzureLiveDeployClient factory contract). dryRun:false
-      // ONLY here — a genuinely live call happened.
-      const out = this.liveClient!.deploy({
+      // ONLY here — a genuinely live call happened AND completed.
+      const out = await this.liveClient!.deploy({
         target,
         environment: env,
         region: this.region,
@@ -340,12 +349,12 @@ class AzureDeployProvider implements DeployProvider {
     };
   }
 
-  rollback(target: string, deployId: string): RollbackResult {
+  async rollback(target: string, deployId: string): Promise<RollbackResult> {
     this.requireConfig();
     this.requireWiredIfLive();
     if (this.useLive()) {
       // REAL: re-deploy the prior known-good ARM deployment via the client.
-      const out = this.liveClient!.rollback({
+      const out = await this.liveClient!.rollback({
         target,
         deployId,
         region: this.region,
@@ -359,13 +368,14 @@ class AzureDeployProvider implements DeployProvider {
 
 /**
  * Batch C: the injectable live-GCP deploy client (identical discipline to
- * AwsLiveDeployClient / AzureLiveDeployClient). Methods are synchronous to
- * keep the DeployProvider interface synchronous; a real impl wraps the async
- * SDK behind them.
+ * AwsLiveDeployClient / AzureLiveDeployClient). Methods are Promise-returning
+ * (ASYNC-DEPLOY refactor) so the real impl awaits the Infra Manager LRO to
+ * done.
  *
- * FACTORY CONTRACT for a real impl (@google-cloud/config — Infrastructure
- * Manager, Deployment Manager's successor — NOT added as a dep: nothing here
- * calls it yet; same sync-interface note as AzureLiveDeployClient):
+ * FACTORY CONTRACT — implemented for real by ./deploy-gcp-client.ts's
+ * buildGcpLiveDeployClient (@google-cloud/config — Infrastructure Manager,
+ * Deployment Manager's successor — lazily dynamic-imported on the first live
+ * call):
  *   deploy   → ADC / workload identity federation (never a static SA key) →
  *              new ConfigClient().createDeployment/updateDeployment({parent:
  *              `projects/${project}/locations/${region}`, deploymentId:
@@ -376,20 +386,22 @@ class AzureDeployProvider implements DeployProvider {
  *              (deployments/{d}/revisions list → prior revision).
  */
 export interface GcpLiveDeployClient {
-  /** REAL: infra-manager (Deployment Manager successor) deployment trigger. */
+  /** REAL: infra-manager (Deployment Manager successor) deployment LRO awaited
+   * to done. A FAILED terminal deployment state MUST throw — never a
+   * success-shaped result. */
   deploy(params: {
     target: string;
     environment: string;
     region: string;
     project: string;
-  }): { deployId: string; url: string };
+  }): Promise<{ deployId: string; url: string }>;
   /** REAL: revert to the prior infra-manager deployment revision. */
   rollback(params: {
     target: string;
     deployId: string;
     region: string;
     project: string;
-  }): { reverted: string };
+  }): Promise<{ reverted: string }>;
 }
 
 /**
@@ -434,15 +446,15 @@ class GcpDeployProvider implements DeployProvider {
     }
   }
 
-  deploy(target: string, environment: string | null, seed: string): DeployResult {
+  async deploy(target: string, environment: string | null, seed: string): Promise<DeployResult> {
     this.requireConfig();
     this.requireWiredIfLive();
     const env = environment ?? "default";
     if (this.useLive()) {
       // REAL: WIF auth → infra-manager deployment via the injected client (see
       // the GcpLiveDeployClient factory contract). dryRun:false ONLY here — a
-      // genuinely live call happened.
-      const out = this.liveClient!.deploy({
+      // genuinely live call happened AND completed.
+      const out = await this.liveClient!.deploy({
         target,
         environment: env,
         region: this.region,
@@ -467,12 +479,12 @@ class GcpDeployProvider implements DeployProvider {
     };
   }
 
-  rollback(target: string, deployId: string): RollbackResult {
+  async rollback(target: string, deployId: string): Promise<RollbackResult> {
     this.requireConfig();
     this.requireWiredIfLive();
     if (this.useLive()) {
       // REAL: revert to the prior deployment revision via the client.
-      const out = this.liveClient!.rollback({
+      const out = await this.liveClient!.rollback({
         target,
         deployId,
         region: this.region,
@@ -489,12 +501,12 @@ class GcpDeployProvider implements DeployProvider {
  * the decrypted kubeconfig credential is handed to every call and never held
  * by the provider beyond its own constructor argument. Identical discipline to
  * the other live deploy clients (fake in tests, no default network client).
- * Methods are synchronous to keep the DeployProvider interface synchronous; a
- * real impl wraps the async SDK behind them.
+ * Methods are Promise-returning (ASYNC-DEPLOY refactor) so the real impl
+ * awaits the rollout to a terminal state.
  *
- * FACTORY CONTRACT for a real impl (@kubernetes/client-node — NOT added as a
- * dep: nothing here calls it yet; same sync-interface note as the azure/gcp
- * deploy clients):
+ * FACTORY CONTRACT — implemented for real by ./deploy-k8s-client.ts's
+ * buildK8sLiveDeployClient (@kubernetes/client-node, lazily dynamic-imported
+ * on the first live call):
  *   deploy   → const kc = new k8s.KubeConfig(); kc.loadFromString(kubeconfig);
  *              const api = kc.makeApiClient(k8s.AppsV1Api);
  *              await api.patchNamespacedDeployment({name: target, namespace,
@@ -505,20 +517,22 @@ class GcpDeployProvider implements DeployProvider {
  *              template back to the prior ReplicaSet revision.
  */
 export interface KubernetesLiveDeployClient {
-  /** REAL: kubeconfig-scoped apply/patch of the Deployment + rollout watch. */
+  /** REAL: kubeconfig-scoped server-side apply of the Deployment + rollout
+   * watch awaited to completion. A rollout that fails or times out MUST throw
+   * — never a success-shaped result. */
   deploy(params: {
     target: string;
     environment: string;
     namespace: string;
     kubeconfig: string;
-  }): { deployId: string; url: string };
+  }): Promise<{ deployId: string; url: string }>;
   /** REAL: rollout-undo to the prior ReplicaSet revision. */
   rollback(params: {
     target: string;
     deployId: string;
     namespace: string;
     kubeconfig: string;
-  }): { reverted: string };
+  }): Promise<{ reverted: string }>;
 }
 
 /**
@@ -566,7 +580,7 @@ class KubernetesDeployProvider implements DeployProvider {
     }
   }
 
-  deploy(target: string, environment: string | null, seed: string): DeployResult {
+  async deploy(target: string, environment: string | null, seed: string): Promise<DeployResult> {
     this.requireConfig();
     this.requireWiredIfLive();
     const env = environment ?? "default";
@@ -574,8 +588,8 @@ class KubernetesDeployProvider implements DeployProvider {
     if (this.useLive()) {
       // REAL: kubeconfig-scoped apply + rollout watch via the injected client
       // (see the KubernetesLiveDeployClient factory contract). dryRun:false
-      // ONLY here — a genuinely live call happened.
-      const out = this.liveClient!.deploy({
+      // ONLY here — a genuinely live call happened AND completed.
+      const out = await this.liveClient!.deploy({
         target,
         environment: env,
         namespace: ns,
@@ -600,7 +614,7 @@ class KubernetesDeployProvider implements DeployProvider {
     };
   }
 
-  rollback(target: string, deployId: string): RollbackResult {
+  async rollback(target: string, deployId: string): Promise<RollbackResult> {
     this.requireConfig();
     this.requireWiredIfLive();
     if (this.useLive()) {
@@ -608,7 +622,7 @@ class KubernetesDeployProvider implements DeployProvider {
       // the original deploy is carried in the recorded deployId's context by
       // the workflow engine; the provider's own namespace (or the recorded
       // environment at rollback time) scopes the undo.
-      const out = this.liveClient!.rollback({
+      const out = await this.liveClient!.rollback({
         target,
         deployId,
         namespace: this.namespace ?? "default",

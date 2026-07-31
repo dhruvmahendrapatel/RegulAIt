@@ -21,7 +21,8 @@ import {
  *     live path ever runs unwired, and no silent dry-run pretends under a
  *     live flag;
  *   · rollback carries the same three-way semantics.
- * Pure unit tests — no DB, no network.
+ * Pure unit tests — no DB, no network. (ASYNC-DEPLOY refactor: providers and
+ * fakes are Promise-returning; assertions await — mechanically updated only.)
  */
 
 const SUB = "00000000-1111-2222-3333-444444444444";
@@ -33,11 +34,11 @@ afterEach(() => {
 function fakeAzure() {
   const calls: Record<string, unknown>[] = [];
   const client: AzureLiveDeployClient = {
-    deploy(params) {
+    async deploy(params) {
       calls.push({ op: "deploy", ...params });
       return { deployId: "arm-dep-1", url: "https://portal.azure.com/#live/arm-dep-1" };
     },
-    rollback(params) {
+    async rollback(params) {
       calls.push({ op: "rollback", ...params });
       return { reverted: params.deployId };
     },
@@ -48,11 +49,11 @@ function fakeAzure() {
 function fakeGcp() {
   const calls: Record<string, unknown>[] = [];
   const client: GcpLiveDeployClient = {
-    deploy(params) {
+    async deploy(params) {
       calls.push({ op: "deploy", ...params });
       return { deployId: "im-dep-1", url: "https://console.cloud.google.com/live/im-dep-1" };
     },
-    rollback(params) {
+    async rollback(params) {
       calls.push({ op: "rollback", ...params });
       return { reverted: params.deployId };
     },
@@ -63,11 +64,11 @@ function fakeGcp() {
 function fakeK8s() {
   const calls: Record<string, unknown>[] = [];
   const client: KubernetesLiveDeployClient = {
-    deploy(params) {
+    async deploy(params) {
       calls.push({ op: "deploy", ...params });
       return { deployId: "rollout-7", url: "k8s://live/rollout-7" };
     },
-    rollback(params) {
+    async rollback(params) {
       calls.push({ op: "rollback", ...params });
       return { reverted: params.deployId };
     },
@@ -76,11 +77,11 @@ function fakeK8s() {
 }
 
 describe("azure — REGULAIT_DEPLOY_LIVE three-way semantics", () => {
-  it("flag OFF: dry-run byte-identical to the pre-live shape, wired client never touched", () => {
+  it("flag OFF: dry-run byte-identical to the pre-live shape, wired client never touched", async () => {
     delete process.env.REGULAIT_DEPLOY_LIVE;
     const { client, calls } = fakeAzure();
     const p = resolveDeployProvider({ provider: "azure", roleArn: SUB, region: "eastus", azureLiveClient: client });
-    const res = p.deploy("web", "prod", "abcdef1234");
+    const res = await p.deploy("web", "prod", "abcdef1234");
     expect(calls).toHaveLength(0);
     expect(res).toEqual({
       deployId: "azure_az_abcdef12_prod",
@@ -88,16 +89,16 @@ describe("azure — REGULAIT_DEPLOY_LIVE three-way semantics", () => {
       detail: `azure login sub ${SUB} → deploy to web (prod) in eastus [dry-run]`,
       dryRun: true,
     });
-    const rb = p.rollback("web", res.deployId);
+    const rb = await p.rollback("web", res.deployId);
     expect(calls).toHaveLength(0);
     expect(rb).toEqual({ reverted: res.deployId, detail: `azure rollback of ${res.deployId} on web [dry-run]` });
   });
 
-  it("flag ON + injected client: ARM deployment driven with subscription/region threaded; dryRun honestly false", () => {
+  it("flag ON + injected client: ARM deployment driven with subscription/region threaded; dryRun honestly false", async () => {
     process.env.REGULAIT_DEPLOY_LIVE = "true";
     const { client, calls } = fakeAzure();
     const p = resolveDeployProvider({ provider: "azure", roleArn: SUB, region: "westeurope", azureLiveClient: client });
-    const res = p.deploy("web", "prod", "seed1234");
+    const res = await p.deploy("web", "prod", "seed1234");
     expect(calls[0]).toEqual({
       op: "deploy",
       target: "web",
@@ -109,33 +110,33 @@ describe("azure — REGULAIT_DEPLOY_LIVE three-way semantics", () => {
     expect(res.url).toContain("live");
     expect(res.detail).toContain("[live]");
     expect(res.dryRun).toBe(false);
-    const rb = p.rollback("web", "arm-dep-1");
+    const rb = await p.rollback("web", "arm-dep-1");
     expect(rb.reverted).toBe("arm-dep-1");
     expect(rb.detail).toContain("[live]");
     expect(calls[1]).toMatchObject({ op: "rollback", deployId: "arm-dep-1", subscription: SUB });
   });
 
-  it("flag ON with NO injected client: explicit error for deploy AND rollback — never an unwired live run", () => {
+  it("flag ON with NO injected client: explicit error for deploy AND rollback — never an unwired live run", async () => {
     process.env.REGULAIT_DEPLOY_LIVE = "1";
     const p = resolveDeployProvider({ provider: "azure", roleArn: SUB, region: "eastus" });
-    expect(() => p.deploy("web", "prod", "seed")).toThrow(/no live Azure deploy client was injected/);
-    expect(() => p.rollback("web", "dep-1")).toThrow(DeployProviderError);
+    await expect(p.deploy("web", "prod", "seed")).rejects.toThrow(/no live Azure deploy client was injected/);
+    await expect(p.rollback("web", "dep-1")).rejects.toThrow(DeployProviderError);
   });
 
-  it("flag ON still validates config first (missing subscription/region is the config error)", () => {
+  it("flag ON still validates config first (missing subscription/region is the config error)", async () => {
     process.env.REGULAIT_DEPLOY_LIVE = "1";
     const { client } = fakeAzure();
     const p = resolveDeployProvider({ provider: "azure", roleArn: "", region: "", azureLiveClient: client });
-    expect(() => p.deploy("web", "prod", "seed")).toThrow(/needs a subscription/);
+    await expect(p.deploy("web", "prod", "seed")).rejects.toThrow(/needs a subscription/);
   });
 });
 
 describe("gcp — REGULAIT_DEPLOY_LIVE three-way semantics", () => {
-  it("flag OFF: dry-run byte-identical to the pre-live shape, wired client never touched", () => {
+  it("flag OFF: dry-run byte-identical to the pre-live shape, wired client never touched", async () => {
     delete process.env.REGULAIT_DEPLOY_LIVE;
     const { client, calls } = fakeGcp();
     const p = resolveDeployProvider({ provider: "gcp", roleArn: "proj-1", region: "us-central1", gcpLiveClient: client });
-    const res = p.deploy("svc", "prod", "abcdef1234");
+    const res = await p.deploy("svc", "prod", "abcdef1234");
     expect(calls).toHaveLength(0);
     expect(res).toEqual({
       deployId: "gcp_gc_abcdef12_prod",
@@ -143,16 +144,16 @@ describe("gcp — REGULAIT_DEPLOY_LIVE three-way semantics", () => {
       detail: "gcp wif project proj-1 → deploy to svc (prod) in us-central1 [dry-run]",
       dryRun: true,
     });
-    const rb = p.rollback("svc", res.deployId);
+    const rb = await p.rollback("svc", res.deployId);
     expect(calls).toHaveLength(0);
     expect(rb.detail).toContain("[dry-run]");
   });
 
-  it("flag ON + injected client: infra-manager deployment driven with project/region threaded; dryRun honestly false", () => {
+  it("flag ON + injected client: infra-manager deployment driven with project/region threaded; dryRun honestly false", async () => {
     process.env.REGULAIT_DEPLOY_LIVE = "true";
     const { client, calls } = fakeGcp();
     const p = resolveDeployProvider({ provider: "gcp", roleArn: "proj-1", region: "europe-west1", gcpLiveClient: client });
-    const res = p.deploy("svc", "prod", "seed1234");
+    const res = await p.deploy("svc", "prod", "seed1234");
     expect(calls[0]).toEqual({
       op: "deploy",
       target: "svc",
@@ -163,21 +164,21 @@ describe("gcp — REGULAIT_DEPLOY_LIVE three-way semantics", () => {
     expect(res.deployId).toBe("im-dep-1");
     expect(res.detail).toContain("[live]");
     expect(res.dryRun).toBe(false);
-    const rb = p.rollback("svc", "im-dep-1");
+    const rb = await p.rollback("svc", "im-dep-1");
     expect(rb.reverted).toBe("im-dep-1");
     expect(rb.detail).toContain("[live]");
   });
 
-  it("flag ON with NO injected client: explicit error for deploy AND rollback", () => {
+  it("flag ON with NO injected client: explicit error for deploy AND rollback", async () => {
     process.env.REGULAIT_DEPLOY_LIVE = "1";
     const p = resolveDeployProvider({ provider: "gcp", roleArn: "proj-1", region: "us-central1" });
-    expect(() => p.deploy("svc", "prod", "seed")).toThrow(/no live GCP deploy client was injected/);
-    expect(() => p.rollback("svc", "dep-1")).toThrow(DeployProviderError);
+    await expect(p.deploy("svc", "prod", "seed")).rejects.toThrow(/no live GCP deploy client was injected/);
+    await expect(p.rollback("svc", "dep-1")).rejects.toThrow(DeployProviderError);
   });
 });
 
 describe("kubernetes — REGULAIT_DEPLOY_LIVE three-way semantics", () => {
-  it("flag OFF: dry-run byte-identical to the pre-live shape, wired client never touched", () => {
+  it("flag OFF: dry-run byte-identical to the pre-live shape, wired client never touched", async () => {
     delete process.env.REGULAIT_DEPLOY_LIVE;
     const { client, calls } = fakeK8s();
     const p = resolveDeployProvider({
@@ -186,7 +187,7 @@ describe("kubernetes — REGULAIT_DEPLOY_LIVE three-way semantics", () => {
       region: "team-ns",
       k8sLiveClient: client,
     });
-    const res = p.deploy("api", "prod", "abcdef1234");
+    const res = await p.deploy("api", "prod", "abcdef1234");
     expect(calls).toHaveLength(0);
     expect(res).toEqual({
       deployId: "k8s_k8s_abcdef12_prod",
@@ -194,11 +195,11 @@ describe("kubernetes — REGULAIT_DEPLOY_LIVE three-way semantics", () => {
       detail: "kubeconfig apply → rollout api in namespace team-ns (prod) [dry-run]",
       dryRun: true,
     });
-    expect(p.rollback("api", res.deployId).detail).toContain("[dry-run]");
+    expect((await p.rollback("api", res.deployId)).detail).toContain("[dry-run]");
     expect(calls).toHaveLength(0);
   });
 
-  it("flag ON + injected client: the kubeconfig credential + namespace are threaded; dryRun honestly false", () => {
+  it("flag ON + injected client: the kubeconfig credential + namespace are threaded; dryRun honestly false", async () => {
     process.env.REGULAIT_DEPLOY_LIVE = "true";
     const { client, calls } = fakeK8s();
     const p = resolveDeployProvider({
@@ -207,7 +208,7 @@ describe("kubernetes — REGULAIT_DEPLOY_LIVE three-way semantics", () => {
       region: "team-ns",
       k8sLiveClient: client,
     });
-    const res = p.deploy("api", "prod", "seed1234");
+    const res = await p.deploy("api", "prod", "seed1234");
     expect(calls[0]).toEqual({
       op: "deploy",
       target: "api",
@@ -218,32 +219,32 @@ describe("kubernetes — REGULAIT_DEPLOY_LIVE three-way semantics", () => {
     expect(res.deployId).toBe("rollout-7");
     expect(res.detail).toContain("[live]");
     expect(res.dryRun).toBe(false);
-    const rb = p.rollback("api", "rollout-7");
+    const rb = await p.rollback("api", "rollout-7");
     expect(rb.reverted).toBe("rollout-7");
     expect(calls[1]).toMatchObject({ op: "rollback", kubeconfig: "kubeconfig-yaml", namespace: "team-ns" });
   });
 
-  it("flag ON + injected client with no namespace configured: the environment doubles as the namespace", () => {
+  it("flag ON + injected client with no namespace configured: the environment doubles as the namespace", async () => {
     process.env.REGULAIT_DEPLOY_LIVE = "1";
     const { client, calls } = fakeK8s();
     const p = resolveDeployProvider({ provider: "kubernetes", credential: "kc", k8sLiveClient: client });
-    p.deploy("api", "staging", "seed1234");
+    await p.deploy("api", "staging", "seed1234");
     expect(calls[0]).toMatchObject({ namespace: "staging", environment: "staging" });
   });
 
-  it("flag ON with NO injected client: explicit error; missing kubeconfig stays the config error", () => {
+  it("flag ON with NO injected client: explicit error; missing kubeconfig stays the config error", async () => {
     process.env.REGULAIT_DEPLOY_LIVE = "1";
     const p = resolveDeployProvider({ provider: "kubernetes", credential: "kc", region: "ns" });
-    expect(() => p.deploy("api", "prod", "seed")).toThrow(/no live Kubernetes deploy client was injected/);
-    expect(() => p.rollback("api", "dep-1")).toThrow(DeployProviderError);
+    await expect(p.deploy("api", "prod", "seed")).rejects.toThrow(/no live Kubernetes deploy client was injected/);
+    await expect(p.rollback("api", "dep-1")).rejects.toThrow(DeployProviderError);
     const { client } = fakeK8s();
     const bare = resolveDeployProvider({ provider: "kubernetes", credential: "", k8sLiveClient: client });
-    expect(() => bare.deploy("api", "prod", "seed")).toThrow(/needs a kubeconfig credential/);
+    await expect(bare.deploy("api", "prod", "seed")).rejects.toThrow(/needs a kubeconfig credential/);
   });
 });
 
 describe("cross-cloud honesty invariants", () => {
-  it("dryRun:false is ONLY ever reported when a live client call actually happened", () => {
+  it("dryRun:false is ONLY ever reported when a live client call actually happened", async () => {
     // flag off, all three clouds, wired or not → dryRun:true always
     delete process.env.REGULAIT_DEPLOY_LIVE;
     for (const cfg of [
@@ -254,15 +255,15 @@ describe("cross-cloud honesty invariants", () => {
       { provider: "gcp" as const, roleArn: "proj-1", region: "us-central1" },
       { provider: "kubernetes" as const, credential: "kc", region: "ns" },
     ]) {
-      expect(resolveDeployProvider(cfg).deploy("t", "production", "seed1234").dryRun).toBe(true);
+      expect((await resolveDeployProvider(cfg).deploy("t", "production", "seed1234")).dryRun).toBe(true);
     }
   });
 
-  it("the production-gate contract survives: a dry-run result still carries dryRun:true for prod targets", () => {
+  it("the production-gate contract survives: a dry-run result still carries dryRun:true for prod targets", async () => {
     // ADR-0022: workflows.ts blocks a production deploy gate on dryRun:true —
     // the flag-off adapters keep reporting it so that refusal keeps working.
     delete process.env.REGULAIT_DEPLOY_LIVE;
-    const res = resolveDeployProvider({ provider: "azure", roleArn: SUB, region: "eastus" }).deploy(
+    const res = await resolveDeployProvider({ provider: "azure", roleArn: SUB, region: "eastus" }).deploy(
       "web",
       "production",
       "abcdef1234",
