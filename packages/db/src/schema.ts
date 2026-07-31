@@ -1298,6 +1298,15 @@ export const complianceProfiles = pgTable("compliance_profiles", {
    * framework declares no infra floor of its own. */
   backupRetentionDays: integer("backup_retention_days"),
   patchCadenceDays: integer("patch_cadence_days"),
+  /** O2 (migration 0045): project-budget CEILING this framework forces onto
+   * any project carrying its tag — composed as MIN (strictest ceiling wins),
+   * and it caps an unbudgeted project too. Null = no ceiling. */
+  maxProjectBudgetUsd: doublePrecision("max_project_budget_usd"),
+  /** O2: budget-enforcement FLOOR — 'block' forces blocking even when the org
+   * says warn_only (strictest wins, matching the cascade's composition
+   * rules); 'warn_only' can never relax a stricter org setting (surfaced as
+   * an inert declaration). Null = no opinion. */
+  budgetEnforcement: text("budget_enforcement", { enum: ["block", "warn_only"] }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

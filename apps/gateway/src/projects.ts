@@ -254,6 +254,24 @@ export function effectiveCompliancePolicy(profiles: ComplianceProfileRow[]) {
         p.patchCadenceDays == null ? m : m == null ? p.patchCadenceDays : Math.min(m, p.patchCadenceDays),
       null,
     ),
+    // O2 (ADR-0027): the project-budget CEILING — MIN composes (the strictest
+    // framework wins), matching patchCadenceDays' strictest-cadence rule.
+    maxProjectBudgetUsd: profiles.reduce<number | null>(
+      (m, p) =>
+        p.maxProjectBudgetUsd == null
+          ? m
+          : m == null
+            ? p.maxProjectBudgetUsd
+            : Math.min(m, p.maxProjectBudgetUsd),
+      null,
+    ),
+    // O2: enforcement floor — 'block' beats 'warn_only' beats no-opinion
+    // (strictest wins). A profile can only ever TIGHTEN the org setting.
+    budgetEnforcement: profiles.some((p) => p.budgetEnforcement === "block")
+      ? ("block" as const)
+      : profiles.some((p) => p.budgetEnforcement === "warn_only")
+        ? ("warn_only" as const)
+        : null,
   };
 }
 
@@ -412,7 +430,24 @@ export async function preDispatchProjectGate(
   }
   const now = new Date();
   const periodKey = currentPeriodKey(now);
-  if (project.budgetUsd == null || overageActive(project, periodKey)) {
+  // O2 (ADR-0027): the compliance cascade's COST dimensions join the gate.
+  // A framework's maxProjectBudgetUsd is a CEILING: the effective budget is
+  // min(project budget, ceiling) — and the ceiling caps an UNBUDGETED
+  // project too (a framework cap is not opt-out-able by leaving the budget
+  // blank). A framework's budgetEnforcement 'block' forces blocking even
+  // when the org says warn_only — strictest wins; the org can never be
+  // relaxed by a profile. Unclassified projects: cascade is empty, the gate
+  // is byte-identical to before.
+  const tags = (project.classifications ?? []) as string[];
+  const cascade = effectiveCompliancePolicy(await profilesForTags(db, tags));
+  const ceilingUsd = cascade.maxProjectBudgetUsd;
+  const effectiveBudgetUsd =
+    project.budgetUsd == null
+      ? ceilingUsd
+      : ceilingUsd == null
+        ? project.budgetUsd
+        : Math.min(project.budgetUsd, ceilingUsd);
+  if (effectiveBudgetUsd == null || overageActive(project, periodKey)) {
     return { ok: true, project, spentUsd: 0 };
   }
   const spentUsd = await projectSpendUsd(db, projectId, { monthly: isMonthly(project), now });
@@ -421,21 +456,29 @@ export async function preDispatchProjectGate(
   // escalates into the one approvals queue + audits, but lets the dispatch
   // through). Defaults are byte-identical to the pre-0038 behaviour.
   const org = await loadOrgSettings(db);
-  const blockAtUsd = (project.budgetUsd * org.budgetHardBlockPct) / 100;
+  const blockAtUsd = (effectiveBudgetUsd * org.budgetHardBlockPct) / 100;
   if (spentUsd >= blockAtUsd) {
     await escalateProjectBudget(db, project, userId, spentUsd);
-    if (org.budgetEnforcement === "warn_only") {
+    // O2: strictest-wins — a framework's 'block' beats an org 'warn_only'
+    const enforcement = cascade.budgetEnforcement === "block" ? "block" : org.budgetEnforcement;
+    if (enforcement === "warn_only") {
       // enforcement is advisory: the crossing is escalated + audited above,
       // the call itself proceeds and its measured cost still lands.
       return { ok: true, project, spentUsd };
     }
+    const ceilingGoverned = ceilingUsd != null && effectiveBudgetUsd === ceilingUsd &&
+      (project.budgetUsd == null || ceilingUsd < project.budgetUsd);
     return {
       ok: false,
       status: 409,
       error: "project_budget_exceeded",
       detail:
         `measured spend $${spentUsd.toFixed(6)} >= hard-block threshold $${blockAtUsd.toFixed(6)}` +
-        ` (${org.budgetHardBlockPct}% of budget $${project.budgetUsd})`,
+        ` (${org.budgetHardBlockPct}% of ${ceilingGoverned ? `compliance ceiling $${effectiveBudgetUsd}` : `budget $${effectiveBudgetUsd}`})` +
+        (ceilingGoverned ? ` — the ceiling comes from compliance profile(s) [${tags.join(", ")}]` : "") +
+        (cascade.budgetEnforcement === "block" && org.budgetEnforcement === "warn_only"
+          ? " — blocking forced by the compliance cascade (org warn_only overridden, strictest wins)"
+          : ""),
     };
   }
   return { ok: true, project, spentUsd };
@@ -1612,6 +1655,9 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       piiMode: body.piiMode ?? ("log" as const),
       backupRetentionDays: body.backupRetentionDays ?? null,
       patchCadenceDays: body.patchCadenceDays ?? null,
+      // O2 (ADR-0027): per-framework cost dimensions — null = no opinion
+      maxProjectBudgetUsd: body.maxProjectBudgetUsd ?? null,
+      budgetEnforcement: body.budgetEnforcement ?? null,
     };
     const [row] = await db
       .insert(complianceProfiles)
@@ -1663,11 +1709,41 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
     if (!gate.ok) return reply.status(gate.status).send({ error: gate.error });
     const tags = (project.classifications ?? []) as string[];
     const profiles = await profilesForTags(db, tags);
+    const effective = effectiveCompliancePolicy(profiles);
+    // O2 (ADR-0027): surface COST-policy conflicts exactly like the existing
+    // cascade conflicts — computed and named, never silently resolved. The
+    // gate itself always applies the strictest composition regardless.
+    const org = await loadOrgSettings(db);
+    const costConflicts: string[] = [];
+    if (
+      effective.maxProjectBudgetUsd != null &&
+      project.budgetUsd != null &&
+      project.budgetUsd > effective.maxProjectBudgetUsd
+    ) {
+      costConflicts.push(
+        `project budget $${project.budgetUsd} exceeds the compliance ceiling $${effective.maxProjectBudgetUsd} — the CEILING governs (strictest wins)`,
+      );
+    }
+    if (effective.budgetEnforcement === "block" && org.budgetEnforcement === "warn_only") {
+      costConflicts.push(
+        "org budget enforcement is warn_only but a compliance profile forces block — BLOCK governs (strictest wins)",
+      );
+    }
+    if (effective.budgetEnforcement === "warn_only" && org.budgetEnforcement === "block") {
+      costConflicts.push(
+        "a compliance profile declares warn_only but the org enforces block — the profile declaration is INERT (a framework can tighten, never relax)",
+      );
+    }
     return {
       classifications: tags,
       pendingClassifications: (project.pendingClassifications ?? null) as string[] | null,
       profiles,
-      effective: effectiveCompliancePolicy(profiles),
+      effective,
+      costPolicy: {
+        maxProjectBudgetUsd: effective.maxProjectBudgetUsd,
+        budgetEnforcement: effective.budgetEnforcement,
+        conflicts: costConflicts,
+      },
       enforcement: {
         requiredWorkflowTemplates: "enforced-at-instance-creation",
         // ADR-0023: read_only now DENIES write-classified tools on every

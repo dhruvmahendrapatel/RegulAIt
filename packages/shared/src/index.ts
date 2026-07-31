@@ -871,6 +871,10 @@ export const upsertComplianceProfileSchema = z.object({
    * forces onto any infra resource carrying its tag (pillar 3). */
   backupRetentionDays: z.number().int().positive().nullable().optional(),
   patchCadenceDays: z.number().int().positive().nullable().optional(),
+  /** O2 (ADR-0027): project-budget ceiling (MIN-composed, strictest wins) */
+  maxProjectBudgetUsd: z.number().positive().max(100_000_000).nullable().optional(),
+  /** O2: enforcement floor — 'block' forces blocking even in a warn_only org */
+  budgetEnforcement: z.enum(["block", "warn_only"]).nullable().optional(),
 });
 
 // PILLAR 3 (§8.2): the governed infrastructure-operations layer.

@@ -36,3 +36,15 @@ ALTER TABLE "connector_revocations" ADD COLUMN "scope" text DEFAULT 'full' NOT N
 -- row; resolution is tool-first, server-flat-price fallback. Null (every
 -- existing and auto-synced row) = no override = today's flat server price.
 ALTER TABLE "mcp_tools" ADD COLUMN "price_per_call_usd" double precision;
+--> statement-breakpoint
+
+-- O2 per-framework cost policies: a compliance profile may declare a project
+-- budget CEILING (composed as MIN — the strictest ceiling wins, and it also
+-- caps an unbudgeted project) and a budget-enforcement FLOOR (a profile
+-- declaring 'block' forces blocking even when the org says warn_only —
+-- strictest wins; 'warn_only' can never relax a stricter org and is surfaced
+-- as an inert declaration). Null (every existing row) = no cost opinion =
+-- today's behaviour.
+ALTER TABLE "compliance_profiles" ADD COLUMN "max_project_budget_usd" double precision;
+--> statement-breakpoint
+ALTER TABLE "compliance_profiles" ADD COLUMN "budget_enforcement" text;
