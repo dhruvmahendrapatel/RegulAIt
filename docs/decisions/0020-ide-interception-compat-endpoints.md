@@ -158,41 +158,79 @@ distinction that matters — accept-and-**disclose** is not the silent drop this
 
 The tier is deliberately narrow: a field qualifies only when ignoring it cannot change whether an
 output is safe, governed, priced or attributed. `temperature` nudges sampling. `tool_choice` and
-`thinking` change what the model is *able to do*, so they stay a 400. `top_p`/`top_k`/
+`thinking` change what the model is *able to do*, so they could never join the ignore tier — they
+stayed a 400 until they earned real mappings (see the 2026-07-31 amendment below). `top_p`/`top_k`/
 `stop_sequences` are arguably the same class as `temperature` and were left rejected only because
 `temperature` alone was observed causing the problem; widening the tier is one line if a real client
 trips over them.
 
+**Amended 2026-07-31 — the long tail moves to HONOURED, one real mapping at a time.**
+`tool_choice`, OpenAI `response_format` (structured outputs) and Anthropic `thinking` moved from
+the rejected tier to the supported tier. Per the standing rule, none of them entered the
+accept-and-ignore tier (that tier stays exactly `temperature`): each is honoured with a real
+end-to-end mapping through `ModelDispatchRequest` into every adapter that can express it —
+
+- `tool_choice` → neutral `toolChoice: "auto" | "none" | "required" | {name}`; Anthropic
+  `{type: auto|none|any|tool}`, OpenAI/xAI `"auto"|"none"|"required"|{type:function,…}`, Google
+  `functionCallingConfig` `AUTO|NONE|ANY` (+`allowedFunctionNames` for a named tool), mock
+  observably. A named tool absent from the request's own `tools` list is a 400; unmappable
+  variants (`disable_parallel_tool_use: true`, unknown types) still 400 naming the exact variant.
+- `response_format` → neutral `responseFormat` (`json_object` / `json_schema`; `text` maps to
+  absent — it *is* the default). OpenAI/xAI native passthrough (chat completions and the
+  Responses surface's `text.format`), Google `responseMimeType`/`responseSchema`, mock echo.
+  **The Anthropic adapter deliberately has NO mapping**: the Messages API offers no native
+  structured-output mechanism, a system-prompt suffix cannot *guarantee* valid JSON the way
+  OpenAI's json mode does, and a forced-single-tool emulation reshapes the response (tool_use
+  instead of text; breaks text-delta streaming) — neither is faithful, so an OpenAI-shaped
+  request carrying `response_format` that resolves to an Anthropic-provider agent is a **400
+  naming the field and the provider**. Each surface honours what its dialect + the served
+  provider can really express; the asymmetry is documented, not papered over.
+- `thinking` → neutral `thinking: {budgetTokens}` (Anthropic `{type:"enabled", budget_tokens}`;
+  `{type:"disabled"}` is a real mapping onto absent). Anthropic adapter only (plus mock):
+  real parameter, `thinking`/`redacted_thinking` blocks surfaced first in the response with
+  signatures intact, round-tripped through assistant-turn history, and streamed with vendor
+  framing (`thinking_delta` / `signature_delta` in their own content block before the text
+  block). On any other provider the request is a 400 naming the field — never silently dropped.
+  Usage honesty: thinking tokens are output tokens in Anthropic's own accounting, so
+  `usage.outputTokens` (and the measured ledger) carries them unchanged.
+
 **`POST /v1/messages` (Anthropic shape)**
 
-- Supported top-level: `model`, `messages`, `system`, `max_tokens`, `stream`, `tools`.
+- Supported top-level: `model`, `messages`, `system`, `max_tokens`, `stream`, `tools`,
+  `tool_choice` *(2026-07-31)*, `thinking` *(2026-07-31)*.
 - Supported content blocks: `text`, `image` (base64 source), `document` (base64 source),
-  `tool_use`, `tool_result` (string content or an array of text parts).
+  `tool_use`, `tool_result` (string content or an array of text parts), and — on **assistant**
+  turns only — `thinking` / `redacted_thinking` *(2026-07-31: a prior response replayed into
+  history, round-tripped natively with signature intact)*.
 - `system` accepts a string or an array of text blocks; a `cache_control` marker on a system block
   is a **real mapping** onto pillar-6 prompt caching (`cacheSystem`), not a dropped field.
 - Accepted but not honoured (disclosed via `x-regulait-ignored-fields` + audit row): `temperature`.
 - Rejected with a 400 naming the field: `top_p`, `top_k`, `stop_sequences`,
-  `metadata`, `tool_choice`, `thinking`, `service_tier`, `container`, `mcp_servers` and any other
-  unknown top-level key; content blocks of any other type (`thinking`, `redacted_thinking`,
-  `server_tool_use`, …); non-`base64` image/document sources (url/file/text); per-message
-  `cache_control`; non-`custom` tool types; roles other than `user`/`assistant`.
+  `metadata`, `service_tier`, `container`, `mcp_servers` and any other
+  unknown top-level key; content blocks of any other type (`server_tool_use`, …) and
+  `thinking`/`redacted_thinking` blocks on non-assistant turns; non-`base64` image/document
+  sources (url/file/text); per-message `cache_control`; non-`custom` tool types; roles other than
+  `user`/`assistant`; `tool_choice.disable_parallel_tool_use: true` and unknown
+  `tool_choice`/`thinking` variants (named exactly).
 - `anthropic-version` and other protocol headers are accepted and ignored — they negotiate wire
   protocol, not model behaviour.
 
 **`POST /v1/chat/completions` (OpenAI shape)**
 
 - Supported top-level: `model`, `messages`, `stream`, `tools`, `max_tokens`,
-  `max_completion_tokens`.
+  `max_completion_tokens`, `tool_choice` *(2026-07-31)*, `response_format` *(2026-07-31)*.
 - Supported roles: `system` and `developer` (hoisted, in order, into the dispatch's out-of-band
   `system` field), `user`, `assistant` (including `tool_calls`), `tool` (mapped to a user turn
   carrying one `tool_result` block).
 - Supported user content parts: `text`, and `image_url` when the URL is a base64 `data:` URI.
 - Accepted but not honoured (disclosed via `x-regulait-ignored-fields` + audit row): `temperature`.
 - Rejected with a 400 naming the field: `top_p`, `n`, `stop`, `presence_penalty`,
-  `frequency_penalty`, `logit_bias`, `logprobs`, `seed`, `response_format`, `tool_choice`,
+  `frequency_penalty`, `logit_bias`, `logprobs`, `seed`, `thinking`,
   `parallel_tool_calls`, `stream_options`, `reasoning_effort`, `store`, `metadata`, `user` and any
   other unknown top-level key; remote (`https://`) image URLs; non-`function` tool types; unknown
-  roles.
+  roles; unknown `tool_choice`/`response_format` variants (named exactly); `response_format` on a
+  request whose served agent dispatches to a provider with no native structured-output mechanism
+  (Anthropic — see the amendment above).
 
 Errors are returned in the **provider's own error envelope** (`{type:"error",error:{…}}` /
 `{error:{…}}`) with the RegulAIt code preserved as `regulait_code`, so an IDE renders a governance
@@ -232,11 +270,15 @@ already worked, is now documented and has an admin-facing config generator.
 
 **Harder / given up.**
 
-- The compatibility surface has a long tail we deliberately do **not** cover: thinking blocks,
+- The compatibility surface has a long tail we deliberately do **not** cover: ~~thinking blocks,
   prompt-caching headers beyond the system mapping, `tool_choice`, sampling parameters, structured
-  outputs. Widening the subset is incremental follow-up work, one field at a time, each with a real
+  outputs~~. Widening the subset is incremental follow-up work, one field at a time, each with a real
   mapping. `temperature` was the first amendment (see §5) — accepted-and-disclosed rather than
-  rejected, because a 400 there blocked real clients without protecting anything.
+  rejected, because a 400 there blocked real clients without protecting anything. *(Amended
+  2026-07-31: `tool_choice`, `response_format` and `thinking` are now honoured with real mappings —
+  see §5. The remaining uncovered tail is sampling parameters (`top_p`/`top_k`/`stop_sequences`),
+  prompt-caching beyond the system mapping, and Anthropic-side structured outputs, which stays a
+  documented 400 by decision rather than omission.)*
 - Two more entry points now share the singleton posture row. A misconfigured `resolution_mode`
   affects both surfaces at once; there is no per-role or per-project override yet (ROADMAP notes
   one as plausible, mirroring migration 0026's rule scoping — deferred).

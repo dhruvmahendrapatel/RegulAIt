@@ -53,13 +53,46 @@ export interface ModelToolDef {
  * multimodal — a photo/screenshot the model sees as vision, or a PDF it reads
  * as a document. Providers without native vision degrade these to a short text
  * placeholder rather than dropping them silently.
+ * thinking / redacted_thinking carry an earlier assistant turn's extended-
+ * thinking blocks back through a multi-turn history: the Anthropic adapter
+ * round-trips them natively (signature intact — required for verification);
+ * every other adapter SKIPS them, which mirrors the vendors' own behaviour of
+ * stripping prior-turn thinking rather than feeding it back as prose.
  * Together they let a tool-using loop append turns across iterations. */
 export type ModelContentBlock =
   | { type: "text"; text: string }
   | { type: "image"; mediaType: string; dataBase64: string; name?: string }
   | { type: "document"; mediaType: string; dataBase64: string; name?: string }
   | { type: "tool_use"; id: string; name: string; input: unknown }
-  | { type: "tool_result"; toolUseId: string; content: string; isError?: boolean };
+  | { type: "tool_result"; toolUseId: string; content: string; isError?: boolean }
+  | { type: "thinking"; thinking: string; signature?: string }
+  | { type: "redacted_thinking"; data: string };
+
+/** ADR-0020 long tail — the neutral tool_choice contract. "auto" lets the
+ * model decide, "none" forbids tool calls, "required" forces SOME tool call,
+ * `{name}` forces THAT tool. Every adapter has a real native mapping (see the
+ * per-adapter tables); anything a provider dialect can express beyond this
+ * (e.g. Anthropic's disable_parallel_tool_use=true) is NOT representable here
+ * and must fail loudly upstream rather than be dropped. */
+export type ModelToolChoice = "auto" | "none" | "required" | { name: string };
+
+/** ADR-0020 long tail — structured outputs, in the OpenAI response_format
+ * dialect's terms because that is the surface that speaks it. json_object
+ * constrains the model to emit valid JSON; json_schema additionally pins the
+ * shape. Honoured only by adapters with a NATIVE mechanism (OpenAI/xAI
+ * response_format, Google responseMimeType/responseSchema, mock echo);
+ * the Anthropic adapter has none and callers must 400 rather than pretend
+ * a prompt nudge is a guarantee. */
+export type ModelResponseFormat =
+  | { type: "json_object" }
+  | { type: "json_schema"; name?: string; schema: Record<string, unknown>; strict?: boolean };
+
+/** An extended-thinking block on a RESULT: what the model reasoned before
+ * answering. `signature` is the provider's verification token and must be
+ * carried back verbatim when the block is replayed into history. */
+export type ModelThinkingBlock =
+  | { type: "thinking"; thinking: string; signature: string }
+  | { type: "redacted_thinking"; data: string };
 
 /** A short human-readable stand-in for an attachment on providers that can't
  * take the bytes natively (mock, and the chat-completions/Gemini text join).
@@ -103,10 +136,29 @@ export interface ModelDispatchRequest {
    * `toolCalls`, which the caller executes and feeds back as tool_result
    * turns. */
   tools?: ModelToolDef[];
+  /** ADR-0020 long tail: constrain WHICH tools the model may/must call this
+   * turn. When absent the request is byte-identical to the pre-toolChoice
+   * contract. Callers are responsible for only naming tools present in
+   * `tools` — adapters map, they do not validate. */
+  toolChoice?: ModelToolChoice;
+  /** ADR-0020 long tail: structured-output constraint. Only set on adapters
+   * with a native mechanism (openai / xai / google / mock); the Anthropic
+   * adapter throws rather than degrade it to an unenforced prompt nudge. */
+  responseFormat?: ModelResponseFormat;
+  /** ADR-0020 long tail: Anthropic extended thinking with an explicit token
+   * budget. Only set on adapters that implement it (anthropic / mock);
+   * callers must fail a request loudly rather than pass this to an adapter
+   * that would drop it. Thinking tokens are OUTPUT tokens in the provider's
+   * own accounting — usage.outputTokens already includes them. */
+  thinking?: { budgetTokens: number };
   /** streaming: called with each text delta as it arrives. The returned
    * result is still the COMPLETE message — accounting and refusal handling
    * are identical to the non-streaming path. */
   onText?: (delta: string) => void;
+  /** streaming (thinking): called with each thinking delta, and once with the
+   * block's signature when the provider emits it. Only fires on adapters that
+   * implement `thinking`. */
+  onThinking?: (delta: { thinking?: string; signature?: string }) => void;
 }
 
 export interface ModelDispatchResult {
@@ -121,6 +173,12 @@ export interface ModelDispatchResult {
    * wants executed, in the provider-neutral shape the caller re-governs and
    * runs before feeding results back as the next turn. */
   toolCalls?: Array<{ id: string; name: string; arguments: unknown }>;
+  /** present only when the request enabled extended thinking AND the model
+   * emitted thinking content: the thinking / redacted_thinking blocks, in
+   * order, with signatures intact so a caller can replay them into the next
+   * turn's history. Usage note: the tokens these represent are already
+   * inside `usage.outputTokens` (the provider bills thinking as output). */
+  thinking?: ModelThinkingBlock[];
   /** MEASURED by the provider, never estimated here. `reasoningTokens` is
    * present only when the provider reports a distinct reasoning-token count
    * (OpenAI Responses API `output_tokens_details.reasoning_tokens`). Honesty
@@ -211,15 +269,43 @@ export class AnthropicProvider implements ModelProvider {
             })),
           }
         : {}),
+      // ADR-0020 long tail: the neutral tool_choice maps 1:1 onto Anthropic's
+      // four native shapes — auto / none / any (our "required") / tool+name.
+      ...(req.toolChoice ? { tool_choice: anthropicToolChoice(req.toolChoice) } : {}),
+      // ADR-0020 long tail: extended thinking is a REAL Anthropic parameter;
+      // the response's thinking blocks are surfaced on the result and the
+      // provider's own usage already counts them as output tokens.
+      ...(req.thinking
+        ? { thinking: { type: "enabled" as const, budget_tokens: req.thinking.budgetTokens } }
+        : {}),
     };
+    if (req.responseFormat) {
+      // No native structured-output mechanism exists on the Messages API. A
+      // system-prompt nudge cannot GUARANTEE valid JSON the way OpenAI's json
+      // mode does, and a forced-single-tool emulation reshapes the response
+      // (tool_use instead of text; breaks text-delta streaming) — neither is
+      // a faithful mapping, so this adapter fails loudly instead of
+      // pretending. Callers must route responseFormat away before dispatch.
+      throw new ModelProviderError(
+        "anthropic dispatch does not support responseFormat: the Messages API has no native " +
+          "structured-output mechanism, and RegulAIt will not degrade a guarantee to a prompt nudge",
+      );
+    }
     // stream when the caller wants deltas, or when the output budget is large
     // enough that a single non-streaming request risks a timeout
-    const useStream = req.onText !== undefined || params.max_tokens > STREAM_THRESHOLD_TOKENS;
+    const useStream =
+      req.onText !== undefined ||
+      req.onThinking !== undefined ||
+      params.max_tokens > STREAM_THRESHOLD_TOKENS;
     let msg: Anthropic.Message;
     try {
       if (useStream) {
         const stream = this.client.messages.stream(params);
         if (req.onText) stream.on("text", (delta) => req.onText!(delta));
+        if (req.onThinking) {
+          stream.on("thinking", (delta) => req.onThinking!({ thinking: delta }));
+          stream.on("signature", (signature) => req.onThinking!({ signature }));
+        }
         msg = await stream.finalMessage();
       } else {
         msg = await this.client.messages.create(params);
@@ -245,6 +331,16 @@ export class AnthropicProvider implements ModelProvider {
     const toolCalls = msg.content
       .filter((b): b is Anthropic.ToolUseBlock => b.type === "tool_use")
       .map((b) => ({ id: b.id, name: b.name, arguments: b.input }));
+    // thinking / redacted_thinking blocks surface on the result IN ORDER with
+    // signatures intact, so a caller can replay them into the next turn's
+    // history verbatim (Anthropic verifies the signature on replay).
+    const thinkingBlocks: ModelThinkingBlock[] = msg.content.flatMap((b): ModelThinkingBlock[] =>
+      b.type === "thinking"
+        ? [{ type: "thinking" as const, thinking: b.thinking, signature: b.signature }]
+        : b.type === "redacted_thinking"
+          ? [{ type: "redacted_thinking" as const, data: b.data }]
+          : [],
+    );
     return {
       // a refusal's content must never be surfaced as an answer
       outputText: refusal
@@ -256,13 +352,24 @@ export class AnthropicProvider implements ModelProvider {
       stopReason,
       refusal,
       ...(toolCalls.length > 0 ? { toolCalls } : {}),
+      ...(thinkingBlocks.length > 0 ? { thinking: thinkingBlocks } : {}),
       usage: {
+        // honesty note: output_tokens is Anthropic's own billed output total,
+        // which INCLUDES thinking tokens — carried unchanged, never re-derived
         inputTokens: msg.usage.input_tokens,
         outputTokens: msg.usage.output_tokens,
       },
       providerMessageId: msg.id ?? null,
     };
   }
+}
+
+/** neutral tool_choice -> Anthropic's native shape (1:1, no loss) */
+function anthropicToolChoice(tc: ModelToolChoice): Anthropic.ToolChoice {
+  if (tc === "auto") return { type: "auto" };
+  if (tc === "none") return { type: "none" };
+  if (tc === "required") return { type: "any" };
+  return { type: "tool", name: tc.name };
 }
 
 /** Map our neutral content (string or block array) onto Anthropic's native
@@ -295,6 +402,14 @@ function anthropicContent(
     }
     if (b.type === "tool_use") {
       return { type: "tool_use", id: b.id, name: b.name, input: b.input };
+    }
+    // Native thinking round-trip: an earlier assistant turn's thinking blocks
+    // ride back verbatim, signature included (Anthropic verifies it on replay).
+    if (b.type === "thinking") {
+      return { type: "thinking", thinking: b.thinking, signature: b.signature ?? "" };
+    }
+    if (b.type === "redacted_thinking") {
+      return { type: "redacted_thinking", data: b.data };
     }
     return {
       type: "tool_result",
@@ -390,6 +505,42 @@ function openAiMessages(
   return out;
 }
 
+/** neutral tool_choice -> the chat-completions shape (1:1, no loss) */
+function openAiToolChoice(
+  tc: ModelToolChoice,
+): NonNullable<OpenAI.Chat.Completions.ChatCompletionCreateParams["tool_choice"]> {
+  if (typeof tc === "string") return tc;
+  return { type: "function", function: { name: tc.name } };
+}
+
+/** neutral responseFormat -> the chat-completions response_format (native
+ * passthrough — this IS the dialect the neutral shape was modeled on) */
+function openAiResponseFormat(
+  rf: ModelResponseFormat,
+): NonNullable<OpenAI.Chat.Completions.ChatCompletionCreateParams["response_format"]> {
+  if (rf.type === "json_object") return { type: "json_object" };
+  return {
+    type: "json_schema",
+    json_schema: {
+      name: rf.name ?? "response",
+      schema: rf.schema,
+      ...(rf.strict !== undefined ? { strict: rf.strict } : {}),
+    },
+  };
+}
+
+/** ADR-0020 long tail: `thinking` is Anthropic-only. An adapter that cannot
+ * honour it must FAIL LOUDLY, never drop it — a silently-vanished thinking
+ * budget would change what the model does without the caller learning. */
+function rejectThinking(req: ModelDispatchRequest, label: string): void {
+  if (req.thinking) {
+    throw new ModelProviderError(
+      `${label} dispatch does not support 'thinking': extended thinking has no native mapping ` +
+        `on this provider, and RegulAIt never silently drops a field that changes what the model does`,
+    );
+  }
+}
+
 /** The chat-completions dispatch core, shared by every OpenAI-compatible
  * provider (OpenAI itself, xAI). `label` only flavors error messages. */
 async function dispatchChatCompletions(
@@ -397,6 +548,7 @@ async function dispatchChatCompletions(
   req: ModelDispatchRequest,
   label: string,
 ): Promise<ModelDispatchResult> {
+  rejectThinking(req, label);
   const messages = [
       // pillar-6 prompt caching: `req.cacheSystem` is intentionally ignored on
       // the OpenAI-compatible family — OpenAI/xAI auto-cache long prompt
@@ -422,6 +574,12 @@ async function dispatchChatCompletions(
           })),
         }
       : {};
+    // ADR-0020 long tail: native passthrough — the OpenAI dialect is the one
+    // the neutral toolChoice / responseFormat shapes were modeled on.
+    const choiceParam = req.toolChoice ? { tool_choice: openAiToolChoice(req.toolChoice) } : {};
+    const formatParam = req.responseFormat
+      ? { response_format: openAiResponseFormat(req.responseFormat) }
+      : {};
     try {
       if (req.onText !== undefined || maxTokens > STREAM_THRESHOLD_TOKENS) {
         const stream = await client.chat.completions.create({
@@ -429,6 +587,8 @@ async function dispatchChatCompletions(
           max_completion_tokens: maxTokens,
           messages,
           ...toolParam,
+          ...choiceParam,
+          ...formatParam,
           stream: true,
           stream_options: { include_usage: true },
         });
@@ -483,6 +643,8 @@ async function dispatchChatCompletions(
         max_completion_tokens: maxTokens,
         messages,
         ...toolParam,
+        ...choiceParam,
+        ...formatParam,
       });
       const choice = res.choices[0];
       const refusal =
@@ -656,6 +818,7 @@ async function dispatchResponses(
   req: ModelDispatchRequest,
   label: string,
 ): Promise<ModelDispatchResult> {
+  rejectThinking(req, label);
   const maxTokens = req.maxTokens ?? DEFAULT_MAX_TOKENS;
   const params = {
     model: req.model,
@@ -676,6 +839,34 @@ async function dispatchResponses(
             parameters: t.inputSchema,
             strict: false,
           })),
+        }
+      : {}),
+    // ADR-0020 long tail: same neutral shapes, Responses-native spellings —
+    // tool_choice flattens the function name (no nested `function` object),
+    // response_format rides as text.format.
+    ...(req.toolChoice
+      ? {
+          tool_choice:
+            typeof req.toolChoice === "string"
+              ? req.toolChoice
+              : ({ type: "function" as const, name: req.toolChoice.name } as OpenAI.Responses.ToolChoiceFunction),
+        }
+      : {}),
+    ...(req.responseFormat
+      ? {
+          text: {
+            format:
+              req.responseFormat.type === "json_object"
+                ? ({ type: "json_object" } as const)
+                : {
+                    type: "json_schema" as const,
+                    name: req.responseFormat.name ?? "response",
+                    schema: req.responseFormat.schema,
+                    ...(req.responseFormat.strict !== undefined
+                      ? { strict: req.responseFormat.strict }
+                      : {}),
+                  },
+          },
         }
       : {}),
     // data minimization (pillar 1): the Responses API persists request/
@@ -919,20 +1110,34 @@ function googleParts(
   toolNames: Map<string, string>,
 ): Record<string, unknown>[] {
   if (typeof content === "string") return [{ text: content }];
-  return content.map((b) => {
-    if (b.type === "text") return { text: b.text };
-    if (b.type === "image" || b.type === "document") return { text: attachmentPlaceholder(b) };
+  return content.flatMap((b): Record<string, unknown>[] => {
+    if (b.type === "text") return [{ text: b.text }];
+    if (b.type === "image" || b.type === "document") return [{ text: attachmentPlaceholder(b) }];
+    // prior-turn thinking blocks are SKIPPED, mirroring the vendors' own
+    // behaviour of stripping replayed thinking (never fed back as prose)
+    if (b.type === "thinking" || b.type === "redacted_thinking") return [];
     if (b.type === "tool_use") {
       // Gemini's args is a Struct — always an object, never a scalar/array
-      return { functionCall: { name: b.name, args: isRecord(b.input) ? b.input : {} } };
+      return [{ functionCall: { name: b.name, args: isRecord(b.input) ? b.input : {} } }];
     }
-    return {
-      functionResponse: {
-        name: toolNames.get(b.toolUseId) ?? b.toolUseId,
-        response: b.isError ? { error: b.content } : { output: b.content },
+    return [
+      {
+        functionResponse: {
+          name: toolNames.get(b.toolUseId) ?? b.toolUseId,
+          response: b.isError ? { error: b.content } : { output: b.content },
+        },
       },
-    };
+    ];
   });
+}
+
+/** neutral tool_choice -> Gemini's functionCallingConfig (1:1: AUTO / NONE /
+ * ANY, with a forced tool spelled as ANY restricted to one allowed name) */
+function googleFunctionCallingConfig(tc: ModelToolChoice): Record<string, unknown> {
+  if (tc === "auto") return { mode: "AUTO" };
+  if (tc === "none") return { mode: "NONE" };
+  if (tc === "required") return { mode: "ANY" };
+  return { mode: "ANY", allowedFunctionNames: [tc.name] };
 }
 
 function mapGoogleStop(finishReason: string | null | undefined): ModelDispatchResult["stopReason"] {
@@ -955,6 +1160,7 @@ export class GoogleProvider implements ModelProvider {
   }
 
   async dispatch(req: ModelDispatchRequest): Promise<ModelDispatchResult> {
+    rejectThinking(req, "google");
     const maxTokens = req.maxTokens ?? DEFAULT_MAX_TOKENS;
     const useStream = req.onText !== undefined || maxTokens > STREAM_THRESHOLD_TOKENS;
     const method = useStream ? "streamGenerateContent?alt=sse" : "generateContent";
@@ -1003,7 +1209,26 @@ export class GoogleProvider implements ModelProvider {
                 ],
               }
             : {}),
-          generationConfig: { maxOutputTokens: maxTokens },
+          // ADR-0020 long tail: tool_choice maps onto Gemini's native
+          // functionCallingConfig (AUTO / NONE / ANY [+allowedFunctionNames])
+          ...(req.toolChoice
+            ? { toolConfig: { functionCallingConfig: googleFunctionCallingConfig(req.toolChoice) } }
+            : {}),
+          generationConfig: {
+            maxOutputTokens: maxTokens,
+            // ADR-0020 long tail: structured outputs map onto Gemini's NATIVE
+            // mechanism — responseMimeType for json_object, plus responseSchema
+            // (translated to the Gemini Schema dialect exactly as tool schemas
+            // are) for json_schema.
+            ...(req.responseFormat
+              ? {
+                  responseMimeType: "application/json",
+                  ...(req.responseFormat.type === "json_schema"
+                    ? { responseSchema: googleSchema(req.responseFormat.schema) }
+                    : {}),
+                }
+              : {}),
+          },
         }),
       },
     );
@@ -1803,6 +2028,34 @@ export class MockModelProvider implements ModelProvider {
       };
     }
 
+    // ADR-0020 long tail: deterministic extended-thinking support so the
+    // whole thinking path (blocks, signature, SSE deltas, ledger) is testable
+    // with zero external keys. The thinking tokens are counted as OUTPUT
+    // tokens, exactly the provider's own accounting convention.
+    const thinkingOut: ModelThinkingBlock[] | undefined = req.thinking
+      ? [
+          {
+            type: "thinking",
+            thinking:
+              `Thinking (budget ${req.thinking.budgetTokens}): weighing how to answer ` +
+              `"${mockTopic(lastUser || historyText)}" within the given scope.`,
+            signature: "mock-signature",
+          },
+        ]
+      : undefined;
+    const thinkingTokens = thinkingOut
+      ? mockTokens(thinkingOut[0]!.type === "thinking" ? thinkingOut[0]!.thinking : "")
+      : 0;
+    const emitThinking = () => {
+      if (!thinkingOut || !req.onThinking) return;
+      const text = thinkingOut[0]!.type === "thinking" ? thinkingOut[0]!.thinking : "";
+      const chunkSize = 40;
+      for (let i = 0; i < text.length; i += chunkSize) {
+        req.onThinking({ thinking: text.slice(i, i + chunkSize) });
+      }
+      req.onThinking({ signature: "mock-signature" });
+    };
+
     // Test/demo affordance for §8.4 OUTPUT-side PII enforcement: the sentinel
     // itself carries NO PII pattern (so an INPUT PII check passes it through),
     // but the reply emits a well-known INVALID test SSN — letting a suite
@@ -1833,16 +2086,33 @@ export class MockModelProvider implements ModelProvider {
     const loopMatch = historyText.match(/<<use-tool-loop:([A-Za-z0-9_.-]+)>>/);
     const onceMatch = historyText.match(/<<use-tool:([A-Za-z0-9_.-]+)>>/);
     const toolResultSeen = mockHasToolResult(turns);
-    const wantTool = loopMatch ?? (!toolResultSeen ? onceMatch : null);
-    if (wantTool) {
+    // ADR-0020 long tail: toolChoice is honoured OBSERVABLY so e2e suites can
+    // assert a real effect — "none" suppresses even a sentinel-requested tool
+    // call; a named/{required} choice forces a tool_use with no sentinel at
+    // all (falling back to the first declared tool for "required"). A forced
+    // choice stops forcing once a tool_result is in history, so governed
+    // loops still terminate.
+    const choice = req.toolChoice;
+    const forcedName =
+      typeof choice === "object"
+        ? choice.name
+        : choice === "required"
+          ? (req.tools?.[0]?.name ?? null)
+          : null;
+    const sentinelName = (loopMatch ?? (!toolResultSeen ? onceMatch : null))?.[1] ?? null;
+    const wantToolName =
+      choice === "none" ? null : (sentinelName ?? (!toolResultSeen ? forcedName : null));
+    if (wantToolName) {
       // one deterministic tool_use, canned empty args — a governed loop turns
       // this into a re-checked tool call, then feeds the result back
+      emitThinking();
       return {
         outputText: "",
         stopReason: "tool_use",
         refusal: false,
-        toolCalls: [{ id: `mock-tool-${seq}`, name: wantTool[1]!, arguments: {} }],
-        usage: { inputTokens: mockTokens(historyText), outputTokens: 1 },
+        toolCalls: [{ id: `mock-tool-${seq}`, name: wantToolName, arguments: {} }],
+        ...(thinkingOut ? { thinking: thinkingOut } : {}),
+        usage: { inputTokens: mockTokens(historyText), outputTokens: 1 + thinkingTokens },
         providerMessageId: `mock-msg-${seq}`,
       };
     }
@@ -1853,6 +2123,7 @@ export class MockModelProvider implements ModelProvider {
       const finalText =
         `Tool call complete — the tool returned: ${quoted}. ` +
         `Final answer for "${mockTopic(lastUser || historyText)}" incorporating that result.`;
+      emitThinking();
       if (req.onText) {
         const chunkSize = 40;
         for (let i = 0; i < finalText.length; i += chunkSize) {
@@ -1863,7 +2134,11 @@ export class MockModelProvider implements ModelProvider {
         outputText: finalText,
         stopReason: "end_turn",
         refusal: false,
-        usage: { inputTokens: mockTokens(historyText), outputTokens: mockTokens(finalText) },
+        ...(thinkingOut ? { thinking: thinkingOut } : {}),
+        usage: {
+          inputTokens: mockTokens(historyText),
+          outputTokens: mockTokens(finalText) + thinkingTokens,
+        },
         providerMessageId: `mock-msg-${seq}`,
       };
     }
@@ -1893,15 +2168,31 @@ export class MockModelProvider implements ModelProvider {
     // Streaming and usage accounting stay on the shared path.
     const planning = req.system?.includes(TASK_DECOMPOSITION_SENTINEL) ?? false;
     const compacting = req.system?.includes(CONVERSATION_COMPACTION_SENTINEL) ?? false;
-    const outputText = planning
-      ? mockDecompositionReply(lastUser, req.system!, mockTier(req.model))
-      : compacting
-        ? mockCompactionSummary(lastUser)
-        : [
-            ...(req.system ? [mockSystemAck(req.system)] : []),
-            ...(continuation ? [continuation] : []),
-            mockReplyBody(mockIntent(lastUser), mockTier(req.model), mockTopic(topicSource)),
-          ].join("\n\n");
+    // ADR-0020 long tail: responseFormat gets ECHO COMPLIANCE — the reply is
+    // pure, parseable JSON (no ack/continuation prose, exactly as a real json
+    // mode suppresses free text) naming which format was honoured and, for
+    // json_schema, the schema name — so a suite can assert the constraint
+    // flowed through end to end.
+    const outputText = req.responseFormat
+      ? JSON.stringify(
+          req.responseFormat.type === "json_schema"
+            ? {
+                format: "json_schema",
+                schema: req.responseFormat.name ?? "response",
+                topic: mockTopic(topicSource),
+              }
+            : { format: "json_object", topic: mockTopic(topicSource) },
+        )
+      : planning
+        ? mockDecompositionReply(lastUser, req.system!, mockTier(req.model))
+        : compacting
+          ? mockCompactionSummary(lastUser)
+          : [
+              ...(req.system ? [mockSystemAck(req.system)] : []),
+              ...(continuation ? [continuation] : []),
+              mockReplyBody(mockIntent(lastUser), mockTier(req.model), mockTopic(topicSource)),
+            ].join("\n\n");
+    emitThinking();
     if (req.onText) {
       // deterministic chunking so the streaming path is testable end-to-end
       const chunkSize = 40;
@@ -1913,7 +2204,11 @@ export class MockModelProvider implements ModelProvider {
       outputText,
       stopReason: "end_turn",
       refusal: false,
-      usage: { inputTokens: mockTokens(historyText), outputTokens: mockTokens(outputText) },
+      ...(thinkingOut ? { thinking: thinkingOut } : {}),
+      usage: {
+        inputTokens: mockTokens(historyText),
+        outputTokens: mockTokens(outputText) + thinkingTokens,
+      },
       providerMessageId: `mock-msg-${seq}`,
     };
   }

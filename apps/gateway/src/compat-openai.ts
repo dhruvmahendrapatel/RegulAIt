@@ -14,7 +14,13 @@
 import type { FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
 import type { Db } from "@regulait/db";
-import type { ModelChatMessage, ModelContentBlock, ModelToolDef } from "@regulait/model-provider";
+import type {
+  ModelChatMessage,
+  ModelContentBlock,
+  ModelResponseFormat,
+  ModelToolChoice,
+  ModelToolDef,
+} from "@regulait/model-provider";
 import { z } from "zod";
 import type { DispatchOutcome } from "./agents-connectors.js";
 import {
@@ -23,13 +29,16 @@ import {
   disclosureHeaders,
   executeCompatCall,
   prepareCompatCall,
+  providerCapabilityError,
   rejectUnsupportedFields,
   type CompatPrepared,
 } from "./compat-core.js";
 
 /** The ONLY top-level request fields this surface honours. Anything else is a
  * 400 naming the field — RegulAIt will not silently ignore a parameter that
- * changes what the model does. */
+ * changes what the model does. `tool_choice` and `response_format` joined the
+ * honoured tier on 2026-07-31 (ADR-0020 §5 amendment): each has a REAL
+ * end-to-end mapping, never an accept-and-ignore. */
 export const OPENAI_SUPPORTED_FIELDS = [
   "model",
   "messages",
@@ -37,6 +46,8 @@ export const OPENAI_SUPPORTED_FIELDS = [
   "tools",
   "max_tokens",
   "max_completion_tokens",
+  "tool_choice",
+  "response_format",
 ] as const;
 
 const contentPart = z
@@ -86,6 +97,32 @@ const openaiRequestSchema = z.object({
         })
         .passthrough(),
     )
+    .optional(),
+  tool_choice: z
+    .union([
+      z.string(),
+      z
+        .object({
+          type: z.string(),
+          function: z.object({ name: z.string() }).optional(),
+        })
+        .passthrough(),
+    ])
+    .optional(),
+  response_format: z
+    .object({
+      type: z.string(),
+      json_schema: z
+        .object({
+          name: z.string().optional(),
+          description: z.string().optional(),
+          schema: z.record(z.unknown()).optional(),
+          strict: z.boolean().nullable().optional(),
+        })
+        .passthrough()
+        .optional(),
+    })
+    .passthrough()
     .optional(),
 });
 
@@ -255,6 +292,89 @@ function toTools(tools: z.infer<typeof openaiRequestSchema>["tools"]): ModelTool
   });
 }
 
+/**
+ * OpenAI `tool_choice` -> the neutral ModelToolChoice (ADR-0020 §5,
+ * 2026-07-31 amendment). The three string variants and the named-function
+ * object map 1:1. Anything else — `allowed_tools`, `custom`, unknown strings
+ * — is a 400 naming the exact variant, never a drop. A named tool must be in
+ * the request's own tools list; a forcing variant needs a non-empty list;
+ * "auto"/"none" without tools degrade to absent (behaviourally identical).
+ */
+export function toToolChoice(
+  tc: z.infer<typeof openaiRequestSchema>["tool_choice"],
+  tools: ModelToolDef[] | undefined,
+): ModelToolChoice | undefined {
+  if (tc === undefined) return undefined;
+  const names = new Set((tools ?? []).map((t) => t.name));
+  if (typeof tc === "string") {
+    if (tc === "auto" || tc === "none") return names.size > 0 ? tc : undefined;
+    if (tc === "required") {
+      if (names.size === 0) {
+        throw new CompatFieldError(
+          "tool_choice='required'",
+          "tool_choice 'required' forces a tool call, so the request must declare at least one tool",
+        );
+      }
+      return "required";
+    }
+    throw new CompatFieldError(
+      `tool_choice='${tc}'`,
+      `tool_choice variant '${tc}' is not supported by this endpoint. ` +
+        `Supported: auto, none, required, {type:'function',function:{name}}.`,
+    );
+  }
+  if (tc.type !== "function") {
+    throw new CompatFieldError(
+      `tool_choice.type='${tc.type}'`,
+      "only 'function' tool_choice objects are supported; other variants have no governed mapping",
+    );
+  }
+  const name = tc.function?.name;
+  if (!name) {
+    throw new CompatFieldError("tool_choice.function.name", "a function tool_choice needs function.name");
+  }
+  if (!names.has(name)) {
+    throw new CompatFieldError(
+      "tool_choice.function.name",
+      `tool_choice names '${name}', which is not in this request's tools list ` +
+        `(${[...names].join(", ") || "empty"}) — a forced tool must be one the model can actually call`,
+    );
+  }
+  return { name };
+}
+
+/** OpenAI `response_format` -> the neutral shape (ADR-0020 §5, 2026-07-31
+ * amendment). `text` is a real mapping onto "absent" (it IS the default);
+ * json_object passes through; json_schema needs its schema. Any other type is
+ * a 400 naming the variant. */
+export function toResponseFormat(
+  rf: z.infer<typeof openaiRequestSchema>["response_format"],
+): ModelResponseFormat | undefined {
+  if (!rf) return undefined;
+  if (rf.type === "text") return undefined;
+  if (rf.type === "json_object") return { type: "json_object" };
+  if (rf.type === "json_schema") {
+    const schema = rf.json_schema?.schema;
+    if (!schema) {
+      throw new CompatFieldError(
+        "response_format.json_schema.schema",
+        "response_format type 'json_schema' needs json_schema.schema (a JSON Schema object)",
+      );
+    }
+    return {
+      type: "json_schema",
+      ...(rf.json_schema?.name ? { name: rf.json_schema.name } : {}),
+      schema,
+      ...(typeof rf.json_schema?.strict === "boolean" ? { strict: rf.json_schema.strict } : {}),
+    };
+  }
+  throw new CompatFieldError(
+    `response_format.type='${rf.type}'`,
+    `response_format variant '${rf.type}' is not supported by this endpoint. ` +
+      `Supported: text, json_object, json_schema.`,
+  );
+}
+
 /** normalized stop reason -> OpenAI finish_reason */
 export const FINISH_REASON: Record<string, string> = {
   end_turn: "stop",
@@ -322,6 +442,8 @@ export function registerOpenAiCompat(app: FastifyInstance, db: Db, opts: { dataK
     let body: z.infer<typeof openaiRequestSchema>;
     let translated: OpenAiTranslation;
     let tools: ModelToolDef[] | undefined;
+    let toolChoice: ModelToolChoice | undefined;
+    let responseFormat: ModelResponseFormat | undefined;
     let ignoredFields: string[] = [];
     try {
       const raw = (req.body ?? {}) as Record<string, unknown>;
@@ -329,6 +451,8 @@ export function registerOpenAiCompat(app: FastifyInstance, db: Db, opts: { dataK
       body = openaiRequestSchema.parse(raw);
       translated = toModelMessages(body.messages);
       tools = toTools(body.tools);
+      toolChoice = toToolChoice(body.tool_choice, tools);
+      responseFormat = toResponseFormat(body.response_format);
     } catch (err) {
       if (err instanceof CompatFieldError) {
         return reply.status(400).send(openaiError(400, "unsupported_field", err.detail));
@@ -359,6 +483,19 @@ export function registerOpenAiCompat(app: FastifyInstance, db: Db, opts: { dataK
       return reply.status(prep.status).send(openaiError(prep.status, prep.error, prep.detail));
     }
     const prepared = prep.prepared;
+    // ADR-0020 long tail: response_format is expressible in this dialect, but
+    // the SERVED provider must have a native structured-output mechanism —
+    // notably the Anthropic adapter has none, so a request routed there is a
+    // 400 naming the field (the documented per-surface asymmetry), never a
+    // prompt-nudge pretence.
+    const capability = providerCapabilityError(prepared, {
+      responseFormat: responseFormat !== undefined,
+    });
+    if (capability) {
+      return reply
+        .status(capability.status)
+        .send(openaiError(capability.status, capability.error, capability.detail));
+    }
     const id = `chatcmpl-${randomUUID().replace(/-/g, "")}`;
     const created = Math.floor(Date.now() / 1000);
     const maxTokens = body.max_completion_tokens ?? body.max_tokens;
@@ -397,6 +534,8 @@ export function registerOpenAiCompat(app: FastifyInstance, db: Db, opts: { dataK
         messages: translated.messages,
         system: translated.system,
         tools,
+        toolChoice,
+        responseFormat,
         maxTokens,
         onText: (delta) => {
           open();
@@ -443,6 +582,8 @@ export function registerOpenAiCompat(app: FastifyInstance, db: Db, opts: { dataK
       messages: translated.messages,
       system: translated.system,
       tools,
+      toolChoice,
+      responseFormat,
       maxTokens,
     });
     disclosureHeaders(reply, prepared);
