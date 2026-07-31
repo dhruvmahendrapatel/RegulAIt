@@ -146,6 +146,15 @@ export const mcpTools = pgTable(
     name: text("name").notNull(),
     kind: text("kind", { enum: ["read", "write"] }).notNull(),
     description: text("description"),
+    /** O10 (migration 0045): optional PER-TOOL price override. Resolution is
+     * tool-first, server-flat-price fallback (ADR-0019 recorded the flat
+     * price as "an additive column when a customer needs it" — this is it).
+     * A column on the inventory row rather than a jsonb map on the server:
+     * the inventory row is the identity the proxy already resolves per call,
+     * so no name drift between a map key and the manifest is possible, and
+     * the manifest re-sync upsert (kind/description only) provably never
+     * clobbers an admin-set price. Null = no override = the server price. */
+    pricePerCallUsd: doublePrecision("price_per_call_usd"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex("mcp_tools_server_name_uq").on(t.serverId, t.name)],
@@ -217,6 +226,12 @@ export const auditLog = pgTable(
         // ADR-0021: an admin change to the org-wide functional defaults
         // (org_settings singleton). Plain text column — no DDL needed.
         "org_settings",
+        // A4 (ADR-0027): an admin set/clear of the deploy-mode scope on a
+        // pillar-1 restriction rule. Plain text column — no DDL needed.
+        "restriction_rule",
+        // O9 (ADR-0027): an admin narrowing/restoring a revocation's scope
+        // (full <-> read_only). Plain text column — no DDL needed.
+        "revocation",
         // ADR-0022 identity lifecycle: admin acts on users (deactivate/
         // reactivate/rename/admin-flag), roles (force-delete), teams
         // (member-remove/delete), workflow templates (retire) and approver
@@ -243,6 +258,12 @@ export const auditLog = pgTable(
     ruleId: text("rule_id").notNull(),
     ruleChain: jsonb("rule_chain").notNull(),
     reason: text("reason").notNull(),
+    // A4 (migration 0044): the deploy mode of the target a deploy-mode-scoped
+    // action acted on (workflow deploy/rollback events, infra operations on
+    // target-pinned resources). NULL = unknown/not-applicable — pre-0044 rows
+    // are honestly un-backfillable (they never recorded a mode, ADR-0019),
+    // and most rows (MCP calls, membership changes, …) have no mode at all.
+    deployMode: text("deploy_mode", { enum: ["hosted", "byoc", "air_gapped"] }),
   },
   (t) => [index("audit_log_user_at_idx").on(t.userId, t.at)],
 );
@@ -268,6 +289,9 @@ export const approvalRules = pgTable(
       .notNull()
       .default("user"),
     serverScope: text("server_scope", { enum: ["server", "all"] }).notNull().default("server"),
+    // A4 (migration 0044): optional deploy-mode scope — null (every pre-0044
+    // row, and the default) = mode-unscoped = today's behaviour.
+    deployMode: text("deploy_mode", { enum: ["hosted", "byoc", "air_gapped"] }),
     toolName: text("tool_name"),
     writeOnly: boolean("write_only").notNull().default(false),
     approverUserId: uuid("approver_user_id")
@@ -300,6 +324,8 @@ export const rateLimits = pgTable(
       .notNull()
       .default("user"),
     serverScope: text("server_scope", { enum: ["server", "all"] }).notNull().default("server"),
+    // A4 (migration 0044): optional deploy-mode scope — null = today.
+    deployMode: text("deploy_mode", { enum: ["hosted", "byoc", "air_gapped"] }),
     toolName: text("tool_name"),
     maxCalls: integer("max_calls").notNull(),
     windowSeconds: integer("window_seconds").notNull(),
@@ -372,6 +398,8 @@ export const dataScopeRules = pgTable(
       .notNull()
       .default("user"),
     serverScope: text("server_scope", { enum: ["server", "all"] }).notNull().default("server"),
+    // A4 (migration 0044): optional deploy-mode scope — null = today.
+    deployMode: text("deploy_mode", { enum: ["hosted", "byoc", "air_gapped"] }),
     toolName: text("tool_name"),
     argPath: text("arg_path").notNull(),
     allowedValues: jsonb("allowed_values").$type<string[]>().notNull(),
@@ -474,6 +502,11 @@ export const revocations = pgTable(
       .notNull()
       .references(() => mcpServers.id, { onDelete: "cascade" }),
     toolName: text("tool_name"),
+    /** O9 (migration 0045): 'full' (default = today) suppresses the matched
+     * role-derived entitlement entirely; 'read_only' suppresses only
+     * WRITE-classified tools — reads stay allowed. A full revocation still
+     * beats everything (precedence otherwise unchanged). */
+    scope: text("scope", { enum: ["full", "read_only"] }).notNull().default("full"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -683,6 +716,11 @@ export const connectorRevocations = pgTable(
       .notNull()
       .references(() => connectors.id, { onDelete: "cascade" }),
     reason: text("reason"),
+    /** O9 (migration 0045): 'full' (default = today) denies every operation;
+     * 'read_only' denies WRITES only — reads stay allowed. Agent revocations
+     * carry no scope: agents have no read/write op classification to scope by
+     * (ADR-0027). */
+    scope: text("scope", { enum: ["full", "read_only"] }).notNull().default("full"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -824,6 +862,27 @@ export const deployTargets = pgTable("deploy_targets", {
   // keys) and the region to deploy in. Null for the mock/hosted provider.
   roleArn: text("role_arn"),
   region: text("region"),
+  // Migration 0043 (the #64 flagged gap): per-provider-kind config, validated
+  // per kind at the API boundary (shared's createDeployTargetSchema). A jsonb
+  // rather than one column per field, deliberately: the table stays
+  // provider-agnostic (the standing principle) — a future provider adds keys,
+  // not DDL — while the zod per-kind validation is every bit as strict as a
+  // column CHECK would be. Null = a pre-0043 row = the legacy behaviour
+  // (roleArn doubles as the azure subscription / gcp project handle, live
+  // clients fall back to their env vars).
+  //   aws:        { cluster? }                                (roleArn/region stay columns)
+  //   azure:      { subscriptionId?, resourceGroup?, templateUri? }
+  //   gcp:        { projectId?, blueprintGcs? }
+  //   kubernetes: { namespace? }                              (kubeconfig stays the credential)
+  providerConfig: jsonb("provider_config").$type<{
+    cluster?: string;
+    subscriptionId?: string;
+    resourceGroup?: string;
+    templateUri?: string;
+    projectId?: string;
+    blueprintGcs?: string;
+    namespace?: string;
+  } | null>(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -963,6 +1022,15 @@ export const pmConnections = pgTable("pm_connections", {
    * key — stored AES-256-GCM-encrypted like the connection token. Null on
    * connections minted before this column existed (legacy-header flows only). */
   webhookSecretCiphertext: text("webhook_secret_ciphertext"),
+  /** O7 (migration 0045): what a detected drift does. 'manual' (default =
+   * today) surfaces only; 'prefer_regulait' pushes RegulAIt's expected state
+   * back to the PM tool; 'prefer_pm' adopts the PM tool's state on the link
+   * (the run state machine is never driven from outside). */
+  driftResolution: text("drift_resolution", {
+    enum: ["manual", "prefer_pm", "prefer_regulait"],
+  })
+    .notNull()
+    .default("manual"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -988,6 +1056,10 @@ export const pmLinks = pgTable(
      * applied to the state machine; divergence surfaces as drift */
     inboundState: text("inbound_state"),
     inboundAt: timestamp("inbound_at", { withTimezone: true }),
+    /** O7 (migration 0045): the PM-reported state a prefer_pm connection has
+     * ADOPTED as authoritative for this item — an inboundState equal to it no
+     * longer counts as drift. Null = nothing adopted (today). */
+    adoptedState: text("adopted_state"),
     /** set when the PM tool reports the item deleted */
     orphanedAt: timestamp("orphaned_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1239,6 +1311,15 @@ export const complianceProfiles = pgTable("compliance_profiles", {
    * framework declares no infra floor of its own. */
   backupRetentionDays: integer("backup_retention_days"),
   patchCadenceDays: integer("patch_cadence_days"),
+  /** O2 (migration 0045): project-budget CEILING this framework forces onto
+   * any project carrying its tag — composed as MIN (strictest ceiling wins),
+   * and it caps an unbudgeted project too. Null = no ceiling. */
+  maxProjectBudgetUsd: doublePrecision("max_project_budget_usd"),
+  /** O2: budget-enforcement FLOOR — 'block' forces blocking even when the org
+   * says warn_only (strictest wins, matching the cascade's composition
+   * rules); 'warn_only' can never relax a stricter org setting (surfaced as
+   * an inert declaration). Null = no opinion. */
+  budgetEnforcement: text("budget_enforcement", { enum: ["block", "warn_only"] }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -1468,10 +1549,26 @@ export const certInventory = pgTable(
     serial: text("serial"),
     notAfter: timestamp("not_after", { withTimezone: true }).notNull(),
     lastRotatedAt: timestamp("last_rotated_at", { withTimezone: true }),
-    // active | rotation_proposed | rotated | expired — text (no DB CHECK), like
-    // infra_findings, so drizzle owns the enum.
+    // O6 (ADR-0027) cert-rotation LIFECYCLE — text (no DB CHECK), like
+    // infra_findings, so drizzle owns the enum:
+    //   active → rotation_proposed → (approve) rotating* → rotated
+    //                              ↘ (deny)             → rotation_denied
+    //                              ↘ (provider failure) → rotation_failed
+    // (*rotating is the in-txn provider call, not a persisted checkpoint —
+    // there is no async boundary to observe it across.) rotation_denied and
+    // rotation_failed are RE-PROPOSABLE (the rotate endpoint accepts them);
+    // the denial/failure marker + reason live on the cert_rotations ledger
+    // row of that attempt. Pre-O6 rows only ever held
+    // active/rotation_proposed/rotated/expired — all still valid states.
     status: text("status", {
-      enum: ["active", "rotation_proposed", "rotated", "expired"],
+      enum: [
+        "active",
+        "rotation_proposed",
+        "rotation_denied",
+        "rotation_failed",
+        "rotated",
+        "expired",
+      ],
     })
       .notNull()
       .default("active"),
@@ -1480,7 +1577,11 @@ export const certInventory = pgTable(
   (t) => [index("cert_inventory_resource_idx").on(t.resourceId)],
 );
 
-// A governed cert rotation OUTCOME. Written inside the /decide txn on approve.
+// O6 (ADR-0027): one row PER ROTATION ATTEMPT, created at PROPOSE time
+// (status 'proposed') and advanced by the /decide hook to rotated / denied /
+// failed — the durable record of every attempt, including the ones that were
+// refused or blew up. `reason` carries the approver's denial reason or the
+// provider's failure message. (Pre-O6, a row only ever appeared on approve.)
 export const certRotations = pgTable("cert_rotations", {
   id: uuid("id").primaryKey().defaultRandom(),
   certId: uuid("cert_id")
@@ -1491,9 +1592,11 @@ export const certRotations = pgTable("cert_rotations", {
   oldSerial: text("old_serial"),
   newSerial: text("new_serial"),
   newNotAfter: timestamp("new_not_after", { withTimezone: true }),
-  status: text("status", { enum: ["proposed", "rotated", "failed"] })
+  status: text("status", { enum: ["proposed", "rotated", "denied", "failed"] })
     .notNull()
     .default("proposed"),
+  /** O6: the approver's denial reason, or the provider's failure message */
+  reason: text("reason"),
   rotatedAt: timestamp("rotated_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
@@ -1545,6 +1648,10 @@ export const backupRuns = pgTable(
     finishedAt: timestamp("finished_at", { withTimezone: true }),
     sizeBytes: bigint("size_bytes", { mode: "number" }),
     retentionUntil: timestamp("retention_until", { withTimezone: true }),
+    /** O5 (migration 0045): who wrote this row — 'scheduler:<provider-kind>'
+     * for scheduler-verified rows (the mock provider's rows are honestly
+     * labelled 'scheduler:mock'); null = pre-O5 / seed / manual. */
+    source: text("source"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("backup_runs_resource_idx").on(t.resourceId)],
@@ -1822,6 +1929,26 @@ export const orgSettings = pgTable(
      * effective retention = max(profile floor, this) — an org default can never
      * SHORTEN what a compliance framework demands. */
     defaultAuditRetentionDays: integer("default_audit_retention_days"),
+    /** A4 (migration 0044): MAX-ONLY per-deploy-mode retention overrides —
+     * a map mode -> days ({} = none = today). Composition per audit row:
+     * effective retention = max(global floor, override[row.deployMode]). An
+     * override can only EXTEND retention for its mode's rows; one below the
+     * global floor is inert (MAX keeps the floor) — retention can never
+     * shorten below any applicable floor, by construction. Rows with a null
+     * deployMode (unknown/not-deploy-scoped, incl. every pre-0044 row) always
+     * use the global floor. */
+    modeAuditRetention: jsonb("mode_audit_retention")
+      .$type<Partial<Record<"hosted" | "byoc" | "air_gapped", number>>>()
+      .notNull()
+      .default({}),
+
+    // --- O5 (migration 0045): scheduled backup verification --------------
+    /** OFF (default) = today's behaviour: success ledger rows only ever come
+     * from the seed or a manual write. ON = the boot scheduler verifies
+     * recent recovery points per backup_target on the interval below, via the
+     * existing provider scan path, and writes source-labelled ledger rows. */
+    backupVerifyEnabled: boolean("backup_verify_enabled").notNull().default(false),
+    backupVerifyIntervalHours: integer("backup_verify_interval_hours").notNull().default(24),
 
     // --- orchestration worker caps -----------------------------------------
     defaultWorkerMaxTurns: integer("default_worker_max_turns").notNull().default(6),

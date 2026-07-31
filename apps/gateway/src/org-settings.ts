@@ -18,19 +18,36 @@
 
 import type { FastifyInstance } from "fastify";
 import {
+  and,
+  approvalRules,
   auditLog,
   complianceProfiles,
+  connectorRevocations,
+  dataScopeRules,
   eq,
+  isNull,
   lt,
+  ne,
+  or,
   count,
   oidcProviders,
   orgSettings,
   ORG_SETTINGS_ID,
+  rateLimits,
+  revocations,
   users,
   type Db,
   type OrgSettingsRow,
+  type SQL,
 } from "@regulait/db";
-import { updateOrgSettingsSchema } from "@regulait/shared";
+import {
+  revocationKindParamSchema,
+  ruleKindParamSchema,
+  setRevocationScopeSchema,
+  setRuleDeployModeSchema,
+  updateOrgSettingsSchema,
+} from "@regulait/shared";
+import { z } from "zod";
 
 export type { OrgSettingsRow };
 
@@ -100,6 +117,52 @@ export interface RetentionFloor {
   floorSource: string[];
   cutoff: Date | null;
   prunable: number;
+  /** A4: the EFFECTIVE per-mode overrides — only those exceeding the global
+   * floor (an override at/below the floor is inert under MAX composition) */
+  modeOverrides: Array<{ mode: string; retainedDays: number; cutoff: Date }>;
+}
+
+/** A4 (migration 0044): the per-mode overrides that actually extend past the
+ * global floor. MAX-only by construction: an override <= the floor changes
+ * nothing (the floor already retains longer), so it is dropped here — and an
+ * override can never shorten anything because it only ever EXCLUDES rows from
+ * a prune the global floor would otherwise perform. */
+export function effectiveModeOverrides(
+  modeAuditRetention: Partial<Record<string, number>> | null | undefined,
+  globalRetainedDays: number,
+  now: number = Date.now(),
+): Array<{ mode: string; retainedDays: number; cutoff: Date }> {
+  return Object.entries(modeAuditRetention ?? {})
+    .filter((e): e is [string, number] => typeof e[1] === "number" && e[1] > globalRetainedDays)
+    .map(([mode, days]) => ({
+      mode,
+      retainedDays: days,
+      cutoff: new Date(now - days * 24 * 3600 * 1000),
+    }));
+}
+
+/** the prune predicate under the composed floor: older than the global cutoff,
+ * EXCEPT rows whose deploy mode has a longer override and are still inside
+ * that override's window. Null-mode rows (unknown / pre-0044 / not
+ * deploy-scoped) always follow the global floor alone. */
+function prunableWhere(
+  cutoff: Date,
+  overrides: Array<{ mode: string; cutoff: Date }>,
+): SQL {
+  const conds: SQL[] = [lt(auditLog.at, cutoff)];
+  for (const o of overrides) {
+    // keep (i.e. exclude from prune) rows of this mode newer than the
+    // override's cutoff. NULL-mode rows must NOT be protected — `ne` alone is
+    // NULL-poisoned in SQL, hence the explicit isNull arm.
+    conds.push(
+      or(
+        isNull(auditLog.deployMode),
+        ne(auditLog.deployMode, o.mode as "hosted" | "byoc" | "air_gapped"),
+        lt(auditLog.at, o.cutoff),
+      )!,
+    );
+  }
+  return and(...conds)!;
 }
 
 /**
@@ -127,15 +190,24 @@ export async function retentionFloor(db: Db): Promise<RetentionFloor> {
       ? Math.max(profileFloor, orgDays)
       : (profileFloor ?? orgDays);
   if (retainedDays == null) {
-    return { retainedDays: null, floorSource: [], cutoff: null, prunable: 0 };
+    // no global floor = keep everything = nothing prunable. A4: per-mode
+    // overrides are irrelevant here — they can only EXTEND retention, and
+    // "keep all" is already the maximum (fail-safe unchanged).
+    return { retainedDays: null, floorSource: [], cutoff: null, prunable: 0, modeOverrides: [] };
   }
   const floorSource = withDays
     .filter((p) => p.auditRetentionDays === retainedDays)
     .map((p) => p.tag);
   if (orgDays != null && orgDays === retainedDays) floorSource.push("org_default");
   const cutoff = new Date(Date.now() - retainedDays * 24 * 3600 * 1000);
-  const [row] = await db.select({ n: count() }).from(auditLog).where(lt(auditLog.at, cutoff));
-  return { retainedDays, floorSource, cutoff, prunable: row?.n ?? 0 };
+  // A4: MAX-only per-mode overrides — rows of an overridden mode stay retained
+  // for the longer window; everything else prunes under the global floor.
+  const modeOverrides = effectiveModeOverrides(org.modeAuditRetention, retainedDays);
+  const [row] = await db
+    .select({ n: count() })
+    .from(auditLog)
+    .where(prunableWhere(cutoff, modeOverrides));
+  return { retainedDays, floorSource, cutoff, prunable: row?.n ?? 0, modeOverrides };
 }
 
 /** One prune pass under the composed floor. Deletes nothing when no floor is
@@ -150,7 +222,12 @@ export async function runAuditPruneOnce(
   if (f.retainedDays == null || f.cutoff == null) {
     return { deleted: 0, retainedDays: null, floorSource: [] };
   }
-  const deleted = await db.delete(auditLog).where(lt(auditLog.at, f.cutoff)).returning({ id: auditLog.id });
+  // A4: prune under the COMPOSED floor — the global cutoff, minus rows a
+  // longer per-mode override still retains (MAX-only: never shortens).
+  const deleted = await db
+    .delete(auditLog)
+    .where(prunableWhere(f.cutoff, f.modeOverrides))
+    .returning({ id: auditLog.id });
   await db.insert(auditLog).values({
     userId: actorUserId ?? "00000000-0000-0000-0000-000000000000",
     objectType: "project",
@@ -161,6 +238,14 @@ export async function runAuditPruneOnce(
       retainedDays: f.retainedDays,
       floorSource: f.floorSource,
       cutoff: f.cutoff,
+      ...(f.modeOverrides.length
+        ? {
+            modeOverrides: f.modeOverrides.map((o) => ({
+              mode: o.mode,
+              retainedDays: o.retainedDays,
+            })),
+          }
+        : {}),
       ...(auto ? { auto: true } : {}),
     },
     effect: "allow",
@@ -297,5 +382,90 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db) {
           : "org settings written with no effective change",
     });
     return reply.send({ settings: after });
+  });
+
+  // -------------------------------------------------------------------------
+  // A4 (ADR-0027) — deploy-mode scope on pillar-1 restriction rules.
+  // Admin-only like everything in this module. Registered here (an existing
+  // admin governance module) rather than beside the rule POSTs: setting the
+  // mode scope is a policy-posture edit, and this keeps the rule-creation
+  // endpoints byte-identical (default = mode-unscoped = today).
+  // -------------------------------------------------------------------------
+  const RULE_TABLES = {
+    approvals: approvalRules,
+    "rate-limits": rateLimits,
+    "data-scopes": dataScopeRules,
+  } as const;
+
+  app.patch("/v1/rules/:kind/:ruleId/deploy-mode", async (req, reply) => {
+    const { kind, ruleId } = z
+      .object({ kind: ruleKindParamSchema, ruleId: z.string().uuid() })
+      .parse(req.params);
+    const body = setRuleDeployModeSchema.parse(req.body);
+    const table = RULE_TABLES[kind];
+    const [before] = await db.select().from(table).where(eq(table.id, ruleId));
+    if (!before) return reply.status(404).send({ error: "unknown_rule" });
+    const [row] = await db
+      .update(table)
+      .set({ deployMode: body.deployMode })
+      .where(eq(table.id, ruleId))
+      .returning();
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "restriction_rule",
+      objectId: ruleId,
+      detail: {
+        phase: "rule-deploy-mode",
+        ruleKind: kind,
+        before: before.deployMode ?? null,
+        after: body.deployMode,
+      },
+      effect: "allow",
+      ruleId: "rule-deploy-mode-set",
+      ruleChain: [],
+      reason:
+        body.deployMode == null
+          ? `${kind} rule '${ruleId}' deploy-mode scope cleared (mode-unscoped — applies to every call)`
+          : `${kind} rule '${ruleId}' scoped to deploy mode '${body.deployMode}' — it now binds only to calls whose attributed work lands on a ${body.deployMode} deploy target`,
+    });
+    return reply.send(row);
+  });
+
+  // -------------------------------------------------------------------------
+  // O9 (ADR-0027) — partial revocations. A revocation is CREATED total
+  // ('full', the ADR-0019 semantics); this admin-only edit narrows it to
+  // read_only (write-classified tools/ops denied, reads allowed) or restores
+  // full. MCP + connector revocations only — agent revocations have no
+  // read/write op classification to scope by.
+  // -------------------------------------------------------------------------
+  const REVOCATION_TABLES = { mcp: revocations, connectors: connectorRevocations } as const;
+
+  app.patch("/v1/revocations/:kind/:revocationId/scope", async (req, reply) => {
+    const { kind, revocationId } = z
+      .object({ kind: revocationKindParamSchema, revocationId: z.string().uuid() })
+      .parse(req.params);
+    const body = setRevocationScopeSchema.parse(req.body);
+    const table = REVOCATION_TABLES[kind];
+    const [before] = await db.select().from(table).where(eq(table.id, revocationId));
+    if (!before) return reply.status(404).send({ error: "unknown_revocation" });
+    const [row] = await db
+      .update(table)
+      .set({ scope: body.scope })
+      .where(eq(table.id, revocationId))
+      .returning();
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "revocation",
+      objectId: revocationId,
+      detail: { phase: "revocation-scope", revocationKind: kind, before: before.scope, after: body.scope },
+      effect: "allow",
+      ruleId: "revocation-scope-set",
+      ruleChain: [],
+      reason:
+        body.scope === "read_only"
+          ? `${kind} revocation '${revocationId}' narrowed to read_only — write-classified ${kind === "mcp" ? "tools" : "operations"} stay denied, reads are allowed again`
+          : `${kind} revocation '${revocationId}' restored to full — every ${kind === "mcp" ? "tool" : "operation"} denied (the ADR-0019 total semantics)`,
+    });
+    return reply.send(row);
   });
 }

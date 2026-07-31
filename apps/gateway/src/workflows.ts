@@ -49,6 +49,7 @@ import {
   advanceStageSchema,
   createAssignmentRuleSchema,
   createDeployTargetSchema,
+  deployTargetProviderConfig,
   createGitConnectionSchema,
   createWorkflowTemplateSchema,
   deployOverrideSchema,
@@ -97,6 +98,11 @@ async function applyEvent(
   event: WorkflowEvent,
   actorUserId: string | null,
   precondition?: (tx: Parameters<Parameters<Db["transaction"]>[0]>[0]) => Promise<boolean>,
+  /** A4 (migration 0044): the mode of the deploy target a deploy-scoped event
+   * acted on — stamped onto the audit row so per-mode audit retention and the
+   * mode dimension are real. Only the deploy/rollback executors pass it; every
+   * other event keeps null (= not a deploy-scoped action). */
+  deployMode?: "hosted" | "byoc" | "air_gapped" | null,
 ): Promise<{ state: InstanceState; effects: Effect[]; skipped?: boolean }> {
   // One transaction with the instance row locked: concurrent decisions,
   // re-opens, and aborts serialize instead of racing read-modify-write. When
@@ -132,6 +138,9 @@ async function applyEvent(
       ruleId: `workflow:${event.kind}`,
       ruleChain: [],
       reason: `workflow instance event '${event.kind}' (status → ${state.status})`,
+      // A4: deploy-scoped events carry their target's mode; everything else
+      // stays null (unknown/not-applicable — honestly un-backfillable).
+      deployMode: deployMode ?? null,
     });
 
     // A re-open stales EVERY outstanding gate downstream, and a terminal
@@ -189,10 +198,20 @@ export async function applyWorkflowApprovalDecision(
   // ADR-0021 approval quorum: 'all' (default, today) = every named approver
   // must approve before the stage advances; 'any' = the FIRST approval
   // advances it and the remaining pending rows are superseded (a dead gate is
-  // never left decidable). Org-level only for now: the workflow kernel's
-  // stage schema strips unknown keys, so a per-template stage-level override
-  // would need a kernel change — recorded as deferred in ADR-0021.
-  const quorum = (await loadOrgSettings(dbx as Db)).approvalQuorum;
+  // never left decidable).
+  // ADR-0027 (the deferral recorded in ADR-0021, now closed): a
+  // human_approval STAGE may carry its own quorum override, which beats the
+  // org default in BOTH directions — a template can demand 'all' in an 'any'
+  // org and vice versa. Absent (every pre-ADR-0027 template) = the org
+  // default = today's behaviour.
+  const [instRow] = await dbx
+    .select({ definition: workflowInstances.definition })
+    .from(workflowInstances)
+    .where(eq(workflowInstances.id, instanceId));
+  const stageQuorum = (
+    (instRow?.definition as { stages?: Array<{ id: string; quorum?: "all" | "any" }> })?.stages ?? []
+  ).find((s) => s.id === stageId)?.quorum;
+  const quorum = stageQuorum ?? (await loadOrgSettings(dbx as Db)).approvalQuorum;
 
   // The quorum test is evaluated INSIDE applyEvent's instance lock, so a
   // re-open that inserts fresh rows (or another approver) serializes with the
@@ -489,6 +508,9 @@ async function runGitExecutions(
           instanceId,
           { kind: "deploy_blocked", stageId: stage.id, reason: handoff },
           actorUserId,
+          undefined,
+          // A4: the target may be missing here (that IS one of the handoffs)
+          target?.mode ?? null,
         );
         lastEffects = r.effects;
         pending = [];
@@ -506,9 +528,12 @@ async function runGitExecutions(
             baseUrl: target!.baseUrl,
             roleArn: target!.roleArn,
             region: target!.region,
+            // migration 0043: the row's validated per-kind config — row-first
+            // over the legacy roleArn reuse and the gateway-wide env vars.
+            providerConfig: target!.providerConfig,
             // REGULAIT_DEPLOY_LIVE wiring: flag off = {} (dry-run, byte-
             // identical); flag on = the real lazily-loading per-cloud client.
-            ...liveDeployClients(target!.provider),
+            ...liveDeployClients(target!.provider, process.env, target!.providerConfig),
           });
           // ASYNC-DEPLOY: awaited like every other async stage executor (git
           // ops, nested runs). The stage claim was taken in its own committed
@@ -544,6 +569,8 @@ async function runGitExecutions(
           instanceId,
           { kind: "deploy_blocked", stageId: stage.id, reason: deployErr },
           actorUserId,
+          undefined,
+          target!.mode, // A4: the deploy-scoped audit row carries the target's mode
         );
         lastEffects = r.effects;
         pending = [];
@@ -568,6 +595,8 @@ async function runGitExecutions(
             instanceId,
             { kind: "deploy_blocked", stageId: stage.id, reason },
             actorUserId,
+            undefined,
+            target!.mode, // A4
           );
           lastEffects = r.effects;
           pending = [];
@@ -579,6 +608,8 @@ async function runGitExecutions(
         instanceId,
         { kind: "execution_succeeded", stageId: stage.id },
         actorUserId,
+        undefined,
+        target!.mode, // A4: the successful deploy's audit row carries the mode
       );
       lastEffects = r.effects;
       pending = r.effects.filter((e) => e.kind === "execute_stage");
@@ -610,8 +641,10 @@ async function runGitExecutions(
             baseUrl: target.baseUrl,
             roleArn: target.roleArn,
             region: target.region,
+            // migration 0043: row-first per-kind config, as in the deploy executor
+            providerConfig: target.providerConfig,
             // same REGULAIT_DEPLOY_LIVE wiring as the deploy executor
-            ...liveDeployClients(target.provider),
+            ...liveDeployClients(target.provider, process.env, target.providerConfig),
           });
           // ASYNC-DEPLOY: awaited outside any transaction (same claim/release
           // semantics as the deploy executor); a rejection lands in this catch
@@ -634,7 +667,14 @@ async function runGitExecutions(
       // a rollback that itself FAILS is a serious operator situation — it stays
       // awaiting_execution (retryable via /advance), never silently terminal.
       if (rbErr !== null) break;
-      const r = await applyEvent(db, instanceId, { kind: "rolled_back", stageId: stage.id }, actorUserId);
+      const r = await applyEvent(
+        db,
+        instanceId,
+        { kind: "rolled_back", stageId: stage.id },
+        actorUserId,
+        undefined,
+        target?.mode ?? null, // A4
+      );
       lastEffects = r.effects;
       pending = r.effects.filter((e) => e.kind === "execute_stage");
       continue;
@@ -795,6 +835,10 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     mode: deployTargets.mode,
     roleArn: deployTargets.roleArn,
     region: deployTargets.region,
+    // migration 0043: identifiers/locations only (cluster, subscription,
+    // resource group, template/blueprint URIs, namespace) — never a secret, so
+    // safe to return like roleArn
+    providerConfig: deployTargets.providerConfig,
     createdAt: deployTargets.createdAt,
   };
   app.post("/v1/deploy/targets", async (req, reply) => {
@@ -812,6 +856,8 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
         mode: body.mode ?? "hosted",
         roleArn: body.roleArn ?? null,
         region: body.region ?? null,
+        // migration 0043: the validated per-kind config (null = none given)
+        providerConfig: deployTargetProviderConfig(body),
         credentialCiphertext:
           body.credential && opts.dataKey ? encryptTokenOnce(opts.dataKey, body.credential) : null,
       })

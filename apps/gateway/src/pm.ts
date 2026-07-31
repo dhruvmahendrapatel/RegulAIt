@@ -141,6 +141,15 @@ export async function mirrorApprovalDecision(
   deciderUserId: string,
 ): Promise<{ ok: boolean; action?: string; error?: string } | null> {
   if (!dataKey || !approvalRow.stageId) return null;
+  // O8 (ADR-0027): a RUN BUDGET-CAP escalation decision mirrors too — onto
+  // the RUN-LEVEL PARENT work item (which exists for exactly this), always
+  // as a COMMENT: a budget sanction is not a stage outcome, so it must never
+  // enter a customer's "Approved" state. Both directions (approved AND
+  // denied) mirror — decide-hook parity with sign-offs.
+  const isBudgetEscalation =
+    approvalRow.objectType === "run" &&
+    (approvalRow.stageId.startsWith("__budget__") ||
+      approvalRow.stageId.startsWith("__nodebudget__"));
   let linkWhere;
   if (approvalRow.objectType === "workflow" && approvalRow.instanceId) {
     linkWhere = and(
@@ -149,11 +158,13 @@ export async function mirrorApprovalDecision(
       isNull(pmLinks.nodeId),
       isNull(pmLinks.orphanedAt),
     );
-  } else if (
-    approvalRow.objectType === "run" &&
-    approvalRow.runId &&
-    !approvalRow.stageId.startsWith("__budget__")
-  ) {
+  } else if (isBudgetEscalation && approvalRow.runId) {
+    linkWhere = and(
+      eq(pmLinks.objectType, "run"),
+      eq(pmLinks.objectId, approvalRow.runId),
+      isNull(pmLinks.orphanedAt),
+    );
+  } else if (approvalRow.objectType === "run" && approvalRow.runId) {
     linkWhere = and(
       eq(pmLinks.objectType, "run_node"),
       eq(pmLinks.objectId, approvalRow.runId),
@@ -170,16 +181,21 @@ export async function mirrorApprovalDecision(
   const mapping = mappingFor(conn.provider, conn.mapping ?? undefined);
   // Sign-off decisions only transition on approval; a denial is always a
   // comment — a customer's "Approved" state must never be entered on a deny.
+  // O8: a budget escalation is ALWAYS a comment (never a transition) — a
+  // spend sanction is a first-class linked record, not a stage state.
   const action =
-    approvalRow.status === "approved"
+    approvalRow.status === "approved" && !isBudgetEscalation
       ? resolveApprovalAction(mapping, approvalRow.stageId)
       : ({ kind: "comment" } as const);
   try {
     const provider = providerFor(conn, dataKey);
     const [decider] = await db.select({ email: users.email }).from(users).where(eq(users.id, deciderUserId));
-    const note =
-      `[RegulAIt] sign-off '${approvalRow.stageId}' ${approvalRow.status} by ${decider?.email ?? deciderUserId}` +
-      (approvalRow.decisionReason ? `: ${approvalRow.decisionReason}` : "");
+    const nodeRef = isBudgetEscalation ? approvalRow.stageId.split(":")[1] : null;
+    const note = isBudgetEscalation
+      ? `[RegulAIt] budget-cap escalation${nodeRef ? ` (node '${nodeRef}')` : ""} ${approvalRow.status === "approved" ? "SANCTIONED — another attempt may run" : "DENIED — the run stays capped"} by ${decider?.email ?? deciderUserId}` +
+        (approvalRow.decisionReason ? `: ${approvalRow.decisionReason}` : "")
+      : `[RegulAIt] sign-off '${approvalRow.stageId}' ${approvalRow.status} by ${decider?.email ?? deciderUserId}` +
+        (approvalRow.decisionReason ? `: ${approvalRow.decisionReason}` : "");
     if (action.kind === "transition") {
       await provider.transitionState(conn.project, link.externalId, action.state);
     }
@@ -197,9 +213,11 @@ export async function mirrorApprovalDecision(
         ...(action.kind === "transition" ? { state: action.state } : {}),
       },
       effect: "allow",
-      ruleId: "pm-approval-mirrored",
+      ruleId: isBudgetEscalation ? "pm-budget-decision-mirrored" : "pm-approval-mirrored",
       ruleChain: [],
-      reason: `sign-off '${approvalRow.stageId}' (${approvalRow.status}) mirrored as ${action.kind}`,
+      reason: isBudgetEscalation
+        ? `budget-cap escalation decision (${approvalRow.status}) mirrored as a comment on the run's parent work item`
+        : `sign-off '${approvalRow.stageId}' (${approvalRow.status}) mirrored as ${action.kind}`,
     });
     return { ok: true, action: action.kind };
   } catch (err) {
@@ -272,6 +290,8 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
         apiVersion: body.apiVersion ?? null,
         webhookSecretHash: sha256(webhookSecret),
         webhookSecretCiphertext: encryptSecret(opts.dataKey, webhookSecret),
+        // O7 (ADR-0027): drift policy — manual (today) unless the admin chose
+        driftResolution: body.driftResolution ?? "manual",
       })
       .returning(CONNECTION_COLUMNS);
     return reply.status(201).send({ ...row, webhookSecret });
@@ -648,24 +668,78 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
           const nodeStatus = (run.state as RunState).nodeStatuses[link.nodeId];
           const mapping = mappingFor(conn.provider, conn.mapping ?? undefined);
           const expected = nodeStatus ? resolveStatus(mapping, nodeStatus) : null;
-          if (expected !== null && body.state !== expected) {
+          // O7: a state this connection already ADOPTED (prefer_pm) is no
+          // longer a divergence — re-reports of it are quiet.
+          if (expected !== null && body.state !== expected && body.state !== link.adoptedState) {
             drift = true;
-            await db.insert(auditLog).values({
-              userId: run.initiatingUserId,
-              objectType: "pm_work_item",
-              objectId: link.objectId,
-              detail: {
-                nodeId: link.nodeId,
-                externalId: link.externalId,
-                reportedState: body.state,
-                expectedState: expected,
-                provider: conn.provider,
-              },
-              effect: "allow",
-              ruleId: "pm-drift-detected",
-              ruleChain: [],
-              reason: `PM tool reports '${body.state}' for node '${link.nodeId}' but RegulAIt's status maps to '${expected}' — drift surfaced, state machine untouched`,
-            });
+            const auditDrift = async (extra: Record<string, unknown>, reason: string) =>
+              db.insert(auditLog).values({
+                userId: run.initiatingUserId,
+                objectType: "pm_work_item",
+                objectId: link.objectId,
+                detail: {
+                  nodeId: link.nodeId,
+                  externalId: link.externalId,
+                  reportedState: body.state,
+                  expectedState: expected,
+                  provider: conn.provider,
+                  ...extra,
+                },
+                effect: "allow",
+                ruleId: extra.resolution ? "pm-drift-auto-resolved" : "pm-drift-detected",
+                ruleChain: [],
+                reason,
+              });
+            // O7 (ADR-0027): per-connection drift policy. 'manual' (default =
+            // today) surfaces only. The two auto modes resolve in the DECLARED
+            // direction, audited with before/after; anything that cannot be
+            // safely auto-resolved falls back to the surfaced manual path.
+            if (conn.driftResolution === "prefer_regulait" && opts.dataKey) {
+              try {
+                // push RegulAIt's expected state back to the PM tool —
+                // status ownership is RegulAIt's, so this direction is safe
+                await providerFor(conn, opts.dataKey).transitionState(
+                  conn.project,
+                  link.externalId,
+                  expected,
+                );
+                await db
+                  .update(pmLinks)
+                  .set({ lastSyncedAt: new Date() })
+                  .where(eq(pmLinks.id, link.id));
+                drift = false;
+                await auditDrift(
+                  { resolution: "prefer_regulait", before: body.state, after: expected },
+                  `PM tool reported '${body.state}' for node '${link.nodeId}' but RegulAIt's status maps to '${expected}' — auto-resolved prefer_regulait: work item transitioned back to '${expected}'`,
+                );
+              } catch (err) {
+                // the push failed — the drift stays SURFACED, never hidden
+                await auditDrift(
+                  { autoResolveFailed: err instanceof Error ? err.message : String(err) },
+                  `PM tool reports '${body.state}' for node '${link.nodeId}' but RegulAIt's status maps to '${expected}' — prefer_regulait push FAILED (${err instanceof Error ? err.message : String(err)}); drift stays surfaced, state machine untouched`,
+                );
+              }
+            } else if (conn.driftResolution === "prefer_pm") {
+              // adopt the PM tool's state as authoritative FOR THE LINK. The
+              // run state machine is never driven from outside (that would
+              // not be safe — e.g. a PM 'Done' cannot complete a running
+              // node), so adoption records the declared source of truth and
+              // stops flagging this state as drift.
+              await db
+                .update(pmLinks)
+                .set({ adoptedState: body.state })
+                .where(eq(pmLinks.id, link.id));
+              drift = false;
+              await auditDrift(
+                { resolution: "prefer_pm", before: expected, after: body.state },
+                `PM tool reports '${body.state}' for node '${link.nodeId}' (RegulAIt maps to '${expected}') — auto-resolved prefer_pm: the PM state is adopted as authoritative for this item; the run state machine stays untouched`,
+              );
+            } else {
+              await auditDrift(
+                {},
+                `PM tool reports '${body.state}' for node '${link.nodeId}' but RegulAIt's status maps to '${expected}' — drift surfaced, state machine untouched`,
+              );
+            }
           }
         }
       }
@@ -1048,7 +1122,12 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
         const nodeStatus = runState.nodeStatuses[link.nodeId];
         const mapping = mappingFor(conn.provider, conn.mapping ?? undefined);
         const expected = nodeStatus ? resolveStatus(mapping, nodeStatus) : null;
-        drift = expected !== null && link.inboundState !== expected;
+        // O7: a prefer_pm-ADOPTED state is the declared truth for this item —
+        // it no longer counts as drift.
+        drift =
+          expected !== null &&
+          link.inboundState !== expected &&
+          link.inboundState !== link.adoptedState;
       }
       return { ...link, connectionName: conn?.name ?? null, drift };
     });

@@ -49,6 +49,7 @@ import {
   scanInfraSchema,
 } from "@regulait/shared";
 import {
+  evaluateBackupSchedule,
   infraLiveEnabled,
   resolveInfraProvider,
   severityRank,
@@ -62,6 +63,7 @@ import { buildAwsInfraLiveClient } from "./infra-aws-client.js";
 import { buildAzureInfraLiveClient } from "./infra-azure-client.js";
 import { buildGcpInfraLiveClient } from "./infra-gcp-client.js";
 import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects.js";
+import { loadOrgSettings } from "./org-settings.js";
 
 type InfraResourceRow = typeof infraResources.$inferSelect;
 type InfraPolicyRow = typeof infraPolicies.$inferSelect;
@@ -337,7 +339,7 @@ async function resolveActor(db: Db, userId: string | null): Promise<string> {
  * 'accepted_risk' (audit deny). Both outcomes audited — never a silent path. */
 export async function applyInfraApprovalDecision(
   tx: Db,
-  approvalRow: { id?: string; stageId: string | null },
+  approvalRow: { id?: string; stageId: string | null; decisionReason?: string | null },
   decision: "approved" | "denied",
   deciderUserId: string,
 ): Promise<void> {
@@ -357,6 +359,8 @@ export async function applyInfraApprovalDecision(
     .from(infraResources)
     .where(eq(infraResources.id, finding.resourceId));
   const signature = String(finding.detail?.signature ?? "");
+  // A4: stamp the target-pinned resource's mode onto the decision audit rows
+  const deployMode = await resourceDeployMode(tx, resource?.deployTargetId ?? null);
   if (decision === "approved") {
     if (resource) {
       const provider = resolveInfraProvider(providerConfig(resource));
@@ -378,6 +382,7 @@ export async function applyInfraApprovalDecision(
       ruleId: "infra-remediated",
       ruleChain: [],
       reason: `governed remediation approved by the named approver; ${finding.kind}/${finding.severity} on ${resource?.name ?? finding.resourceId} remediated`,
+      deployMode, // A4
     });
   } else {
     await tx.update(infraFindings).set({ status: "accepted_risk" }).where(eq(infraFindings.id, finding.id));
@@ -390,20 +395,32 @@ export async function applyInfraApprovalDecision(
       ruleId: "infra-remediation-denied",
       ruleChain: [],
       reason: `governed remediation denied; ${finding.kind}/${finding.severity} on ${resource?.name ?? finding.resourceId} logged as accepted risk`,
+      deployMode, // A4
     });
   }
+}
+
+/** A4 (migration 0044): the deploy mode of the target a resource is pinned to
+ * — stamped onto the audit rows of governed infra mutations so the mode
+ * dimension (and per-mode retention) covers infra operations too. Null = the
+ * resource is not target-pinned (not a deploy-scoped action). */
+async function resourceDeployMode(
+  tx: Db,
+  deployTargetId: string | null,
+): Promise<"hosted" | "byoc" | "air_gapped" | null> {
+  if (!deployTargetId) return null;
+  const [t] = await tx
+    .select({ mode: deployTargets.mode })
+    .from(deployTargets)
+    .where(eq(deployTargets.id, deployTargetId));
+  return t?.mode ?? null;
 }
 
 /** ADR-0015 boundary check: is this resource pinned to a customer-hosted,
  * air-gapped deploy target? If so, no execution-plane detail (provider result
  * strings/URLs) may be retained in the control plane — only metadata. */
 async function isAirGapped(tx: Db, deployTargetId: string | null): Promise<boolean> {
-  if (!deployTargetId) return false;
-  const [t] = await tx
-    .select({ mode: deployTargets.mode })
-    .from(deployTargets)
-    .where(eq(deployTargets.id, deployTargetId));
-  return t?.mode === "air_gapped";
+  return (await resourceDeployMode(tx, deployTargetId)) === "air_gapped";
 }
 
 const ACTION_TO_KIND: Record<InfraAction, InfraFindingRow["kind"]> = {
@@ -420,7 +437,7 @@ const ACTION_TO_KIND: Record<InfraAction, InfraFindingRow["kind"]> = {
  * air_gapped mode only metadata is retained — no provider detail crosses back. */
 async function applyInfraActionDecision(
   tx: Db,
-  approvalRow: { id?: string; stageId: string | null },
+  approvalRow: { id?: string; stageId: string | null; decisionReason?: string | null },
   decision: "approved" | "denied",
   deciderUserId: string,
 ): Promise<void> {
@@ -457,36 +474,140 @@ async function applyInfraActionDecision(
     .select()
     .from(infraFindings)
     .where(and(eq(infraFindings.refTable, refTable), eq(infraFindings.refId, ledgerId)));
-  const airGapped = await isAirGapped(tx, resource?.deployTargetId ?? null);
+  // A4: one lookup serves both the boundary check and the audit-mode stamp
+  const deployMode = await resourceDeployMode(tx, resource?.deployTargetId ?? null);
+  const airGapped = deployMode === "air_gapped";
   const signature = String(finding?.detail?.signature ?? `${action}:${ledgerId}`);
 
+  // O6 (ADR-0027): the newest PROPOSED rotation-attempt ledger row — created
+  // by the rotate endpoint at propose time, advanced here to its terminal
+  // state (rotated / denied / failed). Pre-O6 proposals have none; the
+  // approve path falls back to inserting one so old in-flight approvals
+  // still land a durable record.
+  const [proposedRotation] =
+    action === "cert_rotate"
+      ? await tx
+          .select()
+          .from(certRotations)
+          .where(and(eq(certRotations.certId, ledgerId), eq(certRotations.status, "proposed")))
+          .orderBy(desc(certRotations.createdAt))
+          .limit(1)
+      : [];
+
   if (decision === "approved") {
+    // O6 STATE-MACHINE GUARD: a rotation approval only acts on a cert that is
+    // still rotation_proposed — anything else (already rotated, re-proposed
+    // and denied elsewhere, expired) is a stale decision that must not mutate
+    // the lifecycle. Audited, never silent.
+    if (action === "cert_rotate" && certRow!.status !== "rotation_proposed") {
+      await tx.insert(auditLog).values({
+        userId: deciderUserId,
+        objectType: "infra_operation",
+        objectId: finding?.id ?? null,
+        detail: { phase: "action-decision", action, decision, ledgerId, certStatus: certRow!.status },
+        effect: "deny",
+        ruleId: "infra-action-stale",
+        ruleChain: [],
+        reason: `stale cert_rotate approval ignored: cert is '${certRow!.status}', not rotation_proposed — lifecycle unchanged`,
+        deployMode,
+      });
+      return;
+    }
     let providerDetail: Record<string, unknown> = {};
+    let providerError: string | null = null;
     if (resource) {
       const provider = resolveInfraProvider(providerConfig(resource));
-      const res = await provider.remediate({
-        id: finding?.id ?? ledgerId,
-        resourceId: resource.id,
-        kind: ACTION_TO_KIND[action],
-        signature,
-        detail: finding?.detail ?? null,
+      try {
+        // O6: conceptually the cert enters "rotating" here — the provider call
+        // runs inside this txn (no async boundary to persist it across), and
+        // the durable checkpoint is the terminal state below.
+        const res = await provider.remediate({
+          id: finding?.id ?? ledgerId,
+          resourceId: resource.id,
+          kind: ACTION_TO_KIND[action],
+          signature,
+          detail: finding?.detail ?? null,
+        });
+        providerDetail = res.detail;
+      } catch (err) {
+        // O6: a cert rotation the provider fails lands in the FAILED terminal
+        // state (attempt row 'failed' + reason, cert 'rotation_failed',
+        // finding re-opened for re-proposal) instead of aborting the decide.
+        // patch/backup keep the pre-O6 contract: a provider throw propagates.
+        if (action !== "cert_rotate") throw err;
+        providerError = err instanceof Error ? err.message : String(err);
+      }
+    }
+    if (action === "cert_rotate" && providerError !== null) {
+      if (proposedRotation) {
+        await tx
+          .update(certRotations)
+          .set({
+            status: "failed",
+            reason: providerError,
+            approvalId: approvalRow.id ?? proposedRotation.approvalId,
+            findingId: finding?.id ?? proposedRotation.findingId,
+          })
+          .where(eq(certRotations.id, proposedRotation.id));
+      } else {
+        await tx.insert(certRotations).values({
+          certId: certRow!.id,
+          findingId: finding?.id ?? null,
+          approvalId: approvalRow.id ?? null,
+          oldSerial: certRow!.serial ?? null,
+          status: "failed",
+          reason: providerError,
+        });
+      }
+      await tx
+        .update(certInventory)
+        .set({ status: "rotation_failed" })
+        .where(eq(certInventory.id, certRow!.id));
+      if (finding) {
+        // re-proposable: the finding goes back to open, never silently closed
+        await tx.update(infraFindings).set({ status: "open" }).where(eq(infraFindings.id, finding.id));
+      }
+      await tx.insert(auditLog).values({
+        userId: deciderUserId,
+        objectType: "infra_operation",
+        objectId: finding?.id ?? null,
+        detail: { phase: "action-decision", action, decision, ledgerId, signature, providerError },
+        effect: "deny",
+        ruleId: "infra-cert-rotation-failed",
+        ruleChain: [],
+        reason: `approved cert rotation FAILED at the provider on ${resource?.name ?? resourceId}: ${providerError} — cert marked rotation_failed, finding re-opened, re-proposable`,
+        deployMode,
       });
-      providerDetail = res.detail;
+      return;
     }
     // write the durable OUTCOME per action
     if (action === "cert_rotate") {
       const newSerial = `SER-rot-${now.getTime()}`;
       const newNotAfter = new Date(now.getTime() + 365 * 86_400_000);
-      await tx.insert(certRotations).values({
-        certId: certRow!.id,
-        findingId: finding?.id ?? null,
-        approvalId: approvalRow.id ?? null,
-        oldSerial: certRow!.serial ?? null,
-        newSerial,
-        newNotAfter,
-        status: "rotated",
-        rotatedAt: now,
-      });
+      if (proposedRotation) {
+        await tx
+          .update(certRotations)
+          .set({
+            findingId: finding?.id ?? proposedRotation.findingId,
+            approvalId: approvalRow.id ?? proposedRotation.approvalId,
+            newSerial,
+            newNotAfter,
+            status: "rotated",
+            rotatedAt: now,
+          })
+          .where(eq(certRotations.id, proposedRotation.id));
+      } else {
+        await tx.insert(certRotations).values({
+          certId: certRow!.id,
+          findingId: finding?.id ?? null,
+          approvalId: approvalRow.id ?? null,
+          oldSerial: certRow!.serial ?? null,
+          newSerial,
+          newNotAfter,
+          status: "rotated",
+          rotatedAt: now,
+        });
+      }
       await tx
         .update(certInventory)
         .set({ notAfter: newNotAfter, lastRotatedAt: now, serial: newSerial, status: "rotated" })
@@ -528,11 +649,40 @@ async function applyInfraActionDecision(
       ruleId: "infra-action-applied",
       ruleChain: [],
       reason: `governed ${action} approved by the named approver on ${resource?.name ?? resourceId}${airGapped ? " (air-gapped: metadata-only record retained)" : ""}`,
+      deployMode, // A4: null when the resource is not target-pinned
     });
   } else {
-    // deny — revert the proposed state; the finding is the single accepted-risk surface.
+    // deny — the finding is the single accepted-risk surface.
     if (action === "cert_rotate") {
-      await tx.update(certInventory).set({ status: "active" }).where(eq(certInventory.id, certRow!.id));
+      // O6: a denied rotation KEEPS its denied marker — the cert lands in
+      // rotation_denied (re-proposable via the rotate endpoint) and the
+      // attempt's ledger row records who-said-no's reason. Pre-O6 this reset
+      // to 'active', erasing that a rotation was ever refused.
+      const deniedReason = approvalRow.decisionReason ?? "denied by the named approver";
+      await tx
+        .update(certInventory)
+        .set({ status: "rotation_denied" })
+        .where(eq(certInventory.id, certRow!.id));
+      if (proposedRotation) {
+        await tx
+          .update(certRotations)
+          .set({
+            status: "denied",
+            reason: deniedReason,
+            approvalId: approvalRow.id ?? proposedRotation.approvalId,
+            findingId: finding?.id ?? proposedRotation.findingId,
+          })
+          .where(eq(certRotations.id, proposedRotation.id));
+      } else {
+        await tx.insert(certRotations).values({
+          certId: certRow!.id,
+          findingId: finding?.id ?? null,
+          approvalId: approvalRow.id ?? null,
+          oldSerial: certRow!.serial ?? null,
+          status: "denied",
+          reason: deniedReason,
+        });
+      }
     } else if (action === "patch_apply") {
       await tx.update(patchRecords).set({ status: "accepted_risk" }).where(eq(patchRecords.id, patchRow!.id));
     } else {
@@ -549,7 +699,11 @@ async function applyInfraActionDecision(
       effect: "deny",
       ruleId: "infra-action-denied",
       ruleChain: [],
-      reason: `governed ${action} denied on ${resource?.name ?? resourceId}; logged as accepted risk, infra state unchanged`,
+      reason:
+        action === "cert_rotate"
+          ? `governed cert_rotate denied on ${resource?.name ?? resourceId}; cert marked rotation_denied (re-proposable), denial reason recorded on the rotation ledger, finding logged as accepted risk`
+          : `governed ${action} denied on ${resource?.name ?? resourceId}; logged as accepted risk, infra state unchanged`,
+      deployMode, // A4
     });
   }
 }
@@ -729,6 +883,8 @@ async function proposeInfraAction(
     ruleId: "infra-action-proposed",
     ruleChain: [],
     reason: `governed ${action} on ${resource?.name ?? ledger.resourceId} pends the named approver — infra state unchanged until approval`,
+    // A4: proposals on a target-pinned resource carry the target's mode too
+    deployMode: await resourceDeployMode(db, resource?.deployTargetId ?? null),
   });
   return approval!.id;
 }
@@ -738,9 +894,129 @@ async function requireApprover(db: Db, approverUserId: string): Promise<boolean>
   return Boolean(approver);
 }
 
+// ---------------------------------------------------------------------------
+// O5 (ADR-0027, migration 0045) — scheduled backup VERIFICATION.
+// Pre-O5, a `success` backup_runs row could only come from the seed or a
+// manual write — the ledger never verified anything by itself. This pass
+// checks each backup_target's recent recovery points through the EXISTING
+// provider path (provider.scan — the same evaluateBackupSchedule check the
+// findings pipeline runs) and writes an HONEST ledger row: success ONLY when
+// the provider's check found no missed backup, and every row labelled with
+// its source ('scheduler:<provider-kind>' — the mock provider's rows say
+// 'scheduler:mock' and can never masquerade as a real cloud verification).
+// A provider that reports the backup MISSED yields NO success row (the scan
+// pipeline owns the finding); an unreachable/un-live provider is skipped and
+// counted, never a crash and never a fabricated row.
+// ---------------------------------------------------------------------------
+
+export async function runBackupVerifyOnce(
+  db: Db,
+): Promise<{ checked: number; verified: number; missed: number; skipped: number }> {
+  const resources = await db
+    .select()
+    .from(infraResources)
+    .where(eq(infraResources.kind, "backup_target"));
+  let verified = 0;
+  let missed = 0;
+  let skipped = 0;
+  const now = new Date();
+  for (const resource of resources) {
+    try {
+      const provider = resolveInfraProvider(providerConfig(resource));
+      const reports = await provider.scan({
+        id: resource.id,
+        kind: resource.kind,
+        name: resource.name,
+        config: resource.config,
+      });
+      // The provider's backup report carries the OBSERVED last recovery point
+      // (mock + real adapters alike; the mock always emits one, graded by
+      // evaluateBackupSchedule). VERIFIED means: the provider observed a
+      // recovery point AND the schedule evaluator — the same one the findings
+      // pipeline uses — says it is not missed. No observed recovery point =
+      // missed (never a fabricated success). No backup report at all = the
+      // provider saw nothing wrong = verified.
+      const report = reports.find((r) => r.kind === "backup_missed");
+      if (report) {
+        const lastRaw = report.detail?.lastBackupAt;
+        const lastBackupAt = lastRaw ? new Date(String(lastRaw)) : null;
+        const schedule = String((resource.config ?? {}).backupSchedule ?? "daily");
+        const { missed: isMissed } = evaluateBackupSchedule(schedule, lastBackupAt, now, 1);
+        if (lastBackupAt === null || isMissed) {
+          // NOT verified — no success row is ever written for a missed
+          // backup; the scan/findings pipeline is the surface for the miss.
+          missed++;
+          continue;
+        }
+      }
+      await db.insert(backupRuns).values({
+        resourceId: resource.id,
+        kind: "backup",
+        status: "success",
+        startedAt: now,
+        finishedAt: now,
+        source: `scheduler:${provider.kind}`,
+      });
+      verified++;
+    } catch (err) {
+      // un-live cloud kinds (501) and provider failures skip the resource —
+      // honest absence, never a fabricated success
+      if (err instanceof InfraProviderError) skipped++;
+      else throw err;
+    }
+  }
+  if (resources.length > 0) {
+    const actorId = await resolveActor(db, null);
+    await db.insert(auditLog).values({
+      userId: actorId,
+      objectType: "infra_operation",
+      objectId: null,
+      detail: { phase: "backup-verify", checked: resources.length, verified, missed, skipped },
+      effect: "allow",
+      ruleId: "backup-verify-pass",
+      ruleChain: [],
+      reason: `scheduled backup verification: ${verified}/${resources.length} target(s) verified via their provider, ${missed} missed, ${skipped} skipped`,
+    });
+  }
+  return { checked: resources.length, verified, missed, skipped };
+}
+
+/**
+ * O5 boot scheduler — the startAuditPruneScheduler pattern EXACTLY (see
+ * org-settings.ts): an hourly unref'd tick that re-reads org settings each
+ * time (an admin's change applies without a restart), runs when the
+ * configured interval has elapsed, never crashes the gateway, and returns
+ * the stop function the app's onClose hook calls. OFF by default
+ * (backupVerifyEnabled=false = today's no-scheduler behaviour).
+ */
+export function startBackupVerifyScheduler(db: Db): () => void {
+  let lastRunAt = 0;
+  const tick = async () => {
+    try {
+      const org = await loadOrgSettings(db);
+      if (!org.backupVerifyEnabled) return;
+      const intervalMs = Math.max(1, org.backupVerifyIntervalHours) * 3600 * 1000;
+      if (Date.now() - lastRunAt < intervalMs) return;
+      lastRunAt = Date.now();
+      await runBackupVerifyOnce(db);
+    } catch {
+      // a failed pass never crashes the gateway; the next tick retries
+    }
+  };
+  const timer = setInterval(() => void tick(), 3600 * 1000);
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
+
 const SEVERITY_ORDER: InfraSeverity[] = ["low", "medium", "high", "critical"];
 
 export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: string) {
+  // O5: the backup-verification scheduler boots with the infra routes (OFF by
+  // default via org settings) — unref'd, stopped on close, exactly like the
+  // audit auto-prune scheduler app.ts starts beside registerOrgSettingsRoutes.
+  const stopBackupVerifyScheduler = startBackupVerifyScheduler(db);
+  app.addHook("onClose", async () => stopBackupVerifyScheduler());
+
   // --- resources ---------------------------------------------------------
   app.get("/v1/infra/resources", async () => {
     const [resources, policies] = await Promise.all([
@@ -968,12 +1244,33 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
     const body = rotateCertSchema.parse(req.body);
     const [cert] = await db.select().from(certInventory).where(eq(certInventory.id, certId));
     if (!cert) return reply.status(404).send({ error: "unknown_cert" });
-    if (cert.status !== "active") {
-      return reply.status(409).send({ error: "not_rotatable", detail: `cert is '${cert.status}'` });
+    // O6 lifecycle guard: a rotation may be proposed from active AND from the
+    // two re-proposable terminal states (a denied or failed attempt is a
+    // recorded outcome, not a dead end). rotation_proposed (already pending),
+    // rotated and expired stay 409s.
+    const REPROPOSABLE = ["active", "rotation_denied", "rotation_failed"];
+    if (!REPROPOSABLE.includes(cert.status)) {
+      return reply.status(409).send({
+        error: "not_rotatable",
+        detail: `cert is '${cert.status}' — a rotation can be proposed from ${REPROPOSABLE.join("/")} only`,
+      });
     }
     if (!(await requireApprover(db, body.approverUserId))) return reply.status(422).send({ error: "unknown_approver" });
     const actorId = await resolveActor(db, req.authCtx.userId);
     await db.update(certInventory).set({ status: "rotation_proposed" }).where(eq(certInventory.id, certId));
+    // O6: the attempt's own ledger row, created AT PROPOSE (status
+    // 'proposed'); the /decide hook advances it to rotated/denied/failed —
+    // every attempt leaves a durable, reasoned record.
+    const [linkedFinding] = await db
+      .select({ id: infraFindings.id })
+      .from(infraFindings)
+      .where(and(eq(infraFindings.refTable, "cert_inventory"), eq(infraFindings.refId, certId)));
+    await db.insert(certRotations).values({
+      certId,
+      findingId: linkedFinding?.id ?? null,
+      oldSerial: cert.serial ?? null,
+      status: "proposed",
+    });
     const approvalId = await proposeInfraAction(
       db,
       "cert_rotate",

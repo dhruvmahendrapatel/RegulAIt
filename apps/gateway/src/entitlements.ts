@@ -206,5 +206,7 @@ export async function loadConnectorRevocations(
     userId: r.userId,
     connectorId: r.connectorId,
     reason: r.reason,
+    // O9 (ADR-0027): partial-revocation scope — 'full' = the total semantics
+    scope: r.scope,
   }));
 }
