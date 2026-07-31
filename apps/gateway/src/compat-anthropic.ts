@@ -19,7 +19,12 @@
 import type { FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
 import type { Db } from "@regulait/db";
-import type { ModelChatMessage, ModelContentBlock, ModelToolDef } from "@regulait/model-provider";
+import type {
+  ModelChatMessage,
+  ModelContentBlock,
+  ModelToolChoice,
+  ModelToolDef,
+} from "@regulait/model-provider";
 import { z } from "zod";
 import type { DispatchOutcome } from "./agents-connectors.js";
 import {
@@ -28,12 +33,15 @@ import {
   disclosureHeaders,
   executeCompatCall,
   prepareCompatCall,
+  providerCapabilityError,
   rejectUnsupportedFields,
   type CompatPrepared,
 } from "./compat-core.js";
 
 /** The ONLY top-level request fields this surface honours. Anything else is a
- * 400 naming the field — see CompatFieldError's rationale. */
+ * 400 naming the field — see CompatFieldError's rationale. `tool_choice` and
+ * `thinking` joined the honoured tier on 2026-07-31 (ADR-0020 §5 amendment):
+ * each has a REAL end-to-end mapping, never an accept-and-ignore. */
 export const ANTHROPIC_SUPPORTED_FIELDS = [
   "model",
   "messages",
@@ -41,6 +49,8 @@ export const ANTHROPIC_SUPPORTED_FIELDS = [
   "max_tokens",
   "stream",
   "tools",
+  "tool_choice",
+  "thinking",
 ] as const;
 
 const base64Source = z.object({
@@ -89,6 +99,21 @@ const anthropicRequestSchema = z.object({
         .passthrough(),
     )
     .optional(),
+  tool_choice: z
+    .object({
+      type: z.string(),
+      name: z.string().optional(),
+      disable_parallel_tool_use: z.boolean().optional(),
+    })
+    .passthrough()
+    .optional(),
+  thinking: z
+    .object({
+      type: z.string(),
+      budget_tokens: z.number().int().positive().optional(),
+    })
+    .passthrough()
+    .optional(),
 });
 
 type AnyBlock = z.infer<typeof anyBlock>;
@@ -116,9 +141,11 @@ export function anthropicError(status: number, code: string, message: string) {
 }
 
 /** Request content block -> the neutral ModelContentBlock. Unmappable blocks
- * (thinking, redacted_thinking, server_tool_use, url/file sources,
- * per-message cache_control) throw rather than vanish. */
-function toModelBlock(b: AnyBlock, where: string): ModelContentBlock {
+ * (server_tool_use, url/file sources, per-message cache_control) throw rather
+ * than vanish. thinking / redacted_thinking are a REAL mapping since the
+ * 2026-07-31 ADR-0020 amendment — but only on ASSISTANT turns, the only place
+ * the vendor's own dialect puts them. */
+function toModelBlock(b: AnyBlock, where: string, role: "user" | "assistant"): ModelContentBlock {
   if (b.cache_control !== undefined) {
     throw new CompatFieldError(
       `${where}.cache_control`,
@@ -177,11 +204,46 @@ function toModelBlock(b: AnyBlock, where: string): ModelContentBlock {
         ...(b.is_error ? { isError: true } : {}),
       };
     }
+    case "thinking": {
+      // A prior assistant turn's extended-thinking block riding back through
+      // history — a real round-trip mapping (the Anthropic adapter replays it
+      // natively, signature intact). Only assistant turns may carry one,
+      // exactly as in the vendor's own dialect.
+      if (role !== "assistant") {
+        throw new CompatFieldError(
+          `${where}.type='thinking'`,
+          "thinking blocks are only valid on assistant turns (a prior response replayed into history)",
+        );
+      }
+      const thinking = (b as { thinking?: unknown }).thinking;
+      if (typeof thinking !== "string") {
+        throw new CompatFieldError(`${where}.thinking`, "a thinking block needs a string 'thinking'");
+      }
+      const signature = (b as { signature?: unknown }).signature;
+      return {
+        type: "thinking",
+        thinking,
+        ...(typeof signature === "string" ? { signature } : {}),
+      };
+    }
+    case "redacted_thinking": {
+      if (role !== "assistant") {
+        throw new CompatFieldError(
+          `${where}.type='redacted_thinking'`,
+          "redacted_thinking blocks are only valid on assistant turns",
+        );
+      }
+      const data = (b as { data?: unknown }).data;
+      if (typeof data !== "string") {
+        throw new CompatFieldError(`${where}.data`, "a redacted_thinking block needs a string 'data'");
+      }
+      return { type: "redacted_thinking", data };
+    }
     default:
       throw new CompatFieldError(
         `${where}.type='${b.type}'`,
         `content blocks of type '${b.type}' are not supported by this endpoint. Supported block types: ` +
-          `text, image, document, tool_use, tool_result.`,
+          `text, image, document, tool_use, tool_result, thinking, redacted_thinking.`,
       );
   }
 }
@@ -198,9 +260,10 @@ export function toModelMessages(
       );
     }
     if (typeof m.content === "string") return { role: m.role, content: m.content };
+    const role = m.role;
     return {
-      role: m.role,
-      content: m.content.map((b, j) => toModelBlock(b, `messages[${i}].content[${j}]`)),
+      role,
+      content: m.content.map((b, j) => toModelBlock(b, `messages[${i}].content[${j}]`, role)),
     };
   });
 }
@@ -250,6 +313,87 @@ function toTools(
   });
 }
 
+/**
+ * Anthropic `tool_choice` -> the neutral ModelToolChoice (ADR-0020 §5,
+ * 2026-07-31 amendment). All four native variants map 1:1 (auto / none /
+ * any→required / tool+name). Anything the neutral contract cannot carry —
+ * `disable_parallel_tool_use: true`, unknown types — is a 400 naming the
+ * exact variant, never a drop. A named tool must exist in the request's own
+ * tools list, and a forcing variant (any / tool) needs a non-empty list;
+ * auto / none without tools degrade to absent, which is behaviourally
+ * identical (nothing to choose from).
+ */
+export function toToolChoice(
+  tc: z.infer<typeof anthropicRequestSchema>["tool_choice"],
+  tools: ModelToolDef[] | undefined,
+): ModelToolChoice | undefined {
+  if (!tc) return undefined;
+  if (tc.disable_parallel_tool_use === true) {
+    throw new CompatFieldError(
+      "tool_choice.disable_parallel_tool_use",
+      "'tool_choice.disable_parallel_tool_use: true' has no mapping in RegulAIt's neutral dispatch " +
+        "contract, so it is rejected rather than silently dropped — remove it or leave it false (the default).",
+    );
+  }
+  const names = new Set((tools ?? []).map((t) => t.name));
+  switch (tc.type) {
+    case "auto":
+      return names.size > 0 ? "auto" : undefined;
+    case "none":
+      return names.size > 0 ? "none" : undefined;
+    case "any":
+      if (names.size === 0) {
+        throw new CompatFieldError(
+          "tool_choice.type='any'",
+          "tool_choice 'any' forces a tool call, so the request must declare at least one tool",
+        );
+      }
+      return "required";
+    case "tool": {
+      if (!tc.name) {
+        throw new CompatFieldError("tool_choice.name", "tool_choice type 'tool' needs a 'name'");
+      }
+      if (!names.has(tc.name)) {
+        throw new CompatFieldError(
+          "tool_choice.name",
+          `tool_choice names '${tc.name}', which is not in this request's tools list ` +
+            `(${[...names].join(", ") || "empty"}) — a forced tool must be one the model can actually call`,
+        );
+      }
+      return { name: tc.name };
+    }
+    default:
+      throw new CompatFieldError(
+        `tool_choice.type='${tc.type}'`,
+        `tool_choice variant '${tc.type}' is not supported by this endpoint. Supported: auto, none, any, tool.`,
+      );
+  }
+}
+
+/** Anthropic `thinking` -> the neutral shape. `enabled` needs its
+ * budget_tokens; `disabled` is a real mapping onto "absent" (the vendor's own
+ * semantics); anything else is a 400 naming the variant. */
+export function toThinking(
+  t: z.infer<typeof anthropicRequestSchema>["thinking"],
+): { budgetTokens: number } | undefined {
+  if (!t) return undefined;
+  if (t.type === "disabled") return undefined;
+  if (t.type === "enabled") {
+    if (!t.budget_tokens) {
+      throw new CompatFieldError(
+        "thinking.budget_tokens",
+        "thinking type 'enabled' needs a positive integer 'budget_tokens'",
+      );
+    }
+    return { budgetTokens: t.budget_tokens };
+  }
+  throw new CompatFieldError(
+    `thinking.type='${t.type}'`,
+    `thinking variant '${t.type}' is not supported by this endpoint. ` +
+      `Supported: enabled (with budget_tokens), disabled.`,
+  );
+}
+
 const STOP_REASON: Record<string, string> = {
   end_turn: "end_turn",
   max_tokens: "max_tokens",
@@ -265,6 +409,15 @@ export function toAnthropicResponse(
   result: Extract<DispatchOutcome, { ok: true }>["result"],
 ) {
   const content: Array<Record<string, unknown>> = [];
+  // thinking blocks come FIRST, exactly as the vendor orders them, with
+  // signatures intact so the client can replay them into the next turn
+  for (const t of result.thinking ?? []) {
+    content.push(
+      t.type === "thinking"
+        ? { type: "thinking", thinking: t.thinking, signature: t.signature }
+        : { type: "redacted_thinking", data: t.data },
+    );
+  }
   if (result.outputText) content.push({ type: "text", text: result.outputText });
   for (const call of result.toolCalls ?? []) {
     content.push({ type: "tool_use", id: call.id, name: call.name, input: call.arguments });
@@ -306,6 +459,8 @@ export function registerAnthropicCompat(app: FastifyInstance, db: Db, opts: { da
     let messages: ModelChatMessage[];
     let system: { text: string | undefined; cacheSystem: boolean };
     let tools: ModelToolDef[] | undefined;
+    let toolChoice: ModelToolChoice | undefined;
+    let thinking: { budgetTokens: number } | undefined;
     let ignoredFields: string[] = [];
     try {
       const raw = (req.body ?? {}) as Record<string, unknown>;
@@ -314,6 +469,8 @@ export function registerAnthropicCompat(app: FastifyInstance, db: Db, opts: { da
       messages = toModelMessages(body.messages);
       system = toSystem(body.system);
       tools = toTools(body.tools);
+      toolChoice = toToolChoice(body.tool_choice, tools);
+      thinking = toThinking(body.thinking);
     } catch (err) {
       if (err instanceof CompatFieldError) {
         return reply.status(400).send(anthropicError(400, "unsupported_field", err.detail));
@@ -344,6 +501,15 @@ export function registerAnthropicCompat(app: FastifyInstance, db: Db, opts: { da
       return reply.status(prep.status).send(anthropicError(prep.status, prep.error, prep.detail));
     }
     const prepared = prep.prepared;
+    // ADR-0020 long tail: the field is expressible in this dialect, but the
+    // SERVED provider must be able to honour it — a mismatch is a 400 naming
+    // the field, never a silent drop (thinking is anthropic/mock only).
+    const capability = providerCapabilityError(prepared, { thinking: thinking !== undefined });
+    if (capability) {
+      return reply
+        .status(capability.status)
+        .send(anthropicError(capability.status, capability.error, capability.detail));
+    }
     const msgId = `msg_${randomUUID().replace(/-/g, "")}`;
 
     // ---- streaming -------------------------------------------------------
@@ -353,6 +519,14 @@ export function registerAnthropicCompat(app: FastifyInstance, db: Db, opts: { da
     // instead of a 200 that carries a failure.
     if (prepared.useStream) {
       let opened = false;
+      // Content blocks open LAZILY and in the vendor's own order: an optional
+      // thinking block first (thinking_delta / signature_delta framing), then
+      // the text block, then tool_use blocks — so a thinking-enabled stream is
+      // frame-compatible with the real Messages API.
+      let blockIndex = -1;
+      let openBlock: "thinking" | "text" | null = null;
+      const send = (event: string, data: unknown) =>
+        reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
       const open = () => {
         if (opened) return;
         opened = true;
@@ -376,14 +550,19 @@ export function registerAnthropicCompat(app: FastifyInstance, db: Db, opts: { da
             usage: { input_tokens: 0, output_tokens: 0 },
           },
         });
+      };
+      const startBlock = (kind: "thinking" | "text") => {
+        open();
+        if (openBlock !== null) send("content_block_stop", { type: "content_block_stop", index: blockIndex });
+        blockIndex += 1;
+        openBlock = kind;
         send("content_block_start", {
           type: "content_block_start",
-          index: 0,
-          content_block: { type: "text", text: "" },
+          index: blockIndex,
+          content_block:
+            kind === "text" ? { type: "text", text: "" } : { type: "thinking", thinking: "" },
         });
       };
-      const send = (event: string, data: unknown) =>
-        reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
       const outcome = await executeCompatCall(db, opts.dataKey, prepared, {
         surface: "anthropic",
@@ -391,12 +570,33 @@ export function registerAnthropicCompat(app: FastifyInstance, db: Db, opts: { da
         system: system.text,
         cacheSystem: system.cacheSystem,
         tools,
+        toolChoice,
+        thinking,
         maxTokens: body.max_tokens,
+        onThinking: (d) => {
+          if (d.thinking) {
+            if (openBlock !== "thinking") startBlock("thinking");
+            send("content_block_delta", {
+              type: "content_block_delta",
+              index: blockIndex,
+              delta: { type: "thinking_delta", thinking: d.thinking },
+            });
+          }
+          // the signature arrives as its own delta before the block closes,
+          // exactly the vendor framing — clients need it to replay the block
+          if (d.signature && openBlock === "thinking") {
+            send("content_block_delta", {
+              type: "content_block_delta",
+              index: blockIndex,
+              delta: { type: "signature_delta", signature: d.signature },
+            });
+          }
+        },
         onText: (delta) => {
-          open();
+          if (openBlock !== "text") startBlock("text");
           send("content_block_delta", {
             type: "content_block_delta",
-            index: 0,
+            index: blockIndex,
             delta: { type: "text_delta", text: delta },
           });
         },
@@ -416,10 +616,14 @@ export function registerAnthropicCompat(app: FastifyInstance, db: Db, opts: { da
         return reply;
       }
       open();
-      send("content_block_stop", { type: "content_block_stop", index: 0 });
+      // shape fidelity: there is always at least one text block, even when no
+      // text delta ever fired (refusal / pure tool_use)
+      if (openBlock !== "text") startBlock("text");
+      send("content_block_stop", { type: "content_block_stop", index: blockIndex });
+      openBlock = null;
       // Tool calls ride as extra content blocks after the text block, so a
       // tool-using client sees the same shape it would from the vendor.
-      let index = 1;
+      let index = blockIndex + 1;
       for (const call of outcome.result.toolCalls ?? []) {
         send("content_block_start", {
           type: "content_block_start",
@@ -454,6 +658,8 @@ export function registerAnthropicCompat(app: FastifyInstance, db: Db, opts: { da
       system: system.text,
       cacheSystem: system.cacheSystem,
       tools,
+      toolChoice,
+      thinking,
       maxTokens: body.max_tokens,
     });
     disclosureHeaders(reply, prepared);

@@ -366,17 +366,21 @@ describe("POST /v1/messages — Anthropic-shaped translation shim", () => {
     expect(toolBlock.name).toBe("ide_lookup");
   });
 
+  // tool_choice moved to the HONOURED tier (ADR-0020 §5 amendment,
+  // 2026-07-31) — the unsupported-field discipline is now demonstrated on
+  // `metadata`, which stays rejected. tool_choice's own coverage lives in
+  // compat-longtail.test.ts.
   it("FAILS LOUDLY on an unsupported top-level field, naming it", async () => {
     const r = await app.inject({
       method: "POST",
       headers: devAuth,
       url: "/v1/messages",
-      payload: anthropicBody("ide-premium", "hi", { tool_choice: { type: "any" } }),
+      payload: anthropicBody("ide-premium", "hi", { metadata: { user_id: "u1" } }),
     });
     expect(r.statusCode).toBe(400);
     expect(r.json().type).toBe("error");
     expect(r.json().error.type).toBe("invalid_request_error");
-    expect(r.json().error.message).toContain("tool_choice");
+    expect(r.json().error.message).toContain("metadata");
   });
 
   // temperature moved from "400" to "accepted, not honoured": IDE clients send
@@ -435,18 +439,20 @@ describe("POST /v1/messages — Anthropic-shaped translation shim", () => {
     expect((withIgnored!.detail as { ignoredFields: string[] }).ignoredFields).toEqual(["temperature"]);
   });
 
-  it("still 400s a field that would change what the model CAN do", async () => {
+  // thinking moved to the HONOURED tier (ADR-0020 §5 amendment, 2026-07-31);
+  // top_k stays in the rejected tier and demonstrates the same discipline.
+  it("still 400s a field outside the honoured subset", async () => {
     const r = await app.inject({
       method: "POST",
       headers: devAuth,
       url: "/v1/messages",
-      payload: anthropicBody("ide-premium", "hi", { thinking: { type: "enabled" } }),
+      payload: anthropicBody("ide-premium", "hi", { top_k: 40 }),
     });
     expect(r.statusCode).toBe(400);
-    expect(r.json().error.message).toContain("thinking");
+    expect(r.json().error.message).toContain("top_k");
   });
 
-  it("FAILS LOUDLY on an unsupported content-block type", async () => {
+  it("FAILS LOUDLY on a content block where its dialect does not allow it (thinking on a user turn)", async () => {
     const r = await app.inject({
       method: "POST",
       headers: devAuth,
@@ -459,6 +465,21 @@ describe("POST /v1/messages — Anthropic-shaped translation shim", () => {
     });
     expect(r.statusCode).toBe(400);
     expect(r.json().error.message).toContain("thinking");
+  });
+
+  it("FAILS LOUDLY on a genuinely unknown content-block type", async () => {
+    const r = await app.inject({
+      method: "POST",
+      headers: devAuth,
+      url: "/v1/messages",
+      payload: {
+        model: "ide-premium",
+        max_tokens: 64,
+        messages: [{ role: "user", content: [{ type: "server_tool_use", id: "x", name: "y" }] }],
+      },
+    });
+    expect(r.statusCode).toBe(400);
+    expect(r.json().error.message).toContain("server_tool_use");
   });
 
   it("streams a well-formed Anthropic SSE event sequence", async () => {
@@ -573,16 +594,19 @@ describe("POST /v1/chat/completions — OpenAI-shaped translation shim", () => {
     expect(r.headers["x-regulait-ignored-fields"]).toBe("temperature");
   });
 
+  // response_format moved to the HONOURED tier (ADR-0020 §5 amendment,
+  // 2026-07-31) — logit_bias stays rejected and demonstrates the discipline;
+  // response_format's own coverage lives in compat-longtail.test.ts.
   it("FAILS LOUDLY on an unsupported field, naming it", async () => {
     const r = await app.inject({
       method: "POST",
       headers: devAuth,
       url: "/v1/chat/completions",
-      payload: openaiBody("ide-premium", "hi", { response_format: { type: "json_object" } }),
+      payload: openaiBody("ide-premium", "hi", { logit_bias: { "50256": -100 } }),
     });
     expect(r.statusCode).toBe(400);
     expect(r.json().error.type).toBe("invalid_request_error");
-    expect(r.json().error.message).toContain("response_format");
+    expect(r.json().error.message).toContain("logit_bias");
   });
 
   it("round-trips assistant tool_calls and a tool result turn", async () => {

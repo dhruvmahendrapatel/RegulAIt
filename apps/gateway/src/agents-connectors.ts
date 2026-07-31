@@ -46,6 +46,10 @@ import {
   resolveModelProvider,
   type ModelChatMessage,
   type ModelContentBlock,
+  type ModelDispatchRequest,
+  type ModelResponseFormat,
+  type ModelThinkingBlock,
+  type ModelToolChoice,
   type ModelToolDef,
 } from "@regulait/model-provider";
 import {
@@ -135,6 +139,11 @@ export type DispatchOutcome =
         refusal: boolean;
         /** present only when the model paused to call tools (pillar 7 loop) */
         toolCalls?: Array<{ id: string; name: string; arguments: unknown }>;
+        /** ADR-0020 long tail: the extended-thinking blocks the model emitted
+         * (signature intact), threaded from the provider result so the compat
+         * surface can render them; withheld along with the output on a PII
+         * output block. Their tokens are already inside usage.outputTokens. */
+        thinking?: ModelThinkingBlock[];
         usage: { inputTokens: number; outputTokens: number };
         costUsd: number | null;
         measuredCostSavedUsd: number | null;
@@ -175,11 +184,22 @@ export async function executeGovernedDispatch(
     /** pillar 7: tools the worker may call this turn. When absent the request
      * is byte-identical to the tool-free dispatch. */
     tools?: ModelToolDef[] | undefined;
+    /** ADR-0020 long tail: constrain which tools the model may/must call.
+     * Pure ModelDispatchRequest threading — validated upstream by the shims. */
+    toolChoice?: ModelToolChoice | undefined;
+    /** ADR-0020 long tail: structured-output constraint. The caller has
+     * already checked the served provider can honour it. */
+    responseFormat?: ModelResponseFormat | undefined;
+    /** ADR-0020 long tail: Anthropic extended thinking. The caller has
+     * already checked the served provider can honour it. */
+    thinking?: { budgetTokens: number } | undefined;
     maxTokens?: number | undefined;
     /** pillar 5 attribution: the project this call bills to */
     projectId?: string | null | undefined;
     /** streaming delta callback, forwarded to the provider */
     onText?: ((delta: string) => void) | undefined;
+    /** streaming thinking-delta callback, forwarded to the provider */
+    onThinking?: ModelDispatchRequest["onThinking"] | undefined;
     detail?: Record<string, unknown>;
   },
 ): Promise<DispatchOutcome> {
@@ -334,8 +354,12 @@ export async function executeGovernedDispatch(
       ...(dispatchSystem ? { system: dispatchSystem } : {}),
       ...(args.cacheSystem ? { cacheSystem: true } : {}),
       ...(args.tools ? { tools: args.tools } : {}),
+      ...(args.toolChoice ? { toolChoice: args.toolChoice } : {}),
+      ...(args.responseFormat ? { responseFormat: args.responseFormat } : {}),
+      ...(args.thinking ? { thinking: args.thinking } : {}),
       ...(args.maxTokens ? { maxTokens: args.maxTokens } : {}),
       ...(args.onText ? { onText: args.onText } : {}),
+      ...(args.onThinking ? { onThinking: args.onThinking } : {}),
     });
   } catch (err) {
     if (err instanceof ModelProviderError) {
@@ -461,6 +485,9 @@ export async function executeGovernedDispatch(
       stopReason: result.stopReason,
       refusal: result.refusal,
       ...(result.toolCalls ? { toolCalls: result.toolCalls } : {}),
+      // thinking blocks ride out with the output — and are withheld WITH the
+      // output when a PII block replaced it (reasoning can leak the same PII)
+      ...(result.thinking && !withheld ? { thinking: result.thinking } : {}),
       usage: result.usage,
       costUsd,
       measuredCostSavedUsd,

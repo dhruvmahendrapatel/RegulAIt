@@ -42,7 +42,14 @@ import {
 } from "@regulait/db";
 import { evaluateAgent } from "@regulait/policy-kernel";
 import { classifyComplexity, estimateTokens, routeModel } from "@regulait/optimizer-kernel";
-import { isModelProviderKind, type ModelChatMessage, type ModelToolDef } from "@regulait/model-provider";
+import {
+  isModelProviderKind,
+  type ModelChatMessage,
+  type ModelDispatchRequest,
+  type ModelResponseFormat,
+  type ModelToolChoice,
+  type ModelToolDef,
+} from "@regulait/model-provider";
 import {
   createInterceptionScopeRuleSchema,
   updateInterceptionScopeRuleSchema,
@@ -340,6 +347,61 @@ export function rejectUnsupportedFields(
     );
   }
   return ignored;
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0020 long tail — per-provider capability gate
+// ---------------------------------------------------------------------------
+
+/** Providers whose adapter has a REAL native `thinking` mapping. */
+export const THINKING_CAPABLE_PROVIDERS: ReadonlySet<string> = new Set(["anthropic", "mock"]);
+
+/** Providers whose adapter has a REAL native structured-output mechanism
+ * (OpenAI/xAI response_format, Google responseMimeType/responseSchema, mock
+ * echo). Anthropic is deliberately absent: the Messages API has none, and a
+ * system-prompt nudge is not a guarantee — see ADR-0020 §5 (2026-07-31). */
+export const RESPONSE_FORMAT_CAPABLE_PROVIDERS: ReadonlySet<string> = new Set([
+  "openai",
+  "xai",
+  "google",
+  "mock",
+]);
+
+/**
+ * A field can be expressible in the surface's dialect yet un-honourable by
+ * the SERVED agent's provider (resolution — including router_decides — picks
+ * the agent, and each provider adapter maps only what it natively supports).
+ * Per the Batch-H rule that a field is either honoured or fails loudly, that
+ * mismatch is a 400 NAMING the field and the provider — never a silent drop.
+ */
+export function providerCapabilityError(
+  prepared: CompatPrepared,
+  fields: { thinking?: boolean | undefined; responseFormat?: boolean | undefined },
+): CompatError | null {
+  const provider = prepared.served.provider;
+  if (fields.thinking && !THINKING_CAPABLE_PROVIDERS.has(provider)) {
+    return {
+      status: 400,
+      error: "unsupported_field",
+      detail:
+        `'thinking' cannot be honoured on this call: the served agent '${prepared.served.name}' ` +
+        `dispatches to provider '${provider}', which has no extended-thinking mapping ` +
+        `(supported: ${[...THINKING_CAPABLE_PROVIDERS].join(", ")}). RegulAIt never silently ` +
+        `drops a field that changes what the model does.`,
+    };
+  }
+  if (fields.responseFormat && !RESPONSE_FORMAT_CAPABLE_PROVIDERS.has(provider)) {
+    return {
+      status: 400,
+      error: "unsupported_field",
+      detail:
+        `'response_format' cannot be honoured on this call: the served agent ` +
+        `'${prepared.served.name}' dispatches to provider '${provider}', which has no native ` +
+        `structured-output mechanism (supported: ${[...RESPONSE_FORMAT_CAPABLE_PROVIDERS].join(", ")}). ` +
+        `RegulAIt will not degrade a guarantee to a prompt nudge, so the call fails loudly instead.`,
+    };
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -694,8 +756,16 @@ export async function executeCompatCall(
      * marker on a system block. A pure cost annotation. */
     cacheSystem?: boolean | undefined;
     tools?: ModelToolDef[] | undefined;
+    /** ADR-0020 long tail: already translated to the neutral shape and
+     * validated (named tool present, mappable variant) by the shim. */
+    toolChoice?: ModelToolChoice | undefined;
+    /** ADR-0020 long tail: provider capability already checked via
+     * providerCapabilityError before this call. */
+    responseFormat?: ModelResponseFormat | undefined;
+    thinking?: { budgetTokens: number } | undefined;
     maxTokens?: number | undefined;
     onText?: ((delta: string) => void) | undefined;
+    onThinking?: ModelDispatchRequest["onThinking"] | undefined;
   },
 ): Promise<DispatchOutcome> {
   const flatText = args.messages
@@ -716,9 +786,13 @@ export async function executeCompatCall(
     ...(args.system ? { system: args.system } : {}),
     ...(args.cacheSystem ? { cacheSystem: true } : {}),
     ...(args.tools ? { tools: args.tools } : {}),
+    ...(args.toolChoice ? { toolChoice: args.toolChoice } : {}),
+    ...(args.responseFormat ? { responseFormat: args.responseFormat } : {}),
+    ...(args.thinking ? { thinking: args.thinking } : {}),
     ...(args.maxTokens ? { maxTokens: args.maxTokens } : {}),
     projectId: prepared.projectId,
     ...(args.onText ? { onText: args.onText } : {}),
+    ...(args.onThinking ? { onThinking: args.onThinking } : {}),
     detail: {
       surface: `compat_${args.surface}`,
       mode: COMPAT_MODE,
