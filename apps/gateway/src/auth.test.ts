@@ -11,6 +11,11 @@
  * validation, domain filter, JIT default-deny vs provision-never-admin, and
  * the sso_only switch + its no-lockout guards. Plus an API-key regression
  * block proving the pre-0042 header path is byte-identical.
+ *
+ * ADR-0028 block at the end: session ORIGIN (migration 0046) recorded by every
+ * login flow, the forced-password-change LOCKOUT fix for api_key-origin
+ * sessions in a recovery state, and — most importantly — the escalation guard
+ * that keeps the steady state requiring the current password.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
@@ -30,7 +35,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
-import { totpCode, totpStep } from "./auth.js";
+import { hashToken, totpCode, totpStep } from "./auth.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -853,5 +858,307 @@ describe("API-key path regression (byte-identical to pre-0042)", () => {
       method: "PUT", headers: AUTH, url: "/v1/org/settings", payload: { mfaRequired: "off" },
     });
     expect(off.statusCode).toBe(200);
+  });
+});
+
+// ===========================================================================
+// ADR-0028 (migration 0046) — session origin + the forced-password-change
+// LOCKOUT fix. A user who signed in with POST /auth/login-with-key onto an
+// account with must_change_password = true was sent to a gate demanding the
+// CURRENT one-time password they were never given, with every non-self-service
+// route 403'd behind that same gate. The fix relaxes the current-password
+// requirement ONLY for an api_key-origin session on a recovery-state account;
+// the steady state is untouched, because relaxing THAT would turn a stolen key
+// into a permanent password that outlives the key's revocation.
+// ===========================================================================
+describe("ADR-0028 — session origin + API-key password recovery", () => {
+  const NEWPW = "brand-New-Password-42";
+  const OTHERPW = "second-New-Password-43";
+
+  const mkKey = async (userId: string, name: string): Promise<string> => {
+    const r = await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/users/${userId}/keys`, payload: { name },
+    });
+    expect(r.statusCode).toBe(201);
+    return r.json().token;
+  };
+  const keyLogin = async (apiKey: string) => {
+    const r = await app.inject({
+      method: "POST", url: "/auth/login-with-key", headers: CSRF, payload: { apiKey },
+    });
+    expect(r.statusCode).toBe(200);
+    return r;
+  };
+  /** POST /auth/change-password with an arbitrary payload (currentPassword is
+   * optional on the wire now — the SERVER decides whether it is required) */
+  const setPw = (cookie: string, payload: Record<string, unknown>) =>
+    app.inject({
+      method: "POST", url: "/auth/change-password", headers: CSRF,
+      cookies: { regulait_session: cookie }, payload,
+    });
+  const originOf = async (cookie: string) => {
+    const [row] = await db
+      .select({ origin: authSessions.origin })
+      .from(authSessions)
+      .where(eq(authSessions.tokenHash, hashToken(cookie)));
+    return row?.origin ?? null;
+  };
+  /** put a live session back into the pre-0046 state the migration backfilled */
+  const forceOrigin = (cookie: string, origin: "password" | "api_key" | "oidc" | "bootstrap" | "unknown") =>
+    db.update(authSessions).set({ origin }).where(eq(authSessions.tokenHash, hashToken(cookie)));
+  /** the exact state the owner hit: one-time password issued, signed in by key */
+  const keySessionOnOneTimeAccount = async (email: string, name: string) => {
+    const uid = await mkUser(email, name);
+    await setInitialPassword(uid);
+    const key = await mkKey(uid, "recovery");
+    const cookie = cookieOf(await keyLogin(key));
+    return { uid, key, cookie };
+  };
+
+  // ---- origin is recorded by every session-creation site -------------------
+
+  it("password login records origin 'password'", async () => {
+    const email = "origin-pw@auth-test.example";
+    const uid = await mkUser(email, "Origin Password");
+    const cookie = await onboard(uid, email, NEWPW);
+    expect(await originOf(cookie)).toBe("password");
+  });
+
+  it("an MFA-completed login is still 'password' origin (the 2nd factor is not the credential)", async () => {
+    const email = "origin-mfa@auth-test.example";
+    const pw = "origin-Mfa-pw-88";
+    const uid = await mkUser(email, "Origin Mfa");
+    const first = await onboard(uid, email, pw);
+    const enroll = await app.inject({
+      method: "POST", url: "/auth/totp/enroll", headers: CSRF, cookies: { regulait_session: first },
+    });
+    expect(enroll.statusCode).toBe(200);
+    const secret = enroll.json().secret;
+    const act = await app.inject({
+      method: "POST", url: "/auth/totp/activate", headers: CSRF, cookies: { regulait_session: first },
+      payload: { code: totpCode(secret, totpStep()) },
+    });
+    expect(act.statusCode).toBe(200);
+    const pending = (await login(email, pw)).json().pendingToken;
+    const verified = await app.inject({
+      method: "POST", url: "/auth/mfa/verify", headers: CSRF,
+      // activation burned the current step; the ±1 window accepts the next
+      payload: { pendingToken: pending, code: totpCode(secret, totpStep() + 1) },
+    });
+    expect(verified.statusCode).toBe(200);
+    expect(await originOf(cookieOf(verified))).toBe("password");
+    expect(uid).toBeTruthy();
+  });
+
+  it("login-with-key records origin 'api_key'; the bootstrap token records 'bootstrap'", async () => {
+    const uid = await mkUser("origin-key@auth-test.example", "Origin Key");
+    const key = await mkKey(uid, "origin");
+    const keyed = await keyLogin(key);
+    expect(await originOf(cookieOf(keyed))).toBe("api_key");
+    // the deploy-time bootstrap token is a DIFFERENT credential and gets its
+    // own origin — it never opens the api_key bypass
+    const boot = await keyLogin(BOOT);
+    const bootCookie = cookieOf(boot);
+    expect(await originOf(bootCookie)).toBe("bootstrap");
+    const bootMe = await me(bootCookie);
+    expect(bootMe.json().userId).toBeNull();
+    expect(bootMe.json().passwordChangeRequiresCurrent).toBe(true);
+  });
+
+  it("the OIDC callback records origin 'oidc'", async () => {
+    const provider = await mkProvider({ name: "origin-oidc-idp", jitProvisioning: true });
+    const { cb } = await oidcRoundTrip(provider.id, { email: "origin-oidc@auth-test.example" });
+    expect(cb.statusCode).toBe(302);
+    expect(await originOf(cookieOf(cb))).toBe("oidc");
+    expect(
+      (await app.inject({ method: "DELETE", headers: AUTH, url: `/v1/auth/oidc-providers/${provider.id}` })).statusCode,
+    ).toBe(200);
+  });
+
+  it("the DB refuses an origin outside the allowed set (0046 CHECK constraint)", async () => {
+    await expect(
+      db.execute(
+        sql`insert into auth_sessions (token_hash, user_id, expires_at, idle_expires_at, idle_minutes, origin)
+            values ('ck-probe-0046', null, now() + interval '1 hour', now() + interval '1 hour', 30, 'sso')`,
+      ),
+    ).rejects.toThrow();
+  });
+
+  // ---- THE LOCKOUT: bypass allowed in the recovery states ------------------
+
+  it("api_key session + must_change: a password is set WITHOUT the current one, and the gate opens", async () => {
+    const { uid, cookie } = await keySessionOnOneTimeAccount("lockout-a@auth-test.example", "Lock A");
+    // the gate is closed exactly as the owner saw it
+    const gated = await app.inject({ method: "GET", url: "/v1/me", cookies: { regulait_session: cookie } });
+    expect(gated.statusCode).toBe(403);
+    expect(gated.json().error).toBe("password_change_required");
+    // /auth/me tells the UI the field is not needed
+    const before = await me(cookie);
+    expect(before.json().mustChangePassword).toBe(true);
+    expect(before.json().sessionOrigin).toBe("api_key");
+    expect(before.json().passwordChangeRequiresCurrent).toBe(false);
+    // ... and the server agrees
+    const done = await setPw(cookie, { newPassword: NEWPW });
+    expect(done.statusCode).toBe(200);
+    // the gate is open and the account now has a real password
+    const open = await app.inject({ method: "GET", url: "/v1/me", cookies: { regulait_session: cookie } });
+    expect(open.statusCode).toBe(200);
+    expect(open.json().userId).toBe(uid);
+    const after = await me(cookie);
+    expect(after.json().mustChangePassword).toBe(false);
+    expect(after.json().passwordSet).toBe(true);
+    // and the new password really is the one that was set
+    expect((await login("lockout-a@auth-test.example", NEWPW)).statusCode).toBe(200);
+  });
+
+  it("the bypass is audited under its OWN rule id, naming the origin and the recovery condition", async () => {
+    const { uid, cookie } = await keySessionOnOneTimeAccount("lockout-b@auth-test.example", "Lock B");
+    expect((await setPw(cookie, { newPassword: NEWPW })).statusCode).toBe(200);
+    const row = await latestAudit("password-set-via-key-session");
+    expect(row).toBeTruthy();
+    expect(row!.objectId).toBe(uid);
+    expect(row!.effect).toBe("allow");
+    const detail = row!.detail as Record<string, unknown>;
+    expect(detail.sessionOrigin).toBe("api_key");
+    expect(detail.recoveryCondition).toBe("must_change_password");
+    expect(detail.currentPasswordRequired).toBe(false);
+    expect(detail.email).toBe("lockout-b@auth-test.example");
+  });
+
+  it("api_key session + NO password hash: a password is set without a current one (was a 409 dead end)", async () => {
+    const email = "lockout-c@auth-test.example";
+    const uid = await mkUser(email, "Lock C");
+    const cookie = cookieOf(await keyLogin(await mkKey(uid, "recovery")));
+    const before = await me(cookie);
+    expect(before.json().passwordSet).toBe(false);
+    expect(before.json().passwordChangeRequiresCurrent).toBe(false);
+    const done = await setPw(cookie, { newPassword: NEWPW });
+    expect(done.statusCode).toBe(200);
+    const row = await latestAudit("password-set-via-key-session");
+    expect((row!.detail as Record<string, unknown>).recoveryCondition).toBe("no_password_hash");
+    expect((await login(email, NEWPW)).statusCode).toBe(200);
+  });
+
+  it("the key-session password set still revokes every OTHER session", async () => {
+    const email = "lockout-d@auth-test.example";
+    const uid = await mkUser(email, "Lock D");
+    await setInitialPassword(uid);
+    const key = await mkKey(uid, "recovery");
+    const doomed = cookieOf(await keyLogin(key));
+    const survivor = cookieOf(await keyLogin(key));
+    expect((await setPw(survivor, { newPassword: NEWPW })).statusCode).toBe(200);
+    expect((await me(doomed)).statusCode).toBe(401);
+    expect((await me(survivor)).statusCode).toBe(200);
+  });
+
+  // ---- THE GUARD: the steady state is untouched ---------------------------
+
+  it("ESCALATION GUARD: api_key session + established password + no forced change STILL requires the current password", async () => {
+    const email = "steady@auth-test.example";
+    const uid = await mkUser(email, "Steady State");
+    await onboard(uid, email, NEWPW); // real password, must_change cleared
+    const cookie = cookieOf(await keyLogin(await mkKey(uid, "stolen-key-simulation")));
+    expect(await originOf(cookie)).toBe("api_key");
+    // /auth/me and the server agree: the key alone is NOT enough here
+    const probe = await me(cookie);
+    expect(probe.json().mustChangePassword).toBe(false);
+    expect(probe.json().passwordSet).toBe(true);
+    expect(probe.json().passwordChangeRequiresCurrent).toBe(true);
+    const bare = await setPw(cookie, { newPassword: OTHERPW });
+    expect(bare.statusCode).toBe(401);
+    expect(bare.json().error).toBe("current_password_required");
+    // the old password still works — nothing was changed
+    expect((await login(email, NEWPW)).statusCode).toBe(200);
+    // proving the current password is the ONLY way through
+    const ok = await setPw(cookie, { currentPassword: NEWPW, newPassword: OTHERPW });
+    expect(ok.statusCode).toBe(200);
+    expect((await login(email, OTHERPW)).statusCode).toBe(200);
+  });
+
+  it("a WRONG current password on that same session still 401s current_password_incorrect", async () => {
+    const email = "steady-wrong@auth-test.example";
+    const uid = await mkUser(email, "Steady Wrong");
+    await onboard(uid, email, NEWPW);
+    const cookie = cookieOf(await keyLogin(await mkKey(uid, "key")));
+    const wrong = await setPw(cookie, { currentPassword: "not-the-Password-1", newPassword: OTHERPW });
+    expect(wrong.statusCode).toBe(401);
+    expect(wrong.json().error).toBe("current_password_incorrect");
+    const rejected = await latestAudit("password-change-rejected");
+    expect(rejected!.objectId).toBe(uid);
+    expect((await login(email, NEWPW)).statusCode).toBe(200);
+  });
+
+  it("password-origin session + must_change: the current password is STILL required", async () => {
+    const email = "pw-origin-gate@auth-test.example";
+    const uid = await mkUser(email, "Pw Origin");
+    const oneTime = await setInitialPassword(uid);
+    const cookie = cookieOf(await login(email, oneTime));
+    expect(await originOf(cookie)).toBe("password");
+    const probe = await me(cookie);
+    expect(probe.json().mustChangePassword).toBe(true);
+    expect(probe.json().passwordChangeRequiresCurrent).toBe(true);
+    const bare = await setPw(cookie, { newPassword: NEWPW });
+    expect(bare.statusCode).toBe(401);
+    expect(bare.json().error).toBe("current_password_required");
+    // the one-time password they DO hold still works, exactly as before
+    expect((await setPw(cookie, { currentPassword: oneTime, newPassword: NEWPW })).statusCode).toBe(200);
+  });
+
+  it("a pre-0046 'unknown' origin session fails CLOSED even in the recovery state", async () => {
+    const { cookie } = await keySessionOnOneTimeAccount("unknown-origin@auth-test.example", "Unknown Origin");
+    // exactly what migration 0046 backfilled onto every pre-existing row
+    await forceOrigin(cookie, "unknown");
+    const probe = await me(cookie);
+    expect(probe.json().sessionOrigin).toBe("unknown");
+    expect(probe.json().mustChangePassword).toBe(true);
+    expect(probe.json().passwordChangeRequiresCurrent).toBe(true);
+    const bare = await setPw(cookie, { newPassword: NEWPW });
+    expect(bare.statusCode).toBe(401);
+    expect(bare.json().error).toBe("current_password_required");
+    // an oidc-origin session in the same recovery state fails closed too
+    await forceOrigin(cookie, "oidc");
+    expect((await me(cookie)).json().passwordChangeRequiresCurrent).toBe(true);
+    expect((await setPw(cookie, { newPassword: NEWPW })).statusCode).toBe(401);
+  });
+
+  it("a header API-key request carries no session origin, so it fails closed too", async () => {
+    const email = "header-key@auth-test.example";
+    const uid = await mkUser(email, "Header Key");
+    await setInitialPassword(uid);
+    const key = await mkKey(uid, "header");
+    const probe = await app.inject({
+      method: "GET", url: "/auth/me", headers: { authorization: `Bearer ${key}` },
+    });
+    expect(probe.json().sessionOrigin).toBeNull();
+    expect(probe.json().passwordChangeRequiresCurrent).toBe(true);
+    const bare = await app.inject({
+      method: "POST", url: "/auth/change-password",
+      headers: { authorization: `Bearer ${key}` }, payload: { newPassword: NEWPW },
+    });
+    expect(bare.statusCode).toBe(401);
+    expect(bare.json().error).toBe("current_password_required");
+  });
+
+  it("/auth/me's boolean predicts the server's answer in every state (one rule, one source)", async () => {
+    const states: Array<{ email: string; recovery: boolean }> = [
+      { email: "oracle-recovery@auth-test.example", recovery: true },
+      { email: "oracle-steady@auth-test.example", recovery: false },
+    ];
+    for (const st of states) {
+      const uid = await mkUser(st.email, "Oracle");
+      let cookie: string;
+      if (st.recovery) {
+        await setInitialPassword(uid);
+        cookie = cookieOf(await keyLogin(await mkKey(uid, "oracle")));
+      } else {
+        await onboard(uid, st.email, NEWPW);
+        cookie = cookieOf(await keyLogin(await mkKey(uid, "oracle")));
+      }
+      const claimed = (await me(cookie)).json().passwordChangeRequiresCurrent;
+      const attempt = await setPw(cookie, { newPassword: OTHERPW });
+      // claimed "not required" <=> the bare request succeeds
+      expect(claimed).toBe(attempt.statusCode !== 200);
+      expect(attempt.statusCode).toBe(st.recovery ? 200 : 401);
+    }
   });
 });
