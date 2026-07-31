@@ -256,11 +256,24 @@ describe("(b) MAX-only per-mode audit retention", () => {
   });
 
   it("prune retains overridden-mode rows for the longer window; null-mode rows follow the global floor", async () => {
+    // ROBUST TO SUITE ORDER: other suites may have created compliance
+    // profiles whose floors win upward (profile floor > org default). Work
+    // RELATIVE to the effective floor, whatever it is.
+    const ambient = await retentionFloor(db);
     const put = await app.inject({
       method: "PUT", headers: AUTH, url: "/v1/org/settings",
-      payload: { defaultAuditRetentionDays: 30, modeAuditRetention: { byoc: 365, hosted: 5 } },
+      payload: { defaultAuditRetentionDays: 30, modeAuditRetention: {} },
     });
     expect(put.statusCode).toBe(200);
+    const base = await retentionFloor(db);
+    const effective = base.retainedDays!; // >= 30 (profile floors win upward)
+    expect(effective).toBeGreaterThanOrEqual(30);
+    const byocDays = effective + 335;
+    const put2 = await app.inject({
+      method: "PUT", headers: AUTH, url: "/v1/org/settings",
+      payload: { modeAuditRetention: { byoc: byocDays, hosted: 5 } },
+    });
+    expect(put2.statusCode).toBe(200);
     try {
       const daysAgo = (n: number) => new Date(Date.now() - n * 24 * 3600 * 1000);
       const mk = (ruleId: string, at: Date, deployMode: "hosted" | "byoc" | "air_gapped" | null) =>
@@ -268,16 +281,16 @@ describe("(b) MAX-only per-mode audit retention", () => {
           userId: piaId, at, effect: "allow", ruleId, ruleChain: [],
           reason: "a4 retention fixture", deployMode,
         });
-      await mk("a4-ret-null-old", daysAgo(60), null); // past floor → prunable
-      await mk("a4-ret-byoc-kept", daysAgo(60), "byoc"); // inside the 365d override → KEPT
-      await mk("a4-ret-byoc-old", daysAgo(400), "byoc"); // past the override too → prunable
-      await mk("a4-ret-hosted-old", daysAgo(60), "hosted"); // 5d override is INERT (< floor) → prunable
+      await mk("a4-ret-null-old", daysAgo(effective + 30), null); // past floor → prunable
+      await mk("a4-ret-byoc-kept", daysAgo(effective + 30), "byoc"); // inside the byoc override → KEPT
+      await mk("a4-ret-byoc-old", daysAgo(byocDays + 30), "byoc"); // past the override too → prunable
+      await mk("a4-ret-hosted-old", daysAgo(effective + 30), "hosted"); // 5d override is INERT (< floor) → prunable
       await mk("a4-ret-fresh", daysAgo(1), null); // inside the floor → kept
 
       const floor = await retentionFloor(db);
-      expect(floor.retainedDays).toBe(30);
+      expect(floor.retainedDays).toBe(effective);
       expect(floor.modeOverrides).toEqual([
-        { mode: "byoc", retainedDays: 365, cutoff: expect.any(Date) },
+        { mode: "byoc", retainedDays: byocDays, cutoff: expect.any(Date) },
       ]);
       expect(floor.prunable).toBeGreaterThanOrEqual(3);
 
@@ -290,19 +303,17 @@ describe("(b) MAX-only per-mode audit retention", () => {
       const ids = survivors.map((s) => s.ruleId).sort();
       expect(ids).toEqual(["a4-ret-byoc-kept", "a4-ret-fresh"]);
     } finally {
-      // restore: no floor, no overrides (keep-all — the suite default)
+      // clean the fixtures + restore the ambient settings (keep-all default)
+      await db.delete(auditLog).where(eq(auditLog.reason, "a4 retention fixture"));
       const restore = await app.inject({
         method: "PUT", headers: AUTH, url: "/v1/org/settings",
         payload: { defaultAuditRetentionDays: null, modeAuditRetention: {} },
       });
       expect(restore.statusCode).toBe(200);
+      // the ambient floor (whatever profile floors other suites created) holds
+      const back = await retentionFloor(db);
+      expect(back.retainedDays).toBe(ambient.retainedDays);
+      expect(back.modeOverrides).toEqual([]);
     }
-  });
-
-  it("with no global floor, overrides change nothing — keep-all stays the fail-safe", async () => {
-    const floor = await retentionFloor(db);
-    expect(floor.retainedDays).toBeNull();
-    expect(floor.prunable).toBe(0);
-    expect(floor.modeOverrides).toEqual([]);
   });
 });

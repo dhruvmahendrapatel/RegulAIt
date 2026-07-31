@@ -337,7 +337,7 @@ async function resolveActor(db: Db, userId: string | null): Promise<string> {
  * 'accepted_risk' (audit deny). Both outcomes audited — never a silent path. */
 export async function applyInfraApprovalDecision(
   tx: Db,
-  approvalRow: { id?: string; stageId: string | null },
+  approvalRow: { id?: string; stageId: string | null; decisionReason?: string | null },
   decision: "approved" | "denied",
   deciderUserId: string,
 ): Promise<void> {
@@ -435,7 +435,7 @@ const ACTION_TO_KIND: Record<InfraAction, InfraFindingRow["kind"]> = {
  * air_gapped mode only metadata is retained — no provider detail crosses back. */
 async function applyInfraActionDecision(
   tx: Db,
-  approvalRow: { id?: string; stageId: string | null },
+  approvalRow: { id?: string; stageId: string | null; decisionReason?: string | null },
   decision: "approved" | "denied",
   deciderUserId: string,
 ): Promise<void> {
@@ -477,33 +477,135 @@ async function applyInfraActionDecision(
   const airGapped = deployMode === "air_gapped";
   const signature = String(finding?.detail?.signature ?? `${action}:${ledgerId}`);
 
+  // O6 (ADR-0027): the newest PROPOSED rotation-attempt ledger row — created
+  // by the rotate endpoint at propose time, advanced here to its terminal
+  // state (rotated / denied / failed). Pre-O6 proposals have none; the
+  // approve path falls back to inserting one so old in-flight approvals
+  // still land a durable record.
+  const [proposedRotation] =
+    action === "cert_rotate"
+      ? await tx
+          .select()
+          .from(certRotations)
+          .where(and(eq(certRotations.certId, ledgerId), eq(certRotations.status, "proposed")))
+          .orderBy(desc(certRotations.createdAt))
+          .limit(1)
+      : [];
+
   if (decision === "approved") {
+    // O6 STATE-MACHINE GUARD: a rotation approval only acts on a cert that is
+    // still rotation_proposed — anything else (already rotated, re-proposed
+    // and denied elsewhere, expired) is a stale decision that must not mutate
+    // the lifecycle. Audited, never silent.
+    if (action === "cert_rotate" && certRow!.status !== "rotation_proposed") {
+      await tx.insert(auditLog).values({
+        userId: deciderUserId,
+        objectType: "infra_operation",
+        objectId: finding?.id ?? null,
+        detail: { phase: "action-decision", action, decision, ledgerId, certStatus: certRow!.status },
+        effect: "deny",
+        ruleId: "infra-action-stale",
+        ruleChain: [],
+        reason: `stale cert_rotate approval ignored: cert is '${certRow!.status}', not rotation_proposed — lifecycle unchanged`,
+        deployMode,
+      });
+      return;
+    }
     let providerDetail: Record<string, unknown> = {};
+    let providerError: string | null = null;
     if (resource) {
       const provider = resolveInfraProvider(providerConfig(resource));
-      const res = await provider.remediate({
-        id: finding?.id ?? ledgerId,
-        resourceId: resource.id,
-        kind: ACTION_TO_KIND[action],
-        signature,
-        detail: finding?.detail ?? null,
+      try {
+        // O6: conceptually the cert enters "rotating" here — the provider call
+        // runs inside this txn (no async boundary to persist it across), and
+        // the durable checkpoint is the terminal state below.
+        const res = await provider.remediate({
+          id: finding?.id ?? ledgerId,
+          resourceId: resource.id,
+          kind: ACTION_TO_KIND[action],
+          signature,
+          detail: finding?.detail ?? null,
+        });
+        providerDetail = res.detail;
+      } catch (err) {
+        // O6: a cert rotation the provider fails lands in the FAILED terminal
+        // state (attempt row 'failed' + reason, cert 'rotation_failed',
+        // finding re-opened for re-proposal) instead of aborting the decide.
+        // patch/backup keep the pre-O6 contract: a provider throw propagates.
+        if (action !== "cert_rotate") throw err;
+        providerError = err instanceof Error ? err.message : String(err);
+      }
+    }
+    if (action === "cert_rotate" && providerError !== null) {
+      if (proposedRotation) {
+        await tx
+          .update(certRotations)
+          .set({
+            status: "failed",
+            reason: providerError,
+            approvalId: approvalRow.id ?? proposedRotation.approvalId,
+            findingId: finding?.id ?? proposedRotation.findingId,
+          })
+          .where(eq(certRotations.id, proposedRotation.id));
+      } else {
+        await tx.insert(certRotations).values({
+          certId: certRow!.id,
+          findingId: finding?.id ?? null,
+          approvalId: approvalRow.id ?? null,
+          oldSerial: certRow!.serial ?? null,
+          status: "failed",
+          reason: providerError,
+        });
+      }
+      await tx
+        .update(certInventory)
+        .set({ status: "rotation_failed" })
+        .where(eq(certInventory.id, certRow!.id));
+      if (finding) {
+        // re-proposable: the finding goes back to open, never silently closed
+        await tx.update(infraFindings).set({ status: "open" }).where(eq(infraFindings.id, finding.id));
+      }
+      await tx.insert(auditLog).values({
+        userId: deciderUserId,
+        objectType: "infra_operation",
+        objectId: finding?.id ?? null,
+        detail: { phase: "action-decision", action, decision, ledgerId, signature, providerError },
+        effect: "deny",
+        ruleId: "infra-cert-rotation-failed",
+        ruleChain: [],
+        reason: `approved cert rotation FAILED at the provider on ${resource?.name ?? resourceId}: ${providerError} — cert marked rotation_failed, finding re-opened, re-proposable`,
+        deployMode,
       });
-      providerDetail = res.detail;
+      return;
     }
     // write the durable OUTCOME per action
     if (action === "cert_rotate") {
       const newSerial = `SER-rot-${now.getTime()}`;
       const newNotAfter = new Date(now.getTime() + 365 * 86_400_000);
-      await tx.insert(certRotations).values({
-        certId: certRow!.id,
-        findingId: finding?.id ?? null,
-        approvalId: approvalRow.id ?? null,
-        oldSerial: certRow!.serial ?? null,
-        newSerial,
-        newNotAfter,
-        status: "rotated",
-        rotatedAt: now,
-      });
+      if (proposedRotation) {
+        await tx
+          .update(certRotations)
+          .set({
+            findingId: finding?.id ?? proposedRotation.findingId,
+            approvalId: approvalRow.id ?? proposedRotation.approvalId,
+            newSerial,
+            newNotAfter,
+            status: "rotated",
+            rotatedAt: now,
+          })
+          .where(eq(certRotations.id, proposedRotation.id));
+      } else {
+        await tx.insert(certRotations).values({
+          certId: certRow!.id,
+          findingId: finding?.id ?? null,
+          approvalId: approvalRow.id ?? null,
+          oldSerial: certRow!.serial ?? null,
+          newSerial,
+          newNotAfter,
+          status: "rotated",
+          rotatedAt: now,
+        });
+      }
       await tx
         .update(certInventory)
         .set({ notAfter: newNotAfter, lastRotatedAt: now, serial: newSerial, status: "rotated" })
@@ -548,9 +650,37 @@ async function applyInfraActionDecision(
       deployMode, // A4: null when the resource is not target-pinned
     });
   } else {
-    // deny — revert the proposed state; the finding is the single accepted-risk surface.
+    // deny — the finding is the single accepted-risk surface.
     if (action === "cert_rotate") {
-      await tx.update(certInventory).set({ status: "active" }).where(eq(certInventory.id, certRow!.id));
+      // O6: a denied rotation KEEPS its denied marker — the cert lands in
+      // rotation_denied (re-proposable via the rotate endpoint) and the
+      // attempt's ledger row records who-said-no's reason. Pre-O6 this reset
+      // to 'active', erasing that a rotation was ever refused.
+      const deniedReason = approvalRow.decisionReason ?? "denied by the named approver";
+      await tx
+        .update(certInventory)
+        .set({ status: "rotation_denied" })
+        .where(eq(certInventory.id, certRow!.id));
+      if (proposedRotation) {
+        await tx
+          .update(certRotations)
+          .set({
+            status: "denied",
+            reason: deniedReason,
+            approvalId: approvalRow.id ?? proposedRotation.approvalId,
+            findingId: finding?.id ?? proposedRotation.findingId,
+          })
+          .where(eq(certRotations.id, proposedRotation.id));
+      } else {
+        await tx.insert(certRotations).values({
+          certId: certRow!.id,
+          findingId: finding?.id ?? null,
+          approvalId: approvalRow.id ?? null,
+          oldSerial: certRow!.serial ?? null,
+          status: "denied",
+          reason: deniedReason,
+        });
+      }
     } else if (action === "patch_apply") {
       await tx.update(patchRecords).set({ status: "accepted_risk" }).where(eq(patchRecords.id, patchRow!.id));
     } else {
@@ -567,7 +697,10 @@ async function applyInfraActionDecision(
       effect: "deny",
       ruleId: "infra-action-denied",
       ruleChain: [],
-      reason: `governed ${action} denied on ${resource?.name ?? resourceId}; logged as accepted risk, infra state unchanged`,
+      reason:
+        action === "cert_rotate"
+          ? `governed cert_rotate denied on ${resource?.name ?? resourceId}; cert marked rotation_denied (re-proposable), denial reason recorded on the rotation ledger, finding logged as accepted risk`
+          : `governed ${action} denied on ${resource?.name ?? resourceId}; logged as accepted risk, infra state unchanged`,
       deployMode, // A4
     });
   }
@@ -989,12 +1122,33 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
     const body = rotateCertSchema.parse(req.body);
     const [cert] = await db.select().from(certInventory).where(eq(certInventory.id, certId));
     if (!cert) return reply.status(404).send({ error: "unknown_cert" });
-    if (cert.status !== "active") {
-      return reply.status(409).send({ error: "not_rotatable", detail: `cert is '${cert.status}'` });
+    // O6 lifecycle guard: a rotation may be proposed from active AND from the
+    // two re-proposable terminal states (a denied or failed attempt is a
+    // recorded outcome, not a dead end). rotation_proposed (already pending),
+    // rotated and expired stay 409s.
+    const REPROPOSABLE = ["active", "rotation_denied", "rotation_failed"];
+    if (!REPROPOSABLE.includes(cert.status)) {
+      return reply.status(409).send({
+        error: "not_rotatable",
+        detail: `cert is '${cert.status}' — a rotation can be proposed from ${REPROPOSABLE.join("/")} only`,
+      });
     }
     if (!(await requireApprover(db, body.approverUserId))) return reply.status(422).send({ error: "unknown_approver" });
     const actorId = await resolveActor(db, req.authCtx.userId);
     await db.update(certInventory).set({ status: "rotation_proposed" }).where(eq(certInventory.id, certId));
+    // O6: the attempt's own ledger row, created AT PROPOSE (status
+    // 'proposed'); the /decide hook advances it to rotated/denied/failed —
+    // every attempt leaves a durable, reasoned record.
+    const [linkedFinding] = await db
+      .select({ id: infraFindings.id })
+      .from(infraFindings)
+      .where(and(eq(infraFindings.refTable, "cert_inventory"), eq(infraFindings.refId, certId)));
+    await db.insert(certRotations).values({
+      certId,
+      findingId: linkedFinding?.id ?? null,
+      oldSerial: cert.serial ?? null,
+      status: "proposed",
+    });
     const approvalId = await proposeInfraAction(
       db,
       "cert_rotate",
