@@ -34,7 +34,7 @@ import {
   orchestrationRuns,
 } from "@regulait/db";
 import { resolveProvider, GitProviderError, IMPLEMENTED_GIT_PROVIDERS } from "@regulait/git-provider";
-import { resolveDeployProvider, DeployProviderError } from "./deploy.js";
+import { resolveDeployProvider, liveDeployClients, DeployProviderError } from "./deploy.js";
 import { validateGraph } from "@regulait/orchestration-kernel";
 import { inTransaction, planRun, type ApprovalPostCommit, type DbOrTx } from "./orchestration.js";
 import {
@@ -506,8 +506,16 @@ async function runGitExecutions(
             baseUrl: target!.baseUrl,
             roleArn: target!.roleArn,
             region: target!.region,
+            // REGULAIT_DEPLOY_LIVE wiring: flag off = {} (dry-run, byte-
+            // identical); flag on = the real lazily-loading per-cloud client.
+            ...liveDeployClients(target!.provider),
           });
-          const res = provider.deploy(target!.name, target!.environment, instance.id);
+          // ASYNC-DEPLOY: awaited like every other async stage executor (git
+          // ops, nested runs). The stage claim was taken in its own committed
+          // transaction above and is released below after the provider call —
+          // awaiting here holds no DB transaction or row lock open, and a
+          // rejected promise lands in the same catch → deploy_blocked path.
+          const res = await provider.deploy(target!.name, target!.environment, instance.id);
           // §3 the control-plane / agent-execution-plane data boundary: in
           // AIR_GAPPED mode NOTHING that could carry execution-plane detail
           // (the deploy URL, the provider detail string) is retained in the
@@ -602,8 +610,13 @@ async function runGitExecutions(
             baseUrl: target.baseUrl,
             roleArn: target.roleArn,
             region: target.region,
+            // same REGULAIT_DEPLOY_LIVE wiring as the deploy executor
+            ...liveDeployClients(target.provider),
           });
-          const res = provider.rollback(target.name, priorDeploy?.deployId ?? "unknown");
+          // ASYNC-DEPLOY: awaited outside any transaction (same claim/release
+          // semantics as the deploy executor); a rejection lands in this catch
+          // and keeps the stage awaiting_execution (retryable), never terminal.
+          const res = await provider.rollback(target.name, priorDeploy?.deployId ?? "unknown");
           // §3 air-gapped boundary: keep only which deploy was reversed, not the
           // provider detail string (which could carry execution-plane info).
           context[`rollback:${stage.id}`] =
