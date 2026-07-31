@@ -6352,8 +6352,10 @@ describe("compliance classification cascade (§8.3)", () => {
 });
 
 describe("admin portal (ADR-0012): static shell + API-parity gap endpoints", () => {
-  it("GET /admin serves the shell without auth — zero data, zero secrets inside", async () => {
-    const res = await app.inject({ method: "GET", url: "/admin" });
+  it("GET /legacy/admin serves the shell without auth — zero data, zero secrets inside", async () => {
+    // phase-2 swap (ADR-0026): /admin now redirects to the SPA; the legacy
+    // shell stays served for one release at /legacy/admin.
+    const res = await app.inject({ method: "GET", url: "/legacy/admin" });
     expect(res.statusCode).toBe(200);
     expect(res.headers["content-type"]).toContain("text/html");
     // §6 functional surfaces, as the (restructured) tab titles — Users & Roles
@@ -7437,9 +7439,9 @@ describe("UI plumbing: /v1/me and own-scoped list views", () => {
   });
 });
 
-describe("end-user app shell (/app)", () => {
+describe("end-user app shell (/legacy/app after the phase-2 swap)", () => {
   it("serves without auth — zero data, zero secrets — with all workspace pages", async () => {
-    const res = await app.inject({ method: "GET", url: "/app" });
+    const res = await app.inject({ method: "GET", url: "/legacy/app" });
     expect(res.statusCode).toBe(200);
     expect(res.headers["content-type"]).toContain("text/html");
     for (const page of ["Playground", "Runs", "Workflows", "Inbox", "Projects"]) {

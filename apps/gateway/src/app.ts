@@ -183,6 +183,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "/v1/pm/webhooks/:connectionName",
     "/admin",
     "/app",
+    // the deprecated legacy shells (phase-2 swap): static, zero-data pages a
+    // browser hits before it has any credential — exactly like /ui below
+    "/legacy/admin",
+    "/legacy/app",
     "/",
     "/health",
     "/auth/login",
@@ -407,6 +411,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "POST /v1/pm/webhooks/:connectionName",
     "GET /admin",
     "GET /app",
+    // the deprecated legacy shells (phase-2 swap) — static pages, same
+    // reasoning as /app above
+    "GET /legacy/admin",
+    "GET /legacy/app",
     "GET /",
     "GET /health",
     // ADR-0026: the SPA shell, same static-page reasoning as /app above
@@ -1852,10 +1860,24 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     };
   });
 
-  // ADR-0012: the portal is a static shell (zero data, zero secrets) that
-  // talks to the same REST API as any script — policy-as-code by construction.
-  app.get("/admin", async (_req, reply) => reply.type("text/html").send(ADMIN_PORTAL_HTML));
-  app.get("/app", async (_req, reply) => reply.type("text/html").send(APP_HTML));
+  // ADR-0026 phase 2 — the default-surface swap: the React SPA at /ui is now
+  // the product surface, so the historic shell URLs redirect there. The
+  // legacy shells (ADR-0012 static, zero data, zero secrets) stay reachable
+  // for ONE release at /legacy/*, visibly labeled deprecated; removal is
+  // recorded in the ADR-0026 amendment.
+  const deprecationBanner =
+    '<div style="background:#7c5200;color:#fff;padding:8px 14px;' +
+    "font:12.5px system-ui,sans-serif;text-align:center\">" +
+    "Deprecated: this legacy console is kept for one release only — the product now lives at " +
+    '<a href="/ui" style="color:#fff;text-decoration:underline">/ui</a>.</div>';
+  const withDeprecation = (html: string) =>
+    html.replace('<div id="root">', `${deprecationBanner}<div id="root">`);
+  const LEGACY_ADMIN_HTML = withDeprecation(ADMIN_PORTAL_HTML);
+  const LEGACY_APP_HTML = withDeprecation(APP_HTML);
+  app.get("/admin", async (_req, reply) => reply.redirect("/ui", 302));
+  app.get("/app", async (_req, reply) => reply.redirect("/ui", 302));
+  app.get("/legacy/admin", async (_req, reply) => reply.type("text/html").send(LEGACY_ADMIN_HTML));
+  app.get("/legacy/app", async (_req, reply) => reply.type("text/html").send(LEGACY_APP_HTML));
 
   // ADR-0026: the React SPA at /ui (built bundle from apps/web/dist —
   // assets, SPA fallback, 503 when unbuilt). Registered like the two legacy
@@ -1863,9 +1885,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerWebServing(app);
 
   // The two things anything pointed at the bare origin expects to find: a
-  // human landing on / gets the app, a load balancer or uptime check gets a
-  // status. Both are auth-exempt — neither reveals anything.
-  app.get("/", async (_req, reply) => reply.redirect("/app", 302));
+  // human landing on / gets the app (the SPA since the phase-2 swap), a load
+  // balancer or uptime check gets a status. Both are auth-exempt.
+  app.get("/", async (_req, reply) => reply.redirect("/ui", 302));
   app.get("/health", async (_req, reply) => {
     try {
       await db.execute(sql`select 1`);

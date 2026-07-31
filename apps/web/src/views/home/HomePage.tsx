@@ -81,7 +81,7 @@ function SetupCard() {
             All {d.totalCount} setup steps are complete — this deployment is fully wired.
           </span>
           <span className={v.grow} />
-          <a href="/admin#getting-started">Review in the classic console ↗</a>
+          <Link to="/admin/setup">Review the checklist</Link>
         </div>
       </Card>
     );
@@ -96,7 +96,7 @@ function SetupCard() {
           </Badge>
         </span>
       }
-      actions={<a href="/admin#getting-started">Open checklist ↗</a>}
+      actions={<Link to="/admin/setup">Open checklist</Link>}
     >
       <div>
         {d.steps.map((step) => (
@@ -108,13 +108,9 @@ function SetupCard() {
             {step.done ? (
               <Badge tone="ok">done</Badge>
             ) : (
-              <a
-                className={v.faint}
-                href="/admin#getting-started"
-                title="Complete this step in the classic admin console"
-              >
-                complete ↗
-              </a>
+              <Link className={v.faint} to="/admin/setup" title="Complete this step in Getting started">
+                complete
+              </Link>
             )}
           </div>
         ))}
@@ -197,7 +193,7 @@ function SpendCard() {
     <Card
       title={auth?.isAdmin ? "Spend snapshot" : "My spend"}
       actions={
-        auth?.isAdmin ? <a href="/admin#cost-projects">Cost dashboard ↗</a> : <Link to="/projects">Projects</Link>
+        auth?.isAdmin ? <Link to="/admin/cost">Cost dashboard</Link> : <Link to="/projects">Projects</Link>
       }
     >
       {(t.events ?? 0) === 0 ? (
@@ -309,7 +305,7 @@ function AuditCard() {
     );
   const entries = (q.data?.entries ?? []).slice(0, 6);
   return (
-    <Card title="Recent audit trail" actions={<a href="/admin#audit-log">Full log ↗</a>}>
+    <Card title="Recent audit trail" actions={<Link to="/admin/audit">Full log</Link>}>
       {entries.length === 0 ? (
         <EmptyState title="No audit entries yet" body="Every governed decision lands here as it happens." />
       ) : (

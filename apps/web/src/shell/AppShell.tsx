@@ -1,8 +1,8 @@
 /**
  * The application shell: grouped left nav (with the "/" quick filter), topbar
- * (user menu, theme toggle), and — for admins — the honest bridge into the
- * classic console: placeholder group headers that open the legacy /admin tab
- * until phase 2 migrates those surfaces into this shell.
+ * (user menu, theme toggle), and — for admins — the full native admin surface
+ * (phase 2): every group is a set of real /ui routes inside this shell; the
+ * deprecated legacy consoles stay reachable from the footer for one release.
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
@@ -26,15 +26,61 @@ const WORKSPACE: NavEntry[] = [
   { label: "Projects", to: "/projects" },
 ];
 
-/** admin bridge: each group opens the closest legacy /admin tab (phase 2
- * replaces these with native views inside this shell) */
-const ADMIN_BRIDGE: Array<{ label: string; hash: string }> = [
-  { label: "Identity & Access", hash: "users" },
-  { label: "Governance", hash: "rules-engine" },
-  { label: "Integrations", hash: "mcp-servers" },
-  { label: "Cost & Optimization", hash: "cost-projects" },
-  { label: "Compliance & Infra", hash: "infrastructure" },
-  { label: "Settings", hash: "organization" },
+/** the native admin surface (phase 2): grouped real routes inside this shell */
+const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
+  {
+    group: "Identity & Access",
+    items: [
+      { label: "Users", to: "/admin/users" },
+      { label: "Roles", to: "/admin/roles" },
+      { label: "Teams", to: "/admin/teams" },
+      { label: "Client access", to: "/admin/client-access" },
+      { label: "SSO & sessions", to: "/admin/sso" },
+    ],
+  },
+  {
+    group: "Governance",
+    items: [
+      { label: "Rules engine", to: "/admin/rules" },
+      { label: "Simulation", to: "/admin/simulation" },
+      { label: "Approvals queue", to: "/admin/approvals" },
+      { label: "Audit log", to: "/admin/audit" },
+      { label: "Workflow templates", to: "/admin/workflow-templates" },
+    ],
+  },
+  {
+    group: "Integrations",
+    items: [
+      { label: "Agents", to: "/admin/agents" },
+      { label: "Model credentials", to: "/admin/model-credentials" },
+      { label: "Connectors", to: "/admin/connectors" },
+      { label: "MCP servers", to: "/admin/mcp-servers" },
+      { label: "Git connections", to: "/admin/git-connections" },
+      { label: "PM connections", to: "/admin/pm-connections" },
+      { label: "Deploy targets", to: "/admin/deploy-targets" },
+    ],
+  },
+  {
+    group: "Cost & Optimization",
+    items: [
+      { label: "Cost dashboard", to: "/admin/cost" },
+      { label: "Optimization", to: "/admin/optimization" },
+    ],
+  },
+  {
+    group: "Compliance & Infra",
+    items: [
+      { label: "Compliance profiles", to: "/admin/compliance" },
+      { label: "Infrastructure", to: "/admin/infrastructure" },
+    ],
+  },
+  {
+    group: "Settings",
+    items: [
+      { label: "Organization", to: "/admin/organization" },
+      { label: "Getting started", to: "/admin/setup" },
+    ],
+  },
 ];
 
 export default function AppShell(props: { children: ReactNode }) {
@@ -86,10 +132,15 @@ export default function AppShell(props: { children: ReactNode }) {
     () => WORKSPACE.filter((n) => !q || n.label.toLowerCase().includes(q)),
     [q],
   );
-  const adminItems = useMemo(
-    () => (auth?.isAdmin ? ADMIN_BRIDGE.filter((n) => !q || n.label.toLowerCase().includes(q)) : []),
-    [auth?.isAdmin, q],
-  );
+  const adminGroups = useMemo(() => {
+    if (!auth?.isAdmin) return [];
+    return ADMIN_GROUPS.map((g) => ({
+      group: g.group,
+      items: g.items.filter(
+        (n) => !q || n.label.toLowerCase().includes(q) || g.group.toLowerCase().includes(q),
+      ),
+    })).filter((g) => g.items.length > 0);
+  }, [auth?.isAdmin, q]);
 
   const displayName = auth?.user?.displayName ?? "Operator";
   const initials = displayName
@@ -139,30 +190,35 @@ export default function AppShell(props: { children: ReactNode }) {
             )}
           </NavLink>
         ))}
-        {adminItems.length > 0 && (
-          <>
-            <div className={s.section}>Administration</div>
-            {adminItems.map((n) => (
-              <a
-                key={n.hash}
-                className={s.navItem}
-                href={`/admin#${n.hash}`}
-                title="Opens the classic admin console (migrates into this shell in phase 2)"
+        {adminGroups.map((g) => (
+          <div key={g.group}>
+            <div className={s.section}>{g.group}</div>
+            {g.items.map((n) => (
+              <NavLink
+                key={n.to}
+                to={n.to}
+                className={({ isActive }) => (isActive ? s.navItemActive! : s.navItem!)}
+                onClick={() => setSideOpen(false)}
               >
                 {n.label}
-                <span className={s.navExt} aria-hidden>
-                  classic ↗
-                </span>
-              </a>
+              </NavLink>
             ))}
-          </>
-        )}
+          </div>
+        ))}
         <div className={s.sideFoot}>
           Governed AI delivery platform
           <br />
-          <a href="/app" title="The previous end-user UI, still served at /app">
-            classic app ↗
+          <a href="/legacy/app" title="The previous end-user UI (deprecated, one release)">
+            legacy app ↗
           </a>
+          {auth?.isAdmin && (
+            <>
+              {" · "}
+              <a href="/legacy/admin" title="The previous admin console (deprecated, one release)">
+                legacy admin ↗
+              </a>
+            </>
+          )}
         </div>
       </aside>
 
