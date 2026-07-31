@@ -295,6 +295,13 @@
       "when": 1784977000000,
       "tag": "0041_interception_depth",
       "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1784978000000,
+      "tag": "0042_secure_auth",
+      "breakpoints": true
     }
   ]
 }
