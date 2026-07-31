@@ -2272,6 +2272,15 @@ const TABS = [
     + "<p class='dim' style='font-size:12px'>Off by default: pruning only happens when an admin presses the button on the Audit Log page. When on, the gateway prunes on the configured interval under the SAME floor the manual button uses. The org default retention only fills the gap when no compliance profile sets one — a profile floor always wins upward, so this can never shorten a framework's audit trail. Enter 0 to clear the org default (never prune without a profile floor — today's behaviour). Every prune, manual or scheduled, is itself audited.</p>"
     + "</div>"
 
+    // --- O5 backup verification --------------------------------------------
+    + "<h2>Backup verification (O5)</h2><div class='card'>"
+    + form("f-org-backup", [
+        {name:"backupVerifyEnabled",label:"scheduled backup verification",options:[{v:"false",l:"off (seed/manual ledger rows only — default)"},{v:"true",l:"on (verify recovery points on a schedule)"}]},
+        {name:"backupVerifyIntervalHours",label:"verify interval (hours)",type:"number"},
+      ], "Save backup verification")
+    + "<p class='dim' style='font-size:12px'>Off by default (today's behaviour). When on, the gateway checks each backup-target resource's recent recovery points through its provider on the configured interval and writes an honest, source-labelled ledger row: success only when the provider's own check found no missed backup, and rows from the mock provider are labelled scheduler:mock so they can never pass for a real cloud verification. A missed backup writes no success row — the findings pipeline stays the surface for the miss. Every pass is audited.</p>"
+    + "</div>"
+
     // --- Sign-in & sessions (ADR-0025) -------------------------------------
     + "<h2>Sign-in &amp; sessions</h2><div class='card'>"
     + form("f-org-auth", [
@@ -2311,6 +2320,7 @@ const TABS = [
   setVals("f-org-workers", ["defaultWorkerMaxTurns","maxWorkerTurns","maxAttachmentsPerDispatch","maxAttachmentBytes","imageTokenEstimateTokens","sharedContextMaxChars","nodeOutputMaxChars"]);
   setVals("f-org-approvals", ["approvalQuorum","approvalDelegationEnabled"]);
   setVals("f-org-retention", ["autoPruneEnabled","pruneIntervalHours","defaultAuditRetentionDays"]);
+  setVals("f-org-backup", ["backupVerifyEnabled","backupVerifyIntervalHours"]);
   setVals("f-org-auth", ["passwordMinLength","passwordRequireClasses","sessionLifetimeHours","sessionIdleMinutes","mfaRequired","ssoOnly","loginLockoutThreshold","loginLockoutWindowMinutes","loginLockoutMinutes"]);
   // the retention-days number input has no stored 0; show blank when null
   const retIn = $("#f-org-retention [name=defaultAuditRetentionDays]");
@@ -2384,6 +2394,10 @@ const TABS = [
       modeAuditRetention: modeMap,
     });
   });
+  wire("f-org-backup", (d) => putOrg({
+    backupVerifyEnabled: asBool(d.backupVerifyEnabled),
+    backupVerifyIntervalHours: Number(d.backupVerifyIntervalHours),
+  }));
   wire("f-org-auth", (d) => putOrg({
     passwordMinLength: Number(d.passwordMinLength),
     passwordRequireClasses: Number(d.passwordRequireClasses),

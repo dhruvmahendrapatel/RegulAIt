@@ -1604,6 +1604,10 @@ export const backupRuns = pgTable(
     finishedAt: timestamp("finished_at", { withTimezone: true }),
     sizeBytes: bigint("size_bytes", { mode: "number" }),
     retentionUntil: timestamp("retention_until", { withTimezone: true }),
+    /** O5 (migration 0045): who wrote this row — 'scheduler:<provider-kind>'
+     * for scheduler-verified rows (the mock provider's rows are honestly
+     * labelled 'scheduler:mock'); null = pre-O5 / seed / manual. */
+    source: text("source"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("backup_runs_resource_idx").on(t.resourceId)],
@@ -1893,6 +1897,14 @@ export const orgSettings = pgTable(
       .$type<Partial<Record<"hosted" | "byoc" | "air_gapped", number>>>()
       .notNull()
       .default({}),
+
+    // --- O5 (migration 0045): scheduled backup verification --------------
+    /** OFF (default) = today's behaviour: success ledger rows only ever come
+     * from the seed or a manual write. ON = the boot scheduler verifies
+     * recent recovery points per backup_target on the interval below, via the
+     * existing provider scan path, and writes source-labelled ledger rows. */
+    backupVerifyEnabled: boolean("backup_verify_enabled").notNull().default(false),
+    backupVerifyIntervalHours: integer("backup_verify_interval_hours").notNull().default(24),
 
     // --- orchestration worker caps -----------------------------------------
     defaultWorkerMaxTurns: integer("default_worker_max_turns").notNull().default(6),

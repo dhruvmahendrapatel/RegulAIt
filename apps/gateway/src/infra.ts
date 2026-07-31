@@ -49,6 +49,7 @@ import {
   scanInfraSchema,
 } from "@regulait/shared";
 import {
+  evaluateBackupSchedule,
   infraLiveEnabled,
   resolveInfraProvider,
   severityRank,
@@ -62,6 +63,7 @@ import { buildAwsInfraLiveClient } from "./infra-aws-client.js";
 import { buildAzureInfraLiveClient } from "./infra-azure-client.js";
 import { buildGcpInfraLiveClient } from "./infra-gcp-client.js";
 import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects.js";
+import { loadOrgSettings } from "./org-settings.js";
 
 type InfraResourceRow = typeof infraResources.$inferSelect;
 type InfraPolicyRow = typeof infraPolicies.$inferSelect;
@@ -892,9 +894,129 @@ async function requireApprover(db: Db, approverUserId: string): Promise<boolean>
   return Boolean(approver);
 }
 
+// ---------------------------------------------------------------------------
+// O5 (ADR-0027, migration 0045) — scheduled backup VERIFICATION.
+// Pre-O5, a `success` backup_runs row could only come from the seed or a
+// manual write — the ledger never verified anything by itself. This pass
+// checks each backup_target's recent recovery points through the EXISTING
+// provider path (provider.scan — the same evaluateBackupSchedule check the
+// findings pipeline runs) and writes an HONEST ledger row: success ONLY when
+// the provider's check found no missed backup, and every row labelled with
+// its source ('scheduler:<provider-kind>' — the mock provider's rows say
+// 'scheduler:mock' and can never masquerade as a real cloud verification).
+// A provider that reports the backup MISSED yields NO success row (the scan
+// pipeline owns the finding); an unreachable/un-live provider is skipped and
+// counted, never a crash and never a fabricated row.
+// ---------------------------------------------------------------------------
+
+export async function runBackupVerifyOnce(
+  db: Db,
+): Promise<{ checked: number; verified: number; missed: number; skipped: number }> {
+  const resources = await db
+    .select()
+    .from(infraResources)
+    .where(eq(infraResources.kind, "backup_target"));
+  let verified = 0;
+  let missed = 0;
+  let skipped = 0;
+  const now = new Date();
+  for (const resource of resources) {
+    try {
+      const provider = resolveInfraProvider(providerConfig(resource));
+      const reports = await provider.scan({
+        id: resource.id,
+        kind: resource.kind,
+        name: resource.name,
+        config: resource.config,
+      });
+      // The provider's backup report carries the OBSERVED last recovery point
+      // (mock + real adapters alike; the mock always emits one, graded by
+      // evaluateBackupSchedule). VERIFIED means: the provider observed a
+      // recovery point AND the schedule evaluator — the same one the findings
+      // pipeline uses — says it is not missed. No observed recovery point =
+      // missed (never a fabricated success). No backup report at all = the
+      // provider saw nothing wrong = verified.
+      const report = reports.find((r) => r.kind === "backup_missed");
+      if (report) {
+        const lastRaw = report.detail?.lastBackupAt;
+        const lastBackupAt = lastRaw ? new Date(String(lastRaw)) : null;
+        const schedule = String((resource.config ?? {}).backupSchedule ?? "daily");
+        const { missed: isMissed } = evaluateBackupSchedule(schedule, lastBackupAt, now, 1);
+        if (lastBackupAt === null || isMissed) {
+          // NOT verified — no success row is ever written for a missed
+          // backup; the scan/findings pipeline is the surface for the miss.
+          missed++;
+          continue;
+        }
+      }
+      await db.insert(backupRuns).values({
+        resourceId: resource.id,
+        kind: "backup",
+        status: "success",
+        startedAt: now,
+        finishedAt: now,
+        source: `scheduler:${provider.kind}`,
+      });
+      verified++;
+    } catch (err) {
+      // un-live cloud kinds (501) and provider failures skip the resource —
+      // honest absence, never a fabricated success
+      if (err instanceof InfraProviderError) skipped++;
+      else throw err;
+    }
+  }
+  if (resources.length > 0) {
+    const actorId = await resolveActor(db, null);
+    await db.insert(auditLog).values({
+      userId: actorId,
+      objectType: "infra_operation",
+      objectId: null,
+      detail: { phase: "backup-verify", checked: resources.length, verified, missed, skipped },
+      effect: "allow",
+      ruleId: "backup-verify-pass",
+      ruleChain: [],
+      reason: `scheduled backup verification: ${verified}/${resources.length} target(s) verified via their provider, ${missed} missed, ${skipped} skipped`,
+    });
+  }
+  return { checked: resources.length, verified, missed, skipped };
+}
+
+/**
+ * O5 boot scheduler — the startAuditPruneScheduler pattern EXACTLY (see
+ * org-settings.ts): an hourly unref'd tick that re-reads org settings each
+ * time (an admin's change applies without a restart), runs when the
+ * configured interval has elapsed, never crashes the gateway, and returns
+ * the stop function the app's onClose hook calls. OFF by default
+ * (backupVerifyEnabled=false = today's no-scheduler behaviour).
+ */
+export function startBackupVerifyScheduler(db: Db): () => void {
+  let lastRunAt = 0;
+  const tick = async () => {
+    try {
+      const org = await loadOrgSettings(db);
+      if (!org.backupVerifyEnabled) return;
+      const intervalMs = Math.max(1, org.backupVerifyIntervalHours) * 3600 * 1000;
+      if (Date.now() - lastRunAt < intervalMs) return;
+      lastRunAt = Date.now();
+      await runBackupVerifyOnce(db);
+    } catch {
+      // a failed pass never crashes the gateway; the next tick retries
+    }
+  };
+  const timer = setInterval(() => void tick(), 3600 * 1000);
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
+
 const SEVERITY_ORDER: InfraSeverity[] = ["low", "medium", "high", "critical"];
 
 export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: string) {
+  // O5: the backup-verification scheduler boots with the infra routes (OFF by
+  // default via org settings) — unref'd, stopped on close, exactly like the
+  // audit auto-prune scheduler app.ts starts beside registerOrgSettingsRoutes.
+  const stopBackupVerifyScheduler = startBackupVerifyScheduler(db);
+  app.addHook("onClose", async () => stopBackupVerifyScheduler());
+
   // --- resources ---------------------------------------------------------
   app.get("/v1/infra/resources", async () => {
     const [resources, policies] = await Promise.all([

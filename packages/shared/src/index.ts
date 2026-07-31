@@ -1112,6 +1112,9 @@ export const updateOrgSettingsSchema = z
     modeAuditRetention: z
       .record(z.enum(["hosted", "byoc", "air_gapped"]), z.number().int().positive())
       .optional(),
+    // O5 (migration 0045): scheduled backup verification — OFF by default
+    backupVerifyEnabled: z.boolean().optional(),
+    backupVerifyIntervalHours: z.number().int().min(1).max(24 * 30).optional(),
     // orchestration worker caps — 20 is the zod wall the kernel/API already hold
     defaultWorkerMaxTurns: z.number().int().min(1).max(20).optional(),
     maxWorkerTurns: z.number().int().min(1).max(20).optional(),
