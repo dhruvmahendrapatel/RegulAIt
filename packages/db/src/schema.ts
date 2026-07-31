@@ -220,6 +220,9 @@ export const auditLog = pgTable(
         // A4 (ADR-0027): an admin set/clear of the deploy-mode scope on a
         // pillar-1 restriction rule. Plain text column — no DDL needed.
         "restriction_rule",
+        // O9 (ADR-0027): an admin narrowing/restoring a revocation's scope
+        // (full <-> read_only). Plain text column — no DDL needed.
+        "revocation",
         // ADR-0022 identity lifecycle: admin acts on users (deactivate/
         // reactivate/rename/admin-flag), roles (force-delete), teams
         // (member-remove/delete), workflow templates (retire) and approver
@@ -490,6 +493,11 @@ export const revocations = pgTable(
       .notNull()
       .references(() => mcpServers.id, { onDelete: "cascade" }),
     toolName: text("tool_name"),
+    /** O9 (migration 0045): 'full' (default = today) suppresses the matched
+     * role-derived entitlement entirely; 'read_only' suppresses only
+     * WRITE-classified tools — reads stay allowed. A full revocation still
+     * beats everything (precedence otherwise unchanged). */
+    scope: text("scope", { enum: ["full", "read_only"] }).notNull().default("full"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -699,6 +707,11 @@ export const connectorRevocations = pgTable(
       .notNull()
       .references(() => connectors.id, { onDelete: "cascade" }),
     reason: text("reason"),
+    /** O9 (migration 0045): 'full' (default = today) denies every operation;
+     * 'read_only' denies WRITES only — reads stay allowed. Agent revocations
+     * carry no scope: agents have no read/write op classification to scope by
+     * (ADR-0027). */
+    scope: text("scope", { enum: ["full", "read_only"] }).notNull().default("full"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

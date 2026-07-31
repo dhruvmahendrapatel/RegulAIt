@@ -1171,6 +1171,18 @@ export const setRuleDeployModeSchema = z.object({
 });
 export const ruleKindParamSchema = z.enum(["approvals", "rate-limits", "data-scopes"]);
 
+/** O9 (ADR-0027): set the scope of an existing MCP/connector revocation.
+ * 'full' = the ADR-0019 total semantics (default for every new revocation);
+ * 'read_only' = write-classified tools/ops denied, reads still allowed.
+ * Scope is an EDIT of an existing subtractive override — creation always
+ * defaults to full, so a revocation starts as the unambiguous total ADR-0019
+ * argued for and is narrowed only by an explicit, audited second act. Agent
+ * revocations carry no scope (no read/write op classification to scope by). */
+export const setRevocationScopeSchema = z.object({
+  scope: z.enum(["full", "read_only"]),
+});
+export const revocationKindParamSchema = z.enum(["mcp", "connectors"]);
+
 // ---------------------------------------------------------------------------
 // ADR-0025 — REAL HUMAN AUTHENTICATION (migration 0042): password + session
 // login, TOTP MFA, OIDC SSO. Request shapes only — hashing/verification live

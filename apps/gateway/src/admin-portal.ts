@@ -1134,13 +1134,24 @@ const TABS = [
         {name:"ruleId",label:"rule id",ph:"paste the rule id from the tables above"},
         {name:"deployMode",label:"deploy mode",options:[{v:"__clear__",l:"— clear (every call) —"},{v:"hosted",l:"hosted"},{v:"byoc",l:"byoc"},{v:"air_gapped",l:"air_gapped"}]},
       ], "Set scope")
-    + "<p class='dim' style='font-size:12px'>A mode-scoped restriction applies only to calls whose attributed project has in-flight workflow instances landing on a deploy target of that mode. The context is derived server-side — never client-asserted — and an unattributed call (or one with no in-flight deploy-bound work) never matches a mode-scoped rule. Mode scoping only narrows WHICH restrictions apply; it can never mint an allow. Every change here is audited.</p></div>";
+    + "<p class='dim' style='font-size:12px'>A mode-scoped restriction applies only to calls whose attributed project has in-flight workflow instances landing on a deploy target of that mode. The context is derived server-side — never client-asserted — and an unattributed call (or one with no in-flight deploy-bound work) never matches a mode-scoped rule. Mode scoping only narrows WHICH restrictions apply; it can never mint an allow. Every change here is audited.</p></div>"
+    // O9 (ADR-0027): narrow an EXISTING revocation to read_only (writes stay
+    // denied, reads allowed) or restore it to full. Creation is always full.
+    + "<h2>Revocation scope (O9)</h2><div class='card'>"
+    + form("f-rvscope", [
+        {name:"kind",label:"revocation kind",options:[{v:"mcp",l:"MCP (role-derived) revocation"},{v:"connectors",l:"connector revocation"}]},
+        {name:"revocationId",label:"revocation id",ph:"paste the revocation id"},
+        {name:"scope",label:"scope",options:[{v:"full",l:"full — everything denied (default)"},{v:"read_only",l:"read_only — writes denied, reads allowed"}]},
+      ], "Set scope")
+    + "<p class='dim' style='font-size:12px'>A revocation is created FULL (the unambiguous ADR-0019 total). Narrowing it to read_only keeps write-classified tools/operations denied while letting reads through; a full revocation always beats everything else. Agent revocations carry no scope — agents have no read/write operation classification to scope by. Every change is audited.</p></div>";
   for (const id of ["f-apr", "f-dsr", "f-rlr"]) { linkTools(id, tools); linkScope(id); }
   wire("f-apr", (d) => post("/v1/rules/approvals", d));
   wire("f-dsr", (d) => post("/v1/rules/data-scopes", { ...d, allowedValues: String(d.allowedValues).split(",") }));
   wire("f-rlr", (d) => post("/v1/rules/rate-limits", { ...d, maxCalls: Number(d.maxCalls), windowSeconds: Number(d.windowSeconds) }));
   wire("f-rmode", (d) => api("PATCH", "/v1/rules/" + d.kind + "/" + encodeURIComponent(d.ruleId) + "/deploy-mode",
     { deployMode: d.deployMode === "__clear__" ? null : d.deployMode }));
+  wire("f-rvscope", (d) => api("PATCH", "/v1/revocations/" + d.kind + "/" + encodeURIComponent(d.revocationId) + "/scope",
+    { scope: d.scope }));
 }],
 ["Workflows", async (el) => {
   // Pillar 2's admin home: templates (with their stage chain), the assignment

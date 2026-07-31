@@ -22,6 +22,7 @@ import {
   approvalRules,
   auditLog,
   complianceProfiles,
+  connectorRevocations,
   dataScopeRules,
   eq,
   isNull,
@@ -33,12 +34,19 @@ import {
   orgSettings,
   ORG_SETTINGS_ID,
   rateLimits,
+  revocations,
   users,
   type Db,
   type OrgSettingsRow,
   type SQL,
 } from "@regulait/db";
-import { ruleKindParamSchema, setRuleDeployModeSchema, updateOrgSettingsSchema } from "@regulait/shared";
+import {
+  revocationKindParamSchema,
+  ruleKindParamSchema,
+  setRevocationScopeSchema,
+  setRuleDeployModeSchema,
+  updateOrgSettingsSchema,
+} from "@regulait/shared";
 import { z } from "zod";
 
 export type { OrgSettingsRow };
@@ -419,6 +427,44 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db) {
         body.deployMode == null
           ? `${kind} rule '${ruleId}' deploy-mode scope cleared (mode-unscoped — applies to every call)`
           : `${kind} rule '${ruleId}' scoped to deploy mode '${body.deployMode}' — it now binds only to calls whose attributed work lands on a ${body.deployMode} deploy target`,
+    });
+    return reply.send(row);
+  });
+
+  // -------------------------------------------------------------------------
+  // O9 (ADR-0027) — partial revocations. A revocation is CREATED total
+  // ('full', the ADR-0019 semantics); this admin-only edit narrows it to
+  // read_only (write-classified tools/ops denied, reads allowed) or restores
+  // full. MCP + connector revocations only — agent revocations have no
+  // read/write op classification to scope by.
+  // -------------------------------------------------------------------------
+  const REVOCATION_TABLES = { mcp: revocations, connectors: connectorRevocations } as const;
+
+  app.patch("/v1/revocations/:kind/:revocationId/scope", async (req, reply) => {
+    const { kind, revocationId } = z
+      .object({ kind: revocationKindParamSchema, revocationId: z.string().uuid() })
+      .parse(req.params);
+    const body = setRevocationScopeSchema.parse(req.body);
+    const table = REVOCATION_TABLES[kind];
+    const [before] = await db.select().from(table).where(eq(table.id, revocationId));
+    if (!before) return reply.status(404).send({ error: "unknown_revocation" });
+    const [row] = await db
+      .update(table)
+      .set({ scope: body.scope })
+      .where(eq(table.id, revocationId))
+      .returning();
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "revocation",
+      objectId: revocationId,
+      detail: { phase: "revocation-scope", revocationKind: kind, before: before.scope, after: body.scope },
+      effect: "allow",
+      ruleId: "revocation-scope-set",
+      ruleChain: [],
+      reason:
+        body.scope === "read_only"
+          ? `${kind} revocation '${revocationId}' narrowed to read_only — write-classified ${kind === "mcp" ? "tools" : "operations"} stay denied, reads are allowed again`
+          : `${kind} revocation '${revocationId}' restored to full — every ${kind === "mcp" ? "tool" : "operation"} denied (the ADR-0019 total semantics)`,
     });
     return reply.send(row);
   });

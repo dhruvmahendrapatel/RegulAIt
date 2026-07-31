@@ -51,6 +51,10 @@ export interface Revocation {
   userId: string;
   serverId: string;
   toolName: string | null;
+  /** O9 (ADR-0027): 'full' (default, incl. absent = every pre-O9 rule) =
+   * suppress entirely; 'read_only' = suppress WRITE-classified tools only —
+   * reads stay allowed. A full revocation still beats everything. */
+  scope?: "full" | "read_only" | null;
 }
 
 /**
@@ -350,13 +354,23 @@ export function evaluate(input: EvaluationInput): Decision {
 
   // A revocation only ever suppresses ROLE-DERIVED entitlements (§5): direct
   // user grants are themselves per-user overrides and always survive.
-  const revocationFor = (toolName: string | null): Revocation | undefined =>
-    (input.revocations ?? []).find(
+  // O9 (ADR-0027): a 'read_only'-scoped revocation suppresses WRITE-classified
+  // tools only — a read stays allowed. A FULL revocation (the default, and
+  // every pre-O9 row) beats everything, so precedence is otherwise unchanged:
+  // when both match, full governs.
+  const revocationFor = (toolName: string | null): Revocation | undefined => {
+    const matching = (input.revocations ?? []).filter(
       (r) =>
         r.userId === userId &&
         r.serverId === serverId &&
         (r.toolName === null || r.toolName === toolName),
     );
+    const full = matching.find((r) => (r.scope ?? "full") === "full");
+    if (full) return full;
+    return tool.kind === "write"
+      ? matching.find((r) => r.scope === "read_only")
+      : undefined;
+  };
 
   // Grant precedence: direct tool grant → role tool grant (minus revocations)
   // → direct read-only-all → role read-only-all (minus revocations) → deny.
@@ -654,13 +668,18 @@ export interface AgentRevocation {
   reason?: string | null;
 }
 
-/** ADR-0019: the CONNECTOR twin of AgentRevocation. Same total semantics, same
- * allow-path-only invariant. */
+/** ADR-0019: the CONNECTOR twin of AgentRevocation. Same allow-path-only
+ * invariant. O9 (ADR-0027) partial scope: 'full' (default, incl. absent =
+ * every pre-O9 row) denies every operation; 'read_only' denies WRITES only —
+ * reads stay allowed. A full revocation still beats everything. Agent
+ * revocations stay total: agents carry no read/write op classification to
+ * scope by. */
 export interface ConnectorRevocation {
   id: string;
   userId: string;
   connectorId: string;
   reason?: string | null;
+  scope?: "full" | "read_only" | null;
 }
 
 export interface EvaluateAgentInput {
@@ -981,9 +1000,17 @@ export function evaluateConnector(input: EvaluateConnectorInput): ConnectorDecis
   // narrowing a grant is what editing the grant is for — a revocation must be
   // an unambiguous, auditable "this user may not use this connector at all".
   // Absent input = byte-identical to the pre-ADR-0019 path.
-  const connectorRevocation = (input.connectorRevocations ?? []).find(
+  // O9 (ADR-0027): a FULL revocation (default, incl. every pre-O9 row) denies
+  // every operation exactly as before; a 'read_only'-scoped revocation denies
+  // WRITES only — a read proceeds to the ordinary grant checks. When both
+  // exist, full governs (a full revocation still beats everything).
+  const matchingRevocations = (input.connectorRevocations ?? []).filter(
     (r) => r.userId === userId && r.connectorId === connectorId,
   );
+  const fullRevocation = matchingRevocations.find((r) => (r.scope ?? "full") === "full");
+  const partialRevocation = matchingRevocations.find((r) => r.scope === "read_only");
+  const connectorRevocation =
+    fullRevocation ?? (operation === "write" ? partialRevocation : undefined);
   if (connectorRevocation) {
     chain.push({ rule: "connector-revoked", outcome: "deny", grantId: connectorRevocation.id });
     return {
@@ -991,9 +1018,13 @@ export function evaluateConnector(input: EvaluateConnectorInput): ConnectorDecis
       ruleId: "connector-revoked",
       ruleChain: chain,
       reason:
-        `connector ${connectorRef} is granted to user ${refLabel(userId, input.userName)} ` +
-        `but revoked for them by per-user revocation ${refLabel(connectorRevocation.id)}` +
-        (connectorRevocation.reason ? ` — ${connectorRevocation.reason}` : ""),
+        connectorRevocation.scope === "read_only"
+          ? `write to connector ${connectorRef} denied: per-user revocation ` +
+            `${refLabel(connectorRevocation.id)} is scoped read_only — reads stay allowed` +
+            (connectorRevocation.reason ? ` — ${connectorRevocation.reason}` : "")
+          : `connector ${connectorRef} is granted to user ${refLabel(userId, input.userName)} ` +
+            `but revoked for them by per-user revocation ${refLabel(connectorRevocation.id)}` +
+            (connectorRevocation.reason ? ` — ${connectorRevocation.reason}` : ""),
     };
   }
 

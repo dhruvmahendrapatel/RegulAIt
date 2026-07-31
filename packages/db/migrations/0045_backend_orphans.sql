@@ -21,3 +21,12 @@ ALTER TABLE "backup_runs" ADD COLUMN "source" text;
 ALTER TABLE "org_settings" ADD COLUMN "backup_verify_enabled" boolean DEFAULT false NOT NULL;
 --> statement-breakpoint
 ALTER TABLE "org_settings" ADD COLUMN "backup_verify_interval_hours" integer DEFAULT 24 NOT NULL;
+--> statement-breakpoint
+
+-- O9 partial revocations: 'full' (default = every existing row = today's
+-- total semantics) vs 'read_only' (write-classified tools/ops denied, reads
+-- still allowed). MCP + connector revocations only — agent revocations have
+-- no read/write op classification to scope by (ADR-0027).
+ALTER TABLE "revocations" ADD COLUMN "scope" text DEFAULT 'full' NOT NULL;
+--> statement-breakpoint
+ALTER TABLE "connector_revocations" ADD COLUMN "scope" text DEFAULT 'full' NOT NULL;
