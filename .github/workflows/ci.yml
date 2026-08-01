@@ -75,7 +75,13 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U regulait"
+          # -d is not optional here: pg_isready with no -d defaults the dbname
+          # to the USERNAME, so it dials a database called `regulait` that does
+          # not exist (POSTGRES_DB is regulait_test) and the server logs
+          # `FATAL: database "regulait" does not exist` every 5s. The probe
+          # still passes, so it is harmless — but it is red noise in the log
+          # that actively misleads anyone reading it during an investigation.
+          --health-cmd "pg_isready -U regulait -d regulait_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
