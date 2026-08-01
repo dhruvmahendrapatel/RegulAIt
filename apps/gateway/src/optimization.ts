@@ -1,12 +1,17 @@
 import type { FastifyInstance } from "fastify";
-import { costEvents, count, desc, eq, sql, usageEvents, type Db } from "@regulait/db";
+import { costEvents, count, desc, eq, sql, usageEvents, type Db, type SQL } from "@regulait/db";
 import { z } from "zod";
-import { usageEventsCsv } from "./projects.js";
+import { streamUsageEventsCsv } from "./projects.js";
+import { resolveCsvWindow } from "./csv-export.js";
 
 const listQuery = z.object({
   userId: z.string().uuid().optional(),
   limit: z.coerce.number().int().min(1).max(500).default(100),
   format: z.enum(["json", "csv"]).default("json"),
+  // ADR-0031: explicit date bounds on the CSV export; absent bounds fall back
+  // to the disclosed default window.
+  from: z.coerce.date().optional(),
+  to: z.coerce.date().optional(),
 });
 
 /** OPTIMIZATION §7: the savings ledger read surface. Pillar 5's per-project
@@ -56,16 +61,18 @@ export function registerOptimizationRoutes(app: FastifyInstance, db: Db) {
     const where = userId ? eq(usageEvents.userId, userId) : undefined;
 
     if (q.format === "csv") {
-      const rows = await db
-        .select()
-        .from(usageEvents)
-        .where(where)
-        .orderBy(desc(usageEvents.at))
-        .limit(q.limit);
-      return reply
-        .header("content-type", "text/csv; charset=utf-8")
-        .header("content-disposition", 'attachment; filename="usage-events.csv"')
-        .send(usageEventsCsv(rows));
+      // ADR-0031: same streamed/keyset/disclosed path as the per-project
+      // export. `limit` stays this endpoint's ceiling (max 500) and is now
+      // DISCLOSED when it actually cuts the export short, instead of silently
+      // handing back a short file.
+      const baseFilters: SQL[] = userId ? [eq(usageEvents.userId, userId)] : [];
+      await streamUsageEventsCsv(db, reply, {
+        filename: "usage-events.csv",
+        baseFilters,
+        window: resolveCsvWindow(q.from, q.to),
+        maxRows: q.limit,
+      });
+      return reply;
     }
 
     const [events, [totals]] = await Promise.all([

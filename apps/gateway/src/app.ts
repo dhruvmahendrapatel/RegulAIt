@@ -3,6 +3,8 @@ import {
   and,
   desc,
   eq,
+  gte,
+  lte,
   agentRevocations,
   agents,
   apiKeys,
@@ -42,7 +44,15 @@ import {
   users,
   workflowInstances,
   type Db,
+  type SQL,
 } from "@regulait/db";
+import {
+  csvBatchRows,
+  csvMaxRows,
+  resolveCsvWindow,
+  streamCsv,
+} from "./csv-export.js";
+import { afterCursorDesc, atTextSql } from "./pagination.js";
 import { visibleTools, type ToolRef } from "@regulait/policy-kernel";
 import {
   assignRoleSchema,
@@ -141,6 +151,51 @@ const visibleToolsParams = z.object({
 });
 const auditQuery = z.object({ userId: z.string().uuid().optional() });
 const UUID_ANY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** every audit_log column, spelled out so a keyset read can select the row AND
+ * a derived microsecond-exact `atText` cursor field in one query without
+ * changing the row shape any existing caller sees */
+const auditLogColumns = {
+  id: auditLog.id,
+  at: auditLog.at,
+  userId: auditLog.userId,
+  objectType: auditLog.objectType,
+  objectId: auditLog.objectId,
+  detail: auditLog.detail,
+  serverId: auditLog.serverId,
+  toolName: auditLog.toolName,
+  effect: auditLog.effect,
+  ruleId: auditLog.ruleId,
+  ruleChain: auditLog.ruleChain,
+  reason: auditLog.reason,
+  deployMode: auditLog.deployMode,
+} as const;
+
+/** ADR-0031: the filter set shared by the audit read surface and the CSV
+ * export, so the screen view and the auditor's file can never disagree. */
+interface AuditFilterInput {
+  userId?: string;
+  objectType?: string;
+  effect?: "allow" | "deny" | "require_approval";
+}
+
+function auditFilters(q: AuditFilterInput, from: Date | null, to: Date | null): SQL[] {
+  const out: SQL[] = [];
+  if (q.userId) out.push(eq(auditLog.userId, q.userId));
+  if (q.objectType) out.push(eq(auditLog.objectType, q.objectType as "mcp_tool"));
+  if (q.effect) out.push(eq(auditLog.effect, q.effect));
+  if (from) out.push(gte(auditLog.at, from));
+  if (to) out.push(lte(auditLog.at, to));
+  return out;
+}
+
+const auditCsvQuery = z.object({
+  userId: z.string().uuid().optional(),
+  objectType: z.string().min(1).max(64).optional(),
+  effect: z.enum(["allow", "deny", "require_approval"]).optional(),
+  from: z.coerce.date().optional(),
+  to: z.coerce.date().optional(),
+});
 
 export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   const app = Fastify({ logger: false });
@@ -1946,28 +2001,81 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   // ADR-0022: CSV export of the (filtered) audit trail — the compliance
   // deliverable auditors actually ask for. Admin-only via the default gate;
-  // same download pattern as the per-project costs CSV. Unlike the 100-row
-  // screen view, the export carries the FULL filtered trail.
+  // same download pattern as the per-project costs CSV.
+  //
+  // ADR-0031: this used to `select()` the WHOLE filtered table, materialise it
+  // into a JS array and concatenate one giant string — with audit_log growing a
+  // row per governed call and auto-prune OFF by default, that is an OOM of the
+  // container waiting to happen. It now streams: keyset batches over
+  // (at DESC, id DESC), written to reply.raw a batch at a time, under a
+  // defaulted date window and a hard row ceiling — BOTH disclosed (headers
+  // always, plus a trailing comment row whenever the file is not the complete
+  // answer). The column shape is unchanged, so a complete export is
+  // byte-identical to what the old code produced.
+  const AUDIT_CSV_HEADER = [
+    "at",
+    "userId",
+    "userName",
+    "objectType",
+    "objectId",
+    "serverId",
+    "toolName",
+    "effect",
+    "ruleId",
+    "reason",
+    "detail",
+  ] as const;
+
   app.get("/v1/audit.csv", async (req, reply) => {
-    const { userId } = auditQuery.parse(req.query);
-    const [rows, userRows] = await Promise.all([
-      db
-        .select()
-        .from(auditLog)
-        .where(userId ? eq(auditLog.userId, userId) : undefined)
-        .orderBy(desc(auditLog.at)),
-      db.select({ id: users.id, displayName: users.displayName, email: users.email }).from(users),
-    ]);
-    const nameOf = new Map(userRows.map((u) => [u.id, u.displayName || u.email]));
+    const q = auditCsvQuery.parse(req.query);
+    const win = resolveCsvWindow(q.from, q.to);
+    const filters = auditFilters(q, win.from, win.to);
+    const where = filters.length ? and(...filters) : undefined;
+
+    // The userName column needs a display name per row. The old code loaded
+    // EVERY user up front; we resolve lazily per batch and memoise, so the map
+    // is bounded by the distinct users actually present in the export.
+    const nameOf = new Map<string, string>();
+    const resolveNames = async (ids: string[]) => {
+      const missing = [...new Set(ids)].filter((id) => !nameOf.has(id));
+      if (missing.length === 0) return;
+      const rows = await db
+        .select({ id: users.id, displayName: users.displayName, email: users.email })
+        .from(users)
+        .where(inArray(users.id, missing));
+      for (const u of rows) nameOf.set(u.id, u.displayName || u.email);
+      for (const id of missing) if (!nameOf.has(id)) nameOf.set(id, "");
+    };
+
     const csvCell = (v: unknown): string => {
       if (v === null || v === undefined) return "";
       const s = typeof v === "object" ? JSON.stringify(v) : String(v);
       return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     };
-    const header = ["at", "userId", "userName", "objectType", "objectId", "serverId", "toolName", "effect", "ruleId", "reason", "detail"];
-    const lines = [header.join(",")];
-    for (const r of rows) {
-      lines.push(
+
+    type Row = typeof auditLog.$inferSelect & { atText: string };
+    await streamCsv<Row>(reply, {
+      filename: `audit-log${q.userId ? `-${q.userId.slice(0, 8)}` : ""}.csv`,
+      header: AUDIT_CSV_HEADER,
+      eol: "\n",
+      batchSize: csvBatchRows(),
+      maxRows: csvMaxRows(),
+      window: win,
+      fetchPage: async (after, limit) => {
+        const pageWhere = after
+          ? and(...filters, afterCursorDesc(auditLog.at, auditLog.id, after))
+          : where;
+        const rows = (await db
+          .select({ ...auditLogColumns, atText: atTextSql(auditLog.at) })
+          .from(auditLog)
+          .where(pageWhere)
+          .orderBy(desc(auditLog.at), desc(auditLog.id))
+          .limit(limit)) as Row[];
+        await resolveNames(rows.map((r) => r.userId));
+        return rows;
+      },
+      cursorOf: (r) => ({ at: r.atText, id: r.id }),
+      renderRow: (r) =>
         [
           r.at.toISOString(),
           r.userId,
@@ -1983,12 +2091,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         ]
           .map(csvCell)
           .join(","),
-      );
-    }
-    return reply
-      .header("content-type", "text/csv; charset=utf-8")
-      .header("content-disposition", `attachment; filename="audit-log${userId ? `-${userId.slice(0, 8)}` : ""}.csv"`)
-      .send(lines.join("\n") + "\n");
+      hasRowsOutsideWindow: async () => {
+        if (!win.from) return false;
+        const older = auditFilters(q, null, win.from);
+        const rows = await db
+          .select({ id: auditLog.id })
+          .from(auditLog)
+          .where(older.length ? and(...older) : undefined)
+          .limit(1);
+        return rows.length > 0;
+      },
+    });
   });
 
   return app;

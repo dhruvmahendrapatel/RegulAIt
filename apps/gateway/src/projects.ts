@@ -1,6 +1,7 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import {
   and,
+  lte,
   approvals,
   auditLog,
   connectors,
@@ -24,7 +25,16 @@ import {
   workflowArtifacts,
   workflowInstances,
   type Db,
+  type SQL,
 } from "@regulait/db";
+import {
+  csvBatchRows,
+  csvMaxRows,
+  resolveCsvWindow,
+  streamCsv,
+  type CsvWindow,
+} from "./csv-export.js";
+import { afterCursorDesc, atTextSql } from "./pagination.js";
 import {
   addProjectMemberSchema,
   addTeamMemberSchema,
@@ -54,6 +64,12 @@ import { loadOrgSettings, orgDefaultPiiMode, retentionFloor, runAuditPruneOnce }
 type ProjectRow = typeof projects.$inferSelect;
 
 const projectIdParam = z.object({ projectId: z.string().uuid() });
+/** ADR-0031: optional explicit date bounds on the streamed spend export. Absent
+ * bounds fall back to the disclosed default window. */
+const costsCsvQuery = z.object({
+  from: z.coerce.date().optional(),
+  to: z.coerce.date().optional(),
+});
 const initiativeIdParam = z.object({ initiativeId: z.string().uuid() });
 
 /** RFC-4180 field escaping: quote and double-up embedded quotes whenever a
@@ -80,29 +96,109 @@ export const USAGE_CSV_HEADER = [
   "projectId",
 ] as const;
 
+/** one already-escaped usage_events data line (no terminator) */
+export function usageEventRow(r: typeof usageEvents.$inferSelect): string {
+  return [
+    r.at instanceof Date ? r.at.toISOString() : r.at,
+    r.userId,
+    r.objectType,
+    r.agentId,
+    r.connectorId,
+    r.model,
+    r.operation,
+    r.inputTokens,
+    r.outputTokens,
+    r.costUsd,
+    r.measuredCostSavedUsd,
+    r.projectId,
+  ]
+    .map(csvField)
+    .join(",");
+}
+
 export function usageEventsCsv(rows: Array<typeof usageEvents.$inferSelect>): string {
   const lines = [USAGE_CSV_HEADER.join(",")];
-  for (const r of rows) {
-    lines.push(
-      [
-        r.at instanceof Date ? r.at.toISOString() : r.at,
-        r.userId,
-        r.objectType,
-        r.agentId,
-        r.connectorId,
-        r.model,
-        r.operation,
-        r.inputTokens,
-        r.outputTokens,
-        r.costUsd,
-        r.measuredCostSavedUsd,
-        r.projectId,
-      ]
-        .map(csvField)
-        .join(","),
-    );
-  }
+  for (const r of rows) lines.push(usageEventRow(r));
   return lines.join("\r\n") + "\r\n";
+}
+
+/** every usage_events column, spelled out so a keyset read can select the row
+ * AND the microsecond-exact `atText` cursor field in one query (ADR-0031) */
+export const usageEventColumns = {
+  id: usageEvents.id,
+  at: usageEvents.at,
+  userId: usageEvents.userId,
+  objectType: usageEvents.objectType,
+  agentId: usageEvents.agentId,
+  requestedAgentId: usageEvents.requestedAgentId,
+  baselineAgentId: usageEvents.baselineAgentId,
+  connectorId: usageEvents.connectorId,
+  operation: usageEvents.operation,
+  provider: usageEvents.provider,
+  model: usageEvents.model,
+  inputTokens: usageEvents.inputTokens,
+  outputTokens: usageEvents.outputTokens,
+  costUsd: usageEvents.costUsd,
+  measuredCostSavedUsd: usageEvents.measuredCostSavedUsd,
+  stopReason: usageEvents.stopReason,
+  refusal: usageEvents.refusal,
+  providerMessageId: usageEvents.providerMessageId,
+  projectId: usageEvents.projectId,
+  detail: usageEvents.detail,
+} as const;
+
+/**
+ * ADR-0031: the shared streaming export for a usage_events selection. Both
+ * `/v1/projects/:id/costs.csv` and `/v1/usage-events?format=csv` route through
+ * it, so the two exports share one batching/ceiling/disclosure story. Column
+ * shape is unchanged — a complete export is byte-identical to `usageEventsCsv`.
+ */
+export async function streamUsageEventsCsv(
+  db: Db,
+  reply: FastifyReply,
+  opts: {
+    filename: string;
+    /** filters that do NOT include the date window */
+    baseFilters: SQL[];
+    window: CsvWindow;
+    maxRows?: number;
+  },
+): Promise<void> {
+  const win = opts.window;
+  const withWindow = (from: Date | null, to: Date | null): SQL[] => {
+    const out = [...opts.baseFilters];
+    if (from) out.push(gte(usageEvents.at, from));
+    if (to) out.push(lte(usageEvents.at, to));
+    return out;
+  };
+  const filters = withWindow(win.from, win.to);
+
+  type Row = typeof usageEvents.$inferSelect & { atText: string };
+  await streamCsv<Row>(reply, {
+    filename: opts.filename,
+    header: USAGE_CSV_HEADER,
+    eol: "\r\n",
+    batchSize: csvBatchRows(),
+    maxRows: opts.maxRows ?? csvMaxRows(),
+    window: win,
+    fetchPage: async (after, limit) =>
+      (await db
+        .select({ ...usageEventColumns, atText: atTextSql(usageEvents.at) })
+        .from(usageEvents)
+        .where(
+          and(...(after ? [...filters, afterCursorDesc(usageEvents.at, usageEvents.id, after)] : filters)),
+        )
+        .orderBy(desc(usageEvents.at), desc(usageEvents.id))
+        .limit(limit)) as Row[],
+    cursorOf: (r) => ({ at: r.atText, id: r.id }),
+    renderRow: usageEventRow,
+    hasRowsOutsideWindow: async () => {
+      if (!win.from) return false;
+      const older = withWindow(null, win.from);
+      const rows = await db.select({ id: usageEvents.id }).from(usageEvents).where(and(...older)).limit(1);
+      return rows.length > 0;
+    },
+  });
 }
 
 /** §9 conflict approvals: stageId = this prefix + the retained item's id. */
@@ -2215,8 +2311,13 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
   // Per-invocation CSV export for a project's spend — same member/admin authz
   // as the /costs rollup (membership is the whole test for a non-admin). The
   // rows are the raw usage_events, newest first, for FinOps/chargeback export.
+  //
+  // ADR-0031: streamed in keyset batches under a defaulted date window and a
+  // hard row ceiling, both disclosed — it used to select the project's ENTIRE
+  // usage history into memory and concatenate one string.
   app.get("/v1/projects/:projectId/costs.csv", async (req, reply) => {
     const { projectId } = projectIdParam.parse(req.params);
+    const q = costsCsvQuery.parse(req.query);
     const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
     if (!project) return reply.status(404).send({ error: "unknown_project" });
     if (!req.authCtx.isAdmin) {
@@ -2229,15 +2330,11 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
         );
       if (!membership) return reply.status(403).send({ error: "not_a_project_member" });
     }
-    const rows = await db
-      .select()
-      .from(usageEvents)
-      .where(eq(usageEvents.projectId, projectId))
-      .orderBy(desc(usageEvents.at));
     const safeName = project.name.replace(/[^A-Za-z0-9_.-]+/g, "-");
-    return reply
-      .header("content-type", "text/csv; charset=utf-8")
-      .header("content-disposition", `attachment; filename="${safeName}-costs.csv"`)
-      .send(usageEventsCsv(rows));
+    await streamUsageEventsCsv(db, reply, {
+      filename: `${safeName}-costs.csv`,
+      baseFilters: [eq(usageEvents.projectId, projectId)],
+      window: resolveCsvWindow(q.from, q.to),
+    });
   });
 }
