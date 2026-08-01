@@ -27,6 +27,14 @@ const migrationsFolder = path.resolve(
 
 const BOOT = "creds-bootstrap-token";
 const AUTH = { authorization: `Bearer ${BOOT}` };
+
+// ADR-0034 amendment — these stand in for "some non-default endpoint". They
+// are loopback literals rather than public hostnames on purpose: the guard
+// RESOLVES every destination at write time, so a public hostname here would
+// make this suite depend on DNS, and a `.invalid` one would fail closed.
+// Port 1 is never listening — nothing is ever dispatched to them.
+const XAI_BASE = "https://127.0.0.1:1/v1";
+const BYO_BASE = "https://127.0.0.1:1/byo";
 const DATA_KEY = "b".repeat(64);
 
 let db: Db;
@@ -41,6 +49,24 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+
+  // ADR-0034 amendment — a credential `baseUrl` override is now behind the
+  // egress guard, and the guard is DEFAULT-DENY: no allow entry, no
+  // destination. This suite stores overrides pointed at a loopback address, so
+  // it allow-lists that host explicitly with the private-range opt-in, exactly
+  // as an air-gapped operator would (the same pattern as custom-providers.test.ts).
+  const allowed = await app.inject({
+    method: "POST",
+    headers: AUTH,
+    url: "/v1/egress-allow-hosts",
+    payload: {
+      host: "127.0.0.1",
+      allowPrivateRanges: true,
+      allowPlaintextHttp: true,
+      note: "credential-surface suite: local fake endpoints",
+    },
+  });
+  expect(allowed.statusCode).toBe(201);
 
   const nina = await app.inject({
     method: "POST",
@@ -114,11 +140,11 @@ describe("/admin platform model credentials", () => {
       method: "POST",
       headers: AUTH,
       url: "/v1/model-credentials",
-      payload: { provider: "xai", apiKey: "xai-portal-secret-2", baseUrl: "https://api.x.ai/v1" },
+      payload: { provider: "xai", apiKey: "xai-portal-secret-2", baseUrl: XAI_BASE },
     });
     expect(rotated.statusCode).toBe(201);
     expect(rotated.json().id).toBe(created.json().id);
-    expect(rotated.json().baseUrl).toBe("https://api.x.ai/v1");
+    expect(rotated.json().baseUrl).toBe(XAI_BASE);
 
     const stored = await db.select().from(modelCredentials);
     const xai = stored.find((c) => c.provider === "xai");
@@ -173,7 +199,7 @@ describe("/app self-service BYO keys", () => {
       method: "POST",
       headers: ninaAuth,
       url: `/v1/users/${ninaId}/model-credentials`,
-      payload: { provider: "anthropic", apiKey: "sk-nina-own-key", baseUrl: "https://byo.invalid" },
+      payload: { provider: "anthropic", apiKey: "sk-nina-own-key", baseUrl: BYO_BASE },
     });
     expect(added.statusCode).toBe(201);
     expect(JSON.stringify(added.json())).not.toContain("sk-nina-own-key");
@@ -186,7 +212,7 @@ describe("/app self-service BYO keys", () => {
     expect(listed.statusCode).toBe(200);
     expect(listed.json().credentials).toHaveLength(1);
     expect(listed.json().credentials[0].provider).toBe("anthropic");
-    expect(listed.json().credentials[0].baseUrl).toBe("https://byo.invalid");
+    expect(listed.json().credentials[0].baseUrl).toBe(BYO_BASE);
     expect(JSON.stringify(listed.json())).not.toContain("sk-nina-own-key");
 
     const [stored] = await db.select().from(userModelCredentials);

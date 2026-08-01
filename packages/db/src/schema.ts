@@ -282,6 +282,11 @@ export const auditLog = pgTable(
         // "which third-party endpoint did our models talk to" is answerable).
         // Plain text column — no DDL needed.
         "custom_model_provider",
+        // ADR-0034 amendment: a `model_credentials` / `user_model_credentials`
+        // baseUrl OVERRIDE refused by the egress guard — at write time (the
+        // 400) or at dispatch time (the 403 a pre-guard row now gets). Plain
+        // text column — no DDL needed.
+        "model_credential",
       ],
     })
       .notNull()
