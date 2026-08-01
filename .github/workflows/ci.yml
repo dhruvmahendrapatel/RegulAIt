@@ -1,27 +1,69 @@
 name: CI
 
-# PAUSED (2026-07-30): the account's GitHub Actions minutes are exhausted, so
-# every auto-triggered run instant-fails (log download 404s) before any step —
-# pure red noise on PRs. Triggers are set to manual-only (workflow_dispatch)
-# until minutes are topped up. Local verification (`pnpm -r build`,
-# `node scripts/check-ui-syntax.mjs`, `pnpm -r test`) is the gate meanwhile.
-# TO RE-ENABLE: restore the `pull_request:` and `push: branches: [main]` triggers
-# below (they are kept commented for a clean revert).
+# RE-ENABLED (2026-08-01), replacing the 2026-07-30 pause that was forced by an
+# exhausted Actions allowance. The allowance is 2,000 minutes/month, so the
+# triggers below are deliberately shaped to fit a month of this project's very
+# high commit rate inside it rather than being restored verbatim.
+#
+# ── How the budget is spent ──────────────────────────────────────────────────
+# GitHub bills per JOB, on wall-clock, ROUNDED UP to the whole minute, and
+# parallel jobs each bill separately. So the cost of a run is the SUM of its
+# jobs, not the longest one. Every knob below exists to keep that sum down:
+#
+#  1. NO `push:` TRIGGER.  A `pull_request` run already builds the MERGE of head
+#     into base, so a green PR is a green main. Re-running the identical content
+#     again on push-to-main would roughly double the monthly spend and prove
+#     nothing new. Accepted trade-off: a PR validated against an older main can
+#     still land a semantic conflict, so refresh the branch before merging when
+#     another PR landed in between. `workflow_dispatch` covers "check main now".
+#  2. DOCS-ONLY CHANGES SKIP CI ENTIRELY (`paths-ignore`). This repo commits
+#     ADRs, STATE.md and session logs constantly; none of it can break a build,
+#     and it is a large share of all commits.
+#  3. `docker-build` SELF-SKIPS unless files that can actually change the image
+#     were touched. It still costs the ~1 minute of runner startup, versus the
+#     ~5 it costs to build — so the common source-only PR pays for roughly one
+#     job instead of two. A weekly cron builds it unconditionally so the
+#     quickstart path cannot rot unnoticed.
+#  4. `cancel-in-progress` kills superseded runs when a PR is pushed to again.
+#  5. TIGHT `timeout-minutes`. The expensive failure mode is not a slow job, it
+#     is a HUNG one billing its full cap; 25 -> 20/12 caps that blast radius.
+#
+# ── Rough monthly arithmetic (estimates — revise once real run times exist) ──
+#     PR push:  build-and-test ~8 min + docker-build ~1 min (skipped)  = ~9 min
+#     Weekly:   both jobs, image built unconditionally  ~13 min x 4    = ~52 min
+#     => (2,000 - 52) / 9 ~= 215 PR pushes a month before the allowance is gone.
+# If that ceiling is ever actually hit, the next lever is narrowing
+# `pull_request` to `types: [ready_for_review]` so draft iterations stop
+# billing — NOT taken now, because this repo's agents open drafts and a draft
+# that never runs CI is a draft nobody can trust.
 on:
+  pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'project-state/**'
+      - '.gitignore'
+      - 'LICENSE'
+  # Weekly health check of `main`. This is what replaces the deleted `push:`
+  # trigger: it catches the two things a PR run structurally cannot — a
+  # semantic conflict between two PRs that were each green against an older
+  # base, and slow rot from the outside world (a moved base image, a yanked
+  # transitive dependency) with no commit of ours to blame.
+  schedule:
+    - cron: '0 6 * * 1'
   workflow_dispatch:
-  # pull_request:
-  # push:
-  #   branches: [main]
 
-# Rapid follow-up pushes cancel the older in-flight run for the same ref.
+# Rapid follow-up pushes cancel the older in-flight run for the same PR.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Not a performance target — a blast-radius cap. A hung job bills its full
+    # timeout, so this is the most CI minutes any single run can waste.
+    timeout-minutes: 20
 
     services:
       postgres:
@@ -67,8 +109,45 @@ jobs:
 
   docker-build:
     # The quickstart path must never rot: prove the compose image still builds.
+    #
+    # But it only rots when something the image is made of changes, so on a PR
+    # this job first asks whether any such file moved and skips the ~5-minute
+    # build if not — paying ~1 minute of runner startup instead. On schedule and
+    # on workflow_dispatch it always builds, which is what stops a slow rot
+    # (e.g. a base-image tag going stale) from hiding behind untouched files.
+    #
+    # Deliberately NOT `dorny/paths-filter` or `tj-actions/changed-files`: a
+    # third-party action in the CI path is a supply-chain surface, and native
+    # `paths:` filters are workflow-level only, not per-job.
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
-      - run: docker build -t regulait-gateway:ci .
+        with:
+          # For a pull_request the checked-out commit is the MERGE commit, so
+          # HEAD^1 is the base and `HEAD^1..HEAD` is exactly the PR's diff.
+          # Depth 2 is all that needs fetching for that.
+          fetch-depth: 2
+
+      - id: scope
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "Not a PR (${{ github.event_name }}) — building unconditionally."
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed="$(git diff --name-only HEAD^1 HEAD)"
+          echo "Changed files:"; echo "$changed"
+          # Anything that can alter the produced image: the recipe itself, the
+          # compose stack, the ignore file that decides the build context, the
+          # lockfile, and every package manifest in the workspace.
+          if printf '%s\n' "$changed" | grep -qE '^(Dockerfile|docker-compose\.yml|\.dockerignore|pnpm-lock\.yaml|pnpm-workspace\.yaml|package\.json|(apps|packages)/[^/]+/package\.json)$'; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No image-relevant file changed — skipping the build to save CI minutes."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.scope.outputs.build == 'true'
+        run: docker build -t regulait-gateway:ci .
