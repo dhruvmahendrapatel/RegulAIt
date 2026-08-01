@@ -143,7 +143,17 @@ const auditQuery = z.object({ userId: z.string().uuid().optional() });
 const UUID_ANY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function buildApp(db: Db, opts: BuildAppOptions = {}) {
-  const app = Fastify({ logger: false });
+  // trustProxy (ADR-0029): the deployed stack runs behind a Caddy TLS
+  // terminator, so the socket peer is the proxy, not the user. Without this,
+  // `req.ip` — recorded on every auth_sessions row (ADR-0025/0028) — degrades
+  // to the proxy's container address and the session audit trail loses the real
+  // client. It does NOT affect the session cookie's `Secure` flag:
+  // requestIsSecure() reads `x-forwarded-proto` straight off the raw headers,
+  // which Fastify never gates on trustProxy. Safe because Caddy *overwrites*
+  // X-Forwarded-For with the real peer (header_up X-Forwarded-For {remote_host}
+  // in infra/caddy/Caddyfile) rather than appending to a client-supplied value,
+  // and the gateway port is published to host loopback only.
+  const app = Fastify({ logger: false, trustProxy: true });
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof z.ZodError) {
