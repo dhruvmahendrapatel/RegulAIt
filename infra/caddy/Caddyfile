@@ -1,0 +1,98 @@
+# RegulAIt dev stack — zero-cost TLS terminator (ADR-0029).
+#
+# Caddy fronts the gateway and terminates TLS with a real, browser-trusted
+# Let's Encrypt certificate. No ALB, no ACM, no purchased domain, no Route53 —
+# and therefore no new AWS cost.
+#
+# The hostname comes from sslip.io, a free public wildcard-DNS service:
+# `3-237-199-248.sslip.io` resolves to 3.237.199.248. That is a real, publicly
+# resolvable A record, which is all the ACME HTTP-01 challenge needs.
+#
+# Everything environment-specific is an env placeholder, so THIS file is the
+# file that runs everywhere — box, laptop, and the local proof — and only the
+# variables differ:
+#
+#   REGULAIT_TLS_HOST             site address   default 3-237-199-248.sslip.io
+#   REGULAIT_TLS_UPSTREAM         proxy target   default gateway:3000 (compose DNS)
+#   REGULAIT_TLS_EMAIL_DIRECTIVE  ACME contact   default empty (allowed)
+#   REGULAIT_TLS_ISSUER           issuer         default EMPTY = real ACME /
+#                                                Let's Encrypt. The local-proof
+#                                                override sets it to
+#                                                `tls internal` so a laptop or CI
+#                                                box uses Caddy's own local CA and
+#                                                NEVER calls Let's Encrypt (a
+#                                                failed challenge from the wrong
+#                                                host burns LE's failed-validation
+#                                                rate limit).
+#
+#   Caveat, stated plainly: if the instance's public IP changes, the hostname
+#   changes with it and Caddy issues a brand-new certificate. See docs/ops/TLS.md.
+{
+	# Optional ACME account contact (expiry-warning mail). Empty by default so no
+	# personal address is baked into the repo — Let's Encrypt accepts an account
+	# with no contact. To set one, export
+	#   REGULAIT_TLS_EMAIL_DIRECTIVE="email ops@example.com"
+	{$REGULAIT_TLS_EMAIL_DIRECTIVE:}
+}
+
+{$REGULAIT_TLS_HOST:3-237-199-248.sslip.io} {
+	# Empty by default → Caddy's default automatic HTTPS (Let's Encrypt, with
+	# ZeroSSL as fallback). Set to `tls internal` for a local self-signed proof.
+	{$REGULAIT_TLS_ISSUER:}
+
+	# --- security headers ------------------------------------------------------
+	header {
+		# HSTS is deliberately OFF. Rationale (ADR-0029): this hostname is derived
+		# from an EC2 public IP that can change on stop/start. HSTS is a browser-
+		# side, host-scoped, non-revocable commitment — once a browser has pinned
+		# `3-237-199-248.sslip.io` to HTTPS-only there is no server-side way to
+		# undo it before max-age expires, and an `includeSubDomains` on a
+		# *.sslip.io name would be actively hostile to everyone else using the
+		# service. A dev stack that may still need a plain-HTTP fallback must not
+		# paint itself into that corner. Turn it on (short max-age first, e.g.
+		# 300, then raise) only once a stable real domain replaces this name.
+		# Strict-Transport-Security "max-age=300"
+
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		# Don't advertise the proxy version.
+		-Server
+	}
+
+	# --- reverse proxy ---------------------------------------------------------
+	# `gateway:3000` is the compose service name + its in-container port. The
+	# gateway publishes 3000 to host LOOPBACK ONLY (ADR-0029), so Caddy is the
+	# only route in from off-box.
+	#
+	# Caddy sets these upstream headers automatically, with no directives needed:
+	#   X-Forwarded-For    <- client IP (appended to any inbound value)
+	#   X-Forwarded-Proto  <- "https" for TLS requests
+	#   X-Forwarded-Host   <- the original Host header
+	# The gateway's requestIsSecure() reads x-forwarded-proto straight off the
+	# raw headers, so the session cookie's `Secure` flag activates behind this.
+	#
+	# We override X-Forwarded-For with {remote_host} instead of letting Caddy
+	# append: overwriting discards any client-supplied X-Forwarded-For, so the
+	# left-most entry the gateway sees is always the real peer and cannot be
+	# spoofed. That is what makes Fastify's `trustProxy` safe to enable.
+	reverse_proxy {$REGULAIT_TLS_UPSTREAM:gateway:3000} {
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Real-IP {remote_host}
+
+		# The gateway streams SSE (playground / run output). Disable response
+		# buffering so tokens reach the browser as they are produced.
+		flush_interval -1
+	}
+
+	# Access log to stdout, so `docker compose logs caddy` is the one place to look.
+	log {
+		output stdout
+		format console
+	}
+}
+
+# Plain HTTP on :80 needs no stanza here: for a site address with an explicit
+# hostname Caddy automatically serves the ACME HTTP-01 challenge on :80 and
+# 308-redirects everything else to HTTPS. :80 must therefore stay open in the
+# security group or both issuance and renewal fail.
