@@ -55,6 +55,7 @@ import {
 import { afterCursorDesc, atTextSql, decodeCursor, encodeCursor } from "./pagination.js";
 import { resolveTrustProxy, type TrustProxySetting } from "./trusted-proxy.js";
 import fastifyRateLimit from "@fastify/rate-limit";
+import { schedulerHealth } from "./scheduler-health.js";
 import {
   rateLimitKey,
   rateLimitMax,
@@ -2080,6 +2081,23 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       return reply.status(503).send({ status: "degraded", database: "unreachable" });
     }
     return { status: "ok", database: "ok" };
+  });
+
+  // ADR-0031 item 6: the health surface the two boot schedulers report into.
+  // Admin-only via the default gate (deliberately NOT in NON_ADMIN_ROUTES) and
+  // deliberately NOT part of /health — a liveness probe must not start failing
+  // because a backup verification pass errored, but an admin must be able to
+  // SEE that it did. In-memory on purpose: it still answers when the database
+  // is the thing that broke, which is the most likely reason a tick failed.
+  app.get("/v1/health/schedulers", async () => {
+    const schedulers = schedulerHealth();
+    return {
+      schedulers,
+      healthy: schedulers.every((s) => s.healthy),
+      // an empty list means neither scheduler has ticked in this process yet
+      // (both ship OFF by default) — absence of failures, not proof of success
+      note: "in-memory, per-process, reset on restart; both schedulers are OFF by default (org_settings)",
+    };
   });
 
   // ADR-0025: password/session/TOTP/OIDC login surface + the admin endpoints
