@@ -43,6 +43,7 @@ import {
   requiredTemplateIdsFor,
 } from "./projects.js";
 import { decryptSecret, encryptSecret as encryptTokenOnce } from "./secrets.js";
+import { guardConnectionCall, refuseConnectionEgressWrite } from "./connection-egress.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { activeDelegatorsFor } from "./delegations.js";
 import {
@@ -688,11 +689,43 @@ async function runGitExecutions(
         .from(gitConnections)
         .where(eq(gitConnections.name, stage.connection!));
       if (!conn) throw new GitProviderError(`unknown git connection '${stage.connection}'`);
-      const provider = resolveProvider({
-        provider: conn.provider,
-        token: decryptSecret(dataKey, conn.tokenCiphertext),
-        baseUrl: conn.baseUrl,
-      });
+      // ADR-0034 amendment #2 — THE GIT `baseUrl`, BEHIND THE EGRESS GUARD.
+      // An admin-typed GHE/self-hosted-GitLab/Bitbucket-DC/ADO root is the same
+      // SSRF primitive as a custom model endpoint, and it carries a PAT. The
+      // check runs on EVERY execution, not just at connection-create time,
+      // because DNS moves and because connections written before this guard
+      // existed are in the live database now. A refusal throws, so it becomes
+      // this stage's `execution_failed` (the path's existing refusal shape —
+      // there is no per-git-call HTTP boundary to 403 from) with nothing
+      // leaving the box. A null baseUrl means the vendor default, which nobody
+      // can type: unchecked, unguarded fetch, byte-identical behaviour.
+      let gitFetch: typeof fetch | undefined;
+      if (conn.baseUrl) {
+        gitFetch = (
+          await guardConnectionCall(db, {
+            surface: "git_connection",
+            baseUrl: conn.baseUrl,
+            userId: actorUserId,
+            objectId: conn.id,
+            label: `git connection '${conn.name}' (${conn.provider})`,
+            detail: {
+              connection: conn.name,
+              provider: conn.provider,
+              instanceId,
+              stageId: stage.id,
+              action: stage.action,
+            },
+          })
+        ).fetchImpl;
+      }
+      const provider = resolveProvider(
+        {
+          provider: conn.provider,
+          token: decryptSecret(dataKey, conn.tokenCiphertext),
+          baseUrl: conn.baseUrl,
+        },
+        gitFetch as unknown as Parameters<typeof resolveProvider>[1],
+      );
 
       const change = instance.change as { description: string };
       if (stage.action === "create_branch") {
@@ -790,6 +823,19 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     }
     if (!opts.dataKey) {
       return reply.status(503).send({ error: "no_data_key", detail: "set REGULAIT_DATA_KEY" });
+    }
+    // ADR-0034 amendment #2 — the earliest honest failure for a git endpoint.
+    // NOT a substitute for the per-execution check in runGitExecutions.
+    if (body.baseUrl) {
+      const refusal = await refuseConnectionEgressWrite(db, {
+        surface: "git_connection",
+        baseUrl: body.baseUrl,
+        userId: req.authCtx.userId ?? null,
+        phase: "git_connection_write",
+        label: `git connection '${body.name}' baseUrl`,
+        detail: { name: body.name, provider: body.provider },
+      });
+      if (refusal) return reply.status(400).send(refusal);
     }
     const [row] = await db
       .insert(gitConnections)
