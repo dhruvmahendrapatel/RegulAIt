@@ -139,7 +139,34 @@ const visibleToolsParams = z.object({
   userId: z.string().uuid(),
   serverId: z.string().uuid(),
 });
-const auditQuery = z.object({ userId: z.string().uuid().optional() });
+/** A4 (ADR-0027) exposed as a QUERY dimension: `deployMode` filters the trail
+ * by the deploy mode a deploy-mode-scoped action acted on.
+ *
+ * The honest fourth value is `unknown` → `deploy_mode IS NULL`. That bucket is
+ * NOT "hosted by default" and never can be: pre-0044 rows never recorded a
+ * mode (ADR-0027 §2a — un-backfillable by design), and the large majority of
+ * rows (MCP calls, membership changes, settings edits …) are not deploy-scoped
+ * at all, so they have no mode to have. Omitting the param = every row. */
+const auditQuery = z.object({
+  userId: z.string().uuid().optional(),
+  deployMode: z.enum(["hosted", "byoc", "air_gapped", "unknown"]).optional(),
+});
+
+/** the WHERE for the two audit reads — identical filter semantics on screen
+ * and in the CSV export, so a downloaded trail always matches what was seen. */
+const auditWhere = (q: z.infer<typeof auditQuery>) => {
+  const conds = [
+    ...(q.userId ? [eq(auditLog.userId, q.userId)] : []),
+    ...(q.deployMode
+      ? [
+          q.deployMode === "unknown"
+            ? isNull(auditLog.deployMode)
+            : eq(auditLog.deployMode, q.deployMode),
+        ]
+      : []),
+  ];
+  return conds.length === 0 ? undefined : conds.length === 1 ? conds[0] : and(...conds);
+};
 const UUID_ANY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function buildApp(db: Db, opts: BuildAppOptions = {}) {
@@ -1952,11 +1979,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerOpenAiCompat(app, db, { dataKey: opts.dataKey });
 
   app.get("/v1/audit", async (req) => {
-    const { userId } = auditQuery.parse(req.query);
+    const q = auditQuery.parse(req.query);
     const rows = await db
       .select()
       .from(auditLog)
-      .where(userId ? eq(auditLog.userId, userId) : undefined)
+      .where(auditWhere(q))
       .orderBy(desc(auditLog.at))
       .limit(100);
     return { entries: rows };
@@ -1967,12 +1994,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // same download pattern as the per-project costs CSV. Unlike the 100-row
   // screen view, the export carries the FULL filtered trail.
   app.get("/v1/audit.csv", async (req, reply) => {
-    const { userId } = auditQuery.parse(req.query);
+    const q = auditQuery.parse(req.query);
+    const { userId } = q;
     const [rows, userRows] = await Promise.all([
       db
         .select()
         .from(auditLog)
-        .where(userId ? eq(auditLog.userId, userId) : undefined)
+        .where(auditWhere(q))
         .orderBy(desc(auditLog.at)),
       db.select({ id: users.id, displayName: users.displayName, email: users.email }).from(users),
     ]);
@@ -1982,7 +2010,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const s = typeof v === "object" ? JSON.stringify(v) : String(v);
       return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     };
-    const header = ["at", "userId", "userName", "objectType", "objectId", "serverId", "toolName", "effect", "ruleId", "reason", "detail"];
+    // A4 (ADR-0027): deployMode ships as its own column. A row with no mode is
+    // written as the literal `unknown` rather than an empty cell — the same
+    // word the filter uses — so an auditor reading the export can never mistake
+    // "we never recorded a mode here" for "hosted" or for a lost value.
+    const header = ["at", "userId", "userName", "objectType", "objectId", "serverId", "toolName", "effect", "ruleId", "deployMode", "reason", "detail"];
     const lines = [header.join(",")];
     for (const r of rows) {
       lines.push(
@@ -1996,6 +2028,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           r.toolName,
           r.effect,
           r.ruleId,
+          r.deployMode ?? "unknown",
           r.reason,
           r.detail,
         ]
@@ -2003,9 +2036,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           .join(","),
       );
     }
+    const suffix = `${userId ? `-${userId.slice(0, 8)}` : ""}${q.deployMode ? `-${q.deployMode}` : ""}`;
     return reply
       .header("content-type", "text/csv; charset=utf-8")
-      .header("content-disposition", `attachment; filename="audit-log${userId ? `-${userId.slice(0, 8)}` : ""}.csv"`)
+      .header("content-disposition", `attachment; filename="audit-log${suffix}.csv"`)
       .send(lines.join("\n") + "\n");
   });
 

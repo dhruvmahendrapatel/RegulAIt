@@ -245,6 +245,80 @@ describe("(a) the audit deploy_mode dimension", () => {
     // the start event is NOT deploy-scoped — honest null
     expect(byKind.get("start")?.deployMode ?? null).toBeNull();
   });
+
+  it("GET /v1/audit?deployMode= filters the trail, with `unknown` as a first-class null bucket", async () => {
+    // fixtures across all four buckets, freshly stamped so they sit at the top
+    // of the 100-row window whatever else the shared DB holds.
+    const mk = (ruleId: string, deployMode: "hosted" | "byoc" | "air_gapped" | null) =>
+      db.insert(auditLog).values({
+        userId: piaId, effect: "allow", ruleId, ruleChain: [],
+        reason: "a4 audit-filter fixture", deployMode,
+      });
+    await mk("a4-filter-hosted", "hosted");
+    await mk("a4-filter-byoc", "byoc");
+    await mk("a4-filter-airgapped", "air_gapped");
+    await mk("a4-filter-unknown", null);
+
+    const read = async (qs: string) => {
+      const res = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit${qs}` });
+      expect(res.statusCode).toBe(200);
+      return res.json().entries as Array<{ ruleId: string; deployMode: string | null }>;
+    };
+
+    // each named mode returns ONLY its own rows
+    for (const mode of ["hosted", "byoc", "air_gapped"] as const) {
+      const rows = await read(`?deployMode=${mode}`);
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows.every((r) => r.deployMode === mode)).toBe(true);
+      expect(rows.some((r) => r.ruleId === `a4-filter-${mode.replace("_", "")}`)).toBe(true);
+    }
+
+    // `unknown` is null-only — it must NEVER leak a row that has a real mode,
+    // which is the whole honesty point: those rows are un-backfillable, not
+    // silently "hosted".
+    const unknown = await read("?deployMode=unknown");
+    expect(unknown.length).toBeGreaterThan(0);
+    expect(unknown.every((r) => r.deployMode === null)).toBe(true);
+    expect(unknown.some((r) => r.ruleId === "a4-filter-unknown")).toBe(true);
+    expect(unknown.some((r) => r.ruleId.startsWith("a4-filter-") && r.ruleId !== "a4-filter-unknown")).toBe(false);
+
+    // no param = every row, mode or not
+    const all = await read("");
+    expect(all.some((r) => r.deployMode === null)).toBe(true);
+    expect(all.some((r) => r.deployMode !== null)).toBe(true);
+
+    // the filter composes with userId (AND, not OR)
+    const combined = await read(`?userId=${piaId}&deployMode=byoc`);
+    expect(combined.every((r) => r.deployMode === "byoc")).toBe(true);
+    const otherUser = await read(`?userId=${anaId}&deployMode=byoc`);
+    expect(otherUser.some((r) => r.ruleId === "a4-filter-byoc")).toBe(false);
+
+    // an unknown mode value is refused rather than silently ignored
+    const bad = await app.inject({ method: "GET", headers: AUTH, url: "/v1/audit?deployMode=on_prem" });
+    expect(bad.statusCode).toBe(400);
+  });
+
+  it("the CSV export carries deployMode, honours the filter, and writes null as the literal `unknown`", async () => {
+    const csv = await app.inject({ method: "GET", headers: AUTH, url: "/v1/audit.csv?deployMode=unknown" });
+    expect(csv.statusCode).toBe(200);
+    const [header, ...body] = csv.body.trim().split("\n");
+    const cols = header!.split(",");
+    const modeIdx = cols.indexOf("deployMode");
+    expect(modeIdx).toBeGreaterThan(-1);
+    expect(body.length).toBeGreaterThan(0);
+    // every exported row in the unknown bucket says so in words — an auditor
+    // can never read an empty cell as "hosted" or as a lost value
+    for (const line of body) {
+      expect(line.split(",")[modeIdx]).toBe("unknown");
+    }
+    expect(csv.headers["content-disposition"]).toContain("audit-log-unknown.csv");
+
+    const scoped = await app.inject({ method: "GET", headers: AUTH, url: "/v1/audit.csv?deployMode=byoc" });
+    expect(scoped.statusCode).toBe(200);
+    for (const line of scoped.body.trim().split("\n").slice(1)) {
+      expect(line.split(",")[modeIdx]).toBe("byoc");
+    }
+  });
 });
 
 describe("(b) MAX-only per-mode audit retention", () => {

@@ -163,3 +163,165 @@ seeded real gateway, zero console errors per page), so the default swapped:
 `pnpm -r build` green; frozen lockfile clean; gateway suite green including the new redirect +
 /legacy alias tests; 32 Playwright journeys green with zero console errors and light + dark
 screenshots of every admin view.
+
+> **⚠ CORRECTION (2026-08-01): the parity claim in this amendment was WRONG.** See the phase-3
+> correction below before relying on anything above. In particular, "Playwright proved parity on
+> every group" was not true — the Playwright suite proved that the views the SPA *had* worked, not
+> that the SPA had every view. The **removal plan above is suspended**; `/legacy/*`,
+> `admin-portal.ts`, `app-ui.ts`, `ui-theme.ts` and `check-ui-syntax.mjs` all stay.
+
+---
+
+## Phase-3 correction (2026-08-01) — the phase-2 parity claim was false; removal is halted
+
+- **Status of this amendment**: Accepted (correction + partial closure)
+
+### The correction, stated plainly
+
+**The phase-2 amendment claimed parity with zero gaps. That claim was false.** It was made on the
+strength of "25 phase-2 journeys + the 7 phase-1 journeys … green", but a green journey only
+proves the views that exist behave; it can never prove a view is not missing. No one diffed the
+capability surface of `app-ui.ts` against the SPA, and the SPA's own source contained two
+comments admitting the gap that the amendment contradicted — `RunsPage.tsx` ("Goal-driven
+decomposition and per-node tuning stay available in the classic app for now") and
+`ProjectDetailPage.tsx` ("they migrate into this shell in phase 2", written *about* a phase 2
+that then shipped without them).
+
+**Three P0-pillar-headline capabilities existed ONLY in the legacy shell:**
+
+| Capability | Endpoint | Pillar |
+| --- | --- | --- |
+| Run goal decomposition (goal → task graph) | `POST /v1/runs/decompose` | 7 — the headline of dynamic multi-agent orchestration |
+| PM work-item link visibility | `GET /v1/pm/links` | 8 — "the PM tool is the source of truth" |
+| The decision ledger (read **and** write) | `GET`/`POST /v1/decisions` | 4 — decisions as first-class linked records |
+
+Deleting `app-ui.ts` on the strength of the phase-2 claim — which is exactly what the removal
+plan instructed the next release to do, and what was in flight when this was caught — would have
+**deleted the only working UI for three pillar-headline features**. That is the concrete cost of
+the false claim, and it is why this correction is recorded loudly rather than folded into a
+changelog line.
+
+**Consequently: the legacy removal is HALTED.** `/legacy/app`, `/legacy/admin`,
+`admin-portal.ts`, `app-ui.ts`, `ui-theme.ts`, `scripts/check-ui-syntax.mjs` and its CI step all
+stay, and the "one release" stay of execution in the phase-2 amendment is void — the shells stay
+until every gap below is closed, not until a release boundary passes.
+
+### What this correction shipped (three of four gaps closed)
+
+All three named gaps now have real SPA surfaces on the same endpoints, in the same kit and
+tokens, indistinguishable from the rest of phase 2:
+
+1. **Goal decomposition** (`RunsPage`) — "Describe the goal" + lead-agent pick →
+   `POST /v1/runs/decompose` → the draft lands in a review editor. The response is a **proposal
+   only**, so the surface states that nothing runs until *Plan run*, which is the same unchanged
+   `POST /v1/runs` the template path uses — §3's distinct, reviewable human step preserved. The
+   lead dispatch is real metered spend, so cost / model / tokens are shown up front (a null cost
+   renders "unpriced", never `$0`), with a "retried once" badge when the first draft failed
+   validation. **§5.1 "a lead can suggest, never grant" is load-bearing**: every place the
+   gateway swapped an ungranted owner agent or dropped an un-entitled agent/tool/server from a
+   delegation ceiling gets its own line naming what was asked for and what happened. Title and
+   owner are editable per node; instructions and the DAG stay as drafted (the kernel validates on
+   submit) and every already-narrowed ceiling field is carried through untouched — **the UI never
+   widens what the backend narrowed**.
+2. **PM work items** (`GET /v1/pm/links`, on run detail *and* workflow detail) — the card says
+   RegulAIt stores the **link, not a copy**, and offers `?live=true` as an explicit act that
+   resolves the PM-authoritative fields right now; a per-link `liveError` renders as
+   "unreachable" rather than being swallowed. Drift and orphaned items are surfaced and
+   explicitly never auto-fixed here. A **Sync now** action drives `pm-sync` through the
+   connection name carried on an existing link (the backend's documented route for a non-admin);
+   because that name only exists once a link does, the **first** link still cannot be created
+   here and the button is disabled saying exactly that.
+3. **Decision ledger** (`GET`/`POST /v1/decisions`, same two hosts) — recorded locally **always**,
+   with the PM mirror best-effort on top. The four real outcomes are reported distinctly: no link
+   at all, mirrored as a named work item, mirrored as a comment (no Decision type mapped), or
+   mirror **failed** with the provider's error. (The first implementation of this reported
+   "mirrored" whenever `pmMirror` was truthy — but `POST` returns the mirror *outcome*
+   `{ok, action?, externalId?, error?}` while `GET` returns the resulting *link*, so a failed
+   mirror is truthy. That would have claimed the customer's tool held a record it did not; it is
+   fixed and called out here because it is the same class of error as the parity claim itself.)
+
+PM links and decisions are **one pair of components** used by both detail pages: the backend is
+one pair of endpoints over the only two parent types, so a second implementation could only drift.
+
+The two false in-code comments are deleted. `ProjectDetailPage`'s replacement no longer says
+"migrates in phase 2" — it states that shared-context editing is a **still-open gap** keeping the
+legacy shell alive.
+
+### STOPPED, not shipped — a FOURTH gap found while auditing
+
+Auditing the rest of the surface (endpoint-by-endpoint diff of both legacy shells against
+`apps/web/src`, including string-concatenated paths the naive diff misses) turned up **one more
+legacy-only capability, which this correction did NOT build**:
+
+- **Pillar 4's shared context store** — `GET`/`POST /v1/projects/:id/context`,
+  `GET /v1/projects/:id/context/graph`, `POST /v1/projects/:id/context/promote`. The legacy
+  editor implements read-before-write, base-revision conflict detection, a both-texts conflict
+  view, rebase-vs-send-to-arbiter, the `409 base_revision_required` recovery path, artifact
+  promotion, and the version graph. That is pillar 4's headline (versioned conflict resolution
+  with provenance) and it is materially larger than the three above — it is a stateful editor,
+  not a card. It was outside the three items this correction was scoped to, so it is reported
+  rather than half-built.
+
+Everything else diffs clean: no other endpoint or path fragment reachable from `app-ui.ts` /
+`admin-portal.ts` is missing from the SPA. One legacy-only *action* was found and closed in
+passing (run `pm-sync`, above); `POST /v1/runs/:id/nodes/:nodeId/dispatch` (dispatch a single
+node) remains legacy-only but is a convenience over `/auto`, which the SPA has, so it is noted
+rather than counted as a gap.
+
+### What "parity" means from now on
+
+The phase-2 standard — "the Playwright journeys are green" — is retired as a parity test,
+because it cannot detect a missing view. **Parity is a capability diff, not a passing suite.**
+Before any future session proposes deleting the legacy shells again, it must:
+
+1. enumerate every endpoint and path fragment referenced by `app-ui.ts` and `admin-portal.ts`,
+   **including string-concatenated ones** (`grep -ohE '\+ *"/[a-z0-9._/-]+'`), and diff that set
+   against `apps/web/src`;
+2. show that the remaining gap list is **empty** — today it is exactly one entry, the shared
+   context store;
+3. only then delete, and record the diff in the ADR.
+
+A green e2e run is necessary and not sufficient. This paragraph exists so the next session
+inherits the method, not the claim.
+
+### Verification (this correction)
+
+- `pnpm -r build` green (gateway `tsc`; web `tsc --noEmit` + `vite build`).
+- `node scripts/check-ui-syntax.mjs` green — it is **retained**, because the template-literal
+  shells it guards are retained.
+- Gateway suite **801 → 804**, 63 files, all green. The +3 are the audit-filter and
+  per-tool-pricing tests below; **no test was removed** (the two legacy-shell assertions deleted
+  in the halted removal are restored).
+- Playwright **32 → 36 journeys**, all green, zero console errors — decomposition
+  draft → review → edit → accept (asserting the created run carries the human's edit, not the
+  lead's wording, and that a too-short goal is refused before any request is made), PM links +
+  sync + live read + a decision recorded on run detail, and both cards present on workflow
+  detail.
+
+### Also in this correction: the two phase-2 debts that were genuinely just degraded
+
+Independent of the parity failure, the two views phase 2 shipped gracefully degraded (because
+their backends landed the same hour) are now wired:
+
+- **Audit log — A4's deploy-mode dimension.** `audit_log.deploy_mode` (ADR-0027 §2a) was written
+  by the deploy/rollback executors and target-pinned infra mutations but had **no query
+  surface**: `GET /v1/audit` accepted only `userId`. Added
+  `?deployMode=hosted|byoc|air_gapped|unknown` to `/v1/audit` and `/v1/audit.csv` (one shared
+  WHERE, so the export always matches the screen) plus a `deployMode` CSV column.
+  **The honesty requirement is the design**: `unknown` maps to `deploy_mode IS NULL` and is an
+  explicit, equal option — never an "other", never a default-to-hosted. ADR-0027 states those
+  rows are un-backfillable by design (two real things: actions that were never deploy-scoped, and
+  every row written before migration 0044), so nothing infers a mode. The table renders them as a
+  plain "unknown" with a tooltip naming both possibilities; the card states in prose that unknown
+  is not a fourth mode and not a synonym for "hosted", and repeats ADR-0027's disclosed limit
+  that per-mode retention only differentiates post-0044 rows; the CSV writes the literal word
+  `unknown` rather than an empty cell an auditor could misread; and filtering to a mode with no
+  rows says *why* rather than implying the trail is broken.
+- **MCP servers — O10 per-tool pricing.** The backend existed exactly as ADR-0027 §7 describes
+  (`PATCH /v1/servers/:serverId/tools/:toolName/price`, `{ pricePerCallUsd: number | null }`, on
+  the inventory row, audited, resolved tool-first with the server flat price as fallback). The
+  tool table now names which of the three states each row is in — **override / inherited /
+  unpriced** — and takes an in-place edit, where a blank field clears the override back to
+  inheritance rather than pricing the tool at zero. The **server flat rate is read-only**:
+  `createServerSchema` takes `name` + `url` only, so no API sets it and the UI does not pretend
+  otherwise.

@@ -147,6 +147,9 @@ export interface McpServer {
   id: string;
   name: string;
   url: string;
+  /** PILLAR 5: the server's FLAT list price per allowed tool call. Null =
+   * unpriced (cost stays an honest null, never invented). */
+  pricePerCallUsd?: number | null;
   createdAt?: string;
 }
 
@@ -156,6 +159,10 @@ export interface McpTool {
   name: string;
   kind: "read" | "write";
   description?: string | null;
+  /** O10 (ADR-0027): the optional PER-TOOL price override on this inventory
+   * row. Resolution at metering time is tool-first, server-flat fallback.
+   * Null = no override = this tool inherits the server's flat price. */
+  pricePerCallUsd?: number | null;
 }
 
 export interface GitConnection {

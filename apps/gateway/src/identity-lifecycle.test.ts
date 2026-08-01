@@ -305,7 +305,13 @@ describe("audit CSV export", () => {
     expect(all.headers["content-type"]).toContain("text/csv");
     expect(all.headers["content-disposition"]).toContain("audit-log.csv");
     const lines = all.body.trim().split("\n");
-    expect(lines[0]).toBe("at,userId,userName,objectType,objectId,serverId,toolName,effect,ruleId,reason,detail");
+    // deployMode joined the export when A4's dimension gained a query surface
+    // (ADR-0027 §2a) — the column is always present, and a row with no mode
+    // says the word `unknown` rather than leaving a cell an auditor could read
+    // as "hosted".
+    expect(lines[0]).toBe(
+      "at,userId,userName,objectType,objectId,serverId,toolName,effect,ruleId,deployMode,reason,detail",
+    );
     expect(lines.length).toBeGreaterThan(1);
     // filtered: only the named user's rows
     const filtered = await app.inject({

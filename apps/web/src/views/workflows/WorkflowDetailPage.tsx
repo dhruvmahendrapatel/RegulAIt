@@ -22,6 +22,7 @@ import {
   StatusBadge,
 } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
+import { DecisionLedgerCard, PmLinksCard } from "../pm/PmAndDecisions";
 import v from "../views.module.css";
 import s from "./workflows.module.css";
 
@@ -407,6 +408,12 @@ export default function WorkflowDetailPage() {
             )}
           </Card>
         )}
+
+        {/* PILLAR 8: this instance mapped onto the customer's own work item,
+            and PILLAR 4's decision ledger for it. Same components the run
+            detail uses — one backend contract, one implementation. */}
+        <PmLinksCard parent={{ objectType: "workflow_instance", objectId: instanceId! }} />
+        <DecisionLedgerCard parent={{ objectType: "workflow_instance", objectId: instanceId! }} />
       </div>
     </>
   );

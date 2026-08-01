@@ -124,6 +124,24 @@ describe("the PATCH endpoint", () => {
     expect(audit).toBeTruthy();
     expect(audit!.detail).toMatchObject({ before: null, after: 0.05 });
   });
+
+  it("the inventory read surfaces override vs inherited — the shape the admin UI binds to", async () => {
+    // the SPA's MCP-servers view renders one row per tool as override /
+    // inherited / unpriced, so BOTH halves of the tool-first-server-flat
+    // resolution must be readable from the two list endpoints it already calls.
+    const servers = await app.inject({ method: "GET", headers: AUTH, url: "/v1/servers" });
+    expect(servers.statusCode).toBe(200);
+    const server = servers.json().servers.find((s: { id: string }) => s.id === serverId);
+    expect(server.pricePerCallUsd).toBe(0.002); // the server flat rate the UI shows as "inherited"
+
+    const tools = await app.inject({ method: "GET", headers: AUTH, url: `/v1/servers/${serverId}/tools` });
+    expect(tools.statusCode).toBe(200);
+    const byName = new Map(
+      (tools.json().tools as Array<{ name: string; pricePerCallUsd: number | null }>).map((t) => [t.name, t]),
+    );
+    expect(byName.get("o10_pricey")!.pricePerCallUsd).toBe(0.05); // overrides
+    expect(byName.get("o10_cheap")!.pricePerCallUsd).toBeNull(); // inherits the server flat rate
+  });
 });
 
 describe("tool-first resolution, server-flat fallback — attributed and unattributed alike", () => {

@@ -1,7 +1,18 @@
 /**
- * Audit log — the single trail every pillar writes into. Filterable by user,
- * full-trail CSV export (the screen shows the latest 100 rows), and the §8.4
- * retention floor + governed prune (owned confirm, itself audited).
+ * Audit log — the single trail every pillar writes into. Filterable by user
+ * and by A4's deploy-mode dimension, full-trail CSV export (the screen shows
+ * the latest 100 rows), and the §8.4 retention floor + governed prune (owned
+ * confirm, itself audited).
+ *
+ * DEPLOY-MODE HONESTY (ADR-0027 §2a). `deploy_mode` is written only by
+ * deploy-mode-scoped actions (workflow deploy/rollback executors, governed
+ * infra mutations on target-pinned resources). Everything else — and EVERY row
+ * written before migration 0044 — carries null, which ADR-0027 states is
+ * "un-backfillable by design … an honest absence, never an invented value".
+ * So the filter offers `unknown / pre-0044` as an explicit, equal option, the
+ * table renders those rows as a plain "unknown" (never a mode, never a dash
+ * that reads as "none"), and the card says out loud that unknown is two
+ * different real things and cannot be resolved into a mode retroactively.
  */
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -18,20 +29,38 @@ import v from "../../views.module.css";
 const effectTone = (effect: string): Tone =>
   effect === "allow" ? "ok" : effect === "deny" ? "danger" : effect === "require_approval" ? "warn" : "neutral";
 
+/** the four filter values the backend accepts; `unknown` maps to
+ * `deploy_mode IS NULL`, which is a first-class bucket, not an "other". */
+const MODE_OPTS = [
+  { v: "hosted", l: "hosted" },
+  { v: "byoc", l: "byoc" },
+  { v: "air_gapped", l: "air_gapped" },
+  { v: "unknown", l: "unknown / pre-0044" },
+];
+
 export default function AuditLogPage() {
   const users = useUsers();
   const { toast } = useToast();
   const act = useAction();
   const [userId, setUserId] = useState("");
+  const [deployMode, setDeployMode] = useState("");
   const [confirmPrune, setConfirmPrune] = useState(false);
+
+  const qs = useMemo(() => {
+    const p = new URLSearchParams();
+    if (userId) p.set("userId", userId);
+    if (deployMode) p.set("deployMode", deployMode);
+    const s = p.toString();
+    return s ? `?${s}` : "";
+  }, [userId, deployMode]);
 
   const retention = useQuery({
     queryKey: ["admin", "audit-retention"],
     queryFn: () => api.get<AuditRetention>("/v1/audit/retention"),
   });
   const audit = useQuery({
-    queryKey: ["admin", "audit", userId],
-    queryFn: () => api.get<{ entries: AuditEntry[] }>(`/v1/audit${userId ? `?userId=${userId}` : ""}`),
+    queryKey: ["admin", "audit", userId, deployMode],
+    queryFn: () => api.get<{ entries: AuditEntry[] }>(`/v1/audit${qs}`),
   });
 
   const nameOf = useMemo(
@@ -48,7 +77,7 @@ export default function AuditLogPage() {
     <>
       <PageHeader
         title="Audit log"
-        sub="Every governed decision, lifecycle action and settings change lands here — one trail, all eight pillars. The table shows the latest 100 rows; the CSV export carries the full filtered trail."
+        sub="Every governed decision, lifecycle action and settings change lands here — one trail, all eight pillars. Filter by user and by deploy mode; the table shows the latest 100 rows, and the CSV export carries the full filtered trail."
       />
       <div className={v.stack}>
         <Card title="Retention (§8.4) — a single global floor">
@@ -87,21 +116,32 @@ export default function AuditLogPage() {
                 {optionEls(userOpts(users.data?.users), "— all users —")}
               </Select>
             </Field>
+            <Field label="Filter by deploy mode">
+              <Select value={deployMode} onChange={(e) => setDeployMode(e.target.value)}>
+                {optionEls(MODE_OPTS, "— any mode —")}
+              </Select>
+            </Field>
             <span className={v.grow} />
             <Button
               size="sm"
               title="Download the FULL filtered trail (the table shows the latest 100 rows)"
               onClick={() =>
-                void downloadCsv(
-                  `/v1/audit.csv${userId ? `?userId=${userId}` : ""}`,
-                  "audit-log.csv",
-                  (msg) => toast(msg, "error"),
-                )
+                void downloadCsv(`/v1/audit.csv${qs}`, "audit-log.csv", (msg) => toast(msg, "error"))
               }
             >
               Download CSV
             </Button>
           </div>
+          <p className={v.faint}>
+            A row carries a deploy mode only when the action was deploy-mode-scoped — a workflow
+            deploy/rollback, or a governed infra change on a target-pinned resource. Everything else
+            (MCP calls, membership, settings edits) has <strong>no mode to have</strong>, and every row
+            written before migration 0044 has none either: that mode was never recorded, so it is{" "}
+            <strong>un-backfillable</strong> and is not inferred here. Both land in one honest{" "}
+            <strong>unknown / pre-0044</strong> bucket — it is <em>not</em> a fourth mode and{" "}
+            <em>not</em> a synonym for “hosted”. Per-mode retention only differentiates rows written
+            after 0044 for the same reason.
+          </p>
           <Table<AuditEntry & { rowKey: string }>
             columns={[
               {
@@ -123,12 +163,37 @@ export default function AuditLogPage() {
                 render: (e) => <Badge tone={effectTone(e.effect)}>{e.effect.replaceAll("_", " ")}</Badge>,
               },
               { key: "rule", header: "Rule", render: (e) => <span className={v.mono}>{e.ruleId}</span> },
+              {
+                key: "deployMode",
+                header: "Deploy mode",
+                sort: (e) => e.deployMode ?? "unknown",
+                render: (e) =>
+                  e.deployMode ? (
+                    <Badge tone="info">{e.deployMode}</Badge>
+                  ) : (
+                    <span
+                      className={v.dim}
+                      title="No mode was recorded for this row — either it is not a deploy-mode-scoped action, or it predates migration 0044. Un-backfillable by design; never assume a mode."
+                    >
+                      unknown
+                    </span>
+                  ),
+              },
               { key: "reason", header: "Reason", render: (e) => <span className={v.dim}>{e.reason ?? "—"}</span> },
             ]}
             rows={rows}
             rowKey={(e) => e.rowKey}
             loading={audit.isLoading}
-            empty={<EmptyState title="No audit rows match" body="Every governed action writes here — try clearing the filter." />}
+            empty={
+              <EmptyState
+                title="No audit rows match"
+                body={
+                  deployMode && deployMode !== "unknown"
+                    ? `No row records a ${deployMode} deploy mode yet — only deploy-mode-scoped actions written after migration 0044 carry one. Clear the filter to see the full trail.`
+                    : "Every governed action writes here — try clearing the filter."
+                }
+              />
+            }
           />
         </Card>
       </div>
