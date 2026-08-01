@@ -32,11 +32,6 @@ locals {
 
   state = var.enabled ? "ENABLED" : "DISABLED"
 
-  # Referenced by the trust policy's aws:SourceArn condition. Written as a
-  # prefix wildcard rather than the concrete schedule ARNs on purpose: naming
-  # the schedules would make the role depend on the schedules and the schedules
-  # depend on the role, which is a cycle Terraform cannot resolve.
-  schedule_arn_pattern = "arn:${local.partition}:scheduler:${local.region}:${local.account_id}:schedule/${var.schedule_group_name}/${var.name}-*"
 }
 
 # --- the role EventBridge Scheduler assumes -----------------------------------
@@ -52,11 +47,35 @@ resource "aws_iam_role" "scheduler" {
       Effect    = "Allow"
       Principal = { Service = "scheduler.amazonaws.com" }
       Action    = "sts:AssumeRole"
-      # Confused-deputy guards: only THIS account's scheduler service, and only
-      # schedules whose name this module owns, may assume the role.
+      # Confused-deputy guard: only THIS account's scheduler service may assume
+      # the role. This is exactly the trust policy AWS documents for an
+      # EventBridge Scheduler execution role.
+      #
+      # An aws:SourceArn condition narrowing this further to schedules named
+      # "${var.name}-*" was tried and REMOVED, because it does not work: any
+      # form of it — ArnLike, or ArnLikeIfExists, or a pattern as wide as
+      # `schedule/<group>/*` — makes CreateSchedule fail with
+      #
+      #   ValidationException: The execution role you provide must allow AWS
+      #   EventBridge Scheduler to assume the role.
+      #
+      # CreateSchedule validates the trust relationship up front, and that
+      # validation does not satisfy an aws:SourceArn condition. Note the
+      # failure reads exactly like IAM propagation lag and is not: it persists
+      # indefinitely, across separate applies minutes apart. Verified by
+      # bisecting the trust policy against live CreateSchedule calls —
+      # SourceAccount-only passes, anything adding SourceArn fails.
+      #
+      # WHAT THIS GIVES UP, stated plainly: cross-account confused-deputy is
+      # still blocked (SourceAccount must equal this account). What is lost is
+      # INTRA-account narrowing — another schedule in this same account could
+      # name this role. The compensating control is the permission policy
+      # below: it grants exactly StartInstances/StopInstances on exactly the
+      # instance ARNs passed in, so the worst such a schedule could do is stop
+      # or start the boxes this module already manages. No Terminate, no
+      # wildcard resource.
       Condition = {
         StringEquals = { "aws:SourceAccount" = local.account_id }
-        ArnLike      = { "aws:SourceArn" = local.schedule_arn_pattern }
       }
     }]
   })

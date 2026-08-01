@@ -201,3 +201,76 @@ power cycles for the first time.
 4. This is **dev-only**. Nothing here is production, and the standing guardrail
    is untouched: no `prod`/`production` account, tag, or role was created or
    used.
+
+---
+
+## Amendment — 2026-08-01: applied, and the `aws:SourceArn` guard had to be dropped
+
+This ADR was written before it was applied. Applying it changed one decision;
+recording that here rather than editing the text above.
+
+**The `aws:SourceArn` confused-deputy guard does not work and has been removed.**
+As designed, the scheduler role's trust policy carried two conditions:
+`StringEquals aws:SourceAccount` plus `ArnLike aws:SourceArn` narrowed to
+schedules named `<name>-*`. Every `CreateSchedule` call failed with:
+
+```
+ValidationException: The execution role you provide must allow AWS EventBridge
+Scheduler to assume the role.
+```
+
+This reads exactly like IAM propagation lag and is not — it persisted across
+four separate applies over roughly half an hour, each retrying internally for
+~2m10s. It was isolated by bisecting the trust policy against live
+`CreateSchedule` calls:
+
+| Trust policy condition | `CreateSchedule` |
+|---|---|
+| none | PASS |
+| `StringEquals aws:SourceAccount` | **PASS** |
+| `ArnLike aws:SourceArn` (even `schedule/<group>/*`) | FAIL |
+| `ArnLikeIfExists aws:SourceArn` | FAIL |
+
+`CreateSchedule` validates the trust relationship before the schedule exists,
+and that validation does not satisfy an `aws:SourceArn` condition in any form —
+including the `...IfExists` variant that is the normal IAM idiom for an absent
+context key. What remains is exactly the trust policy AWS documents for a
+Scheduler execution role.
+
+A caution for anyone re-testing this: the validation result appears to be
+cached per-role for a minute or two, so back-to-back probes can return a
+previous policy's verdict. Two of the intermediate results above were initially
+misread for that reason. Allow ~75s between changing the trust policy and
+drawing a conclusion.
+
+**What this gives up, stated plainly.** Cross-account confused-deputy is still
+blocked — `aws:SourceAccount` must equal this account. What is lost is
+*intra*-account narrowing: another schedule in this same account could name
+this role. The compensating control is the permission policy, which was already
+the point: exactly `ec2:StartInstances`/`StopInstances`, on exactly the instance
+ARNs passed in, no `Terminate`, no wildcard resource. The worst a rogue
+same-account schedule could do with this role is stop or start the boxes this
+module already manages.
+
+**Applied state.** `aws_eip` + association, the scheduler role and its inline
+policy, and both schedules are live:
+
+```
+power_window = ENABLED | start=cron(0 8 ? * MON-FRI *) | stop=cron(0 20 ? * MON-FRI *)
+             | tz=America/New_York | instances=i-013c62adc887c76bb
+public_ip_is_stable = true
+```
+
+**Follow-ups 1 and 2 above are now done.** `boot-resync.sh` is installed and
+enabled as a systemd oneshot; it re-pointed Caddy on first run and also
+re-enabled swap and wrote the missing `/etc/fstab` entry. The Caddyfile and
+`docs/ops/TLS.md` now carry the EIP-derived name.
+
+**Correction to this ADR's original text.** It states the box "is currently
+stopped". It was not — it was mid-restart during a concurrent `terraform apply`
+that changed `user_data`, which the EC2 provider applies by stopping and
+starting the instance. That same apply is what moved the address the first
+time. The address moved twice in one day in total
+(`3.237.199.248` → `98.86.163.252` → `3.229.246.126`, the last on EIP
+attachment), which if anything strengthens the case the ADR makes for pinning
+it.

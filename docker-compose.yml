@@ -87,7 +87,7 @@ services:
       # Public hostname this stack serves. Default is the sslip.io name derived
       # from the dev box's public IP (see infra/caddy/Caddyfile). Override when
       # the IP changes or a real domain arrives.
-      REGULAIT_TLS_HOST: ${REGULAIT_TLS_HOST:-3-237-199-248.sslip.io}
+      REGULAIT_TLS_HOST: ${REGULAIT_TLS_HOST:-3-229-246-126.sslip.io}
       # Where Caddy proxies to. Compose-network DNS name of the gateway.
       REGULAIT_TLS_UPSTREAM: ${REGULAIT_TLS_UPSTREAM:-gateway:3000}
       # Empty = real Let's Encrypt. compose.tls-local.yml sets `tls internal`.
