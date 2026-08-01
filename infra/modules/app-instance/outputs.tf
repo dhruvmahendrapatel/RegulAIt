@@ -22,6 +22,19 @@ output "source_bucket" {
   value = aws_s3_bucket.source.bucket
 }
 
+# The role the box's own processes act as. Handed to modules that need to grant
+# this instance something (e.g. write access to a backup bucket) without
+# reaching into this module's internals — and, importantly, without touching
+# `aws_instance` at all: attaching a policy to an existing role is not an
+# instance change and cannot trigger a stop/start or a replacement.
+output "instance_role_name" {
+  value = aws_iam_role.instance.name
+}
+
+output "instance_role_arn" {
+  value = aws_iam_role.instance.arn
+}
+
 output "security_group_id" {
   value = aws_security_group.app.id
 }

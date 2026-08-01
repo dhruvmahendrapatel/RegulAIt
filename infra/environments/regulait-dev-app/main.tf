@@ -70,3 +70,46 @@ module "power_schedule" {
 
   tags = local.tags
 }
+
+# --- database backup (ADR-0035) ----------------------------------------------
+#
+# THE PROBLEM THIS CLOSES: the whole database is a Docker named volume
+# (`pgdata`) on the root EBS volume of the single instance above. No RDS, no
+# replica, no snapshot. Every user, credential ciphertext, audit row, project,
+# workflow instance and spend record lives there and nowhere else — and ADR-0032
+# now power-cycles that box every weekday on purpose. An audit log with no
+# backup is not an audit log.
+#
+# This half is only the DESTINATION and the permission to write to it. The job
+# itself is `infra/scripts/pg-backup.sh`, a self-installing systemd timer on the
+# box — deliberately NOT user_data, because user_data runs once per INSTANCE and
+# editing it makes the EC2 provider stop/start the box (and, before the Elastic
+# IP, changed its address). See docs/ops/DB_BACKUP.md for the install command,
+# which `backup_install_command` below prints ready to paste.
+module "db_backup" {
+  source = "../../modules/backup-target-s3"
+
+  name        = "regulait-dev-app-db"
+  bucket_name = "regulait-dev-app-db-backup-517506432475"
+  prefix      = "postgres"
+
+  # The box writes its own backups, so the grant lands on the instance role.
+  # Attaching a policy to an existing role does not touch `aws_instance`.
+  writer_role_names = [module.app.instance_role_name]
+
+  retention_days                    = var.backup_retention_days
+  noncurrent_version_retention_days = var.backup_noncurrent_retention_days
+
+  enable_freshness_alarm = var.backup_alarm_enabled
+  freshness_missing_days = var.backup_alarm_missing_days
+  alarm_sns_topic_arns   = var.backup_alarm_sns_topic_arns
+  metric_namespace       = "RegulAIt/Backup"
+
+  # SSE-S3, not KMS. A customer-managed key costs $1/mo plus per-request charges
+  # and, for a dev bucket whose only reader is this account's own admin, isolates
+  # it from nobody. Revisit if a compliance tag (pillar 3) ever demands a key
+  # whose grants we control.
+  kms_key_arn = null
+
+  tags = local.tags
+}
