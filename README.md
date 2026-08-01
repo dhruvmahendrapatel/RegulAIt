@@ -56,6 +56,24 @@ pnpm --filter @regulait/gateway start   # migrations run on boot
 
 Tests (`pnpm -r test`) need `DATABASE_URL` pointing at a scratch database.
 
+### Hardening knobs (ADR-0031) — safe defaults, no configuration required
+
+| Variable | Default | What it does |
+|---|---|---|
+| `REGULAIT_TRUSTED_PROXIES` | *(unset — trust nothing)* | Which peers may set `X-Forwarded-*`. Comma-separated IPs, CIDRs, or `loopback`/`linklocal`/`uniquelocal`; `none`/`off` for nothing, `all` to trust every peer (discouraged). **If you put Caddy/nginx/an ALB in front of the gateway you must set this**, or every request is attributed to the proxy's address in `auth_sessions.ip` and the audit trail. The effective posture is printed at boot. |
+| `REGULAIT_RATE_LIMIT` | `on` | `off` disables HTTP rate limiting entirely. |
+| `REGULAIT_RATE_LIMIT_MAX` / `REGULAIT_RATE_LIMIT_WINDOW_MS` | `1200` / `60000` | The general per-client-IP bucket. |
+| `REGULAIT_AUTH_RATE_LIMIT_MAX` / `REGULAIT_AUTH_RATE_LIMIT_WINDOW_MS` | `10` / `300000` | The stricter bucket on `/auth/login`, `/auth/mfa/verify` and `/auth/login-with-key`. |
+| `REGULAIT_API_KEY_RATE_LIMIT_MAX` | `6000` | Per-API-key allowance, so a busy service account is neither throttled by nor able to exhaust its neighbours'. |
+| `REGULAIT_CSV_WINDOW_DAYS` | `90` | Default date window on a CSV export when the caller names no `from`/`to`. `0` disables the window. |
+| `REGULAIT_CSV_MAX_ROWS` | `500000` | Hard per-export row ceiling. |
+| `REGULAIT_CSV_BATCH_ROWS` | `2000` | Rows fetched and written per streaming batch. |
+
+CSV exports stream and are bounded; whenever a file is not the complete answer, the
+response headers (`x-regulait-export-*`) and a trailing comment row in the file itself
+say so. `GET /v1/health/schedulers` (admin-only) reports whether the audit-prune and
+backup-verification schedulers are failing.
+
 > Deployment note: the compose file is dev-grade (fixed demo secrets — override them
 > anywhere shared). Nothing here deploys to AWS; that step is deliberately gated on an
 > explicit decision (see CLAUDE.md's standing guardrail).
