@@ -38,3 +38,4 @@ Thumbs.db
 
 # agent worktrees (session tooling, never source)
 .claude/worktrees/
+infra/modules/*/.terraform.lock.hcl

@@ -6,8 +6,9 @@ browser-trusted Let's Encrypt certificate**, at no added AWS cost. See
 an ALB.
 
 **URL:** `terraform output tls_hostname` — **this is the only authoritative source.** The
-`3-237-199-248.sslip.io` literals throughout this file are illustrative and are already stale; the
-box's address moved once while it was stopped. As of
+`3-229-246-126.sslip.io` literals throughout this file were refreshed on 2026-08-01 and are correct
+as of then, but treat them as illustrative: the address moved twice in one day before it was
+pinned (`3.237.199.248` → `98.86.163.252` → `3.229.246.126`). As of
 [ADR-0032](../decisions/0032-scheduled-power-off-dev-infra.md) an Elastic IP pins it, and the box
 is [powered off outside weekday hours](POWER_SCHEDULE.md) — so if nothing answers, check whether
 it is simply outside the window before debugging TLS.
@@ -25,7 +26,7 @@ browser ──443/tcp──▶ Caddy (container, compose profile "tls")  ──�
 
 1. **DNS.** [sslip.io](https://sslip.io) is a free public wildcard-DNS service: it resolves
    `a-b-c-d.sslip.io` to `a.b.c.d` for any IP. No domain purchase, no Route53 hosted zone,
-   nothing to register. `3-237-199-248.sslip.io` → `3.237.199.248`.
+   nothing to register. `3-229-246-126.sslip.io` → `3.229.246.126`.
 2. **Certificate.** Caddy's automatic HTTPS sees a site address with a real hostname, requests a
    certificate from Let's Encrypt, and answers the HTTP-01 challenge on `:80` itself. It renews
    at ~2/3 of the lifetime with no cron and no human.
@@ -67,16 +68,16 @@ from IMDS and writing it into `docker-compose.override.yml`.
 ### Verify
 
 ```bash
-curl -sI https://3-237-199-248.sslip.io/ui | head -1        # 200, and NO -k needed
-curl -sI http://3-237-199-248.sslip.io/ui  | head -1        # 308 → https
-echo | openssl s_client -connect 3-237-199-248.sslip.io:443 \
-       -servername 3-237-199-248.sslip.io 2>/dev/null | grep -E "issuer|subject"
+curl -sI https://3-229-246-126.sslip.io/ui | head -1        # 200, and NO -k needed
+curl -sI http://3-229-246-126.sslip.io/ui  | head -1        # 308 → https
+echo | openssl s_client -connect 3-229-246-126.sslip.io:443 \
+       -servername 3-229-246-126.sslip.io 2>/dev/null | grep -E "issuer|subject"
 ```
 
 The cookie check that actually matters — log in and confirm the flag is on:
 
 ```bash
-curl -si -X POST https://3-237-199-248.sslip.io/auth/login \
+curl -si -X POST https://3-229-246-126.sslip.io/auth/login \
   -H 'x-regulait-csrf: 1' -H 'content-type: application/json' \
   -d '{"email":"...","password":"..."}' | grep -i set-cookie
 # expect: ... HttpOnly; SameSite=Strict; Max-Age=86400; Secure
@@ -101,7 +102,7 @@ failure counts against Let's Encrypt's failed-validation limit (5 per account/ho
    the instance (or replace it) and an auto-assigned IP changes, so the hostname changes, so the
    old certificate is useless and Caddy issues a new one for the new name. Any bookmark, OIDC
    redirect URI, or IDE base URL pointing at the old name breaks. **This already happened once**:
-   the box was stopped and its address moved from `3.237.199.248` to `98.86.163.252` while every
+   the box was stopped and its address moved from `3.229.246.126` to `98.86.163.252` while every
    literal in this file and the Caddyfile still said the old one.
 
    **Now mitigated:** [ADR-0032](../decisions/0032-scheduled-power-off-dev-infra.md) attaches an
@@ -114,7 +115,7 @@ failure counts against Let's Encrypt's failed-validation limit (5 per account/ho
    costs exactly what the auto-assigned address already cost while the box runs, and ~$2.35/month
    extra for the hours it is stopped.
 
-   Treat every `3-237-199-248.sslip.io` literal in this file as illustrative.
+   Treat every `3-229-246-126.sslip.io` literal in this file as illustrative.
    `terraform output tls_hostname` is the only authoritative source.
 2. **sslip.io is a third-party service.** It is free, long-running, and open-source, but it is not
    ours. If it goes away or rate-limits, the hostname stops resolving and — worse — renewal fails
