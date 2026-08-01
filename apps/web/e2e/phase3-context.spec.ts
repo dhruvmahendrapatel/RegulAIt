@@ -36,6 +36,10 @@ mkdirSync(SHOTS, { recursive: true });
 
 const AVERY_PASSWORD = "E2e-Avery-Context!";
 const CSRF = { "x-regulait-csrf": "1" };
+/** a context write is a real transaction (revision + approval + audit row) and
+ * then a refetch; on a loaded CI box that round trip can outrun the default
+ * 10s expect budget, and waiting longer never weakens what is asserted */
+const WRITE = { timeout: 25_000 };
 /** unique per run so a re-run against a warm database never collides */
 const KEY = `e2e-conflict-${Date.now().toString(36)}`;
 
@@ -169,8 +173,8 @@ test("edit and save: the write names its base revision and becomes current", asy
   await dialog.getByRole("button", { name: "Save revision" }).click();
 
   const outcome = page.getByTestId("context-outcome");
-  await expect(outcome).toContainText("Revision 2 of “coding-standards” is now the current value");
-  await expect(page.getByTestId("context-entry-coding-standards")).toContainText("rev 2 · current");
+  await expect(outcome).toContainText("Revision 2 of “coding-standards” is now the current value", WRITE);
+  await expect(page.getByTestId("context-entry-coding-standards")).toContainText("rev 2 · current", WRITE);
   await shot(page, "phase3-04-context-saved");
   track.assertClean("edit and save");
 });
@@ -190,13 +194,27 @@ test("conflict A — a real 409 base_revision_required, resolved by REBASE", asy
   });
   expect(first.revision).toBe(1);
 
-  // stub EXACTLY ONE pre-read so the client still believes the key is new —
-  // this is the race the 409 exists for, made deterministic
-  await page.route(
-    (url) => url.pathname.endsWith("/context") && url.searchParams.get("key") === KEY && !url.searchParams.has("history"),
-    (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ context: [], pending: [], arbiter: null }) }),
-    { times: 1 },
-  );
+  // Stub EXACTLY ONE pre-read of this key, so the client still believes the key
+  // is new when it writes — which is precisely the race `409
+  // base_revision_required` exists for, made deterministic. The counter is ours
+  // rather than route()'s `times`, so a miss is diagnosable instead of silent,
+  // and every later read of this key (the conflict view's own re-read) passes
+  // straight through to the real gateway.
+  const isPreRead = (url: URL) =>
+    url.pathname.endsWith("/context") &&
+    url.searchParams.get("key") === KEY &&
+    !url.searchParams.has("history");
+  let stubHits = 0;
+  await page.route(isPreRead, (route) => {
+    stubHits += 1;
+    return stubHits === 1
+      ? route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ context: [], pending: [], arbiter: null }),
+        })
+      : route.continue();
+  });
 
   const before = writes.length;
   await dialog.getByRole("button", { name: "Save revision" }).click();
@@ -204,14 +222,17 @@ test("conflict A — a real 409 base_revision_required, resolved by REBASE", asy
   // the gateway really answered 409 — asserted on the wire, not inferred
   await expect
     .poll(() => writes.slice(before).some((w) => w.status === 409), {
-      message: "the gateway must have answered 409 base_revision_required",
-      timeout: 10_000,
+      message: () =>
+        `the gateway must have answered 409 base_revision_required (pre-reads intercepted: ${stubHits}, ` +
+        `context writes seen: ${JSON.stringify(writes.slice(before))})`,
+      timeout: 25_000,
     })
     .toBe(true);
+  await page.unroute(isPreRead);
 
   // and the UI recovered into the both-texts conflict view, not a silent retry
   const conflict = page.getByTestId("context-conflict");
-  await expect(conflict).toBeVisible();
+  await expect(conflict).toBeVisible(WRITE);
   await expect(conflict).toContainText("is now at revision 1");
   await expect(conflict).toContainText("it already exists");
   await expect(conflict).toContainText("Dana got there first");
@@ -223,8 +244,8 @@ test("conflict A — a real 409 base_revision_required, resolved by REBASE", asy
 
   await dialog.getByRole("button", { name: "Rebase on rev 1 & save" }).click();
   const outcome = page.getByTestId("context-outcome");
-  await expect(outcome).toContainText(`Revision 2 of “${KEY}” is now the current value`);
-  await expect(page.getByTestId(`context-entry-${KEY}`)).toContainText("rev 2 · current");
+  await expect(outcome).toContainText(`Revision 2 of “${KEY}” is now the current value`, WRITE);
+  await expect(page.getByTestId(`context-entry-${KEY}`)).toContainText("rev 2 · current", WRITE);
   await shot(page, "phase3-06-conflict-409-rebased");
   track.assertClean("409 conflict → rebase");
 });
@@ -250,7 +271,7 @@ test("conflict B — the head moves under an open edit, resolved by ESCALATION t
 
   // read-before-write caught it: nothing was sent, both texts are on screen
   const conflict = page.getByTestId("context-conflict");
-  await expect(conflict).toBeVisible();
+  await expect(conflict).toBeVisible(WRITE);
   await expect(conflict).toContainText("is now at revision 3");
   await expect(conflict).toContainText("your edit was based on revision 2");
   await expect(conflict).toContainText("rollback rehearsal"); // theirs
@@ -263,10 +284,10 @@ test("conflict B — the head moves under an open edit, resolved by ESCALATION t
   await dialog.getByRole("button", { name: /^Escalate to Dana/ }).click();
 
   const outcome = page.getByTestId("context-outcome");
-  await expect(outcome).toContainText(`Revision 4 of “${KEY}” was retained, but it is NOT the current value`);
+  await expect(outcome).toContainText(`Revision 4 of “${KEY}” was retained, but it is NOT the current value`, WRITE);
   await expect(outcome).toContainText("sent yours to Dana Developer to decide");
   // the store did NOT move: rev 3 is still what everyone reads
-  await expect(page.getByTestId(`context-entry-${KEY}`)).toContainText("rev 3 · current");
+  await expect(page.getByTestId(`context-entry-${KEY}`)).toContainText("rev 3 · current", WRITE);
   await expect(page.getByTestId(`context-entry-${KEY}`)).toContainText("1 awaiting arbiter");
   await expect(page.getByText("Conflicting revisions awaiting a decision")).toBeVisible();
   await shot(page, "phase3-08-conflict-escalated");
@@ -328,7 +349,7 @@ test("promote: a signed-off artifact lands in the shared store, reported by its 
   // the write answers with an outcome object; this asserts the reported words
   // match what actually happened, rather than "it did not throw"
   const outcome = page.getByTestId("context-outcome");
-  await expect(outcome).toContainText("Revision 1 of “requirements_file” is now the current value");
+  await expect(outcome).toContainText("Revision 1 of “requirements_file” is now the current value", WRITE);
   await expect(outcome).toContainText("Promoted from the signed-off artifact “requirements_file” v1");
   const entry = page.getByTestId("context-entry-requirements_file");
   await expect(entry).toContainText("from artifact");
