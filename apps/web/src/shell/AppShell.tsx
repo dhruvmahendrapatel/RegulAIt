@@ -271,7 +271,7 @@ export default function AppShell(props: { children: ReactNode }) {
                     navigate("/account");
                   }}
                 >
-                  Account security
+                  Account
                 </button>
                 <button
                   className={s.menuItem}
@@ -292,6 +292,16 @@ export default function AppShell(props: { children: ReactNode }) {
                   }}
                 >
                   Two-factor authentication
+                </button>
+                <button
+                  className={s.menuItem}
+                  role="menuitem"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    navigate("/account?section=keys");
+                  }}
+                >
+                  Your model keys
                 </button>
                 <button className={s.menuDanger} role="menuitem" onClick={() => void signOut()}>
                   Sign out
