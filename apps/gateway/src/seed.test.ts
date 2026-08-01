@@ -24,6 +24,7 @@ import {
   workflowInstances,
   type Db,
 } from "@regulait/db";
+import { buildApp } from "./app.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -128,5 +129,41 @@ describe("seed script", () => {
     const ctx = rolled!.context as Record<string, { reverted?: string; deployId?: string }>;
     expect(ctx["deploy:deploy"]?.deployId).toBeDefined();
     expect(ctx["rollback:undo"]?.reverted).toBe(ctx["deploy:deploy"]!.deployId);
+  });
+
+  // ADR-0030: the owner must be able to sign in as `admin` straight out of the
+  // seeder — and the seed path is what keeps the feature exercised.
+  it("gives each persona a username (idempotently) that actually signs in", async () => {
+    const rows = await scratch.select().from(users);
+    for (const [email, username] of [
+      ["admin@regulait.local", "admin"],
+      ["dana@regulait.local", "dana"],
+      ["avery@regulait.local", "avery"],
+    ] as const) {
+      const row = rows.find((u) => u.email === email);
+      expect(row, email).toBeDefined();
+      // re-running the seeder must not duplicate or clear it
+      expect(row!.username).toBe(username);
+    }
+    // and the username is a real credential, not decoration: issue a fresh
+    // one-time password through the API and sign in with the NAME alone
+    const app = buildApp(scratch, { bootstrapToken: "seed-test-boot" });
+    const admin = rows.find((u) => u.email === "admin@regulait.local")!;
+    const issued = await app.inject({
+      method: "POST",
+      headers: { authorization: "Bearer seed-test-boot" },
+      url: `/v1/users/${admin.id}/set-initial-password`,
+      payload: { force: true },
+    });
+    expect(issued.statusCode).toBe(200);
+    const signIn = await app.inject({
+      method: "POST",
+      url: "/auth/login",
+      headers: { "x-regulait-csrf": "1" },
+      payload: { identifier: "admin", password: issued.json().password },
+    });
+    expect(signIn.statusCode).toBe(200);
+    expect(signIn.json().userId).toBe(admin.id);
+    await app.close();
   });
 });
