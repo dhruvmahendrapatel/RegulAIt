@@ -1,6 +1,6 @@
 ---
-phase: eight-pillars-shipped-hardening
-last_updated: 2026-07-30
+phase: eight-pillars-shipped-productizing
+last_updated: 2026-07-31
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -10,11 +10,33 @@ roadmap: ../docs/product/ROADMAP.md
 
 # RegulAIt — Project State
 
-> Front-matter note (2026-07-30): the narrative addenda below run through **2026-07-30**, while
-> `last_session` points at `sessions/2026-07-24-session-02.md`. That is accurate, not drift — the
-> 07-24 file is the most recent session log written; no newer session file exists yet.
+> **Maintenance note (2026-07-31): this file was allowed to drift and has been caught up.**
+> Between PR #57 and PR #75 — roughly eighteen PRs including the entire React SPA rewrite and the
+> whole authentication system — updates went into the session log
+> (`sessions/2026-07-30-session-03.md`) but NOT into this file, which `CLAUDE.md` names as one of
+> only two artifacts guaranteed to persist across sessions. The recap below is now current as of
+> PR #75. **Lesson for future sessions: update STATE.md at the same moment as the session log, not
+> at the end of a long batch** — a session that ended unexpectedly during that window would have
+> handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+**RegulAIt is a working, deployed product, not a scaffold.** All eight P0 pillars have shipped
+functionality; the gateway suite is at **801 tests** across 63 files; the schema is at **migration
+0046**; decisions run to **ADR-0030**. The product is served by a **React SPA** (`apps/web` —
+React 18 + Vite + react-router + TanStack Query, an owned token design system, light/dark, six
+grouped nav sections) at **`/ui`**, which is now the *only* UI: `/`, `/app` and `/admin` all 302
+there, with the retired template-literal shells parked at `/legacy/*` for one release (ADR-0026).
+Humans authenticate with **real auth** — scrypt passwords, revocable server-side sessions
+(HttpOnly/SameSite cookies + a CSRF header), audited lockout, TOTP MFA, and OIDC SSO with PKCE and
+default-deny JIT provisioning (ADR-0025); API keys remain the programmatic/IDE credential.
+**IDE interception** ships as provider-shaped translation shims (`/v1/messages`,
+`/v1/chat/completions`) over the one governed dispatch core, admin-gated and off by default
+(ADR-0020/0024). Everything runs on the dev EC2 box at `http://3.237.199.248:3000` — **dev-grade,
+explicitly NOT production**, and see the honest transport caveat in the addenda below.
+**What is NOT done**: no real model provider is connected (the owner's key is parked and must not
+be raised until they raise it), and the deployment is a single EC2 box with Postgres in a
+container volume.
+
 The infrastructure bootstrap phase (EPIC-01) is **complete**. The private GitHub repo
 [dhruvmahendrapatel/RegulAIt](https://github.com/dhruvmahendrapatel/RegulAIt) is live with the
 full scaffold. AWS is a two-account Organization (Management `913436627353` / Workload
@@ -772,6 +794,50 @@ connecting real providers (model key = parked Batch G, owner's call) and the gui
 first-provider journey (open). Wave-3 backlog, per ROADMAP §6: Snowflake credential schema,
 worker streaming, `agents.systemPrompt`, `mcpDefaultMode` enforcement, O11/O13/O15 interception
 depth, Azure/GCP infra, A4.
+
+**Waves 4–7 addendum, 2026-07-31 — the work this file had NOT recorded (PRs #58–#75).**
+Written 2026-07-31 to close the STATE.md drift noted at the top. Each item is in the session log
+in more detail; this is the durable summary.
+- **#58** worker/auto-dispatch STREAMING (multiplexed per-node SSE envelope, live Runs view,
+  ledger parity streamed-vs-not).
+- **#59** migration 0040 / ADR-0023: **Snowflake connector** (structured-JSON credential inside
+  the single AES-GCM ciphertext — a zero-migration convention future multi-field connectors
+  reuse), `agents.systemPrompt` (admin prompt is the dispatch system BASE, a caller's is APPENDED
+  and can never replace it), and **`mcpDefaultMode` actually ENFORCED** (was declared-only).
+- **#60/#62** Azure + GCP infra adapters and real azure/gcp/k8s deploy paths, with honest
+  structural unknowns (Azure exposes no CVSS — the severity source is labeled; GCP has no
+  renew-now cert API so rotation is a permanent 501).
+- **#63** migration 0041 / ADR-0024 — **the interception trio**: every gateway call is now
+  METERED (unattributed MCP lands in a visible NULL-project bucket, never a project budget),
+  per-user/project/role **scope rules** for staged rollout (exposure ≠ entitlement, pinned by
+  test), and **key custody is an ENFORCED rung** (BYO creds go inert), not merely declared.
+- **#64** the **async-deploy refactor** (`DeployProvider` → Promise, awaited in workflows.ts, no
+  lock held across a cloud LRO) plus the real AWS/Azure/GCP/k8s deploy clients it unblocked.
+  `dryRun:false` only ever follows a genuinely completed call.
+- **#65** guided **Getting-started** checklist from real readiness data (mock never ticks a box).
+- **#67** compat long tail — `tool_choice`, structured outputs, Anthropic `thinking` honoured
+  end-to-end; Anthropic `response_format` is a 400 rather than a fake emulation.
+- **#68** migration 0042 / **ADR-0025 — SECURE HUMAN AUTH** (see the recap at the top).
+- **#69/#70** **ADR-0026 — the React SPA**, phase 1 (workspace) then phase 2 (complete admin
+  surface), with parity proven by 32/32 Playwright BEFORE the default-route swap.
+- **#71** migrations 0043–0045 / ADR-0027 — all 11 remaining backlog items (per-kind deploy
+  targets, A4 complete, cert lifecycle, backup scheduler, per-stage quorum, partial revocations,
+  per-tool MCP pricing, additive-only reclassification reapply, per-framework cost policies, PM
+  drift auto-resolution, PM budget mirroring).
+- **#74/#75** two defects the OWNER found by using the deployed build: auth gates never named the
+  account they were acting on; and an API-key session could be **locked out** by a
+  forced-password-change gate demanding a password that was never issued. Fixed with migration
+  0046 / ADR-0028 (`auth_sessions.origin`), scoped so the recovery bypass CANNOT be used to turn
+  a stolen API key into a permanent password — that guard is a named test.
+
+Suite 386 → **801**. Migrations 0036 → **0046**. ADRs 0019 → **0028** (0029/0030 in flight).
+**Nine verified deploys.** ROADMAP §6's backlog went from 16 orphans to effectively empty.
+
+**Standing owner directives as of 2026-07-31** — carry these forward:
+- **Do NOT raise the Anthropic/model-key topic again until the owner raises it.**
+- Admin-configurability is a standing mandate (ADR-0021 conventions).
+- No production designation without explicit in-session sign-off (unchanged). The owner
+  explicitly declined a production move and any new AWS cost on 2026-07-31.
 
 **Housekeeping addendum, 2026-07-30 (doc-reconciliation batch — amends, does not rewrite, the
 entries around it).** (1) **Temperature amendment to Batch H:** the entry above says unsupported
