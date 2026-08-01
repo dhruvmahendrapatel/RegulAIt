@@ -212,3 +212,125 @@ compose file sets it and boot logs the posture.
 The regression wall this ADR asked for is kept and extended: the `Secure` cases are still pinned,
 now from both sides of the trust boundary (`apps/gateway/src/auth.test.ts`, describe "ADR-0029
 reverse-proxy trust, narrowed by ADR-0031").
+
+---
+
+### Amendment — 2026-08-01 (HSTS): §6 was never true, and its premise has since half-expired
+
+**§6 above says "HSTS deliberately OFF". It was not off.** Caddy abstained exactly as this ADR
+describes, but [ADR-0031](0031-p0-hardening-streaming-exports-proxy-trust-rate-limits-csp.md)
+item 5 later added `Strict-Transport-Security: max-age=31536000; includeSubDomains` in the
+**gateway's** `onSend` hook, on every genuinely secure response. Measured, not inferred: an app
+built with the deployed trust posture and injected with Caddy's own upstream headers returns
+
+```
+strict-transport-security: max-age=31536000; includeSubDomains
+```
+
+So for the whole time this document argued that a one-year, `includeSubDomains` pin on an
+IP-derived hostname was unacceptable, the deployed box was sending exactly that. **The defect is
+that two layers disagreed about a non-revocable browser commitment**, and it is that — not the
+choice of value — that this amendment exists to end.
+
+#### What changed underneath the original argument
+
+[ADR-0032](0032-scheduled-power-off-dev-infra.md) attached an **Elastic IP**, precisely so the
+address survives the nightly stop/start. `3-229-246-126.sslip.io` is now stable in a way it was
+not when §6 was written — the ADR's own "Harder / given up" bullet named an EIP as the mitigation
+and it has since been taken. The central premise of §6 has therefore **partly** expired. Partly,
+because:
+
+- The EIP is stable **while it exists**. `terraform destroy` releases it and a re-created EIP is a
+  *different* address (ADR-0032 says so in its own consequences). The name can still change — far
+  less often, and now only deliberately.
+- The released address goes back to the AWS pool and can land with an **unrelated customer**, who
+  would inherit both our hostname and any pin we left in visitors' browsers. That externality
+  survives our move to a real domain; it does not survive a short `max-age`.
+
+#### One correction to §6's reasoning, on the record
+
+§6 claims `includeSubDomains` on this name "would be hostile to everyone else using the service".
+**That is overstated.** HSTS policy is stored against the exact known host and `includeSubDomains`
+extends it to subdomains *of that host* — `*.3-229-246-126.sslip.io`. It has no effect on
+`sslip.io` itself, nor on any sibling `a-b-c-d.sslip.io`. The real (narrower) objection stands on
+its own without the exaggeration: sslip.io resolves *any* label prefix to the same address, so the
+flag claims a namespace that follows the IP to whoever holds it next — and we serve no subdomains,
+so it buys this deployment nothing at all.
+
+#### Decision
+
+**The gateway is the single owner of `Strict-Transport-Security`. Caddy continues to set nothing,
+and its comment now says why rather than claiming the header is off.**
+
+*Why the gateway and not the edge* — the same reason ADR-0031 put CSP there. `infra/caddy/` is
+**our dev stack**; the gateway is **the product**. It ships into BYOC and air-gapped installs
+(ADR-0015) that terminate TLS on the customer's own nginx / ALB / Ingress, and onto real domains
+where HSTS is straightforwardly correct. A posture that lives only in a Caddyfile we happen to run
+is a posture every one of those deployments silently does not get. The gateway is also directly
+reachable on its own port, which is the argument ADR-0031 already accepted for the rest of the
+header set.
+
+*The value* — default **`max-age=86400`**: one day, **no `includeSubDomains`**, **no `preload`**.
+Down from one year. A default is by definition what a deployment that has not thought about it
+gets, so it takes the conservative rung of the ladder HSTS is conventionally ramped up: one day
+still does the job the header exists for — defending a returning user's session cookie against an
+active downgrade on the next plaintext navigation — while bounding a stranger inheriting the name
+to a single day rather than a year. Confirmed absent everywhere: **`preload` is neither set nor
+implied nor requested**, in this repo or on the wire, and it never will be by default.
+
+*The gate is unchanged and still correct*: the header rides only a genuinely secure request —
+a real TLS hop or one from a peer named in `REGULAIT_TRUSTED_PROXIES` — never a plaintext hop and
+never a forged `x-forwarded-proto` (ADR-0031 item 3). A peer that could forge `https` could
+otherwise pin a host we may not be able to serve over TLS.
+
+*Recovery, since "non-revocable" is the whole worry*: a shorter `max-age` **replaces** the stored
+one for any visitor who returns over HTTPS, and dropping `includeSubDomains` from the header drops
+it from their stored policy too. So the ramp-down is self-healing for returning visitors; only
+someone who pinned a year and never comes back keeps it. That is the honest limit of the fix.
+
+#### Configurable — but as a deployment variable, not an org setting
+
+Per the standing "admins get options wherever a choice is feasible" mandate, this was weighed
+against the [ADR-0021](0021-org-settings-configurability-layer.md) `org_settings` pattern and
+deliberately **not** put there. It is exposed as **`REGULAIT_HSTS`** — the same category and the
+same home as ADR-0031's `REGULAIT_TRUSTED_PROXIES`:
+
+| | |
+| --- | --- |
+| unset | `max-age=86400` (the default above) |
+| `off` / `none` / `false` / `0` / empty | no header at all |
+| any valid value | sent verbatim, e.g. `max-age=31536000; includeSubDomains` on a real domain |
+| anything malformed | **throws at boot** |
+
+Three reasons it is not an `org_settings` toggle:
+
+1. **It is a deployment-shape fact, not an org policy.** Whether HSTS is safe here depends on
+   whether the hostname is stable, whether a plain-HTTP recovery path is still needed, and who
+   terminates TLS. An admin clicking a toggle in the portal cannot know whether the box's address
+   is elastic.
+2. **Every other `org_settings` toggle is reversible on the next request; this one is not.** HSTS
+   is stored *in the visitor's browser*. A mis-click cannot be undone from the server, only
+   shortened for people who come back. The mandate asks for options where a choice is feasible —
+   it does not ask us to put a non-revocable client-side commitment behind a self-service button.
+3. **It would make a security header depend on the database.** `loadOrgSettings` is a select per
+   consultation, and this header is set in the `onSend` hook that runs on *every* response,
+   including `/health` and error responses that must still work when Postgres is down. A security
+   header that disappears during an outage is worse than one that is merely configured.
+
+A malformed value throws rather than degrading to "no header" because a browser *ignores* a
+malformed HSTS header — the quiet failure mode is an operator who believes they have HSTS and does
+not, which is the exact confusion this amendment exists to end. `max-age=0` is valid and is the
+documented way to actively unpin visitors, so there is a valid string for every intent.
+
+#### Where it lives
+
+`apps/gateway/src/hsts.ts` (`resolveHsts` / `describeHsts` / `DEFAULT_HSTS`), consumed once at
+`buildApp` time in `apps/gateway/src/app.ts` and printed at boot by `main.ts` next to the proxy
+posture. `infra/caddy/Caddyfile`'s comment and `docs/ops/TLS.md` §4 both now describe this rather
+than the old claim; both keep the history rather than pretending the contradiction never happened.
+Pinned by ten tests in `apps/gateway/src/security-headers.test.ts` — including that the default is
+*exactly* what this amendment promises, that it carries neither `includeSubDomains` nor `preload`,
+that `off` really sends nothing, and that no setting can put it on a plaintext or forged hop.
+
+**Still not production.** Nothing here changes the deployment's status, and the standing guardrail
+is untouched.
