@@ -53,6 +53,7 @@ import {
   streamCsv,
 } from "./csv-export.js";
 import { afterCursorDesc, atTextSql, decodeCursor, encodeCursor } from "./pagination.js";
+import { resolveTrustProxy, type TrustProxySetting } from "./trusted-proxy.js";
 import { visibleTools, type ToolRef } from "@regulait/policy-kernel";
 import {
   assignRoleSchema,
@@ -106,6 +107,10 @@ export interface BuildAppOptions {
   bootstrapToken?: string;
   /** hex AES-256 key for encrypting stored git tokens (REGULAIT_DATA_KEY) */
   dataKey?: string;
+  /** ADR-0031: which peers may speak for the client via X-Forwarded-*.
+   * Defaults to REGULAIT_TRUSTED_PROXIES (which itself defaults to trusting
+   * nothing). Exposed so a test can assert both directions. */
+  trustProxy?: TrustProxySetting;
 }
 import { z } from "zod";
 import { registerMcpProxy } from "./mcp-proxy.js";
@@ -216,7 +221,14 @@ const auditCsvQuery = z.object({
 });
 
 export function buildApp(db: Db, opts: BuildAppOptions = {}) {
-  const app = Fastify({ logger: false });
+  // ADR-0031 item 3 (correcting ADR-0029): X-Forwarded-* is honoured ONLY from
+  // an explicitly named proxy address/CIDR. `req.ip` is what lands in
+  // auth_sessions.ip and in the attribution the audit trail is built on, so a
+  // blanket `trustProxy: true` would let anything that reaches the gateway
+  // port choose its own client IP and forge an `https` origin. Default: trust
+  // nothing. See trusted-proxy.ts for the env contract.
+  const trustProxy = opts.trustProxy ?? resolveTrustProxy();
+  const app = Fastify({ logger: false, trustProxy });
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof z.ZodError) {
