@@ -389,5 +389,10 @@ export interface AuditEntry {
   toolName?: string | null;
   effect: string;
   ruleId: string;
+  /** A4 (ADR-0027): the deploy mode a deploy-mode-scoped action acted on.
+   * null/absent = UNKNOWN — either the row predates migration 0044 (honestly
+   * un-backfillable) or the action was never deploy-scoped. Never render this
+   * as a mode; render it as "unknown". */
+  deployMode?: "hosted" | "byoc" | "air_gapped" | null;
   reason?: string | null;
 }
