@@ -34,6 +34,7 @@
 
 import { isIP } from "node:net";
 import { lookup as dnsLookup } from "node:dns/promises";
+import { pinnedFetch } from "./pinned-fetch.js";
 
 // ---------------------------------------------------------------------------
 // types
@@ -458,7 +459,17 @@ export function egressRefusal(err: unknown): string | null {
 }
 
 export interface GuardedFetchOptions extends EgressCheckOptions {
-  /** the underlying fetch (injectable so tests never touch the network) */
+  /**
+   * TEST SEAM ONLY. Injecting a fetch replaces the pinned transport below, so
+   * an injected fetch resolves the hostname itself and is therefore NOT pinned.
+   * No production call site passes this — `custom-providers.ts`,
+   * `credential-egress.ts` and `connection-egress.ts` all thread it straight
+   * from their own `deps`/`opts`, and `app.ts` supplies none — so the pinning
+   * guarantee below is the one every real dispatch gets. It is spelled out here
+   * rather than left implicit because a security property that quietly
+   * evaporates under an injected dependency is exactly the kind of thing a
+   * later reader must not have to rediscover.
+   */
   fetchImpl?: typeof fetch;
 }
 
@@ -474,25 +485,34 @@ export interface GuardedFetchOptions extends EgressCheckOptions {
  * an honest message, and an admin whose endpoint really redirects can point
  * the baseUrl at the final destination.
  *
- * DNS PINNING AND THE RESIDUAL TOCTOU — stated plainly, because half-closed is
- * worse than honestly-open:
- *   - For **http** the request is pinned: after validation the URL's host is
- *     rewritten to the validated IP literal and the original hostname is sent
- *     in the `Host` header. A DNS rebind between check and connect cannot
- *     move the connection, because no second resolution happens.
- *   - For **https** the connection is NOT pinned. Rewriting the URL to an IP
- *     literal would break SNI and certificate verification, and Node's global
- *     fetch exposes no supported hook for supplying a pinned `lookup` while
- *     keeping the original `servername`. So an https destination is validated
- *     immediately before each request and then resolved a second time by the
- *     TLS stack. A rebind inside that sub-millisecond window is not closed.
- *     It is materially harder to exploit than the http case (the attacker must
- *     also present a certificate valid for the allow-listed hostname), but it
- *     is a real residual and ADR-0034 records it as such rather than claiming
- *     the guard is airtight.
+ * DNS PINNING — as of ADR-0034 amendment #3 (2026-08-01) this holds for BOTH
+ * schemes, through ONE mechanism:
+ *   - The URL keeps its original hostname and the connection is made through a
+ *     `lookup` that resolves nothing and returns the addresses this guard just
+ *     validated (`pinned-fetch.ts`). No second resolution happens, so a DNS
+ *     rebind between check and connect cannot move the connection.
+ *   - Because the hostname is preserved rather than rewritten to an IP literal,
+ *     **https keeps real SNI and real certificate verification** against that
+ *     hostname. `rejectUnauthorized` stays at its default `true` and no
+ *     `checkServerIdentity` override is installed: the pin does not buy itself
+ *     out of the TLS identity check, which would have been a worse hole than
+ *     the one it closes.
+ *   - `http` was already pinned before this change (URL rewritten to the
+ *     validated IP literal, original hostname in the `Host` header) and is not
+ *     regressed: it now reaches the same address by the same `lookup`, still
+ *     sending the hostname as `Host`. The rewrite is gone, not the pin.
+ *   - Multi-address hosts pin to the WHOLE validated set, not to `addresses[0]`
+ *     — see the multi-address note in `pinned-fetch.ts`. An address the guard
+ *     never validated cannot be dialled.
+ *
+ * WHAT REMAINS. An injected `fetchImpl` (tests only — see `GuardedFetchOptions`)
+ * cannot be pinned and keeps the pre-amendment behaviour, including the http
+ * IP-literal rewrite. And pinning constrains WHERE the socket goes, not what an
+ * allow-listed host chooses to serve: an attacker who legitimately controls an
+ * allow-listed name still reaches their own server, which was always true.
  */
 export function createGuardedFetch(opts: GuardedFetchOptions): typeof fetch {
-  const base = opts.fetchImpl ?? fetch;
+  const injected = opts.fetchImpl;
   const guarded = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const rawUrl =
       typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -500,17 +520,34 @@ export function createGuardedFetch(opts: GuardedFetchOptions): typeof fetch {
     if (!decision.ok) throw new EgressBlockedError(decision);
 
     const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
-    let target = decision.url;
-    if (decision.protocol === "http:") {
-      // pin: connect to the address we validated, present the original Host
-      const pinned = new URL(decision.url);
-      const addr = decision.addresses[0]!;
-      pinned.hostname = isIP(addr) === 6 ? `[${addr}]` : addr;
-      target = pinned.toString();
-      headers.set("host", decision.port === 80 ? decision.host : `${decision.host}:${decision.port}`);
+
+    let res: Response;
+    if (injected) {
+      // TEST SEAM. Unpinned by construction; the http IP-literal rewrite that
+      // predates amendment #3 is preserved here verbatim so injected-fetch
+      // suites keep observing exactly what they always observed.
+      let target = decision.url;
+      if (decision.protocol === "http:") {
+        const pinned = new URL(decision.url);
+        const addr = decision.addresses[0]!;
+        pinned.hostname = isIP(addr) === 6 ? `[${addr}]` : addr;
+        target = pinned.toString();
+        headers.set("host", decision.port === 80 ? decision.host : `${decision.host}:${decision.port}`);
+      }
+      res = await injected(target, { ...init, headers, redirect: "manual" });
+    } else {
+      res = await pinnedFetch(
+        {
+          url: decision.url,
+          protocol: decision.protocol,
+          host: decision.host,
+          port: decision.port,
+          addresses: decision.addresses,
+        },
+        { ...init, headers, redirect: "manual" },
+      );
     }
 
-    const res = await base(target, { ...init, headers, redirect: "manual" });
     if (res.status >= 300 && res.status < 400) {
       throw new EgressRedirectError(res.headers.get("location"));
     }

@@ -69,6 +69,15 @@
  * still open on these paths too** — this change implements no `undici.Agent`
  * and closes none of that window. It inherits exactly the same one the
  * custom-provider and credential paths have.
+ *
+ * ── SUPERSEDED, 2026-08-01 (ADR-0034 amendment #3) ──────────────────────────
+ * The paragraph immediately above is kept verbatim because it is what this
+ * module shipped saying, and amendments in this repo are appended, not
+ * rewritten. It is now OUT OF DATE in one respect: `createGuardedFetch` pins
+ * BOTH schemes to the validated addresses via `pinned-fetch.ts`, keeping SNI
+ * and certificate verification against the original hostname, so these paths
+ * inherit the closed window rather than the open one. Everything else in the
+ * paragraph still holds.
  */
 
 import { auditLog, type Db } from "@regulait/db";
@@ -156,10 +165,10 @@ export async function checkConnectionBaseUrl(
 
 /**
  * The fetch a `baseUrl`-overridden connection must use. Re-validates on EVERY
- * HTTP request the adapter makes, pins plaintext http to the validated address
- * with the original `Host` header, and refuses redirects — identical semantics
- * to the custom-provider and credential paths, because it is literally the same
- * function.
+ * HTTP request the adapter makes, pins the connection to the validated
+ * addresses for BOTH schemes (ADR-0034 amendment #3), and refuses redirects —
+ * identical semantics to the custom-provider and credential paths, because it
+ * is literally the same function.
  */
 export function connectionGuardedFetch(
   allowList: EgressAllowEntry[],
