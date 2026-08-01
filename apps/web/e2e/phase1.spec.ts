@@ -160,7 +160,8 @@ test("projects: list and budget/membership detail", async () => {
   await firstCard.click();
 
   await expect(page.getByText("Budget vs actual")).toBeVisible();
-  await expect(page.getByText("Members")).toBeVisible();
+  // exact: the project tab strip also carries the word "members"
+  await expect(page.getByText("Members", { exact: true })).toBeVisible();
   await shot(page, "12-project-detail");
   track.assertClean("projects list + detail");
 });
