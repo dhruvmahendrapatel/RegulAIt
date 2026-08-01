@@ -16,6 +16,11 @@ data "aws_vpc" "default" {
 locals {
   vpc_id = var.vpc_id != "" ? var.vpc_id : data.aws_vpc.default[0].id
 
+  # The address callers should actually use. With an Elastic IP this is the EIP
+  # (stable across stop/start); without one it is whatever EC2 handed out this
+  # boot (ephemeral — see aws_eip.app below).
+  effective_public_ip = var.assign_elastic_ip ? aws_eip.app[0].public_ip : aws_instance.app.public_ip
+
   # Backwards-compatible: callers that never set ingress_ports keep the old
   # single-port behaviour (open app_port). Callers that terminate TLS on-box
   # pass [80, 443] and app_port stops being an ingress port at all.
@@ -174,4 +179,34 @@ resource "aws_instance" "app" {
 
   # The bundle is uploaded out-of-band after apply; user-data waits for it.
   depends_on = [aws_iam_role_policy.read_source]
+}
+
+# --- stable public address (optional) -----------------------------------------
+#
+# WHY THIS EXISTS: an auto-assigned public IPv4 is released on every STOP and a
+# different one is handed out on the next START. Any name, certificate, firewall
+# rule or bookmark derived from that address silently breaks the moment the box
+# is power-cycled — which is exactly what a stop/start cost schedule does on
+# purpose, every single weekday. An Elastic IP survives stop/start, so the
+# address (and anything derived from it) is stable across the whole cycle.
+#
+# COST: since 2024-02-01 AWS bills EVERY public IPv4 at ~$0.005/hr, in-use or
+# idle. So while the instance RUNS an EIP costs exactly what the auto-assigned
+# address already cost — the only new money is the idle hours while the box is
+# stopped. See infra/modules/scheduled-power/README.md for the arithmetic.
+#
+# CAUTION: `terraform destroy` releases this address for good; a re-created EIP
+# is a DIFFERENT address. Anything pinned to it (DNS, certs) has to be re-pointed.
+resource "aws_eip" "app" {
+  count = var.assign_elastic_ip ? 1 : 0
+
+  domain = "vpc"
+  tags   = merge(var.tags, { Name = "${var.name}-eip" })
+}
+
+resource "aws_eip_association" "app" {
+  count = var.assign_elastic_ip ? 1 : 0
+
+  allocation_id = aws_eip.app[0].id
+  instance_id   = aws_instance.app.id
 }

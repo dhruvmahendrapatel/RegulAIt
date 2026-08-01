@@ -29,6 +29,13 @@ services:
       retries: 20
     volumes:
       - pgdata:/var/lib/postgresql/data
+    # ADR-0032: the dev box is now powered off on a schedule, so Postgres takes
+    # a SIGTERM every weekday evening. Docker's default grace period is 10s,
+    # after which it SIGKILLs — Postgres survives that (WAL replay on the next
+    # start) but pays a crash-recovery pass and leaves scary log lines. 60s is
+    # far more than a dev-sized shutdown checkpoint needs, so the common case
+    # becomes a clean "database system is shut down".
+    stop_grace_period: 60s
     networks: [regulait]
 
   gateway:

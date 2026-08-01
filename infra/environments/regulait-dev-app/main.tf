@@ -10,6 +10,15 @@
 # are open; the app's own 3000 is bound to host loopback and is no longer an
 # ingress port at all. Zero added AWS cost — no ALB, no ACM, no Route53.
 
+locals {
+  tags = {
+    Project     = "RegulAIt"
+    Environment = "dev"
+    ManagedBy   = "terraform"
+    Stack       = "regulait-dev-app"
+  }
+}
+
 module "app" {
   source = "../../modules/app-instance"
 
@@ -29,10 +38,35 @@ module "app" {
   ingress_cidrs      = var.ingress_cidrs
   source_bucket_name = "regulait-dev-app-source-517506432475"
 
-  tags = {
-    Project     = "RegulAIt"
-    Environment = "dev"
-    ManagedBy   = "terraform"
-    Stack       = "regulait-dev-app"
-  }
+  # PREREQUISITE for the power schedule below, not an optional nicety. The
+  # instance's auto-assigned public IPv4 is released on every stop and a new one
+  # is issued on the next start — and this stack's entire public identity is
+  # derived from that address (`<dashed-ip>.sslip.io`, ADR-0029), so a nightly
+  # power cycle would change the URL, invalidate the Let's Encrypt certificate,
+  # and force a fresh ACME issuance every morning. An Elastic IP pins it.
+  # Cost detail and the one-time IP cutover are in ADR-0032.
+  assign_elastic_ip = var.assign_elastic_ip
+
+  tags = local.tags
+}
+
+# --- scheduled power (ADR-0032) ----------------------------------------------
+#
+# The dev box is a single t3.small that nobody uses overnight or at weekends.
+# Powering it off outside a weekday window roughly halves the monthly bill for
+# this stack. StopInstances is a graceful shutdown that PRESERVES the EBS root
+# volume, which is where the Postgres container volume lives — this is a
+# stop/start, never a replace. See infra/modules/scheduled-power/README.md.
+module "power_schedule" {
+  source = "../../modules/scheduled-power"
+
+  name         = "regulait-dev-app"
+  instance_ids = [module.app.instance_id]
+
+  enabled    = var.power_schedule_enabled
+  start_cron = var.power_schedule_start_cron
+  stop_cron  = var.power_schedule_stop_cron
+  timezone   = var.power_schedule_timezone
+
+  tags = local.tags
 }
