@@ -1,5 +1,5 @@
 /**
- * Organization (ADR-0021) — the org_settings singleton in five sections, each
+ * Organization (ADR-0021) — the org_settings singleton in six sections, each
  * its own PARTIAL PUT so an admin can change one dial without restating the
  * rest. Every default equals the shipped behaviour, so an untouched page IS
  * the previous release. Sign-in & sessions lives in Identity & Access → SSO &
@@ -126,6 +126,11 @@ function Loaded(props: { settings: Record<string, unknown> }) {
   const [envProviders, setEnvProviders] = useState<string[]>(
     Array.isArray(s.envFallbackProviders) ? (s.envFallbackProviders as string[]) : [],
   );
+
+  // --- 2b. Custom LLM providers (ADR-0034) ---------------------------------
+  const custom = useSection({
+    customModelProvidersEnabled: str(s, "customModelProvidersEnabled"),
+  });
 
   // --- 3. Budgets & limits -------------------------------------------------
   const budget = useSection({
@@ -321,7 +326,33 @@ function Loaded(props: { settings: Record<string, unknown> }) {
         </SectionShell>
       </Card>
 
-      <Card title="3 · Budgets & limits">
+      <Card title="3 · Custom LLM providers (ADR-0034)">
+        <SectionShell
+          title="Master switch"
+          busy={custom.act.busy}
+          error={custom.act.error}
+          submitLabel="Save custom-provider switch"
+          onSubmit={() =>
+            void custom.act.run(
+              () => put({ customModelProvidersEnabled: asBool(custom.f.customModelProvidersEnabled!) }),
+              "Custom-provider switch saved (audited)",
+            )
+          }
+          help="The 'remove the capability entirely' switch for admin-registered endpoints (Ollama, vLLM, LM Studio, an internal gateway). It is NOT the thing standing between this org and an open proxy — the capability is already default-deny four separate ways beneath it: registration is admin-only, the egress allow-list starts empty, a provider stays disabled until a connection test passes, and a user still needs the ordinary per-agent grant. Off refuses registration and enablement and stops every custom dispatch with a 409 before any request leaves the box; the Integrations → Custom LLM providers page then says so plainly instead of appearing broken."
+        >
+          <Field label="Custom LLM providers">
+            <Select
+              value={custom.f.customModelProvidersEnabled}
+              onChange={(e) => custom.set("customModelProvidersEnabled", e.target.value)}
+            >
+              <option value="true">enabled (default — admins may register endpoints)</option>
+              <option value="false">disabled (capability removed org-wide)</option>
+            </Select>
+          </Field>
+        </SectionShell>
+      </Card>
+
+      <Card title="4 · Budgets & limits">
         <SectionShell
           title="Budget enforcement + worker/size ceilings"
           busy={budget.act.busy}
@@ -363,7 +394,7 @@ function Loaded(props: { settings: Record<string, unknown> }) {
         </SectionShell>
       </Card>
 
-      <Card title="4 · Approvals">
+      <Card title="5 · Approvals">
         <SectionShell
           title="Quorum + delegation"
           busy={approvals.act.busy}
@@ -399,7 +430,7 @@ function Loaded(props: { settings: Record<string, unknown> }) {
         </SectionShell>
       </Card>
 
-      <Card title="5 · Audit retention">
+      <Card title="6 · Audit retention">
         <SectionShell
           title="Scheduled auto-prune + org default retention"
           busy={retention.act.busy}

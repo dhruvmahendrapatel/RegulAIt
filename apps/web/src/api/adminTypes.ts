@@ -122,6 +122,56 @@ export interface AdminAgent {
   costPerMTokIn: number | null;
   costPerMTokOut: number | null;
   systemPrompt: string | null;
+  /** ADR-0034: set iff provider === 'custom' — the DB enforces the pair as a
+   * discriminated union, so these two fields are never independently valid. */
+  customProviderId?: string | null;
+}
+
+// ---- ADR-0034: custom LLM providers + the egress allow-list ---------------
+
+export type CustomWireProtocol = "openai_chat" | "anthropic_messages";
+
+/**
+ * The read projection of a `custom_model_providers` row. `keyCiphertext` is
+ * structurally absent from every response — the stored key is NEVER returned,
+ * only `hasApiKey`, so this type has no field that could hold it.
+ */
+export interface CustomModelProvider {
+  id: string;
+  name: string;
+  wireProtocol: CustomWireProtocol;
+  baseUrl: string;
+  /** the PROVIDER half of the two-flag plaintext-http opt-in */
+  allowPlaintextHttp: boolean;
+  enabled: boolean;
+  /** written only by a PASSING connection test — it is what the enable gate reads */
+  lastTestedAt: string | null;
+  lastTestError: string | null;
+  hasApiKey?: boolean;
+  createdBy: string | null;
+  createdAt: string;
+}
+
+/** One granted egress destination. A bare host — no scheme, port, path or
+ * wildcard: the guard matches it exactly against the normalized destination. */
+export interface EgressAllowHost {
+  id: string;
+  host: string;
+  allowPrivateRanges: boolean;
+  allowPlaintextHttp: boolean;
+  note: string | null;
+  createdBy: string | null;
+  createdAt: string;
+}
+
+/** A passing POST /v1/custom-model-providers/:id/test. */
+export interface ConnectionTestResult {
+  ok: true;
+  host: string;
+  port: number;
+  protocol: string;
+  model: string;
+  stopReason?: string | null;
 }
 
 export interface UserAgentPolicyView {
@@ -501,6 +551,9 @@ export interface OrgSettings {
   [key: string]: unknown;
   infraApproverUserId?: string | null;
   envFallbackProviders?: string[];
+  /** ADR-0034 master switch. Off refuses registration/enablement and stops
+   * every custom-provider dispatch with a 409 before anything leaves the box. */
+  customModelProvidersEnabled?: boolean;
 }
 
 export interface OrgSettingsResponse {

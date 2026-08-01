@@ -58,6 +58,10 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
     items: [
       { label: "Agents", to: "/admin/agents" },
       { label: "Model credentials", to: "/admin/model-credentials" },
+      // ADR-0034 — sits next to Model credentials because it is the same
+      // question ("what can our models talk to?") asked about an endpoint we
+      // do not own, rather than a vendor we do.
+      { label: "Custom LLM providers", to: "/admin/custom-providers" },
       { label: "Connectors", to: "/admin/connectors" },
       { label: "MCP servers", to: "/admin/mcp-servers" },
       { label: "Git connections", to: "/admin/git-connections" },

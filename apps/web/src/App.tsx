@@ -34,6 +34,7 @@ import AuditLogPage from "./views/admin/governance/AuditLogPage";
 import WorkflowTemplatesPage from "./views/admin/governance/WorkflowTemplatesPage";
 import AgentsPage from "./views/admin/integrations/AgentsPage";
 import ModelCredentialsPage from "./views/admin/integrations/ModelCredentialsPage";
+import CustomProvidersPage from "./views/admin/integrations/CustomProvidersPage";
 import ConnectorsPage from "./views/admin/integrations/ConnectorsPage";
 import McpServersPage from "./views/admin/integrations/McpServersPage";
 import GitConnectionsPage from "./views/admin/integrations/GitConnectionsPage";
@@ -125,6 +126,7 @@ export default function App() {
                         <Route path="workflow-templates" element={<WorkflowTemplatesPage />} />
                         <Route path="agents" element={<AgentsPage />} />
                         <Route path="model-credentials" element={<ModelCredentialsPage />} />
+                        <Route path="custom-providers" element={<CustomProvidersPage />} />
                         <Route path="connectors" element={<ConnectorsPage />} />
                         <Route path="mcp-servers" element={<McpServersPage />} />
                         <Route path="git-connections" element={<GitConnectionsPage />} />
