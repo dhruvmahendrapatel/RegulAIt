@@ -52,7 +52,7 @@ import {
   resolveCsvWindow,
   streamCsv,
 } from "./csv-export.js";
-import { afterCursorDesc, atTextSql } from "./pagination.js";
+import { afterCursorDesc, atTextSql, decodeCursor, encodeCursor } from "./pagination.js";
 import { visibleTools, type ToolRef } from "@regulait/policy-kernel";
 import {
   assignRoleSchema,
@@ -149,7 +149,25 @@ const visibleToolsParams = z.object({
   userId: z.string().uuid(),
   serverId: z.string().uuid(),
 });
-const auditQuery = z.object({ userId: z.string().uuid().optional() });
+/** ADR-0031: documented ceiling on one /v1/audit page. A caller that wants more
+ * than this pages with `cursor`, or takes the streamed CSV export. */
+export const AUDIT_MAX_PAGE_SIZE = 1000;
+const AUDIT_DEFAULT_PAGE_SIZE = 100;
+
+const auditQuery = z.object({
+  userId: z.string().uuid().optional(),
+  objectType: z.string().min(1).max(64).optional(),
+  effect: z.enum(["allow", "deny", "require_approval"]).optional(),
+  from: z.coerce.date().optional(),
+  to: z.coerce.date().optional(),
+  limit: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(AUDIT_MAX_PAGE_SIZE)
+    .default(AUDIT_DEFAULT_PAGE_SIZE),
+  cursor: z.string().min(1).max(256).optional(),
+});
 const UUID_ANY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** every audit_log column, spelled out so a keyset read can select the row AND
@@ -1988,15 +2006,40 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerAnthropicCompat(app, db, { dataKey: opts.dataKey });
   registerOpenAiCompat(app, db, { dataKey: opts.dataKey });
 
-  app.get("/v1/audit", async (req) => {
-    const { userId } = auditQuery.parse(req.query);
+  // ADR-0031 item 2: the audit read surface used to be hard-capped at 100 rows
+  // with a userId filter and nothing else — for a compliance product that means
+  // no admin could ever see row 101. It now pages with an opaque keyset cursor
+  // on the stable (at DESC, id DESC) sort, and filters on from/to/objectType/
+  // effect as well as userId. Callers that pass nothing get EXACTLY the old
+  // behaviour: the newest 100 rows under `entries`.
+  app.get("/v1/audit", async (req, reply) => {
+    const q = auditQuery.parse(req.query);
+    const cursor = q.cursor ? decodeCursor(q.cursor) : null;
+    if (q.cursor && !cursor) return reply.status(400).send({ error: "invalid_cursor" });
+
+    const filters = auditFilters(q, q.from ?? null, q.to ?? null);
+    if (cursor) filters.push(afterCursorDesc(auditLog.at, auditLog.id, cursor));
+
+    // one extra row decides hasMore without a second COUNT over a table that
+    // grows a row per governed call
     const rows = await db
-      .select()
+      .select({ ...auditLogColumns, atText: atTextSql(auditLog.at) })
       .from(auditLog)
-      .where(userId ? eq(auditLog.userId, userId) : undefined)
-      .orderBy(desc(auditLog.at))
-      .limit(100);
-    return { entries: rows };
+      .where(filters.length ? and(...filters) : undefined)
+      .orderBy(desc(auditLog.at), desc(auditLog.id))
+      .limit(q.limit + 1);
+
+    const hasMore = rows.length > q.limit;
+    const page = hasMore ? rows.slice(0, q.limit) : rows;
+    const last = page[page.length - 1];
+    return {
+      // `atText` is a cursor-derivation detail, never part of the row contract
+      entries: page.map(({ atText: _atText, ...entry }) => entry),
+      pageSize: page.length,
+      maxPageSize: AUDIT_MAX_PAGE_SIZE,
+      hasMore,
+      nextCursor: hasMore && last ? encodeCursor({ at: last.atText, id: last.id }) : null,
+    };
   });
 
   // ADR-0022: CSV export of the (filtered) audit trail — the compliance
