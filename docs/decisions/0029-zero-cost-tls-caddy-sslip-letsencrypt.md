@@ -154,3 +154,61 @@ HSTS gets turned on — short `max-age` first — once a stable real domain repl
   stands.
 
 Runbook, verification commands, and rollback: [`docs/ops/TLS.md`](../ops/TLS.md).
+
+---
+
+### Amendment — 2026-08-01 (ADR-0031)
+
+The `trustProxy: true` this ADR introduced was **too broad**, and the assessment that
+`requestIsSecure()` was fine as written was **wrong in one direction**. Both are corrected by
+[ADR-0031](0031-p0-hardening-streaming-exports-proxy-trust-rate-limits-csp.md) §3. The decision
+above — that the gateway must trust the Caddy front-end, because otherwise `req.ip` degrades to a
+container address and the session audit trail loses the real client — stands exactly as written.
+What changes is *whose* `X-Forwarded-*` gets believed.
+
+**1. `trustProxy: true` trusted every peer, not the proxy.** The safety argument here rests on
+Caddy *overwriting* `X-Forwarded-For` with `{remote_host}`. That is true, and it protects every
+request that goes **through** Caddy. It says nothing about requests that do not: the gateway port
+is published on host loopback (`127.0.0.1:3000:3000`, by design — the README entry point and the
+on-box SSM `curl localhost:3000` verification depend on it), and sibling containers share the
+compose network. Anything on either path bypasses Caddy entirely and, under `true`, could choose
+the client IP written to `auth_sessions.ip` and carried through the audit trail — the attribution
+record pillar 1 sells.
+
+Replaced by an explicit setting resolved from **`REGULAIT_TRUSTED_PROXIES`** (comma-separated IPs,
+CIDRs, or the `proxy-addr` keywords `loopback`/`linklocal`/`uniquelocal`; `none`/`off` for nothing;
+`all` only if an operator asks for the old behaviour by name).
+
+- **Deployed value: `172.28.0.2` — Caddy's address, and nothing else.** `docker-compose.yml` now
+  declares an explicit network with a pinned subnet (`172.28.0.0/16`) and gives the `caddy`
+  service that fixed address, purely so the trusted peer can be *named* rather than approximated
+  by a subnet that would also cover the `db` container. Host loopback is deliberately **not**
+  trusted. With the `tls` profile off, `172.28.0.2` simply does not exist, so nothing is trusted
+  and `req.ip` is the socket peer — the same value a laptop saw before.
+- **Default when the variable is unset: trust nothing.** That is the right default for anyone
+  running the gateway *without* a proxy (laptop, CI, `docker run`, a BYOC install with no
+  terminator), where any believed `X-Forwarded-*` is by definition unverifiable. The deployed path
+  is correct because the compose file sets the variable, not because the default guesses.
+- `main.ts` prints the effective posture at boot, so a misconfiguration surfaces as an
+  obviously-wrong IP an operator notices rather than a plausible IP anyone can choose.
+
+**2. `requestIsSecure()` reading the raw header was a real defect, not a non-issue.** The
+assessment above is correct that forging `x-forwarded-proto: https` can only turn the cookie's
+`Secure` flag **on**, which is harmless. But the same ungated read accepts
+`x-forwarded-proto: http` from anything that reaches the port without passing through Caddy — and
+that direction issues a session cookie with **no** `Secure` flag, which a browser will then send
+in cleartext. An attacker deciding whether our session cookies are protected is not a property to
+keep.
+
+`requestIsSecure()` now returns `req.protocol === "https"`, which is Fastify's own trust-gated
+answer: it consults `x-forwarded-proto` only for a peer matching `trustProxy`, and otherwise
+reports the real socket protocol. Consequences, both deliberate and both tested: a multi-hop
+`x-forwarded-proto` is read as the **last** entry (the nearest, trusted hop) rather than the
+first — the first is precisely the entry a client can inject when an upstream appends rather than
+overwrites, and our Caddy sends a single value so no chain arises here — and a deployment behind a
+terminator **must** name it in `REGULAIT_TRUSTED_PROXIES` or `Secure` turns off, which is why the
+compose file sets it and boot logs the posture.
+
+The regression wall this ADR asked for is kept and extended: the `Secure` cases are still pinned,
+now from both sides of the trust boundary (`apps/gateway/src/auth.test.ts`, describe "ADR-0029
+reverse-proxy trust, narrowed by ADR-0031").
