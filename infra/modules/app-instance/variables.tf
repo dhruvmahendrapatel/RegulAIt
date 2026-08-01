@@ -16,12 +16,18 @@ variable "instance_type" {
 }
 
 variable "app_port" {
-  description = "TCP port the app listens on; opened to ingress_cidrs."
+  description = "TCP port the app listens on. Used as the sole ingress port when ingress_ports is empty; otherwise informational (the app sits behind an on-box reverse proxy and is not reachable directly)."
   type        = number
 }
 
+variable "ingress_ports" {
+  description = "TCP ports opened to ingress_cidrs. Empty (the default) means [app_port], preserving the pre-TLS behaviour. Set to [80, 443] when a reverse proxy on the instance terminates TLS — 443/udp is added automatically for HTTP/3 whenever 443 is present."
+  type        = list(number)
+  default     = []
+}
+
 variable "ingress_cidrs" {
-  description = "CIDRs allowed to reach app_port. Default is open — override for anything beyond throwaway dev stacks."
+  description = "CIDRs allowed to reach the ingress ports. Default is open — override for anything beyond throwaway dev stacks."
   type        = list(string)
   default     = ["0.0.0.0/0"]
 }
@@ -35,6 +41,12 @@ variable "source_object_key" {
   description = "Object key of the source tarball the instance downloads on boot."
   type        = string
   default     = "source.tar.gz"
+}
+
+variable "enable_onbox_tls" {
+  description = "When true, boot the compose stack with the `tls` profile and point its Caddy TLS terminator at an sslip.io hostname derived from this instance's public IPv4 (ADR-0029). Requires ingress_ports to include 80 and 443. Costs nothing — no ALB, no ACM."
+  type        = bool
+  default     = false
 }
 
 variable "swap_gb" {

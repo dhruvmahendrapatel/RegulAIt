@@ -1162,3 +1162,95 @@ describe("ADR-0028 — session origin + API-key password recovery", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// ADR-0029 — behind the Caddy TLS terminator.
+//
+// Two distinct mechanisms, deliberately separated because they behave
+// differently:
+//
+//  1. The session cookie's `Secure` flag. requestIsSecure() reads
+//     `x-forwarded-proto` straight off the RAW headers, so it works with or
+//     without Fastify's trustProxy. These cases are the regression wall that
+//     keeps it that way — if it were ever "simplified" to req.protocol, the
+//     no-trustProxy configuration would silently drop Secure and these fail.
+//  2. `req.ip`, recorded on every auth_sessions row (ADR-0025/0028). That one
+//     DOES depend on trustProxy, which is why buildApp enables it.
+// ---------------------------------------------------------------------------
+describe("ADR-0029 reverse-proxy trust", () => {
+  const PW = "Proxy-Trust-Pw-1";
+
+  const loginWith = (email: string, password: string, headers: Record<string, string>) =>
+    app.inject({
+      method: "POST", url: "/auth/login",
+      headers: { ...CSRF, ...headers },
+      payload: { email, password },
+    });
+
+  const setCookieHeader = (res: { headers: Record<string, unknown> }): string => {
+    const h = res.headers["set-cookie"];
+    return Array.isArray(h) ? h.join("\n") : String(h ?? "");
+  };
+
+  it("sets Secure when x-forwarded-proto is https, and does NOT when the header is absent", async () => {
+    const email = "proxy-secure@auth-test.example";
+    const uid = await mkUser(email, "Proxy Secure");
+    await onboard(uid, email, PW);
+
+    // plain HTTP, no proxy header at all — the localhost/dev case
+    const plain = await loginWith(email, PW, {});
+    expect(plain.statusCode).toBe(200);
+    expect(setCookieHeader(plain)).toContain("regulait_session=");
+    expect(setCookieHeader(plain)).not.toContain("Secure");
+
+    // exactly what Caddy sends upstream for a TLS request
+    const behindTls = await loginWith(email, PW, { "x-forwarded-proto": "https" });
+    expect(behindTls.statusCode).toBe(200);
+    expect(setCookieHeader(behindTls)).toContain("; Secure");
+    // the rest of the cookie hardening must survive alongside it
+    expect(setCookieHeader(behindTls)).toContain("HttpOnly");
+    expect(setCookieHeader(behindTls)).toContain("SameSite=Strict");
+
+    // explicitly forwarded http (Caddy's :80 side, pre-redirect) => still off
+    const behindPlain = await loginWith(email, PW, { "x-forwarded-proto": "http" });
+    expect(setCookieHeader(behindPlain)).not.toContain("Secure");
+
+    // a comma-joined chain (two proxies) is read left-most-first
+    const chained = await loginWith(email, PW, { "x-forwarded-proto": "https, http" });
+    expect(setCookieHeader(chained)).toContain("; Secure");
+  });
+
+  it("clears the cookie with Secure too, so the browser actually drops it over TLS", async () => {
+    const email = "proxy-logout@auth-test.example";
+    const uid = await mkUser(email, "Proxy Logout");
+    await onboard(uid, email, PW);
+    const cookie = cookieOf(await loginWith(email, PW, { "x-forwarded-proto": "https" }));
+    const out = await app.inject({
+      method: "POST", url: "/auth/logout",
+      headers: { ...CSRF, "x-forwarded-proto": "https" },
+      cookies: { regulait_session: cookie },
+    });
+    expect(out.statusCode).toBe(200);
+    expect(setCookieHeader(out)).toContain("Max-Age=0");
+    expect(setCookieHeader(out)).toContain("; Secure");
+  });
+
+  it("records the real client IP from X-Forwarded-For on the session row (trustProxy)", async () => {
+    const email = "proxy-ip@auth-test.example";
+    const uid = await mkUser(email, "Proxy Ip");
+    await onboard(uid, email, PW);
+    // Caddy OVERWRITES X-Forwarded-For with the real peer, so exactly one entry.
+    const res = await loginWith(email, PW, {
+      "x-forwarded-proto": "https",
+      "x-forwarded-for": "203.0.113.9",
+    });
+    expect(res.statusCode).toBe(200);
+    const [row] = await db
+      .select({ ip: authSessions.ip })
+      .from(authSessions)
+      .where(eq(authSessions.userId, uid))
+      .orderBy(desc(authSessions.createdAt))
+      .limit(1);
+    expect(row!.ip).toBe("203.0.113.9");
+  });
+});

@@ -1,0 +1,22 @@
+# Local-proof override for the TLS stack (ADR-0029).
+#
+#   docker compose --profile tls -f docker-compose.yml -f compose.tls-local.yml up --build
+#   curl -k -i https://localhost/ui
+#
+# What it changes, and why:
+#
+#  * REGULAIT_TLS_HOST=localhost — the sslip.io name points at the real EC2 box,
+#    not at your machine, so serving it locally would be meaningless.
+#  * REGULAIT_TLS_ISSUER="tls internal" — Caddy mints the certificate from its
+#    own local CA instead of calling Let's Encrypt. THIS IS THE POINT OF THE
+#    FILE: a laptop cannot pass an HTTP-01 challenge for the box's hostname, and
+#    every failed attempt counts against Let's Encrypt's failed-validation rate
+#    limit (5 per account/hostname/hour). Never run the ACME path locally.
+#
+# Everything else — the same Caddyfile, the same reverse_proxy, the same
+# X-Forwarded-* handling, the same cert volume — is exercised unchanged.
+services:
+  caddy:
+    environment:
+      REGULAIT_TLS_HOST: localhost
+      REGULAIT_TLS_ISSUER: tls internal

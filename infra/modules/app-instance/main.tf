@@ -1,7 +1,12 @@
 # app-instance — a single EC2 box that boots, pulls a source tarball from S3,
 # and runs it with `docker compose up -d --build`. Dev-grade by design: one
-# instance, no ALB/TLS/ASG. Access for operators is SSM Session Manager only —
+# instance, no ALB/ASG. Access for operators is SSM Session Manager only —
 # no SSH keypair exists.
+#
+# TLS terminates INSIDE the box (ADR-0029): the compose stack runs a Caddy
+# reverse proxy on 80/443 in front of the app, so this module opens the ports
+# the caller asks for and stays agnostic about what listens on them. There is
+# still no ALB and no ACM certificate — nothing here costs money.
 
 data "aws_vpc" "default" {
   count   = var.vpc_id == "" ? 1 : 0
@@ -10,6 +15,11 @@ data "aws_vpc" "default" {
 
 locals {
   vpc_id = var.vpc_id != "" ? var.vpc_id : data.aws_vpc.default[0].id
+
+  # Backwards-compatible: callers that never set ingress_ports keep the old
+  # single-port behaviour (open app_port). Callers that terminate TLS on-box
+  # pass [80, 443] and app_port stops being an ingress port at all.
+  ingress_ports = length(var.ingress_ports) > 0 ? var.ingress_ports : [var.app_port]
 }
 
 data "aws_subnets" "in_vpc" {
@@ -88,16 +98,33 @@ resource "aws_iam_instance_profile" "instance" {
 
 resource "aws_security_group" "app" {
   name        = "${var.name}-app"
-  description = "App port in, everything out"
+  description = "Declared ingress ports in, everything out"
   vpc_id      = local.vpc_id
   tags        = var.tags
 
-  ingress {
-    description = "app"
-    from_port   = var.app_port
-    to_port     = var.app_port
-    protocol    = "tcp"
-    cidr_blocks = var.ingress_cidrs
+  dynamic "ingress" {
+    for_each = toset(local.ingress_ports)
+    content {
+      description = "app-${ingress.value}"
+      from_port   = ingress.value
+      to_port     = ingress.value
+      protocol    = "tcp"
+      cidr_blocks = var.ingress_cidrs
+    }
+  }
+
+  # HTTP/3 (QUIC) on 443/udp, only when 443 is one of the TCP ingress ports.
+  # Caddy advertises h3 via Alt-Svc; without this the browser silently falls
+  # back to TCP, so it is an optimisation, not a requirement.
+  dynamic "ingress" {
+    for_each = contains(local.ingress_ports, 443) ? [443] : []
+    content {
+      description = "http3-quic"
+      from_port   = ingress.value
+      to_port     = ingress.value
+      protocol    = "udp"
+      cidr_blocks = var.ingress_cidrs
+    }
   }
 
   egress {
@@ -128,9 +155,10 @@ resource "aws_instance" "app" {
   }
 
   user_data = templatefile("${path.module}/user-data.sh.tftpl", {
-    bucket     = aws_s3_bucket.source.bucket
-    object_key = var.source_object_key
-    swap_gb    = var.swap_gb
+    bucket           = aws_s3_bucket.source.bucket
+    object_key       = var.source_object_key
+    swap_gb          = var.swap_gb
+    enable_onbox_tls = var.enable_onbox_tls
   })
 
   # The bundle is uploaded out-of-band after apply; user-data waits for it.
