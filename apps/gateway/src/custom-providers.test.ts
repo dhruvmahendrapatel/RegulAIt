@@ -17,7 +17,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createDb, runMigrations, type Db } from "@regulait/db";
+import { createDb, egressAllowHosts, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -47,6 +47,11 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  // HERMETIC DEFAULT-DENY (ADR-0034 amendment): sibling suites now allow-list
+  // 127.0.0.1 for their own fake endpoints, and this file's first assertion is
+  // that nothing is reachable before an admin says so. Start from the empty
+  // allow-list that is the shipped default rather than whatever ran before.
+  await db.delete(egressAllowHosts);
 
   // A local OpenAI-compatible endpoint — the shape Ollama / vLLM / LM Studio /
   // LocalAI all present.

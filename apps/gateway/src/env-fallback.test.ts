@@ -43,7 +43,14 @@ const DUMMY_KEY = "sk-ant-envtest";
 // fails with a connection error (wrapped as model_dispatch_failed), which is
 // exactly the "past the credential gate, fails at the provider" signal we want —
 // never a real request to Anthropic.
-const DEAD_BASE = "https://anthropic-envtest.invalid";
+// ADR-0034 amendment — an OFFLINE-but-PERMITTED endpoint. It was
+// `https://anthropic-envtest.invalid` until credential/env baseUrl overrides
+// came behind the egress guard; a `.invalid` host now fails closed at the
+// guard (it resolves to nothing), which would have masked the thing these
+// tests actually assert — that the CREDENTIAL GATE was passed and the failure
+// happens at the provider. A loopback literal on a dead port is allow-listed
+// below, needs no DNS, and still refuses the connection instantly.
+const DEAD_BASE = "https://127.0.0.1:1";
 
 let db: Db;
 let app: ReturnType<typeof buildApp>;
@@ -88,6 +95,25 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+
+  // ADR-0034 amendment — model-credential / env `baseUrl` overrides are now
+  // behind the default-deny egress guard. This suite points one at a loopback
+  // address, so it allow-lists that host explicitly with the private-range and
+  // plaintext opt-ins, exactly as an air-gapped operator would (the same
+  // pattern as custom-providers.test.ts).
+  const egressAllowed = await app.inject({
+    method: "POST",
+    headers: AUTH,
+    url: "/v1/egress-allow-hosts",
+    payload: {
+      host: "127.0.0.1",
+      allowPrivateRanges: true,
+      allowPlaintextHttp: true,
+      note: "env-fallback suite: local fake endpoints",
+    },
+  });
+  expect(egressAllowed.statusCode).toBe(201);
+
   // start from a known-clean anthropic platform slot (another suite may have left
   // its own; this file owns the anthropic 409/fallback story while it runs)
   await db.delete(modelCredentials).where(eq(modelCredentials.provider, "anthropic"));
