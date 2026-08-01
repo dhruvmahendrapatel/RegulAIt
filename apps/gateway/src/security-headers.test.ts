@@ -14,7 +14,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDb, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
-import { inlineScriptBodies, sha256Source } from "./security-headers.js";
+import { documentCsp, inlineScriptBodies, sha256Source } from "./security-headers.js";
 import { defaultWebDistDir } from "./web-serving.js";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -102,17 +102,20 @@ describe("ADR-0031: security headers on every response", () => {
     expect(res.headers["content-security-policy"]).toContain("default-src 'none'");
   });
 
-  it("the document CSP allows the legacy shells' inline script by hash, not by 'unsafe-inline'", async () => {
-    const res = await app.inject({ method: "GET", url: "/legacy/admin" });
-    expect(res.statusCode).toBe(200);
-    const csp = parseCsp(res.headers["content-security-policy"] as string);
+  it("the document CSP never surrenders script-src to 'unsafe-inline'", () => {
+    // ADR-0033 deleted the /legacy/* shells this used to be asserted against;
+    // the document policy itself is asserted directly so the shape stays
+    // covered even when no SPA bundle is present to serve. The bundle-served
+    // version of this (every inline script really covered by a hash) is the
+    // load-bearing test in the next describe.
+    const csp = parseCsp(documentCsp());
     expect(csp["script-src"]).toContain("'self'");
     expect(csp["script-src"]).not.toContain("'unsafe-inline'");
+    expect(csp["script-src"]).not.toContain("'unsafe-eval'");
     expect(csp["object-src"]).toEqual(["'none'"]);
     expect(csp["frame-ancestors"]).toEqual(["'none'"]);
-    for (const body of inlineScriptBodies(res.body)) {
-      expect(csp["script-src"]).toContain(sha256Source(body));
-    }
+    expect(csp["base-uri"]).toEqual(["'self'"]);
+    expect(csp["default-src"]).toEqual(["'self'"]);
   });
 });
 

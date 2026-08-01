@@ -4,7 +4,7 @@ name: CI
 # every auto-triggered run instant-fails (log download 404s) before any step —
 # pure red noise on PRs. Triggers are set to manual-only (workflow_dispatch)
 # until minutes are topped up. Local verification (`pnpm -r build`,
-# `node scripts/check-ui-syntax.mjs`, `pnpm -r test`) is the gate meanwhile.
+# `pnpm -r test`) is the gate meanwhile.
 # TO RE-ENABLE: restore the `pull_request:` and `push: branches: [main]` triggers
 # below (they are kept commented for a clean revert).
 on:
@@ -53,12 +53,13 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # `pnpm -r build` also typechecks + bundles the React SPA (apps/web),
+      # which is the ONLY UI since ADR-0033 deleted the two single-file
+      # template-literal shells. The check-ui-syntax.mjs step that used to
+      # `node --check` their inline <script> blocks went with them: tsc and
+      # vite parse the SPA's real TypeScript, so a UI typo can no longer ship
+      # behind a green build.
       - run: pnpm -r build
-
-      # The two single-file UIs are template-literal HTML strings — tsc never
-      # parses their inline JS, so a typo ships a blank page with a green
-      # build. This extracts the rendered <script> blocks and node --checks them.
-      - run: node scripts/check-ui-syntax.mjs
 
       - run: pnpm -r test
         env:

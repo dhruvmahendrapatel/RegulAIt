@@ -1,7 +1,6 @@
-/** Response shapes of the gateway endpoints the phase-1 surface consumes.
- * Derived from apps/gateway/src/{app,auth,app-ui,setup-status}.ts — the same
- * contracts the legacy /app drives. Fields the UI does not render are omitted
- * (the client never depends on more than it shows). */
+/** Response shapes of the gateway endpoints the SPA consumes.
+ * Derived from apps/gateway/src/{app,auth,setup-status}.ts. Fields the UI does
+ * not render are omitted (the client never depends on more than it shows). */
 
 // ---- identity ------------------------------------------------------------
 
