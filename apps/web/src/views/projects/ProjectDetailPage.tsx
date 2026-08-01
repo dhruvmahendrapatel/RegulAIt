@@ -390,9 +390,11 @@ export default function ProjectDetailPage() {
               </div>
             ))}
           <div className={v.faint} style={{ marginTop: "var(--s2)" }}>
-            Shared context editing and the context version graph stay in the{" "}
-            <a href="/app#/projects">classic app</a> for now — they migrate into this shell in
-            phase 2.
+            Shared context editing and the context version graph are{" "}
+            <strong>not in this shell yet</strong> — they remain only in the{" "}
+            <a href="/legacy/app#/projects">legacy app</a>. Phase 2 did not migrate them, so this is
+            a real, still-open gap rather than a planned handoff; the legacy shell stays served
+            until it closes.
           </div>
         </Card>
       </div>

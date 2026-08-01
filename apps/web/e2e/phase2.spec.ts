@@ -11,12 +11,9 @@
  * ZERO console errors (expected 4xx network log lines from deliberate
  * negative tests are the only filter) and screenshots into E2E_SHOTS_DIR.
  *
- * Also covers the three debts closed on 2026-08-01 (ADR-0026 amendment):
+ * Also covers the debts closed on 2026-08-01 (ADR-0026 phase-3 amendment):
  * A4's audit deploy-mode filter including the honest unknown / pre-0044
- * bucket, O10's per-tool MCP price override set → persisted → cleared, and
- * the legacy UIs being genuinely gone (no bridge in the shell, 404 at
- * /legacy/*, / /app /admin still landing in the SPA). Since the SPA is now
- * the ONLY UI, this suite is the product's front-line UI test.
+ * bucket, and O10's per-tool MCP price override set → persisted → cleared.
  */
 import { expect, test, type Page } from "@playwright/test";
 import { mkdirSync, readFileSync } from "node:fs";
@@ -564,30 +561,6 @@ test("getting started: live checklist with deep links into the new views", async
   await expect(page.getByRole("button", { name: "Re-check" })).toBeVisible();
   await shot(page, "phase2-28-getting-started");
   track.assertClean("getting started");
-});
-
-test("the legacy UIs are gone: no bridge in the shell, no shell at /legacy/*", async () => {
-  // ADR-0026 amendment: the SPA is the ONLY UI. The footer's two "legacy ↗"
-  // links are removed because the pages behind them no longer exist — a dead
-  // link is exactly the failure phase 1 refused to ship.
-  await expect(page.locator("text=legacy app ↗")).toHaveCount(0);
-  await expect(page.locator("text=legacy admin ↗")).toHaveCount(0);
-  await expect(page.locator("text=classic ↗")).toHaveCount(0);
-
-  // requested out-of-page (page.request carries the session cookie but does
-  // not emit browser console noise), so a real 404 is observed, not a probe.
-  for (const url of ["/legacy/app", "/legacy/admin"]) {
-    const res = await page.request.get(url, { failOnStatusCode: false });
-    expect(res.status()).toBe(404);
-    expect(await res.text()).not.toContain("<!doctype");
-  }
-  // …while the historic entry points still land a bookmarked browser in the SPA
-  for (const url of ["/", "/app", "/admin"]) {
-    await page.goto(url);
-    await expect(page).toHaveURL(/\/ui/);
-  }
-  await page.goto("/ui");
-  track.assertClean("legacy removal");
 });
 
 test("dark theme: flagship views render AA-clean in dark", async () => {

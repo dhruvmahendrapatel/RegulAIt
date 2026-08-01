@@ -2,7 +2,12 @@
  * Phase-1 SPA journey against a REAL seeded gateway: sign in as the seeded
  * developer persona with the printed one-time password (forced change), land
  * on the dashboard, then drive Chat (streamed mock reply), Runs, Workflows,
- * Inbox (decide something) and Projects. Every page asserts ZERO console
+ * Inbox (decide something) and Projects.
+ *
+ * Also covers the three capabilities the phase-3 correction found were still
+ * legacy-only (ADR-0026's phase-2 "parity proven" claim was wrong): pillar 7
+ * goal decomposition (draft → review → edit → accept), pillar 8 PM work-item
+ * links, and pillar 4's decision ledger. Every page asserts ZERO console
  * errors (uncaught page errors are always fatal; the only filtered console
  * line is the browser's own network log for the expected pre-login 401
  * probe, which JS cannot suppress) and screenshots into E2E_SHOTS_DIR.
@@ -119,6 +124,33 @@ test("runs: list and open a seeded run (DAG + nodes)", async () => {
   track.assertClean("runs list + detail");
 });
 
+test("run detail: PM work items and the decision ledger (pillars 8 + 4)", async () => {
+  // the seeded checkout-refactor run is pm-synced and already carries one
+  // decision, so both surfaces have real data to render
+  await page.getByRole("link", { name: "Runs", exact: true }).click();
+  await page.locator("tbody tr[role='link']").first().click();
+  await expect(page.getByText("Task graph")).toBeVisible();
+
+  const pmCard = page.locator("section", { hasText: "PM work items" }).first();
+  await expect(pmCard).toBeVisible();
+  // RegulAIt stores the LINK, not a copy — the card has to say so
+  await expect(pmCard.getByText(/stores the/)).toBeVisible();
+
+  const decisionsCard = page.locator("section", { hasText: "Decision ledger" }).first();
+  await expect(decisionsCard).toBeVisible();
+  await shot(page, "06b-run-pm-and-decisions");
+
+  // record a decision and see it land in the ledger
+  const text = `e2e: proceed with the SPA parity build (${Date.now()})`;
+  await decisionsCard.getByLabel("Decision", { exact: true }).fill(text);
+  await decisionsCard.getByLabel(/^Rationale/).fill("Recorded from the SPA to prove the ledger is writable here.");
+  await decisionsCard.getByRole("button", { name: "Record decision" }).click();
+  await expect(page.getByText(/Decision recorded/).first()).toBeVisible();
+  await expect(decisionsCard.getByRole("cell", { name: text })).toBeVisible();
+  await shot(page, "06c-run-decision-recorded");
+  track.assertClean("run pm links + decision ledger");
+});
+
 test("workflows: list and open a seeded instance (stage rail)", async () => {
   await page.getByRole("link", { name: "Workflows", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Workflows", exact: true })).toBeVisible();
@@ -129,8 +161,51 @@ test("workflows: list and open a seeded instance (stage rail)", async () => {
   await firstRow.click();
 
   await expect(page.getByText("Pipeline")).toBeVisible();
+  // the same two pillar-8 / pillar-4 surfaces hang off a workflow instance
+  await expect(page.locator("section", { hasText: "PM work items" }).first()).toBeVisible();
+  await expect(page.locator("section", { hasText: "Decision ledger" }).first()).toBeVisible();
   await shot(page, "08-workflow-detail");
   track.assertClean("workflows list + detail");
+});
+
+test("runs: goal decomposition drafts a reviewable, editable plan (pillar 7)", async () => {
+  await page.getByRole("link", { name: "Runs", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Runs", exact: true })).toBeVisible();
+
+  // the goal must be substantial — the endpoint enforces a 10-char minimum and
+  // the UI states that before the request is made
+  await page.getByLabel("Describe the goal").fill("short");
+  await page.getByRole("button", { name: "Draft plan with a lead agent" }).click();
+  await expect(page.getByText(/at least 10 characters/)).toBeVisible();
+
+  await page
+    .getByLabel("Describe the goal")
+    .fill("Add per-tool price overrides to the MCP admin surface and prove they persist");
+  await page.getByRole("button", { name: "Draft plan with a lead agent" }).click();
+  await expect(page.getByText("Plan drafted").first()).toBeVisible();
+
+  // the draft is a PROPOSAL — it must be visibly costed and visibly not-yet-run
+  const proposal = page.getByTestId("run-proposal");
+  await expect(proposal).toBeVisible();
+  await expect(proposal.getByText(/plan drafted by/)).toBeVisible();
+  await expect(proposal.getByText(/lead cost/)).toBeVisible();
+  await expect(proposal.getByText(/nothing runs until you press Plan run/)).toBeVisible();
+  await shot(page, "06d-run-proposal");
+
+  // and it must be EDITABLE before acceptance
+  const firstTitle = proposal.getByLabel(/^Title for node /).first();
+  await expect(firstTitle).toBeVisible();
+  const editedTitle = `edited by the human ${Date.now()}`;
+  await firstTitle.fill(editedTitle);
+
+  // accepting is the ordinary POST /v1/runs — the run that appears carries the
+  // human's edit, not the lead's original wording
+  await page.getByRole("button", { name: "Plan run" }).click();
+  await expect(page.getByText(/Run planned/).first()).toBeVisible();
+  await expect(page.getByText("Task graph")).toBeVisible();
+  await expect(page.getByText(editedTitle)).toBeVisible();
+  await shot(page, "06e-run-from-proposal");
+  track.assertClean("goal decomposition");
 });
 
 test("inbox: a pending item is decidable with a reason", async () => {
