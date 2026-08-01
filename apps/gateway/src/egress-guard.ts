@@ -1,0 +1,520 @@
+/**
+ * ADR-0034 — the EGRESS GUARD.
+ *
+ * WHY THIS EXISTS. Admin-registered custom LLM providers (pillar 1's
+ * provider-agnostic promise, pillar 3's air-gapped mode) let an admin type a
+ * `baseUrl` that the gateway will then fetch on a user's behalf. That is a
+ * textbook Server-Side Request Forgery primitive: the gateway runs on an EC2
+ * instance, so `http://169.254.169.254/latest/meta-data/iam/security-credentials/`
+ * hands back the instance role's AWS credentials, and everything else routable
+ * from the VPC — including the Postgres container on the compose network — is
+ * one string away. "Only an admin can set it" is NOT a mitigation: an admin
+ * account is exactly what an attacker escalates to, and a governance product
+ * that would proxy an arbitrary internal request on request has no story.
+ *
+ * THE SHAPE. Default-deny, twice over:
+ *   1. the destination HOST must appear in the admin `egress_allow_hosts`
+ *      allow-list (there is no "allow all" entry, and no wildcards);
+ *   2. every RESOLVED ADDRESS of that host must fall outside the blocked
+ *      ranges below, unless the allow entry explicitly opts that host into
+ *      private ranges (the air-gapped / `http://localhost:11434` case).
+ * Plaintext http additionally requires BOTH the per-host allow entry AND the
+ * provider row to opt in — one flag is a typo, two flags are a decision.
+ *
+ * WHEN. Registration-time validation is necessary but NOT sufficient: DNS can
+ * be re-pointed after approval. So this runs again on EVERY dispatch, and once
+ * more inside the guarded fetch for every individual HTTP request the adapter
+ * makes. See the TOCTOU note on `createGuardedFetch` for what that does and
+ * does not close.
+ *
+ * The module is deliberately DB-free and side-effect-free apart from DNS: the
+ * allow-list arrives as data and the resolver is injectable, so the adversarial
+ * suite in `egress-guard.test.ts` runs with no database and no network.
+ */
+
+import { isIP } from "node:net";
+import { lookup as dnsLookup } from "node:dns/promises";
+
+// ---------------------------------------------------------------------------
+// types
+// ---------------------------------------------------------------------------
+
+/** One admin allow-list row, reduced to the fields the decision needs. */
+export interface EgressAllowEntry {
+  /** already normalized (lowercase, no trailing dot, punycode) */
+  host: string;
+  /** permits this host to resolve INTO an otherwise-blocked range */
+  allowPrivateRanges: boolean;
+  /** permits plaintext http TO this host (still ANDed with the provider flag) */
+  allowPlaintextHttp: boolean;
+}
+
+export type EgressDenyCode =
+  | "malformed_url"
+  | "unsupported_scheme"
+  | "userinfo_forbidden"
+  | "host_not_allowlisted"
+  | "plaintext_http_forbidden"
+  | "blocked_host_suffix"
+  | "dns_resolution_failed"
+  | "blocked_address_range"
+  | "redirect_refused";
+
+export interface EgressAllowed {
+  ok: true;
+  /** the normalized absolute URL (punycode host, no userinfo) */
+  url: string;
+  protocol: "http:" | "https:";
+  /** normalized hostname — what goes in the audit row */
+  host: string;
+  port: number;
+  /** every address the host resolved to, all of which passed */
+  addresses: string[];
+}
+
+export interface EgressDenied {
+  ok: false;
+  code: EgressDenyCode;
+  reason: string;
+  host?: string;
+  addresses?: string[];
+}
+
+export type EgressDecision = EgressAllowed | EgressDenied;
+
+export class EgressBlockedError extends Error {
+  constructor(readonly decision: EgressDenied) {
+    super(`egress blocked (${decision.code}): ${decision.reason}`);
+    this.name = "EgressBlockedError";
+  }
+}
+
+/** injectable for tests — the same shape as dns/promises.lookup(host,{all:true}) */
+export type EgressResolver = (host: string) => Promise<Array<{ address: string; family: number }>>;
+
+export interface EgressCheckOptions {
+  /** the admin allow-list; EMPTY MEANS NOTHING IS REACHABLE (default-deny) */
+  allowList: EgressAllowEntry[];
+  /** the provider row's own allowPlaintextHttp — ANDed with the host entry's */
+  providerAllowsPlaintextHttp?: boolean;
+  resolve?: EgressResolver;
+}
+
+// ---------------------------------------------------------------------------
+// host normalization
+// ---------------------------------------------------------------------------
+
+/**
+ * Canonical host form used for BOTH allow-list storage and comparison, so
+ * `Metadata.Google.Internal.` and `metadata.google.internal` can never be two
+ * different things. WHATWG `URL` has already done the heavy lifting by the time
+ * a parsed host reaches here (IDNA → punycode, unicode folding, decimal/octal/
+ * hex IPv4 → dotted quad); this only lowercases, strips a trailing root dot,
+ * and unwraps IPv6 brackets.
+ */
+export function normalizeHost(raw: string): string {
+  let h = raw.trim().toLowerCase();
+  while (h.endsWith(".")) h = h.slice(0, -1);
+  if (h.startsWith("[") && h.endsWith("]")) h = h.slice(1, -1);
+  return h;
+}
+
+/** Hostname suffixes that name a private namespace by convention. Blocked
+ * outright unless the exact host is allow-listed WITH allowPrivateRanges —
+ * `.internal` in particular is where GCP/Azure park their metadata services. */
+const BLOCKED_HOST_SUFFIXES = [".internal", ".local", ".localhost", ".home.arpa"];
+const BLOCKED_HOST_EXACT = new Set(["localhost", "local", "internal"]);
+
+export function hasBlockedHostSuffix(host: string): boolean {
+  const h = normalizeHost(host);
+  if (BLOCKED_HOST_EXACT.has(h)) return true;
+  return BLOCKED_HOST_SUFFIXES.some((s) => h.endsWith(s));
+}
+
+// ---------------------------------------------------------------------------
+// address classification
+// ---------------------------------------------------------------------------
+
+function ipv4ToInt(ip: string): number | null {
+  const parts = ip.split(".");
+  if (parts.length !== 4) return null;
+  let n = 0;
+  for (const p of parts) {
+    if (!/^\d{1,3}$/.test(p)) return null;
+    const v = Number(p);
+    if (v > 255) return null;
+    n = n * 256 + v;
+  }
+  return n >>> 0;
+}
+
+interface Cidr4 {
+  base: number;
+  bits: number;
+  label: string;
+}
+
+function cidr4(cidr: string, label: string): Cidr4 {
+  const [addr, bitsRaw] = cidr.split("/");
+  const base = ipv4ToInt(addr ?? "");
+  if (base === null) throw new Error(`bad CIDR ${cidr}`);
+  return { base, bits: Number(bitsRaw), label };
+}
+
+/**
+ * THE DEFAULT-DENY RANGE LIST. Everything an SSRF wants and nothing a public
+ * model endpoint legitimately lives in.
+ */
+const BLOCKED_V4: Cidr4[] = [
+  cidr4("0.0.0.0/8", "unspecified / this-network"),
+  cidr4("10.0.0.0/8", "RFC1918 private"),
+  cidr4("100.64.0.0/10", "CGNAT (RFC6598)"),
+  cidr4("127.0.0.0/8", "loopback"),
+  cidr4("169.254.0.0/16", "link-local — cloud instance metadata (IMDS)"),
+  cidr4("172.16.0.0/12", "RFC1918 private"),
+  cidr4("192.0.0.0/24", "IETF protocol assignments"),
+  cidr4("192.168.0.0/16", "RFC1918 private"),
+  cidr4("198.18.0.0/15", "benchmarking (RFC2544)"),
+  cidr4("224.0.0.0/4", "multicast"),
+  cidr4("240.0.0.0/4", "reserved / broadcast"),
+];
+
+function classifyV4(ip: string): string | null {
+  const n = ipv4ToInt(ip);
+  if (n === null) return "unparseable IPv4 address";
+  for (const c of BLOCKED_V4) {
+    const mask = c.bits === 0 ? 0 : (0xffffffff << (32 - c.bits)) >>> 0;
+    if ((n & mask) >>> 0 === (c.base & mask) >>> 0) return c.label;
+  }
+  return null;
+}
+
+/** expand an IPv6 literal to its 8 groups of 16 bits */
+function ipv6Groups(ip: string): number[] | null {
+  let s = ip.toLowerCase();
+  if (s.startsWith("[") && s.endsWith("]")) s = s.slice(1, -1);
+  const zone = s.indexOf("%");
+  if (zone >= 0) s = s.slice(0, zone);
+  // an embedded IPv4 tail (::ffff:1.2.3.4) becomes two hex groups
+  const v4m = s.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+  if (v4m) {
+    const n = ipv4ToInt(v4m[1]!);
+    if (n === null) return null;
+    s = s.slice(0, s.length - v4m[1]!.length) + `${(n >>> 16).toString(16)}:${(n & 0xffff).toString(16)}`;
+  }
+  const halves = s.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":").filter((x) => x !== "") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":").filter((x) => x !== "") : [];
+  const fill = 8 - head.length - tail.length;
+  if (halves.length === 1) {
+    if (head.length !== 8) return null;
+  } else if (fill < 0) {
+    return null;
+  }
+  const groups = [
+    ...head,
+    ...(halves.length === 2 ? Array(fill).fill("0") : []),
+    ...tail,
+  ].map((g) => parseInt(g, 16));
+  if (groups.length !== 8 || groups.some((g) => Number.isNaN(g) || g < 0 || g > 0xffff)) return null;
+  return groups;
+}
+
+function classifyV6(ip: string): string | null {
+  const g = ipv6Groups(ip);
+  if (!g) return "unparseable IPv6 address";
+  const isZeroPrefix = (n: number) => g.slice(0, n).every((x) => x === 0);
+  // ::  and  ::1
+  if (isZeroPrefix(7) && g[7] === 0) return "IPv6 unspecified (::)";
+  if (isZeroPrefix(7) && g[7] === 1) return "IPv6 loopback (::1)";
+  // ::ffff:0:0/96 — IPv4-MAPPED. The classic `[::ffff:169.254.169.254]` bypass:
+  // unwrap to the embedded v4 address and apply the v4 rules to it.
+  if (isZeroPrefix(5) && g[5] === 0xffff) {
+    const v4 = `${g[6]! >>> 8}.${g[6]! & 0xff}.${g[7]! >>> 8}.${g[7]! & 0xff}`;
+    const why = classifyV4(v4);
+    return why ? `IPv4-mapped ${v4}: ${why}` : null;
+  }
+  // 64:ff9b::/96 — NAT64, same unwrap
+  if (g[0] === 0x64 && g[1] === 0xff9b && isZeroPrefixFrom(g, 2, 6)) {
+    const v4 = `${g[6]! >>> 8}.${g[6]! & 0xff}.${g[7]! >>> 8}.${g[7]! & 0xff}`;
+    const why = classifyV4(v4);
+    return why ? `NAT64-embedded ${v4}: ${why}` : null;
+  }
+  if ((g[0]! & 0xffc0) === 0xfe80) return "IPv6 link-local (fe80::/10)";
+  if ((g[0]! & 0xfe00) === 0xfc00) return "IPv6 unique-local (fc00::/7)";
+  if ((g[0]! & 0xff00) === 0xff00) return "IPv6 multicast (ff00::/8)";
+  return null;
+}
+
+function isZeroPrefixFrom(g: number[], from: number, to: number): boolean {
+  for (let i = from; i < to; i++) if (g[i] !== 0) return false;
+  return true;
+}
+
+/**
+ * The single address decision: returns a human reason when the address is in a
+ * blocked range, or null when it is fine. Exported because it is the part the
+ * adversarial suite hammers directly.
+ */
+export function classifyAddress(ip: string): string | null {
+  const fam = isIP(ip);
+  if (fam === 4) return classifyV4(ip);
+  if (fam === 6) return classifyV6(ip);
+  // Not a literal at all — a resolver handed us something we cannot reason
+  // about. Fail CLOSED: an unclassifiable address is a blocked address.
+  return `unrecognised address form '${ip}'`;
+}
+
+// ---------------------------------------------------------------------------
+// the check
+// ---------------------------------------------------------------------------
+
+const defaultResolver: EgressResolver = async (host) => {
+  const res = await dnsLookup(host, { all: true, verbatim: true });
+  return res.map((r) => ({ address: r.address, family: r.family }));
+};
+
+/**
+ * Validate a destination URL. Returns a DECISION rather than throwing so the
+ * caller can turn it into an honest 4xx with a reason (the repo's refusal
+ * convention) or an audit row.
+ */
+export async function checkEgress(
+  rawUrl: string,
+  opts: EgressCheckOptions,
+): Promise<EgressDecision> {
+  let u: URL;
+  try {
+    u = new URL(rawUrl);
+  } catch {
+    return { ok: false, code: "malformed_url", reason: `'${rawUrl}' is not an absolute URL` };
+  }
+
+  if (u.protocol !== "https:" && u.protocol !== "http:") {
+    return {
+      ok: false,
+      code: "unsupported_scheme",
+      reason: `scheme '${u.protocol}' is not permitted — only https (or explicitly opted-in http)`,
+    };
+  }
+
+  // USERINFO IS REFUSED OUTRIGHT. `http://169.254.169.254@evil.com/` and
+  // `http://evil.com@169.254.169.254/` differ only in which side of the `@`
+  // the real host is, and the pair exists precisely to fool a human reviewer
+  // (and half the URL parsers ever written). No OpenAI-compatible endpoint
+  // needs credentials in the URL — we carry the key in a header — so the
+  // safe reading of an ambiguous URL is "reject it".
+  if (u.username !== "" || u.password !== "") {
+    return {
+      ok: false,
+      code: "userinfo_forbidden",
+      reason: "URL credentials (user:pass@host) are not permitted — the parsed host would be ambiguous to a reviewer",
+      host: normalizeHost(u.hostname),
+    };
+  }
+
+  const host = normalizeHost(u.hostname);
+  if (!host) {
+    return { ok: false, code: "malformed_url", reason: "URL has no host" };
+  }
+
+  // 1. ALLOW-LIST — default-deny. Exact host match only: no wildcards, because
+  //    `*.example.com` is one dangling subdomain takeaway from being a hole,
+  //    and an operator who wants three hosts can add three rows.
+  const entry = opts.allowList.find((e) => normalizeHost(e.host) === host);
+  if (!entry) {
+    return {
+      ok: false,
+      code: "host_not_allowlisted",
+      reason: `host '${host}' is not in the egress allow-list — an admin must add it before it can be reached`,
+      host,
+    };
+  }
+
+  // 2. SCHEME — https unless BOTH the host entry and the provider row opt in.
+  if (u.protocol === "http:") {
+    if (!entry.allowPlaintextHttp) {
+      return {
+        ok: false,
+        code: "plaintext_http_forbidden",
+        reason: `plaintext http to '${host}' requires the egress allow entry to set allowPlaintextHttp`,
+        host,
+      };
+    }
+    if (opts.providerAllowsPlaintextHttp === false) {
+      return {
+        ok: false,
+        code: "plaintext_http_forbidden",
+        reason: `plaintext http requires the provider itself to set allowPlaintextHttp as well as the host entry`,
+        host,
+      };
+    }
+  }
+
+  // 3. HOST SUFFIX — `.internal` / `.local` name a private namespace. Still
+  //    reachable, but only for a host whose entry took the private-range
+  //    decision explicitly (that is the air-gapped `vllm.internal` case).
+  if (hasBlockedHostSuffix(host) && !entry.allowPrivateRanges) {
+    return {
+      ok: false,
+      code: "blocked_host_suffix",
+      reason: `host '${host}' names a private namespace; its allow entry must set allowPrivateRanges`,
+      host,
+    };
+  }
+
+  // 4. RESOLVE AND CHECK EVERY ADDRESS. The literal is never trusted:
+  //    `http://metadata.evil.com/` is a perfectly ordinary public hostname
+  //    right up until it answers 169.254.169.254.
+  const resolve = opts.resolve ?? defaultResolver;
+  let addresses: string[];
+  const literalFamily = isIP(host);
+  if (literalFamily !== 0) {
+    addresses = [host];
+  } else {
+    try {
+      const res = await resolve(host);
+      addresses = res.map((r) => r.address);
+    } catch (err) {
+      return {
+        ok: false,
+        code: "dns_resolution_failed",
+        reason: `could not resolve '${host}': ${err instanceof Error ? err.message : String(err)}`,
+        host,
+      };
+    }
+    if (addresses.length === 0) {
+      return { ok: false, code: "dns_resolution_failed", reason: `'${host}' resolved to no addresses`, host };
+    }
+  }
+
+  if (!entry.allowPrivateRanges) {
+    for (const a of addresses) {
+      const why = classifyAddress(a);
+      if (why) {
+        return {
+          ok: false,
+          code: "blocked_address_range",
+          reason: `'${host}' resolves to ${a} — ${why}. Blocked by default; an admin may set allowPrivateRanges on its allow entry if this is a genuine on-prem endpoint.`,
+          host,
+          addresses,
+        };
+      }
+    }
+  }
+
+  const port = u.port ? Number(u.port) : u.protocol === "https:" ? 443 : 80;
+  return {
+    ok: true,
+    url: u.toString(),
+    protocol: u.protocol,
+    host,
+    port,
+    addresses,
+  };
+}
+
+/** Throwing wrapper for call sites that already sit inside a try/catch. */
+export async function assertEgressAllowed(
+  rawUrl: string,
+  opts: EgressCheckOptions,
+): Promise<EgressAllowed> {
+  const d = await checkEgress(rawUrl, opts);
+  if (!d.ok) throw new EgressBlockedError(d);
+  return d;
+}
+
+// ---------------------------------------------------------------------------
+// the guarded fetch
+// ---------------------------------------------------------------------------
+
+export class EgressRedirectError extends Error {
+  constructor(readonly location: string | null) {
+    super(
+      `upstream returned a redirect to '${location ?? "(no Location)"}' — redirects are refused on custom-provider egress`,
+    );
+    this.name = "EgressRedirectError";
+  }
+}
+
+/**
+ * Dig an egress refusal out of whatever the SDK wrapped it in.
+ *
+ * openai-node and @anthropic-ai/sdk turn a throwing `fetch` into an
+ * `APIConnectionError` whose message is the useless "Connection error." — so a
+ * guard refusal (a GOVERNANCE DECISION, with a specific reason an operator
+ * needs to see) would otherwise reach the caller as an opaque network blip.
+ * Bounded walk, so a cyclic cause chain cannot hang the request.
+ */
+export function egressRefusal(err: unknown): string | null {
+  let cur: unknown = err;
+  for (let i = 0; i < 8 && cur; i += 1) {
+    if (cur instanceof EgressBlockedError) return cur.decision.reason;
+    if (cur instanceof EgressRedirectError) return cur.message;
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return null;
+}
+
+export interface GuardedFetchOptions extends EgressCheckOptions {
+  /** the underlying fetch (injectable so tests never touch the network) */
+  fetchImpl?: typeof fetch;
+}
+
+/**
+ * A `fetch` that re-validates on EVERY request and refuses redirects.
+ *
+ * REDIRECTS ARE REFUSED ENTIRELY rather than re-validated per hop. A 302 to
+ * `http://169.254.169.254/` is the shortest path around any pre-flight check,
+ * and following-then-checking means the socket to the redirect target has
+ * already been opened by the time we look. Re-validating each hop would work,
+ * but no OpenAI-compatible or Anthropic-Messages endpoint requires a redirect
+ * to function, so the cheaper and stricter rule wins: 3xx is a hard error with
+ * an honest message, and an admin whose endpoint really redirects can point
+ * the baseUrl at the final destination.
+ *
+ * DNS PINNING AND THE RESIDUAL TOCTOU — stated plainly, because half-closed is
+ * worse than honestly-open:
+ *   - For **http** the request is pinned: after validation the URL's host is
+ *     rewritten to the validated IP literal and the original hostname is sent
+ *     in the `Host` header. A DNS rebind between check and connect cannot
+ *     move the connection, because no second resolution happens.
+ *   - For **https** the connection is NOT pinned. Rewriting the URL to an IP
+ *     literal would break SNI and certificate verification, and Node's global
+ *     fetch exposes no supported hook for supplying a pinned `lookup` while
+ *     keeping the original `servername`. So an https destination is validated
+ *     immediately before each request and then resolved a second time by the
+ *     TLS stack. A rebind inside that sub-millisecond window is not closed.
+ *     It is materially harder to exploit than the http case (the attacker must
+ *     also present a certificate valid for the allow-listed hostname), but it
+ *     is a real residual and ADR-0034 records it as such rather than claiming
+ *     the guard is airtight.
+ */
+export function createGuardedFetch(opts: GuardedFetchOptions): typeof fetch {
+  const base = opts.fetchImpl ?? fetch;
+  const guarded = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const rawUrl =
+      typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const decision = await checkEgress(rawUrl, opts);
+    if (!decision.ok) throw new EgressBlockedError(decision);
+
+    const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+    let target = decision.url;
+    if (decision.protocol === "http:") {
+      // pin: connect to the address we validated, present the original Host
+      const pinned = new URL(decision.url);
+      const addr = decision.addresses[0]!;
+      pinned.hostname = isIP(addr) === 6 ? `[${addr}]` : addr;
+      target = pinned.toString();
+      headers.set("host", decision.port === 80 ? decision.host : `${decision.host}:${decision.port}`);
+    }
+
+    const res = await base(target, { ...init, headers, redirect: "manual" });
+    if (res.status >= 300 && res.status < 400) {
+      throw new EgressRedirectError(res.headers.get("location"));
+    }
+    return res;
+  };
+  return guarded as typeof fetch;
+}

@@ -276,6 +276,12 @@ export const auditLog = pgTable(
         // as objectType "user"; admin CRUD of an SSO provider audits as
         // "oidc_provider". Plain text column — no DDL needed.
         "oidc_provider",
+        // ADR-0034: admin registration/update/enable/removal of a CUSTOM LLM
+        // provider, every egress-allow-list change, and the per-dispatch
+        // destination-host record (the point of a governance product is that
+        // "which third-party endpoint did our models talk to" is answerable).
+        // Plain text column — no DDL needed.
+        "custom_model_provider",
       ],
     })
       .notNull()
@@ -570,8 +576,81 @@ export const agents = pgTable("agents", {
   // the invariant from the one shared core). null = no base prompt (today's
   // behaviour, byte-identical).
   systemPrompt: text("system_prompt"),
+  // ADR-0034 (migration 0048): when `provider` is the literal 'custom', THIS
+  // is which admin-registered endpoint the agent executes against. The two
+  // fields form a discriminated union enforced in the DB by
+  // agents_custom_provider_ck: provider='custom' ⇔ custom_provider_id IS NOT
+  // NULL. Deliberately a real FK column rather than encoding the id inside the
+  // `provider` text: `provider` is a CLOSED vocabulary that model_credentials
+  // keys on, usage_events records, the env-fallback allow-list enumerates and
+  // isModelProviderKind() switches over exhaustively — smuggling 'custom:<uuid>'
+  // through it would silently poison every one of those. ON DELETE RESTRICT:
+  // an endpoint an agent still points at cannot be deleted out from under it.
+  customProviderId: uuid("custom_provider_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+// ---------------------------------------------------------------------------
+// ADR-0034 (migration 0048) — ADMIN-REGISTERED CUSTOM LLM PROVIDERS, and the
+// egress allow-list that makes their admin-suppliable baseUrl safe to have.
+// ---------------------------------------------------------------------------
+
+/** The two wire dialects a custom endpoint may speak. Both reuse an existing,
+ * already-tested adapter core — this is a routing choice, not a new protocol
+ * implementation, which is exactly why the set is closed. */
+export const CUSTOM_WIRE_PROTOCOLS = ["openai_chat", "anthropic_messages"] as const;
+export type CustomWireProtocol = (typeof CUSTOM_WIRE_PROTOCOLS)[number];
+
+export const customModelProviders = pgTable("custom_model_providers", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  /** admin-chosen label; what appears wherever a provider name appears */
+  name: text("name").notNull().unique(),
+  wireProtocol: text("wire_protocol", { enum: CUSTOM_WIRE_PROTOCOLS }).notNull(),
+  /** the endpoint root, e.g. https://vllm.corp.example/v1 */
+  baseUrl: text("base_url").notNull(),
+  /** AES-256-GCM under REGULAIT_DATA_KEY, same discipline as every other
+   * credential surface — write-only, never returned. NULLABLE on purpose: a
+   * local Ollama / LocalAI endpoint has no API key at all, and inventing a
+   * placeholder would make "is this authenticated?" unanswerable. */
+  keyCiphertext: text("key_ciphertext"),
+  /** the provider HALF of the plaintext-http opt-in. Both this AND the
+   * matching egress_allow_hosts row must be true for an http:// baseUrl to be
+   * reachable — one flag is a typo, two flags are a decision. */
+  allowPlaintextHttp: boolean("allow_plaintext_http").notNull().default(false),
+  /** default FALSE: a freshly registered provider is inert until an admin runs
+   * the connection test and enables it. */
+  enabled: boolean("enabled").notNull().default(false),
+  /** when the connection test last passed — enabling requires a pass */
+  lastTestedAt: timestamp("last_tested_at", { withTimezone: true }),
+  lastTestError: text("last_test_error"),
+  createdBy: uuid("created_by"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** The admin egress allow-list. DEFAULT-DENY: an empty table means no custom
+ * provider can reach anything. Exact host match only — no wildcards, because a
+ * `*.example.com` entry is one dangling subdomain away from being a hole. */
+export const egressAllowHosts = pgTable("egress_allow_hosts", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  /** normalized: lowercase, punycode, no trailing dot */
+  host: text("host").notNull().unique(),
+  /** lets THIS host resolve into an otherwise-blocked range (RFC1918, loopback,
+   * link-local, CGNAT…). Off by default. This is the air-gapped escape hatch
+   * pillar 3 needs — `http://localhost:11434`, `http://vllm.internal:8000` —
+   * scoped to one host and recorded as an admin decision, never a blanket
+   * "allow private". It does NOT relax the https requirement. */
+  allowPrivateRanges: boolean("allow_private_ranges").notNull().default(false),
+  /** the host HALF of the plaintext-http opt-in (see the provider flag above) */
+  allowPlaintextHttp: boolean("allow_plaintext_http").notNull().default(false),
+  /** why this host is here — an allow-list row with no stated reason is how
+   * allow-lists rot */
+  note: text("note"),
+  createdBy: uuid("created_by"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type CustomModelProviderRow = typeof customModelProviders.$inferSelect;
+export type EgressAllowHostRow = typeof egressAllowHosts.$inferSelect;
 
 export const agentGrants = pgTable(
   "agent_grants",
@@ -2016,6 +2095,15 @@ export const orgSettings = pgTable(
      * self-service, still uniqueness-checked and audited identically. Reading
      * one's own username is always allowed; this dial governs WRITES only. */
     usernameSelfService: boolean("username_self_service").notNull().default(false),
+    /** ADR-0034 (migration 0048): the master switch for admin-registered
+     * CUSTOM LLM providers. false stops every custom-provider dispatch cold
+     * (409) and refuses registration/enable — the whole capability, including
+     * its egress surface, off from one place. Default true: the capability is
+     * already default-deny four ways below it (admin-only registration, an
+     * empty egress allow-list, enabled=false until a connection test passes,
+     * and the ordinary per-user agent grant), so an org that wants it gone
+     * entirely flips this and an org that never registers one is unaffected. */
+    customModelProvidersEnabled: boolean("custom_model_providers_enabled").notNull().default(true),
 
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

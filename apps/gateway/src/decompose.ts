@@ -31,7 +31,12 @@ import { evaluateAgent, visibleTools, type AgentDecision, type ToolRef } from "@
 import { validateGraph } from "@regulait/orchestration-kernel";
 import { isModelProviderKind, TASK_DECOMPOSITION_SENTINEL } from "@regulait/model-provider";
 import { decomposeGoalSchema, decompositionPlanSchema } from "@regulait/shared";
-import { configuredProviders, executeGovernedDispatch, type AgentRow } from "./agents-connectors.js";
+import {
+  agentProviderToken,
+  configuredProviders,
+  executeGovernedDispatch,
+  type AgentRow,
+} from "./agents-connectors.js";
 import { loadAgentRevocations, loadEntitlements, loadRoleAgentGrants } from "./entitlements.js";
 import { assertProjectAttribution } from "./projects.js";
 import { z } from "zod";
@@ -331,7 +336,7 @@ export function registerDecomposeRoutes(
         a.enabled &&
         a.model &&
         isModelProviderKind(a.provider) &&
-        configured.has(a.provider) &&
+        configured.has(agentProviderToken(a)) &&
         evalFor(a, WORKER_MODE).effect === "allow",
     );
 

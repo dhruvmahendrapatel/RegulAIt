@@ -10,6 +10,7 @@ import {
   OPENAI_RESPONSES_ONLY_MODELS,
   TASK_DECOMPOSITION_SENTINEL,
   openAiUsesResponsesApi,
+  CustomProvider,
   resolveModelProvider,
 } from "./index.js";
 
@@ -2609,5 +2610,138 @@ describe("thinking (ADR-0020 long tail): Anthropic extended thinking", () => {
       ],
     });
     expect(r.outputText).not.toContain("SECRET-REASONING-TOKEN");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0034 — CustomProvider: an ADMIN-REGISTERED endpoint the platform ships
+// no adapter for. The point of these tests is that it implements NO protocol
+// of its own: openai_chat IS the shared chat-completions core and
+// anthropic_messages IS the AnthropicProvider, both aimed at the admin's
+// baseUrl. So what is asserted here is the WIRING — dialect selection, where
+// the bytes go, and how a key (or the absence of one) reaches the wire.
+// ---------------------------------------------------------------------------
+
+describe("CustomProvider (ADR-0034)", () => {
+  const completion = {
+    id: "chatcmpl-custom",
+    object: "chat.completion",
+    created: 1,
+    model: "llama-3.3-70b",
+    choices: [
+      {
+        index: 0,
+        message: { role: "assistant", content: "hi from vllm", refusal: null },
+        finish_reason: "stop",
+        logprobs: null,
+      },
+    ],
+    usage: { prompt_tokens: 7, completion_tokens: 4, total_tokens: 11 },
+  };
+
+  it("openai_chat rides the shared chat-completions core against the admin's baseUrl", async () => {
+    let captured: { url: string; auth: string | null; body: Record<string, unknown> } | null = null;
+    const provider = new CustomProvider({
+      apiKey: "sk-selfhosted",
+      baseUrl: "https://vllm.corp.example/v1",
+      wireProtocol: "openai_chat",
+      fetchImpl: async (url, init) => {
+        captured = {
+          url: String(url),
+          auth: new Headers(init?.headers).get("authorization"),
+          body: JSON.parse(String(init?.body)),
+        };
+        return new Response(JSON.stringify(completion), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    const result = await provider.dispatch({ model: "llama-3.3-70b", input: "hello", maxTokens: 32 });
+    expect(provider.kind).toBe("custom");
+    expect(captured!.url).toBe("https://vllm.corp.example/v1/chat/completions");
+    expect(captured!.auth).toBe("Bearer sk-selfhosted");
+    expect(captured!.body).toMatchObject({ model: "llama-3.3-70b", max_completion_tokens: 32 });
+    // identical normalization to the shipped adapters — nothing re-derived
+    expect(result.outputText).toBe("hi from vllm");
+    expect(result.stopReason).toBe("end_turn");
+    expect(result.usage).toEqual({ inputTokens: 7, outputTokens: 4 });
+  });
+
+  it("a KEYLESS endpoint sends no Authorization header at all — not a bogus one", async () => {
+    let auth: string | null | undefined;
+    let sawSentinel = false;
+    const provider = new CustomProvider({
+      baseUrl: "http://localhost:11434/v1",
+      wireProtocol: "openai_chat",
+      fetchImpl: async (url, init) => {
+        const h = new Headers(init?.headers);
+        auth = h.get("authorization");
+        sawSentinel = JSON.stringify([...h.entries()]).includes("regulait-keyless");
+        return new Response(JSON.stringify(completion), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    await provider.dispatch({ model: "llama3.2", input: "hi" });
+    expect(auth).toBeNull();
+    expect(sawSentinel).toBe(false);
+  });
+
+  it("anthropic_messages delegates to the real Anthropic adapter at the admin's baseUrl", async () => {
+    let captured: { url: string; key: string | null } | null = null;
+    const provider = new CustomProvider({
+      apiKey: "bridge-key",
+      baseUrl: "https://bedrock-bridge.corp.example",
+      wireProtocol: "anthropic_messages",
+      fetchImpl: async (url, init) => {
+        captured = { url: String(url), key: new Headers(init?.headers).get("x-api-key") };
+        return anthropicJson({
+          id: "msg_custom",
+          type: "message",
+          role: "assistant",
+          model: "claude-via-bridge",
+          content: [{ type: "text", text: "bridged" }],
+          stop_reason: "end_turn",
+          usage: { input_tokens: 5, output_tokens: 2 },
+        });
+      },
+    });
+    const result = await provider.dispatch({ model: "claude-via-bridge", input: "hi" });
+    expect(captured!.url).toContain("bedrock-bridge.corp.example");
+    expect(captured!.url).toContain("/v1/messages");
+    expect(captured!.key).toBe("bridge-key");
+    expect(result.outputText).toBe("bridged");
+    expect(result.usage).toEqual({ inputTokens: 5, outputTokens: 2 });
+  });
+
+  it("the registry resolves 'custom' WITHOUT a key but never without a baseUrl or wireProtocol", () => {
+    expect(() => resolveModelProvider({ provider: "custom" })).toThrowError(/baseUrl/);
+    expect(() =>
+      resolveModelProvider({ provider: "custom", baseUrl: "https://x.example/v1" }),
+    ).toThrowError(/wireProtocol/);
+    // keyless is legitimate — that is the local-Ollama / air-gapped case
+    const p = resolveModelProvider({
+      provider: "custom",
+      baseUrl: "https://x.example/v1",
+      wireProtocol: "openai_chat",
+    });
+    expect(p.kind).toBe("custom");
+  });
+
+  it("labels its errors 'custom' so a failure is attributable to the admin's endpoint", async () => {
+    const provider = new CustomProvider({
+      baseUrl: "https://x.example/v1",
+      wireProtocol: "openai_chat",
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ error: { message: "model not loaded" } }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        }),
+    });
+    await expect(provider.dispatch({ model: "m", input: "hi" })).rejects.toThrowError(
+      /custom dispatch failed/,
+    );
   });
 });

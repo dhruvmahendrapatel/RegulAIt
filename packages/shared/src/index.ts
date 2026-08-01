@@ -254,6 +254,26 @@ export const createAgentSchema = z.object({
    * set, every governed dispatch of this agent sends it as the system base; a
    * caller-supplied system is APPENDED after it, never replaces it. */
   systemPrompt: z.string().min(1).max(20_000).nullable().optional(),
+  /** ADR-0034: which admin-registered custom endpoint this agent executes
+   * against. The mirror of the DB's agents_custom_provider_ck — the pair is a
+   * discriminated union, so provider 'custom' demands an id and any other
+   * provider forbids one. Validated here too so the 400 says WHY. */
+  customProviderId: z.string().uuid().nullable().optional(),
+});
+
+/** the discriminated-union rule shared by agent create and agent update */
+export function agentCustomProviderPairValid(v: {
+  provider?: string | undefined;
+  customProviderId?: string | null | undefined;
+}): boolean {
+  if (v.provider === undefined) return true;
+  return (v.provider === "custom") === (v.customProviderId != null);
+}
+
+export const createAgentSchemaChecked = createAgentSchema.refine(agentCustomProviderPairValid, {
+  message:
+    "provider 'custom' requires customProviderId, and customProviderId is only valid with provider 'custom'",
+  path: ["customProviderId"],
 });
 
 export const setAgentEnabledSchema = z.object({ enabled: z.boolean() });
@@ -412,10 +432,76 @@ export const updateInitiativeSchema = z
   });
 
 export const createModelCredentialSchema = z.object({
+  // deliberately still the four SHIPPED vendor adapters. A custom provider's
+  // key lives on its own custom_model_providers row (ADR-0034) — one endpoint,
+  // one key — not in this per-provider-kind singleton table, which could only
+  // ever hold ONE key for all custom endpoints.
   provider: z.enum(["anthropic", "openai", "google", "xai"]),
   apiKey: z.string().min(1),
   baseUrl: z.string().url().nullable().optional(),
 });
+
+// ---------------------------------------------------------------------------
+// ADR-0034 — admin-registered custom LLM providers + the egress allow-list
+// ---------------------------------------------------------------------------
+
+export const customWireProtocolSchema = z.enum(["openai_chat", "anthropic_messages"]);
+export type CustomWireProtocolValue = z.infer<typeof customWireProtocolSchema>;
+
+export const createCustomModelProviderSchema = z
+  .object({
+    name: z.string().min(1).max(120),
+    wireProtocol: customWireProtocolSchema,
+    baseUrl: z.string().url(),
+    /** null/absent = a KEYLESS endpoint (local Ollama, LocalAI, a gateway that
+     * authenticates by network position). Explicitly permitted — inventing a
+     * placeholder key would make "is this authenticated?" unanswerable. */
+    apiKey: z.string().min(1).max(4096).nullable().optional(),
+    /** the provider half of the plaintext-http opt-in; the matching
+     * egress_allow_hosts row must set it too */
+    allowPlaintextHttp: z.boolean().optional(),
+  })
+  .strict();
+export type CreateCustomModelProvider = z.infer<typeof createCustomModelProviderSchema>;
+
+/** PATCH — every field optional; `apiKey: null` CLEARS the stored key (making
+ * the endpoint keyless), which is different from omitting it (keep as-is). */
+export const updateCustomModelProviderSchema = z
+  .object({
+    name: z.string().min(1).max(120).optional(),
+    wireProtocol: customWireProtocolSchema.optional(),
+    baseUrl: z.string().url().optional(),
+    apiKey: z.string().min(1).max(4096).nullable().optional(),
+    allowPlaintextHttp: z.boolean().optional(),
+  })
+  .strict()
+  .refine((p) => Object.values(p).some((v) => v !== undefined), {
+    message: "nothing to update — provide at least one field",
+  });
+export type UpdateCustomModelProvider = z.infer<typeof updateCustomModelProviderSchema>;
+
+export const setCustomModelProviderEnabledSchema = z.object({ enabled: z.boolean() }).strict();
+
+/** An egress allow-list row. `host` is a bare hostname (or IP literal) — NOT a
+ * URL, NOT a wildcard: the guard matches it exactly against the normalized
+ * destination host, so `*.example.com` is not expressible on purpose. */
+export const createEgressAllowHostSchema = z
+  .object({
+    host: z
+      .string()
+      .min(1)
+      .max(253)
+      .refine((h) => !/[\s@/:]/.test(h), {
+        message: "host must be a bare hostname or IP literal — no scheme, port, credentials or path",
+      }),
+    /** the air-gapped escape hatch: lets THIS host resolve into an otherwise-
+     * blocked range (RFC1918 / loopback / link-local / CGNAT). Off by default. */
+    allowPrivateRanges: z.boolean().optional(),
+    allowPlaintextHttp: z.boolean().optional(),
+    note: z.string().min(1).max(500).nullable().optional(),
+  })
+  .strict();
+export type CreateEgressAllowHost = z.infer<typeof createEgressAllowHostSchema>;
 
 /** the connector-provider adapter enum (mirrors the CONNECTOR_PROVIDER_KINDS
  * union without importing the package into shared) */
@@ -1100,6 +1186,9 @@ export const updateOrgSettingsSchema = z
       .array(z.enum(["anthropic", "openai", "google", "xai"]))
       .max(4)
       .optional(),
+    /** ADR-0034: master switch for admin-registered custom LLM providers.
+     * false refuses registration/enable and stops every custom dispatch (409). */
+    customModelProvidersEnabled: z.boolean().optional(),
     // budgets
     budgetEnforcement: budgetEnforcementSchema.optional(),
     budgetHardBlockPct: z.number().int().min(1).max(100).optional(),

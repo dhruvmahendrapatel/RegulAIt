@@ -54,6 +54,7 @@ import {
   runEventSchema,
 } from "@regulait/shared";
 import {
+  agentProviderToken,
   configuredProviders,
   executeGovernedDispatch,
   type SkippedCandidate,
@@ -1428,7 +1429,7 @@ export async function planRun(
         if (a.id === ownerId) return null;
         if (!a.model) return "no_model_id";
         if (!isModelProviderKind(a.provider)) return "unknown_provider";
-        if (!configured.has(a.provider)) return "no_model_credential";
+        if (!configured.has(agentProviderToken(a))) return "no_model_credential";
         return null;
       };
       for (const node of graph.nodes) {
