@@ -3,6 +3,8 @@ import {
   and,
   desc,
   eq,
+  gte,
+  lte,
   agentRevocations,
   agents,
   apiKeys,
@@ -42,7 +44,25 @@ import {
   users,
   workflowInstances,
   type Db,
+  type SQL,
 } from "@regulait/db";
+import {
+  csvBatchRows,
+  csvMaxRows,
+  resolveCsvWindow,
+  streamCsv,
+} from "./csv-export.js";
+import { afterCursorDesc, atTextSql, decodeCursor, encodeCursor } from "./pagination.js";
+import { resolveTrustProxy, type TrustProxySetting } from "./trusted-proxy.js";
+import fastifyRateLimit from "@fastify/rate-limit";
+import { schedulerHealth } from "./scheduler-health.js";
+import {
+  rateLimitKey,
+  rateLimitMax,
+  rateLimitWindowMs,
+  resolveRateLimitConfig,
+  type RateLimitConfig,
+} from "./rate-limit.js";
 import { visibleTools, type ToolRef } from "@regulait/policy-kernel";
 import {
   assignRoleSchema,
@@ -96,6 +116,14 @@ export interface BuildAppOptions {
   bootstrapToken?: string;
   /** hex AES-256 key for encrypting stored git tokens (REGULAIT_DATA_KEY) */
   dataKey?: string;
+  /** ADR-0031: which peers may speak for the client via X-Forwarded-*.
+   * Defaults to REGULAIT_TRUSTED_PROXIES (which itself defaults to trusting
+   * nothing). Exposed so a test can assert both directions. */
+  trustProxy?: TrustProxySetting;
+  /** ADR-0031: per-IP / per-key HTTP rate limits. Defaults come from the
+   * environment (see rate-limit.ts); this override exists so a test can pin
+   * tiny windows without touching process.env. */
+  rateLimit?: Partial<RateLimitConfig>;
 }
 import { z } from "zod";
 import { registerMcpProxy } from "./mcp-proxy.js";
@@ -131,7 +159,13 @@ import {
   startAuditPruneScheduler,
 } from "./org-settings.js";
 import { registerSetupStatusRoutes } from "./setup-status.js";
-import { WEB_UI_ROUTES, registerWebServing } from "./web-serving.js";
+import { WEB_UI_ROUTES, defaultWebDistDir, registerWebServing } from "./web-serving.js";
+import path from "node:path";
+import {
+  registerInlineScripts,
+  registerSpaInlineScripts,
+  securityHeaders,
+} from "./security-headers.js";
 import { MergeConflictError, WorkflowStateError } from "@regulait/workflow-kernel";
 
 const uuidParam = z.object({ serverId: z.string().uuid() });
@@ -139,48 +173,175 @@ const visibleToolsParams = z.object({
   userId: z.string().uuid(),
   serverId: z.string().uuid(),
 });
-/** A4 (ADR-0027) exposed as a QUERY dimension: `deployMode` filters the trail
- * by the deploy mode a deploy-mode-scoped action acted on.
+/** ADR-0031: documented ceiling on one /v1/audit page. A caller that wants more
+ * than this pages with `cursor`, or takes the streamed CSV export. */
+export const AUDIT_MAX_PAGE_SIZE = 1000;
+const AUDIT_DEFAULT_PAGE_SIZE = 100;
+
+/**
+ * THE filter set for the audit trail. Both the screen read (`GET /v1/audit`)
+ * and the compliance export (`GET /v1/audit.csv`) parse this same object and
+ * build their WHERE with the same `auditFilters()` below — a downloaded trail
+ * can never quietly cover a different set of rows than the one an admin saw.
  *
- * The honest fourth value is `unknown` → `deploy_mode IS NULL`. That bucket is
- * NOT "hosted by default" and never can be: pre-0044 rows never recorded a
- * mode (ADR-0027 §2a — un-backfillable by design), and the large majority of
- * rows (MCP calls, membership changes, settings edits …) are not deploy-scoped
- * at all, so they have no mode to have. Omitting the param = every row. */
-const auditQuery = z.object({
+ * `deployMode` is A4 (ADR-0027) exposed as a QUERY dimension: it filters the
+ * trail by the deploy mode a deploy-mode-scoped action acted on. The honest
+ * fourth value is `unknown` → `deploy_mode IS NULL`. That bucket is NOT
+ * "hosted by default" and never can be: pre-0044 rows never recorded a mode
+ * (ADR-0027 §2a — un-backfillable by design), and the large majority of rows
+ * (MCP calls, membership changes, settings edits …) are not deploy-scoped at
+ * all, so they have no mode to have. Omitting the param = every row.
+ *
+ * `objectType`/`effect`/`from`/`to` are ADR-0031 additions; `from`/`to` are
+ * also what lets an auditor take the export in bounded slices instead of
+ * asking for the whole table at once.
+ */
+const auditFilterQuery = z.object({
   userId: z.string().uuid().optional(),
   deployMode: z.enum(["hosted", "byoc", "air_gapped", "unknown"]).optional(),
+  objectType: z.string().min(1).max(64).optional(),
+  effect: z.enum(["allow", "deny", "require_approval"]).optional(),
+  from: z.coerce.date().optional(),
+  to: z.coerce.date().optional(),
+});
+type AuditFilterInput = z.infer<typeof auditFilterQuery>;
+
+/** the screen read adds paging on top of the shared filter set */
+const auditQuery = auditFilterQuery.extend({
+  limit: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(AUDIT_MAX_PAGE_SIZE)
+    .default(AUDIT_DEFAULT_PAGE_SIZE),
+  cursor: z.string().min(1).max(256).optional(),
 });
 
-/** the WHERE for the two audit reads — identical filter semantics on screen
- * and in the CSV export, so a downloaded trail always matches what was seen. */
-const auditWhere = (q: z.infer<typeof auditQuery>) => {
-  const conds = [
-    ...(q.userId ? [eq(auditLog.userId, q.userId)] : []),
-    ...(q.deployMode
-      ? [
-          q.deployMode === "unknown"
-            ? isNull(auditLog.deployMode)
-            : eq(auditLog.deployMode, q.deployMode),
-        ]
-      : []),
-  ];
-  return conds.length === 0 ? undefined : conds.length === 1 ? conds[0] : and(...conds);
-};
+/** the export takes the filter set unchanged — no paging params, because it
+ * streams the whole (bounded, disclosed) selection rather than one page */
+const auditCsvQuery = auditFilterQuery;
 const UUID_ANY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** every audit_log column, spelled out so a keyset read can select the row AND
+ * a derived microsecond-exact `atText` cursor field in one query without
+ * changing the row shape any existing caller sees */
+const auditLogColumns = {
+  id: auditLog.id,
+  at: auditLog.at,
+  userId: auditLog.userId,
+  objectType: auditLog.objectType,
+  objectId: auditLog.objectId,
+  detail: auditLog.detail,
+  serverId: auditLog.serverId,
+  toolName: auditLog.toolName,
+  effect: auditLog.effect,
+  ruleId: auditLog.ruleId,
+  ruleChain: auditLog.ruleChain,
+  reason: auditLog.reason,
+  deployMode: auditLog.deployMode,
+} as const;
+
+/**
+ * THE WHERE terms for the audit trail — the single implementation behind both
+ * `GET /v1/audit` and `GET /v1/audit.csv` (PR #79's `auditWhere`, extended with
+ * ADR-0031's filters and its explicit date window). One function, so a filter
+ * added on one side can never silently stop applying to the other.
+ *
+ * `from`/`to` are passed in rather than read off `q` because the export may
+ * apply a DEFAULTED window the caller never asked for (see csv-export.ts), and
+ * because the "are there rows outside the window?" disclosure probe needs the
+ * same filters with the window inverted.
+ */
+function auditFilters(q: AuditFilterInput, from: Date | null, to: Date | null): SQL[] {
+  const out: SQL[] = [];
+  if (q.userId) out.push(eq(auditLog.userId, q.userId));
+  if (q.deployMode) {
+    // 'unknown' is deploy_mode IS NULL — an explicit, equal bucket, never an
+    // inferred "hosted" (ADR-0027 §2a: those rows are un-backfillable).
+    out.push(
+      q.deployMode === "unknown"
+        ? isNull(auditLog.deployMode)
+        : eq(auditLog.deployMode, q.deployMode),
+    );
+  }
+  if (q.objectType) out.push(eq(auditLog.objectType, q.objectType as "mcp_tool"));
+  if (q.effect) out.push(eq(auditLog.effect, q.effect));
+  if (from) out.push(gte(auditLog.at, from));
+  if (to) out.push(lte(auditLog.at, to));
+  return out;
+}
+
+/** the same terms as one composed predicate (`undefined` = no filter at all) */
+function auditWhere(q: AuditFilterInput, from: Date | null, to: Date | null): SQL | undefined {
+  const conds = auditFilters(q, from, to);
+  return conds.length === 0 ? undefined : conds.length === 1 ? conds[0] : and(...conds);
+}
+
 export function buildApp(db: Db, opts: BuildAppOptions = {}) {
-  // trustProxy (ADR-0029): the deployed stack runs behind a Caddy TLS
-  // terminator, so the socket peer is the proxy, not the user. Without this,
-  // `req.ip` — recorded on every auth_sessions row (ADR-0025/0028) — degrades
-  // to the proxy's container address and the session audit trail loses the real
-  // client. It does NOT affect the session cookie's `Secure` flag:
-  // requestIsSecure() reads `x-forwarded-proto` straight off the raw headers,
-  // which Fastify never gates on trustProxy. Safe because Caddy *overwrites*
-  // X-Forwarded-For with the real peer (header_up X-Forwarded-For {remote_host}
-  // in infra/caddy/Caddyfile) rather than appending to a client-supplied value,
-  // and the gateway port is published to host loopback only.
-  const app = Fastify({ logger: false, trustProxy: true });
+  // trustProxy (ADR-0029, NARROWED by ADR-0031 item 3): the deployed stack runs
+  // behind a Caddy TLS terminator, so the socket peer is the proxy, not the
+  // user. Without trusting it, `req.ip` — recorded on every auth_sessions row
+  // (ADR-0025/0028) — degrades to the proxy's container address and the session
+  // audit trail loses the real client. That is why ADR-0029 turned it on.
+  //
+  // But `true` trusts X-Forwarded-* from ANY peer, and Caddy's overwrite
+  // (`header_up X-Forwarded-For {remote_host}`) only protects the path that
+  // actually goes through Caddy. Anything that reaches the gateway port
+  // directly — host loopback, a sibling container on the compose network, a
+  // future sidecar — bypasses Caddy entirely and could then choose the client
+  // IP that lands on the compliance trail. So the peer is now named instead of
+  // assumed: REGULAIT_TRUSTED_PROXIES (IPs/CIDRs/proxy-addr keywords), which
+  // docker-compose.yml sets to the compose network for the `tls` profile.
+  // Default when unset: trust nothing. See trusted-proxy.ts.
+  const trustProxy = opts.trustProxy ?? resolveTrustProxy();
+  const app = Fastify({ logger: false, trustProxy });
+
+  // ADR-0031 item 4 — HTTP rate limiting. There was a per-ACCOUNT login
+  // lockout (ADR-0025) and nothing bounding per-IP/per-key request rates on
+  // any of the ~167 endpoints, so credential spraying across many accounts was
+  // unmetered. Two buckets: a generous global one, and a much stricter one on
+  // the three credential-accepting endpoints. Both key on `req.ip`, which is
+  // only trustworthy because of item 3 above — with a blanket trustProxy an
+  // attacker would rotate x-forwarded-for for a fresh bucket per request.
+  //
+  // The plugin is registered with global:false and driven from OUR onRequest
+  // hook rather than its onRoute integration: onRoute only sees routes
+  // registered after the plugin finishes loading, and `register()` defers that
+  // to ready() — long after every route below is in place. Driving it from a
+  // hook added here, before any route, makes coverage order-independent.
+  const rateCfg = resolveRateLimitConfig(process.env, opts.rateLimit ?? {});
+  if (rateCfg.enabled) {
+    app.register(fastifyRateLimit, {
+      global: false,
+      keyGenerator: rateLimitKey,
+      max: (_req, key) => rateLimitMax(rateCfg, key),
+      timeWindow: (_req, key) => rateLimitWindowMs(rateCfg, key),
+      // a load balancer's liveness poll must never be throttled into a false
+      // "gateway is down"
+      allowList: (req) => req.url === "/health",
+    });
+    let limiter: ReturnType<typeof app.createRateLimit> | null = null;
+    app.addHook("onRequest", async (req, reply) => {
+      limiter ??= app.createRateLimit();
+      const verdict = await limiter(req);
+      // isAllowed === true means allow-listed (never counted at all)
+      if (verdict.isAllowed) return;
+      reply
+        .header("x-ratelimit-limit", String(verdict.max))
+        .header("x-ratelimit-remaining", String(verdict.remaining))
+        .header("x-ratelimit-reset", String(verdict.ttlInSeconds));
+      if (!verdict.isExceeded) return;
+      return reply
+        .status(429)
+        .header("x-ratelimit-remaining", "0")
+        .header("retry-after", String(verdict.ttlInSeconds))
+        .send({
+          error: "rate_limited",
+          detail: `too many requests — limit ${verdict.max} per ${Math.round(verdict.timeWindow / 1000)}s`,
+          retryAfterSeconds: verdict.ttlInSeconds,
+        });
+    });
+  }
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof z.ZodError) {
@@ -203,6 +364,32 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     app.log.error(err);
     if (process.env.DEBUG_ERRORS) console.error("GATEWAY ERR:", err);
     return reply.status(500).send({ error: "internal" });
+  });
+
+  // ADR-0031 item 5 — security headers on every response. The gateway serves
+  // the SPA itself and is directly reachable (the compose port, and every dev
+  // machine), so it cannot delegate CSP / nosniff / frame-ancestors to an edge
+  // proxy. Deliberately here rather than in web-serving.ts: these belong to
+  // every response, not just static files.
+  //
+  // Set-if-absent, never overwrite: a route (or an edge) that already chose a
+  // value keeps it, so nothing here can conflict with a header set upstream.
+  // The one thing that is NOT set unconditionally is HSTS — announcing it over
+  // plain http would be wrong in dev, so it rides only a genuinely secure
+  // request (which, per item 3, means a real TLS hop or a hop from a trusted
+  // proxy — never a forged x-forwarded-proto).
+  app.addHook("onSend", async (req, reply, payload) => {
+    const contentType = reply.getHeader("content-type");
+    const headers = securityHeaders(
+      typeof contentType === "string" ? contentType : undefined,
+    );
+    for (const [name, value] of Object.entries(headers)) {
+      if (reply.getHeader(name) === undefined) reply.header(name, value);
+    }
+    if (req.protocol === "https" && reply.getHeader("strict-transport-security") === undefined) {
+      reply.header("strict-transport-security", "max-age=31536000; includeSubDomains");
+    }
+    return payload;
   });
 
   app.decorateRequest("authCtx");
@@ -1919,6 +2106,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     html.replace('<div id="root">', `${deprecationBanner}<div id="root">`);
   const LEGACY_ADMIN_HTML = withDeprecation(ADMIN_PORTAL_HTML);
   const LEGACY_APP_HTML = withDeprecation(APP_HTML);
+  // ADR-0031 item 5: allow the inline scripts these documents actually carry
+  // by HASH rather than surrendering script-src to 'unsafe-inline'. Derived
+  // from the exact bytes that will be served — the two legacy shells here, and
+  // the SPA's theme pre-paint script read from the built bundle — so a rebuilt
+  // bundle or an edited pre-paint script keeps working with no hardcoded
+  // constant to drift.
+  registerInlineScripts(LEGACY_ADMIN_HTML);
+  registerInlineScripts(LEGACY_APP_HTML);
+  registerSpaInlineScripts(path.resolve(process.env.REGULAIT_WEB_DIST ?? defaultWebDistDir()));
   app.get("/admin", async (_req, reply) => reply.redirect("/ui", 302));
   app.get("/app", async (_req, reply) => reply.redirect("/ui", 302));
   app.get("/legacy/admin", async (_req, reply) => reply.type("text/html").send(LEGACY_ADMIN_HTML));
@@ -1940,6 +2136,23 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       return reply.status(503).send({ status: "degraded", database: "unreachable" });
     }
     return { status: "ok", database: "ok" };
+  });
+
+  // ADR-0031 item 6: the health surface the two boot schedulers report into.
+  // Admin-only via the default gate (deliberately NOT in NON_ADMIN_ROUTES) and
+  // deliberately NOT part of /health — a liveness probe must not start failing
+  // because a backup verification pass errored, but an admin must be able to
+  // SEE that it did. In-memory on purpose: it still answers when the database
+  // is the thing that broke, which is the most likely reason a tick failed.
+  app.get("/v1/health/schedulers", async () => {
+    const schedulers = schedulerHealth();
+    return {
+      schedulers,
+      healthy: schedulers.every((s) => s.healthy),
+      // an empty list means neither scheduler has ticked in this process yet
+      // (both ship OFF by default) — absence of failures, not proof of success
+      note: "in-memory, per-process, reset on restart; both schedulers are OFF by default (org_settings)",
+    };
   });
 
   // ADR-0025: password/session/TOTP/OIDC login surface + the admin endpoints
@@ -1978,46 +2191,128 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerAnthropicCompat(app, db, { dataKey: opts.dataKey });
   registerOpenAiCompat(app, db, { dataKey: opts.dataKey });
 
-  app.get("/v1/audit", async (req) => {
+  // ADR-0031 item 2: the audit read surface used to be hard-capped at 100 rows
+  // with a userId filter (plus PR #79's deployMode) and nothing else — for a
+  // compliance product that means no admin could ever see row 101. It now pages
+  // with an opaque keyset cursor on the stable (at DESC, id DESC) sort, and
+  // filters on from/to/objectType/effect as well as userId and deployMode —
+  // all through the SAME auditFilters() the CSV export uses. Callers that pass
+  // nothing get EXACTLY the old behaviour: the newest 100 rows under `entries`.
+  app.get("/v1/audit", async (req, reply) => {
     const q = auditQuery.parse(req.query);
+    const cursor = q.cursor ? decodeCursor(q.cursor) : null;
+    if (q.cursor && !cursor) return reply.status(400).send({ error: "invalid_cursor" });
+
+    const filters = auditFilters(q, q.from ?? null, q.to ?? null);
+    if (cursor) filters.push(afterCursorDesc(auditLog.at, auditLog.id, cursor));
+
+    // one extra row decides hasMore without a second COUNT over a table that
+    // grows a row per governed call
     const rows = await db
-      .select()
+      .select({ ...auditLogColumns, atText: atTextSql(auditLog.at) })
       .from(auditLog)
-      .where(auditWhere(q))
-      .orderBy(desc(auditLog.at))
-      .limit(100);
-    return { entries: rows };
+      .where(filters.length ? and(...filters) : undefined)
+      .orderBy(desc(auditLog.at), desc(auditLog.id))
+      .limit(q.limit + 1);
+
+    const hasMore = rows.length > q.limit;
+    const page = hasMore ? rows.slice(0, q.limit) : rows;
+    const last = page[page.length - 1];
+    return {
+      // `atText` is a cursor-derivation detail, never part of the row contract
+      entries: page.map(({ atText: _atText, ...entry }) => entry),
+      pageSize: page.length,
+      maxPageSize: AUDIT_MAX_PAGE_SIZE,
+      hasMore,
+      nextCursor: hasMore && last ? encodeCursor({ at: last.atText, id: last.id }) : null,
+    };
   });
 
   // ADR-0022: CSV export of the (filtered) audit trail — the compliance
   // deliverable auditors actually ask for. Admin-only via the default gate;
-  // same download pattern as the per-project costs CSV. Unlike the 100-row
-  // screen view, the export carries the FULL filtered trail.
+  // same download pattern as the per-project costs CSV.
+  //
+  // ADR-0031: this used to `select()` the WHOLE filtered table, materialise it
+  // into a JS array and concatenate one giant string — with audit_log growing a
+  // row per governed call and auto-prune OFF by default, that is an OOM of the
+  // container waiting to happen. It now streams: keyset batches over
+  // (at DESC, id DESC), written to reply.raw a batch at a time, under a
+  // defaulted date window and a hard row ceiling — BOTH disclosed (headers
+  // always, plus a trailing comment row whenever the file is not the complete
+  // answer). The column shape is unchanged, so a complete export is
+  // byte-identical to what the old code produced.
+  // A4 (ADR-0027): `deployMode` is its own column. A row with no mode is
+  // written as the literal `unknown` rather than an empty cell — the same word
+  // the filter uses — so an auditor reading the export can never mistake "we
+  // never recorded a mode here" for "hosted" or for a lost value.
+  const AUDIT_CSV_HEADER = [
+    "at",
+    "userId",
+    "userName",
+    "objectType",
+    "objectId",
+    "serverId",
+    "toolName",
+    "effect",
+    "ruleId",
+    "deployMode",
+    "reason",
+    "detail",
+  ] as const;
+
   app.get("/v1/audit.csv", async (req, reply) => {
-    const q = auditQuery.parse(req.query);
-    const { userId } = q;
-    const [rows, userRows] = await Promise.all([
-      db
-        .select()
-        .from(auditLog)
-        .where(auditWhere(q))
-        .orderBy(desc(auditLog.at)),
-      db.select({ id: users.id, displayName: users.displayName, email: users.email }).from(users),
-    ]);
-    const nameOf = new Map(userRows.map((u) => [u.id, u.displayName || u.email]));
+    const q = auditCsvQuery.parse(req.query);
+    const win = resolveCsvWindow(q.from, q.to);
+    const filters = auditFilters(q, win.from, win.to);
+    const where = filters.length ? and(...filters) : undefined;
+
+    // The userName column needs a display name per row. The old code loaded
+    // EVERY user up front; we resolve lazily per batch and memoise, so the map
+    // is bounded by the distinct users actually present in the export.
+    const nameOf = new Map<string, string>();
+    const resolveNames = async (ids: string[]) => {
+      const missing = [...new Set(ids)].filter((id) => !nameOf.has(id));
+      if (missing.length === 0) return;
+      const rows = await db
+        .select({ id: users.id, displayName: users.displayName, email: users.email })
+        .from(users)
+        .where(inArray(users.id, missing));
+      for (const u of rows) nameOf.set(u.id, u.displayName || u.email);
+      for (const id of missing) if (!nameOf.has(id)) nameOf.set(id, "");
+    };
+
     const csvCell = (v: unknown): string => {
       if (v === null || v === undefined) return "";
       const s = typeof v === "object" ? JSON.stringify(v) : String(v);
       return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     };
-    // A4 (ADR-0027): deployMode ships as its own column. A row with no mode is
-    // written as the literal `unknown` rather than an empty cell — the same
-    // word the filter uses — so an auditor reading the export can never mistake
-    // "we never recorded a mode here" for "hosted" or for a lost value.
-    const header = ["at", "userId", "userName", "objectType", "objectId", "serverId", "toolName", "effect", "ruleId", "deployMode", "reason", "detail"];
-    const lines = [header.join(",")];
-    for (const r of rows) {
-      lines.push(
+
+    // filename names every filter that shaped the file, so two downloads taken
+    // with different filters never collide in a downloads folder
+    const suffix = `${q.userId ? `-${q.userId.slice(0, 8)}` : ""}${q.deployMode ? `-${q.deployMode}` : ""}`;
+    type Row = typeof auditLog.$inferSelect & { atText: string };
+    await streamCsv<Row>(reply, {
+      filename: `audit-log${suffix}.csv`,
+      header: AUDIT_CSV_HEADER,
+      eol: "\n",
+      batchSize: csvBatchRows(),
+      maxRows: csvMaxRows(),
+      window: win,
+      fetchPage: async (after, limit) => {
+        const pageWhere = after
+          ? and(...filters, afterCursorDesc(auditLog.at, auditLog.id, after))
+          : where;
+        const rows = (await db
+          .select({ ...auditLogColumns, atText: atTextSql(auditLog.at) })
+          .from(auditLog)
+          .where(pageWhere)
+          .orderBy(desc(auditLog.at), desc(auditLog.id))
+          .limit(limit)) as Row[];
+        await resolveNames(rows.map((r) => r.userId));
+        return rows;
+      },
+      cursorOf: (r) => ({ at: r.atText, id: r.id }),
+      renderRow: (r) =>
         [
           r.at.toISOString(),
           r.userId,
@@ -2034,13 +2329,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         ]
           .map(csvCell)
           .join(","),
-      );
-    }
-    const suffix = `${userId ? `-${userId.slice(0, 8)}` : ""}${q.deployMode ? `-${q.deployMode}` : ""}`;
-    return reply
-      .header("content-type", "text/csv; charset=utf-8")
-      .header("content-disposition", `attachment; filename="audit-log${suffix}.csv"`)
-      .send(lines.join("\n") + "\n");
+      hasRowsOutsideWindow: async () => {
+        if (!win.from) return false;
+        // the SAME filters with the window inverted — the disclosure must speak
+        // about the rows this export would have covered, not about every row
+        const older = auditFilters(q, null, win.from);
+        const rows = await db
+          .select({ id: auditLog.id })
+          .from(auditLog)
+          .where(older.length ? and(...older) : undefined)
+          .limit(1);
+        return rows.length > 0;
+      },
+    });
   });
 
   return app;

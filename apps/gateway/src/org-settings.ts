@@ -48,6 +48,7 @@ import {
   updateOrgSettingsSchema,
 } from "@regulait/shared";
 import { z } from "zod";
+import { recordSchedulerFailure, recordSchedulerSuccess } from "./scheduler-health.js";
 
 export type { OrgSettingsRow };
 
@@ -264,21 +265,33 @@ export async function runAuditPruneOnce(
  * configured interval has elapsed since the last pass. Returns the stop
  * function the app's onClose hook calls.
  */
+export interface SchedulerTickState {
+  lastRunAt: number;
+}
+
+/** ONE tick of the auto-prune scheduler. Exported so a test can drive it
+ * without waiting an hour — the timer below is the only other caller. */
+export async function auditPruneTick(db: Db, state: SchedulerTickState): Promise<void> {
+  try {
+    const org = await loadOrgSettings(db);
+    if (!org.autoPruneEnabled) return;
+    const intervalMs = Math.max(1, org.pruneIntervalHours) * 3600 * 1000;
+    if (Date.now() - state.lastRunAt < intervalMs) return;
+    state.lastRunAt = Date.now();
+    await runAuditPruneOnce(db, null, true);
+    recordSchedulerSuccess("audit-prune");
+  } catch (err) {
+    // ADR-0031 item 6: a failed pass still never crashes the gateway and the
+    // next tick still retries — but it is no longer INVISIBLE. This logs,
+    // marks the scheduler unhealthy on /v1/health/schedulers, and writes an
+    // audit row; it never throws.
+    await recordSchedulerFailure(db, "audit-prune", err);
+  }
+}
+
 export function startAuditPruneScheduler(db: Db): () => void {
-  let lastRunAt = 0;
-  const tick = async () => {
-    try {
-      const org = await loadOrgSettings(db);
-      if (!org.autoPruneEnabled) return;
-      const intervalMs = Math.max(1, org.pruneIntervalHours) * 3600 * 1000;
-      if (Date.now() - lastRunAt < intervalMs) return;
-      lastRunAt = Date.now();
-      await runAuditPruneOnce(db, null, true);
-    } catch {
-      // a failed pass never crashes the gateway; the next tick retries
-    }
-  };
-  const timer = setInterval(() => void tick(), 3600 * 1000);
+  const state: SchedulerTickState = { lastRunAt: 0 };
+  const timer = setInterval(() => void auditPruneTick(db, state), 3600 * 1000);
   timer.unref?.();
   return () => clearInterval(timer);
 }

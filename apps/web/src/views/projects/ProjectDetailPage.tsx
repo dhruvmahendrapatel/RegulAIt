@@ -4,15 +4,16 @@
  * estimated savings, CSV export — plus membership management for owners.
  */
 import { useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
-import type { Project, ProjectCosts, ProjectMember } from "../../api/types";
+import type { ProjectCosts, ProjectMember } from "../../api/types";
 import { ago, fmtUsd } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
 import {
   Badge,
+  BarList as KitBarList,
   Button,
   Card,
   ConfirmModal,
@@ -22,9 +23,9 @@ import {
   Select,
   SkeletonBlock,
   Meter,
-  IdChip,
 } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
+import { ProjectChrome, useProjectChrome } from "./projectChrome";
 import v from "../views.module.css";
 
 interface DirectoryUser {
@@ -40,31 +41,19 @@ export default function ProjectDetailPage() {
   const queryClient = useQueryClient();
   const me = auth?.userId ?? null;
 
-  const projectsQ = useQuery({
-    queryKey: ["projects"],
-    queryFn: () => api.get<{ projects: Project[] }>("/v1/projects"),
-  });
+  const chrome = useProjectChrome(projectId);
+  const { projectsQ, membersQ, members, project, myRole } = chrome;
   const costsQ = useQuery({
     queryKey: ["project-costs", projectId],
     enabled: Boolean(projectId),
     queryFn: () => api.get<ProjectCosts>(`/v1/projects/${projectId}/costs`),
-  });
-  const membersQ = useQuery({
-    queryKey: ["project-members", projectId],
-    enabled: Boolean(projectId),
-    queryFn: () => api.get<{ members: ProjectMember[] }>(`/v1/projects/${projectId}/members`),
   });
   const directoryQ = useQuery({
     queryKey: ["directory"],
     queryFn: () => api.get<{ users: DirectoryUser[] }>("/v1/users/directory"),
   });
 
-  const project = (projectsQ.data?.projects ?? []).find((p) => p.id === projectId);
-  const members = membersQ.data?.members ?? [];
   const directory = directoryQ.data?.users ?? [];
-  const myRole: ProjectMember["role"] = auth?.isAdmin
-    ? "owner"
-    : (members.find((m) => m.userId === me)?.role ?? "viewer");
   const ownerCount = members.filter((m) => m.role === "owner").length;
 
   const [addUserId, setAddUserId] = useState("");
@@ -103,7 +92,7 @@ export default function ProjectDetailPage() {
     const err = costsQ.error as { status?: number; message?: string };
     return (
       <>
-        <PageHeader title={project?.name ?? "Project"} />
+        <ProjectChrome projectId={projectId} project={project} myRole={myRole} tab="overview" />
         <Card>
           <ErrorState
             message={err.message ?? "unknown error"}
@@ -132,23 +121,13 @@ export default function ProjectDetailPage() {
 
   return (
     <>
-      <div style={{ marginBottom: "var(--s1)" }}>
-        <Link to="/projects">← All projects</Link>
-      </div>
-      <PageHeader
-        title={project?.name ?? c.project?.name ?? "Project"}
-        sub={
-          <span className={v.rowTight}>
-            {(project?.classifications ?? []).map((cl) => (
-              <Badge key={cl} tone="info">
-                {cl}
-              </Badge>
-            ))}
-            <Badge>{myRole}</Badge>
-            {c.initiative && <span className={v.faint}>Initiative: {c.initiative.name}</span>}
-            <IdChip id={projectId} />
-          </span>
-        }
+      <ProjectChrome
+        projectId={projectId}
+        project={project}
+        fallbackName={c.project?.name}
+        myRole={myRole}
+        tab="overview"
+        sub={c.initiative ? <span className={v.faint}>Initiative: {c.initiative.name}</span> : undefined}
         actions={
           <Button
             size="sm"
@@ -234,6 +213,26 @@ export default function ProjectDetailPage() {
             <BarList
               items={(c.byAgent ?? []).map((x) => ({
                 label: x.model ?? x.agentId?.slice(0, 8) ?? "agent",
+                value: x.costUsd,
+              }))}
+            />
+          </Card>
+          {/* ADR-0019/0024: connector and MCP-tool spend ride the SAME ledger,
+              so they are already inside the measured total above. Naming them
+              here is what stops the agent breakdown from looking like an
+              unexplained gap against that total. */}
+          <Card title="Spend by connector">
+            <BarList
+              items={(c.byConnector ?? []).map((x) => ({
+                label: `${x.name ?? "connector"} · ${x.operation ?? ""}`,
+                value: x.costUsd,
+              }))}
+            />
+          </Card>
+          <Card title="Spend by MCP tool">
+            <BarList
+              items={(c.byMcpTool ?? []).map((x) => ({
+                label: x.toolName ?? "tool",
                 value: x.costUsd,
               }))}
             />
@@ -389,13 +388,6 @@ export default function ProjectDetailPage() {
                 </div>
               </div>
             ))}
-          <div className={v.faint} style={{ marginTop: "var(--s2)" }}>
-            Shared context editing and the context version graph are{" "}
-            <strong>not in this shell yet</strong> — they remain only in the{" "}
-            <a href="/legacy/app#/projects">legacy app</a>. Phase 2 did not migrate them, so this is
-            a real, still-open gap rather than a planned handoff; the legacy shell stays served
-            until it closes.
-          </div>
         </Card>
       </div>
 
@@ -431,38 +423,8 @@ export default function ProjectDetailPage() {
   );
 }
 
-/** tiny horizontal bar list — tokens only, no chart library */
+/** the ranked-bar readout now lives in the kit (ui/kit.tsx) — one visual for
+ * every cost/savings breakdown, here and on the workspace Spend page. */
 function BarList(props: { items: Array<{ label: string; value: number }> }) {
-  const items = props.items.filter((i) => Number.isFinite(i.value)).slice(0, 10);
-  if (!items.length) {
-    return <EmptyState title="No data yet" body="Metered activity appears here as it happens." />;
-  }
-  const max = Math.max(...items.map((i) => i.value), 1e-9);
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "var(--s1)" }}>
-      {items.map((i, idx) => (
-        <div key={idx} className={v.row} style={{ gap: "var(--s1)" }}>
-          <span
-            className={v.faint}
-            style={{ width: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-            title={i.label}
-          >
-            {i.label}
-          </span>
-          <div style={{ flex: 1, minWidth: 40 }}>
-            <div
-              style={{
-                height: 10,
-                width: `${Math.max(2, (i.value / max) * 100)}%`,
-                background: "var(--primary)",
-                opacity: 0.85,
-                borderRadius: 3,
-              }}
-            />
-          </div>
-          <span className={`${v.mono} ${v.num}`}>{fmtUsd(i.value)}</span>
-        </div>
-      ))}
-    </div>
-  );
+  return <KitBarList items={props.items} format={fmtUsd} />;
 }

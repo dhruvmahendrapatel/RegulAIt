@@ -325,3 +325,268 @@ their backends landed the same hour) are now wired:
   inheritance rather than pricing the tool at zero. The **server flat rate is read-only**:
   `createServerSchema` takes `name` + `url` only, so no API sets it and the UI does not pretend
   otherwise.
+---
+
+## Amendment (2026-08-01) — the shared context store is native; the fourth legacy-only gap is closed
+
+- **Status of this amendment**: Accepted
+- **Scope**: pillar 4's shared context store only. This amendment deliberately does **not**
+  re-assert overall parity — see "What is still legacy-only" below.
+
+### Why this amendment exists
+
+Phase 2's swap decision said "Playwright proved parity on every group". That claim was about the
+**admin groups**, and it was read afterwards as a claim about the whole product. It was not:
+phase 1's own text (§3) had already listed five capabilities as deliberately legacy-only, phase 2
+closed exactly one of them (the admin console), and the remaining four were never tracked
+anywhere the swap decision could see them. Two successive amendments then asserted parity without
+enumerating anything. Asserting parity is not evidence of parity.
+
+### The capability-diff method (used here, and required from now on)
+
+A parity claim is only admissible with the diff attached. The method:
+
+1. **Enumerate the legacy side mechanically, not from memory** — the shell's own page list
+   (`PAGES` in `app-ui.ts`, the tab list in `admin-portal.ts`), then, within the page under
+   review, every rendered control and every endpoint call site in its source.
+2. **Map each item to a concrete SPA route + control** that a user could reach, or record it as a
+   residual. "The SPA can do that somewhere" is not a mapping; a route and a control is.
+3. **Publish the residual list**, including items outside the scope of the change being made.
+   A change may close residuals; it may never quietly drop them from the list.
+4. **Prove the mapped items by execution**, not inspection: a Playwright journey that drives the
+   real control against a real gateway, including the failure paths.
+
+### Diff 1 — the shared context store (`app-ui.ts` §"projects" + §"context graph")
+
+Every legacy control, and where it now lives. SPA routes: `/ui/context` (workspace index),
+`/ui/projects/:id/context` (the store), `/ui/projects/:id/context/graph` (the version graph).
+
+| Legacy control (`app-ui.ts`) | SPA equivalent | Status |
+| --- | --- | --- |
+| per-key row: key, `rev N`, `from artifact`, `N awaiting arbiter`, provenance (user · team · age), collapsible current text | entry row on `/projects/:id/context` | closed |
+| `history` drawer → `GET ?key=&history=true`, per-revision accepted / awaiting-arbiter / rejected, base revision, author, team, text | history drawer, same endpoint, same three states | closed |
+| pending banner "N revisions awaiting arbiter" + arbiter name + Inbox link | "Conflicting revisions awaiting a decision" card, one row per retained revision | closed, richer |
+| `+ add context` — new-key editor (key input, textarea, base-revision explanation) | "Add context" modal | closed |
+| `✎` edit — **fetches the current revision before opening** | "Edit" — same read-before-write on open | closed |
+| submit-time re-read; both-texts conflict card when the key moved | conflict view with labelled *yours* / *theirs* panels and an explicit "How this resolves" panel | closed, clearer |
+| `Rebase on rev N and submit` | `Rebase on rev N & save` | closed |
+| `Submit against my stale base` (→ arbiter) | `Escalate to <arbiter name>`; disabled with the reason when the project has no arbiter (legacy surfaced a raw `422 no_arbiter` after the fact) | closed, safer |
+| `409 base_revision_required` recovery into the same conflict view | identical recovery path | closed |
+| toast distinguishing an accepted revision from a conflicting one | persistent outcome banner (accepted vs "retained, NOT current, with <arbiter>") plus the toast | closed, harder to miss |
+| `Promote to shared context` on a completed instance's artifact; initiator-only; `403 not_the_artifact_owner` message | promote card + consequence modal; the button is disabled with the initiator's name when it isn't yours; the 403 still messaged | closed, richer |
+| Context Graph: project picker, one column per key, revisions top→bottom, lineage edges, conflict side-lane, legend, keyboard-focusable nodes, detail panel, `#/context-graph/<id>` deep link | `/projects/:id/context/graph` (deep link is the route itself), `/ui/context` is the picker; fork edges now detour around intervening rows instead of drawing a straight line that reads as a chain; "rejected by the arbiter" is a distinct state from "awaiting the arbiter" | closed, more honest |
+
+**Residual for the context store: none.** One deliberate navigation difference: legacy stacked
+every project's store on one Projects page; the SPA scopes one store per project and puts the
+cross-project view at `/ui/context`. Same capability, fewer things on screen at once.
+
+### Diff 2 — the shell level, as observed on this branch
+
+`PAGES` in `app-ui.ts` vs the SPA's Workspace nav:
+
+| Legacy page | SPA | Status |
+| --- | --- | --- |
+| Playground | `/ui/chat` | closed (phase 1) |
+| Runs | `/ui/runs`, `/ui/runs/:id` | closed (phase 1) except goal-decomposition + per-node tuning |
+| Workflows | `/ui/workflows`, `/ui/workflows/:id` | closed (phase 1) |
+| Inbox | `/ui/inbox` | closed (phase 1) |
+| Projects | `/ui/projects`, `/ui/projects/:id` | closed (phase 1) |
+| **Context Graph** | `/ui/projects/:id/context/graph` | **closed by this amendment** |
+| Spend & savings | — | **residual** |
+| Settings (end-user BYO model keys) | — | **residual** |
+
+### What is still legacy-only (do not delete `/legacy/*` yet)
+
+Phase 1 §3 named five deliberately-legacy-only capabilities. Four remain tracked; this change
+closes one of them:
+
+1. the admin console — **closed in phase 2**;
+2. shared-context editing + the context version graph — **closed here**;
+3. spend analytics beyond the dashboard cards (the end-user "Spend & savings" page: their own
+   usage-event and cost-event ledgers, per-project drill-down) — **still legacy-only on this
+   branch**; no SPA route calls `/v1/usage-events` or `/v1/cost-events` outside the admin-only
+   Optimization page;
+4. run goal-decomposition + per-node tuning — **still legacy-only on this branch**; nothing under
+   `apps/web/src` references the decompose endpoints;
+5. BYO model keys for an end user — **still legacy-only on this branch**; the only credential
+   surface in the SPA is the admin-only Model credentials page.
+
+Items 3–5 are being closed on a parallel branch. **Legacy removal is unblocked for the context
+store specifically, and for the product only once that branch has landed beside this one and the
+Diff-2 table has no residual rows.** This branch alone does not license deleting `app-ui.ts`,
+`admin-portal.ts` or the `/legacy/*` routes. Whoever removes them must re-run Diff 2 on the
+merged tree and paste the result — an empty residual list is the precondition, not a formality.
+
+### Verification (this amendment)
+
+Everything below was executed on this branch against its own scratch database
+(`regulait_wt_context`, dropped and recreated), not inferred:
+
+- `pnpm install --frozen-lockfile` clean; `pnpm -r build` green; **zero new dependencies**.
+- Gateway suite: **826 passed / 826**, on a virgin database. No gateway, package, migration or
+  infra file was touched by this change, so the count is unchanged by construction.
+- Playwright: **41 journeys green**, zero console errors on every page, light + dark screenshots.
+  32 were the pre-existing phase-1/phase-2 journeys; 9 are new and drive the store end to end as
+  the seeded **contributor** persona (not an admin, so §9.2's role gate is genuinely exercised):
+  read + provenance + history; edit-and-save; **a literal `409 base_revision_required` returned by
+  the gateway** — forced by stubbing exactly one pre-read so the client believes a key it is about
+  to create does not exist, with the 409 asserted on the wire rather than inferred from the UI —
+  **resolved by rebase**; a second, independent conflict where a real out-of-band revision lands
+  under an open edit so the submit-time re-read catches it and sends nothing, **resolved by
+  escalation to the named arbiter**, asserting afterwards that the store did *not* move and the
+  retained revision is queued for the arbiter; artifact promotion, asserting the reported words
+  match the outcome object the gateway returned (`accepted` / `conflict`), not merely that the
+  call did not throw; and the version graph, selecting the escalated revision and checking it
+  reports "based on rev 2 · awaiting the arbiter".
+- Two pre-existing Playwright assertions were made unambiguous (`getByText("Members")` and
+  `getByText("Budget vs actual")` became strict-mode-safe once a project tab strip and a rollup
+  section shared those words). No behaviour changed.
+
+Two operational notes for whoever re-runs this:
+
+- The gateway suite must be pointed at a **virgin** database. Most files share `DATABASE_URL`
+  directly, so pointing it at a database that has already been seeded (the Playwright scratch
+  database, for instance) fails hundreds of tests for reasons that have nothing to do with the
+  change under test.
+- A handful of test files create fixed-name scratch databases (`regulait_seed_test`,
+  `regulait_wt_stream`, …) and drop them `WITH (FORCE)`. Two agents running the gateway suite
+  against the same Postgres at the same time therefore terminate each other's connections. A
+  failure in exactly those files, that passes when the file is re-run alone, is that collision —
+  not a regression.
+
+## Phase-4 amendment (2026-08-01) — the two END-USER residuals, closed
+
+The phase-3 correction ended with a method rather than a claim: **parity is a capability diff,
+not a passing suite.** Running that diff again — this time verb-aware, because a path-only diff
+cannot tell a surface that only *reads* an endpoint from one that *manages* it — turned up two
+residuals the phase-3 pass had not counted, and both were **end-user (non-admin) surfaces**. In
+a product whose pillar 5 is per-project cost attribution and whose pillar 6 is token
+optimization, neither omission is cosmetic: the developer who *generates* the spend could not see
+any of it, and the developer whose key ADR-0024 is written about could not manage that key.
+
+| Residual | What the SPA had | What was missing |
+| --- | --- | --- |
+| Own spend & savings | `cost-events` / `usage-events` referenced only from the ADMIN `OptimizationPage` | any non-admin surface at all |
+| BYO model keys | `ChatPage` READ `/v1/users/:id/model-credentials` for its "your key vs platform" badge | add / replace / remove — management existed only in the admin `ModelCredentialsPage`, which even told users to "add their own keys from the workspace → Account", a page that did not exist |
+
+### 1. `/ui/spend` — Spend & savings, self-scoped by construction
+
+A Workspace route (nav, after Projects) and the destination of Home's non-admin "My spend" card.
+
+**The governance question was settled from the endpoints, not assumed.** `GET /v1/cost-events`
+and `GET /v1/usage-events` are both in `NON_ADMIN_ROUTES`, and both compute
+`userId = req.authCtx.isAdmin ? q.userId : req.authCtx.userId` — a non-admin's `?userId=` is
+**not trusted**, it is overwritten with self, and a bootstrap session with no user identity is
+refused outright (`bootstrap_has_no_cost_history`). So the per-user filtering the page needs
+already existed and is enforced server-side; no backend change was required and none was made.
+
+The case that needed care was the **admin**, for whom those same endpoints default to
+**org-wide**. The page therefore always sends `?userId=<me>` and says on the page that the
+organisation-wide rollup is the admin Cost dashboard, elsewhere. A "My spend" page that quietly
+showed an admin the whole org would be the same class of dishonesty this ADR keeps correcting.
+
+What it shows: measured spend / tokens / measured savings / estimated savings; spend over the
+last 14 days (days with no call render **empty rather than dropped** — a quiet day is a real
+day); spend by project (rows link to that project's budget, forecast and showback), by agent, by
+connector; the recent-invocations table; and a Savings tab with per-technique totals and an
+explicit **estimated-vs-measured** explanation so the two numbers are never added together.
+Unpriced calls render `unpriced`, never `$0`. Unattributed spend is its own named bucket.
+
+One addition over the legacy page: a **"Key used"** column reading `detail.credentialSource`
+off the ledger row — which credential *actually* served each call (`your key` / `platform` /
+`none`). It is measured, never inferred from which keys happen to be stored. That column turns
+out to matter for the second surface.
+
+Name lookups come from the caller's OWN grants (`/v1/users/:id/agents`,
+`/v1/users/:id/connectors`) — the admin catalogs are 403 for a developer and are never touched.
+
+### 2. `/ui/account` → Your model keys — self-service BYO credentials
+
+List your stored per-provider credentials, add or rotate one, remove one. It shares ChatPage's
+`["my-credentials", userId]` query key, so that badge updates without a reload.
+
+**A stored secret is never displayed or echoed.** The backend keeps AES-256-GCM ciphertext and
+no endpoint returns plaintext, so the card shows provider + presence + endpoint + when it was
+set, and nothing else; the input is cleared the moment the write succeeds.
+
+**Key custody is stated, not discovered by failing.** With ADR-0024's `key_custody_enforced` on,
+`POST /v1/users/:id/model-credentials` answers **409** and dispatch skips stored user rows
+entirely. When custody is known to be on, the add control is **withdrawn rather than offered and
+broken**, an explanation states the ADR's exact semantics (org holds the vendor keys; existing
+rows are *kept, not deleted, and inert*; they come back exactly as stored if an admin lifts it),
+and stored rows are badged `stored · inert` — never "in use".
+
+**The honest limitation, recorded rather than papered over.** `GET /v1/interception/settings` is
+**admin-only, deliberately** (writing the posture is not a developer's business), so an admin
+reads the flag up front while a **developer cannot** — they can only learn it from the 409. The
+card therefore does two things instead of guessing: it never tells a developer their stored key
+*is being used* (presence reads as "stored", not "active"), and it points at the one honest
+answer available to them — the per-call `Key used` column on Spend & savings, which is measured.
+On the 409 the card flips into the same explained state an admin sees, so the refusal teaches
+rather than erroring. **A one-line backend change would remove the asymmetry** — surfacing
+`keyCustodyEnforced` (a boolean the developer is already subject to, and which leaks no
+configuration) on `GET /v1/me` beside the existing size ceilings. That was out of this change's
+territory and is left as a named, deliberate follow-up, not a silent gap.
+
+`ChatPage`'s own "your key" badge has the same blind spot for the same reason and is **not**
+fixed here — recorded so the next session finds it named rather than rediscovering it.
+
+### 3. Found by the same diff, closed in passing: connector + MCP-tool project spend
+
+`GET /v1/projects/:id/costs` returns `byConnector` and `byMcpTool` — both were **typed** in
+`apps/web/src/api/types.ts` and **rendered by neither** `ProjectDetailPage` nor the admin cost
+rollup, though the legacy drill-down showed both. Because ADR-0019/0024 put connector and
+MCP-tool spend on the *same* ledger, that spend was already inside every measured total while
+the visible breakdown only accounted for agents — the "unexplained gap between provider invoices
+and project totals" ADR-0024 §1 exists to prevent. Both rollups now name them. An endpoint-level
+diff cannot see this class of gap (same endpoint, ignored fields); it was found by reading the
+legacy drill-down against the SPA's.
+
+### The residual list, measured — NOT empty
+
+Re-running the diff on this branch (`grep` every quoted/backticked path fragment out of
+`app-ui.ts` + `admin-portal.ts`, normalise interpolations to `:x`, pair each with the verb of
+its `get`/`post`/`patch`/`put`/`del` helper, and diff against every `api.*` / `fetch` /
+`ssePost` / `downloadCsv` call in `apps/web/src`) gives **148 legacy capabilities vs 174 SPA
+capabilities**, with:
+
+- **Tier 1 — path referenced nowhere in `apps/web/src` (4, one capability):**
+  `GET`/`POST /v1/projects/:id/context`, `GET /v1/projects/:id/context/graph`,
+  `POST /v1/projects/:id/context/promote` — **pillar 4's shared context store**, unchanged from
+  the phase-3 correction's fourth gap. Still the reason the legacy shells stay.
+- **Tier 2 — path present but that verb not seen via `api.*` (1):**
+  `POST /v1/infra/findings/:id/remediate`, verified **by hand** to be a false positive — the SPA
+  reaches it through `InfrastructurePage`'s `propose(title, body, path)` helper, which hides the
+  verb from the regex. Recorded because the tier exists precisely so this class is checked
+  rather than assumed.
+- The two residuals this amendment closed (`GET /v1/users/:id/connectors` for a non-admin, and
+  `POST /v1/users/:id/model-credentials`) no longer appear.
+
+**So: parity is still NOT reached, and the legacy shells still stay.** The remaining gap is one
+capability — the shared context store — and it is the same one phase 3 named. This paragraph
+says so explicitly because three previous passes claimed parity they had not measured.
+
+The diff also has a known blind spot, now demonstrated by item 3 above: it compares *endpoints*,
+so a capability that is a **field of a response the SPA already fetches** is invisible to it. The
+next session should treat "same endpoint, unrendered field" as a category to check by reading,
+not by grepping.
+
+### Verification (this amendment)
+
+- `pnpm -r build` green (gateway `tsc`; web `tsc --noEmit` + `vite build`).
+- Playwright **36 → 39 journeys**, all green, **zero console errors**, own scratch database
+  (`regulait_wt_enduser`). The three new journeys drive the NON-ADMIN persona: her own Spend &
+  savings (including the *negative* assertions that a non-admin sees no org-wide note and no
+  Cost dashboard link); model keys add → listed as present-but-never-revealed (asserting the
+  secret appears nowhere in `page.content()` and the field is cleared) → removed; and, from the
+  admin journey, key custody flipped on with **both** readers proven — the admin from the
+  proactive settings read, a real non-admin (avery, second browser context) from the 409 alone,
+  with her rejected key never echoed. The toggle is restored at the end.
+- One **pre-existing flaky assertion** was found and fixed while doing this: after opening the
+  cost rollup, phase2 asserted an unscoped `getByText("Budget vs actual")`, which was matching
+  the **fleet table's column header** while the rollup query was still in flight. It passed only
+  by winning that race; any change to bundle size or timing turns it into a strict-mode
+  violation. It is now scoped to the rollup card, which is what it always meant to assert. A
+  baseline run at `d711a98` (36/36 green) confirmed the flake was pre-existing and not caused by
+  this change.
+- Gateway suite **unchanged** — no file under `apps/gateway/src` was touched by this amendment.

@@ -60,3 +60,23 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "ami_id" {
+  description = <<-EOT
+    PIN THE AMI. Leave null and the module resolves
+    /aws/service/ami-amazon-linux-latest/... from SSM — which AWS re-points at
+    every new Amazon Linux release, so `terraform plan` silently starts
+    proposing "aws_instance.app must be replaced" with no change on our side.
+
+    On this stack Postgres lives in a container volume ON the instance, so that
+    replacement is TOTAL DATA LOSS. It is not a hypothetical: a plan on
+    2026-08-01 proposed exactly that (ami-0b8dddb... -> ami-0006118...) purely
+    because the upstream parameter had moved.
+
+    So: pin it to the AMI the instance is actually running. Upgrading the image
+    is then a DELIBERATE act — change this value only together with a data
+    migration plan, never as a side effect of someone running plan.
+  EOT
+  type        = string
+  default     = null
+}

@@ -14,6 +14,11 @@
  * Also covers the debts closed on 2026-08-01 (ADR-0026 phase-3 amendment):
  * A4's audit deploy-mode filter including the honest unknown / pre-0044
  * bucket, and O10's per-tool MCP price override set → persisted → cleared.
+ *
+ * The last journey belongs to the phase-4 end-user correction: it flips
+ * ADR-0024's key-custody toggle on and proves BOTH readers of the new
+ * self-service key card land in the same explained state — the admin from the
+ * proactive settings read, a developer from the 409 they can only learn from.
  */
 import { expect, test, type Page } from "@playwright/test";
 import { mkdirSync, readFileSync } from "node:fs";
@@ -490,8 +495,13 @@ test("cost dashboard: fleet meters, project rollup with charts, Unattributed buc
   await expect(page.getByText("Unattributed spend", { exact: false }).first()).toBeVisible();
 
   await page.getByRole("link", { name: "Open cost rollup for demo-project" }).click();
-  await expect(page.getByText("Budget vs actual")).toBeVisible();
-  await expect(page.getByText("Showback by user")).toBeVisible();
+  // scope to the rollup card: the fleet table ABOVE it also has a "Budget vs
+  // actual" column, so an unscoped text match is ambiguous the moment the
+  // rollup query resolves. This assertion only ever passed by racing that
+  // query — it was matching the fleet column header, not the rollup.
+  const rollup = page.locator("section").filter({ hasText: "Showback by user" });
+  await expect(rollup.getByText("Budget vs actual")).toBeVisible();
+  await expect(rollup.getByText("Showback by user")).toBeVisible();
   await expect(page.getByRole("img", { name: "Showback by user" })).toBeVisible();
   await shot(page, "phase2-23-cost-dashboard");
   track.assertClean("cost dashboard");
@@ -575,4 +585,71 @@ test("dark theme: flagship views render AA-clean in dark", async () => {
   await nav("Users", "Users");
   await shot(page, "phase2-31-users-dark");
   track.assertClean("dark theme sweep");
+});
+
+/**
+ * ADR-0026 end-user residual #2, the hard half: what the BYO-key surface does
+ * when ADR-0024's key custody is enforced. Both readers are covered, because
+ * they learn it differently — an admin reads
+ * `GET /v1/interception/settings` up front, a developer cannot (that read is
+ * admin-only) and can only learn it from the 409 on write. Neither may be
+ * offered a control that cannot work, and neither may be told a stored key is
+ * in use. Runs last, and restores the toggle.
+ */
+test("key custody enforced: the key card explains the state instead of offering a broken control", async ({
+  browser,
+}) => {
+  await nav("Client access", "Client access");
+  await page.getByLabel("Enforce key custody").selectOption("true");
+  await page.getByRole("button", { name: "Save posture" }).click();
+  await expect(page.getByText("Posture saved").first()).toBeVisible();
+
+  // (a) the ADMIN path — proactive, no failed write needed
+  await page.getByRole("button", { name: /Ada Admin/ }).click();
+  await page.getByRole("menuitem", { name: "Your model keys" }).click();
+  await expect(page.getByText("This deployment enforces key custody.")).toBeVisible();
+  await expect(page.getByText("kept, not deleted, and inert")).toBeVisible();
+  // the control that would 409 is GONE, not merely disabled
+  await expect(page.getByLabel("API key")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^(Save|Replace) key$/ })).toHaveCount(0);
+  await shot(page, "phase2-32-key-custody-admin-dark");
+  track.assertClean("key custody — admin view");
+
+  // (b) the NON-ADMIN path — avery cannot read the posture, so the refusal is
+  // what teaches her, and it must land as the same explanation
+  const dev = await browser.newPage();
+  const devTrack = trackConsole(dev);
+  await dev.goto("/ui");
+  await dev.getByLabel("Email").fill("avery@regulait.local");
+  await dev.getByLabel("Password", { exact: true }).fill(state.passwords.avery);
+  await dev.getByRole("button", { name: "Sign in" }).click();
+  await dev.getByLabel("Current (one-time) password").fill(state.passwords.avery);
+  await dev.getByLabel("New password", { exact: true }).fill("E2e-Avery-Custody!");
+  await dev.getByLabel("Confirm new password").fill("E2e-Avery-Custody!");
+  await dev.getByRole("button", { name: "Set password & continue" }).click();
+  await expect(dev.getByRole("heading", { name: /Welcome back/ })).toBeVisible();
+
+  await dev.goto("/ui/account?section=keys");
+  // she has no way to know yet, so the form is offered…
+  const keyField = dev.getByLabel("API key");
+  await expect(keyField).toBeVisible();
+  await keyField.fill("sk-e2e-custody-refused-0123456789");
+  await dev.getByRole("button", { name: "Save key" }).click();
+
+  // …and the refusal turns into the explanation, not a raw error string
+  await expect(dev.getByText("This deployment enforces key custody.")).toBeVisible();
+  await expect(dev.getByText("An admin can lift it in Client access.")).toBeVisible();
+  await expect(dev.getByLabel("API key")).toHaveCount(0);
+  await expect(dev.getByText("No keys of your own")).toBeVisible();
+  expect(await dev.content()).not.toContain("sk-e2e-custody-refused");
+  await shot(dev, "phase2-33-key-custody-developer");
+  devTrack.assertClean("key custody — developer view");
+  await dev.close();
+
+  // restore the deployment posture for anything that runs after this
+  await nav("Client access", "Client access");
+  await page.getByLabel("Enforce key custody").selectOption("false");
+  await page.getByRole("button", { name: "Save posture" }).click();
+  await expect(page.getByText("Posture saved").first()).toBeVisible();
+  track.assertClean("key custody — restored");
 });

@@ -293,6 +293,8 @@ export function Modal(props: {
   children?: ReactNode;
   onClose: () => void;
   actions?: ReactNode;
+  /** roomier dialog — for side-by-side content, not for more prose */
+  wide?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -308,7 +310,14 @@ export function Modal(props: {
   if (!props.open) return null;
   return (
     <div className={s.scrim} onMouseDown={(e) => e.target === e.currentTarget && props.onClose()}>
-      <div className={s.modal} role="dialog" aria-modal="true" aria-label={props.title} tabIndex={-1} ref={ref}>
+      <div
+        className={[s.modal, props.wide ? s.modalWide : ""].join(" ")}
+        role="dialog"
+        aria-modal="true"
+        aria-label={props.title}
+        tabIndex={-1}
+        ref={ref}
+      >
         <div className={s.modalTitle}>{props.title}</div>
         {props.children != null && <div className={s.modalBody}>{props.children}</div>}
         {props.actions != null && <div className={s.modalActions}>{props.actions}</div>}
@@ -496,6 +505,61 @@ export function Meter(props: {
       {props.markPct != null && props.markPct < 100 && (
         <span className={s.meterMark} style={{ left: `${props.markPct}%` }} title={`${props.markPct}% alert threshold`} />
       )}
+    </div>
+  );
+}
+
+// ---- BarList (ranked horizontal bars) -------------------------------------
+
+export interface BarItem {
+  /** stable react key; falls back to the row index */
+  key?: string;
+  /** plain text, or a <Link> when the row should navigate somewhere */
+  label: ReactNode;
+  /** tooltip / a11y text when `label` is not a plain string */
+  title?: string;
+  value: number;
+}
+
+/**
+ * The ranked-bar readout every cost/savings breakdown uses (showback by
+ * member, by agent, by project, savings by technique…). Top-N, sorted by the
+ * caller, one shared visual so no two breakdowns look different.
+ */
+export function BarList(props: {
+  items: BarItem[];
+  /** value formatter — pass fmtUsd for money, toLocaleString for counts */
+  format: (v: number) => string;
+  limit?: number;
+  empty?: ReactNode;
+}) {
+  const items = props.items.filter((i) => Number.isFinite(i.value)).slice(0, props.limit ?? 10);
+  if (items.length === 0) {
+    return (
+      <>
+        {props.empty ?? (
+          <EmptyState title="No data yet" body="Metered activity appears here as it happens." />
+        )}
+      </>
+    );
+  }
+  const max = Math.max(...items.map((i) => i.value), 1e-9);
+  return (
+    <div className={s.barList}>
+      {items.map((i, idx) => (
+        <div key={i.key ?? idx} className={s.barRow}>
+          <span
+            className={s.barLabel}
+            title={i.title ?? (typeof i.label === "string" ? i.label : undefined)}
+          >
+            {i.label}
+          </span>
+          <div className={s.barTrack}>
+            <div className={s.barFill} style={{ width: `${Math.max(2, (i.value / max) * 100)}%` }} />
+          </div>
+          <span className={s.barValue}>{props.format(i.value)}</span>
+        </div>
+      ))}
     </div>
   );
 }

@@ -6,6 +6,7 @@ import { evaluate } from "@regulait/policy-kernel";
 import { buildApp } from "./app.js";
 import { deriveDeployContext, governedEvaluate } from "./governed-evaluate.js";
 import { effectiveModeOverrides, runAuditPruneOnce, retentionFloor } from "./org-settings.js";
+import { isCsvNoticeRow } from "./csv-export.js";
 
 /**
  * A4 (ADR-0027, migration 0044 — decomposing ADR-0019's deferred A4):
@@ -305,10 +306,18 @@ describe("(a) the audit deploy_mode dimension", () => {
     const cols = header!.split(",");
     const modeIdx = cols.indexOf("deployMode");
     expect(modeIdx).toBeGreaterThan(-1);
-    expect(body.length).toBeGreaterThan(0);
+    // ADR-0031: the export streams under a defaulted date window and a row
+    // ceiling, and appends a single-field disclosure row when either actually
+    // clipped the file. Whether it appears here depends on what earlier suites
+    // left in audit_log, so the DATA rows are what this test is about — but the
+    // notice, when present, must be a real ADR-0031 notice and nothing else.
+    const notices = body.filter(isCsvNoticeRow);
+    for (const n of notices) expect(n).toContain("REGULAIT EXPORT");
+    const rows = body.filter((l) => !isCsvNoticeRow(l));
+    expect(rows.length).toBeGreaterThan(0);
     // every exported row in the unknown bucket says so in words — an auditor
     // can never read an empty cell as "hosted" or as a lost value
-    for (const line of body) {
+    for (const line of rows) {
       expect(line.split(",")[modeIdx]).toBe("unknown");
     }
     expect(csv.headers["content-disposition"]).toContain("audit-log-unknown.csv");
@@ -316,6 +325,7 @@ describe("(a) the audit deploy_mode dimension", () => {
     const scoped = await app.inject({ method: "GET", headers: AUTH, url: "/v1/audit.csv?deployMode=byoc" });
     expect(scoped.statusCode).toBe(200);
     for (const line of scoped.body.trim().split("\n").slice(1)) {
+      if (isCsvNoticeRow(line)) continue;
       expect(line.split(",")[modeIdx]).toBe("byoc");
     }
   });

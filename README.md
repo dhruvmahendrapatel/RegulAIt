@@ -72,6 +72,26 @@ docker compose --profile tls -f docker-compose.yml \
 Runbook and caveats: [docs/ops/TLS.md](docs/ops/TLS.md). Decision:
 [ADR-0029](docs/decisions/0029-zero-cost-tls-caddy-sslip-letsencrypt.md).
 
+### Hardening knobs (ADR-0031) — safe defaults, no configuration required
+
+| Variable | Default | What it does |
+|---|---|---|
+| `REGULAIT_TRUSTED_PROXIES` | `172.28.0.2` in compose (Caddy); *unset = trust nothing* elsewhere | Which peers may set `X-Forwarded-*`. Comma-separated IPs, CIDRs, or `loopback`/`linklocal`/`uniquelocal`; `none`/`off` for nothing, `all` to trust every peer (discouraged). This decides both the client IP recorded in `auth_sessions.ip` / the audit trail **and** whether the session cookie gets its `Secure` flag. **If you front the gateway with your own proxy you must set this**, or client IPs collapse to the proxy's address and `Secure` turns off. The effective posture is printed at boot. |
+| `REGULAIT_RATE_LIMIT` | `on` | `off` disables HTTP rate limiting entirely. |
+| `REGULAIT_RATE_LIMIT_MAX` / `REGULAIT_RATE_LIMIT_WINDOW_MS` | `1200` / `60000` | The general per-client-IP bucket. |
+| `REGULAIT_AUTH_RATE_LIMIT_MAX` / `REGULAIT_AUTH_RATE_LIMIT_WINDOW_MS` | `10` / `300000` | The stricter bucket on `/auth/login`, `/auth/mfa/verify` and `/auth/login-with-key`. |
+| `REGULAIT_API_KEY_RATE_LIMIT_MAX` | `6000` | Per-API-key allowance, so a busy service account is neither throttled by nor able to exhaust its neighbours'. |
+| `REGULAIT_CSV_WINDOW_DAYS` | `90` | Default date window on a CSV export when the caller names no `from`/`to`. `0` disables the window. |
+| `REGULAIT_CSV_MAX_ROWS` | `500000` | Hard per-export row ceiling. |
+| `REGULAIT_CSV_BATCH_ROWS` | `2000` | Rows fetched and written per streaming batch. |
+
+CSV exports stream and are bounded; whenever a file is not the complete answer, the
+response headers (`x-regulait-export-*`) and a trailing comment row in the file itself
+say so. That row is a single quoted field starting `# REGULAIT EXPORT` — a parser that
+reads column N from every line should skip it (`isCsvNoticeRow()` in
+`apps/gateway/src/csv-export.ts`). `GET /v1/health/schedulers` (admin-only) reports
+whether the audit-prune and backup-verification schedulers are failing.
+
 > Deployment note: the compose file is dev-grade (fixed demo secrets — override them
 > anywhere shared). The AWS dev stack is still **not production** — TLS closes the cleartext
 > session-cookie hole, it does not change that status (see CLAUDE.md's standing guardrail).

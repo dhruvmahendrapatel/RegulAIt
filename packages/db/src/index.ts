@@ -5,7 +5,7 @@ import * as schema from "./schema.js";
 export * from "./schema.js";
 export { schema };
 
-// regulAIt Authorized (ADR-0031). Namespaced rather than re-exported flat:
+// regulAIt Authorized (ADR-0032). Namespaced rather than re-exported flat:
 // both products define an `auditLog` table, and keeping Authorized behind a
 // namespace means new tables here can never shadow a Governed one.
 //   import { authorized } from "@regulait/db";

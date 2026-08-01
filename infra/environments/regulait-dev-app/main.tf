@@ -18,7 +18,13 @@ module "app" {
   ingress_ports = [80, 443]
   # 80 is not optional: Let's Encrypt's HTTP-01 challenge and every subsequent
   # renewal are served there. Closing it breaks issuance ~60 days later, quietly.
-  enable_onbox_tls   = true
+  enable_onbox_tls = true
+
+  # Pinned to the image the box is ALREADY running (verified 2026-08-01 via
+  # ec2 describe-instances). Without this the SSM "latest" lookup drifts and
+  # plan proposes replacing the instance — which would destroy the Postgres
+  # container volume. Change only with a data-migration plan.
+  ami_id             = "ami-0b8dddb344dc74379"
   instance_type      = var.instance_type
   ingress_cidrs      = var.ingress_cidrs
   source_bucket_name = "regulait-dev-app-source-517506432475"

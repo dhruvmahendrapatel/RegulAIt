@@ -1,4 +1,4 @@
-# ADR-0031: Port regulAIt Authorized into this monorepo, reusing the policy and workflow kernels
+# ADR-0032: Port regulAIt Authorized into this monorepo, reusing the policy and workflow kernels
 
 - **Status**: Accepted
 - **Date**: 2026-08-01
