@@ -1,0 +1,164 @@
+/* Pillar-4 shared-context surfaces: entry list, conflict view, version graph.
+   Tokens only — no colour literals, so both themes come out AA-clean. */
+
+/* ---- entry rows --------------------------------------------------------- */
+
+.entry {
+  padding: var(--s2) 0;
+  border-bottom: 1px solid var(--border);
+}
+.entry:first-child {
+  padding-top: var(--s1);
+}
+.entry:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.entryHead {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s1);
+  flex-wrap: wrap;
+}
+.entryKey {
+  font-family: var(--font-mono);
+  font-size: var(--text-md);
+  font-weight: 600;
+  word-break: break-all;
+}
+.entryActions {
+  display: flex;
+  gap: var(--s0);
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+/* ---- history drawer ----------------------------------------------------- */
+
+.drawer {
+  margin-top: var(--s2);
+  border-left: 2px solid var(--border-strong);
+  padding-left: var(--s2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+.drawerRow {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s0);
+  padding-bottom: var(--s1);
+}
+.drawerRow + .drawerRow {
+  border-top: 1px solid var(--border);
+  padding-top: var(--s1);
+}
+
+/* ---- conflict view ------------------------------------------------------ */
+
+.conflictNote {
+  border: 1px solid var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn-soft-text);
+  border-radius: var(--radius-md);
+  padding: var(--s2);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+.bothTexts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s2);
+  margin-top: var(--s2);
+}
+@media (max-width: 720px) {
+  .bothTexts {
+    grid-template-columns: 1fr;
+  }
+}
+.sideLabel {
+  display: flex;
+  align-items: center;
+  gap: var(--s0);
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: var(--s0);
+}
+.resolution {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s0);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--s2);
+}
+.resolutionWhy {
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  line-height: 1.6;
+}
+
+/* ---- version graph ------------------------------------------------------ */
+
+.graphLayout {
+  display: flex;
+  gap: var(--s2);
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.graphMain {
+  flex: 1 1 520px;
+  min-width: 0;
+}
+.graphSide {
+  flex: 0 0 300px;
+  max-width: 100%;
+}
+@media (max-width: 900px) {
+  .graphSide {
+    flex: 1 1 100%;
+  }
+}
+.graphScroll {
+  overflow: auto;
+  max-height: 68vh;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  padding: var(--s2);
+}
+.legend {
+  display: flex;
+  gap: var(--s2);
+  flex-wrap: wrap;
+  margin-bottom: var(--s1);
+}
+.legendItem {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s0);
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+}
+.swatch {
+  width: 16px;
+  height: 12px;
+  border-radius: 3px;
+  border-width: 1.5px;
+  border-style: solid;
+}
+.node:focus-visible rect {
+  stroke-width: 3;
+}
+.node {
+  cursor: pointer;
+}
+.detailLines {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s0);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}

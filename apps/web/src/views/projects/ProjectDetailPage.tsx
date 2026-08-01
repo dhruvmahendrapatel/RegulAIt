@@ -4,10 +4,10 @@
  * estimated savings, CSV export — plus membership management for owners.
  */
 import { useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
-import type { Project, ProjectCosts, ProjectMember } from "../../api/types";
+import type { ProjectCosts, ProjectMember } from "../../api/types";
 import { ago, fmtUsd } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
@@ -22,9 +22,9 @@ import {
   Select,
   SkeletonBlock,
   Meter,
-  IdChip,
 } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
+import { ProjectChrome, useProjectChrome } from "./projectChrome";
 import v from "../views.module.css";
 
 interface DirectoryUser {
@@ -40,31 +40,19 @@ export default function ProjectDetailPage() {
   const queryClient = useQueryClient();
   const me = auth?.userId ?? null;
 
-  const projectsQ = useQuery({
-    queryKey: ["projects"],
-    queryFn: () => api.get<{ projects: Project[] }>("/v1/projects"),
-  });
+  const chrome = useProjectChrome(projectId);
+  const { projectsQ, membersQ, members, project, myRole } = chrome;
   const costsQ = useQuery({
     queryKey: ["project-costs", projectId],
     enabled: Boolean(projectId),
     queryFn: () => api.get<ProjectCosts>(`/v1/projects/${projectId}/costs`),
-  });
-  const membersQ = useQuery({
-    queryKey: ["project-members", projectId],
-    enabled: Boolean(projectId),
-    queryFn: () => api.get<{ members: ProjectMember[] }>(`/v1/projects/${projectId}/members`),
   });
   const directoryQ = useQuery({
     queryKey: ["directory"],
     queryFn: () => api.get<{ users: DirectoryUser[] }>("/v1/users/directory"),
   });
 
-  const project = (projectsQ.data?.projects ?? []).find((p) => p.id === projectId);
-  const members = membersQ.data?.members ?? [];
   const directory = directoryQ.data?.users ?? [];
-  const myRole: ProjectMember["role"] = auth?.isAdmin
-    ? "owner"
-    : (members.find((m) => m.userId === me)?.role ?? "viewer");
   const ownerCount = members.filter((m) => m.role === "owner").length;
 
   const [addUserId, setAddUserId] = useState("");
@@ -103,7 +91,7 @@ export default function ProjectDetailPage() {
     const err = costsQ.error as { status?: number; message?: string };
     return (
       <>
-        <PageHeader title={project?.name ?? "Project"} />
+        <ProjectChrome projectId={projectId} project={project} myRole={myRole} tab="overview" />
         <Card>
           <ErrorState
             message={err.message ?? "unknown error"}
@@ -132,23 +120,13 @@ export default function ProjectDetailPage() {
 
   return (
     <>
-      <div style={{ marginBottom: "var(--s1)" }}>
-        <Link to="/projects">← All projects</Link>
-      </div>
-      <PageHeader
-        title={project?.name ?? c.project?.name ?? "Project"}
-        sub={
-          <span className={v.rowTight}>
-            {(project?.classifications ?? []).map((cl) => (
-              <Badge key={cl} tone="info">
-                {cl}
-              </Badge>
-            ))}
-            <Badge>{myRole}</Badge>
-            {c.initiative && <span className={v.faint}>Initiative: {c.initiative.name}</span>}
-            <IdChip id={projectId} />
-          </span>
-        }
+      <ProjectChrome
+        projectId={projectId}
+        project={project}
+        fallbackName={c.project?.name}
+        myRole={myRole}
+        tab="overview"
+        sub={c.initiative ? <span className={v.faint}>Initiative: {c.initiative.name}</span> : undefined}
         actions={
           <Button
             size="sm"
@@ -389,13 +367,6 @@ export default function ProjectDetailPage() {
                 </div>
               </div>
             ))}
-          <div className={v.faint} style={{ marginTop: "var(--s2)" }}>
-            Shared context editing and the context version graph are{" "}
-            <strong>not in this shell yet</strong> — they remain only in the{" "}
-            <a href="/legacy/app#/projects">legacy app</a>. Phase 2 did not migrate them, so this is
-            a real, still-open gap rather than a planned handoff; the legacy shell stays served
-            until it closes.
-          </div>
         </Card>
       </div>
 
