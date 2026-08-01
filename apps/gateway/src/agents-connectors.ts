@@ -104,6 +104,12 @@ import { loadInterceptionSettings } from "./compat-core.js";
 import { resolveCustomProviderForDispatch } from "./custom-providers.js";
 import { egressRefusal } from "./egress-guard.js";
 import { checkCredentialBaseUrl, credentialGuardedFetch } from "./credential-egress.js";
+import {
+  ConnectionEgressBlockedError,
+  guardConnectionCall,
+  refuseConnectionEgressWrite,
+  type ConnectionSurface,
+} from "./connection-egress.js";
 
 const userIdParam = z.object({ userId: z.string().uuid() });
 const agentIdParam = z.object({ agentId: z.string().uuid() });
@@ -899,6 +905,30 @@ export function registerAgentConnectorRoutes(
       reason: detail,
     });
     return { error: "egress_blocked", code: decision.code, detail };
+  }
+
+  /**
+   * ADR-0034 amendment #2 — the same thing for the CONNECTOR surface, whose
+   * `baseUrl` (on the connector row or on its credential row) is the URL a
+   * `webhook`-kind connector POSTs a caller-supplied payload to. Thin wrapper
+   * so the route bodies stay readable; the policy lives in
+   * `connection-egress.ts` with the other three surfaces.
+   */
+  async function refuseConnectionEgress(
+    req: { authCtx: { userId?: string | null } },
+    args: {
+      surface: ConnectionSurface;
+      baseUrl: string;
+      objectId?: string;
+      phase: string;
+      label: string;
+      detail?: Record<string, unknown>;
+    },
+  ) {
+    return refuseConnectionEgressWrite(db, {
+      ...args,
+      userId: req.authCtx.userId ?? null,
+    });
   }
 
   // --- agent registry (§4: global catalog, decoupled from entitlement) ---
@@ -2310,6 +2340,21 @@ export function registerAgentConnectorRoutes(
 
   app.post("/v1/connectors", async (req, reply) => {
     const body = createConnectorSchema.parse(req.body);
+    // ADR-0034 amendment #2 — the earliest honest failure for a connector
+    // endpoint. NOT a substitute for the invoke-time check (see the note
+    // there): this is so a typo, or a deliberate IMDS/collector URL, is a 400
+    // at the moment somebody types it rather than a surprise on a later user's
+    // governed call.
+    if (body.baseUrl) {
+      const refusal = await refuseConnectionEgress(req, {
+        surface: "connector",
+        baseUrl: body.baseUrl,
+        phase: "connector_write",
+        label: `connector '${body.name}' baseUrl`,
+        detail: { name: body.name, ...(body.providerKind ? { connectorKind: body.providerKind } : {}) },
+      });
+      if (refusal) return reply.status(400).send(refusal);
+    }
     const [row] = await db.insert(connectors).values(body).returning();
     return reply.status(201).send(row);
   });
@@ -2352,6 +2397,24 @@ export function registerAgentConnectorRoutes(
         }
         throw err;
       }
+    }
+    // ADR-0034 amendment #2 — the credential `baseUrl` OVERRIDES the
+    // connector's, so it is the same primitive and gets the same write-time
+    // refusal. Checked after the credential-shape validation above so the more
+    // specific message still wins when both are wrong.
+    if (body.baseUrl) {
+      const refusal = await refuseConnectionEgress(req, {
+        surface: "connector",
+        baseUrl: body.baseUrl,
+        objectId: connectorId,
+        phase: "connector_credential_write",
+        label: `connector '${connector.name}' credential baseUrl`,
+        detail: {
+          name: connector.name,
+          ...(connector.providerKind ? { connectorKind: connector.providerKind } : {}),
+        },
+      });
+      if (refusal) return reply.status(400).send(refusal);
     }
     const values = {
       connectorId,
@@ -2605,17 +2668,99 @@ export function registerAgentConnectorRoutes(
       }
     }
 
+    // ADR-0034 amendment #2 — THE CONNECTOR `baseUrl`, BEHIND THE EGRESS GUARD.
+    //
+    // This is the surface both earlier amendments named as the highest-priority
+    // one still open, and it is worse than the model paths in one specific way:
+    // the `webhook` kind does not READ the URL, it **POSTs `body.payload` to
+    // it**. A governed connector call is exactly where customer data lives, so
+    // an admin-typed `baseUrl` here is an exfiltration pipe, not merely an SSRF
+    // primitive. It is checked HERE, on every invoke — not only at write time —
+    // because a write-time verdict is not a fact about the future and because
+    // rows written before this guard existed are in the live database now.
+    //
+    // NO OVERRIDE MEANS NO CHECK: with `baseUrl` null the adapter uses its
+    // compiled vendor endpoint (slack/github/jira/... defaults), which nobody
+    // can type, so a non-overriding connector behaves byte-identically — the
+    // global fetch, no allow-list entry required.
+    let connectorFetch: typeof fetch | undefined;
+    if (baseUrl) {
+      let guarded;
+      try {
+        guarded = await guardConnectionCall(db, {
+          surface: "connector",
+          baseUrl,
+          userId,
+          objectId: connectorId,
+          label: `connector '${connector.name}' (${connector.providerKind})`,
+          detail: {
+            connectorKind: connector.providerKind,
+            operation: body.operation,
+            source: cred?.baseUrl ? "connector_credential" : "connector",
+            ...(projectId ? { projectId } : {}),
+          },
+        });
+      } catch (err) {
+        if (err instanceof ConnectionEgressBlockedError) {
+          return reply.status(403).send({
+            decision,
+            error: "egress_blocked",
+            code: err.decision.code,
+            detail:
+              `connector '${connector.name}' (${connector.providerKind}): ${err.decision.reason}` +
+              ` (an admin adds permitted destinations under Egress Allow Hosts)`,
+          });
+        }
+        throw err;
+      }
+      connectorFetch = guarded.fetchImpl;
+    }
+
     // Execute. A FAILED call (ConnectorProviderError) bills NOTHING and
     // surfaces as 502 — the same discipline as a failed model dispatch.
     let result;
     try {
-      const provider = resolveConnectorProvider({ kind: connector.providerKind, baseUrl, token });
+      const provider = resolveConnectorProvider(
+        { kind: connector.providerKind, baseUrl, token },
+        connectorFetch as unknown as Parameters<typeof resolveConnectorProvider>[1],
+      );
       result = await provider.invoke({
         operation: body.operation,
         object: body.object ?? null,
         payload: body.payload ?? null,
       });
     } catch (err) {
+      // ADR-0034 amendment #2 — a refusal raised by the GUARDED FETCH itself
+      // (the allow-list withdrawn between the pre-check and the request, or an
+      // approved endpoint answering 302 -> IMDS) is a GOVERNANCE decision, not
+      // an upstream failure. Without this it would surface as an opaque 500 or
+      // be laundered into a 502 "the connector broke", hiding the one fact an
+      // operator needs. `egressRefusal` digs it out of whatever the adapter
+      // wrapped it in, exactly as the model paths do.
+      const refusal = egressRefusal(err);
+      if (refusal) {
+        await db.insert(auditLog).values({
+          userId,
+          objectType: "connector",
+          objectId: connectorId,
+          detail: {
+            phase: "call",
+            baseUrl,
+            connectorKind: connector.providerKind,
+            operation: body.operation,
+            ...(projectId ? { projectId } : {}),
+          },
+          effect: "deny",
+          ruleId: "connector-egress-blocked",
+          ruleChain: [],
+          reason: `connector '${connector.name}': ${refusal}`,
+        });
+        return reply.status(403).send({
+          decision,
+          error: "egress_blocked",
+          detail: `connector '${connector.name}': ${refusal}`,
+        });
+      }
       if (err instanceof ConnectorProviderError) {
         return reply
           .status(502)

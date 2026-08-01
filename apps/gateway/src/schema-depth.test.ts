@@ -219,6 +219,26 @@ beforeAll(async () => {
   mcpUpstream = await startMcpUpstream();
   snowUpstream = await startSnowflakeUpstream();
 
+  // ADR-0034 amendment #2 — `connectors.baseUrl` / `connector_credentials.baseUrl`
+  // are now behind the default-deny egress guard, at write time and on every
+  // invoke. This file's http and snowflake connectors point at loopback fakes,
+  // so it allow-lists 127.0.0.1 explicitly with the private-range and plaintext
+  // opt-ins — exactly what an air-gapped operator does, and exactly what
+  // mcp-proxy.test.ts / custom-providers.test.ts already do. Explicit rather
+  // than inherited: sibling suites empty this table.
+  const egressAllowed = await app.inject({
+    method: "POST",
+    headers: AUTH,
+    url: "/v1/egress-allow-hosts",
+    payload: {
+      host: "127.0.0.1",
+      allowPrivateRanges: true,
+      allowPlaintextHttp: true,
+      note: "schema-depth suite: local fake connector upstreams",
+    },
+  });
+  expect(egressAllowed.statusCode).toBe(201);
+
   const dev = await makeUser("sd-dev@example.com");
   devId = dev.id;
   devAuth = dev.auth;

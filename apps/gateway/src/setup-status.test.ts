@@ -115,6 +115,25 @@ beforeAll(async () => {
     payload: { anthropicCompatEnabled: false, openaiCompatEnabled: false },
   });
   expect(put.statusCode).toBe(200);
+  // ADR-0034 amendment #2 — `pm_connections.baseUrl` is now behind the
+  // default-deny egress guard, and this file's "a REAL (jira) connection
+  // counts" step has to supply one. Allow-list 127.0.0.1 with the private-range
+  // and plaintext opt-ins, exactly as an air-gapped operator would, and point
+  // the fixture at a loopback dead port: the guard RESOLVES every destination,
+  // so a real vendor hostname would make this suite depend on DNS. Explicit
+  // rather than inherited — a sibling file's entry is not this file's fixture.
+  const egressAllowed = await app.inject({
+    method: "POST",
+    headers: AUTH,
+    url: "/v1/egress-allow-hosts",
+    payload: {
+      host: "127.0.0.1",
+      allowPrivateRanges: true,
+      allowPlaintextHttp: true,
+      note: "setup-status suite: loopback PM-connection fixture",
+    },
+  });
+  expect(egressAllowed.statusCode).toBe(201);
   // deactivate every ACTIVE non-admin user so the non_admin_user step starts
   // honestly pending; restored verbatim in afterAll
   const disabled = await db
@@ -255,7 +274,7 @@ describe("GET /v1/setup/status", () => {
       payload: {
         name: "setup-jira",
         provider: "jira",
-        baseUrl: "https://setup-test.atlassian.net",
+        baseUrl: "http://127.0.0.1:9/setup-test",
         project: "SETUP",
         token: "jt",
       },

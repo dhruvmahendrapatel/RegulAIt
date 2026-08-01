@@ -35,6 +35,11 @@ import {
   pmSyncSchema,
 } from "@regulait/shared";
 import { decryptSecret, encryptSecret } from "./secrets.js";
+import {
+  ConnectionEgressBlockedError,
+  guardConnectionCall,
+  refuseConnectionEgressWrite,
+} from "./connection-egress.js";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 
@@ -53,21 +58,62 @@ const CONNECTION_COLUMNS = {
   createdAt: pmConnections.createdAt,
 };
 
-function providerFor(
+/**
+ * ADR-0034 amendment #2 — EVERY PM PROVIDER RESOLUTION GOES THROUGH THE EGRESS
+ * GUARD.
+ *
+ * `pm_connections.baseUrl` is admin-typed (the SPA exposes the field) and is
+ * the root every Jira/ADO/Linear/Asana/monday call is issued against — and for
+ * `generic_webhook` it is a URL this gateway **POSTs work-item content to**, so
+ * it is an exfiltration channel as well as an SSRF one. This function is the
+ * single chokepoint through which all seven call sites in this file resolve a
+ * provider, so guarding it here guards the outbound path once rather than
+ * seven times.
+ *
+ * It is async now, and it can throw `ConnectionEgressBlockedError`. The two
+ * `pm-sync` endpoints turn that into a real 403; every other site already sits
+ * inside a `try` that surfaces the failure to the caller (a mirror reports
+ * `{ok:false,error}` and the link's `lastSyncedAt` stays visibly stale) — in
+ * all cases nothing leaves the box.
+ *
+ * A null `baseUrl` (mock, and Linear/Asana/monday on their vendor defaults) is
+ * unchecked and gets the global fetch: nobody can type a compiled endpoint.
+ */
+async function providerFor(
+  db: Db,
   conn: {
+    id: string;
+    name: string;
     provider: (typeof pmConnections.$inferSelect)["provider"];
     baseUrl: string | null;
     apiVersion: number | null;
     tokenCiphertext: string;
   },
   dataKey: string,
+  ctx: { userId?: string | null; detail?: Record<string, unknown> } = {},
 ) {
-  return resolvePmProvider({
-    provider: conn.provider,
-    token: decryptSecret(dataKey, conn.tokenCiphertext),
-    baseUrl: conn.baseUrl,
-    apiVersion: conn.apiVersion,
-  });
+  let pmFetch: typeof fetch | undefined;
+  if (conn.baseUrl) {
+    pmFetch = (
+      await guardConnectionCall(db, {
+        surface: "pm_connection",
+        baseUrl: conn.baseUrl,
+        userId: ctx.userId ?? null,
+        objectId: conn.id,
+        label: `pm connection '${conn.name}' (${conn.provider})`,
+        detail: { connection: conn.name, provider: conn.provider, ...(ctx.detail ?? {}) },
+      })
+    ).fetchImpl;
+  }
+  return resolvePmProvider(
+    {
+      provider: conn.provider,
+      token: decryptSecret(dataKey, conn.tokenCiphertext),
+      baseUrl: conn.baseUrl,
+      apiVersion: conn.apiVersion,
+    },
+    pmFetch as unknown as Parameters<typeof resolvePmProvider>[1],
+  );
 }
 
 /** §3/§5 outbound mirror: RegulAIt owns node status (it owns the state
@@ -103,7 +149,11 @@ export async function mirrorNodeStatus(
   const state = resolveStatus(mapping, nodeStatus);
   if (state === null) return null;
   try {
-    await providerFor(conn, dataKey).transitionState(conn.project, link.externalId, state);
+    const provider = await providerFor(db, conn, dataKey, {
+      userId: actorUserId,
+      detail: { op: "mirror_node_status", runId, nodeId },
+    });
+    await provider.transitionState(conn.project, link.externalId, state);
     await db.update(pmLinks).set({ lastSyncedAt: new Date() }).where(eq(pmLinks.id, link.id));
     await db.insert(auditLog).values({
       userId: actorUserId,
@@ -188,7 +238,10 @@ export async function mirrorApprovalDecision(
       ? resolveApprovalAction(mapping, approvalRow.stageId)
       : ({ kind: "comment" } as const);
   try {
-    const provider = providerFor(conn, dataKey);
+    const provider = await providerFor(db, conn, dataKey, {
+      userId: deciderUserId,
+      detail: { op: "mirror_approval_decision", stageId: approvalRow.stageId },
+    });
     const [decider] = await db.select({ email: users.email }).from(users).where(eq(users.id, deciderUserId));
     const nodeRef = isBudgetEscalation ? approvalRow.stageId.split(":")[1] : null;
     const note = isBudgetEscalation
@@ -272,6 +325,20 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
       }
       throw err; // zod mapping errors → 400 via the app error handler
     }
+    // ADR-0034 amendment #2 — the earliest honest failure for a PM endpoint.
+    // NOT a substitute for the per-call check in providerFor: this is so an
+    // IMDS/collector URL is a 400 at the moment an admin types it in the SPA.
+    if (body.baseUrl) {
+      const refusal = await refuseConnectionEgressWrite(db, {
+        surface: "pm_connection",
+        baseUrl: body.baseUrl,
+        userId: req.authCtx.userId ?? null,
+        phase: "pm_connection_write",
+        label: `pm connection '${body.name}' baseUrl`,
+        detail: { name: body.name, provider: body.provider },
+      });
+      if (refusal) return reply.status(400).send(refusal);
+    }
     // ADR-0010: per-connection webhook secret — plaintext returned exactly
     // once. The hash is stored for the legacy shared-secret-header check;
     // an AES-256-GCM ciphertext is stored alongside because provider-native
@@ -323,8 +390,18 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
     const mapping = mappingFor(conn.provider, conn.mapping ?? undefined);
     let provider;
     try {
-      provider = providerFor(conn, opts.dataKey);
+      provider = await providerFor(db, conn, opts.dataKey, {
+        userId: req.authCtx.userId,
+        detail: { op: "run_pm_sync", runId },
+      });
     } catch (err) {
+      // ADR-0034 amendment #2 — a real 403 at the HTTP boundary that exists on
+      // this path, with nothing having left the box and the attempt audited.
+      if (err instanceof ConnectionEgressBlockedError) {
+        return reply
+          .status(403)
+          .send({ error: "egress_blocked", code: err.decision.code, detail: err.decision.reason });
+      }
       if (err instanceof PmProviderError) {
         return reply.status(422).send({ error: "unsupported_pm_provider", detail: err.message });
       }
@@ -489,8 +566,17 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
     const mapping = mappingFor(conn.provider, conn.mapping ?? undefined);
     let provider;
     try {
-      provider = providerFor(conn, opts.dataKey);
+      provider = await providerFor(db, conn, opts.dataKey, {
+        userId: req.authCtx.userId,
+        detail: { op: "workflow_pm_sync", instanceId },
+      });
     } catch (err) {
+      // ADR-0034 amendment #2 — see the run pm-sync endpoint above.
+      if (err instanceof ConnectionEgressBlockedError) {
+        return reply
+          .status(403)
+          .send({ error: "egress_blocked", code: err.decision.code, detail: err.decision.reason });
+      }
       if (err instanceof PmProviderError) {
         return reply.status(422).send({ error: "unsupported_pm_provider", detail: err.message });
       }
@@ -698,11 +784,10 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
               try {
                 // push RegulAIt's expected state back to the PM tool —
                 // status ownership is RegulAIt's, so this direction is safe
-                await providerFor(conn, opts.dataKey).transitionState(
-                  conn.project,
-                  link.externalId,
-                  expected,
-                );
+                const drifted = await providerFor(db, conn, opts.dataKey, {
+                  detail: { op: "drift_resolution", resolution: "prefer_regulait" },
+                });
+                await drifted.transitionState(conn.project, link.externalId, expected);
                 await db
                   .update(pmLinks)
                   .set({ lastSyncedAt: new Date() })
@@ -925,7 +1010,10 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
         .where(eq(pmConnections.id, parentLink.connectionId));
       if (conn) {
         try {
-          const provider = providerFor(conn, opts.dataKey);
+          const provider = await providerFor(db, conn, opts.dataKey, {
+            userId,
+            detail: { op: "decision_mirror" },
+          });
           const mapping = mappingFor(conn.provider, conn.mapping ?? undefined);
           const [maker] = await db.select({ email: users.email }).from(users).where(eq(users.id, userId));
           const action = resolveDecisionAction(mapping, {
@@ -1138,7 +1226,11 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
         const conn = connById.get(link.connectionId);
         if (!conn) return { ...link, live: null, liveError: "connection no longer exists" };
         try {
-          const item = await providerFor(conn, opts.dataKey!).getWorkItem(conn.project, link.externalId);
+          const liveProvider = await providerFor(db, conn, opts.dataKey!, {
+            userId: req.authCtx.userId ?? null,
+            detail: { op: "links_live_read" },
+          });
+          const item = await liveProvider.getWorkItem(conn.project, link.externalId);
           return { ...link, live: { state: item.state, fields: item.fields, comments: item.comments } };
         } catch (err) {
           return { ...link, live: null, liveError: err instanceof Error ? err.message : String(err) };

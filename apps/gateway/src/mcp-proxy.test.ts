@@ -21,6 +21,19 @@ const migrationsFolder = path.resolve(
   "../../../packages/db/migrations",
 );
 
+/**
+ * ADR-0034 amendment #2 — an ALLOW-LISTED LOOPBACK DEAD PORT, for the fixtures
+ * whose `baseUrl` is never actually fetched (a read-back projection, an INBOUND
+ * webhook connection). `connectors`/`pm_connections` `baseUrl` fields now go
+ * through the default-deny egress guard at write time, and the guard RESOLVES
+ * every destination: a `.example` host fails closed and a real vendor hostname
+ * would make this suite depend on DNS — either would mask what these tests
+ * actually assert. Port 9 (discard) is allow-listed with this file's 127.0.0.1
+ * entry and answers nothing, which is exactly what these cases want. No
+ * assertion was weakened and no guard behaviour was relaxed.
+ */
+const DEAD_LOOPBACK = "http://127.0.0.1:9";
+
 // --- upstream test MCP server (stateless: fresh server+transport per request) ---
 
 function buildUpstreamMcpServer(): McpServer {
@@ -126,6 +139,10 @@ beforeAll(async () => {
   // provider servers on 127.0.0.1, so it allow-lists that host explicitly with
   // the private-range and plaintext opt-ins, exactly as an air-gapped operator
   // would (the same pattern as custom-providers.test.ts).
+  // ADR-0034 amendment #2 — the SAME entry now also covers this file's
+  // connector `baseUrl`s and its Jira/Linear/Asana/monday/generic-webhook PM
+  // connections, all of which point at loopback fakes and all of which are now
+  // guarded at write time and on every outbound call.
   const egressAllowed = await app.inject({
     method: "POST",
     headers: AUTH,
@@ -1247,7 +1264,7 @@ describe("connector execution layer (pillar 5 §10.3, pillar 1 connectors)", () 
   it("credential add → list (never the secret) → delete", async () => {
     const add = await app.inject({
       method: "POST", headers: AUTH, url: `/v1/connectors/${mockConnId}/credential`,
-      payload: { token: "super-secret-token", baseUrl: "https://warehouse.example" },
+      payload: { token: "super-secret-token", baseUrl: `${DEAD_LOOPBACK}/warehouse` },
     });
     expect(add.statusCode).toBe(201);
     expect(JSON.stringify(add.json())).not.toContain("super-secret-token");
@@ -1256,7 +1273,7 @@ describe("connector execution layer (pillar 5 §10.3, pillar 1 connectors)", () 
       method: "GET", headers: AUTH, url: `/v1/connectors/${mockConnId}/credential`,
     });
     expect(list.statusCode).toBe(200);
-    expect(list.json().credential.baseUrl).toBe("https://warehouse.example");
+    expect(list.json().credential.baseUrl).toBe(`${DEAD_LOOPBACK}/warehouse`);
     expect(JSON.stringify(list.json())).not.toContain("super-secret-token");
     expect(list.json().credential.tokenCiphertext).toBeUndefined();
 
@@ -4119,7 +4136,7 @@ describe("provider-native inbound webhooks (pillar 8 depth)", () => {
       method: "POST", headers: AUTH, url: "/v1/pm/connections",
       payload: {
         name: "jira-inbound", provider: "jira", project: "REG",
-        baseUrl: "https://acme.atlassian.net", token: "bot@example.com:api-token",
+        baseUrl: `${DEAD_LOOPBACK}/acme-jira`, token: "bot@example.com:api-token",
       },
     });
     expect(conn.statusCode).toBe(201);
@@ -4156,7 +4173,7 @@ describe("provider-native inbound webhooks (pillar 8 depth)", () => {
       method: "POST", headers: AUTH, url: "/v1/pm/connections",
       payload: {
         name: "generic-inbound", provider: "generic_webhook", project: "bridge",
-        baseUrl: "https://recv.example/regulait", token: "bridge-token",
+        baseUrl: `${DEAD_LOOPBACK}/regulait`, token: "bridge-token",
       },
     });
     expect(conn.statusCode).toBe(201);

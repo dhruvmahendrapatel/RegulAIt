@@ -473,3 +473,183 @@ closes. In particular:
   all of it `credential-egress.test.ts`. **Zero pre-existing tests changed** — five suites gained
   an allow-list entry in `beforeAll` and three fixture URLs moved, no assertion was altered.
 - `pnpm -r build` clean; full `pnpm -r test` green on a freshly dropped/recreated `regulait_test`.
+
+---
+
+## Amendment — 2026-08-01: disclosed gaps #1, #3 and #4 are closed (the connection `baseUrl` fields)
+
+- **Status**: Accepted
+- **Migration**: none (no DDL; two new `audit_log.object_type` values on a plain text column)
+
+### What was still open, and why the connector one was named the highest priority
+
+The previous amendment's enumeration listed three admin-typed URLs that this gateway fetches and
+that no guard touched:
+
+| surface | reached by |
+| --- | --- |
+| `connectors.baseUrl` + `connector_credentials.baseUrl` | `resolveConnectorProvider` → generic/http/**webhook**/slack/github/jira/snowflake |
+| `git_connections.baseUrl` | GitHub / GitLab / Bitbucket / Azure DevOps adapters |
+| `pm_connections.baseUrl` | Jira / ADO / Linear / Asana / monday / **generic_webhook** adapters |
+
+The connector one was called the highest-priority follow-up for a reason that is worth restating
+rather than compressing: **it is an exfiltration channel, not only an SSRF one.** The `webhook`
+kind does not read the URL — `POST /v1/connectors/:id/invoke` carries a caller-supplied payload
+and the adapter posts that payload, verbatim, to whatever `baseUrl` the row names. A governed
+connector call is exactly where customer data lives; that is the point of a connector. So an
+admin-typed `baseUrl` on a webhook connector was a governed, audited, cost-attributed pipe to an
+attacker's collector. `pm_connections`'s `generic_webhook` provider has the same shape. The SSRF
+reading (read IMDS, read Postgres on the compose network) was the *lesser* of the two problems.
+
+"Only an admin can set it" was not a mitigation then and is not one now: an admin account is what
+an attacker escalates *to*.
+
+### Decision
+
+**All four columns go through the SAME guard and the SAME `egress_allow_hosts` allow-list.**
+`apps/gateway/src/connection-egress.ts` is the same kind of thin adapter onto `checkEgress` /
+`createGuardedFetch` that `credential-egress.ts` is — same table, same per-host
+`allow_private_ranges` / `allow_plaintext_http` opt-ins, same refusal vocabulary, same guarded
+fetch. **No second allow-list mechanism and no parallel policy was introduced.** There is one
+egress policy in this codebase and one place to reason about it.
+
+It runs at **both** moments, for the reason ADR-0034 already established:
+
+1. **Write time** — `POST /v1/connectors`, `POST /v1/connectors/:id/credential`,
+   `POST /v1/git/connections` and `POST /v1/pm/connections` refuse a non-allow-listed destination
+   with a **400 `egress_blocked`** naming the reason, audited (`connector-egress-blocked`,
+   `git-connection-egress-blocked`, `pm-connection-egress-blocked`, all `effect: deny`).
+2. **Every outbound call** — a registration-time verdict is not a fact about the future (DNS moves,
+   the allow-list can be withdrawn) **and rows written before this guard existed are in the live
+   database right now**. The call-time check is what makes those rows safe.
+3. The resulting adapter is handed `createGuardedFetch`, so every individual HTTP request is
+   re-validated, plaintext http is pinned to the validated address with the original `Host`
+   header, and **redirects are refused**.
+
+**Where the call-time refusal surfaces, honestly:**
+
+- **Connector** — a real **403 `egress_blocked`** from `POST /v1/connectors/:id/invoke`, audited,
+  before `resolveConnectorProvider` is called. A refusal raised *inside* the guarded fetch (the
+  allow-list withdrawn mid-request, or an approved endpoint answering `302 → IMDS`) is dug back
+  out with `egressRefusal()` and surfaced as the same 403 rather than being laundered into a 502
+  "the connector broke" or escaping as an opaque 500.
+- **PM** — `providerFor()` is now the single async chokepoint all seven call sites in `pm.ts` go
+  through. The two `pm-sync` endpoints turn a refusal into a real **403 `egress_blocked`**; the
+  mirror/drift/live-read paths already sit inside a `try` and surface it as their existing visible
+  failure (`{ok:false,error}`, `lastSyncedAt` left stale).
+- **Git** — `runGitExecutions` has **no per-call HTTP boundary to 403 from**; the refusal throws
+  and becomes that stage's `execution_failed` with the reason in `context.lastError`, which is the
+  path's existing refusal shape. Stated plainly rather than claimed as a 403 it is not.
+
+In every case **nothing leaves the box**.
+
+**Destination-host audit on every guarded call.** A permitted call writes an `effect: allow` row
+(`connector-egress-call` / `git-connection-egress-call` / `pm-connection-egress-call`) carrying
+`{host, port, protocol, addresses}` — the same payload ADR-0034 records for a custom-provider
+dispatch, so one query answers "which third-party endpoint did our traffic reach, on whose behalf"
+across all four surfaces. It is written **before** the request, deliberately: a call that hangs or
+crashes still leaves the record of where it was going.
+
+**No override means no check.** A row with a null `baseUrl` uses its adapter's compiled vendor
+endpoint (`https://api.github.com`, `https://slack.com/api`, …), which nobody can type. Those
+paths are unchecked, keep the global fetch, and behave byte-identically.
+
+**One opt-in, not two** — the same deliberate difference the previous amendment recorded. None of
+these three tables has an `allow_plaintext_http` column and this change adds **no migration**, so
+plaintext http here is gated by the host entry's flag alone: still explicit, per-host, admin-only,
+audited.
+
+### Pre-existing rows: refused, never rewritten
+
+Unchanged policy. A row holding a now-invalid `baseUrl` keeps it. Nothing is migrated, back-filled
+or nulled — it is refused at call time until an admin allow-lists the host or clears the override.
+Asserted in the suite by inserting connector, `git_connections` and `pm_connections` rows directly
+into Postgres and driving a real governed call through each.
+
+### Compatibility: how many suites were pointing at loopback
+
+**Two suites needed a new `127.0.0.1` allow entry** (`schema-depth.test.ts` — its http and
+snowflake connector upstreams; `setup-status.test.ts` — its "a REAL jira connection counts" step),
+with the private-range and plaintext opt-ins, exactly the sequence an air-gapped operator performs.
+A **third**, `mcp-proxy.test.ts`, already carried one from the previous amendment and that single
+entry now also covers its connector `baseUrl`s and its six PM connections — so **three suites in
+total depend on an explicit allow entry** for this change, two of them newly.
+
+**Four fixture URLs** were re-pointed at an allow-listed loopback dead port (`127.0.0.1:9`,
+discard): `https://warehouse.example` (a read-back projection), `https://acme.atlassian.net` and
+`https://recv.example/regulait` (INBOUND-webhook connections whose `baseUrl` is never fetched), and
+`https://setup-test.atlassian.net`. The guard *resolves* every destination, so a `.example` host
+fails closed and a real vendor hostname would make CI depend on DNS — either would have masked what
+those tests actually assert. **No assertion was weakened and no guard behaviour was relaxed to make
+a test pass.**
+
+`connection-egress.test.ts` starts from an **emptied `egress_allow_hosts`**, as
+`custom-providers.test.ts` and `credential-egress.test.ts` already do: a file whose subject is
+"what is refused" must not inherit a sibling's entry from the shared test database. The whole
+gateway suite was additionally run with `--sequence.shuffle.files` to prove no suite depends on
+inheriting another's entry.
+
+That two-new/three-total is itself the finding, and it is smaller than the previous amendment's
+five only because most connection fixtures in this codebase are `provider: "mock"` with no
+`baseUrl` at all.
+
+### What remains EXPOSED, and why it was left
+
+- **`mcp_servers.url` — still exposed, deliberately, and it needs its own design decision.**
+  `connectUpstream(serverRow.url)` fetches it on four paths. Re-verified: the reasoning holds. An
+  internal/self-hosted MCP server is a **legitimate and common** deployment — that is the entire
+  point of a self-hosted tool server — so a blanket default-deny host allow-list here would break
+  the *ordinary* case rather than an exotic one. It needs a decision about what the default posture
+  is (a separate MCP-scoped allow-list? private ranges permitted by default with the public
+  internet denied? an org toggle?), not a one-line call bolted on. **Do not add the same check
+  without that decision.**
+- **`oidc_providers.issuerUrl` — still exposed.** Narrower than the four now closed: it fires on
+  the login path and the response is parsed as OIDC discovery metadata rather than returned raw.
+  But it is still an admin-typed URL this server fetches, and `auth.ts` explicitly enables
+  `allowInsecureRequests` for `http://` issuers. **Opinion, recorded and not acted on here: it
+  should follow the same pattern**, since a self-hosted Keycloak/Authentik is the same air-gapped
+  shape as a self-hosted model endpoint and the existing per-host opt-in already expresses it
+  exactly. Left out to keep this change to one coherent set of surfaces.
+- **`deploy_targets.baseUrl` — re-verified INERT.** The column is still read into
+  `ResolveDeployProviderConfig.baseUrl` and **no deploy adapter (mock/aws/azure/gcp/kubernetes)
+  reads it** — zero references inside `resolveDeployProvider` or any adapter. Guarding it would
+  guard nothing. It becomes live the day an adapter uses it.
+
+### What is STILL not mitigated
+
+1. **The https DNS-rebind TOCTOU is still open, on these paths too.** This change reuses
+   `createGuardedFetch` **unchanged**: http destinations are pinned to the validated address,
+   https destinations are validated immediately before each request and then resolved a second
+   time by the TLS stack. **This change does not implement the `undici.Agent` with
+   `connect: { lookup, servername }` that would close it, and therefore closes none of it.** The
+   connector, git and PM paths inherit exactly the same open window as the custom-provider and
+   credential paths. Said plainly so this amendment is not read as closing more than it does.
+2. **Ports and paths are still unconstrained** on an allow-listed host.
+3. **An admin who can edit `egress_allow_hosts` is still the trust root.**
+4. **`mcp_servers.url` and `oidc_providers.issuerUrl` remain exposed**, per the section above.
+
+### Evidence
+
+- `connection-egress.test.ts`, **16 tests**: connector, connector-credential, git and PM `baseUrl`s
+  at IMDS each refused at **write** time with nothing stored and the attempt audited; still refused
+  when the IMDS address is itself allow-listed **with** the plaintext opt-in (the range check is
+  what stops it); `.internal` suffix, `user@host` ambiguity and `db:5432` on the connector path;
+  **the exfiltration case as its own named test** — a `webhook` connector row inserted directly
+  into Postgres, aimed at a **live, listening, willing collector** on loopback that is *not*
+  allow-listed, invoked with a payload carrying a canary — refused 403, **collector received zero
+  requests and the canary never appears in its log**, and the row keeps its `baseUrl`; the same
+  through the `connector_credentials.baseUrl` override that wins at dispatch; a pre-existing http
+  connector, a pre-existing `pm_connections` row (real 403 at `/v1/runs/:id/pm-sync`) and a
+  pre-existing `git_connections` row (stage fails closed, reason in `lastError`) all refused at
+  call time; a hostname that **resolves** to link-local refused, and split-DNS (one good answer
+  does not launder a bad one) while the ordinary answer is still allowed; the allow-listed loopback
+  receiver delivering end to end with the `Host` header pinned and the destination-host audit row
+  written; **withdrawing** the allow entry stopping the very next call with the collector count
+  unchanged; an approved endpoint that **302s to IMDS** refused mid-flight as a 403 rather than a
+  laundered 502; and a connector with no `baseUrl` untouched.
+- **Suite**: workspace **1669 → 1685**, gateway **960/72 files → 976/73 files**. Delta **+16**, all
+  of it `connection-egress.test.ts`. **Zero pre-existing tests changed** — two suites gained an
+  allow-list entry in `beforeAll` and four fixture URLs moved to an allow-listed loopback dead
+  port; no assertion was altered.
+- `pnpm -r build` clean; full `pnpm -r test` green on a freshly dropped/recreated `regulait_test`,
+  and green again under `--sequence.shuffle.files`.

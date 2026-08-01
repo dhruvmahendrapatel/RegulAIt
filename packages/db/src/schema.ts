@@ -287,6 +287,14 @@ export const auditLog = pgTable(
         // 400) or at dispatch time (the 403 a pre-guard row now gets). Plain
         // text column — no DDL needed.
         "model_credential",
+        // ADR-0034 amendment #2: the `git_connections.baseUrl` /
+        // `pm_connections.baseUrl` overrides, refused at write time or at call
+        // time, and the destination-host record of every guarded call that WAS
+        // permitted. (`connectors.baseUrl` / `connector_credentials.baseUrl`
+        // ride the pre-existing "connector" value.) Plain text column — no DDL
+        // needed.
+        "git_connection",
+        "pm_connection",
       ],
     })
       .notNull()
