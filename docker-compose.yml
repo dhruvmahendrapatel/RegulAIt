@@ -113,11 +113,28 @@ services:
 # in REGULAIT_TRUSTED_PROXIES above. If 172.28.0.0/16 collides with something
 # already on the host, compose fails loudly at network-create time — override
 # both this subnet and REGULAIT_TRUSTED_PROXIES together if that happens.
+#
+# `ip_range` is what makes the pin above actually work, and it is NOT optional.
+# Pinning an address does not RESERVE it: Docker's dynamic allocator hands out
+# addresses from the start of the subnet to whichever container starts first,
+# and `caddy` is necessarily last (the gateway waits on db's healthcheck, and
+# caddy waits on the gateway). So db took 172.28.0.2, and caddy then failed to
+# start with a bare `Error response from daemon: Address already in use` —
+# with the whole stack otherwise healthy, which made it look like a host port
+# conflict rather than an IPAM one.
+#
+# Confining dynamic allocation to 172.28.1.0/24 puts every automatically
+# assigned address well clear of 172.28.0.2, so the only container that can
+# ever hold it is the one that explicitly asks for it.
 networks:
   regulait:
     ipam:
       config:
         - subnet: 172.28.0.0/16
+          gateway: 172.28.0.1
+          # Dynamic pool ONLY. Statically pinned addresses (caddy) live outside
+          # it, in 172.28.0.0/24, and must stay outside it.
+          ip_range: 172.28.1.0/24
 
 volumes:
   pgdata:
