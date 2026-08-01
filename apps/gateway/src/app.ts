@@ -54,6 +54,14 @@ import {
 } from "./csv-export.js";
 import { afterCursorDesc, atTextSql, decodeCursor, encodeCursor } from "./pagination.js";
 import { resolveTrustProxy, type TrustProxySetting } from "./trusted-proxy.js";
+import fastifyRateLimit from "@fastify/rate-limit";
+import {
+  rateLimitKey,
+  rateLimitMax,
+  rateLimitWindowMs,
+  resolveRateLimitConfig,
+  type RateLimitConfig,
+} from "./rate-limit.js";
 import { visibleTools, type ToolRef } from "@regulait/policy-kernel";
 import {
   assignRoleSchema,
@@ -111,6 +119,10 @@ export interface BuildAppOptions {
    * Defaults to REGULAIT_TRUSTED_PROXIES (which itself defaults to trusting
    * nothing). Exposed so a test can assert both directions. */
   trustProxy?: TrustProxySetting;
+  /** ADR-0031: per-IP / per-key HTTP rate limits. Defaults come from the
+   * environment (see rate-limit.ts); this override exists so a test can pin
+   * tiny windows without touching process.env. */
+  rateLimit?: Partial<RateLimitConfig>;
 }
 import { z } from "zod";
 import { registerMcpProxy } from "./mcp-proxy.js";
@@ -229,6 +241,53 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // nothing. See trusted-proxy.ts for the env contract.
   const trustProxy = opts.trustProxy ?? resolveTrustProxy();
   const app = Fastify({ logger: false, trustProxy });
+
+  // ADR-0031 item 4 — HTTP rate limiting. There was a per-ACCOUNT login
+  // lockout (ADR-0025) and nothing bounding per-IP/per-key request rates on
+  // any of the ~167 endpoints, so credential spraying across many accounts was
+  // unmetered. Two buckets: a generous global one, and a much stricter one on
+  // the three credential-accepting endpoints. Both key on `req.ip`, which is
+  // only trustworthy because of item 3 above — with a blanket trustProxy an
+  // attacker would rotate x-forwarded-for for a fresh bucket per request.
+  //
+  // The plugin is registered with global:false and driven from OUR onRequest
+  // hook rather than its onRoute integration: onRoute only sees routes
+  // registered after the plugin finishes loading, and `register()` defers that
+  // to ready() — long after every route below is in place. Driving it from a
+  // hook added here, before any route, makes coverage order-independent.
+  const rateCfg = resolveRateLimitConfig(process.env, opts.rateLimit ?? {});
+  if (rateCfg.enabled) {
+    app.register(fastifyRateLimit, {
+      global: false,
+      keyGenerator: rateLimitKey,
+      max: (_req, key) => rateLimitMax(rateCfg, key),
+      timeWindow: (_req, key) => rateLimitWindowMs(rateCfg, key),
+      // a load balancer's liveness poll must never be throttled into a false
+      // "gateway is down"
+      allowList: (req) => req.url === "/health",
+    });
+    let limiter: ReturnType<typeof app.createRateLimit> | null = null;
+    app.addHook("onRequest", async (req, reply) => {
+      limiter ??= app.createRateLimit();
+      const verdict = await limiter(req);
+      // isAllowed === true means allow-listed (never counted at all)
+      if (verdict.isAllowed) return;
+      reply
+        .header("x-ratelimit-limit", String(verdict.max))
+        .header("x-ratelimit-remaining", String(verdict.remaining))
+        .header("x-ratelimit-reset", String(verdict.ttlInSeconds));
+      if (!verdict.isExceeded) return;
+      return reply
+        .status(429)
+        .header("x-ratelimit-remaining", "0")
+        .header("retry-after", String(verdict.ttlInSeconds))
+        .send({
+          error: "rate_limited",
+          detail: `too many requests — limit ${verdict.max} per ${Math.round(verdict.timeWindow / 1000)}s`,
+          retryAfterSeconds: verdict.ttlInSeconds,
+        });
+    });
+  }
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof z.ZodError) {
