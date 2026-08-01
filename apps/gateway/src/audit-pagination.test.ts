@@ -48,6 +48,9 @@ beforeAll(async () => {
   expect(u.statusCode).toBe(201);
   userId = u.json().id;
 
+  // A4 (ADR-0027): a spread of deploy modes INCLUDING nulls, so the shared-WHERE
+  // equivalence and the bucket-partition assertions have something to bite on.
+  const MODES = ["hosted", "byoc", "air_gapped", null] as const;
   await db.insert(auditLog).values(
     Array.from({ length: TOTAL }, (_, i) => ({
       userId,
@@ -56,6 +59,7 @@ beforeAll(async () => {
       ruleId: `page-fixture-${i}`,
       ruleChain: [],
       reason: `row ${i}`,
+      deployMode: MODES[i % MODES.length] as "hosted" | null,
       at: SHARED_AT,
     })),
   );
@@ -166,5 +170,113 @@ describe("ADR-0031: /v1/audit cursor pagination", () => {
   it("stays admin-only", async () => {
     const anon = await app.inject({ method: "GET", url: "/v1/audit" });
     expect(anon.statusCode).toBe(401);
+  });
+});
+
+/**
+ * The screen and the download must never diverge (PR #79's shared-WHERE
+ * requirement, now covering ADR-0031's filters too). Both endpoints parse the
+ * same zod object and build their predicate with the same `auditFilters()`;
+ * this walks a matrix of filter combinations and asserts the two surfaces
+ * select the SAME rows — the regression that would otherwise show up as an
+ * auditor's export quietly ignoring a filter the admin applied.
+ */
+describe("ADR-0031 + PR #79: /v1/audit and /v1/audit.csv select identical rows", () => {
+  /** the ids the screen returns for a filter (paging all the way through) */
+  async function screenIds(query: string): Promise<string[]> {
+    const ids: string[] = [];
+    let cursor: string | null = null;
+    do {
+      const body: { entries: Array<{ id: string }>; nextCursor: string | null } = await get(
+        `/v1/audit?${query}&limit=${AUDIT_MAX_PAGE_SIZE}${cursor ? `&cursor=${cursor}` : ""}`,
+      );
+      for (const e of body.entries) ids.push(e.id);
+      cursor = body.nextCursor;
+    } while (cursor);
+    return ids;
+  }
+
+  /** the (at,ruleId) pairs the export writes — the CSV has no id column, so
+   * the comparison rides the two fields that identify a fixture row */
+  async function exportKeys(query: string): Promise<string[]> {
+    const res = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit.csv?${query}` });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).not.toContain("# REGULAIT EXPORT NOTICE");
+    const [header, ...rows] = res.body.trimEnd().split("\n");
+    const cols = header!.split(",");
+    const atIdx = cols.indexOf("at");
+    const ruleIdx = cols.indexOf("ruleId");
+    const modeIdx = cols.indexOf("deployMode");
+    expect(atIdx).toBe(0);
+    expect(ruleIdx).toBeGreaterThan(0);
+    expect(modeIdx).toBe(ruleIdx + 1);
+    return rows.map((r) => {
+      const cells = r.split(",");
+      return `${cells[atIdx]}|${cells[ruleIdx]}|${cells[modeIdx]}`;
+    });
+  }
+
+  async function screenKeys(query: string): Promise<string[]> {
+    const body: { entries: Array<{ at: string; ruleId: string; deployMode: string | null }> } =
+      await get(`/v1/audit?${query}&limit=${AUDIT_MAX_PAGE_SIZE}`);
+    return body.entries.map((e) => `${e.at}|${e.ruleId}|${e.deployMode ?? "unknown"}`);
+  }
+
+  // a wide window so the export's default 90-day lookback never clips, which
+  // would be a legitimate difference rather than a filter divergence
+  const WIDE = `from=${new Date(Date.UTC(2000, 0, 1)).toISOString()}`;
+
+  const MATRIX = [
+    `userId=__UID__`,
+    `userId=__UID__&effect=deny`,
+    `userId=__UID__&objectType=agent`,
+    `userId=__UID__&deployMode=unknown`,
+    `userId=__UID__&deployMode=hosted`,
+    `userId=__UID__&deployMode=byoc`,
+    `userId=__UID__&effect=allow&objectType=mcp_tool`,
+    `userId=__UID__&effect=deny&deployMode=unknown`,
+  ];
+
+  it("agree row-for-row across every filter combination, including deployMode", async () => {
+    for (const template of MATRIX) {
+      const q = `${template.replace(/__UID__/g, userId)}&${WIDE}`;
+      const fromScreen = await screenKeys(q);
+      const fromExport = await exportKeys(q);
+      expect(fromExport, `filter: ${q}`).toEqual(fromScreen);
+    }
+  });
+
+  it("the deployMode buckets partition the trail with no row lost or double-counted", async () => {
+    const all = await screenIds(`userId=${userId}&${WIDE}`);
+    const buckets = await Promise.all(
+      (["hosted", "byoc", "air_gapped", "unknown"] as const).map((m) =>
+        screenIds(`userId=${userId}&deployMode=${m}&${WIDE}`),
+      ),
+    );
+    const union = buckets.flat();
+    expect(new Set(union).size).toBe(union.length); // no row in two buckets
+    expect(new Set(union)).toEqual(new Set(all)); // and none missing
+    // `unknown` is NULL-only, never an "other" that swallows named modes
+    expect(buckets[3]!.length).toBeGreaterThan(0);
+  });
+
+  it("the export applies the date window identically to the screen", async () => {
+    const cut = new Date(Date.UTC(2023, 0, 1)).toISOString();
+    const q = `userId=${userId}&from=${cut}`;
+    expect(await exportKeys(q)).toEqual(await screenKeys(q));
+    // and the ancient row is excluded from BOTH
+    expect((await exportKeys(q)).some((k) => k.includes("page-fixture-ancient"))).toBe(false);
+    expect((await screenKeys(q)).some((k) => k.includes("page-fixture-ancient"))).toBe(false);
+  });
+
+  it("rejects an unknown deployMode on both surfaces rather than ignoring it", async () => {
+    for (const url of ["/v1/audit", "/v1/audit.csv"]) {
+      const res = await app.inject({
+        method: "GET",
+        headers: AUTH,
+        url: `${url}?deployMode=on_prem`,
+      });
+      expect(res.statusCode, url).toBe(400);
+    }
   });
 });

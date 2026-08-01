@@ -106,6 +106,20 @@ export interface CsvStreamResult {
 const NOTICE_PREFIX = "# REGULAIT EXPORT NOTICE:";
 const ERROR_PREFIX = "# REGULAIT EXPORT ERROR:";
 
+/**
+ * Is this line the trailing disclosure row rather than a data row?
+ *
+ * The row is emitted ONLY when the export is not the complete answer (the row
+ * ceiling was hit, the defaulted window clipped rows, or the stream failed
+ * mid-flight). It is a single RFC-4180 field, so it never disturbs the column
+ * shape of the data above it — but a consumer that walks every line and reads
+ * column N does need to skip it. Exported so callers (and tests) have one
+ * shared way to recognise it instead of each inventing a prefix check.
+ */
+export function isCsvNoticeRow(line: string): boolean {
+  return line.startsWith(`"${NOTICE_PREFIX}`) || line.startsWith(`"${ERROR_PREFIX}`);
+}
+
 /** one CSV field, RFC-4180 quoted, so the notice occupies a single column and
  * never disturbs the column shape of the data rows above it */
 function noticeRow(text: string): string {

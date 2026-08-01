@@ -30,8 +30,9 @@ const migrationsFolder = path.resolve(
 
 const BOOT = "csv-stream-bootstrap";
 const AUTH = { authorization: `Bearer ${BOOT}` };
+/** includes PR #79's A4 `deployMode` column (ADR-0027) */
 const AUDIT_HEADER =
-  "at,userId,userName,objectType,objectId,serverId,toolName,effect,ruleId,reason,detail";
+  "at,userId,userName,objectType,objectId,serverId,toolName,effect,ruleId,deployMode,reason,detail";
 
 let db: Db;
 let app: ReturnType<typeof buildApp>;
