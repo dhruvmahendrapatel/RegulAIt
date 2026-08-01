@@ -325,3 +325,131 @@ their backends landed the same hour) are now wired:
   inheritance rather than pricing the tool at zero. The **server flat rate is read-only**:
   `createServerSchema` takes `name` + `url` only, so no API sets it and the UI does not pretend
   otherwise.
+---
+
+## Amendment (2026-08-01) — the shared context store is native; the fourth legacy-only gap is closed
+
+- **Status of this amendment**: Accepted
+- **Scope**: pillar 4's shared context store only. This amendment deliberately does **not**
+  re-assert overall parity — see "What is still legacy-only" below.
+
+### Why this amendment exists
+
+Phase 2's swap decision said "Playwright proved parity on every group". That claim was about the
+**admin groups**, and it was read afterwards as a claim about the whole product. It was not:
+phase 1's own text (§3) had already listed five capabilities as deliberately legacy-only, phase 2
+closed exactly one of them (the admin console), and the remaining four were never tracked
+anywhere the swap decision could see them. Two successive amendments then asserted parity without
+enumerating anything. Asserting parity is not evidence of parity.
+
+### The capability-diff method (used here, and required from now on)
+
+A parity claim is only admissible with the diff attached. The method:
+
+1. **Enumerate the legacy side mechanically, not from memory** — the shell's own page list
+   (`PAGES` in `app-ui.ts`, the tab list in `admin-portal.ts`), then, within the page under
+   review, every rendered control and every endpoint call site in its source.
+2. **Map each item to a concrete SPA route + control** that a user could reach, or record it as a
+   residual. "The SPA can do that somewhere" is not a mapping; a route and a control is.
+3. **Publish the residual list**, including items outside the scope of the change being made.
+   A change may close residuals; it may never quietly drop them from the list.
+4. **Prove the mapped items by execution**, not inspection: a Playwright journey that drives the
+   real control against a real gateway, including the failure paths.
+
+### Diff 1 — the shared context store (`app-ui.ts` §"projects" + §"context graph")
+
+Every legacy control, and where it now lives. SPA routes: `/ui/context` (workspace index),
+`/ui/projects/:id/context` (the store), `/ui/projects/:id/context/graph` (the version graph).
+
+| Legacy control (`app-ui.ts`) | SPA equivalent | Status |
+| --- | --- | --- |
+| per-key row: key, `rev N`, `from artifact`, `N awaiting arbiter`, provenance (user · team · age), collapsible current text | entry row on `/projects/:id/context` | closed |
+| `history` drawer → `GET ?key=&history=true`, per-revision accepted / awaiting-arbiter / rejected, base revision, author, team, text | history drawer, same endpoint, same three states | closed |
+| pending banner "N revisions awaiting arbiter" + arbiter name + Inbox link | "Conflicting revisions awaiting a decision" card, one row per retained revision | closed, richer |
+| `+ add context` — new-key editor (key input, textarea, base-revision explanation) | "Add context" modal | closed |
+| `✎` edit — **fetches the current revision before opening** | "Edit" — same read-before-write on open | closed |
+| submit-time re-read; both-texts conflict card when the key moved | conflict view with labelled *yours* / *theirs* panels and an explicit "How this resolves" panel | closed, clearer |
+| `Rebase on rev N and submit` | `Rebase on rev N & save` | closed |
+| `Submit against my stale base` (→ arbiter) | `Escalate to <arbiter name>`; disabled with the reason when the project has no arbiter (legacy surfaced a raw `422 no_arbiter` after the fact) | closed, safer |
+| `409 base_revision_required` recovery into the same conflict view | identical recovery path | closed |
+| toast distinguishing an accepted revision from a conflicting one | persistent outcome banner (accepted vs "retained, NOT current, with <arbiter>") plus the toast | closed, harder to miss |
+| `Promote to shared context` on a completed instance's artifact; initiator-only; `403 not_the_artifact_owner` message | promote card + consequence modal; the button is disabled with the initiator's name when it isn't yours; the 403 still messaged | closed, richer |
+| Context Graph: project picker, one column per key, revisions top→bottom, lineage edges, conflict side-lane, legend, keyboard-focusable nodes, detail panel, `#/context-graph/<id>` deep link | `/projects/:id/context/graph` (deep link is the route itself), `/ui/context` is the picker; fork edges now detour around intervening rows instead of drawing a straight line that reads as a chain; "rejected by the arbiter" is a distinct state from "awaiting the arbiter" | closed, more honest |
+
+**Residual for the context store: none.** One deliberate navigation difference: legacy stacked
+every project's store on one Projects page; the SPA scopes one store per project and puts the
+cross-project view at `/ui/context`. Same capability, fewer things on screen at once.
+
+### Diff 2 — the shell level, as observed on this branch
+
+`PAGES` in `app-ui.ts` vs the SPA's Workspace nav:
+
+| Legacy page | SPA | Status |
+| --- | --- | --- |
+| Playground | `/ui/chat` | closed (phase 1) |
+| Runs | `/ui/runs`, `/ui/runs/:id` | closed (phase 1) except goal-decomposition + per-node tuning |
+| Workflows | `/ui/workflows`, `/ui/workflows/:id` | closed (phase 1) |
+| Inbox | `/ui/inbox` | closed (phase 1) |
+| Projects | `/ui/projects`, `/ui/projects/:id` | closed (phase 1) |
+| **Context Graph** | `/ui/projects/:id/context/graph` | **closed by this amendment** |
+| Spend & savings | — | **residual** |
+| Settings (end-user BYO model keys) | — | **residual** |
+
+### What is still legacy-only (do not delete `/legacy/*` yet)
+
+Phase 1 §3 named five deliberately-legacy-only capabilities. Four remain tracked; this change
+closes one of them:
+
+1. the admin console — **closed in phase 2**;
+2. shared-context editing + the context version graph — **closed here**;
+3. spend analytics beyond the dashboard cards (the end-user "Spend & savings" page: their own
+   usage-event and cost-event ledgers, per-project drill-down) — **still legacy-only on this
+   branch**; no SPA route calls `/v1/usage-events` or `/v1/cost-events` outside the admin-only
+   Optimization page;
+4. run goal-decomposition + per-node tuning — **still legacy-only on this branch**; nothing under
+   `apps/web/src` references the decompose endpoints;
+5. BYO model keys for an end user — **still legacy-only on this branch**; the only credential
+   surface in the SPA is the admin-only Model credentials page.
+
+Items 3–5 are being closed on a parallel branch. **Legacy removal is unblocked for the context
+store specifically, and for the product only once that branch has landed beside this one and the
+Diff-2 table has no residual rows.** This branch alone does not license deleting `app-ui.ts`,
+`admin-portal.ts` or the `/legacy/*` routes. Whoever removes them must re-run Diff 2 on the
+merged tree and paste the result — an empty residual list is the precondition, not a formality.
+
+### Verification (this amendment)
+
+Everything below was executed on this branch against its own scratch database
+(`regulait_wt_context`, dropped and recreated), not inferred:
+
+- `pnpm install --frozen-lockfile` clean; `pnpm -r build` green; **zero new dependencies**.
+- Gateway suite: **826 passed / 826**, on a virgin database. No gateway, package, migration or
+  infra file was touched by this change, so the count is unchanged by construction.
+- Playwright: **41 journeys green**, zero console errors on every page, light + dark screenshots.
+  32 were the pre-existing phase-1/phase-2 journeys; 9 are new and drive the store end to end as
+  the seeded **contributor** persona (not an admin, so §9.2's role gate is genuinely exercised):
+  read + provenance + history; edit-and-save; **a literal `409 base_revision_required` returned by
+  the gateway** — forced by stubbing exactly one pre-read so the client believes a key it is about
+  to create does not exist, with the 409 asserted on the wire rather than inferred from the UI —
+  **resolved by rebase**; a second, independent conflict where a real out-of-band revision lands
+  under an open edit so the submit-time re-read catches it and sends nothing, **resolved by
+  escalation to the named arbiter**, asserting afterwards that the store did *not* move and the
+  retained revision is queued for the arbiter; artifact promotion, asserting the reported words
+  match the outcome object the gateway returned (`accepted` / `conflict`), not merely that the
+  call did not throw; and the version graph, selecting the escalated revision and checking it
+  reports "based on rev 2 · awaiting the arbiter".
+- Two pre-existing Playwright assertions were made unambiguous (`getByText("Members")` and
+  `getByText("Budget vs actual")` became strict-mode-safe once a project tab strip and a rollup
+  section shared those words). No behaviour changed.
+
+Two operational notes for whoever re-runs this:
+
+- The gateway suite must be pointed at a **virgin** database. Most files share `DATABASE_URL`
+  directly, so pointing it at a database that has already been seeded (the Playwright scratch
+  database, for instance) fails hundreds of tests for reasons that have nothing to do with the
+  change under test.
+- A handful of test files create fixed-name scratch databases (`regulait_seed_test`,
+  `regulait_wt_stream`, …) and drop them `WITH (FORCE)`. Two agents running the gateway suite
+  against the same Postgres at the same time therefore terminate each other's connections. A
+  failure in exactly those files, that passes when the file is re-run alone, is that collision —
+  not a regression.

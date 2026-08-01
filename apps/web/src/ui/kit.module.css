@@ -291,7 +291,13 @@
   box-shadow: var(--shadow-lg);
   width: 100%;
   max-width: 440px;
+  max-height: 86vh;
+  overflow-y: auto;
   padding: var(--s3);
+}
+/* side-by-side content (the shared-context conflict view) needs room */
+.modalWide {
+  max-width: 820px;
 }
 .modalTitle {
   font-size: var(--text-lg);

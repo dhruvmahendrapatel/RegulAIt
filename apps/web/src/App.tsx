@@ -16,6 +16,9 @@ import WorkflowDetailPage from "./views/workflows/WorkflowDetailPage";
 import InboxPage from "./views/inbox/InboxPage";
 import ProjectsPage from "./views/projects/ProjectsPage";
 import ProjectDetailPage from "./views/projects/ProjectDetailPage";
+import ProjectContextPage from "./views/projects/ProjectContextPage";
+import ContextGraphPage from "./views/projects/ContextGraphPage";
+import ContextIndexPage from "./views/projects/ContextIndexPage";
 import AccountPage from "./views/account/AccountPage";
 import { RequireAdmin } from "./views/admin/adminKit";
 import UsersPage from "./views/admin/identity/UsersPage";
@@ -99,6 +102,9 @@ export default function App() {
                 <Route path="/inbox" element={<InboxPage />} />
                 <Route path="/projects" element={<ProjectsPage />} />
                 <Route path="/projects/:projectId" element={<ProjectDetailPage />} />
+                <Route path="/projects/:projectId/context" element={<ProjectContextPage />} />
+                <Route path="/projects/:projectId/context/graph" element={<ContextGraphPage />} />
+                <Route path="/context" element={<ContextIndexPage />} />
                 <Route path="/account" element={<AccountPage />} />
                 <Route
                   path="/admin/*"

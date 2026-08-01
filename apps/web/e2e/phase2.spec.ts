@@ -490,8 +490,11 @@ test("cost dashboard: fleet meters, project rollup with charts, Unattributed buc
   await expect(page.getByText("Unattributed spend", { exact: false }).first()).toBeVisible();
 
   await page.getByRole("link", { name: "Open cost rollup for demo-project" }).click();
-  await expect(page.getByText("Budget vs actual")).toBeVisible();
+  // wait for the rollup itself before asserting on it: the fleet table above
+  // carries a "Budget vs actual" COLUMN HEADER, so the phrase is ambiguous the
+  // moment the rollup has rendered — the rollup's own section title is last.
   await expect(page.getByText("Showback by user")).toBeVisible();
+  await expect(page.getByText("Budget vs actual").last()).toBeVisible();
   await expect(page.getByRole("img", { name: "Showback by user" })).toBeVisible();
   await shot(page, "phase2-23-cost-dashboard");
   track.assertClean("cost dashboard");

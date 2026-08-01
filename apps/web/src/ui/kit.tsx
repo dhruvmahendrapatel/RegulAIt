@@ -293,6 +293,8 @@ export function Modal(props: {
   children?: ReactNode;
   onClose: () => void;
   actions?: ReactNode;
+  /** roomier dialog — for side-by-side content, not for more prose */
+  wide?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -308,7 +310,14 @@ export function Modal(props: {
   if (!props.open) return null;
   return (
     <div className={s.scrim} onMouseDown={(e) => e.target === e.currentTarget && props.onClose()}>
-      <div className={s.modal} role="dialog" aria-modal="true" aria-label={props.title} tabIndex={-1} ref={ref}>
+      <div
+        className={[s.modal, props.wide ? s.modalWide : ""].join(" ")}
+        role="dialog"
+        aria-modal="true"
+        aria-label={props.title}
+        tabIndex={-1}
+        ref={ref}
+      >
         <div className={s.modalTitle}>{props.title}</div>
         {props.children != null && <div className={s.modalBody}>{props.children}</div>}
         {props.actions != null && <div className={s.modalActions}>{props.actions}</div>}

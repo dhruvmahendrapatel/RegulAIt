@@ -24,6 +24,7 @@ const WORKSPACE: NavEntry[] = [
   { label: "Workflows", to: "/workflows" },
   { label: "Inbox", to: "/inbox" },
   { label: "Projects", to: "/projects" },
+  { label: "Shared context", to: "/context" },
 ];
 
 /** the native admin surface (phase 2): grouped real routes inside this shell */
