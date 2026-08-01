@@ -321,3 +321,155 @@ described honestly.
   48 egress-guard + 20 custom-providers (gateway) + 5 CustomProvider adapter tests
   (model-provider). Zero pre-existing tests changed.
 - `pnpm -r build` clean; migration 0048 applies cleanly on boot against a freshly created database.
+
+---
+
+## Amendment — 2026-08-01: disclosed gap #2 is closed (credential `baseUrl` overrides)
+
+- **Status of the amendment**: Accepted
+- **Migration**: none. No DDL. One TS-only `auditLog.objectType` extension
+  (`model_credential`), the same plain-text-column pattern ADR-0034 itself used for
+  `custom_model_provider`.
+
+### What was still open, and how bad it actually was
+
+"WHAT THIS DOES **NOT** MITIGATE" item 2 above said the pre-existing
+`model_credentials.baseUrl` / `user_model_credentials.baseUrl` overrides (migrations 0016/0017)
+were "an equivalent primitive still outside the guard". They were, and re-reading it with the
+exploit in hand it was worse than the phrasing suggests:
+
+- The destination was settable through the **shipped** model-credential endpoints, and
+  `POST /v1/users/:userId/model-credentials` is in `NON_ADMIN_ROUTES` — so this was **not**
+  admin-only. Any authenticated user could set their own credential's `baseUrl` to
+  `http://169.254.169.254/latest/meta-data/iam/security-credentials/` and, on the next dispatch of
+  any agent of that provider, have the gateway fetch the EC2 instance role's AWS credentials on
+  their behalf. The per-user row takes **precedence** over the platform one, so it did not even
+  need the platform slot to be empty.
+- Everything routable from the VPC was reachable the same way, Postgres on the compose network
+  included.
+- The `*_BASE_URL` env fallbacks (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, …) land in the same
+  variable at dispatch and were equally unguarded.
+
+This was live in deployed code, not a design gap.
+
+### Decision
+
+**Route every credential `baseUrl` override through the existing guard — no second mechanism.**
+`apps/gateway/src/credential-egress.ts` is a thin adapter onto `checkEgress` /
+`createGuardedFetch` and the **same** `egress_allow_hosts` table with the **same** per-host
+`allow_private_ranges` / `allow_plaintext_http` opt-ins. There is one egress policy and one place
+to reason about it.
+
+It runs at **both** moments, deliberately:
+
+1. **Write time** — `POST /v1/model-credentials` and `POST /v1/users/:userId/model-credentials`
+   refuse a non-allow-listed destination with a **400 `egress_blocked`** naming the reason, and
+   audit the attempt (`ruleId: model-credential-egress-blocked`, `effect: deny`). Checked *after*
+   the ADR-0024 key-custody gate, so the more specific refusal still wins.
+2. **Every dispatch** — inside `executeGovernedDispatch`, before the adapter is constructed. A
+   write-time verdict is not a fact about the future (DNS moves, the allow-list can be withdrawn)
+   **and rows written before this guard existed are in the live database right now**. A refused
+   dispatch is a 403 `egress_blocked`, audited, with nothing leaving the box.
+3. The resulting adapter gets `createGuardedFetch`, so every HTTP request the SDK makes is
+   re-validated, plaintext http is pinned to the validated address with the original `Host`
+   header, and **redirects are refused** — a 302 to IMDS from an approved endpoint does not work.
+
+**No override means no check.** With `baseUrl` null the adapter uses its compiled vendor endpoint,
+which nobody can type; requiring an allow entry for `api.anthropic.com` would be ceremony, not
+security. Every non-overriding deployment is byte-identical, down to the fetch implementation.
+
+### Pre-existing rows: refused, never rewritten
+
+A row holding a now-invalid `baseUrl` keeps it. Nothing is migrated, back-filled or nulled. It is
+**refused at dispatch** with an honest 403 until an admin either allow-lists the host or clears
+the override. Silently nulling stored operator configuration would be a worse failure mode than
+refusing it loudly, and a null there would be indistinguishable from "never had one". This is
+asserted in the suite by inserting such a row directly into Postgres and dispatching through it.
+
+### One deliberate difference from the custom-provider path
+
+A custom provider carries its own `allow_plaintext_http`, so plaintext http there needs **two**
+opt-ins. A credential row has no such column and this change adds **no migration**, so plaintext
+http to a credential `baseUrl` is gated by the host entry's `allow_plaintext_http` **alone** —
+still explicit, per-host, admin-only and audited, but one opt-in rather than two. Recorded here
+rather than left to be discovered.
+
+### Compatibility: how many suites were pointing at loopback
+
+**Five existing suites** had to add an explicit `127.0.0.1` allow entry with the private-range and
+plaintext opt-ins — exactly the sequence an air-gapped operator performs, and exactly what
+`custom-providers.test.ts` already did:
+
+| suite | why |
+| --- | --- |
+| `mcp-proxy.test.ts` | openai/google/xai adapter e2e + BYO-key precedence, all against local fakes |
+| `interception-depth.test.ts` | ADR-0024 key-custody precedence, platform vs user fake endpoints |
+| `credentials-keys.test.ts` | stores overrides for the read-back projection |
+| `env-fallback.test.ts` | `ANTHROPIC_BASE_URL` fallback |
+| `org-settings.test.ts` | `envKeyFallbackEnabled` |
+
+Three `.invalid` / public-hostname fixtures were re-pointed at an allow-listed **loopback dead
+port**: the guard *resolves* every destination, so a public hostname would have made CI depend on
+DNS and a `.invalid` one fails closed — which would have masked what those tests actually assert
+(that the credential gate was passed and the failure happens at the provider). No assertion was
+weakened and no guard behaviour was relaxed to make a test pass. Two suites that assert *refusal*
+(`custom-providers.test.ts`, the new `credential-egress.test.ts`) now start from an emptied
+`egress_allow_hosts`, because a file whose subject is "what is refused" must not inherit a sibling
+suite's allow entry from the shared database.
+
+That five is itself the finding: five separate places in this codebase were quietly steering the
+gateway's model traffic at a host of their choosing.
+
+### Enumeration of the other outbound surfaces (asked for, answered, mostly NOT fixed)
+
+Scope creep on a security fix is its own risk, so this PR fixes the disclosed gap and **reports**
+the rest. Every one of these was checked against the code that actually issues the request:
+
+| surface | who can set it | reaches the network? | status |
+| --- | --- | --- | --- |
+| `model_credentials.baseUrl` | admin | yes, model dispatch | **GUARDED (this amendment)** |
+| `user_model_credentials.baseUrl` | **any user, own row** (`NON_ADMIN_ROUTES`) | yes, model dispatch | **GUARDED (this amendment)** |
+| `ANTHROPIC_/OPENAI_/GOOGLE_/XAI_BASE_URL` env fallback | operator (process env) | yes, model dispatch | **GUARDED** — it lands in the same variable, so it came along for free |
+| `connectors.baseUrl` + `connector_credentials.baseUrl` | admin | **yes** — `resolveConnectorProvider` → generic/http/**webhook**/slack/github/jira/snowflake all fetch it | **EXPOSED.** Same primitive. The `webhook` kind is worse than a read: it **POSTs the payload** to the URL, so it is an exfiltration channel as well as an SSRF one. Guardable with the same call; left out only to keep this PR to one surface. **Highest-priority follow-up.** |
+| `git_connections.baseUrl` | admin | **yes** — GitHub/GitLab/Bitbucket/Azure-DevOps adapters | **EXPOSED.** Same shape, same fix would apply. |
+| `pm_connections.baseUrl` | admin (the SPA exposes the field) | **yes** — Jira/ADO/Linear/Asana/monday/generic-webhook adapters, `generic_webhook` again POSTs | **EXPOSED.** |
+| `mcp_servers.url` | admin | **yes** — `connectUpstream(serverRow.url)` | **EXPOSED, and needs its own design.** Internal MCP servers are a *legitimate and common* deployment (that is the point of a self-hosted tool server), so a default-deny host allow-list here would break the ordinary case rather than an exotic one. It needs a decision about what the default posture is, not a one-line call. **Do not bolt the same check on without that decision.** |
+| `oidc_providers.issuerUrl` | admin | **yes** — OIDC discovery, and `auth.ts` explicitly enables `allowInsecureRequests` for `http://` issuers | **EXPOSED.** Narrower (fires on the login path, response is parsed as OIDC metadata rather than returned raw) but it is still an admin-typed URL the server fetches. |
+| `deploy_targets.baseUrl` | admin | **no** — the column is read into `ResolveDeployProviderConfig.baseUrl` and no deploy adapter (aws/azure/gcp/kubernetes/mock) ever issues a request with it | **INERT today.** Guarding it would guard nothing; it becomes live the day an adapter uses it. |
+| infra adapters (`infra-provider`) | — | cloud SDKs to fixed vendor endpoints | not an admin-typed destination; out of scope |
+
+Nothing above is *fixed* by this PR except the three marked GUARDED. They are named so the next
+decision is informed rather than blind.
+
+### What is STILL not mitigated
+
+Every item in "WHAT THIS DOES **NOT** MITIGATE" above still stands except #2, which this amendment
+closes. In particular:
+
+1. **The https DNS-rebind TOCTOU is still open, on this path too.** This change reuses
+   `createGuardedFetch` unchanged: http destinations are pinned to the validated address, https
+   destinations are validated immediately before each request and then resolved a second time by
+   the TLS stack. **This PR does not implement the `undici.Agent` with `connect: { lookup,
+   servername }` that would close it, and therefore closes none of it.** The credential paths
+   inherit exactly the same open window as the custom-provider path. Said plainly so this change
+   is not read as closing more than it does.
+2. **Ports and paths are still unconstrained** on an allow-listed host.
+3. **An admin who can edit `egress_allow_hosts` is still the trust root.**
+4. **The connector, git, PM, MCP and OIDC surfaces enumerated above remain exposed.**
+
+### Evidence
+
+- `credential-egress.test.ts`, **11 tests**: platform credential at IMDS refused at **write** time
+  (and still refused when the IMDS address is itself allow-listed **with** the plaintext opt-in —
+  the range check is what stops it); per-user credential at IMDS refused for the user's own row;
+  `.internal` suffix, `user@host` ambiguity, `db:5432`, non-http scheme; a **pre-existing row
+  inserted directly into Postgres** refused at **dispatch** with zero requests leaving the box and
+  its `baseUrl` left intact; the same for a per-user row; a hostname that **resolves** to
+  link-local refused (and split-DNS: one good answer does not launder a bad one); the allow-listed
+  loopback endpoint dispatching end-to-end with the pinned `Host` header; **withdrawing** the
+  allow entry stopping the very next dispatch; an approved endpoint that **302s to IMDS** refused
+  mid-flight; and a credential with no `baseUrl` untouched.
+- **Suite**: workspace **1658 → 1669**, gateway **949/71 files → 960/72 files**. Delta **+11**,
+  all of it `credential-egress.test.ts`. **Zero pre-existing tests changed** — five suites gained
+  an allow-list entry in `beforeAll` and three fixture URLs moved, no assertion was altered.
+- `pnpm -r build` clean; full `pnpm -r test` green on a freshly dropped/recreated `regulait_test`.

@@ -222,6 +222,24 @@ beforeAll(async () => {
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   gatewayUrl = await app.listen({ port: 0, host: "127.0.0.1" });
 
+  // ADR-0034 amendment — model-credential `baseUrl` overrides are now behind
+  // the default-deny egress guard. This suite points them at local fake
+  // provider servers on 127.0.0.1, so it allow-lists that host explicitly with
+  // the private-range and plaintext opt-ins, exactly as an air-gapped operator
+  // would (the same pattern as custom-providers.test.ts).
+  const egressAllowed = await app.inject({
+    method: "POST",
+    headers: AUTH,
+    url: "/v1/egress-allow-hosts",
+    payload: {
+      host: "127.0.0.1",
+      allowPrivateRanges: true,
+      allowPlaintextHttp: true,
+      note: "interception-depth suite: local fake provider endpoints",
+    },
+  });
+  expect(egressAllowed.statusCode).toBe(201);
+
   upstream = await startUpstream();
   const server = await app.inject({
     method: "POST",

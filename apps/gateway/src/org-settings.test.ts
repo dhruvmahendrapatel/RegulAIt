@@ -139,6 +139,24 @@ beforeAll(async () => {
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
 
+  // ADR-0034 amendment — model-credential / env `baseUrl` overrides are now
+  // behind the default-deny egress guard. This suite points one at a loopback
+  // address, so it allow-lists that host explicitly with the private-range and
+  // plaintext opt-ins, exactly as an air-gapped operator would (the same
+  // pattern as custom-providers.test.ts).
+  const egressAllowed = await app.inject({
+    method: "POST",
+    headers: AUTH,
+    url: "/v1/egress-allow-hosts",
+    payload: {
+      host: "127.0.0.1",
+      allowPrivateRanges: true,
+      allowPlaintextHttp: true,
+      note: "org-settings suite: local fake endpoints",
+    },
+  });
+  expect(egressAllowed.statusCode).toBe(201);
+
   const uma = await makeUser("orgset-uma@example.com", "Orgset Uma");
   umaId = uma.id;
   umaAuth = uma.auth;
@@ -369,7 +387,10 @@ describe("compliance defaults", () => {
 
   it("env-key fallback off => provider honestly unconfigured and dispatch 409s (no env-var hint)", async () => {
     process.env.ANTHROPIC_API_KEY = "sk-ant-orgset-test";
-    process.env.ANTHROPIC_BASE_URL = "https://anthropic-orgset.invalid";
+    // ADR-0034 amendment: offline but PERMITTED (allow-listed loopback, dead
+    // port). A `.invalid` host now fails closed at the egress guard, which
+    // would mask what this test asserts — that the credential gate was passed.
+    process.env.ANTHROPIC_BASE_URL = "https://127.0.0.1:1";
     // wipe any stored anthropic platform credential another suite left
     const del = await app.inject({ method: "DELETE", headers: AUTH, url: "/v1/model-credentials/anthropic" });
     expect([200, 404]).toContain(del.statusCode);

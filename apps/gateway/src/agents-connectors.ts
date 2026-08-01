@@ -103,6 +103,7 @@ import {
 import { loadInterceptionSettings } from "./compat-core.js";
 import { resolveCustomProviderForDispatch } from "./custom-providers.js";
 import { egressRefusal } from "./egress-guard.js";
+import { checkCredentialBaseUrl, credentialGuardedFetch } from "./credential-egress.js";
 
 const userIdParam = z.object({ userId: z.string().uuid() });
 const agentIdParam = z.object({ agentId: z.string().uuid() });
@@ -309,6 +310,9 @@ export async function executeGovernedDispatch(
   let apiKey: string | null = null;
   let baseUrl: string | null = null;
   let credentialSource: "user" | "platform" | "none" = "none";
+  /** which row (if any) supplied the baseUrl override — for the egress audit */
+  let credentialId: string | null = null;
+  let credentialOrigin: "user_credential" | "platform_credential" | "environment" | null = null;
   if (served.provider !== "mock" && served.provider !== "custom") {
     if (!dataKey) {
       return { ok: false, status: 503, error: "no_data_key", detail: "set REGULAIT_DATA_KEY" };
@@ -338,6 +342,8 @@ export async function executeGovernedDispatch(
     const cred = userCred ?? platformCred;
     if (cred) {
       credentialSource = userCred ? "user" : "platform";
+      credentialId = cred.id;
+      credentialOrigin = userCred ? "user_credential" : "platform_credential";
       apiKey = decryptSecret(dataKey, cred.keyCiphertext);
       baseUrl = cred.baseUrl;
     } else {
@@ -356,6 +362,7 @@ export async function executeGovernedDispatch(
       const envKey = fallbackAllowed ? platformEnvKey(served.provider) : null;
       if (envKey) {
         credentialSource = "platform";
+        credentialOrigin = "environment";
         apiKey = envKey.apiKey;
         baseUrl = envKey.baseUrl;
       } else {
@@ -373,6 +380,57 @@ export async function executeGovernedDispatch(
         };
       }
     }
+  }
+
+  // ADR-0034 amendment — THE CREDENTIAL `baseUrl` OVERRIDE, BEHIND THE SAME
+  // EGRESS GUARD as a custom provider. ADR-0034 disclosed this as an open gap:
+  // `model_credentials.baseUrl` / `user_model_credentials.baseUrl` (migrations
+  // 0016/0017) are the SAME SSRF primitive as an admin-typed custom endpoint —
+  // point one at http://169.254.169.254/… and this gateway, which runs on EC2,
+  // fetches the instance role's credentials and hands them back.
+  //
+  // It runs HERE, on every dispatch, and not only at write time, because:
+  //   - rows written BEFORE this guard existed are in the live database now,
+  //     carrying whatever baseUrl they were given, and they are refused rather
+  //     than silently rewritten or nulled;
+  //   - a write-time verdict is not a fact about the future: DNS can be
+  //     re-pointed and the allow-list can be withdrawn after approval.
+  //
+  // NO OVERRIDE MEANS NO CHECK: with baseUrl null the adapter uses its compiled
+  // vendor default, which no human can type, so there is nothing to decide and
+  // the behaviour of every non-overriding deployment is byte-identical.
+  let credentialFetch: typeof fetch | undefined;
+  if (baseUrl) {
+    const { decision, allowList } = await checkCredentialBaseUrl(db, baseUrl);
+    if (!decision.ok) {
+      const reason =
+        `model credential baseUrl override for provider '${served.provider}' ` +
+        `(${credentialOrigin ?? "unknown source"}): ${decision.reason}`;
+      await db.insert(auditLog).values({
+        userId,
+        objectType: "model_credential",
+        objectId: credentialId,
+        detail: {
+          phase: "dispatch",
+          agentId: served.id,
+          provider: served.provider,
+          source: credentialOrigin,
+          baseUrl,
+          code: decision.code,
+          ...(decision.host ? { host: decision.host } : {}),
+          ...(args.projectId ? { projectId: args.projectId } : {}),
+        },
+        effect: "deny",
+        ruleId: "model-credential-egress-blocked",
+        ruleChain: [],
+        reason,
+      });
+      return { ok: false, status: 403, error: "egress_blocked", detail: reason };
+    }
+    // the same guarded fetch the custom-provider path uses: re-validates every
+    // HTTP request the SDK makes, pins plaintext http to the validated address,
+    // refuses redirects. Built from the SAME allow-list snapshot just validated.
+    credentialFetch = credentialGuardedFetch(allowList);
   }
 
   // ADR-0023 `agents.systemPrompt` INVARIANT — enforced here in the ONE shared
@@ -400,7 +458,12 @@ export async function executeGovernedDispatch(
     // other provider resolves exactly as before
     const provider = customProvider?.ok
       ? customProvider.provider
-      : resolveModelProvider({ provider: served.provider, apiKey, baseUrl });
+      : resolveModelProvider(
+          { provider: served.provider, apiKey, baseUrl },
+          // only an OVERRIDDEN destination gets the guarded fetch; a vendor
+          // default endpoint is unchanged, down to the fetch implementation
+          credentialFetch,
+        );
     result = await provider.dispatch({
       model: served.model,
       input: args.input,
@@ -424,18 +487,26 @@ export async function executeGovernedDispatch(
     // governance product must be able to show afterwards.
     const egress = egressRefusal(err);
     if (egress) {
+      // the same refusal can now arrive from either guarded path — a custom
+      // endpoint or a credential baseUrl override — so the audit row names the
+      // right object instead of filing a credential block under a provider id
+      // that does not exist.
+      const viaCredential = !customProvider?.ok;
       await db.insert(auditLog).values({
         userId,
-        objectType: "custom_model_provider",
-        objectId: served.customProviderId,
+        objectType: viaCredential ? "model_credential" : "custom_model_provider",
+        objectId: viaCredential ? credentialId : served.customProviderId,
         detail: {
           phase: "dispatch",
           agentId: served.id,
+          ...(viaCredential
+            ? { provider: served.provider, source: credentialOrigin, baseUrl }
+            : {}),
           ...(customDestination ? { intendedHost: customDestination.host } : {}),
           ...(args.projectId ? { projectId: args.projectId } : {}),
         },
         effect: "deny",
-        ruleId: "custom-provider-egress-blocked",
+        ruleId: viaCredential ? "model-credential-egress-blocked" : "custom-provider-egress-blocked",
         ruleChain: [],
         reason: egress,
       });
@@ -790,6 +861,46 @@ export function registerAgentConnectorRoutes(
   db: Db,
   opts: { dataKey?: string } = {},
 ) {
+  /**
+   * ADR-0034 amendment — WRITE-TIME EGRESS CHECK for a credential `baseUrl`.
+   *
+   * Returns null when the destination is permitted, or the 400 body when it is
+   * not. Every refusal is audited: somebody attempting to point the gateway at
+   * IMDS is precisely the event a governance product must be able to show
+   * afterwards, whether or not it succeeded.
+   */
+  async function refuseCredentialEgress(
+    req: { authCtx: { userId?: string | null } },
+    provider: string,
+    baseUrl: string,
+    subjectUserId: string | null,
+    scope: "user" | null,
+  ): Promise<{ error: string; code: string; detail: string } | null> {
+    const { decision } = await checkCredentialBaseUrl(db, baseUrl);
+    if (decision.ok) return null;
+    const detail =
+      `baseUrl override for provider '${provider}' refused: ${decision.reason}` +
+      ` (an admin adds permitted destinations under Egress Allow Hosts)`;
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "model_credential",
+      objectId: null,
+      detail: {
+        phase: scope === "user" ? "user_credential_write" : "platform_credential_write",
+        provider,
+        baseUrl,
+        code: decision.code,
+        ...(decision.host ? { host: decision.host } : {}),
+        ...(subjectUserId ? { subjectUserId } : {}),
+      },
+      effect: "deny",
+      ruleId: "model-credential-egress-blocked",
+      ruleChain: [],
+      reason: detail,
+    });
+    return { error: "egress_blocked", code: decision.code, detail };
+  }
+
   // --- agent registry (§4: global catalog, decoupled from entitlement) ---
 
   app.post("/v1/agents", async (req, reply) => {
@@ -851,6 +962,14 @@ export function registerAgentConnectorRoutes(
     const body = createModelCredentialSchema.parse(req.body);
     if (!opts.dataKey) {
       return reply.status(503).send({ error: "no_data_key", detail: "set REGULAIT_DATA_KEY" });
+    }
+    // ADR-0034 amendment: a baseUrl override is an SSRF primitive, so it clears
+    // the egress allow-list HERE, at the moment somebody types it — the
+    // earliest honest failure. This is NOT a substitute for the dispatch-time
+    // check (DNS moves; rows predate the guard), it is the polite half of it.
+    if (body.baseUrl) {
+      const refused = await refuseCredentialEgress(req, body.provider, body.baseUrl, null, null);
+      if (refused) return reply.status(400).send(refused);
     }
     const values = {
       provider: body.provider,
@@ -1028,6 +1147,14 @@ export function registerAgentConnectorRoutes(
     }
     if (!opts.dataKey) {
       return reply.status(503).send({ error: "no_data_key", detail: "set REGULAIT_DATA_KEY" });
+    }
+    // ADR-0034 amendment — the per-user table is the MORE exposed of the two:
+    // a non-admin may write their own row here, so without this check any user
+    // could choose a destination the gateway would then fetch on their behalf.
+    // Checked after the key-custody gate so the more specific refusal wins.
+    if (body.baseUrl) {
+      const refused = await refuseCredentialEgress(req, body.provider, body.baseUrl, userId, "user");
+      if (refused) return reply.status(400).send(refused);
     }
     const values = {
       userId,
