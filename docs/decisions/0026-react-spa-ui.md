@@ -280,3 +280,15 @@ Everything below was executed on this branch against its own scratch database
 - Two pre-existing Playwright assertions were made unambiguous (`getByText("Members")` and
   `getByText("Budget vs actual")` became strict-mode-safe once a project tab strip and a rollup
   section shared those words). No behaviour changed.
+
+Two operational notes for whoever re-runs this:
+
+- The gateway suite must be pointed at a **virgin** database. Most files share `DATABASE_URL`
+  directly, so pointing it at a database that has already been seeded (the Playwright scratch
+  database, for instance) fails hundreds of tests for reasons that have nothing to do with the
+  change under test.
+- A handful of test files create fixed-name scratch databases (`regulait_seed_test`,
+  `regulait_wt_stream`, …) and drop them `WITH (FORCE)`. Two agents running the gateway suite
+  against the same Postgres at the same time therefore terminate each other's connections. A
+  failure in exactly those files, that passes when the file is re-run alone, is that collision —
+  not a regression.
