@@ -337,12 +337,35 @@ ROTATE
 
   systemctl daemon-reload
 
+  # Report what systemd actually did, not what we asked for. An installer that
+  # prints "enabled" whatever happened is how a box ends up with no backup and
+  # a reassuring log line.
   if [ "$ENABLED" = "1" ]; then
-    systemctl enable --now regulait-pg-backup.timer
-    log "install: regulait-pg-backup.timer enabled — $ONCALENDAR"
+    if systemctl enable --now regulait-pg-backup.timer; then
+      log "install: regulait-pg-backup.timer enabled — $ONCALENDAR"
+    else
+      log "install: WARNING systemctl enable --now returned non-zero"
+    fi
   else
     systemctl disable --now regulait-pg-backup.timer 2>/dev/null
     log "install: REGULAIT_BACKUP_ENABLED=0, timer installed but DISABLED"
+  fi
+
+  # The single fact that matters: is the enable symlink on disk? That symlink,
+  # on the root EBS volume, is the entire reason the timer survives a stop/start.
+  local want="/etc/systemd/system/timers.target.wants/regulait-pg-backup.timer"
+  if [ "$ENABLED" = "1" ]; then
+    if [ -L "$want" ]; then
+      log "install: verified enable symlink exists -> the timer survives a reboot"
+    else
+      log "install: ERROR $want is missing — the timer will NOT come back after a power cycle"
+      return 1
+    fi
+  fi
+
+  # Fail loudly on a unit file systemd would reject, rather than at 17:00 UTC.
+  if command -v systemd-analyze >/dev/null 2>&1; then
+    systemd-analyze verify "$TIMER_PATH" "$UNIT_PATH" 2>&1 | sed 's/^/install: systemd-analyze: /'
   fi
 }
 
