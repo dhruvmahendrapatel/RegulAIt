@@ -48,5 +48,35 @@ services:
     restart: unless-stopped
 EOF
 
-docker compose up -d --build
+# --- on-box TLS (ADR-0029) ----------------------------------------------------
+# Caddy terminates TLS in the compose stack and gets a real Let's Encrypt
+# certificate for an sslip.io hostname derived from THIS instance's public IP —
+# sslip.io resolves `a-b-c-d.sslip.io` to a.b.c.d, so no domain, no Route53, no
+# ACM, no ALB, and no new AWS cost. The IP is read from IMDSv2 at boot rather
+# than passed in from Terraform, which would be a create-time cycle (the public
+# IP does not exist until the instance does).
+COMPOSE_PROFILE_ARGS=""
+%{ if enable_onbox_tls ~}
+IMDS_TOKEN=$(curl -sS -X PUT "http://169.254.169.254/latest/api/token" \
+  -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+PUBLIC_IP=$(curl -sS -H "X-aws-ec2-metadata-token: $${IMDS_TOKEN}" \
+  "http://169.254.169.254/latest/meta-data/public-ipv4")
+if [ -n "$${PUBLIC_IP}" ]; then
+  TLS_HOST="$(echo "$${PUBLIC_IP}" | tr '.' '-').sslip.io"
+  cat >> docker-compose.override.yml <<EOF
+  caddy:
+    environment:
+      REGULAIT_TLS_HOST: $${TLS_HOST}
+EOF
+  COMPOSE_PROFILE_ARGS="--profile tls"
+  echo "app-boot: on-box TLS enabled for $${TLS_HOST}"
+else
+  # Fail LOUD rather than silently serving plaintext: without a public IP there
+  # is no resolvable hostname, so ACME cannot succeed.
+  echo "app-boot: FATAL no public IPv4 from IMDS; refusing to start without TLS"
+  exit 1
+fi
+%{ endif ~}
+
+docker compose $${COMPOSE_PROFILE_ARGS} up -d --build
 echo "app-boot: compose up returned $?"

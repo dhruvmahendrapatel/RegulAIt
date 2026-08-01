@@ -1,5 +1,15 @@
+# ADR-0029: the app is served over HTTPS at the sslip.io name derived from the
+# instance's public IP. Plain http://<ip>:3000 no longer answers from off-box.
 output "app_url" {
-  value = "http://${module.app.public_ip}:3000"
+  value = "https://${module.app.sslip_hostname}"
+}
+
+output "tls_hostname" {
+  value = module.app.sslip_hostname
+}
+
+output "public_ip" {
+  value = module.app.public_ip
 }
 
 output "instance_id" {
