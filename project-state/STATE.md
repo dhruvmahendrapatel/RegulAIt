@@ -1,6 +1,6 @@
 ---
 phase: eight-pillars-shipped-productizing
-last_updated: 2026-07-31
+last_updated: 2026-08-01
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -794,6 +794,53 @@ connecting real providers (model key = parked Batch G, owner's call) and the gui
 first-provider journey (open). Wave-3 backlog, per ROADMAP §6: Snowflake credential schema,
 worker streaming, `agents.systemPrompt`, `mcpDefaultMode` enforcement, O11/O13/O15 interception
 depth, Azure/GCP infra, A4.
+
+**Waves 7–8 addendum, 2026-08-01 — TLS, hardening, true SPA parity, username login, and a
+terraform landmine (PRs #76–#84).** Written the same day, per the lesson recorded above.
+
+- **#77 / ADR-0029 — zero-cost TLS.** Caddy in the compose stack, `3-237-199-248.sslip.io`
+  (free wildcard DNS, no domain purchase), real Let's Encrypt certs. ALB+ACM declined on cost;
+  self-signed rejected as not honestly "TLS". Cert volume is named (without it every redeploy
+  re-issues and burns the rate limit); HSTS deliberately OFF on an IP-derived hostname; :80 must
+  stay open or renewal fails silently two months later. **It exposed a real defect**: a reverse
+  proxy would have made `req.ip` — on every `auth_sessions` row — record Caddy instead of the
+  user, in a product whose first pillar is per-user audit. Fixed via `trustProxy`, safe because
+  Caddy OVERWRITES X-Forwarded-For rather than appending.
+- **#78 / migration 0047 / ADR-0030 — username login.** `@` is barred from usernames so the
+  namespaces cannot overlap and a username can never impersonate an email; case-folding is
+  enforced at STORAGE (normalize-on-write + CHECK), so `Dhruv`/`dhruv` cannot coexist even via
+  hand-written SQL; the ADR-0025 uniform-401 body is preserved byte-identically and the unknown-
+  username path still burns a scrypt. Seeded personas gained `admin`/`avery`/`dana`.
+- **#79/#80/#83 — SPA parity was FALSE three times, then measured.** ADR-0026 claimed "parity
+  proven, zero gaps". A capability diff found goal-decomposition, PM links and the decision
+  ledger legacy-only (#79); investigating that found a FOURTH, pillar 4's shared context store
+  (#80); and closing the last two end-user surfaces (#83) turned up a FIFTH class the diff is
+  blind to — `byConnector`/`byMcpTool` spend was inside every project total but rendered in no
+  breakdown. **Parity is now defined as a capability diff, not a nav walkthrough**, and the
+  legacy shells were NOT deleted (the deletion was built, tested, then reverted).
+- **#81 / ADR-0031 — P0 hardening** from an adversarial audit: streamed keyset CSV exports with
+  microsecond-exact cursors (a naive cursor silently drops rows sharing an instant) and a
+  DISCLOSED ceiling (a compliance export is never silently short); audit cursor pagination;
+  `trustProxy` narrowed to Caddy's pinned address; rate limiting; CSP with boot-computed inline
+  hashes; observable schedulers. It also corrected ADR-0029: forging `x-forwarded-proto: https`
+  only turns Secure ON (harmless) — the dangerous direction, missed by me, is a forged `http`
+  turning it OFF and issuing a cleartext-sendable cookie.
+- **#84 — a terraform landmine, found before it fired.** `plan` proposed
+  `aws_instance.app must be replaced` because the module read the AMI from
+  `/aws/service/ami-amazon-linux-latest/...`, which AWS re-points on every AL2023 release.
+  **Postgres is a container volume on that instance**, so any apply by anyone, for any reason,
+  was total data loss. Fixed by pinning the AMI, `user_data_replace_on_change = false`, and
+  reverting a cosmetic SG description (ForceNew). Plan now: `0 add, 2 change, 0 destroy`.
+
+Suite 829 → **881**. Migrations → **0047**. ADRs → **0031**.
+
+**NOT DEPLOYED as of this entry.** Today's app code is unshipped, and it cannot go out the old
+way: #77 bound the gateway to host loopback, so a redeploy WITHOUT Caddy leaves the box
+unreachable. TLS and the next deploy are one operation, and it awaits the owner's go-ahead.
+
+**Standing exposure the owner has been told about twice and not yet acted on:** Postgres remains
+a container volume on a single EC2 instance. #84 defused the current trigger; it did not remove
+the exposure. Free mitigation offered: nightly `pg_dump` → S3 + a tested restore.
 
 **Waves 4–7 addendum, 2026-07-31 — the work this file had NOT recorded (PRs #58–#75).**
 Written 2026-07-31 to close the STATE.md drift noted at the top. Each item is in the session log
