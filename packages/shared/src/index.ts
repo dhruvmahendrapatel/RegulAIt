@@ -1147,6 +1147,11 @@ export const updateOrgSettingsSchema = z
     loginLockoutThreshold: z.number().int().min(3).max(100).optional(),
     loginLockoutWindowMinutes: z.number().int().min(1).max(24 * 60).optional(),
     loginLockoutMinutes: z.number().int().min(1).max(24 * 60).optional(),
+    /** ADR-0030: may users manage their OWN username? false (default) =
+     * admin-managed only. The org is the ceiling exactly as everywhere else —
+     * turning it off does not delete anyone's username, it stops self-service
+     * writes. */
+    usernameSelfService: z.boolean().optional(),
   })
   .strict()
   .superRefine((v, ctx) => {
@@ -1203,13 +1208,76 @@ export const setToolPriceSchema = z.object({
 // in the gateway; nothing here ever carries a hash.
 // ---------------------------------------------------------------------------
 
+/**
+ * ADR-0030 — the login identifier accepted in ONE field.
+ *
+ * `identifier` is the new, namespace-agnostic name; `email` is kept as the
+ * BACKWARD-COMPATIBLE alias every shipped client (the legacy /app and /admin
+ * shells, the SPA's older builds, anyone's script) already posts. Exactly one
+ * of them must be present; the parse normalizes to `identifier` so the handler
+ * has a single thing to resolve.
+ *
+ * The old `z.string().email()` on `email` is deliberately RELAXED to a plain
+ * bounded string: a client that has only ever known the `email` field must be
+ * able to post a username in it (that is precisely the owner's case — typing
+ * `dhruv` into the legacy sign-in form). Nothing is weakened by this: the
+ * server never treats the value as an email address on its own say-so, it
+ * applies the ADR-0030 resolution rule ('@' ⇒ email namespace, otherwise
+ * username namespace), and the failure answer is the same uniform 401 either
+ * way. Relaxing it moves a 400-before-auth into that uniform 401, which is
+ * strictly less of an oracle than it was.
+ */
 export const loginSchema = z
   .object({
-    email: z.string().email(),
+    email: z.string().min(1).max(320).optional(),
+    identifier: z.string().min(1).max(320).optional(),
     password: z.string().min(1).max(512),
   })
+  .strict()
+  .superRefine((v, ctx) => {
+    if (v.identifier === undefined && v.email === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "an identifier (email or username) is required",
+        path: ["identifier"],
+      });
+    }
+  })
+  .transform((v) => ({
+    identifier: (v.identifier ?? v.email ?? "").trim(),
+    password: v.password,
+  }));
+export type LoginRequest = z.input<typeof loginSchema>;
+
+/**
+ * ADR-0030 — the username shape, held identically by zod and by the migration
+ * 0047 CHECK: 2..63 chars, starts alphanumeric, then letters/digits/dot/
+ * underscore/hyphen. Deliberately NO '@': that single exclusion is what keeps
+ * the username namespace disjoint from the email namespace, so a username can
+ * never resolve to — or impersonate — another user's email address.
+ */
+export const USERNAME_PATTERN = /^[a-z0-9][a-z0-9._-]{1,62}$/;
+
+/** Case folding is NORMALIZE-ON-WRITE (ADR-0030): trim + lowercase, then the
+ * shape check. `Dhruv` and `dhruv` are the same username by construction —
+ * only the lowercase form is ever stored or compared, and migration 0047's
+ * CHECK refuses anything else at the storage layer too. */
+export const usernameSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .transform((v) => v.trim().toLowerCase())
+  .refine((v) => USERNAME_PATTERN.test(v), {
+    message:
+      "a username is 2–63 characters, starts with a letter or digit, and may contain letters, digits, '.', '_' and '-' — no '@', no spaces",
+  });
+
+/** set/change (string) or CLEAR (null) a username. Used by both the admin
+ * route and the self-service route — one shape, one validator, one meaning. */
+export const setUsernameSchema = z
+  .object({ username: usernameSchema.nullable() })
   .strict();
-export type LoginRequest = z.infer<typeof loginSchema>;
+export type SetUsernameRequest = z.infer<typeof setUsernameSchema>;
 
 /** step 2 of a TOTP-enabled login: the pending token from step 1 + a code */
 export const mfaVerifySchema = z

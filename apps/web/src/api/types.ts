@@ -16,7 +16,10 @@ export interface AuthMeResponse {
   userId: string | null;
   isAdmin: boolean;
   via: "bootstrap" | "api-key" | "session";
-  user: { id: string; email: string; displayName: string } | null;
+  /** ADR-0030: `username` is the second login identifier — null when the
+   * account signs in by email only, and absent entirely from a pre-0047
+   * gateway (hence optional: an older gateway degrades to "no username"). */
+  user: { id: string; email: string; username?: string | null; displayName: string } | null;
   mustChangePassword: boolean;
   totpEnabled: boolean;
   passwordSet: boolean;
@@ -29,6 +32,23 @@ export interface AuthMeResponse {
   passwordChangeRequiresCurrent?: boolean;
   /** how this session was established; null for header-credential requests */
   sessionOrigin?: "password" | "api_key" | "oidc" | "bootstrap" | "unknown" | null;
+  /** ADR-0030: may this user write their OWN username? Absent on an older
+   * gateway, which reads as "no" — the conservative default and the same
+   * posture a fresh org_settings row has. Reading one's username is never
+   * gated; this governs the edit affordance only. */
+  usernameSelfService?: boolean;
+}
+
+/**
+ * ADR-0030 — the login body. `identifier` (email OR username) is the current
+ * field; `email` is the pre-0047 alias the gateway still accepts, and the one
+ * this client keeps sending for email logins so an OLDER gateway (which knows
+ * nothing about `identifier` and rejects unknown keys) keeps working.
+ */
+export interface LoginRequestBody {
+  email?: string;
+  identifier?: string;
+  password: string;
 }
 
 export interface LoginResponse {

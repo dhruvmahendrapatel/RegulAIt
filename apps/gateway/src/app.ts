@@ -438,6 +438,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "POST /auth/logout",
     "GET /auth/me",
     "POST /auth/change-password",
+    // ADR-0030: a user managing their OWN username — their own account, like
+    // change-password. Whether it is ALLOWED at all is the org's call
+    // (org_settings.username_self_service, default false = admin-managed);
+    // admin-ness is not the point of the route, so it is not the gate.
+    "POST /auth/username",
     "POST /auth/totp/enroll",
     "POST /auth/totp/activate",
     "POST /auth/totp/disable",
@@ -500,6 +505,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       .select({
         id: users.id,
         email: users.email,
+        // ADR-0030: the second login identifier (null = email-only), so the
+        // users table can show and manage it. Never a credential.
+        username: users.username,
         displayName: users.displayName,
         isAdmin: users.isAdmin,
         disabledAt: users.disabledAt,

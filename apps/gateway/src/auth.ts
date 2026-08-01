@@ -35,6 +35,7 @@ import {
   loginWithKeySchema,
   mfaVerifySchema,
   setInitialPasswordSchema,
+  setUsernameSchema,
   totpActivateSchema,
   totpDisableSchema,
   updateOidcProviderSchema,
@@ -507,13 +508,30 @@ declare module "fastify" {
   }
 }
 
-/** uniform 401 for EVERY password-login failure — unknown email, wrong
- * password, passwordless account, deactivated account, active lockout — so
- * the endpoint is not an account-existence oracle. */
+/** uniform 401 for EVERY password-login failure — unknown email, UNKNOWN
+ * USERNAME (ADR-0030), wrong password, passwordless account, deactivated
+ * account, active lockout — so the endpoint is not an account-existence
+ * oracle. The wording is deliberately UNCHANGED from ADR-0025: the body must
+ * be byte-identical across every failure mode, and changing it would both
+ * break clients matching on it and, worse, invite a future variant per
+ * namespace — which is exactly the oracle this constant exists to deny. */
 const UNIFORM_LOGIN_401 = {
   error: "invalid_credentials",
   detail: "email or password is incorrect",
 };
+
+/**
+ * ADR-0030 — the ONE resolution rule for a login identifier.
+ *
+ * An identifier containing '@' is an EMAIL; anything else is a USERNAME.
+ * The rule is total and unambiguous because the two namespaces are provably
+ * disjoint: migration 0047's CHECK forbids '@' in a username, so no string
+ * can ever be a valid member of both. A username can therefore never be used
+ * to impersonate another user's email address.
+ */
+export function identifierKind(identifier: string): "email" | "username" {
+  return identifier.includes("@") ? "email" : "username";
+}
 
 function requireCsrfHeader(req: FastifyRequest, reply: FastifyReply): boolean {
   if (req.headers[CSRF_HEADER] !== "1") {
@@ -546,6 +564,20 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     return row ?? null;
   };
 
+  /** ADR-0030: resolve either namespace with the SAME shape of query and the
+   * same absence semantics — a miss returns null and the caller then walks
+   * the identical failure path (scrypt burn + uniform 401 + audit), so an
+   * unknown username is indistinguishable from an unknown email, which is
+   * indistinguishable from a wrong password. */
+  const loadUserByIdentifier = async (identifier: string) => {
+    if (identifierKind(identifier) === "email") return loadUserByEmail(identifier);
+    const [row] = await db
+      .select()
+      .from(users)
+      .where(eq(users.username, identifier.toLowerCase()));
+    return row ?? null;
+  };
+
   // ---- POST /auth/login ----------------------------------------------------
   app.post("/auth/login", async (req, reply) => {
     if (!requireCsrfHeader(req, reply)) return reply;
@@ -563,7 +595,10 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       });
     }
 
-    const user = await loadUserByEmail(body.email);
+    // ADR-0030: ONE field, either namespace. `body.identifier` is what the
+    // schema normalized `{identifier}` OR the legacy `{email}` down to.
+    const kind = identifierKind(body.identifier);
+    const user = await loadUserByIdentifier(body.identifier);
     const fail = async (why: string) => {
       if (user) {
         // lockout bookkeeping (dials from org settings). The window resets
@@ -584,19 +619,24 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
         if (engage) {
           await auditAuth(db, null, user.id, "login-lockout", "deny",
             `account '${user.email}' temporarily locked after ${count} failed logins (${org.loginLockoutMinutes}m)`,
-            { phase: "login-lockout", email: user.email, failures: count, lockoutMinutes: org.loginLockoutMinutes });
+            // ADR-0030: lockout is per ACCOUNT, not per identifier — failures
+            // arriving by username and by email count against the same user.
+            { phase: "login-lockout", email: user.email, identifierKind: kind, failures: count, lockoutMinutes: org.loginLockoutMinutes });
         }
       }
       await auditAuth(db, null, user?.id ?? null, "login-failed", "deny",
         "password login failed",
-        // the audit trail records WHY; the HTTP response never does
-        { phase: "login-failed", email: body.email, why });
+        // the audit trail records WHY (and WHICH namespace was tried); the
+        // HTTP response never does
+        { phase: "login-failed", identifier: body.identifier, identifierKind: kind, why });
       return reply.status(401).send(UNIFORM_LOGIN_401);
     };
 
     if (!user) {
+      // ADR-0030: the unknown-USERNAME path burns the same scrypt as the
+      // unknown-email and wrong-password paths — one branch, no shortcut.
       verifyPassword(body.password, null); // burn the same scrypt cost
-      return fail("unknown_email");
+      return fail(kind === "username" ? "unknown_username" : "unknown_email");
     }
     if (user.disabledAt) {
       verifyPassword(body.password, null);
@@ -631,8 +671,8 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     // ADR-0028: password credential -> 'password' origin
     await setSession(reply, req, user.id, org, "password");
     await auditAuth(db, user.id, user.id, "login-succeeded", "allow",
-      `user '${user.email}' signed in with a password`,
-      { phase: "login", email: user.email, method: "password" });
+      `user '${user.email}' signed in with a password (by ${kind})`,
+      { phase: "login", email: user.email, method: "password", identifierKind: kind });
     return reply.send({
       ok: true,
       userId: user.id,
@@ -740,7 +780,9 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     if (userId) {
       const [row] = await db.select().from(users).where(eq(users.id, userId));
       if (row) {
-        user = { id: row.id, email: row.email, displayName: row.displayName };
+        // ADR-0030: a user may ALWAYS see their own username (reading it is
+        // never gated); org.usernameSelfService governs writes only.
+        user = { id: row.id, email: row.email, username: row.username, displayName: row.displayName };
         mustChangePassword = row.mustChangePassword;
         totpEnabled = row.totpEnabled;
         passwordSet = row.passwordHash !== null;
@@ -768,6 +810,10 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       /** the recorded origin of THIS session ('unknown' = pre-0046 row); null
        * when the request authenticated with a header credential */
       sessionOrigin: req.sessionAuth?.origin ?? null,
+      /** ADR-0030: may THIS caller write their own username? false (the
+       * default org posture) = admin-managed; the UI shows the value
+       * read-only rather than offering an edit that would 403. */
+      usernameSelfService: org.usernameSelfService,
     };
   });
 
@@ -985,6 +1031,103 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       `admin cleared TOTP MFA for locked-out user '${target.email}': ${body.reason}`,
       { phase: "mfa-cleared", email: target.email, reason: body.reason });
     return { ok: true, totpEnabled: false };
+  });
+
+  // ---- ADR-0030: username management --------------------------------------
+  // ONE writer for both surfaces (admin route + self-service route): same
+  // validator, same uniqueness check, same audit shape. The only difference is
+  // WHO may call it and how much a 409 is allowed to say.
+
+  /** a unique-index violation racing our pre-check (two admins, same second) */
+  const isUniqueViolation = (err: unknown): boolean =>
+    (err as { cause?: { code?: string } })?.cause?.code === "23505";
+
+  const applyUsername = async (
+    reply: FastifyReply,
+    actorUserId: string | null,
+    targetUserId: string,
+    /** already normalized+validated by usernameSchema; null CLEARS it */
+    next: string | null,
+    via: "admin" | "self",
+  ) => {
+    const [target] = await db.select().from(users).where(eq(users.id, targetUserId));
+    if (!target) return reply.status(404).send({ error: "unknown_user" });
+    const before = target.username;
+    /** a 409 must NAME the conflict for an admin (who can act on it) and must
+     * NOT name the holder to a self-service caller (that would turn this route
+     * into a directory of who owns which username). */
+    const conflict = (username: string, holderEmail: string, holderId: string) =>
+      reply.status(409).send({
+        error: "username_taken",
+        detail:
+          via === "admin"
+            ? `username '${username}' already belongs to ${holderEmail}`
+            : `username '${username}' is already taken`,
+        username,
+        ...(via === "admin" ? { conflictUserId: holderId } : {}),
+      });
+    if (next !== null) {
+      const [clash] = await db
+        .select({ id: users.id, email: users.email })
+        .from(users)
+        .where(and(eq(users.username, next), ne(users.id, targetUserId)));
+      if (clash) return conflict(next, clash.email, clash.id);
+    }
+    try {
+      await db.update(users).set({ username: next }).where(eq(users.id, targetUserId));
+    } catch (err) {
+      // the pre-check lost a race with a concurrent write — still a clean 409,
+      // never a raw constraint error escaping as a 500/opaque "conflict"
+      if (next !== null && isUniqueViolation(err)) {
+        const [clash] = await db
+          .select({ id: users.id, email: users.email })
+          .from(users)
+          .where(and(eq(users.username, next), ne(users.id, targetUserId)));
+        return conflict(next, clash?.email ?? "another account", clash?.id ?? "");
+      }
+      throw err;
+    }
+    const ruleId = next === null ? "username-cleared" : before === null ? "username-set" : "username-changed";
+    const actorWord = via === "admin" ? "admin" : "user";
+    await auditAuth(db, actorUserId, targetUserId, ruleId, "allow",
+      next === null
+        ? `${actorWord} cleared the username '${before}' on '${target.email}'`
+        : before === null
+          ? `${actorWord} set the username '${next}' on '${target.email}'`
+          : `${actorWord} changed the username on '${target.email}': '${before}' → '${next}'`,
+      { phase: "username", email: target.email, from: before, to: next, via });
+    return reply.send({ id: target.id, username: next, previousUsername: before });
+  };
+
+  /** admin: set / change / clear ANY user's username. Admin-only via app.ts's
+   * default gate (absent from NON_ADMIN_ROUTES), exactly like the rest of the
+   * users admin surface. */
+  app.put("/v1/users/:userId/username", async (req, reply) => {
+    const { userId } = userIdParam.parse(req.params);
+    const body = setUsernameSchema.parse(req.body ?? {});
+    return applyUsername(reply, req.authCtx.userId, userId, body.username, "admin");
+  });
+
+  /** self-service: a user manages their OWN username — only when the org has
+   * opted in (org_settings.username_self_service, default false = admin-managed
+   * only). READING one's own username is never gated; /auth/me always carries
+   * it. The org is the ceiling here exactly as everywhere else. */
+  app.post("/auth/username", async (req, reply) => {
+    if (!requireCsrfHeader(req, reply)) return reply;
+    const body = setUsernameSchema.parse(req.body ?? {});
+    const userId = req.authCtx.userId;
+    if (!userId) return reply.status(403).send({ error: "no_user_identity" });
+    const org = await loadOrgSettings(db);
+    if (!org.usernameSelfService) {
+      await auditAuth(db, userId, userId, "username-self-service-denied", "deny",
+        "user attempted to change their own username while self-service is disabled",
+        { phase: "username", requested: body.username, via: "self" });
+      return reply.status(403).send({
+        error: "username_self_service_disabled",
+        detail: "usernames are managed by an administrator in this organization",
+      });
+    }
+    return applyUsername(reply, userId, userId, body.username, "self");
   });
 
   // ---- OIDC SSO ------------------------------------------------------------
