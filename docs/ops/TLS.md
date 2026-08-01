@@ -5,8 +5,12 @@ browser-trusted Let's Encrypt certificate**, at no added AWS cost. See
 [ADR-0029](../decisions/0029-zero-cost-tls-caddy-sslip-letsencrypt.md) for why this shape and not
 an ALB.
 
-**URL:** `https://3-237-199-248.sslip.io` (the sslip.io name for the box's current public IP;
-`terraform output tls_hostname` is authoritative).
+**URL:** `terraform output tls_hostname` — **this is the only authoritative source.** The
+`3-237-199-248.sslip.io` literals throughout this file are illustrative and are already stale; the
+box's address moved once while it was stopped. As of
+[ADR-0032](../decisions/0032-scheduled-power-off-dev-infra.md) an Elastic IP pins it, and the box
+is [powered off outside weekday hours](POWER_SCHEDULE.md) — so if nothing answers, check whether
+it is simply outside the window before debugging TLS.
 
 ---
 
@@ -93,12 +97,25 @@ failure counts against Let's Encrypt's failed-validation limit (5 per account/ho
 
 ## Caveats — read before relying on this
 
-1. **The hostname is derived from the public IP.** Stop/start the instance (or replace it) and the
-   IP changes, so the hostname changes, so the old certificate is useless and Caddy issues a new
-   one for the new name. Any bookmark, OIDC redirect URI, or IDE base URL pointing at the old name
-   breaks. **Mitigation if this becomes painful:** an Elastic IP is free *while attached to a
-   running instance* (AWS bills idle/unattached EIPs), which pins the hostname for the life of the
-   stack — but that is a new AWS resource and was not in scope here, so it is not applied.
+1. **The hostname is derived from the public IP — RESOLVED by ADR-0032, see below.** Stop/start
+   the instance (or replace it) and an auto-assigned IP changes, so the hostname changes, so the
+   old certificate is useless and Caddy issues a new one for the new name. Any bookmark, OIDC
+   redirect URI, or IDE base URL pointing at the old name breaks. **This already happened once**:
+   the box was stopped and its address moved from `3.237.199.248` to `98.86.163.252` while every
+   literal in this file and the Caddyfile still said the old one.
+
+   **Now mitigated:** [ADR-0032](../decisions/0032-scheduled-power-off-dev-infra.md) attaches an
+   **Elastic IP** (`assign_elastic_ip = true`), which survives stop/start and pins the hostname for
+   the life of the stack. This was mandatory once the box started being powered off nightly to save
+   cost — see [POWER_SCHEDULE.md](POWER_SCHEDULE.md).
+
+   *Correcting the pricing claim that used to sit here:* an EIP is **not** free while attached.
+   Since 2024-02-01 AWS bills **every** public IPv4 at ~$0.005/hr, idle *or* in use — so an EIP
+   costs exactly what the auto-assigned address already cost while the box runs, and ~$2.35/month
+   extra for the hours it is stopped.
+
+   Treat every `3-237-199-248.sslip.io` literal in this file as illustrative.
+   `terraform output tls_hostname` is the only authoritative source.
 2. **sslip.io is a third-party service.** It is free, long-running, and open-source, but it is not
    ours. If it goes away or rate-limits, the hostname stops resolving and — worse — renewal fails
    ~60 days later, quietly, until the certificate expires. `docker compose logs caddy` is the only
