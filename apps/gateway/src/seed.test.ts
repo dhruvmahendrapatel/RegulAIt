@@ -25,6 +25,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -39,6 +40,10 @@ const seedScript = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".
 
 let admin: Db;
 let scratch: Db;
+// Owned by the suite, not by a single test: an assertion that throws part-way
+// through a test must never be able to leave the app — and therefore the
+// scratch database — pinned open past teardown.
+let app: ReturnType<typeof buildApp> | undefined;
 const seedRuns: Array<{ status: number | null; stderr: string }> = [];
 
 beforeAll(async () => {
@@ -54,12 +59,25 @@ beforeAll(async () => {
     seedRuns.push({ status: r.status, stderr: r.stderr ?? "" });
   }
   scratch = createDb(scratchUrl);
+  // buildApp does NOT take ownership of the Db it is handed — it never ends the
+  // pool, and `app.close()` only runs fastify's onClose hooks. Closing the app
+  // and ending the pool are therefore two separate obligations of whoever
+  // called createDb, and they have to happen in that order: fastify's onClose
+  // can still touch the database.
+  app = buildApp(scratch, { bootstrapToken: "seed-test-boot" });
 }, 400_000);
 
 afterAll(async () => {
-  await scratch?.$client.end();
-  await admin.execute(sql.raw(`DROP DATABASE IF EXISTS ${SCRATCH_DB} WITH (FORCE)`));
-  await admin.$client.end();
+  // Reverse order of construction, and every step runs even if an earlier one
+  // throws. `dropScratchDatabase` waits for Postgres itself to report zero
+  // backends on the scratch database before dropping it — see
+  // ./testing/scratch-db.ts for why `await pool.end()` is not that guarantee.
+  await closeAll([
+    () => app?.close() ?? Promise.resolve(),
+    () => scratch?.$client.end() ?? Promise.resolve(),
+    () => dropScratchDatabase(admin, SCRATCH_DB),
+    () => admin.$client.end(),
+  ]);
 });
 
 describe("seed script", () => {
@@ -146,24 +164,24 @@ describe("seed script", () => {
       expect(row!.username).toBe(username);
     }
     // and the username is a real credential, not decoration: issue a fresh
-    // one-time password through the API and sign in with the NAME alone
-    const app = buildApp(scratch, { bootstrapToken: "seed-test-boot" });
-    const admin = rows.find((u) => u.email === "admin@regulait.local")!;
-    const issued = await app.inject({
+    // one-time password through the API and sign in with the NAME alone. The
+    // app is built in beforeAll and closed in afterAll — closing it here would
+    // be skipped by any assertion above that throws.
+    const adminUser = rows.find((u) => u.email === "admin@regulait.local")!;
+    const issued = await app!.inject({
       method: "POST",
       headers: { authorization: "Bearer seed-test-boot" },
-      url: `/v1/users/${admin.id}/set-initial-password`,
+      url: `/v1/users/${adminUser.id}/set-initial-password`,
       payload: { force: true },
     });
     expect(issued.statusCode).toBe(200);
-    const signIn = await app.inject({
+    const signIn = await app!.inject({
       method: "POST",
       url: "/auth/login",
       headers: { "x-regulait-csrf": "1" },
       payload: { identifier: "admin", password: issued.json().password },
     });
     expect(signIn.statusCode).toBe(200);
-    expect(signIn.json().userId).toBe(admin.id);
-    await app.close();
+    expect(signIn.json().userId).toBe(adminUser.id);
   });
 });
