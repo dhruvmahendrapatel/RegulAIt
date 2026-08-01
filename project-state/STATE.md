@@ -4,7 +4,7 @@ last_updated: 2026-08-01
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-08-01-session-04.md
+last_session: sessions/2026-08-01-session-05.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -21,8 +21,8 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 **RegulAIt is a working, deployed product, not a scaffold.** All eight P0 pillars have shipped
-functionality; the gateway suite is at **888 tests** across 70 files (**1592** across the whole
-workspace); the schema is at **migration 0047**; decisions run to **ADR-0032**. The product is served by a **React SPA** (`apps/web` —
+functionality; the gateway suite is at **~1000 tests** across 74+ files (**~1700** across the whole
+workspace); the schema is at **migration 0048**; decisions run to **ADR-0035**. The product is served by a **React SPA** (`apps/web` —
 React 18 + Vite + react-router + TanStack Query, an owned token design system, light/dark, six
 grouped nav sections) at **`/ui`**, which is now the *only* UI: `/`, `/app` and `/admin` all 302
 there. The template-literal shells are **deleted** as of ADR-0033 (−7,125 lines): the SPA is not
@@ -1380,6 +1380,74 @@ and the script is recoverable at `a8d2ce9`.
 without ever being executed in its real environment — a compose profile never started, a test
 suite never run by CI, an IAM policy never applied. Green local tests are not evidence that a
 deployment path works.
+
+### Waves 10-11 addendum (2026-08-01) — bring-your-own LLM, and the security work it exposed
+
+The owner asked to "add the ability for users to plug in their own LLM", then for four follow-ups
+in sequence. Seven PRs (#95-#101). The feature itself is the smaller half of the story.
+
+**Custom LLM providers (ADR-0034, migration 0048, #95/#97).** BYO *keys* already worked; what did
+not exist was a way to name an endpoint the platform ships no adapter for — `provider` was a closed
+zod enum of four internet SaaS vendors, so Ollama, vLLM, LM Studio, Azure OpenAI, a Bedrock proxy
+and every internal gateway were unreachable, and `agents` had no per-agent endpoint so two
+self-hosted models on two hosts was inexpressible. **This also made pillar 3's air-gapped mode
+hollow** — a mode whose every supported provider is an internet SaaS is not an air-gapped mode.
+Admin-only registration; agents bind by FK (`agents.custom_provider_id` + a DB CHECK making
+`provider='custom'` a real discriminated union) rather than by smuggling an id through the
+`provider` text column that `model_credentials` keys on and an exhaustive switch depends on. The
+adapter implements no protocol of its own — `openai_chat` IS the shared chat-completions core,
+`anthropic_messages` IS `AnthropicProvider` — so streaming, refusals and usage accounting are
+inherited by construction. Keyless endpoints (local Ollama) are first class: the `Authorization`
+header is DELETED, not filled with a sentinel.
+
+**The headline is not the feature. An admin-suppliable `baseUrl` is an SSRF primitive**, and on EC2
+it reads the instance role's IAM credentials out of `169.254.169.254`. Building the guard for the
+new surface exposed that the *old* ones were never guarded — and worse than first disclosed:
+`POST /v1/users/:userId/model-credentials` is in **`NON_ADMIN_ROUTES`**, and a per-user credential
+takes **precedence** at dispatch. **Any authenticated user could read this box's AWS credentials.**
+Live since per-user BYO keys shipped (migrations 0016/0017). Closed in #96.
+
+**Then the same shape everywhere else (#98).** `connectors.baseUrl` was the sharp one: the
+`webhook` kind (and PM's `generic_webhook`) **POSTs the caller's payload** to the URL, so it was an
+**exfiltration** channel, not merely SSRF — a governed, audited, cost-attributed pipe to an
+attacker's collector. Proven closed by *absence*: a live, listening collector on un-allow-listed
+loopback receives **zero requests** and never sees the canary.
+
+**The DNS-rebind window, closed at last (#100).** Three PRs had each disclosed and left it:
+validate, then let Node resolve the name a second time at connect. `pinned-fetch.ts` connects
+through a `lookup` that resolves nothing and returns the addresses just validated. **The
+dependency question was answered NO NEW DEPENDENCY** — Node 22 exports no `undici`/`Agent`, and
+both routes to one (a direct dep = a second HTTP stack in the security path; or the undocumented
+`globalThis[Symbol.for("undici.globalDispatcher.1")]`) fail the posture `ci.yml` already applies to
+third-party actions. `http.request`'s documented `lookup` option gives the whole capability from
+stdlib for ~300 lines. **The test performs the attack**: two real TLS listeners on 127.0.0.1 and
+127.0.0.2, resolver answering benign-then-attacker; unpinned, the socket lands on the attacker
+(asserted on `res.socket.remoteAddress`); pinned, the attacker records zero connections and the
+resolver is called exactly once.
+
+**HSTS (#101).** Caddy abstained with a long comment explaining why; the gateway asserted
+`max-age=31536000; includeSubDomains` anyway. Two layers disagreeing about a **non-revocable**
+browser commitment was the defect. Gateway now owns it (it is what ships into BYOC installs where
+no Caddy of ours exists), default `max-age=86400`, no `includeSubDomains`, no `preload`,
+configurable via `REGULAIT_HSTS` — deliberately an env var and NOT `org_settings`, because it is a
+deployment-shape fact, it is the one setting a server cannot undo, and it is read in the `onSend`
+hook that must work when Postgres is down. **ADR-0029's own reasoning was corrected**: its claim
+that `includeSubDomains` would be "hostile to everyone else using sslip.io" was overstated — HSTS
+is host-scoped. The real argument is better: a released Elastic IP returns to the AWS pool, so a
+stranger could inherit our hostname *and* any pin left in browsers.
+
+**Backup: merged, NOT running (ADR-0035, #99).** Nightly verified `pg_dump` to a write-only,
+versioned S3 bucket the instance can `PutObject` to but **cannot read or delete**. Restore was
+**exercised, not documented** — 70/70 tables matched, scrypt hashes and audit rows byte-identical.
+A measured finding worth keeping: on a 90%-truncated dump `pg_restore --list` **exits 0** while an
+actual restore yields **0 of 200,000 rows**, so the obvious `--list` check would have blessed and
+uploaded a backup containing none of the data. **This is inert until `terraform apply` + a one-time
+SSM install. The database still has no backup.**
+
+**Orchestration lesson (mine, not an agent's).** Two agents were run concurrently against the
+**same local `regulait_test` Postgres** and one saw broad, unrelated failures from the contention.
+`CLAUDE.md` already names per-agent test databases as a convention; the briefs did not enforce it.
+Enforce it in the brief, not in the retrospective.
 
 ## Epics
 | ID | Name | Status | Related |
