@@ -13,6 +13,7 @@ import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
 import {
   Badge,
+  BarList as KitBarList,
   Button,
   Card,
   ConfirmModal,
@@ -431,38 +432,8 @@ export default function ProjectDetailPage() {
   );
 }
 
-/** tiny horizontal bar list — tokens only, no chart library */
+/** the ranked-bar readout now lives in the kit (ui/kit.tsx) — one visual for
+ * every cost/savings breakdown, here and on the workspace Spend page. */
 function BarList(props: { items: Array<{ label: string; value: number }> }) {
-  const items = props.items.filter((i) => Number.isFinite(i.value)).slice(0, 10);
-  if (!items.length) {
-    return <EmptyState title="No data yet" body="Metered activity appears here as it happens." />;
-  }
-  const max = Math.max(...items.map((i) => i.value), 1e-9);
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "var(--s1)" }}>
-      {items.map((i, idx) => (
-        <div key={idx} className={v.row} style={{ gap: "var(--s1)" }}>
-          <span
-            className={v.faint}
-            style={{ width: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-            title={i.label}
-          >
-            {i.label}
-          </span>
-          <div style={{ flex: 1, minWidth: 40 }}>
-            <div
-              style={{
-                height: 10,
-                width: `${Math.max(2, (i.value / max) * 100)}%`,
-                background: "var(--primary)",
-                opacity: 0.85,
-                borderRadius: 3,
-              }}
-            />
-          </div>
-          <span className={`${v.mono} ${v.num}`}>{fmtUsd(i.value)}</span>
-        </div>
-      ))}
-    </div>
-  );
+  return <KitBarList items={props.items} format={fmtUsd} />;
 }

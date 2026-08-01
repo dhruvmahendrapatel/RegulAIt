@@ -1,0 +1,43 @@
+/* Spend & savings — the daily-spend column chart. Tokens only, no library. */
+
+.dayChart {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 96px;
+  padding-top: var(--s1);
+}
+.dayCol {
+  flex: 1;
+  min-width: 3px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  height: 100%;
+  border-radius: 3px 3px 0 0;
+}
+.dayBar {
+  width: 100%;
+  border-radius: 3px 3px 0 0;
+  background: var(--primary);
+  opacity: 0.85;
+  min-height: 2px;
+}
+.dayBarEmpty {
+  background: var(--surface-2);
+  opacity: 1;
+}
+.dayAxis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: var(--s0);
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+}
+
+/* the "which key served this call" legend on the invocations table */
+.sourceCell {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s0);
+}

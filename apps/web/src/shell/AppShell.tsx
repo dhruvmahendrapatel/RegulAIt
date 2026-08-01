@@ -24,6 +24,9 @@ const WORKSPACE: NavEntry[] = [
   { label: "Workflows", to: "/workflows" },
   { label: "Inbox", to: "/inbox" },
   { label: "Projects", to: "/projects" },
+  // pillars 5 + 6 for the person who generates the spend — self-scoped, and
+  // the only place a non-admin can see their own cost and savings ledgers
+  { label: "Spend & savings", to: "/spend" },
 ];
 
 /** the native admin surface (phase 2): grouped real routes inside this shell */
