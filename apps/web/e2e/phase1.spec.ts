@@ -135,6 +135,14 @@ test("run detail: PM work items and the decision ledger (pillars 8 + 4)", async 
   await expect(pmCard).toBeVisible();
   // RegulAIt stores the LINK, not a copy — the card has to say so
   await expect(pmCard.getByText(/stores the/)).toBeVisible();
+  // the seeded run is pm-synced, so its work items are listed and re-syncable
+  await expect(pmCard.getByRole("cell", { name: "run", exact: true })).toBeVisible();
+  await pmCard.getByRole("button", { name: "Sync now" }).click();
+  await expect(page.getByText(/Synced with /).first()).toBeVisible();
+  // reading live resolves the PM-authoritative fields, or says "unreachable" —
+  // either is honest; silently showing a stale cached copy would not be
+  await pmCard.getByRole("button", { name: "Read live from the tool" }).click();
+  await expect(pmCard.getByRole("button", { name: "Stop reading live" })).toBeVisible();
 
   const decisionsCard = page.locator("section", { hasText: "Decision ledger" }).first();
   await expect(decisionsCard).toBeVisible();

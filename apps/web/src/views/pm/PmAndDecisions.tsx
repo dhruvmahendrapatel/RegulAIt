@@ -49,18 +49,57 @@ interface LiveLink extends PmLink {
 
 export function PmLinksCard(props: { parent: Parent }) {
   const { parent } = props;
+  const qc = useQueryClient();
+  const { toast } = useToast();
   const [live, setLive] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const q = useQuery({
     queryKey: ["pm-links", parent.objectType, parent.objectId, live],
     queryFn: () =>
       api.get<{ links: LiveLink[] }>(`/v1/pm/links?${linkQuery(parent)}${live ? "&live=true" : ""}`),
-    // a deployment with no PM connection configured is the normal case, not an
-    // error — an empty list renders as an honest empty state
+    // a run with no PM connection configured is the normal case, not an error
+    // — an empty list renders as an honest empty state
     retry: false,
   });
   const links = q.data?.links ?? [];
   const anyDrift = links.some((l) => l.drift);
   const anyOrphan = links.some((l) => l.orphanedAt);
+  /** The connection to re-sync through. It comes from an EXISTING link, which
+   * is the backend's documented design: each link carries its connection's
+   * name precisely so a non-admin can drive pm-sync without the admin-only
+   * connections list. That also means the FIRST sync cannot be started here —
+   * there is no connection name to name yet — so the button is honestly
+   * disabled with that reason rather than offering an action that would 404. */
+  const syncConn = links.find((l) => l.connectionName)?.connectionName ?? null;
+
+  const syncNow = async () => {
+    if (!syncConn) return;
+    setSyncing(true);
+    try {
+      const path =
+        parent.objectType === "run"
+          ? `/v1/runs/${parent.objectId}/pm-sync`
+          : `/v1/workflows/instances/${parent.objectId}/pm-sync`;
+      const r = await api.post<{
+        created?: unknown[];
+        verified?: unknown[];
+        repaired?: unknown[];
+        orphaned?: unknown[];
+      }>(path, { connectionName: syncConn });
+      const parts = [
+        `${r.created?.length ?? 0} created`,
+        `${r.verified?.length ?? 0} verified live`,
+        ...((r.repaired?.length ?? 0) > 0 ? [`${r.repaired!.length} repaired`] : []),
+        ...((r.orphaned?.length ?? 0) > 0 ? [`${r.orphaned!.length} ORPHANED`] : []),
+      ];
+      toast(`Synced with ${syncConn} — ${parts.join(", ")}`, (r.orphaned?.length ?? 0) > 0 ? "error" : "success");
+      void qc.invalidateQueries({ queryKey: ["pm-links", parent.objectType, parent.objectId] });
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   return (
     <Card title="PM work items">
@@ -70,6 +109,18 @@ export function PmLinksCard(props: { parent: Parent }) {
           description and acceptance criteria. Reading live fetches them from the tool right now;
           there is no cached copy to serve stale.
         </span>
+        <Button
+          size="sm"
+          disabled={!syncConn || syncing}
+          title={
+            syncConn
+              ? `link any unlinked nodes and re-verify the existing items through '${syncConn}'`
+              : "nothing is linked yet, so there is no connection to sync through — an admin creates the first link from the PM connections view"
+          }
+          onClick={() => void syncNow()}
+        >
+          {syncing ? "Syncing…" : "Sync now"}
+        </Button>
         <Button
           size="sm"
           disabled={links.length === 0 || q.isFetching}
@@ -217,22 +268,34 @@ export function DecisionLedgerCard(props: { parent: Parent }) {
     }
     setBusy(true);
     try {
-      const r = await api.post<DecisionRecord & { pmMirror?: { externalUrl: string } | null }>(
-        "/v1/decisions",
-        {
-          objectType: parent.objectType,
-          objectId: parent.objectId,
-          decision: d,
-          ...(rationale.trim() ? { rationale: rationale.trim() } : {}),
-        },
-      );
+      // NOTE the shape difference, which matters for honesty: POST returns
+      // pmMirror as the OUTCOME of the best-effort mirror attempt
+      // ({ ok, action?, externalId?, error? }), while GET returns it as the
+      // resulting LINK ({ externalId, externalUrl }) or null. A failed mirror
+      // is a truthy object here — reporting "mirrored" on truthiness alone
+      // would claim the customer's tool has a record it does not have.
+      const r = await api.post<
+        DecisionRecord & {
+          pmMirror?: { ok: boolean; action?: string; externalId?: string; error?: string } | null;
+        }
+      >("/v1/decisions", {
+        objectType: parent.objectType,
+        objectId: parent.objectId,
+        decision: d,
+        ...(rationale.trim() ? { rationale: rationale.trim() } : {}),
+      });
       setDecision("");
       setRationale("");
+      const m = r.pmMirror;
       toast(
-        r.pmMirror
-          ? "Decision recorded and mirrored to your PM tool as a linked work item"
-          : "Decision recorded — kept locally in the audit trail",
-        "success",
+        !m
+          ? "Decision recorded — kept locally (nothing here is linked to a PM tool)"
+          : m.ok
+            ? m.action === "work_item"
+              ? `Decision recorded and mirrored to your PM tool as work item ${m.externalId}`
+              : "Decision recorded and mirrored to your PM tool as a comment (no Decision type is mapped)"
+            : `Decision recorded locally, but the PM mirror FAILED: ${m.error ?? "unknown error"}`,
+        m && !m.ok ? "error" : "success",
       );
       void qc.invalidateQueries({ queryKey: ["decisions", parent.objectType, parent.objectId] });
       void qc.invalidateQueries({ queryKey: ["pm-links", parent.objectType, parent.objectId] });
