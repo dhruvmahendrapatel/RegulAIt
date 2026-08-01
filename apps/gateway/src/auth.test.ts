@@ -1596,25 +1596,55 @@ describe("ADR-0030 — login by username", () => {
 
 
 // ---------------------------------------------------------------------------
-// ADR-0029 — behind the Caddy TLS terminator.
+// ADR-0029 — behind the Caddy TLS terminator, as NARROWED by ADR-0031 item 3.
 //
-// Two distinct mechanisms, deliberately separated because they behave
-// differently:
+// Two mechanisms ride the reverse proxy, and both are now gated on the SAME
+// question: is the peer that sent these X-Forwarded-* headers the proxy we
+// named, or just whoever happened to connect?
 //
-//  1. The session cookie's `Secure` flag. requestIsSecure() reads
-//     `x-forwarded-proto` straight off the RAW headers, so it works with or
-//     without Fastify's trustProxy. These cases are the regression wall that
-//     keeps it that way — if it were ever "simplified" to req.protocol, the
-//     no-trustProxy configuration would silently drop Secure and these fail.
-//  2. `req.ip`, recorded on every auth_sessions row (ADR-0025/0028). That one
-//     DOES depend on trustProxy, which is why buildApp enables it.
+//  1. The session cookie's `Secure` flag (requestIsSecure). ADR-0029 read
+//     `x-forwarded-proto` off the RAW headers, ungated, on the grounds that
+//     forging it can only turn Secure ON. That is the harmless direction. The
+//     harmful one is `x-forwarded-proto: http` from something that bypassed
+//     Caddy — the gateway port is published on host loopback — which would
+//     hand out a session cookie with no Secure flag for a browser to send in
+//     cleartext. It now uses req.protocol, which Fastify only derives from the
+//     header for a TRUSTED peer.
+//  2. `req.ip`, recorded on every auth_sessions row (ADR-0025/0028). Same gate.
+//
+// So these tests run against an app built behind a NAMED proxy, and every case
+// is asserted from both sides of that trust boundary.
 // ---------------------------------------------------------------------------
-describe("ADR-0029 reverse-proxy trust", () => {
+describe("ADR-0029 reverse-proxy trust, narrowed by ADR-0031", () => {
   const PW = "Proxy-Trust-Pw-1";
+  /** the address REGULAIT_TRUSTED_PROXIES names — Caddy, in the real stack */
+  const PROXY = "172.28.0.2";
+  /** anything else that can reach the gateway port: host loopback, a sibling
+   * container, a sidecar. Never went through Caddy. */
+  const UNTRUSTED = "127.0.0.1";
 
-  const loginWith = (email: string, password: string, headers: Record<string, string>) =>
-    app.inject({
-      method: "POST", url: "/auth/login",
+  /** the deployed posture: exactly one trusted hop */
+  let proxied: ReturnType<typeof buildApp>;
+
+  beforeAll(async () => {
+    proxied = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY, trustProxy: [PROXY] });
+    await proxied.ready();
+  });
+  afterAll(async () => {
+    await proxied.close();
+  });
+
+  const loginTo = (
+    target: ReturnType<typeof buildApp>,
+    email: string,
+    password: string,
+    headers: Record<string, string>,
+    remoteAddress = PROXY,
+  ) =>
+    target.inject({
+      method: "POST",
+      url: "/auth/login",
+      remoteAddress,
       headers: { ...CSRF, ...headers },
       payload: { email, password },
     });
@@ -1624,19 +1654,29 @@ describe("ADR-0029 reverse-proxy trust", () => {
     return Array.isArray(h) ? h.join("\n") : String(h ?? "");
   };
 
-  it("sets Secure when x-forwarded-proto is https, and does NOT when the header is absent", async () => {
+  const latestSessionIp = async (uid: string): Promise<string | null> => {
+    const [row] = await db
+      .select({ ip: authSessions.ip })
+      .from(authSessions)
+      .where(eq(authSessions.userId, uid))
+      .orderBy(desc(authSessions.createdAt))
+      .limit(1);
+    return row?.ip ?? null;
+  };
+
+  it("sets Secure when the TRUSTED proxy forwards https, and not when it forwards http or nothing", async () => {
     const email = "proxy-secure@auth-test.example";
     const uid = await mkUser(email, "Proxy Secure");
     await onboard(uid, email, PW);
 
     // plain HTTP, no proxy header at all — the localhost/dev case
-    const plain = await loginWith(email, PW, {});
+    const plain = await loginTo(proxied, email, PW, {});
     expect(plain.statusCode).toBe(200);
     expect(setCookieHeader(plain)).toContain("regulait_session=");
     expect(setCookieHeader(plain)).not.toContain("Secure");
 
     // exactly what Caddy sends upstream for a TLS request
-    const behindTls = await loginWith(email, PW, { "x-forwarded-proto": "https" });
+    const behindTls = await loginTo(proxied, email, PW, { "x-forwarded-proto": "https" });
     expect(behindTls.statusCode).toBe(200);
     expect(setCookieHeader(behindTls)).toContain("; Secure");
     // the rest of the cookie hardening must survive alongside it
@@ -1644,21 +1684,55 @@ describe("ADR-0029 reverse-proxy trust", () => {
     expect(setCookieHeader(behindTls)).toContain("SameSite=Strict");
 
     // explicitly forwarded http (Caddy's :80 side, pre-redirect) => still off
-    const behindPlain = await loginWith(email, PW, { "x-forwarded-proto": "http" });
+    const behindPlain = await loginTo(proxied, email, PW, { "x-forwarded-proto": "http" });
     expect(setCookieHeader(behindPlain)).not.toContain("Secure");
+  });
 
-    // a comma-joined chain (two proxies) is read left-most-first
-    const chained = await loginWith(email, PW, { "x-forwarded-proto": "https, http" });
-    expect(setCookieHeader(chained)).toContain("; Secure");
+  it("THE FIX: an untrusted peer cannot decide whether our cookies are protected", async () => {
+    const email = "proxy-forge@auth-test.example";
+    const uid = await mkUser(email, "Proxy Forge");
+    await onboard(uid, email, PW);
+
+    // the DANGEROUS direction ADR-0029 left open: something that bypassed
+    // Caddy claims the hop was plaintext, hoping for a cookie with no Secure
+    // flag that a browser will then send in the clear. On the trust-gated
+    // path the claim is simply ignored — and since this hop really is
+    // plaintext, the cookie is (correctly) not marked Secure either way.
+    const strip = await loginTo(proxied, email, PW, { "x-forwarded-proto": "http" }, UNTRUSTED);
+    expect(strip.statusCode).toBe(200);
+    expect(setCookieHeader(strip)).not.toContain("Secure");
+
+    // the mirror: a forged `https` from an untrusted peer is not believed
+    // either. The old raw-header read would have marked this Secure purely on
+    // the say-so of whoever connected.
+    const claim = await loginTo(proxied, email, PW, { "x-forwarded-proto": "https" }, UNTRUSTED);
+    expect(claim.statusCode).toBe(200);
+    expect(setCookieHeader(claim)).not.toContain("Secure");
+
+    // ...while the identical header from the NAMED proxy still wins
+    const genuine = await loginTo(proxied, email, PW, { "x-forwarded-proto": "https" }, PROXY);
+    expect(setCookieHeader(genuine)).toContain("; Secure");
+  });
+
+  it("an app that trusts nothing (the default) never believes x-forwarded-proto at all", async () => {
+    const email = "proxy-notrust@auth-test.example";
+    const uid = await mkUser(email, "Proxy NoTrust");
+    await onboard(uid, email, PW);
+    // `app` is built with the default posture: REGULAIT_TRUSTED_PROXIES unset
+    const res = await loginTo(app, email, PW, { "x-forwarded-proto": "https" }, PROXY);
+    expect(res.statusCode).toBe(200);
+    expect(setCookieHeader(res)).not.toContain("Secure");
   });
 
   it("clears the cookie with Secure too, so the browser actually drops it over TLS", async () => {
     const email = "proxy-logout@auth-test.example";
     const uid = await mkUser(email, "Proxy Logout");
     await onboard(uid, email, PW);
-    const cookie = cookieOf(await loginWith(email, PW, { "x-forwarded-proto": "https" }));
-    const out = await app.inject({
-      method: "POST", url: "/auth/logout",
+    const cookie = cookieOf(await loginTo(proxied, email, PW, { "x-forwarded-proto": "https" }));
+    const out = await proxied.inject({
+      method: "POST",
+      url: "/auth/logout",
+      remoteAddress: PROXY,
       headers: { ...CSRF, "x-forwarded-proto": "https" },
       cookies: { regulait_session: cookie },
     });
@@ -1667,22 +1741,44 @@ describe("ADR-0029 reverse-proxy trust", () => {
     expect(setCookieHeader(out)).toContain("; Secure");
   });
 
-  it("records the real client IP from X-Forwarded-For on the session row (trustProxy)", async () => {
+  it("records the real client IP from X-Forwarded-For — but only from the named proxy", async () => {
     const email = "proxy-ip@auth-test.example";
     const uid = await mkUser(email, "Proxy Ip");
     await onboard(uid, email, PW);
+
     // Caddy OVERWRITES X-Forwarded-For with the real peer, so exactly one entry.
-    const res = await loginWith(email, PW, {
+    const res = await loginTo(proxied, email, PW, {
       "x-forwarded-proto": "https",
       "x-forwarded-for": "203.0.113.9",
     });
     expect(res.statusCode).toBe(200);
-    const [row] = await db
-      .select({ ip: authSessions.ip })
-      .from(authSessions)
-      .where(eq(authSessions.userId, uid))
-      .orderBy(desc(authSessions.createdAt))
-      .limit(1);
-    expect(row!.ip).toBe("203.0.113.9");
+    expect(await latestSessionIp(uid)).toBe("203.0.113.9");
+
+    // the same header from a peer that bypassed Caddy is ignored: the audit
+    // trail records who actually connected, not who they claimed to be
+    const forged = await loginTo(
+      proxied,
+      email,
+      PW,
+      { "x-forwarded-for": "198.51.100.66" },
+      UNTRUSTED,
+    );
+    expect(forged.statusCode).toBe(200);
+    expect(await latestSessionIp(uid)).toBe(UNTRUSTED);
+  });
+
+  it("a multi-hop x-forwarded-proto is read as the NEAREST hop, not the client-supplied first entry", async () => {
+    // ADR-0031: the first entry is exactly the one a client can inject when any
+    // upstream APPENDS rather than overwrites, so the last (the trusted proxy
+    // that actually spoke to us) is the safer of the two to believe. Our Caddy
+    // sends a single value, so no chain arises in this topology — this pins the
+    // semantics rather than describing a case we produce.
+    const email = "proxy-chain@auth-test.example";
+    const uid = await mkUser(email, "Proxy Chain");
+    await onboard(uid, email, PW);
+    const chained = await loginTo(proxied, email, PW, { "x-forwarded-proto": "https, http" });
+    expect(setCookieHeader(chained)).not.toContain("Secure");
+    const chainedTls = await loginTo(proxied, email, PW, { "x-forwarded-proto": "http, https" });
+    expect(setCookieHeader(chainedTls)).toContain("; Secure");
   });
 });

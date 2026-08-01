@@ -63,7 +63,8 @@ import { buildAwsInfraLiveClient } from "./infra-aws-client.js";
 import { buildAzureInfraLiveClient } from "./infra-azure-client.js";
 import { buildGcpInfraLiveClient } from "./infra-gcp-client.js";
 import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects.js";
-import { loadOrgSettings } from "./org-settings.js";
+import { loadOrgSettings, type SchedulerTickState } from "./org-settings.js";
+import { recordSchedulerFailure, recordSchedulerSuccess } from "./scheduler-health.js";
 
 type InfraResourceRow = typeof infraResources.$inferSelect;
 type InfraPolicyRow = typeof infraPolicies.$inferSelect;
@@ -989,21 +990,30 @@ export async function runBackupVerifyOnce(
  * the stop function the app's onClose hook calls. OFF by default
  * (backupVerifyEnabled=false = today's no-scheduler behaviour).
  */
+/** ONE tick of the backup-verification scheduler. Exported so a test can drive
+ * it without waiting an hour — the timer below is the only other caller. */
+export async function backupVerifyTick(db: Db, state: SchedulerTickState): Promise<void> {
+  try {
+    const org = await loadOrgSettings(db);
+    if (!org.backupVerifyEnabled) return;
+    const intervalMs = Math.max(1, org.backupVerifyIntervalHours) * 3600 * 1000;
+    if (Date.now() - state.lastRunAt < intervalMs) return;
+    state.lastRunAt = Date.now();
+    await runBackupVerifyOnce(db);
+    recordSchedulerSuccess("backup-verify");
+  } catch (err) {
+    // ADR-0031 item 6: a failed pass still never crashes the gateway and the
+    // next tick still retries — but it is no longer INVISIBLE. This logs,
+    // marks the scheduler unhealthy on /v1/health/schedulers, and writes an
+    // audit row; it never throws. A backup verification that has been failing
+    // for months must not look like one that is switched off.
+    await recordSchedulerFailure(db, "backup-verify", err);
+  }
+}
+
 export function startBackupVerifyScheduler(db: Db): () => void {
-  let lastRunAt = 0;
-  const tick = async () => {
-    try {
-      const org = await loadOrgSettings(db);
-      if (!org.backupVerifyEnabled) return;
-      const intervalMs = Math.max(1, org.backupVerifyIntervalHours) * 3600 * 1000;
-      if (Date.now() - lastRunAt < intervalMs) return;
-      lastRunAt = Date.now();
-      await runBackupVerifyOnce(db);
-    } catch {
-      // a failed pass never crashes the gateway; the next tick retries
-    }
-  };
-  const timer = setInterval(() => void tick(), 3600 * 1000);
+  const state: SchedulerTickState = { lastRunAt: 0 };
+  const timer = setInterval(() => void backupVerifyTick(db, state), 3600 * 1000);
   timer.unref?.();
   return () => clearInterval(timer);
 }

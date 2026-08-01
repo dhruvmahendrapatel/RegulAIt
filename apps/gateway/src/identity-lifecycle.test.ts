@@ -28,6 +28,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { isCsvNoticeRow } from "./csv-export.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -318,7 +319,14 @@ describe("audit CSV export", () => {
       method: "GET", headers: admin1Auth, url: `/v1/audit.csv?userId=${admin1Id}`,
     });
     expect(filtered.statusCode).toBe(200);
-    const frows = filtered.body.trim().split("\n").slice(1);
+    // ADR-0031: the export streams under a defaulted window + row ceiling and
+    // appends a single-field disclosure row when either clipped the file. It is
+    // not a data row, so it is excluded here rather than asserted against.
+    const frows = filtered.body
+      .trim()
+      .split("\n")
+      .slice(1)
+      .filter((l) => !isCsvNoticeRow(l));
     expect(frows.length).toBeGreaterThan(0);
     for (const row of frows) expect(row).toContain(admin1Id);
   });

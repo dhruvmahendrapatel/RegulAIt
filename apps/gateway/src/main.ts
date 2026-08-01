@@ -2,6 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb, runMigrations } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { describeTrustProxy, resolveTrustProxy } from "./trusted-proxy.js";
 
 const connectionString =
   process.env.DATABASE_URL ?? "postgres://regulait:regulait@localhost:5432/regulait";
@@ -25,4 +26,7 @@ app.listen({ port, host: "0.0.0.0" }).then((address) => {
   console.log(`regulait gateway listening on ${address}`);
   console.log(`  app UI:    ${address}/app`);
   console.log(`  admin UI:  ${address}/admin`);
+  // ADR-0031: say out loud whose X-Forwarded-* this deployment believes —
+  // getting this wrong silently corrupts every client IP in the audit trail.
+  console.log(`  proxy:     ${describeTrustProxy(resolveTrustProxy())}`);
 });

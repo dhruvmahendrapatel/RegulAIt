@@ -23,8 +23,9 @@
  *    token counts and cost as an identical non-streamed one, and the run's
  *    measured budget accumulates identically.
  *
- * Runs against its OWN scratch database (regulait_wt_stream, drop+recreate),
- * so it can never pollute the database the other gateway suites share.
+ * Runs against its OWN scratch database (`<DATABASE_URL's db>_stream`,
+ * drop+recreate), so it can never pollute the database the other gateway suites
+ * share — nor collide with another checkout running the same file.
  */
 import { beforeAll, afterAll, describe, expect, it } from "vitest";
 import path from "node:path";
@@ -50,7 +51,17 @@ const migrationsFolder = path.resolve(
   "../../../packages/db/migrations",
 );
 
-const DB_NAME = "regulait_wt_stream";
+// Derived from DATABASE_URL rather than hardcoded (ADR-0031). A fixed name is
+// shared by every checkout on the machine, and this file drop-recreates it with
+// WITH (FORCE) — so two suites running concurrently (parallel worktrees, a
+// second developer, CI beside a local run) terminate each other's connections
+// and surface as an unhandled 57P01 plus a spuriously failed suite. Scoping the
+// scratch database to the caller's own database name makes the isolation this
+// file already intended actually hold.
+const DB_NAME = `${new URL(DATABASE_URL).pathname.replace(/^\//, "") || "regulait"}_stream`.slice(
+  0,
+  63,
+);
 const streamUrl = (() => {
   const u = new URL(DATABASE_URL);
   u.pathname = "/" + DB_NAME;
@@ -139,6 +150,15 @@ beforeAll(async () => {
   await admin.execute(sql.raw(`DROP DATABASE IF EXISTS ${DB_NAME} WITH (FORCE)`));
   await admin.execute(sql.raw(`CREATE DATABASE ${DB_NAME}`));
   db = createDb(streamUrl);
+  // This file DROPs its own database WITH (FORCE) at both ends of its life,
+  // which terminates any backend still attached to it. pg surfaces an idle
+  // client dying as a Pool 'error' event, and a Pool with no 'error' listener
+  // re-throws it as an UNCAUGHT exception — which vitest reports as a run-level
+  // error and, when the timing is unlucky, as a spuriously failed suite with
+  // all 15 tests skipped. The termination is expected here; swallow it rather
+  // than letting a deliberate teardown look like a product failure.
+  db.$client.on("error", () => {});
+  admin.$client.on("error", () => {});
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "b".repeat(64) });
 
