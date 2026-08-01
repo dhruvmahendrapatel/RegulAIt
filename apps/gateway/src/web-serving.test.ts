@@ -100,10 +100,7 @@ describe("GET /ui — the SPA shell", () => {
       const res = await unbuiltApp.inject({ method: "GET", url });
       expect(res.statusCode).toBe(503);
       expect(res.json().error).toBe("web_bundle_not_built");
-      expect(res.json().detail).toContain("pnpm --filter @regulait/web build");
-      // the detail must NOT keep pointing at a fallback UI that no longer
-      // exists — the legacy shells are removed (ADR-0026 amendment)
-      expect(res.json().detail).toContain("no fallback UI");
+      expect(res.json().detail).toContain("legacy UI remains at /app");
     }
   });
 });
@@ -139,7 +136,7 @@ describe("no auth bypass — /ui serving never shadows the API surface", () => {
     expect(res.json().isAdmin).toBe(true);
   });
 
-  it("phase-2 swap: / , /app and /admin all redirect to the SPA at /ui, still without a credential", async () => {
+  it("phase-2 swap: / , /app and /admin all redirect to the SPA at /ui", async () => {
     for (const url of ["/", "/app", "/admin"]) {
       const res = await app.inject({ method: "GET", url });
       expect(res.statusCode).toBe(302);
@@ -147,31 +144,14 @@ describe("no auth bypass — /ui serving never shadows the API surface", () => {
     }
   });
 
-  it("the legacy shells are GONE: /legacy/* is an unregistered path, never HTML", async () => {
-    // ADR-0026 amendment (2026-08-01): admin-portal.ts, app-ui.ts and
-    // ui-theme.ts are deleted, so /legacy/app and /legacy/admin register no
-    // route at all. They now behave exactly like any other path the gateway
-    // does not serve — no exception was carved for them, and in particular
-    // they are NOT auth-exempt any more, so an anonymous browser hitting an
-    // old bookmark gets the gateway's uniform default-deny rather than a
-    // login-shaped hint that a console is still hiding back there.
-    for (const url of ["/legacy/app", "/legacy/admin", "/legacy/anything"]) {
-      const anon = await app.inject({ method: "GET", url });
-      expect(anon.statusCode).toBe(401);
-      expect(anon.json().error).toBe("unauthenticated");
-
-      const withCred = await app.inject({
-        method: "GET",
-        url,
-        headers: { authorization: `Bearer ${BOOT}` },
-      });
-      expect(withCred.statusCode).toBe(404);
-      // whatever the status, no byte of a legacy shell can come back
-      for (const res of [anon, withCred]) {
-        expect(res.headers["content-type"]).not.toContain("text/html");
-        expect(res.body).not.toContain("<!doctype");
-        expect(res.body).not.toContain("Deprecated");
-      }
+  it("legacy shells stay reachable for one release at /legacy/*, labeled deprecated", async () => {
+    for (const url of ["/legacy/app", "/legacy/admin"]) {
+      const res = await app.inject({ method: "GET", url });
+      expect(res.statusCode).toBe(200);
+      expect(res.headers["content-type"]).toContain("text/html");
+      expect(res.body).toContain("Deprecated");
+      expect(res.body).toContain('href="/ui"');
+      expect(res.body).not.toBe(INDEX_HTML);
     }
   });
 

@@ -6351,14 +6351,31 @@ describe("compliance classification cascade (§8.3)", () => {
   });
 });
 
-// ADR-0012's admin-portal SHELL is deleted (ADR-0026 amendment, 2026-08-01) —
-// the test that asserted its tab titles went with it, because the thing it
-// described no longer exists and the SPA's own Playwright suite is what proves
-// those surfaces render now. What survives here is the half that was never
-// about the shell: the list endpoints ADR-0012 added to close the API-parity
-// gap, and their admin-only gating. Those are real backend behaviour, they are
-// what the SPA reads, and pillar 1 says they must stay 403 for non-admins.
-describe("ADR-0012 API-parity gap endpoints (the admin lists every UI reads)", () => {
+describe("admin portal (ADR-0012): static shell + API-parity gap endpoints", () => {
+  it("GET /legacy/admin serves the shell without auth — zero data, zero secrets inside", async () => {
+    // phase-2 swap (ADR-0026): /admin now redirects to the SPA; the legacy
+    // shell stays served for one release at /legacy/admin.
+    const res = await app.inject({ method: "GET", url: "/legacy/admin" });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toContain("text/html");
+    // §6 functional surfaces, as the (restructured) tab titles — Users & Roles
+    // is now split into Users / Roles / Teams, and the governance tabs carry
+    // their shorter section-grouped labels.
+    for (const panel of [
+      "Users", "Roles", "Teams", "Agents", "Connectors", "MCP Servers",
+      "Rules Engine", "Audit Log", "Approvals Queue",
+      "Simulation / Access preview", "Cost & Projects",
+    ]) {
+      expect(res.body).toContain(panel);
+    }
+    // the grouped-nav section headers are present (the new information architecture)
+    for (const section of ["Identity & Access", "AI Governance", "Policy", "Operations"]) {
+      expect(res.body).toContain(section);
+    }
+    // the shell holds no data: nothing it serves varies with DB state
+    expect(res.body).not.toContain("@example.com");
+  });
+
   it("the gap list endpoints exist and stay admin-only", async () => {
     const usersList = await app.inject({ method: "GET", headers: AUTH, url: "/v1/users" });
     expect(usersList.statusCode).toBe(200);
@@ -7422,11 +7439,17 @@ describe("UI plumbing: /v1/me and own-scoped list views", () => {
   });
 });
 
-// The end-user shell at /legacy/app is deleted (ADR-0026 amendment): this
-// describe asserted only that the removed HTML string contained its own page
-// names, so there is nothing left for it to test. /legacy/* being gone is
-// asserted in web-serving.test.ts, and the workspace pages themselves are
-// covered by the SPA's Playwright journeys.
+describe("end-user app shell (/legacy/app after the phase-2 swap)", () => {
+  it("serves without auth — zero data, zero secrets — with all workspace pages", async () => {
+    const res = await app.inject({ method: "GET", url: "/legacy/app" });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toContain("text/html");
+    for (const page of ["Playground", "Runs", "Workflows", "Inbox", "Projects"]) {
+      expect(res.body).toContain(page);
+    }
+    expect(res.body).not.toContain("@example.com");
+  });
+});
 
 describe("slice 3: the approval loop closes — approver reads, reasons, admin override", () => {
   let adminId: string;
