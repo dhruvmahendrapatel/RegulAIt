@@ -360,6 +360,108 @@ export interface ProjectCosts {
   estimatedSavings?: Array<{ technique: string; estimatedCostSavedUsd: number }>;
 }
 
+// ---- pillar 4: the shared context store (§9.2 / ADR-0011) ----------------
+// Mirrors the gateway contracts in projects.ts exactly:
+//   GET  /v1/projects/:id/context                 -> ContextResponse
+//   GET  /v1/projects/:id/context?key=&history=1  -> ContextHistoryResponse
+//   POST /v1/projects/:id/context                 -> ContextWriteOutcome (201)
+//        409 { error: "base_revision_required", latestAccepted }
+//        422 { error: "no_arbiter", detail }
+//   POST /v1/projects/:id/context/promote         -> ContextWriteOutcome (201)
+//        403 { error: "not_the_artifact_owner" } / 404 unknown_artifact
+//   GET  /v1/projects/:id/context/graph           -> ContextGraphResponse
+
+export interface ContextProvenance {
+  userId?: string | null;
+  userName?: string | null;
+  teamId?: string | null;
+  teamName?: string | null;
+  sourceArtifactId?: string | null;
+  at?: string | null;
+}
+
+/** the current (highest ACCEPTED) revision of one key */
+export interface ContextItem {
+  key: string;
+  revision: number;
+  content: string;
+  provenance?: ContextProvenance;
+}
+
+/** a retained (accepted=false) revision whose conflict still sits with the arbiter */
+export interface ContextPendingItem {
+  itemId: string;
+  key: string;
+  revision: number;
+  baseRevision: number | null;
+  content: string;
+  byName?: string | null;
+  teamName?: string | null;
+  at: string;
+  approvalId: string;
+}
+
+export interface ContextResponse {
+  context?: ContextItem[];
+  pending?: ContextPendingItem[];
+  arbiter?: { userId: string; name?: string | null } | null;
+}
+
+/** every retained side of every conflict for one key, oldest revision first */
+export interface ContextHistoryRow {
+  id: string;
+  key: string;
+  revision: number;
+  baseRevision: number | null;
+  content: string;
+  accepted: boolean;
+  sourceArtifactId?: string | null;
+  createdAt: string;
+  byName?: string | null;
+  teamName?: string | null;
+  pendingApprovalId?: string | null;
+}
+
+export interface ContextHistoryResponse {
+  history?: ContextHistoryRow[];
+}
+
+/**
+ * The write answer is an OUTCOME OBJECT, never a success boolean: a 201 with
+ * `accepted: false` / `conflict: true` means the revision was RETAINED but is
+ * NOT the current value — it was routed to the project's named arbiter. Every
+ * caller must branch on it rather than treat the response as truthy.
+ */
+export interface ContextWriteOutcome {
+  id: string;
+  key: string;
+  revision: number;
+  accepted: boolean;
+  conflict?: boolean;
+  approvalId?: string | null;
+}
+
+export interface ContextGraphNode {
+  id: string;
+  key: string;
+  revision: number;
+  baseRevision: number | null;
+  accepted: boolean;
+  /** retained AND still awaiting the arbiter's decision */
+  pending: boolean;
+  /** truncated to 240 chars server-side — a preview, never the full text */
+  content: string;
+  contributor?: { userId?: string | null; name?: string | null; teamId?: string | null; teamName?: string | null };
+  at: string;
+}
+
+export interface ContextGraphResponse {
+  project: { id: string; name: string };
+  nodes?: ContextGraphNode[];
+  /** accepted head per key — everything else accepted is superseded */
+  keys?: Array<{ key: string; currentRevision: number }>;
+}
+
 // ---- spend / dashboard ---------------------------------------------------
 
 export interface UsageEventsResponse {
