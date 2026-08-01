@@ -653,3 +653,188 @@ five only because most connection fixtures in this codebase are `provider: "mock
   port; no assertion was altered.
 - `pnpm -r build` clean; full `pnpm -r test` green on a freshly dropped/recreated `regulait_test`,
   and green again under `--sequence.shuffle.files`.
+
+---
+
+## Amendment — 2026-08-01: the https DNS-rebind TOCTOU is closed (pinned egress transport)
+
+- **Status**: Accepted
+- **Migration**: none. No DDL, no schema change, **no new dependency** (see below)
+
+### What was still open
+
+Three consecutive changes to this ADR each disclosed the same window and each deliberately left
+it open. The original wording, item #1 of "WHAT THIS DOES **NOT** MITIGATE":
+
+> For **https** it is not pinned — rewriting to an IP literal breaks SNI and certificate
+> verification, and Node's global fetch exposes no supported hook for supplying a pinned `lookup`
+> while keeping the original `servername`. […] Closing it needs a pinned-`lookup` dispatcher
+> (`undici.Agent` with `connect: { lookup, servername }`), which is a **dependency decision**, not
+> a code tweak.
+
+The attack it names is concrete. The guard resolves an allow-listed hostname and checks every
+address it gets back; Node's global `fetch` then resolves the same name a second time when it
+actually opens the socket. An attacker who controls DNS for a name that is on the allow-list
+answers the first query with a benign public address and the second with `169.254.169.254`. The
+guard's verdict — and the audit row it writes, which says which addresses were validated —
+describes a destination the socket never went to. It is harder than the plaintext-http case
+because the attacker must also present a certificate valid for the allow-listed name, but for a
+name they control that is a free ACME issuance, so "harder" is not "mitigated".
+
+### The dependency decision: NO NEW DEPENDENCY
+
+This is the decision ADR-0034 deferred, and it is taken here explicitly.
+
+Node's global `fetch` is undici underneath, but **Node exports no `undici` module and no `Agent`
+class**. Both Node versions this project pins agree and are on the same major — `.github/workflows/ci.yml`
+sets `node-version: 22` and the `Dockerfile` builds `FROM node:22-slim` — so there is no version
+skew to reason about, and on Node 22 there is no built-in `undici` surface to import. Reaching
+undici's `Agent` from inside this codebase would mean one of exactly two things:
+
+1. **Add `undici` as a direct dependency** — a second, independently-versioned copy of an HTTP
+   stack, in the security path. It would also have to bring its own `fetch` along with it: a
+   userland `Agent` handed to the *built-in* `fetch` as a `dispatcher` crosses two separate copies
+   of undici's internals, which is not a contract anyone guarantees.
+2. **Reach the built-in copy through `globalThis[Symbol.for("undici.globalDispatcher.1")]`** — an
+   undocumented internal that can change or disappear in a Node patch release, and whose absence
+   would be *silent* precisely when the code that depends on it is what decides where our sockets
+   go.
+
+Neither survives the posture this repo already applies one layer out. `.github/workflows/ci.yml`
+refuses `dorny/paths-filter` and `tj-actions/changed-files` on the stated grounds that "a
+third-party action in the CI path is a supply-chain surface", and ADR-0012 took the same line on
+the admin portal's dependency tree. **This code sits in the security path, so it earns more of
+that scrutiny, not less**: a compromised release of the package that chooses our sockets'
+destination is a strictly worse event than a compromised release of a build tool.
+
+The decision is therefore to use the **standard library**, which turns out to offer the whole
+capability on documented, stable API:
+
+- `http.request` / `https.request` accept a **`lookup`** option (it is forwarded to
+  `net.connect`). Supply a `lookup` that resolves nothing and returns the addresses the guard just
+  validated, and there is no second resolution — so there is no window.
+- Because the URL keeps its **original hostname** rather than being rewritten to an IP literal,
+  `tls` still derives **SNI** from it and still runs the default `checkServerIdentity` against it.
+
+The cost of that choice is honest and worth naming: `apps/gateway/src/pinned-fetch.ts` is a small,
+deliberate re-implementation of the slice of `fetch` the guarded call sites actually use (method,
+headers, buffered body, streamed response, `content-encoding` decoding, `AbortSignal`) rather than
+a `dispatcher` option passed to somebody else's fetch. That is roughly 300 lines of our code
+instead of ~50k lines of somebody else's, in the one module where we most want to be able to read
+every line. It is scoped as tightly as possible: it is not a general-purpose fetch, it is the
+transport for an already-validated destination, and nothing outside `createGuardedFetch` calls it.
+
+### What changed
+
+**`createGuardedFetch` remains the single entry point.** There is no second function, no
+scheme-specific export, and no caller anywhere had to learn anything: `custom-providers.ts`,
+`credential-egress.ts` and `connection-egress.ts` are untouched apart from their header comments.
+Inside it, the http/https fork is **gone** — both schemes now take the same path:
+
+- keep the URL's hostname (no IP-literal rewrite),
+- connect through `pinnedLookup(decision.addresses)`,
+- leave TLS entirely alone.
+
+**Certificate verification is not relaxed to make this work.** `rejectUnauthorized` keeps its
+default `true`, no `checkServerIdentity` override is installed, and no `ca` override exists on any
+production path. That was the trap in this fix — pinning by IP literal and then disabling the
+identity check to compensate would have traded a rebind window for an unauthenticated-TLS hole,
+which is strictly worse. Two tests exist solely to prove it did not happen (below).
+
+**The http path is not regressed.** It was already pinned (URL rewritten to the validated IP with
+the original hostname in `Host`); it is now pinned by the same `lookup` instead, and Node derives
+the identical `Host` header from the preserved hostname. The `pinned.test` http case asserts both
+the served address and the `Host` value.
+
+### Pinning semantics for multi-address hosts
+
+The guard validates **every** address a host resolves to. The pin is to that **whole validated
+set**, not to `addresses[0]`:
+
+- `pinnedLookup` answers with the full validated list, honouring Node's `all` / `family` contract,
+  so Node's own `autoSelectFamily` connect logic picks and fails over among them exactly as it
+  would for a real DNS answer. A legitimately multi-homed or dual-stack endpoint keeps working,
+  including when its first address is unreachable (tested).
+- The security property is the other half and is absolute: **an address that was never validated
+  cannot be dialled**, because the resolver that would have produced it is never consulted again.
+- When every validated address is unreachable the call **fails closed** — it does not fall back to
+  DNS (tested).
+- **Connection reuse is keyed on the validated address set**, not on host:port. Node's
+  `Agent.getName()` does not include `lookup`, so one shared agent would hand a request pinned to
+  address A a pooled socket previously opened to address B for the same hostname — quietly undoing
+  the pin. One agent per (scheme, validated address set) makes that impossible, and there is a
+  named regression test for it because it is exactly the kind of thing that would come back.
+
+### What the rebind test proves, before and after
+
+`apps/gateway/src/pinned-fetch.test.ts` performs the attack rather than describing it. Two **real
+TLS listeners**, with a real certificate chain issued for the test and trusted process-wide via
+`tls.setDefaultCACertificates` (no production `ca` seam exists, so the suite exercises the same
+trust configuration a deployment uses), bound to two loopback addresses on the **same port**:
+`127.0.0.1` is the address the guard validates, `127.0.0.2` is what the attacker's second DNS
+answer names. The resolver stub returns the benign address on its first call and the attacker's on
+its second — the rebind, exactly.
+
+- **Before (control).** `unpinnedRequest` reproduces the pre-amendment shape: validate the name,
+  then let the connect path resolve it a second time. Against the identical stub, `checkEgress`
+  reports it validated `127.0.0.1` and **the socket lands on `127.0.0.2`** — asserted on
+  `res.socket.remoteAddress`, on the responding server's own bind address, and on the resolver
+  having been called twice. The hole, reproduced.
+- **After.** The same stub through `createGuardedFetch` is served by `127.0.0.1`, the attacker's
+  listener records **zero** connections, and the resolver stub is called **exactly once** — the
+  second answer is never even asked for.
+- **Genuinely red before / green after**, verified rather than assumed: re-resolving at connect
+  time inside `createGuardedFetch` (a one-line simulation of the old behaviour) turns the three
+  PINNED assertions red — including the IMDS one, which then spends five seconds actually trying
+  to connect to `169.254.169.254` — and reverting turns them green. 15 of the 18 pass either way,
+  because they are the "did anything else break" half.
+
+**What the test does NOT prove, stated plainly.** The literal `169.254.169.254` case is asserted
+one step short of the socket, because nothing can bind IMDS's address in a test. For that case the
+proof is that the attacker's second answer is **never produced at all** (`state.calls === 1`) and
+the response comes from the validated listener. The socket-level claim is carried by the
+`127.0.0.2` tests. The two are separate assertions and the suite labels them as such rather than
+blurring them together.
+
+Also covered, because closing one hole must not open another: a host whose only addresses are
+blocked is still refused with nothing leaving the box; split DNS still refuses (one good answer
+does not launder a bad one); a non-allow-listed host is still refused before any socket opens; the
+allow-listed loopback path still works end to end over real TLS with SNI carrying the **hostname**
+and the POST body round-tripping; redirects are still refused; a gzipped response is still decoded
+as it was under global `fetch`; **a certificate whose SANs do not match the hostname still fails**
+(`ERR_TLS_CERT_ALTNAME_INVALID`, with the application never reached); and **a certificate from an
+untrusted issuer still fails**. Those last two are the anti-regression for the trap named above.
+
+### What is STILL not mitigated
+
+1. **An injected `fetchImpl` is unpinned by construction.** `GuardedFetchOptions.fetchImpl` is a
+   test seam; an injected fetch resolves the hostname itself, so it keeps the pre-amendment
+   behaviour including the http IP-literal rewrite. No production call site passes one —
+   `custom-providers.ts`, `credential-egress.ts` and `connection-egress.ts` thread it straight from
+   their own `deps`/`opts` and `app.ts` supplies none — so every real dispatch is pinned. It is
+   documented on the type rather than left implicit, because a security property that evaporates
+   under an injected dependency is exactly what a later reader must not have to rediscover.
+2. **Pinning constrains where the socket goes, not what the destination serves.** An attacker who
+   *legitimately* controls an allow-listed name still reaches their own server. That was always
+   true and is the allow-list's job, not the transport's.
+3. **The request body is buffered before the socket opens.** Every guarded call site sends a JSON
+   document, and buffering is what makes multi-address connect safe. A future streaming-upload
+   call site would need this revisited.
+4. **Ports and paths are still unconstrained** on an allow-listed host (unchanged).
+5. **An admin who can edit `egress_allow_hosts` is still the trust root** (unchanged).
+6. **`mcp_servers.url` and `oidc_providers.issuerUrl` remain exposed** — unchanged by this
+   amendment, and both still need the design decisions the previous amendment described. Note that
+   when they do come inside the guard they inherit this pinning for free.
+
+### Evidence
+
+- `pinned-fetch.test.ts`, **18 tests**, described above: the control that reproduces the rebind,
+  the three pinned cases that are red without the fix and green with it, the pooled-socket-reuse
+  regression test, the two certificate-verification probes, multi-address failover and fail-closed,
+  and the `pinnedLookup` unit cases (`all`, single, family filter, and never inventing an address).
+- **Suite**: workspace **1685 → 1703**, gateway **976/73 files → 994/74 files**. Delta **+18**, all
+  of it `pinned-fetch.test.ts`. **Zero pre-existing tests changed** — no fixture, no assertion, no
+  `beforeAll` anywhere else was touched, which is itself the compatibility finding: routing every
+  real (non-injected) guarded request through a new transport moved nothing.
+- `pnpm -r build` clean; full `pnpm -r test` green on a freshly dropped/recreated `regulait_test`,
+  and the gateway suite green again under `--sequence.shuffle.files`.

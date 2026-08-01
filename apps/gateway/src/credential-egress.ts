@@ -97,9 +97,11 @@ export async function checkCredentialBaseUrl(
 
 /**
  * The fetch a credential-overridden dispatch must use. Re-validates on EVERY
- * HTTP request the SDK makes, pins plaintext http to the validated address, and
- * refuses redirects — identical semantics to the custom-provider path, because
- * it is literally the same function.
+ * HTTP request the SDK makes, pins the connection to the validated addresses
+ * for BOTH schemes (ADR-0034 amendment #3 — https keeps SNI and certificate
+ * verification against the original hostname), and refuses redirects —
+ * identical semantics to the custom-provider path, because it is literally the
+ * same function.
  */
 export function credentialGuardedFetch(
   allowList: EgressAllowEntry[],
