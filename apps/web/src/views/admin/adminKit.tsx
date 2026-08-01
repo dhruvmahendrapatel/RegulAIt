@@ -15,6 +15,8 @@ import type {
   AdminUser,
   ComplianceProfile,
   Connector,
+  CustomModelProvider,
+  EgressAllowHost,
   McpServer,
   McpTool,
   Role,
@@ -47,6 +49,8 @@ export const adminKeys = {
   servers: ["admin", "servers"] as const,
   projects: ["admin", "projects"] as const,
   profiles: ["admin", "compliance-profiles"] as const,
+  customProviders: ["admin", "custom-model-providers"] as const,
+  egressHosts: ["admin", "egress-allow-hosts"] as const,
 };
 
 export const useUsers = () =>
@@ -66,6 +70,20 @@ export const useServers = () =>
   useQuery({ queryKey: adminKeys.servers, queryFn: () => api.get<{ servers: McpServer[] }>("/v1/servers") });
 export const useProjects = () =>
   useQuery({ queryKey: adminKeys.projects, queryFn: () => api.get<{ projects: AdminProject[] }>("/v1/projects") });
+/** ADR-0034 — the registered custom endpoints. Admin-only, like every other
+ * catalog here; the API's projection has no field for the stored key. */
+export const useCustomProviders = () =>
+  useQuery({
+    queryKey: adminKeys.customProviders,
+    queryFn: () => api.get<{ providers: CustomModelProvider[] }>("/v1/custom-model-providers"),
+  });
+/** ADR-0034 — the egress allow-list. An EMPTY list means nothing is reachable;
+ * that is the default-deny posture, not a loading failure. */
+export const useEgressAllowHosts = () =>
+  useQuery({
+    queryKey: adminKeys.egressHosts,
+    queryFn: () => api.get<{ hosts: EgressAllowHost[] }>("/v1/egress-allow-hosts"),
+  });
 export const useComplianceProfiles = () =>
   useQuery({
     queryKey: adminKeys.profiles,

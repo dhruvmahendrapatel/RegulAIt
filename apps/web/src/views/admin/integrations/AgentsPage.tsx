@@ -5,8 +5,9 @@
  * run budget), and the per-user entitlement view.
  */
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { api } from "../../../api/client";
-import type { AdminAgent, UserAgentPolicyView } from "../../../api/adminTypes";
+import type { AdminAgent, CustomModelProvider, UserAgentPolicyView } from "../../../api/adminTypes";
 import { fmtUsd } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea } from "../../../ui/kit";
@@ -16,6 +17,7 @@ import {
   optionEls,
   useAction,
   useAgents,
+  useCustomProviders,
   useUsers,
   userOpts,
 } from "../adminKit";
@@ -27,10 +29,17 @@ const CLEAR = "__clear__";
 export default function AgentsPage() {
   const agents = useAgents();
   const users = useUsers();
+  const customProviders = useCustomProviders();
   const act = useAction();
 
   const aOpts = agentOpts(agents.data?.agents);
   const uOpts = userOpts(users.data?.users);
+  // ADR-0034: an agent bound to a custom endpoint shows WHICH endpoint, not
+  // just the word "custom" — two agents can both be provider 'custom' and go
+  // to two different hosts.
+  const endpointName = new Map(
+    (customProviders.data?.providers ?? []).map((p) => [p.id, p.name] as const),
+  );
 
   return (
     <>
@@ -43,7 +52,22 @@ export default function AgentsPage() {
           <Table<AdminAgent>
             columns={[
               { key: "name", header: "Name", sort: (x) => x.name, render: (x) => x.name },
-              { key: "provider", header: "Provider", sort: (x) => x.provider, render: (x) => x.provider },
+              {
+                key: "provider",
+                header: "Provider",
+                sort: (x) => x.provider,
+                render: (x) =>
+                  x.provider === "custom" ? (
+                    <>
+                      custom ·{" "}
+                      <span className={v.mono}>
+                        {x.customProviderId ? (endpointName.get(x.customProviderId) ?? x.customProviderId) : "—"}
+                      </span>
+                    </>
+                  ) : (
+                    x.provider
+                  ),
+              },
               { key: "tier", header: "Tier", align: "right", sort: (x) => x.tier, render: (x) => x.tier },
               {
                 key: "model",
@@ -55,9 +79,16 @@ export default function AgentsPage() {
                 header: "$/MTok in → out",
                 align: "right",
                 render: (x) =>
-                  x.costPerMTokIn == null && x.costPerMTokOut == null
-                    ? "—"
-                    : `${fmtUsd(x.costPerMTokIn)} → ${fmtUsd(x.costPerMTokOut)}`,
+                  x.costPerMTokIn == null && x.costPerMTokOut == null ? (
+                    <span
+                      className={v.faint}
+                      title="No price is recorded. Spend is metered in real tokens with costUsd null, and the optimizer neither routes toward this agent nor claims savings against it."
+                    >
+                      unpriced
+                    </span>
+                  ) : (
+                    `${fmtUsd(x.costPerMTokIn)} → ${fmtUsd(x.costPerMTokOut)}`
+                  ),
               },
               {
                 key: "prompt",
@@ -110,18 +141,29 @@ export default function AgentsPage() {
   );
 }
 
+const EMPTY_AGENT = {
+  name: "",
+  provider: "anthropic",
+  customProviderId: "",
+  tier: "1",
+  model: "",
+  costPerMTokIn: "",
+  costPerMTokOut: "",
+  systemPrompt: "",
+};
+
 function RegisterAgentCard() {
   const act = useAction();
-  const [f, setF] = useState({
-    name: "",
-    provider: "anthropic",
-    tier: "1",
-    model: "",
-    costPerMTokIn: "",
-    costPerMTokOut: "",
-    systemPrompt: "",
-  });
+  const customProviders = useCustomProviders();
+  const [f, setF] = useState(EMPTY_AGENT);
   const set = (k: keyof typeof f, val: string) => setF((s) => ({ ...s, [k]: val }));
+
+  // ADR-0034: ONLY ENABLED ENDPOINTS ARE SELECTABLE. A disabled one is either
+  // untested or deliberately switched off; binding an agent to it would build
+  // a 409 into the catalog.
+  const selectable: CustomModelProvider[] = (customProviders.data?.providers ?? []).filter((p) => p.enabled);
+  const isCustom = f.provider === "custom";
+
   return (
     <Card title="Register an agent">
       <form
@@ -136,13 +178,17 @@ function RegisterAgentCard() {
                   provider: f.provider,
                   tier: Number(f.tier),
                   ...(f.model ? { model: f.model } : {}),
+                  // The DB models `provider = 'custom'` and `customProviderId`
+                  // as a discriminated union (a CHECK constraint), so the two
+                  // are always sent together or not at all.
+                  ...(isCustom ? { customProviderId: f.customProviderId } : {}),
                   ...(f.costPerMTokIn ? { costPerMTokIn: Number(f.costPerMTokIn) } : {}),
                   ...(f.costPerMTokOut ? { costPerMTokOut: Number(f.costPerMTokOut) } : {}),
                   ...(f.systemPrompt ? { systemPrompt: f.systemPrompt } : {}),
                 }),
               "Agent registered",
             )
-            .then((ok) => ok && setF({ name: "", provider: "anthropic", tier: "1", model: "", costPerMTokIn: "", costPerMTokOut: "", systemPrompt: "" }));
+            .then((ok) => ok && setF(EMPTY_AGENT));
         }}
       >
         <div className={a.formRow}>
@@ -150,27 +196,68 @@ function RegisterAgentCard() {
             <Input required value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="e.g. claude-opus" />
           </Field>
           <Field label="Provider">
-            <Select value={f.provider} onChange={(e) => set("provider", e.target.value)}>
-              {["anthropic", "openai", "google", "xai", "mock"].map((p) => (
+            <Select
+              value={f.provider}
+              onChange={(e) => {
+                set("provider", e.target.value);
+                // never leave a stale endpoint id behind on a non-custom agent
+                if (e.target.value !== "custom") set("customProviderId", "");
+              }}
+              data-testid="agent-provider"
+            >
+              {["anthropic", "openai", "google", "xai", "mock", "custom"].map((p) => (
                 <option key={p} value={p}>
                   {p}
                 </option>
               ))}
             </Select>
           </Field>
+          {isCustom && (
+            <Field label="Custom endpoint (enabled endpoints only)" grow>
+              <Select
+                required
+                value={f.customProviderId}
+                onChange={(e) => set("customProviderId", e.target.value)}
+                data-testid="agent-custom-endpoint"
+              >
+                {optionEls(
+                  selectable.map((p) => ({ v: p.id, l: `${p.name} · ${p.wireProtocol} · ${p.baseUrl}` })),
+                  "— select an endpoint —",
+                )}
+              </Select>
+            </Field>
+          )}
           <Field label="Tier (0 = cheapest)">
             <Input required type="number" min={0} value={f.tier} onChange={(e) => set("tier", e.target.value)} />
           </Field>
           <Field label="Model id (blank = not dispatchable)">
             <Input value={f.model} onChange={(e) => set("model", e.target.value)} placeholder="e.g. claude-opus-5" />
           </Field>
-          <Field label="$/MTok in">
+          <Field label={isCustom ? "$/MTok in — blank = unpriced" : "$/MTok in"}>
             <Input type="number" step="any" value={f.costPerMTokIn} onChange={(e) => set("costPerMTokIn", e.target.value)} />
           </Field>
-          <Field label="$/MTok out">
+          <Field label={isCustom ? "$/MTok out — blank = unpriced" : "$/MTok out"}>
             <Input type="number" step="any" value={f.costPerMTokOut} onChange={(e) => set("costPerMTokOut", e.target.value)} />
           </Field>
         </div>
+        {isCustom && (
+          <>
+            {selectable.length === 0 && (
+              <p className={v.errLine} role="alert" data-testid="no-enabled-endpoints">
+                No custom endpoint is enabled yet. Register one under{" "}
+                <Link to="/admin/custom-providers">Integrations → Custom LLM providers</Link>, pass its
+                connection test, then enable it — only enabled endpoints can be bound to an agent.
+              </p>
+            )}
+            <p className={v.faint}>
+              A self-hosted endpoint has no list price, and <strong>leaving both cost fields blank is the
+              right answer</strong> — null means unpriced, not zero and not unknown-so-guess. Spend is still
+              metered in real tokens, with <span className={v.mono}>costUsd: null</span>; pillar 6's
+              optimizer passes through rather than comparing, never routes toward an unpriced model, and
+              never claims savings against one. Please do not invent a number to fill the box.
+            </p>
+          </>
+        )}
         <Field label="System prompt — admin base (governance artifact, optional)">
           <Textarea
             rows={4}

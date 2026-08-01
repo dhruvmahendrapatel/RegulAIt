@@ -554,7 +554,8 @@ test("infrastructure: posture, set approver, propose a governed remediation", as
   track.assertClean("infrastructure");
 });
 
-test("organization: the five-section org settings form saves partially", async () => {
+// six sections since ADR-0034 added the custom-model-provider master switch
+test("organization: the six-section org settings form saves partially", async () => {
   await nav("Organization", "Organization");
   await expect(page.getByText("1 · Optimization", { exact: false })).toBeVisible();
   await page.getByRole("button", { name: "Save approval policy" }).click();
