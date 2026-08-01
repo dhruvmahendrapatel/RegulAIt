@@ -220,10 +220,40 @@ export function readCookie(header: string | string[] | undefined, name: string):
   return null;
 }
 
+/**
+ * Did this request REALLY arrive over TLS? This decides the session cookie's
+ * `Secure` flag, so getting it wrong in the "no" direction leaks the session
+ * token onto a plaintext hop.
+ *
+ * ADR-0031 (item 3 follow-up) — this used to read `x-forwarded-proto` straight
+ * off the raw headers, which Fastify never gates on `trustProxy`. ADR-0029
+ * assessed that as safe on the grounds that forging the header can only turn
+ * `Secure` ON. That is the harmless direction; the harmful one is the reverse.
+ * Anything able to reach the gateway port without passing through Caddy — host
+ * loopback (the port is published there), a sibling container, a future
+ * sidecar — could send `x-forwarded-proto: http` and be issued a session cookie
+ * with NO `Secure` flag, which the browser will then happily transmit in
+ * cleartext. An attacker choosing whether our cookies are protected is not a
+ * property we want to keep.
+ *
+ * `req.protocol` is Fastify's own answer to the same question, and it is
+ * trust-gated: it consults `x-forwarded-proto` only when the socket peer
+ * matches the configured `trustProxy` (see trusted-proxy.ts), and otherwise
+ * reports the real socket protocol. So the value is decided by the named proxy
+ * or by the transport itself — never by whoever happened to connect.
+ *
+ * Two consequences, both deliberate:
+ *  - Multi-hop `x-forwarded-proto: a, b` is now read as the LAST entry (the
+ *    nearest, trusted proxy) rather than the first. The first entry is exactly
+ *    the one a client can inject when any upstream *appends* rather than
+ *    overwrites, so the last is the safer of the two. Our Caddy sends a single
+ *    value, so no chain arises in this topology.
+ *  - A deployment behind a TLS terminator MUST name it in
+ *    REGULAIT_TRUSTED_PROXIES, or `Secure` turns off — docker-compose.yml sets
+ *    it, and main.ts prints the effective posture at boot precisely so this
+ *    cannot be got wrong quietly.
+ */
 export function requestIsSecure(req: FastifyRequest): boolean {
-  const fwd = req.headers["x-forwarded-proto"];
-  const proto = Array.isArray(fwd) ? fwd[0] : fwd;
-  if (proto) return proto.split(",")[0]!.trim() === "https";
   return req.protocol === "https";
 }
 
