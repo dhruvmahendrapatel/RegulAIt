@@ -1,0 +1,41 @@
+-- Migration 0047 (ADR-0030) — a SECOND login identifier: users.username.
+--
+-- ROADMAP §6 row 17: the owner asked to sign in as `dhruv`. Sign-in has been
+-- email-keyed everywhere since ADR-0025, and `POST /auth/login` rejected any
+-- non-email identifier with a 400 from zod BEFORE auth logic ran — so the
+-- deferral was real, not cosmetic.
+--
+-- THE COLLISION RULE (the reason the CHECK below exists at all): a username
+-- must never be able to impersonate another user's email. One login field
+-- resolves BOTH namespaces, so the two namespaces have to be provably
+-- disjoint. `@` is what makes an identifier an email, so `@` is exactly what
+-- the username shape forbids. The resolution rule then becomes total and
+-- unambiguous: an identifier containing '@' is an email, anything else is a
+-- username, and no string can ever be both.
+--
+-- CASE FOLDING — normalize-on-write, NOT a functional index. The shape CHECK
+-- admits lowercase only, so the stored namespace is lowercase by
+-- construction; the application lowercases every write and every lookup. A
+-- plain UNIQUE index is therefore case-insensitively unique with no second
+-- index to keep in sync and no way for `Dhruv` and `dhruv` to coexist even if
+-- a row is inserted by hand behind the API (the CHECK refuses `Dhruv`
+-- outright). Uniqueness is a property of the storage, not of a code path.
+--
+-- NULLABLE on purpose: every existing user has no username and keeps signing
+-- in exactly as before. Postgres treats NULLs as distinct in a UNIQUE index,
+-- so any number of users may have none.
+--
+-- Shape: ^[a-z0-9][a-z0-9._-]{1,62}$ — 2..63 chars, starts alphanumeric, then
+-- letters/digits/dot/underscore/hyphen. No '@' (the collision rule), no
+-- whitespace, no uppercase, nothing that needs URL-escaping in a path.
+ALTER TABLE "users" ADD COLUMN "username" text;
+--> statement-breakpoint
+ALTER TABLE "users" ADD CONSTRAINT "users_username_shape_ck" CHECK ("username" IS NULL OR "username" ~ '^[a-z0-9][a-z0-9._-]{1,62}$');
+--> statement-breakpoint
+CREATE UNIQUE INDEX "users_username_uq" ON "users" ("username");
+--> statement-breakpoint
+-- ADR-0021 conventions: a new org-wide functional choice gets an org_settings
+-- dial with a BEHAVIOUR-PRESERVING default. Usernames are admin-managed
+-- (false) until an org opts in — the conservative default, and the one that
+-- matches how every other identity anchor (email, admin flag) already works.
+ALTER TABLE "org_settings" ADD COLUMN "username_self_service" boolean DEFAULT false NOT NULL;

@@ -1162,3 +1162,527 @@ describe("ADR-0028 — session origin + API-key password recovery", () => {
     }
   });
 });
+
+// ===========================================================================
+// ADR-0030 — LOGIN BY USERNAME (migration 0047).
+//
+// Beyond "it works", the two invariants this block exists to hold:
+//   1. ADR-0025's uniform-error invariant SURVIVES the second namespace — an
+//      unknown username, an unknown email and a wrong password are one status,
+//      one body, one scrypt cost;
+//   2. the namespaces cannot COLLIDE — a username can never contain '@', so it
+//      can never resolve as (or impersonate) somebody else's email, and case
+//      folding is a property of the STORAGE, not of a code path.
+// ===========================================================================
+describe("ADR-0030 — login by username", () => {
+  const PW = "correct-horse-Battery1";
+  const dom = "@user-test.example";
+
+  /** the NEW body shape: one identifier field, either namespace */
+  const loginBy = (identifier: string, password: string) =>
+    app.inject({ method: "POST", url: "/auth/login", headers: CSRF, payload: { identifier, password } });
+  /** the PRE-0047 body shape, byte-for-byte what shipped clients send */
+  const legacyLogin = (email: string, password: string) =>
+    app.inject({ method: "POST", url: "/auth/login", headers: CSRF, payload: { email, password } });
+  const setUsername = (userId: string, username: string | null) =>
+    app.inject({
+      method: "PUT", headers: AUTH, url: `/v1/users/${userId}/username`, payload: { username },
+    });
+  const selfSetUsername = (cookie: string, username: string | null) =>
+    app.inject({
+      method: "POST", url: "/auth/username", headers: CSRF,
+      cookies: { regulait_session: cookie }, payload: { username },
+    });
+  const setSelfService = async (on: boolean) => {
+    const r = await app.inject({
+      method: "PUT", headers: AUTH, url: "/v1/org/settings", payload: { usernameSelfService: on },
+    });
+    expect(r.statusCode).toBe(200);
+    expect(r.json().settings.usernameSelfService).toBe(on);
+  };
+  const usernameOf = async (userId: string) => {
+    const [row] = await db.select({ username: users.username }).from(users).where(eq(users.id, userId));
+    return row?.username ?? null;
+  };
+  const clearLockout = (userId: string) =>
+    db
+      .update(users)
+      .set({ failedLoginCount: 0, lastFailedLoginAt: null, lockedUntil: null })
+      .where(eq(users.id, userId));
+
+  let uid: string;
+  const EMAIL = `dhruv${dom}`;
+
+  beforeAll(async () => {
+    uid = await mkUser(EMAIL, "Dhruv Owner");
+    await onboard(uid, EMAIL, PW);
+  });
+
+  // org_settings is a shared singleton — never leave the dial flipped for the
+  // suites that run after this file
+  afterAll(async () => {
+    await app.inject({
+      method: "PUT", headers: AUTH, url: "/v1/org/settings", payload: { usernameSelfService: false },
+    });
+  });
+
+  // ---- admin management ---------------------------------------------------
+
+  it("an admin sets a username; it is audited and rides the users list payload", async () => {
+    const r = await setUsername(uid, "dhruv");
+    expect(r.statusCode).toBe(200);
+    expect(r.json()).toMatchObject({ id: uid, username: "dhruv", previousUsername: null });
+    const audit = await latestAudit("username-set");
+    expect(audit!.objectId).toBe(uid);
+    expect(audit!.effect).toBe("allow");
+    expect((audit!.detail as Record<string, unknown>).to).toBe("dhruv");
+    expect((audit!.detail as Record<string, unknown>).via).toBe("admin");
+    const list = await app.inject({ method: "GET", headers: AUTH, url: "/v1/users" });
+    const row = list.json().users.find((u: { id: string }) => u.id === uid);
+    expect(row.username).toBe("dhruv");
+  });
+
+  // ---- the point of the feature ------------------------------------------
+
+  it("login by USERNAME succeeds and yields exactly the same session as email login", async () => {
+    const r = await loginBy("dhruv", PW);
+    expect(r.statusCode).toBe(200);
+    expect(r.json().userId).toBe(uid);
+    const cookie = cookieOf(r);
+    const probe = await me(cookie);
+    expect(probe.statusCode).toBe(200);
+    expect(probe.json().userId).toBe(uid);
+    // a user can always SEE their own username
+    expect(probe.json().user.username).toBe("dhruv");
+    // ADR-0028: a password login is 'password' origin whichever identifier it used
+    const [row] = await db
+      .select({ origin: authSessions.origin })
+      .from(authSessions)
+      .where(eq(authSessions.tokenHash, hashToken(cookie)));
+    expect(row!.origin).toBe("password");
+    const audit = await latestAudit("login-succeeded");
+    expect((audit!.detail as Record<string, unknown>).identifierKind).toBe("username");
+  });
+
+  it("REGRESSION: the pre-0047 {email, password} body still logs in unchanged", async () => {
+    const r = await legacyLogin(EMAIL, PW);
+    expect(r.statusCode).toBe(200);
+    expect(r.json().userId).toBe(uid);
+    expect(cookieOf(r).length).toBeGreaterThan(10);
+    // and the same address through the new field name resolves identically
+    const viaIdentifier = await loginBy(EMAIL, PW);
+    expect(viaIdentifier.statusCode).toBe(200);
+    expect(viaIdentifier.json().userId).toBe(uid);
+  });
+
+  it("a legacy client that only knows the `email` field may still post a USERNAME in it", async () => {
+    // the resolution rule reads the VALUE, not the field name: no '@' ⇒ username
+    const r = await legacyLogin("dhruv", PW);
+    expect(r.statusCode).toBe(200);
+    expect(r.json().userId).toBe(uid);
+    // ...and a body with neither identifier is a plain 400, not a 500
+    const empty = await app.inject({
+      method: "POST", url: "/auth/login", headers: CSRF, payload: { password: PW },
+    });
+    expect(empty.statusCode).toBe(400);
+    expect(empty.json().error).toBe("validation");
+  });
+
+  // ---- the uniform-error invariant (ADR-0025) survives --------------------
+
+  it("an unknown USERNAME and a wrong password are indistinguishable — same status AND same body", async () => {
+    const unknownUsername = await loginBy("nobody-at-all", PW);
+    const wrongPassword = await loginBy("dhruv", "wrong-Password11");
+    const unknownEmail = await loginBy(`ghost${dom}`, PW);
+    expect(unknownUsername.statusCode).toBe(401);
+    expect(wrongPassword.statusCode).toBe(401);
+    expect(unknownEmail.statusCode).toBe(401);
+    // byte-identical bodies across all three failure modes
+    expect(unknownUsername.body).toBe(wrongPassword.body);
+    expect(unknownUsername.body).toBe(unknownEmail.body);
+    expect(unknownUsername.json()).toEqual({
+      error: "invalid_credentials",
+      detail: "email or password is incorrect",
+    });
+    // the audit trail — and ONLY the audit trail — knows which it was
+    const row = await latestAudit("login-failed");
+    expect(row!.effect).toBe("deny");
+    const detail = row!.detail as Record<string, unknown>;
+    expect(detail.identifierKind).toBe("email");
+    expect(detail.why).toBe("unknown_email");
+    await clearLockout(uid);
+  });
+
+  it("an unknown USERNAME still burns the scrypt path (no fast-fail timing oracle)", async () => {
+    const timed = async (fn: () => Promise<unknown>) => {
+      const started = process.hrtime.bigint();
+      await fn();
+      return Number(process.hrtime.bigint() - started) / 1e6;
+    };
+    // min-of-3 per path: scheduling noise only ever makes a run SLOWER, so the
+    // minimum is the stable floor to compare
+    const unknown: number[] = [];
+    const wrong: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      unknown.push(await timed(() => loginBy("still-nobody", PW)));
+      wrong.push(await timed(() => loginBy("dhruv", "wrong-Password11")));
+    }
+    const minUnknown = Math.min(...unknown);
+    const minWrong = Math.min(...wrong);
+    // a fast-fail (no hash computed) would be sub-millisecond; a scrypt at
+    // N=2^14 costs tens of milliseconds
+    expect(minUnknown).toBeGreaterThan(5);
+    expect(minUnknown).toBeGreaterThan(minWrong * 0.5);
+    await clearLockout(uid);
+  });
+
+  // ---- the collision rule -------------------------------------------------
+
+  it("a username containing '@' is REFUSED at write — the namespaces cannot overlap", async () => {
+    for (const bad of ["someone@else.example", "dhruv@", "@dhruv"]) {
+      const r = await setUsername(uid, bad);
+      expect(r.statusCode, bad).toBe(400);
+      expect(r.json().error).toBe("validation");
+    }
+    // the username set earlier survived every refusal
+    expect(await usernameOf(uid)).toBe("dhruv");
+  });
+
+  it("the shape is enforced on write: case is FOLDED, everything else is refused", async () => {
+    const other = await mkUser(`shape${dom}`, "Shape Test");
+    // uppercase is normalized, not rejected — `MixedCase` and `mixedcase` are one name
+    const folded = await setUsername(other, "MixedCase");
+    expect(folded.statusCode).toBe(200);
+    expect(folded.json().username).toBe("mixedcase");
+    for (const bad of ["a", "-leading", ".dot", "has space", "has/slash", "x".repeat(64)]) {
+      const r = await setUsername(other, bad);
+      expect(r.statusCode, bad).toBe(400);
+    }
+    expect(await usernameOf(other)).toBe("mixedcase");
+  });
+
+  it("case-insensitive uniqueness is REAL: 'Dhruv' collides with 'dhruv' (409 naming the conflict)", async () => {
+    const other = await mkUser(`clash${dom}`, "Clash Test");
+    const r = await setUsername(other, "Dhruv");
+    expect(r.statusCode).toBe(409);
+    expect(r.json().error).toBe("username_taken");
+    expect(r.json().detail).toContain("dhruv");
+    expect(r.json().detail).toContain(EMAIL); // admin surface: the 409 names the holder
+    expect(r.json().conflictUserId).toBe(uid);
+    // an exact-case collision answers identically
+    const exact = await setUsername(other, "dhruv");
+    expect(exact.statusCode).toBe(409);
+    expect(exact.json().error).toBe("username_taken");
+    expect(await usernameOf(other)).toBeNull();
+  });
+
+  it("the uniqueness guarantee is STRUCTURAL — the database itself refuses both violations", async () => {
+    const other = await mkUser(`raw${dom}`, "Raw Test");
+    // mixed case cannot even be STORED (migration 0047's CHECK), which is what
+    // makes the plain unique index case-insensitive by construction
+    await expect(
+      db.update(users).set({ username: "Dhruv" }).where(eq(users.id, other)),
+    ).rejects.toThrow();
+    // and a duplicate is refused by the unique index, API path or not
+    await expect(
+      db.update(users).set({ username: "dhruv" }).where(eq(users.id, other)),
+    ).rejects.toThrow();
+    expect(await usernameOf(other)).toBeNull();
+    // NULL is not unique-constrained: any number of users may have no username
+    const another = await mkUser(`raw2${dom}`, "Raw Test 2");
+    expect(await usernameOf(another)).toBeNull();
+  });
+
+  // ---- change / clear -----------------------------------------------------
+
+  it("an admin CHANGES a username: the old one stops working, the new one starts (audited)", async () => {
+    const r = await setUsername(uid, "dhruv.patel");
+    expect(r.statusCode).toBe(200);
+    expect(r.json()).toMatchObject({ username: "dhruv.patel", previousUsername: "dhruv" });
+    const audit = await latestAudit("username-changed");
+    expect(audit!.objectId).toBe(uid);
+    expect((audit!.detail as Record<string, unknown>).from).toBe("dhruv");
+    expect((await loginBy("dhruv", PW)).statusCode).toBe(401);
+    expect((await loginBy("dhruv.patel", PW)).statusCode).toBe(200);
+    // the email never stopped working through any of this
+    expect((await legacyLogin(EMAIL, PW)).statusCode).toBe(200);
+    await clearLockout(uid);
+    expect((await setUsername(uid, "dhruv")).statusCode).toBe(200);
+  });
+
+  it("an admin CLEARS a username: login by it is the uniform 401, email login is untouched (audited)", async () => {
+    const email = `clearme${dom}`;
+    const target = await mkUser(email, "Clear Me");
+    await onboard(target, email, PW);
+    expect((await setUsername(target, "clearme")).statusCode).toBe(200);
+    expect((await loginBy("clearme", PW)).statusCode).toBe(200);
+    const cleared = await setUsername(target, null);
+    expect(cleared.statusCode).toBe(200);
+    expect(cleared.json()).toMatchObject({ username: null, previousUsername: "clearme" });
+    const audit = await latestAudit("username-cleared");
+    expect(audit!.objectId).toBe(target);
+    expect((audit!.detail as Record<string, unknown>).from).toBe("clearme");
+    const gone = await loginBy("clearme", PW);
+    expect(gone.statusCode).toBe(401);
+    expect(gone.json()).toEqual({ error: "invalid_credentials", detail: "email or password is incorrect" });
+    await clearLockout(target);
+    expect((await legacyLogin(email, PW)).statusCode).toBe(200);
+    // ...and the freed name can be handed to somebody else
+    const heir = await mkUser(`heir${dom}`, "Heir");
+    expect((await setUsername(heir, "clearme")).statusCode).toBe(200);
+    // clearing an already-clear username is a no-op, not an error
+    expect((await setUsername(target, null)).statusCode).toBe(200);
+  });
+
+  it("a username write against an unknown user is a 404, not a silent no-op", async () => {
+    const r = await setUsername("00000000-0000-0000-0000-0000000000ff", "ghost");
+    expect(r.statusCode).toBe(404);
+    expect(r.json().error).toBe("unknown_user");
+  });
+
+  // ---- self-service policy (ADR-0021 conventions) -------------------------
+
+  it("username_self_service=false (the default) BLOCKS a user changing their own — audited", async () => {
+    const settings = await app.inject({ method: "GET", headers: AUTH, url: "/v1/org/settings" });
+    expect(settings.json().settings.usernameSelfService).toBe(false);
+    const cookie = cookieOf(await loginBy("dhruv", PW));
+    expect((await me(cookie)).json().usernameSelfService).toBe(false);
+    const r = await selfSetUsername(cookie, "renamed");
+    expect(r.statusCode).toBe(403);
+    expect(r.json().error).toBe("username_self_service_disabled");
+    const audit = await latestAudit("username-self-service-denied");
+    expect(audit!.effect).toBe("deny");
+    expect(await usernameOf(uid)).toBe("dhruv");
+  });
+
+  it("a user may ALWAYS read their own username, self-service or not", async () => {
+    const cookie = cookieOf(await legacyLogin(EMAIL, PW));
+    const probe = await me(cookie);
+    expect(probe.json().user.username).toBe("dhruv");
+    expect(probe.json().usernameSelfService).toBe(false);
+  });
+
+  it("username_self_service=true lets a user manage their own — same rules, quieter 409", async () => {
+    await setSelfService(true);
+    const cookie = cookieOf(await loginBy("dhruv", PW));
+    expect((await me(cookie)).json().usernameSelfService).toBe(true);
+    const ok = await selfSetUsername(cookie, "Dhruv.P");
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json().username).toBe("dhruv.p"); // folded, exactly as on the admin path
+    const audit = await latestAudit("username-changed");
+    expect((audit!.detail as Record<string, unknown>).via).toBe("self");
+    expect((await loginBy("dhruv.p", PW)).statusCode).toBe(200);
+    // uniqueness still bites — but a self-service 409 must NOT name the holder
+    const taken = await mkUser(`taken${dom}`, "Taken");
+    expect((await setUsername(taken, "already-mine")).statusCode).toBe(200);
+    const clash = await selfSetUsername(cookie, "already-mine");
+    expect(clash.statusCode).toBe(409);
+    expect(clash.json().error).toBe("username_taken");
+    expect(clash.json().detail).not.toContain(`taken${dom}`);
+    expect(clash.json().conflictUserId).toBeUndefined();
+    // the shape rules are identical here, and a user may clear their own
+    expect((await selfSetUsername(cookie, "no@at.signs")).statusCode).toBe(400);
+    expect((await selfSetUsername(cookie, null)).statusCode).toBe(200);
+    expect(await usernameOf(uid)).toBeNull();
+    await setSelfService(false);
+    expect((await setUsername(uid, "dhruv")).statusCode).toBe(200);
+  });
+
+  // ---- every other auth flow, entered by username -------------------------
+
+  it("TOTP MFA still works when the login came in by username", async () => {
+    const email = `mfa-user${dom}`;
+    const target = await mkUser(email, "Mfa Username");
+    const cookie = await onboard(target, email, PW);
+    expect((await setUsername(target, "mfa-user")).statusCode).toBe(200);
+    const enroll = await app.inject({
+      method: "POST", url: "/auth/totp/enroll", headers: CSRF, cookies: { regulait_session: cookie },
+    });
+    expect(enroll.statusCode).toBe(200);
+    const secret = enroll.json().secret;
+    const activate = await app.inject({
+      method: "POST", url: "/auth/totp/activate", headers: CSRF,
+      cookies: { regulait_session: cookie }, payload: { code: totpCode(secret, totpStep()) },
+    });
+    expect(activate.statusCode).toBe(200);
+    // step 1 by USERNAME: password accepted, no cookie, a pending token instead
+    const step1 = await loginBy("mfa-user", PW);
+    expect(step1.statusCode).toBe(200);
+    expect(step1.json().mfaRequired).toBe(true);
+    expect(step1.cookies.find((c) => c.name === "regulait_session")).toBeUndefined();
+    const step2 = await app.inject({
+      method: "POST", url: "/auth/mfa/verify", headers: CSRF,
+      payload: { pendingToken: step1.json().pendingToken, code: totpCode(secret, totpStep() + 1) },
+    });
+    expect(step2.statusCode).toBe(200);
+    expect(step2.json().userId).toBe(target);
+    expect((await me(cookieOf(step2))).statusCode).toBe(200);
+  });
+
+  it("the must-change-password gate still works when the login came in by username", async () => {
+    const email = `must-user${dom}`;
+    const target = await mkUser(email, "Must Username");
+    expect((await setUsername(target, "must-user")).statusCode).toBe(200);
+    const oneTime = await setInitialPassword(target);
+    const signIn = await loginBy("must-user", oneTime);
+    expect(signIn.statusCode).toBe(200);
+    expect(signIn.json().mustChangePassword).toBe(true);
+    const cookie = cookieOf(signIn);
+    const blocked = await app.inject({ method: "GET", url: "/v1/me", cookies: { regulait_session: cookie } });
+    expect(blocked.statusCode).toBe(403);
+    expect(blocked.json().error).toBe("password_change_required");
+    expect((await changePassword(cookie, oneTime, PW)).statusCode).toBe(200);
+    const open = await app.inject({ method: "GET", url: "/v1/me", cookies: { regulait_session: cookie } });
+    expect(open.statusCode).toBe(200);
+    // the new password works through EITHER identifier
+    expect((await loginBy("must-user", PW)).statusCode).toBe(200);
+    expect((await legacyLogin(email, PW)).statusCode).toBe(200);
+  });
+
+  it("lockout counts failures against the ACCOUNT, whichever identifier they arrive by", async () => {
+    const email = `lock-user${dom}`;
+    const target = await mkUser(email, "Lock Username");
+    await onboard(target, email, PW);
+    expect((await setUsername(target, "lock-user")).statusCode).toBe(200);
+    // mix the namespaces: 3 by username + 2 by email = the default threshold of 5
+    for (let i = 0; i < 3; i++) {
+      expect((await loginBy("lock-user", "wrong-Password11")).statusCode).toBe(401);
+    }
+    for (let i = 0; i < 2; i++) {
+      expect((await legacyLogin(email, "wrong-Password11")).statusCode).toBe(401);
+    }
+    const audit = await latestAudit("login-lockout");
+    expect(audit!.objectId).toBe(target);
+    expect((audit!.detail as Record<string, unknown>).failures).toBe(5);
+    // the CORRECT password now fails through BOTH identifiers — one account,
+    // one lockout, and still the uniform body
+    const byUsername = await loginBy("lock-user", PW);
+    const byEmail = await legacyLogin(email, PW);
+    expect(byUsername.statusCode).toBe(401);
+    expect(byEmail.statusCode).toBe(401);
+    expect(byUsername.body).toBe(byEmail.body);
+    await db.update(users).set({ lockedUntil: new Date(Date.now() - 1000) }).where(eq(users.id, target));
+    expect((await loginBy("lock-user", PW)).statusCode).toBe(200);
+  });
+
+  it("a deactivated account is refused by username exactly as by email (ADR-0022 parity)", async () => {
+    const email = `dis-user${dom}`;
+    const target = await mkUser(email, "Disabled Username");
+    await onboard(target, email, PW);
+    expect((await setUsername(target, "dis-user")).statusCode).toBe(200);
+    const off = await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/users/${target}/deactivate`, payload: {},
+    });
+    expect(off.statusCode).toBe(200);
+    const byUsername = await loginBy("dis-user", PW);
+    const byEmail = await legacyLogin(email, PW);
+    expect(byUsername.statusCode).toBe(401);
+    expect(byUsername.body).toBe(byEmail.body); // no oracle in either namespace
+    await app.inject({ method: "POST", headers: AUTH, url: `/v1/users/${target}/reactivate`, payload: {} });
+    await clearLockout(target);
+    expect((await loginBy("dis-user", PW)).statusCode).toBe(200);
+  });
+
+  it("the seeder's persona names are valid under the shape the migration enforces", async () => {
+    for (const name of ["admin", "dana", "avery"]) {
+      const target = await mkUser(`${name}-shape${dom}`, `Shape ${name}`);
+      const r = await setUsername(target, name.toUpperCase());
+      expect(r.statusCode, name).toBe(200);
+      expect(r.json().username).toBe(name);
+      expect((await setUsername(target, null)).statusCode).toBe(200);
+    }
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// ADR-0029 — behind the Caddy TLS terminator.
+//
+// Two distinct mechanisms, deliberately separated because they behave
+// differently:
+//
+//  1. The session cookie's `Secure` flag. requestIsSecure() reads
+//     `x-forwarded-proto` straight off the RAW headers, so it works with or
+//     without Fastify's trustProxy. These cases are the regression wall that
+//     keeps it that way — if it were ever "simplified" to req.protocol, the
+//     no-trustProxy configuration would silently drop Secure and these fail.
+//  2. `req.ip`, recorded on every auth_sessions row (ADR-0025/0028). That one
+//     DOES depend on trustProxy, which is why buildApp enables it.
+// ---------------------------------------------------------------------------
+describe("ADR-0029 reverse-proxy trust", () => {
+  const PW = "Proxy-Trust-Pw-1";
+
+  const loginWith = (email: string, password: string, headers: Record<string, string>) =>
+    app.inject({
+      method: "POST", url: "/auth/login",
+      headers: { ...CSRF, ...headers },
+      payload: { email, password },
+    });
+
+  const setCookieHeader = (res: { headers: Record<string, unknown> }): string => {
+    const h = res.headers["set-cookie"];
+    return Array.isArray(h) ? h.join("\n") : String(h ?? "");
+  };
+
+  it("sets Secure when x-forwarded-proto is https, and does NOT when the header is absent", async () => {
+    const email = "proxy-secure@auth-test.example";
+    const uid = await mkUser(email, "Proxy Secure");
+    await onboard(uid, email, PW);
+
+    // plain HTTP, no proxy header at all — the localhost/dev case
+    const plain = await loginWith(email, PW, {});
+    expect(plain.statusCode).toBe(200);
+    expect(setCookieHeader(plain)).toContain("regulait_session=");
+    expect(setCookieHeader(plain)).not.toContain("Secure");
+
+    // exactly what Caddy sends upstream for a TLS request
+    const behindTls = await loginWith(email, PW, { "x-forwarded-proto": "https" });
+    expect(behindTls.statusCode).toBe(200);
+    expect(setCookieHeader(behindTls)).toContain("; Secure");
+    // the rest of the cookie hardening must survive alongside it
+    expect(setCookieHeader(behindTls)).toContain("HttpOnly");
+    expect(setCookieHeader(behindTls)).toContain("SameSite=Strict");
+
+    // explicitly forwarded http (Caddy's :80 side, pre-redirect) => still off
+    const behindPlain = await loginWith(email, PW, { "x-forwarded-proto": "http" });
+    expect(setCookieHeader(behindPlain)).not.toContain("Secure");
+
+    // a comma-joined chain (two proxies) is read left-most-first
+    const chained = await loginWith(email, PW, { "x-forwarded-proto": "https, http" });
+    expect(setCookieHeader(chained)).toContain("; Secure");
+  });
+
+  it("clears the cookie with Secure too, so the browser actually drops it over TLS", async () => {
+    const email = "proxy-logout@auth-test.example";
+    const uid = await mkUser(email, "Proxy Logout");
+    await onboard(uid, email, PW);
+    const cookie = cookieOf(await loginWith(email, PW, { "x-forwarded-proto": "https" }));
+    const out = await app.inject({
+      method: "POST", url: "/auth/logout",
+      headers: { ...CSRF, "x-forwarded-proto": "https" },
+      cookies: { regulait_session: cookie },
+    });
+    expect(out.statusCode).toBe(200);
+    expect(setCookieHeader(out)).toContain("Max-Age=0");
+    expect(setCookieHeader(out)).toContain("; Secure");
+  });
+
+  it("records the real client IP from X-Forwarded-For on the session row (trustProxy)", async () => {
+    const email = "proxy-ip@auth-test.example";
+    const uid = await mkUser(email, "Proxy Ip");
+    await onboard(uid, email, PW);
+    // Caddy OVERWRITES X-Forwarded-For with the real peer, so exactly one entry.
+    const res = await loginWith(email, PW, {
+      "x-forwarded-proto": "https",
+      "x-forwarded-for": "203.0.113.9",
+    });
+    expect(res.statusCode).toBe(200);
+    const [row] = await db
+      .select({ ip: authSessions.ip })
+      .from(authSessions)
+      .where(eq(authSessions.userId, uid))
+      .orderBy(desc(authSessions.createdAt))
+      .limit(1);
+    expect(row!.ip).toBe("203.0.113.9");
+  });
+});

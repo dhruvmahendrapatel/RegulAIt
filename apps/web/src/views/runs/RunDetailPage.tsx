@@ -26,6 +26,7 @@ import {
   type Tone,
 } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
+import { DecisionLedgerCard, PmLinksCard } from "../pm/PmAndDecisions";
 import v from "../views.module.css";
 import s from "./runs.module.css";
 
@@ -409,6 +410,12 @@ export default function RunDetailPage() {
             ))}
           </Card>
         )}
+
+        {/* PILLAR 8: this run's task graph mapped onto the customer's own work
+            items, and PILLAR 4's decision ledger for it — both scoped to this
+            run, both feeding the same single audit trail. */}
+        <PmLinksCard parent={{ objectType: "run", objectId: runId! }} />
+        <DecisionLedgerCard parent={{ objectType: "run", objectId: runId! }} />
       </div>
 
       <ConfirmModal

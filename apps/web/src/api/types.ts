@@ -16,7 +16,10 @@ export interface AuthMeResponse {
   userId: string | null;
   isAdmin: boolean;
   via: "bootstrap" | "api-key" | "session";
-  user: { id: string; email: string; displayName: string } | null;
+  /** ADR-0030: `username` is the second login identifier — null when the
+   * account signs in by email only, and absent entirely from a pre-0047
+   * gateway (hence optional: an older gateway degrades to "no username"). */
+  user: { id: string; email: string; username?: string | null; displayName: string } | null;
   mustChangePassword: boolean;
   totpEnabled: boolean;
   passwordSet: boolean;
@@ -29,6 +32,23 @@ export interface AuthMeResponse {
   passwordChangeRequiresCurrent?: boolean;
   /** how this session was established; null for header-credential requests */
   sessionOrigin?: "password" | "api_key" | "oidc" | "bootstrap" | "unknown" | null;
+  /** ADR-0030: may this user write their OWN username? Absent on an older
+   * gateway, which reads as "no" — the conservative default and the same
+   * posture a fresh org_settings row has. Reading one's username is never
+   * gated; this governs the edit affordance only. */
+  usernameSelfService?: boolean;
+}
+
+/**
+ * ADR-0030 — the login body. `identifier` (email OR username) is the current
+ * field; `email` is the pre-0047 alias the gateway still accepts, and the one
+ * this client keeps sending for email logins so an OLDER gateway (which knows
+ * nothing about `identifier` and rejects unknown keys) keeps working.
+ */
+export interface LoginRequestBody {
+  email?: string;
+  identifier?: string;
+  password: string;
 }
 
 export interface LoginResponse {
@@ -164,6 +184,83 @@ export interface RunSummary {
   projectId?: string | null;
   state?: { nodeStatuses?: Record<string, NodeStatus> };
   budget?: { measuredSpentUsd?: number; capUsd?: number };
+}
+
+/**
+ * PILLAR 7 — POST /v1/runs/decompose. One governed, metered LEAD dispatch
+ * drafts a task graph from a plain-language goal and returns a PROPOSAL ONLY:
+ * nothing is created until the human submits it through POST /v1/runs. The
+ * `substituted` / `dropped*` fields are the §5.1 "a lead can suggest, never
+ * grant" record — the lead named something outside the caller's entitlements
+ * and the gateway narrowed it. They must always be surfaced, never swallowed.
+ */
+export interface ProposalNode {
+  id: string;
+  title: string;
+  instruction: string;
+  ownerAgentId: string;
+  agentName: string;
+  mode: string;
+  dependsOn: string[];
+  substituted?: { requestedAgentName: string; reason: string };
+  toolServers?: string[];
+  droppedToolServers?: string[];
+  maxTurns?: number;
+  leadNodeId?: string;
+  allowedAgentIds?: string[];
+  allowedToolRefs?: string[];
+  droppedAllowedAgents?: string[];
+  droppedAllowedTools?: string[];
+  budgetCapUsd?: number;
+}
+
+export interface DecomposeResponse {
+  proposal: { name: string; nodes: ProposalNode[] };
+  dispatch: {
+    /** null = the lead's model is unpriced; cost is never invented */
+    costUsd: number | null;
+    modelUsed: string;
+    servedAgentId: string;
+    tokens: { inputTokens: number; outputTokens: number };
+  };
+  /** the first draft failed validation and the lead corrected it once */
+  retried: boolean;
+}
+
+/** ADR-0010 §3 — GET /v1/pm/links?runId=|instanceId=. RegulAIt stores only the
+ * linkage; the PM tool owns the fields. `drift` = the tool's last reported
+ * state disagrees with the state RegulAIt's status maps to (run nodes only) —
+ * surfaced, never auto-fixed. */
+export interface PmLink {
+  id: string;
+  connectionId: string;
+  connectionName: string | null;
+  objectType: "run" | "run_node" | "workflow_instance" | "decision";
+  objectId: string;
+  nodeId: string | null;
+  externalId: string;
+  externalUrl: string;
+  lastSyncedAt?: string | null;
+  inboundState?: string | null;
+  inboundAt?: string | null;
+  adoptedState?: string | null;
+  orphanedAt?: string | null;
+  drift?: boolean;
+}
+
+/** ADR-0010 §4 — GET/POST /v1/decisions. First-class decision records, always
+ * recorded locally; `pmMirror` is present only when the decision materialized
+ * as a linked Decision-typed work item (a comment mirror leaves no link row). */
+export interface DecisionRecord {
+  id: string;
+  objectType: "run" | "workflow_instance";
+  objectId: string;
+  decision: string;
+  rationale: string | null;
+  decisionMakerUserId: string;
+  decisionMakerName?: string | null;
+  createdAt: string;
+  pmMirror?: { externalId: string; externalUrl: string } | null;
 }
 
 export interface RunEvent {
@@ -389,5 +486,10 @@ export interface AuditEntry {
   toolName?: string | null;
   effect: string;
   ruleId: string;
+  /** A4 (ADR-0027): the deploy mode a deploy-mode-scoped action acted on.
+   * null/absent = UNKNOWN — either the row predates migration 0044 (honestly
+   * un-backfillable) or the action was never deploy-scoped. Never render this
+   * as a mode; render it as "unknown". */
+  deployMode?: "hosted" | "byoc" | "air_gapped" | null;
   reason?: string | null;
 }

@@ -67,6 +67,19 @@ const adminId = await ensureUser("admin@regulait.local", "Ada Admin", true);
 const danaId = await ensureUser("dana@regulait.local", "Dana Developer");
 const averyId = await ensureUser("avery@regulait.local", "Avery Approver");
 
+// --- ADR-0030: usernames for the personas (sign in as `admin`, not an email)
+// Set through the REAL audited admin route, so seeding exercises the same
+// validation, uniqueness check and audit row a human admin would produce. It
+// is idempotent by nature: re-setting the same username on the same user is a
+// no-op write (the uniqueness check excludes the target itself).
+for (const [username, id] of [
+  ["admin", adminId],
+  ["dana", danaId],
+  ["avery", averyId],
+] as const) {
+  await call("PUT", `/v1/users/${id}/username`, { username });
+}
+
 const keys: Record<string, string> = {};
 for (const [name, id] of [
   ["admin", adminId],
@@ -1141,12 +1154,14 @@ await db.$client.end();
 console.log(`
 RegulAIt demo data ready.
 
-  Browser sign-in (ADR-0025) at /app and /admin: email + ONE-TIME password.
-  Shown ONCE; each persona must set their own password at first sign-in.
+  Browser sign-in (ADR-0025/0030) at /ui: EMAIL OR USERNAME + ONE-TIME
+  password. Shown ONCE; each persona must set their own password at first
+  sign-in. The username column is the ADR-0030 second identifier — sign in as
+  simply 'admin' if you prefer.
 
-    admin  admin@regulait.local   ${passwords.admin}
-    dana   dana@regulait.local    ${passwords.dana}    (requester — Playground, Runs, Workflows)
-    avery  avery@regulait.local   ${passwords.avery}   (approver — Inbox has a sign-off waiting)
+    admin  admin  admin@regulait.local   ${passwords.admin}
+    dana   dana   dana@regulait.local    ${passwords.dana}    (requester — Playground, Runs, Workflows)
+    avery  avery  avery@regulait.local   ${passwords.avery}   (approver — Inbox has a sign-off waiting)
 
   API keys (programmatic/IDE access — NOT the browser login; the login page
   keeps a "sign in with an API key" fallback that exchanges one for a

@@ -10,6 +10,10 @@
  * org settings, and drive the client config generator. Every page asserts
  * ZERO console errors (expected 4xx network log lines from deliberate
  * negative tests are the only filter) and screenshots into E2E_SHOTS_DIR.
+ *
+ * Also covers the debts closed on 2026-08-01 (ADR-0026 phase-3 amendment):
+ * A4's audit deploy-mode filter including the honest unknown / pre-0044
+ * bucket, and O10's per-tool MCP price override set → persisted → cleared.
  */
 import { expect, test, type Page } from "@playwright/test";
 import { mkdirSync, readFileSync } from "node:fs";
@@ -252,6 +256,81 @@ test("audit log: retention card, filterable table, CSV export", async () => {
   track.assertClean("audit log");
 });
 
+test("audit log: A4 deploy-mode filter, including the honest unknown / pre-0044 bucket", async () => {
+  await nav("Audit log", "Audit log");
+  const modeFilter = page.getByLabel("Filter by deploy mode");
+  await expect(modeFilter).toBeVisible();
+  // the control must NAME the un-backfillable bucket rather than hiding it
+  await expect(modeFilter.locator("option", { hasText: "unknown / pre-0044" })).toHaveCount(1);
+  // …and the page must say out loud why unknown is not a mode
+  await expect(page.getByText("un-backfillable", { exact: false })).toBeVisible();
+  // (a plain locator, not getByRole: the kit's <th> cells expose as `cell`,
+  // and the header text is uppercased by CSS text-transform)
+  await expect(page.locator("thead th", { hasText: "Deploy mode" })).toBeVisible();
+
+  // the table refetches on every filter change, so settle on a CONSISTENT
+  // snapshot (loading renders skeleton rows) before judging it.
+  const modeCells = (mode: string) => page.getByRole("cell", { name: mode, exact: true });
+  const emptyMsg = page.getByText("No audit rows match");
+  const settled = async () => {
+    const [rows, unknown, hosted, byoc, air, empty] = await Promise.all([
+      page.locator("tbody tr").count(),
+      modeCells("unknown").count(),
+      modeCells("hosted").count(),
+      modeCells("byoc").count(),
+      modeCells("air_gapped").count(),
+      emptyMsg.isVisible(),
+    ]);
+    return { rows, unknown, empty, byMode: { hosted, byoc, air_gapped: air } as Record<string, number> };
+  };
+
+  // unfiltered: rows exist, and the null-mode ones render as a plain "unknown"
+  await expect(page.locator("tbody tr").first()).toBeVisible();
+  await expect.poll(async () => (await settled()).unknown).toBeGreaterThan(0);
+
+  // the unknown bucket is null-ONLY — every visible row must be an unknown one
+  await modeFilter.selectOption("unknown");
+  await expect
+    .poll(async () => {
+      const s = await settled();
+      return s.rows > 0 && s.rows === s.unknown;
+    })
+    .toBe(true);
+  await shot(page, "phase2-14b-audit-mode-unknown");
+
+  // a named mode must never leak an unknown row back in — that is exactly the
+  // dishonesty the bucket exists to prevent. Either the table shows only that
+  // mode, or it honestly says nothing matches yet.
+  for (const mode of ["hosted", "byoc", "air_gapped"]) {
+    await modeFilter.selectOption(mode);
+    await expect
+      .poll(async () => {
+        const s = await settled();
+        if (s.unknown !== 0) return false; // an unknown row leaked into a mode
+        // either every row carries THIS mode, or the table is honestly empty
+        return s.empty || (s.rows > 0 && s.rows === s.byMode[mode]);
+      })
+      .toBe(true);
+    // when nothing matches, the empty state must EXPLAIN why rather than
+    // implying the trail is broken
+    if ((await settled()).empty) {
+      await expect(
+        page.getByText(`No row records a ${mode} deploy mode yet`, { exact: false }),
+      ).toBeVisible();
+    }
+  }
+  await shot(page, "phase2-14c-audit-mode-named");
+
+  // the export follows the filter, so a downloaded trail matches the screen
+  await modeFilter.selectOption("unknown");
+  const dl = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download CSV" }).click();
+  expect((await dl).suggestedFilename()).toContain("audit-log");
+
+  await modeFilter.selectOption("");
+  track.assertClean("audit log deploy-mode filter");
+});
+
 test("workflow templates: author a template from a starter", async () => {
   await nav("Workflow templates", "Workflow templates");
   await page.getByLabel("Name").fill(`e2e-template-${Date.now()}`);
@@ -331,6 +410,49 @@ test("mcp servers: tool inventory + tool grant", async () => {
   await expect(page.getByText("Tool registered").first()).toBeVisible();
   await shot(page, "phase2-19-mcp-servers");
   track.assertClean("mcp servers");
+});
+
+test("mcp servers: set a per-tool price override and see it persist (O10)", async () => {
+  const toolsCard = page.locator("section", { hasText: "Tools on " }).first();
+  // selecting a server is a TOGGLE, and the previous journey left one open —
+  // open it only if it is not already open, so this test is order-independent
+  const openTools = async () => {
+    if (!(await toolsCard.isVisible())) {
+      await page.locator("tbody tr[role='link']").first().click();
+    }
+    await expect(toolsCard).toBeVisible();
+  };
+  await nav("MCP servers", "MCP servers");
+  await openTools();
+
+  // the row for the tool the previous journey registered
+  const row = toolsCard.locator("tbody tr", { hasText: "e2e_tool" }).first();
+  await expect(row).toBeVisible();
+  // it starts with NO override — the seeded server carries no flat rate either,
+  // so the honest state is "unpriced", never an invented zero
+  await expect(row.getByText(/override/)).toHaveCount(0);
+
+  await row.getByLabel("Price per call for e2e_tool").fill("0.25");
+  await row.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByText(/Price for e2e_tool set to/).first()).toBeVisible();
+  // the row now reports itself as an OVERRIDE, not as an inherited rate
+  await expect(row.getByText(/\$0\.25 override/)).toBeVisible();
+  await shot(page, "phase2-19b-mcp-tool-price");
+
+  // PERSISTENCE: a full reload re-reads the inventory row from the backend
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "MCP servers", exact: true })).toBeVisible();
+  await openTools();
+  const reloadedRow = toolsCard.locator("tbody tr", { hasText: "e2e_tool" }).first();
+  await expect(reloadedRow.getByText(/\$0\.25 override/)).toBeVisible();
+  await expect(reloadedRow.getByLabel("Price per call for e2e_tool")).toHaveValue("0.25");
+
+  // clearing the field restores inheritance rather than pricing the tool at 0
+  await reloadedRow.getByLabel("Price per call for e2e_tool").fill("");
+  await reloadedRow.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByText(/Override cleared for e2e_tool/).first()).toBeVisible();
+  await expect(reloadedRow.getByText(/override/)).toHaveCount(0);
+  track.assertClean("mcp per-tool pricing");
 });
 
 test("git connections: seeded connection listed with provider hints", async () => {

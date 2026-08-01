@@ -178,12 +178,36 @@ const visibleToolsParams = z.object({
 export const AUDIT_MAX_PAGE_SIZE = 1000;
 const AUDIT_DEFAULT_PAGE_SIZE = 100;
 
-const auditQuery = z.object({
+/**
+ * THE filter set for the audit trail. Both the screen read (`GET /v1/audit`)
+ * and the compliance export (`GET /v1/audit.csv`) parse this same object and
+ * build their WHERE with the same `auditFilters()` below — a downloaded trail
+ * can never quietly cover a different set of rows than the one an admin saw.
+ *
+ * `deployMode` is A4 (ADR-0027) exposed as a QUERY dimension: it filters the
+ * trail by the deploy mode a deploy-mode-scoped action acted on. The honest
+ * fourth value is `unknown` → `deploy_mode IS NULL`. That bucket is NOT
+ * "hosted by default" and never can be: pre-0044 rows never recorded a mode
+ * (ADR-0027 §2a — un-backfillable by design), and the large majority of rows
+ * (MCP calls, membership changes, settings edits …) are not deploy-scoped at
+ * all, so they have no mode to have. Omitting the param = every row.
+ *
+ * `objectType`/`effect`/`from`/`to` are ADR-0031 additions; `from`/`to` are
+ * also what lets an auditor take the export in bounded slices instead of
+ * asking for the whole table at once.
+ */
+const auditFilterQuery = z.object({
   userId: z.string().uuid().optional(),
+  deployMode: z.enum(["hosted", "byoc", "air_gapped", "unknown"]).optional(),
   objectType: z.string().min(1).max(64).optional(),
   effect: z.enum(["allow", "deny", "require_approval"]).optional(),
   from: z.coerce.date().optional(),
   to: z.coerce.date().optional(),
+});
+type AuditFilterInput = z.infer<typeof auditFilterQuery>;
+
+/** the screen read adds paging on top of the shared filter set */
+const auditQuery = auditFilterQuery.extend({
   limit: z.coerce
     .number()
     .int()
@@ -192,6 +216,10 @@ const auditQuery = z.object({
     .default(AUDIT_DEFAULT_PAGE_SIZE),
   cursor: z.string().min(1).max(256).optional(),
 });
+
+/** the export takes the filter set unchanged — no paging params, because it
+ * streams the whole (bounded, disclosed) selection rather than one page */
+const auditCsvQuery = auditFilterQuery;
 const UUID_ANY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** every audit_log column, spelled out so a keyset read can select the row AND
@@ -213,17 +241,29 @@ const auditLogColumns = {
   deployMode: auditLog.deployMode,
 } as const;
 
-/** ADR-0031: the filter set shared by the audit read surface and the CSV
- * export, so the screen view and the auditor's file can never disagree. */
-interface AuditFilterInput {
-  userId?: string;
-  objectType?: string;
-  effect?: "allow" | "deny" | "require_approval";
-}
-
+/**
+ * THE WHERE terms for the audit trail — the single implementation behind both
+ * `GET /v1/audit` and `GET /v1/audit.csv` (PR #79's `auditWhere`, extended with
+ * ADR-0031's filters and its explicit date window). One function, so a filter
+ * added on one side can never silently stop applying to the other.
+ *
+ * `from`/`to` are passed in rather than read off `q` because the export may
+ * apply a DEFAULTED window the caller never asked for (see csv-export.ts), and
+ * because the "are there rows outside the window?" disclosure probe needs the
+ * same filters with the window inverted.
+ */
 function auditFilters(q: AuditFilterInput, from: Date | null, to: Date | null): SQL[] {
   const out: SQL[] = [];
   if (q.userId) out.push(eq(auditLog.userId, q.userId));
+  if (q.deployMode) {
+    // 'unknown' is deploy_mode IS NULL — an explicit, equal bucket, never an
+    // inferred "hosted" (ADR-0027 §2a: those rows are un-backfillable).
+    out.push(
+      q.deployMode === "unknown"
+        ? isNull(auditLog.deployMode)
+        : eq(auditLog.deployMode, q.deployMode),
+    );
+  }
   if (q.objectType) out.push(eq(auditLog.objectType, q.objectType as "mcp_tool"));
   if (q.effect) out.push(eq(auditLog.effect, q.effect));
   if (from) out.push(gte(auditLog.at, from));
@@ -231,21 +271,28 @@ function auditFilters(q: AuditFilterInput, from: Date | null, to: Date | null): 
   return out;
 }
 
-const auditCsvQuery = z.object({
-  userId: z.string().uuid().optional(),
-  objectType: z.string().min(1).max(64).optional(),
-  effect: z.enum(["allow", "deny", "require_approval"]).optional(),
-  from: z.coerce.date().optional(),
-  to: z.coerce.date().optional(),
-});
+/** the same terms as one composed predicate (`undefined` = no filter at all) */
+function auditWhere(q: AuditFilterInput, from: Date | null, to: Date | null): SQL | undefined {
+  const conds = auditFilters(q, from, to);
+  return conds.length === 0 ? undefined : conds.length === 1 ? conds[0] : and(...conds);
+}
 
 export function buildApp(db: Db, opts: BuildAppOptions = {}) {
-  // ADR-0031 item 3 (correcting ADR-0029): X-Forwarded-* is honoured ONLY from
-  // an explicitly named proxy address/CIDR. `req.ip` is what lands in
-  // auth_sessions.ip and in the attribution the audit trail is built on, so a
-  // blanket `trustProxy: true` would let anything that reaches the gateway
-  // port choose its own client IP and forge an `https` origin. Default: trust
-  // nothing. See trusted-proxy.ts for the env contract.
+  // trustProxy (ADR-0029, NARROWED by ADR-0031 item 3): the deployed stack runs
+  // behind a Caddy TLS terminator, so the socket peer is the proxy, not the
+  // user. Without trusting it, `req.ip` — recorded on every auth_sessions row
+  // (ADR-0025/0028) — degrades to the proxy's container address and the session
+  // audit trail loses the real client. That is why ADR-0029 turned it on.
+  //
+  // But `true` trusts X-Forwarded-* from ANY peer, and Caddy's overwrite
+  // (`header_up X-Forwarded-For {remote_host}`) only protects the path that
+  // actually goes through Caddy. Anything that reaches the gateway port
+  // directly — host loopback, a sibling container on the compose network, a
+  // future sidecar — bypasses Caddy entirely and could then choose the client
+  // IP that lands on the compliance trail. So the peer is now named instead of
+  // assumed: REGULAIT_TRUSTED_PROXIES (IPs/CIDRs/proxy-addr keywords), which
+  // docker-compose.yml sets to the compose network for the `tls` profile.
+  // Default when unset: trust nothing. See trusted-proxy.ts.
   const trustProxy = opts.trustProxy ?? resolveTrustProxy();
   const app = Fastify({ logger: false, trustProxy });
 
@@ -605,6 +652,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "POST /auth/logout",
     "GET /auth/me",
     "POST /auth/change-password",
+    // ADR-0030: a user managing their OWN username — their own account, like
+    // change-password. Whether it is ALLOWED at all is the org's call
+    // (org_settings.username_self_service, default false = admin-managed);
+    // admin-ness is not the point of the route, so it is not the gate.
+    "POST /auth/username",
     "POST /auth/totp/enroll",
     "POST /auth/totp/activate",
     "POST /auth/totp/disable",
@@ -667,6 +719,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       .select({
         id: users.id,
         email: users.email,
+        // ADR-0030: the second login identifier (null = email-only), so the
+        // users table can show and manage it. Never a credential.
+        username: users.username,
         displayName: users.displayName,
         isAdmin: users.isAdmin,
         disabledAt: users.disabledAt,
@@ -2137,11 +2192,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerOpenAiCompat(app, db, { dataKey: opts.dataKey });
 
   // ADR-0031 item 2: the audit read surface used to be hard-capped at 100 rows
-  // with a userId filter and nothing else — for a compliance product that means
-  // no admin could ever see row 101. It now pages with an opaque keyset cursor
-  // on the stable (at DESC, id DESC) sort, and filters on from/to/objectType/
-  // effect as well as userId. Callers that pass nothing get EXACTLY the old
-  // behaviour: the newest 100 rows under `entries`.
+  // with a userId filter (plus PR #79's deployMode) and nothing else — for a
+  // compliance product that means no admin could ever see row 101. It now pages
+  // with an opaque keyset cursor on the stable (at DESC, id DESC) sort, and
+  // filters on from/to/objectType/effect as well as userId and deployMode —
+  // all through the SAME auditFilters() the CSV export uses. Callers that pass
+  // nothing get EXACTLY the old behaviour: the newest 100 rows under `entries`.
   app.get("/v1/audit", async (req, reply) => {
     const q = auditQuery.parse(req.query);
     const cursor = q.cursor ? decodeCursor(q.cursor) : null;
@@ -2185,6 +2241,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // always, plus a trailing comment row whenever the file is not the complete
   // answer). The column shape is unchanged, so a complete export is
   // byte-identical to what the old code produced.
+  // A4 (ADR-0027): `deployMode` is its own column. A row with no mode is
+  // written as the literal `unknown` rather than an empty cell — the same word
+  // the filter uses — so an auditor reading the export can never mistake "we
+  // never recorded a mode here" for "hosted" or for a lost value.
   const AUDIT_CSV_HEADER = [
     "at",
     "userId",
@@ -2195,6 +2255,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "toolName",
     "effect",
     "ruleId",
+    "deployMode",
     "reason",
     "detail",
   ] as const;
@@ -2226,9 +2287,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     };
 
+    // filename names every filter that shaped the file, so two downloads taken
+    // with different filters never collide in a downloads folder
+    const suffix = `${q.userId ? `-${q.userId.slice(0, 8)}` : ""}${q.deployMode ? `-${q.deployMode}` : ""}`;
     type Row = typeof auditLog.$inferSelect & { atText: string };
     await streamCsv<Row>(reply, {
-      filename: `audit-log${q.userId ? `-${q.userId.slice(0, 8)}` : ""}.csv`,
+      filename: `audit-log${suffix}.csv`,
       header: AUDIT_CSV_HEADER,
       eol: "\n",
       batchSize: csvBatchRows(),
@@ -2259,6 +2323,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           r.toolName,
           r.effect,
           r.ruleId,
+          r.deployMode ?? "unknown",
           r.reason,
           r.detail,
         ]
@@ -2266,6 +2331,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           .join(","),
       hasRowsOutsideWindow: async () => {
         if (!win.from) return false;
+        // the SAME filters with the window inverted — the disclosure must speak
+        // about the rows this export would have covered, not about every row
         const older = auditFilters(q, null, win.from);
         const rows = await db
           .select({ id: auditLog.id })

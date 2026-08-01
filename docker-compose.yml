@@ -4,6 +4,17 @@
 # printed once in the gateway container log (docker compose logs gateway).
 # The image build stage runs `pnpm -r build`, which includes the web bundle,
 # so /ui is always built inside the container.
+#
+# TLS (ADR-0029): the `caddy` service below terminates HTTPS in front of the
+# gateway. It sits behind the `tls` compose profile, so it is OFF for a plain
+# `docker compose up` — a laptop must never attempt ACME issuance for the box's
+# hostname (failed challenges burn Let's Encrypt rate limits). Turn it on with:
+#
+#   docker compose --profile tls up -d --build          # real Let's Encrypt cert
+#   docker compose --profile tls -f docker-compose.yml -f compose.tls-local.yml up
+#                                                       # local proof, self-signed CA
+#
+# See docs/ops/TLS.md.
 services:
   db:
     image: postgres:16
@@ -36,7 +47,46 @@ services:
       # ANTHROPIC_API_KEY: sk-ant-...   # (optional ANTHROPIC_BASE_URL) → Claude live
       # OPENAI_API_KEY / GOOGLE_API_KEY (or GEMINI_API_KEY) / XAI_API_KEY likewise
     ports:
-      - "3000:3000"
+      # ADR-0029: bound to host loopback ONLY — never 0.0.0.0. Caddy reaches the
+      # gateway over the compose network (`gateway:3000`), so cleartext HTTP is
+      # not exposed off-box. Loopback is kept because `http://localhost:3000/ui`
+      # is the documented local-dev entry point (README) and the on-box
+      # SSM verification step (`curl -sf localhost:3000/...`) relies on it.
+      - "127.0.0.1:3000:3000"
+
+  # --- TLS terminator (profile: tls) -----------------------------------------
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["tls"]
+    depends_on:
+      - gateway
+    restart: unless-stopped
+    environment:
+      # Public hostname this stack serves. Default is the sslip.io name derived
+      # from the dev box's public IP (see infra/caddy/Caddyfile). Override when
+      # the IP changes or a real domain arrives.
+      REGULAIT_TLS_HOST: ${REGULAIT_TLS_HOST:-3-237-199-248.sslip.io}
+      # Where Caddy proxies to. Compose-network DNS name of the gateway.
+      REGULAIT_TLS_UPSTREAM: ${REGULAIT_TLS_UPSTREAM:-gateway:3000}
+      # Empty = real Let's Encrypt. compose.tls-local.yml sets `tls internal`.
+      REGULAIT_TLS_ISSUER: ${REGULAIT_TLS_ISSUER:-}
+      # Optional ACME account contact, e.g. "email ops@example.com".
+      REGULAIT_TLS_EMAIL_DIRECTIVE: ${REGULAIT_TLS_EMAIL_DIRECTIVE:-}
+    ports:
+      - "80:80" # ACME HTTP-01 challenge + redirect to HTTPS
+      - "443:443" # TLS
+      - "443:443/udp" # HTTP/3
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # THE operationally critical bit: /data holds the ACME account key and
+      # every issued certificate. Without a named volume, each `compose up`
+      # (i.e. every deploy) starts from an empty /data and re-issues from
+      # scratch — Let's Encrypt allows 5 duplicate certificates per week, so a
+      # few deploys in a day would lock issuance out for the rest of the week.
+      - caddy_data:/data
+      - caddy_config:/config
 
 volumes:
   pgdata:
+  caddy_data:
+  caddy_config:
