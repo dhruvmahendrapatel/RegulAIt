@@ -117,8 +117,6 @@ import { registerOpenAiCompat } from "./compat-openai.js";
 import { registerConversationRoutes } from "./conversations.js";
 import { applyProjectApprovalDecision, registerProjectRoutes } from "./projects.js";
 import { applyInfraApprovalDecision, registerInfraRoutes } from "./infra.js";
-import { ADMIN_PORTAL_HTML } from "./admin-portal.js";
-import { APP_HTML } from "./app-ui.js";
 import { registerOptimizationRoutes } from "./optimization.js";
 import { applyRunApprovalDecision, registerOrchestrationRoutes } from "./orchestration.js";
 import { registerDecomposeRoutes } from "./decompose.js";
@@ -208,12 +206,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // cookie in-route).
   const AUTH_EXEMPT_ROUTES = new Set([
     "/v1/pm/webhooks/:connectionName",
+    // /admin and /app are 302s to /ui now (ADR-0026 phase-2 swap) — a browser
+    // hits a bookmark before it has any credential, so the redirect itself
+    // must not require one. The legacy shells they used to serve are GONE
+    // (ADR-0026 amendment 2026-08-01); /legacy/* is deliberately not listed.
     "/admin",
     "/app",
-    // the deprecated legacy shells (phase-2 swap): static, zero-data pages a
-    // browser hits before it has any credential — exactly like /ui below
-    "/legacy/admin",
-    "/legacy/app",
     "/",
     "/health",
     "/auth/login",
@@ -438,10 +436,6 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "POST /v1/pm/webhooks/:connectionName",
     "GET /admin",
     "GET /app",
-    // the deprecated legacy shells (phase-2 swap) — static pages, same
-    // reasoning as /app above
-    "GET /legacy/admin",
-    "GET /legacy/app",
     "GET /",
     "GET /health",
     // ADR-0026: the SPA shell, same static-page reasoning as /app above
@@ -1887,28 +1881,21 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     };
   });
 
-  // ADR-0026 phase 2 — the default-surface swap: the React SPA at /ui is now
-  // the product surface, so the historic shell URLs redirect there. The
-  // legacy shells (ADR-0012 static, zero data, zero secrets) stay reachable
-  // for ONE release at /legacy/*, visibly labeled deprecated; removal is
-  // recorded in the ADR-0026 amendment.
-  const deprecationBanner =
-    '<div style="background:#7c5200;color:#fff;padding:8px 14px;' +
-    "font:12.5px system-ui,sans-serif;text-align:center\">" +
-    "Deprecated: this legacy console is kept for one release only — the product now lives at " +
-    '<a href="/ui" style="color:#fff;text-decoration:underline">/ui</a>.</div>';
-  const withDeprecation = (html: string) =>
-    html.replace('<div id="root">', `${deprecationBanner}<div id="root">`);
-  const LEGACY_ADMIN_HTML = withDeprecation(ADMIN_PORTAL_HTML);
-  const LEGACY_APP_HTML = withDeprecation(APP_HTML);
+  // ADR-0026 phase 2 — the default-surface swap: the React SPA at /ui is the
+  // product surface, so the historic shell URLs redirect there. The two
+  // ADR-0012 single-file shells that /legacy/app and /legacy/admin served for
+  // one release are DELETED (ADR-0026 amendment, 2026-08-01) along with
+  // admin-portal.ts, app-ui.ts and ui-theme.ts. /legacy/* registers no route
+  // at all now — it is gone exactly like any other removed path, never a
+  // shell behind a login. These two redirects stay because SSO's server-side
+  // returnTo whitelist still names /app and /admin, and because bookmarks
+  // outlive releases.
   app.get("/admin", async (_req, reply) => reply.redirect("/ui", 302));
   app.get("/app", async (_req, reply) => reply.redirect("/ui", 302));
-  app.get("/legacy/admin", async (_req, reply) => reply.type("text/html").send(LEGACY_ADMIN_HTML));
-  app.get("/legacy/app", async (_req, reply) => reply.type("text/html").send(LEGACY_APP_HTML));
 
   // ADR-0026: the React SPA at /ui (built bundle from apps/web/dist —
-  // assets, SPA fallback, 503 when unbuilt). Registered like the two legacy
-  // shells above; the API surface is never shadowed.
+  // assets, SPA fallback, 503 when unbuilt) — now the ONLY UI the gateway
+  // serves. The API surface is never shadowed.
   registerWebServing(app);
 
   // The two things anything pointed at the bare origin expects to find: a

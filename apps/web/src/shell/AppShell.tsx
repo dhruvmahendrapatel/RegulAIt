@@ -1,8 +1,9 @@
 /**
  * The application shell: grouped left nav (with the "/" quick filter), topbar
  * (user menu, theme toggle), and — for admins — the full native admin surface
- * (phase 2): every group is a set of real /ui routes inside this shell; the
- * deprecated legacy consoles stay reachable from the footer for one release.
+ * (phase 2): every group is a set of real /ui routes inside this shell. The
+ * ADR-0026 amendment removed the legacy consoles entirely, so this shell is
+ * the whole product surface — there are no outbound bridges left.
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
@@ -205,21 +206,10 @@ export default function AppShell(props: { children: ReactNode }) {
             ))}
           </div>
         ))}
-        <div className={s.sideFoot}>
-          Governed AI delivery platform
-          <br />
-          <a href="/legacy/app" title="The previous end-user UI (deprecated, one release)">
-            legacy app ↗
-          </a>
-          {auth?.isAdmin && (
-            <>
-              {" · "}
-              <a href="/legacy/admin" title="The previous admin console (deprecated, one release)">
-                legacy admin ↗
-              </a>
-            </>
-          )}
-        </div>
+        {/* The two "legacy ↗" bridges are gone: the ADR-0026 amendment deleted
+            the single-file shells they pointed at, so a link here would be a
+            dead end — the exact failure phase 1 refused to ship. */}
+        <div className={s.sideFoot}>Governed AI delivery platform</div>
       </aside>
 
       <div className={s.mainCol}>
