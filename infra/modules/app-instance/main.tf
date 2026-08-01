@@ -97,8 +97,11 @@ resource "aws_iam_instance_profile" "instance" {
 # --- network ------------------------------------------------------------------
 
 resource "aws_security_group" "app" {
-  name        = "${var.name}-app"
-  description = "Declared ingress ports in, everything out"
+  name = "${var.name}-app"
+  # NOTE: the wording is load-bearing. `description` is ForceNew on
+  # aws_security_group, so editing this string replaces the SG for no
+  # functional gain. Left at the original text deliberately.
+  description = "App port in, everything out"
   vpc_id      = local.vpc_id
   tags        = var.tags
 
@@ -138,7 +141,9 @@ resource "aws_security_group" "app" {
 # --- instance -----------------------------------------------------------------
 
 resource "aws_instance" "app" {
-  ami                    = nonsensitive(data.aws_ssm_parameter.al2023_ami.value)
+  # pinned when var.ami_id is set; see variables.tf for why the SSM "latest"
+  # lookup is a data-loss hazard on a stateful single-instance stack
+  ami                    = coalesce(var.ami_id, nonsensitive(data.aws_ssm_parameter.al2023_ami.value))
   instance_type          = var.instance_type
   subnet_id              = data.aws_subnets.in_vpc.ids[0]
   vpc_security_group_ids = [aws_security_group.app.id]
@@ -153,6 +158,12 @@ resource "aws_instance" "app" {
     volume_size = 20
     volume_type = "gp3"
   }
+
+  # Editing user-data must NOT destroy the box: on aws_instance a user_data
+  # change forces replacement by default, and this instance holds the database.
+  # Changes therefore apply on the next boot; a redeploy of the app itself goes
+  # through SSM, not through recreating the machine.
+  user_data_replace_on_change = false
 
   user_data = templatefile("${path.module}/user-data.sh.tftpl", {
     bucket           = aws_s3_bucket.source.bucket
