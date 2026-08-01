@@ -4,7 +4,7 @@ last_updated: 2026-08-01
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-07-30-session-03.md
+last_session: sessions/2026-08-01-session-04.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -21,8 +21,8 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 **RegulAIt is a working, deployed product, not a scaffold.** All eight P0 pillars have shipped
-functionality; the gateway suite is at **801 tests** across 63 files; the schema is at **migration
-0046**; decisions run to **ADR-0030**. The product is served by a **React SPA** (`apps/web` —
+functionality; the gateway suite is at **888 tests** across 70 files (**1592** across the whole
+workspace); the schema is at **migration 0047**; decisions run to **ADR-0032**. The product is served by a **React SPA** (`apps/web` —
 React 18 + Vite + react-router + TanStack Query, an owned token design system, light/dark, six
 grouped nav sections) at **`/ui`**, which is now the *only* UI: `/`, `/app` and `/admin` all 302
 there, with the retired template-literal shells parked at `/legacy/*` for one release (ADR-0026).
@@ -31,11 +31,15 @@ Humans authenticate with **real auth** — scrypt passwords, revocable server-si
 default-deny JIT provisioning (ADR-0025); API keys remain the programmatic/IDE credential.
 **IDE interception** ships as provider-shaped translation shims (`/v1/messages`,
 `/v1/chat/completions`) over the one governed dispatch core, admin-gated and off by default
-(ADR-0020/0024). Everything runs on the dev EC2 box at `http://3.237.199.248:3000` — **dev-grade,
-explicitly NOT production**, and see the honest transport caveat in the addenda below.
+(ADR-0020/0024). Everything runs on the dev EC2 box, now over **real HTTPS** at
+**`https://3-229-246-126.sslip.io`** — a browser-trusted Let's Encrypt certificate terminated by
+Caddy on-box, at zero AWS cost (ADR-0029). Still **dev-grade, explicitly NOT production**. The
+box **powers itself off outside 08:00–20:00 Mon–Fri America/New_York** (ADR-0032) on an Elastic
+IP, so the address — and therefore the URL and its certificate — survives the cycle. **CI is
+live again** on a 2,000 min/month budget.
 **What is NOT done**: no real model provider is connected (the owner's key is parked and must not
 be raised until they raise it), and the deployment is a single EC2 box with Postgres in a
-container volume.
+container volume — **still no backup**, which is the largest single risk on the board.
 
 The infrastructure bootstrap phase (EPIC-01) is **complete**. The private GitHub repo
 [dhruvmahendrapatel/RegulAIt](https://github.com/dhruvmahendrapatel/RegulAIt) is live with the
@@ -1279,6 +1283,84 @@ path** landed (PR #3): `POST /mcp/:serverId` speaks streamable-HTTP MCP on both 
 `tools/call` runs the kernel, audits every decision, and only forwards allows upstream. User
 identity is an interim trusted header (`x-regulait-user-id`) until real authn lands. E2E-tested
 with a real in-process upstream MCP server and real MCP client (26 tests total).
+
+### Wave 9 addendum (2026-08-01) — infra applied, HTTPS live, CI back, power schedule
+
+The owner asked for six things in one message: apply the infra, start powering the AWS box off
+when idle, deploy the latest app code, re-enable CI within a 2,000 min/month allowance, clean up
+the legacy UI, and get HTTPS live. All are done or in flight, and the route there surfaced three
+real defects that had been latent precisely because nothing was exercising them.
+
+**Infra applied (#84's plan, verified `0 add / 2 change / 0 destroy`).** Ports 80/443 opened, the
+`:3000` ingress removed. No instance replacement, so the Postgres volume (`vol-0573958930d696417`)
+survived — that was the whole point of the #84 landmine fix. **But the apply changed `user_data`,
+which the EC2 provider applies by STOPPING AND STARTING the instance**, which released the
+auto-assigned public IPv4. The address moved `3.237.199.248` → `98.86.163.252`, and later again to
+`3.229.246.126` on Elastic-IP attachment. Worth internalising: *any* `user_data` edit is an
+address change on a box whose hostname is derived from its address.
+
+**Defect 1 — the `tls` profile had never once started.** It shipped in #77 and was never exercised
+end-to-end. Caddy pins itself to `172.28.0.2` so `REGULAIT_TRUSTED_PROXIES` can name exactly one
+container (ADR-0031), but **pinning an address does not reserve it**: Docker allocates dynamically
+from the start of the subnet, and Caddy is necessarily last to start (gateway waits on db's
+healthcheck, Caddy waits on the gateway). `db` took `172.28.0.2` and Caddy died with
+`Address already in use` — which reads as a host *port* conflict, not an IPAM one, with nothing
+listening on 80 or 443. Since the gateway is loopback-only since ADR-0029, this left the box with
+**no route in at all**. Fixed in #88 with an explicit `ip_range: 172.28.1.0/24` confining dynamic
+allocation clear of the pinned address.
+
+**HTTPS is live and verified** (#88 + deploy): Let's Encrypt `CN=3-229-246-126.sslip.io`, `/`→302,
+`/ui`→200, `/health`→200, port 80→308 redirect, chain validates. Deploys preserve
+`REGULAIT_DATA_KEY` — regenerating it would make every stored credential permanently undecryptable.
+
+**Defect 2 — CI's first run caught a latent test bug.** All **881 tests passed** and the job still
+exited 1: `seed.test.ts` tears its scratch database down with `DROP DATABASE ... WITH (FORCE)`,
+which force-terminates a connection something still holds, raising Postgres `57P01` as an
+unhandled pool error that vitest counts. Latent for weeks *because CI was off*, and it would
+red-fail every PR. Being fixed properly rather than suppressed.
+
+**Defect 3 — ADR-0032's `aws:SourceArn` confused-deputy guard does not work** (#90). Every
+`CreateSchedule` failed with an error that reads exactly like IAM propagation lag and is not — it
+survived four applies over ~30 minutes. Bisected against live API calls: `SourceAccount` alone
+passes; `ArnLike` fails; **`ArnLikeIfExists` also fails**, even though tolerating an absent context
+key is precisely what that suffix exists for. `CreateSchedule` validates the trust relationship
+*before the schedule exists* and satisfies no `SourceArn` condition in any form. Guard dropped,
+with the cost stated plainly in the ADR: cross-account is still blocked, intra-account narrowing is
+not, and the compensating control is the permission policy (exactly Start/StopInstances on exactly
+the passed instance ARNs, no Terminate, no wildcard). **A trap for anyone re-testing: the
+validation verdict is cached per-role for a minute or two, so back-to-back probes return the
+previous policy's answer.** Two intermediate readings were initially misread that way.
+
+**Power schedule live** (ADR-0032, #87/#90): EventBridge Scheduler → EC2 universal target, no
+Lambda and nothing always-on. `ENABLED | start=cron(0 8 ? * MON-FRI *) | stop=cron(0 20 ? * MON-FRI *)
+| tz=America/New_York`. **≈$20.43 → ≈$10.67/mo (~48%)** — honestly not more, because EBS bills
+whether the box runs or not and the IPv4 charge applies idle or in use; only compute scales with
+uptime. `infra/scripts/boot-resync.sh` is installed as a systemd oneshot and re-points Caddy on
+every boot; on first run it also re-enabled swap and wrote the `/etc/fstab` entry user-data never
+did (cloud-init `scripts-user` is per-*instance*, never per-boot).
+
+**CI re-enabled on a budget** (#86). GitHub bills per job, wall-clock, rounded up, and parallel
+jobs bill separately. So: no `push: main` trigger (a PR run already builds the merge commit, so it
+was pure duplication), a weekly `schedule` covering what PR runs structurally cannot, docs-only
+changes skipped entirely, and `docker-build` self-skipping unless an image-relevant file moved —
+**that gate already proved out, finishing in 4 seconds instead of ~5 minutes**. Estimated headroom
+~215 PR pushes/month.
+
+**Legacy UI deletion — blocked twice, correctly, then unblocked.** The first attempt was reverted
+(`95a3bc1`) because ADR-0026 *asserted* parity with zero evidence and five capabilities were
+legacy-only. A rigorous capability diff this session found **six more**: rules deploy-mode scoping,
+revocation narrowing, and four run-detail operator controls (manual node dispatch, `reassign_node`,
+`node_submitted`, per-node instruction override) — meaning the SPA could only drive a run fully
+automatically and could not rescue a stranded node. Closed in #89, which also promoted the checker
+into the repo as `scripts/parity-diff.mjs` + `legacy-ui-parity.test.ts`, comparing **three**
+dimensions (endpoint shapes, run event kinds POSTed, request-body keys) because an endpoint list
+alone cannot see gaps 4–6. It also found the throwaway extractor's comment stripper would eat the
+rest of a file on a `text/*` literal — i.e. **it could report false parity**. Deletion follows.
+
+**Standing lesson, restated:** every one of these three defects existed because something shipped
+without ever being executed in its real environment — a compose profile never started, a test
+suite never run by CI, an IAM policy never applied. Green local tests are not evidence that a
+deployment path works.
 
 ## Epics
 | ID | Name | Status | Related |

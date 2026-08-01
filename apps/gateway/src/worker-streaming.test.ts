@@ -42,6 +42,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -150,15 +151,11 @@ beforeAll(async () => {
   await admin.execute(sql.raw(`DROP DATABASE IF EXISTS ${DB_NAME} WITH (FORCE)`));
   await admin.execute(sql.raw(`CREATE DATABASE ${DB_NAME}`));
   db = createDb(streamUrl);
-  // This file DROPs its own database WITH (FORCE) at both ends of its life,
-  // which terminates any backend still attached to it. pg surfaces an idle
-  // client dying as a Pool 'error' event, and a Pool with no 'error' listener
-  // re-throws it as an UNCAUGHT exception — which vitest reports as a run-level
-  // error and, when the timing is unlucky, as a spuriously failed suite with
-  // all 15 tests skipped. The termination is expected here; swallow it rather
-  // than letting a deliberate teardown look like a product failure.
-  db.$client.on("error", () => {});
-  admin.$client.on("error", () => {});
+  // NOTE: this file used to silence the teardown race by attaching empty
+  // 'error' listeners to both pools. That swallowed genuine pool errors too.
+  // afterAll now waits for Postgres to report the scratch database's backends
+  // actually gone before dropping it (see ./testing/scratch-db.ts), so there is
+  // no expected error left to swallow — and a real one is loud again.
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "b".repeat(64) });
 
@@ -181,10 +178,15 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
-  await app.close();
-  await db.$client.end();
-  await admin.execute(sql.raw(`DROP DATABASE IF EXISTS ${DB_NAME} WITH (FORCE)`));
-  await admin.$client.end();
+  // Reverse order of construction, every step attempted even if an earlier one
+  // throws, and the drop gated on Postgres reporting zero backends rather than
+  // on `pool.end()` having resolved — which is NOT that guarantee.
+  await closeAll([
+    () => app.close(),
+    () => db.$client.end(),
+    () => dropScratchDatabase(admin, DB_NAME),
+    () => admin.$client.end(),
+  ]);
 });
 
 describe("node dispatch streaming (stream: true)", () => {
