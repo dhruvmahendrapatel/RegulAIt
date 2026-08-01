@@ -25,6 +25,9 @@ const WORKSPACE: NavEntry[] = [
   { label: "Inbox", to: "/inbox" },
   { label: "Projects", to: "/projects" },
   { label: "Shared context", to: "/context" },
+  // pillars 5 + 6 for the person who generates the spend — self-scoped, and
+  // the only place a non-admin can see their own cost and savings ledgers
+  { label: "Spend & savings", to: "/spend" },
 ];
 
 /** the native admin surface (phase 2): grouped real routes inside this shell */
@@ -269,7 +272,7 @@ export default function AppShell(props: { children: ReactNode }) {
                     navigate("/account");
                   }}
                 >
-                  Account security
+                  Account
                 </button>
                 <button
                   className={s.menuItem}
@@ -290,6 +293,16 @@ export default function AppShell(props: { children: ReactNode }) {
                   }}
                 >
                   Two-factor authentication
+                </button>
+                <button
+                  className={s.menuItem}
+                  role="menuitem"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    navigate("/account?section=keys");
+                  }}
+                >
+                  Your model keys
                 </button>
                 <button className={s.menuDanger} role="menuitem" onClick={() => void signOut()}>
                   Sign out

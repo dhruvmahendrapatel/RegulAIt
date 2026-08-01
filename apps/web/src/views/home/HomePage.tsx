@@ -193,7 +193,11 @@ function SpendCard() {
     <Card
       title={auth?.isAdmin ? "Spend snapshot" : "My spend"}
       actions={
-        auth?.isAdmin ? <Link to="/admin/cost">Cost dashboard</Link> : <Link to="/projects">Projects</Link>
+        auth?.isAdmin ? (
+          <Link to="/admin/cost">Cost dashboard</Link>
+        ) : (
+          <Link to="/spend">Spend &amp; savings</Link>
+        )
       }
     >
       {(t.events ?? 0) === 0 ? (

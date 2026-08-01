@@ -555,6 +555,9 @@ export interface UsageEventsResponse {
     measuredCostSavedUsd?: number;
     refusal?: boolean;
     projectId?: string | null;
+    /** agent rows carry which credential actually served the call (ADR-0024):
+     * "user" (a BYO key), "platform" (the org's), or "none" (mock). */
+    detail?: { credentialSource?: string } | null;
   }>;
   totals?: {
     costUsd?: number;

@@ -453,3 +453,140 @@ Two operational notes for whoever re-runs this:
   against the same Postgres at the same time therefore terminate each other's connections. A
   failure in exactly those files, that passes when the file is re-run alone, is that collision —
   not a regression.
+
+## Phase-4 amendment (2026-08-01) — the two END-USER residuals, closed
+
+The phase-3 correction ended with a method rather than a claim: **parity is a capability diff,
+not a passing suite.** Running that diff again — this time verb-aware, because a path-only diff
+cannot tell a surface that only *reads* an endpoint from one that *manages* it — turned up two
+residuals the phase-3 pass had not counted, and both were **end-user (non-admin) surfaces**. In
+a product whose pillar 5 is per-project cost attribution and whose pillar 6 is token
+optimization, neither omission is cosmetic: the developer who *generates* the spend could not see
+any of it, and the developer whose key ADR-0024 is written about could not manage that key.
+
+| Residual | What the SPA had | What was missing |
+| --- | --- | --- |
+| Own spend & savings | `cost-events` / `usage-events` referenced only from the ADMIN `OptimizationPage` | any non-admin surface at all |
+| BYO model keys | `ChatPage` READ `/v1/users/:id/model-credentials` for its "your key vs platform" badge | add / replace / remove — management existed only in the admin `ModelCredentialsPage`, which even told users to "add their own keys from the workspace → Account", a page that did not exist |
+
+### 1. `/ui/spend` — Spend & savings, self-scoped by construction
+
+A Workspace route (nav, after Projects) and the destination of Home's non-admin "My spend" card.
+
+**The governance question was settled from the endpoints, not assumed.** `GET /v1/cost-events`
+and `GET /v1/usage-events` are both in `NON_ADMIN_ROUTES`, and both compute
+`userId = req.authCtx.isAdmin ? q.userId : req.authCtx.userId` — a non-admin's `?userId=` is
+**not trusted**, it is overwritten with self, and a bootstrap session with no user identity is
+refused outright (`bootstrap_has_no_cost_history`). So the per-user filtering the page needs
+already existed and is enforced server-side; no backend change was required and none was made.
+
+The case that needed care was the **admin**, for whom those same endpoints default to
+**org-wide**. The page therefore always sends `?userId=<me>` and says on the page that the
+organisation-wide rollup is the admin Cost dashboard, elsewhere. A "My spend" page that quietly
+showed an admin the whole org would be the same class of dishonesty this ADR keeps correcting.
+
+What it shows: measured spend / tokens / measured savings / estimated savings; spend over the
+last 14 days (days with no call render **empty rather than dropped** — a quiet day is a real
+day); spend by project (rows link to that project's budget, forecast and showback), by agent, by
+connector; the recent-invocations table; and a Savings tab with per-technique totals and an
+explicit **estimated-vs-measured** explanation so the two numbers are never added together.
+Unpriced calls render `unpriced`, never `$0`. Unattributed spend is its own named bucket.
+
+One addition over the legacy page: a **"Key used"** column reading `detail.credentialSource`
+off the ledger row — which credential *actually* served each call (`your key` / `platform` /
+`none`). It is measured, never inferred from which keys happen to be stored. That column turns
+out to matter for the second surface.
+
+Name lookups come from the caller's OWN grants (`/v1/users/:id/agents`,
+`/v1/users/:id/connectors`) — the admin catalogs are 403 for a developer and are never touched.
+
+### 2. `/ui/account` → Your model keys — self-service BYO credentials
+
+List your stored per-provider credentials, add or rotate one, remove one. It shares ChatPage's
+`["my-credentials", userId]` query key, so that badge updates without a reload.
+
+**A stored secret is never displayed or echoed.** The backend keeps AES-256-GCM ciphertext and
+no endpoint returns plaintext, so the card shows provider + presence + endpoint + when it was
+set, and nothing else; the input is cleared the moment the write succeeds.
+
+**Key custody is stated, not discovered by failing.** With ADR-0024's `key_custody_enforced` on,
+`POST /v1/users/:id/model-credentials` answers **409** and dispatch skips stored user rows
+entirely. When custody is known to be on, the add control is **withdrawn rather than offered and
+broken**, an explanation states the ADR's exact semantics (org holds the vendor keys; existing
+rows are *kept, not deleted, and inert*; they come back exactly as stored if an admin lifts it),
+and stored rows are badged `stored · inert` — never "in use".
+
+**The honest limitation, recorded rather than papered over.** `GET /v1/interception/settings` is
+**admin-only, deliberately** (writing the posture is not a developer's business), so an admin
+reads the flag up front while a **developer cannot** — they can only learn it from the 409. The
+card therefore does two things instead of guessing: it never tells a developer their stored key
+*is being used* (presence reads as "stored", not "active"), and it points at the one honest
+answer available to them — the per-call `Key used` column on Spend & savings, which is measured.
+On the 409 the card flips into the same explained state an admin sees, so the refusal teaches
+rather than erroring. **A one-line backend change would remove the asymmetry** — surfacing
+`keyCustodyEnforced` (a boolean the developer is already subject to, and which leaks no
+configuration) on `GET /v1/me` beside the existing size ceilings. That was out of this change's
+territory and is left as a named, deliberate follow-up, not a silent gap.
+
+`ChatPage`'s own "your key" badge has the same blind spot for the same reason and is **not**
+fixed here — recorded so the next session finds it named rather than rediscovering it.
+
+### 3. Found by the same diff, closed in passing: connector + MCP-tool project spend
+
+`GET /v1/projects/:id/costs` returns `byConnector` and `byMcpTool` — both were **typed** in
+`apps/web/src/api/types.ts` and **rendered by neither** `ProjectDetailPage` nor the admin cost
+rollup, though the legacy drill-down showed both. Because ADR-0019/0024 put connector and
+MCP-tool spend on the *same* ledger, that spend was already inside every measured total while
+the visible breakdown only accounted for agents — the "unexplained gap between provider invoices
+and project totals" ADR-0024 §1 exists to prevent. Both rollups now name them. An endpoint-level
+diff cannot see this class of gap (same endpoint, ignored fields); it was found by reading the
+legacy drill-down against the SPA's.
+
+### The residual list, measured — NOT empty
+
+Re-running the diff on this branch (`grep` every quoted/backticked path fragment out of
+`app-ui.ts` + `admin-portal.ts`, normalise interpolations to `:x`, pair each with the verb of
+its `get`/`post`/`patch`/`put`/`del` helper, and diff against every `api.*` / `fetch` /
+`ssePost` / `downloadCsv` call in `apps/web/src`) gives **148 legacy capabilities vs 174 SPA
+capabilities**, with:
+
+- **Tier 1 — path referenced nowhere in `apps/web/src` (4, one capability):**
+  `GET`/`POST /v1/projects/:id/context`, `GET /v1/projects/:id/context/graph`,
+  `POST /v1/projects/:id/context/promote` — **pillar 4's shared context store**, unchanged from
+  the phase-3 correction's fourth gap. Still the reason the legacy shells stay.
+- **Tier 2 — path present but that verb not seen via `api.*` (1):**
+  `POST /v1/infra/findings/:id/remediate`, verified **by hand** to be a false positive — the SPA
+  reaches it through `InfrastructurePage`'s `propose(title, body, path)` helper, which hides the
+  verb from the regex. Recorded because the tier exists precisely so this class is checked
+  rather than assumed.
+- The two residuals this amendment closed (`GET /v1/users/:id/connectors` for a non-admin, and
+  `POST /v1/users/:id/model-credentials`) no longer appear.
+
+**So: parity is still NOT reached, and the legacy shells still stay.** The remaining gap is one
+capability — the shared context store — and it is the same one phase 3 named. This paragraph
+says so explicitly because three previous passes claimed parity they had not measured.
+
+The diff also has a known blind spot, now demonstrated by item 3 above: it compares *endpoints*,
+so a capability that is a **field of a response the SPA already fetches** is invisible to it. The
+next session should treat "same endpoint, unrendered field" as a category to check by reading,
+not by grepping.
+
+### Verification (this amendment)
+
+- `pnpm -r build` green (gateway `tsc`; web `tsc --noEmit` + `vite build`).
+- Playwright **36 → 39 journeys**, all green, **zero console errors**, own scratch database
+  (`regulait_wt_enduser`). The three new journeys drive the NON-ADMIN persona: her own Spend &
+  savings (including the *negative* assertions that a non-admin sees no org-wide note and no
+  Cost dashboard link); model keys add → listed as present-but-never-revealed (asserting the
+  secret appears nowhere in `page.content()` and the field is cleared) → removed; and, from the
+  admin journey, key custody flipped on with **both** readers proven — the admin from the
+  proactive settings read, a real non-admin (avery, second browser context) from the 409 alone,
+  with her rejected key never echoed. The toggle is restored at the end.
+- One **pre-existing flaky assertion** was found and fixed while doing this: after opening the
+  cost rollup, phase2 asserted an unscoped `getByText("Budget vs actual")`, which was matching
+  the **fleet table's column header** while the rollup query was still in flight. It passed only
+  by winning that race; any change to bundle size or timing turns it into a strict-mode
+  violation. It is now scoped to the rollup card, which is what it always meant to assert. A
+  baseline run at `d711a98` (36/36 green) confirmed the flake was pre-existing and not caused by
+  this change.
+- Gateway suite **unchanged** — no file under `apps/gateway/src` was touched by this amendment.
