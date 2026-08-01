@@ -21,7 +21,18 @@
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 
-export const MODEL_PROVIDER_KINDS = ["anthropic", "openai", "google", "xai", "mock"] as const;
+export const MODEL_PROVIDER_KINDS = [
+  "anthropic",
+  "openai",
+  "google",
+  "xai",
+  // ADR-0034: an ADMIN-REGISTERED endpoint the platform ships no adapter for
+  // (Ollama, vLLM, LM Studio, LocalAI, Azure OpenAI, a Bedrock proxy, an
+  // internal gateway). It is a KIND, not a vendor — which endpoint is a
+  // separate FK on the agent row, so this stays a closed vocabulary.
+  "custom",
+  "mock",
+] as const;
 export type ModelProviderKind = (typeof MODEL_PROVIDER_KINDS)[number];
 
 export function isModelProviderKind(value: string): value is ModelProviderKind {
@@ -32,8 +43,13 @@ export class ModelProviderError extends Error {
   constructor(
     message: string,
     readonly status?: number,
+    /** ADR-0034: the ORIGINAL failure, preserved. The SDKs flatten a transport
+     * failure to "Connection error.", which would turn an egress-guard refusal
+     * (a governance decision) into an opaque network blip. Callers walk this
+     * chain to report the real reason. */
+    options?: { cause?: unknown },
   ) {
-    super(message);
+    super(message, options);
   }
 }
 
@@ -315,6 +331,7 @@ export class AnthropicProvider implements ModelProvider {
         throw new ModelProviderError(
           `anthropic dispatch failed: ${err.message}`,
           typeof err.status === "number" ? err.status : undefined,
+          { cause: err },
         );
       }
       throw err;
@@ -671,6 +688,7 @@ async function dispatchChatCompletions(
       throw new ModelProviderError(
         `${label} dispatch failed: ${err.message}`,
         typeof err.status === "number" ? err.status : undefined,
+        { cause: err },
       );
     }
     throw err;
@@ -905,6 +923,7 @@ async function dispatchResponses(
       throw new ModelProviderError(
         `${label} dispatch failed: ${err.message}`,
         typeof err.status === "number" ? err.status : undefined,
+        { cause: err },
       );
     }
     throw err;
@@ -956,6 +975,83 @@ export class XaiProvider implements ModelProvider {
 
   dispatch(req: ModelDispatchRequest): Promise<ModelDispatchResult> {
     return dispatchChatCompletions(this.client, req, "xai");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Custom adapter (ADR-0034) — an ADMIN-REGISTERED OpenAI-compatible or
+// Anthropic-Messages-compatible endpoint.
+//
+// This deliberately implements NO protocol of its own. `openai_chat` is the
+// same `dispatchChatCompletions` core that already serves OpenAI and xAI,
+// pointed at the admin's baseUrl; `anthropic_messages` delegates to the real
+// `AnthropicProvider`. Streaming, refusal discipline, tool calls, usage
+// accounting and error labelling are therefore identical to the shipped
+// adapters by construction rather than by re-implementation — the only new
+// behaviour on this path is WHERE the bytes go, which is precisely the part
+// the egress guard governs.
+//
+// THE KEYLESS CASE. A local Ollama / LocalAI endpoint has no API key. The
+// OpenAI SDK refuses to construct without one, so we pass a sentinel and then
+// DELETE the Authorization header outright (openai-node treats a null default
+// header as "remove"). The result is a request that carries no credential at
+// all, rather than one that quietly ships the string "unused" to whatever the
+// admin pointed us at.
+// ---------------------------------------------------------------------------
+
+export type CustomWireProtocol = "openai_chat" | "anthropic_messages";
+
+export interface CustomAdapterOptions {
+  /** null/absent = a keyless endpoint (local Ollama, LocalAI, an internal
+   * gateway that authenticates by network position) */
+  apiKey?: string | null;
+  /** REQUIRED — a custom provider is nothing but its endpoint */
+  baseUrl: string;
+  wireProtocol: CustomWireProtocol;
+  fetchImpl?: typeof fetch;
+}
+
+const KEYLESS_SENTINEL = "regulait-keyless";
+
+export class CustomProvider implements ModelProvider {
+  readonly kind = "custom" as const;
+  /** set for anthropic_messages; null for openai_chat */
+  private readonly anthropic: AnthropicProvider | null = null;
+  /** set for openai_chat; null for anthropic_messages */
+  private readonly openai: OpenAI | null = null;
+
+  constructor(opts: CustomAdapterOptions) {
+    if (!opts.baseUrl) {
+      throw new ModelProviderError("custom provider requires a baseUrl");
+    }
+    if (opts.wireProtocol === "anthropic_messages") {
+      this.anthropic = new AnthropicProvider({
+        // the Anthropic SDK sends x-api-key; a keyless endpoint gets the
+        // sentinel rather than a crash. Documented in ADR-0034: an
+        // anthropic-dialect endpoint that needs no key is not a shape any
+        // known deployment has, so it is not worth a header surgery path.
+        apiKey: opts.apiKey ?? KEYLESS_SENTINEL,
+        baseUrl: opts.baseUrl,
+        ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
+      });
+      return;
+    }
+    this.openai = new OpenAI({
+      apiKey: opts.apiKey ?? KEYLESS_SENTINEL,
+      baseURL: opts.baseUrl,
+      // null removes the header entirely — a keyless endpoint sees no
+      // Authorization at all, not a bogus bearer token
+      ...(opts.apiKey ? {} : { defaultHeaders: { Authorization: null } }),
+      ...(opts.fetchImpl ? { fetch: opts.fetchImpl } : {}),
+      maxRetries: 2,
+    });
+  }
+
+  dispatch(req: ModelDispatchRequest): Promise<ModelDispatchResult> {
+    if (this.openai) return dispatchChatCompletions(this.openai, req, "custom");
+    if (this.anthropic) return this.anthropic.dispatch(req);
+    // unreachable — the constructor sets exactly one of the two
+    throw new ModelProviderError("custom provider has no wire adapter");
   }
 }
 
@@ -2220,9 +2316,14 @@ export class MockModelProvider implements ModelProvider {
 
 export interface ModelProviderConfig {
   provider: ModelProviderKind;
-  /** required for real providers; the mock needs none (air-gapped path) */
+  /** required for real vendors; the mock needs none (air-gapped path), and a
+   * 'custom' endpoint may genuinely be keyless (local Ollama / LocalAI) */
   apiKey?: string | null;
   baseUrl?: string | null;
+  /** ADR-0034 — REQUIRED when provider === 'custom': which dialect the
+   * admin-registered endpoint speaks. There is no default: guessing a wire
+   * protocol would mean silently sending a request the endpoint cannot parse. */
+  wireProtocol?: CustomWireProtocol | null;
 }
 
 /** shared mock instance so state persists across resolutions in one process */
@@ -2267,6 +2368,23 @@ export function resolveModelProvider(
       return new XaiProvider({
         apiKey: config.apiKey,
         baseUrl: config.baseUrl ?? null,
+        ...(fetchImpl ? { fetchImpl } : {}),
+      });
+    // ADR-0034: an admin-registered endpoint. NO API KEY IS REQUIRED — that is
+    // the whole point of supporting local Ollama and air-gapped gateways — but
+    // baseUrl and wireProtocol are, and their absence is a config error that
+    // fails explicit rather than defaulting to somebody's SaaS.
+    case "custom":
+      if (!config.baseUrl) {
+        throw new ModelProviderError("custom requires a baseUrl");
+      }
+      if (!config.wireProtocol) {
+        throw new ModelProviderError("custom requires a wireProtocol (openai_chat | anthropic_messages)");
+      }
+      return new CustomProvider({
+        apiKey: config.apiKey ?? null,
+        baseUrl: config.baseUrl,
+        wireProtocol: config.wireProtocol,
         ...(fetchImpl ? { fetchImpl } : {}),
       });
     case "mock":

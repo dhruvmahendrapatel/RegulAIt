@@ -13,6 +13,7 @@ import {
   gte,
   inArray,
   isNull,
+  customModelProviders,
   modelCredentials,
   sql,
   semanticCache,
@@ -54,6 +55,7 @@ import {
 } from "@regulait/model-provider";
 import {
   createAgentGrantSchema,
+  agentCustomProviderPairValid,
   createAgentSchema,
   createConnectorCredentialSchema,
   createConnectorGrantSchema,
@@ -99,6 +101,8 @@ import {
   loadOrgSettings,
 } from "./org-settings.js";
 import { loadInterceptionSettings } from "./compat-core.js";
+import { resolveCustomProviderForDispatch } from "./custom-providers.js";
+import { egressRefusal } from "./egress-guard.js";
 
 const userIdParam = z.object({ userId: z.string().uuid() });
 const agentIdParam = z.object({ agentId: z.string().uuid() });
@@ -264,10 +268,48 @@ export async function executeGovernedDispatch(
     }
   }
 
+  // ADR-0034 — CUSTOM PROVIDER RESOLUTION. Deliberately placed HERE, inside
+  // the one governed-dispatch core, after the entitlement/routing decision and
+  // after the project budget + PII gates: a custom endpoint gets exactly the
+  // same governance every other provider gets, and nothing about this branch
+  // can widen it. What it adds is a destination that must clear the egress
+  // guard EVERY TIME (DNS can be re-pointed after an admin approved the host),
+  // and an audit row naming the host we actually talked to.
+  let customDestination: { host: string; port: number; protocol: string; addresses: string[] } | null =
+    null;
+  let customProvider: Awaited<ReturnType<typeof resolveCustomProviderForDispatch>> | null = null;
+  if (served.provider === "custom") {
+    customProvider = await resolveCustomProviderForDispatch(db, dataKey, served.customProviderId);
+    if (!customProvider.ok) {
+      await db.insert(auditLog).values({
+        userId,
+        objectType: "custom_model_provider",
+        objectId: served.customProviderId,
+        detail: {
+          phase: "dispatch",
+          agentId: served.id,
+          error: customProvider.error,
+          ...(args.projectId ? { projectId: args.projectId } : {}),
+        },
+        effect: "deny",
+        ruleId: `custom-provider-${customProvider.error}`,
+        ruleChain: [],
+        reason: customProvider.detail,
+      });
+      return {
+        ok: false,
+        status: customProvider.status,
+        error: customProvider.error,
+        detail: customProvider.detail,
+      };
+    }
+    customDestination = customProvider.destination;
+  }
+
   let apiKey: string | null = null;
   let baseUrl: string | null = null;
   let credentialSource: "user" | "platform" | "none" = "none";
-  if (served.provider !== "mock") {
+  if (served.provider !== "mock" && served.provider !== "custom") {
     if (!dataKey) {
       return { ok: false, status: 503, error: "no_data_key", detail: "set REGULAIT_DATA_KEY" };
     }
@@ -344,9 +386,21 @@ export async function executeGovernedDispatch(
     ? served.systemPrompt + (args.system ? `\n\n${args.system}` : "")
     : args.system;
 
+  // A custom endpoint's key (when it has one at all) is the ORG's, stored on
+  // the custom_model_providers row — the same trust level as a platform
+  // credential, so the ledger says so. A keyless local endpoint honestly
+  // records "none": there was no credential, not a hidden one.
+  if (customProvider?.ok) {
+    credentialSource = customProvider.row.keyCiphertext ? "platform" : "none";
+  }
+
   let result;
   try {
-    const provider = resolveModelProvider({ provider: served.provider, apiKey, baseUrl });
+    // the custom path brings its own already-guarded provider instance; every
+    // other provider resolves exactly as before
+    const provider = customProvider?.ok
+      ? customProvider.provider
+      : resolveModelProvider({ provider: served.provider, apiKey, baseUrl });
     result = await provider.dispatch({
       model: served.model,
       input: args.input,
@@ -362,6 +416,31 @@ export async function executeGovernedDispatch(
       ...(args.onThinking ? { onThinking: args.onThinking } : {}),
     });
   } catch (err) {
+    // ADR-0034: an egress refusal raised INSIDE the adapter (the guarded fetch
+    // re-checking per request, or a redirect) is a governance decision, not a
+    // network blip. The SDKs flatten it to "Connection error.", so unwrap the
+    // cause chain and report the real reason — and audit it, because a block
+    // that fires between registration and the socket is exactly the event a
+    // governance product must be able to show afterwards.
+    const egress = egressRefusal(err);
+    if (egress) {
+      await db.insert(auditLog).values({
+        userId,
+        objectType: "custom_model_provider",
+        objectId: served.customProviderId,
+        detail: {
+          phase: "dispatch",
+          agentId: served.id,
+          ...(customDestination ? { intendedHost: customDestination.host } : {}),
+          ...(args.projectId ? { projectId: args.projectId } : {}),
+        },
+        effect: "deny",
+        ruleId: "custom-provider-egress-blocked",
+        ruleChain: [],
+        reason: egress,
+      });
+      return { ok: false, status: 403, error: "egress_blocked", detail: egress };
+    }
     if (err instanceof ModelProviderError) {
       return { ok: false, status: 502, error: "model_dispatch_failed", detail: err.message };
     }
@@ -435,8 +514,38 @@ export async function executeGovernedDispatch(
     refusal: result.refusal,
     providerMessageId: result.providerMessageId,
     projectId: args.projectId ?? null,
-    detail: { credentialSource, ...(args.detail ?? {}), ...piiDetail },
+    detail: {
+      credentialSource,
+      ...(customDestination ? { customProviderId: served.customProviderId, egress: customDestination } : {}),
+      ...(args.detail ?? {}),
+      ...piiDetail,
+    },
   });
+  // ADR-0034 — THE DESTINATION-HOST AUDIT ROW. The whole point of a governance
+  // product is that "which third-party endpoint did our models talk to, on
+  // whose behalf, for which project" is answerable after the fact. Written for
+  // every custom-provider dispatch, alongside (never instead of) the ordinary
+  // entitlement audit the caller already wrote.
+  if (customDestination) {
+    await db.insert(auditLog).values({
+      userId,
+      objectType: "custom_model_provider",
+      objectId: served.customProviderId,
+      detail: {
+        phase: "dispatch",
+        agentId: served.id,
+        model: served.model,
+        egress: customDestination,
+        ...(customProvider?.ok ? { providerName: customProvider.row.name, wireProtocol: customProvider.row.wireProtocol } : {}),
+        credentialSource,
+        ...(args.projectId ? { projectId: args.projectId } : {}),
+      },
+      effect: "allow",
+      ruleId: "custom-provider-dispatch",
+      ruleChain: [],
+      reason: `custom provider dispatch to ${customDestination.protocol}//${customDestination.host}:${customDestination.port}`,
+    });
+  }
   // §8.4 audit rows for a PII event (never for a clean payload): an OUTPUT
   // block is a governance deny; a warn is an allow with the 'pii-warned' rule;
   // log mode records counts in the usage detail above and stays silent here.
@@ -603,6 +712,16 @@ export function platformEnvKeyName(provider: string): string | null {
  * provider kinds `platformEnvKey` can resolve. */
 export const ENV_FALLBACK_PROVIDERS = ["anthropic", "openai", "google", "xai"] as const;
 
+/**
+ * ADR-0034 — the key an agent is looked up under in `configuredProviders`'s
+ * set. For every shipped vendor this is just the provider kind (today's
+ * behaviour, byte-identical). For a custom-provider agent it is the SPECIFIC
+ * endpoint, so dispatchability is decided per endpoint rather than per kind.
+ */
+export function agentProviderToken(a: { provider: string; customProviderId?: string | null }): string {
+  return a.provider === "custom" ? `custom:${a.customProviderId ?? "none"}` : a.provider;
+}
+
 /** Providers this user could actually dispatch to right now: "mock" needs no
  * key at all, everything else needs a stored credential — the caller's own
  * (BYO key) or the platform's — and a data key to decrypt it with, OR a
@@ -616,6 +735,26 @@ export async function configuredProviders(
   userId: string,
 ): Promise<Set<string>> {
   const set = new Set<string>(["mock"]);
+  // ADR-0034 — CUSTOM PROVIDERS ARE DISPATCHABLE PER ENDPOINT, NOT PER KIND.
+  // Every other entry in this set is a provider KIND ("anthropic"), because a
+  // stored key makes every agent of that kind servable. A custom endpoint is
+  // not like that: two agents can both be provider 'custom' while one points
+  // at a live endpoint and the other at a disabled one. So the token here is
+  // `custom:<uuid>` (see `agentProviderToken`), and only ENABLED endpoints get
+  // one — a routed-to agent whose endpoint is off would otherwise turn a
+  // working request into a 409 the router could have avoided. When the org
+  // master switch is off, no token is added and every custom agent is
+  // correctly seen as unservable.
+  {
+    const org = await loadOrgSettings(db);
+    if (org.customModelProvidersEnabled) {
+      const live = await db
+        .select({ id: customModelProviders.id })
+        .from(customModelProviders)
+        .where(eq(customModelProviders.enabled, true));
+      for (const c of live) set.add(`custom:${c.id}`);
+    }
+  }
   // The env fallback is decrypted-key-free, so it counts even without a data
   // key — but only when the ADR-0021 org gate allows it for that provider.
   const org = await loadOrgSettings(db);
@@ -655,6 +794,22 @@ export function registerAgentConnectorRoutes(
 
   app.post("/v1/agents", async (req, reply) => {
     const body = createAgentSchema.parse(req.body);
+    // ADR-0034 — the discriminated union, checked here so the 400 explains
+    // itself rather than surfacing as a raw CHECK-constraint violation.
+    if (!agentCustomProviderPairValid(body)) {
+      return reply.status(400).send({
+        error: "invalid_custom_provider_binding",
+        detail:
+          "provider 'custom' requires customProviderId, and customProviderId is only valid with provider 'custom'",
+      });
+    }
+    if (body.customProviderId) {
+      const [cp] = await db
+        .select({ id: customModelProviders.id })
+        .from(customModelProviders)
+        .where(eq(customModelProviders.id, body.customProviderId));
+      if (!cp) return reply.status(404).send({ error: "unknown_custom_provider" });
+    }
     const [row] = await db
       .insert(agents)
       .values({
@@ -666,6 +821,7 @@ export function registerAgentConnectorRoutes(
         costPerMTokOut: body.costPerMTokOut ?? null,
         model: body.model ?? null,
         systemPrompt: body.systemPrompt ?? null,
+        customProviderId: body.customProviderId ?? null,
       })
       .returning();
     return reply.status(201).send(row);
@@ -1405,7 +1561,7 @@ export function registerAgentConnectorRoutes(
           if (a.id === agent.id) return null;
           if (!a.model) return "no_model_id";
           if (!isModelProviderKind(a.provider)) return "unknown_provider";
-          if (!configured.has(a.provider)) return "no_model_credential";
+          if (!configured.has(agentProviderToken(a))) return "no_model_credential";
           return null;
         };
         skippedCandidates = entitled.flatMap((a) => {
@@ -1415,7 +1571,7 @@ export function registerAgentConnectorRoutes(
         const skippedIds = new Set(skippedCandidates.map((s) => s.agentId));
         candidateRows = entitled.filter((a) => !skippedIds.has(a.id));
         compactionCandidates = entitled.filter(
-          (a) => a.model && isModelProviderKind(a.provider) && configured.has(a.provider),
+          (a) => a.model && isModelProviderKind(a.provider) && configured.has(agentProviderToken(a)),
         );
       }
 

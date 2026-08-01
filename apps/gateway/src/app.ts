@@ -128,6 +128,7 @@ export interface BuildAppOptions {
 import { z } from "zod";
 import { registerMcpProxy } from "./mcp-proxy.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
+import { registerCustomProviderRoutes } from "./custom-providers.js";
 import {
   API_KEY_HEADER_ROUTES,
   COMPAT_ANTHROPIC_ROUTE,
@@ -2146,6 +2147,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerAuthRoutes(app, db, { bootstrapToken: opts.bootstrapToken, dataKey: opts.dataKey });
 
   registerAgentConnectorRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0034 — admin-registered custom LLM providers + the egress allow-list
+  // that makes their admin-suppliable baseUrl safe to have. Every route is
+  // admin-only via the global gate (none appear in NON_ADMIN_ROUTES).
+  registerCustomProviderRoutes(app, db, { dataKey: opts.dataKey });
   registerConversationRoutes(app, db);
   registerProjectRoutes(app, db);
   registerInfraRoutes(app, db, opts.dataKey);

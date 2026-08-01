@@ -57,6 +57,7 @@ import {
 } from "@regulait/shared";
 import { z } from "zod";
 import {
+  agentProviderToken,
   configuredProviders,
   executeGovernedDispatch,
   type AgentRow,
@@ -652,7 +653,9 @@ export async function prepareCompatCall(
     const entitled = registry.filter((a) => evalFor(a).effect === "allow");
     const configured = await configuredProviders(db, dataKey, userId);
     const candidateRows = entitled.filter(
-      (a) => a.id === requested.id || (a.model && isModelProviderKind(a.provider) && configured.has(a.provider)),
+      (a) =>
+        a.id === requested.id ||
+        (a.model && isModelProviderKind(a.provider) && configured.has(agentProviderToken(a))),
     );
     const complexity = classifyComplexity(args.text);
     const estimate = estimateTokens(args.text, complexity);
