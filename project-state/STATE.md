@@ -25,7 +25,8 @@ functionality; the gateway suite is at **888 tests** across 70 files (**1592** a
 workspace); the schema is at **migration 0047**; decisions run to **ADR-0032**. The product is served by a **React SPA** (`apps/web` —
 React 18 + Vite + react-router + TanStack Query, an owned token design system, light/dark, six
 grouped nav sections) at **`/ui`**, which is now the *only* UI: `/`, `/app` and `/admin` all 302
-there, with the retired template-literal shells parked at `/legacy/*` for one release (ADR-0026).
+there. The template-literal shells are **deleted** as of ADR-0033 (−7,125 lines): the SPA is not
+merely the default UI, it is the only one, and `/legacy/*` serves nothing.
 Humans authenticate with **real auth** — scrypt passwords, revocable server-side sessions
 (HttpOnly/SameSite cookies + a CSRF header), audited lockout, TOTP MFA, and OIDC SSO with PKCE and
 default-deny JIT provisioning (ADR-0025); API keys remain the programmatic/IDE credential.
@@ -1356,6 +1357,24 @@ into the repo as `scripts/parity-diff.mjs` + `legacy-ui-parity.test.ts`, compari
 dimensions (endpoint shapes, run event kinds POSTed, request-body keys) because an endpoint list
 alone cannot see gaps 4–6. It also found the throwaway extractor's comment stripper would eat the
 rest of a file on a `text/*` literal — i.e. **it could report false parity**. Deletion follows.
+
+**Legacy UI deleted (ADR-0033, #93) — −7,125 lines.** `admin-portal.ts` (2,583), `app-ui.ts`
+(2,841), `ui-theme.ts` (927), plus `check-ui-syntax.mjs`, the `/legacy/*` routes and the tests
+that existed only to assert the deleted shells. The parity checker was run on `main` immediately
+before deleting and reported zero legacy-only endpoints, run event kinds and request-body keys;
+that output is ADR-0033's evidence. Test count 1592 → 1585, and **every one of the seven is an
+accounted-for legacy test** — two suites had a legacy assertion *replaced* rather than removed, so
+`/legacy/*` is now positively asserted to be gone (401 → 404, never HTML) instead of merely
+untested.
+
+Three judgement calls in that PR are worth keeping: **CSP was not weakened** (the inline-script
+hashing is shared with the SPA's theme pre-paint script and stays); **`style-src 'unsafe-inline'`
+was deliberately left alone** even though ADR-0031's blocker for it is now gone, because a wrongly
+tightened `style-src` renders an unstyled page rather than raising an error and needs its own
+browser verification; and **the parity gate was deleted along with the thing it guarded**, since
+freezing it against a snapshot of a deleted file yields a gate that can only ever pass — worse
+than no gate, because it looks like protection. The method it encoded is written into ADR-0033 §1
+and the script is recoverable at `a8d2ce9`.
 
 **Standing lesson, restated:** every one of these three defects existed because something shipped
 without ever being executed in its real environment — a compose profile never started, a test
