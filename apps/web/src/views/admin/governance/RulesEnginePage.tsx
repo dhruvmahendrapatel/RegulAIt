@@ -7,7 +7,14 @@
 import { useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
-import type { ApprovalRule, DataScopeRule, RateLimitRule, RuleBase } from "../../../api/adminTypes";
+import type {
+  ApprovalRule,
+  DataScopeRule,
+  RateLimitRule,
+  RuleBase,
+  RuleDeployMode,
+  RuleKind,
+} from "../../../api/adminTypes";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Button, Card, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
@@ -135,6 +142,56 @@ function SubjectFields(props: {
   );
 }
 
+const DEPLOY_MODES: RuleDeployMode[] = ["hosted", "byoc", "air_gapped"];
+
+/**
+ * A4 (ADR-0027) — PATCH /v1/rules/:kind/:ruleId/deploy-mode.
+ *
+ * Mode scoping only ever NARROWS which restrictions apply; it can never mint
+ * an allow. The deploy-mode context is derived server-side from the attributed
+ * project's in-flight workflow instances — never client-asserted — so an
+ * unattributed call (or one with no in-flight deploy-bound work) never matches
+ * a mode-scoped rule. Every change is audited. Rendered inline per row rather
+ * than as a paste-the-rule-id form: the rule you are scoping is the row you
+ * are looking at.
+ */
+function DeployModeCell(props: { kind: RuleKind; rule: RuleBase }) {
+  const act = useAction();
+  const current = props.rule.deployMode ?? "";
+  return (
+    <span className={v.stackTight}>
+      <Select
+        aria-label={`Deploy-mode scope for rule ${props.rule.id}`}
+        data-testid={`deploy-mode-${props.rule.id}`}
+        value={current}
+        disabled={act.busy}
+        onChange={(e) => {
+          const next = e.target.value === "" ? null : (e.target.value as RuleDeployMode);
+          void act.run(
+            () =>
+              api.patch(`/v1/rules/${props.kind}/${props.rule.id}/deploy-mode`, { deployMode: next }),
+            next === null
+              ? "Scope cleared — this rule applies to every call"
+              : `Rule scoped to ${next} deploy targets`,
+          );
+        }}
+      >
+        <option value="">— every call —</option>
+        {DEPLOY_MODES.map((m) => (
+          <option key={m} value={m}>
+            {m}
+          </option>
+        ))}
+      </Select>
+      {act.error && (
+        <span className={v.errLine} role="alert">
+          {act.error}
+        </span>
+      )}
+    </span>
+  );
+}
+
 export default function RulesEnginePage() {
   const users = useUsers();
   const roles = useRoles();
@@ -180,6 +237,12 @@ export default function RulesEnginePage() {
     { key: "server", header: "Server", render: (r) => serverOf(r) },
     { key: "tool", header: "Tool", render: (r) => r.toolName ?? "— any —" },
   ];
+  /** A4 — the mode-scope editor, the same trailing column on all three tables */
+  const modeColumn = <T extends RuleBase>(kind: RuleKind) => ({
+    key: "deployMode",
+    header: "Deploy-mode scope" as ReactNode,
+    render: (r: T) => <DeployModeCell kind={kind} rule={r} />,
+  });
 
   return (
     <>
@@ -188,6 +251,17 @@ export default function RulesEnginePage() {
         sub="A rule targets one user, an assigned role, a team, or the whole fleet — on one server or all of them. Every governed call evaluates them in the same fixed precedence the Simulation view visualizes."
       />
       <div className={v.stack}>
+        <Card title="Deploy-mode scoping (ADR-0027 A4)">
+          <div className={v.faint}>
+            Every rule below carries a <strong>deploy-mode scope</strong>, editable inline on its row. A
+            mode-scoped restriction applies only to calls whose attributed project has in-flight workflow
+            instances landing on a deploy target of that mode. The context is derived server-side — never
+            client-asserted — and an unattributed call (or one with no in-flight deploy-bound work) never
+            matches a mode-scoped rule. Mode scoping only narrows WHICH restrictions apply; it can never
+            mint an allow. Every change here is audited.
+          </div>
+        </Card>
+
         <Card title="Approval rules — pause the call for a named approver">
           <RuleForm
             users={uOpts}
@@ -219,6 +293,7 @@ export default function RulesEnginePage() {
                 render: (r) => names.userName.get(r.approverUserId) ?? r.approverUserId,
               },
               { key: "created", header: "Created", render: (r) => ago(r.createdAt) },
+              modeColumn<ApprovalRule>("approvals"),
             ]}
             rows={approvals.data?.rules ?? []}
             rowKey={(r) => r.id}
@@ -272,6 +347,7 @@ export default function RulesEnginePage() {
                 render: (r) => (r.allowedValues ?? []).join(", "),
               },
               { key: "created", header: "Created", render: (r) => ago(r.createdAt) },
+              modeColumn<DataScopeRule>("data-scopes"),
             ]}
             rows={dataScopes.data?.rules ?? []}
             rowKey={(r) => r.id}
@@ -321,6 +397,7 @@ export default function RulesEnginePage() {
               { key: "maxCalls", header: "Max calls", align: "right", render: (r) => r.maxCalls },
               { key: "window", header: "Window (s)", align: "right", render: (r) => r.windowSeconds },
               { key: "created", header: "Created", render: (r) => ago(r.createdAt) },
+              modeColumn<RateLimitRule>("rate-limits"),
             ]}
             rows={rateLimits.data?.rules ?? []}
             rowKey={(r) => r.id}

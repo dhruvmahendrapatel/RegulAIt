@@ -49,6 +49,29 @@ variable "enable_onbox_tls" {
   default     = false
 }
 
+variable "assign_elastic_ip" {
+  description = <<-EOT
+    Allocate an Elastic IP and associate it with the instance, giving it a
+    public IPv4 that SURVIVES a stop/start. Default false keeps the pre-existing
+    behaviour (EC2's auto-assigned address, which changes on every power cycle).
+
+    Turn this on for any stack that is scheduled off and on (see
+    infra/modules/scheduled-power), or whose hostname/certificate is derived
+    from its IP — with `enable_onbox_tls` both are true at once, because the
+    sslip.io name literally encodes the address.
+
+    Billing: AWS charges ~$0.005/hr for every public IPv4 whether idle or in
+    use, so an EIP costs nothing extra while the instance runs; the only added
+    charge is the hours it sits allocated to a STOPPED instance.
+
+    One-time cutover cost: an instance that already has an auto-assigned address
+    CANNOT keep it — AWS has no convert-to-EIP operation. Enabling this changes
+    the public IP once, on the apply that adds it.
+  EOT
+  type        = bool
+  default     = false
+}
+
 variable "swap_gb" {
   description = "Swapfile size in GB added before the build (0 disables)."
   type        = number

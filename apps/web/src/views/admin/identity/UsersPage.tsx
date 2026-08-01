@@ -14,6 +14,8 @@ import type {
   ApiKey,
   McpRevocation,
   ObjectRevocation,
+  RevocationScope,
+  RevocationScopeKind,
   UserSession,
 } from "../../../api/adminTypes";
 import { ago } from "../../../api/format";
@@ -499,6 +501,54 @@ function SessionsPanel(props: { userId: string }) {
 
 // ---- per-user overrides (revocations) -------------------------------------
 
+/**
+ * O9 (ADR-0027) — PATCH /v1/revocations/:kind/:revocationId/scope.
+ *
+ * A revocation is CREATED full (the unambiguous ADR-0019 total). Narrowing it
+ * to read_only keeps write-classified tools/operations denied while letting
+ * reads through; a full revocation always beats everything else. Scope is an
+ * EDIT of an existing subtractive override, never part of creation — so this
+ * lives on the row, not on the add form. Agent revocations carry no scope
+ * (agents have no read/write operation classification to scope by), which is
+ * why only the MCP and connector tables get this column. Every change is
+ * audited.
+ */
+function RevocationScopeCell(props: {
+  kind: RevocationScopeKind;
+  revocationId: string;
+  scope: RevocationScope | undefined;
+}) {
+  const act = useAction();
+  return (
+    <span className={v.stackTight}>
+      <Select
+        aria-label={`Scope for revocation ${props.revocationId}`}
+        data-testid={`revocation-scope-${props.revocationId}`}
+        value={props.scope ?? "full"}
+        disabled={act.busy}
+        onChange={(e) => {
+          const next = e.target.value as RevocationScope;
+          void act.run(
+            () =>
+              api.patch(`/v1/revocations/${props.kind}/${props.revocationId}/scope`, { scope: next }),
+            next === "read_only"
+              ? "Narrowed to read_only — writes stay denied, reads are allowed again"
+              : "Restored to full — every tool/operation denied",
+          );
+        }}
+      >
+        <option value="full">full — everything denied</option>
+        <option value="read_only">read_only — writes denied, reads allowed</option>
+      </Select>
+      {act.error && (
+        <span className={v.errLine} role="alert">
+          {act.error}
+        </span>
+      )}
+    </span>
+  );
+}
+
 function OverridesPanel(props: { userId: string }) {
   const servers = useServers();
   const agents = useAgents();
@@ -539,7 +589,11 @@ function OverridesPanel(props: { userId: string }) {
       <div className={v.dim}>
         A revocation takes ONE object away from THIS user without touching their roles — it beats both a
         direct grant and every role-derived grant, and it can only ever deny. Lifting it restores whatever
-        the grants already said.
+        the grants already said. Every revocation is CREATED full (the unambiguous ADR-0019 total); the
+        <strong> Scope</strong> column narrows an existing MCP or connector revocation to read_only —
+        write-classified tools/operations stay denied while reads are allowed again — or restores it to
+        full. Agent revocations carry no scope: agents have no read/write operation classification to
+        scope by. Every scope change is audited.
       </div>
       <div className={v.sectionTitle}>MCP revocations</div>
       <form
@@ -578,6 +632,11 @@ function OverridesPanel(props: { userId: string }) {
         columns={[
           { key: "server", header: "Server", render: (r) => serverName.get(r.serverId) ?? r.serverId },
           { key: "tool", header: "Tool", render: (r) => r.toolName ?? "— all role-derived —" },
+          {
+            key: "scope",
+            header: "Scope",
+            render: (r) => <RevocationScopeCell kind="mcp" revocationId={r.id} scope={r.scope} />,
+          },
           { key: "created", header: "Created", render: (r) => ago(r.createdAt) },
           {
             key: "actions",
@@ -695,6 +754,13 @@ function OverridesPanel(props: { userId: string }) {
             columns={[
               { key: "connector", header: "Connector", render: (r) => r.connectorName ?? "—" },
               { key: "reason", header: "Reason", render: (r) => r.reason ?? "—" },
+              {
+                key: "scope",
+                header: "Scope",
+                render: (r) => (
+                  <RevocationScopeCell kind="connectors" revocationId={r.id} scope={r.scope} />
+                ),
+              },
               {
                 key: "actions",
                 header: "",

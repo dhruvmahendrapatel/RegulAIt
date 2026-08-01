@@ -2,6 +2,19 @@
  * Run detail — the DAG drawn as a real graph, per-node states, live worker
  * streaming (the multiplexed per-node SSE envelope: node_start / node_delta /
  * node_complete / run_complete), accept + retry + auto-advance + abort.
+ *
+ * It is also the MANUAL operator console, so a run is never only drivable in
+ * fully-automatic mode (pillar 7 §3's full verb set):
+ *   - a per-node instruction override, which rides along as the `inputs` map
+ *     on the next auto-advance pass;
+ *   - manual STREAMING dispatch of a single in_progress node
+ *     (POST /v1/runs/:runId/nodes/:nodeId/dispatch) followed by its
+ *     node_submitted event — the recovery path when a pass strands a node;
+ *   - reassign_node, the middle term of the retry/reassign/escalate triad,
+ *     moving a blocked node onto another agent the caller is entitled to.
+ * Every one of these is a governed server call: the gateway re-checks the
+ * initiating user's entitlements (and the node's lead ceiling) on each, and a
+ * refusal surfaces here as the server's own reason, never a silent no-op.
  */
 import { useCallback, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
@@ -20,9 +33,11 @@ import {
   ErrorState,
   IdChip,
   Meter,
+  Select,
   SkeletonBlock,
   StatusBadge,
   StatusDot,
+  Textarea,
   type Tone,
 } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
@@ -58,6 +73,16 @@ interface LivePane {
   status: "streaming" | "done" | "failed" | string;
 }
 
+/** the node states whose worker instructions can still change anything — a
+ * done / in_review node has already produced its output */
+const EDITABLE: NodeStatus[] = ["not_started", "in_progress", "blocked"];
+
+/** the instruction the server will use if we send no override for this node */
+const defaultInstruction = (n: RunGraphNode) => n.instruction ?? n.title;
+
+const STREAM_SUPPRESSED_NOTE =
+  "Streaming is disabled for this project: its PII mode is block, so worker output is checked in full before it is shown.";
+
 export default function RunDetailPage() {
   const { runId } = useParams<{ runId: string }>();
   const { auth } = useSession();
@@ -69,6 +94,13 @@ export default function RunDetailPage() {
   const [acceptReviews, setAcceptReviews] = useState(true);
   const [livePanes, setLivePanes] = useState<LivePane[]>([]);
   const livePaneRefs = useRef(new Map<string, HTMLPreElement>());
+  /** per-node instruction overrides, keyed by nodeId — only nodes the operator
+   * actually edited are ever sent (see editedInputs below) */
+  const [instructions, setInstructions] = useState<Record<string, string>>({});
+  const [openEditors, setOpenEditors] = useState<Record<string, boolean>>({});
+  /** the agent picked in a blocked node's reassign select, before submitting */
+  const [reassignTo, setReassignTo] = useState<Record<string, string>>({});
+  const [dispatchingNode, setDispatchingNode] = useState<string | null>(null);
 
   const q = useQuery({
     queryKey: ["run", runId],
@@ -82,6 +114,14 @@ export default function RunDetailPage() {
   });
   const agentNames = useMemo(
     () => Object.fromEntries((agentsQ.data?.agents ?? []).map((a) => [a.agentId, a.name])),
+    [agentsQ.data],
+  );
+  /** the reassign roster: the caller's OWN granted agents, minus any revoked
+   * for them. It is a convenience list, never a privilege claim — the gateway
+   * re-runs the full entitlement check (and the node's lead ceiling) under the
+   * INITIATING user on every reassign, and refuses with its own reason. */
+  const myAgents = useMemo(
+    () => (agentsQ.data?.agents ?? []).filter((a) => !a.revoked),
     [agentsQ.data],
   );
 
@@ -113,15 +153,33 @@ export default function RunDetailPage() {
     });
   }, []);
 
+  /**
+   * The per-node instruction overrides to send with this pass: ONLY nodes the
+   * operator actually changed. A node absent from `inputs` uses its declared
+   * instruction server-side, so an untouched run posts exactly the payload it
+   * always did.
+   */
+  const editedInputs = useCallback((): Record<string, string> => {
+    const nodes = q.data?.run.graph.nodes ?? [];
+    const out: Record<string, string> = {};
+    for (const n of nodes) {
+      const edited = instructions[n.id]?.trim();
+      if (edited && edited !== defaultInstruction(n).trim()) out[n.id] = edited;
+    }
+    return out;
+  }, [q.data, instructions]);
+
   // pillar 7 live streaming: the multiplexed per-node envelope — every event
   // keyed by nodeId so parallel-wave deltas interleave safely, one pane each
   const autoAdvance = useCallback(async () => {
     setAutoBusy(true);
     setLivePanes([]);
     try {
+      const inputs = editedInputs();
       const res = await ssePost(`/v1/runs/${runId}/auto`, {
         stream: true,
         acceptReviews,
+        ...(Object.keys(inputs).length ? { inputs } : {}),
       });
       if (res.ok && res.headers.get("content-type")?.includes("event-stream")) {
         let final: { stoppedReason?: string } | null = null;
@@ -168,11 +226,7 @@ export default function RunDetailPage() {
         void refresh();
         return;
       }
-      if (j?.streamingSuppressed) {
-        toast(
-          "Streaming is disabled for this project: its PII mode is block, so worker output is checked in full before it is shown.",
-        );
-      }
+      if (j?.streamingSuppressed) toast(STREAM_SUPPRESSED_NOTE);
       const label = STOP_LABELS[j?.stoppedReason ?? ""] ?? `stopped: ${String(j?.stoppedReason ?? "").replaceAll("_", " ")}`;
       toast(`Auto-advance took ${j?.steps?.length ?? 0} step${(j?.steps?.length ?? 0) === 1 ? "" : "s"} — ${label}`);
       void refresh();
@@ -182,7 +236,81 @@ export default function RunDetailPage() {
     } finally {
       setAutoBusy(false);
     }
-  }, [runId, acceptReviews, agentNames, patchPane, toast, refresh]);
+  }, [runId, acceptReviews, agentNames, patchPane, toast, refresh, editedInputs]);
+
+  /**
+   * MANUAL DISPATCH of one in_progress node — the recovery path when an
+   * auto-advance pass strands a node in_progress (its wave failed after the
+   * node was started). It is the same two steps a pass takes, driven by hand:
+   * dispatch the node's worker (streaming its tokens into that node's live
+   * pane) with whatever instruction override is in the editor, then submit the
+   * output for review with a node_submitted event.
+   *
+   * The endpoint is fully governed — entitlement, budget and config refusals
+   * come back as real HTTP errors and are surfaced verbatim. Once the first
+   * delta is on the wire the response is committed, so a later failure arrives
+   * as an SSE `error` frame instead; both paths abort before node_submitted so
+   * a failed dispatch never submits an output that does not exist.
+   */
+  const dispatchNode = useCallback(
+    async (node: RunGraphNode) => {
+      setDispatchingNode(node.id);
+      setLivePanes([]);
+      try {
+        const edited = instructions[node.id]?.trim();
+        const override = edited && edited !== defaultInstruction(node).trim() ? edited : null;
+        const res = await ssePost(`/v1/runs/${runId}/nodes/${node.id}/dispatch`, {
+          stream: true,
+          ...(override ? { input: override } : {}),
+        });
+        if (res.ok && res.headers.get("content-type")?.includes("event-stream")) {
+          let failed: { error?: string; detail?: string } | null = null;
+          patchPane(node.id, (p) => ({ ...p, status: "streaming" }));
+          await readSse(res, (ev, raw) => {
+            const data = raw as { text?: string; error?: string; detail?: string };
+            if (ev === "delta") {
+              patchPane(node.id, (p) => ({ ...p, text: p.text + (data.text ?? "") }));
+              const el = livePaneRefs.current.get(node.id);
+              if (el) el.scrollTop = el.scrollHeight;
+            }
+            if (ev === "error") failed = data;
+          });
+          const err = failed as { error?: string; detail?: string } | null;
+          patchPane(node.id, (p) => ({ ...p, status: err ? "failed" : "done" }));
+          if (err) {
+            toast(`✗ ${err.detail ?? err.error ?? "dispatch failed"}`, "error");
+            void refresh();
+            return;
+          }
+        } else {
+          // graceful degrade: buffered JSON (a block-mode PII project never
+          // streams — the server discloses it — or a real HTTP error)
+          type BufferedDispatch = { streamingSuppressed?: boolean };
+          let j: BufferedDispatch | null = null;
+          try {
+            j = (await res.json()) as BufferedDispatch;
+          } catch {
+            j = null;
+          }
+          if (!res.ok) {
+            toast(`✗ ${errMessage(res.status, j ?? {})}`, "error");
+            void refresh();
+            return;
+          }
+          if (j?.streamingSuppressed) toast(STREAM_SUPPRESSED_NOTE);
+        }
+        await api.post(`/v1/runs/${runId}/events`, { kind: "node_submitted", nodeId: node.id });
+        toast("Node dispatched — output submitted for review", "success");
+        void refresh();
+      } catch (e) {
+        toast(`✗ ${e instanceof Error ? e.message : e}`, "error");
+        void refresh();
+      } finally {
+        setDispatchingNode(null);
+      }
+    },
+    [runId, instructions, patchPane, toast, refresh],
+  );
 
   if (q.isLoading) {
     return (
@@ -227,6 +355,8 @@ export default function RunDetailPage() {
           new Date(events[0]!.at).getTime(),
       )
     : null;
+  /** how many nodes carry an instruction override the next pass would send */
+  const pendingOverrides = Object.keys(editedInputs()).length;
   const cap = budget.capUsd;
   const spent = budget.measuredSpentUsd ?? 0;
 
@@ -254,9 +384,22 @@ export default function RunDetailPage() {
             )}
             {(run.status === "running" || run.status === "planned") && (
               <>
-                <Button onClick={() => void autoAdvance()} disabled={autoBusy}>
+                <Button
+                  onClick={() => void autoAdvance()}
+                  disabled={autoBusy || dispatchingNode !== null}
+                  title={
+                    pendingOverrides > 0
+                      ? `${pendingOverrides} edited node instruction${pendingOverrides === 1 ? "" : "s"} will be sent with this pass`
+                      : undefined
+                  }
+                >
                   {autoBusy ? "Advancing…" : "Auto-advance"}
                 </Button>
+                {pendingOverrides > 0 && (
+                  <Badge tone="info">
+                    {pendingOverrides} instruction override{pendingOverrides === 1 ? "" : "s"}
+                  </Badge>
+                )}
                 <label className={v.faint} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
                   <input
                     type="checkbox"
@@ -353,6 +496,40 @@ export default function RunDetailPage() {
                       >
                         Retry
                       </Button>
+                      {/* §3's middle verb: move the node onto another agent.
+                          The picker is the caller's own granted roster; the
+                          server re-checks it under the initiating user and
+                          against this node's lead ceiling before accepting. */}
+                      <Select
+                        className={s.reassignPicker}
+                        aria-label={`Reassign ${n.id} to agent`}
+                        data-testid={`reassign-agent-${n.id}`}
+                        value={reassignTo[n.id] ?? state.owners[n.id] ?? ""}
+                        onChange={(e) => setReassignTo((m) => ({ ...m, [n.id]: e.target.value }))}
+                      >
+                        {myAgents.length === 0 && <option value="">— no agents granted to you —</option>}
+                        {myAgents.map((a) => (
+                          <option key={a.agentId} value={a.agentId}>
+                            {a.name} · {a.provider}
+                          </option>
+                        ))}
+                      </Select>
+                      <Button
+                        size="sm"
+                        data-testid={`reassign-${n.id}`}
+                        disabled={myAgents.length === 0}
+                        title="Re-checked against your entitlements — a run can never drift to an agent you couldn't use yourself"
+                        onClick={() => {
+                          const ownerAgentId = reassignTo[n.id] ?? state.owners[n.id] ?? "";
+                          if (!ownerAgentId) return;
+                          void postEvent(
+                            { kind: "reassign_node", nodeId: n.id, ownerAgentId },
+                            "Node reassigned and re-opened",
+                          );
+                        }}
+                      >
+                        Reassign
+                      </Button>
                       <Button
                         size="sm"
                         title="Hand this failure to the run's escalation approver — it lands in their inbox"
@@ -367,7 +544,52 @@ export default function RunDetailPage() {
                       </Button>
                     </div>
                   )}
+                  {/* per-node instruction override (gap 6) + manual dispatch
+                      (gaps 3/5) — collapsed by default so the node list stays
+                      readable, defaulted to the node's existing instruction */}
+                  {EDITABLE.includes(st) && openEditors[n.id] && (
+                    <div className={s.nodeEditor} data-testid={`node-editor-${n.id}`}>
+                      <Textarea
+                        aria-label={`Instructions for ${n.id}`}
+                        data-testid={`node-instruction-${n.id}`}
+                        rows={4}
+                        spellCheck={false}
+                        value={instructions[n.id] ?? defaultInstruction(n)}
+                        onChange={(e) => setInstructions((m) => ({ ...m, [n.id]: e.target.value }))}
+                      />
+                      <div className={v.faint}>
+                        Sent to this node&apos;s worker as its instructions on the next dispatch
+                        {st === "in_progress" ? "" : " (auto-advance picks edits up)"}.
+                      </div>
+                      {st === "in_progress" && (
+                        <div>
+                          <Button
+                            size="sm"
+                            data-testid={`dispatch-${n.id}`}
+                            disabled={autoBusy || dispatchingNode !== null}
+                            onClick={() => void dispatchNode(n)}
+                          >
+                            {dispatchingNode === n.id
+                              ? "Dispatching…"
+                              : "Dispatch with these instructions"}
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
+                {EDITABLE.includes(st) && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    aria-expanded={Boolean(openEditors[n.id])}
+                    data-testid={`node-edit-toggle-${n.id}`}
+                    title="Adjust the instructions sent to this node's worker"
+                    onClick={() => setOpenEditors((m) => ({ ...m, [n.id]: !m[n.id] }))}
+                  >
+                    ✎
+                  </Button>
+                )}
                 <StatusBadge status={st} />
                 {st === "in_review" && (
                   <Button

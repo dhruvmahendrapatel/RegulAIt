@@ -24,7 +24,7 @@ also a narrower claim than it sounds. Precisely:
 
 **What it means**
 - Every pillar has code, tests, a migration history, and a UI surface on the live dev stack
-  (`http://3.237.199.248:3000`, EC2 `i-013c62adc887c76bb`, ADR-0013).
+  (`http://3.229.246.126:3000`, EC2 `i-013c62adc887c76bb`, ADR-0013).
 - The load-bearing *invariants* are enforced and tested, not asserted in prose: default-deny
   survives every path; the optimizer can never widen entitlement; delegation only ever
   tightens (agent ceiling ADR-0016 + budget ceiling); one audit trail, one approvals queue;
