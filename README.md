@@ -56,9 +56,25 @@ pnpm --filter @regulait/gateway start   # migrations run on boot
 
 Tests (`pnpm -r test`) need `DATABASE_URL` pointing at a scratch database.
 
+### TLS
+
+The deployed dev box serves **HTTPS with a real Let's Encrypt certificate** at
+`https://<dashed-public-ip>.sslip.io` — a Caddy reverse proxy inside the same compose stack, at no
+added AWS cost (no ALB, no ACM, no domain). It lives behind the `tls` compose profile, so it is off
+for the local quickstart above:
+
+```bash
+docker compose --profile tls up -d --build                    # real Let's Encrypt (on the box only)
+docker compose --profile tls -f docker-compose.yml \
+               -f compose.tls-local.yml up --build            # local proof, self-signed local CA
+```
+
+Runbook and caveats: [docs/ops/TLS.md](docs/ops/TLS.md). Decision:
+[ADR-0029](docs/decisions/0029-zero-cost-tls-caddy-sslip-letsencrypt.md).
+
 > Deployment note: the compose file is dev-grade (fixed demo secrets — override them
-> anywhere shared). Nothing here deploys to AWS; that step is deliberately gated on an
-> explicit decision (see CLAUDE.md's standing guardrail).
+> anywhere shared). The AWS dev stack is still **not production** — TLS closes the cleartext
+> session-cookie hole, it does not change that status (see CLAUDE.md's standing guardrail).
 
 ## Status
 
