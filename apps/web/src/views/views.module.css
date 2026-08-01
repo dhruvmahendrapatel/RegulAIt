@@ -36,6 +36,13 @@
   flex-direction: column;
   gap: var(--s2);
 }
+/* vertical twin of .rowTight — an inline control plus its own error line */
+.stackTight {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s0);
+}
 .row {
   display: flex;
   align-items: center;

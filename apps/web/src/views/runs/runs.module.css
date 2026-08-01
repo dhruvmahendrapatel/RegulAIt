@@ -19,6 +19,29 @@
   font-weight: 550;
 }
 
+/* the blocked-node owner picker: the kit select is full-width by default,
+   which would wrap retry/reassign/escalate onto three lines — the triad reads
+   as one row of choices, so it is sized to its content here */
+.reassignPicker {
+  width: auto;
+  max-width: 240px;
+}
+
+/* the collapsed per-node instruction override + its manual-dispatch button */
+.nodeEditor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s0);
+  margin-top: var(--s1);
+  padding: var(--s1) var(--s2);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.nodeEditor textarea {
+  width: 100%;
+}
+
 .livePane {
   margin-top: var(--s1);
 }

@@ -171,3 +171,61 @@ describe("endpoint + end-to-end through governed evaluation", () => {
     expect(readAgain.json().effect).toBe("deny");
   });
 });
+
+/**
+ * O9's LIST projections. A scope an operator cannot see is a scope they can
+ * only edit blind: the SPA renders the current value in the row it is about to
+ * narrow, so both revocation listings have to carry `scope`. `GET
+ * /v1/revocations` selects the whole row and always did; the connector listing
+ * is an explicit projection and did NOT, which made the connector half of the
+ * O9 control unrenderable. Asserted here so the projection cannot silently
+ * regress back to omitting it.
+ */
+describe("O9 — the revocation listings expose the scope the endpoint edits", () => {
+  let connectorRevocationId: string;
+  let connectorId: string;
+
+  it("connector revocations list their scope, and a PATCH round-trips into the list", async () => {
+    const connector = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/connectors",
+      payload: { name: "o9-conn", kind: "data", providerKind: "mock" },
+    });
+    expect(connector.statusCode).toBe(201);
+    connectorId = connector.json().id;
+
+    const created = await app.inject({
+      method: "POST", headers: AUTH, url: `/v1/users/${userId}/revocations/connectors`,
+      payload: { connectorId, reason: "o9 projection check" },
+    });
+    expect(created.statusCode).toBe(201);
+    connectorRevocationId = created.json().id;
+
+    // creation is always the ADR-0019 total, and the LIST says so
+    const before = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/users/${userId}/revocations/connectors`,
+    });
+    expect(before.statusCode).toBe(200);
+    const beforeRow = before.json().revocations.find((r: { id: string }) => r.id === connectorRevocationId);
+    expect(beforeRow).toBeTruthy();
+    expect(beforeRow.scope).toBe("full");
+
+    const patched = await app.inject({
+      method: "PATCH", headers: AUTH, url: `/v1/revocations/connectors/${connectorRevocationId}/scope`,
+      payload: { scope: "read_only" },
+    });
+    expect(patched.statusCode).toBe(200);
+    expect(patched.json().scope).toBe("read_only");
+
+    const after = await app.inject({
+      method: "GET", headers: AUTH, url: `/v1/users/${userId}/revocations/connectors`,
+    });
+    const afterRow = after.json().revocations.find((r: { id: string }) => r.id === connectorRevocationId);
+    expect(afterRow.scope).toBe("read_only");
+  });
+
+  it("MCP revocations list their scope too", async () => {
+    const list = await app.inject({ method: "GET", headers: AUTH, url: "/v1/revocations" });
+    expect(list.statusCode).toBe(200);
+    for (const r of list.json().revocations) expect(["full", "read_only"]).toContain(r.scope);
+  });
+});
