@@ -27,6 +27,8 @@
  * are removed. Recorded as a follow-up in ADR-0031.
  */
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 
 /** CSP source expression for a literal inline script/style body. */
 export function sha256Source(body: string): string {
@@ -53,6 +55,20 @@ const scriptHashes = new Set<string>();
 /** Register every inline script in `html` as an allowed CSP source. */
 export function registerInlineScripts(html: string): void {
   for (const body of inlineScriptBodies(html)) scriptHashes.add(sha256Source(body));
+}
+
+/**
+ * Register the SPA shell's inline scripts, read from the built bundle. Silent
+ * no-op when the bundle is absent — /ui already answers a clear 503 in that
+ * case, so there is nothing to allow.
+ */
+export function registerSpaInlineScripts(distDir: string): boolean {
+  try {
+    registerInlineScripts(readFileSync(path.join(distDir, "index.html"), "utf8"));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** test seam — drops every registered hash */

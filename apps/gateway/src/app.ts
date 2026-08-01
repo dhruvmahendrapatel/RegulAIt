@@ -158,7 +158,13 @@ import {
   startAuditPruneScheduler,
 } from "./org-settings.js";
 import { registerSetupStatusRoutes } from "./setup-status.js";
-import { WEB_UI_ROUTES, registerWebServing } from "./web-serving.js";
+import { WEB_UI_ROUTES, defaultWebDistDir, registerWebServing } from "./web-serving.js";
+import path from "node:path";
+import {
+  registerInlineScripts,
+  registerSpaInlineScripts,
+  securityHeaders,
+} from "./security-headers.js";
 import { MergeConflictError, WorkflowStateError } from "@regulait/workflow-kernel";
 
 const uuidParam = z.object({ serverId: z.string().uuid() });
@@ -310,6 +316,32 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     app.log.error(err);
     if (process.env.DEBUG_ERRORS) console.error("GATEWAY ERR:", err);
     return reply.status(500).send({ error: "internal" });
+  });
+
+  // ADR-0031 item 5 — security headers on every response. The gateway serves
+  // the SPA itself and is directly reachable (the compose port, and every dev
+  // machine), so it cannot delegate CSP / nosniff / frame-ancestors to an edge
+  // proxy. Deliberately here rather than in web-serving.ts: these belong to
+  // every response, not just static files.
+  //
+  // Set-if-absent, never overwrite: a route (or an edge) that already chose a
+  // value keeps it, so nothing here can conflict with a header set upstream.
+  // The one thing that is NOT set unconditionally is HSTS — announcing it over
+  // plain http would be wrong in dev, so it rides only a genuinely secure
+  // request (which, per item 3, means a real TLS hop or a hop from a trusted
+  // proxy — never a forged x-forwarded-proto).
+  app.addHook("onSend", async (req, reply, payload) => {
+    const contentType = reply.getHeader("content-type");
+    const headers = securityHeaders(
+      typeof contentType === "string" ? contentType : undefined,
+    );
+    for (const [name, value] of Object.entries(headers)) {
+      if (reply.getHeader(name) === undefined) reply.header(name, value);
+    }
+    if (req.protocol === "https" && reply.getHeader("strict-transport-security") === undefined) {
+      reply.header("strict-transport-security", "max-age=31536000; includeSubDomains");
+    }
+    return payload;
   });
 
   app.decorateRequest("authCtx");
@@ -2018,6 +2050,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     html.replace('<div id="root">', `${deprecationBanner}<div id="root">`);
   const LEGACY_ADMIN_HTML = withDeprecation(ADMIN_PORTAL_HTML);
   const LEGACY_APP_HTML = withDeprecation(APP_HTML);
+  // ADR-0031 item 5: allow the inline scripts these documents actually carry
+  // by HASH rather than surrendering script-src to 'unsafe-inline'. Derived
+  // from the exact bytes that will be served — the two legacy shells here, and
+  // the SPA's theme pre-paint script read from the built bundle — so a rebuilt
+  // bundle or an edited pre-paint script keeps working with no hardcoded
+  // constant to drift.
+  registerInlineScripts(LEGACY_ADMIN_HTML);
+  registerInlineScripts(LEGACY_APP_HTML);
+  registerSpaInlineScripts(path.resolve(process.env.REGULAIT_WEB_DIST ?? defaultWebDistDir()));
   app.get("/admin", async (_req, reply) => reply.redirect("/ui", 302));
   app.get("/app", async (_req, reply) => reply.redirect("/ui", 302));
   app.get("/legacy/admin", async (_req, reply) => reply.type("text/html").send(LEGACY_ADMIN_HTML));
