@@ -1,14 +1,24 @@
 /**
- * Sign-in (ADR-0025): email + password (uniform errors — never an
- * account-existence oracle), the TOTP second step, SSO provider buttons, and
- * the details-toggled API-key exchange for key-first users. On success the
- * router returns the user to wherever the 401 interrupted them.
+ * Sign-in (ADR-0025, ADR-0030): EMAIL OR USERNAME + password (uniform errors —
+ * never an account-existence oracle), the TOTP second step, SSO provider
+ * buttons, and the details-toggled API-key exchange for key-first users. On
+ * success the router returns the user to wherever the 401 interrupted them.
+ *
+ * The field is deliberately NOT type="email" any more: forcing email format in
+ * the browser is exactly what made `dhruv` unusable before the server ever saw
+ * it. Validation of the identifier belongs to the server, which answers the
+ * same uniform 401 for every failure mode.
  */
 import { useEffect, useState, type FormEvent } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
-import type { AuthMeResponse, LoginResponse, OidcProvidersResponse } from "../../api/types";
+import type {
+  AuthMeResponse,
+  LoginRequestBody,
+  LoginResponse,
+  OidcProvidersResponse,
+} from "../../api/types";
 import { useSession } from "../../session/SessionContext";
 import { Button, Field, Input } from "../../ui/kit";
 import s from "./auth.module.css";
@@ -30,7 +40,8 @@ export default function LoginPage() {
   const location = useLocation();
   const returnTo = (location.state as { from?: string } | null)?.from ?? "/";
 
-  const [email, setEmail] = useState("");
+  // ADR-0030: one field, either namespace — an email address or a username
+  const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [code, setCode] = useState("");
@@ -63,7 +74,15 @@ export default function LoginPage() {
     setError(null);
     setBusy(true);
     try {
-      const r = await api.post<LoginResponse>("/auth/login", { email, password });
+      // ADR-0030 graceful degradation: an email keeps riding the pre-0047
+      // `email` field (which every gateway understands), and only a username
+      // needs the new `identifier` field. A username against an older gateway
+      // fails either way — it has no usernames to match.
+      const value = identifier.trim();
+      const body: LoginRequestBody = value.includes("@")
+        ? { email: value, password }
+        : { identifier: value, password };
+      const r = await api.post<LoginResponse>("/auth/login", body);
       if (r.mfaRequired && r.pendingToken) {
         setPendingToken(r.pendingToken);
         return;
@@ -74,7 +93,9 @@ export default function LoginPage() {
         setSsoOnly(true);
         setError("Password sign-in is disabled for this organization — use single sign-on below.");
       } else if (err instanceof ApiError && err.status === 401) {
-        setError("Email or password is incorrect.");
+        // deliberately one message for every failure mode — the server's
+        // uniform 401 is not an account-existence oracle and neither is this
+        setError("Email/username or password is incorrect.");
       } else {
         setError(err instanceof Error ? err.message : String(err));
       }
@@ -150,9 +171,9 @@ export default function LoginPage() {
           </p>
           {/* which identity this challenge belongs to — matters when several
            * accounts share an authenticator app */}
-          {email && (
+          {identifier && (
             <div className={s.identity}>
-              Signing in as <strong>{email}</strong>
+              Signing in as <strong>{identifier}</strong>
             </div>
           )}
           {error && <div className={s.error} role="alert">{error}</div>}
@@ -196,15 +217,18 @@ export default function LoginPage() {
         {error && <div className={s.error} role="alert">{error}</div>}
         {!ssoOnly && (
           <form className={s.form} onSubmit={submitPassword}>
-            <Field label="Email">
+            <Field label="Email or username">
               <Input
-                type="email"
+                type="text"
                 autoComplete="username"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
                 autoFocus
                 required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="you@company.com"
+                value={identifier}
+                onChange={(e) => setIdentifier(e.target.value)}
+                placeholder="you@company.com or dhruv"
               />
             </Field>
             <Field label="Password">

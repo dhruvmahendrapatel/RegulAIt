@@ -18,6 +18,15 @@ import {
 export const users = pgTable("users", {
   id: uuid("id").primaryKey().defaultRandom(),
   email: text("email").notNull().unique(),
+  /** ADR-0030 (migration 0047): the SECOND login identifier. NULL = this user
+   * signs in by email only (every pre-0047 user). UNIQUE, and lowercase by
+   * construction — the DB CHECK admits `^[a-z0-9][a-z0-9._-]{1,62}$` only, so
+   * a plain unique index IS case-insensitive uniqueness and `Dhruv` cannot
+   * coexist with `dhruv` (it cannot be stored at all). The shape forbids '@',
+   * which is what keeps the username and email namespaces provably disjoint:
+   * one login field resolves both, and a username can never impersonate
+   * someone else's email address. */
+  username: text("username").unique(),
   displayName: text("display_name").notNull(),
   isAdmin: boolean("is_admin").notNull().default(false),
   /** ADR-0022 identity lifecycle: a DISABLED user (offboarding, suspension).
@@ -2000,6 +2009,13 @@ export const orgSettings = pgTable(
     loginLockoutThreshold: integer("login_lockout_threshold").notNull().default(5),
     loginLockoutWindowMinutes: integer("login_lockout_window_minutes").notNull().default(15),
     loginLockoutMinutes: integer("login_lockout_minutes").notNull().default(15),
+    /** ADR-0030 (migration 0047): may a user set/change/clear their OWN
+     * username? false (default) = admin-managed only, the behaviour-preserving
+     * conservative choice — a username is a login identifier, and every other
+     * identity anchor (email, admin flag) is already admin-managed. true =
+     * self-service, still uniqueness-checked and audited identically. Reading
+     * one's own username is always allowed; this dial governs WRITES only. */
+    usernameSelfService: boolean("username_self_service").notNull().default(false),
 
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
