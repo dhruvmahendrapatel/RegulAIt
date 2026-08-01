@@ -125,10 +125,25 @@ failure counts against Let's Encrypt's failed-validation limit (5 per account/ho
    validations per account/hostname/hour. The `caddy_data` named volume exists precisely so
    repeated deploys reuse the stored certificate instead of re-issuing. **Do not `docker compose
    down -v` on the box** — that deletes the volume and burns a fresh issuance.
-4. **HSTS is off on purpose.** See the comment block in the Caddyfile: HSTS on an IP-derived
-   hostname is a browser-side commitment you cannot revoke, and `includeSubDomains` on a
-   `*.sslip.io` name would affect unrelated users of the service. Turn it on only behind a real,
-   stable domain, starting with a short `max-age`.
+4. **HSTS is owned by the GATEWAY, not by Caddy — and it is ON, deliberately short.** This page
+   used to say "HSTS is off on purpose", matching the Caddyfile comment. That was wrong: Caddy set
+   no `Strict-Transport-Security`, but the gateway behind it had been adding
+   `max-age=31536000; includeSubDomains` to every secure response since ADR-0031, so the box
+   really was announcing a one-year pin. Resolved by the ADR-0029 amendment of 2026-08-01 —
+   **exactly one layer sets this header, and it is the gateway**, because the gateway is what
+   ships into BYOC/air-gapped installs where no Caddy of ours exists.
+
+   Current value: **`max-age=86400`** — one day, **no** `includeSubDomains`, **no** `preload`. It
+   rides only a genuinely secure request (a real TLS hop, or one from a peer named in
+   `REGULAIT_TRUSTED_PROXIES`), never a plaintext hop or a forged `x-forwarded-proto`.
+
+   Change it with the gateway's **`REGULAIT_HSTS`** env var (`off` for none; any valid value
+   verbatim; a malformed value fails the boot rather than silently sending nothing). The effective
+   posture is printed in the gateway's boot log next to the proxy posture. **Do not add a
+   `Strict-Transport-Security` directive to the Caddyfile** — two layers setting it is the defect
+   that was fixed. Raise the `max-age` (and consider `includeSubDomains`) only behind a real,
+   stable domain; on this sslip.io name a released Elastic IP hands the hostname to a stranger,
+   who would inherit the pin along with it.
 5. **:80 is not optional.** It carries the ACME challenge for issuance *and every renewal*.
    Closing it in the security group breaks renewal silently, two months later.
 6. **Still not production.** One instance, one container of each thing, dev-grade seed data, no
@@ -151,7 +166,10 @@ Caddy issues a certificate for the new name on first request and keeps serving t
 it expires. Nothing in the app, the Caddyfile, or Terraform needs editing — `REGULAIT_TLS_HOST` is
 the whole switch. At that point also drop `enable_onbox_tls`'s IMDS-derived override in
 `user-data.sh.tftpl` (or set the variable explicitly) so boot stops recomputing the sslip.io name,
-and consider turning HSTS on.
+and raise HSTS on the gateway — `REGULAIT_HSTS=max-age=31536000; includeSubDomains` is the
+conventional end state once the name is one you own and intend to keep. Ramp it (a day, then a
+week, then a year); each value replaces the previous one in the browsers of visitors who return
+over HTTPS, so the ladder is climbable in both directions.
 
 ---
 

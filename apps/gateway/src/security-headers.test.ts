@@ -15,6 +15,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDb, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { documentCsp, inlineScriptBodies, sha256Source } from "./security-headers.js";
+import { DEFAULT_HSTS, HSTS_ENV, describeHsts, resolveHsts } from "./hsts.js";
 import { defaultWebDistDir } from "./web-serving.js";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -116,6 +117,136 @@ describe("ADR-0031: security headers on every response", () => {
     expect(csp["frame-ancestors"]).toEqual(["'none'"]);
     expect(csp["base-uri"]).toEqual(["'self'"]);
     expect(csp["default-src"]).toEqual(["'self'"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0029 amendment (2026-08-01) — HSTS has exactly ONE owner: this gateway.
+//
+// Before: `infra/caddy/Caddyfile` abstained with a long comment saying HSTS was
+// deliberately OFF, while ADR-0031 item 5 had the gateway sending a flat
+// `max-age=31536000; includeSubDomains` on every secure response. The deployed
+// box therefore announced a one-year pin that the ADR argued must not exist.
+//
+// After: the gateway owns it (it is what ships into BYOC/air-gapped installs
+// where no Caddy of ours exists), the value comes from REGULAIT_HSTS, and the
+// default is a bounded one day with NO includeSubDomains and NO preload. These
+// tests pin the default, because the default is what the ADR promises.
+// ---------------------------------------------------------------------------
+describe("ADR-0029 amendment: the gateway owns Strict-Transport-Security", () => {
+  /** the address REGULAIT_TRUSTED_PROXIES names — Caddy, in the real stack */
+  const PROXY = "172.28.0.2";
+  /** exactly what Caddy sends upstream for a TLS request */
+  const TLS_HOP = {
+    remoteAddress: PROXY,
+    headers: { "x-forwarded-proto": "https" },
+  } as const;
+
+  const built: ReturnType<typeof buildApp>[] = [];
+  const mk = (hsts?: string | null) => {
+    const a = buildApp(db, { bootstrapToken: BOOT, trustProxy: [PROXY], ...(hsts !== undefined ? { hsts } : {}) });
+    built.push(a);
+    return a;
+  };
+
+  afterAll(async () => {
+    for (const a of built) await a.close();
+  });
+
+  it("sends the ADR's default — one day, host-scoped — on a genuinely secure hop", async () => {
+    const res = await mk().inject({ method: "GET", url: "/health", ...TLS_HOP });
+    expect(res.statusCode).toBe(200);
+    // the value the ADR-0029 amendment commits to, asserted exactly
+    expect(res.headers["strict-transport-security"]).toBe(DEFAULT_HSTS);
+    expect(DEFAULT_HSTS).toBe("max-age=86400");
+  });
+
+  it("the default claims no subdomains and requests no preload", async () => {
+    const res = await mk().inject({ method: "GET", url: "/health", ...TLS_HOP });
+    const value = String(res.headers["strict-transport-security"]);
+    // sslip.io resolves ANY label prefix to the same IP, so includeSubDomains
+    // would claim a namespace that follows the address to its next owner —
+    // and we serve no subdomains, so it buys this deployment nothing.
+    expect(value.toLowerCase()).not.toContain("includesubdomains");
+    // preload is effectively irreversible and must never be implied
+    expect(value.toLowerCase()).not.toContain("preload");
+    // NOT the pre-amendment value, which is the whole point of the change
+    expect(value).not.toBe("max-age=31536000; includeSubDomains");
+  });
+
+  it("sends nothing at all when the deployment turns it off", async () => {
+    const off = mk(null);
+    const secure = await off.inject({ method: "GET", url: "/health", ...TLS_HOP });
+    expect(secure.statusCode).toBe(200);
+    expect(secure.headers["strict-transport-security"]).toBeUndefined();
+    // the rest of the header set is untouched by the HSTS decision
+    expect(secure.headers["x-content-type-options"]).toBe("nosniff");
+  });
+
+  it("sends a configured value verbatim — the real-domain case", async () => {
+    const strict = mk("max-age=31536000; includeSubDomains");
+    const res = await strict.inject({ method: "GET", url: "/health", ...TLS_HOP });
+    expect(res.headers["strict-transport-security"]).toBe("max-age=31536000; includeSubDomains");
+  });
+
+  it("never rides a plaintext hop, whatever the setting is", async () => {
+    for (const value of [undefined, "max-age=31536000; includeSubDomains"] as const) {
+      const a = value === undefined ? mk() : mk(value);
+      const plain = await a.inject({ method: "GET", url: "/health" });
+      expect(plain.headers["strict-transport-security"]).toBeUndefined();
+      // ...and a forged x-forwarded-proto from an UNTRUSTED peer is not a
+      // secure hop either (ADR-0031 item 3 — same trust gate as the cookie's
+      // Secure flag). Announcing HSTS on an attacker's say-so would let them
+      // pin a host we may not be able to serve over TLS.
+      const forged = await a.inject({
+        method: "GET",
+        url: "/health",
+        remoteAddress: "127.0.0.1",
+        headers: { "x-forwarded-proto": "https" },
+      });
+      expect(forged.headers["strict-transport-security"]).toBeUndefined();
+    }
+  });
+
+  describe("resolveHsts / REGULAIT_HSTS", () => {
+    it("defaults to the bounded value when the variable is unset", () => {
+      expect(resolveHsts({})).toBe(DEFAULT_HSTS);
+    });
+
+    it("treats the off-spellings as off", () => {
+      for (const raw of ["off", "OFF", "none", "false", "0", "no", "disabled", "", "  "]) {
+        expect(resolveHsts({ [HSTS_ENV]: raw }), raw).toBeNull();
+      }
+    });
+
+    it("passes a valid value through, trimmed", () => {
+      expect(resolveHsts({ [HSTS_ENV]: "max-age=0" })).toBe("max-age=0");
+      expect(resolveHsts({ [HSTS_ENV]: "  max-age=63072000; includeSubDomains  " })).toBe(
+        "max-age=63072000; includeSubDomains",
+      );
+      expect(resolveHsts({ [HSTS_ENV]: "max-age=63072000; includeSubDomains; preload" })).toBe(
+        "max-age=63072000; includeSubDomains; preload",
+      );
+    });
+
+    it("throws on a malformed value rather than silently sending nothing", () => {
+      // a browser IGNORES a malformed HSTS header, so the quiet failure mode is
+      // an operator who believes they have HSTS and does not
+      for (const raw of ["1 year", "max-age", "max-age=abc", "includeSubDomains", "max-age=10; nonsense"]) {
+        expect(() => resolveHsts({ [HSTS_ENV]: raw }), raw).toThrow(/REGULAIT_HSTS/);
+      }
+    });
+
+    it("describes the posture loudly enough to notice in a boot log", () => {
+      expect(describeHsts(null)).toContain("OFF");
+      expect(describeHsts(DEFAULT_HSTS)).toContain(DEFAULT_HSTS);
+      // the default is unremarkable and carries no warnings
+      expect(describeHsts(DEFAULT_HSTS)).not.toContain("[");
+      const loud = describeHsts("max-age=31536000; includeSubDomains; preload");
+      expect(loud).toContain("PRELOAD");
+      expect(loud).toContain("includeSubDomains");
+      expect(loud).toContain("non-revocable");
+    });
   });
 });
 

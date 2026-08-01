@@ -51,16 +51,31 @@
 
 	# --- security headers ------------------------------------------------------
 	header {
-		# HSTS is deliberately OFF. Rationale (ADR-0029): this hostname is derived
-		# from an EC2 public IP that can change on stop/start. HSTS is a browser-
-		# side, host-scoped, non-revocable commitment — once a browser has pinned
-		# `3-229-246-126.sslip.io` to HTTPS-only there is no server-side way to
-		# undo it before max-age expires, and an `includeSubDomains` on a
-		# *.sslip.io name would be actively hostile to everyone else using the
-		# service. A dev stack that may still need a plain-HTTP fallback must not
-		# paint itself into that corner. Turn it on (short max-age first, e.g.
-		# 300, then raise) only once a stable real domain replaces this name.
-		# Strict-Transport-Security "max-age=300"
+		# HSTS is NOT set here — but read the next paragraph before concluding it
+		# is off, because for a while this comment was simply wrong.
+		#
+		# What it used to say: "HSTS is deliberately OFF (ADR-0029)", on the
+		# grounds that this hostname is derived from an EC2 public IP that can
+		# change on stop/start, and that HSTS is a browser-side, host-scoped,
+		# NON-REVOCABLE commitment with no server-side undo before max-age
+		# expires. All true. What it missed is that Caddy abstaining does not
+		# make HSTS off: since ADR-0031 the GATEWAY behind this proxy had been
+		# adding `max-age=31536000; includeSubDomains` to every secure response,
+		# so the deployed box announced a one-year pin the whole time the ADR
+		# argued it must not.
+		#
+		# Resolved by the ADR-0029 amendment of 2026-08-01: the GATEWAY is the
+		# single owner of this header, because the gateway is what ships (into
+		# BYOC / air-gapped installs that terminate TLS on someone else's proxy,
+		# where no Caddyfile of ours exists) while this file is only our dev
+		# stack. Its default is now a bounded `max-age=86400` with NO
+		# includeSubDomains and NO preload, configurable per deployment via the
+		# gateway's REGULAIT_HSTS env var. See apps/gateway/src/hsts.ts.
+		#
+		# So: do NOT add a Strict-Transport-Security directive here. Two layers
+		# setting it is exactly the defect that was fixed. Change the gateway's
+		# REGULAIT_HSTS instead — and raise the max-age only once a stable real
+		# domain replaces this sslip.io name.
 
 		X-Content-Type-Options nosniff
 		X-Frame-Options DENY

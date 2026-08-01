@@ -54,6 +54,7 @@ import {
 } from "./csv-export.js";
 import { afterCursorDesc, atTextSql, decodeCursor, encodeCursor } from "./pagination.js";
 import { resolveTrustProxy, type TrustProxySetting } from "./trusted-proxy.js";
+import { resolveHsts } from "./hsts.js";
 import fastifyRateLimit from "@fastify/rate-limit";
 import { schedulerHealth } from "./scheduler-health.js";
 import {
@@ -124,6 +125,12 @@ export interface BuildAppOptions {
    * environment (see rate-limit.ts); this override exists so a test can pin
    * tiny windows without touching process.env. */
   rateLimit?: Partial<RateLimitConfig>;
+  /** ADR-0029 amendment: the Strict-Transport-Security value sent on genuinely
+   * secure responses, or `null` for none. Defaults to REGULAIT_HSTS (which
+   * itself defaults to `max-age=86400`). Exposed so a test can assert both
+   * directions without touching process.env — see hsts.ts for why this is a
+   * deployment env var rather than an org_settings toggle. */
+  hsts?: string | null;
 }
 import { z } from "zod";
 import { registerMcpProxy } from "./mcp-proxy.js";
@@ -291,6 +298,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   const trustProxy = opts.trustProxy ?? resolveTrustProxy();
   const app = Fastify({ logger: false, trustProxy });
 
+  // ADR-0029 amendment — the Strict-Transport-Security value, resolved ONCE at
+  // boot (never per request: the header must not depend on the database, and
+  // an operator's posture must not drift mid-process). `undefined` means "not
+  // overridden", which is different from `null` = "send no header", so the
+  // nullish coalesce is deliberately on `undefined` only.
+  const hsts = opts.hsts !== undefined ? opts.hsts : resolveHsts();
+
   // ADR-0031 item 4 — HTTP rate limiting. There was a per-ACCOUNT login
   // lockout (ADR-0025) and nothing bounding per-IP/per-key request rates on
   // any of the ~167 endpoints, so credential spraying across many accounts was
@@ -373,6 +387,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // plain http would be wrong in dev, so it rides only a genuinely secure
   // request (which, per item 3, means a real TLS hop or a hop from a trusted
   // proxy — never a forged x-forwarded-proto).
+  //
+  // ADR-0029 amendment: the VALUE is no longer hardcoded. It used to be a flat
+  // `max-age=31536000; includeSubDomains`, which directly contradicted
+  // ADR-0029's stated "HSTS deliberately OFF" — the Caddyfile abstained and the
+  // gateway asserted a one-year pin anyway. The gateway is now the single
+  // owner (it is what ships into BYOC/air-gapped installs where no Caddy of
+  // ours exists), the default is a bounded `max-age=86400`, and an operator on
+  // a real domain raises it via REGULAIT_HSTS. See hsts.ts.
   app.addHook("onSend", async (req, reply, payload) => {
     const contentType = reply.getHeader("content-type");
     const headers = securityHeaders(
@@ -381,8 +403,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     for (const [name, value] of Object.entries(headers)) {
       if (reply.getHeader(name) === undefined) reply.header(name, value);
     }
-    if (req.protocol === "https" && reply.getHeader("strict-transport-security") === undefined) {
-      reply.header("strict-transport-security", "max-age=31536000; includeSubDomains");
+    if (
+      hsts !== null &&
+      req.protocol === "https" &&
+      reply.getHeader("strict-transport-security") === undefined
+    ) {
+      reply.header("strict-transport-security", hsts);
     }
     return payload;
   });
