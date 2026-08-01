@@ -7,7 +7,12 @@
  * Also covers the three capabilities the phase-3 correction found were still
  * legacy-only (ADR-0026's phase-2 "parity proven" claim was wrong): pillar 7
  * goal decomposition (draft → review → edit → accept), pillar 8 PM work-item
- * links, and pillar 4's decision ledger. Every page asserts ZERO console
+ * links, and pillar 4's decision ledger — and the two END-USER residuals the
+ * phase-4 capability diff found (2026-08-01): a non-admin's own Spend &
+ * savings (pillars 5+6, self-scoped), and self-service BYO model keys
+ * (add → listed as present-but-never-revealed → removed). The key-custody
+ * half of that second surface is driven from phase2 (it needs an admin to
+ * flip the org toggle). Every page asserts ZERO console
  * errors (uncaught page errors are always fatal; the only filtered console
  * line is the browser's own network log for the expected pre-login 401
  * probe, which JS cannot suppress) and screenshots into E2E_SHOTS_DIR.
@@ -248,10 +253,79 @@ test("projects: list and budget/membership detail", async () => {
   track.assertClean("projects list + detail");
 });
 
-test("account security + theme toggle + sign out", async () => {
+test("spend & savings: a non-admin sees their OWN spend and the optimizer's savings", async () => {
+  // the ADR-0026 end-user residual: cost-events / usage-events were reachable
+  // in the SPA only from the ADMIN Optimization page
+  await page.locator("aside").getByRole("link", { name: "Spend & savings" }).click();
+  await expect(page.getByRole("heading", { name: "Spend & savings", exact: true })).toBeVisible();
+
+  // the four self-scoped headline numbers
+  await expect(page.getByText("measured spend ·")).toBeVisible();
+  await expect(page.getByText("tokens in → out")).toBeVisible();
+  await expect(page.getByText("measured savings — routing actuals")).toBeVisible();
+  await expect(page.getByText("estimated savings — all techniques")).toBeVisible();
+
+  // dana is NOT an admin, so the page must not advertise an org-wide rollup
+  await expect(page.getByText("your own numbers only")).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Cost dashboard" })).toHaveCount(0);
+
+  // the seeded dispatches + connector reads make every breakdown real
+  await expect(page.getByText("Spend by project", { exact: true })).toBeVisible();
+  await expect(page.getByText("Spend by agent", { exact: true })).toBeVisible();
+  await expect(page.getByText("Spend by connector", { exact: true })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "Key used" })).toBeVisible();
+  await expect(page.getByRole("img", { name: "Daily spend, last 14 days" })).toBeVisible();
+  await shot(page, "13a-spend-overview");
+
+  // the pillar-6 half: what the optimizer did on her behalf
+  await page.getByRole("tab", { name: "Savings" }).click();
+  await expect(page.getByText("Savings by technique — estimated, full history")).toBeVisible();
+  await expect(page.getByText("What the optimizer did for you")).toBeVisible();
+  await expect(page.getByText("Estimated vs measured")).toBeVisible();
+  await shot(page, "13b-spend-savings");
+
+  track.assertClean("spend & savings");
+});
+
+test("my model keys: add, listed as present-but-never-revealed, remove", async () => {
+  const SECRET = "sk-e2e-never-echoed-0123456789";
   await page.getByRole("button", { name: /Dana Developer/ }).click();
-  await page.getByRole("menuitem", { name: "Account security" }).click();
-  await expect(page.getByRole("heading", { name: "Account security" })).toBeVisible();
+  await page.getByRole("menuitem", { name: "Your model keys" }).click();
+  await expect(page.getByRole("heading", { name: "Account", exact: true })).toBeVisible();
+  await expect(page.getByText("Your model keys", { exact: true })).toBeVisible();
+  // nothing stored yet — and no custody notice, since the seed leaves the
+  // key-custody toggle off
+  await expect(page.getByText("No keys of your own")).toBeVisible();
+  await expect(page.getByText("This deployment enforces key custody.")).toHaveCount(0);
+  await shot(page, "13c-model-keys-empty");
+
+  await page.getByLabel("API key").fill(SECRET);
+  await page.getByRole("button", { name: "Save key" }).click();
+  await expect(page.getByText(/anthropic key saved/)).toBeVisible();
+
+  // presence is reported; the secret itself is nowhere on the page or in the DOM
+  await expect(page.getByRole("cell", { name: "anthropic", exact: true })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "stored", exact: true })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "provider default" })).toBeVisible();
+  expect(await page.content()).not.toContain(SECRET);
+  await expect(page.getByLabel("API key")).toHaveValue("");
+  // re-selecting the provider now offers a rotation rather than a duplicate
+  await expect(page.getByRole("button", { name: "Replace key" })).toBeVisible();
+  await shot(page, "13d-model-keys-stored");
+
+  await page.getByRole("button", { name: "Remove your anthropic key" }).click();
+  await page.getByRole("button", { name: "Remove key" }).click();
+  await expect(page.getByText(/anthropic key removed/)).toBeVisible();
+  await expect(page.getByText("No keys of your own")).toBeVisible();
+  await shot(page, "13e-model-keys-removed");
+
+  track.assertClean("model keys add/list/remove");
+});
+
+test("account + theme toggle + sign out", async () => {
+  await page.getByRole("button", { name: /Dana Developer/ }).click();
+  await page.getByRole("menuitem", { name: "Account", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Account", exact: true })).toBeVisible();
   await shot(page, "13-account-security");
 
   // theme toggle flips the root data-theme attribute
