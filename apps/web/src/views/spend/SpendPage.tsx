@@ -501,7 +501,9 @@ export default function SpendPage() {
               <div className={v.grid2} style={{ marginTop: "var(--s2)" }}>
                 <div className={v.stat}>
                   <span className={v.statValue}>{fmtUsd(estimatedSaved)}</span>
-                  <span className={v.statLabel}>estimated · {techniques.length} techniques</span>
+                  <span className={v.statLabel}>
+                    estimated · {techniques.length} technique{techniques.length === 1 ? "" : "s"}
+                  </span>
                 </div>
                 <div className={v.stat}>
                   <span className={v.statValue}>{fmtUsd(totals.measuredCostSavedUsd)}</span>

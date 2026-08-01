@@ -239,6 +239,26 @@ export default function ProjectDetailPage() {
               }))}
             />
           </Card>
+          {/* ADR-0019/0024: connector and MCP-tool spend ride the SAME ledger,
+              so they are already inside the measured total above. Naming them
+              here is what stops the agent breakdown from looking like an
+              unexplained gap against that total. */}
+          <Card title="Spend by connector">
+            <BarList
+              items={(c.byConnector ?? []).map((x) => ({
+                label: `${x.name ?? "connector"} · ${x.operation ?? ""}`,
+                value: x.costUsd,
+              }))}
+            />
+          </Card>
+          <Card title="Spend by MCP tool">
+            <BarList
+              items={(c.byMcpTool ?? []).map((x) => ({
+                label: x.toolName ?? "tool",
+                value: x.costUsd,
+              }))}
+            />
+          </Card>
           <Card title="Estimated savings by technique">
             <BarList
               items={(c.estimatedSavings ?? []).map((x) => ({
