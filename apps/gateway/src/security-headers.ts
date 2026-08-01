@@ -10,21 +10,20 @@
  * response object always wins.
  *
  * CSP and the inline-script problem: the SPA's `index.html` carries one inline
- * `<script>` (the theme pre-paint that avoids a flash of the wrong theme), and
- * the two deprecated `/legacy/*` shells are single-file apps with an inline
- * `<script>` each. Rather than surrender to `'unsafe-inline'`, we hash the
- * inline scripts AT BOOT from the exact bytes that will be served and emit
- * `'sha256-…'` sources. That keeps working when the SPA bundle is rebuilt with
- * new hashed asset names, and it keeps working if the pre-paint script's text
- * changes — the hash is derived from the served file, never hardcoded.
+ * `<script>` (the theme pre-paint that avoids a flash of the wrong theme).
+ * Rather than surrender to `'unsafe-inline'`, we hash the inline scripts AT
+ * BOOT from the exact bytes that will be served and emit `'sha256-…'` sources.
+ * That keeps working when the SPA bundle is rebuilt with new hashed asset
+ * names, and it keeps working if the pre-paint script's text changes — the
+ * hash is derived from the served file, never hardcoded.
  *
- * Disclosed relaxation: `style-src` keeps `'unsafe-inline'`. The deprecated
- * legacy shells carry large inline `<style>` blocks and inline `style="…"`
- * attributes that cannot be hashed together (a hash source makes the browser
- * ignore `'unsafe-inline'`, which would break them outright). The React SPA
- * does not need it — React sets styles through CSSOM, which CSP does not
- * govern — so this can tighten to `'self'` the release the `/legacy/*` shells
- * are removed. Recorded as a follow-up in ADR-0031.
+ * Disclosed relaxation: `style-src` keeps `'unsafe-inline'`. ADR-0033 deleted
+ * the `/legacy/*` shells whose large inline `<style>` blocks originally forced
+ * it, so the blocker is gone — but tightening it to `'self'` is a behaviour
+ * change to every served document and is deliberately NOT bundled into a
+ * deletion PR: it needs its own browser verification (a wrongly-tightened
+ * style-src renders an unstyled page, not an error). Left as-is here and
+ * carried as the ADR-0031 follow-up, now unblocked.
  */
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -80,7 +79,7 @@ export function registeredScriptSources(): string[] {
   return [...scriptHashes];
 }
 
-/** Documents (the SPA shell and the legacy shells). */
+/** Documents (the SPA shell — the only UI document the gateway serves). */
 export function documentCsp(): string {
   const scriptSrc = ["'self'", ...scriptHashes].join(" ");
   return [

@@ -590,3 +590,45 @@ not by grepping.
   baseline run at `d711a98` (36/36 green) confirmed the flake was pre-existing and not caused by
   this change.
 - Gateway suite **unchanged** — no file under `apps/gateway/src` was touched by this amendment.
+
+---
+
+## Amendment (2026-08-01) — the phase-2 "parity, zero gaps" claim was FALSE; the shells are now deleted (see ADR-0033)
+
+- **Status of this amendment**: Accepted (correction of record + closure)
+
+This is appended, not merged into the text above, so the false claim and its correction both
+stay legible. Nothing earlier in this ADR is edited.
+
+**The claim.** The phase-2 amendment (2026-07-31) stated the SPA had reached parity with the two
+ADR-0012 template-literal shells, with zero gaps, and on that basis parked them at `/legacy/*`
+for "one release" pending deletion. The evidence offered was that the Playwright journeys were
+green.
+
+**The claim was false, and it was false twice over.** A green journey proves the views that exist
+behave; it cannot prove a view is not missing. **Eleven legacy-only capabilities were found
+across two audits:**
+
+- **Audit 1 — five**, recorded in this ADR's phase-3 correction (2026-08-01) and its two
+  follow-on amendments: `POST /v1/runs/decompose` (pillar 7's headline), `GET /v1/pm/links`
+  (pillar 8), `GET`/`POST /v1/decisions` (pillar 4), the shared context store
+  `/v1/projects/:id/context*` (pillar 4's headline), and the end-user self-service residuals.
+- **Audit 2 — six MORE**, found only when the diff was made mechanical (PR #89, `a8d2ce9`), i.e.
+  *after* the phase-3 correction had already re-asserted a gap list of exactly one:
+  `PATCH /v1/rules/:kind/:ruleId/deploy-mode`, `PATCH /v1/revocations/:kind/:revocationId/scope`,
+  `POST /v1/runs/:runId/nodes/:nodeId/dispatch`, the `reassign_node` and `node_submitted` run
+  events, and the per-node instruction override on `/auto`'s `inputs` map.
+
+Audit 2 is the part that matters most for the record: the phase-3 correction had itself set out a
+method and declared "everything else diffs clean". Six real holes survived that hand audit. A
+capability diff performed by reading is not reliable either — **only a mechanical one is**.
+
+**Both sets are now closed, parity was proven mechanically, and the shells are deleted.**
+`admin-portal.ts`, `app-ui.ts`, `ui-theme.ts`, `scripts/check-ui-syntax.mjs` and the `/legacy/*`
+routes are gone as of **[ADR-0033](0033-delete-legacy-template-literal-uis.md)**, which records
+the deletion, the corrected three-dimension definition of parity (endpoint shapes, run event
+kinds, request-body keys — mechanically enforced), and the evidence at the moment of deletion.
+
+The "one release" stay of execution written into the phase-2 amendment above never governed
+anything: the shells stayed until the gap list was empty and provably so, which took two further
+audits and a machine-checked gate. **Read this ADR's parity claims as false until ADR-0033.**

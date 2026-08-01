@@ -100,7 +100,10 @@ describe("GET /ui — the SPA shell", () => {
       const res = await unbuiltApp.inject({ method: "GET", url });
       expect(res.statusCode).toBe(503);
       expect(res.json().error).toBe("web_bundle_not_built");
-      expect(res.json().detail).toContain("legacy UI remains at /app");
+      // ADR-0033: there is no fallback UI left to point at, and the message
+      // must not pretend otherwise — it names the build command instead.
+      expect(res.json().detail).toContain("pnpm --filter @regulait/web build");
+      expect(res.json().detail).toContain("There is no fallback UI");
     }
   });
 });
@@ -144,14 +147,21 @@ describe("no auth bypass — /ui serving never shadows the API surface", () => {
     }
   });
 
-  it("legacy shells stay reachable for one release at /legacy/*, labeled deprecated", async () => {
+  it("ADR-0033: /legacy/* is gone — not a shell, not a redirect, just not a route", async () => {
+    // The deletion must leave no half-alive surface: an unmatched path is
+    // answered by the auth hook (401) exactly like any other removed route,
+    // and never serves HTML.
     for (const url of ["/legacy/app", "/legacy/admin"]) {
       const res = await app.inject({ method: "GET", url });
-      expect(res.statusCode).toBe(200);
-      expect(res.headers["content-type"]).toContain("text/html");
-      expect(res.body).toContain("Deprecated");
-      expect(res.body).toContain('href="/ui"');
-      expect(res.body).not.toBe(INDEX_HTML);
+      expect(res.statusCode, url).toBe(401);
+      expect(res.body, url).not.toContain("<!doctype");
+      const withCred = await app.inject({
+        method: "GET",
+        url,
+        headers: { authorization: `Bearer ${BOOT}` },
+      });
+      expect(withCred.statusCode, url).toBe(404);
+      expect(withCred.body, url).not.toContain("<!doctype");
     }
   });
 

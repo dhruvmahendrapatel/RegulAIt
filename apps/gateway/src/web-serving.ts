@@ -1,10 +1,12 @@
 /**
- * /ui — serves the built React SPA (apps/web/dist) from the gateway.
+ * /ui — serves the built React SPA (apps/web/dist) from the gateway. Since
+ * ADR-0033 removed the two ADR-0012 single-file shells, this is the ONLY UI
+ * the product serves; /, /app and /admin are 302s into it.
  *
  * Contract (ADR-0026):
  *  - GET /ui and GET /ui/* are the ONLY routes this module registers — the
- *    API surface (/v1, /auth, /mcp, the legacy /app + /admin shells) is
- *    untouched and can never be shadowed by a static file.
+ *    API surface (/v1, /auth, /mcp) is untouched and can never be shadowed by
+ *    a static file.
  *  - real files under dist/ are served with correct content types; hashed
  *    /ui/assets/* files get immutable caching, index.html gets no-cache;
  *  - any other /ui/* path falls back to index.html (SPA client routing);
@@ -83,7 +85,7 @@ export function registerWebServing(app: FastifyInstance, opts: WebServingOptions
       return reply.status(503).send({
         error: "web_bundle_not_built",
         detail:
-          "the web bundle is not built — run `pnpm --filter @regulait/web build` (or `pnpm -r build`); the legacy UI remains at /app",
+          "the web bundle is not built — run `pnpm --filter @regulait/web build` (or `pnpm -r build`). There is no fallback UI: the legacy /app and /admin shells were removed (ADR-0033), so the API at /v1 is the only surface until the bundle exists",
       });
     }
     return sendFile(reply, indexPath, false);

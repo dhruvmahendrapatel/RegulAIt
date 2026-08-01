@@ -35,9 +35,9 @@ export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 
 export const shortId = (id: string) => id.slice(0, 8) + "…";
 
-/** Approvals Queue sentinel stages → human labels (must match the legacy
- * mapping in ui-theme.ts so the two surfaces never label one approval
- * differently). Returns null when the stage is not a sentinel. */
+/** Approvals Queue sentinel stages → human labels. This was originally kept in
+ * step with the same mapping in the deleted ui-theme.ts (ADR-0033); it is now
+ * the single definition. Returns null when the stage is not a sentinel. */
 export function approvalStageLabel(a: {
   stageId?: string | null;
   contextConflict?: { key?: string } | undefined;

@@ -6351,30 +6351,11 @@ describe("compliance classification cascade (§8.3)", () => {
   });
 });
 
-describe("admin portal (ADR-0012): static shell + API-parity gap endpoints", () => {
-  it("GET /legacy/admin serves the shell without auth — zero data, zero secrets inside", async () => {
-    // phase-2 swap (ADR-0026): /admin now redirects to the SPA; the legacy
-    // shell stays served for one release at /legacy/admin.
-    const res = await app.inject({ method: "GET", url: "/legacy/admin" });
-    expect(res.statusCode).toBe(200);
-    expect(res.headers["content-type"]).toContain("text/html");
-    // §6 functional surfaces, as the (restructured) tab titles — Users & Roles
-    // is now split into Users / Roles / Teams, and the governance tabs carry
-    // their shorter section-grouped labels.
-    for (const panel of [
-      "Users", "Roles", "Teams", "Agents", "Connectors", "MCP Servers",
-      "Rules Engine", "Audit Log", "Approvals Queue",
-      "Simulation / Access preview", "Cost & Projects",
-    ]) {
-      expect(res.body).toContain(panel);
-    }
-    // the grouped-nav section headers are present (the new information architecture)
-    for (const section of ["Identity & Access", "AI Governance", "Policy", "Operations"]) {
-      expect(res.body).toContain(section);
-    }
-    // the shell holds no data: nothing it serves varies with DB state
-    expect(res.body).not.toContain("@example.com");
-  });
+// ADR-0033 deleted the ADR-0012 template-literal admin shell this suite used
+// to also assert the rendered panels of. The endpoints it existed to back are
+// the durable part and stay covered here; the shell's own rendering is now the
+// SPA's, covered by apps/web's Playwright suites.
+describe("admin portal: the API-parity gap endpoints", () => {
 
   it("the gap list endpoints exist and stay admin-only", async () => {
     const usersList = await app.inject({ method: "GET", headers: AUTH, url: "/v1/users" });
@@ -7439,17 +7420,9 @@ describe("UI plumbing: /v1/me and own-scoped list views", () => {
   });
 });
 
-describe("end-user app shell (/legacy/app after the phase-2 swap)", () => {
-  it("serves without auth — zero data, zero secrets — with all workspace pages", async () => {
-    const res = await app.inject({ method: "GET", url: "/legacy/app" });
-    expect(res.statusCode).toBe(200);
-    expect(res.headers["content-type"]).toContain("text/html");
-    for (const page of ["Playground", "Runs", "Workflows", "Inbox", "Projects"]) {
-      expect(res.body).toContain(page);
-    }
-    expect(res.body).not.toContain("@example.com");
-  });
-});
+// The end-user shell this used to assert (/legacy/app) was deleted by
+// ADR-0033; the SPA at /ui is the only end-user surface and is driven for real
+// by apps/web's Playwright suites.
 
 describe("slice 3: the approval loop closes — approver reads, reasons, admin override", () => {
   let adminId: string;
