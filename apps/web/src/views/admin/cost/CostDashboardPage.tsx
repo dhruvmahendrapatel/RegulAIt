@@ -261,6 +261,27 @@ function ProjectRollup(props: { projectId: string; projectName: string }) {
                 title="Spend by agent"
               />
             </div>
+            {/* ADR-0019/0024: connector and MCP-tool spend ride the SAME
+                ledger and are already inside the measured total — named here
+                so the agent breakdown is not an unexplained gap against it. */}
+            <div>
+              <div className={v.sectionTitle}>Spend by connector</div>
+              <BarChart
+                items={(c.byConnector ?? []) as Array<Record<string, unknown>>}
+                valueKey="costUsd"
+                label={(i) => `${String(i.name ?? "connector")} · ${String(i.operation ?? "")}`}
+                title="Spend by connector"
+              />
+            </div>
+            <div>
+              <div className={v.sectionTitle}>Spend by MCP tool</div>
+              <BarChart
+                items={(c.byMcpTool ?? []) as Array<Record<string, unknown>>}
+                valueKey="costUsd"
+                label={(i) => String(i.toolName ?? "tool")}
+                title="Spend by MCP tool"
+              />
+            </div>
             <div>
               <div className={v.sectionTitle}>Estimated savings by technique</div>
               <BarChart

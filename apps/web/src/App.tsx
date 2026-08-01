@@ -19,6 +19,7 @@ import ProjectDetailPage from "./views/projects/ProjectDetailPage";
 import ProjectContextPage from "./views/projects/ProjectContextPage";
 import ContextGraphPage from "./views/projects/ContextGraphPage";
 import ContextIndexPage from "./views/projects/ContextIndexPage";
+import SpendPage from "./views/spend/SpendPage";
 import AccountPage from "./views/account/AccountPage";
 import { RequireAdmin } from "./views/admin/adminKit";
 import UsersPage from "./views/admin/identity/UsersPage";
@@ -105,6 +106,7 @@ export default function App() {
                 <Route path="/projects/:projectId/context" element={<ProjectContextPage />} />
                 <Route path="/projects/:projectId/context/graph" element={<ContextGraphPage />} />
                 <Route path="/context" element={<ContextIndexPage />} />
+                <Route path="/spend" element={<SpendPage />} />
                 <Route path="/account" element={<AccountPage />} />
                 <Route
                   path="/admin/*"

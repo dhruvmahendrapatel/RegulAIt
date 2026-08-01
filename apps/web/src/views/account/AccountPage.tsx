@@ -1,6 +1,7 @@
 /**
- * Account security — identity, password change, and TOTP MFA self-service
- * (ADR-0025). Reached from the topbar user menu; ?section= deep-links.
+ * Account — identity, password change and TOTP MFA self-service (ADR-0025),
+ * plus per-user BYO model keys (ModelKeysCard). Reached from the topbar user
+ * menu; ?section= deep-links (password | mfa | keys).
  */
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useSearchParams } from "react-router-dom";
@@ -9,6 +10,7 @@ import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
 import { Badge, Button, Card, CodeBlock, Field, IdChip, Input } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
+import ModelKeysCard from "./ModelKeysCard";
 import v from "../views.module.css";
 import s from "../auth/auth.module.css";
 
@@ -18,15 +20,20 @@ export default function AccountPage() {
   const section = params.get("section");
   const pwRef = useRef<HTMLDivElement>(null);
   const mfaRef = useRef<HTMLDivElement>(null);
+  const keysRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (section === "password") pwRef.current?.scrollIntoView({ block: "start" });
     if (section === "mfa") mfaRef.current?.scrollIntoView({ block: "start" });
+    if (section === "keys") keysRef.current?.scrollIntoView({ block: "start" });
   }, [section]);
 
   return (
     <>
-      <PageHeader title="Account security" sub="Your identity and how you sign in." />
+      <PageHeader
+        title="Account"
+        sub="Your identity, how you sign in, and the provider keys your own requests run on."
+      />
       <div className={v.stack}>
         <Card title="Identity">
           <div className={v.listRow}>
@@ -66,6 +73,9 @@ export default function AccountPage() {
         </div>
         <div ref={mfaRef}>
           <MfaCard totpEnabled={Boolean(auth?.totpEnabled)} onChanged={() => void refresh()} />
+        </div>
+        <div ref={keysRef}>
+          <ModelKeysCard />
         </div>
       </div>
     </>
