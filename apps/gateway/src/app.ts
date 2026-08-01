@@ -1347,6 +1347,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         connectorId: connectorRevocations.connectorId,
         connectorName: connectors.name,
         reason: connectorRevocations.reason,
+        // O9 (ADR-0027): the current scope, so a UI can SHOW what it is about
+        // to narrow/restore rather than editing blind. Additive projection —
+        // 'full' is the column default, so every pre-0045 row reads as full.
+        scope: connectorRevocations.scope,
         createdAt: connectorRevocations.createdAt,
       })
       .from(connectorRevocations)

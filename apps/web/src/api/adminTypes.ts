@@ -83,11 +83,20 @@ export interface Team {
   members?: Array<{ userId: string; name: string }>;
 }
 
+/** O9 (ADR-0027): a revocation is CREATED 'full' (the ADR-0019 total). An
+ * explicit, audited second act can narrow it to 'read_only' — writes stay
+ * denied, reads are allowed again. Agent revocations carry no scope: agents
+ * have no read/write operation classification to scope by. */
+export type RevocationScope = "full" | "read_only";
+/** the two revocation kinds the scope endpoint accepts (path discriminant) */
+export type RevocationScopeKind = "mcp" | "connectors";
+
 export interface McpRevocation {
   id: string;
   userId: string;
   serverId: string;
   toolName: string | null;
+  scope?: RevocationScope;
   createdAt: string;
 }
 
@@ -96,6 +105,8 @@ export interface ObjectRevocation {
   agentName?: string;
   connectorName?: string;
   reason: string | null;
+  /** connector revocations only — agent revocations have no scope */
+  scope?: RevocationScope;
   createdAt: string;
 }
 
@@ -197,6 +208,13 @@ export interface DeployTarget {
 
 // ---- governance ----------------------------------------------------------
 
+/** A4 (ADR-0027): the deploy-mode a restriction rule is scoped to. null (the
+ * default, and every pre-0044 rule) means mode-unscoped — it applies to every
+ * call. The context is derived SERVER-side, never client-asserted. */
+export type RuleDeployMode = "hosted" | "byoc" | "air_gapped";
+/** the three rule kinds the deploy-mode endpoint accepts (path discriminant) */
+export type RuleKind = "approvals" | "data-scopes" | "rate-limits";
+
 export interface RuleBase {
   id: string;
   scope: "user" | "role" | "team" | "fleet";
@@ -206,6 +224,7 @@ export interface RuleBase {
   serverScope: "server" | "all";
   serverId?: string | null;
   toolName?: string | null;
+  deployMode?: RuleDeployMode | null;
   createdAt: string;
 }
 
