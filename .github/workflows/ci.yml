@@ -74,13 +74,18 @@ jobs:
           POSTGRES_DB: regulait_test
         ports:
           - 5432:5432
+        # NOTE: everything under `options:` is folded into one string and passed
+        # VERBATIM to `docker create` — a `#` in there is not a comment, it is
+        # an argument, and docker fails with "invalid reference format". Keep
+        # commentary out here, above the block.
+        #
+        # `-d` is not optional: pg_isready with no -d defaults the dbname to the
+        # USERNAME, so it dials a database called `regulait` that does not exist
+        # (POSTGRES_DB is regulait_test) and the server logs
+        # `FATAL: database "regulait" does not exist` every 5s. The probe still
+        # passes, so it is harmless — but it is red noise that actively misleads
+        # anyone reading the log during an investigation.
         options: >-
-          # -d is not optional here: pg_isready with no -d defaults the dbname
-          # to the USERNAME, so it dials a database called `regulait` that does
-          # not exist (POSTGRES_DB is regulait_test) and the server logs
-          # `FATAL: database "regulait" does not exist` every 5s. The probe
-          # still passes, so it is harmless — but it is red noise in the log
-          # that actively misleads anyone reading it during an investigation.
           --health-cmd "pg_isready -U regulait -d regulait_test"
           --health-interval 5s
           --health-timeout 5s
