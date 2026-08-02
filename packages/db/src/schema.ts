@@ -3574,3 +3574,159 @@ export const configActivationEvents = pgTable(
 
 export type ConfigVersionRow = typeof configVersions.$inferSelect;
 export type ConfigActivationEventRow = typeof configActivationEvents.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0049 (migration 0061) — COST FORECASTING and SPEND-ANOMALY DETECTION.
+//
+// Nothing below stores a rollup of spend. `usage_events` stays the single
+// source of truth for every dollar; these tables hold a POLICY (what to look
+// for), a DECIDED FUTURE FACT (a scheduled change), or an OBSERVATION ARTIFACT
+// (a forecast that was computed, an anomaly that was flagged) — never a number
+// another surface could disagree with. The vocabularies are declared here in
+// the same lockstep-with-@regulait/shared style as the guardrail ids above:
+// this package deliberately has no dependency on shared, and the gateway
+// imports both, so a divergence fails to type-check.
+// ---------------------------------------------------------------------------
+
+export const ANOMALY_SENSITIVITY_VALUES = ["low", "medium", "high"] as const;
+export const ANOMALY_ACTION_VALUES = ["alert", "require_approval"] as const;
+export const ANOMALY_SIGNAL_VALUES = [
+  "spend_spike",
+  "token_volume",
+  "unusual_model",
+  "off_hours",
+  "egress_volume",
+] as const;
+export const ANOMALY_METHOD_VALUES = ["mad_z", "pct_over_baseline", "share_of_history"] as const;
+export const ANOMALY_STATUS_VALUES = ["open", "acknowledged", "dismissed"] as const;
+export const FORECAST_METHOD_VALUES = ["run_rate", "ewma"] as const;
+
+/** The admin dial (ADR-0021 conventions). One row per project plus at most one
+ * ORG-WIDE DEFAULT (projectId null). `enabled` defaults FALSE — ADR-0049 §3's
+ * OFF-by-default posture, so a deployment that never turns this on behaves
+ * byte-identically to before migration 0061. `lastEvaluatedAt` staying null is
+ * how "nothing fires on a timer" is VISIBLE rather than merely documented. */
+export const spendMonitorPolicies = pgTable(
+  "spend_monitor_policies",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** null = the org-wide default; a project row overrides it */
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "cascade" }),
+    enabled: boolean("enabled").notNull().default(false),
+    sensitivity: text("sensitivity", { enum: ANOMALY_SENSITIVITY_VALUES }).notNull().default("medium"),
+    baselineDays: integer("baseline_days").notNull().default(30),
+    /** ADR-0049 §5's alert-not-block bias, as the column default */
+    action: text("action", { enum: ANOMALY_ACTION_VALUES }).notNull().default("alert"),
+    /** null = evaluate every signal in the vocabulary */
+    signals: jsonb("signals").$type<string[]>(),
+    activeHourStart: integer("active_hour_start"),
+    activeHourEnd: integer("active_hour_end"),
+    lastEvaluatedAt: timestamp("last_evaluated_at", { withTimezone: true }),
+    updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("spend_monitor_policies_project_uq")
+      .on(t.projectId)
+      .where(sql`${t.projectId} IS NOT NULL`),
+  ],
+);
+
+/** ADR-0049 §1's scheduled-change adjustment: a DECIDED future delta, signed,
+ * with a mandatory reason. The forecast adds these on top of the extrapolation;
+ * nothing else is ever anticipated. */
+export const spendScheduledChanges = pgTable(
+  "spend_scheduled_changes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    /** SIGNED: a decommissioned expensive agent is a negative number */
+    deltaUsd: doublePrecision("delta_usd").notNull(),
+    effectiveAt: timestamp("effective_at", { withTimezone: true }).notNull(),
+    reason: text("reason").notNull(),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("spend_scheduled_changes_project_effective_idx").on(t.projectId, t.effectiveAt)],
+);
+
+/** The append-only flag ledger. Every row carries the signal, the method, the
+ * baseline, the threshold, the score and the window, so a flag is re-derivable
+ * by hand months later (§5: no unexplained risk score). `approvalId` points at
+ * the item on the ONE Approvals Queue — that column existing, rather than a
+ * parallel status machine, IS §4's "no new inbox" guarantee. */
+export const spendAnomalies = pgTable(
+  "spend_anomalies",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    /** §2's per-user narrowing; null = a project-level flag */
+    subjectUserId: uuid("subject_user_id"),
+    signal: text("signal", { enum: ANOMALY_SIGNAL_VALUES }).notNull(),
+    method: text("method", { enum: ANOMALY_METHOD_VALUES }).notNull(),
+    observed: doublePrecision("observed").notNull(),
+    baselineMedian: doublePrecision("baseline_median"),
+    baselineMad: doublePrecision("baseline_mad"),
+    baselineSamples: integer("baseline_samples").notNull(),
+    score: doublePrecision("score"),
+    threshold: doublePrecision("threshold"),
+    absoluteFloor: doublePrecision("absolute_floor").notNull(),
+    windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
+    windowEnd: timestamp("window_end", { withTimezone: true }).notNull(),
+    /** the full sentence a human reads; never a bare number */
+    explanation: text("explanation").notNull(),
+    action: text("action", { enum: ANOMALY_ACTION_VALUES }).notNull(),
+    approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    status: text("status", { enum: ANOMALY_STATUS_VALUES }).notNull().default("open"),
+    decidedByUserId: uuid("decided_by_user_id"),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    decisionReason: text("decision_reason"),
+    detail: jsonb("detail"),
+    detectedAt: timestamp("detected_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("spend_anomalies_project_detected_idx").on(t.projectId, t.detectedAt),
+    index("spend_anomalies_status_idx").on(t.status),
+    /** idempotent re-evaluation: one row per (project, signal, window) however
+     * many times an operator drives the sweep */
+    uniqueIndex("spend_anomalies_window_uq").on(t.projectId, t.signal, t.windowStart, t.windowEnd),
+  ],
+);
+
+/** The forecast ARTIFACT, mirroring ADR-0047's `report_runs`. `sufficient` is a
+ * real column and `projectedSpendUsd` is nullable, with a DB CHECK tying them
+ * together: an insufficient-data answer is stored AS SUCH, so the history can
+ * never be mined for a number that was never claimed. */
+export const spendForecastRuns = pgTable(
+  "spend_forecast_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    requestedByUserId: uuid("requested_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    scopeKind: text("scope_kind", { enum: ["org", "initiative", "team", "project"] }).notNull(),
+    scopeId: uuid("scope_id"),
+    /** the honest record of what this forecast was PERMITTED to see; null =
+     * the org-wide set, reachable only by an admin under an org-scoped request */
+    effectiveProjectIds: jsonb("effective_project_ids").$type<string[] | null>(),
+    method: text("method", { enum: FORECAST_METHOD_VALUES }).notNull(),
+    period: text("period").notNull(),
+    periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
+    periodEnd: timestamp("period_end", { withTimezone: true }).notNull(),
+    sufficient: boolean("sufficient").notNull(),
+    projectedSpendUsd: doublePrecision("projected_spend_usd"),
+    lowUsd: doublePrecision("low_usd"),
+    highUsd: doublePrecision("high_usd"),
+    spendToDateUsd: doublePrecision("spend_to_date_usd").notNull(),
+    payload: jsonb("payload").notNull(),
+    generatedAt: timestamp("generated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("spend_forecast_runs_generated_idx").on(t.generatedAt)],
+);
+
+export type SpendMonitorPolicyRow = typeof spendMonitorPolicies.$inferSelect;
+export type SpendScheduledChangeRow = typeof spendScheduledChanges.$inferSelect;
+export type SpendAnomalyRow = typeof spendAnomalies.$inferSelect;
+export type SpendForecastRunRow = typeof spendForecastRuns.$inferSelect;

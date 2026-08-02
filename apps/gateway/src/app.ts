@@ -121,6 +121,7 @@ import { registerEvalRoutes } from "./evals.js";
 import { applyModelCardApprovalDecision, registerMrmRoutes } from "./mrm.js";
 import { registerReportingRoutes } from "./reporting.js";
 import { registerConfigVersionRoutes } from "./config-versions.js";
+import { registerSpendMonitorRoutes } from "./spend-monitor.js";
 import {
   assignedApprovalIdsFor,
   ensureAssignment,
@@ -782,6 +783,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "GET /v1/reports/runs",
     "GET /v1/reports/runs/:id",
     "GET /v1/reports/runs/:id/export",
+    // ADR-0049: a team lead reading THEIR OWN forecast and THEIR OWN project's
+    // anomaly flags. Both resolve the caller's entitlement to a CONCRETE
+    // project-id set through ADR-0047's `evaluateReportAccess` — the same
+    // function, not a second copy — and build every ledger query FROM that set,
+    // so neither a projection nor a flag can reveal another team's spend.
+    // Authoring POLICIES, recording SCHEDULED CHANGES and DRIVING the evaluator
+    // are conspicuously NOT here: deciding what counts as anomalous, and
+    // reading every project's ledger to find out, stays admin.
+    "GET /v1/spend/forecast",
+    "GET /v1/spend/anomalies",
     "POST /v1/users/:userId/model-credentials",
     "GET /v1/users/:userId/model-credentials",
     "DELETE /v1/users/:userId/model-credentials/:provider",
@@ -2685,6 +2696,18 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // route at all: it lives inside executeGovernedDispatch, so every caller
   // inherits it, and the resolved version is stamped onto the usage_events row.
   registerConfigVersionRoutes(app, db);
+  // ADR-0049 — cost forecasting and spend-anomaly detection over the MEASURED
+  // usage ledger. Two things about the wiring are load-bearing. First, the
+  // entitlement decision is ADR-0047's `evaluateReportAccess` CALLED, not
+  // re-implemented: a forecast and an anomaly alert are derived numbers, and a
+  // derived number is exactly the shape in which one team's spend leaks to
+  // another, so there is one copy of the rules. Second, enforcement escalates
+  // into the EXISTING approvals queue with a `__spend_anomaly__` stage
+  // sentinel — the same table, the same decide path, no second inbox. Reading
+  // a forecast/anomaly is non-admin-reachable (scoped inside the handler);
+  // authoring policies, recording scheduled changes and driving the evaluator
+  // stay admin.
+  registerSpendMonitorRoutes(app, db);
 
   registerAgentConnectorRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0034 — admin-registered custom LLM providers + the egress allow-list

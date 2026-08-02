@@ -179,6 +179,58 @@ export {
   type PromotionDecision,
 } from "./config-versions.js";
 
+// ADR-0049 — cost forecasting and spend-anomaly detection's pure half: the two
+// documented projectors (run-rate and EWMA) with a real confidence interval and
+// an explicit insufficient-data refusal, the Iglewicz–Hoaglin modified-z
+// anomaly rule with its cold-start and absolute-floor rails, and the
+// enforcement decision that routes through the EXISTING Approvals Queue while
+// respecting ADR-0027 §9's compliance cost floor.
+export {
+  FORECAST_METHODS,
+  ANOMALY_SIGNALS,
+  ANOMALY_METHODS,
+  ANOMALY_ACTIONS,
+  ANOMALY_STATUSES,
+  ANOMALY_SENSITIVITIES,
+  SENSITIVITY_Z,
+  ANOMALY_ABSOLUTE_FLOORS,
+  MIN_BASELINE_SAMPLES,
+  MIN_FORECAST_DAYS,
+  MIN_FORECAST_ELAPSED_FRACTION,
+  FORECAST_DISCLAIMER,
+  ANOMALY_DISCLAIMER,
+  spendMonitorPolicySchema,
+  scheduledSpendChangeSchema,
+  forecastQuerySchema,
+  decideAnomalySchema,
+  mean,
+  median,
+  stddev,
+  mad,
+  modifiedZ,
+  ewma,
+  bucketDaily,
+  activeHours,
+  budgetBreachDay,
+  forecastSpend,
+  detectAnomaly,
+  detectUnusualModel,
+  decideEnforcement,
+  type ForecastMethod,
+  type AnomalySignal,
+  type AnomalyMethod,
+  type AnomalyAction,
+  type AnomalyStatus,
+  type AnomalySensitivity,
+  type SpendMonitorPolicyInput,
+  type ForecastInput,
+  type ForecastResult,
+  type AnomalyInput,
+  type AnomalyVerdict,
+  type EnforcementInput,
+  type EnforcementDecision,
+} from "./forecasting.js";
+
 // ADR-0042 — the guardrail engine's pure half: the detector registry, the
 // block|warn|log verbs (piiMode's triad, plus an `off` member), the
 // MAX-of-strictness composition that makes the compliance cascade a ceiling,

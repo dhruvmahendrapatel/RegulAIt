@@ -109,6 +109,12 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
     group: "Cost & Optimization",
     items: [
       { label: "Cost dashboard", to: "/admin/cost" },
+      // ADR-0049 — budget-vs-FORECAST and spend-anomaly signals over the same
+      // measured ledger the Cost dashboard renders as actuals. Next to it
+      // because it is the same question asked forward in time rather than
+      // backward, and because a forecast that lived somewhere else would
+      // inevitably drift from the actuals it extrapolates.
+      { label: "Spend forecast & anomalies", to: "/admin/spend-monitor" },
       { label: "Optimization", to: "/admin/optimization" },
     ],
   },

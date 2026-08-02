@@ -143,7 +143,7 @@ export async function resolveScopeProjectIds(
   }
 }
 
-async function callerProjectIds(db: Db, userId: string | null): Promise<string[]> {
+export async function callerProjectIds(db: Db, userId: string | null): Promise<string[]> {
   if (!userId) return [];
   const rows = await db
     .select({ id: projectMembers.projectId })
@@ -152,7 +152,7 @@ async function callerProjectIds(db: Db, userId: string | null): Promise<string[]
   return rows.map((r) => r.id);
 }
 
-async function callerTeamIds(db: Db, userId: string | null): Promise<string[]> {
+export async function callerTeamIds(db: Db, userId: string | null): Promise<string[]> {
   if (!userId) return [];
   const rows = await db
     .select({ id: teamMembers.teamId })
