@@ -41,6 +41,7 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       { label: "Teams", to: "/admin/teams" },
       { label: "Client access", to: "/admin/client-access" },
       { label: "SSO & sessions", to: "/admin/sso" },
+      { label: "Provisioning (SCIM)", to: "/admin/provisioning" },
     ],
   },
   {

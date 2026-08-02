@@ -365,6 +365,13 @@
       "when": 1784987000000,
       "tag": "0051_saml_sso",
       "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1784988000000,
+      "tag": "0052_scim_provisioning",
+      "breakpoints": true
     }
   ]
 }

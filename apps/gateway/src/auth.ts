@@ -555,7 +555,7 @@ export function auditAuth(
   effect: "allow" | "deny",
   reason: string,
   detail: Record<string, unknown>,
-  objectType: "user" | "oidc_provider" | "saml_provider" = "user",
+  objectType: "user" | "oidc_provider" | "saml_provider" | "scim_group" | "scim_token" = "user",
 ) {
   return db.insert(auditLog).values({
     userId: actorUserId ?? NIL_UUID,

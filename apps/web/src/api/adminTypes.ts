@@ -88,6 +88,33 @@ export interface SamlProvider {
   enabled: boolean;
 }
 
+/** ADR-0037 — a SCIM provisioning bearer token. The secret itself is NEVER in
+ * this shape: it is returned exactly once by the issue/rotate endpoints and
+ * only its sha256 is stored. */
+export interface ScimToken {
+  id: string;
+  name: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+}
+
+export interface ScimStatus {
+  tokens: ScimToken[];
+  activeTokens: number;
+  lastUsedAt: string | null;
+  counts: {
+    provisionedUsers: number;
+    deactivatedUsers: number;
+    groups: number;
+    memberships: number;
+  };
+  /** always false today: a synced group is inert until an admin-defined
+   * group->role mapping exists (ADR-0038), and the API states it rather than
+   * leaving the UI to assume it */
+  groupsGrantEntitlement: boolean;
+}
+
 export interface Role {
   id: string;
   name: string;

@@ -1,6 +1,6 @@
 # ADR-0037: SCIM 2.0 provisioning (Users + Groups) with deactivate-never-delete deprovisioning
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-08-01
 
 ## Context
@@ -122,3 +122,86 @@ a governance product.
   per-token rate-limit wiring; the `scim_group` audit objectType; and admin-portal screens to
   issue/rotate SCIM tokens and view sync status (mirroring the SSO provider sync-status surface in
   GOVERNANCE_LAYER_SPEC §6.1).
+
+## Implementation amendment (2026-08-02)
+
+Implemented as decided — migration **0052** (`scim_tokens`, `scim_groups`, `scim_group_members`,
+and `users.scim_external_id`), the SCIM router at `/scim/v2` (`ServiceProviderConfig`, `/Users`
+GET/POST/GET-by-id/PUT/PATCH/DELETE, `/Groups` GET/POST/GET-by-id/PUT/PATCH/DELETE), the per-token
+rate-limit bucket, the new `scim_group` and `scim_token` audit `objectType`s, the admin endpoints
+`/v1/scim/tokens` (list/issue/rotate/revoke) and `/v1/scim/status`, and a **Provisioning (SCIM)**
+screen in the admin SPA. Gateway suite **1102 → 1142 tests**, all green. Zero new dependencies —
+SCIM is JSON over HTTP and needed none.
+
+**The load-bearing behaviour, asserted by test rather than asserted in prose.** A user is
+provisioned through SCIM, given a live browser session AND a live API key, then deprovisioned by
+*both* signals in turn:
+
+- `PATCH active:false` → `users.disabled_at` set, **the row still exists** (asserted with a direct
+  `SELECT`, not by asking the API that wrote it), every live `auth_sessions` row revoked so the
+  next request from that browser 401s, and the API key stops authenticating with no separate step;
+- `DELETE /Users/:id` → identical outcome, 204, **row still present**;
+- `active:true` → `disabled_at` cleared and the *same* API key authenticates again.
+
+There is no code path in `scim.ts` that deletes a `users` row.
+
+**Deviations and choices, stated plainly:**
+
+1. **`DELETE /Users/:id` does not delete, and the resource stays READABLE afterwards.** RFC 7644
+   says DELETE removes the resource and a subsequent GET should 404. Here the account is
+   deactivated, so `GET /Users/:id` still answers 200 with `active:false`. Every connector we care
+   about treats that as deprovisioned. Honouring the letter of the RFC would mean destroying the
+   audit, cost and provenance record of everything the account ever did — the opposite of what a
+   governance product is for, and a direct violation of ADR-0022.
+2. **Idempotent create resolves to `409 uniqueness`, not "return the existing resource".** The ADR
+   allowed either. 409 is what Okta and Entra expect (they follow it with a `userName eq` GET and
+   switch to PATCH), and — the deciding reason — a 200 would let a create attempt silently ADOPT a
+   pre-existing locally-created account, including an admin's. The refusal is itself audited
+   (`scim-user-create-conflict`, effect `deny`). No duplicate row is possible either way:
+   `users.email` is unique.
+3. **`scim_groups.external_id` is nullable-but-unique** rather than `NOT NULL`. `externalId` is
+   optional in RFC 7643 and not every connector sends one on group create; fabricating one from the
+   display name would invent an identity the IdP never asserted. Postgres treats NULLs as distinct,
+   so every group that HAS an external id can exist exactly once.
+4. **An unsupported filter is a `400 invalidFilter`, and an unsupported PATCH path a
+   `400 invalidPath`** — never a silently-ignored operation. A filter we cannot evaluate answered
+   with an unfiltered (or empty) 200 tells a reconciling connector "this user does not exist",
+   which is precisely how duplicate accounts get created; a silently-dropped PATCH operation is how
+   a "deprovisioned" user stays provisioned. Implemented: `userName|emails|emails.value|externalId|
+   id eq "…"` for Users, `displayName|externalId|id eq "…"` for Groups.
+5. **A new `scim_token` audit `objectType` beyond the ADR's `scim_group`.** Issuing a provisioning
+   credential is a governed act in its own right, not a footnote on some user's row.
+6. **A dedicated rate-limit bucket, not the existing api-key one.** `rateLimitKey` returns
+   `scim:<token>` for anything under `/scim/v2`, keyed on the presented token — matched on the URL
+   PATH so a 404 under the prefix cannot fall back into the generous global bucket. Default 3000
+   requests/minute per token (`REGULAIT_SCIM_RATE_LIMIT_MAX` / `_WINDOW_MS`): a full directory sync
+   is bursty and must not be throttled into a half-synced state, while a connector stuck in a retry
+   loop is bounded well below it. The 429 carries `Retry-After`, per the ADR.
+7. **`ServiceProviderConfig` is served and is behind the token**, because real connectors probe it
+   before their first write. It states `changePassword: {supported: false}` — SCIM never sets a
+   password here — and `bulk: {supported: false}`.
+8. **`PATCH` accepts both the explicit-path and the path-less `{op:"replace", value:{active:false}}`
+   shapes**, and tolerates the string `"true"`/`"false"` some connectors send for `active`. Unknown
+   *attributes* in a payload are ignored (an Okta payload carries far more than we map); unknown
+   *operations* are refused. That asymmetry is deliberate: an extra attribute changes nothing, an
+   unhonoured operation changes the answer.
+
+**The three invariants SCIM cannot cross, each with its own test.** A SCIM-created user has
+`passwordHash` null and cannot password-login (a payload carrying `password` is ignored); is never
+admin (a payload asserting `isAdmin`/`roles` gets neither the flag nor a role assignment); and
+never has `users.username` written (ADR-0030) — SCIM's `userName` is the mapping key and lands on
+`users.email`, never on the local identifier, on create or on PATCH.
+
+**SCIM is a separate trust path, and the tests attack it as one.** `/scim/v2` is auth-exempt from
+the session/api-key hook in `app.ts` precisely so a human credential can never be the thing that
+admits a request, and non-admin-gated because a connector has no user identity to be admin with.
+Refused, each by test: no credential, a revoked token, a rotated-away token, an **admin's** API
+key, an **admin's** session cookie, and the deploy-time bootstrap token. `/v1/scim/*` token
+management is, conversely, admin-only.
+
+**Still open (deliberately out of scope here):** group→role mapping is **ADR-0038** — a synced
+group is inert, the status endpoint says `groupsGrantEntitlement: false` in the payload, and the
+membership write carries a comment saying so; `PUT`/`PATCH` on `/Groups` reconcile membership but
+grant nothing. Also unbuilt: SCIM `/Me`, `/ResourceTypes` and `/Schemas`; ETag/version
+concurrency; sort; bulk; and real-connector interop testing against live Okta/Entra tenants, which
+the ADR already names as required before claiming support for a named IdP.

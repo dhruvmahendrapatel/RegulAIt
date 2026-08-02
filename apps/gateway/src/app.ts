@@ -111,6 +111,7 @@ import {
   type AuthContext,
 } from "./auth.js";
 import { registerSamlRoutes } from "./saml.js";
+import { SCIM_ROUTES, registerScimAdminRoutes, registerScimRoutes } from "./scim.js";
 import { evaluateIpEnvelope } from "./net-policy.js";
 import { activeDelegatorsFor, activeDelegationFrom } from "./delegations.js";
 
@@ -459,6 +460,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "/auth/saml/:providerId/start",
     "/auth/saml/:providerId/acs",
     "/auth/saml/:providerId/metadata",
+    // ADR-0037 — SCIM is a SEPARATE TRUST PATH, and this exemption is what
+    // makes that true rather than aspirational. These routes must never
+    // authenticate via a human session cookie or a user's API key: they
+    // authenticate ONLY against `scim_tokens`, inside scim.ts's own
+    // encapsulated preHandler. Exempting them here means the hook below cannot
+    // be the thing that lets a user credential in; presenting one to /scim/v2
+    // gets a SCIM 401 from that preHandler, because it is not in `scim_tokens`.
+    ...SCIM_ROUTES,
     // the /ui SPA shell (ADR-0026): a static, zero-data page like /app and
     // /admin above — the browser hits it before it has any credential; every
     // API call the page makes still authenticates normally.
@@ -796,6 +805,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "GET /auth/saml/:providerId/start",
     "POST /auth/saml/:providerId/acs",
     "GET /auth/saml/:providerId/metadata",
+    // ADR-0037: the admin gate keys on a USER's isAdmin flag, and a SCIM
+    // connector deliberately has no user identity at all — so it would 403
+    // here on every request. The gate that actually applies to these routes is
+    // scim.ts's own token check; admin-ness is not, and cannot be, the point.
+    // The /v1/scim/* token-management endpoints are conspicuously NOT listed:
+    // issuing a provisioning credential stays admin-only.
+    ...SCIM_ROUTES.flatMap((r) =>
+      ["GET", "POST", "PUT", "PATCH", "DELETE"].map((m) => `${m} ${r}`),
+    ),
     "GET /v1/me",
     "GET /v1/model-providers/status",
     "GET /v1/runs",
@@ -2337,6 +2355,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // provider CRUD.
   registerAuthRoutes(app, db, { bootstrapToken: opts.bootstrapToken, dataKey: opts.dataKey });
   registerSamlRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0037 — SCIM 2.0 provisioning. TWO registrations on purpose, because
+  // they live on two different trust paths: `registerScimRoutes` mounts
+  // /scim/v2 inside its own encapsulated scope that authenticates ONLY on
+  // `scim_tokens` (auth-exempt above precisely so the human session/api-key
+  // hook cannot admit a user credential to it), while `registerScimAdminRoutes`
+  // mounts ordinary admin-gated /v1 endpoints for issuing and revoking those
+  // tokens. Deprovisioning through either DELETE or active:false lands on
+  // ADR-0022's `disabled_at` — never a row delete.
+  registerScimRoutes(app, db);
+  registerScimAdminRoutes(app, db);
 
   registerAgentConnectorRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0034 — admin-registered custom LLM providers + the egress allow-list

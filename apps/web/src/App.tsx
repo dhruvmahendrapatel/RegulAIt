@@ -27,6 +27,7 @@ import RolesPage from "./views/admin/identity/RolesPage";
 import TeamsPage from "./views/admin/identity/TeamsPage";
 import ClientAccessPage from "./views/admin/identity/ClientAccessPage";
 import SsoPage from "./views/admin/identity/SsoPage";
+import ScimPage from "./views/admin/identity/ScimPage";
 import RulesEnginePage from "./views/admin/governance/RulesEnginePage";
 import SimulationPage from "./views/admin/governance/SimulationPage";
 import ApprovalsAdminPage from "./views/admin/governance/ApprovalsAdminPage";
@@ -119,6 +120,7 @@ export default function App() {
                         <Route path="teams" element={<TeamsPage />} />
                         <Route path="client-access" element={<ClientAccessPage />} />
                         <Route path="sso" element={<SsoPage />} />
+                        <Route path="provisioning" element={<ScimPage />} />
                         <Route path="rules" element={<RulesEnginePage />} />
                         <Route path="simulation" element={<SimulationPage />} />
                         <Route path="approvals" element={<ApprovalsAdminPage />} />

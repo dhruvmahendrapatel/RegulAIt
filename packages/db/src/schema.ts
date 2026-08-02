@@ -51,12 +51,28 @@ export const users = pgTable("users", {
   /** replay guard: the highest RFC 6238 time-step already consumed — a code
    * for a step <= this is refused even inside the ±1 validation window. */
   totpLastUsedStep: bigint("totp_last_used_step", { mode: "number" }),
+  /** ADR-0037 (migration 0052): the IdP's OWN id for this user, as asserted on
+   * the SCIM `externalId` attribute. NULL for every locally-created user and
+   * every pre-0052 row — none was invented. Unique among non-null values.
+   *
+   * It exists for exactly one reason: email is the SCIM join key, so an IdP
+   * that changes someone's primary email would otherwise mint a SECOND
+   * account. A connector that correlates by SCIM id first can find the
+   * existing row and re-map the email onto it. */
+  scimExternalId: text("scim_external_id"),
   /** login lockout counters (org_settings dials set the thresholds) */
   failedLoginCount: integer("failed_login_count").notNull().default(0),
   lastFailedLoginAt: timestamp("last_failed_login_at", { withTimezone: true }),
   lockedUntil: timestamp("locked_until", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+},
+  (t) => [
+    // ADR-0037: unique among NON-NULL values (Postgres treats NULLs as
+    // distinct), so an IdP id maps to at most one account while every user
+    // that never came from an IdP keeps a null.
+    uniqueIndex("users_scim_external_id_uq").on(t.scimExternalId),
+  ],
+);
 
 // --- ADR-0025: server-side browser sessions ---------------------------------
 // The cookie carries a 256-bit random token; only its sha256 is stored — a DB
@@ -275,6 +291,76 @@ export const samlAssertionIds = pgTable("saml_assertion_ids", {
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
 });
 
+// --- ADR-0037: SCIM 2.0 provisioning (migration 0052) ------------------------
+// The IdP-machine-to-gateway plumbing an enterprise provisioning engine talks
+// to. Three tables and one column, and the most important thing about all of
+// them is what they do NOT contain: no hard-delete path for a user. SCIM's
+// `DELETE /Users/:id` and `PATCH active:false` both land on ADR-0022's
+// `users.disabled_at`, so offboarding is instant, complete (sessions revoked,
+// keys stop authenticating) and REVERSIBLE.
+
+/**
+ * One bearer credential per configured IdP integration — deliberately the
+ * `api_keys` shape field for field: a 256-bit random token whose sha256 is the
+ * only thing ever stored, minted and shown exactly once, revocable, with a
+ * `lastUsedAt` that makes "is this integration actually running?" answerable
+ * from the admin portal.
+ *
+ * This is a DISTINCT trust path from `users`: the SCIM routes authenticate on
+ * this table and on nothing else — never a session cookie, never a user API
+ * key — so a leaked SCIM token carries provisioning power and no user
+ * identity, and rotating it touches no human account.
+ */
+export const scimTokens = pgTable("scim_tokens", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  /** operator-facing label, and the ATTRIBUTION name written into every audit
+   * row this token's requests produce ("okta-prod deactivated x@y") */
+  name: text("name").notNull().unique(),
+  tokenHash: text("token_hash").notNull().unique(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+});
+
+/**
+ * A group as the IdP asserts it. `externalId` is the IdP's own id and is what
+ * a replayed full sync converges on; it is nullable (RFC 7643 makes it
+ * optional and not every connector sends one on create) but UNIQUE among
+ * non-null values, so a group that has one can exist exactly once.
+ *
+ * A row here grants NOTHING. It is inbound sync state. Turning membership into
+ * entitlement is an admin-defined, default-deny mapping — ADR-0038 — and is
+ * deliberately absent here so SCIM cannot become a privilege-escalation path.
+ */
+export const scimGroups = pgTable("scim_groups", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  externalId: text("external_id").unique(),
+  displayName: text("display_name").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** group → user membership. The UNIQUE(group, user) index is what makes a
+ * replayed full-org sync CONVERGE rather than duplicate — the reconciler
+ * computes deltas, and the index is the backstop if two syncs race. */
+export const scimGroupMembers = pgTable(
+  "scim_group_members",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    groupId: uuid("group_id")
+      .notNull()
+      .references(() => scimGroups.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("scim_group_members_group_user_uq").on(t.groupId, t.userId),
+    index("scim_group_members_user_idx").on(t.userId),
+  ],
+);
+
 export const mcpServers = pgTable("mcp_servers", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: text("name").notNull().unique(),
@@ -434,6 +520,16 @@ export const auditLog = pgTable(
         // (the audited refusal a re-pointed or pre-0049 row now gets). Plain
         // text column — no DDL needed.
         "mcp_server",
+        // ADR-0037: SCIM group sync. Group CRUD and every membership
+        // add/remove audits here; SCIM USER provisioning keeps objectType
+        // "user" so "what happened to this account" stays one query. Plain
+        // text column — no DDL needed.
+        "scim_group",
+        // ADR-0037: an admin issuing / rotating / revoking a SCIM bearer
+        // token. The token is a provisioning-power credential on its own trust
+        // path, so its lifecycle is a governed act in its own right rather
+        // than a footnote on some user's row. Plain text column — no DDL.
+        "scim_token",
       ],
     })
       .notNull()
