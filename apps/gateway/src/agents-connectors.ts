@@ -79,6 +79,7 @@ import {
   type GuardrailPolicy,
 } from "./guardrails.js";
 import { mrmDispatchGate } from "./mrm.js";
+import { newVersion, resolveAgentPromptVersion } from "./config-versions.js";
 import { z } from "zod";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import {
@@ -545,8 +546,30 @@ export async function executeGovernedDispatch(
   // system BASE, and a caller-supplied system is APPENDED after it — it never
   // replaces it. The admin prompt is a governance artifact (what the admin
   // decided this agent IS), so no caller-side field may displace it.
-  const dispatchSystem = served.systemPrompt
-    ? served.systemPrompt + (args.system ? `\n\n${args.system}` : "")
+  //
+  // ADR-0048 layers VERSIONING onto exactly this line and nothing else. When
+  // the served agent has any `config_versions` rows, the base prompt comes from
+  // the RESOLVED version — the active one, or the canary when this request's
+  // stable key falls inside the canary percentage — instead of from the
+  // `agents.systemPrompt` column. The invariant above is untouched: a canary
+  // base prompt still wins over, and is still only appended to by, the caller's
+  // `system`. An agent with no version rows resolves to null and falls back to
+  // the column, which is byte-identical pre-0048 behaviour.
+  //
+  // The stable key is the run id (else the conversation id, else the user), so
+  // a multi-turn conversation cannot flip its base prompt halfway through.
+  const promptVersion = await resolveAgentPromptVersion(db, {
+    agentId: served.id,
+    userId,
+    runId: typeof args.detail?.["runId"] === "string" ? (args.detail["runId"] as string) : null,
+    conversationId:
+      typeof args.detail?.["conversationId"] === "string"
+        ? (args.detail["conversationId"] as string)
+        : null,
+  });
+  const basePrompt = promptVersion ? promptVersion.systemPrompt : served.systemPrompt;
+  const dispatchSystem = basePrompt
+    ? basePrompt + (args.system ? `\n\n${args.system}` : "")
     : args.system;
 
   // A custom endpoint's key (when it has one at all) is the ORG's, stored on
@@ -770,8 +793,26 @@ export async function executeGovernedDispatch(
     refusal: result.refusal,
     providerMessageId: result.providerMessageId,
     projectId: args.projectId ?? null,
+    // ADR-0048 §3 — THE STAMP. Which immutable prompt version actually served
+    // this dispatch, and whether it served as a canary. This is what makes a
+    // regression attributable to the version that caused it rather than to a
+    // time window; without it the canary would be a rollout mechanism with no
+    // way to read its own result. NULL when the agent has never been versioned.
+    configVersionId: promptVersion?.versionId ?? null,
+    configVersion: promptVersion?.version ?? null,
+    configCanary: promptVersion?.canary ?? false,
     detail: {
       credentialSource,
+      ...(promptVersion
+        ? {
+            promptVersion: {
+              version: promptVersion.version,
+              canary: promptVersion.canary,
+              bucket: promptVersion.bucket,
+              reason: promptVersion.reason,
+            },
+          }
+        : {}),
       ...(customDestination ? { customProviderId: served.customProviderId, egress: customDestination } : {}),
       ...(args.detail ?? {}),
       ...piiDetail,
@@ -1176,16 +1217,31 @@ export function registerAgentConnectorRoutes(
   // route is deliberately NOT in NON_ADMIN_ROUTES). It is not a secret: it
   // rides the agent row that admins already read, and it is disclosed policy
   // context applied to every dispatch of the agent, not key material.
+  //
+  // ADR-0048: this used to be a straight `UPDATE agents SET system_prompt`,
+  // which took effect org-wide on the next dispatch with NO version history and
+  // NO way to answer "which prompt text served this dispatch". It now MINTS AN
+  // IMMUTABLE VERSION and activates it: the admin gesture and its
+  // effective-immediately behaviour are unchanged, but the prior text survives
+  // as its own row and one click rolls back to it. `agents.systemPrompt` is
+  // still written — as a READ-MODEL of the active version — so the agents API,
+  // the SPA, and ADR-0044's `eval_runs.system_prompt_hash` keep seeing the
+  // served base prompt without learning about `config_versions`.
   app.post("/v1/agents/:agentId/system-prompt", async (req, reply) => {
     const { agentId } = agentIdParam.parse(req.params);
     const body = setAgentSystemPromptSchema.parse(req.body);
-    const [row] = await db
-      .update(agents)
-      .set({ systemPrompt: body.systemPrompt })
-      .where(eq(agents.id, agentId))
-      .returning();
-    if (!row) return reply.status(404).send({ error: "unknown_agent" });
-    return row;
+    const [existing] = await db.select().from(agents).where(eq(agents.id, agentId));
+    if (!existing) return reply.status(404).send({ error: "unknown_agent" });
+    const created = await newVersion(db, {
+      artifactType: "agent_system_prompt",
+      artifactId: agentId,
+      body: { systemPrompt: body.systemPrompt ?? null },
+      label: `set via POST /v1/agents/:id/system-prompt`,
+      authorUserId: req.authCtx.userId ?? null,
+      activate: true,
+    });
+    const [row] = await db.select().from(agents).where(eq(agents.id, agentId));
+    return { ...row!, configVersion: created.version.version };
   });
 
   // --- model credentials (admin-only via the global gate) ---

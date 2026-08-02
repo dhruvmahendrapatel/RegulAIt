@@ -614,6 +614,16 @@ export const auditLog = pgTable(
         // A report aggregates across teams, so "who was told no" is as much
         // the record as "what was produced". Plain text column — no DDL needed.
         "report",
+        // ADR-0048: an admin creating a new immutable VERSION of a governance
+        // artifact (a base system prompt, a rules-engine artifact), starting or
+        // adjusting a CANARY, PROMOTING one to active — with or without the
+        // ADR-0044 eval gate, the override being audited with its reason — and
+        // ROLLING BACK. Activation is the act that changes what every
+        // subsequent dispatch is governed by, so it is a governed act in its
+        // own right. The DISPATCHES those versions serve stamp the version onto
+        // `usage_events` rather than emitting a second audit row, so the trail
+        // stays single. Plain text column — no DDL needed.
+        "config_version",
       ],
     })
       .notNull()
@@ -1687,9 +1697,23 @@ export const usageEvents = pgTable(
     providerMessageId: text("provider_message_id"),
     /** PILLAR 5 attribution; FK-free like the rest of the ledger */
     projectId: uuid("project_id"),
+    /** ADR-0048 §3 — THE STAMP. Which immutable config version (today: which
+     * agent base-system-prompt version) actually served this dispatch, and
+     * whether it was serving as a CANARY. This is the whole point of a canary:
+     * a regression observed in the metrics must be traceable to the version
+     * that caused it. FK-free like the rest of the ledger, and the integer is
+     * stored alongside the id so the answer survives a pruned version row.
+     * NULL = no versioned artifact governed this row (a connector/MCP row, or
+     * an agent that has never had a base prompt). */
+    configVersionId: uuid("config_version_id"),
+    configVersion: integer("config_version"),
+    configCanary: boolean("config_canary").notNull().default(false),
     detail: jsonb("detail"),
   },
-  (t) => [index("usage_events_user_idx").on(t.userId, t.at)],
+  (t) => [
+    index("usage_events_user_idx").on(t.userId, t.at),
+    index("usage_events_config_version_idx").on(t.configVersionId),
+  ],
 );
 
 // MODEL DISPATCH: per-user provider credentials (BYO key). Resolution order
@@ -3446,3 +3470,107 @@ export const reportRuns = pgTable(
 export type ReportDefinitionRow = typeof reportDefinitions.$inferSelect;
 export type ReportScheduleRow = typeof reportSchedules.$inferSelect;
 export type ReportRunRow = typeof reportRuns.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0048 (migration 0060) — IMMUTABLE VERSIONING, CANARY, ROLLBACK for the
+// governance artifacts the gateway actually reads.
+//
+// Follows ADR-0040's precedent (`abac_policies` + `abac_policy_versions`)
+// rather than inventing a second shape: immutable version rows plus an ACTIVE
+// pointer, where activation is a pointer move and rollback is selecting an
+// older row. What it adds is the CANARY status (a deterministic, sticky
+// percentage split) and the STAMP on `usage_events`, so a regression observed
+// in the metrics is traceable to the version that caused it.
+// ---------------------------------------------------------------------------
+
+export const CONFIG_ARTIFACT_TYPES = [
+  "agent_system_prompt",
+  "agent_config",
+  "approval_rule",
+  "rate_limit",
+  "data_scope_rule",
+  "compliance_profile",
+] as const;
+export type ConfigArtifactType = (typeof CONFIG_ARTIFACT_TYPES)[number];
+
+export const CONFIG_VERSION_STATUSES = [
+  "draft",
+  "canary",
+  "active",
+  "rolled_back",
+  "superseded",
+] as const;
+export type ConfigVersionStatus = (typeof CONFIG_VERSION_STATUSES)[number];
+
+export const CONFIG_ACTIVATION_ACTIONS = [
+  "created",
+  "activated",
+  "canary_started",
+  "canary_adjusted",
+  "promoted",
+  "rolled_back",
+  "abandoned",
+] as const;
+export type ConfigActivationAction = (typeof CONFIG_ACTIVATION_ACTIONS)[number];
+
+export const configVersions = pgTable(
+  "config_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    artifactType: text("artifact_type", { enum: CONFIG_ARTIFACT_TYPES }).notNull(),
+    artifactId: uuid("artifact_id").notNull(),
+    version: integer("version").notNull(),
+    /** the artifact VERBATIM — this column IS the thing rollback re-points at */
+    body: jsonb("body").$type<Record<string, unknown>>().notNull(),
+    label: text("label"),
+    parentVersion: integer("parent_version"),
+    status: text("status", { enum: CONFIG_VERSION_STATUSES }).notNull().default("draft"),
+    /** 1..99 exactly when status='canary' (DB CHECK, both directions) */
+    canaryPct: integer("canary_pct"),
+    authorUserId: uuid("author_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("config_versions_artifact_version_uq").on(t.artifactType, t.artifactId, t.version),
+    // ADR-0048 §1's invariant, in the DATABASE rather than in a comment
+    uniqueIndex("config_versions_one_active_uq")
+      .on(t.artifactType, t.artifactId)
+      .where(sql`${t.status} = 'active'`),
+    uniqueIndex("config_versions_one_canary_uq")
+      .on(t.artifactType, t.artifactId)
+      .where(sql`${t.status} = 'canary'`),
+    index("config_versions_artifact_status_idx").on(t.artifactType, t.artifactId, t.status),
+  ],
+);
+
+/** the APPEND-ONLY record of which version was active when. `status` on
+ * `config_versions` tells you the present; this is what makes the past
+ * reconstructable. */
+export const configActivationEvents = pgTable(
+  "config_activation_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    artifactType: text("artifact_type", { enum: CONFIG_ARTIFACT_TYPES }).notNull(),
+    artifactId: uuid("artifact_id").notNull(),
+    versionId: uuid("version_id")
+      .notNull()
+      .references(() => configVersions.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    fromVersionId: uuid("from_version_id"),
+    fromVersion: integer("from_version"),
+    action: text("action", { enum: CONFIG_ACTIVATION_ACTIONS }).notNull(),
+    canaryPct: integer("canary_pct"),
+    actorUserId: uuid("actor_user_id").references(() => users.id, { onDelete: "set null" }),
+    reason: text("reason"),
+    /** ADR-0048 §4: the eval run that gated this promotion, when one did */
+    evalRunId: uuid("eval_run_id").references(() => evalRuns.id, { onDelete: "set null" }),
+    /** ...and the honest escape hatch when nothing gated it. A DB CHECK forces
+     * an override to carry a non-empty reason. */
+    override: boolean("override").notNull().default(false),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("config_activation_events_artifact_at_idx").on(t.artifactType, t.artifactId, t.at)],
+);
+
+export type ConfigVersionRow = typeof configVersions.$inferSelect;
+export type ConfigActivationEventRow = typeof configActivationEvents.$inferSelect;

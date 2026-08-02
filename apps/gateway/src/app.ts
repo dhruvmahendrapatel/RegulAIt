@@ -120,6 +120,7 @@ import { registerGuardrailRoutes } from "./guardrails.js";
 import { registerEvalRoutes } from "./evals.js";
 import { applyModelCardApprovalDecision, registerMrmRoutes } from "./mrm.js";
 import { registerReportingRoutes } from "./reporting.js";
+import { registerConfigVersionRoutes } from "./config-versions.js";
 import {
   assignedApprovalIdsFor,
   ensureAssignment,
@@ -2673,6 +2674,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // that set, so a report can never show spend or audit data the caller could
   // not see directly.
   registerReportingRoutes(app, db);
+  // ADR-0048 — immutable versioning, canary rollout and one-click rollback for
+  // the governance artifacts the gateway reads. Following ADR-0040's precedent:
+  // immutable version rows plus an active pointer, activation is a pointer
+  // move, rollback is selecting an older row. ALL of it is admin-only through
+  // the DEFAULT gate (none of these appear in NON_ADMIN_ROUTES) — minting a
+  // prompt version, ramping a canary, promoting past the eval gate or rolling
+  // back changes what every subsequent dispatch in the org is governed by,
+  // which is privileged by definition. The dispatch-time RESOLUTION is not a
+  // route at all: it lives inside executeGovernedDispatch, so every caller
+  // inherits it, and the resolved version is stamped onto the usage_events row.
+  registerConfigVersionRoutes(app, db);
 
   registerAgentConnectorRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0034 — admin-registered custom LLM providers + the egress allow-list

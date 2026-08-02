@@ -69,6 +69,11 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // risk of using it for this purpose, and is that acceptance still valid?"
       // A high score is an input to that decision, never a substitute for it.
       { label: "Model risk", to: "/admin/model-risk" },
+      // ADR-0048 — the CHANGE-CONTROL layer under all of the above. The gates
+      // decide whether a call may proceed; this decides which VERSION of the
+      // governing artifact it proceeds under, and gives that change a canary
+      // and a one-click undo.
+      { label: "Prompt versions", to: "/admin/prompt-versions" },
       { label: "Simulation", to: "/admin/simulation" },
       { label: "Approvals queue", to: "/admin/approvals" },
       // ADR-0046 — the SAME approvals, scaled: routing, SLA timers, escalation,

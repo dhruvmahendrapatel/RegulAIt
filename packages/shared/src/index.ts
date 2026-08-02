@@ -150,6 +150,35 @@ export {
   type ReportCsvRow,
 } from "./reporting.js";
 
+// ADR-0048 — immutable config versioning / canary / rollback's pure half: the
+// DETERMINISTIC bucketing (a pure function of a stable key, so a multi-turn run
+// cannot flip mid-conversation and the split is reproducible from a ledger row
+// months later), the version resolution, and the eval-gated promotion decision.
+export {
+  CONFIG_ARTIFACT_TYPES,
+  CONFIG_VERSION_STATUSES,
+  LIVE_CANARY_ARTIFACT_TYPES,
+  canaryIsLive,
+  createConfigVersionSchema,
+  activateConfigVersionSchema,
+  startCanarySchema,
+  promoteCanarySchema,
+  rollbackConfigSchema,
+  fnv1a32,
+  canaryBucket,
+  resolveVersion,
+  promptFromBody,
+  evaluatePromotion,
+  stableKeyFor,
+  type ConfigArtifactType,
+  type ConfigVersionStatus,
+  type CreateConfigVersion,
+  type VersionLike,
+  type ResolvedVersion,
+  type EvalEvidence,
+  type PromotionDecision,
+} from "./config-versions.js";
+
 // ADR-0042 — the guardrail engine's pure half: the detector registry, the
 // block|warn|log verbs (piiMode's triad, plus an `off` member), the
 // MAX-of-strictness composition that makes the compliance cascade a ceiling,
