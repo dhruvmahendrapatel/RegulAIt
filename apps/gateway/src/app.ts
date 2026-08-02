@@ -115,6 +115,7 @@ import { SCIM_ROUTES, registerScimAdminRoutes, registerScimRoutes } from "./scim
 import { registerGroupRoleMappingRoutes } from "./group-role-api.js";
 import { registerAbacRoutes } from "./abac.js";
 import { registerGuardrailRoutes } from "./guardrails.js";
+import { registerEvalRoutes } from "./evals.js";
 import { abacPrincipalFromRequest } from "./abac-principal.js";
 import { evaluateIpEnvelope } from "./net-policy.js";
 import { activeDelegatorsFor, activeDelegationFrom } from "./delegations.js";
@@ -757,6 +758,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "GET /v1/projects/:projectId/compliance",
     "GET /v1/projects/:projectId/costs",
     "GET /v1/projects/:projectId/costs.csv",
+    // ADR-0044: triggering an eval run is governed by the caller's own AGENT
+    // entitlement (evaluateAgent inside the runner), not by admin-ness — the
+    // same reasoning as the invoke path above. Everything that AUTHORS what a
+    // gate measures (datasets, cases, versions, the baseline) stays admin-only.
+    "POST /v1/evals/runs",
     "POST /v1/runs",
     "POST /v1/runs/decompose",
     "POST /v1/runs/:runId/events",
@@ -2436,6 +2442,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // through the DEFAULT gate — none appear in NON_ADMIN_ROUTES, because
   // relaxing a content control is exactly a privileged act.
   registerGuardrailRoutes(app, db);
+  // ADR-0044 — the evaluation harness: golden dataset versions, the scorer
+  // registry, runs, per-case results and the baseline comparison. Authoring a
+  // dataset or moving a baseline changes what the promotion gate will accept,
+  // so all of it is admin-only through the DEFAULT gate — except POST
+  // /v1/evals/runs, which is in NON_ADMIN_ROUTES because its gate is the
+  // caller's own agent entitlement, checked inside the runner exactly as an
+  // invoke would check it.
+  registerEvalRoutes(app, db, { dataKey: opts.dataKey });
 
   registerAgentConnectorRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0034 — admin-registered custom LLM providers + the egress allow-list

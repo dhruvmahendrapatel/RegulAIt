@@ -2,6 +2,42 @@ import { z } from "zod";
 
 export { detectPII, type PiiHit, type PiiCategory } from "./pii.js";
 
+// ADR-0044 — the evaluation harness's pure half: the scorer registry (six
+// deterministic kinds plus the model-backed judge's deterministic prompt/parse
+// halves), the aggregate math, and the baseline-comparison gate decision that
+// the workflow automated-check stage blocks on.
+export {
+  EVAL_SCORER_KINDS,
+  DETERMINISTIC_SCORER_KINDS,
+  isDeterministicScorer,
+  evalScorerRegistry,
+  evalScorerConfigSchema,
+  evalScorerKindSchema,
+  validateScorerConfig,
+  validateAgainstSchema,
+  scoreDeterministic,
+  buildJudgePrompt,
+  parseJudgeVerdict,
+  aggregateEvalResults,
+  evaluateEvalGate,
+  createEvalDatasetSchema,
+  createEvalCaseSchema,
+  startEvalRunSchema,
+  setEvalBaselineSchema,
+  type EvalScorerKind,
+  type EvalScorerInfo,
+  type EvalScorerConfig,
+  type EvalScore,
+  type EvalScoreDetail,
+  type DeterministicScoreInput,
+  type EvalJudge,
+  type EvalJudgeRequest,
+  type EvalJudgeVerdict,
+  type EvalAggregate,
+  type EvalGateInput,
+  type EvalGateDecision,
+} from "./evals.js";
+
 // ADR-0042 — the guardrail engine's pure half: the detector registry, the
 // block|warn|log verbs (piiMode's triad, plus an `off` member), the
 // MAX-of-strictness composition that makes the compliance cascade a ceiling,

@@ -5,12 +5,14 @@ import {
   integer,
   boolean,
   doublePrecision,
+  foreignKey,
   index,
   jsonb,
   numeric,
   pgTable,
   text,
   timestamp,
+  unique,
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
@@ -582,6 +584,14 @@ export const auditLog = pgTable(
         // (objectType "mcp_tool", ruleId = the policy id) — one audit trail,
         // exactly as the ADR requires. Plain text column — no DDL needed.
         "abac_policy",
+        // ADR-0044: an evaluation RUN — its verdict (passed / regressed /
+        // failed), the dataset version and agent snapshot it measured, which
+        // judge scored it and what it cost — plus an admin pinning or clearing
+        // a baseline, which changes what every later gate is compared against.
+        // The eval's own DISPATCHES audit as ordinary "agent" rows through
+        // executeGovernedDispatch, so the trail stays single. Plain text
+        // column — no DDL needed.
+        "eval_run",
       ],
     })
       .notNull()
@@ -2704,3 +2714,208 @@ export const guardrailConfigs = pgTable(
 );
 
 export type GuardrailConfigRow = typeof guardrailConfigs.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0044 (migration 0056) — THE AGENT EVALUATION & REGRESSION HARNESS.
+//
+// The existing gates prove a dispatch was governed, metered and audited. None
+// of them can say whether a prompt edit, a routing-tier drop or a swapped
+// custom-provider endpoint made the agent WORSE. These four tables are the
+// durable record that answers that: a pinned dataset version, a run against a
+// snapshotted agent config, a scored result per case, and the stored
+// comparison against a baseline run — which IS the regression signal.
+// ---------------------------------------------------------------------------
+
+/** the scorer kinds; kept in lockstep with @regulait/shared's EVAL_SCORER_KINDS
+ * (this package deliberately has no dependency on that one — see the note on
+ * GUARDRAIL_DETECTOR_IDS above) */
+export const EVAL_SCORER_KINDS = [
+  "exact",
+  "contains",
+  "regex",
+  "json_schema",
+  "numeric",
+  "rubric",
+  "llm_as_judge",
+] as const;
+export type EvalScorerKindDb = (typeof EVAL_SCORER_KINDS)[number];
+
+export const EVAL_RUN_TRIGGERS = ["manual", "workflow", "scheduled"] as const;
+export const EVAL_RUN_STATUSES = ["running", "completed", "error", "denied"] as const;
+
+/** ONE ROW PER (name, version). A version is frozen the moment a run references
+ * it; editing cases mints N+1 instead of mutating N, which is what makes a red
+ * gate un-arguable. */
+export const evalDatasets = pgTable(
+  "eval_datasets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    version: integer("version").notNull().default(1),
+    note: text("note"),
+    /** dataset-level DEFAULT scorer; a case may override both */
+    scorerKind: text("scorer_kind", { enum: EVAL_SCORER_KINDS }).notNull().default("contains"),
+    scorerConfig: jsonb("scorer_config").$type<Record<string, unknown>>().notNull().default({}),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("eval_datasets_version_check", sql`${t.version} >= 1`),
+    check(
+      "eval_datasets_scorer_kind_check",
+      sql`${t.scorerKind} IN ('exact','contains','regex','json_schema','numeric','rubric','llm_as_judge')`,
+    ),
+    uniqueIndex("eval_datasets_name_version_uq").on(t.name, t.version),
+    unique("eval_datasets_id_version_uq").on(t.id, t.version),
+  ],
+);
+
+export const evalCases = pgTable(
+  "eval_cases",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    datasetId: uuid("dataset_id").notNull(),
+    /** kept honest by the composite FK below, never by convention */
+    datasetVersion: integer("dataset_version").notNull(),
+    input: text("input").notNull(),
+    /** string | number | object | array; NULL for reference-free scorers */
+    expected: jsonb("expected"),
+    rubric: jsonb("rubric"),
+    tags: jsonb("tags").$type<string[]>().notNull().default([]),
+    /** NULL = inherit the dataset's default scorer */
+    scorerKind: text("scorer_kind", { enum: EVAL_SCORER_KINDS }),
+    scorerConfig: jsonb("scorer_config").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "eval_cases_scorer_kind_check",
+      sql`${t.scorerKind} IS NULL OR ${t.scorerKind} IN ('exact','contains','regex','json_schema','numeric','rubric','llm_as_judge')`,
+    ),
+    foreignKey({
+      name: "eval_cases_dataset_version_fk",
+      columns: [t.datasetId, t.datasetVersion],
+      foreignColumns: [evalDatasets.id, evalDatasets.version],
+    }).onDelete("cascade"),
+    index("eval_cases_dataset_idx").on(t.datasetId, t.datasetVersion),
+  ],
+);
+
+export const evalRuns = pgTable(
+  "eval_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    datasetId: uuid("dataset_id").notNull(),
+    datasetVersion: integer("dataset_version").notNull(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    customProviderId: uuid("custom_provider_id").references(() => customModelProviders.id, {
+      onDelete: "set null",
+    }),
+    /** the SNAPSHOT of what was measured — the four ADR-0044 levers, so
+     * "B regressed against A" sits next to "and here is what differed" */
+    agentName: text("agent_name").notNull(),
+    model: text("model"),
+    tier: integer("tier"),
+    /** a hash, not the text: the prompt itself is a governance artifact that
+     * lives in `agents` and must not acquire a drifting second copy */
+    systemPromptHash: text("system_prompt_hash"),
+    /** ADR-0044 §6: the judge is pinned on the run */
+    judgeAgentId: uuid("judge_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    /** which judge IMPLEMENTATION scored it — a model-backed judge, or a
+     * deterministic stand-in. Recorded so a score can never be mistaken for a
+     * model's opinion when no model produced it. */
+    judgeImpl: text("judge_impl"),
+    trigger: text("trigger", { enum: EVAL_RUN_TRIGGERS }).notNull(),
+    status: text("status", { enum: EVAL_RUN_STATUSES }).notNull().default("running"),
+    mode: text("mode").notNull().default("execute"),
+    initiatedByUserId: uuid("initiated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
+    workflowInstanceId: uuid("workflow_instance_id").references(() => workflowInstances.id, {
+      onDelete: "set null",
+    }),
+    workflowStageId: text("workflow_stage_id"),
+    workflowCheckName: text("workflow_check_name"),
+    tolerance: doublePrecision("tolerance").notNull().default(0.05),
+    minScore: doublePrecision("min_score"),
+    minPassRate: doublePrecision("min_pass_rate"),
+    cases: integer("cases").notNull().default(0),
+    passedCases: integer("passed_cases").notNull().default(0),
+    meanScore: doublePrecision("mean_score"),
+    passRate: doublePrecision("pass_rate"),
+    /** roll-up of the metered usage_events rows this run produced — display
+     * only; `usage_events` remains the one ledger */
+    costUsd: doublePrecision("cost_usd").notNull().default(0),
+    inputTokens: integer("input_tokens").notNull().default(0),
+    outputTokens: integer("output_tokens").notNull().default(0),
+    /** the STORED comparison, so a verdict stays reconstructible after the
+     * baseline moves */
+    baselineRunId: uuid("baseline_run_id"),
+    scoreDelta: doublePrecision("score_delta"),
+    passRateDelta: doublePrecision("pass_rate_delta"),
+    gatePassed: boolean("gate_passed"),
+    regression: boolean("regression"),
+    gateReason: text("gate_reason"),
+    isBaseline: boolean("is_baseline").notNull().default(false),
+    error: text("error"),
+    note: text("note"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (t) => [
+    check("eval_runs_trigger_check", sql`${t.trigger} IN ('manual','workflow','scheduled')`),
+    check("eval_runs_status_check", sql`${t.status} IN ('running','completed','error','denied')`),
+    check("eval_runs_tolerance_check", sql`${t.tolerance} >= 0 AND ${t.tolerance} <= 1`),
+    foreignKey({
+      name: "eval_runs_dataset_version_fk",
+      columns: [t.datasetId, t.datasetVersion],
+      foreignColumns: [evalDatasets.id, evalDatasets.version],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "eval_runs_baseline_run_id_fk",
+      columns: [t.baselineRunId],
+      foreignColumns: [t.id],
+    }).onDelete("set null"),
+    index("eval_runs_dataset_idx").on(t.datasetId, t.datasetVersion, t.startedAt),
+    index("eval_runs_agent_idx").on(t.agentId, t.startedAt),
+    /** at most ONE pinned baseline per (dataset version, agent) — two would
+     * make "the" comparison ambiguous */
+    uniqueIndex("eval_runs_baseline_uq")
+      .on(t.datasetId, t.datasetVersion, t.agentId)
+      .where(sql`${t.isBaseline}`),
+  ],
+);
+
+export const evalResults = pgTable(
+  "eval_results",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => evalRuns.id, { onDelete: "cascade" }),
+    caseId: uuid("case_id").references(() => evalCases.id, { onDelete: "set null" }),
+    scorerKind: text("scorer_kind", { enum: EVAL_SCORER_KINDS }).notNull(),
+    score: doublePrecision("score").notNull(),
+    passed: boolean("passed").notNull(),
+    latencyMs: integer("latency_ms"),
+    costUsd: doublePrecision("cost_usd"),
+    inputTokens: integer("input_tokens").notNull().default(0),
+    outputTokens: integer("output_tokens").notNull().default(0),
+    /** TRUNCATED, and carrying the withheld marker instead of the content when
+     * a PII/guardrail block acted — the eval path is not a storage bypass */
+    outputText: text("output_text"),
+    judgeRationale: text("judge_rationale"),
+    /** why the DISPATCH failed — distinct from "the answer scored badly" */
+    error: text("error"),
+    detail: jsonb("detail").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("eval_results_score_check", sql`${t.score} >= 0 AND ${t.score} <= 1`),
+    uniqueIndex("eval_results_run_case_uq").on(t.runId, t.caseId),
+  ],
+);
+
+export type EvalDatasetRow = typeof evalDatasets.$inferSelect;
+export type EvalCaseRow = typeof evalCases.$inferSelect;
+export type EvalRunRow = typeof evalRuns.$inferSelect;
+export type EvalResultRow = typeof evalResults.$inferSelect;

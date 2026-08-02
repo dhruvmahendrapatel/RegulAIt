@@ -60,6 +60,10 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // point: what is in the payload vs. where the call may go vs. who may
       // make it under which attributes.
       { label: "Guardrails", to: "/admin/guardrails" },
+      // ADR-0044 — the QUALITY gate, beside the content/destination/attribute
+      // gates. Same question shape ("may this proceed?") asked of the agent's
+      // OUTPUT against a fixed dataset, and it blocks promotion the same way.
+      { label: "Evaluations", to: "/admin/evals" },
       { label: "Simulation", to: "/admin/simulation" },
       { label: "Approvals queue", to: "/admin/approvals" },
       { label: "Audit log", to: "/admin/audit" },
