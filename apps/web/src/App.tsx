@@ -58,6 +58,7 @@ import ComplianceProfilesPage from "./views/admin/compliance/ComplianceProfilesP
 import InfrastructurePage from "./views/admin/compliance/InfrastructurePage";
 import OrganizationPage from "./views/admin/settings/OrganizationPage";
 import GettingStartedPage from "./views/admin/settings/GettingStartedPage";
+import LicensingPage from "./views/admin/settings/LicensingPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -161,6 +162,7 @@ export default function App() {
                         <Route path="compliance" element={<ComplianceProfilesPage />} />
                         <Route path="infrastructure" element={<InfrastructurePage />} />
                         <Route path="organization" element={<OrganizationPage />} />
+                        <Route path="licensing" element={<LicensingPage />} />
                         <Route path="setup" element={<GettingStartedPage />} />
                         <Route path="*" element={<Navigate to="/admin/users" replace />} />
                       </Routes>

@@ -315,6 +315,44 @@ export {
   type CreateBillingPeriod,
 } from "./billing.js";
 
+// ADR-0052 — licensing & seats' pure half: the offline license document shape,
+// the validity-window evaluation, the reviewed ACTION-CLASS inventory and the
+// split-posture decision (governance fails OPEN past expiry, commercial
+// expansion fails CLOSED), the seat-grant decision over ADR-0022's
+// deactivate-never-delete definition, and the default-CLOSED tier feature read.
+// No crypto here — verification lives in the gateway half, offline, against a
+// pinned keyring.
+export {
+  LICENSE_SCHEMA_ID,
+  LICENSE_DEPLOYMENT_MODES,
+  LICENSE_FEATURES,
+  LICENSE_STATES,
+  LICENSE_ACTION_CLASSES,
+  LICENSE_ACTION_INVENTORY,
+  LICENSE_POSTURE_NOTE,
+  SEAT_DEFINITION_NOTE,
+  classifyAction,
+  canonicalLicenseBytes,
+  licenseDocumentSchema,
+  installLicenseSchema,
+  evaluateLicenseWindow,
+  evaluateLicensedAction,
+  evaluateSeatGrant,
+  featureEnabled,
+  type LicenseDeploymentMode,
+  type LicenseFeature,
+  type LicenseState,
+  type LicenseActionClass,
+  type ClassifiedAction,
+  type LicenseDocument,
+  type WindowEvaluation,
+  type LicenseDecision,
+  type LicenseDecisionInput,
+  type SeatDecision,
+  type FeatureDecision,
+  type InstallLicense,
+} from "./licensing.js";
+
 // ADR-0042 — the guardrail engine's pure half: the detector registry, the
 // block|warn|log verbs (piiMode's triad, plus an `off` member), the
 // MAX-of-strictness composition that makes the compliance cascade a ceiling,

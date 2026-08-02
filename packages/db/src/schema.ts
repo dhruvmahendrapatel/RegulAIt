@@ -636,6 +636,14 @@ export const auditLog = pgTable(
         "rate_card",
         "billing_period",
         "billing_statement",
+        // ADR-0052: an admin INSTALLING a signed license, every operator-driven
+        // re-verification, the escalating grace/expiry warnings, and — the rows
+        // that matter most — every REFUSED artifact (tampered, signed by an
+        // unpinned key, malformed) and every act refused because the license
+        // lapsed or the seat cap was reached. A refused forgery is exactly the
+        // row an operator needs, and it exists even though the artifact never
+        // became a license. Plain text column — no DDL needed.
+        "license",
       ],
     })
       .notNull()
@@ -4032,3 +4040,96 @@ export type RateCardEntryRow = typeof rateCardEntries.$inferSelect;
 export type BillingPeriodRow = typeof billingPeriods.$inferSelect;
 export type BillingStatementRow = typeof billingStatements.$inferSelect;
 export type BillingExportRow = typeof billingExports.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0052 (migration 0064) — LICENSING & SEAT MANAGEMENT.
+//
+// A signed, OFFLINE-verifiable license file. ADR-0041 makes BYOC/air-gapped the
+// primary motion, so there is no home to phone: the artifact is verified
+// locally against a pinned Ed25519 public key, reusing ADR-0041's update-bundle
+// posture rather than inventing a second crypto scheme.
+//
+// `document` is the EXACT BYTES the signature covers, stored verbatim so the
+// row stays independently re-verifiable forever. The parsed columns beside it
+// are a denormalised READ MODEL, never the authority.
+//
+// A partial unique index keeps EXACTLY ONE license active, so "which license is
+// in force" is never a question answered by picking the newest row. A forged
+// artifact never reaches this table: verification precedes the insert and a
+// refusal leaves the installed license exactly where it was.
+// ---------------------------------------------------------------------------
+
+export const LICENSE_DEPLOYMENT_MODE_VALUES = ["hosted", "byoc", "airgapped"] as const;
+export const LICENSE_STATUS_VALUES = ["active", "superseded"] as const;
+export const LICENSE_VERIFICATION_TRIGGER_VALUES = ["install", "periodic", "manual"] as const;
+export const LICENSE_VERIFICATION_STATE_VALUES = [
+  "absent",
+  "not_yet_valid",
+  "valid",
+  "grace",
+  "expired",
+  "invalid",
+] as const;
+
+export const licenses = pgTable(
+  "licenses",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+
+    // --- THE SIGNED ARTIFACT (the authority) ---
+    document: text("document").notNull(),
+    documentSha256: text("document_sha256").notNull(),
+    signature: text("signature").notNull(),
+    signingKeyId: text("signing_key_id").notNull(),
+
+    // --- THE PARSED READ MODEL (convenience, never the authority) ---
+    licenseId: text("license_id").notNull(),
+    tenant: text("tenant").notNull(),
+    tier: text("tier").notNull(),
+    seatCap: integer("seat_cap").notNull(),
+    features: jsonb("features").$type<string[]>().notNull().default([]),
+    deploymentMode: text("deployment_mode", { enum: LICENSE_DEPLOYMENT_MODE_VALUES }).notNull(),
+    issuedAt: timestamp("issued_at", { withTimezone: true }).notNull(),
+    notBefore: timestamp("not_before", { withTimezone: true }).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    graceDays: integer("grace_days").notNull(),
+    /** OPT-IN, never the default — a total shutdown on expiry, available only
+     * because some customers' own contracts require it */
+    hardStopOnExpiry: boolean("hard_stop_on_expiry").notNull().default(false),
+
+    status: text("status", { enum: LICENSE_STATUS_VALUES }).notNull().default("active"),
+    installedByUserId: uuid("installed_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    installedAt: timestamp("installed_at", { withTimezone: true }).notNull().defaultNow(),
+    supersededAt: timestamp("superseded_at", { withTimezone: true }),
+  },
+  (t) => [uniqueIndex("licenses_document_sha_uq").on(t.documentSha256)],
+);
+
+/** The verification trail. ADR-0052 §1's "periodic timer" is an ENDPOINT here
+ * (there is no in-process scheduler in this codebase), and an empty table — or
+ * a `last checked` that stops moving — is how a deployment that never wired the
+ * cron SEES that. Every REFUSAL lands here too, including artifacts that were
+ * refused and therefore never became a `licenses` row. */
+export const licenseVerifications = pgTable(
+  "license_verifications",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** null when the artifact was refused and never became a row */
+    licenseRowId: uuid("license_row_id").references(() => licenses.id, { onDelete: "set null" }),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+    trigger: text("trigger", { enum: LICENSE_VERIFICATION_TRIGGER_VALUES }).notNull(),
+    ok: boolean("ok").notNull(),
+    state: text("state", { enum: LICENSE_VERIFICATION_STATE_VALUES }).notNull(),
+    ruleId: text("rule_id").notNull(),
+    reason: text("reason").notNull(),
+    seatCap: integer("seat_cap"),
+    activeSeats: integer("active_seats"),
+    signingKeyId: text("signing_key_id"),
+    checkedByUserId: uuid("checked_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    detail: jsonb("detail"),
+  },
+  (t) => [index("license_verifications_at_idx").on(t.at), index("license_verifications_ok_idx").on(t.ok)],
+);
+
+export type LicenseRow = typeof licenses.$inferSelect;
+export type LicenseVerificationRow = typeof licenseVerifications.$inferSelect;

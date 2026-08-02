@@ -140,6 +140,11 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
     group: "Settings",
     items: [
       { label: "Organization", to: "/admin/organization" },
+      // ADR-0052 — the COMMERCIAL ceiling, deliberately beside the org-wide
+      // functional ceiling rather than under Cost: a license caps how many
+      // entitled users and which tier features exist, which is the same kind of
+      // org-level setting as the ones next to it. It is never a cost report.
+      { label: "Licensing & seats", to: "/admin/licensing" },
       { label: "Getting started", to: "/admin/setup" },
     ],
   },

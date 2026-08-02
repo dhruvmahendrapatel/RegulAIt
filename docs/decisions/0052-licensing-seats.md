@@ -1,6 +1,6 @@
 # ADR-0052 — Licensing & seats: a signed offline license, seat caps, tier flags, and a split-by-action-class expiry posture
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-08-01
 - **Relates to**: ADR-0041 (BYOC / air-gapped as the primary motion — the reason this must work
   offline), ADR-0014 / ADR-0019 (the per-user entitlement model this enforces seats against),
@@ -158,3 +158,202 @@ and §8.5 already commit to.
   boot/periodic verifier are specified here but not built.
 - The action-class classification (which enforcement points are safety vs expansion) needs an
   explicit, reviewed inventory before implementation.
+
+## Implementation amendment — 2026-08-02 (migration 0064)
+
+Accepted and built. What follows is the honest record of the verification posture, which failures
+fail which way and why, and which enforcement points are actually wired.
+
+### THE POSTURE SENTENCE — read this before anything else
+
+**Fail CLOSED on a forgery. Fail OPEN on an absence. Degrade, never brick, on an expiry.**
+
+Those are three different facts and they were decided deliberately, not defaulted:
+
+| situation | answer | why |
+|---|---|---|
+| **forged / tampered / signed by an unpinned key / malformed body** | **REFUSED outright.** Not installed, audited as a deny, and — critically — it **does not displace the license already in force**. | Displacing a valid license with a forged one (bigger seat cap, unlocked tier, later expiry) *is* the attack. "Refuse and keep the previous state" is the only safe answer. |
+| **absent — no license installed at all** | **Runs UNLICENSED.** Governance, approvals, guardrails and audit are fully operational; every tier feature is **closed**; **no seat cap is enforced**; every surface reports `licensed: false`. | There is no authoritative number to enforce, and inventing one would be a fabricated policy. Bricking a fresh install would make the governance layer depend on the commercial one — the exact inversion §5 refuses — and would leave no way to reach the console to install the license. The residual is stated rather than hidden: an operator who never installs a license gets an un-capped but fully governed and visibly unlicensed system. |
+| **expired past grace** | **Degrades.** Reads work, governance/audit keep running, **expansion is refused**. | §5's split, implemented literally. |
+
+**What "read-only degrade" means here, precisely.** ADR-0041 §8.5 says "degrade to last known policy,
+not everything stops". Read-only is therefore read-only **with respect to growth**: the deployment
+cannot add seats, agents, connectors, providers or tier features, while the governance layer keeps
+evaluating, keeps enforcing and keeps *writing its audit trail*. It deliberately does **not** mean
+"no row is ever written" — an audit log that stops recording because of a billing date is a security
+incident caused by an accounting event. Both halves are asserted in the tests.
+
+### What shipped
+
+**Pure half — `packages/shared/src/licensing.ts` (+ 26 unit tests):** the `regulait.license/1`
+document schema, `evaluateLicenseWindow` (the four states off the host clock),
+`LICENSE_ACTION_INVENTORY` (see below), `evaluateLicensedAction` (the split posture, in ONE place),
+`evaluateSeatGrant`, `featureEnabled` (default closed), and the install write shape.
+
+**Gateway half — `apps/gateway/src/licensing.ts` (+ 20 integration tests):** `verifyLicenseArtifact`
+(offline Ed25519 via `node:crypto` against a pinned keyring), `resolveLicense`, `licenseGate`,
+`seatGate`, `licenseFeature`, the two enforcement helpers, and the routes `POST /v1/licenses`,
+`GET /v1/licenses`, `GET /v1/licenses/:id`, `GET /v1/licenses/status`, `POST /v1/licenses/verify`,
+`GET /v1/licenses/verifications` — all admin-only through the default gate.
+
+**Migration 0064:** `licenses` (with a **partial unique index keeping exactly one active**, so
+"which license is in force" is never a question answered by picking the newest row) and
+`license_verifications`.
+
+**Keyring + signer:** `infra/license-keys/` (README + a development public key whose private half was
+destroyed on generation) and `scripts/sign-license.sh` — deliberately the twin of
+`scripts/build-update-bundle.sh`: same algorithm, same `--key <path>` custody, same "the signature
+covers the exact bytes" rule.
+
+**Admin SPA:** `/admin/licensing`, under **Settings** beside Organization — a license is an
+org-level ceiling, not a cost report.
+
+### The crypto is ADR-0041's, reused rather than reinvented
+
+Same algorithm (Ed25519), same artefact shape (signed bytes + base64 signature + a `signingKeyId`
+naming a `.pub` in a pinned keyring), same refusal vocabulary, same rotation doctrine (a new key is
+delivered *in a bundle signed by the old one*; there is no revocation list because an air-gapped
+deployment has nothing to check it against). The keyrings are separate — `infra/release-keys/` for
+software, `infra/license-keys/` for entitlement — because a release-signing key must not be able to
+mint licenses.
+
+Two details worth naming:
+
+1. **The signature covers the EXACT DELIVERED BYTES, not a re-canonicalisation.** §1 says "Ed25519
+   over the canonicalized body"; we sign and verify the bytes themselves, exactly as
+   `verify-update-bundle.sh` does ("the authority is the SIGNATURE over the exact bytes, not the
+   parse"). `canonicalLicenseBytes` exists as a *producer* convenience so two licenses diff cleanly;
+   it is not on the trust path. A verifier that re-serialises before checking accepts documents whose
+   delivered bytes differ from what was signed — a whole class of bug that simply does not exist here.
+   `licenses.document` stores those bytes verbatim, so the row stays independently re-verifiable
+   forever; the parsed columns beside it are a read model and never the authority.
+2. **The body is parsed only AFTER the signature verifies.** A malformed body from a valid signer is
+   a different (and far less alarming) failure than a well-formed body from an unknown one, and the
+   two get different `ruleId`s.
+
+**No production signing key was generated.** `regulait-license-dev-2026-08.pub` is a development key
+whose private half was created in a scratch directory and **not retained**, exactly as ADR-0041's
+release key was. Consequence, stated plainly: **nobody can currently sign a license this repo's
+default keyring accepts.** That is the correct fail-closed direction and it means this keyring is the
+*shape* of a licensing root, not one. A real keypair must be generated on an offline host before the
+first commercial deployment, and the dev key removed in the same change. The tests do not depend on
+it — they generate an **ephemeral** keypair in memory and point `REGULAIT_LICENSE_KEYRING` at a
+temporary directory, so real crypto is exercised with **no committed secret**.
+
+### One definition of a seat, shared with ADR-0051
+
+`countActiveSeats` lives in `apps/gateway/src/billing.ts` and `licensing.ts` **imports** it. There is
+exactly one implementation, so the number a customer is capped at and the number they are billed for
+cannot diverge. It honours ADR-0022: a **deactivated user consumes no seat** — they keep every FK,
+audit row and history, but cannot authenticate and cannot dispatch, so billing or capping them would
+be a real overcharge. Tested directly, including that deactivating frees headroom that was exhausted
+a moment earlier and that the user row survives.
+
+Seat enforcement is a **growth** gate, never a service gate. An over-cap deployment (which happens
+legitimately when a smaller license is installed onto a larger estate) refuses the *next*
+provisioning and touches nobody; the test asserts the active-user count is unchanged after such an
+install.
+
+### The action-class inventory is DATA, not scattered conditions
+
+§Consequences says every enforcement point must correctly classify itself and that a miscategorised
+path is a real bug. So the classification is `LICENSE_ACTION_INVENTORY` — a reviewable list with a
+stated reason per entry, served on `GET /v1/licenses/status` and rendered on the admin page.
+`classifyAction` defaults an **unknown** action to `expansion`, the safe direction: a new expansion
+path that quietly defaulted to `governance` would be an unlicensed hole.
+
+### Deviations from the proposal above
+
+1. **A missing license does NOT enforce a seat cap.** §3 describes seat caps without saying what
+   happens with no license. We chose: unlicensed means uncapped-but-visibly-unlicensed, with all tier
+   features closed. The alternative — inventing a default cap — is a fabricated policy, and a
+   fail-closed default would brick every fresh install before a license could be installed. Disclosed
+   above and on the status API.
+2. **Two enforcement points are wired, not the whole §4 surface.** Live today: `user.provision`
+   (`POST /v1/users`, seat cap + expansion) and `agent.create` (`POST /v1/agents`, expansion).
+   `GET /v1/licenses/status` returns `enforcementPointsWired` so the gap is visible in the product.
+   Connector/MCP-server/provider creation, and the SSO/SCIM/compliance-pack tier flags, are
+   **modelled and unwired** — they produce no license refusal today rather than a partial one that
+   looks complete.
+3. **The "periodic timer" of §1 is an ENDPOINT.** There is no in-process scheduler in this codebase
+   (ADRs 0044–0051 all landed the same way). `POST /v1/licenses/verify` is what an operator or an
+   external cron drives; it re-checks the **signature over the stored bytes** as well as the window,
+   so a row edited directly in the database is caught. `lastVerifiedAt` staying null is how a
+   deployment that never wires the cron sees that. There is also no boot-time check — the gateway
+   does not verify at startup, because a startup failure on a licensing problem is exactly the
+   brick §5 refuses.
+4. **A license that fails re-verification is RETAINED, not deleted.** Destroying evidence on a failed
+   check is the wrong instinct for a governance product. It is recorded loudly in
+   `license_verifications` and `audit_log`, and governance continues unaffected.
+5. **`hosted` mode refresh is not implemented.** §1 says the file "can be refreshed automatically" in
+   hosted mode. Nothing fetches a license, in any mode — that would be the phone-home the whole
+   design exists to avoid, and adding it for one mode only would mean two verification paths.
+   Installing a renewal is an admin action everywhere.
+6. **`deploymentMode` is recorded but not enforced against the running mode.** The grant is stored,
+   surfaced and signed; nothing yet refuses to run in air-gapped mode under a `hosted` license.
+   Cross-checking it against ADR-0027's A4 deploy-mode dimension is a follow-up.
+7. **No `grace` escalation ladder.** §5 describes "escalating admin-console and audit warnings". What
+   ships is one `license-grace-warning` audit row per operator-driven check plus a persistent console
+   banner — not a schedule of increasingly loud notices, because there is no scheduler and no
+   notification transport in this codebase.
+8. **Clock tampering is undefended, by design.** Validity is evaluated against the control-plane
+   host's clock, which is the customer's own machine. Disclosed in the ADR, repeated in the module
+   header, and returned in the status endpoint's own `note` so it reaches an operator rather than
+   only a reader of this file.
+
+### What is genuinely verified vs. structural only
+
+**Genuinely verified end to end (20 gateway integration tests over real Postgres, 26 unit tests):**
+
+- **A validly-signed license verifies offline with ZERO network calls.** `globalThis.fetch`,
+  `http.request` and `https.request` are replaced with recording, throwing spies for a full
+  install → status → verify cycle and asserted never called. A second, structural proof rides
+  alongside: `verifyLicenseArtifact` is asserted to be **synchronous** — a function that returns a
+  value rather than a promise cannot have awaited a network round trip, whatever a spy observes.
+  (`net`/`tls` are deliberately *not* patched: the Postgres pool rides them, and breaking the db
+  would prove nothing about licensing.)
+- **A TAMPERED license is refused** — the attack is raising `seatCap` and replaying the original
+  signature — **and the genuine license is asserted still in force with its original cap.**
+- **A license signed by a DIFFERENT key is refused.** The other key's public half is deliberately
+  *also* pinned, so this is a genuine cryptographic refusal rather than a key-id lookup miss; both
+  failures are covered separately.
+- **An UNPINNED key id is refused even with a valid signature**, and a key id shaped like a path
+  escape (`../../etc/shadow`) is rejected before it reaches the filesystem.
+- **A row edited directly in the database is caught** by the operator-driven re-verification, and is
+  retained rather than deleted.
+- **An EXPIRED license degrades rather than blocking**: `GET /v1/users`, `GET /v1/agents` and
+  `GET /v1/audit` all still answer, the governance action class is still permitted with ruleId
+  `license-expired-governance-fails-open`, and both wired write paths refuse with 403 — with the
+  refused user asserted absent from the database.
+- **Grace keeps everything open** including tier flags; **past grace closes them**.
+- **`hardStopOnExpiry` is opt-in**, refuses governance, and still permits reads so the deployment can
+  be renewed. It is asserted to default `false`.
+- **Seats count ACTIVE users and do not count deactivated ones**; exceeding the cap yields
+  `seat_cap_reached` with the active/cap numbers; deactivating frees a seat that is then genuinely
+  usable; an over-cap install disables nobody.
+- **Re-installing the same artifact is recognised, not duplicated; a new one supersedes and keeps
+  the history.**
+- **Admin gating** on all six routes, and **audit rows with stable ruleIds**: `license-installed`,
+  `license-signature-invalid`, `license-signing-key-not-pinned`, `license-keyring-missing`,
+  `license-key-id-malformed`, `license-document-malformed`, `license-expired-no-expansion`,
+  `seat_cap_reached`, `license-grace-warning`, `license-expired-warning`.
+
+**Structural only — the shape exists and is honest, but nothing exercises it end to end:**
+
+- **The tier flags themselves.** `featureEnabled` is correct and tested, and `GET
+  /v1/licenses/status` reports every flag's state, but **no feature actually reads it yet** — SSO,
+  SCIM, compliance packs and orchestration fan-out are not license-gated today.
+- **`deploymentMode` enforcement** — recorded and signed, never compared to the running mode.
+- **`scripts/sign-license.sh`** — written and shellcheck-clean in shape, but never executed against a
+  real private key in CI, because no private key exists. The tests sign with `node:crypto` instead.
+- **Boot-time verification** — deliberately absent (deviation 3).
+
+### Follow-ups this slice leaves open
+
+- Generate a real license-signing keypair offline; commit its public half; remove the dev key.
+- Wire the remaining §4 flag consumers (SSO/SAML, SCIM, compliance packs, orchestration fan-out) and
+  the remaining expansion points (connector, MCP server, model/PM/git connection creation).
+- Cross-check `deploymentMode` against ADR-0027's A4 deploy-mode dimension, so an air-gapped install
+  under a `hosted` license is refused rather than merely inconsistent.
+- Feed the seat count into ADR-0051's `syncSeats` once a billing backend exists that can receive it.
+- A grace-window escalation ladder, once a notification transport exists to escalate through.

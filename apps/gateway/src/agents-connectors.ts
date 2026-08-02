@@ -115,6 +115,7 @@ import {
 import { loadInterceptionSettings } from "./compat-core.js";
 import { resolveCustomProviderForDispatch } from "./custom-providers.js";
 import { egressRefusal } from "./egress-guard.js";
+import { refuseIfExpansionBlocked } from "./licensing.js";
 import { checkCredentialBaseUrl, credentialGuardedFetch } from "./credential-egress.js";
 import {
   ConnectionEgressBlockedError,
@@ -1179,6 +1180,17 @@ export function registerAgentConnectorRoutes(
 
   app.post("/v1/agents", async (req, reply) => {
     const body = createAgentSchema.parse(req.body);
+    // ADR-0052 — THE EXPANSION GATE. A new agent is a wider governed footprint,
+    // so it is expansion-class: refused once the license has lapsed past its
+    // grace window, permitted in every other state including grace. Dispatching
+    // an agent that already exists is governance-class and is deliberately NOT
+    // gated — an expired license freezes growth, it never turns the gate off.
+    const licenseRefusal = await refuseIfExpansionBlocked(db, {
+      actorUserId: req.authCtx.userId ?? null,
+      objectType: "agent",
+      what: `creating agent '${body.name}'`,
+    });
+    if (licenseRefusal) return reply.status(licenseRefusal.status).send(licenseRefusal.body);
     // ADR-0034 — the discriminated union, checked here so the 400 explains
     // itself rather than surfacing as a raw CHECK-constraint violation.
     if (!agentCustomProviderPairValid(body)) {

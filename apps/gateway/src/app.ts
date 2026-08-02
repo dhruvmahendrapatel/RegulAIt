@@ -124,6 +124,7 @@ import { registerConfigVersionRoutes } from "./config-versions.js";
 import { registerSpendMonitorRoutes } from "./spend-monitor.js";
 import { registerLineageRoutes } from "./lineage.js";
 import { registerBillingRoutes } from "./billing.js";
+import { refuseIfSeatCapReached, registerLicensingRoutes } from "./licensing.js";
 import {
   assignedApprovalIdsFor,
   ensureAssignment,
@@ -938,6 +939,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   app.post("/v1/users", async (req, reply) => {
     const body = createUserSchema.parse(req.body);
+    // ADR-0052 — THE SEAT GATE. A seat is an entitled user, so provisioning one
+    // is an EXPANSION-class act: it is refused when the licensed cap is reached
+    // or the license has lapsed past its grace window. It is a GROWTH gate and
+    // never a service gate — nothing here can revoke, disable or degrade a user
+    // who already exists, and a deployment that is over cap (which happens
+    // legitimately when a smaller license is installed onto a larger estate)
+    // simply cannot add the NEXT one. With no license installed there is no
+    // authoritative cap and this is a no-op.
+    const seatRefusal = await refuseIfSeatCapReached(db, {
+      actorUserId: req.authCtx.userId ?? null,
+      email: body.email,
+    });
+    if (seatRefusal) return reply.status(seatRefusal.status).send(seatRefusal.body);
     const [row] = await db
       .insert(users)
       .values({ email: body.email, displayName: body.displayName, isAdmin: body.isAdmin ?? false })
@@ -2758,6 +2772,21 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // leaks. Third, there is no payment processor: `NoopBilling` (export-only, no
   // network) is the only backend, which is ADR-0051 §6's air-gapped default.
   registerBillingRoutes(app, db);
+  // ADR-0052 — licensing & seats. The load-bearing piece is that verification
+  // is OFFLINE: ADR-0041 makes air-gapped the primary motion, so there is no
+  // home to phone, and the license is a signed artifact checked locally against
+  // a pinned Ed25519 keyring — the same crypto posture as ADR-0041's update
+  // bundles, not a second scheme. Three postures are deliberate rather than
+  // defaulted: a FORGED or tampered artifact is refused outright and never
+  // displaces the installed one (fail closed); a MISSING license is not an
+  // error — the deployment runs UNLICENSED, fully governed, tier features
+  // closed, no seat cap enforced (fail open, because bricking a fresh install
+  // would make governance depend on commerce and leave no way to install the
+  // license); and on EXPIRY the split is by action class — governance, audit
+  // and approvals keep running while commercial expansion freezes. Every route
+  // is admin-only via the DEFAULT gate: installing a license changes the
+  // commercial ceiling for the whole deployment.
+  registerLicensingRoutes(app, db);
 
   registerAgentConnectorRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0034 — admin-registered custom LLM providers + the egress allow-list
