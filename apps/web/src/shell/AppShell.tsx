@@ -69,6 +69,11 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // risk of using it for this purpose, and is that acceptance still valid?"
       // A high score is an input to that decision, never a substitute for it.
       { label: "Model risk", to: "/admin/model-risk" },
+      // ADR-0057 — the SECURITY gate, beside the quality and risk gates. Evals
+      // ask "is this agent good on our cases?"; this asks "does it hold when
+      // someone attacks it?", measured through the live guardrails and blocking
+      // promotion through the same automated-check stage.
+      { label: "Red-teaming", to: "/admin/redteam" },
       // ADR-0048 — the CHANGE-CONTROL layer under all of the above. The gates
       // decide whether a call may proceed; this decides which VERSION of the
       // governing artifact it proceeds under, and gives that change a canary

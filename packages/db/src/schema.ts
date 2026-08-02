@@ -4594,3 +4594,186 @@ export type ChatOpsConnectionRow = typeof chatopsConnections.$inferSelect;
 export type ChatIdentityLinkRow = typeof chatIdentityLinks.$inferSelect;
 export type ChatOpsMessageRow = typeof chatopsMessages.$inferSelect;
 export type ChatOpsInteractionRow = typeof chatopsInteractions.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0057 (migration 0070) — CONTINUOUS RED-TEAMING.
+//
+// WHAT IS NOT HERE, AND THAT IS THE POINT
+//
+//   There is no second runner, no second results table, no second gate. A
+//   red-team probe is materialized into an `eval_cases` row, run by ADR-0044's
+//   `runEvalSuite` through `executeGovernedDispatch`, and scored by the same
+//   deterministic scorers — so `eval_runs`/`eval_results` remain the ONE record
+//   of what was sent and what came back, and the promotion block is the SAME
+//   `automated_check` → `blocked_on_check` route a failed CI check takes.
+//
+//   The four tables below add exactly what an eval run cannot express: which
+//   ATTACK LIBRARY VERSION scored it, which ATTACK CLASS each case belongs to,
+//   how SEVERE a defeat is, and which probes actually got through.
+//
+//   Red-team results reach a model card through the EXISTING
+//   `model_card_evidence` table with `kind = 'eval_run'` (ADR-0045 §5). There
+//   is deliberately no parallel evidence or approvals surface.
+// ---------------------------------------------------------------------------
+
+export const RED_TEAM_ATTACK_CLASS_VALUES = [
+  "prompt_injection",
+  "jailbreak",
+  "data_exfiltration",
+  "pii_leak",
+  "bias",
+] as const;
+
+export const RED_TEAM_SEVERITY_VALUES = ["low", "medium", "high", "critical"] as const;
+
+/**
+ * A VERSIONED ATTACK LIBRARY. Attacks are data, not code (ADR-0057 §1): adding
+ * a probe is a row, never a redeploy. A library version FREEZES on publish —
+ * the moment it is materialized into an eval dataset that a run can score
+ * against — because a result stamped with a library version is meaningless if
+ * the library can move underneath it. Editing a published library mints the
+ * next version, exactly as an eval dataset does.
+ */
+export const redteamLibraries = pgTable(
+  "redteam_libraries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    version: integer("version").notNull().default(1),
+    note: text("note"),
+    status: text("status", { enum: ["draft", "published"] })
+      .notNull()
+      .default("draft"),
+    /** the eval dataset this library version was materialized into. NULL until
+     * published. This column is the whole "reuse ADR-0044's harness" decision,
+     * expressed in the schema: there is no red-team runner to point at. */
+    evalDatasetId: uuid("eval_dataset_id").references(() => evalDatasets.id, {
+      onDelete: "restrict",
+    }),
+    evalDatasetVersion: integer("eval_dataset_version"),
+    publishedAt: timestamp("published_at", { withTimezone: true }),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("redteam_libraries_name_version_uq").on(t.name, t.version)],
+);
+
+/** One adversarial probe: the prompt, the class it attacks, how bad a defeat
+ * is, and the ORACLE that decides whether the agent complied with something it
+ * should have refused. The oracle is an ordinary ADR-0044 scorer config with
+ * inverted meaning — `forbidden` markers describe the DISCLOSURE. */
+export const redteamProbes = pgTable(
+  "redteam_probes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    libraryId: uuid("library_id")
+      .notNull()
+      .references(() => redteamLibraries.id, { onDelete: "cascade" }),
+    probeKey: text("probe_key").notNull(),
+    attackClass: text("attack_class", { enum: RED_TEAM_ATTACK_CLASS_VALUES }).notNull(),
+    severity: text("severity", { enum: RED_TEAM_SEVERITY_VALUES }).notNull().default("high"),
+    input: text("input").notNull(),
+    scorerKind: text("scorer_kind").notNull(),
+    scorerConfig: jsonb("scorer_config").$type<Record<string, unknown>>().notNull().default({}),
+    expected: jsonb("expected"),
+    note: text("note"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("redteam_probes_library_key_uq").on(t.libraryId, t.probeKey),
+    index("redteam_probes_class_idx").on(t.attackClass),
+  ],
+);
+
+/**
+ * ONE RED-TEAM RUN — the security reading of exactly one `eval_runs` row.
+ *
+ * `eval_run_id` is UNIQUE and RESTRICT: a red-team verdict can never be
+ * detached from the governed, metered, audited dispatches that produced it, and
+ * two verdicts can never claim the same evidence.
+ */
+export const redteamRuns = pgTable(
+  "redteam_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    libraryId: uuid("library_id")
+      .notNull()
+      .references(() => redteamLibraries.id, { onDelete: "restrict" }),
+    /** stamped, so the result stays readable after the library row is renamed */
+    libraryName: text("library_name").notNull(),
+    libraryVersion: integer("library_version").notNull(),
+    evalRunId: uuid("eval_run_id")
+      .notNull()
+      .references(() => evalRuns.id, { onDelete: "restrict" }),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    agentName: text("agent_name").notNull(),
+    model: text("model"),
+    /** the ADR-0023 system prompt the agent carried WHEN PROBED — a red-team
+     * result is about a configuration, not about a name */
+    systemPromptHash: text("system_prompt_hash"),
+    initiatedByUserId: uuid("initiated_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    projectId: uuid("project_id"),
+    trigger: text("trigger").notNull().default("manual"),
+    probes: integer("probes").notNull().default(0),
+    resisted: integer("resisted").notNull().default(0),
+    defeated: integer("defeated").notNull().default(0),
+    resistRate: doublePrecision("resist_rate"),
+    meanScore: doublePrecision("mean_score"),
+    /** the per-attack-class aggregates, verbatim from `aggregateRedTeamByClass` */
+    classSummary: jsonb("class_summary").$type<unknown[]>().notNull().default([]),
+    /** which classes BLOCKED; the rest are reporting-only (ADR-0057 §6) */
+    gatingClasses: jsonb("gating_classes").$type<string[]>().notNull().default([]),
+    baselineRunId: uuid("baseline_run_id"),
+    gatePassed: boolean("gate_passed"),
+    regression: boolean("regression").notNull().default(false),
+    gateReason: text("gate_reason"),
+    costUsd: doublePrecision("cost_usd").notNull().default(0),
+    note: text("note"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("redteam_runs_eval_run_uq").on(t.evalRunId),
+    index("redteam_runs_agent_idx").on(t.agentId, t.startedAt),
+    index("redteam_runs_library_idx").on(t.libraryId),
+  ],
+);
+
+/**
+ * A DEFEAT. One row per probe that got through, pointing at the `eval_results`
+ * row holding the actual transcript — so "which attack succeeded, and what did
+ * the agent say" is one join, and the finding cannot drift from the evidence.
+ *
+ * Findings are records, not a queue: remediation runs through the EXISTING
+ * workflow/approvals surfaces, never a second inbox (ADR-0057 §5).
+ */
+export const redteamFindings = pgTable(
+  "redteam_findings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => redteamRuns.id, { onDelete: "cascade" }),
+    probeId: uuid("probe_id").references(() => redteamProbes.id, { onDelete: "set null" }),
+    probeKey: text("probe_key").notNull(),
+    attackClass: text("attack_class", { enum: RED_TEAM_ATTACK_CLASS_VALUES }).notNull(),
+    severity: text("severity", { enum: RED_TEAM_SEVERITY_VALUES }).notNull(),
+    score: doublePrecision("score").notNull(),
+    /** the eval_results row with the full transcript and scorer evidence */
+    evalResultId: uuid("eval_result_id").references(() => evalResults.id, { onDelete: "set null" }),
+    outputSnippet: text("output_snippet"),
+    detail: jsonb("detail").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("redteam_findings_run_idx").on(t.runId),
+    index("redteam_findings_class_idx").on(t.attackClass, t.severity),
+  ],
+);
+
+export type RedTeamLibraryRow = typeof redteamLibraries.$inferSelect;
+export type RedTeamProbeRow = typeof redteamProbes.$inferSelect;
+export type RedTeamRunRow = typeof redteamRuns.$inferSelect;
+export type RedTeamFindingRow = typeof redteamFindings.$inferSelect;

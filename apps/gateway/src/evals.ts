@@ -183,6 +183,18 @@ export interface EvalRunOptions {
   workflow?: { instanceId: string; stageId: string; checkName: string } | null | undefined;
   note?: string | null | undefined;
   /**
+   * ADR-0057 — THE ORIGIN TAG. Stamped onto `detail.purpose` of every dispatch
+   * this run makes and onto the run's audit row, so adversarial red-team
+   * traffic is separable from ordinary evaluation traffic in the pillar-5 cost
+   * dashboard and in anomaly detection. Defaults to `"eval"`, which is exactly
+   * what every pre-ADR-0057 caller already emitted — the tag changes no
+   * behaviour, only the label the ledger carries.
+   */
+  purpose?: string | undefined;
+  /** extra key/values merged into each dispatch's `detail` (the red-team run
+   * id, so a transcript can be traced back to the probe that produced it) */
+  originDetail?: Record<string, unknown> | undefined;
+  /**
    * TEST SEAM (and future extension point): supply the judge implementation.
    * Absent = a `ModelBackedJudge` built from `judgeAgentId`, i.e. the real,
    * model-backed path. A test injects a deterministic stub here to prove the
@@ -340,6 +352,10 @@ export async function runEvalSuite(
   if (!agent) return { ok: false, status: 404, error: "unknown_agent" };
 
   const mode = opts.mode ?? "execute";
+  // ADR-0057: the origin tag rides every dispatch detail and the run's audit
+  // row. "eval" is the pre-ADR-0057 value, so an untagged caller is unchanged.
+  const purpose = opts.purpose ?? "eval";
+  const originDetail = opts.originDetail ?? {};
   const decide = await agentDecider(db, opts.userId);
 
   // ENTITLEMENT, FIRST AND UNCONDITIONALLY. An eval is not a side channel: a
@@ -353,7 +369,8 @@ export async function runEvalSuite(
       objectId: dataset.id,
       detail: {
         phase: "agent-entitlement",
-        purpose: "eval",
+        purpose,
+        ...originDetail,
         agentId: agent.id,
         datasetName: dataset.name,
         datasetVersion: dataset.version,
@@ -380,7 +397,7 @@ export async function runEvalSuite(
         userId: opts.userId,
         objectType: "eval_run",
         objectId: dataset.id,
-        detail: { phase: "judge-entitlement", purpose: "eval", judgeAgentId: ja.id, mode },
+        detail: { phase: "judge-entitlement", purpose, ...originDetail, judgeAgentId: ja.id, mode },
         effect: "deny",
         ruleId: jd.ruleId,
         ruleChain: jd.ruleChain,
@@ -455,7 +472,8 @@ export async function runEvalSuite(
       maxTokens: 2048,
       projectId: opts.projectId ?? null,
       detail: {
-        purpose: "eval",
+        purpose,
+        ...originDetail,
         evalRunId: run!.id,
         evalCaseId: c.id,
         datasetName: dataset.name,
@@ -603,6 +621,8 @@ export async function runEvalSuite(
     objectId: finished!.id,
     detail: {
       phase: "eval",
+      purpose,
+      ...originDetail,
       datasetName: dataset.name,
       datasetVersion: dataset.version,
       agentId: agent.id,

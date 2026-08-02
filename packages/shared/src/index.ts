@@ -2214,3 +2214,39 @@ export {
   type ChatSignatureInput,
   type ChatSignatureResult,
 } from "./chatops.js";
+// ADR-0057 — continuous red-teaming's pure half: the attack-class registry
+// (each class next to what it CANNOT tell you), the versioned built-in probe
+// corpus, the oracle validator that refuses a probe which can never report a
+// defeat, the per-class aggregate math, and the per-class regression gate —
+// itself a thin composition over ADR-0044's `evaluateEvalGate`, because a
+// red-team suite IS an eval suite with adversarial cases and inverted polarity.
+export {
+  RED_TEAM_ATTACK_CLASSES,
+  RED_TEAM_CANARY,
+  RED_TEAM_COVERAGE_DISCLOSURE,
+  RED_TEAM_ORIGIN_TAG,
+  RED_TEAM_SEVERITIES,
+  RED_TEAM_SEVERITY_WEIGHT,
+  aggregateRedTeamByClass,
+  attachRedTeamEvidenceSchema,
+  builtinRedTeamLibrary,
+  createRedTeamLibrarySchema,
+  createRedTeamProbeSchema,
+  evaluateRedTeamGate,
+  redTeamAttackClassRegistry,
+  redTeamAttackClassSchema,
+  redTeamOverallAggregate,
+  redTeamSeveritySchema,
+  severityRank,
+  startRedTeamRunSchema,
+  validateRedTeamProbe,
+  type RedTeamAttackClass,
+  type RedTeamAttackClassInfo,
+  type RedTeamClassAggregate,
+  type RedTeamClassVerdict,
+  type RedTeamGateDecision,
+  type RedTeamGateInput,
+  type RedTeamProbeOutcome,
+  type RedTeamProbeSeed,
+  type RedTeamSeverity,
+} from "./redteam.js";

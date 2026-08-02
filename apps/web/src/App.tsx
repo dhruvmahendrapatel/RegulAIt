@@ -35,6 +35,7 @@ import AbacPoliciesPage from "./views/admin/governance/AbacPoliciesPage";
 import GuardrailsPage from "./views/admin/governance/GuardrailsPage";
 import EvalsPage from "./views/admin/governance/EvalsPage";
 import ModelRiskPage from "./views/admin/governance/ModelRiskPage";
+import RedTeamPage from "./views/admin/governance/RedTeamPage";
 import ReportsPage from "./views/admin/cost/ReportsPage";
 import PromptVersionsPage from "./views/admin/governance/PromptVersionsPage";
 import ApprovalsAdminPage from "./views/admin/governance/ApprovalsAdminPage";
@@ -143,6 +144,7 @@ export default function App() {
                         <Route path="guardrails" element={<GuardrailsPage />} />
                         <Route path="evals" element={<EvalsPage />} />
                         <Route path="model-risk" element={<ModelRiskPage />} />
+                        <Route path="redteam" element={<RedTeamPage />} />
                         <Route path="reports" element={<ReportsPage />} />
                         <Route path="prompt-versions" element={<PromptVersionsPage />} />
                         <Route path="approvals" element={<ApprovalsAdminPage />} />

@@ -176,6 +176,12 @@ export const NON_ADMIN_ROUTES = new Set([
   // same reasoning as the invoke path above. Everything that AUTHORS what a
   // gate measures (datasets, cases, versions, the baseline) stays admin-only.
   "POST /v1/evals/runs",
+  // ADR-0057: a red-team run IS an eval run (its probes go through the very
+  // same `runEvalSuite` → `executeGovernedDispatch`), so it is gated by the
+  // caller's own AGENT entitlement for exactly the reason above — a user who
+  // cannot invoke an agent cannot probe it either. Authoring the ATTACK LIBRARY
+  // stays admin-only: a library edit changes what the promotion gate measures.
+  "POST /v1/redteam/runs",
   "POST /v1/runs",
   "POST /v1/runs/decompose",
   "POST /v1/runs/:runId/events",

@@ -119,6 +119,7 @@ import { registerAbacRoutes } from "./abac.js";
 import { registerGuardrailRoutes } from "./guardrails.js";
 import { registerEvalRoutes } from "./evals.js";
 import { applyModelCardApprovalDecision, registerMrmRoutes } from "./mrm.js";
+import { registerRedTeamRoutes } from "./redteam.js";
 import { registerReportingRoutes } from "./reporting.js";
 import { registerConfigVersionRoutes } from "./config-versions.js";
 import { registerSpendMonitorRoutes } from "./spend-monitor.js";
@@ -2534,6 +2535,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // here at all: it rides POST /v1/approvals/:approvalId/decide, which the
   // named approver reaches as a non-admin exactly as before.
   registerMrmRoutes(app, db);
+  // ADR-0057 — CONTINUOUS RED-TEAMING. Versioned attack libraries, the shipped
+  // corpus, and runs — every one of which is an ADR-0044 eval run underneath,
+  // so probes take the same governed dispatch, the same metering and the same
+  // audit trail as real traffic, and a regression blocks promotion through the
+  // SAME automated_check gate a failed CI check uses. Authoring a library is
+  // admin-only through the DEFAULT gate (it changes what the promotion gate
+  // measures); POST /v1/redteam/runs is in NON_ADMIN_ROUTES because its gate is
+  // the caller's own agent entitlement, checked inside the runner.
+  registerRedTeamRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0046 — the review workbench: routing rules, SLA policies + the lazy
   // breach evaluation that stands in for the scheduler this codebase does not
   // have, claiming, saved views, per-reviewer workload, and BULK. Bulk is
