@@ -837,6 +837,18 @@ async function dispatchRunNode(
             };
             traceStatus = "pii_blocked";
             break;
+          // ADR-0042: a guardrail detector refused the tool ARGUMENTS. The
+          // worker is told by CATEGORY, never by content, so a refusal cannot
+          // itself become a channel for the thing that was refused.
+          case "guardrail_blocked":
+            block = {
+              type: "tool_result",
+              toolUseId: tc.id,
+              content: `blocked by governance: ${toolOut.reason}`,
+              isError: true,
+            };
+            traceStatus = "guardrail_blocked";
+            break;
           case "approval_required":
             block = {
               type: "tool_result",

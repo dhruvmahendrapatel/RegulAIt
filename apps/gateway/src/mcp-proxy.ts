@@ -26,7 +26,20 @@ import {
 import { visibleTools, type Decision, type ToolRef } from "@regulait/policy-kernel";
 import { selectTools } from "@regulait/optimizer-kernel";
 import type { ModelToolDef } from "@regulait/model-provider";
-import { setToolPriceSchema, type PiiHit } from "@regulait/shared";
+import {
+  setToolPriceSchema,
+  guardrailCategoryList,
+  guardrailWithheldMarker,
+  type PiiHit,
+} from "@regulait/shared";
+import {
+  flattenFindings,
+  guardrailOutcome,
+  recordGuardrailDecision,
+  resolveGuardrailPolicy,
+  runGuardrails,
+  type DispatchGuardrails,
+} from "./guardrails.js";
 import { governedEvaluate } from "./governed-evaluate.js";
 import { abacPrincipalFromRequest, type AbacPrincipalContext } from "./abac-principal.js";
 import { guardedMcpConnect, McpEgressBlockedError } from "./mcp-egress.js";
@@ -104,10 +117,20 @@ export async function connectUpstream(
  * core; MCP upstreams authenticate via their registered URL, so it is unused
  * today. */
 export type GovernedToolCallOutcome =
-  | { kind: "allowed"; content: unknown; pii?: McpPii; costUsd?: number | null }
+  | {
+      kind: "allowed";
+      content: unknown;
+      pii?: McpPii;
+      guardrails?: DispatchGuardrails;
+      costUsd?: number | null;
+    }
   | { kind: "unknown_tool" }
   | { kind: "denied"; decision: Decision }
   | { kind: "pii_blocked"; reason: string; pii: McpPii }
+  /** ADR-0042: a content-safety detector refused the tool ARGUMENTS. Distinct
+   * from `denied` (entitlement) and `pii_blocked` (§8.4's own classifier) so a
+   * caller — and the audit trail — can tell the three apart. */
+  | { kind: "guardrail_blocked"; reason: string; guardrails: DispatchGuardrails }
   | { kind: "approval_required"; approvalId: string; decision: Decision }
   | { kind: "approval_consumed_race"; approvalId: string };
 
@@ -326,6 +349,43 @@ export async function executeGovernedToolCall(
       }
     }
 
+    // ADR-0042 GUARDRAIL ENGINE, MCP path. This entry point matters more than
+    // the other two for prompt-injection specifically: ADR-0034's amendment
+    // showed a governed pipe can carry ATTACKER-CHOSEN BYTES back, so tool
+    // OUTPUT is exactly the surface the ADR names as in-scope. Both phases run
+    // here — arguments in, tool result out — with PII excluded (its dedicated
+    // path is directly above).
+    const mcpGuardrails = await resolveGuardrailPolicy(db, { projectId });
+    let mgInput: ReturnType<typeof runGuardrails> | null = null;
+    if (mcpGuardrails.active) {
+      mgInput = runGuardrails(mcpGuardrails, "input", JSON.stringify(args.arguments ?? null));
+      const outcome = guardrailOutcome(mgInput);
+      if (outcome) {
+        await recordGuardrailDecision(db, {
+          userId,
+          objectType: "mcp_server",
+          objectId: serverId,
+          projectId,
+          evaluation: mgInput,
+          outcome,
+          detail: { toolName, serverId },
+        });
+      }
+      if (mgInput.action === "block") {
+        const reason = `tool arguments blocked by guardrail: ${guardrailCategoryList(mgInput.blocking)}`;
+        return {
+          kind: "guardrail_blocked",
+          reason,
+          guardrails: {
+            action: "block",
+            phase: "input",
+            findings: flattenFindings(mgInput.findings),
+            withheld: false,
+          },
+        };
+      }
+    }
+
     if (approvedApprovalId) {
       // Atomically consume the approval; losing the race means another call
       // already spent it, so this call must go back through the queue.
@@ -369,6 +429,32 @@ export async function executeGovernedToolCall(
         ? { mode: piiMode, action: piiAction, inputHits, outputHits, withheld }
         : null;
 
+    // ADR-0042 OUTPUT phase — the tool RESULT. This is the injection-carrying
+    // surface: a compromised or hostile MCP server answers with text that the
+    // orchestrator will feed straight back to a model as context. A block is
+    // bill-and-withhold, identical to the PII rule directly above.
+    let mgOutput: ReturnType<typeof runGuardrails> | null = null;
+    let mgWithheld = false;
+    if (mcpGuardrails.active) {
+      mgOutput = runGuardrails(mcpGuardrails, "output", JSON.stringify(content ?? null));
+      if (mgOutput.action === "block") {
+        mgWithheld = true;
+        resultContent = {
+          content: [{ type: "text", text: guardrailWithheldMarker(mgOutput.blocking) }],
+          isError: true,
+        };
+      }
+    }
+    const mgFindings = [...(mgInput?.findings ?? []), ...(mgOutput?.findings ?? [])];
+    const mcpGuardrailView: DispatchGuardrails | null = mgFindings.length
+      ? {
+          action: mgWithheld ? "block" : mgFindings.some((f) => f.action === "warn") ? "warn" : "log",
+          phase: mgWithheld ? "output" : mgInput?.findings.length ? "input" : "output",
+          findings: flattenFindings(mgFindings),
+          withheld: mgWithheld,
+        }
+      : null;
+
     // PILLAR 5 (ADR-0019, widened by ADR-0024 O11): EVERY allowed, executed
     // tool call bills the server's flat per-call list price onto the SAME
     // usage ledger the model and connector paths write. Attribution decides
@@ -394,8 +480,32 @@ export async function executeGovernedToolCall(
         toolName,
         // §8.4 COUNTS ONLY — never the matched substrings
         ...(pii ? { pii: { mode: pii.mode, action: pii.action, inputHits, outputHits } } : {}),
+        // ADR-0042 COUNTS ONLY, same contract
+        ...(mcpGuardrailView
+          ? {
+              guardrails: {
+                action: mcpGuardrailView.action,
+                findings: mcpGuardrailView.findings,
+                withheld: mgWithheld,
+              },
+            }
+          : {}),
       },
     });
+    if (mgOutput) {
+      const outcome = guardrailOutcome(mgOutput);
+      if (outcome) {
+        await recordGuardrailDecision(db, {
+          userId,
+          objectType: "mcp_server",
+          objectId: serverId,
+          projectId,
+          evaluation: mgOutput,
+          outcome,
+          detail: { toolName, serverId },
+        });
+      }
+    }
     // §8.4 audit rows for a PII event (never for a clean payload): an OUTPUT
     // block is a deny; a warn is an allow with 'pii-warned'; log stays silent
     // (its counts are already in the usage detail above).
@@ -435,6 +545,7 @@ export async function executeGovernedToolCall(
       kind: "allowed",
       content: resultContent,
       ...(pii ? { pii } : {}),
+      ...(mcpGuardrailView ? { guardrails: mcpGuardrailView } : {}),
       // ADR-0024 (O11): every executed call is metered, so the cost is always
       // reported back — attributed or not. O10: tool-first resolution.
       costUsd: pricePerCallUsd,
@@ -749,6 +860,10 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
         // §8.4 input block: denied pre-call, nothing executed, nothing billed.
         // The message names CATEGORIES only, never the matched content.
         case "pii_blocked":
+          throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${outcome.reason}`);
+        // ADR-0042 input block: same shape, same honesty — a real MCP error,
+        // never a fabricated empty success, and CATEGORIES only in the message.
+        case "guardrail_blocked":
           throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${outcome.reason}`);
         case "approval_required": {
           // name the approver by display name when the kernel carried one — the

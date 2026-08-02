@@ -55,6 +55,11 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // question ("what may this call do?") asked with attributes instead of
       // static grants. It can only ever subtract from what Rules allows.
       { label: "ABAC policies", to: "/admin/abac-policies" },
+      // ADR-0042 — the CONTENT gate, beside the destination and attribute
+      // gates. Independent controls that happen to share one interception
+      // point: what is in the payload vs. where the call may go vs. who may
+      // make it under which attributes.
+      { label: "Guardrails", to: "/admin/guardrails" },
       { label: "Simulation", to: "/admin/simulation" },
       { label: "Approvals queue", to: "/admin/approvals" },
       { label: "Audit log", to: "/admin/audit" },

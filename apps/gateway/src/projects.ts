@@ -1907,6 +1907,9 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       // O2 (ADR-0027): per-framework cost dimensions — null = no opinion
       maxProjectBudgetUsd: body.maxProjectBudgetUsd ?? null,
       budgetEnforcement: body.budgetEnforcement ?? null,
+      // ADR-0042: the guardrail FLOOR this framework forces. MAX-composed with
+      // every other setting downstream, so it can only ever raise a layer.
+      guardrailModes: body.guardrailModes ?? null,
     };
     const [row] = await db
       .insert(complianceProfiles)

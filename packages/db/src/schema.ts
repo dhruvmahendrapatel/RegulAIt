@@ -15,6 +15,26 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 
+// ADR-0042 (migration 0055) — the guardrail vocabulary, declared HERE rather
+// than imported from @regulait/shared because this package deliberately has no
+// dependency on it. The two definitions are kept in lockstep by the gateway,
+// which imports both and would not type-check if they diverged.
+/** the detector classes the guardrail registry evaluates */
+export const GUARDRAIL_DETECTOR_IDS = [
+  "pii",
+  "prompt_injection",
+  "jailbreak",
+  "toxicity",
+  "semantic_dlp",
+] as const;
+export type GuardrailDetectorId = (typeof GUARDRAIL_DETECTOR_IDS)[number];
+/** `log|warn|block` is exactly the piiMode triad; `off` is the per-detector
+ * "do not run this at all" that piiMode expresses as a NULL cascade result */
+export const GUARDRAIL_MODES = ["off", "log", "warn", "block"] as const;
+export type GuardrailMode = (typeof GUARDRAIL_MODES)[number];
+/** admin-supplied extra vocabulary per detector, additive across scopes */
+export type GuardrailTermMap = Partial<Record<GuardrailDetectorId, string[]>>;
+
 export const users = pgTable("users", {
   id: uuid("id").primaryKey().defaultRandom(),
   email: text("email").notNull().unique(),
@@ -1794,6 +1814,14 @@ export const complianceProfiles = pgTable("compliance_profiles", {
    * rules); 'warn_only' can never relax a stricter org setting (surfaced as
    * an inert declaration). Null = no opinion. */
   budgetEnforcement: text("budget_enforcement", { enum: ["block", "warn_only"] }),
+  /** ADR-0042 (migration 0055): the guardrail FLOOR this framework forces onto
+   * every project carrying its tag — a partial map detector -> mode, e.g.
+   * {"prompt_injection":"block"}. Composed MAX-of-strictness across a
+   * project's profiles exactly as `piiMode` is, and then composed by the same
+   * MAX with the org/agent/connector setting, so a framework can only ever
+   * RAISE a layer and a local setting can never relax below it. NULL (every
+   * pre-0055 row) = this framework has no guardrail opinion. */
+  guardrailModes: jsonb("guardrail_modes").$type<Partial<Record<GuardrailDetectorId, GuardrailMode>>>(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -2616,3 +2644,63 @@ export interface AbacPolicyTestCase {
 
 export type AbacPolicyRow = typeof abacPolicies.$inferSelect;
 export type AbacPolicyVersionRow = typeof abacPolicyVersions.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0042 (migration 0055) — the guardrail engine's configuration
+// ---------------------------------------------------------------------------
+//
+// One row per SCOPE. `scope='org'` (scope_id NULL, at most one row by partial
+// unique index) is the deployment-wide default; `scope='agent'|'connector'`
+// rows override it for one registry object. Effective mode per detector is
+//
+//     MAX-of-strictness( compliance-cascade floor , override ?? org default )
+//
+// which is the single rule that makes the §8.3 cascade a CEILING rather than a
+// peer: a framework can raise a layer to `block`, and no local row can lower
+// it, because MAX has no way to lower anything.
+//
+// There is deliberately NO guardrail_violations table. Every guardrail
+// decision — block, warn AND log — lands in the one `auditLog`, so "what did
+// this deployment's guardrails do" is answered by the same query that answers
+// every other governance question.
+export const guardrailConfigs = pgTable(
+  "guardrail_configs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scope: text("scope", { enum: ["org", "agent", "connector"] }).notNull(),
+    /** NULL iff scope='org' (DB CHECK) — the org default has no target */
+    scopeId: uuid("scope_id"),
+    // The four ADR-0042 layers. PII is absent on purpose: it stays governed by
+    // the §8.3 cascade's own piiMode, byte-for-byte as ADR-0019 left it.
+    promptInjectionMode: text("prompt_injection_mode", { enum: GUARDRAIL_MODES })
+      .notNull()
+      .default("log"),
+    jailbreakMode: text("jailbreak_mode", { enum: GUARDRAIL_MODES }).notNull().default("log"),
+    toxicityMode: text("toxicity_mode", { enum: GUARDRAIL_MODES }).notNull().default("log"),
+    semanticDlpMode: text("semantic_dlp_mode", { enum: GUARDRAIL_MODES }).notNull().default("log"),
+    /** the org's own vocabulary per detector; additive across scopes */
+    customTerms: jsonb("custom_terms").$type<GuardrailTermMap>().notNull().default({}),
+    updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("guardrail_configs_scope_check", sql`${t.scope} IN ('org','agent','connector')`),
+    check(
+      "guardrail_configs_scope_id_check",
+      sql`(${t.scope} = 'org') = (${t.scopeId} IS NULL)`,
+    ),
+    check(
+      "guardrail_configs_prompt_injection_check",
+      sql`${t.promptInjectionMode} IN ('off','log','warn','block')`,
+    ),
+    check("guardrail_configs_jailbreak_check", sql`${t.jailbreakMode} IN ('off','log','warn','block')`),
+    check("guardrail_configs_toxicity_check", sql`${t.toxicityMode} IN ('off','log','warn','block')`),
+    check(
+      "guardrail_configs_semantic_dlp_check",
+      sql`${t.semanticDlpMode} IN ('off','log','warn','block')`,
+    ),
+  ],
+);
+
+export type GuardrailConfigRow = typeof guardrailConfigs.$inferSelect;

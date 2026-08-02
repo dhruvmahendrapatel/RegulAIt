@@ -114,6 +114,7 @@ import { registerSamlRoutes } from "./saml.js";
 import { SCIM_ROUTES, registerScimAdminRoutes, registerScimRoutes } from "./scim.js";
 import { registerGroupRoleMappingRoutes } from "./group-role-api.js";
 import { registerAbacRoutes } from "./abac.js";
+import { registerGuardrailRoutes } from "./guardrails.js";
 import { abacPrincipalFromRequest } from "./abac-principal.js";
 import { evaluateIpEnvelope } from "./net-policy.js";
 import { activeDelegatorsFor, activeDelegationFrom } from "./delegations.js";
@@ -2428,6 +2429,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // NON_ADMIN_ROUTES, because authoring a policy that can deny every governed
   // call in the org is precisely the kind of act a non-admin must not reach.
   registerAbacRoutes(app, db);
+  // ADR-0042 — the guardrail engine's admin surface: the detector registry
+  // (with each detector's honest limits), org/agent/connector mode config, the
+  // resolved-policy explainer, the tuning sandbox and the recent-violations
+  // view (a query over the ONE audit log, not a second ledger). Admin-only
+  // through the DEFAULT gate — none appear in NON_ADMIN_ROUTES, because
+  // relaxing a content control is exactly a privileged act.
+  registerGuardrailRoutes(app, db);
 
   registerAgentConnectorRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0034 — admin-registered custom LLM providers + the egress allow-list

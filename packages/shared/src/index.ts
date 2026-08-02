@@ -2,6 +2,68 @@ import { z } from "zod";
 
 export { detectPII, type PiiHit, type PiiCategory } from "./pii.js";
 
+// ADR-0042 — the guardrail engine's pure half: the detector registry, the
+// block|warn|log verbs (piiMode's triad, plus an `off` member), the
+// MAX-of-strictness composition that makes the compliance cascade a ceiling,
+// and the counts-only evaluation result.
+export {
+  GUARDRAIL_DETECTOR_IDS,
+  GUARDRAIL_MODES,
+  GUARDRAIL_DETECTORS,
+  GUARDRAIL_DEFAULT_MODES,
+  guardrailRegistry,
+  evaluateGuardrails,
+  composeGuardrailModes,
+  composeGuardrailTerms,
+  guardrailCategoryList,
+  guardrailWithheldMarker,
+  strictestMode,
+  modeAtLeast,
+  type GuardrailDetectorId,
+  type GuardrailMode,
+  type GuardrailModes,
+  type GuardrailTerms,
+  type GuardrailHit,
+  type GuardrailPhase,
+  type GuardrailDetector,
+  type GuardrailFinding,
+  type GuardrailEvaluation,
+} from "./guardrails.js";
+
+/** ADR-0042 admin write shapes. A mode is one of the four verbs; a partial map
+ * lets an admin change one detector without restating the others.
+ *
+ * `pii` is deliberately NOT writable here. PII's mode is the §8.3 compliance
+ * cascade's `piiMode` and nothing else — offering a second place to set it
+ * would create two sources of truth for one control, and the weaker one would
+ * eventually win an argument it should not be in. */
+export const guardrailModeSchema = z.enum(["off", "log", "warn", "block"]);
+export const guardrailModeMapSchema = z
+  .object({
+    prompt_injection: guardrailModeSchema.optional(),
+    jailbreak: guardrailModeSchema.optional(),
+    toxicity: guardrailModeSchema.optional(),
+    semantic_dlp: guardrailModeSchema.optional(),
+  })
+  .strict();
+const guardrailTermListSchema = z.array(z.string().min(1).max(120)).max(200);
+export const guardrailTermMapSchema = z
+  .object({
+    prompt_injection: guardrailTermListSchema.optional(),
+    jailbreak: guardrailTermListSchema.optional(),
+    toxicity: guardrailTermListSchema.optional(),
+    semantic_dlp: guardrailTermListSchema.optional(),
+  })
+  .strict();
+export const putGuardrailConfigSchema = z.object({
+  modes: guardrailModeMapSchema.optional(),
+  customTerms: guardrailTermMapSchema.optional(),
+});
+export const guardrailSampleSchema = z.object({
+  text: z.string().max(200_000),
+  phase: z.enum(["input", "output"]).default("input"),
+});
+
 export const toolKindSchema = z.enum(["read", "write"]);
 export type ToolKind = z.infer<typeof toolKindSchema>;
 
@@ -980,6 +1042,10 @@ export const upsertComplianceProfileSchema = z.object({
   maxProjectBudgetUsd: z.number().positive().max(100_000_000).nullable().optional(),
   /** O2: enforcement floor — 'block' forces blocking even in a warn_only org */
   budgetEnforcement: z.enum(["block", "warn_only"]).nullable().optional(),
+  /** ADR-0042: the guardrail FLOOR this framework forces onto every project
+   * carrying its tag. MAX-composed with every other setting, so it can only
+   * raise a layer. */
+  guardrailModes: guardrailModeMapSchema.nullable().optional(),
 });
 
 // PILLAR 3 (§8.2): the governed infrastructure-operations layer.

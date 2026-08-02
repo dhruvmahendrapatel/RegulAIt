@@ -68,6 +68,16 @@ import {
   setAgentSystemPromptSchema,
 } from "@regulait/shared";
 import type { PiiHit } from "@regulait/shared";
+import { guardrailWithheldMarker, guardrailCategoryList } from "@regulait/shared";
+import {
+  guardrailOutcome,
+  recordGuardrailDecision,
+  resolveGuardrailPolicy,
+  runGuardrails,
+  flattenFindings,
+  type DispatchGuardrails,
+  type GuardrailPolicy,
+} from "./guardrails.js";
 import { z } from "zod";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import {
@@ -162,9 +172,18 @@ export type DispatchOutcome =
         projectBudgetAlerted: boolean;
         /** §8.4: present only when a classified project's PII policy acted */
         pii?: DispatchPii;
+        /** ADR-0042: present only when a guardrail detector produced hits */
+        guardrails?: DispatchGuardrails;
       };
     }
-  | { ok: false; status: number; error: string; detail?: string; pii?: DispatchPii };
+  | {
+      ok: false;
+      status: number;
+      error: string;
+      detail?: string;
+      pii?: DispatchPii;
+      guardrails?: DispatchGuardrails;
+    };
 
 /** The one governed-dispatch core, shared by the direct invoke path and the
  * orchestration worker-node path. The served agent is an INPUT — this
@@ -272,6 +291,56 @@ export async function executeGovernedDispatch(
         reason,
       });
       return { ok: false, status: 403, error: "pii_blocked", detail: reason, pii };
+    }
+  }
+
+  // ADR-0042 GUARDRAIL ENGINE (pillar 1/3). The SAME interception point and the
+  // SAME two phases §8.4's PII enforcement uses, generalized to a registry of
+  // detectors. PII is deliberately EXCLUDED from the engine's dispatch-time
+  // evaluation (`runGuardrails` passes exclude:['pii']) because the dedicated
+  // path above already enforces it with ADR-0019's exact response and audit
+  // semantics — double-enforcing would double-audit and change those semantics.
+  // PII remains classifier #1 in the registry itself.
+  //
+  // The effective modes are MAX-composed from the org default, this agent's
+  // override, and the attributed project's compliance floor — so a framework
+  // can raise a layer and no local setting can lower it.
+  const guardrails = await resolveGuardrailPolicy(db, {
+    projectId: args.projectId ?? null,
+    agentId: served.id,
+  });
+  let guardrailInput: ReturnType<typeof runGuardrails> | null = null;
+  if (guardrails.active) {
+    // INPUT phase, BEFORE any provider work — a block costs nothing: no
+    // dispatch, no usage row, no tokens. Identical placement to the PII input
+    // check immediately above.
+    guardrailInput = runGuardrails(guardrails, "input", args.input);
+    const outcome = guardrailOutcome(guardrailInput);
+    if (outcome) {
+      await recordGuardrailDecision(db, {
+        userId,
+        objectType: "agent",
+        objectId: served.id,
+        projectId: args.projectId ?? null,
+        evaluation: guardrailInput,
+        outcome,
+        detail: { agentId: served.id, model: served.model },
+      });
+    }
+    if (guardrailInput.action === "block") {
+      const reason = `input blocked by guardrail: ${guardrailCategoryList(guardrailInput.blocking)}`;
+      return {
+        ok: false,
+        status: 403,
+        error: "guardrail_blocked",
+        detail: reason,
+        guardrails: {
+          action: "block",
+          phase: "input",
+          findings: flattenFindings(guardrailInput.findings),
+          withheld: false,
+        },
+      };
     }
   }
 
@@ -458,6 +527,36 @@ export async function executeGovernedDispatch(
     credentialSource = customProvider.row.keyCiphertext ? "platform" : "none";
   }
 
+  // ADR-0042 STREAMING, AND THE HONEST RESIDUAL.
+  //
+  // An output-phase guardrail can only decide once the full completion exists.
+  // A live delta stream would therefore have already put the offending bytes on
+  // the client's wire before the decision was reachable — the exact failure
+  // ADR-0019 recorded for PII and closed with route-level suppression.
+  //
+  // This closes it HERE, inside the one dispatch core, so it covers EVERY
+  // streaming caller — the SSE invoke route, both compat shims, and the
+  // orchestration worker path — rather than only the one route that knows to
+  // ask. When any output-phase detector is at `block`, `onText` is not handed
+  // to the provider at all: deltas are accumulated locally, the completed text
+  // is scanned, and only then is the buffer flushed to the caller — or dropped
+  // entirely if the scan blocked. A client can therefore never receive a token
+  // of content the buffered path would have withheld.
+  //
+  // RESIDUAL, STATED PLAINLY: streaming is DEGRADED, not preserved, whenever an
+  // output detector is at `block` — the caller receives the text in one flush
+  // at completion instead of incrementally. `streamBuffered: true` rides the
+  // response so this is disclosed rather than silent. With every output
+  // detector at `off`/`log`/`warn` (the shipped posture) nothing is buffered and
+  // streaming is byte-identical to before.
+  const bufferStream = !!args.onText && guardrails.blocksOutput;
+  const bufferedDeltas: string[] = [];
+  const providerOnText = bufferStream
+    ? (delta: string) => {
+        bufferedDeltas.push(delta);
+      }
+    : args.onText;
+
   let result;
   try {
     // the custom path brings its own already-guarded provider instance; every
@@ -481,7 +580,7 @@ export async function executeGovernedDispatch(
       ...(args.responseFormat ? { responseFormat: args.responseFormat } : {}),
       ...(args.thinking ? { thinking: args.thinking } : {}),
       ...(args.maxTokens ? { maxTokens: args.maxTokens } : {}),
-      ...(args.onText ? { onText: args.onText } : {}),
+      ...(providerOnText ? { onText: providerOnText } : {}),
       ...(args.onThinking ? { onThinking: args.onThinking } : {}),
     });
   } catch (err) {
@@ -575,6 +674,56 @@ export async function executeGovernedDispatch(
     ? { pii: { mode: pii.mode, action: pii.action, inputHits, outputHits } }
     : {};
 
+  // ADR-0042 OUTPUT phase. The call already ran, so a block here is the same
+  // BILL-AND-WITHHOLD the PII path performs: the usage row below records the
+  // honest spend, and the text is replaced by a counts-only marker.
+  let guardrailOutput: ReturnType<typeof runGuardrails> | null = null;
+  let guardrailWithheld = false;
+  if (guardrails.active) {
+    guardrailOutput = runGuardrails(guardrails, "output", result.outputText);
+    if (guardrailOutput.action === "block") {
+      guardrailWithheld = true;
+      // the guardrail marker wins over the PII one when both fired: both are
+      // withheld markers, and this one names the layer that refused.
+      outputText = guardrailWithheldMarker(guardrailOutput.blocking);
+    }
+  }
+  // Flush (or drop) the buffered stream. This is the line that makes the
+  // streaming guarantee real: on a block the deltas are simply never written.
+  if (bufferStream && args.onText && !guardrailWithheld && !withheld) {
+    for (const delta of bufferedDeltas) args.onText(delta);
+  }
+  const guardrailFindings = [
+    ...(guardrailInput?.findings ?? []),
+    ...(guardrailOutput?.findings ?? []),
+  ];
+  const guardrailAction: DispatchGuardrails["action"] | null = guardrailWithheld
+    ? "block"
+    : guardrailFindings.length === 0
+      ? null
+      : guardrailFindings.some((f) => f.action === "warn")
+        ? "warn"
+        : "log";
+  const dispatchGuardrails: DispatchGuardrails | null = guardrailAction
+    ? {
+        action: guardrailAction,
+        phase: guardrailWithheld ? "output" : (guardrailInput?.findings.length ? "input" : "output"),
+        findings: flattenFindings(guardrailFindings),
+        withheld: guardrailWithheld,
+        ...(bufferStream ? { streamBuffered: true as const } : {}),
+      }
+    : null;
+  // COUNTS ONLY in the usage detail, exactly as the PII detail is.
+  const guardrailDetail = dispatchGuardrails
+    ? {
+        guardrails: {
+          action: dispatchGuardrails.action,
+          findings: dispatchGuardrails.findings,
+          withheld: guardrailWithheld,
+        },
+      }
+    : {};
+
   await db.insert(usageEvents).values({
     userId,
     objectType: "agent",
@@ -596,8 +745,30 @@ export async function executeGovernedDispatch(
       ...(customDestination ? { customProviderId: served.customProviderId, egress: customDestination } : {}),
       ...(args.detail ?? {}),
       ...piiDetail,
+      ...guardrailDetail,
     },
   });
+  // ADR-0042: the OUTPUT-phase guardrail audit row — one row into the SINGLE
+  // existing audit log, with detector, category counts, mode and outcome. A
+  // block is `effect: 'deny'`; warn and log are allows.
+  if (guardrailOutput) {
+    const outcome = guardrailOutcome(guardrailOutput);
+    if (outcome) {
+      await recordGuardrailDecision(db, {
+        userId,
+        objectType: "agent",
+        objectId: served.id,
+        projectId: args.projectId ?? null,
+        evaluation: guardrailOutput,
+        outcome,
+        detail: {
+          agentId: served.id,
+          model: served.model,
+          ...(bufferStream ? { streamBuffered: true } : {}),
+        },
+      });
+    }
+  }
   // ADR-0034 — THE DESTINATION-HOST AUDIT ROW. The whole point of a governance
   // product is that "which third-party endpoint did our models talk to, on
   // whose behalf, for which project" is answerable after the fact. Written for
@@ -672,8 +843,9 @@ export async function executeGovernedDispatch(
       refusal: result.refusal,
       ...(result.toolCalls ? { toolCalls: result.toolCalls } : {}),
       // thinking blocks ride out with the output — and are withheld WITH the
-      // output when a PII block replaced it (reasoning can leak the same PII)
-      ...(result.thinking && !withheld ? { thinking: result.thinking } : {}),
+      // output when a PII or guardrail block replaced it (reasoning can leak
+      // the same content the completion was withheld for)
+      ...(result.thinking && !withheld && !guardrailWithheld ? { thinking: result.thinking } : {}),
       usage: result.usage,
       costUsd,
       measuredCostSavedUsd,
@@ -690,6 +862,7 @@ export async function executeGovernedDispatch(
           }
         : {}),
       ...(pii ? { pii } : {}),
+      ...(dispatchGuardrails ? { guardrails: dispatchGuardrails } : {}),
     },
   };
 }
@@ -1483,8 +1656,19 @@ export function registerAgentConnectorRoutes(
     // Input-block stays exactly as it was: pre-call, no dispatch, no cost.
     // Only computed when the caller actually asked to stream, so the
     // non-streaming path takes no extra query.
+    //
+    // ADR-0042 extends the SAME rule to the guardrail engine: an output-phase
+    // detector at `block` has the identical "decision needs the whole text"
+    // problem, so it suppresses the delta stream identically and the existing
+    // `streamingOnBlockMode: 'reject'` posture applies unchanged. This check
+    // uses the REQUESTED agent, because routing has not run yet; the served
+    // agent's own override is still caught by the core's buffer-and-flush in
+    // executeGovernedDispatch, which is the actual guarantee — this one is the
+    // early, disclosed refusal.
     const streamSuppressed =
-      body.stream === true && (await projectPiiMode(db, projectId)) === "block";
+      body.stream === true &&
+      ((await projectPiiMode(db, projectId)) === "block" ||
+        (await resolveGuardrailPolicy(db, { projectId, agentId: agent.id })).blocksOutput);
     // ADR-0021: 'suppress' (default) keeps ADR-0019's buffer-and-disclose;
     // 'reject' refuses the stream request outright so a client that REQUIRES
     // streaming learns immediately instead of receiving an unasked-for shape.
@@ -1494,7 +1678,7 @@ export function registerAgentConnectorRoutes(
         return reply.status(400).send({
           error: "streaming_rejected_on_block_project",
           detail:
-            "this project's PII mode is 'block' and this deployment rejects streaming on such projects — retry without stream:true",
+            "an output-phase content control is in 'block' mode for this call (the project's PII mode, or an ADR-0042 guardrail detector) and this deployment rejects streaming in that case — retry without stream:true",
         });
       }
     }
@@ -2251,6 +2435,7 @@ export function registerAgentConnectorRoutes(
             error: outcome.error,
             ...(outcome.detail ? { detail: outcome.detail } : {}),
             ...(outcome.pii ? { pii: outcome.pii } : {}),
+            ...(outcome.guardrails ? { guardrails: outcome.guardrails } : {}),
           });
         }
         reply.raw.end();
@@ -2324,6 +2509,7 @@ export function registerAgentConnectorRoutes(
         error: dispatchOutcome.error,
         ...(dispatchOutcome.detail ? { detail: dispatchOutcome.detail } : {}),
         ...(dispatchOutcome.pii ? { pii: dispatchOutcome.pii } : {}),
+        ...(dispatchOutcome.guardrails ? { guardrails: dispatchOutcome.guardrails } : {}),
         ...suppressionFlag,
       });
     }
@@ -2668,6 +2854,49 @@ export function registerAgentConnectorRoutes(
       }
     }
 
+    // ADR-0042 GUARDRAIL ENGINE, connector path — the same two phases, the same
+    // exclusion of PII (enforced on its own path above), the same audit rules.
+    // Scoped to this connector's override (or the org default), MAX-composed
+    // with the attributed project's compliance floor.
+    const connectorGuardrails: GuardrailPolicy = await resolveGuardrailPolicy(db, {
+      projectId,
+      connectorId,
+    });
+    let cgInput: ReturnType<typeof runGuardrails> | null = null;
+    if (connectorGuardrails.active) {
+      cgInput = runGuardrails(
+        connectorGuardrails,
+        "input",
+        JSON.stringify({ object: body.object ?? null, payload: body.payload ?? null }),
+      );
+      const outcome = guardrailOutcome(cgInput);
+      if (outcome) {
+        await recordGuardrailDecision(db, {
+          userId,
+          objectType: "connector",
+          objectId: connectorId,
+          projectId,
+          evaluation: cgInput,
+          outcome,
+          detail: { operation: body.operation, connectorKind: connector.providerKind },
+        });
+      }
+      if (cgInput.action === "block") {
+        const reason = `input blocked by guardrail: ${guardrailCategoryList(cgInput.blocking)}`;
+        return reply.status(403).send({
+          decision,
+          error: "guardrail_blocked",
+          detail: reason,
+          guardrails: {
+            action: "block",
+            phase: "input",
+            findings: flattenFindings(cgInput.findings),
+            withheld: false,
+          },
+        });
+      }
+    }
+
     // ADR-0034 amendment #2 — THE CONNECTOR `baseUrl`, BEHIND THE EGRESS GUARD.
     //
     // This is the surface both earlier amendments named as the highest-priority
@@ -2794,6 +3023,26 @@ export function registerAgentConnectorRoutes(
         ? { mode: piiMode, action: piiAction, inputHits, outputHits, withheld }
         : null;
 
+    // ADR-0042 OUTPUT phase, connector path — bill-and-withhold, same as PII.
+    let cgOutput: ReturnType<typeof runGuardrails> | null = null;
+    let cgWithheld = false;
+    if (connectorGuardrails.active) {
+      cgOutput = runGuardrails(connectorGuardrails, "output", JSON.stringify(result.body ?? null));
+      if (cgOutput.action === "block") {
+        cgWithheld = true;
+        respBody = guardrailWithheldMarker(cgOutput.blocking);
+      }
+    }
+    const cgFindings = [...(cgInput?.findings ?? []), ...(cgOutput?.findings ?? [])];
+    const connectorGuardrailView: DispatchGuardrails | null = cgFindings.length
+      ? {
+          action: cgWithheld ? "block" : cgFindings.some((f) => f.action === "warn") ? "warn" : "log",
+          phase: cgWithheld ? "output" : cgInput?.findings.length ? "input" : "output",
+          findings: flattenFindings(cgFindings),
+          withheld: cgWithheld,
+        }
+      : null;
+
     // pillar 5 actuals: an allowed, executed call bills the connector's flat
     // list price. Unpriced → null, never an invented figure (agents' rule).
     const costUsd = connector.pricePerCallUsd ?? null;
@@ -2810,8 +3059,32 @@ export function registerAgentConnectorRoutes(
         providerKind: connector.providerKind,
         // §8.4 COUNTS ONLY — never the matched substrings
         ...(pii ? { pii: { mode: pii.mode, action: pii.action, inputHits, outputHits } } : {}),
+        // ADR-0042 COUNTS ONLY, same contract
+        ...(connectorGuardrailView
+          ? {
+              guardrails: {
+                action: connectorGuardrailView.action,
+                findings: connectorGuardrailView.findings,
+                withheld: cgWithheld,
+              },
+            }
+          : {}),
       },
     });
+    if (cgOutput) {
+      const outcome = guardrailOutcome(cgOutput);
+      if (outcome) {
+        await recordGuardrailDecision(db, {
+          userId,
+          objectType: "connector",
+          objectId: connectorId,
+          projectId,
+          evaluation: cgOutput,
+          outcome,
+          detail: { operation: body.operation, connectorKind: connector.providerKind },
+        });
+      }
+    }
     // §8.4 audit rows for a PII event (never for a clean payload): an OUTPUT
     // block is a deny; a warn is an allow with 'pii-warned'; log is silent
     // (counts already recorded in the usage detail above).
@@ -2854,6 +3127,7 @@ export function registerAgentConnectorRoutes(
       result: { status: result.status, body: respBody },
       costUsd,
       ...(pii ? { pii } : {}),
+      ...(connectorGuardrailView ? { guardrails: connectorGuardrailView } : {}),
     });
   });
 }
