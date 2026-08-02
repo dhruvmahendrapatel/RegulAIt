@@ -659,6 +659,16 @@ export const auditLog = pgTable(
         // words, at the exact position where the guarantee starts. Plain text
         // column — no DDL needed.
         "audit_chain",
+        // ADR-0055: shadow-AI discovery. An admin editing the detection
+        // CATALOGUE (which providers are detectable at all), an evidence
+        // IMPORT — including the refused ones, which are the rows that matter —
+        // and every disposition/remediation-link on a FINDING. The discovery
+        // engine is governed by the kernel it feeds (ADR-0055 §5): there is no
+        // privileged scan identity that reads without an audit row. Plain text
+        // column — no DDL needed.
+        "ai_endpoint_signature",
+        "shadow_ai_import",
+        "shadow_ai_finding",
       ],
     })
       .notNull()
@@ -4308,3 +4318,136 @@ export const onboardingImports = pgTable(
 
 export type OnboardingStepRow = typeof onboardingSteps.$inferSelect;
 export type OnboardingImportRow = typeof onboardingImports.$inferSelect;
+
+// ===========================================================================
+// ADR-0055 — SHADOW-AI DISCOVERY (migration 0068)
+//
+// The importer/analyzer half of the ADR. RegulAIt ships NO COLLECTOR — see the
+// migration header — so these three tables model EVIDENCE THAT ARRIVED, the
+// CATALOGUE it is matched against, and the CONCLUSIONS drawn. Nothing here
+// implies the platform watched anything itself.
+// ===========================================================================
+
+/**
+ * THE CATALOGUE, AND IT IS DATA (ADR-0055 §1). The matcher in
+ * `@regulait/shared` holds no provider name at all: empty this table and
+ * discovery matches nothing. Adding detection for a new provider — including a
+ * customer's private in-house endpoint — is a row here, never a deploy.
+ *
+ * There is deliberately no `pattern` column: an admin-editable regex evaluated
+ * against imported strings is a ReDoS primitive. Keys are prefix + minimum
+ * length, hosts are exact-or-dot-boundary-suffix. Both linear.
+ */
+export const aiEndpointSignatures = pgTable(
+  "ai_endpoint_signatures",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    provider: text("provider").notNull(),
+    kind: text("kind", { enum: ["hostname", "sdk_package", "api_key_prefix", "web_app"] }).notNull(),
+    /** a hostname, a package name, or a key PREFIX — never a regular expression */
+    value: text("value").notNull(),
+    matchType: text("match_type", { enum: ["exact_host", "host_suffix", "package", "key_prefix"] }).notNull(),
+    /** key signatures only: the minimum length of the FULL observed key */
+    minLength: integer("min_length"),
+    /** the governed thing that would REPLACE this usage — what makes a finding
+     * actionable rather than a complaint. SET NULL on agent delete: retiring an
+     * agent must never delete the evidence of ungoverned usage. */
+    replacementAgentId: uuid("replacement_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    replacementNote: text("replacement_note"),
+    /** 'regulait-seed', 'admin', or a vendor advisory URL — with lastUpdatedAt,
+     * this is the STALENESS DISCLOSURE the ADR asks for, per row */
+    provenance: text("provenance").notNull().default("admin"),
+    enabled: boolean("enabled").notNull().default(true),
+    lastUpdatedAt: timestamp("last_updated_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("ai_endpoint_signatures_provider_idx").on(t.provider)],
+);
+
+/**
+ * Every evidence file — planned, applied AND REFUSED. The refusals are the rows
+ * that matter: a payload that tried to smuggle a privilege word into a
+ * description of network traffic is refused twice over (a pre-parse screen and
+ * strict row schemas with no such field) and the refusal lands here beside an
+ * `audit_log` deny.
+ *
+ * WHAT AN IMPORT CAN DO, EXHAUSTIVELY: write rows into `shadowAiFindings`.
+ */
+export const shadowAiImports = pgTable(
+  "shadow_ai_imports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kind: text("kind", { enum: ["egress_log", "code_scan", "saas_export", "self_reported"] }).notNull(),
+    mode: text("mode", { enum: ["dry_run", "apply"] }).notNull(),
+    status: text("status", { enum: ["planned", "applied", "refused"] }).notNull(),
+    source: text("source"),
+    payloadSha256: text("payload_sha256").notNull(),
+    rowCount: integer("row_count").notNull().default(0),
+    summary: jsonb("summary").$type<Record<string, unknown>>().notNull(),
+    ruleId: text("rule_id").notNull(),
+    reason: text("reason").notNull(),
+    requestedByUserId: uuid("requested_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    appliedAt: timestamp("applied_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("shadow_ai_imports_created_idx").on(t.createdAt),
+    index("shadow_ai_imports_kind_idx").on(t.kind),
+    index("shadow_ai_imports_status_idx").on(t.status),
+  ],
+);
+
+/**
+ * THE CORRELATED INVENTORY. The unique index on
+ * (subjectKind, subject, provider) is the dedup story: a second import
+ * re-observing the same usage widens `signalSources`, extends `lastSeenAt` and
+ * raises confidence — it never creates a second row.
+ *
+ * Severity (what the signal IMPLIES) and confidence (how many INDEPENDENT
+ * collectors corroborate it) are separate axes and are never collapsed into one
+ * score — that collapse is exactly the flat alert stream ADR-0055 §6 refuses.
+ */
+export const shadowAiFindings = pgTable(
+  "shadow_ai_findings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    subjectKind: text("subject_kind", { enum: ["host", "repo", "saas_app", "system"] }).notNull(),
+    subject: text("subject").notNull(),
+    provider: text("provider").notNull(),
+    signalSources: jsonb("signal_sources").$type<string[]>().notNull(),
+    signatureKinds: jsonb("signature_kinds").$type<string[]>().notNull(),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+    observationCount: integer("observation_count").notNull().default(0),
+    severity: text("severity", { enum: ["low", "medium", "high", "critical"] }).notNull(),
+    confidence: text("confidence", { enum: ["low", "medium", "high"] }).notNull(),
+    disposition: text("disposition", {
+      enum: ["open", "confirmed", "sanctioned", "false_positive", "remediated"],
+    })
+      .notNull()
+      .default("open"),
+    /** carried through from the CATALOGUE — never from the imported file */
+    replacementAgentId: uuid("replacement_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    replacementNote: text("replacement_note"),
+    /** bounded leads, redacted key fragments only — never a credential */
+    evidence: jsonb("evidence").$type<Array<Record<string, unknown>>>().notNull(),
+    lastImportId: uuid("last_import_id").references(() => shadowAiImports.id, { onDelete: "set null" }),
+    dispositionReason: text("disposition_reason"),
+    dispositionByUserId: uuid("disposition_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    dispositionAt: timestamp("disposition_at", { withTimezone: true }),
+    /** the workflow instance opened to pull this usage into governance */
+    remediationInstanceId: uuid("remediation_instance_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("shadow_ai_findings_severity_idx").on(t.severity),
+    index("shadow_ai_findings_disposition_idx").on(t.disposition),
+    index("shadow_ai_findings_last_seen_idx").on(t.lastSeenAt),
+  ],
+);
+
+export type AiEndpointSignatureRow = typeof aiEndpointSignatures.$inferSelect;
+export type ShadowAiImportRow = typeof shadowAiImports.$inferSelect;
+export type ShadowAiFindingRow = typeof shadowAiFindings.$inferSelect;

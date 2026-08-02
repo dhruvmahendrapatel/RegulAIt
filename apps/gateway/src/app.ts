@@ -210,6 +210,7 @@ import { WEB_UI_ROUTES, defaultWebDistDir, registerWebServing } from "./web-serv
 import { AUTH_EXEMPT_ROUTES, NON_ADMIN_ROUTES } from "./route-classes.js";
 import { registerOpenApiRoutes, type RouteInventoryEntry } from "./openapi.js";
 import { registerOnboardingRoutes } from "./onboarding.js";
+import { registerShadowAiRoutes } from "./shadow-ai.js";
 import path from "node:path";
 import { registerSpaInlineScripts, securityHeaders } from "./security-headers.js";
 import { MergeConflictError, WorkflowStateError } from "@regulait/workflow-kernel";
@@ -2661,6 +2662,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // exactly the authority a non-admin must not reach. None appear in
   // NON_ADMIN_ROUTES.
   registerOnboardingRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0055 — SHADOW-AI DISCOVERY. Admin-only by default (nothing here is in
+  // NON_ADMIN_ROUTES): uploading a customer's proxy export, editing the
+  // detection catalogue and dispositioning findings are all operator authority.
+  // The subsystem makes NO outbound request and can write only its own three
+  // tables — an evidence file cannot mint a user, role, grant or approval.
+  registerShadowAiRoutes(app, db);
   // ADR-0053 — the published contract: the OpenAPI document, the versioning /
   // deprecation policy, and the RFC-8594 Deprecation/Sunset headers. Registered
   // here (rather than first) only for readability; the inventory hook at the top

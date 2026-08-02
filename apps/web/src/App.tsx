@@ -40,6 +40,7 @@ import PromptVersionsPage from "./views/admin/governance/PromptVersionsPage";
 import ApprovalsAdminPage from "./views/admin/governance/ApprovalsAdminPage";
 import ReviewWorkbenchPage from "./views/admin/governance/ReviewWorkbenchPage";
 import AuditLogPage from "./views/admin/governance/AuditLogPage";
+import ShadowAiPage from "./views/admin/governance/ShadowAiPage";
 import LineagePage from "./views/admin/governance/LineagePage";
 import WorkflowTemplatesPage from "./views/admin/governance/WorkflowTemplatesPage";
 import AgentsPage from "./views/admin/integrations/AgentsPage";
@@ -147,6 +148,8 @@ export default function App() {
                         <Route path="review-workbench" element={<ReviewWorkbenchPage />} />
                         <Route path="audit" element={<AuditLogPage />} />
                         <Route path="lineage" element={<LineagePage />} />
+                        {/* ADR-0055 */}
+                        <Route path="shadow-ai" element={<ShadowAiPage />} />
                         <Route path="workflow-templates" element={<WorkflowTemplatesPage />} />
                         <Route path="agents" element={<AgentsPage />} />
                         <Route path="model-credentials" element={<ModelCredentialsPage />} />

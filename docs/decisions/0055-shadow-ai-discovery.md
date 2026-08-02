@@ -1,6 +1,6 @@
 # ADR-0055: Shadow-AI Discovery — inventory ungoverned LLM usage and pull it into governance
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-08-01
 
 ## Context
@@ -147,3 +147,133 @@ consent to. The inventory schema and correlation/dedup keys. A "pull into govern
 template shipped as a default (composing with the compliance packs, ADR-0058). The coverage
 scorecard surface. And a decision on retention of raw scan findings (especially leaked-key
 fragments), which should default to the shortest retention the compliance cascade permits.
+
+---
+
+## Amendment — 2026-08-02: implemented as an IMPORTER + ANALYZER, with no collector (migration 0068)
+
+Implemented and accepted. What follows is the honest split between what this
+release genuinely enforces and what is structural — and, most importantly,
+**exactly what a customer must supply**, because the single largest gap between
+this ADR as written and this ADR as shipped is that **no collector ships.**
+
+### The correction this amendment makes to the ADR
+
+§2 describes "three signal collectors". **RegulAIt ships none of them, and this
+deployment cannot.** The control plane does not sit on a customer's network, does
+not hold their DNS resolver, does not run on their endpoints, and has no browser
+extension. A governance product that quietly began sniffing traffic would be the
+very thing it exists to prevent — so the collectors are not merely deferred, they
+are the customer's own systems by design.
+
+What ships is the rest of the ADR: the **catalogue**, the **importer**, the
+**analyzer**, the **correlation**, the **severity/confidence model**, the
+**coverage scorecard** and the **inventory + disposition workflow**.
+
+**What a customer must feed it, precisely.** `POST /v1/shadow-ai/imports` accepts
+four evidence classes, each a strict, bounded row schema:
+
+| kind | who produces it | required fields per row |
+| --- | --- | --- |
+| `egress_log` | their forward proxy, firewall, DNS resolver or SIEM export | `destinationHost` (host or URL); optional `sourceIdentity`, `requestCount`, `observedAt` |
+| `code_scan` | their own CI repo scan (a RegulAIt scanner over `packages/git-provider` is follow-up work) | `repo` plus at least one of `packageName` / `keyFragment`; optional `path`, `keyLength`, `observedAt` |
+| `saas_export` | their SaaS admin console's installed/OAuth-granted app export | `appName`, `vendorHost`; optional `grantedBy`, `installCount` |
+| `self_reported` | a human | `owner`, `system`, `provider`; optional `note` |
+
+Nothing else is accepted, and no route anywhere reaches out to fetch evidence.
+
+### Genuinely enforced (proved by test, not asserted)
+
+- **An evidence file cannot mint governance.** Structural, then screened, then
+  schema'd: the only tables the import path writes are `shadow_ai_imports` and
+  `shadow_ai_findings`; a pre-parse screen refuses any payload carrying a
+  governance-shaped key at any depth (`isAdmin`, `grants`, `roleId`, …) with a
+  422, an audited deny under `shadow-ai-import-privilege-refused` and a `refused`
+  row; and every row schema is `.strict()` with no privilege field to parse into.
+  The suite asserts all three attacks are refused **and that the user and role
+  counts are unchanged** — a silent strip would fail.
+- **Bounded untrusted input.** 2 MB per payload (checked on the raw bytes before
+  anything walks the document), 5 000 rows per import, every string
+  length-capped, a key fragment capped at 12 characters and redacted to 8 before
+  storage. A full credential is refused outright rather than accepted "for
+  analysis".
+- **True positives AND true negatives.** In one import, `api.openai.com` is
+  flagged while `github.com`, `registry.npmjs.org` and `notopenai.com` are not;
+  `openai` matches and `openai-mock` does not; `sk-ant-…` at 64 characters is
+  critical while `sk-test` at 7 is nothing. Host matching is exact-or-
+  dot-boundary-suffix, so `api.openai.com.evil.net` never matches. An analyzer
+  that flagged everything fails this suite.
+- **The catalogue really is data.** Emptying `ai_endpoint_signatures` makes the
+  same evidence match **nothing**; registering one row for a private, in-house
+  hostname makes it match; deleting that row stops it again. The matcher contains
+  no provider name. **How it is updated:** `POST /v1/shadow-ai/catalogue/seed`
+  installs (and re-installs, idempotently) the shipped seed, refreshing only rows
+  still marked `regulait-seed` so an admin's edit is never clobbered;
+  `POST /v1/shadow-ai/catalogue` adds or edits one row — including a private
+  endpoint we could never know about; `DELETE` removes one. No release is
+  involved in any of them. `provenance` + `lastUpdatedAt` are on every row, and
+  `GET /v1/shadow-ai/catalogue` reports `oldestEntryAt`, so staleness is legible.
+- **No regex ever comes from data.** ADR-0034's argument about admin-settable
+  `baseUrl` applies verbatim to an admin-settable pattern: it would be a ReDoS
+  primitive with an admin-shaped trigger. Key detection is prefix + minimum
+  length (a DB CHECK refuses a prefix with no bound); host detection is exact or
+  dot-boundary suffix. Both linear. **Most-specific-wins** ordering is enforced so
+  `sk-ant-` beats `sk-` and an exact host beats a suffix — a first-match matcher
+  would have made the verdict depend on row insertion order.
+- **Correlation, not double-counting.** A unique index on
+  `(subject_kind, lower(subject), lower(provider))` means a second import
+  re-observing the same usage widens `signal_sources`, extends the window, adds
+  to `observation_count` and raises confidence — never a second row. Confidence
+  is the count of **distinct** sources, so the same source twice is not
+  corroboration.
+- **Findings are actionable.** `replacement_agent_id` links a finding to the
+  governed agent in the registry that would replace it — resolved from the
+  **catalogue**, never from the uploaded file — and is surfaced on
+  `GET /v1/shadow-ai/findings` and in the remediation plan.
+- **Coverage is a model, not a claim.** `GET /v1/shadow-ai/findings` returns the
+  scorecard with a per-source "what it sees / what it misses" and a statement
+  that RegulAIt ships no collector and that discovery "reduces shadow AI — it
+  does not prove its absence". The console renders it above the numbers.
+- **The engine is governed by the kernel it feeds (§5).** Every route is
+  admin-only (none appears in `NON_ADMIN_ROUTES`); every catalogue change,
+  import — including refusals — and disposition writes an `audit_log` row with a
+  stable `rule_id` through the ordinary audit path. There is no privileged
+  discovery identity.
+- **No egress.** Discovery makes no outbound request of any kind, so there is
+  nothing here for the ADR-0034 guard to guard. That is deliberate: a discovery
+  engine that phoned home with an inventory of a customer's AI usage would be the
+  worst possible shape for this feature.
+
+### Structural only — named plainly
+
+- **No collector, as above.** The `code_scan` path is an importer for scan
+  results; the repo walk over `packages/git-provider` described in §2 is **not
+  built**. Nothing schedules, triggers or performs a scan.
+- **Remediation does not start a workflow.** `GET …/remediation-plan` composes
+  the §4 step sequence and hands back the request body for the existing
+  `POST /v1/workflows/instances`; `POST …/remediate` links an instance that route
+  created. This is deliberate — a second instantiation path would be a second set
+  of assignment rules, compliance-cascade merges and quorum checks to keep in
+  step — but it does mean the "pull into governance" flow is two calls, not one
+  button, and **the shipped default workflow template of §4 does not exist yet.**
+- **The "confirm governed" automated check is not wired.** The plan *names* the
+  step ("confirm the next call appears in `audit_log`/`usage_events`") but no
+  `automated_check` stage yet reads the ledgers and passes on its own.
+- **Severity thresholds are not an `org_settings` dial.** §6's "what
+  auto-opens a remediation workflow vs. what waits for triage" is not
+  configurable; every finding lands as `open` for triage.
+- **Retention of raw findings is not yet under the compliance cascade.** The
+  mitigation actually in place is stronger than a retention policy for the worst
+  case — we never store a usable credential, only an 8-character redacted prefix
+  plus the observed length — but the §"follow-up" retention decision is still
+  open.
+- **A finding re-observed after a human closed it is surfaced, not reopened.**
+  `dispositionStale` is reported; nothing auto-reverts a judgement.
+
+### Migration
+
+`0068_shadow_ai_discovery.sql` — three tables: `ai_endpoint_signatures` (the
+catalogue), `shadow_ai_imports` (every evidence file, including the refused ones)
+and `shadow_ai_findings` (the correlated inventory). `audit_log.object_type`
+gains `ai_endpoint_signature`, `shadow_ai_import` and `shadow_ai_finding` as a
+TS-only widening — the column has no DB CHECK, so there is no DDL for it.

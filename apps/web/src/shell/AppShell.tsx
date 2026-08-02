@@ -91,6 +91,10 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // entitlement, and it says on its face that spend is a list-price
       // estimate and that no scheduler drives its schedules.
       { label: "Reports", to: "/admin/reports" },
+      // ADR-0055 — the land-and-expand wedge: what AI are we NOT governing?
+      // It sits in Governance rather than Integrations because a discovered row
+      // is a governance gap, not a connection to configure.
+      { label: "Shadow-AI discovery", to: "/admin/shadow-ai" },
       { label: "Workflow templates", to: "/admin/workflow-templates" },
     ],
   },
