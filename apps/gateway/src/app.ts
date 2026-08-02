@@ -119,6 +119,7 @@ import { registerAbacRoutes } from "./abac.js";
 import { registerGuardrailRoutes } from "./guardrails.js";
 import { registerEvalRoutes } from "./evals.js";
 import { applyModelCardApprovalDecision, registerMrmRoutes } from "./mrm.js";
+import { registerReportingRoutes } from "./reporting.js";
 import {
   assignedApprovalIdsFor,
   ensureAssignment,
@@ -769,6 +770,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "DELETE /v1/approvals/views/:id",
     "GET /v1/cost-events",
     "GET /v1/usage-events",
+    // ADR-0047: a team lead generating and reading THEIR OWN scorecard. Every
+    // one of these applies `evaluateReportAccess` inside the handler, which
+    // returns the exact project-id list the caller may query and refuses
+    // outright when that list is empty or the definition carries an ORG
+    // reporting grant. Authoring DEFINITIONS and SCHEDULES, and driving the
+    // schedule sweep, are conspicuously NOT here: deciding what an org-wide
+    // board report contains, and who receives it, stays admin.
+    "POST /v1/reports/definitions/:id/generate",
+    "GET /v1/reports/runs",
+    "GET /v1/reports/runs/:id",
+    "GET /v1/reports/runs/:id/export",
     "POST /v1/users/:userId/model-credentials",
     "GET /v1/users/:userId/model-credentials",
     "DELETE /v1/users/:userId/model-credentials/:provider",
@@ -2650,6 +2662,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // handed `decideOneApproval` — the very function the single-decision route
   // calls — so a bulk item cannot take a shortcut around any guard.
   registerWorkbenchRoutes(app, db, { decideOne: decideOneApproval });
+  // ADR-0047 — executive & compliance reporting: report definitions, schedule
+  // DEFINITIONS (nothing fires on a timer here — an operator drives
+  // POST /v1/reports/schedules/run-due), the immutable run ledger, and the
+  // CSV/JSON export. Authoring a definition or a schedule is admin-only through
+  // the DEFAULT gate; GENERATING and READING are reachable by a non-admin
+  // (NON_ADMIN_ROUTES below) because a team lead running their own team's
+  // scorecard is the point — and every one of those paths resolves the caller's
+  // entitlement to a CONCRETE project-id set and builds its ledger queries FROM
+  // that set, so a report can never show spend or audit data the caller could
+  // not see directly.
+  registerReportingRoutes(app, db);
 
   registerAgentConnectorRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0034 — admin-registered custom LLM providers + the egress allow-list

@@ -99,6 +99,57 @@ export {
   type BulkRefusalReason,
 } from "./workbench.js";
 
+// ADR-0047 — executive & compliance reporting's pure half: the period
+// resolution, the ENTITLEMENT decision (which returns the exact project-id set
+// a generation may query, so scoping is applied at query construction rather
+// than as a post-hoc filter over an already-leaked aggregate), the section
+// assembly, the gap-rendering control assessment, and the CSV round trip.
+export {
+  REPORT_KINDS,
+  REPORT_SCOPE_KINDS,
+  REPORT_PERIODS,
+  REPORT_FORMATS,
+  REPORT_ENTITLEMENT_SCOPES,
+  REPORT_SECTIONS,
+  REPORT_CADENCES,
+  REPORT_ESTIMATE_DISCLAIMER,
+  BUILT_IN_CONTROLS,
+  createReportDefinitionSchema,
+  createReportScheduleSchema,
+  updateReportScheduleSchema,
+  generateReportSchema,
+  resolveReportPeriod,
+  evaluateReportAccess,
+  buildSpendSection,
+  buildGovernanceSection,
+  buildWorkflowSection,
+  assessControls,
+  reportCsvRows,
+  renderReportCsv,
+  parseReportCsv,
+  defaultSectionsFor,
+  scheduleIsDue,
+  round6,
+  type ReportKind,
+  type ReportScopeKind,
+  type ReportPeriod,
+  type ReportFormat,
+  type ReportEntitlementScope,
+  type ReportSection,
+  type ReportCadence,
+  type ResolvedPeriod,
+  type ReportAccessInput,
+  type ReportAccessDecision,
+  type SpendLine,
+  type SpendSection,
+  type GovernanceSection,
+  type WorkflowSection,
+  type ControlAssessment,
+  type ComplianceSection,
+  type ReportPayload,
+  type ReportCsvRow,
+} from "./reporting.js";
+
 // ADR-0042 — the guardrail engine's pure half: the detector registry, the
 // block|warn|log verbs (piiMode's triad, plus an `off` member), the
 // MAX-of-strictness composition that makes the compliance cascade a ceiling,

@@ -75,6 +75,12 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // workload and bulk triage. A layer on the one queue, never a second one.
       { label: "Review workbench", to: "/admin/review-workbench" },
       { label: "Audit log", to: "/admin/audit" },
+      // ADR-0047 — the BOARD-facing read of the same two ledgers the Cost
+      // dashboard and the Audit log render operationally. Nothing new is
+      // stored: a report is a read-only projection, scoped to the caller's own
+      // entitlement, and it says on its face that spend is a list-price
+      // estimate and that no scheduler drives its schedules.
+      { label: "Reports", to: "/admin/reports" },
       { label: "Workflow templates", to: "/admin/workflow-templates" },
     ],
   },

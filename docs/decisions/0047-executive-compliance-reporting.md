@@ -1,7 +1,7 @@
 # ADR-0047: Executive & compliance reporting — read-only, entitlement-scoped board dashboards and scheduled exports over the existing cost/audit/workflow data
 
-- **Status**: Proposed
-- **Date**: 2026-08-01
+- **Status**: Accepted
+- **Date**: 2026-08-01 (proposed) / 2026-08-02 (accepted + implemented, migration 0059)
 - **Relates to**: ADR-0019/0024 (the one `usage_events` ledger; every gateway call metered),
   ADR-0031 (streaming keyset CSV exports + `/v1/audit` cursor pagination — the export machinery this
   reuses), ADR-0032/0035 (scheduler + write-only encrypted S3 bucket posture), ADR-0022
@@ -133,3 +133,160 @@ result out as a report. A control with no evidence renders as an explicit gap, n
   executes; sequence this after it.
 - Settle the HTML→PDF rendering dependency in implementation review against the repo's supply-chain
   posture.
+
+## Implementation amendment — 2026-08-02 (migration 0059)
+
+Accepted and built. This section records what shipped, where it deviates from the proposal above,
+and — most importantly — **what is genuinely enforced versus what has nothing driving it**. Read
+the honesty section before assuming a scheduled export lands in anyone's inbox. It does not.
+
+### What shipped
+
+**Migration 0059 (`0059_executive_reporting`)** — three tables and **no rollup/materialization of
+any kind**:
+
+- `report_definitions` — `kind` ∈ `exec_summary | team_scorecard | compliance`, `scope_kind` ∈
+  `org | initiative | team | project` with `scope_id`, `period`, `sections`, `format`, and the
+  load-bearing `entitlement_scope` ∈ `org | team | project`. Two DB CHECKs carry the design: an
+  org-scoped definition takes **no** `scope_id` and every other scope **requires** one; and
+  `entitlement_scope='org'` is only permitted on an org-scoped definition, so "narrow report,
+  org-wide grant" is not expressible.
+- `report_schedules` — `cadence` ∈ `daily | weekly | monthly | quarterly`, `enabled`,
+  `recipient_user_ids`, `last_generated_at`, `last_run_id`. **A schedule DEFINITION only.**
+- `report_runs` — one immutable row per generation, carrying the resolved period, the format, the
+  payload, and — the honest record — `entitlement_scope` **copied at generation time** plus
+  `effective_project_ids`, the exact set the generator was permitted to query (`NULL` = org-wide).
+  Copying the scope is what stops a later edit to the definition from retroactively widening who
+  may read an already-generated artifact.
+
+New `audit_log.object_type` value `report` (plain text, no DDL), with stable ruleIds:
+`report-definition-created`, `report-definition-deleted`, `report-schedule-created`,
+`report-schedule-updated`, `report-schedule-deleted`, `report-schedule-swept`, `report-generated`,
+`report-exported`, `report-read-denied`, `report-export-denied`, and the refusal family
+`report-access-denied-{org-scope,not-team-member,not-project-member,no-visible-projects,
+scope-mismatch,no-identity}`.
+
+**`packages/shared/src/reporting.ts`** — the pure half: `resolveReportPeriod` (half-open UTC
+windows, so two machines from the same ledger cannot produce different numbers), the section
+assembly, `assessControls`, the CSV render/parse pair, `scheduleIsDue`, and — the important one —
+**`evaluateReportAccess`, which returns the exact project-id set a generation may query rather than
+a boolean.**
+
+**`apps/gateway/src/reporting.ts`** — `resolveScopeProjectIds` (definition scope → project ids,
+never consults the caller), `computeReport` (the ledger queries), `generateReport` (decision +
+compute + run row + audit), `canReadRun`, and the API.
+
+**SPA** — `/admin/reports` under Governance, next to the Audit log.
+
+### §4 is implemented as a query-construction narrowing, not a filter
+
+This is the thing the ADR said the reviewer must check, so it is stated concretely. Scoping is a
+**two-step, two-function** design:
+
+1. `resolveScopeProjectIds` answers *"which projects does this DEFINITION cover"* and never looks at
+   the caller.
+2. `evaluateReportAccess` answers *"which of those may THIS caller see"* and returns ids.
+
+Every ledger query in `computeReport` is then built **from those ids** — `inArray(usage_events.
+project_id, ids)`, a jsonb `detail->>'projectId' = ANY(...)` predicate on `audit_log`, and a
+member-id predicate on `approvals`. Nothing is ever computed org-wide and filtered afterwards,
+because a post-hoc filter over an aggregate cannot un-aggregate it. Three further properties:
+
+- **Admin widens WHO, never WHAT.** An admin under a *team*-scoped definition still gets the team's
+  project list, not the org's. Only an admin under an *org*-scoped definition receives the
+  unbounded scope (`null`), which is the sole path by which spend attributed to **no** project
+  enters a report.
+- **A granted report is still narrowed by membership.** A team lead entitled to their team's
+  scorecard sees only the team's projects **they are a member of** — the grant chooses the report,
+  membership chooses the rows.
+- **An empty intersection is a 403, not a zero.** Serving an empty report would make "no visible
+  data" indistinguishable from "no spend".
+
+### Deviations from the proposal above
+
+1. **NO PDF.** §3 names `pdf` and flags the rendering dependency as unresolved. It stays
+   unresolved: the format vocabulary is `csv | json | both`, and `pdf` **is not accepted anywhere**
+   rather than being accepted and quietly emitting something else. The board-ready *document* is
+   therefore not built; the board-ready *data* is. Recorded as a deviation, not a footnote.
+2. **NO DELIVERY, AND NO S3.** §3 says artifacts are deposited to the ADR-0035 write-only encrypted
+   bucket. Nothing is written anywhere but `report_runs`. `recipient_user_ids` is stored so the
+   entitlement check has something to check against; **no recipient is mailed, notified, or handed a
+   file.** The concentrated-artifact risk §3 describes is therefore not yet contained by the bucket
+   posture — it is contained only by the read/export authorization on `report_runs`, which is real
+   and tested, and by the artifact never leaving the database on its own.
+3. **The compliance control catalogue is BUILT-IN, not ADR-0058's.** §2 is explicit that this ADR
+   does not own the catalogue and ADR-0058 does not exist. What shipped is the **renderer** plus
+   five controls whose evidence comes from ledgers that do exist (audit rows, approvals, live MRM
+   sign-offs per ADR-0045, eval runs per ADR-0044, attributed-spend rows). The gap rule is enforced:
+   a control with zero evidence renders `status: 'gap'` with an explicit note, never a silent pass.
+   The payload also states in-band that presence of evidence is **not** an assertion that a control
+   is operating effectively.
+4. **CSV does not reuse ADR-0031's streaming keyset export.** §3 says it should. A report is a
+   *bounded, already-computed* artifact — tens to hundreds of rows in `report_runs.row_count`, not a
+   ledger scan — so the streaming machinery would add nothing and the export writes the rendered
+   payload directly. The long-format `section,key,metric,value` shape is documented and round-trip
+   tested. The ADR-0031 window/ceiling disclosure is not applicable because there is no truncation
+   to disclose.
+5. **`workflow` section throughput comes from `approvals`, not `workflow_instances`.** §1 names
+   both. Approval throughput and latency shipped; per-stage workflow-instance counts did not.
+6. **Report kinds share one computation.** `exec_summary` and `team_scorecard` currently differ only
+   in scope and default sections, not in the sections' contents. Honest: the "scorecard" shape is
+   the same data at a narrower scope.
+
+### What is GENUINELY ENFORCED vs. what NOTHING DRIVES
+
+**Genuinely enforced — asserted on served payloads and persisted rows, not on UI:**
+
+- **THE NUMBERS RECONCILE AGAINST THE LEDGER.** The reconciliation test re-queries `usage_events`
+  for the exact period window, sums the rows in JS, and asserts the report's `totalCostUsd`,
+  `totalEvents` and `totalInputTokens` **equal** that — per project line as well as in total. It is
+  not a snapshot of whatever the code produced. If a rollup table were ever introduced and drifted,
+  this fails.
+- **CROSS-TEAM AGGREGATION DOES NOT LEAK.** A non-admin team lead's scorecard is asserted to contain
+  exactly one project line (their own), to **omit** the other team's project id entirely, and — the
+  proof it is arithmetic rather than cosmetic — its total is asserted **strictly less than** the
+  total an unscoped query over both projects produces. The persisted `report_runs.
+  effective_project_ids` is asserted to be that same single-element list.
+- **THE ORG REPORT IS ADMIN-ONLY.** A non-admin generating an org-scoped definition gets 403 with
+  `report_scope_not_entitled` and an audited `report-access-denied-org-scope` row. Another team's
+  scorecard and a non-member's project report are each refused with their own ruleId.
+- **ARTIFACT READS ARE SCOPED TOO.** A non-admin is refused both `GET /v1/reports/runs/:id` and its
+  `/export` for an org-scoped artifact (audited `report-read-denied` / `report-export-denied`), and
+  the run does **not** appear in their `GET /v1/reports/runs` list — while their own team artifact
+  is readable.
+- **THE EXPORT ROUND-TRIPS.** The CSV is parsed back and its `spend/total/cost_usd` cell is asserted
+  equal to the payload's number, so the export cannot silently disagree with the report.
+- **ADMIN GATING.** Authoring definitions and schedules, driving the sweep, and the overview are
+  admin-only via the default gate; generation and artifact reads are the only non-admin routes, and
+  each resolves entitlement inside the handler. A non-admin's attempt to create a definition is
+  asserted to leave **no row**.
+- **THE ESTIMATE LABEL IS ON THE FACE OF THE REPORT.** `spend.estimate: true` plus the
+  GOVERNANCE §10.4 disclaimer ride every payload and every CSV (`meta,report,basis,estimate`).
+
+**Nothing drives it — stated plainly:**
+
+- **THERE IS NO IN-PROCESS SCHEDULER IN THIS CODEBASE, AND THIS SLICE DID NOT ADD ONE.** A
+  `report_schedules` row is a cadence definition and nothing more. Reports are generated in exactly
+  two ways: someone calls `POST /v1/reports/definitions/:id/generate`, or an operator/external cron
+  calls `POST /v1/reports/schedules/run-due`. Both the sweep response and the SPA say so in those
+  words, and `last_generated_at` staying `NULL` is how an idle schedule is **visible** rather than
+  assumed to be working. The test asserts that creating a schedule generates nothing, that the sweep
+  is what generates, and that an immediately-repeated sweep skips.
+- **No artifact is delivered anywhere.** No S3, no mail, no ChatOps.
+- **`initiative` scope is implemented but untested end to end** — it resolves through
+  `projects.initiative_id` exactly as `team` resolves through `project_members.team_id`.
+- **Retention/pruning of `report_runs` is not built.** Payloads accumulate.
+
+### Verification performed
+
+See the combined verification block in ADR-0048's amendment — both slices were built and verified in
+one session and share one test run.
+
+### Follow-ups this slice leaves open
+
+- **PDF rendering** — still the unresolved dependency decision §3 flags.
+- **Delivery to the ADR-0035 write-only encrypted bucket**, and recipient notification.
+- **ADR-0058 compliance packs** — replace the built-in five-control set with real framework
+  mappings; the renderer is ready for them.
+- **A scheduler**, or a documented cron entry, for `run-due`.
+- **Retention for `report_runs.payload`.**

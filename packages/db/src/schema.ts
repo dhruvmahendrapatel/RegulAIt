@@ -607,6 +607,13 @@ export const auditLog = pgTable(
         // `approval-claimed`, `approval-bulk-*`), so "what happened to this
         // approval" stays one query. Plain text column — no DDL needed.
         "approval_assignment_rule",
+        // ADR-0047: an admin authoring a report DEFINITION or SCHEDULE, every
+        // report GENERATION (with the effective scope it was permitted to
+        // query), every EXPORT, and — the row that matters — every generation
+        // REFUSED because the caller's entitlement did not cover the scope.
+        // A report aggregates across teams, so "who was told no" is as much
+        // the record as "what was produced". Plain text column — no DDL needed.
+        "report",
       ],
     })
       .notNull()
@@ -3328,3 +3335,114 @@ export type ApprovalSlaPolicyRow = typeof approvalSlaPolicies.$inferSelect;
 export type ApprovalAssignmentRuleRow = typeof approvalAssignmentRules.$inferSelect;
 export type ApprovalAssignmentRow = typeof approvalAssignments.$inferSelect;
 export type ApprovalSavedViewRow = typeof approvalSavedViews.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0047 (migration 0059) — EXECUTIVE & COMPLIANCE REPORTING.
+//
+// A READ-ONLY PROJECTION over the ledgers that already exist. There is no
+// rollup/summary table here on purpose: a denormalized copy of spend drifts
+// from `usage_events`, and a board report that disagrees with the cost
+// dashboard is worse than no board report. Every figure is computed at
+// generation time from `usage_events` / `audit_log` / `approvals` under a WHERE
+// clause built from the CALLER'S OWN entitlement.
+// ---------------------------------------------------------------------------
+
+export const REPORT_KINDS = ["exec_summary", "team_scorecard", "compliance"] as const;
+export const REPORT_SCOPE_KINDS = ["org", "initiative", "team", "project"] as const;
+export const REPORT_PERIODS = [
+  "current_month",
+  "last_month",
+  "current_quarter",
+  "last_quarter",
+  "last_30_days",
+] as const;
+export const REPORT_FORMATS = ["csv", "json", "both"] as const;
+export const REPORT_ENTITLEMENT_SCOPES = ["org", "team", "project"] as const;
+export const REPORT_CADENCES = ["daily", "weekly", "monthly", "quarterly"] as const;
+export const REPORT_TRIGGERS = ["manual", "scheduled"] as const;
+
+export const reportDefinitions = pgTable(
+  "report_definitions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    kind: text("kind", { enum: REPORT_KINDS }).notNull(),
+    scopeKind: text("scope_kind", { enum: REPORT_SCOPE_KINDS }).notNull().default("org"),
+    /** NULL exactly when scopeKind='org' (DB CHECK) */
+    scopeId: uuid("scope_id"),
+    period: text("period", { enum: REPORT_PERIODS }).notNull().default("current_month"),
+    sections: jsonb("sections").$type<string[]>(),
+    format: text("format", { enum: REPORT_FORMATS }).notNull().default("json"),
+    /** THE GRANT a caller must hold. 'org' is admin-only, and the DB refuses to
+     * pair it with anything but an org-scoped definition. */
+    entitlementScope: text("entitlement_scope", { enum: REPORT_ENTITLEMENT_SCOPES })
+      .notNull()
+      .default("project"),
+    description: text("description"),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("report_definitions_name_uq").on(t.name),
+    index("report_definitions_kind_idx").on(t.kind),
+  ],
+);
+
+/** the schedule DEFINITION. Nothing in this codebase fires it — an operator or
+ * an external cron drives POST /v1/reports/schedules/run-due. */
+export const reportSchedules = pgTable(
+  "report_schedules",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    definitionId: uuid("definition_id")
+      .notNull()
+      .references(() => reportDefinitions.id, { onDelete: "cascade" }),
+    cadence: text("cadence", { enum: REPORT_CADENCES }).notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    recipientUserIds: jsonb("recipient_user_ids").$type<string[]>(),
+    lastGeneratedAt: timestamp("last_generated_at", { withTimezone: true }),
+    lastRunId: uuid("last_run_id"),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("report_schedules_definition_idx").on(t.definitionId),
+    index("report_schedules_enabled_idx").on(t.enabled),
+  ],
+);
+
+/** one immutable row per generation. `effectiveProjectIds` is the honest record
+ * of what the generator was PERMITTED to query — NULL means org-wide. */
+export const reportRuns = pgTable(
+  "report_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    definitionId: uuid("definition_id")
+      .notNull()
+      .references(() => reportDefinitions.id, { onDelete: "cascade" }),
+    scheduleId: uuid("schedule_id").references(() => reportSchedules.id, { onDelete: "set null" }),
+    requestedByUserId: uuid("requested_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    trigger: text("trigger", { enum: REPORT_TRIGGERS }).notNull().default("manual"),
+    period: text("period", { enum: REPORT_PERIODS }).notNull(),
+    periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
+    periodEnd: timestamp("period_end", { withTimezone: true }).notNull(),
+    /** COPIED at generation time so a later edit to the definition cannot
+     * retroactively widen who may read an already-generated artifact */
+    entitlementScope: text("entitlement_scope", { enum: REPORT_ENTITLEMENT_SCOPES }).notNull(),
+    effectiveProjectIds: jsonb("effective_project_ids").$type<string[] | null>(),
+    format: text("format", { enum: REPORT_FORMATS }).notNull().default("json"),
+    payload: jsonb("payload").notNull(),
+    rowCount: integer("row_count").notNull().default(0),
+    generatedAt: timestamp("generated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("report_runs_definition_at_idx").on(t.definitionId, t.generatedAt),
+    index("report_runs_requested_by_idx").on(t.requestedByUserId),
+  ],
+);
+
+export type ReportDefinitionRow = typeof reportDefinitions.$inferSelect;
+export type ReportScheduleRow = typeof reportSchedules.$inferSelect;
+export type ReportRunRow = typeof reportRuns.$inferSelect;
