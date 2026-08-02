@@ -29,10 +29,16 @@ import {
   createDb,
   desc,
   eq,
+  inArray,
+  oidcProviders,
+  ORG_SETTINGS_ID,
+  orgSettings,
   roleAssignments,
+  samlProviders,
   sql,
   users,
   type Db,
+  type OrgSettingsRow,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { hashToken, totpCode, totpStep } from "./auth.js";
@@ -235,6 +241,27 @@ const oidcRoundTrip = async (
   });
   return { cb, state, nonce };
 };
+/**
+ * SUITE-ORDER ISOLATION. The whole gateway suite shares ONE database
+ * (vitest.config.ts turns file parallelism off for exactly that reason) and
+ * vitest orders files by their cached previous-run duration, so ANY file may
+ * run before this one. Two pieces of state are global and would otherwise let
+ * a neighbour decide whether this file passes:
+ *
+ *  1. `org_settings` is a SINGLETON row (ORG_SETTINGS_ID = "singleton").
+ *  2. The set of ENABLED SSO providers — which the ADR-0036 lockout guard
+ *     counts across OIDC *and* SAML together — decides whether `sso_only` may
+ *     be engaged at all.
+ *
+ * So: every provider this file creates is tracked and deleted at the end, the
+ * singleton is snapshotted and restored, and the `sso_only` block below
+ * establishes its own precondition (zero enabled providers of either family)
+ * instead of assuming a fresh database. group-role-mapping.test.ts is the
+ * model for the cleanup half.
+ */
+const createdOidcProviderIds = new Set<string>();
+let orgSettingsSnapshot: OrgSettingsRow | null = null;
+
 const mkProvider = async (payload: Record<string, unknown>) => {
   const r = await app.inject({
     method: "POST", headers: AUTH, url: "/v1/auth/oidc-providers",
@@ -246,7 +273,9 @@ const mkProvider = async (payload: Record<string, unknown>) => {
     },
   });
   expect(r.statusCode).toBe(201);
-  return r.json();
+  const row = r.json();
+  createdOidcProviderIds.add(row.id);
+  return row;
 };
 
 beforeAll(async () => {
@@ -272,9 +301,24 @@ beforeAll(async () => {
     },
   });
   expect(egressAllowed.statusCode).toBe(201);
+  // snapshot the shared singleton so whatever this file flips is handed back
+  // exactly as it was found (see the SUITE-ORDER ISOLATION note above)
+  const [settings] = await db.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  orgSettingsSnapshot = settings ?? null;
 }, 120_000);
 
 afterAll(async () => {
+  // Providers first, settings second: the rows go out through the DB (not the
+  // API), so the no-lockout guard can never refuse this file's own cleanup.
+  if (createdOidcProviderIds.size > 0) {
+    await db.delete(oidcProviders).where(inArray(oidcProviders.id, [...createdOidcProviderIds]));
+  }
+  if (orgSettingsSnapshot) {
+    await db
+      .update(orgSettings)
+      .set(orgSettingsSnapshot)
+      .where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  }
   await app.close();
   await new Promise<void>((resolve) => idp.server?.close(() => resolve()) ?? resolve());
 });
@@ -781,6 +825,60 @@ describe("OIDC SSO (fake IdP: discovery + jwks + token)", () => {
 
 // ===========================================================================
 describe("sso_only", () => {
+  // These assertions are about a COUNT of enabled SSO providers, so they only
+  // mean anything against a known starting count. Any earlier file (saml.test
+  // .ts, group-role-mapping.test.ts, mcp-oidc-egress.test.ts) may have left
+  // enabled providers behind, and vitest's duration-ordered file scheduling
+  // decides which of them ran first — so establish the precondition here
+  // rather than inheriting it, and hand back exactly what was borrowed.
+  const borrowedOidcIds: string[] = [];
+  const borrowedSamlIds: string[] = [];
+
+  beforeAll(async () => {
+    // ssoOnly off first: while it is on, disabling the last door is refused.
+    await db.update(orgSettings).set({ ssoOnly: false }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    const oidcOn = await db
+      .select({ id: oidcProviders.id })
+      .from(oidcProviders)
+      .where(eq(oidcProviders.enabled, true));
+    const samlOn = await db
+      .select({ id: samlProviders.id })
+      .from(samlProviders)
+      .where(eq(samlProviders.enabled, true));
+    borrowedOidcIds.push(...oidcOn.map((p) => p.id));
+    borrowedSamlIds.push(...samlOn.map((p) => p.id));
+    if (borrowedOidcIds.length > 0) {
+      await db
+        .update(oidcProviders)
+        .set({ enabled: false })
+        .where(inArray(oidcProviders.id, borrowedOidcIds));
+    }
+    if (borrowedSamlIds.length > 0) {
+      await db
+        .update(samlProviders)
+        .set({ enabled: false })
+        .where(inArray(samlProviders.id, borrowedSamlIds));
+    }
+  });
+
+  afterAll(async () => {
+    // never leave sso_only engaged for a later file — a stuck dial 403s every
+    // password login in the suite
+    await db.update(orgSettings).set({ ssoOnly: false }).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+    if (borrowedOidcIds.length > 0) {
+      await db
+        .update(oidcProviders)
+        .set({ enabled: true })
+        .where(inArray(oidcProviders.id, borrowedOidcIds));
+    }
+    if (borrowedSamlIds.length > 0) {
+      await db
+        .update(samlProviders)
+        .set({ enabled: true })
+        .where(inArray(samlProviders.id, borrowedSamlIds));
+    }
+  });
+
   it("cannot be enabled while zero enabled OIDC providers exist", async () => {
     const r = await app.inject({
       method: "PUT", headers: AUTH, url: "/v1/org/settings", payload: { ssoOnly: true },

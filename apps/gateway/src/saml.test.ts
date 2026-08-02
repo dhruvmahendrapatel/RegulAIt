@@ -34,11 +34,17 @@ import {
   createDb,
   desc,
   eq,
+  inArray,
+  oidcProviders,
+  ORG_SETTINGS_ID,
+  orgSettings,
   roleAssignments,
   samlAssertionIds,
   samlLoginStates,
+  samlProviders,
   users,
   type Db,
+  type OrgSettingsRow,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { governingIpPolicy, HUMAN_SESSION_ORIGINS, hashToken } from "./auth.js";
@@ -220,6 +226,21 @@ const postAcs = (providerId: string, signedXml: string, relayState?: string) =>
 // helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * SUITE-ORDER ISOLATION (mirrors the note in auth.test.ts). The gateway suite
+ * shares ONE database and vitest orders files by cached duration, so this file
+ * may run before any other. Two things here are GLOBAL and must not leak:
+ * enabled SSO providers (the ADR-0036 lockout guard counts OIDC + SAML
+ * together, so a leftover enabled provider silently changes what a later
+ * file's `sso_only` assertions observe) and the `org_settings` singleton this
+ * file flips (`ssoOnly`, `sessionIpPolicy`, `sessionIpAllowlist`). Every
+ * provider created here is tracked and deleted, and the singleton is
+ * snapshotted and restored — the group-role-mapping.test.ts pattern.
+ */
+const createdSamlProviderIds = new Set<string>();
+const createdOidcProviderIds = new Set<string>();
+let orgSettingsSnapshot: OrgSettingsRow | null = null;
+
 const mkProvider = async (payload: Record<string, unknown> = {}) => {
   const r = await app.inject({
     method: "POST", headers: AUTH, url: "/v1/auth/saml-providers",
@@ -232,7 +253,9 @@ const mkProvider = async (payload: Record<string, unknown> = {}) => {
     },
   });
   expect(r.statusCode, JSON.stringify(r.json())).toBe(201);
-  return r.json();
+  const row = r.json();
+  createdSamlProviderIds.add(row.id);
+  return row;
 };
 
 const mkUser = async (email: string, name: string): Promise<string> => {
@@ -297,9 +320,26 @@ beforeAll(async () => {
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   keyA = makeSigningKey("regulait-test-idp-a");
   keyB = makeSigningKey("regulait-test-idp-b");
+  const [settings] = await db.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  orgSettingsSnapshot = settings ?? null;
 }, 120_000);
 
 afterAll(async () => {
+  // Providers go out through the DB rather than the API so the no-lockout
+  // guard can never refuse this file's own cleanup; the singleton is restored
+  // afterwards to exactly the row this file found.
+  if (createdSamlProviderIds.size > 0) {
+    await db.delete(samlProviders).where(inArray(samlProviders.id, [...createdSamlProviderIds]));
+  }
+  if (createdOidcProviderIds.size > 0) {
+    await db.delete(oidcProviders).where(inArray(oidcProviders.id, [...createdOidcProviderIds]));
+  }
+  if (orgSettingsSnapshot) {
+    await db
+      .update(orgSettings)
+      .set(orgSettingsSnapshot)
+      .where(eq(orgSettings.id, ORG_SETTINGS_ID));
+  }
   await app?.close();
 });
 
@@ -713,7 +753,11 @@ describe("ADR-0036 — admin CRUD, secrets and the generalized lockout guard", (
   });
 
   it("sso_only counts OIDC and SAML TOGETHER — a SAML-only org may engage it", async () => {
-    // start clean: no enabled providers of either family
+    // Start clean: no enabled providers of EITHER family. This is a counting
+    // assertion, so the precondition is established here rather than inherited
+    // from whichever file vitest happened to schedule first — including OIDC
+    // providers, which the guard counts together with SAML ones. Everything
+    // borrowed is handed back at the end of the test.
     await app.inject({ method: "PUT", headers: AUTH, url: "/v1/org/settings", payload: { ssoOnly: false } });
     const all = await app.inject({ method: "GET", headers: AUTH, url: "/v1/auth/saml-providers" });
     for (const prov of all.json().providers as Array<{ id: string; enabled: boolean }>) {
@@ -723,6 +767,15 @@ describe("ADR-0036 — admin CRUD, secrets and the generalized lockout guard", (
           payload: { enabled: false },
         });
       }
+    }
+    const borrowedOidc = (
+      await db.select({ id: oidcProviders.id }).from(oidcProviders).where(eq(oidcProviders.enabled, true))
+    ).map((p) => p.id);
+    if (borrowedOidc.length > 0) {
+      await db
+        .update(oidcProviders)
+        .set({ enabled: false })
+        .where(inArray(oidcProviders.id, borrowedOidc));
     }
     const refused = await app.inject({
       method: "PUT", headers: AUTH, url: "/v1/org/settings", payload: { ssoOnly: true },
@@ -773,6 +826,7 @@ describe("ADR-0036 — admin CRUD, secrets and the generalized lockout guard", (
       },
     });
     expect(oidc2.statusCode, JSON.stringify(oidc2.json())).toBe(201);
+    createdOidcProviderIds.add(oidc2.json().id);
     const nowFree = await app.inject({
       method: "PATCH", headers: AUTH, url: `/v1/auth/saml-providers/${p.id}`,
       payload: { enabled: false },
@@ -794,8 +848,14 @@ describe("ADR-0036 — admin CRUD, secrets and the generalized lockout guard", (
     });
     expect(oidcFree.statusCode).toBe(200);
 
-    // leave the org as we found it
+    // leave the org as we found it — dial off, borrowed providers handed back
     await app.inject({ method: "PUT", headers: AUTH, url: "/v1/org/settings", payload: { ssoOnly: false } });
+    if (borrowedOidc.length > 0) {
+      await db
+        .update(oidcProviders)
+        .set({ enabled: true })
+        .where(inArray(oidcProviders.id, borrowedOidc));
+    }
   });
 });
 
