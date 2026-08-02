@@ -30,7 +30,6 @@ import {
   ne,
   or,
   count,
-  oidcProviders,
   orgSettings,
   ORG_SETTINGS_ID,
   rateLimits,
@@ -50,6 +49,7 @@ import {
 import { z } from "zod";
 import { recordSchedulerFailure, recordSchedulerSuccess } from "./scheduler-health.js";
 import { evaluateIpEnvelope, isValidCidr } from "./net-policy.js";
+import { countEnabledSsoProviders } from "./sso-providers.js";
 
 export type { OrgSettingsRow };
 
@@ -352,17 +352,19 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db) {
         });
       }
     }
-    // ADR-0025 lockout guard: sso_only without a single enabled OIDC provider
+    // ADR-0025 lockout guard: sso_only without a single enabled SSO provider
     // would strand every human login behind a door that does not exist.
+    // ADR-0036 GENERALIZED the count: OIDC and SAML are co-equal federated
+    // paths, so a SAML-only org can legitimately turn sso_only on and the
+    // guard must count both families through the SAME helper the provider
+    // CRUD surfaces use — two copies of this rule would drift.
     if (body.ssoOnly === true) {
-      const enabled = await db
-        .select({ id: oidcProviders.id })
-        .from(oidcProviders)
-        .where(eq(oidcProviders.enabled, true));
-      if (enabled.length === 0) {
+      const enabled = await countEnabledSsoProviders(db);
+      if (enabled.total === 0) {
         return reply.status(422).send({
           error: "sso_only_needs_a_provider",
-          detail: "enable at least one OIDC provider before turning sso_only on — otherwise nobody can sign in",
+          detail:
+            "enable at least one SSO provider (OIDC or SAML) before turning sso_only on — otherwise nobody can sign in",
         });
       }
     }

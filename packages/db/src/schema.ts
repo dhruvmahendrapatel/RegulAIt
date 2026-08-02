@@ -68,13 +68,17 @@ export const users = pgTable("users", {
  * - `password`  — POST /auth/login (password, no MFA required)
  * - `api_key`   — POST /auth/login-with-key with a user's API key
  * - `oidc`      — the OIDC callback minted it
+ * - `saml`      — ADR-0036 (migration 0051): the SAML Assertion Consumer
+ *   Service minted it. Co-equal with `oidc`: same session machinery, same
+ *   default-deny JIT posture, and — like `oidc` — it NEVER receives the
+ *   ADR-0028 current-password bypass (that bypass is `api_key`-only).
  * - `bootstrap` — POST /auth/login-with-key with the deploy-time bootstrap token
  * - `unknown`   — a pre-0046 row. The true origin is unknowable and was NOT
  *   invented at backfill time; `unknown` never receives the ADR-0028
  *   current-password bypass (fail closed).
  * Sessions completed through MFA are `password` — the second factor does not
  * change WHICH credential established the session. */
-export const SESSION_ORIGINS = ["password", "api_key", "oidc", "bootstrap", "unknown"] as const;
+export const SESSION_ORIGINS = ["password", "api_key", "oidc", "saml", "bootstrap", "unknown"] as const;
 export type SessionOrigin = (typeof SESSION_ORIGINS)[number];
 
 /** ADR-0039 (migration 0050): the IP-policy levels shared by BOTH knobs
@@ -116,7 +120,14 @@ export const authSessions = pgTable(
   },
   (t) => [
     index("auth_sessions_user_idx").on(t.userId),
-    check("auth_sessions_origin_ck", sql`${t.origin} IN ('password', 'api_key', 'oidc', 'bootstrap', 'unknown')`),
+    // ADR-0036 (migration 0051) widened this to admit 'saml'. The constraint
+    // is the wall that would otherwise make every SAML session insert fail —
+    // adding the origin to SESSION_ORIGINS without widening it here would
+    // typecheck and then 23514 at runtime.
+    check(
+      "auth_sessions_origin_ck",
+      sql`${t.origin} IN ('password', 'api_key', 'oidc', 'saml', 'bootstrap', 'unknown')`,
+    ),
   ],
 );
 
@@ -165,6 +176,102 @@ export const oidcLoginStates = pgTable("oidc_login_states", {
   /** post-login browser destination — restricted to /app or /admin */
   returnTo: text("return_to").notNull().default("/app"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+});
+
+// --- ADR-0036: SAML 2.0 SSO (migration 0051) ---------------------------------
+// A SAML twin of oidcProviders, shape-for-shape, so the admin surface, the JIT
+// policy and the audit objectType extend by ANALOGY rather than by a new
+// pattern. The two federated paths are co-equal: same createSession, same
+// default-deny posture, same allowed-domain backstop.
+export const samlProviders = pgTable("saml_providers", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull().unique(),
+  /** the IdP's entity id / Issuer. Our SP entity id is deployment-global (it
+   * is derived per-request, exactly like the OIDC redirect_uri); THIS column
+   * is the value we pin an assertion's <Issuer> against. */
+  entityId: text("entity_id").notNull(),
+  /** the IdP SingleSignOn endpoint an SP-initiated AuthnRequest 302s to */
+  idpSsoUrl: text("idp_sso_url").notNull(),
+  /** the IdP's X.509 signing certificate(s), PEM. A LIST so a certificate
+   * ROLLOVER can stage the incoming cert before the IdP cuts over — an
+   * assertion signed by ANY pinned cert verifies. Signatures are verified
+   * against these pinned certs, NEVER against a cert embedded in the
+   * document: that pinning is what defeats signature-wrapping. */
+  idpSigningCerts: jsonb("idp_signing_certs").$type<string[]>().notNull(),
+  enabled: boolean("enabled").notNull().default(true),
+  /** NULL = any domain; else the asserted email's domain must be listed. The
+   * MANDATORY backstop — an IdP email attribute is only as trustworthy as the
+   * IdP's own verification, so an empty list is a conscious admin choice. */
+  allowedEmailDomains: jsonb("allowed_email_domains").$type<string[]>(),
+  /** role granted to JIT-provisioned users (never admin); NULL = no role */
+  defaultRoleId: uuid("default_role_id").references(() => roles.id, { onDelete: "set null" }),
+  /** default-deny: an unknown subject with JIT off is 403'd and audited */
+  jitProvisioning: boolean("jit_provisioning").notNull().default(false),
+  /** posture flags handed straight to the library. Defaulting BOTH signature
+   * requirements on would break the (common) IdP that signs only the
+   * assertion, so want_authn_response_signed defaults false while
+   * want_assertions_signed defaults TRUE — at least one signature over the
+   * assertion is always required, and turning want_assertions_signed off is
+   * refused at the API (see samlProviderSchema). */
+  wantAssertionsSigned: boolean("want_assertions_signed").notNull().default(true),
+  wantAuthnResponseSigned: boolean("want_authn_response_signed").notNull().default(false),
+  /** IdP-initiated SSO is a known CSRF / stolen-assertion surface: OPT-IN per
+   * provider. Off (the default) means an assertion with no matching
+   * outstanding InResponseTo correlation row is REFUSED. */
+  allowIdpInitiated: boolean("allow_idp_initiated").notNull().default(false),
+  /** the SAML attribute carrying the email when the NameID format is not
+   * emailAddress. NULL = try the usual suspects (NameID/emailAddress, the
+   * `email`/`mail` profile keys, urn:oid:0.9.2342.19200300.100.1.3). */
+  emailAttribute: text("email_attribute"),
+  /** OPTIONAL SP-side private key for request signing / encrypted assertions.
+   * AES-256-GCM under REGULAIT_DATA_KEY, WRITE-ONLY at the API — byte-identical
+   * handling to oidc_providers.client_secret_ciphertext and the TOTP secret. */
+  spPrivateKeyCiphertext: text("sp_private_key_ciphertext"),
+  /** the matching SP public certificate (PEM) — public by definition, it is
+   * published in our SP metadata for the IdP admin to consume. */
+  spCertificate: text("sp_certificate"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** the twin of oidcLoginStates: one row per SP-initiated AuthnRequest. The
+ * request id is what the IdP echoes back as InResponseTo, so this row IS the
+ * correlation proof that the login was solicited; relay_state and returnTo
+ * live server-side, never in the browser. SINGLE-USE (claimed-and-deleted)
+ * and swept by expiry. */
+export const samlLoginStates = pgTable("saml_login_states", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  providerId: uuid("provider_id")
+    .notNull()
+    .references(() => samlProviders.id, { onDelete: "cascade" }),
+  /** the AuthnRequest ID — matched against the response's InResponseTo */
+  requestId: text("request_id").notNull().unique(),
+  relayState: text("relay_state").notNull().unique(),
+  /** post-login browser destination — restricted to /app or /admin */
+  returnTo: text("return_to").notNull().default("/app"),
+  /** the ACS URL this request named; the assertion's Recipient must match it */
+  acsUrl: text("acs_url").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+});
+
+/** REPLAY seen-set: the assertion ID of every accepted assertion, kept until
+ * its validity window closes. The SAML analogue of the single-use OIDC state
+ * row and the TOTP lastUsedStep guard — a captured assertion presented twice
+ * inside its own NotOnOrAfter is refused the second time. Swept by expiry. */
+export const samlAssertionIds = pgTable("saml_assertion_ids", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  providerId: uuid("provider_id")
+    .notNull()
+    .references(() => samlProviders.id, { onDelete: "cascade" }),
+  /** globally unique: an assertion ID is required to be unique by the spec,
+   * and scoping the guard per-provider would let a second registered provider
+   * re-play the first one's assertion. */
+  assertionId: text("assertion_id").notNull().unique(),
+  seenAt: timestamp("seen_at", { withTimezone: true }).notNull().defaultNow(),
+  /** the assertion's own NotOnOrAfter (plus the accepted skew): after this the
+   * assertion is refused on its own merits and the row can be swept. */
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
 });
 
@@ -298,6 +405,11 @@ export const auditLog = pgTable(
         // as objectType "user"; admin CRUD of an SSO provider audits as
         // "oidc_provider". Plain text column — no DDL needed.
         "oidc_provider",
+        // ADR-0036: admin CRUD of a SAML provider, and every SAML assertion
+        // refusal that is a property of the PROVIDER rather than of a user
+        // (unsolicited assertion, replay, audience/recipient/issuer mismatch).
+        // Plain text column — no DDL needed.
+        "saml_provider",
         // ADR-0034: admin registration/update/enable/removal of a CUSTOM LLM
         // provider, every egress-allow-list change, and the per-dispatch
         // destination-host record (the point of a governance product is that

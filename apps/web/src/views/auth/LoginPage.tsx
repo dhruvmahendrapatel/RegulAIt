@@ -18,6 +18,7 @@ import type {
   LoginRequestBody,
   LoginResponse,
   OidcProvidersResponse,
+  SamlProvidersResponse,
 } from "../../api/types";
 import { useSession } from "../../session/SessionContext";
 import { Button, Field, Input } from "../../ui/kit";
@@ -53,6 +54,14 @@ export default function LoginPage() {
   const providers = useQuery({
     queryKey: ["oidc-providers"],
     queryFn: () => api.get<OidcProvidersResponse>("/auth/oidc/providers"),
+    staleTime: 60_000,
+  });
+  // ADR-0036: SAML is a CO-EQUAL federated path, so it is a second list here
+  // rather than a second screen — the person signing in should not have to
+  // know which protocol their IdP speaks.
+  const samlProviders = useQuery({
+    queryKey: ["saml-providers"],
+    queryFn: () => api.get<SamlProvidersResponse>("/auth/saml/providers"),
     staleTime: 60_000,
   });
 
@@ -148,13 +157,16 @@ export default function LoginPage() {
     }
   };
 
-  const ssoButtons = (providers.data?.providers ?? []).map((p) => (
+  const ssoButtons = [
+    ...(providers.data?.providers ?? []).map((p) => ({ ...p, kind: "oidc" as const })),
+    ...(samlProviders.data?.providers ?? []).map((p) => ({ ...p, kind: "saml" as const })),
+  ].map((p) => (
     <Button
-      key={p.id}
+      key={`${p.kind}:${p.id}`}
       onClick={() => {
         // server-side returnTo whitelist is /app|/admin (phase 2 adds /ui) —
         // the session cookie is set either way, so /ui works after callback.
-        window.location.href = `/auth/oidc/${p.id}/start?returnTo=/app`;
+        window.location.href = `/auth/${p.kind}/${p.id}/start?returnTo=/app`;
       }}
     >
       Continue with {p.name}

@@ -66,6 +66,28 @@ export interface OidcProvider {
   enabled: boolean;
 }
 
+/** ADR-0036 — the SAML twin. Note what is NOT here: the SP private key is
+ * write-only at the API, so the UI only ever learns WHETHER one is set. */
+export interface SamlProvider {
+  id: string;
+  name: string;
+  /** the IdP's entity id / Issuer — assertions are pinned to it */
+  entityId: string;
+  idpSsoUrl: string;
+  /** PEM list: a rollover stages the incoming cert beside the outgoing one */
+  idpSigningCerts: string[];
+  allowedEmailDomains: string[] | null;
+  defaultRoleId: string | null;
+  jitProvisioning: boolean;
+  wantAssertionsSigned: boolean;
+  wantAuthnResponseSigned: boolean;
+  allowIdpInitiated: boolean;
+  emailAttribute: string | null;
+  spPrivateKeySet: boolean;
+  spCertificate: string | null;
+  enabled: boolean;
+}
+
 export interface Role {
   id: string;
   name: string;

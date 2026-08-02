@@ -62,6 +62,16 @@ services:
       # Harmless with the `tls` profile OFF: 172.28.0.2 simply does not exist,
       # so nothing is trusted and req.ip is the socket peer.
       REGULAIT_TRUSTED_PROXIES: ${REGULAIT_TRUSTED_PROXIES:-172.28.0.2}
+      # ADR-0036 (SAML 2.0 SSO) — both OPTIONAL, both bounded:
+      #  - REGULAIT_SAML_ENTITY_ID pins the deployment-global SP entity id.
+      #    Unset, it is derived from the request host (like the OIDC
+      #    redirect_uri). Pin it before handing metadata to an IdP admin if
+      #    anything in front of the gateway can rename the host, because every
+      #    IdP's AudienceRestriction is written against this exact string.
+      #  - REGULAIT_SAML_CLOCK_SKEW_MINUTES widens the NotBefore/NotOnOrAfter
+      #    tolerance. Default 2, CLAMPED to 9 — there is no "unlimited" value.
+      # REGULAIT_SAML_ENTITY_ID: https://regulait.example.com/auth/saml/metadata
+      # REGULAIT_SAML_CLOCK_SKEW_MINUTES: "2"
       # Optional — set a provider's API key here (or in a .env / secret) to
       # activate real model dispatch platform-wide, no admin-UI paste, no key in
       # the DB. Read at dispatch time only; a stored credential still wins.

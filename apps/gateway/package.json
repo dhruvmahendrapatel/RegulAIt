@@ -30,6 +30,7 @@
     "@google-cloud/os-config": "^4.3.2",
     "@kubernetes/client-node": "^1.4.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@node-saml/node-saml": "5.1.0",
     "@regulait/connector-provider": "workspace:*",
     "@regulait/db": "workspace:*",
     "@regulait/git-provider": "workspace:*",
@@ -46,6 +47,7 @@
     "zod": "^3.25.67"
   },
   "devDependencies": {
-    "vitest": "^3.2.4"
+    "vitest": "^3.2.4",
+    "xml-crypto": "6.1.2"
   }
 }

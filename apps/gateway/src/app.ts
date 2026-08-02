@@ -110,6 +110,7 @@ import {
   resolveSession,
   type AuthContext,
 } from "./auth.js";
+import { registerSamlRoutes } from "./saml.js";
 import { evaluateIpEnvelope } from "./net-policy.js";
 import { activeDelegatorsFor, activeDelegationFrom } from "./delegations.js";
 
@@ -448,6 +449,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "/auth/oidc/providers",
     "/auth/oidc/:providerId/start",
     "/auth/oidc/callback",
+    // ADR-0036 — the SAML twin. The provider list and /start are pre-credential
+    // by definition; the ACS is called by the IdP (or by the user's browser
+    // carrying the IdP's POST), which likewise holds no RegulAIt credential —
+    // the assertion IS the credential and it is validated in-route. The
+    // metadata document is public by design: entity id, ACS URL and our PUBLIC
+    // certificate, i.e. exactly what an IdP admin would otherwise retype.
+    "/auth/saml/providers",
+    "/auth/saml/:providerId/start",
+    "/auth/saml/:providerId/acs",
+    "/auth/saml/:providerId/metadata",
     // the /ui SPA shell (ADR-0026): a static, zero-data page like /app and
     // /admin above — the browser hits it before it has any credential; every
     // API call the page makes still authenticates normally.
@@ -777,6 +788,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "GET /auth/oidc/providers",
     "GET /auth/oidc/:providerId/start",
     "GET /auth/oidc/callback",
+    // ADR-0036 — the SAML twin of the three above. Auth-exempt AND non-admin:
+    // a browser at the login screen has no credential, and the IdP posting an
+    // assertion to the ACS has no RegulAIt identity at all — the assertion is
+    // the credential, and it is validated in-route.
+    "GET /auth/saml/providers",
+    "GET /auth/saml/:providerId/start",
+    "POST /auth/saml/:providerId/acs",
+    "GET /auth/saml/:providerId/metadata",
     "GET /v1/me",
     "GET /v1/model-providers/status",
     "GET /v1/runs",
@@ -2317,6 +2336,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // for one-time passwords, MFA recovery, session revocation and SSO
   // provider CRUD.
   registerAuthRoutes(app, db, { bootstrapToken: opts.bootstrapToken, dataKey: opts.dataKey });
+  registerSamlRoutes(app, db, { dataKey: opts.dataKey });
 
   registerAgentConnectorRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0034 — admin-registered custom LLM providers + the egress allow-list

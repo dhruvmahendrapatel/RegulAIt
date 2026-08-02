@@ -45,6 +45,7 @@ import { z } from "zod";
 import * as oidc from "openid-client";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { loadOrgSettings } from "./org-settings.js";
+import { countEnabledSsoProviders, SSO_ONLY_LAST_PROVIDER } from "./sso-providers.js";
 import { evaluateIpEnvelope } from "./net-policy.js";
 import { deviceLabel } from "./device-label.js";
 import { checkEgress, createGuardedFetch, type EgressDenied } from "./egress-guard.js";
@@ -546,7 +547,7 @@ export function otpauthUri(email: string, secretBase32: string): string {
 
 // --- audit helper -----------------------------------------------------------
 
-function auditAuth(
+export function auditAuth(
   db: Db,
   actorUserId: string | null,
   targetUserId: string | null,
@@ -554,7 +555,7 @@ function auditAuth(
   effect: "allow" | "deny",
   reason: string,
   detail: Record<string, unknown>,
-  objectType: "user" | "oidc_provider" = "user",
+  objectType: "user" | "oidc_provider" | "saml_provider" = "user",
 ) {
   return db.insert(auditLog).values({
     userId: actorUserId ?? NIL_UUID,
@@ -629,6 +630,64 @@ function requireCsrfHeader(req: FastifyRequest, reply: FastifyReply): boolean {
   return true;
 }
 
+/**
+ * ADR-0039 enforce_at_login (and stricter): may a NEW session be minted for
+ * this request? Called at every session-CREATION site with the knob that
+ * governs the origin being created. Any enforcing level refuses creation from
+ * outside the envelope — a session minted under `enforce_continuous` would die
+ * on its first use anyway, so refusing at the door is the same policy stated
+ * honestly. Refusal = 401 + audit, NO cookie. Returns true when the login was
+ * refused (caller returns immediately).
+ *
+ * Module-level and exported (ADR-0036): the SAML ACS is a session-creation
+ * site living in another file and MUST answer to the same function, not to a
+ * second copy of the rule that could drift.
+ */
+export async function refuseIpBlockedLogin(
+  db: Db,
+  req: FastifyRequest,
+  reply: FastifyReply,
+  org: OrgSettingsRow,
+  knob: "session_ip_policy" | "api_key_ip_policy",
+  detail: { method: string; userId?: string | null; email?: string; provider?: string },
+): Promise<boolean> {
+  const policy = knob === "session_ip_policy" ? org.sessionIpPolicy : org.apiKeyIpPolicy;
+  if (policy === "off") return false;
+  const decision = evaluateIpEnvelope(org.sessionIpAllowlist, req.ip ?? null);
+  if (decision.allowed) return false;
+  await auditAuth(db, null, detail.userId ?? null, "ip-policy-login-denied", "deny",
+    `session creation (${detail.method}) refused by ${knob}='${policy}': client IP ${req.ip ?? "unknown"} is ${decision.reason === "no_client_ip" ? "undeterminable (fail closed)" : "outside the org IP allow-list"}`,
+    {
+      phase: "ip-policy-login",
+      knob,
+      policy,
+      clientIp: req.ip ?? null,
+      reason: decision.reason,
+      allowlist: org.sessionIpAllowlist ?? [],
+      ...detail,
+    });
+  await reply.status(401).send({
+    error: "ip_not_allowed",
+    detail: "sign-in from this network address is not permitted by organization policy",
+  });
+  return true;
+}
+
+/**
+ * ADR-0025's identity anchor, module-level so BOTH federated paths share ONE
+ * implementation: SSO maps on the verified/asserted EMAIL, case-insensitively,
+ * and never on `users.username` (ADR-0030's locally-editable second
+ * identifier — a compromised or misconfigured IdP attribute must not be able
+ * to impersonate another account through it).
+ */
+export async function loadUserByEmail(db: Db, email: string) {
+  const [row] = await db
+    .select()
+    .from(users)
+    .where(sql`lower(${users.email}) = ${email.toLowerCase()}`);
+  return row ?? null;
+}
+
 export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRouteOptions = {}) {
   const setSession = async (
     reply: FastifyReply,
@@ -641,51 +700,16 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     void reply.header("set-cookie", sessionCookie(token, requestIsSecure(req), maxAgeSeconds));
   };
 
-  /**
-   * ADR-0039 enforce_at_login (and stricter): may a NEW session be minted for
-   * this request? Called at every session-CREATION site with the knob that
-   * governs the origin being created. Any enforcing level refuses creation
-   * from outside the envelope — a session minted under `enforce_continuous`
-   * would die on its first use anyway, so refusing at the door is the same
-   * policy stated honestly. Refusal = 401 + audit, NO cookie. Returns true
-   * when the login was refused (caller returns immediately).
-   */
-  const refuseIpBlockedLogin = async (
+  /** thin binder over the module-level rule (shared with the SAML ACS) */
+  const refuseIpBlocked = (
     req: FastifyRequest,
     reply: FastifyReply,
     org: OrgSettingsRow,
     knob: "session_ip_policy" | "api_key_ip_policy",
     detail: { method: string; userId?: string | null; email?: string; provider?: string },
-  ): Promise<boolean> => {
-    const policy = knob === "session_ip_policy" ? org.sessionIpPolicy : org.apiKeyIpPolicy;
-    if (policy === "off") return false;
-    const decision = evaluateIpEnvelope(org.sessionIpAllowlist, req.ip ?? null);
-    if (decision.allowed) return false;
-    await auditAuth(db, null, detail.userId ?? null, "ip-policy-login-denied", "deny",
-      `session creation (${detail.method}) refused by ${knob}='${policy}': client IP ${req.ip ?? "unknown"} is ${decision.reason === "no_client_ip" ? "undeterminable (fail closed)" : "outside the org IP allow-list"}`,
-      {
-        phase: "ip-policy-login",
-        knob,
-        policy,
-        clientIp: req.ip ?? null,
-        reason: decision.reason,
-        allowlist: org.sessionIpAllowlist ?? [],
-        ...detail,
-      });
-    await reply.status(401).send({
-      error: "ip_not_allowed",
-      detail: "sign-in from this network address is not permitted by organization policy",
-    });
-    return true;
-  };
+  ) => refuseIpBlockedLogin(db, req, reply, org, knob, detail);
 
-  const loadUserByEmail = async (email: string) => {
-    const [row] = await db
-      .select()
-      .from(users)
-      .where(sql`lower(${users.email}) = ${email.toLowerCase()}`);
-    return row ?? null;
-  };
+  const loadUserByEmailHere = (email: string) => loadUserByEmail(db, email);
 
   /** ADR-0030: resolve either namespace with the SAME shape of query and the
    * same absence semantics — a miss returns null and the caller then walks
@@ -693,7 +717,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
    * unknown username is indistinguishable from an unknown email, which is
    * indistinguishable from a wrong password. */
   const loadUserByIdentifier = async (identifier: string) => {
-    if (identifierKind(identifier) === "email") return loadUserByEmail(identifier);
+    if (identifierKind(identifier) === "email") return loadUserByEmailHere(identifier);
     const [row] = await db
       .select()
       .from(users)
@@ -720,7 +744,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
 
     // ADR-0039: an out-of-envelope address never even reaches password
     // processing — refused before any credential is examined, no cookie.
-    if (await refuseIpBlockedLogin(req, reply, org, "session_ip_policy", { method: "password" })) {
+    if (await refuseIpBlocked(req, reply, org, "session_ip_policy", { method: "password" })) {
       return reply;
     }
 
@@ -818,7 +842,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     // ADR-0039: the second login step is still session CREATION — the policy
     // may have tightened between the password step and this one, and a
     // pending-MFA token must not be a side door around the envelope.
-    if (await refuseIpBlockedLogin(req, reply, org, "session_ip_policy", { method: "password+totp" })) {
+    if (await refuseIpBlocked(req, reply, org, "session_ip_policy", { method: "password+totp" })) {
       return reply;
     }
     const now = new Date();
@@ -878,7 +902,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     // the break-glass path and is never IP-restricted.
     if (
       ctx.via === "api-key" &&
-      (await refuseIpBlockedLogin(req, reply, org, "api_key_ip_policy", {
+      (await refuseIpBlocked(req, reply, org, "api_key_ip_policy", {
         method: "api-key-exchange",
         userId: ctx.userId,
       }))
@@ -1477,7 +1501,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       return reply.status(403).send({ error: "email_domain_not_allowed" });
     }
 
-    let user = await loadUserByEmail(email);
+    let user = await loadUserByEmailHere(email);
     if (user?.disabledAt) {
       await auditAuth(db, null, user.id, "oidc-login-failed", "deny",
         `OIDC login refused: account '${email}' is deactivated`,
@@ -1521,7 +1545,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     // ADR-0039: SSO is a human login — the identity provider vouching for the
     // user does not move the request inside the org's network envelope.
     if (
-      await refuseIpBlockedLogin(req, reply, org, "session_ip_policy", {
+      await refuseIpBlocked(req, reply, org, "session_ip_policy", {
         method: "oidc",
         userId: user.id,
         email,
@@ -1622,20 +1646,14 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       }
     }
     // lockout guard: disabling the LAST enabled provider while sso_only is on
-    // would strand every human login
+    // would strand every human login. ADR-0036 GENERALIZED the count to both
+    // provider families — with a live SAML provider, disabling the last OIDC
+    // one no longer strands anybody, and the guard must not pretend otherwise.
     if (body.enabled === false && existing.enabled) {
       const org = await loadOrgSettings(db);
       if (org.ssoOnly) {
-        const stillEnabled = await db
-          .select({ id: oidcProviders.id })
-          .from(oidcProviders)
-          .where(and(eq(oidcProviders.enabled, true), ne(oidcProviders.id, providerId)));
-        if (stillEnabled.length === 0) {
-          return reply.status(409).send({
-            error: "sso_only_needs_a_provider",
-            detail: "sso_only is on and this is the last enabled OIDC provider — turn sso_only off first",
-          });
-        }
+        const remaining = await countEnabledSsoProviders(db, { oidcId: providerId });
+        if (remaining.total === 0) return reply.status(409).send(SSO_ONLY_LAST_PROVIDER);
       }
     }
     const { clientSecret, ...rest } = body;
@@ -1662,16 +1680,9 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     if (existing.enabled) {
       const org = await loadOrgSettings(db);
       if (org.ssoOnly) {
-        const stillEnabled = await db
-          .select({ id: oidcProviders.id })
-          .from(oidcProviders)
-          .where(and(eq(oidcProviders.enabled, true), ne(oidcProviders.id, providerId)));
-        if (stillEnabled.length === 0) {
-          return reply.status(409).send({
-            error: "sso_only_needs_a_provider",
-            detail: "sso_only is on and this is the last enabled OIDC provider — turn sso_only off first",
-          });
-        }
+        // ADR-0036: OIDC + SAML counted together (see countEnabledSsoProviders)
+        const remaining = await countEnabledSsoProviders(db, { oidcId: providerId });
+        if (remaining.total === 0) return reply.status(409).send(SSO_ONLY_LAST_PROVIDER);
       }
     }
     await db.delete(oidcProviders).where(eq(oidcProviders.id, providerId));

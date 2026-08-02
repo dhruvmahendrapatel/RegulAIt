@@ -1494,3 +1494,106 @@ export const updateOidcProviderSchema = z
   })
   .strict();
 export type UpdateOidcProvider = z.infer<typeof updateOidcProviderSchema>;
+
+// --- ADR-0036: SAML 2.0 providers (the OIDC twin) ---------------------------
+
+/** an IdP signing certificate, PEM. Pinned OUT OF BAND — assertions verify
+ * against these and never against a certificate embedded in the document,
+ * which is what defeats signature-wrapping. */
+const samlCertSchema = z
+  .string()
+  .trim()
+  .regex(
+    /^-----BEGIN CERTIFICATE-----[\s\S]+-----END CERTIFICATE-----$/,
+    "not a PEM certificate (-----BEGIN CERTIFICATE----- … -----END CERTIFICATE-----)",
+  );
+
+/** the shared field set. `idpSigningCerts` is a LIST so a certificate ROLLOVER
+ * can stage the incoming cert next to the outgoing one — SAML has no
+ * `.well-known` auto-refresh, so an expired pinned cert fails CLOSED (logins
+ * stop, the safe direction) and staging is the only way to avoid an outage. */
+const samlProviderFields = {
+  name: z.string().trim().min(1).max(200),
+  /** the IdP's entity id / Issuer; an assertion's <Issuer> is pinned to it */
+  entityId: z.string().trim().min(1).max(1024),
+  idpSsoUrl: z.string().url(),
+  idpSigningCerts: z.array(samlCertSchema).min(1).max(5),
+  enabled: z.boolean(),
+  allowedEmailDomains: z.array(oidcDomainSchema).min(1).max(50).nullable(),
+  defaultRoleId: z.string().uuid().nullable(),
+  jitProvisioning: z.boolean(),
+  wantAssertionsSigned: z.boolean(),
+  wantAuthnResponseSigned: z.boolean(),
+  allowIdpInitiated: z.boolean(),
+  /** SAML attribute name carrying the email when the NameID is not an
+   * emailAddress. NEVER a username: ADR-0030's second identifier is
+   * locally-editable and must never be an SSO mapping target. */
+  emailAttribute: z.string().trim().min(1).max(512).nullable(),
+  /** OPTIONAL SP private key (PEM) for request signing / encrypted assertions.
+   * WRITE-ONLY: stored AES-256-GCM under REGULAIT_DATA_KEY and never returned. */
+  spPrivateKey: z.string().min(1).max(16384),
+  spCertificate: z
+    .string()
+    .trim()
+    .regex(
+      /^-----BEGIN CERTIFICATE-----[\s\S]+-----END CERTIFICATE-----$/,
+      "not a PEM certificate",
+    ),
+};
+
+/**
+ * The one posture rule both schemas share: a provider may NOT be configured so
+ * that an UNSIGNED assertion could be accepted. Turning wantAssertionsSigned
+ * off is only coherent when the whole authn response is signed instead — so
+ * the pair (false, false) is refused at the API rather than quietly handed to
+ * the library. `undefined` on a PATCH means "unchanged"; the effective pair is
+ * re-checked against the stored row in the route.
+ */
+const signaturePostureOk = (v: {
+  wantAssertionsSigned?: boolean | undefined;
+  wantAuthnResponseSigned?: boolean | undefined;
+}) => !(v.wantAssertionsSigned === false && v.wantAuthnResponseSigned !== true);
+export const SAML_SIGNATURE_POSTURE_MESSAGE =
+  "wantAssertionsSigned may only be turned off when wantAuthnResponseSigned is on — otherwise an unsigned assertion could be accepted";
+
+export const createSamlProviderSchema = z
+  .object({
+    name: samlProviderFields.name,
+    entityId: samlProviderFields.entityId,
+    idpSsoUrl: samlProviderFields.idpSsoUrl,
+    idpSigningCerts: samlProviderFields.idpSigningCerts,
+    enabled: samlProviderFields.enabled.optional(),
+    allowedEmailDomains: samlProviderFields.allowedEmailDomains.optional(),
+    defaultRoleId: samlProviderFields.defaultRoleId.optional(),
+    jitProvisioning: samlProviderFields.jitProvisioning.optional(),
+    wantAssertionsSigned: samlProviderFields.wantAssertionsSigned.optional(),
+    wantAuthnResponseSigned: samlProviderFields.wantAuthnResponseSigned.optional(),
+    allowIdpInitiated: samlProviderFields.allowIdpInitiated.optional(),
+    emailAttribute: samlProviderFields.emailAttribute.optional(),
+    spPrivateKey: samlProviderFields.spPrivateKey.optional(),
+    spCertificate: samlProviderFields.spCertificate.optional(),
+  })
+  .strict()
+  .refine(signaturePostureOk, { message: SAML_SIGNATURE_POSTURE_MESSAGE });
+export type CreateSamlProvider = z.infer<typeof createSamlProviderSchema>;
+
+/** partial update; spPrivateKey is WRITE-ONLY (rotate by writing, never read) */
+export const updateSamlProviderSchema = z
+  .object({
+    name: samlProviderFields.name.optional(),
+    entityId: samlProviderFields.entityId.optional(),
+    idpSsoUrl: samlProviderFields.idpSsoUrl.optional(),
+    idpSigningCerts: samlProviderFields.idpSigningCerts.optional(),
+    enabled: samlProviderFields.enabled.optional(),
+    allowedEmailDomains: samlProviderFields.allowedEmailDomains.optional(),
+    defaultRoleId: samlProviderFields.defaultRoleId.optional(),
+    jitProvisioning: samlProviderFields.jitProvisioning.optional(),
+    wantAssertionsSigned: samlProviderFields.wantAssertionsSigned.optional(),
+    wantAuthnResponseSigned: samlProviderFields.wantAuthnResponseSigned.optional(),
+    allowIdpInitiated: samlProviderFields.allowIdpInitiated.optional(),
+    emailAttribute: samlProviderFields.emailAttribute.optional(),
+    spPrivateKey: samlProviderFields.spPrivateKey.optional(),
+    spCertificate: samlProviderFields.spCertificate.optional(),
+  })
+  .strict();
+export type UpdateSamlProvider = z.infer<typeof updateSamlProviderSchema>;
