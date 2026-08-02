@@ -120,6 +120,12 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // backward, and because a forecast that lived somewhere else would
       // inevitably drift from the actuals it extrapolates.
       { label: "Spend forecast & anomalies", to: "/admin/spend-monitor" },
+      // ADR-0051 — the same measured ledger again, turned into money. It sits
+      // here rather than under Settings because the honest framing is that
+      // billing is a READ of the cost data next to it: rate cards and invoices
+      // never touch the meter, and a statement that disagreed with the Cost
+      // dashboard would be the bug this placement makes obvious.
+      { label: "Metering & billing", to: "/admin/billing" },
       { label: "Optimization", to: "/admin/optimization" },
     ],
   },

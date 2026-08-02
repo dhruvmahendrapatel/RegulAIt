@@ -624,6 +624,18 @@ export const auditLog = pgTable(
         // `usage_events` rather than emitting a second audit row, so the trail
         // stays single. Plain text column — no DDL needed.
         "config_version",
+        // ADR-0051: an admin authoring an immutable RATE CARD version, opening
+        // or CLOSING a billing period, every statement CUT (with the effective
+        // scope it was permitted to total), the one-way ISSUE, every EXPORT,
+        // every RE-DERIVATION and its drift, and — the rows that matter — every
+        // cut REFUSED because the caller's entitlement did not cover the scope
+        // and every issue REFUSED because the version covered only part of it.
+        // An invoice is the shape in which one team's spend leaks and the shape
+        // in which history gets quietly restated, so both refusals are records.
+        // Plain text column — no DDL needed.
+        "rate_card",
+        "billing_period",
+        "billing_statement",
       ],
     })
       .notNull()
@@ -3836,3 +3848,187 @@ export const lineageEdges = pgTable(
 
 export type LineageNodeRow = typeof lineageNodes.$inferSelect;
 export type LineageEdgeRow = typeof lineageEdges.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0051 (migration 0063) — METERING & BILLING.
+//
+// Nothing here meters. `usage_events` (measured) and `cost_events` (estimated
+// list price) have been written unconditionally at the point of every governed
+// call since ADR-0019/0024; these tables are a READ-SIDE consumer of that one
+// ledger and add no counter that could drift from it.
+//
+// FOUR STRUCTURAL DECISIONS, all about money not being quietly editable:
+//  1. rate cards are IMMUTABLE (name, version) rows — a price change is a new
+//     version, never an UPDATE;
+//  2. a statement carries its own `pricingSnapshot`, so re-derivation replays
+//     the frozen price and a newer card cannot reach backwards;
+//  3. statements are APPEND-ONLY versions (the ADR-0040/0048 precedent) and an
+//     issued one is never edited;
+//  4. `effectiveProjectIds` is frozen at generation exactly as ADR-0047's
+//     `report_runs` freezes it — widening a scope later must not widen an
+//     already-cut document's audience.
+// ---------------------------------------------------------------------------
+
+export const BILLING_DIMENSION_VALUES = ["model", "connector", "mcp_tool", "seat"] as const;
+export const RATE_UNIT_VALUES = [
+  "per_1k_input_tokens",
+  "per_1k_output_tokens",
+  "per_call",
+  "per_seat_month",
+] as const;
+export const BILLING_PERIOD_STATUS_VALUES = ["open", "closed"] as const;
+export const BILLING_STATEMENT_STATUS_VALUES = ["draft", "issued", "superseded"] as const;
+export const BILLING_RATING_MODE_VALUES = ["estimated", "reconciled"] as const;
+export const BILLING_BACKEND_VALUES = ["noop"] as const;
+
+export const rateCards = pgTable(
+  "rate_cards",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    /** append-only: a "change" writes (name, version+1) and supersedes this */
+    version: integer("version").notNull(),
+    currency: text("currency").notNull().default("USD"),
+    status: text("status", { enum: ["active", "superseded"] }).notNull().default("active"),
+    description: text("description"),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("rate_cards_name_version_uq").on(t.name, t.version),
+    index("rate_cards_status_idx").on(t.status),
+  ],
+);
+
+/** Never updated — there is no UPDATE path in the gateway and no updatedAt
+ * column here, because an editable price is an editable invoice. */
+export const rateCardEntries = pgTable(
+  "rate_card_entries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    rateCardId: uuid("rate_card_id")
+      .notNull()
+      .references(() => rateCards.id, { onDelete: "cascade" }),
+    dimension: text("dimension", { enum: BILLING_DIMENSION_VALUES }).notNull(),
+    /** the model name / connector id / tool name, or '*' — exact beats wildcard */
+    matchKey: text("match_key").notNull().default("*"),
+    unit: text("unit", { enum: RATE_UNIT_VALUES }).notNull(),
+    unitPriceUsd: doublePrecision("unit_price_usd").notNull(),
+  },
+  (t) => [
+    uniqueIndex("rate_card_entries_card_key_uq").on(t.rateCardId, t.dimension, t.matchKey, t.unit),
+  ],
+);
+
+export const billingPeriods = pgTable(
+  "billing_periods",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scopeKind: text("scope_kind", { enum: ["org", "initiative", "team", "project"] }).notNull(),
+    scopeId: uuid("scope_id"),
+    /** derived ('org' when scopeId is null) so the UNIQUE index below actually
+     * holds — Postgres treats NULLs in a unique index as DISTINCT, which would
+     * otherwise let the same org month be opened twice */
+    scopeKey: text("scope_key").notNull(),
+    periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
+    periodEnd: timestamp("period_end", { withTimezone: true }).notNull(),
+    status: text("status", { enum: BILLING_PERIOD_STATUS_VALUES }).notNull().default("open"),
+    rateCardId: uuid("rate_card_id").references(() => rateCards.id, { onDelete: "set null" }),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    closedByUserId: uuid("closed_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("billing_periods_scope_window_uq").on(t.scopeKind, t.scopeKey, t.periodStart, t.periodEnd),
+    index("billing_periods_status_idx").on(t.status),
+  ],
+);
+
+export const billingStatements = pgTable(
+  "billing_statements",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    periodId: uuid("period_id")
+      .notNull()
+      .references(() => billingPeriods.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    status: text("status", { enum: BILLING_STATEMENT_STATUS_VALUES }).notNull().default("draft"),
+    ratingMode: text("rating_mode", { enum: BILLING_RATING_MODE_VALUES }).notNull().default("estimated"),
+
+    rateCardId: uuid("rate_card_id").references(() => rateCards.id, { onDelete: "set null" }),
+    rateCardName: text("rate_card_name").notNull(),
+    rateCardVersion: integer("rate_card_version").notNull(),
+    /** THE FROZEN PRICE. Re-derivation replays this, never the live card. */
+    pricingSnapshot: jsonb("pricing_snapshot").notNull(),
+
+    entitlementScope: text("entitlement_scope", { enum: ["org", "team", "project"] }).notNull(),
+    /** the honest record of what this artifact was PERMITTED to see; null =
+     * the org-wide set, only ever produced for an admin on an org period */
+    effectiveProjectIds: jsonb("effective_project_ids").$type<string[] | null>(),
+    /** false = a partial-visibility personal view; it may never be ISSUED */
+    coversFullScope: boolean("covers_full_scope").notNull().default(false),
+
+    /** the cut instant — re-derivation replays the ledger as of here */
+    derivedThroughAt: timestamp("derived_through_at", { withTimezone: true }).notNull(),
+
+    sourceUsageEventCount: integer("source_usage_event_count").notNull(),
+    measuredInputTokens: bigint("measured_input_tokens", { mode: "number" }).notNull(),
+    measuredOutputTokens: bigint("measured_output_tokens", { mode: "number" }).notNull(),
+    unpricedEventCount: integer("unpriced_event_count").notNull(),
+    /** the anchor back to the cost dashboard; kept SEPARATE from the billed
+     * total because §5 refuses to flatten estimate and commercial price */
+    ledgerEstimatedCostUsd: doublePrecision("ledger_estimated_cost_usd").notNull(),
+
+    seatCount: integer("seat_count").notNull(),
+    usageSubtotalUsd: doublePrecision("usage_subtotal_usd").notNull(),
+    seatSubtotalUsd: doublePrecision("seat_subtotal_usd").notNull(),
+    totalUsd: doublePrecision("total_usd").notNull(),
+
+    payload: jsonb("payload").notNull(),
+    generatedByUserId: uuid("generated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    generatedAt: timestamp("generated_at", { withTimezone: true }).notNull().defaultNow(),
+    issuedByUserId: uuid("issued_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    issuedAt: timestamp("issued_at", { withTimezone: true }),
+    issueReason: text("issue_reason"),
+  },
+  (t) => [
+    uniqueIndex("billing_statements_period_version_uq").on(t.periodId, t.version),
+    index("billing_statements_period_idx").on(t.periodId),
+    index("billing_statements_status_idx").on(t.status),
+  ],
+);
+
+/** ADR-0051 §1: "a double-bill is structurally impossible". The idempotency
+ * grain is (period, backend) — a statement covers a period's row set by
+ * construction, so shipping the period once IS shipping each of its rows once. */
+export const billingExports = pgTable(
+  "billing_exports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    statementId: uuid("statement_id")
+      .notNull()
+      .references(() => billingStatements.id, { onDelete: "cascade" }),
+    periodId: uuid("period_id")
+      .notNull()
+      .references(() => billingPeriods.id, { onDelete: "cascade" }),
+    backend: text("backend", { enum: BILLING_BACKEND_VALUES }).notNull().default("noop"),
+    format: text("format", { enum: ["csv", "json"] }).notNull(),
+    rowCount: integer("row_count").notNull(),
+    usageEventCount: integer("usage_event_count").notNull(),
+    totalUsd: doublePrecision("total_usd").notNull(),
+    exportedByUserId: uuid("exported_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    exportedAt: timestamp("exported_at", { withTimezone: true }).notNull().defaultNow(),
+    detail: jsonb("detail"),
+  },
+  (t) => [
+    uniqueIndex("billing_exports_period_backend_uq").on(t.periodId, t.backend),
+    index("billing_exports_statement_idx").on(t.statementId),
+  ],
+);
+
+export type RateCardRow = typeof rateCards.$inferSelect;
+export type RateCardEntryRow = typeof rateCardEntries.$inferSelect;
+export type BillingPeriodRow = typeof billingPeriods.$inferSelect;
+export type BillingStatementRow = typeof billingStatements.$inferSelect;
+export type BillingExportRow = typeof billingExports.$inferSelect;

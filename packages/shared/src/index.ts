@@ -258,6 +258,63 @@ export {
   type TraversalResult,
 } from "./lineage.js";
 
+// ADR-0051 — metering & billing's pure half: the rate-card vocabulary, the
+// exact-beats-wildcard rate lookup, the deterministic ledger→money rating
+// function (an unpriced event is UNPRICED, never zero), the statement assembly
+// and its re-derivation check, the chargeback/showback CSV, and the
+// `BillingProvider` port whose only implementation is the export-only,
+// network-free `NoopBilling` (ADR-0051 §6's air-gapped default).
+export {
+  BILLING_DIMENSIONS,
+  RATE_UNITS,
+  RATING_MODES,
+  STATEMENT_STATUSES,
+  BILLING_SCOPE_KINDS,
+  BILLING_BACKENDS,
+  RATE_WILDCARD,
+  BILLING_DISCLAIMER,
+  EMPTY_PRICING_SNAPSHOT,
+  NoopBilling,
+  billingProviders,
+  rateFor,
+  billingKeyFor,
+  rateUsage,
+  seatLine,
+  buildStatement,
+  reconcileStatement,
+  statementCsvRows,
+  renderStatementCsv,
+  parseStatementCsv,
+  billingScopeKey,
+  rateEntrySchema,
+  createRateCardSchema,
+  createBillingPeriodSchema,
+  generateStatementSchema,
+  issueStatementSchema,
+  type BillingDimension,
+  type RateUnit,
+  type RatingMode,
+  type StatementStatus,
+  type BillingScopeKind,
+  type BillingBackend,
+  type RateEntry,
+  type PricingSnapshot,
+  type RatableEvent,
+  type UsageLine,
+  type RatedUsage,
+  type SeatLine,
+  type StatementPayload,
+  type ReconcileDiff,
+  type ReconcileResult,
+  type StatementCsvRow,
+  type BillingCapabilities,
+  type MeteredUsage,
+  type PushResult,
+  type BillingProvider,
+  type CreateRateCard,
+  type CreateBillingPeriod,
+} from "./billing.js";
+
 // ADR-0042 — the guardrail engine's pure half: the detector registry, the
 // block|warn|log verbs (piiMode's triad, plus an `off` member), the
 // MAX-of-strictness composition that makes the compliance cascade a ceiling,

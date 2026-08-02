@@ -52,6 +52,7 @@ import PmConnectionsPage from "./views/admin/integrations/PmConnectionsPage";
 import DeployTargetsPage from "./views/admin/integrations/DeployTargetsPage";
 import CostDashboardPage from "./views/admin/cost/CostDashboardPage";
 import SpendMonitorPage from "./views/admin/cost/SpendMonitorPage";
+import BillingPage from "./views/admin/cost/BillingPage";
 import OptimizationPage from "./views/admin/cost/OptimizationPage";
 import ComplianceProfilesPage from "./views/admin/compliance/ComplianceProfilesPage";
 import InfrastructurePage from "./views/admin/compliance/InfrastructurePage";
@@ -155,6 +156,7 @@ export default function App() {
                         <Route path="deploy-targets" element={<DeployTargetsPage />} />
                         <Route path="cost" element={<CostDashboardPage />} />
                         <Route path="spend-monitor" element={<SpendMonitorPage />} />
+                        <Route path="billing" element={<BillingPage />} />
                         <Route path="optimization" element={<OptimizationPage />} />
                         <Route path="compliance" element={<ComplianceProfilesPage />} />
                         <Route path="infrastructure" element={<InfrastructurePage />} />

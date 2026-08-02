@@ -123,6 +123,7 @@ import { registerReportingRoutes } from "./reporting.js";
 import { registerConfigVersionRoutes } from "./config-versions.js";
 import { registerSpendMonitorRoutes } from "./spend-monitor.js";
 import { registerLineageRoutes } from "./lineage.js";
+import { registerBillingRoutes } from "./billing.js";
 import {
   assignedApprovalIdsFor,
   ensureAssignment,
@@ -794,6 +795,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // reading every project's ledger to find out, stays admin.
     "GET /v1/spend/forecast",
     "GET /v1/spend/anomalies",
+    // ADR-0051: a team lead cutting and reading THEIR OWN team's billing view.
+    // Same mechanism as ADR-0047/0049 — `evaluateReportAccess` resolves the
+    // caller to a CONCRETE project-id set and every usage_events query is built
+    // FROM that set, so an invoice can never total another team's spend. A view
+    // cut by a caller who can see only PART of the period's scope is recorded
+    // `coversFullScope: false` and is refused at issue time. Authoring RATE
+    // CARDS, opening PERIODS, CLOSING a period and ISSUING an invoice are
+    // conspicuously NOT here: deciding what a customer owes stays admin.
+    "POST /v1/billing/periods/:id/statements",
+    "GET /v1/billing/statements",
+    "GET /v1/billing/statements/:id",
+    "GET /v1/billing/statements/:id/export",
+    "POST /v1/billing/statements/:id/reconcile",
     // ADR-0050: lineage reads. Every one narrows to the caller's own project
     // memberships INSIDE the handler — the same narrowing pillar 4 applies to
     // the context store itself, so lineage cannot become a side channel that
@@ -2731,6 +2745,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // 404s exactly as a nonexistent one does, because for a provenance graph
   // confirming that something exists IS the disclosure.
   registerLineageRoutes(app, db);
+  // ADR-0051 — metering & billing. Nothing here meters: `usage_events` and
+  // `cost_events` have been written unconditionally at the point of every
+  // governed call since ADR-0019/0024, and this is a READ-SIDE consumer of that
+  // one ledger, so no billing number can drift from the cost dashboard. Three
+  // things about the wiring are load-bearing. First, an issued statement is
+  // IMMUTABLE: rate cards are append-only versions, every statement freezes the
+  // pricing snapshot it was rated against, and re-cutting a period appends a
+  // version rather than editing one. Second, the entitlement decision is again
+  // ADR-0047's `evaluateReportAccess` CALLED (through ADR-0049's adapter), not
+  // a third copy — an invoice is exactly the shape in which one team's spend
+  // leaks. Third, there is no payment processor: `NoopBilling` (export-only, no
+  // network) is the only backend, which is ADR-0051 §6's air-gapped default.
+  registerBillingRoutes(app, db);
 
   registerAgentConnectorRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0034 — admin-registered custom LLM providers + the egress allow-list
