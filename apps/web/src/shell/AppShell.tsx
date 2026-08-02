@@ -95,6 +95,10 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // It sits in Governance rather than Integrations because a discovered row
       // is a governance gap, not a connection to configure.
       { label: "Shadow-AI discovery", to: "/admin/shadow-ai" },
+      // ADR-0061 — the Approvals Queue's chat courier. It sits beside the queue
+      // it mirrors, because the identity link is a governance trust artifact and
+      // not an integration setting.
+      { label: "ChatOps approvals", to: "/admin/chatops" },
       { label: "Workflow templates", to: "/admin/workflow-templates" },
     ],
   },

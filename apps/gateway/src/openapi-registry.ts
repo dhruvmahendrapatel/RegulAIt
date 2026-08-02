@@ -358,6 +358,16 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/servers/:serverId/tools": "internal",
   "PATCH /v1/servers/:serverId/tools/:toolName/price": "internal",
   "GET /v1/setup/status": "internal",
+  // ADR-0061 — ChatOps approvals. Internal: an admin console surface plus a
+  // provider-shaped callback whose contract is Slack's, not ours.
+  "GET /v1/chatops/connections": "internal",
+  "POST /v1/chatops/connections": "internal",
+  "DELETE /v1/chatops/connections/:connectionId": "internal",
+  "GET /v1/chatops/identity-links": "internal",
+  "POST /v1/chatops/identity-links": "internal",
+  "DELETE /v1/chatops/identity-links/:linkId": "internal",
+  "POST /v1/chatops/approvals/:approvalId/post": "internal",
+  "POST /v1/chatops/:connectionName/interactions": "internal",
   // ADR-0055 — shadow-AI discovery. Internal: the evidence-import shape and the
   // finding schema will move as the catalogue and the collectors evolve, and an
   // admin console surface is not a contract we want to freeze.
@@ -775,6 +785,14 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/servers/:serverId/tools": "servers",
   "PATCH /v1/servers/:serverId/tools/:toolName/price": "servers",
   "GET /v1/setup/status": "setup",
+  "GET /v1/chatops/connections": "chatops",
+  "POST /v1/chatops/connections": "chatops",
+  "DELETE /v1/chatops/connections/:connectionId": "chatops",
+  "GET /v1/chatops/identity-links": "chatops",
+  "POST /v1/chatops/identity-links": "chatops",
+  "DELETE /v1/chatops/identity-links/:linkId": "chatops",
+  "POST /v1/chatops/approvals/:approvalId/post": "chatops",
+  "POST /v1/chatops/:connectionName/interactions": "chatops",
   "GET /v1/shadow-ai/catalogue": "shadow-ai",
   "POST /v1/shadow-ai/catalogue": "shadow-ai",
   "POST /v1/shadow-ai/catalogue/seed": "shadow-ai",

@@ -477,6 +477,13 @@
       "when": 1785003000000,
       "tag": "0068_shadow_ai_discovery",
       "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": "7",
+      "when": 1785004000000,
+      "tag": "0069_chatops_approvals",
+      "breakpoints": true
     }
   ]
 }

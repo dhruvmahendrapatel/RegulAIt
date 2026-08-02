@@ -2180,3 +2180,37 @@ export {
   type ShadowAiSeverity,
   type ShadowAiSubjectKind,
 } from "./shadow-ai.js";
+
+// ADR-0061 — CHATOPS APPROVALS, the pure half: signature verification and the
+// replay window (the FIRST wall — a forged callback must be cheap to reject,
+// before mapping, entitlement or any DB work), strict interaction parsing (the
+// payload is an ASSERTION, never authorization), the ADR-0046 sensitivity fence
+// applied to a courier, and card composition. Nothing here decides anything.
+export {
+  CHATOPS_ACTIONS,
+  CHATOPS_MAX_BODY_BYTES,
+  CHATOPS_PROVIDERS,
+  CHATOPS_REPLAY_WINDOW_SECONDS,
+  SLACK_SIGNATURE_HEADER,
+  SLACK_TIMESTAMP_HEADER,
+  TEAMS_AUTHORIZATION_HEADER,
+  chatContentFenced,
+  chatDecidable,
+  composeApprovalCard,
+  composeDecidedCard,
+  parseChatInteraction,
+  parseSlackInteraction,
+  parseTeamsInteraction,
+  slackSignature,
+  slackSignatureBaseString,
+  teamsSignature,
+  verifyChatSignature,
+  type ApprovalCard,
+  type ApprovalCardInput,
+  type ChatInteraction,
+  type ChatOpsAction,
+  type ChatOpsProvider,
+  type ChatSignatureFailure,
+  type ChatSignatureInput,
+  type ChatSignatureResult,
+} from "./chatops.js";

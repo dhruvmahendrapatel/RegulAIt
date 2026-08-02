@@ -669,6 +669,16 @@ export const auditLog = pgTable(
         "ai_endpoint_signature",
         "shadow_ai_import",
         "shadow_ai_finding",
+        // ADR-0061: ChatOps approvals. Admin CRUD of a chat WORKSPACE and of a
+        // chat→RegulAIt IDENTITY LINK (the trust artifact that decides which
+        // human a Slack click binds to), the outbound mirror of an approval,
+        // and — the rows that matter — every inbound callback REFUSED because
+        // the chat identity mapped to nobody, to a non-approver, or to an
+        // approval whose sensitivity makes it in-app only. The DECISION itself
+        // audits as an ordinary approval row through the one decide path, so
+        // the trail stays single. Plain text column — no DDL needed.
+        "chatops_connection",
+        "chat_identity_link",
       ],
     })
       .notNull()
@@ -4451,3 +4461,136 @@ export const shadowAiFindings = pgTable(
 export type AiEndpointSignatureRow = typeof aiEndpointSignatures.$inferSelect;
 export type ShadowAiImportRow = typeof shadowAiImports.$inferSelect;
 export type ShadowAiFindingRow = typeof shadowAiFindings.$inferSelect;
+
+// ===========================================================================
+// ADR-0061 — CHATOPS APPROVALS (migration 0069)
+//
+// THERE IS NO chat_approvals TABLE AND NO SECOND STATUS COLUMN. A ChatOps
+// decision is written by the SAME `decideOneApproval` the portal calls, into
+// the SAME `approvals` row, with `decidedBy` = the mapped RegulAIt human. The
+// chat surface is a COURIER, never a second authority path — and the absence of
+// anywhere else to record a decision is what makes that structural.
+// ===========================================================================
+
+/**
+ * The workspace. The OUTBOUND bot token is NOT here: `connectorId` points at an
+ * ordinary `connectors` row whose ordinary `connectorCredentials` row holds it,
+ * so it rides the same encrypted-at-rest, write-only credential store and the
+ * same connector-provider adapter as every other integration.
+ *
+ * What genuinely does not exist elsewhere is the INBOUND signing secret — the
+ * connector machinery models credentials we PRESENT, and this is one we VERIFY
+ * WITH. Encrypted under REGULAIT_DATA_KEY; no endpoint returns it.
+ */
+export const chatopsConnections = pgTable("chatops_connections", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull().unique(),
+  provider: text("provider", { enum: ["slack", "teams"] }).notNull(),
+  connectorId: uuid("connector_id")
+    .notNull()
+    .references(() => connectors.id, { onDelete: "cascade" }),
+  signingSecretCiphertext: text("signing_secret_ciphertext").notNull(),
+  defaultChannel: text("default_channel").notNull(),
+  /** ADR-0061's sensitivity dial. FALSE (the default) = an approval whose
+   * project is in PII mode `block` posts a LINK with no buttons: a chat tap is
+   * not a re-authenticated session, so the most sensitive classes are in-app
+   * only until an admin deliberately opts this workspace in. */
+  allowFencedDecide: boolean("allow_fenced_decide").notNull().default(false),
+  enabled: boolean("enabled").notNull().default(true),
+  createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * THE CRUX (ADR-0061 §2). A chat interaction arrives under the BOT's connection
+ * carrying a chat user id — an ASSERTION. This admin-managed table is what turns
+ * it into a RegulAIt human. Never self-asserted: a self-serve claim would let
+ * anyone in the workspace bind themselves to an approver.
+ *
+ * `emailVerifiedSource` is an honesty column: `idp`/`scim` when the deployment
+ * really did verify the email federated, `admin_asserted` when it is what an
+ * admin typed. Either way the email must match an existing user — an admin can
+ * bind an existing principal, never invent one.
+ */
+export const chatIdentityLinks = pgTable(
+  "chat_identity_links",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => chatopsConnections.id, { onDelete: "cascade" }),
+    chatUserId: text("chat_user_id").notNull(),
+    chatUserEmail: text("chat_user_email").notNull(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    emailVerifiedSource: text("email_verified_source", { enum: ["idp", "scim", "admin_asserted"] }).notNull(),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("chat_identity_links_chat_user_uq").on(t.connectionId, t.chatUserId),
+    uniqueIndex("chat_identity_links_user_uq").on(t.connectionId, t.userId),
+  ],
+);
+
+/** What we posted. `redacted` records that the sensitivity fence fired and a
+ * link went to chat instead of the content — the question a compliance reviewer
+ * asks about a third-party workspace, answerable without re-reading Slack. */
+export const chatopsMessages = pgTable(
+  "chatops_messages",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => chatopsConnections.id, { onDelete: "cascade" }),
+    approvalId: uuid("approval_id")
+      .notNull()
+      .references(() => approvals.id, { onDelete: "cascade" }),
+    channel: text("channel").notNull(),
+    messageRef: text("message_ref"),
+    redacted: boolean("redacted").notNull().default(false),
+    decidable: boolean("decidable").notNull().default(true),
+    postedAt: timestamp("posted_at", { withTimezone: true }).notNull().defaultNow(),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+  },
+  (t) => [index("chatops_messages_approval_idx").on(t.approvalId)],
+);
+
+/**
+ * THE DOUBLE-CLICK GUARD. The status machine already makes a double-DECIDE
+ * impossible (`decideOneApproval` updates WHERE status = 'pending'), but a
+ * second click must also not write a second AUDIT row. The unique index makes
+ * the second callback resolve to the first one's recorded outcome.
+ *
+ * ONLY SUCCESSFUL decisions are recorded. A refusal deliberately gets no row: it
+ * must be audited every time (repeated attempts by an unentitled principal are
+ * the signal), and an admin who then creates the missing identity link must be
+ * able to have the person click again.
+ */
+export const chatopsInteractions = pgTable(
+  "chatops_interactions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => chatopsConnections.id, { onDelete: "cascade" }),
+    /** no FK: the record of who decided outlives the approval's own retention */
+    approvalId: uuid("approval_id").notNull(),
+    chatUserId: text("chat_user_id").notNull(),
+    action: text("action", { enum: ["approve", "reject"] }).notNull(),
+    decidedByUserId: uuid("decided_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    outcome: text("outcome", { enum: ["decided", "already_decided"] }).notNull(),
+    detail: jsonb("detail").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("chatops_interactions_idem_uq").on(t.connectionId, t.approvalId, t.chatUserId, t.action),
+    index("chatops_interactions_approval_idx").on(t.approvalId),
+  ],
+);
+
+export type ChatOpsConnectionRow = typeof chatopsConnections.$inferSelect;
+export type ChatIdentityLinkRow = typeof chatIdentityLinks.$inferSelect;
+export type ChatOpsMessageRow = typeof chatopsMessages.$inferSelect;
+export type ChatOpsInteractionRow = typeof chatopsInteractions.$inferSelect;

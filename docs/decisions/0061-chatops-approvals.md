@@ -1,6 +1,6 @@
 # ADR-0061: ChatOps approvals — the Approvals Queue in Slack/Teams, bound to the real human
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-08-01
 
 ## Context
@@ -163,3 +163,135 @@ verification never reaches the mapping or entitlement steps.
   add a test that a chat-origin decision from an unmapped or unentitled user is refused-and-audited;
   update the chat message on decision to retire stale buttons; keep the one decide function the
   sole authority path.
+
+---
+
+## Amendment — 2026-08-02: implemented (migration 0069)
+
+Implemented and accepted. The identity-binding crux is genuinely enforced; the
+Teams half is deliberately asymmetric and that asymmetry is stated below rather
+than papered over.
+
+### Genuinely enforced (proved by test, not asserted)
+
+- **One decide path, and chat does not get its own.** `app.ts` hands
+  `decideOneApproval` — the exact function the portal route and the ADR-0046
+  bulk endpoint call — into `registerChatOpsRoutes`. The ChatOps module contains
+  no approver check, no status transition and no `approvals` UPDATE of its own;
+  every named-approver / delegation / admin-override-reason / self-review /
+  superseded / already-decided guard applies because it is the same code. The
+  suite asserts a mapped-but-not-the-approver chat user gets `not_the_named_approver`,
+  that the approval stays `pending` with `decided_by` null, and that the refusal
+  is in `audit_log` under `chatops-decide-refused-by-decide-path`.
+- **`isAdmin` is never asserted on the inbound path.** The route passes the
+  MAPPED USER'S OWN `users.is_admin`, so a chat decision has exactly the
+  authority that human has in the portal — passing `true` would have opened the
+  admin-override branch to anyone with a chat identity.
+- **The audit names the human, never the bot.** A valid click is asserted to
+  leave `approvals.decided_by` = the mapped user's id and to write one
+  `chatops-decided` audit row whose `user_id` is that same human.
+- **Signature verification.** Slack's documented base string
+  (`v0:<ts>:<raw body>`), HMAC-SHA256, constant-time compare that cannot throw
+  on a length mismatch. Tested refused: **unsigned**, **wrong secret**,
+  **signature over a different body**, **truncated signature**, missing
+  timestamp, non-numeric timestamp. In the gateway suite each refusal is
+  additionally asserted to leave the approval `pending`.
+- **Replay window.** 300 seconds, and the gateway test does not stub the clock —
+  it signs a genuinely old timestamp and asserts `stale_timestamp`, then signs
+  the SAME body with a current timestamp and asserts it is accepted, so the
+  refusal is provably about the window and not the payload. A future-dated
+  timestamp is refused too.
+- **A signature failure is cheap.** It costs one indexed connection read and
+  writes nothing — no transaction, no approval read, and deliberately **no audit
+  row**, because one audit insert per forged packet would itself be the
+  amplification the ADR's rate-limiting clause warns about. The suite asserts no
+  audit row appears. Auditing begins at the mapping wall, where the caller has
+  proved it is the workspace.
+- **Identity binding is admin-managed and cannot invent a principal.** The link
+  route refuses an email that names no existing user (asserted: no user is
+  created), refuses a disabled user, and the two unique indexes make one chat
+  identity map to one human and one human reachable through one chat identity
+  (asserted: a second link on the same chat id is a 409). An unmapped chat
+  identity is refused **and audited** under `chatops-decide-refused-unmapped-identity`.
+- **Idempotency.** `chatops_interactions` carries a unique index on
+  (connection, approval, chat identity, action). The suite delivers the same
+  callback twice and asserts: the second answers `idempotent: true`,
+  `decided_at` is **unchanged**, and there is exactly **one** `chatops-decided`
+  audit row and **one** interaction row. The status machine already prevented a
+  double-DECIDE; this is what prevents a double-AUDIT. Refusals deliberately get
+  no idempotency row — repeated attempts by an unentitled principal must be
+  audited every time, and an admin who then adds the missing link must be able
+  to have the person click again.
+- **The sensitivity fence keeps content out of chat.** An approval whose
+  attributed project's compliance cascade yields PII mode `block` posts a card
+  carrying only the opaque approval id and a portal link. The gateway suite
+  captures the bytes the gateway really sent to a local HTTP server and asserts
+  the card does **not** contain the tool name, the stage id or the requester's
+  address. Such an approval is also **not chat-decidable** by default
+  (`chatops_connections.allow_fenced_decide` defaults false — ADR-0061's
+  "defaulting the most sensitive classes to in-app-only"), and an attempt to
+  decide it from chat is refused and audited.
+- **Outbound is guarded egress, with no vendor-default exemption.** Every post
+  runs `guardConnectionCall` → `createGuardedFetch` (ADR-0034/0043), so
+  `slack.com` must be an explicit `egress_allow_hosts` entry. The suite withdraws
+  the allow entry and asserts the post is refused with `egress_blocked`, that the
+  refusal is audited, and that **nothing reached the socket**. This is also §8.5's
+  air-gapped behaviour arriving from the guard rather than from a mode flag.
+- **Secrets.** The outbound bot token is not a new store: `connector_id` points
+  at an ordinary connector whose ordinary `connector_credentials` row holds it,
+  and `resolveConnectorProvider` does the posting. Only the INBOUND signing
+  secret is new — encrypted under `REGULAIT_DATA_KEY`, write-only, and asserted
+  never present in any response.
+- **The buttons carry no authority.** A button's `value` is the opaque approval
+  id and nothing else; the unit suite asserts every action element's value is
+  exactly the approval id and that no approver identity appears in the action
+  block.
+
+### Structural only / deliberately asymmetric — named plainly
+
+- **Teams is inbound-only.** Its HMAC verification, parsing, mapping and decide
+  path all work and are tested. But `packages/connector-provider` has no Teams
+  adapter, so the OUTBOUND courier refuses with `outbound_provider_unsupported`
+  rather than pretending to post. Adding a Teams adapter here instead of in the
+  connector package would have been the second integration this whole design
+  exists to avoid.
+- **Teams has no replay window, and says so.** Its outgoing-webhook HMAC covers
+  the body only; there is no signed timestamp, so `verifyChatSignature` returns
+  `replayWindowEnforced: false` on that path. Replay defence for Teams is the
+  interaction-idempotency record plus the approval status machine — both
+  server-side, both real, but weaker than Slack's, and reported as such rather
+  than implied to be equivalent.
+- **`email_verified_source` can be `admin_asserted`.** The ADR wants the link
+  bound to an IdP-verified email. When the deployment has SSO or SCIM, the link
+  records `idp`/`scim`; when it has neither, it records `admin_asserted` — the
+  admin's assertion, labelled as the weaker thing it is in the API and rendered
+  as a warning badge in the console. We do not claim a verification that did not
+  happen.
+- **Posting is not automatic.** `POST /v1/chatops/approvals/:approvalId/post` is
+  an explicit call; nothing yet mirrors an approval to chat the moment it enters
+  `pending`. The §1 "when an approval enters pending, mirror it" trigger is
+  follow-up work, and there is no scheduler in this codebase to drive a sweep.
+- **The card is retired by POSTING a new message, not by editing the old one.**
+  `chat.update` is not on the connector adapter's supported-op list, so the
+  decided card is a follow-up post and `chatops_messages.retired_at` is stamped.
+  The stale buttons on the original message are harmless — a second click on them
+  hits the idempotency record — but they are not visually removed.
+- **Per-approval chat-decidability is per WORKSPACE, not per sensitivity class.**
+  `allow_fenced_decide` is one boolean covering "PII mode `block`". A finer
+  per-classification matrix is follow-up.
+- **Rate limiting is the deployment-wide limiter (ADR-0031), not a per-source
+  bound on this route.** The ADR asks for "bounded per source"; what ships is the
+  ordinary public-route limiter plus a signature check that does no DB work
+  beyond one indexed read.
+
+### Migration
+
+`0069_chatops_approvals.sql` — four tables: `chatops_connections` (the workspace
+plus the one genuinely new secret), `chat_identity_links` (the trust artifact,
+with both unique indexes), `chatops_messages` (the mirror record, carrying
+whether the fence fired) and `chatops_interactions` (the double-click guard).
+There is deliberately **no** `chat_approvals` table and **no** second status
+column: the absence of anywhere else to record a decision is what makes "the
+chat surface is a courier" structural rather than a promise.
+`audit_log.object_type` gains `chatops_connection` and `chat_identity_link` as a
+TS-only widening — the column has no DB CHECK, so there is no DDL for it.

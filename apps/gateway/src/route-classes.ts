@@ -23,6 +23,14 @@ import { WEB_UI_ROUTES } from "./web-serving.js";
 
 export const AUTH_EXEMPT_ROUTES = new Set([
   "/v1/pm/webhooks/:connectionName",
+  // ADR-0061 — the ChatOps interaction callback. Slack/Teams hold no RegulAIt
+  // credential, so this route cannot require one: it authenticates IN-ROUTE on
+  // the workspace's signing secret over the exact raw body, with a replay
+  // window, before it does anything else. Identical posture to the PM webhook
+  // above. Passing the signature does NOT authorize a decision — the chat user
+  // id is then mapped to a real human and the ONE decide path re-checks
+  // entitlement server-side.
+  "/v1/chatops/:connectionName/interactions",
   // /admin and /app are 302s to /ui (ADR-0026 phase-2 swap) — a browser
   // hits a bookmark before it has any credential, so the redirect itself
   // must not require one. The legacy shells they used to serve are GONE
@@ -243,6 +251,11 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/workflows/instances",
   "GET /v1/projects",
   "GET /v1/users/directory",
+  // ADR-0061: see the AUTH_EXEMPT note above. The admin gate keys on a USER's
+  // isAdmin flag and Slack has no user identity at all, so admin-ness is not,
+  // and cannot be, the gate here. The gate that applies is the signature check
+  // plus the identity mapping plus the one decide path.
+  "POST /v1/chatops/:connectionName/interactions",
 ]);
 
 /**

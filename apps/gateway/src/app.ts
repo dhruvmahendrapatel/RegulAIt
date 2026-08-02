@@ -211,6 +211,7 @@ import { AUTH_EXEMPT_ROUTES, NON_ADMIN_ROUTES } from "./route-classes.js";
 import { registerOpenApiRoutes, type RouteInventoryEntry } from "./openapi.js";
 import { registerOnboardingRoutes } from "./onboarding.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
+import { registerChatOpsRoutes } from "./chatops.js";
 import path from "node:path";
 import { registerSpaInlineScripts, securityHeaders } from "./security-headers.js";
 import { MergeConflictError, WorkflowStateError } from "@regulait/workflow-kernel";
@@ -2539,6 +2540,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // handed `decideOneApproval` — the very function the single-decision route
   // calls — so a bulk item cannot take a shortcut around any guard.
   registerWorkbenchRoutes(app, db, { decideOne: decideOneApproval });
+  // ADR-0061 — CHATOPS APPROVALS. Handed the SAME `decideOneApproval` the
+  // portal route and the bulk endpoint use: the chat surface is a courier over
+  // the one decide path, never a second authority path. The inbound callback
+  // route authenticates on the workspace's signing secret in-route (it is in
+  // AUTH_EXEMPT_ROUTES / NON_ADMIN_ROUTES exactly like the PM webhook, and for
+  // the same reason: Slack holds no RegulAIt credential); every other route
+  // here is admin-only.
+  registerChatOpsRoutes(app, db, {
+    decideOne: decideOneApproval,
+    ...(opts.dataKey ? { dataKey: opts.dataKey } : {}),
+  });
   // ADR-0047 — executive & compliance reporting: report definitions, schedule
   // DEFINITIONS (nothing fires on a timer here — an operator drives
   // POST /v1/reports/schedules/run-due), the immutable run ledger, and the
