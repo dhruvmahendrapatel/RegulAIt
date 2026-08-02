@@ -146,6 +146,11 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
     group: "Compliance & Infra",
     items: [
       { label: "Compliance profiles", to: "/admin/compliance" },
+      // ADR-0058 — framework control mappings evidenced from the same ledgers
+      // everything else here reads. It sits directly under Compliance profiles
+      // because a pack DRIVES that cascade rather than forking it: one tag, one
+      // cascade, one audit trail.
+      { label: "Compliance packs", to: "/admin/compliance-packs" },
       { label: "Infrastructure", to: "/admin/infrastructure" },
     ],
   },

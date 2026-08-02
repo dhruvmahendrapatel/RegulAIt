@@ -91,6 +91,11 @@ export const createReportDefinitionSchema = z
     format: z.enum(REPORT_FORMATS).default("json"),
     entitlementScope: z.enum(REPORT_ENTITLEMENT_SCOPES).default("project"),
     description: z.string().max(2000).nullish(),
+    /** ADR-0058: the compliance pack whose control mapping the `controls`
+     * section is computed from. Absent = ADR-0047's built-in fallback set,
+     * which now says in its own note that it is a fallback and not a framework
+     * mapping. */
+    packId: z.string().uuid().nullish(),
   })
   .strict()
   .refine((d) => (d.scopeKind === "org") === (d.scopeId == null), {
@@ -507,23 +512,42 @@ export const BUILT_IN_CONTROLS = [
   },
 ] as const;
 
-export type ControlStatus = "met" | "gap";
+/** ADR-0058 widened this: a pack-sourced control also reports
+ * `attestation_required` / `attested` / `unaddressed`, which are deliberately
+ * NOT `met` — an organisational control never counts as evidenced. */
+export type ControlStatus =
+  | "met"
+  | "gap"
+  | "satisfied"
+  | "unsatisfied"
+  | "attestation_required"
+  | "attested"
+  | "unaddressed";
 
 export interface ControlAssessment {
   id: string;
   title: string;
   status: ControlStatus;
-  evidenceKey: string;
-  evidenceCount: number;
+  evidenceKey?: string;
+  /** null when no collector ran — the attestation-required / unaddressed case */
+  evidenceCount: number | null;
   note: string;
 }
 
 export interface ComplianceSection {
   framework: string;
-  catalogueSource: "built-in";
+  /** ADR-0058: 'pack' when the catalogue came from an activated compliance
+   * pack; 'built-in' is the ADR-0047 fallback for a definition naming no pack. */
+  catalogueSource: "built-in" | "pack";
+  packId?: string;
+  packVersion?: number;
   controls: ControlAssessment[];
   met: number;
   gaps: number;
+  /** ADR-0058 counts, present only on a pack-sourced section */
+  attestationRequired?: number;
+  attested?: number;
+  unaddressed?: number;
   note: string;
 }
 
@@ -557,9 +581,11 @@ export function assessControls(
     met: controls.filter((c) => c.status === "met").length,
     gaps: controls.filter((c) => c.status === "gap").length,
     note:
-      "Control catalogue is the built-in evidence set; ADR-0058's compliance packs own the " +
-      "framework→control→evidence mapping and are not built yet. Presence of evidence is NOT an " +
-      "assertion that the control is operating effectively.",
+      "FALLBACK CATALOGUE: this definition names no compliance pack, so the built-in evidence set is " +
+      "used. It is NOT a framework mapping. ADR-0058's compliance packs own the " +
+      "framework→control→evidence mapping — attach one (report_definitions.pack_id) to get a real, " +
+      "versioned control mapping. Presence of evidence is NOT an assertion that the control is " +
+      "operating effectively, and nothing here is a compliance certification.",
   };
 }
 

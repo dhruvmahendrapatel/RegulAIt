@@ -58,6 +58,7 @@ import SpendMonitorPage from "./views/admin/cost/SpendMonitorPage";
 import BillingPage from "./views/admin/cost/BillingPage";
 import OptimizationPage from "./views/admin/cost/OptimizationPage";
 import ComplianceProfilesPage from "./views/admin/compliance/ComplianceProfilesPage";
+import CompliancePacksPage from "./views/admin/compliance/CompliancePacksPage";
 import InfrastructurePage from "./views/admin/compliance/InfrastructurePage";
 import OrganizationPage from "./views/admin/settings/OrganizationPage";
 import GettingStartedPage from "./views/admin/settings/GettingStartedPage";
@@ -169,6 +170,8 @@ export default function App() {
                         <Route path="billing" element={<BillingPage />} />
                         <Route path="optimization" element={<OptimizationPage />} />
                         <Route path="compliance" element={<ComplianceProfilesPage />} />
+                        {/* ADR-0058 */}
+                        <Route path="compliance-packs" element={<CompliancePacksPage />} />
                         <Route path="infrastructure" element={<InfrastructurePage />} />
                         <Route path="organization" element={<OrganizationPage />} />
                         <Route path="licensing" element={<LicensingPage />} />

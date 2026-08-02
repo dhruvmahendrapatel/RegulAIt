@@ -93,6 +93,7 @@ import {
   type SpendLine,
 } from "@regulait/shared";
 import { securityHeaders } from "./security-headers.js";
+import { packControlsSection } from "./compliance-packs.js";
 
 /** the audit row's actor when the caller is the identity-less bootstrap token */
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
@@ -166,7 +167,8 @@ export async function callerTeamIds(db: Db, userId: string | null): Promise<stri
 // ---------------------------------------------------------------------------
 
 export interface ComputeReportInput {
-  definition: Pick<ReportDefinitionRow, "name" | "kind" | "scopeKind" | "scopeId" | "sections">;
+  definition: Pick<ReportDefinitionRow, "name" | "kind" | "scopeKind" | "scopeId" | "sections"> &
+    Partial<Pick<ReportDefinitionRow, "packId">>;
   /** null = org-wide (admin only); a list = exactly these projects */
   projectIds: string[] | null;
   periodStart: Date;
@@ -306,6 +308,20 @@ export async function computeReport(db: Db, input: ComputeReportInput): Promise<
   }
 
   if (sections.includes("controls")) {
+    // ADR-0058 RETIRES THE PLACEHOLDER. A definition naming a compliance pack
+    // gets that pack's real, ledger-evidenced control assessment — computed
+    // over the SAME `projectIds` this report was entitled to, so the pack
+    // report cannot leak another team's evidence either — stamped with the
+    // pack version that produced it. `packId` null keeps the built-in fallback
+    // below, whose note now says plainly that it IS a fallback.
+    const packId = (input.definition as { packId?: string | null }).packId ?? null;
+    const packSection = packId
+      ? await packControlsSection(db, { packId, projectIds, periodStart, periodEnd, now: input.now })
+      : null;
+    if (packSection) {
+      payload.controls = packSection as unknown as ReportPayload["controls"];
+      return payload;
+    }
     const [auditRows, approvalRows, liveCards, runs, attributed] = await Promise.all([
       db
         .select({ n: count() })
@@ -555,6 +571,8 @@ export function registerReportingRoutes(app: FastifyInstance, db: Db): void {
         format: body.format,
         entitlementScope: body.entitlementScope,
         description: body.description ?? null,
+        // ADR-0058: the pack whose control mapping this report evidences
+        packId: body.packId ?? null,
         createdByUserId: req.authCtx.userId ?? null,
       })
       .returning();

@@ -2250,3 +2250,39 @@ export {
   type RedTeamProbeSeed,
   type RedTeamSeverity,
 } from "./redteam.js";
+
+// ADR-0058 — REGULATORY COMPLIANCE PACKS, the pure half: the pack/control and
+// collector vocabularies, the satisfaction rule (an attestation-required
+// control returns BEFORE any count is consulted, so it can never reach
+// 'satisfied'), the verdict-free scorecard, and the six launch packs as SEED
+// DATA the gateway inserts as ordinary rows.
+export {
+  COMPLIANCE_PACK_DISCLAIMER,
+  COMPLIANCE_PACK_FRAMEWORKS,
+  COMPLIANCE_PACK_UPDATE_POLICY,
+  CONTROL_COVERAGE_CLASSES,
+  CONTROL_EVALUATION_STATUSES,
+  DEFAULT_COMPLIANCE_PACKS,
+  EVIDENCE_COLLECTORS,
+  PACK_STATUSES,
+  assessPackControl,
+  buildPackScorecard,
+  collectorParamsSchema,
+  createCompliancePackSchema,
+  evaluatePackSchema,
+  packAttestationSchema,
+  packControlSchema,
+  type CollectorParams,
+  type CompliancePackFramework,
+  type ControlCoverageClass,
+  type ControlEvaluationStatus,
+  type CreateCompliancePackInput,
+  type EvaluatePackInput,
+  type EvidenceCollectorId,
+  type PackAttestationInput,
+  type PackControlAssessment,
+  type PackControlInput,
+  type PackControlSpec,
+  type PackScorecard,
+  type PackStatus,
+} from "./compliance-packs.js";

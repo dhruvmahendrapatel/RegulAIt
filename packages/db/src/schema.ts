@@ -679,6 +679,15 @@ export const auditLog = pgTable(
         // the trail stays single. Plain text column — no DDL needed.
         "chatops_connection",
         "chat_identity_link",
+        // ADR-0058: authoring/seeding a compliance PACK, ACTIVATING a version
+        // (and the retirement of the one it supersedes), recording an
+        // ATTESTATION on an organisational control, every pack EVALUATION with
+        // the effective scope it was permitted to query — and the two rows that
+        // matter: every evaluation REFUSED because the caller's entitlement did
+        // not cover the scope, and every attestation REFUSED because the
+        // control is auto-evidenced and a human statement must not stand in for
+        // ledger evidence. Plain text column — no DDL needed.
+        "compliance_pack",
       ],
     })
       .notNull()
@@ -3531,6 +3540,12 @@ export const reportDefinitions = pgTable(
       .notNull()
       .default("project"),
     description: text("description"),
+    /** ADR-0058 (migration 0073): the compliance pack whose control mapping the
+     * `controls` section is computed from. NULL keeps ADR-0047's built-in
+     * fallback set — which now says, in its own note, that it is a fallback and
+     * that a pack should be attached. Set, and the section is computed from the
+     * pack's controls against the real ledgers, stamped with the pack version. */
+    packId: uuid("pack_id"),
     createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -4777,3 +4792,151 @@ export type RedTeamLibraryRow = typeof redteamLibraries.$inferSelect;
 export type RedTeamProbeRow = typeof redteamProbes.$inferSelect;
 export type RedTeamRunRow = typeof redteamRuns.$inferSelect;
 export type RedTeamFindingRow = typeof redteamFindings.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0058 (migration 0073) — REGULATORY COMPLIANCE PACKS
+// ---------------------------------------------------------------------------
+//
+// A PACK IS ROWS. That is the entire schema decision. There is no pack file
+// baked into the image, no framework enum a new regulation would have to be
+// added to, and no code path that reads a hard-coded catalogue:
+// `DEFAULT_COMPLIANCE_PACKS` in `@regulait/shared` is a SEED an endpoint
+// inserts, and the evaluator reads only these tables. Empty them and the
+// evaluator evaluates nothing.
+//
+// WHAT IS DELIBERATELY ABSENT: a `satisfied` column. Nowhere in these tables
+// can an admin record that a control is met. Satisfaction is COMPUTED, at
+// evaluation time, from a SELECT over `audit_log` / `approvals` /
+// `model_card_approvals` / `eval_runs` / `guardrail_configs` / `abac_policies`
+// / `lineage_edges` / `usage_events` / `compliance_profiles`. A tick-box would
+// have been the whole feature's failure mode, so there is no box.
+//
+// The one thing a human CAN record is an ATTESTATION — and it lives in its own
+// table, resolves to its own status (`attested`, never `satisfied`), and
+// carries the human who made it. An organisational control (training, incident
+// response, post-market monitoring) is not observable from a control plane, so
+// it is reported as outstanding until a named person says otherwise.
+
+export const compliancePacks = pgTable(
+  "compliance_packs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** free text ON PURPOSE — a customer's internal control framework is a
+     * first-class pack (ADR-0058 §5) and must not need an enum migration */
+    framework: text("framework").notNull(),
+    /** a framework revision is a NEW ROW with a higher version, activated;
+     * reports keep the version that produced them, so history never rewrites */
+    version: integer("version").notNull(),
+    title: text("title").notNull(),
+    description: text("description"),
+    /** where the mapping came from + who reviewed it. This is what makes
+     * staleness LEGIBLE — it cannot make a mapping authoritative. */
+    provenance: jsonb("provenance").$type<Record<string, unknown>>().notNull().default({}),
+    /** the §8.3 cascade tag this pack drives. A pack ENFORCES NOTHING itself:
+     * tagging an Initiative with this drives the EXISTING cascade. */
+    cascadeTag: text("cascade_tag"),
+    status: text("status", { enum: ["draft", "active", "retired"] }).notNull().default("draft"),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    activatedAt: timestamp("activated_at", { withTimezone: true }),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("compliance_packs_framework_version_uq").on(t.framework, t.version),
+    /** AT MOST ONE ACTIVE VERSION PER FRAMEWORK. Two active versions would mean
+     * two answers to "which mapping evidenced this report". */
+    uniqueIndex("compliance_packs_one_active_uq")
+      .on(t.framework)
+      .where(sql`status = 'active'`),
+    check("compliance_packs_version_check", sql`${t.version} >= 1`),
+  ],
+);
+
+export const compliancePackControls = pgTable(
+  "compliance_pack_controls",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    packId: uuid("pack_id")
+      .notNull()
+      .references(() => compliancePacks.id, { onDelete: "cascade" }),
+    /** the FRAMEWORK's own identifier — 'eu-ai-act:art-12-record-keeping' */
+    controlRef: text("control_ref").notNull(),
+    title: text("title").notNull(),
+    description: text("description"),
+    /** the mapping author's DECLARED posture (ADR-0058 §4) */
+    coverage: text("coverage", { enum: ["enforced", "evidenced", "partial", "unaddressed"] }).notNull(),
+    /** a NAMED, PARAMETERISED query over a ledger that already exists. Not SQL:
+     * a pack is analyst-authored data and must not be an injection primitive. */
+    collector: text("collector").notNull(),
+    collectorParams: jsonb("collector_params").$type<Record<string, unknown>>().notNull().default({}),
+    minEvidenceCount: integer("min_evidence_count").notNull().default(1),
+    /** TRUE = organisational control. The evaluator returns before it looks at
+     * any count, so this can NEVER resolve to 'satisfied'. */
+    attestationRequired: boolean("attestation_required").notNull().default(false),
+    ownerNote: text("owner_note"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("compliance_pack_controls_ref_uq").on(t.packId, t.controlRef),
+    index("compliance_pack_controls_pack_idx").on(t.packId),
+    check("compliance_pack_controls_min_evidence_check", sql`${t.minEvidenceCount} >= 1`),
+    /** the pairing rule, in the DATABASE: an attestation-required control has
+     * no collector, so no ledger row can quietly satisfy it */
+    check(
+      "compliance_pack_controls_attestation_check",
+      sql`(${t.attestationRequired} = false) OR (${t.collector} = 'none')`,
+    ),
+  ],
+);
+
+/** The ONE thing a human may record — and it is not "satisfied". An attestation
+ * is the customer's own statement about an organisational control, attributed
+ * to them, optionally time-boxed, and reported as `attested` (a distinct status
+ * from `satisfied`) so a scorecard reader can always tell which is which. */
+export const compliancePackAttestations = pgTable(
+  "compliance_pack_attestations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    packId: uuid("pack_id")
+      .notNull()
+      .references(() => compliancePacks.id, { onDelete: "cascade" }),
+    controlRef: text("control_ref").notNull(),
+    statement: text("statement").notNull(),
+    evidenceRef: text("evidence_ref"),
+    validUntil: timestamp("valid_until", { withTimezone: true }),
+    attestedByUserId: uuid("attested_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    attestedAt: timestamp("attested_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("compliance_pack_attestations_lookup_idx").on(t.packId, t.controlRef, t.attestedAt)],
+);
+
+/** The generated ARTIFACT — the same posture as `report_runs` (ADR-0047): it is
+ * what a generation produced, never an input to another computation. It records
+ * the pack VERSION that produced it and the EXACT project ids the caller was
+ * entitled to, so "whose evidence is in here" is answerable forever. */
+export const compliancePackReports = pgTable(
+  "compliance_pack_reports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** no cascade delete: the artifact outlives a retired pack */
+    packId: uuid("pack_id").notNull(),
+    framework: text("framework").notNull(),
+    packVersion: integer("pack_version").notNull(),
+    requestedByUserId: uuid("requested_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    scopeKind: text("scope_kind").notNull(),
+    scopeId: uuid("scope_id"),
+    entitlementScope: text("entitlement_scope").notNull(),
+    /** NULL = org-wide (admin under an org-scoped request) */
+    effectiveProjectIds: jsonb("effective_project_ids").$type<string[] | null>(),
+    periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
+    periodEnd: timestamp("period_end", { withTimezone: true }).notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+    generatedAt: timestamp("generated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("compliance_pack_reports_pack_idx").on(t.packId, t.generatedAt)],
+);
+
+export type CompliancePackRow = typeof compliancePacks.$inferSelect;
+export type CompliancePackControlRow = typeof compliancePackControls.$inferSelect;
+export type CompliancePackAttestationRow = typeof compliancePackAttestations.$inferSelect;
+export type CompliancePackReportRow = typeof compliancePackReports.$inferSelect;

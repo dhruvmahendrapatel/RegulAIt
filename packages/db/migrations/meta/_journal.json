@@ -491,6 +491,13 @@
       "when": 1785005000000,
       "tag": "0070_continuous_red_teaming",
       "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "7",
+      "when": 1785008000000,
+      "tag": "0073_compliance_packs",
+      "breakpoints": true
     }
   ]
 }

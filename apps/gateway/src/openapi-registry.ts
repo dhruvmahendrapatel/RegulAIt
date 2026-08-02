@@ -382,6 +382,20 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "DELETE /v1/chatops/identity-links/:linkId": "internal",
   "POST /v1/chatops/approvals/:approvalId/post": "internal",
   "POST /v1/chatops/:connectionName/interactions": "internal",
+  // ADR-0058 — compliance packs. Internal: the pack schema and the collector
+  // vocabulary will move as frameworks are revised and new ledgers become
+  // evidenceable, and freezing a control-mapping shape as a public contract
+  // would make a framework revision a breaking API change.
+  "GET /v1/compliance/packs": "internal",
+  "POST /v1/compliance/packs": "internal",
+  "POST /v1/compliance/packs/seed": "internal",
+  "GET /v1/compliance/packs/:id": "internal",
+  "POST /v1/compliance/packs/:id/activate": "internal",
+  "DELETE /v1/compliance/packs/:id": "internal",
+  "POST /v1/compliance/packs/:id/attestations": "internal",
+  "POST /v1/compliance/packs/:id/evaluate": "internal",
+  "GET /v1/compliance/pack-reports": "internal",
+  "GET /v1/compliance/pack-reports/:id": "internal",
   // ADR-0055 — shadow-AI discovery. Internal: the evidence-import shape and the
   // finding schema will move as the catalogue and the collectors evolve, and an
   // admin console surface is not a contract we want to freeze.
@@ -821,6 +835,16 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "DELETE /v1/chatops/identity-links/:linkId": "chatops",
   "POST /v1/chatops/approvals/:approvalId/post": "chatops",
   "POST /v1/chatops/:connectionName/interactions": "chatops",
+  "GET /v1/compliance/packs": "compliance-packs",
+  "POST /v1/compliance/packs": "compliance-packs",
+  "POST /v1/compliance/packs/seed": "compliance-packs",
+  "GET /v1/compliance/packs/:id": "compliance-packs",
+  "POST /v1/compliance/packs/:id/activate": "compliance-packs",
+  "DELETE /v1/compliance/packs/:id": "compliance-packs",
+  "POST /v1/compliance/packs/:id/attestations": "compliance-packs",
+  "POST /v1/compliance/packs/:id/evaluate": "compliance-packs",
+  "GET /v1/compliance/pack-reports": "compliance-packs",
+  "GET /v1/compliance/pack-reports/:id": "compliance-packs",
   "GET /v1/shadow-ai/catalogue": "shadow-ai",
   "POST /v1/shadow-ai/catalogue": "shadow-ai",
   "POST /v1/shadow-ai/catalogue/seed": "shadow-ai",

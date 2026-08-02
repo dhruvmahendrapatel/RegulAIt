@@ -125,6 +125,17 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/reports/runs",
   "GET /v1/reports/runs/:id",
   "GET /v1/reports/runs/:id/export",
+  // ADR-0058: EVALUATING a compliance pack and reading the resulting scorecard.
+  // Same reasoning, same function: the handler applies `evaluateReportAccess`
+  // — ADR-0047's, not a second copy — and every evidence collector builds its
+  // WHERE clause FROM the returned project-id list, so a team lead's HIPAA
+  // scorecard cannot contain another team's audit rows. AUTHORING packs,
+  // ACTIVATING a version and RECORDING an attestation are conspicuously NOT
+  // here: deciding what a framework's controls mean, and stating on the
+  // organisation's behalf that an organisational control is met, stays admin.
+  "POST /v1/compliance/packs/:id/evaluate",
+  "GET /v1/compliance/pack-reports",
+  "GET /v1/compliance/pack-reports/:id",
   // ADR-0049: a team lead reading THEIR OWN forecast and THEIR OWN project's
   // anomaly flags. Both resolve the caller's entitlement to a CONCRETE
   // project-id set through ADR-0047's `evaluateReportAccess` — the same

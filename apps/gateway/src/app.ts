@@ -212,6 +212,7 @@ import { AUTH_EXEMPT_ROUTES, NON_ADMIN_ROUTES } from "./route-classes.js";
 import { registerOpenApiRoutes, type RouteInventoryEntry } from "./openapi.js";
 import { registerOnboardingRoutes } from "./onboarding.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
+import { registerCompliancePackRoutes } from "./compliance-packs.js";
 import { registerChatOpsRoutes } from "./chatops.js";
 import path from "node:path";
 import { registerSpaInlineScripts, securityHeaders } from "./security-headers.js";
@@ -2690,6 +2691,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // The subsystem makes NO outbound request and can write only its own three
   // tables — an evidence file cannot mint a user, role, grant or approval.
   registerShadowAiRoutes(app, db);
+  // ADR-0058 — REGULATORY COMPLIANCE PACKS. Authoring/activating a pack and
+  // recording an attestation are admin (not in NON_ADMIN_ROUTES); EVALUATING a
+  // pack is reachable by a non-admin and runs ADR-0047's own
+  // `evaluateReportAccess`, so a scorecard never exceeds the caller's own
+  // visibility. Nothing here enforces anything: a pack drives the EXISTING
+  // §8.3 cascade via its tag, and every control's status is computed from a
+  // SELECT over the real ledgers — there is no column an admin can tick.
+  registerCompliancePackRoutes(app, db);
   // ADR-0053 — the published contract: the OpenAPI document, the versioning /
   // deprecation policy, and the RFC-8594 Deprecation/Sunset headers. Registered
   // here (rather than first) only for readability; the inventory hook at the top
