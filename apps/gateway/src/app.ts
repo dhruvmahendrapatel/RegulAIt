@@ -213,6 +213,7 @@ import { registerOpenApiRoutes, type RouteInventoryEntry } from "./openapi.js";
 import { registerOnboardingRoutes } from "./onboarding.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
 import { registerCompliancePackRoutes } from "./compliance-packs.js";
+import { registerCopilotRoutes } from "./copilot.js";
 import { registerChatOpsRoutes } from "./chatops.js";
 import path from "node:path";
 import { registerSpaInlineScripts, securityHeaders } from "./security-headers.js";
@@ -2699,6 +2700,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // §8.3 cascade via its tag, and every control's status is computed from a
   // SELECT over the real ledgers — there is no column an admin can tick.
   registerCompliancePackRoutes(app, db);
+  // ADR-0056 — THE AI GOVERNANCE COPILOT. The ultimate dogfood: our own
+  // flagship agent is a TENANT of the kernel it fronts. Its reads are narrowed
+  // to the INVOKING USER's own project scope at query construction (there is no
+  // copilot super-reader grant, and an identity-less caller is refused); its
+  // narration is an ordinary `executeGovernedDispatch` behind the ordinary
+  // `evaluateAgent` check, so it is entitlement-gated, metered into
+  // usage_events and audited like any other; the audit rows it reads are
+  // treated as UNTRUSTED INPUT through ADR-0042's guardrails; and it has no
+  // mutating tools at all — its only route to a change is a proposal that opens
+  // an ordinary Approvals-Queue item for a named human.
+  registerCopilotRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0053 — the published contract: the OpenAPI document, the versioning /
   // deprecation policy, and the RFC-8594 Deprecation/Sunset headers. Registered
   // here (rather than first) only for readability; the inventory hook at the top

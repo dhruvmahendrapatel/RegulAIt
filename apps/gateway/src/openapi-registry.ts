@@ -382,6 +382,15 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "DELETE /v1/chatops/identity-links/:linkId": "internal",
   "POST /v1/chatops/approvals/:approvalId/post": "internal",
   "POST /v1/chatops/:connectionName/interactions": "internal",
+  // ADR-0056 — the governance copilot. Internal: the tool vocabulary, the
+  // query plan and the evidence envelope will move as more ledgers become
+  // readable, and an answer shape is not a contract we want to freeze while no
+  // model provider is even connected.
+  "GET /v1/copilot/tools": "internal",
+  "POST /v1/copilot/ask": "internal",
+  "GET /v1/copilot/queries": "internal",
+  "POST /v1/copilot/proposals": "internal",
+  "GET /v1/copilot/proposals": "internal",
   // ADR-0058 — compliance packs. Internal: the pack schema and the collector
   // vocabulary will move as frameworks are revised and new ledgers become
   // evidenceable, and freezing a control-mapping shape as a public contract
@@ -835,6 +844,11 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "DELETE /v1/chatops/identity-links/:linkId": "chatops",
   "POST /v1/chatops/approvals/:approvalId/post": "chatops",
   "POST /v1/chatops/:connectionName/interactions": "chatops",
+  "GET /v1/copilot/tools": "copilot",
+  "POST /v1/copilot/ask": "copilot",
+  "GET /v1/copilot/queries": "copilot",
+  "POST /v1/copilot/proposals": "copilot",
+  "GET /v1/copilot/proposals": "copilot",
   "GET /v1/compliance/packs": "compliance-packs",
   "POST /v1/compliance/packs": "compliance-packs",
   "POST /v1/compliance/packs/seed": "compliance-packs",

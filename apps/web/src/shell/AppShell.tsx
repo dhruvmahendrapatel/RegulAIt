@@ -100,6 +100,11 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // It sits in Governance rather than Integrations because a discovered row
       // is a governance gap, not a connection to configure.
       { label: "Shadow-AI discovery", to: "/admin/shadow-ai" },
+      // ADR-0056 — the natural-language front door onto the very ledgers this
+      // group renders. It sits here, not under Settings, because it IS a
+      // governance surface: a governed tenant reading the governance record
+      // with the caller's own entitlements and unable to change anything.
+      { label: "Governance copilot", to: "/admin/copilot" },
       // ADR-0061 — the Approvals Queue's chat courier. It sits beside the queue
       // it mirrors, because the identity link is a governance trust artifact and
       // not an integration setting.

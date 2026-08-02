@@ -493,6 +493,13 @@
       "breakpoints": true
     },
     {
+      "idx": 72,
+      "version": "7",
+      "when": 1785007000000,
+      "tag": "0072_governance_copilot",
+      "breakpoints": true
+    },
+    {
       "idx": 73,
       "version": "7",
       "when": 1785008000000,

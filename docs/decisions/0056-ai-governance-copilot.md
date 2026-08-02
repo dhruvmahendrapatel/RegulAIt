@@ -1,6 +1,6 @@
 # ADR-0056: AI Governance Copilot — a governed agent that reads the audit trail and proposes, never acts
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-08-01
 
 ## Context
@@ -140,3 +140,123 @@ policy-as-code diff, and the writer that applies an approved diff under the *app
 Enrollment in the ADR-0042 guardrail set and the ADR-0057 red-team suite with a promotion-blocking
 regression gate. A precise statement, in-product, that copilot output is decision-support requiring
 human sign-off — never an automated compliance determination.
+
+## Amendment — 2026-08-02: implemented as a GOVERNED, GROUNDED RETRIEVAL LAYER with an unverified generation layer (migration 0072)
+
+Implemented and accepted. What follows is the honest split between what this
+release genuinely enforces and what is structural — and, before either, the
+limit that shapes the whole thing.
+
+### The correction this amendment makes, before anything else
+
+**No model provider is connected in this build, so the copilot's GENERATION
+quality is unverified and this release does not claim otherwise.** What ships,
+and is tested, is everything up to and around the model: the natural-language →
+structured-query step, the entitlement-scoped retrieval, the grounded answer,
+the guardrail pass over untrusted ledger text, the proposal path, and the audit
+trail. The model call itself follows ADR-0044's judge pattern exactly — an
+interface (`CopilotNarrator`), a model-backed implementation
+(`ModelBackedNarrator`) that dispatches through `executeGovernedDispatch`, and a
+test seam — and has never narrated real evidence. Every answer object carries
+`modelNarrationVerified: false`, and `POST /v1/copilot/ask` says so in its own
+response.
+
+**The NL step is deterministic code, not a model call, and that is a design
+decision rather than a shortcut.** `planCopilotQuery` reads only the USER'S
+QUESTION and can emit exactly one of four bounded tool calls. That buys three
+things worth more than fluency: the retrieval path is testable with no provider;
+a crafted audit-log entry cannot steer the planner, because the planner never
+reads retrieved data; and the answer is composed from COUNTS, so the grounded
+layer structurally cannot hallucinate a figure. A model narration, when a
+provider is connected, is layered on top — never a replacement.
+
+### Genuinely enforced by this release
+
+- **It cannot read what its invoking user cannot — at the query boundary.**
+  `resolveCopilotScope` turns the caller into a concrete project-id list using
+  ADR-0047's own `callerProjectIds`, and every `SELECT` is built with that list
+  in its `WHERE` at construction. The suite seeds team B's audit rows with a
+  distinctive marker, has team A's lead ask a question whose unscoped answer
+  would include them, and asserts the marker is absent from the answer, absent
+  from the **retrieved evidence set**, and absent from the stored row — with the
+  count equal to team A's two rows rather than the sum of eight. An admin's
+  identical question **is** asserted to see the sum, so the narrowing is a
+  narrowing and not an empty ledger.
+- **There is no privileged copilot identity.** An identity-less caller — the
+  bootstrap token, which is otherwise fully admin — is refused with 403 and an
+  audited deny, because there is no entitlement set to inherit. A non-admin sees
+  only their own questions and their own proposals.
+- **The narrator is a tenant, not an exemption.** Narrating with a registry
+  agent the invoking user may not invoke is refused 403 through the ordinary
+  `evaluateAgent` path with an audited deny; once granted, the same call
+  dispatches through `executeGovernedDispatch` and the suite asserts a new
+  `usage_events` row attributed to that user and that project. The copilot has
+  no private budget and no private ledger.
+- **It has no mutating tools.** Four read tools, enumerated and self-describing
+  at `GET /v1/copilot/tools` with `mutatingTools: []`. A proposal writes a
+  `copilot_proposals` row plus **one ordinary `approvals` row** and the suite
+  asserts the grant and role tables are byte-for-byte unchanged across it.
+  Migration 0072 contains no column naming a grant, role, rule or entitlement to
+  change. Building a proposal on **another user's query** — laundering
+  wider-scoped evidence into your own hands — is refused and audited.
+- **The audit log is treated as an injection surface.** Retrieved `reason`
+  strings pass through ADR-0042's guardrails as phase `input` before they reach
+  a model or an answer; with the org detector at `block`, the suite asserts the
+  samples are **withheld**, the counts survive (the grounded answer is built from
+  them), `copilot_queries.guardrail_action` records `block`, and the hit is
+  audited.
+- **An ungrounded narration is discarded, not merged.** `narrationIsGrounded`
+  cross-checks the narration's own cited count keys against the retrieval's; a
+  narration citing a figure that was never produced is thrown away, the grounded
+  answer stands alone, and the discard is audited. There is no path on which
+  model prose replaces the counts.
+- **Answers state their scope.** `COPILOT_SCOPE_CAVEAT` is a field on every
+  answer: a zero means "none in your scope", never "none anywhere". Every answer
+  also carries `COPILOT_DECISION_SUPPORT_NOTICE` — decision support, never an
+  automated compliance determination.
+- **Everything is audited** with stable rule ids: the question (with the exact
+  scope its retrieval was narrowed to), the guardrail action, the proposal, and
+  the four refusals (no identity, narrator not entitled, narration discarded,
+  proposal evidence not yours).
+
+### Structural only — named plainly
+
+- **Generation quality, as above.** Unverified. `ModelBackedNarrator` has never
+  run against a real provider.
+- **An approved proposal is not applied by anything.** §"Follow-up work" names
+  "the writer that applies an approved diff under the approver's identity". That
+  writer **is not built**. A proposal opens an approval carrying the diff; a
+  human approving it changes nothing automatically today. This is deliberate for
+  a first release — an auto-applier is a privileged mutation path and deserves
+  its own design — but it does mean the §"worked example" loop stops at
+  "approved", not at "revoked".
+- **The four capabilities are unequal.** Natural-language querying, anomaly
+  *leads* and the proposal path are real. **Report drafting is not built here**:
+  the copilot does not call ADR-0047's report generator or ADR-0058's pack
+  evaluator on the user's behalf. Those are separate endpoints a human drives.
+- **Anomaly detection is two heuristics, not a model.** Deny bursts by rule, and
+  approvals decided in under two seconds. Both are leads with their evidence
+  attached, and both are deliberately crude; pillar 5's own forecast/anomaly
+  engine (ADR-0049) is not wired in here.
+- **The planner is a phrase classifier.** It handles the ADR's worked questions
+  and says `fallback: true` when it matched nothing rather than guessing. It
+  does not parse dates, entities, or named users. A richer planner is a natural
+  place to put a model call later — behind the same interface, with the same
+  bounded output type.
+- **Not enrolled in red-teaming.** §5's "enrolled in continuous red-teaming
+  (ADR-0057) with a promotion-blocking regression gate" is not wired; ADR-0057
+  landed alongside this and the enrollment is follow-up work.
+- **Evidence is bounded to five samples.** Deliberate — samples are the
+  injection surface — but it means the copilot's qualitative view of any window
+  is shallow.
+
+### Migration
+
+`0072_governance_copilot.sql` — two tables: `copilot_queries` (the question, the
+structured plan, the retrieved evidence, the grounded answer, the guardrail
+action, and `scope_project_ids` — the exact set the retrieval was permitted to
+touch, which is what makes containment auditable forever) and `copilot_proposals`
+(a diff plus the evidence that justifies it, bound to an ordinary `approvals`
+row). `audit_log.object_type` gains `copilot_query` and `copilot_proposal`, and
+`approvals.object_type` gains `copilot_proposal`, both as TS-only widenings —
+neither column has a DB CHECK, so there is no DDL for them.

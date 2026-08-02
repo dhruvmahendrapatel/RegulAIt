@@ -2286,3 +2286,38 @@ export {
   type PackScorecard,
   type PackStatus,
 } from "./compliance-packs.js";
+
+// ADR-0056 — THE AI GOVERNANCE COPILOT, the pure half: the read-only tool
+// vocabulary (four tools, no mutating one), the deterministic NL -> structured
+// query step (testable without a provider, and unsteerable by the data it
+// reads), the grounded answer renderer (composed from COUNTS, so it cannot
+// hallucinate a figure), the narrator INTERFACE + prompt/parse/cross-check
+// following ADR-0044's judge pattern, and the proposal record builder.
+export {
+  COPILOT_DECISION_SUPPORT_NOTICE,
+  COPILOT_PROPOSAL_KINDS,
+  COPILOT_SCOPE_CAVEAT,
+  COPILOT_TIMEFRAMES,
+  COPILOT_TOOLS,
+  COPILOT_TOOL_SPECS,
+  buildNarrationPrompt,
+  buildProposalRecord,
+  copilotAskSchema,
+  copilotProposalSchema,
+  narrationIsGrounded,
+  parseNarration,
+  planCopilotQuery,
+  renderGroundedAnswer,
+  type CopilotAskInput,
+  type CopilotEvidence,
+  type CopilotNarration,
+  type CopilotNarrationRequest,
+  type CopilotNarrator,
+  type CopilotProposalInput,
+  type CopilotProposalKind,
+  type CopilotQueryPlan,
+  type CopilotTimeframe,
+  type CopilotTool,
+  type CopilotToolSpec,
+  type GroundedAnswer,
+} from "./copilot.js";

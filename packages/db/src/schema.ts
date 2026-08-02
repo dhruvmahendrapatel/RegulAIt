@@ -688,6 +688,14 @@ export const auditLog = pgTable(
         // control is auto-evidenced and a human statement must not stand in for
         // ledger evidence. Plain text column — no DDL needed.
         "compliance_pack",
+        // ADR-0056: the governance COPILOT. Every question asked of it, with
+        // the exact entitlement scope its retrieval was narrowed to; every
+        // narration dispatch; every proposal it opened in the Approvals Queue;
+        // and the refusals — a narrator agent the invoking user may not call,
+        // and a guardrail hit on evidence read out of the audit log itself.
+        // The copilot is a governed tenant, so its trail is this trail.
+        "copilot_query",
+        "copilot_proposal",
       ],
     })
       .notNull()
@@ -869,7 +877,20 @@ export const approvals = pgTable(
       // The column has no DB CHECK (see migration 0001), so this is a TS-only
       // widening with no DDL, exactly like the values ADR-0011/0016/0017 added.
       // The whole point is that MRM does NOT get a second queue.
-      enum: ["mcp_tool", "workflow", "run", "project", "infra_operation", "model_card"],
+      // ADR-0056: 'copilot_proposal' — a policy-tightening / grant-revocation
+      // diff the governance copilot PROPOSED. Same reasoning as 'model_card'
+      // above: the copilot does NOT get a second inbox, and its only route to a
+      // change is an ordinary row in this one queue, applied by a named human
+      // under their own identity.
+      enum: [
+        "mcp_tool",
+        "workflow",
+        "run",
+        "project",
+        "infra_operation",
+        "model_card",
+        "copilot_proposal",
+      ],
     })
       .notNull()
       .default("mcp_tool"),
@@ -4940,3 +4961,92 @@ export type CompliancePackRow = typeof compliancePacks.$inferSelect;
 export type CompliancePackControlRow = typeof compliancePackControls.$inferSelect;
 export type CompliancePackAttestationRow = typeof compliancePackAttestations.$inferSelect;
 export type CompliancePackReportRow = typeof compliancePackReports.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0056 (migration 0072) — THE AI GOVERNANCE COPILOT
+// ---------------------------------------------------------------------------
+//
+// THE TABLE THAT IS NOT HERE: anything the copilot can mutate.
+//
+// The copilot is a READ-MOSTLY tenant of the platform it governs. It writes
+// exactly two tables — a record of what it was ASKED and what it RETRIEVED, and
+// a record of what it PROPOSED — and neither is a control-plane object. There
+// is no `copilot_applied_changes`, no `copilot_policy_writes`, and no column
+// anywhere below that names a grant, a role, a rule or an entitlement to
+// change. A proposal carries a DIFF and points at an ordinary `approvals` row;
+// applying it is a normal governed action performed by the APPROVER under their
+// own identity, never by the copilot.
+//
+// `scope_project_ids` is the honesty column. Every retrieval is narrowed, at
+// query construction, to the project ids the INVOKING USER is entitled to, and
+// the set it was narrowed to is recorded on the query row. "Could the copilot
+// have seen team B's rows when Alice asked?" is therefore answerable from the
+// ledger, forever, without re-running anything.
+
+export const copilotQueries = pgTable(
+  "copilot_queries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** WHOSE entitlements, whose budget, whose audit trail. Not nullable: an
+     * identity-less copilot query is a contradiction — there would be no
+     * entitlement set to inherit. */
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    question: text("question").notNull(),
+    /** the STRUCTURED tool call the NL step produced. Recorded so "why did it
+     * run that query" is answerable without a model. */
+    plan: jsonb("plan").$type<Record<string, unknown>>().notNull(),
+    /** counts + bounded samples the retrieval returned, already scoped */
+    evidence: jsonb("evidence").$type<Record<string, unknown>>().notNull(),
+    /** the GROUNDED answer — composed from counts, never from model recall */
+    answer: text("answer").notNull(),
+    /** 'grounded' = no model was involved. 'model' = a narration was layered on
+     * top of the grounded answer by a governed dispatch. */
+    generation: text("generation", { enum: ["grounded", "model"] }).notNull().default("grounded"),
+    /** the registry agent that narrated, when one did. FK-free deliberately —
+     * the record of what was answered outlives the agent row. */
+    narratorAgentId: uuid("narrator_agent_id"),
+    /** the EXACT project ids the retrieval was permitted to touch. NULL =
+     * org-wide (admin). This is what makes containment auditable. */
+    scopeProjectIds: jsonb("scope_project_ids").$type<string[] | null>(),
+    /** pillar 5: the project the narration dispatch billed to, when there was one */
+    projectId: uuid("project_id"),
+    /** ADR-0042: set when a guardrail acted on the retrieved evidence or on the
+     * answer. The audit log is an injection surface and this is where a hit on
+     * it becomes visible. */
+    guardrailAction: text("guardrail_action"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("copilot_queries_user_idx").on(t.userId, t.createdAt)],
+);
+
+/** THE ONLY ROUTE FROM THE COPILOT TO A CHANGE — and it is not a change. A row
+ * here is a diff plus the evidence for it, bound to an ordinary `approvals`
+ * row. The copilot has written nothing to the control plane. */
+export const copilotProposals = pgTable(
+  "copilot_proposals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    queryId: uuid("query_id")
+      .notNull()
+      .references(() => copilotQueries.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    title: text("title").notNull(),
+    rationale: text("rationale").notNull(),
+    /** the concrete, reviewable change — RECORDED, never applied by this module */
+    diff: jsonb("diff").$type<Record<string, unknown>>().notNull(),
+    /** the query result that justifies it, copied at proposal time so a later
+     * ledger change cannot silently restate the justification */
+    evidence: jsonb("evidence").$type<Record<string, unknown>>().notNull(),
+    /** THE LINK TO THE ONE QUEUE (ADR-0045's rule, applied again): the copilot
+     * does not get a second inbox. */
+    approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    proposedByUserId: uuid("proposed_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("copilot_proposals_query_idx").on(t.queryId)],
+);
+
+export type CopilotQueryRow = typeof copilotQueries.$inferSelect;
+export type CopilotProposalRow = typeof copilotProposals.$inferSelect;

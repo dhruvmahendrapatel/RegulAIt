@@ -136,6 +136,20 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/compliance/packs/:id/evaluate",
   "GET /v1/compliance/pack-reports",
   "GET /v1/compliance/pack-reports/:id",
+  // ADR-0056: the governance copilot. NON-ADMIN ON PURPOSE — the compliance
+  // officer asking "who accessed PII last quarter" is exactly the person this
+  // exists for, and gating it on admin would have made the entitlement-scoped
+  // retrieval untested theatre. The containment is in the handler and it is
+  // structural: the retrieval resolves the CALLER to a concrete project-id list
+  // and builds every WHERE clause from it, an identity-less caller is refused
+  // outright (there is no entitlement set to inherit), and a non-admin sees
+  // only their own questions and their own proposals. The copilot has no
+  // mutating tools, so there is nothing here an admin gate would be protecting.
+  "GET /v1/copilot/tools",
+  "POST /v1/copilot/ask",
+  "GET /v1/copilot/queries",
+  "POST /v1/copilot/proposals",
+  "GET /v1/copilot/proposals",
   // ADR-0049: a team lead reading THEIR OWN forecast and THEIR OWN project's
   // anomaly flags. Both resolve the caller's entitlement to a CONCRETE
   // project-id set through ADR-0047's `evaluateReportAccess` — the same
