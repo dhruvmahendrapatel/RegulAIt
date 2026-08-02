@@ -246,6 +246,10 @@ importers:
         version: 3.2.7(@types/debug@4.1.13)(@types/node@26.1.1)(tsx@4.23.1)
 
   packages/policy-kernel:
+    dependencies:
+      '@cedar-policy/cedar-wasm':
+        specifier: 4.12.0
+        version: 4.12.0
     devDependencies:
       vitest:
         specifier: ^3.2.4
@@ -543,6 +547,9 @@ packages:
   '@babel/types@7.29.7':
     resolution: {integrity: sha512-4zBIxpPzowiZpusoFkyGVwakdRJUyuH5PxQ/PrqghfdFWWasvnCdPfQXHrenDai+gyLARulZjZowCOj6fjT4pA==}
     engines: {node: '>=6.9.0'}
+
+  '@cedar-policy/cedar-wasm@4.12.0':
+    resolution: {integrity: sha512-tCSj92hh4fnmas4ojO4tjx8wAAW3mKVgQ7M388NsSpXp64FVeYY6xwhKtJRaaYGK0qLiN2jnq8/SNIU2r5fdPw==}
 
   '@drizzle-team/brocli@0.10.2':
     resolution: {integrity: sha512-z33Il7l5dKjUgGULTqBsQBQwckHh5AbIuxhdsIxDDiZAzBOrZO6q9ogcWC65kU382AfynTfgNumVcNIjuIua6w==}
@@ -3609,6 +3616,8 @@ snapshots:
     dependencies:
       '@babel/helper-string-parser': 7.29.7
       '@babel/helper-validator-identifier': 7.29.7
+
+  '@cedar-policy/cedar-wasm@4.12.0': {}
 
   '@drizzle-team/brocli@0.10.2': {}
 

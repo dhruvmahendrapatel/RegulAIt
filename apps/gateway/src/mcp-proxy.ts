@@ -28,6 +28,7 @@ import { selectTools } from "@regulait/optimizer-kernel";
 import type { ModelToolDef } from "@regulait/model-provider";
 import { setToolPriceSchema, type PiiHit } from "@regulait/shared";
 import { governedEvaluate } from "./governed-evaluate.js";
+import { abacPrincipalFromRequest, type AbacPrincipalContext } from "./abac-principal.js";
 import { guardedMcpConnect, McpEgressBlockedError } from "./mcp-egress.js";
 import { loadEntitlements } from "./entitlements.js";
 import { effectiveTechniqueMode, loadOrgSettings } from "./org-settings.js";
@@ -140,6 +141,12 @@ export async function executeGovernedToolCall(
      * row lands with projectId NULL in the Unattributed bucket) but with no
      * PII enforcement, and it can never hit a project budget. */
     projectId?: string | null;
+    /** ADR-0040: the session facts the ABAC principal bag needs (origin,
+     * authentication strength). A session is a property of the REQUEST, so the
+     * route supplies it; a worker loop with no HTTP request behind it supplies
+     * nothing and the attributes degrade to the honest 'unknown'/false, never
+     * to a silently-strong claim a policy could be fooled by. */
+    principal?: AbacPrincipalContext;
   },
 ): Promise<GovernedToolCallOutcome> {
   const { userId, serverId, toolName } = args;
@@ -186,6 +193,9 @@ export async function executeGovernedToolCall(
       // A4: attribution feeds the deploy-context derivation for mode-scoped
       // rules (lazily — no mode-scoped rules loaded = no extra queries).
       projectId,
+      // ADR-0040: the ABAC principal bag's session facts, when a request is
+      // behind this call.
+      args.principal,
     );
 
     await db.insert(auditLog).values({
@@ -723,6 +733,9 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
         toolName,
         arguments: request.params.arguments,
         projectId,
+        // ADR-0040: SERVER-DERIVED session facts. These come from the resolved
+        // session row, never from a header the caller could set.
+        principal: abacPrincipalFromRequest(req),
       });
 
       switch (outcome.kind) {

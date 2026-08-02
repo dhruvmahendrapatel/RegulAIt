@@ -1388,3 +1388,240 @@ describe("per-user connector revocation (ADR-0019)", () => {
     expect(revoked.ruleId).toBe("connector-revoked");
   });
 });
+
+// ===========================================================================
+// ADR-0040 — ABAC on the kernel ALLOW PATH
+//
+// The whole point of putting ABAC inside the kernel rather than beside it is
+// that these invariants can be asserted structurally, once, here — the same
+// way the additive-only / allow-path-only invariants for ADR-0019 revocations
+// already are.
+// ===========================================================================
+describe("ADR-0040 ABAC — the invariants, locked", () => {
+  const abacToolGrant: ToolGrant = {
+    id: "tg-abac", userId: USER, serverId: SERVER, toolName: "query_database",
+  };
+  const FORBID = {
+    effect: "forbid" as const,
+    policyId: "e0f1a2b3-0000-4000-8000-000000000001",
+    policyName: "no-night-hipaa-writes",
+    policyVersion: 3,
+  };
+
+  // -- INVARIANT 1: ABAC NEVER GRANTS -------------------------------------
+  it("(1) a Cedar PERMIT cannot rescue an ungranted call — it never even reaches ABAC", () => {
+    // No grant of any kind. Feed the kernel the most permissive ABAC verdict
+    // there is and assert the decision is still the plain default-deny.
+    const withoutAbac = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool, toolGrants: [], serverGrants: [],
+    });
+    const withPermit = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool, toolGrants: [], serverGrants: [],
+      abacDecision: { effect: "permit" },
+    });
+    expect(withPermit).toEqual(withoutAbac);
+    expect(withPermit.effect).toBe("deny");
+    expect(withPermit.ruleId).toBe(DEFAULT_DENY_RULE_ID);
+    // …and the proof that ABAC was never consulted: no abac-forbid trace exists
+    expect(withPermit.ruleChain.some((t) => t.rule === "abac-forbid")).toBe(false);
+  });
+
+  it("(1) not even a forbid changes an ungranted call — ABAC is not an extra gate, it is a step on the allow path", () => {
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool, toolGrants: [], serverGrants: [],
+      abacDecision: FORBID,
+    });
+    expect(d.ruleId).toBe(DEFAULT_DENY_RULE_ID);
+    expect(d.ruleChain.some((t) => t.rule === "abac-forbid")).toBe(false);
+  });
+
+  it("(1) a lead-ceiling deny still wins — ABAC cannot override an earlier terminal deny", () => {
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [abacToolGrant], serverGrants: [],
+      ceilingTools: ["something_else"],
+      abacDecision: { effect: "permit" },
+    });
+    expect(d.ruleId).toBe("lead-ceiling");
+    expect(d.ruleChain.some((t) => t.rule === "abac-forbid")).toBe(false);
+  });
+
+  // -- INVARIANT 2: EMPTY POLICY SET = TODAY, BYTE FOR BYTE ----------------
+  it("(2) absent abacDecision is byte-identical to the pre-ADR-0040 kernel — representative ALLOW", () => {
+    const base = {
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [abacToolGrant], serverGrants: [],
+    };
+    const today = evaluate(base);
+    expect(evaluate({ ...base, abacDecision: null })).toEqual(today);
+    expect(evaluate({ ...base, abacDecision: undefined })).toEqual(today);
+    // the full Decision, ruleChain included — not merely the effect
+    expect(today).toEqual({
+      effect: "allow",
+      ruleId: "tg-abac",
+      ruleChain: [
+        { rule: "tool-allow-list", outcome: "allow", grantId: "tg-abac" },
+        { rule: "data-scope", outcome: "no-match" },
+        { rule: "rate-limit", outcome: "no-match" },
+        { rule: "approval-required", outcome: "no-match" },
+      ],
+      reason: "tool 'query_database' on server 'server-1' is on user's allow-list",
+    });
+  });
+
+  it("(2) absent abacDecision is byte-identical — representative DENY", () => {
+    const base = { userId: USER, serverId: SERVER, tool: writeTool, toolGrants: [], serverGrants: [] };
+    const today = evaluate(base);
+    expect(evaluate({ ...base, abacDecision: null })).toEqual(today);
+    expect(today).toEqual({
+      effect: "deny",
+      ruleId: DEFAULT_DENY_RULE_ID,
+      ruleChain: [
+        { rule: "tool-allow-list", outcome: "no-match" },
+        { rule: "role-tool-allow-list", outcome: "no-match" },
+        { rule: "server-read-only-all", outcome: "no-match" },
+        { rule: "role-server-read-only-all", outcome: "no-match" },
+        { rule: "default-deny", outcome: "deny" },
+      ],
+      reason: "no grant matches user 'user-a', server 'server-1', tool 'drop_table' — default-deny",
+    });
+  });
+
+  it("(2) a 'permit' verdict adds NO rule-chain entry — a matching-nothing policy set is invisible", () => {
+    const base = {
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [abacToolGrant], serverGrants: [],
+    };
+    expect(evaluate({ ...base, abacDecision: { effect: "permit" } })).toEqual(evaluate(base));
+  });
+
+  // -- FORBID -> DENY ------------------------------------------------------
+  it("a forbid DENIES a granted call, naming the policy in ruleId and abac-forbid in the chain", () => {
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [abacToolGrant], serverGrants: [],
+      abacDecision: FORBID,
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe(FORBID.policyId);
+    expect(d.ruleChain).toEqual([
+      { rule: "tool-allow-list", outcome: "allow", grantId: "tg-abac" },
+      { rule: "abac-forbid", outcome: "deny", grantId: FORBID.policyId },
+    ]);
+    expect(d.reason).toContain("no-night-hipaa-writes");
+    expect(d.reason).toContain("v3");
+  });
+
+  it("a forbid beats data-scope, rate-limit and approval — it is terminal like the lead ceiling", () => {
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [abacToolGrant], serverGrants: [],
+      dataScopeRules: [
+        { id: "ds-1", userId: USER, serverId: SERVER, toolName: null, argPath: "schema", allowedValues: ["public"] },
+      ],
+      rateLimits: [
+        { id: "rl-1", userId: USER, serverId: SERVER, toolName: null, maxCalls: 1, windowSeconds: 60, currentCount: 9 },
+      ],
+      approvalRules: [
+        { id: "ar-1", userId: USER, serverId: SERVER, toolName: null, writeOnly: false, approverUserId: "boss" },
+      ],
+      abacDecision: FORBID,
+    });
+    expect(d.ruleId).toBe(FORBID.policyId);
+    expect(d.ruleChain.map((t) => t.rule)).toEqual(["tool-allow-list", "abac-forbid"]);
+  });
+
+  // -- REQUIRE APPROVAL -> THE SAME QUEUE ----------------------------------
+  it("require_approval pauses the call through the ordinary require_approval effect + approver", () => {
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [abacToolGrant], serverGrants: [],
+      abacDecision: {
+        effect: "require_approval",
+        policyId: "e0f1a2b3-0000-4000-8000-000000000002",
+        policyName: "prod-writes-need-signoff",
+        approverUserId: "approver-1",
+        approverName: "Ada",
+      },
+    });
+    expect(d.effect).toBe("require_approval");
+    expect(d.ruleId).toBe("e0f1a2b3-0000-4000-8000-000000000002");
+    expect(d.approverUserId).toBe("approver-1");
+    expect(d.approverName).toBe("Ada");
+    expect(d.ruleChain).toEqual([
+      { rule: "tool-allow-list", outcome: "allow", grantId: "tg-abac" },
+      { rule: "data-scope", outcome: "no-match" },
+      { rule: "rate-limit", outcome: "no-match" },
+      { rule: "abac-forbid", outcome: "require-approval", grantId: "e0f1a2b3-0000-4000-8000-000000000002" },
+    ]);
+  });
+
+  it("an already-approved queue entry satisfies an ABAC pause — the SAME mechanism, not a second one", () => {
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [abacToolGrant], serverGrants: [],
+      approvedApprovalId: "approval-99",
+      abacDecision: {
+        effect: "require_approval", policyId: "pol-2", approverUserId: "approver-1",
+      },
+    });
+    expect(d.effect).toBe("allow");
+    expect(d.ruleChain).toContainEqual({
+      rule: "abac-forbid", outcome: "satisfied-by-approval", grantId: "approval-99",
+    });
+  });
+
+  it("a require_approval with NO approver FAILS CLOSED to a deny — never a silent allow", () => {
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [abacToolGrant], serverGrants: [],
+      abacDecision: { effect: "require_approval", policyId: "pol-3" },
+    });
+    expect(d.effect).toBe("deny");
+    expect(d.ruleId).toBe("pol-3");
+    expect(d.reason).toContain("names no approver");
+  });
+
+  it("a DENY from data-scope or rate-limit still wins over an ABAC pause — a pause is not an escape hatch", () => {
+    const pause = {
+      effect: "require_approval" as const, policyId: "pol-4", approverUserId: "approver-1",
+    };
+    const scoped = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [abacToolGrant], serverGrants: [],
+      dataScopeRules: [
+        { id: "ds-2", userId: USER, serverId: SERVER, toolName: null, argPath: "schema", allowedValues: ["public"] },
+      ],
+      args: { schema: "secret" },
+      abacDecision: pause,
+    });
+    expect(scoped.effect).toBe("deny");
+    expect(scoped.ruleId).toBe("ds-2");
+    const limited = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [abacToolGrant], serverGrants: [],
+      rateLimits: [
+        { id: "rl-2", userId: USER, serverId: SERVER, toolName: null, maxCalls: 1, windowSeconds: 60, currentCount: 4 },
+      ],
+      abacDecision: pause,
+    });
+    expect(limited.effect).toBe("deny");
+    expect(limited.ruleId).toBe("rl-2");
+  });
+
+  it("an ABAC pause takes precedence over a rule-driven approval, and both name a real approver", () => {
+    const d = evaluate({
+      userId: USER, serverId: SERVER, tool: readTool,
+      toolGrants: [abacToolGrant], serverGrants: [],
+      approvalRules: [
+        { id: "ar-2", userId: USER, serverId: SERVER, toolName: null, writeOnly: false, approverUserId: "rule-boss" },
+      ],
+      abacDecision: {
+        effect: "require_approval", policyId: "pol-5", approverUserId: "abac-boss",
+      },
+    });
+    expect(d.effect).toBe("require_approval");
+    expect(d.ruleId).toBe("pol-5");
+    expect(d.approverUserId).toBe("abac-boss");
+  });
+});

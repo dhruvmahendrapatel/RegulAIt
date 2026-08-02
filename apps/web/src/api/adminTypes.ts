@@ -673,3 +673,76 @@ export interface OrgSettingsResponse {
   settings: OrgSettings;
   envKeys?: Array<{ provider: string; envVar: string; present: boolean }>;
 }
+
+// ---- ADR-0040 ABAC / policy-as-code --------------------------------------
+
+export interface AbacValidationIssue {
+  message: string;
+  help?: string | null;
+}
+
+export interface AbacValidation {
+  ok: boolean;
+  errors: AbacValidationIssue[];
+  warnings: AbacValidationIssue[];
+}
+
+export interface AbacSchemaInfo {
+  engine: string;
+  versions: string[];
+  current: string;
+  modes: string[];
+  schemaText: string | null;
+  /** stated by the server so the UI never has to infer it */
+  abacCanGrant: false;
+}
+
+export interface AbacPolicySummary {
+  id: string;
+  name: string;
+  description?: string | null;
+  enabled: boolean;
+  activeVersionId: string | null;
+  createdAt: string;
+  /** null when nothing is activated yet (the left-join columns) */
+  activeVersion?: number | null;
+  mode?: "forbid" | "require_approval" | null;
+  timezone?: string | null;
+  schemaVersion?: string | null;
+  source?: string | null;
+  approverUserId?: string | null;
+}
+
+export interface AbacPolicyVersion {
+  id: string;
+  policyId: string;
+  version: number;
+  source: string;
+  schemaVersion: string;
+  mode: "forbid" | "require_approval";
+  timezone: string;
+  approverUserId: string | null;
+  testCases: Array<Record<string, unknown>> | null;
+  authorUserId: string | null;
+  createdAt: string;
+}
+
+export interface AbacPolicyDetail {
+  policy: AbacPolicySummary;
+  versions: AbacPolicyVersion[];
+}
+
+export interface AbacTestRun {
+  policyId: string;
+  version: number;
+  total: number;
+  passed: number;
+  failed: number;
+  results: Array<{
+    name: string;
+    expected: "match" | "no_match";
+    actual: "match" | "no_match";
+    passed: boolean;
+    effect: string;
+  }>;
+}

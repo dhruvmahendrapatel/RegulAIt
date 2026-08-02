@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./abac": {
+      "types": "./dist/abac.d.ts",
+      "default": "./dist/abac.js"
     }
   },
   "scripts": {
@@ -18,5 +22,8 @@
   },
   "devDependencies": {
     "vitest": "^3.2.4"
+  },
+  "dependencies": {
+    "@cedar-policy/cedar-wasm": "4.12.0"
   }
 }

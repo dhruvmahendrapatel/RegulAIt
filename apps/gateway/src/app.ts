@@ -113,6 +113,8 @@ import {
 import { registerSamlRoutes } from "./saml.js";
 import { SCIM_ROUTES, registerScimAdminRoutes, registerScimRoutes } from "./scim.js";
 import { registerGroupRoleMappingRoutes } from "./group-role-api.js";
+import { registerAbacRoutes } from "./abac.js";
+import { abacPrincipalFromRequest } from "./abac-principal.js";
 import { evaluateIpEnvelope } from "./net-policy.js";
 import { activeDelegatorsFor, activeDelegationFrom } from "./delegations.js";
 
@@ -1720,11 +1722,21 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
     // Full governed evaluation, but decision-only: unlike the proxy path this
     // endpoint never creates queue entries or consumes approvals.
-    const { decision } = await governedEvaluate(db, body.userId, body.serverId, {
-      serverId: tool.serverId,
-      name: tool.name,
-      kind: tool.kind,
-    });
+    const { decision } = await governedEvaluate(
+      db,
+      body.userId,
+      body.serverId,
+      { serverId: tool.serverId, name: tool.name, kind: tool.kind },
+      undefined,
+      null,
+      // ADR-0019 A4 attribution: this preview endpoint names no project.
+      null,
+      // ADR-0040: the ADMIN's own session facts are NOT the subject's — this
+      // endpoint previews a decision for `body.userId`, who may not be the
+      // caller, so the principal's session attributes are honestly unknown
+      // here. /v1/abac/simulate is where a hypothetical session can be named.
+      undefined,
+    );
 
     await db.insert(auditLog).values({
       userId: body.userId,
@@ -2410,6 +2422,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // DEFAULT gate above (none of them appear in NON_ADMIN_ROUTES): creating a
   // mapping delegates a role's grants to whoever administers the IdP group.
   registerGroupRoleMappingRoutes(app, db);
+  // ADR-0040: ABAC policy-as-code admin surface (CRUD, versions, activate/
+  // rollback, the policy test runner, and the access-preview simulation hook).
+  // Admin-only through app.ts's DEFAULT gate — none of these routes appear in
+  // NON_ADMIN_ROUTES, because authoring a policy that can deny every governed
+  // call in the org is precisely the kind of act a non-admin must not reach.
+  registerAbacRoutes(app, db);
 
   registerAgentConnectorRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0034 — admin-registered custom LLM providers + the egress allow-list

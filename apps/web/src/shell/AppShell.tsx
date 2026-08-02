@@ -51,6 +51,10 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
     group: "Governance",
     items: [
       { label: "Rules engine", to: "/admin/rules" },
+      // ADR-0040 — sits beside the rules engine because it is the same
+      // question ("what may this call do?") asked with attributes instead of
+      // static grants. It can only ever subtract from what Rules allows.
+      { label: "ABAC policies", to: "/admin/abac-policies" },
       { label: "Simulation", to: "/admin/simulation" },
       { label: "Approvals queue", to: "/admin/approvals" },
       { label: "Audit log", to: "/admin/audit" },

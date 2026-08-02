@@ -20,6 +20,7 @@ import {
 } from "@regulait/db";
 import { evaluate, type Decision, type ToolRef } from "@regulait/policy-kernel";
 import { loadEntitlements, loadScopeMemberships } from "./entitlements.js";
+import { evaluateAbacForToolCall, loadActiveAbacPolicies, type AbacPrincipalContext } from "./abac.js";
 
 /**
  * PILLAR 1 rule scoping: the SQL pre-filter that widens a rule load from the
@@ -120,6 +121,11 @@ export async function governedEvaluate(
    * context for mode-scoped rules — and only lazily, when a loaded rule
    * actually carries a deployMode, so the default path costs nothing. */
   projectId?: string | null,
+  /** ADR-0040: the session facts the ABAC principal bag needs (origin,
+   * authentication strength). Supplied by the route, because a session is a
+   * property of the REQUEST, not of the user. Absent = the honest 'unknown'
+   * defaults, never a silently-strong claim. */
+  principal?: AbacPrincipalContext,
 ): Promise<GovernedEvaluation> {
   // PILLAR 1 rule scoping: resolve the user's role/team memberships first, then
   // widen every rule load from the exact (userId, serverId) match to every
@@ -245,6 +251,38 @@ export async function governedEvaluate(
   const deployContext =
     anyModeScoped && projectId ? await deriveDeployContext(db, projectId) : null;
 
+  // ADR-0040 ABAC. The policy-set load is ONE indexed query, and an install
+  // with no active policies stops there: `abacDecision` stays null, the kernel
+  // receives an ABSENT input, and the decision is byte-identical to the
+  // pre-ADR-0040 behaviour. Only when a policy is actually active do we pay for
+  // assembling the attribute bags — the same lazy discipline A4's deploy
+  // context already follows above.
+  //
+  // The attributes are assembled HERE, never inside the kernel: the kernel
+  // stays a pure function of its inputs, which is what lets the simulation
+  // surface reproduce a decision exactly.
+  const abacPolicies = await loadActiveAbacPolicies(db);
+  const abacDecision = abacPolicies.length
+    ? await evaluateAbacForToolCall(
+        db,
+        {
+          userId,
+          serverId,
+          toolName: tool.name,
+          toolKind: tool.kind,
+          projectId: projectId ?? null,
+          // the rate signal already computed at this call site — highest
+          // consumption across the limits that bind this call
+          rateLimitUsagePct: limitsWithCounts.reduce((max, l) => {
+            const pct = l.maxCalls > 0 ? Math.floor((l.currentCount * 100) / l.maxCalls) : 0;
+            return Math.max(max, Math.min(100, pct));
+          }, 0),
+          ...(principal ? { principal } : {}),
+        },
+        abacPolicies,
+      )
+    : null;
+
   const decision = evaluate({
     userId,
     serverId,
@@ -262,6 +300,7 @@ export async function governedEvaluate(
     approvedApprovalId,
     ceilingTools: ceilingTools ?? null,
     deployContext,
+    abacDecision,
   });
 
   return { decision, approvedApprovalId };

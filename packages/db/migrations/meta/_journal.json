@@ -379,6 +379,13 @@
       "when": 1784989000000,
       "tag": "0053_group_role_mapping",
       "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1784990000000,
+      "tag": "0054_abac_policies",
+      "breakpoints": true
     }
   ]
 }

@@ -554,6 +554,14 @@ export const auditLog = pgTable(
         // resolve to either an admin action or a named group+mapping. Plain
         // text column — no DDL needed.
         "group_role_mapping",
+        // ADR-0040: admin CRUD of an ABAC/Cedar policy — create, new version,
+        // ACTIVATE, ROLLBACK, deactivate, delete. Activation is the act that
+        // makes a policy start denying real calls, so it is a governed act in
+        // its own right and lands here with the from/to version numbers. The
+        // DECISIONS those policies produce audit as ordinary governed rows
+        // (objectType "mcp_tool", ruleId = the policy id) — one audit trail,
+        // exactly as the ADR requires. Plain text column — no DDL needed.
+        "abac_policy",
       ],
     })
       .notNull()
@@ -2494,3 +2502,117 @@ export const orgSettings = pgTable(
 );
 
 export type OrgSettingsRow = typeof orgSettings.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0040 (migration 0054) — ABAC / policy-as-code
+// ---------------------------------------------------------------------------
+//
+// Attribute-conditional policy, written in Cedar, evaluated in-process INSIDE
+// the policy kernel's allow path. Two tables, deliberately:
+//
+//   `abacPolicies`         the stable IDENTITY (name, in-the-active-set flag,
+//                          pointer at the live version). Its id is what lands
+//                          in a decision's `ruleId`, in the `abac-forbid`
+//                          rule-chain entry and in `approvals.ruleId`, so it
+//                          survives every edit.
+//   `abacPolicyVersions`   IMMUTABLE. Editing a policy INSERTs version max+1;
+//                          activation UPDATEs the pointer; ROLLBACK is that
+//                          same update aimed at an older row, so history is
+//                          never lost and a rollback is itself revertible.
+//
+// ABAC CAN ONLY SUBTRACT: `mode` admits 'forbid' and 'require_approval' only,
+// there is no column that could widen entitlement, and the engine wrapper
+// refuses a Cedar `permit` at write time. Empty tables = pre-ADR-0040
+// behaviour exactly.
+
+/** what a matching ABAC policy does to a call the RBAC layer already allowed */
+export const ABAC_POLICY_MODES = ["forbid", "require_approval"] as const;
+
+export const abacPolicies = pgTable(
+  "abac_policies",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull().unique(),
+    description: text("description"),
+    /** in the active set? FALSE for every newly created policy — activating is
+     * a deliberate, audited act, never a side effect of authoring. */
+    enabled: boolean("enabled").notNull().default(false),
+    /** which immutable version is live. NULL = nothing activated yet. */
+    activeVersionId: uuid("active_version_id"),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("abac_policies_enabled_idx").on(t.enabled)],
+);
+
+export const abacPolicyVersions = pgTable(
+  "abac_policy_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    policyId: uuid("policy_id")
+      .notNull()
+      .references(() => abacPolicies.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    /** the Cedar source, exactly as authored — this column IS the artifact */
+    source: text("source").notNull(),
+    /** the attribute-schema version it was validated against at write time */
+    schemaVersion: text("schema_version").notNull(),
+    mode: text("mode", { enum: ABAC_POLICY_MODES }).notNull(),
+    /** IANA zone the policy's time-of-day attributes are computed in — never
+     * the server's incidental locale, never a client clock */
+    timezone: text("timezone").notNull().default("UTC"),
+    /** required when mode='require_approval' (DB CHECK): the Approvals-Queue
+     * approver a paused call routes to — the SAME queue, not a parallel one */
+    approverUserId: uuid("approver_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** policy unit tests travelling WITH the version they describe */
+    testCases: jsonb("test_cases").$type<AbacPolicyTestCase[]>(),
+    authorUserId: uuid("author_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("abac_policy_versions_policy_version_uq").on(t.policyId, t.version),
+    index("abac_policy_versions_policy_idx").on(t.policyId, t.version),
+    check("abac_policy_versions_mode_check", sql`${t.mode} IN ('forbid','require_approval')`),
+    check(
+      "abac_policy_versions_approver_check",
+      sql`${t.mode} <> 'require_approval' OR ${t.approverUserId} IS NOT NULL`,
+    ),
+  ],
+);
+
+/** one stored policy unit test: a hypothetical request + the expected verdict */
+export interface AbacPolicyTestCase {
+  name: string;
+  /** ISO instant the case is evaluated at — pins time-of-day cases */
+  at?: string | null;
+  principal: {
+    id?: string | null;
+    roles?: string[];
+    roleIds?: string[];
+    teams?: string[];
+    isAdmin?: boolean;
+    sessionOrigin?: string;
+    mfaCompleted?: boolean;
+  };
+  resource: {
+    serverId?: string | null;
+    serverName?: string | null;
+    toolName: string;
+    kind: "read" | "write";
+    priceTier?: string;
+    projectId?: string | null;
+    projectName?: string | null;
+    classifications?: string[];
+    dataSensitivity?: string | null;
+  };
+  context?: {
+    deployModes?: string[];
+    environments?: string[];
+    rateLimitUsagePct?: number;
+  };
+  /** 'match' = this policy is expected to fire; 'no_match' = it must not */
+  expect: "match" | "no_match";
+}
+
+export type AbacPolicyRow = typeof abacPolicies.$inferSelect;
+export type AbacPolicyVersionRow = typeof abacPolicyVersions.$inferSelect;
