@@ -6,12 +6,13 @@
  * sessions.
  */
 import { useState, type ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { api } from "../../../api/client";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { api, ApiError } from "../../../api/client";
 import type { OrgSettingsResponse } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
-import { Button, Card, Field, Input, Select } from "../../../ui/kit";
+import { Button, Card, ConfirmModal, Field, Input, Select, Textarea } from "../../../ui/kit";
 import { QueryGate, agentOpts, optionEls, useAction, useAgents } from "../adminKit";
+import { useToast } from "../../../ui/toast";
 import v from "../../views.module.css";
 
 const CLEAR = "__clear__";
@@ -155,6 +156,55 @@ function Loaded(props: { settings: Record<string, unknown> }) {
     approvalQuorum: str(s, "approvalQuorum"),
     approvalDelegationEnabled: str(s, "approvalDelegationEnabled"),
   });
+
+  // --- 7. Network access (ADR-0039) ----------------------------------------
+  // Not a useSection form: the save needs the confirm-on-lockout retry flow
+  // (a 409 ip_policy_lockout opens an explicit confirm modal, and only a
+  // confirmed resend carries confirmIpLockout: true).
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const [netForm, setNetForm] = useState({
+    sessionIpPolicy: str(s, "sessionIpPolicy") || "off",
+    apiKeyIpPolicy: str(s, "apiKeyIpPolicy") || "off",
+  });
+  const [ipAllowlistText, setIpAllowlistText] = useState<string>(
+    Array.isArray(s.sessionIpAllowlist) ? (s.sessionIpAllowlist as string[]).join("\n") : "",
+  );
+  const [netBusy, setNetBusy] = useState(false);
+  const [netError, setNetError] = useState<string | null>(null);
+  const [lockoutPrompt, setLockoutPrompt] = useState<string | null>(null);
+  const saveNet = async (confirmIpLockout: boolean) => {
+    setNetBusy(true);
+    setNetError(null);
+    const list = ipAllowlistText
+      .split(/[\n,]+/)
+      .map((x) => x.trim())
+      .filter(Boolean);
+    try {
+      await put({
+        sessionIpPolicy: netForm.sessionIpPolicy,
+        apiKeyIpPolicy: netForm.apiKeyIpPolicy,
+        sessionIpAllowlist: list.length ? list : null,
+        ...(confirmIpLockout ? { confirmIpLockout: true } : {}),
+      });
+      setLockoutPrompt(null);
+      toast("Network access policy saved (audited)", "success");
+      void qc.invalidateQueries({ queryKey: ["admin"] });
+    } catch (err) {
+      if (err instanceof ApiError && err.payload.error === "ip_policy_lockout") {
+        // the gateway's self-lockout guard: continuing requires an explicit,
+        // eyes-open confirm — surfaced as a modal, never silently retried
+        setLockoutPrompt(
+          err.payload.detail ??
+            "This allow-list excludes your own current IP under continuous enforcement — saving would sign you out on your next request.",
+        );
+      } else {
+        setNetError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      setNetBusy(false);
+    }
+  };
 
   // --- 5. Audit retention --------------------------------------------------
   const retention = useSection({
@@ -492,6 +542,55 @@ function Loaded(props: { settings: Record<string, unknown> }) {
           {numField(retention, "Prune interval (hours)", "pruneIntervalHours")}
           {numField(retention, "Org default retention (days, 0 = none)", "defaultAuditRetentionDays")}
         </SectionShell>
+      </Card>
+
+      <Card title="7 · Network access — IP allow-listing (ADR-0039)">
+        <SectionShell
+          title="Trusted-network policy"
+          busy={netBusy}
+          error={netError}
+          submitLabel="Save network access policy"
+          onSubmit={() => void saveNet(false)}
+          help="Confine sign-ins to your corporate networks by CIDR (IPv4 + IPv6, one block per line; empty = no restriction — the upgrade-safe default). The HUMAN knob governs password/SSO sessions: 'enforce at login' refuses new sign-ins from outside the list (existing sessions untouched); 'enforce continuously' also checks every request and force-signs-out a session the moment it leaves the envelope (fail-closed: an undeterminable client IP counts as outside). The API-KEY knob is a deliberately SEPARATE choice for automation (CI runners, IDEs, key-exchanged sessions) over the same list — so 'humans confined, CI not' is a visible chosen state, and tightening one path never silently locks out the other. The deploy-time bootstrap token is never IP-restricted (break-glass recovery). Malformed CIDR blocks are refused at save time; saving a continuous policy that excludes your own current IP demands an explicit confirmation. Behind a TLS-terminating proxy the gateway must trust it (REGULAIT_TRUSTED_PROXIES) or the observed client IP is the proxy's. Every denial and forced sign-out is audited with the IP and the policy that fired."
+        >
+          <Field label="Human session policy">
+            <Select
+              value={netForm.sessionIpPolicy}
+              onChange={(e) => setNetForm((f) => ({ ...f, sessionIpPolicy: e.target.value }))}
+            >
+              <option value="off">off — no IP restriction (default)</option>
+              <option value="enforce_at_login">enforce at login — new sign-ins only</option>
+              <option value="enforce_continuous">enforce continuously — force sign-out when outside</option>
+            </Select>
+          </Field>
+          <Field label="API-key policy (separate knob)">
+            <Select
+              value={netForm.apiKeyIpPolicy}
+              onChange={(e) => setNetForm((f) => ({ ...f, apiKeyIpPolicy: e.target.value }))}
+            >
+              <option value="off">off — automation unrestricted (default)</option>
+              <option value="enforce_at_login">enforce at key-exchange sign-in</option>
+              <option value="enforce_continuous">enforce continuously — every request</option>
+            </Select>
+          </Field>
+          <Field label="Allowed CIDR blocks (one per line)">
+            <Textarea
+              rows={4}
+              value={ipAllowlistText}
+              onChange={(e) => setIpAllowlistText(e.target.value)}
+              placeholder={"10.0.0.0/8\n203.0.113.0/24\n2001:db8::/32"}
+            />
+          </Field>
+        </SectionShell>
+        <ConfirmModal
+          open={lockoutPrompt !== null}
+          title="This policy would lock YOU out"
+          body={lockoutPrompt ?? ""}
+          danger
+          confirmLabel="Save anyway (sign me out)"
+          onCancel={() => setLockoutPrompt(null)}
+          onConfirm={() => void saveNet(true)}
+        />
       </Card>
     </div>
   );

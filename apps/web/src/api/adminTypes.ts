@@ -33,8 +33,26 @@ export interface UserSession {
   idleExpiresAt: string | null;
   lastSeenAt: string | null;
   ip: string | null;
+  /** ADR-0039: where the session was LAST used (ip = where it started) */
+  lastSeenIp: string | null;
   userAgent: string | null;
+  /** ADR-0039: derived browser+OS family — display only, never a control */
+  deviceLabel: string;
+  origin: string;
   revokedAt: string | null;
+}
+
+/** ADR-0039: the caller's own live sessions (GET /auth/sessions) */
+export interface OwnSession {
+  id: string;
+  createdAt: string;
+  expiresAt: string;
+  lastSeenAt: string | null;
+  ip: string | null;
+  lastSeenIp: string | null;
+  origin: string;
+  deviceLabel: string;
+  current: boolean;
 }
 
 export interface OidcProvider {
@@ -562,6 +580,12 @@ export interface OrgSettings {
    * null. true (default) = private-LAN MCP URLs work with zero ceremony;
    * false = strict. IMDS/link-local stays blocked either way. */
   mcpPrivateRangesDefault?: boolean;
+  /** ADR-0039: org network envelope (CIDR blocks; null/empty = unrestricted) */
+  sessionIpAllowlist?: string[] | null;
+  /** ADR-0039: human-session knob — off | enforce_at_login | enforce_continuous */
+  sessionIpPolicy?: "off" | "enforce_at_login" | "enforce_continuous";
+  /** ADR-0039: the separate automation knob, same levels over the same list */
+  apiKeyIpPolicy?: "off" | "enforce_at_login" | "enforce_continuous";
 }
 
 export interface OrgSettingsResponse {

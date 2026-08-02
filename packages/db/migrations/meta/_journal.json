@@ -351,6 +351,13 @@
       "when": 1784985000000,
       "tag": "0049_mcp_oidc_egress",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1784986000000,
+      "tag": "0050_session_device_ip_policy",
+      "breakpoints": true
     }
   ]
 }

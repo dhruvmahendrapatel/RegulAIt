@@ -12,6 +12,7 @@ import {
   approvalRules,
   approvals,
   auditLog,
+  authSessions,
   backupRuns,
   certInventory,
   infraFindings,
@@ -100,12 +101,16 @@ import {
   CSRF_HEADER,
   SESSION_COOKIE,
   authenticate,
+  clearSessionCookie,
   generateToken,
+  governingIpPolicy,
   readCookie,
   registerAuthRoutes,
+  requestIsSecure,
   resolveSession,
   type AuthContext,
 } from "./auth.js";
+import { evaluateIpEnvelope } from "./net-policy.js";
 import { activeDelegatorsFor, activeDelegationFrom } from "./delegations.js";
 
 declare module "fastify" {
@@ -533,7 +538,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     if (!authorization) {
       const cookieToken = readCookie(req.headers.cookie, SESSION_COOKIE);
       if (cookieToken) {
-        const session = await resolveSession(db, cookieToken, Boolean(opts.bootstrapToken));
+        // ADR-0039: the client IP rides into the SAME update as the idle-slide
+        // so last_seen_ip tracks where the session IS, not where it started
+        const session = await resolveSession(db, cookieToken, Boolean(opts.bootstrapToken), req.ip ?? null);
         if (session === "disabled") {
           return reply.status(401).send({
             error: "user_disabled",
@@ -556,6 +563,54 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
               });
             }
           }
+          // ADR-0039 enforce_continuous: EVERY authenticated use of a governed
+          // session is checked against the org envelope; an out-of-range
+          // request is refused AND the session force-revoked on the spot (the
+          // "trusted network only" posture — a laptop leaving the corporate
+          // VPN loses its session mid-flight). Fail closed: an undeterminable
+          // client IP under a non-empty allow-list is outside the envelope.
+          // Human sessions answer to session_ip_policy, exchanged api_key
+          // sessions to api_key_ip_policy; bootstrap is never restricted.
+          // Settings are re-read from the singleton row on every check, so a
+          // tightened allow-list binds on the very next request — no cache.
+          const org = await loadOrgSettings(db);
+          const ipPolicy = governingIpPolicy(org, session.origin);
+          if (ipPolicy === "enforce_continuous") {
+            const decision = evaluateIpEnvelope(org.sessionIpAllowlist, req.ip ?? null);
+            if (!decision.allowed) {
+              const knob = session.origin === "api_key" ? "api_key_ip_policy" : "session_ip_policy";
+              // ONE way sessions die: revoked_at — this is just a finer caller
+              await db
+                .update(authSessions)
+                .set({ revokedAt: new Date() })
+                .where(and(eq(authSessions.id, session.sessionId), isNull(authSessions.revokedAt)));
+              await db.insert(auditLog).values({
+                userId: session.ctx.userId ?? "00000000-0000-0000-0000-000000000000",
+                objectType: "user",
+                objectId: session.ctx.userId,
+                detail: {
+                  phase: "ip-policy-session-revoked",
+                  knob,
+                  policy: ipPolicy,
+                  sessionId: session.sessionId,
+                  origin: session.origin,
+                  clientIp: req.ip ?? null,
+                  reason: decision.reason,
+                  allowlist: org.sessionIpAllowlist ?? [],
+                },
+                effect: "deny",
+                ruleId: "ip-policy-session-revoked",
+                ruleChain: [],
+                reason: `session ${session.sessionId} force-revoked: request from ${req.ip ?? "an undeterminable client IP"} is outside the org IP allow-list under ${knob}='enforce_continuous'`,
+              });
+              void reply.header("set-cookie", clearSessionCookie(requestIsSecure(req)));
+              return reply.status(401).send({
+                error: "ip_not_allowed",
+                detail:
+                  "this session was signed out: requests from this network address are not permitted by organization policy",
+              });
+            }
+          }
           const route = `${req.method} ${req.routeOptions.url ?? ""}`;
           // gate 1: a one-time password must be replaced before anything else
           if (session.mustChangePassword && !AUTH_SELF_SERVICE_ROUTES.has(route)) {
@@ -566,7 +621,6 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           }
           // gate 2: org-mandated MFA enrollment (off|admins|all)
           if (!session.totpEnabled && !AUTH_SELF_SERVICE_ROUTES.has(route) && session.ctx.userId) {
-            const org = await loadOrgSettings(db);
             const mustEnroll =
               org.mfaRequired === "all" || (org.mfaRequired === "admins" && session.ctx.isAdmin);
             if (mustEnroll) {
@@ -594,6 +648,41 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       });
     }
     if (!ctx) return reply.status(401).send({ error: "unauthenticated" });
+    // ADR-0039: header API-key auth under api_key_ip_policy. Each request
+    // presents the credential anew, so ANY enforcing level checks every
+    // request (there is no session to distinguish "login" from "use", and
+    // nothing to revoke — the deny IS the whole enforcement). The bootstrap
+    // header is the break-glass path and is never IP-restricted; the human
+    // knob never touches this path in either direction.
+    if (ctx.via === "api-key") {
+      const org = await loadOrgSettings(db);
+      if (org.apiKeyIpPolicy !== "off") {
+        const decision = evaluateIpEnvelope(org.sessionIpAllowlist, req.ip ?? null);
+        if (!decision.allowed) {
+          await db.insert(auditLog).values({
+            userId: ctx.userId ?? "00000000-0000-0000-0000-000000000000",
+            objectType: "user",
+            objectId: ctx.userId,
+            detail: {
+              phase: "ip-policy-api-key-denied",
+              knob: "api_key_ip_policy",
+              policy: org.apiKeyIpPolicy,
+              clientIp: req.ip ?? null,
+              reason: decision.reason,
+              allowlist: org.sessionIpAllowlist ?? [],
+            },
+            effect: "deny",
+            ruleId: "ip-policy-api-key-denied",
+            ruleChain: [],
+            reason: `API-key request refused: ${req.ip ?? "an undeterminable client IP"} is outside the org IP allow-list under api_key_ip_policy='${org.apiKeyIpPolicy}'`,
+          });
+          return reply.status(401).send({
+            error: "ip_not_allowed",
+            detail: "API-key requests from this network address are not permitted by organization policy",
+          });
+        }
+      }
+    }
     req.authCtx = ctx;
   });
 
@@ -679,6 +768,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "POST /auth/totp/enroll",
     "POST /auth/totp/activate",
     "POST /auth/totp/disable",
+    // ADR-0039: self-service session management — every route operates only
+    // on the CALLER's own sessions (ownership is inside the WHERE clause);
+    // admin-ness is not the point, exactly like change-password above.
+    "GET /auth/sessions",
+    "POST /auth/sessions/:sessionId/revoke",
+    "POST /auth/sessions/revoke-others",
     "GET /auth/oidc/providers",
     "GET /auth/oidc/:providerId/start",
     "GET /auth/oidc/callback",

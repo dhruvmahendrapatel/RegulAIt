@@ -1,7 +1,7 @@
 # ADR-0039: Session & device management — revocation, IP allow-listing, forced logout
 
-- **Status**: Proposed
-- **Date**: 2026-08-01
+- **Status**: Accepted
+- **Date**: 2026-08-01 (implemented 2026-08-02, migration 0050)
 
 ## Context
 
@@ -142,3 +142,48 @@ every continuous-enforcement mid-session force-revoke write to the single audit 
   the auth hook (login-time and continuous); CIDR validation + admin self-lockout guard on the
   settings write; the device-label UA parse for the session-list UI; and admin-portal +
   account-security session screens.
+
+## Implementation amendment (2026-08-02)
+
+Implemented as decided — migration **0050** (`auth_sessions.last_seen_ip`;
+`org_settings.session_ip_allowlist` / `session_ip_policy` / `api_key_ip_policy`), the
+single-session admin route (`POST /v1/users/:userId/sessions/:sessionId/revoke`, beside the
+untouched revoke-all), the self-service surface (`GET /auth/sessions`,
+`POST /auth/sessions/:id/revoke`, `POST /auth/sessions/revoke-others` — ownership is inside the
+WHERE clause, so another user's session id is an unrevealing 404), the hand-rolled IPv4+IPv6 CIDR
+matcher + fail-closed envelope evaluation (`net-policy.ts`), the derived device label
+(`device-label.ts`), login-time and continuous enforcement in the auth hook, write-time CIDR
+validation + the confirm-flag self-lockout guard on the org-settings PUT, audit rows for list
+access / every revocation / every policy denial and mid-session force-revoke (naming client IP and
+the policy/CIDR that fired), and the three SPA surfaces (account Devices & sessions card, per-row
+admin revoke, Organization → Network access controls with the confirm-on-lockout modal).
+`last_seen_ip` rides in the same UPDATE as the idle-slide; org settings are re-read from the
+singleton row on every enforcement check, so a tightened allow-list binds on the very next request.
+
+Recorded clarifications / minor deviations, all in the decided spirit:
+
+- **`api_key_ip_policy` representation**: one text column with the same three levels, evaluated
+  against the SAME `session_ip_allowlist`. "Same shape" is read as *same policy levels over the
+  same CIDR envelope* — what is separate is which paths each knob governs, which preserves the
+  ADR's point (a conscious second choice; neither knob can exempt the other's path) without a
+  second list to drift out of sync. A future need for a distinct automation envelope is an
+  additive column.
+- **Header API-key requests** have no login/use distinction (each request presents the credential
+  anew), so ANY enforcing level of `api_key_ip_policy` checks every header request; there is no
+  session to revoke — the deny is the whole enforcement. Exchanged `api_key` sessions get the full
+  split: creation refused under any enforcing level, per-use check + force-revoke under
+  `enforce_continuous`.
+- **Session creation is also refused under `enforce_continuous`** (not only `enforce_at_login`):
+  a session that would be force-revoked on its first use is refused at the door instead —
+  the same policy stated honestly.
+- **`unknown`-origin (pre-0046) sessions are NOT governed** by the human knob: the ADR enumerates
+  `password | oidc | saml` explicitly, and inventing coverage would revoke grandfathered sessions
+  on upgrade. `saml` is wired into the governing-origin set for ADR-0036 forward-compatibility
+  even though the origin enum does not carry it yet.
+- **Check placement**: `/auth/login` and `/auth/mfa/verify` refuse an out-of-envelope address
+  before any credential processing; the OIDC callback checks just before minting the session
+  (after claim validation, so the audit row can name the user).
+- The **self-lockout guard** fires when a write *touches* the policy or allow-list and the
+  RESULTING posture is `enforce_continuous` with a non-empty list excluding the caller's current
+  IP — so tightening the list under an already-continuous policy is guarded too, and a caller
+  inside the envelope needs no confirm.

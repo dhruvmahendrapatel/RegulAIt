@@ -1167,6 +1167,8 @@ export const orgPiiModeSchema = z.enum(["none", "log", "warn", "block"]);
 export const budgetEnforcementSchema = z.enum(["block", "warn_only"]);
 export const approvalQuorumSchema = z.enum(["all", "any"]);
 export const mfaRequirementSchema = z.enum(["off", "admins", "all"]);
+/** ADR-0039: the shared level set of both IP-policy knobs. */
+export const ipPolicySchema = z.enum(["off", "enforce_at_login", "enforce_continuous"]);
 
 export const updateOrgSettingsSchema = z
   .object({
@@ -1261,6 +1263,17 @@ export const updateOrgSettingsSchema = z
      * turning it off does not delete anyone's username, it stops self-service
      * writes. */
     usernameSelfService: z.boolean().optional(),
+    // ADR-0039 (migration 0050): org network envelope + the two policy knobs.
+    // CIDR syntax is validated in the route (400 on any malformed block) —
+    // zod holds the shape, the gateway's own parser is the authority.
+    sessionIpAllowlist: z.array(z.string().trim().min(1).max(64)).max(256).nullable().optional(),
+    sessionIpPolicy: ipPolicySchema.optional(),
+    apiKeyIpPolicy: ipPolicySchema.optional(),
+    /** ADR-0039 self-lockout guard (mirrors the sso_only guard): saving
+     * enforce_continuous with an allow-list that excludes the caller's own
+     * current IP is refused (409) unless this explicit confirm rides along.
+     * Write-only — stripped before the settings row is updated. */
+    confirmIpLockout: z.boolean().optional(),
   })
   .strict()
   .superRefine((v, ctx) => {

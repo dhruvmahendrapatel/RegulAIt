@@ -77,6 +77,15 @@ export const users = pgTable("users", {
 export const SESSION_ORIGINS = ["password", "api_key", "oidc", "bootstrap", "unknown"] as const;
 export type SessionOrigin = (typeof SESSION_ORIGINS)[number];
 
+/** ADR-0039 (migration 0050): the IP-policy levels shared by BOTH knobs
+ * (session_ip_policy for human sessions, api_key_ip_policy for the automation
+ * path). off = today; enforce_at_login gates session CREATION only;
+ * enforce_continuous gates every authenticated use and force-revokes an
+ * out-of-envelope session on the spot. Fail-closed: an undeterminable client
+ * IP under an enforcing policy is denied. */
+export const IP_POLICIES = ["off", "enforce_at_login", "enforce_continuous"] as const;
+export type IpPolicy = (typeof IP_POLICIES)[number];
+
 export const authSessions = pgTable(
   "auth_sessions",
   {
@@ -97,6 +106,11 @@ export const authSessions = pgTable(
     idleMinutes: integer("idle_minutes").notNull(),
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
     ip: text("ip"),
+    /** ADR-0039 (migration 0050): where the session was LAST used (`ip` above
+     * stays the creation-time record). Written in the SAME update as the
+     * idle-slide on every authenticated use — no extra query. Nullable:
+     * pre-0050 rows carry no record and none was invented. */
+    lastSeenIp: text("last_seen_ip"),
     userAgent: text("user_agent"),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
   },
@@ -2139,6 +2153,21 @@ export const orgSettings = pgTable(
      * the private-range opt-in) before a private-range URL is reachable.
      * Link-local/IMDS stays unconditionally blocked in BOTH postures. */
     mcpPrivateRangesDefault: boolean("mcp_private_ranges_default").notNull().default(true),
+    /** ADR-0039 (migration 0050): the org network envelope — CIDR blocks
+     * (IPv4 + IPv6) interactive access must come from. NULL/empty = no
+     * restriction (today; upgrade locks nobody out). Malformed entries are
+     * refused at write time and match NOTHING at evaluation time. */
+    sessionIpAllowlist: jsonb("session_ip_allowlist").$type<string[]>(),
+    /** ADR-0039: the HUMAN-session knob (origins password|oidc|saml). See
+     * IP_POLICIES. Exchanged api_key sessions and bootstrap are NOT governed
+     * by this — automation has its own knob below, bootstrap has none. */
+    sessionIpPolicy: text("session_ip_policy", { enum: IP_POLICIES }).notNull().default("off"),
+    /** ADR-0039: the SEPARATE automation knob (header API-key auth +
+     * origin='api_key' sessions), same levels over the SAME allow-list — a
+     * conscious second choice so tightening the human policy never silently
+     * locks out CI, and neither knob can exempt the other's path. The
+     * bootstrap origin is never IP-restricted. */
+    apiKeyIpPolicy: text("api_key_ip_policy", { enum: IP_POLICIES }).notNull().default("off"),
 
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

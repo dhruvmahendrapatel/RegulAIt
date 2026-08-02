@@ -452,16 +452,28 @@ function SessionsPanel(props: { userId: string }) {
           columns={[
             { key: "created", header: "Signed in", sort: (s) => s.createdAt, render: (s) => ago(s.createdAt) },
             { key: "seen", header: "Last seen", render: (s) => ago(s.lastSeenAt) },
-            { key: "ip", header: "IP", render: (s) => <span className={v.mono}>{s.ip ?? "—"}</span> },
             {
-              key: "ua",
-              header: "Client",
+              key: "ip",
+              header: "IP (current · at sign-in)",
               render: (s) => (
-                <span className={v.faint} title={s.userAgent ?? undefined}>
-                  {(s.userAgent ?? "—").slice(0, 48)}
+                <span className={v.mono}>
+                  {s.lastSeenIp ?? s.ip ?? "—"}
+                  {s.lastSeenIp && s.ip && s.lastSeenIp !== s.ip ? ` · ${s.ip}` : ""}
                 </span>
               ),
             },
+            {
+              key: "device",
+              header: "Device",
+              // ADR-0039: the derived browser+OS family — display only, never
+              // a security control; the raw UA stays in the hover title
+              render: (s) => (
+                <span className={v.faint} title={s.userAgent ?? undefined}>
+                  {s.deviceLabel}
+                </span>
+              ),
+            },
+            { key: "origin", header: "Origin", render: (s) => <span className={v.mono}>{s.origin}</span> },
             {
               key: "status",
               header: "Status",
@@ -473,6 +485,26 @@ function SessionsPanel(props: { userId: string }) {
                 ) : (
                   <Badge tone="ok">live</Badge>
                 ),
+            },
+            {
+              key: "actions",
+              header: "",
+              render: (s) =>
+                !s.revokedAt && new Date(s.expiresAt).getTime() > Date.now() ? (
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    disabled={act.busy}
+                    onClick={() =>
+                      void act.run(
+                        () => api.post(`/v1/users/${props.userId}/sessions/${s.id}/revoke`, {}),
+                        "Session revoked (audited)",
+                      )
+                    }
+                  >
+                    Revoke
+                  </Button>
+                ) : null,
             },
           ]}
           rows={sessions}
