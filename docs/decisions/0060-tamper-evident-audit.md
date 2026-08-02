@@ -115,6 +115,48 @@ Verification streams over the log using ADR-0031's keyset pattern rather than lo
   correctness risk: `detail` and `ruleChain` are `jsonb`, so the canonical serialization **must**
   be deterministic (sorted keys, stable encoding) or verification throws false tamper-positives —
   called out here as the thing most likely to bite the implementation.
+
+### Worked example — what verification actually catches
+
+Suppose an insider deletes the single `audit_log` row recording a denied production deploy they
+overrode. Without the chain, that row is simply gone and nothing points at the hole. With the
+chain: the next row's `prev_hash` still references the deleted row's `content_hash`, so
+`GET /v1/audit/verify` recomputes the chain, finds the `seq` gap and the broken linkage, and
+reports the exact `seq` where the break begins. If the insider instead *rewrites* the row's
+`reason` from "denied" to "approved" and recomputes every downstream hash to stay internally
+consistent, the local chain verifies clean — but the recomputed head no longer matches the head
+that was **anchored to Object-Lock S3 before the edit**, so verification flags the divergence.
+The only way to defeat both is to also rewrite the immutable anchor, which Object Lock compliance
+mode and an independent external log are specifically there to prevent.
+
+### Deployment-mode behavior (§8.5)
+
+- **Air-gapped / offline.** The chain is computed locally and needs no network, so integrity
+  holds with no outbound connection. Anchoring degrades gracefully: buffer chain-head anchors to
+  a local WORM medium and flush them to S3 / the external log when connectivity resumes — the
+  same buffer-and-sync posture §8.5 already defines for audit events. Until an anchor is
+  externalized, the "recent window" is larger; that is disclosed, not hidden.
+- **BYOC.** The Object-Lock bucket lives in the customer's own account under their IAM, matching
+  the ADR-0035 backup-target pattern; the customer, not us, holds the immutable anchor — which is
+  the stronger trust story for a sovereignty buyer, since even RegulAIt cannot rewrite it.
+
+### Compliance-cascade interaction (§8.3)
+
+Audit-log retention is one of the controls the compliance cascade sets per classification. Hash-
+chaining does not change retention, but it does raise a real question the cascade should own:
+**anchor cadence** and **WORM retention** are now compliance-relevant parameters (a HIPAA/DORA
+workload may demand an anchor at least daily and Object-Lock retention matching the audit-
+retention window). The clean home for those knobs is the same single-tag cascade, so a
+classification implies its anchoring stringency rather than an admin wiring it per install.
+
+### Hash-agility note
+
+`SHA-256` is the choice for v1. Because the algorithm identifier is not stored per row today, a
+future migration to a stronger function would either re-hash forward from a new genesis (leaving
+the old segment verifiable under the old function) or add a self-describing algorithm tag. This
+is a foreseeable follow-up, not a v1 requirement, and is noted so the genesis-boundary pattern
+above is understood to be reusable for an algorithm rollover as well.
+
 - **Follow-up.** Pin the canonicalization precisely; choose anchor cadence and WORM retention
   against the compliance cascade; decide whether the external transparency log is v1 or
   fast-follow; add DB least-privilege/RLS as the preventive complement; converge with a future

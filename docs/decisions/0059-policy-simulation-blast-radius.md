@@ -93,6 +93,47 @@ rather than a hand-picked tuple.
   ADR-0040 lands, "who is affected" becomes "which subjects match the changed predicate" without
   touching the replay engine.
 
+### Output shape
+
+The tool returns a single structured verdict, not a wall of rows:
+
+- **Impact summary** — counts by subject kind (`N users, M agents, K in-flight workflows/runs`)
+  with an expandable list, each entry labeled by *why* it is in scope (direct user grant, role
+  membership, team membership, fleet-wide).
+- **Replay diff** — the four buckets (newly allowed / newly blocked / newly approval-required /
+  unchanged) with per-bucket counts, a sample of representative flipped decisions (user, tool,
+  old effect → new effect, the rule that now fires), and an explicit **indeterminate** count for
+  decisions whose replay could not be made exact (arg-dependent or volume-dependent — see the
+  fidelity caveat above).
+- **A single headline** an admin can act on: e.g. "this change blocks 3 tools for 47 users who
+  are using them today, and newly requires approval on 1,204 calls/week."
+
+### Worked example
+
+An admin edits a fleet-scoped `approval_rules` row to require approval on any write tool. WHO
+resolves the fleet to all active users plus every agent/workflow they can drive. REPLAY re-runs
+the last 30 days of `audit_log` allow rows for write tools under the candidate rule: they flip
+`allow → require_approval`. The diff shows 1,204 such calls across 47 users last month — the
+admin now knows this rule turns roughly 40 approvals/day onto whoever is named approver, and can
+right-size the approver set (or scope the rule down) *before* committing, instead of discovering
+the load after it goes live.
+
+### Composition with the rest of the product
+
+- **Compliance cascade (§8.3).** A blast-radius run is a natural gate to attach to
+  classification changes: reclassifying an Initiative already re-applies the cascade and surfaces
+  a diff for admin review (spec §8.3), and blast radius is the mechanism that makes that diff
+  concrete against real traffic rather than a list of abstract control changes.
+- **Orchestration (pillar 7).** Because worker/lead agents inherit — and never exceed — the
+  initiating user's entitlements, a rule change that blocks a user silently narrows every
+  in-flight run they lead. The impact set must therefore expand users to their in-flight
+  orchestration runs, so an admin sees "this also constrains 6 running task graphs," not just a
+  user count.
+- **Deployment modes (§8.5).** Replay reads only the local `audit_log`, so the tool works
+  unchanged in BYOC and **air-gapped** installs — there is no dependency on the hosted control
+  plane to answer "what would have flipped here." This is a direct benefit of the FK-free,
+  self-contained audit design.
+
 ## Consequences
 
 - **Easier.** Admins see the true reach of a change *before* committing it, and see it against
