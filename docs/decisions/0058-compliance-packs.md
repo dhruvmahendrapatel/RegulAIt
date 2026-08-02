@@ -91,6 +91,17 @@ customer-defined internal framework is authored as a pack using the same schema.
 Shared Projects (a Shared Project's classification, §9.3, drives its packs) and with each other via
 the existing conflict-resolution rules.
 
+Worked example (EU AI Act high-risk): tagging an Initiative with the pack's `eu-ai-act-high-risk`
+classification cascades (§8.3) into a forced design/architecture sign-off stage and a required
+red-team gate (ADR-0057) tuned to gate jailbreak, PII-leak, and bias; sets connector/MCP data-scope
+defaults tighter and PII mode to block; and lengthens audit retention. The pack's evidence queries
+then answer the Act's own asks — a record-keeping query enumerating every model-promotion with its
+red-team result, a human-oversight query showing which stages required a named approver — rendered
+through the reporting layer (ADR-0047) or drafted by the copilot (ADR-0056) for human sign-off. The
+scorecard shows, say, "logging/record-keeping: enforced+evidenced; human oversight: enforced;
+risk-management-system documentation: partial (owner-authored); post-market monitoring:
+owner-responsibility" — an honest map of exactly how far the platform gets them.
+
 ## Consequences
 
 **Easier.** The expensive, expertise-heavy "map the framework onto the tool" work ships in the box,

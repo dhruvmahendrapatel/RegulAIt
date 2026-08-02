@@ -22,7 +22,10 @@ roadmap: ../docs/product/ROADMAP.md
 ## Where we are (read this paragraph first)
 **RegulAIt is a working, deployed product, not a scaffold.** All eight P0 pillars have shipped
 functionality; the gateway suite is at **~1000 tests** across 74+ files (**~1700** across the whole
-workspace); the schema is at **migration 0048**; decisions run to **ADR-0035**. The product is served by a **React SPA** (`apps/web` —
+workspace); the schema is at **migration 0048**; **Accepted** decisions run to **ADR-0035**, and a
+**Proposed** enterprise-readiness set runs **0036–0061** (identity, guardrails, the seven
+launch-blocking differentiators, commercial plumbing) — see
+[docs/product/ENTERPRISE_READINESS_PLAN.md](../docs/product/ENTERPRISE_READINESS_PLAN.md). The product is served by a **React SPA** (`apps/web` —
 React 18 + Vite + react-router + TanStack Query, an owned token design system, light/dark, six
 grouped nav sections) at **`/ui`**, which is now the *only* UI: `/`, `/app` and `/admin` all 302
 there. The template-literal shells are **deleted** as of ADR-0033 (−7,125 lines): the SPA is not
@@ -1448,6 +1451,35 @@ SSM install. The database still has no backup.**
 **same local `regulait_test` Postgres** and one saw broad, unrelated failures from the contention.
 `CLAUDE.md` already names per-agent test databases as a convention; the briefs did not enforce it.
 Enforce it in the brief, not in the retrospective.
+
+### Enterprise-readiness planning wave (2026-08-01) — 26 Proposed ADRs
+
+Owner asked for a meticulous pending-list and the functionality that makes RegulAIt sellable to
+large enterprises, then triaged the resulting gap analysis. The outcome is a tracked plan
+([docs/product/ENTERPRISE_READINESS_PLAN.md](../docs/product/ENTERPRISE_READINESS_PLAN.md)) and
+**26 Proposed ADRs (0036–0061)** — decisions to pursue, each a starting design proposal that gates
+on implementation, none built.
+
+- **NOW (0036–0054):** identity (SAML/SCIM/group-mapping/session-mgmt/ABAC), the BYOC-first
+  deployment decision, the two chosen security items (guardrail engine, MCP/OIDC egress), product
+  depth (evals, MRM, review workbench, reporting, versioning, cost anomaly, lineage), and
+  commercial plumbing (metering/billing, licensing, public API+SDKs, onboarding).
+- **CORE, before go-live (0055–0061):** Shadow-AI Discovery, Governance Copilot, continuous
+  red-teaming, compliance packs (EU AI Act / NIST AI RMF / ISO 42001), policy-simulation
+  blast-radius, tamper-evident audit, ChatOps approvals.
+- **DEFERRED (lists, not ADRs):** reliability/ops → `docs/ops/DEPLOYMENT_READINESS_CHECKLIST.md`;
+  later security (data-key off the DB volume is the top one) + compliance certification +
+  marketplace/docs-portal → the plan's Bucket 3.
+
+**The load-bearing decision is ADR-0041 (BYOC-first):** committing to single-tenant-per-deployment
+makes the singleton org the *correct* control-plane architecture rather than a multi-tenant SaaS
+rebuild — it turns the single biggest structural "gap" into a non-issue by decision.
+
+**Three hard truths sit above all of it** and are not solved by any ADR here: no real LLM is
+connected (key parked); the deployment is a single box (the deployment checklist, parked by owner);
+and there is no compliance attestation yet (deferred — though the customer-facing compliance
+*packs*, ADR-0058, are core, since selling EU AI Act compliance does not require us to be certified
+first).
 
 ## Epics
 | ID | Name | Status | Related |

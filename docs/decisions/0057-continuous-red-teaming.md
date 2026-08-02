@@ -92,6 +92,16 @@ agent serves — a HIPAA workload gates PII-leak strictly; a public-facing workl
 jailbreak and bias more strictly. The compliance packs (ADR-0058) ship these gating presets so a
 customer does not hand-configure them per framework.
 
+**7. A regression is a comparison, and the baseline can move deliberately.** "Worse than baseline"
+is evaluated per gating class against the last *promoted* version's stored score in the MRM
+registry, plus an absolute floor per class so a chronically weak baseline cannot bless a still-weak
+candidate. When a candidate legitimately improves, its scores become the new baseline on promotion —
+so the gate ratchets forward and cannot silently erode. Re-scoring an already-promoted version under
+a *newer attack-library version* can surface a regression that was invisible when it shipped
+(a newly-authored attack it never faced); that does not retroactively un-promote it, but it does
+raise a finding the copilot (ADR-0056) flags and can open a remediation workflow — the honest
+consequence of a library that keeps growing.
+
 ## Consequences
 
 **Easier.** Security posture becomes *measured and enforced* rather than asserted. A model upgrade
