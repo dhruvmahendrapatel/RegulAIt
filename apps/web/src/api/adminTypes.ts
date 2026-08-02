@@ -211,6 +211,10 @@ export interface McpServer {
   /** PILLAR 5: the server's FLAT list price per allowed tool call. Null =
    * unpriced (cost stays an honest null, never invented). */
   pricePerCallUsd?: number | null;
+  /** ADR-0043: may this server's URL resolve into ordinary private LAN space?
+   * null = inherit the org default (mcpPrivateRangesDefault). IMDS/link-local
+   * is never opened by this flag. */
+  allowPrivateRanges?: boolean | null;
   createdAt?: string;
 }
 
@@ -554,6 +558,10 @@ export interface OrgSettings {
   /** ADR-0034 master switch. Off refuses registration/enablement and stops
    * every custom-provider dispatch with a 409 before anything leaves the box. */
   customModelProvidersEnabled?: boolean;
+  /** ADR-0043: the org default for MCP servers whose allowPrivateRanges is
+   * null. true (default) = private-LAN MCP URLs work with zero ceremony;
+   * false = strict. IMDS/link-local stays blocked either way. */
+  mcpPrivateRangesDefault?: boolean;
 }
 
 export interface OrgSettingsResponse {

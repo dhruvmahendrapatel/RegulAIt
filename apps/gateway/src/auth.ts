@@ -44,6 +44,8 @@ import { z } from "zod";
 import * as oidc from "openid-client";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { loadOrgSettings } from "./org-settings.js";
+import { checkEgress, createGuardedFetch, type EgressDenied } from "./egress-guard.js";
+import { loadEgressAllowList } from "./custom-providers.js";
 
 export interface AuthContext {
   /** null only for the bootstrap token (header or exchanged session), which
@@ -522,6 +524,17 @@ function auditAuth(
     ruleChain: [],
     reason,
   });
+}
+
+/** ADR-0043: thrown when an OIDC issuer fails the egress guard at discovery
+ * time. The /start and /callback routes turn it into an honest 403
+ * `egress_blocked`; the refusal is audited before the throw and nothing has
+ * left the box. */
+export class OidcEgressBlockedError extends Error {
+  constructor(readonly decision: EgressDenied) {
+    super(`egress blocked (${decision.code}): ${decision.reason}`);
+    this.name = "OidcEgressBlockedError";
+  }
 }
 
 // --- routes -----------------------------------------------------------------
@@ -1177,18 +1190,48 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     // client_secret_ciphertext deliberately absent: secrets are WRITE-ONLY
   });
 
-  /** discovery against the provider's issuer. http:// issuers (dev/test IdPs)
-   * need the explicit insecure opt-in; https needs nothing. */
+  /** ADR-0043: one issuer-URL egress decision against the SAME default-deny
+   * `egress_allow_hosts` table every other guarded surface uses. An OIDC
+   * issuer is configured once, by an admin, at setup — one allow entry is a
+   * one-time act, not per-call friction — so the ordinary allow-list posture
+   * applies (NOT the MCP private-ranges-open default). */
+  const oidcIssuerDecision = async (issuerUrl: string) => {
+    const allowList = await loadEgressAllowList(db);
+    const decision = await checkEgress(issuerUrl, { allowList });
+    return { decision, allowList };
+  };
+
+  /** discovery against the provider's issuer — now THROUGH the egress guard
+   * (ADR-0043). The issuer is re-validated on every discovery (a write-time
+   * verdict is not a fact about the future, and rows written before this
+   * guard existed are in the live database right now), and the discovery +
+   * token + JWKS fetches all ride `createGuardedFetch`, so they inherit the
+   * ADR-0034 pinned transport and redirect refusal. `allowInsecureRequests`
+   * for an http:// issuer is no longer free: checkEgress only passes plaintext
+   * http when the issuer host's allow entry set allowPlaintextHttp, so the
+   * insecure opt-in is a per-host admin decision, not a side effect of typing
+   * 'http://'. A refusal throws OidcEgressBlockedError with nothing leaving
+   * the box, audited. */
   const oidcConfigFor = async (provider: typeof oidcProviders.$inferSelect) => {
     if (!opts.dataKey) throw new Error("REGULAIT_DATA_KEY required for OIDC");
+    const { decision, allowList } = await oidcIssuerDecision(provider.issuerUrl);
+    if (!decision.ok) {
+      await auditAuth(db, null, provider.id, "oidc-egress-blocked", "deny",
+        `OIDC discovery refused for provider '${provider.name}': ${decision.reason}`,
+        { phase: "oidc-discovery", provider: provider.name, issuerUrl: provider.issuerUrl, code: decision.code },
+        "oidc_provider");
+      throw new OidcEgressBlockedError(decision);
+    }
     const secret = decryptSecret(opts.dataKey, provider.clientSecretCiphertext);
-    return oidc.discovery(
-      new URL(provider.issuerUrl),
-      provider.clientId,
-      secret,
-      undefined,
-      provider.issuerUrl.startsWith("http://") ? { execute: [oidc.allowInsecureRequests] } : undefined,
-    );
+    return oidc.discovery(new URL(provider.issuerUrl), provider.clientId, secret, undefined, {
+      // the guarded fetch is assigned onto the resolved Configuration too, so
+      // the token-endpoint and JWKS requests of the login flow are guarded —
+      // not just the discovery document fetch
+      [oidc.customFetch]: createGuardedFetch({ allowList }),
+      // only reachable for http:// when the host's allow entry opted in —
+      // checkEgress refused plaintext without allowPlaintextHttp above
+      ...(decision.protocol === "http:" ? { execute: [oidc.allowInsecureRequests] } : {}),
+    });
   };
 
   const baseUrlFor = (req: FastifyRequest): string => {
@@ -1216,7 +1259,21 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       .where(and(eq(oidcProviders.id, providerId), eq(oidcProviders.enabled, true)));
     if (!provider) return reply.status(404).send({ error: "unknown_provider" });
     if (!opts.dataKey) return reply.status(409).send({ error: "data_key_required" });
-    const config = await oidcConfigFor(provider);
+    let config: oidc.Configuration;
+    try {
+      config = await oidcConfigFor(provider);
+    } catch (err) {
+      // ADR-0043: a guard refusal is a governance decision with a reason an
+      // operator needs, not a 500 — already audited inside oidcConfigFor.
+      if (err instanceof OidcEgressBlockedError) {
+        return reply.status(403).send({
+          error: "egress_blocked",
+          code: err.decision.code,
+          detail: err.decision.reason,
+        });
+      }
+      throw err;
+    }
     const codeVerifier = oidc.randomPKCECodeVerifier();
     const codeChallenge = await oidc.calculatePKCECodeChallenge(codeVerifier);
     const state = oidc.randomState();
@@ -1262,7 +1319,21 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       .from(oidcProviders)
       .where(and(eq(oidcProviders.id, login.providerId), eq(oidcProviders.enabled, true)));
     if (!provider) return reply.status(401).send({ error: "unknown_provider" });
-    const config = await oidcConfigFor(provider);
+    let config: oidc.Configuration;
+    try {
+      config = await oidcConfigFor(provider);
+    } catch (err) {
+      // ADR-0043: same honest refusal on the callback leg — the issuer may
+      // have been re-pointed, or its allow entry withdrawn, mid-login.
+      if (err instanceof OidcEgressBlockedError) {
+        return reply.status(403).send({
+          error: "egress_blocked",
+          code: err.decision.code,
+          detail: err.decision.reason,
+        });
+      }
+      throw err;
+    }
 
     const currentUrl = new URL(login.redirectUri);
     const qs = req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "";
@@ -1369,6 +1440,24 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       const [role] = await db.select().from(roles).where(eq(roles.id, body.defaultRoleId));
       if (!role) return reply.status(422).send({ error: "unknown_role" });
     }
+    // ADR-0043: WRITE-TIME egress check against the ordinary default-deny
+    // allow-list — a non-permitted issuer is an honest 400 before the row is
+    // stored, audited. (Discovery re-checks every login; this is the earliest
+    // honest failure.)
+    {
+      const { decision } = await oidcIssuerDecision(body.issuerUrl);
+      if (!decision.ok) {
+        await auditAuth(db, req.authCtx.userId, null, "oidc-egress-blocked", "deny",
+          `OIDC provider '${body.name}' registration refused: issuer ${decision.reason}`,
+          { phase: "provider-created", name: body.name, issuerUrl: body.issuerUrl, code: decision.code },
+          "oidc_provider");
+        return reply.status(400).send({
+          error: "egress_blocked",
+          code: decision.code,
+          detail: decision.reason,
+        });
+      }
+    }
     const [row] = await db
       .insert(oidcProviders)
       .values({
@@ -1400,6 +1489,21 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     if (body.defaultRoleId) {
       const [role] = await db.select().from(roles).where(eq(roles.id, body.defaultRoleId));
       if (!role) return reply.status(422).send({ error: "unknown_role" });
+    }
+    // ADR-0043: moving the issuer re-runs the write-time egress check
+    if (body.issuerUrl !== undefined) {
+      const { decision } = await oidcIssuerDecision(body.issuerUrl);
+      if (!decision.ok) {
+        await auditAuth(db, req.authCtx.userId, providerId, "oidc-egress-blocked", "deny",
+          `OIDC provider '${existing.name}' issuer change refused: ${decision.reason}`,
+          { phase: "provider-updated", name: existing.name, issuerUrl: body.issuerUrl, code: decision.code },
+          "oidc_provider");
+        return reply.status(400).send({
+          error: "egress_blocked",
+          code: decision.code,
+          detail: decision.reason,
+        });
+      }
     }
     // lockout guard: disabling the LAST enabled provider while sso_only is on
     // would strand every human login

@@ -2,7 +2,6 @@ import type { FastifyInstance } from "fastify";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   CallToolRequestSchema,
   ErrorCode,
@@ -29,6 +28,7 @@ import { selectTools } from "@regulait/optimizer-kernel";
 import type { ModelToolDef } from "@regulait/model-provider";
 import { setToolPriceSchema, type PiiHit } from "@regulait/shared";
 import { governedEvaluate } from "./governed-evaluate.js";
+import { guardedMcpConnect, McpEgressBlockedError } from "./mcp-egress.js";
 import { loadEntitlements } from "./entitlements.js";
 import { effectiveTechniqueMode, loadOrgSettings } from "./org-settings.js";
 import {
@@ -74,10 +74,17 @@ function toolKind(tool: Tool): "read" | "write" {
   return tool.annotations?.readOnlyHint === true ? "read" : "write";
 }
 
-export async function connectUpstream(url: string): Promise<Client> {
-  const client = new Client({ name: "regulait-gateway", version: "0.1.0" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(url)));
-  return client;
+/** ADR-0043: the upstream connect now runs the egress guard EVERY time — the
+ * per-server private-range flag (org default when null) opens ordinary private
+ * LAN only, IMDS/link-local is refused unconditionally, and a public MCP host
+ * needs an egress_allow_hosts entry. A refusal is audited and throws
+ * McpEgressBlockedError with nothing leaving the box; on allow, every HTTP
+ * request of the session goes through the pinned guarded fetch. */
+export async function connectUpstream(
+  db: Db,
+  serverRow: { id: string; url: string; allowPrivateRanges: boolean | null },
+): Promise<Client> {
+  return guardedMcpConnect(db, serverRow);
 }
 
 /** The one governed tool-call primitive, shared by the MCP proxy route (a
@@ -162,7 +169,7 @@ export async function executeGovernedToolCall(
   };
   try {
     if (!kind) {
-      upstream = await connectUpstream(serverRow.url);
+      upstream = await connectUpstream(db, serverRow);
       const upstreamTools = await syncUpstreamTools(db, serverId, upstream);
       const found = upstreamTools.find((t) => t.name === toolName);
       if (!found) return { kind: "unknown_tool" };
@@ -322,7 +329,7 @@ export async function executeGovernedToolCall(
       }
     }
 
-    if (!upstream) upstream = await connectUpstream(serverRow.url);
+    if (!upstream) upstream = await connectUpstream(db, serverRow);
     // An upstream FAILURE throws out of here before any metering — a failed
     // call bills nothing, exactly like a failed model dispatch or connector
     // invoke.
@@ -482,7 +489,7 @@ export async function resolveNodeToolContext(
     if (!serverRow) continue;
     let upstream: Client | null = null;
     try {
-      upstream = await connectUpstream(serverRow.url);
+      upstream = await connectUpstream(db, serverRow);
       const upstreamTools = await syncUpstreamTools(db, serverId, upstream);
       const entitlements = await loadEntitlements(db, userId, serverId);
       const refs: ToolRef[] = upstreamTools.map((t) => ({
@@ -626,7 +633,23 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
       }
     }
 
-    const upstream = await connectUpstream(serverRow.url);
+    // ADR-0043: the connect-time egress verdict surfaces HERE, before the
+    // reply is hijacked into an MCP transport, as the route's ordinary
+    // pre-hijack refusal shape — a plain 403 naming the real reason. The
+    // refusal is already audited inside the guard and nothing left the box.
+    let upstream: Client;
+    try {
+      upstream = await connectUpstream(db, serverRow);
+    } catch (err) {
+      if (err instanceof McpEgressBlockedError) {
+        return reply.status(403).send({
+          error: "egress_blocked",
+          code: err.decision.code,
+          detail: err.decision.reason,
+        });
+      }
+      throw err;
+    }
 
     const proxy = new Server(
       { name: "regulait-gateway", version: "0.1.0" },

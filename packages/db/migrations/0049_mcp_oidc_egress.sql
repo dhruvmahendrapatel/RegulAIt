@@ -1,0 +1,39 @@
+-- Migration 0049 (ADR-0043) — bring `mcp_servers.url` and `oidc_providers.issuerUrl`
+-- inside the ADR-0034 egress guard.
+--
+-- These were the LAST TWO admin-typed URLs this gateway fetches that no guard
+-- touched — left exposed by ADR-0034's amendments, each time with the recorded
+-- reason that the MCP surface needed its own posture decision first. ADR-0043
+-- takes that decision; this migration is its only DDL.
+--
+-- THE MCP POSTURE (why this is a per-server flag and not a plain allow-list
+-- call). An internal/self-hosted MCP server on a private address
+-- (http://mcp.internal:9000, http://localhost:3000) is the ORDINARY deployment
+-- for the ADR-0041 BYOC/air-gapped buyer — a blanket default-deny host
+-- allow-list here would make the guard fire on the normal case. So: private
+-- LAN ranges are permitted BY DEFAULT for MCP destinations, gated by this
+-- per-server flag with an org-level default, while a PUBLIC-internet MCP URL
+-- still requires an `egress_allow_hosts` entry like every other surface.
+-- 169.254.0.0/16 (link-local — cloud instance metadata) is NEVER opened by
+-- this flag: "reach my internal tool server" is never "reach IMDS". Multicast,
+-- reserved, 0.0.0.0/8 and CGNAT stay blocked too.
+--
+-- NULLABLE, deliberately: null = "inherit the org default" — so flipping the
+-- org toggle below re-postures every server that never took an explicit
+-- per-server decision, and an explicit true/false survives the toggle.
+ALTER TABLE "mcp_servers" ADD COLUMN "allow_private_ranges" boolean;
+--> statement-breakpoint
+-- The org default the null above inherits. TRUE by default — the ADR-0043
+-- decision is that the guard must not break the ordinary self-hosted MCP
+-- deployment. A hardened org flips this to false ("strict"): every MCP server
+-- then needs its own explicit allow_private_ranges=true (or an
+-- egress_allow_hosts entry with the private-range opt-in) before a
+-- private-range URL is reachable. Same "capability switch above a default-deny
+-- substrate" pattern as custom_model_providers_enabled (migration 0048).
+--
+-- oidc_providers needs NO new column: ADR-0043 puts the OIDC issuer behind the
+-- ORDINARY default-deny `egress_allow_hosts` posture (an issuer is configured
+-- once, by an admin, at setup — one allow entry is a one-time act, not
+-- per-call friction), and `allowInsecureRequests` for http:// issuers is now
+-- gated on that entry's allow_plaintext_http instead of being free.
+ALTER TABLE "org_settings" ADD COLUMN "mcp_private_ranges_default" boolean DEFAULT true NOT NULL;

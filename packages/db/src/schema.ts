@@ -163,6 +163,14 @@ export const mcpServers = pgTable("mcp_servers", {
   // never invented (agents' costPerMTok null-safety). A tool call is a discrete
   // governed unit of work, so it is priced per call rather than per token.
   pricePerCallUsd: doublePrecision("price_per_call_usd"),
+  /** ADR-0043 (migration 0049): may this server's URL resolve into ordinary
+   * private LAN space (RFC1918 / loopback / ULA)? NULL = inherit the org
+   * default (org_settings.mcpPrivateRangesDefault, true by default — the
+   * self-hosted `http://mcp.internal:9000` case is the ORDINARY deployment).
+   * 169.254.0.0/16 (IMDS) and the other unconditional ranges are NEVER opened
+   * by this flag; a PUBLIC-internet URL still needs an egress_allow_hosts
+   * entry regardless of it. */
+  allowPrivateRanges: boolean("allow_private_ranges"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -295,6 +303,11 @@ export const auditLog = pgTable(
         // needed.
         "git_connection",
         "pm_connection",
+        // ADR-0043: an `mcp_servers.url` refused by the egress guard — at
+        // write time (the 400 on POST/PATCH /v1/servers) or at connect time
+        // (the audited refusal a re-pointed or pre-0049 row now gets). Plain
+        // text column — no DDL needed.
+        "mcp_server",
       ],
     })
       .notNull()
@@ -2117,6 +2130,15 @@ export const orgSettings = pgTable(
      * and the ordinary per-user agent grant), so an org that wants it gone
      * entirely flips this and an org that never registers one is unaffected. */
     customModelProvidersEnabled: boolean("custom_model_providers_enabled").notNull().default(true),
+    /** ADR-0043 (migration 0049): the org default for MCP servers whose
+     * allowPrivateRanges is null. TRUE (default) = a self-hosted MCP server on
+     * a private address Just Works with zero ceremony — the guard fires on the
+     * risky public-internet case, not the ordinary internal one (ADR-0041's
+     * BYOC/air-gapped buyer). FALSE = strict: every server needs an explicit
+     * per-server allowPrivateRanges=true (or an egress_allow_hosts entry with
+     * the private-range opt-in) before a private-range URL is reachable.
+     * Link-local/IMDS stays unconditionally blocked in BOTH postures. */
+    mcpPrivateRangesDefault: boolean("mcp_private_ranges_default").notNull().default(true),
 
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

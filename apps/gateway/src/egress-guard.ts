@@ -93,11 +93,37 @@ export class EgressBlockedError extends Error {
 /** injectable for tests — the same shape as dns/promises.lookup(host,{all:true}) */
 export type EgressResolver = (host: string) => Promise<Array<{ address: string; family: number }>>;
 
+/**
+ * ADR-0043 — the MCP surface's posture, and the `privateLanOnly` narrowing.
+ *
+ * When this option is present the check runs PRIVATE-LAN-AWARE:
+ *   - the UNCONDITIONAL ranges (link-local/IMDS, CGNAT, multicast, reserved,
+ *     0.0.0.0/8, and the IPv6 analogues incl. the AWS fd00:ec2::/32 IMDS
+ *     prefix) are refused for EVERY destination — no per-server flag and no
+ *     allow entry opens them on this surface. This deliberately NARROWS the
+ *     allow entry's `allowPrivateRanges` opt-in relative to the classic path
+ *     (where that opt-in skips the range check entirely, IMDS included): the
+ *     classic behaviour is unchanged for every other surface, per ADR-0043.
+ *   - with `openByDefault` true, a destination whose EVERY address is ordinary
+ *     private LAN space (RFC1918 / loopback / ULA) is permitted with ZERO
+ *     ceremony — no allow entry, plaintext http included (an internal service
+ *     has no public CA). That is the ordinary self-hosted MCP deployment.
+ *   - anything else (a public destination, or a private one under the strict
+ *     org toggle) takes the ordinary default-deny allow-list posture, with the
+ *     entry's `allowPrivateRanges` opening private LAN only (see above).
+ */
+export interface PrivateLanPosture {
+  /** the EFFECTIVE per-server flag: server.allowPrivateRanges ?? org default */
+  openByDefault: boolean;
+}
+
 export interface EgressCheckOptions {
   /** the admin allow-list; EMPTY MEANS NOTHING IS REACHABLE (default-deny) */
   allowList: EgressAllowEntry[];
   /** the provider row's own allowPlaintextHttp — ANDed with the host entry's */
   providerAllowsPlaintextHttp?: boolean;
+  /** ADR-0043 — present only on the MCP path; see PrivateLanPosture */
+  privateLan?: PrivateLanPosture;
   resolve?: EgressResolver;
 }
 
@@ -165,29 +191,47 @@ function cidr4(cidr: string, label: string): Cidr4 {
 /**
  * THE DEFAULT-DENY RANGE LIST. Everything an SSRF wants and nothing a public
  * model endpoint legitimately lives in.
+ *
+ * ADR-0043 splits it into two disjoint halves WITHOUT changing what the
+ * classic path blocks (their union is byte-identical to the pre-0043 list):
+ *   - PRIVATE_LAN_V4 — ordinary private LAN space, the ranges a legitimate
+ *     self-hosted service actually lives in. The MCP posture (and only it)
+ *     can open these.
+ *   - NEVER_V4 — ranges NO legitimate admin-typed destination lives in
+ *     (IMDS/link-local above all). On the private-LAN-aware path these are
+ *     refused unconditionally — no flag or allow entry opens them.
  */
-const BLOCKED_V4: Cidr4[] = [
-  cidr4("0.0.0.0/8", "unspecified / this-network"),
+const PRIVATE_LAN_V4: Cidr4[] = [
   cidr4("10.0.0.0/8", "RFC1918 private"),
-  cidr4("100.64.0.0/10", "CGNAT (RFC6598)"),
   cidr4("127.0.0.0/8", "loopback"),
-  cidr4("169.254.0.0/16", "link-local — cloud instance metadata (IMDS)"),
   cidr4("172.16.0.0/12", "RFC1918 private"),
-  cidr4("192.0.0.0/24", "IETF protocol assignments"),
   cidr4("192.168.0.0/16", "RFC1918 private"),
+];
+
+const NEVER_V4: Cidr4[] = [
+  cidr4("0.0.0.0/8", "unspecified / this-network"),
+  cidr4("100.64.0.0/10", "CGNAT (RFC6598)"),
+  cidr4("169.254.0.0/16", "link-local — cloud instance metadata (IMDS)"),
+  cidr4("192.0.0.0/24", "IETF protocol assignments"),
   cidr4("198.18.0.0/15", "benchmarking (RFC2544)"),
   cidr4("224.0.0.0/4", "multicast"),
   cidr4("240.0.0.0/4", "reserved / broadcast"),
 ];
 
-function classifyV4(ip: string): string | null {
-  const n = ipv4ToInt(ip);
-  if (n === null) return "unparseable IPv4 address";
-  for (const c of BLOCKED_V4) {
+const BLOCKED_V4: Cidr4[] = [...PRIVATE_LAN_V4, ...NEVER_V4];
+
+function matchV4(n: number, list: Cidr4[]): string | null {
+  for (const c of list) {
     const mask = c.bits === 0 ? 0 : (0xffffffff << (32 - c.bits)) >>> 0;
     if ((n & mask) >>> 0 === (c.base & mask) >>> 0) return c.label;
   }
   return null;
+}
+
+function classifyV4(ip: string): string | null {
+  const n = ipv4ToInt(ip);
+  if (n === null) return "unparseable IPv4 address";
+  return matchV4(n, BLOCKED_V4);
 }
 
 /** expand an IPv6 literal to its 8 groups of 16 bits */
@@ -268,6 +312,74 @@ export function classifyAddress(ip: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// ADR-0043 — the private-LAN-aware classification
+// ---------------------------------------------------------------------------
+
+/** The two-axis verdict the MCP posture needs: is this address in a range NO
+ * flag may ever open, and if not, is it ordinary private LAN space? */
+export interface LanAddressClass {
+  /** non-null = blocked UNCONDITIONALLY on the private-LAN-aware path — the
+   * IMDS carve-out and its friends. No per-server flag, org default or allow
+   * entry opens these there. */
+  never: string | null;
+  /** true = ordinary private LAN space (RFC1918 / loopback / ULA) — what the
+   * ADR-0043 flag (or an allow entry's allowPrivateRanges) opens */
+  privateLan: boolean;
+}
+
+function classifyV4Lan(ip: string): LanAddressClass {
+  const n = ipv4ToInt(ip);
+  if (n === null) return { never: "unparseable IPv4 address", privateLan: false };
+  const never = matchV4(n, NEVER_V4);
+  if (never) return { never, privateLan: false };
+  return { never: null, privateLan: matchV4(n, PRIVATE_LAN_V4) !== null };
+}
+
+function classifyV6Lan(ip: string): LanAddressClass {
+  const g = ipv6Groups(ip);
+  if (!g) return { never: "unparseable IPv6 address", privateLan: false };
+  const isZeroPrefix = (n: number) => g.slice(0, n).every((x) => x === 0);
+  if (isZeroPrefix(7) && g[7] === 0) return { never: "IPv6 unspecified (::)", privateLan: false };
+  // ::1 is loopback — the v6 twin of 127.0.0.1, i.e. ordinary private LAN
+  if (isZeroPrefix(7) && g[7] === 1) return { never: null, privateLan: true };
+  // IPv4-mapped and NAT64: unwrap and apply the v4 split (the
+  // `[::ffff:169.254.169.254]` bypass must stay closed here too)
+  const embedsV4 =
+    (isZeroPrefix(5) && g[5] === 0xffff) ||
+    (g[0] === 0x64 && g[1] === 0xff9b && isZeroPrefixFrom(g, 2, 6));
+  if (embedsV4) {
+    const v4 = `${g[6]! >>> 8}.${g[6]! & 0xff}.${g[7]! >>> 8}.${g[7]! & 0xff}`;
+    const inner = classifyV4Lan(v4);
+    return inner.never
+      ? { never: `embedded IPv4 ${v4}: ${inner.never}`, privateLan: false }
+      : { never: null, privateLan: inner.privateLan };
+  }
+  // fe80::/10 link-local is the v6 twin of 169.254/16 — never openable
+  if ((g[0]! & 0xffc0) === 0xfe80) return { never: "IPv6 link-local (fe80::/10)", privateLan: false };
+  if ((g[0]! & 0xfe00) === 0xfc00) {
+    // ULA is legitimate internal v6 LAN space — EXCEPT AWS's reserved
+    // fd00:ec2::/32, where the IPv6 instance-metadata endpoint
+    // (fd00:ec2::254) lives. The IMDS carve-out must hold in v6 too.
+    if (g[0] === 0xfd00 && g[1] === 0x0ec2) {
+      return { never: "IPv6 unique-local fd00:ec2::/32 — AWS instance metadata (IMDS)", privateLan: false };
+    }
+    return { never: null, privateLan: true };
+  }
+  if ((g[0]! & 0xff00) === 0xff00) return { never: "IPv6 multicast (ff00::/8)", privateLan: false };
+  return { never: null, privateLan: false };
+}
+
+/** ADR-0043: the fine-grained single-address decision the private-LAN-aware
+ * path uses. Fail-closed exactly like classifyAddress: an address that cannot
+ * be classified is never-openable. */
+export function classifyAddressLan(ip: string): LanAddressClass {
+  const fam = isIP(ip);
+  if (fam === 4) return classifyV4Lan(ip);
+  if (fam === 6) return classifyV6Lan(ip);
+  return { never: `unrecognised address form '${ip}'`, privateLan: false };
+}
+
+// ---------------------------------------------------------------------------
 // the check
 // ---------------------------------------------------------------------------
 
@@ -318,6 +430,12 @@ export async function checkEgress(
   const host = normalizeHost(u.hostname);
   if (!host) {
     return { ok: false, code: "malformed_url", reason: "URL has no host" };
+  }
+
+  // ADR-0043 — the private-LAN-aware fork (the MCP surface). Every other
+  // surface takes the classic path below, byte-identically.
+  if (opts.privateLan) {
+    return checkPrivateLanAware(u, host, opts, opts.privateLan);
   }
 
   // 1. ALLOW-LIST — default-deny. Exact host match only: no wildcards, because
@@ -414,6 +532,144 @@ export async function checkEgress(
     port,
     addresses,
   };
+}
+
+/**
+ * ADR-0043 — the private-LAN-aware check, reached only when
+ * `opts.privateLan` is present (today: the MCP surface). The URL has already
+ * passed the shared parse/scheme/userinfo checks.
+ *
+ * Order matters and is deliberate:
+ *   1. RESOLVE FIRST — the posture is decided by WHERE the host actually
+ *      lands, not by what the string looks like.
+ *   2. THE UNCONDITIONAL RANGES are refused for every destination — the IMDS
+ *      carve-out. This runs BEFORE any flag or allow entry is consulted, so
+ *      nothing can open it (`privateLanOnly` narrowing: even an allow entry
+ *      whose allowPrivateRanges would skip the range check on the classic
+ *      path does not skip it here).
+ *   3. ZERO CEREMONY for the ordinary case: flag on + every address ordinary
+ *      private LAN → allowed, plaintext http included (an internal service
+ *      has no public CA). That is `http://mcp.internal:9000` /
+ *      `http://localhost:3000` Just Working, per ADR-0041's buyer.
+ *   4. Everything else — a public destination, or a private one under the
+ *      strict org toggle — takes the ordinary default-deny allow-list
+ *      posture: an entry is required, plaintext http needs the entry's
+ *      opt-in, and private-LAN addresses need the entry's allowPrivateRanges
+ *      (or the flag).
+ */
+async function checkPrivateLanAware(
+  u: URL,
+  host: string,
+  opts: EgressCheckOptions,
+  lan: PrivateLanPosture,
+): Promise<EgressDecision> {
+  // 1. resolve every address (the literal is never trusted)
+  const resolve = opts.resolve ?? defaultResolver;
+  let addresses: string[];
+  if (isIP(host) !== 0) {
+    addresses = [host];
+  } else {
+    try {
+      const res = await resolve(host);
+      addresses = res.map((r) => r.address);
+    } catch (err) {
+      return {
+        ok: false,
+        code: "dns_resolution_failed",
+        reason: `could not resolve '${host}': ${err instanceof Error ? err.message : String(err)}`,
+        host,
+      };
+    }
+    if (addresses.length === 0) {
+      return { ok: false, code: "dns_resolution_failed", reason: `'${host}' resolved to no addresses`, host };
+    }
+  }
+
+  // 2. THE UNCONDITIONAL RANGES — refused before any flag or entry is read.
+  for (const a of addresses) {
+    const cls = classifyAddressLan(a);
+    if (cls.never) {
+      return {
+        ok: false,
+        code: "blocked_address_range",
+        reason:
+          `'${host}' resolves to ${a} — ${cls.never}. This range is never reachable on this surface: ` +
+          `no per-server flag, org default or allow entry opens it.`,
+        host,
+        addresses,
+      };
+    }
+  }
+  const allPrivateLan = addresses.every((a) => classifyAddressLan(a).privateLan);
+
+  const port = u.port ? Number(u.port) : u.protocol === "https:" ? 443 : 80;
+  const allowed: EgressAllowed = {
+    ok: true,
+    url: u.toString(),
+    protocol: u.protocol as "http:" | "https:",
+    host,
+    port,
+    addresses,
+  };
+
+  // 3. the zero-ceremony ordinary case
+  if (lan.openByDefault && allPrivateLan) return allowed;
+
+  // 4. the ordinary allow-list posture for everything else
+  const entry = opts.allowList.find((e) => normalizeHost(e.host) === host);
+  if (!entry) {
+    return {
+      ok: false,
+      code: "host_not_allowlisted",
+      reason: allPrivateLan
+        ? `host '${host}' is on a private range and private ranges are not permitted for this server — ` +
+          `set the server's allowPrivateRanges flag (or the org mcpPrivateRangesDefault), or add an ` +
+          `egress allow entry for it with allowPrivateRanges`
+        : `host '${host}' is not in the egress allow-list — a public MCP destination requires an admin ` +
+          `allow entry before it can be reached`,
+      host,
+      addresses,
+    };
+  }
+
+  if (u.protocol === "http:" && !entry.allowPlaintextHttp) {
+    return {
+      ok: false,
+      code: "plaintext_http_forbidden",
+      reason: `plaintext http to '${host}' requires the egress allow entry to set allowPlaintextHttp`,
+      host,
+    };
+  }
+
+  if (hasBlockedHostSuffix(host) && !entry.allowPrivateRanges && !lan.openByDefault) {
+    return {
+      ok: false,
+      code: "blocked_host_suffix",
+      reason: `host '${host}' names a private namespace; its allow entry must set allowPrivateRanges`,
+      host,
+    };
+  }
+
+  // Private-LAN addresses under an entry need the entry's opt-in (or the
+  // flag). The entry's allowPrivateRanges here opens PRIVATE LAN ONLY — the
+  // unconditional ranges were already refused in step 2.
+  if (!entry.allowPrivateRanges && !lan.openByDefault) {
+    for (const a of addresses) {
+      if (classifyAddressLan(a).privateLan) {
+        return {
+          ok: false,
+          code: "blocked_address_range",
+          reason:
+            `'${host}' resolves to ${a} — a private-range address. Blocked under the strict MCP posture; ` +
+            `set the server's allowPrivateRanges flag or add allowPrivateRanges to its allow entry.`,
+          host,
+          addresses,
+        };
+      }
+    }
+  }
+
+  return allowed;
 }
 
 /** Throwing wrapper for call sites that already sit inside a try/catch. */

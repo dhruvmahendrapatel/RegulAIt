@@ -255,6 +255,23 @@ beforeAll(async () => {
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
   await startIdp();
+  // ADR-0043 — the OIDC issuer URL is now behind the default-deny egress
+  // guard (same table, same opt-ins as every other guarded surface). The fake
+  // IdP is plaintext http on loopback, so this suite allow-lists 127.0.0.1
+  // with the private-range and plaintext opt-ins, exactly as an air-gapped
+  // operator with a self-hosted Keycloak would (the ADR-0034 suite pattern).
+  const egressAllowed = await app.inject({
+    method: "POST",
+    headers: AUTH,
+    url: "/v1/egress-allow-hosts",
+    payload: {
+      host: "127.0.0.1",
+      allowPrivateRanges: true,
+      allowPlaintextHttp: true,
+      note: "auth suite: local fake OIDC IdP",
+    },
+  });
+  expect(egressAllowed.statusCode).toBe(201);
 }, 120_000);
 
 afterAll(async () => {

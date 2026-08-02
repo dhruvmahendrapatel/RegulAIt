@@ -79,7 +79,22 @@ export const deleteTeamSchema = z
 export const createServerSchema = z.object({
   name: z.string().min(1),
   url: z.string().url(),
+  /** ADR-0043: may this server's URL resolve into ordinary private LAN space?
+   * null/absent = inherit the org default (mcpPrivateRangesDefault). IMDS /
+   * link-local and the other unconditional ranges are never opened by this. */
+  allowPrivateRanges: z.boolean().nullable().optional(),
 });
+
+/** ADR-0043: PATCH /v1/servers/:serverId — re-runs the egress guard whenever
+ * the destination or the private-range posture changes (null restores
+ * inheritance of the org default). */
+export const updateServerSchema = z
+  .object({
+    name: z.string().min(1).optional(),
+    url: z.string().url().optional(),
+    allowPrivateRanges: z.boolean().nullable().optional(),
+  })
+  .strict();
 
 export const createToolSchema = z.object({
   name: z.string().min(1),
@@ -1189,6 +1204,11 @@ export const updateOrgSettingsSchema = z
     /** ADR-0034: master switch for admin-registered custom LLM providers.
      * false refuses registration/enable and stops every custom dispatch (409). */
     customModelProvidersEnabled: z.boolean().optional(),
+    /** ADR-0043: the org default for MCP servers whose allowPrivateRanges is
+     * null. true (default) = private-LAN MCP URLs work with zero ceremony;
+     * false = strict, requiring an explicit per-server flag or an allow entry.
+     * IMDS/link-local stays unconditionally blocked either way. */
+    mcpPrivateRangesDefault: z.boolean().optional(),
     // budgets
     budgetEnforcement: budgetEnforcementSchema.optional(),
     budgetHardBlockPct: z.number().int().min(1).max(100).optional(),

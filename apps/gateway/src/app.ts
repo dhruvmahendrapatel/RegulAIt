@@ -90,9 +90,11 @@ import {
   deleteRoleSchema,
   evaluateRequestSchema,
   setUserAdminSchema,
+  updateServerSchema,
   updateUserSchema,
 } from "@regulait/shared";
 import { governedEvaluate } from "./governed-evaluate.js";
+import { refuseMcpServerWrite } from "./mcp-egress.js";
 import { loadEntitlements } from "./entitlements.js";
 import {
   CSRF_HEADER,
@@ -971,8 +973,57 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   app.post("/v1/servers", async (req, reply) => {
     const body = createServerSchema.parse(req.body);
+    // ADR-0043: WRITE-TIME egress check — a bad destination is an honest 400
+    // at the moment somebody types it, audited, not a surprise at first tool
+    // call. (Write-time is not sufficient — connectUpstream re-checks every
+    // time — but it is the earliest honest failure.)
+    const refusal = await refuseMcpServerWrite(db, {
+      url: body.url,
+      allowPrivateRanges: body.allowPrivateRanges ?? null,
+      userId: req.authCtx.userId ?? null,
+      phase: "registration",
+      label: `MCP server '${body.name}' url`,
+    });
+    if (refusal) return reply.status(400).send(refusal);
     const [row] = await db.insert(mcpServers).values(body).returning();
     return reply.status(201).send(row);
+  });
+
+  /** ADR-0043: update an MCP server's destination / private-range posture.
+   * Changing either re-runs the write-time egress check against the NEXT
+   * values (null allowPrivateRanges restores inheritance of the org default).
+   * Admin-only via the default gate, like the registry POST above. */
+  app.patch("/v1/servers/:serverId", async (req, reply) => {
+    const { serverId } = uuidParam.parse(req.params);
+    const body = updateServerSchema.parse(req.body);
+    const [before] = await db.select().from(mcpServers).where(eq(mcpServers.id, serverId));
+    if (!before) return reply.status(404).send({ error: "unknown_server" });
+    const nextUrl = body.url ?? before.url;
+    const nextFlag =
+      body.allowPrivateRanges !== undefined ? body.allowPrivateRanges : before.allowPrivateRanges;
+    if (body.url !== undefined || body.allowPrivateRanges !== undefined) {
+      const refusal = await refuseMcpServerWrite(db, {
+        url: nextUrl,
+        allowPrivateRanges: nextFlag,
+        userId: req.authCtx.userId ?? null,
+        serverId,
+        phase: "update",
+        label: `MCP server '${before.name}' url`,
+      });
+      if (refusal) return reply.status(400).send(refusal);
+    }
+    const [row] = await db
+      .update(mcpServers)
+      .set({
+        ...(body.name !== undefined ? { name: body.name } : {}),
+        ...(body.url !== undefined ? { url: body.url } : {}),
+        ...(body.allowPrivateRanges !== undefined
+          ? { allowPrivateRanges: body.allowPrivateRanges }
+          : {}),
+      })
+      .where(eq(mcpServers.id, serverId))
+      .returning();
+    return reply.send(row);
   });
 
   app.get("/v1/servers", async () => ({ servers: await db.select().from(mcpServers) }));

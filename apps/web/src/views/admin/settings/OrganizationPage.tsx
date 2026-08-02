@@ -132,6 +132,11 @@ function Loaded(props: { settings: Record<string, unknown> }) {
     customModelProvidersEnabled: str(s, "customModelProvidersEnabled"),
   });
 
+  // --- 2c. MCP egress posture (ADR-0043) -----------------------------------
+  const mcpEgress = useSection({
+    mcpPrivateRangesDefault: str(s, "mcpPrivateRangesDefault"),
+  });
+
   // --- 3. Budgets & limits -------------------------------------------------
   const budget = useSection({
     budgetEnforcement: str(s, "budgetEnforcement"),
@@ -347,6 +352,32 @@ function Loaded(props: { settings: Record<string, unknown> }) {
             >
               <option value="true">enabled (default — admins may register endpoints)</option>
               <option value="false">disabled (capability removed org-wide)</option>
+            </Select>
+          </Field>
+        </SectionShell>
+      </Card>
+
+      <Card title="3b · MCP egress posture (ADR-0043)">
+        <SectionShell
+          title="Private ranges for MCP servers"
+          busy={mcpEgress.act.busy}
+          error={mcpEgress.act.error}
+          submitLabel="Save MCP egress posture"
+          onSubmit={() =>
+            void mcpEgress.act.run(
+              () => put({ mcpPrivateRangesDefault: asBool(mcpEgress.f.mcpPrivateRangesDefault!) }),
+              "MCP egress posture saved (audited)",
+            )
+          }
+          help="The default for MCP servers that never took an explicit per-server decision (their flag is 'inherit'). Open (default) = a self-hosted MCP server on a private address (http://mcp.internal:9000, http://localhost:3000) works with zero ceremony — the guard fires on the risky public-internet case, not the ordinary internal one. Strict = every server needs its own explicit allow-private-ranges flag (set on the MCP servers page) or an egress allow entry with the private-range opt-in. Either way, link-local / instance-metadata (169.254.0.0/16) and the other never-legitimate ranges stay unconditionally blocked, and a public-internet MCP URL still requires an egress allow entry."
+        >
+          <Field label="Private-range default for MCP servers">
+            <Select
+              value={mcpEgress.f.mcpPrivateRangesDefault}
+              onChange={(e) => mcpEgress.set("mcpPrivateRangesDefault", e.target.value)}
+            >
+              <option value="true">open (default — private-LAN MCP servers just work)</option>
+              <option value="false">strict (each server needs an explicit opt-in)</option>
             </Select>
           </Field>
         </SectionShell>

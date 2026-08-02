@@ -39,7 +39,7 @@ beforeAll(async () => {
     method: "POST",
     headers: AUTH,
     url: "/v1/servers",
-    payload: { name: "snowflake-mcp", url: "https://mcp.example.com" },
+    payload: { name: "snowflake-mcp", url: "http://127.0.0.1:9" },
   });
   expect(serverRes.statusCode).toBe(201);
   serverId = serverRes.json().id;

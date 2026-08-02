@@ -344,6 +344,13 @@
       "when": 1784984000000,
       "tag": "0048_custom_model_providers",
       "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1784985000000,
+      "tag": "0049_mcp_oidc_egress",
+      "breakpoints": true
     }
   ]
 }
