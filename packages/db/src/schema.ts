@@ -174,6 +174,15 @@ export const oidcProviders = pgTable("oidc_providers", {
   defaultRoleId: uuid("default_role_id").references(() => roles.id, { onDelete: "set null" }),
   /** default-deny: an unknown subject with JIT off is 403'd and audited */
   jitProvisioning: boolean("jit_provisioning").notNull().default(false),
+  /** ADR-0038 (migration 0053): which id_token claim carries group membership
+   * (commonly `groups`, sometimes `roles` or a vendor-namespaced URI).
+   *
+   * NULL — the default, and every pre-0053 row — means this provider emits NO
+   * group signal, so a login through it never reconciles group-derived roles.
+   * Naming the claim is an explicit admin act, exactly like naming an email
+   * attribute. Naming it does NOT grant anything: an asserted group still
+   * confers nothing until an admin maps it (`group_role_mappings`). */
+  groupsClaim: text("groups_claim"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
@@ -247,6 +256,14 @@ export const samlProviders = pgTable("saml_providers", {
   /** the matching SP public certificate (PEM) — public by definition, it is
    * published in our SP metadata for the IdP admin to consume. */
   spCertificate: text("sp_certificate"),
+  /** ADR-0038 (migration 0053): the SAML attribute carrying group membership
+   * (`groups`, `memberOf`, `http://schemas.xmlsoap.org/claims/Group`, …).
+   *
+   * NULL — the default, and every pre-0053 row — means this provider emits NO
+   * group signal, so a login through it never reconciles group-derived roles.
+   * Naming it grants nothing on its own: an asserted group confers nothing
+   * until an admin maps it (`group_role_mappings`). */
+  groupsAttribute: text("groups_attribute"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
@@ -530,6 +547,13 @@ export const auditLog = pgTable(
         // path, so its lifecycle is a governed act in its own right rather
         // than a footnote on some user's row. Plain text column — no DDL.
         "scim_token",
+        // ADR-0038: admin CRUD of a group→role mapping, AND every group→role
+        // reconciliation an identity event triggers (the asserted groups, the
+        // mappings that fired, and each role_assignments insert/remove with its
+        // origin). This is what makes "why does this user hold this role?"
+        // resolve to either an admin action or a named group+mapping. Plain
+        // text column — no DDL needed.
+        "group_role_mapping",
       ],
     })
       .notNull()
@@ -767,9 +791,94 @@ export const roleAssignments = pgTable(
     roleId: uuid("role_id")
       .notNull()
       .references(() => roles.id, { onDelete: "cascade" }),
+    /** ADR-0038 (migration 0053) — WHY this user holds this role.
+     *
+     * `direct`  an admin assigned it. NEVER touched by an IdP reconciliation.
+     * `group`   a currently-mapped, currently-asserted IdP group implies it.
+     *           Owned end-to-end by the group reconciler and removed by it the
+     *           moment the group or the mapping goes away.
+     *
+     * DEFAULT 'direct' backfills every pre-0053 row as admin-direct, which is
+     * exactly what they are — no group mapping existed to have created them. */
+    origin: text("origin", { enum: ["direct", "group"] }).notNull().default("direct"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [uniqueIndex("role_assignments_user_role_uq").on(t.userId, t.roleId)],
+  (t) => [
+    // ADR-0038: the unique key INCLUDES origin so a role held BOTH ways lives
+    // in two rows. That is what makes "a sync can never remove an admin's
+    // direct grant" structural rather than merely careful: the reconciler's
+    // DELETE is scoped to origin='group', and a direct assignment is a
+    // different ROW, not a different column value on the same row.
+    uniqueIndex("role_assignments_user_role_origin_uq").on(t.userId, t.roleId, t.origin),
+    index("role_assignments_user_origin_idx").on(t.userId, t.origin),
+  ],
+);
+
+// --- ADR-0038: IdP group → RegulAIt role mapping (migration 0053) ------------
+// The bridge from "an external directory asserts membership" to "this user
+// holds this role". Default-deny (an unmapped group confers nothing), additive
+// (it enters at the role_assignments layer the kernel already reads, so it can
+// never mint an entitlement a role does not carry), and subordinate to the
+// per-user layer (ADR-0019 revocations still beat a group-implied role).
+
+/** the identity paths that can assert a group. `scim` is a synced group's
+ * external id (or its displayName when the connector sent no externalId);
+ * `saml`/`oidc` are the raw attribute/claim values from the assertion. */
+export const GROUP_SOURCES = ["saml", "oidc", "scim"] as const;
+export type GroupSource = (typeof GROUP_SOURCES)[number];
+
+/**
+ * The admin-curated many-to-many. A group with NO row here grants NOTHING —
+ * there is deliberately no "default role for unmapped groups" column, because
+ * that would be a default-allow backdoor into pillar 1.
+ *
+ * The only thing a mapping can point at is a `roles` row. There is no column
+ * here that reaches `users.isAdmin`, and there never will be: `isAdmin` is not
+ * a role and is not group-derivable.
+ *
+ * `source` is part of the unique key because "Engineering" asserted by SAML and
+ * "Engineering" synced by SCIM are two assertions from two different trust
+ * paths — an admin opts into each separately.
+ */
+export const groupRoleMappings = pgTable(
+  "group_role_mappings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    source: text("source", { enum: GROUP_SOURCES }).notNull(),
+    /** the group identifier exactly as the IdP asserts it */
+    externalGroup: text("external_group").notNull(),
+    roleId: uuid("role_id")
+      .notNull()
+      .references(() => roles.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("group_role_mappings_source_group_role_uq").on(t.source, t.externalGroup, t.roleId),
+    index("group_role_mappings_source_group_idx").on(t.source, t.externalGroup),
+  ],
+);
+
+/**
+ * Sighting log for the "unmapped asserted groups" report (ADR-0038 honest-risk
+ * #3: group-name drift in the IdP silently breaks a mapping — the group becomes
+ * unmapped, which is the SAFE direction, but access disappears and nobody knows
+ * why). One row per (source, externalGroup) ever seen in a sync or a login.
+ *
+ * Records sightings ONLY. A row here grants nothing and implies nothing; it
+ * exists so an admin can see "your IdP keeps asserting 'Engineering-EMEA' and
+ * nothing is mapped to it".
+ */
+export const assertedGroups = pgTable(
+  "asserted_groups",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    source: text("source", { enum: GROUP_SOURCES }).notNull(),
+    externalGroup: text("external_group").notNull(),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    seenCount: integer("seen_count").notNull().default(1),
+  },
+  (t) => [uniqueIndex("asserted_groups_source_group_uq").on(t.source, t.externalGroup)],
 );
 
 // §5 subtractive per-user override: suppresses role-derived entitlements

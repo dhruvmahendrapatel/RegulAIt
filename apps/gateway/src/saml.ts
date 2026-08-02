@@ -71,6 +71,7 @@ import {
 import { loadOrgSettings } from "./org-settings.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { countEnabledSsoProviders, SSO_ONLY_LAST_PROVIDER } from "./sso-providers.js";
+import { normalizeAssertedGroups, reconcileGroupRoles } from "./group-roles.js";
 
 export interface SamlRouteOptions {
   dataKey?: string;
@@ -301,6 +302,45 @@ export function resolveSamlEmail(
   return { email: null, source: "none" };
 }
 
+/**
+ * ADR-0038 — the group attribute out of a validated assertion, or `null` for
+ * "this assertion carried NO group signal".
+ *
+ * The null-vs-empty-array distinction is the whole point and is preserved end
+ * to end: an assertion that simply does not contain the configured attribute
+ * returns `null`, which makes `reconcileGroupRoles` a no-op and leaves existing
+ * group-derived roles alone. Only an attribute that IS present (even with zero
+ * values) is authoritative, and an authoritative empty list reconciles the user
+ * to zero group-derived roles. An IdP that drops the attribute during an
+ * incident must not be able to strip an organisation's access.
+ *
+ * node-saml surfaces attributes both at the top level of the profile and under
+ * `profile.attributes`; both are checked, top level first, because a caller
+ * configuring `memberOf` means the assertion's `memberOf`, wherever the library
+ * chose to put it.
+ */
+export function resolveSamlGroups(profile: Profile, groupsAttribute: string | null): unknown {
+  if (!groupsAttribute) return undefined; // provider emits no group signal
+  const bags: Array<Record<string, unknown> | undefined> = [
+    profile as unknown as Record<string, unknown>,
+    (profile as { attributes?: Record<string, unknown> }).attributes,
+  ];
+  for (const bag of bags) {
+    // hasOwnProperty, NOT `!== undefined`: node-saml creates the key with an
+    // `undefined` value when the <Attribute> element is present but its single
+    // <AttributeValue> is empty. XML has no empty array, so that is how a SAML
+    // IdP says "member of nothing" — and it must stay distinguishable from the
+    // attribute being absent altogether, which is the missing-signal case.
+    if (bag && Object.prototype.hasOwnProperty.call(bag, groupsAttribute)) {
+      const v = bag[groupsAttribute];
+      // "" normalises to the authoritative EMPTY list; undefined would
+      // normalise to "no signal", which is the opposite meaning.
+      return v === undefined || v === null ? "" : v;
+    }
+  }
+  return undefined;
+}
+
 // ---------------------------------------------------------------------------
 // routes
 // ---------------------------------------------------------------------------
@@ -323,6 +363,9 @@ const publicProvider = (p: SamlProviderRow) => ({
   wantAuthnResponseSigned: p.wantAuthnResponseSigned,
   allowIdpInitiated: p.allowIdpInitiated,
   emailAttribute: p.emailAttribute,
+  /** ADR-0038: null = this provider emits no group signal, so its logins never
+   * reconcile group-derived roles. */
+  groupsAttribute: p.groupsAttribute,
   /** the operator needs to know whether SP signing material EXISTS without
    * ever being able to read it back */
   spPrivateKeySet: p.spPrivateKeyCiphertext !== null,
@@ -609,6 +652,32 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
           { phase: "saml-jit", provider: provider.name, email, defaultRoleId: provider.defaultRoleId });
       }
 
+      // ADR-0038 — group → role reconciliation from the assertion's group
+      // attribute, through the SAME shared routine SCIM and OIDC use.
+      //
+      // The fail-safe, restated at the call site because it is the difference
+      // between a safe deploy and a mass access-strip: `groupsAttribute` null =
+      // this provider emits no group signal; the attribute configured but
+      // ABSENT from this assertion = also no signal, leave current state alone;
+      // the attribute PRESENT (including with zero values) = authoritative, and
+      // an authoritative empty list reconciles to zero group-derived roles.
+      if (provider.groupsAttribute) {
+        const asserted = normalizeAssertedGroups(
+          resolveSamlGroups(profile, provider.groupsAttribute),
+        );
+        await reconcileGroupRoles(db, user.id, "saml", asserted, {
+          kind: "saml-login",
+          actor: `saml provider '${provider.name}'`,
+          actorUserId: user.id,
+          detail: {
+            providerId: provider.id,
+            provider: provider.name,
+            groupsAttribute: provider.groupsAttribute,
+            assertionId,
+          },
+        });
+      }
+
       const org = await loadOrgSettings(db);
       // ADR-0039: SSO is a HUMAN login — an IdP vouching for the user does not
       // move the request inside the org's network envelope. `saml` is in
@@ -669,6 +738,10 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
         wantAuthnResponseSigned: body.wantAuthnResponseSigned ?? false,
         allowIdpInitiated: body.allowIdpInitiated ?? false,
         emailAttribute: body.emailAttribute ?? null,
+        // ADR-0038: naming the attribute turns the group SIGNAL on. It grants
+        // nothing by itself — an asserted group confers nothing until an admin
+        // maps it (`group_role_mappings`), and no mapping reaches isAdmin.
+        groupsAttribute: body.groupsAttribute ?? null,
         ...(body.spPrivateKey
           ? { spPrivateKeyCiphertext: encryptSecret(opts.dataKey!, body.spPrivateKey) }
           : {}),

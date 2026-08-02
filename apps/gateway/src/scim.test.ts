@@ -306,7 +306,8 @@ describe("ADR-0037 — the token is the ONLY credential", () => {
     expect(before!.lastUsedAt).not.toBeNull();
     const status = await app.inject({ method: "GET", url: "/v1/scim/status", headers: ADMIN });
     expect(status.statusCode).toBe(200);
-    expect(status.json().groupsGrantEntitlement).toBe(false);
+    expect(status.json().unmappedGroupsGrantEntitlement).toBe(false);
+    expect(status.json().isAdminGroupDerivable).toBe(false);
   });
 });
 
@@ -640,8 +641,17 @@ describe("ADR-0037 — the equality-filter subset", () => {
 
 // ===========================================================================
 
-describe("ADR-0037 — /Groups records membership and grants NOTHING", () => {
-  it("creates a group, reconciles members, and hands out no entitlement", async () => {
+describe("ADR-0037 — /Groups records membership; an UNMAPPED group grants NOTHING", () => {
+  /**
+   * ADR-0038 landed the admin-defined group→role mapping this ADR deliberately
+   * stopped short of, so the promise this test locks has moved by exactly one
+   * word and not one inch further: a synced group grants nothing UNLESS an
+   * admin mapped it. No mapping exists here, and the default-deny outcome is
+   * unchanged — no role, no admin bit, nothing. (The mapped case, and the
+   * proof that a mapping still cannot reach `isAdmin`, live in
+   * group-role-mapping.test.ts.)
+   */
+  it("creates a group, reconciles members, and — unmapped — hands out no entitlement", async () => {
     const a = await provision(uniq("group.a"));
     const b = await provision(uniq("group.b"));
     const externalId = "grp-" + randomBytes(5).toString("hex");
@@ -661,13 +671,18 @@ describe("ADR-0037 — /Groups records membership and grants NOTHING", () => {
       .where(eq(scimGroupMembers.groupId, groupId));
     expect(members).toHaveLength(2);
 
-    // THE point of ADR-0037 stopping where it does: membership granted nothing
+    // THE default-deny point: nobody mapped this group, so membership in it
+    // granted nothing — not a role, and certainly not the admin bit.
     for (const u of [a.id, b.id]) {
       expect(await db.select().from(roleAssignments).where(eq(roleAssignments.userId, u))).toHaveLength(0);
       expect((await dbUser(u))!.isAdmin).toBe(false);
     }
     const status = await app.inject({ method: "GET", url: "/v1/scim/status", headers: ADMIN });
-    expect(status.json().groupsGrantEntitlement).toBe(false);
+    expect(status.json().unmappedGroupsGrantEntitlement).toBe(false);
+    expect(status.json().isAdminGroupDerivable).toBe(false);
+    // the count exists so "12 groups synced" and "2 grant anything" are
+    // visibly different numbers; THIS group is not among the mapped ones
+    expect(typeof status.json().counts.mappedGroups).toBe("number");
   });
 
   it("a REPLAYED full group PUT converges — identical membership, no duplicate rows", async () => {
@@ -826,7 +841,9 @@ describe("ADR-0037 — every provisioning act is audited, with the token as acto
     expect(added).toHaveLength(1);
     expect(added[0]!.objectType).toBe("scim_group");
     expect((added[0]!.detail as Record<string, any>).actor.name).toBe(TOKEN_NAME);
-    expect((added[0]!.detail as Record<string, any>).grants).toBe("none");
+    // ADR-0038: the membership row itself still confers nothing on its own —
+    // the reason line says so, and says exactly what WOULD confer something.
+    expect(added[0]!.reason).toContain("an unmapped group grants nothing");
 
     // and the whole trail is reachable through the ONE audit endpoint
     const trail = await app.inject({

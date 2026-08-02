@@ -26,10 +26,16 @@
  *     path here that deletes a user row, and adding one would violate the
  *     invariant the whole product rests on.
  *
- *  3. **A synced group grants NOTHING.** `/Groups` records what the IdP says.
- *     The mapping of a group onto a RegulAIt role is admin-defined and
- *     default-deny — ADR-0038 — and is deliberately not implemented here, so
- *     an IdP asserting membership can never by itself become entitlement.
+ *  3. **A synced group grants nothing by itself.** `/Groups` records what the
+ *     IdP says. Turning that into entitlement requires an admin to have created
+ *     a `group_role_mappings` row for it (ADR-0038, migration 0053): an
+ *     UNMAPPED group still confers exactly nothing, and there is no "default
+ *     role for unmapped groups" setting to turn that into a default-allow. When
+ *     a mapping DOES exist, every membership change reconciles the affected
+ *     user's `origin='group'` role assignments through the one shared routine in
+ *     `group-roles.ts` — never touching an admin's `origin='direct'` grants, and
+ *     never reaching `users.isAdmin`, which is not a role and not
+ *     group-derivable.
  *
  * Two more invariants SCIM must never be able to cross, both asserted by test:
  * a SCIM-created user has **no password** (`passwordHash` null — SSO or an
@@ -53,6 +59,7 @@ import {
   auditLog,
   authSessions,
   eq,
+  groupRoleMappings,
   inArray,
   isNull,
   scimGroupMembers,
@@ -65,6 +72,7 @@ import {
 } from "@regulait/db";
 import { z } from "zod";
 import { hashToken } from "./auth.js";
+import { reconcileGroupRoles, scimAssertedGroupsFor } from "./group-roles.js";
 
 // ---------------------------------------------------------------------------
 // the token credential
@@ -499,11 +507,36 @@ export function registerScimRoutes(app: FastifyInstance, db: Db) {
     await removeMembers(token, group, toRemove);
   };
 
+  /**
+   * ADR-0038 — the ONE place SCIM membership becomes (or stops being)
+   * entitlement, called after every membership write.
+   *
+   * It hands the user's FULL current synced-group set to the shared
+   * reconciliation routine rather than the delta, so the outcome depends only on
+   * stored state and a replayed sync converges. SCIM membership is stored state,
+   * not a per-event assertion, so it is always an authoritative signal: a user
+   * in no synced group reconciles to zero group-derived roles.
+   *
+   * Nothing about it can escalate: it can only ever write `role_assignments`
+   * rows whose role an admin explicitly mapped, only ever with `origin='group'`,
+   * and an UNMAPPED group still produces nothing.
+   */
+  const reconcileRolesFor = async (token: ScimTokenRow, userId: string, group: GroupRow) => {
+    const asserted = await scimAssertedGroupsFor(db, userId);
+    await reconcileGroupRoles(db, userId, "scim", asserted, {
+      kind: "scim-group-sync",
+      actor: `scim token '${token.name}'`,
+      actorUserId: null,
+      detail: { scimTokenId: token.id, scimTokenName: token.name, groupId: group.id, group: group.displayName },
+    });
+  };
+
   const addMembers = async (token: ScimTokenRow, group: GroupRow, userIds: string[]) => {
     for (const userId of userIds) {
-      // ADR-0037: this write records MEMBERSHIP ONLY — a synced group grants
-      // NOTHING. Group→role mapping (and therefore entitlement) is ADR-0038's
-      // admin-defined, default-deny surface and is deliberately not here.
+      // ADR-0037: this write records MEMBERSHIP. Whether it becomes entitlement
+      // is decided entirely by whether an admin mapped this group (ADR-0038) —
+      // an unmapped group still grants nothing, and no mapping can reach
+      // `users.isAdmin`.
       const inserted = await db
         .insert(scimGroupMembers)
         .values({ groupId: group.id, userId })
@@ -512,8 +545,9 @@ export function registerScimRoutes(app: FastifyInstance, db: Db) {
       if (inserted.length === 0) continue; // already a member — converged
       const u = await loadUser(userId);
       await audit(token, "scim_group", group.id, "scim-group-member-added",
-        `SCIM token '${token.name}' added '${u?.email ?? userId}' to synced group '${group.displayName}' — membership is RECORDED ONLY and grants no entitlement (ADR-0038 maps groups to roles)`,
-        { group: group.displayName, groupExternalId: group.externalId, userId, email: u?.email ?? null, grants: "none" });
+        `SCIM token '${token.name}' added '${u?.email ?? userId}' to synced group '${group.displayName}' — entitlement follows only where an admin mapped this group to a role (ADR-0038); an unmapped group grants nothing`,
+        { group: group.displayName, groupExternalId: group.externalId, userId, email: u?.email ?? null });
+      await reconcileRolesFor(token, userId, group);
     }
   };
 
@@ -528,6 +562,9 @@ export function registerScimRoutes(app: FastifyInstance, db: Db) {
       await audit(token, "scim_group", group.id, "scim-group-member-removed",
         `SCIM token '${token.name}' removed '${u?.email ?? userId}' from synced group '${group.displayName}'`,
         { group: group.displayName, groupExternalId: group.externalId, userId, email: u?.email ?? null });
+      // ADR-0038: losing the group loses whatever baseline the mapping implied,
+      // on the spot. Admin-direct assignments of the same role are untouched.
+      await reconcileRolesFor(token, userId, group);
     }
   };
 
@@ -1174,6 +1211,11 @@ export function registerScimRoutes(app: FastifyInstance, db: Db) {
           before: { displayName: group.displayName, memberCount: members.length },
           after: null,
         });
+      // ADR-0038: the membership rows cascaded away, so every former member's
+      // group-derived roles must be recomputed — a deleted group implies
+      // nothing, exactly like a group that no longer lists you. Admin-direct
+      // assignments of the same role survive untouched.
+      for (const m of members) await reconcileRolesFor(token, m.userId, group);
       return reply.status(204).header("content-type", SCIM_CONTENT_TYPE).send();
     });
   });
@@ -1287,6 +1329,15 @@ export function registerScimAdminRoutes(app: FastifyInstance, db: Db) {
     const memberships = await count(
       db.select({ n: sql<number>`count(*)::int` }).from(scimGroupMembers),
     );
+    // ADR-0038: how many synced groups actually confer something. The rest are
+    // inert, which is the default and the safe direction — but it should be
+    // VISIBLE that "12 groups synced" and "2 groups grant anything" are
+    // different numbers.
+    const mappedGroups = await count(
+      db.select({ n: sql<number>`count(distinct ${groupRoleMappings.externalGroup})::int` })
+        .from(groupRoleMappings)
+        .where(eq(groupRoleMappings.source, "scim")),
+    );
     const lastUsedAt = tokens
       .map((t) => t.lastUsedAt)
       .filter((d): d is Date => d !== null)
@@ -1300,10 +1351,16 @@ export function registerScimAdminRoutes(app: FastifyInstance, db: Db) {
         deactivatedUsers,
         groups,
         memberships,
+        /** ADR-0038: distinct synced groups an admin has mapped to a role */
+        mappedGroups,
       },
       /** stated in the payload, not just in the docs: a synced group is inert
-       * until ADR-0038's admin-defined mapping exists. */
-      groupsGrantEntitlement: false,
+       * unless an admin created an ADR-0038 mapping for it. This flag is about
+       * the UNMAPPED case and is permanently false — there is deliberately no
+       * "default role for unmapped groups" setting to flip it. */
+      unmappedGroupsGrantEntitlement: false,
+      /** and no mapping, of any group, can ever produce the platform admin bit */
+      isAdminGroupDerivable: false,
     };
   });
 }

@@ -240,7 +240,7 @@ export async function resolveInterceptionPolicy(
       .select({ roleId: roleAssignments.roleId })
       .from(roleAssignments)
       .where(eq(roleAssignments.userId, ctx.userId));
-    const roleIds = roleRows.map((r) => r.roleId);
+    const roleIds = [...new Set(roleRows.map((r) => r.roleId))]; // ADR-0038: distinct
     if (roleIds.length > 0) {
       conditions.push(
         and(eq(interceptionScopeRules.scopeKind, "role"), inArray(interceptionScopeRules.scopeId, roleIds)),

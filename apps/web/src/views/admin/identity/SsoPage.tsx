@@ -61,6 +61,7 @@ function OidcCard() {
   const [domains, setDomains] = useState("");
   const [defaultRoleId, setDefaultRoleId] = useState("");
   const [jit, setJit] = useState("false");
+  const [groupsClaim, setGroupsClaim] = useState("");
   const [deleteProvider, setDeleteProvider] = useState<OidcProvider | null>(null);
 
   return (
@@ -82,6 +83,7 @@ function OidcCard() {
                     ? { allowedEmailDomains: domains.split(",").map((s) => s.trim()).filter(Boolean) }
                     : {}),
                   ...(defaultRoleId ? { defaultRoleId } : {}),
+                  ...(groupsClaim ? { groupsClaim } : {}),
                 }),
               "Provider added",
             )
@@ -94,6 +96,7 @@ function OidcCard() {
                 setDomains("");
                 setDefaultRoleId("");
                 setJit("false");
+                setGroupsClaim("");
               }
             });
         }}
@@ -122,6 +125,13 @@ function OidcCard() {
         </Field>
         <Field label="Allowed email domains (comma, empty = any)">
           <Input value={domains} onChange={(e) => setDomains(e.target.value)} placeholder="example.com" />
+        </Field>
+        <Field label="Groups claim (blank = no group signal from this IdP)">
+          <Input
+            value={groupsClaim}
+            onChange={(e) => setGroupsClaim(e.target.value)}
+            placeholder="groups"
+          />
         </Field>
         <Field label="JIT default role">
           <Select value={defaultRoleId} onChange={(e) => setDefaultRoleId(e.target.value)}>
@@ -154,6 +164,18 @@ function OidcCard() {
             render: (p) => (p.allowedEmailDomains ?? []).join(", ") || "any",
           },
           { key: "jit", header: "JIT", render: (p) => (p.jitProvisioning ? "on" : "off") },
+          {
+            key: "groups",
+            header: "Groups",
+            render: (p) =>
+              p.groupsClaim ? (
+                <span className={v.mono}>{p.groupsClaim}</span>
+              ) : (
+                <span className={v.faint} title="no group signal — logins here never reconcile roles">
+                  none
+                </span>
+              ),
+          },
           {
             key: "status",
             header: "Status",
@@ -246,6 +268,7 @@ function SamlCard() {
   const [certs, setCerts] = useState("");
   const [domains, setDomains] = useState("");
   const [emailAttribute, setEmailAttribute] = useState("");
+  const [groupsAttribute, setGroupsAttribute] = useState("");
   const [defaultRoleId, setDefaultRoleId] = useState("");
   const [jit, setJit] = useState("false");
   const [idpInitiated, setIdpInitiated] = useState("false");
@@ -277,6 +300,7 @@ function SamlCard() {
                   jitProvisioning: jit === "true",
                   allowIdpInitiated: idpInitiated === "true",
                   ...(emailAttribute ? { emailAttribute } : {}),
+                  ...(groupsAttribute ? { groupsAttribute } : {}),
                   ...(domains
                     ? { allowedEmailDomains: domains.split(",").map((x) => x.trim()).filter(Boolean) }
                     : {}),
@@ -292,6 +316,7 @@ function SamlCard() {
                 setCerts("");
                 setDomains("");
                 setEmailAttribute("");
+                setGroupsAttribute("");
                 setDefaultRoleId("");
                 setJit("false");
                 setIdpInitiated("false");
@@ -335,6 +360,13 @@ function SamlCard() {
             value={emailAttribute}
             onChange={(e) => setEmailAttribute(e.target.value)}
             placeholder="http://schemas.xmlsoap.org/…/emailaddress"
+          />
+        </Field>
+        <Field label="Group attribute (blank = no group signal from this IdP)">
+          <Input
+            value={groupsAttribute}
+            onChange={(e) => setGroupsAttribute(e.target.value)}
+            placeholder="memberOf"
           />
         </Field>
         <Field label="JIT default role">
@@ -399,6 +431,18 @@ function SamlCard() {
               ),
           },
           { key: "jit", header: "JIT", render: (p) => (p.jitProvisioning ? "on" : "off") },
+          {
+            key: "groups",
+            header: "Groups",
+            render: (p) =>
+              p.groupsAttribute ? (
+                <span className={v.mono}>{p.groupsAttribute}</span>
+              ) : (
+                <span className={v.faint} title="no group signal — logins here never reconcile roles">
+                  none
+                </span>
+              ),
+          },
           {
             key: "idpInit",
             header: "IdP-initiated",

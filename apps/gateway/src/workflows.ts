@@ -1060,7 +1060,9 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       .from(roleAssignments)
       .innerJoin(roles, eq(roles.id, roleAssignments.roleId))
       .where(eq(roleAssignments.userId, userId));
-    const initiatorRoles = initiatorRoleRows.map((r) => r.name);
+    // ADR-0038: distinct — a role held both directly and via an IdP group
+    // mapping is two assignment rows and one role name.
+    const initiatorRoles = [...new Set(initiatorRoleRows.map((r) => r.name))];
     // ADR-0018 addendum (ADR-0019) — the 6th dim, resolved SERVER-SIDE like the
     // 5th: a change's data sensitivity is the set of compliance classification
     // tags its ATTRIBUTED PROJECT carries, i.e. the exact same source

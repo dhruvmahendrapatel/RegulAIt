@@ -1,7 +1,8 @@
 # ADR-0038: Admin-defined IdP-group → RegulAIt-role mapping (default-deny, additive)
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-08-01
+- **Implemented**: 2026-08-02 (migration 0053) — see the amendment at the end.
 
 ## Context
 
@@ -118,3 +119,94 @@ provenance, not just the effective set.
   the reconciliation routine wired into the SAML/OIDC callbacks and the SCIM group-sync handler;
   the `group_role_mapping` audit objectType; admin-portal mapping CRUD with an "unmapped asserted
   groups" report; and extending Simulation to show role provenance (direct vs. which group mapping).
+
+---
+
+## Implementation amendment — 2026-08-02 (migration 0053)
+
+Landed as decided. Three things the ADR left to implementation are settled here.
+
+### 1. "Held both ways": a composite unique key, not an origin upgrade
+
+`role_assignments` already carried `UNIQUE(user_id, role_id)` — one row per (user, role), with
+no record of *why*. That is incompatible with a reconciler, because "remove the group-derived
+assignment" and "remove the admin's assignment" would be the same row.
+
+Two representations were available:
+
+- **(a)** widen the unique key to `(user_id, role_id, origin)` so a `direct` row and a `group` row
+  **coexist as separate rows**; or
+- **(b)** keep one row and *upgrade* its `origin` to `direct` when an admin also assigns it, never
+  reconciling it away afterwards.
+
+**(a) is what shipped.** It is the only one of the two in which losing an admin's direct grant is
+*structurally impossible* rather than merely avoided by correct code: the reconciler's `DELETE` is
+scoped `origin = 'group'`, so even a wrong desired-set computation cannot touch a `direct` row — it
+is a **different row**, not a different column value on the same row. (b) collapses two independent
+facts into one, makes "the admin later unassigns it" ambiguous (revert to group-derived, or vanish
+while the group still implies it?), and puts an ordinary `UPDATE` between an admin's grant and a
+sync, which is exactly the failure mode this ADR exists to prevent.
+
+The cost is that a user may hold two `role_assignments` rows for one role. Callers that ask "which
+roles does this user hold" take the **set** of role ids (deduplicated in `loadEntitlements`,
+`loadScopeMemberships` and the two role-bundled-grant loaders); the policy kernel is unaffected
+because it never sees assignments at all — it receives role-derived *grants* pre-filtered by role
+id. `DELETE /v1/users/:id/roles/:roleId` now removes the **admin-direct row only** and answers 409
+`role_group_derived` when the role is held solely via a mapping, pointing at the two things that
+actually work (remove the mapping, or an ADR-0019 revocation) instead of a delete the next sync
+would silently undo.
+
+### 2. The missing-claim fail-safe, as implemented
+
+The ADR flagged this as "must be nailed down per source". The rule, implemented once in
+`normalizeAssertedGroups` so all three sources cannot drift apart:
+
+| what the identity event carries | interpretation | effect |
+| --- | --- | --- |
+| provider has no `groups_claim` / `groups_attribute` configured | no group signal | **no reconciliation** |
+| the configured claim/attribute is **absent** from this assertion | no group signal | **no reconciliation** — existing group-derived roles survive |
+| an unparseable value (a number, an object) | malformed assertion | **no reconciliation** (fail toward current state) |
+| an **empty array** (OIDC), or an attribute present with an empty value (SAML) | authoritative "member of nothing" | **reconciles to zero** group-derived roles |
+| a non-empty array / string / delimited string | authoritative membership | **reconciles to exactly that set** |
+| SCIM group membership | always authoritative (it is stored state written by a sync, not a per-event assertion) | **reconciles**, including to zero |
+
+The null-vs-empty distinction is a type at the boundary (`string[] | null`), not an empty-array
+coincidence, and both branches are asserted by test. An IdP that drops the claim during an incident
+cannot strip an organisation's access; an IdP that genuinely says "member of nothing" is believed.
+
+One honest SAML limitation, documented rather than papered over: an `<Attribute>` element with
+*zero* `<AttributeValue>` children does not survive XML→object parsing as an empty value and is
+indistinguishable from an absent attribute, so it falls to the fail-safe (no signal). The shape a
+real IdP emits for "member of nothing" — an attribute present with an empty value — **is**
+distinguished, via a `hasOwnProperty` check rather than a `!== undefined` check.
+
+### 3. What shipped
+
+- **Migration 0053** (`0053_group_role_mapping`): `group_role_mappings` (source/external_group/
+  role_id → `roles` `ON DELETE CASCADE`, `UNIQUE(source, external_group, role_id)`);
+  `role_assignments.origin` (`direct` | `group`, **DEFAULT `direct`** so every pre-0053 row is
+  admin-direct) with the unique index widened to `(user_id, role_id, origin)`;
+  `oidc_providers.groups_claim` and `saml_providers.groups_attribute` (both nullable, NULL = no
+  group signal); `asserted_groups`, a sightings log backing the "unmapped asserted groups" report.
+- **The reconciler** (`apps/gateway/src/group-roles.ts`) — one routine, used by the SCIM
+  membership handler, the OIDC callback and the SAML ACS. It reads `group_role_mappings` and
+  writes `role_assignments` and `audit_log`, and nothing else; it never writes a `users` row and
+  never names `isAdmin`, which a test asserts **structurally** (comments stripped) so the claim is
+  "there is no code path" rather than "the path is never taken". The admin CRUD deliberately lives
+  in a separate file for exactly that reason.
+- **Admin surface**: `GET/POST/DELETE /v1/group-role-mappings`,
+  `GET /v1/group-role-mappings/asserted-groups` (the unmapped-group report), and
+  `GET /v1/users/:id/role-provenance` (`direct` | `group` | `both`, naming the mapping);
+  `origin` added to `GET /v1/roles/:id/assignments`; the SPA gains an admin
+  *Group → role mapping* screen with the unmapped-groups report, and the SSO screen gains the
+  claim/attribute fields. `/v1/scim/status` replaces the now-misleading
+  `groupsGrantEntitlement: false` with `unmappedGroupsGrantEntitlement: false`,
+  `isAdminGroupDerivable: false` and a `mappedGroups` count.
+- **Audit**: one `group_role_mapping` row per reconciliation naming the triggering identity event,
+  the asserted groups, the unmapped ones, the mappings that fired, and every insert/remove with its
+  origin — plus rows for admin create/delete of a mapping.
+- **The policy kernel needed no change**, as the ADR predicted: it reads role-derived grants
+  pre-filtered by role id and has never known where an assignment came from.
+- **29 e2e tests** (`group-role-mapping.test.ts`) covering all three sources, both fail-safe
+  branches, the never-remove-a-direct-assignment invariant, revocation-beats-mapping, the
+  additive-only ceiling, mapping deletion, and the two isAdmin proofs.

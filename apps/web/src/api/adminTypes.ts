@@ -63,6 +63,9 @@ export interface OidcProvider {
   allowedEmailDomains: string[] | null;
   defaultRoleId: string | null;
   jitProvisioning: boolean;
+  /** ADR-0038: which id_token claim carries group membership. null = this
+   * provider emits no group signal, so its logins never reconcile roles. */
+  groupsClaim: string | null;
   enabled: boolean;
 }
 
@@ -83,6 +86,9 @@ export interface SamlProvider {
   wantAuthnResponseSigned: boolean;
   allowIdpInitiated: boolean;
   emailAttribute: string | null;
+  /** ADR-0038: which SAML attribute carries group membership. null = this
+   * provider emits no group signal. */
+  groupsAttribute: string | null;
   spPrivateKeySet: boolean;
   spCertificate: string | null;
   enabled: boolean;
@@ -108,11 +114,37 @@ export interface ScimStatus {
     deactivatedUsers: number;
     groups: number;
     memberships: number;
+    /** ADR-0038: distinct synced groups an admin has mapped to a role. The gap
+     * between this and `groups` is how many synced groups are inert. */
+    mappedGroups: number;
   };
-  /** always false today: a synced group is inert until an admin-defined
-   * group->role mapping exists (ADR-0038), and the API states it rather than
-   * leaving the UI to assume it */
-  groupsGrantEntitlement: boolean;
+  /** permanently false: an UNMAPPED group is inert, and there is deliberately
+   * no "default role for unmapped groups" setting to flip it (ADR-0038) */
+  unmappedGroupsGrantEntitlement: boolean;
+  /** permanently false: isAdmin is not a role and is not group-derivable */
+  isAdminGroupDerivable: boolean;
+}
+
+/** ADR-0038: an admin-curated IdP-group -> role mapping. */
+export interface GroupRoleMapping {
+  id: string;
+  source: "saml" | "oidc" | "scim";
+  externalGroup: string;
+  roleId: string;
+  roleName: string;
+  createdAt: string;
+}
+
+/** ADR-0038: a group some identity path has asserted, and what (if anything)
+ * it is mapped to. An entry with `mapped: false` grants nothing. */
+export interface AssertedGroup {
+  source: "saml" | "oidc" | "scim";
+  externalGroup: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  seenCount: number;
+  mapped: boolean;
+  roles: Array<{ roleId: string; roleName: string }>;
 }
 
 export interface Role {

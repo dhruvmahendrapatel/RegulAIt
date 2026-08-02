@@ -50,6 +50,7 @@ import { evaluateIpEnvelope } from "./net-policy.js";
 import { deviceLabel } from "./device-label.js";
 import { checkEgress, createGuardedFetch, type EgressDenied } from "./egress-guard.js";
 import { loadEgressAllowList } from "./custom-providers.js";
+import { normalizeAssertedGroups, reconcileGroupRoles } from "./group-roles.js";
 
 export interface AuthContext {
   /** null only for the bootstrap token (header or exchanged session), which
@@ -1313,6 +1314,9 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     allowedEmailDomains: p.allowedEmailDomains,
     defaultRoleId: p.defaultRoleId,
     jitProvisioning: p.jitProvisioning,
+    /** ADR-0038: null = this provider emits no group signal, so its logins
+     * never reconcile group-derived roles. */
+    groupsClaim: p.groupsClaim,
     createdAt: p.createdAt,
     updatedAt: p.updatedAt,
     // client_secret_ciphertext deliberately absent: secrets are WRITE-ONLY
@@ -1541,6 +1545,30 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
         { phase: "oidc-jit", provider: provider.name, email, sub: claims.sub, defaultRoleId: provider.defaultRoleId });
     }
 
+    // ADR-0038 — group → role reconciliation from the id_token's groups claim.
+    //
+    // THE FAIL-SAFE, spelled out because getting it wrong is a mass access
+    // strip: `provider.groupsClaim` null means this provider emits no group
+    // signal at all; a claim that is CONFIGURED but ABSENT from this id_token is
+    // also "no signal" (an IdP hiccup or a renamed claim must not read as "in
+    // zero groups"). Both leave existing group-derived roles exactly as they
+    // are. A claim that is PRESENT — including an empty array — is
+    // authoritative, and an empty one reconciles the user to zero group-derived
+    // roles. `normalizeAssertedGroups` returns null for the first case and an
+    // array for the second, so the distinction is a type at the boundary rather
+    // than a convention.
+    if (provider.groupsClaim) {
+      const asserted = normalizeAssertedGroups(
+        (claims as Record<string, unknown>)[provider.groupsClaim],
+      );
+      await reconcileGroupRoles(db, user.id, "oidc", asserted, {
+        kind: "oidc-login",
+        actor: `oidc provider '${provider.name}'`,
+        actorUserId: user.id,
+        detail: { providerId: provider.id, provider: provider.name, groupsClaim: provider.groupsClaim, sub: claims.sub },
+      });
+    }
+
     const org = await loadOrgSettings(db);
     // ADR-0039: SSO is a human login — the identity provider vouching for the
     // user does not move the request inside the org's network envelope.
@@ -1609,6 +1637,10 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
         allowedEmailDomains: body.allowedEmailDomains ?? null,
         defaultRoleId: body.defaultRoleId ?? null,
         jitProvisioning: body.jitProvisioning ?? false,
+        // ADR-0038: naming the claim turns the group SIGNAL on. It grants
+        // nothing by itself — an asserted group confers nothing until an admin
+        // maps it (`group_role_mappings`), and no mapping reaches isAdmin.
+        groupsClaim: body.groupsClaim ?? null,
       })
       .returning();
     await auditAuth(db, req.authCtx.userId, null, "oidc-provider-created", "allow",

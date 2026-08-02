@@ -1466,6 +1466,11 @@ const oidcDomainSchema = z
   .toLowerCase()
   .regex(/^[a-z0-9.-]+\.[a-z]{2,}$/, "not a domain");
 
+/** ADR-0038: the name of the claim/attribute carrying groups. Nullable, and
+ * NULL is the meaningful default: no name configured = no group signal at all
+ * from this provider = nothing ever reconciled from its logins. */
+const groupsClaimSchema = z.string().trim().min(1).max(512).nullable();
+
 export const createOidcProviderSchema = z
   .object({
     name: z.string().trim().min(1).max(200),
@@ -1476,6 +1481,11 @@ export const createOidcProviderSchema = z
     allowedEmailDomains: z.array(oidcDomainSchema).min(1).max(50).nullable().optional(),
     defaultRoleId: z.string().uuid().nullable().optional(),
     jitProvisioning: z.boolean().optional(),
+    /** ADR-0038: which id_token claim carries group membership. null/absent =
+     * this provider emits NO group signal, so a login through it never
+     * reconciles group-derived roles. Naming it grants nothing on its own — an
+     * asserted group confers nothing until an admin maps it to a role. */
+    groupsClaim: groupsClaimSchema.optional(),
   })
   .strict();
 export type CreateOidcProvider = z.infer<typeof createOidcProviderSchema>;
@@ -1491,6 +1501,7 @@ export const updateOidcProviderSchema = z
     allowedEmailDomains: z.array(oidcDomainSchema).min(1).max(50).nullable().optional(),
     defaultRoleId: z.string().uuid().nullable().optional(),
     jitProvisioning: z.boolean().optional(),
+    groupsClaim: groupsClaimSchema.optional(),
   })
   .strict();
 export type UpdateOidcProvider = z.infer<typeof updateOidcProviderSchema>;
@@ -1529,6 +1540,9 @@ const samlProviderFields = {
    * emailAddress. NEVER a username: ADR-0030's second identifier is
    * locally-editable and must never be an SSO mapping target. */
   emailAttribute: z.string().trim().min(1).max(512).nullable(),
+  /** ADR-0038: the SAML attribute carrying group membership (`groups`,
+   * `memberOf`, …). null = no group signal from this provider. */
+  groupsAttribute: groupsClaimSchema,
   /** OPTIONAL SP private key (PEM) for request signing / encrypted assertions.
    * WRITE-ONLY: stored AES-256-GCM under REGULAIT_DATA_KEY and never returned. */
   spPrivateKey: z.string().min(1).max(16384),
@@ -1570,6 +1584,7 @@ export const createSamlProviderSchema = z
     wantAuthnResponseSigned: samlProviderFields.wantAuthnResponseSigned.optional(),
     allowIdpInitiated: samlProviderFields.allowIdpInitiated.optional(),
     emailAttribute: samlProviderFields.emailAttribute.optional(),
+    groupsAttribute: samlProviderFields.groupsAttribute.optional(),
     spPrivateKey: samlProviderFields.spPrivateKey.optional(),
     spCertificate: samlProviderFields.spCertificate.optional(),
   })
@@ -1592,6 +1607,7 @@ export const updateSamlProviderSchema = z
     wantAuthnResponseSigned: samlProviderFields.wantAuthnResponseSigned.optional(),
     allowIdpInitiated: samlProviderFields.allowIdpInitiated.optional(),
     emailAttribute: samlProviderFields.emailAttribute.optional(),
+    groupsAttribute: samlProviderFields.groupsAttribute.optional(),
     spPrivateKey: samlProviderFields.spPrivateKey.optional(),
     spCertificate: samlProviderFields.spCertificate.optional(),
   })

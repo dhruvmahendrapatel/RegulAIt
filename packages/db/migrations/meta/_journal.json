@@ -372,6 +372,13 @@
       "when": 1784988000000,
       "tag": "0052_scim_provisioning",
       "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1784989000000,
+      "tag": "0053_group_role_mapping",
+      "breakpoints": true
     }
   ]
 }

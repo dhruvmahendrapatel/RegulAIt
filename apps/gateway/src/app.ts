@@ -112,6 +112,7 @@ import {
 } from "./auth.js";
 import { registerSamlRoutes } from "./saml.js";
 import { SCIM_ROUTES, registerScimAdminRoutes, registerScimRoutes } from "./scim.js";
+import { registerGroupRoleMappingRoutes } from "./group-role-api.js";
 import { evaluateIpEnvelope } from "./net-policy.js";
 import { activeDelegatorsFor, activeDelegationFrom } from "./delegations.js";
 
@@ -1336,12 +1337,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     return { removed: true };
   });
 
+  // ADR-0038: an admin assignment is always `origin='direct'` — the origin an
+  // IdP reconciliation can never touch. If a group mapping also implies this
+  // role the user simply holds two rows (migration 0053's UNIQUE includes
+  // origin); the direct one outlives any directory change.
   app.post("/v1/users/:userId/roles", async (req, reply) => {
     const { userId } = z.object({ userId: z.string().uuid() }).parse(req.params);
     const body = assignRoleSchema.parse(req.body);
     const [row] = await db
       .insert(roleAssignments)
-      .values({ userId, roleId: body.roleId })
+      .values({ userId, roleId: body.roleId, origin: "direct" })
       .returning();
     return reply.status(201).send(row);
   });
@@ -1350,14 +1355,43 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const params = z
       .object({ userId: z.string().uuid(), roleId: z.string().uuid() })
       .parse(req.params);
+    // ADR-0038: unassign removes the ADMIN-DIRECT assignment only. A
+    // group-derived one is owned by the reconciler — deleting it here would be
+    // undone by the holder's very next login/sync, so the honest answer is to
+    // say so and point at the two things that actually work (remove the
+    // mapping, or an ADR-0019 per-user revocation, which beats a role a
+    // mapping keeps re-adding).
     const deleted = await db
       .delete(roleAssignments)
       .where(
-        and(eq(roleAssignments.userId, params.userId), eq(roleAssignments.roleId, params.roleId)),
+        and(
+          eq(roleAssignments.userId, params.userId),
+          eq(roleAssignments.roleId, params.roleId),
+          eq(roleAssignments.origin, "direct"),
+        ),
       )
       .returning({ id: roleAssignments.id });
-    if (deleted.length === 0) return reply.status(404).send({ error: "not_assigned" });
-    return { removed: true };
+    const groupHeld = await db
+      .select({ id: roleAssignments.id })
+      .from(roleAssignments)
+      .where(
+        and(
+          eq(roleAssignments.userId, params.userId),
+          eq(roleAssignments.roleId, params.roleId),
+          eq(roleAssignments.origin, "group"),
+        ),
+      );
+    if (deleted.length === 0) {
+      if (groupHeld.length > 0) {
+        return reply.status(409).send({
+          error: "role_group_derived",
+          detail:
+            "this role is held via an IdP group mapping, not an admin assignment — delete the group→role mapping, or add a per-user revocation (ADR-0019), which beats a group-implied role",
+        });
+      }
+      return reply.status(404).send({ error: "not_assigned" });
+    }
+    return { removed: true, ...(groupHeld.length > 0 ? { stillHeldViaGroup: true } : {}) };
   });
 
   // ADR-0022: who holds a role — the missing read that makes assignments
@@ -1371,6 +1405,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         email: users.email,
         disabledAt: users.disabledAt,
         assignedAt: roleAssignments.createdAt,
+        // ADR-0038: WHY they hold it — an admin action, or an IdP group a
+        // mapping names. A holder listed twice holds it both ways.
+        origin: roleAssignments.origin,
       })
       .from(roleAssignments)
       .innerJoin(users, eq(users.id, roleAssignments.userId))
@@ -1387,11 +1424,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const body = deleteRoleSchema.parse(req.body ?? {});
     const [role] = await db.select().from(roles).where(eq(roles.id, roleId));
     if (!role) return reply.status(404).send({ error: "unknown_role" });
-    const holders = await db
+    const holderRows = await db
       .select({ userId: roleAssignments.userId, email: users.email })
       .from(roleAssignments)
       .innerJoin(users, eq(users.id, roleAssignments.userId))
       .where(eq(roleAssignments.roleId, roleId));
+    // ADR-0038: a user holding the role BOTH directly and via a group mapping
+    // has two assignment rows — they are one holder, counted once.
+    const holders = [...new Map(holderRows.map((h) => [h.userId, h])).values()];
     if (holders.length > 0 && !body.force) {
       return reply.status(409).send({
         error: "role_held",
@@ -2365,6 +2405,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0022's `disabled_at` — never a row delete.
   registerScimRoutes(app, db);
   registerScimAdminRoutes(app, db);
+  // ADR-0038 — admin CRUD for IdP-group → role mappings, the "unmapped asserted
+  // groups" report, and the role-provenance read. Admin-only through the
+  // DEFAULT gate above (none of them appear in NON_ADMIN_ROUTES): creating a
+  // mapping delegates a role's grants to whoever administers the IdP group.
+  registerGroupRoleMappingRoutes(app, db);
 
   registerAgentConnectorRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0034 — admin-registered custom LLM providers + the egress allow-list

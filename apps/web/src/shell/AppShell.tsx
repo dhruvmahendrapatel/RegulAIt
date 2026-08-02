@@ -42,6 +42,9 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       { label: "Client access", to: "/admin/client-access" },
       { label: "SSO & sessions", to: "/admin/sso" },
       { label: "Provisioning (SCIM)", to: "/admin/provisioning" },
+      // ADR-0038: where an IdP group becomes a role — and where the ones that
+      // grant nothing are visible rather than silently inert.
+      { label: "Group → role mapping", to: "/admin/group-mappings" },
     ],
   },
   {

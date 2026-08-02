@@ -15,6 +15,7 @@
  *    more.
  */
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { ScimStatus, ScimToken } from "../../../api/adminTypes";
@@ -238,14 +239,25 @@ function StatusCard(props: { status: ScimStatus }) {
           ],
           ["Groups synced", String(s.counts.groups)],
           ["Membership records", String(s.counts.memberships)],
+          [
+            "…of which mapped to a role",
+            <span key="mapped" className={v.rowTight}>
+              {String(s.counts.mappedGroups)}
+              <span className={v.faint}>
+                (the rest are inert — see Group → role mapping)
+              </span>
+            </span>,
+          ],
         ]}
       />
       <p className={v.faint}>
-        <strong>A synced group grants nothing.</strong> Membership is recorded here as the IdP asserts
-        it, and that is all it does — no role, no agent, no connector, no tool. Turning directory
-        membership into entitlement is an explicit, admin-defined, default-deny mapping which is not
-        built yet, so an IdP cannot become a privilege-escalation path by asserting that someone is in a
-        group called “admins”.
+        <strong>An unmapped group grants nothing.</strong> Membership is recorded here as the IdP
+        asserts it, and on its own that is all it does. It becomes entitlement only where an admin
+        has explicitly mapped that group to a role on the{" "}
+        <Link to="/admin/group-mappings">Group → role mapping</Link> screen — default-deny, with no
+        “default role for unmapped groups” setting anywhere. And no mapping, of any group, can
+        confer the platform admin bit: <code>isAdmin</code> is not a role, so an IdP cannot become a
+        privilege-escalation path by asserting that someone is in a group called “admins”.
       </p>
     </Card>
   );
