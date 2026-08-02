@@ -38,6 +38,39 @@ export {
   type EvalGateDecision,
 } from "./evals.js";
 
+// ADR-0045 — the model risk management registry's pure half: the effective
+// status computation (which recomputes expiry from validUntil rather than
+// trusting the swept status cache), the card-completeness assessment, the
+// dispatch-gate decision, and the honest declared-vs-enforced posture label.
+export {
+  MODEL_CARD_APPROVAL_STATUSES,
+  BIAS_FAIRNESS_STATUSES,
+  biasFairnessEntrySchema,
+  createModelCardSchema,
+  updateModelCardSchema,
+  requestModelCardSignOffSchema,
+  attachModelCardEvidenceSchema,
+  revokeModelCardApprovalSchema,
+  effectiveApprovalStatus,
+  isLiveApproval,
+  daysUntilExpiry,
+  cardState,
+  assessBiasFairness,
+  assessCardCompleteness,
+  evaluateMrmGate,
+  mrmPosture,
+  type MrmApprovalStatus,
+  type BiasFairnessStatus,
+  type BiasFairnessEntryInput,
+  type MrmApprovalLike,
+  type MrmCardState,
+  type BiasFairnessAssessment,
+  type CardCompleteness,
+  type MrmGateReason,
+  type MrmGateDecision,
+  type MrmGateCard,
+} from "./mrm.js";
+
 // ADR-0042 — the guardrail engine's pure half: the detector registry, the
 // block|warn|log verbs (piiMode's triad, plus an `off` member), the
 // MAX-of-strictness composition that makes the compliance cascade a ceiling,

@@ -78,6 +78,7 @@ import {
   type DispatchGuardrails,
   type GuardrailPolicy,
 } from "./guardrails.js";
+import { mrmDispatchGate } from "./mrm.js";
 import { z } from "zod";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import {
@@ -242,6 +243,35 @@ export async function executeGovernedDispatch(
       detail: served
         ? `agent '${served.name}' needs a model id and a known provider (got provider '${served.provider}', model '${served.model ?? "none"}')`
         : "served agent not found in registry",
+    };
+  }
+
+  // ADR-0045 — MODEL RISK MANAGEMENT GATE. Placed HERE: after the caller's
+  // entitlement decision (every caller of this function has already run
+  // evaluateAgent) and before ANY provider work, cost, or content processing.
+  //
+  // Default-OFF (`org_settings.mrm_enforced`), so with the toggle untouched
+  // this is one settings read and byte-identical behaviour. When ON it refuses
+  // a model that carries no model card with an UNEXPIRED approved risk
+  // sign-off — 409 `mrm_approval_required`, audited with a ruleId that
+  // distinguishes "never reviewed" from "review lapsed". The gate recomputes
+  // expiry from `valid_until` on every call rather than trusting the stored
+  // status, so a lapsed certification stops dispatch even in a deployment that
+  // never runs the sweep. That is what makes expiry a control instead of a badge.
+  const mrmRefusal = await mrmDispatchGate(db, {
+    userId,
+    agentId: served.id,
+    agentName: served.name,
+    model: served.model,
+    customProviderId: served.customProviderId ?? null,
+    projectId: args.projectId ?? null,
+  });
+  if (mrmRefusal) {
+    return {
+      ok: false,
+      status: mrmRefusal.status,
+      error: mrmRefusal.error,
+      detail: mrmRefusal.detail,
     };
   }
 

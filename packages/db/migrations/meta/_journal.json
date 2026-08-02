@@ -400,6 +400,13 @@
       "when": 1784992000000,
       "tag": "0056_eval_harness",
       "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "7",
+      "when": 1784993000000,
+      "tag": "0057_model_risk_management",
+      "breakpoints": true
     }
   ]
 }

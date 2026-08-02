@@ -64,6 +64,11 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // gates. Same question shape ("may this proceed?") asked of the agent's
       // OUTPUT against a fixed dataset, and it blocks promotion the same way.
       { label: "Evaluations", to: "/admin/evals" },
+      // ADR-0045 — the RISK-ACCEPTANCE gate, beside the quality gate. Evals ask
+      // "is this agent good on our cases?"; this asks "has a human accepted the
+      // risk of using it for this purpose, and is that acceptance still valid?"
+      // A high score is an input to that decision, never a substitute for it.
+      { label: "Model risk", to: "/admin/model-risk" },
       { label: "Simulation", to: "/admin/simulation" },
       { label: "Approvals queue", to: "/admin/approvals" },
       { label: "Audit log", to: "/admin/audit" },

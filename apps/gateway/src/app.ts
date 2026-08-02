@@ -25,6 +25,7 @@ import {
   isNull,
   mcpServers,
   mcpTools,
+  modelCards,
   or,
   orchestrationRuns,
   projectContextItems,
@@ -116,6 +117,7 @@ import { registerGroupRoleMappingRoutes } from "./group-role-api.js";
 import { registerAbacRoutes } from "./abac.js";
 import { registerGuardrailRoutes } from "./guardrails.js";
 import { registerEvalRoutes } from "./evals.js";
+import { applyModelCardApprovalDecision, registerMrmRoutes } from "./mrm.js";
 import { abacPrincipalFromRequest } from "./abac-principal.js";
 import { evaluateIpEnvelope } from "./net-policy.js";
 import { activeDelegatorsFor, activeDelegationFrom } from "./delegations.js";
@@ -2112,6 +2114,38 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       }
       return null;
     };
+    // ADR-0045: an MRM sign-off row carries its card id in the same `stageId`
+    // sentinel slot the infra/conflict rows use — no new column on `approvals`,
+    // because MRM riding the ONE queue is the whole point.
+    const MODEL_CARD_PREFIX = "__model_card__:";
+    const modelCardIds = ids(
+      rows.map((r) =>
+        r.stageId?.startsWith(MODEL_CARD_PREFIX) && uuidOk(r.stageId.slice(MODEL_CARD_PREFIX.length))
+          ? r.stageId.slice(MODEL_CARD_PREFIX.length)
+          : null,
+      ),
+    );
+    const modelCardRows = modelCardIds.length
+      ? await db.select().from(modelCards).where(inArray(modelCards.id, modelCardIds))
+      : [];
+    const modelCardAgentIds = ids(modelCardRows.map((c) => c.agentId));
+    const modelCardAgentRows = modelCardAgentIds.length
+      ? await db
+          .select({ id: agents.id, name: agents.name })
+          .from(agents)
+          .where(inArray(agents.id, modelCardAgentIds))
+      : [];
+    const modelCardAgentName = new Map(modelCardAgentRows.map((a) => [a.id, a.name]));
+    const modelCardById = new Map(modelCardRows.map((c) => [c.id, c]));
+    const modelCardLabelFor = (stageId: string | null): string | null => {
+      if (!stageId?.startsWith(MODEL_CARD_PREFIX)) return null;
+      const card = modelCardById.get(stageId.slice(MODEL_CARD_PREFIX.length));
+      if (!card) return null;
+      const subject = card.agentId
+        ? (modelCardAgentName.get(card.agentId) ?? "agent")
+        : "custom provider";
+      return `model risk sign-off · ${subject} · ${card.intendedUse}`;
+    };
     const delegatedFor = new Set(delegators);
     const contextConflictFor = (r: (typeof rows)[number]) => {
       if (!r.stageId?.startsWith(CONFLICT_PREFIX)) return {};
@@ -2148,6 +2182,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           (r.runId ? runLabel.get(r.runId) : null) ??
           (r.projectId ? projectLabel.get(r.projectId) : null) ??
           (r.objectType === "infra_operation" ? infraLabelFor(r.stageId) : null) ??
+          (r.objectType === "model_card" ? modelCardLabelFor(r.stageId) : null) ??
           r.toolName ??
           null,
         // ADR-0022: this row reached the caller via an active delegation —
@@ -2313,6 +2348,18 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       if (updated.objectType === "infra_operation") {
         await applyInfraApprovalDecision(tx as unknown as Db, updated, body.decision, deciderUserId);
       }
+      // ADR-0045 MRM sign-offs: the risk acceptance is recorded on the model
+      // card chain HERE, inside the one decide path, so it inherits every
+      // separation-of-duties guard above (named approver, admin-override
+      // reason, self-review reason, delegation) rather than inventing its own.
+      if (updated.objectType === "model_card") {
+        await applyModelCardApprovalDecision(
+          tx as unknown as Db,
+          updated,
+          body.decision,
+          deciderUserId,
+        );
+      }
       return { updated, postCommit };
     });
     if (!outcome.updated) {
@@ -2450,6 +2497,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // caller's own agent entitlement, checked inside the runner exactly as an
   // invoke would check it.
   registerEvalRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0045 — the model risk management registry: model cards, the
+  // recertification chain, evidence links onto ADR-0044 eval runs, the expiry
+  // sweep, and the org toggle that turns "reviewed for a stated purpose" into
+  // a dispatch gate. Every route is admin-only via the global gate (none
+  // appear in NON_ADMIN_ROUTES) — authoring or signing off a risk position is
+  // a privileged act by definition, and the SIGN-OFF DECISION itself is not
+  // here at all: it rides POST /v1/approvals/:approvalId/decide, which the
+  // named approver reaches as a non-admin exactly as before.
+  registerMrmRoutes(app, db);
 
   registerAgentConnectorRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0034 — admin-registered custom LLM providers + the egress allow-list

@@ -592,6 +592,13 @@ export const auditLog = pgTable(
         // executeGovernedDispatch, so the trail stays single. Plain text
         // column — no DDL needed.
         "eval_run",
+        // ADR-0045: a MODEL CARD — authoring/editing a card, requesting a
+        // sign-off, the decided sign-off, a revocation, an expiry sweep flip,
+        // and every DISPATCH REFUSED because the model has no unexpired
+        // approved card. The refusal is the one that matters: it is what makes
+        // "no unreviewed model reaches production data" an audited property
+        // rather than a slide. Plain text column — no DDL needed.
+        "model_card",
       ],
     })
       .notNull()
@@ -696,7 +703,11 @@ export const approvals = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
     objectType: text("object_type", {
-      enum: ["mcp_tool", "workflow", "run", "project", "infra_operation"],
+      // ADR-0045: 'model_card' — an MRM sign-off / recertification request.
+      // The column has no DB CHECK (see migration 0001), so this is a TS-only
+      // widening with no DDL, exactly like the values ADR-0011/0016/0017 added.
+      // The whole point is that MRM does NOT get a second queue.
+      enum: ["mcp_tool", "workflow", "run", "project", "infra_operation", "model_card"],
     })
       .notNull()
       .default("mcp_tool"),
@@ -2532,11 +2543,33 @@ export const orgSettings = pgTable(
      * bootstrap origin is never IP-restricted. */
     apiKeyIpPolicy: text("api_key_ip_policy", { enum: IP_POLICIES }).notNull().default("off"),
 
+    // --- ADR-0045 (migration 0057): model risk management -------------------
+    /** THE DISPATCH GATE. false (default) = today's behaviour, byte-identical:
+     * cards are documentation. true = `executeGovernedDispatch` refuses any
+     * agent whose model has no model card carrying an UNEXPIRED approved
+     * sign-off (409 `mrm_approval_required`, audited, effect deny).
+     *
+     * Deliberately the exact shape of `keyCustodyEnforced` above (ADR-0024):
+     * one org toggle, refuse-with-a-named-reason, fully reversible — turning
+     * it off restores dispatch and destroys no card data. Default-off means no
+     * deployment acquires a production hard-stop by accident. */
+    mrmEnforced: boolean("mrm_enforced").notNull().default(false),
+    /** how many days before `valid_until` a signed-off card counts as
+     * "expiring soon" — the window the registry surfaces lapses in as WORK
+     * ahead of time rather than as an outage on the day. */
+    mrmExpiryWarnDays: integer("mrm_expiry_warn_days").notNull().default(30),
+
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [check("org_settings_singleton", sql`${t.id} = 'singleton'`)],
+  (t) => [
+    check("org_settings_singleton", sql`${t.id} = 'singleton'`),
+    check(
+      "org_settings_mrm_expiry_warn_days_check",
+      sql`${t.mrmExpiryWarnDays} >= 0 AND ${t.mrmExpiryWarnDays} <= 3650`,
+    ),
+  ],
 );
 
 export type OrgSettingsRow = typeof orgSettings.$inferSelect;
@@ -2919,3 +2952,177 @@ export type EvalDatasetRow = typeof evalDatasets.$inferSelect;
 export type EvalCaseRow = typeof evalCases.$inferSelect;
 export type EvalRunRow = typeof evalRuns.$inferSelect;
 export type EvalResultRow = typeof evalResults.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0045 (migration 0057) — THE MODEL RISK MANAGEMENT REGISTRY.
+//
+// The `agents` / `customModelProviders` registries say how to REACH a model and
+// who may INVOKE it. They say nothing about whether a human has REVIEWED AND
+// ACCEPTED THE RISK of using it for a stated purpose — the question NIST AI RMF,
+// ISO/IEC 42001 and the EU AI Act's high-risk documentation duties put at the
+// centre. These three tables are that missing state, and (with
+// `org_settings.mrmEnforced`) the gate that makes it enforceable rather than
+// documentation theatre.
+//
+// WHAT THIS IS NOT: a bias-testing engine. `biasFairness` is a structured SLOT
+// (ADR-0045 §2) — the place an assessment is recorded and its ABSENCE is
+// visible. The platform requires and records an assessment; it does not perform
+// one, and no field here should ever be read as if it did.
+// ---------------------------------------------------------------------------
+
+export const MODEL_CARD_APPROVAL_STATUSES = [
+  "draft",
+  "pending",
+  "approved",
+  "denied",
+  "expired",
+  "revoked",
+  "superseded",
+] as const;
+export type ModelCardApprovalStatus = (typeof MODEL_CARD_APPROVAL_STATUSES)[number];
+
+export const MODEL_CARD_EVIDENCE_KINDS = ["eval_run", "external"] as const;
+export type ModelCardEvidenceKind = (typeof MODEL_CARD_EVIDENCE_KINDS)[number];
+
+/** ADR-0045 §2: one declared bias/fairness assessment SLOT on a card. */
+export interface BiasFairnessEntry {
+  /** what was assessed (e.g. "gender", "dialect", "age-bracket refusal rate") */
+  dimension: string;
+  /** how (e.g. "counterfactual prompt set", "vendor model card §4") */
+  method: string;
+  /** an `eval_runs` id, a URL, or a document reference — free-form on purpose:
+   * the platform records where the evidence lives, it does not fetch it */
+  resultRef?: string | null;
+  status: "not_assessed" | "in_progress" | "assessed" | "waived";
+  assessedAt?: string | null;
+  assessedBy?: string | null;
+  note?: string | null;
+}
+
+/** ONE RISK POSITION on ONE (model, purpose). A second intended use is a second
+ * card — never an edit of this one, because the two decisions can differ. */
+export const modelCards = pgTable(
+  "model_cards",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** EXACTLY ONE of agentId / customProviderId is set (DB CHECK) — the
+     * discriminated-union discipline ADR-0034 established */
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    customProviderId: uuid("custom_provider_id").references(() => customModelProviders.id, {
+      onDelete: "cascade",
+    }),
+    intendedUse: text("intended_use").notNull(),
+    /** provenance / training-data / retention claims AS THE PROVIDER STATES
+     * THEM — recorded as claims, never as our verification of them */
+    dataClaims: jsonb("data_claims").$type<Record<string, unknown>>().notNull().default({}),
+    limitations: text("limitations"),
+    /** ADR-0045 §2 — a SLOT, not an engine. An empty list is a visibly
+     * incomplete card, which is the point. */
+    biasFairness: jsonb("bias_fairness").$type<BiasFairnessEntry[]>().notNull().default([]),
+    /** e.g. ['nist-ai-rmf:MEASURE-2.11','iso-42001:8.3']. A MAPPING an auditor
+     * can follow — never a claim that anything is CERTIFIED. */
+    standardRefs: jsonb("standard_refs").$type<string[]>().notNull().default([]),
+    note: text("note"),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "model_cards_subject_check",
+      sql`(${t.agentId} IS NOT NULL AND ${t.customProviderId} IS NULL) OR (${t.agentId} IS NULL AND ${t.customProviderId} IS NOT NULL)`,
+    ),
+    check("model_cards_intended_use_check", sql`length(btrim(${t.intendedUse})) > 0`),
+    uniqueIndex("model_cards_agent_use_uq")
+      .on(t.agentId, t.intendedUse)
+      .where(sql`${t.agentId} IS NOT NULL`),
+    uniqueIndex("model_cards_provider_use_uq")
+      .on(t.customProviderId, t.intendedUse)
+      .where(sql`${t.customProviderId} IS NOT NULL`),
+    index("model_cards_agent_idx").on(t.agentId),
+    index("model_cards_provider_idx").on(t.customProviderId),
+  ],
+);
+
+/** THE CHAIN. A recertification is a NEW row pointing at the one it supersedes;
+ * nothing here is edited in place, so "who accepted what risk, when, and until
+ * when" is durable history rather than a last-writer-wins column. */
+export const modelCardApprovals = pgTable(
+  "model_card_approvals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    cardId: uuid("card_id")
+      .notNull()
+      .references(() => modelCards.id, { onDelete: "cascade" }),
+    status: text("status", { enum: MODEL_CARD_APPROVAL_STATUSES }).notNull().default("pending"),
+    approverUserId: uuid("approver_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    requestedByUserId: uuid("requested_by_user_id"),
+    /** THE LINK TO THE ONE QUEUE (ADR-0045 §3): the `approvals` row this
+     * sign-off request rides. MRM does not get a second inbox. */
+    approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    decidedBy: uuid("decided_by"),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    decisionReason: text("decision_reason"),
+    /** the recertification date — the field the DISPATCH GATE evaluates
+     * against `now()`. `status` is a swept cache of that comparison; the gate
+     * never trusts it alone. */
+    validUntil: timestamp("valid_until", { withTimezone: true }),
+    supersedesId: uuid("supersedes_id"),
+    requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "model_card_approvals_status_check",
+      sql`${t.status} IN ('draft','pending','approved','denied','expired','revoked','superseded')`,
+    ),
+    foreignKey({
+      name: "model_card_approvals_supersedes_id_fk",
+      columns: [t.supersedesId],
+      foreignColumns: [t.id],
+    }).onDelete("set null"),
+    index("model_card_approvals_card_idx").on(t.cardId, t.requestedAt),
+    index("model_card_approvals_status_idx").on(t.status, t.validUntil),
+    /** at most ONE live sign-off request per card — two concurrent requests
+     * would let two humans accept two different risk positions on one purpose */
+    uniqueIndex("model_card_approvals_one_pending_uq")
+      .on(t.cardId)
+      .where(sql`${t.status} = 'pending'`),
+  ],
+);
+
+/** ADR-0045 §5: the measured evidence behind a risk decision. An `eval_runs`
+ * reference is ON DELETE RESTRICT — a run cited as evidence cannot be deleted
+ * out from under the sign-off that rests on it. */
+export const modelCardEvidence = pgTable(
+  "model_card_evidence",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    cardId: uuid("card_id")
+      .notNull()
+      .references(() => modelCards.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: MODEL_CARD_EVIDENCE_KINDS }).notNull(),
+    evalRunId: uuid("eval_run_id").references(() => evalRuns.id, { onDelete: "restrict" }),
+    externalRef: text("external_ref"),
+    label: text("label"),
+    note: text("note"),
+    attachedByUserId: uuid("attached_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    attachedAt: timestamp("attached_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("model_card_evidence_kind_check", sql`${t.kind} IN ('eval_run','external')`),
+    check(
+      "model_card_evidence_shape_check",
+      sql`(${t.kind} = 'eval_run' AND ${t.evalRunId} IS NOT NULL AND ${t.externalRef} IS NULL) OR (${t.kind} = 'external' AND ${t.externalRef} IS NOT NULL AND ${t.evalRunId} IS NULL)`,
+    ),
+    index("model_card_evidence_card_idx").on(t.cardId),
+    uniqueIndex("model_card_evidence_run_uq")
+      .on(t.cardId, t.evalRunId)
+      .where(sql`${t.evalRunId} IS NOT NULL`),
+  ],
+);
+
+export type ModelCardRow = typeof modelCards.$inferSelect;
+export type ModelCardApprovalRow = typeof modelCardApprovals.$inferSelect;
+export type ModelCardEvidenceRow = typeof modelCardEvidence.$inferSelect;

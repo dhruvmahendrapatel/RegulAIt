@@ -34,6 +34,7 @@ import SimulationPage from "./views/admin/governance/SimulationPage";
 import AbacPoliciesPage from "./views/admin/governance/AbacPoliciesPage";
 import GuardrailsPage from "./views/admin/governance/GuardrailsPage";
 import EvalsPage from "./views/admin/governance/EvalsPage";
+import ModelRiskPage from "./views/admin/governance/ModelRiskPage";
 import ApprovalsAdminPage from "./views/admin/governance/ApprovalsAdminPage";
 import AuditLogPage from "./views/admin/governance/AuditLogPage";
 import WorkflowTemplatesPage from "./views/admin/governance/WorkflowTemplatesPage";
@@ -131,6 +132,7 @@ export default function App() {
                         <Route path="abac-policies" element={<AbacPoliciesPage />} />
                         <Route path="guardrails" element={<GuardrailsPage />} />
                         <Route path="evals" element={<EvalsPage />} />
+                        <Route path="model-risk" element={<ModelRiskPage />} />
                         <Route path="approvals" element={<ApprovalsAdminPage />} />
                         <Route path="audit" element={<AuditLogPage />} />
                         <Route path="workflow-templates" element={<WorkflowTemplatesPage />} />
