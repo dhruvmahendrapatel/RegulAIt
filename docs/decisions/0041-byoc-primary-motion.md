@@ -1,7 +1,7 @@
 # ADR-0041 — BYOC / air-gapped single-tenant-per-deployment as the PRIMARY go-to-market motion
 
-- **Status**: Proposed
-- **Date**: 2026-08-01
+- **Status**: Accepted
+- **Date**: 2026-08-01 (accepted 2026-08-02 — see the implementation amendment at the end)
 - **Relates to**: ADR-0007/0008 (eight P0 pillars — pillar 3), ADR-0015 (BYOC / air-gapped
   deploy modes + control-plane / agent-execution-plane data boundary), ADR-0013 (single-EC2
   compose dev-app shape), ADR-0021 (`org_settings` singleton configurability layer), ADR-0034
@@ -131,3 +131,125 @@ Concretely:
   class, but every within-deployment control (pillar 1 governance, the egress guard, PII
   enforcement) still has to do its job. This decision narrows the threat model; it does not shrink
   the work inside it.
+
+---
+
+## Amendment — 2026-08-02 (implementation: installer, signed update bundles, data-boundary artifact)
+
+Status moves **Proposed → Accepted**. The decision above is unchanged. This amendment records
+exactly what of §2's "committed follow-up scope" is now built, what is deliberately not, and one
+finding the work surfaced that the original text did not anticipate.
+
+### Built
+
+1. **One-command installer — `scripts/install.sh`.** A single reproducible bring-up of the
+   ADR-0013 compose stack (gateway + Postgres + Caddy per ADR-0029) parameterised by
+   `REGULAIT_DATA_KEY`, domain, TLS posture and OIDC issuer.
+   - **Preflight**: docker + `docker compose` v2 (v1 is refused by name — the stack uses profiles,
+     IPAM `ip_range` pinning and `pull_policy`), daemon reachability, port availability
+     (`ss` → `netstat` → a `/dev/tcp` loopback probe), a free-disk floor measured against Docker's
+     own root directory, and openssl.
+   - **THE DATA-KEY GATE.** Refuses to proceed on a missing or weak key: not exactly 64 hex
+     characters, the published `aaaa…` compose default, fewer than 8 distinct hex characters, or
+     any block of period ≤ 16 repeated to length. Generates one when absent, prints it in a banner
+     that states the ADR-0035 consequence in full (a restore onto a new box without it leaves every
+     credential permanently undecryptable), and will not continue interactively until the operator
+     types `recorded`.
+   - **Modes**: `hosted | byoc | air_gapped`, with `SEED_DEMO` defaulting to 0 on the two customer
+     modes so a customer database never sprouts demo users. `air_gapped` **refuses**
+     `--tls letsencrypt` outright — ACME is an outbound call and an inbound challenge — and refuses
+     to start without pre-seeded images, because `compose up --build` pulls `node:22-slim` and runs
+     `pnpm install` against the npm registry. `scripts/build-image-bundle.sh` produces that bundle
+     on a connected host; the generated override pins `image: regulait/gateway:<version>` with
+     `pull_policy: never` on all three services and the bring-up passes `--no-build`.
+   - **Idempotent by construction**: every secret already in the target `.env` is preserved rather
+     than regenerated (regenerating the data key bricks credentials; regenerating the Postgres
+     password locks the gateway out, since `POSTGRES_PASSWORD` is honoured only on first initdb),
+     rendering carries **no timestamp**, and files are compared before writing. Verified: rendering
+     twice produces byte-identical output in all three modes.
+   - `--check` runs the full preflight + render path and stops before any container is touched.
+
+2. **Signed / verifiable update bundles.** `scripts/build-update-bundle.sh` produces
+   `manifest.json` (version, key id, per-file SHA-256) + a **detached Ed25519 signature over the
+   manifest** + `payload/`; `scripts/verify-update-bundle.sh` verifies it **offline** against a
+   pinned keyring (`infra/release-keys/`) with **no network call at all** — deliberately, since an
+   air-gapped deployment has no revocation endpoint or timestamp authority to reach.
+   `scripts/apply-update-bundle.sh` verifies into a throwaway directory, demands a backup, preserves
+   the previous tree, applies, and re-converges via the installer. No invented crypto: `openssl
+   pkeyutl -sign -rawin` (Ed25519), with an RSA/EC `dgst -sha256` fallback so an HSM that cannot do
+   Ed25519 is not excluded. The manifest is signed rather than the tarball, because a manifest can
+   express *a file was added* and a whole-archive hash cannot.
+   **Fail-closed, proven by execution**: modified file, missing file, unlisted extra file, stripped
+   signature, correct key id signed with a different private key, valid signature under an unpinned
+   key id, path-traversal key id, and a genuinely-signed downgrade — all refused with non-zero exit.
+   Pristine bundle and same-version re-apply pass. There is no `--force`.
+   Key custody and the four-step rotation order (ship the new public key in a bundle signed by the
+   OLD key first; never collapse the steps) are written out in `infra/release-keys/README.md`,
+   including the honest disclosure that the shipped key is a **development** key whose private half
+   was not retained — the *shape* of a release root, not one.
+
+3. **The data-boundary trust artifact — `docs/deployment/DATA_BOUNDARY.md`.** Every outbound surface
+   in the product enumerated and checked against source, per mode, with the greps a customer can run
+   to confirm it in five minutes. Confirmed: **no telemetry, no analytics, no crash reporter, no
+   update check, no license phone-home, and no RegulAIt-controlled endpoint compiled into the
+   product**; boot makes no network call; the SPA loads no third-party asset.
+
+4. **Operator documentation** — `docs/deployment/{README,INSTALL,UPGRADE,BACKUP_RESTORE}.md`, plus
+   an annotated `infra/deploy/env.example` (in `infra/deploy/` rather than a root `.env.example`
+   because `.gitignore` correctly refuses `.env*`), and a deploy section in the root README.
+
+5. **`docker-compose.yml` parameterised.** The gateway's `DATABASE_URL`, `REGULAIT_DATA_KEY`,
+   `REGULAIT_BOOTSTRAP_TOKEN`, `SEED_DEMO` and the db's `POSTGRES_PASSWORD` became
+   `${VAR:-<the same dev default>}`. Verified: with no `.env` present the resolved config is
+   byte-identical to before, so `docker compose up --build` on a laptop is unchanged.
+
+### The finding: "air-gapped" is network-enforced, not code-enforced, for compiled vendor endpoints
+
+The egress guard (ADR-0034/0043) adjudicates **URLs a human typed**. It deliberately does not
+adjudicate an adapter's *compiled* vendor endpoint — `agents-connectors.ts` and
+`connection-egress.ts` both say so in the same words: **"NO OVERRIDE MEANS NO CHECK"**. As an SSRF
+argument that is correct; you cannot smuggle `169.254.169.254` into a constant. It is not an egress
+*policy*.
+
+Consequence, stated plainly because a trust artifact that omits its own weakest point is not a trust
+artifact: **on an air-gapped deployment, an operator who configures a built-in provider (`anthropic`
+/ `openai` / `google` / `xai`) — including merely by setting `ANTHROPIC_API_KEY` et al. in the
+environment — will have the gateway attempt an outbound HTTPS connection to that vendor's public API
+carrying the prompt. Nothing in the application refuses it; the network is what stops it.** The same
+holds for a connector/git/PM row with no `baseUrl` override.
+
+The accurate claim is therefore *"the application initiates no outbound connection you did not
+configure, nothing is configured out of the box, and the network is the backstop"* — not *"the
+application cannot egress"*. This is documented in DATA_BOUNDARY.md §4 with the recommended
+mitigations (no default route; prefer ADR-0034 custom providers, which **are** guarded, over
+built-in providers). Closing it properly is a **mode-scoped egress posture** — a new slice with its
+own ADR, in the same place ADR-0015's A4 note already put per-mode policy: pillar 1's rule-scoping
+model. It is not built and is not claimed.
+
+### Explicitly NOT this slice
+
+- **The offline license is [ADR-0052](0052-licensing-seats.md) and is not mine to build.** No
+  license check exists in the product today, and none was added here. §2's licensing bullet remains
+  open. (There is a silver lining for the boundary story: with no license check there is nothing to
+  phone home about.)
+- Non-AWS backup-destination modules. `infra/modules/backup-target-s3` is AWS-only; the posture it
+  implements is portable, the module is not.
+- Build provenance / reproducible builds. A signed bundle proves *who signed the manifest*, not
+  *what commit it was built from*. No SLSA/in-toto attestation.
+- A real release key. See `infra/release-keys/README.md`.
+
+### Verification actually performed
+
+Executed on the implementation host: `bash -n` on all five scripts; the installer's full
+preflight+render path in `--check` for all three modes, with the rendered `.env` files diffed
+against each other; a byte-identical re-render (idempotency) in all three modes; the resolved
+`docker compose config` for the air-gapped render showing `pull_policy: never` and the pinned
+gateway image; the no-`.env` resolved config proving the dev defaults are unchanged; the data-key
+gate refusing six distinct weak inputs; and the ten update-bundle verifier cases above.
+
+**Not executed: a real `docker compose up`.** The bring-up was attempted end to end and reached
+`docker compose up`, where the image pull failed with `403 Forbidden` from the sandbox's egress
+policy on Docker Hub's blob CDN (`production.cloudfront.docker.com`). The container-runtime half of
+the installer — `docker load`, `up -d --no-build`, the readiness probe — is therefore **syntax- and
+config-verified but not runtime-exercised**, and should be run once on a host with registry access
+before it is put in front of a customer.
