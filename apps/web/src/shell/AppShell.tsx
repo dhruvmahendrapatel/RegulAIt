@@ -80,6 +80,11 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // workload and bulk triage. A layer on the one queue, never a second one.
       { label: "Review workbench", to: "/admin/review-workbench" },
       { label: "Audit log", to: "/admin/audit" },
+      // ADR-0050 — the audit log answers "who did what"; this answers "what
+      // flowed into what". Adjacent on purpose: an e-discovery or DPIA question
+      // starts in one and finishes in the other, and keeping them apart is what
+      // makes both readable.
+      { label: "Data lineage", to: "/admin/lineage" },
       // ADR-0047 — the BOARD-facing read of the same two ledgers the Cost
       // dashboard and the Audit log render operationally. Nothing new is
       // stored: a report is a read-only projection, scoped to the caller's own

@@ -231,6 +231,33 @@ export {
   type EnforcementDecision,
 } from "./forecasting.js";
 
+// ADR-0050 — the data-lineage / provenance graph's pure half: the node/edge
+// vocabularies, the derived natural key that keeps two captures of the same
+// real thing on ONE node, and the bounded, cycle-safe, visibility-filtered
+// traversal. `LINEAGE_COMPLETENESS_NOTE` is the scope sentence every answer
+// carries: this is SUPPLIED-INPUTS provenance, never intra-model attribution.
+export {
+  LINEAGE_NODE_KINDS,
+  LINEAGE_SUBTYPES,
+  LINEAGE_EDGE_KINDS,
+  LINEAGE_DIRECTIONS,
+  LINEAGE_MAX_DEPTH,
+  LINEAGE_DEFAULT_DEPTH,
+  LINEAGE_MAX_NODES,
+  LINEAGE_COMPLETENESS_NOTE,
+  lineageNaturalKey,
+  lineageQuerySchema,
+  traverseLineage,
+  directRunLineage,
+  type LineageNodeKind,
+  type LineageSubtype,
+  type LineageEdgeKind,
+  type LineageDirection,
+  type LineageEdgeLike,
+  type TraversalInput,
+  type TraversalResult,
+} from "./lineage.js";
+
 // ADR-0042 — the guardrail engine's pure half: the detector registry, the
 // block|warn|log verbs (piiMode's triad, plus an `off` member), the
 // MAX-of-strictness composition that makes the compliance cascade a ceiling,
@@ -1177,6 +1204,19 @@ export const dispatchNodeSchema = z.object({
   /** pillar 7: override the node's declared tool-loop turn cap for this
    * dispatch (still gateway-bounded) */
   maxTurns: z.number().int().min(1).max(20).optional(),
+  /**
+   * ADR-0050: shared-context KEYS to supply to this worker as system context.
+   * Each resolves to the CURRENT ACCEPTED REVISION of that key in the run's own
+   * project — never a cross-project read, and never "the key as it was later".
+   * Absent (the default) is byte-identical to the pre-lineage dispatch.
+   *
+   * This exists so that supplied-input lineage records something that was
+   * genuinely supplied: the same list drives BOTH the injection into the
+   * worker's system prompt AND the `flowed_into` edges. Recording an input the
+   * worker never received would be exactly the fiction ADR-0050 is written
+   * against, and deriving both from one list is what makes that impossible.
+   */
+  contextKeys: z.array(z.string().min(1).max(200)).max(20).optional(),
 });
 
 export const runEventSchema = z.object({
@@ -1357,6 +1397,16 @@ export const contributeContextSchema = z.object({
   baseRevision: z.number().int().positive().optional(),
   /** contributing team for provenance; must be one of the writer's teams */
   teamId: z.string().uuid().nullable().optional(),
+  /**
+   * ADR-0050: the orchestration run + task-graph node that PRODUCED this write.
+   * Optional and purely declarative — it is what turns a context write into a
+   * `run --produced--> item(vN)` lineage edge, which is in turn what makes
+   * lineage chain ACROSS runs (the item is then a source for whichever later
+   * dispatch consumes it). Omitted = the write is recorded as an item version
+   * with no producing run, which is the honest answer for a human's edit.
+   */
+  producedByRunId: z.string().uuid().optional(),
+  producedByNodeId: z.string().min(1).max(64).optional(),
 });
 
 export const promoteContextSchema = z.object({

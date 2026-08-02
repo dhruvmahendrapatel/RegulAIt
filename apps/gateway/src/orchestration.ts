@@ -11,6 +11,7 @@ import {
   inArray,
   orchestrationRunEvents,
   orchestrationRuns,
+  projectContextItems,
   userAgentPolicies,
   users,
   workflowArtifacts,
@@ -42,6 +43,7 @@ import {
   routeModel,
 } from "@regulait/optimizer-kernel";
 import { effectiveTechniqueMode, loadOrgSettings } from "./org-settings.js";
+import { recordRunInputs, recordRunOutput, recordToolResultInput } from "./lineage.js";
 import {
   isModelProviderKind,
   type ModelChatMessage,
@@ -456,6 +458,66 @@ async function buildNestedRunContext(
  * measured-spend accounting, node_dispatched history, audit trail. Callers
  * (the per-node route and the auto-advance loop) map outcomes to HTTP or to
  * loop decisions. */
+/**
+ * ADR-0050 §2 — resolve declared shared-context KEYS to the CURRENT ACCEPTED
+ * REVISION of each, inside the run's OWN project.
+ *
+ * Three constraints, all load-bearing:
+ *   - **Same project only.** Reading another project's context here would be a
+ *     pillar-4 entitlement hole wearing a convenience feature's clothes.
+ *   - **The accepted head, pinned.** The resolved revision NUMBER is what both
+ *     the injection and the lineage edge use, so the graph points at the
+ *     version actually supplied rather than at "the key".
+ *   - **An unknown key is absent, not an error.** A worker naming context that
+ *     does not exist yet is ordinary; failing an otherwise-valid dispatch over
+ *     it would be worse than supplying less.
+ */
+async function resolveSuppliedContext(
+  db: Db,
+  projectId: string | null,
+  keys: string[] | undefined,
+): Promise<{ system?: string; items: Array<{ id: string; key: string; revision: number }> }> {
+  if (!projectId || !keys || keys.length === 0) return { items: [] };
+  const rows = await db
+    .select()
+    .from(projectContextItems)
+    .where(
+      and(
+        eq(projectContextItems.projectId, projectId),
+        inArray(projectContextItems.key, keys),
+        eq(projectContextItems.accepted, true),
+      ),
+    );
+  const head = new Map<string, (typeof rows)[number]>();
+  for (const r of rows) {
+    const prev = head.get(r.key);
+    if (!prev || r.revision > prev.revision) head.set(r.key, r);
+  }
+  // preserve the caller's declared order so the prompt is deterministic
+  const items = keys.map((k) => head.get(k)).filter((r): r is (typeof rows)[number] => Boolean(r));
+  if (items.length === 0) return { items: [] };
+  // The FIRST LINE names exactly which item VERSIONS were supplied. That is not
+  // decoration: it is the same manifest the `flowed_into` edges are built from,
+  // stated where the worker (and anyone reading a transcript) can see it, so a
+  // divergence between what lineage claims was supplied and what the prompt
+  // actually carried would be visible rather than latent.
+  const manifest = items.map((i) => `${i.key} v${i.revision}`).join(", ");
+  return {
+    system:
+      `Shared project context supplied to this worker: ${manifest}.\n\n` +
+      items.map((i) => `--- context '${i.key}' v${i.revision} ---\n${i.content}`).join("\n\n"),
+    items: items.map((i) => ({ id: i.id, key: i.key, revision: i.revision })),
+  };
+}
+
+/** join the nested-run scope lock and the supplied context into one system
+ * prompt, preserving `undefined` when there is neither (so a dispatch with no
+ * context is byte-identical to the pre-lineage behaviour) */
+function composeSystem(a: string | undefined, b: string | undefined): string | undefined {
+  const parts = [a, b].filter((x): x is string => Boolean(x));
+  return parts.length === 0 ? undefined : parts.join("\n\n");
+}
+
 async function dispatchRunNode(
   db: Db,
   dataKey: string | undefined,
@@ -470,6 +532,10 @@ async function dispatchRunNode(
      * ADR-0019 §8.4 suppression check (resolveStreamRequest) has allowed a
      * stream; absent = byte-identical non-streaming dispatch. */
     onDelta?: ((text: string) => void) | undefined;
+    /** ADR-0050: shared-context keys to SUPPLY to this worker. The same list
+     * drives the system-context injection AND the `flowed_into` lineage edges,
+     * so lineage cannot record an input the worker never received. */
+    contextKeys?: string[] | undefined;
   },
   actorUserId: string,
 ): Promise<NodeDispatchOutcome> {
@@ -527,6 +593,16 @@ async function dispatchRunNode(
     ? await buildNestedRunContext(db, run.workflowInstanceId, run.id, graph.run, node)
     : null;
 
+  // ADR-0050 §2 — SUPPLIED CONTEXT. Each declared key resolves to the CURRENT
+  // ACCEPTED revision of that key IN THE RUN'S OWN PROJECT: never a
+  // cross-project read (which would be a pillar-4 entitlement hole dressed up
+  // as a convenience) and never a stale-or-newer revision (lineage must point
+  // at the version that was actually supplied). An unknown key is silently
+  // absent rather than an error — a worker asking for context that does not
+  // exist yet is ordinary, and failing the dispatch over it would be worse.
+  const supplied = await resolveSuppliedContext(db, run.projectId ?? null, args.contextKeys);
+  const systemPrompt = composeSystem(nested?.system, supplied.system);
+
   const [servedAgent] = await db.select().from(agents).where(eq(agents.id, ownerId));
 
   // PILLAR 7 tool-using worker: resolve the node's DECLARED tool servers into
@@ -558,6 +634,22 @@ async function dispatchRunNode(
 
   const firstInput = args.input ?? nodeInstruction(node) ?? node.title;
   const messages: ModelChatMessage[] = [{ role: "user", content: firstInput }];
+
+  // ADR-0050 — SUPPLIED-INPUT LINEAGE, captured from the SAME values that were
+  // actually handed to the worker above: `nested.artifacts` is the scope lock
+  // in `nested.system`, and `supplied.items` is the context injected alongside
+  // it. Deriving the edges from the injected values rather than from the
+  // request makes it structurally impossible to record an input the worker
+  // never received. Best-effort inside the helper.
+  if (run.projectId) {
+    await recordRunInputs(db, {
+      projectId: run.projectId,
+      runId: run.id,
+      nodeId,
+      ...(nested?.artifacts ? { artifacts: nested.artifacts } : {}),
+      contextItems: supplied.items,
+    });
+  }
 
   // The bounded governed agentic loop. Each iteration is ONE measured, governed
   // model turn; every tool call inside it is a FULL governed+audited action
@@ -619,7 +711,7 @@ async function dispatchRunNode(
       baseline: null,
       input: firstInput,
       messages,
-      system: nested?.system,
+      ...(systemPrompt !== undefined ? { system: systemPrompt } : {}),
       ...(toolDefs.length > 0 ? { tools: toolDefs } : {}),
       maxTokens: args.maxTokens,
       ...(args.onDelta ? { onText: args.onDelta } : {}),
@@ -815,6 +907,20 @@ async function dispatchRunNode(
           case "allowed":
             block = { type: "tool_result", toolUseId: tc.id, content: toolResultText(toolOut.content) };
             traceStatus = "allowed";
+            // ADR-0050: a governed tool RESULT flowing back INTO the worker is
+            // a supplied input, captured at the same point the call was
+            // governed and metered. Metadata only — the result content is not
+            // stored (GOVERNANCE §8.4).
+            if (run.projectId) {
+              await recordToolResultInput(db, {
+                projectId: run.projectId,
+                runId: run.id,
+                nodeId,
+                serverId,
+                toolName: tc.name,
+                callId: tc.id,
+              });
+            }
             break;
           case "denied":
             block = {
@@ -935,6 +1041,18 @@ async function dispatchRunNode(
     },
     actorUserId,
   });
+  // ADR-0050: the `run --produced--> output` edge, written from the same place
+  // the run-side history record is. METADATA ONLY: the node records that this
+  // dispatch produced an output and how big it was, never the text (§8.4).
+  if (run.projectId) {
+    await recordRunOutput(db, {
+      projectId: run.projectId,
+      runId: run.id,
+      nodeId,
+      stopReason: last.result.stopReason,
+      tokens: totalUsage.outputTokens,
+    });
+  }
   await db.insert(auditLog).values({
     userId: actorUserId,
     objectType: "run",

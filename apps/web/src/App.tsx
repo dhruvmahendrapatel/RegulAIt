@@ -40,6 +40,7 @@ import PromptVersionsPage from "./views/admin/governance/PromptVersionsPage";
 import ApprovalsAdminPage from "./views/admin/governance/ApprovalsAdminPage";
 import ReviewWorkbenchPage from "./views/admin/governance/ReviewWorkbenchPage";
 import AuditLogPage from "./views/admin/governance/AuditLogPage";
+import LineagePage from "./views/admin/governance/LineagePage";
 import WorkflowTemplatesPage from "./views/admin/governance/WorkflowTemplatesPage";
 import AgentsPage from "./views/admin/integrations/AgentsPage";
 import ModelCredentialsPage from "./views/admin/integrations/ModelCredentialsPage";
@@ -142,6 +143,7 @@ export default function App() {
                         <Route path="approvals" element={<ApprovalsAdminPage />} />
                         <Route path="review-workbench" element={<ReviewWorkbenchPage />} />
                         <Route path="audit" element={<AuditLogPage />} />
+                        <Route path="lineage" element={<LineagePage />} />
                         <Route path="workflow-templates" element={<WorkflowTemplatesPage />} />
                         <Route path="agents" element={<AgentsPage />} />
                         <Route path="model-credentials" element={<ModelCredentialsPage />} />

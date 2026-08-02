@@ -122,6 +122,7 @@ import { applyModelCardApprovalDecision, registerMrmRoutes } from "./mrm.js";
 import { registerReportingRoutes } from "./reporting.js";
 import { registerConfigVersionRoutes } from "./config-versions.js";
 import { registerSpendMonitorRoutes } from "./spend-monitor.js";
+import { registerLineageRoutes } from "./lineage.js";
 import {
   assignedApprovalIdsFor,
   ensureAssignment,
@@ -793,6 +794,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // reading every project's ledger to find out, stays admin.
     "GET /v1/spend/forecast",
     "GET /v1/spend/anomalies",
+    // ADR-0050: lineage reads. Every one narrows to the caller's own project
+    // memberships INSIDE the handler — the same narrowing pillar 4 applies to
+    // the context store itself, so lineage cannot become a side channel that
+    // reveals context the /context endpoints would refuse. `GET
+    // /v1/lineage/overview` is conspicuously NOT here: an org-wide census of
+    // every project's provenance volume is an admin view.
+    "GET /v1/lineage",
+    "GET /v1/lineage/runs/:runId",
+    "GET /v1/lineage/nodes",
     "POST /v1/users/:userId/model-credentials",
     "GET /v1/users/:userId/model-credentials",
     "DELETE /v1/users/:userId/model-credentials/:provider",
@@ -2708,6 +2718,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // authoring policies, recording scheduled changes and driving the evaluator
   // stay admin.
   registerSpendMonitorRoutes(app, db);
+  // ADR-0050 — the data-lineage / provenance graph. SUPPLIED-INPUTS provenance:
+  // which inputs the gateway handed to a dispatch and what it handed back,
+  // chained across runs through pillar 4's already-versioned context items. It
+  // does NOT claim which of those inputs influenced the output — intra-model
+  // attribution is not observable from outside a model — and every response
+  // carries that sentence rather than leaving it in an ADR. Capture rides the
+  // interception points that already exist (the context-write path and the
+  // orchestration dispatch path), so there is no second instrumentation pass.
+  // The three READ routes are non-admin-reachable and narrow to the caller's
+  // own project memberships at query construction; a node the caller cannot see
+  // 404s exactly as a nonexistent one does, because for a provenance graph
+  // confirming that something exists IS the disclosure.
+  registerLineageRoutes(app, db);
 
   registerAgentConnectorRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0034 — admin-registered custom LLM providers + the egress allow-list

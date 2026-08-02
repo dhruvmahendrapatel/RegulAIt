@@ -35,6 +35,7 @@ import {
   type CsvWindow,
 } from "./csv-export.js";
 import { afterCursorDesc, atTextSql } from "./pagination.js";
+import { recordContextRevision } from "./lineage.js";
 import {
   addProjectMemberSchema,
   addTeamMemberSchema,
@@ -1529,6 +1530,9 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       baseRevision?: number | undefined;
       teamId?: string | null | undefined;
       sourceArtifactId?: string | null;
+      /** ADR-0050: the run/node that produced this write, when declared */
+      producedByRunId?: string | undefined;
+      producedByNodeId?: string | undefined;
     },
   ) {
     const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
@@ -1661,6 +1665,20 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       outcome = await attempt();
     }
     if (outcome.kind === "reply") return reply.status(outcome.status).send(outcome.body);
+    // ADR-0050 — LINEAGE CAPTURE, riding the ONE context-write path rather than
+    // a second instrumentation pass. It runs AFTER the transaction commits and
+    // is best-effort inside `recordContextRevision`: the graph is a derived
+    // read-model over `project_context_items`, so a capture failure must never
+    // turn a durably-written, audited context revision into an error.
+    await recordContextRevision(db, {
+      projectId,
+      key: args.key,
+      revision: outcome.body.revision as number,
+      itemId: outcome.body.id as string,
+      baseRevision: args.baseRevision ?? null,
+      producedByRunId: args.producedByRunId ?? null,
+      producedByNodeId: args.producedByNodeId ?? null,
+    });
     return reply.status(201).send(outcome.body);
   }
 

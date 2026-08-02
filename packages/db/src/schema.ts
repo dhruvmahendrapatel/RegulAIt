@@ -3730,3 +3730,109 @@ export type SpendMonitorPolicyRow = typeof spendMonitorPolicies.$inferSelect;
 export type SpendScheduledChangeRow = typeof spendScheduledChanges.$inferSelect;
 export type SpendAnomalyRow = typeof spendAnomalies.$inferSelect;
 export type SpendForecastRunRow = typeof spendForecastRuns.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0050 (migration 0062) — the DATA-LINEAGE / PROVENANCE GRAPH.
+//
+// SUPPLIED-INPUTS provenance: which inputs the gateway handed to a dispatch and
+// what that dispatch produced, chained across runs through pillar 4's already-
+// versioned context items. It deliberately does NOT model which of those inputs
+// influenced the output — that is intra-model attribution and is not observable
+// from outside a model, so it is not represented here and is not claimed.
+//
+// This is a DERIVED READ-MODEL over the append-only ledgers
+// (`project_context_items`, `usage_events`, `audit_log`), which remain the
+// source of truth: if it were lost it could be rebuilt from them.
+//
+// ORIENTATION: every edge points in the DIRECTION OF DATA FLOW (`from` =
+// upstream). `derived_from` is therefore stored predecessor → successor
+// (v1 → v2) despite how its name reads, so `backward` means "where did this
+// come from" uniformly with no per-edge-kind special case.
+// ---------------------------------------------------------------------------
+
+export const LINEAGE_NODE_KIND_VALUES = ["source", "run", "output"] as const;
+export const LINEAGE_SUBTYPE_VALUES = [
+  "context_item",
+  "workflow_artifact",
+  "connector_result",
+  "mcp_result",
+  "document",
+  "run_node",
+  "agent_dispatch",
+  "dispatch_output",
+  "pull_request",
+  "pm_work_item",
+] as const;
+export const LINEAGE_EDGE_KIND_VALUES = ["flowed_into", "produced", "derived_from"] as const;
+
+export const lineageNodes = pgTable(
+  "lineage_nodes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** THE ENTITLEMENT BOUNDARY: every lineage query narrows to the caller's
+     * visible projects at query construction, because for lineage the mere
+     * EXISTENCE of a node is the sensitive fact. */
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: LINEAGE_NODE_KIND_VALUES }).notNull(),
+    subtype: text("subtype", { enum: LINEAGE_SUBTYPE_VALUES }).notNull(),
+    /** the DEDUPE IDENTITY, derived (never random) so two captures of the same
+     * real thing land on one node rather than silently forking the graph */
+    naturalKey: text("natural_key").notNull(),
+    refId: uuid("ref_id"),
+    refKey: text("ref_key"),
+    /** the SPECIFIC version consumed — lineage never points at "the current
+     * value of the key", which is the whole reason provenance versions */
+    version: integer("version"),
+    label: text("label").notNull(),
+    /** GOVERNANCE §8.4: metadata by DEFAULT. A DB CHECK ties the flag and the
+     * column together in both directions. */
+    contentRecorded: boolean("content_recorded").notNull().default(false),
+    content: text("content"),
+    detail: jsonb("detail"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("lineage_nodes_project_natural_key_uq").on(t.projectId, t.naturalKey),
+    index("lineage_nodes_project_kind_idx").on(t.projectId, t.kind),
+    index("lineage_nodes_ref_idx").on(t.refId),
+  ],
+);
+
+export const lineageEdges = pgTable(
+  "lineage_edges",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** denormalised so the entitlement narrowing is a SQL predicate rather than
+     * a post-join filter */
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    fromNodeId: uuid("from_node_id")
+      .notNull()
+      .references(() => lineageNodes.id, { onDelete: "cascade" }),
+    toNodeId: uuid("to_node_id")
+      .notNull()
+      .references(() => lineageNodes.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: LINEAGE_EDGE_KIND_VALUES }).notNull(),
+    /** FK-free like the ledgers: a lineage record is a governance record that
+     * must survive deletion of the run row it describes */
+    runId: uuid("run_id"),
+    nodeId: text("node_id"),
+    detail: jsonb("detail"),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    /** idempotent capture: one edge per (from, to, kind), however many times a
+     * node is re-dispatched */
+    uniqueIndex("lineage_edges_from_to_kind_uq").on(t.fromNodeId, t.toNodeId, t.kind),
+    index("lineage_edges_from_idx").on(t.fromNodeId),
+    index("lineage_edges_to_idx").on(t.toNodeId),
+    index("lineage_edges_run_idx").on(t.runId),
+    index("lineage_edges_project_idx").on(t.projectId),
+  ],
+);
+
+export type LineageNodeRow = typeof lineageNodes.$inferSelect;
+export type LineageEdgeRow = typeof lineageEdges.$inferSelect;
