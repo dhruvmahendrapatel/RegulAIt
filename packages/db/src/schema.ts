@@ -644,6 +644,14 @@ export const auditLog = pgTable(
         // row an operator needs, and it exists even though the artifact never
         // became a license. Plain text column — no DDL needed.
         "license",
+        // ADR-0054: the first-run wizard's checklist transitions, and every
+        // IMPORT — planned, applied, and (the rows that matter) REFUSED. An
+        // import is bulk state-mutation power handed to a file someone else
+        // wrote, so "an import tried to mint an admin and was refused" has to
+        // be a row an operator can find, not an error message that scrolled
+        // past. Plain text column — no DDL needed.
+        "onboarding_step",
+        "onboarding_import",
       ],
     })
       .notNull()
@@ -4133,3 +4141,90 @@ export const licenseVerifications = pgTable(
 
 export type LicenseRow = typeof licenses.$inferSelect;
 export type LicenseVerificationRow = typeof licenseVerifications.$inferSelect;
+
+// ===========================================================================
+// ADR-0054 — ONBOARDING WIZARD & MIGRATION/IMPORT TOOLING (migration 0066)
+// ===========================================================================
+//
+// Only TWO tables, and the shortness of that list is the design. Everything the
+// wizard produces — roles, group→role mappings, compliance profiles,
+// classifications — lands in the tables it would have landed in had an admin
+// clicked through the existing console, because ADR-0054 §4 requires the output
+// to be ordinary governed state that the policy-as-code path can export and
+// replay. What genuinely exists nowhere else is HOW FAR THROUGH the wizard this
+// deployment is, and WHAT AN IMPORT DID.
+
+/**
+ * The resumable checklist. `stepKey` is the PRIMARY KEY, and that single fact
+ * is the whole idempotence guarantee: there is exactly one row per step in the
+ * deployment, so a write can only ever be an upsert and "ran the step twice"
+ * and "ran it once" are indistinguishable states. There is no wizard-session
+ * id and no per-attempt row, so a piecemeal BYOC install cannot accumulate two
+ * contradictory answers to "is the IdP connected?".
+ *
+ * The status is what an ADMIN ASSERTED, not proof. `GET /v1/onboarding`
+ * composes it with a live readiness signal computed from the objects that
+ * actually exist and reports both, so a step marked done whose provider was
+ * later deleted reads `done` + `satisfied: false` instead of lying.
+ */
+export const onboardingSteps = pgTable("onboarding_steps", {
+  stepKey: text("step_key").primaryKey(),
+  status: text("status", { enum: ["pending", "in_progress", "done", "skipped"] })
+    .notNull()
+    .default("pending"),
+  /** evidence the console shows beside the step — which provider, which file,
+   * how many rows. Never a credential; the route screens before storing. */
+  detail: jsonb("detail").$type<Record<string, unknown>>(),
+  startedAt: timestamp("started_at", { withTimezone: true }),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+  completedByUserId: uuid("completed_by_user_id").references(() => users.id, {
+    onDelete: "set null",
+  }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * Every import — planned, applied, AND REFUSED. The refusals are the rows that
+ * matter: a payload that tried to set `isAdmin` is refused by the strict row
+ * schema and by the pre-parse escalation screen, and the refusal lands here
+ * beside an `audit_log` deny, because "somebody uploaded a file that tried to
+ * mint administrators" has to be findable months later.
+ *
+ * `mode` separates the preview from the act, and both compute their plan with
+ * the same pure planner in `@regulait/shared` — a dry run that is computed
+ * differently from the apply it previews is worse than no dry run.
+ */
+export const onboardingImports = pgTable(
+  "onboarding_imports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kind: text("kind", { enum: ["users", "group_roles"] }).notNull(),
+    mode: text("mode", { enum: ["dry_run", "apply"] }).notNull(),
+    status: text("status", { enum: ["planned", "applied", "refused"] }).notNull(),
+    /** fingerprint of the exact screened bytes — "which file did this?" without
+     * retaining a directory export forever */
+    payloadSha256: text("payload_sha256").notNull(),
+    rowCount: integer("row_count").notNull().default(0),
+    plan: jsonb("plan").$type<Record<string, unknown>>().notNull(),
+    /** null for a dry run and for a refusal — nothing happened, which is the
+     * correct record rather than an empty object implying it did */
+    result: jsonb("result").$type<Record<string, unknown>>(),
+    /** the same stable id that names the audit_log row, so the two join on a
+     * value a human can read */
+    ruleId: text("rule_id").notNull(),
+    reason: text("reason").notNull(),
+    requestedByUserId: uuid("requested_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    appliedAt: timestamp("applied_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("onboarding_imports_created_idx").on(t.createdAt),
+    index("onboarding_imports_kind_idx").on(t.kind),
+    index("onboarding_imports_status_idx").on(t.status),
+  ],
+);
+
+export type OnboardingStepRow = typeof onboardingSteps.$inferSelect;
+export type OnboardingImportRow = typeof onboardingImports.$inferSelect;

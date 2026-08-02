@@ -145,6 +145,7 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // entitled users and which tier features exist, which is the same kind of
       // org-level setting as the ones next to it. It is never a cost report.
       { label: "Licensing & seats", to: "/admin/licensing" },
+      { label: "First-run setup", to: "/admin/first-run" },
       { label: "Getting started", to: "/admin/setup" },
     ],
   },

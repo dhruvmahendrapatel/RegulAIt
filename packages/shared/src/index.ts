@@ -2053,3 +2053,44 @@ export const updateSamlProviderSchema = z
   })
   .strict();
 export type UpdateSamlProvider = z.infer<typeof updateSamlProviderSchema>;
+
+// ADR-0054 — the first-run wizard and the migration/import tooling's PURE half:
+// the step graph and its transition rule, the starter role templates, the
+// compliance packs (which are cascade seeds, not a second configuration path),
+// and the import planners. The planners are shared by dry-run and apply, so a
+// preview is never computed differently from the thing it previews; the row
+// schemas are `.strict()` so an import payload has nowhere to put a privilege
+// it was not granted.
+export {
+  ONBOARDING_STEPS,
+  ONBOARDING_STEP_KEYS,
+  ONBOARDING_STEP_STATUSES,
+  STARTER_ROLE_TEMPLATES,
+  COMPLIANCE_PACKS,
+  COMPLIANCE_PACK_TAGS,
+  onboardingStepKeySchema,
+  updateOnboardingStepSchema,
+  applyCompliancePackSchema,
+  userImportRowSchema,
+  userImportSchema,
+  groupRoleImportRowSchema,
+  groupRoleImportSchema,
+  blockedBy,
+  transitionRefusal,
+  screenForEscalation,
+  planUserImport,
+  planGroupRoleImport,
+  parseCsv,
+  csvToUserRows,
+  type OnboardingStepDef,
+  type OnboardingStepStatus,
+  type StarterRoleTemplate,
+  type CompliancePack,
+  type EscalationFinding,
+  type ExistingUser,
+  type UserImportRow,
+  type UserImportPlan,
+  type UserImportPlanEntry,
+  type GroupRolePlan,
+  type GroupRolePlanEntry,
+} from "./onboarding.js";

@@ -58,6 +58,7 @@ import ComplianceProfilesPage from "./views/admin/compliance/ComplianceProfilesP
 import InfrastructurePage from "./views/admin/compliance/InfrastructurePage";
 import OrganizationPage from "./views/admin/settings/OrganizationPage";
 import GettingStartedPage from "./views/admin/settings/GettingStartedPage";
+import FirstRunPage from "./views/admin/settings/FirstRunPage";
 import LicensingPage from "./views/admin/settings/LicensingPage";
 
 const queryClient = new QueryClient({
@@ -164,6 +165,9 @@ export default function App() {
                         <Route path="organization" element={<OrganizationPage />} />
                         <Route path="licensing" element={<LicensingPage />} />
                         <Route path="setup" element={<GettingStartedPage />} />
+                        {/* ADR-0054: the ordered, resumable first-run FLOW. Distinct from
+                            "setup" above, which is a read-only readiness mirror. */}
+                        <Route path="first-run" element={<FirstRunPage />} />
                         <Route path="*" element={<Navigate to="/admin/users" replace />} />
                       </Routes>
                     </RequireAdmin>

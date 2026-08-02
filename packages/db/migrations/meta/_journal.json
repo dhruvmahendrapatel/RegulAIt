@@ -456,6 +456,13 @@
       "when": 1785000000000,
       "tag": "0064_licensing_seats",
       "breakpoints": true
+    },
+    {
+      "idx": 66,
+      "version": "7",
+      "when": 1785001000000,
+      "tag": "0066_onboarding_migration",
+      "breakpoints": true
     }
   ]
 }

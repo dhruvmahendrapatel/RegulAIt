@@ -202,6 +202,7 @@ import { WEB_UI_ROUTES, defaultWebDistDir, registerWebServing } from "./web-serv
 // documented credential requirement from the SAME objects that enforce it.
 import { AUTH_EXEMPT_ROUTES, NON_ADMIN_ROUTES } from "./route-classes.js";
 import { registerOpenApiRoutes, type RouteInventoryEntry } from "./openapi.js";
+import { registerOnboardingRoutes } from "./onboarding.js";
 import path from "node:path";
 import { registerSpaInlineScripts, securityHeaders } from "./security-headers.js";
 import { MergeConflictError, WorkflowStateError } from "@regulait/workflow-kernel";
@@ -2636,6 +2637,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // Getting-started journey (admin-only via the default gate): one read-only
   // aggregation of real readiness signals the /admin checklist card renders.
   registerSetupStatusRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0054 — the IN-PRODUCT first-run experience (the installer, ADR-0041,
+  // owns deployment bring-up; nothing here duplicates it) plus the
+  // migration/import tooling. Admin-only through the DEFAULT gate: every route
+  // here provisions users, seeds roles or classifies a project, which is
+  // exactly the authority a non-admin must not reach. None appear in
+  // NON_ADMIN_ROUTES.
+  registerOnboardingRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0053 — the published contract: the OpenAPI document, the versioning /
   // deprecation policy, and the RFC-8594 Deprecation/Sunset headers. Registered
   // here (rather than first) only for readability; the inventory hook at the top
