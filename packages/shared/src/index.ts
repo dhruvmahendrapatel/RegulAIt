@@ -71,6 +71,34 @@ export {
   type MrmGateCard,
 } from "./mrm.js";
 
+// ADR-0046 — the review workbench's pure half: rule matching (total, so two
+// equally-specific rules never produce a non-deterministic queue), the DERIVED
+// SLA clock that makes lazy breach evaluation honest, and the bulk fences.
+export {
+  APPROVAL_ASSIGNEE_KINDS,
+  APPROVAL_ESCALATE_ACTIONS,
+  APPROVAL_SLA_STATES,
+  stagePatternMatches,
+  ruleMatches,
+  selectAssignmentRule,
+  slaDeadlines,
+  evaluateSla,
+  bulkCapRefusal,
+  bulkSensitivityFenced,
+  createApprovalSlaPolicySchema,
+  createApprovalAssignmentRuleSchema,
+  bulkDecideApprovalsSchema,
+  createApprovalSavedViewSchema,
+  type ApprovalAssigneeKind,
+  type ApprovalEscalateAction,
+  type ApprovalSlaState,
+  type ApprovalRoutingContext,
+  type AssignmentRuleLike,
+  type SlaPolicyLike,
+  type SlaEvaluation,
+  type BulkRefusalReason,
+} from "./workbench.js";
+
 // ADR-0042 — the guardrail engine's pure half: the detector registry, the
 // block|warn|log verbs (piiMode's triad, plus an `off` member), the
 // MAX-of-strictness composition that makes the compliance cascade a ceiling,

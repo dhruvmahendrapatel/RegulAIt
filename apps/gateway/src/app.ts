@@ -7,6 +7,7 @@ import {
   lte,
   agentRevocations,
   agents,
+  approvalAssignments,
   apiKeys,
   approvalDelegations,
   approvalRules,
@@ -118,6 +119,14 @@ import { registerAbacRoutes } from "./abac.js";
 import { registerGuardrailRoutes } from "./guardrails.js";
 import { registerEvalRoutes } from "./evals.js";
 import { applyModelCardApprovalDecision, registerMrmRoutes } from "./mrm.js";
+import {
+  assignedApprovalIdsFor,
+  ensureAssignment,
+  evaluateAssignmentSla,
+  materializeAndEvaluate,
+  registerWorkbenchRoutes,
+  routingActive,
+} from "./workbench.js";
 import { abacPrincipalFromRequest } from "./abac-principal.js";
 import { evaluateIpEnvelope } from "./net-policy.js";
 import { activeDelegatorsFor, activeDelegationFrom } from "./delegations.js";
@@ -744,6 +753,20 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     "POST /v1/workflows/instances/:instanceId/abort",
     "GET /v1/workflows/instances/:instanceId",
     "GET /v1/approvals",
+    // ADR-0046 — the review workbench's REVIEWER-facing surface. Each of these
+    // is a non-admin route for the same reason deciding an approval is: the
+    // person doing the reviewing is not an admin. Every one of them still
+    // applies the caller's own eligibility inside the handler — bulk goes
+    // through the ONE decide path per item, claim refuses a non-member, views
+    // are scoped to the owner, and workload is scoped by ADR-0022 visibility.
+    // Authoring ROUTING RULES and SLA POLICIES is conspicuously NOT here:
+    // deciding whose queue work lands in, and when it escalates, stays admin.
+    "POST /v1/approvals/bulk",
+    "POST /v1/approvals/:approvalId/claim",
+    "GET /v1/approvals/workload",
+    "GET /v1/approvals/views",
+    "POST /v1/approvals/views",
+    "DELETE /v1/approvals/views/:id",
     "GET /v1/cost-events",
     "GET /v1/usage-events",
     "POST /v1/users/:userId/model-credentials",
@@ -1944,14 +1967,43 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // delegate covers live decisions, they don't inherit the archive).
     const me = req.authCtx.userId ?? "";
     const delegators = !req.authCtx.isAdmin && me ? await activeDelegatorsFor(db, me) : [];
+
+    // ADR-0046 — THE LAZY HALF OF THE WORKBENCH, and the reason this queue does
+    // not need a scheduler it does not have.
+    //
+    // Before the visibility query runs, every PENDING approval is materialized
+    // against the routing rules and its SLA is evaluated. Two consequences:
+    //   - a role/team-routed approval acquires its assignment, which is what
+    //     makes it visible to that role's members below (a routed approval that
+    //     only becomes visible after someone already saw it would be useless);
+    //   - a breach that came due while nobody was looking is detected and
+    //     escalated NOW, at the first read, with the deadlines recomputed from
+    //     `requested_at` so the result is what a timer would have produced.
+    //
+    // Guarded by `routingActive`: with no enabled rule — the shipped state —
+    // this whole block is one COUNT and the queue behaves exactly as it did
+    // before migration 0058, writing nothing.
+    const workbenchOn = await routingActive(db);
+    if (workbenchOn) {
+      const pendingAll = await db.select().from(approvals).where(eq(approvals.status, "pending"));
+      await materializeAndEvaluate(db, pendingAll, me || null);
+    }
+    // ADR-0046 §1: routing decides WHOSE QUEUE a row shows in. A non-admin
+    // therefore also sees the rows assigned (or escalated) to a role or team
+    // they belong to — still not a widening of who may DECIDE, which the decide
+    // path re-checks against `approverUserId` independently.
+    const assignedIds = workbenchOn && !req.authCtx.isAdmin && me ? await assignedApprovalIdsFor(db, me) : [];
     const scopeCondition = req.authCtx.isAdmin
       ? undefined
-      : delegators.length
-        ? or(
+      : or(
+          ...[
             eq(approvals.approverUserId, me),
-            and(inArray(approvals.approverUserId, delegators), eq(approvals.status, "pending")),
-          )
-        : eq(approvals.approverUserId, me);
+            ...(delegators.length
+              ? [and(inArray(approvals.approverUserId, delegators), eq(approvals.status, "pending"))]
+              : []),
+            ...(assignedIds.length ? [inArray(approvals.id, assignedIds)] : []),
+          ],
+        );
     const conditions = [status ? eq(approvals.status, status) : undefined, scopeCondition].filter(
       (c) => c !== undefined,
     );
@@ -1961,6 +2013,18 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       .where(conditions.length > 0 ? and(...conditions) : undefined)
       .orderBy(desc(approvals.requestedAt))
       .limit(100);
+    const assignmentRows = rows.length
+      ? await db
+          .select()
+          .from(approvalAssignments)
+          .where(
+            inArray(
+              approvalAssignments.approvalId,
+              rows.map((r) => r.id),
+            ),
+          )
+      : [];
+    const assignmentFor = new Map(assignmentRows.map((a) => [a.approvalId, a]));
     // Display enrichment — purely additive to the row shape: names for the
     // requester/approver/decider and a label for the governed object, so the
     // inbox and queue can say WHO asked and WHAT is governed without the
@@ -2190,27 +2254,84 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         ...(r.approverUserId !== me && delegatedFor.has(r.approverUserId)
           ? { delegatedFrom: nameOf.get(r.approverUserId) ?? r.approverUserId }
           : {}),
+        // ADR-0046: the routing + SLA sidecar, purely additive. Absent when no
+        // routing rule is enabled, so a pre-0058 client sees the identical shape.
+        ...(assignmentFor.has(r.id)
+          ? {
+              assignment: (() => {
+                const a = assignmentFor.get(r.id)!;
+                return {
+                  assigneeKind: a.assigneeKind,
+                  assigneeId: a.assigneeId,
+                  ruleId: a.ruleId,
+                  quorum: a.quorum,
+                  claimedByUserId: a.claimedByUserId,
+                  claimable:
+                    a.assigneeKind !== "user" && a.claimedByUserId === null && r.status === "pending",
+                  slaState: a.slaState,
+                  warnAt: a.warnAt,
+                  dueAt: a.dueAt,
+                  breachedAt: a.breachedAt,
+                  escalatedAt: a.escalatedAt,
+                  escalationAssigneeKind: a.escalationAssigneeKind,
+                  escalationAssigneeId: a.escalationAssigneeId,
+                };
+              })(),
+            }
+          : {}),
         ...contextConflictFor(r),
       })),
     };
   });
 
-  app.post("/v1/approvals/:approvalId/decide", async (req, reply) => {
-    const { approvalId } = z.object({ approvalId: z.string().uuid() }).parse(req.params);
-    const body = decideApprovalSchema.parse(req.body);
-
+  /**
+   * THE ONE DECIDE PATH (ADR-0046).
+   *
+   * Extracted from the route handler so that the BULK endpoint can call the
+   * exact same function rather than reimplementing "approve an approval".
+   * Every guard below — bootstrap-cannot-decide, unknown, superseded,
+   * not-the-named-approver, the ADR-0022 delegation widening, the admin
+   * override with its required reason, the self-review reason, the single
+   * transaction with its downstream workflow/run/project/infra/model-card
+   * hooks, the post-commit execution and the PM mirror — therefore applies
+   * IDENTICALLY to a bulk item and to a single decision.
+   *
+   * This is the property ADR-0046 §4 turns on: a bulk action is N recorded
+   * decisions through one path, never one opaque event on a shortcut path. If
+   * a future change adds a check here, bulk inherits it for free; there is no
+   * second place to remember.
+   */
+  async function decideOneApproval(input: {
+    approvalId: string;
+    deciderUserId: string | null;
+    isAdmin: boolean;
+    body: z.infer<typeof decideApprovalSchema>;
+  }): Promise<{ ok: true; body: Record<string, unknown> } | { ok: false; status: number; body: Record<string, unknown> }> {
+    const fail = (status: number, payload: Record<string, unknown>) =>
+      ({ ok: false as const, status, body: payload });
     // The decider is the authenticated identity — a body-supplied id would be
     // trivially spoofable. The bootstrap token has no identity and cannot decide.
-    const deciderUserId = req.authCtx.userId;
-    if (!deciderUserId) return reply.status(403).send({ error: "bootstrap_cannot_decide" });
+    const deciderUserId = input.deciderUserId;
+    if (!deciderUserId) return fail(403, { error: "bootstrap_cannot_decide" });
+    const { approvalId, isAdmin } = input;
+    const body = input.body;
 
     const [row] = await db.select().from(approvals).where(eq(approvals.id, approvalId));
-    if (!row) return reply.status(404).send({ error: "unknown_approval" });
+    if (!row) return fail(404, { error: "unknown_approval" });
+    // ADR-0046: the OTHER lazy evaluation point. Deciding an approval that came
+    // due while nobody was looking must still record the breach — otherwise a
+    // queue that is only ever touched by a decision would never register one.
+    // Evaluating BEFORE the decision is deliberate: the breach is a fact about
+    // the wait, and it happened whether or not the decision now clears it.
+    if (row.status === "pending" && (await routingActive(db))) {
+      const assignment = await ensureAssignment(db, row, deciderUserId);
+      if (assignment) await evaluateAssignmentSla(db, row, assignment);
+    }
     // A superseded gate is dead, not decidable: its node was reassigned or
     // retried, its run turned terminal, or a newer artifact re-opened the
     // stage. Refuse loudly instead of accepting a decision about nothing.
     if (row.status === "superseded") {
-      return reply.status(409).send({
+      return fail(409, {
         error: "approval_superseded",
         detail: "this approval was superseded (its node, run, or stage moved on) and can no longer be decided",
       });
@@ -2227,11 +2348,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         : null;
     const adminOverride = row.approverUserId !== deciderUserId && !delegation;
     if (adminOverride) {
-      if (!req.authCtx.isAdmin) {
-        return reply.status(403).send({ error: "not_the_named_approver" });
+      if (!isAdmin) {
+        return fail(403, { error: "not_the_named_approver" });
       }
       if (!body.reason?.trim()) {
-        return reply.status(422).send({
+        return fail(422, {
           error: "override_reason_required",
           detail: "an admin deciding in place of the named approver must record a reason",
         });
@@ -2243,7 +2364,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // reason is required and the audit row is stamped selfReview.
     const selfReview = row.userId === row.approverUserId;
     if (selfReview && !body.reason?.trim()) {
-      return reply.status(400).send({
+      return fail(400, {
         error: "self_review_reason_required",
         detail: "this is a self-review (the approver is the requesting user); deciding it requires a recorded reason",
       });
@@ -2368,7 +2489,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         .select({ status: approvals.status })
         .from(approvals)
         .where(eq(approvals.id, approvalId));
-      return reply.status(409).send(
+      return fail(409, 
         current?.status === "superseded"
           ? {
               error: "approval_superseded",
@@ -2393,14 +2514,31 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // decision, it is surfaced in the response.
     const pmMirror = await mirrorApprovalDecision(db, opts.dataKey, outcome.updated, deciderUserId);
     return {
+      ok: true as const,
+      body: {
       ...outcome.updated,
       ...(adminOverride ? { adminOverride: true } : {}),
       ...(delegation ? { onBehalfOf: row.approverUserId, delegationId: delegation.id } : {}),
       ...(selfReview ? { selfReview: true } : {}),
       ...(pmMirror ? { pmMirror } : {}),
       ...(executionError ? { executionError } : {}),
+      },
     };
+  }
+
+  app.post("/v1/approvals/:approvalId/decide", async (req, reply) => {
+    const { approvalId } = z.object({ approvalId: z.string().uuid() }).parse(req.params);
+    const body = decideApprovalSchema.parse(req.body);
+    const outcome = await decideOneApproval({
+      approvalId,
+      deciderUserId: req.authCtx.userId,
+      isAdmin: req.authCtx.isAdmin,
+      body,
+    });
+    if (!outcome.ok) return reply.status(outcome.status).send(outcome.body);
+    return outcome.body;
   });
+
 
   // ADR-0026 phase 2 — the default-surface swap: the React SPA at /ui is the
   // product surface, so the historic shell URLs redirect there. The two
@@ -2506,6 +2644,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // here at all: it rides POST /v1/approvals/:approvalId/decide, which the
   // named approver reaches as a non-admin exactly as before.
   registerMrmRoutes(app, db);
+  // ADR-0046 — the review workbench: routing rules, SLA policies + the lazy
+  // breach evaluation that stands in for the scheduler this codebase does not
+  // have, claiming, saved views, per-reviewer workload, and BULK. Bulk is
+  // handed `decideOneApproval` — the very function the single-decision route
+  // calls — so a bulk item cannot take a shortcut around any guard.
+  registerWorkbenchRoutes(app, db, { decideOne: decideOneApproval });
 
   registerAgentConnectorRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0034 — admin-registered custom LLM providers + the egress allow-list

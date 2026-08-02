@@ -1,7 +1,7 @@
 # ADR-0046: Review workbench — routing, SLA timers, escalation, saved views, and bulk actions over the one `approvals` table
 
-- **Status**: Proposed
-- **Date**: 2026-08-01
+- **Status**: Accepted
+- **Date**: 2026-08-01 (proposed) / 2026-08-02 (accepted + implemented, migration 0058)
 - **Relates to**: ADR-0011 (conflicts ride the one approvals queue), ADR-0016 (budget-ceiling
   escalations post to approvals), ADR-0017 (infra findings + the one Approvals Queue), ADR-0018
   (six-dimension assignment matching — the routing dimensions reused here), ADR-0021 (`org_settings`
@@ -11,7 +11,8 @@
   ADR-0045 (MRM sign-offs route through here)
 - **Pillars**: 1 (governance — the Approvals Queue is a §6 functional surface), 2 (workflow — every
   human-approval stage posts here)
-- **Migration**: proposed, next free number (0049+). Nothing here ships until this ADR is Accepted.
+- **Migration**: **0058** (`0058_review_workbench`) — see the implementation amendment at the bottom
+  of this file for what actually shipped, what is genuinely enforced, and what nothing drives.
 
 ## Context
 
@@ -127,3 +128,176 @@ and message format; this ADR owns the queue it drives.
 - ADR-0061 defines the ChatOps transport and identity binding that drives §5.
 - Decide whether saved views are per-user or shareable per-team (leaning per-user with an admin-
   publishable shared set), consistent with the entitlement model.
+
+---
+
+## Implementation amendment — 2026-08-02 (migration 0058)
+
+Accepted and built. This section records what shipped, where it deviates from the proposal above,
+and — most importantly — **what is genuinely enforced versus what has nothing driving it**. Read
+the honesty section before assuming an SLA timer fires on its own here. It does not.
+
+### What shipped
+
+**Migration 0058 (`0058_review_workbench`)** — four tables plus two `org_settings` columns, and
+**no column added to `approvals`**:
+
+- `approval_sla_policies` — `warn_after_minutes`, `breach_after_minutes`, and `escalate_action` ∈
+  `add_assignee | reassign | notify_only`. **There is no auto-approve and no auto-deny, and that
+  absence is a DB CHECK rather than a convention** — a queue that clears itself on a timeout is a
+  bypass (ADR-0023/0027). Further CHECKs: breach must be strictly after warn; an escalation must
+  name a target unless it is `notify_only`; `reassign` must name a *user*, because a role cannot
+  become the one NOT-NULL `approver_user_id`.
+- `approval_assignment_rules` — matched on the ADR-0018 dimensions (`object_type`, `project_id`,
+  `data_sensitivity`, `stage_pattern`, `template_id`), ANDed. A rule with **no** conditions matches
+  **nothing** (DB CHECK), the discipline `workflow_assignment_rules` already follows.
+- `approval_assignments` — one row per approval (UNIQUE), carrying the routed owner, the claim
+  state, the SLA clock, the evaluated state and the escalation target.
+- `approval_saved_views` — per-user, with `user_id IS NULL` meaning an admin-published shared view.
+  This resolves the ADR's own open question toward "per-user with an admin-publishable shared set".
+- `org_settings.approval_bulk_max_items` (25) and `approval_bulk_sensitive_blocked` (true).
+
+New `audit_log.object_type` value `approval_assignment_rule` (plain text, no DDL). Every routing,
+SLA, claim and bulk event audits on the **approval's own** objectType with a stable ruleId
+(`approval-routed`, `approval-sla-warning`, `approval-sla-breached`, `approval-claimed`,
+`approval-bulk-decision`, `approval-bulk-item-refused`), so "what happened to this approval" stays
+one query.
+
+**`packages/shared/src/workbench.ts`** — the pure half: `ruleMatches` / `selectAssignmentRule`
+(a TOTAL ordering — priority, then `createdAt`, then id — so two equally specific rules never
+produce a non-deterministic queue), `stagePatternMatches` (`*` glob only, regex metacharacters
+escaped — an admin-typed regex in the read path of every reviewer's inbox is an availability risk
+for no expressive gain), `slaDeadlines`, `evaluateSla`, and the bulk fences.
+
+**`apps/gateway/src/workbench.ts`** — materialization, SLA evaluation + escalation, claiming,
+saved views, workload, the routing/SLA admin API, and the bulk endpoint.
+
+**`apps/gateway/src/app.ts`** — the decide handler's body was **extracted into
+`decideOneApproval`** and the route now calls it. Bulk is handed that same function. This is the
+mechanical guarantee behind §4: there is no second implementation of "approve an approval" for a
+bulk item to take a shortcut through.
+
+**SPA** — `/admin/review-workbench` under Governance: workload, SLA policies, routing rules, and a
+triage table with claim + bulk. The Approvals Queue page is untouched and still works exactly as
+before.
+
+### Deviations from the proposal above
+
+1. **ROUTING IS MATERIALIZED LAZILY, NOT AT APPROVAL CREATION.** §1 says "on creation an approval
+   is matched against these rules". There are roughly a dozen `INSERT INTO approvals` sites in this
+   codebase (workflow stages, MCP write-tool gates, budget escalations, infra remediations, context
+   conflicts, orchestration escalations, MRM sign-offs). Editing every one would be a dozen chances
+   to miss one, and a missed one is an approval that silently never routes. Instead the assignment
+   is created on the first READ of the queue, on a DECIDE, or by the sweep — computed from columns
+   already stored on the approval row. The result is **identical** to eager routing (every matching
+   input is stored state, and the SLA deadlines derive from `requested_at`), and it is impossible
+   for a future insert site to forget. The whole path is guarded by "is any rule enabled?", so a
+   deployment with an empty rules table — the shipped state — materializes nothing, writes nothing,
+   and behaves byte-identically to pre-0058.
+2. **The queue read WIDENS for role/team assignees.** §1 promised routing decides "whose queue it
+   shows in", which requires the members of an assigned role/team to actually see the row. `GET
+   /v1/approvals` therefore also returns approvals assigned (or escalated) to a role or team the
+   caller belongs to. This is **not** a widening of who may decide: the decide path re-checks
+   `approver_user_id` independently, and the tests assert that an unclaimed team member is refused
+   with the queue's own `not_the_named_approver`.
+3. **Bulk `reassign` did not ship.** §4 lists "bulk approve/deny/reassign". Only approve and deny
+   shipped. Bulk reassignment is not a decision and does not ride `decideOneApproval`, so it would
+   have needed its own authorization path — exactly the second path this ADR exists to prevent. It
+   is a follow-up, not an oversight.
+4. **The sensitivity fence has a concrete definition.** §4 says "forbidden on high-sensitivity
+   classes (e.g. anything the compliance cascade flags production/PII)". Shipped as: an approval
+   attributed to a project whose effective compliance policy sets `piiMode: 'block'`. It is
+   evaluated **per item**, so a mixed batch refuses the sensitive item and decides the rest, and it
+   is switchable org-wide (`approvalBulkSensitiveBlocked`, default on).
+5. **Saved views are stored and served but not yet applied server-side.** `filters`/`sort` are
+   persisted and returned; `GET /v1/approvals` does not yet consume a view id, and §3's promised
+   keyset pagination over the approvals read did **not** ship — that read is still the pre-existing
+   `limit(100)`. Real, and listed as a follow-up rather than implied.
+6. **Bulk returns 207 with per-item results**, not a single status. A partial batch is the normal
+   case once per-item authorization is real, and collapsing it to one code would hide exactly the
+   information a reviewer needs.
+
+### What is GENUINELY ENFORCED vs. what NOTHING DRIVES
+
+**Genuinely enforced — asserted end to end, on state rather than on flags:**
+
+- **BULK APPLIES THE SAME PER-ITEM AUTHORIZATION AS A SINGLE DECIDE.** The decisive test puts an
+  approval the caller is *not* the named approver for into a batch with two they are. The batch
+  returns 207: two decided, one refused with **the queue's own `not_the_named_approver`** — the
+  error only reachable through `decideOneApproval` — and the unauthorized approval is asserted
+  **still `pending` with a NULL `decided_by`**. A batch-level authorization shortcut cannot produce
+  that result. Bootstrap-token bulk is refused with `bootstrap_cannot_decide`, and an
+  already-decided item comes back `already_decided` rather than being silently skipped.
+- **BULK IS AUDITED PER ITEM.** `approval-bulk-decision` rows are counted and matched to the
+  decided ids; `approval-bulk-item-refused` rows are counted and matched to the refused ones, with
+  `effect: deny`. The assertions are on counts per item and per batch id — one row per batch would
+  fail them.
+- **SLA BREACH IS DETECTED AND ESCALATES.** The test backdates an approval's `requested_at` past a
+  10-minute breach window and then performs a plain **READ** of the queue. The assignment flips to
+  `breached`, `breached_at` is set, the escalation target is recorded, and an
+  `approval-sla-breached` audit row appears carrying how many minutes late it was. A second and
+  third read do **not** re-escalate (the evaluation is monotonic). A separate case takes a
+  backdated approval **straight to a decision with no read in between** and asserts the breach is
+  still recorded — so a queue only ever touched by decisions still registers its breaches.
+- **ESCALATION MOVES WORK, IT NEVER DECIDES.** Every SLA case asserts the approval is still
+  `pending` after the breach. The `reassign` case asserts `approvals.approver_user_id` actually
+  moved to the escalation target — a real column, not a badge — while `status` stayed `pending` and
+  `decided_by` stayed NULL.
+- **ROUTING ROUTES, AND ONLY ROUTES.** A team rule makes the approval visible to a team member who
+  is not the named approver; that member is still **refused** by the decide path; a non-member is
+  refused the CLAIM; an eligible member's claim resolves `approver_user_id` (audited,
+  `approval-claimed`) without deciding anything; a second claimer gets 409; and the claimer can
+  then decide through the ordinary endpoint. A `user`-kind rule resolves the named approver at
+  materialization so ADR-0022 visibility and ADR-0027 quorum keep reading a meaningful column.
+- **THE FENCES HOLD.** An over-cap bulk is refused **whole** (422) with nothing decided; a bulk with
+  no reason is refused; the PII-blocking project's approval is refused `bulk_forbidden_sensitive`
+  per item while its ordinary sibling succeeds — and is then shown to be perfectly decidable **one
+  at a time**, because the fence is friction, not a lock.
+- **ADMIN-GATING IS WHERE IT BELONGS.** Authoring routing rules and SLA policies, and running the
+  sweep, are admin-only. Bulk, claim, workload and saved views are reviewer-facing (a reviewer is
+  not an admin) and each applies the caller's own eligibility inside the handler. Publishing a
+  shared saved view is admin-only; another reviewer's private view cannot be deleted.
+- **THE LAYER IS INERT UNTIL TURNED ON.** With no enabled rule, the queue read writes no assignment
+  row, evaluates no SLA, and returns the identical response shape (no `assignment` field). Asserted.
+
+**Nothing drives it — stated plainly:**
+
+- **THERE IS NO IN-PROCESS SCHEDULER OR JOB RUNNER IN THIS CODEBASE, AND THIS SLICE DID NOT ADD
+  ONE.** No timer fires. SLA breach becomes visible in exactly three ways: a read of
+  `GET /v1/approvals`, a decision on the approval, or an explicit `POST /v1/approvals/sla/sweep`
+  that an operator or an external cron must call. The design survives this only because the
+  deadlines are a **pure function of `requested_at` and the policy**, so a breach detected late is
+  byte-identical to what a timer would have produced and reports how late it was found. **Do not
+  read anything in this ADR as a claim that timers fire on their own.** In a deployment where
+  nobody opens the queue and nothing calls the sweep, a breach exists in the data and is simply not
+  yet observed.
+- **Escalation notifies nobody.** `add_assignee` widens who *sees* the item in the product;
+  `notify_only` writes an audit row. There is no email, no Slack, no push. §2's "breaches surface as
+  findings on the same one findings/queue surface" shipped as *the queue and the audit trail*, not
+  as a row in the ADR-0017 findings table.
+- **ChatOps (§5) is out of scope here** and belongs to ADR-0061, which does not exist yet.
+- **Quorum composition with ADR-0027 is stored, not yet composed.** `approval_assignment_rules.
+  quorum` and `approval_assignments.quorum` are carried through, but the per-stage quorum logic in
+  the workflow engine has not been changed to read them. A rule that sets `quorum: 3` today records
+  the intent and changes no behaviour.
+
+### Verification performed
+
+- Migrations 0001–0058 apply clean to a fresh database.
+- `pnpm -r build` clean; web bundle builds clean.
+- `packages/shared`: 86 → 116 tests, all passing (30 new pure workbench cases).
+- `policy-kernel`: 129, unchanged. `workflow-kernel`: 39, unchanged.
+- Full gateway suite: **1281 → 1308 tests, all passing** (27 new integration cases in
+  `apps/gateway/src/workbench.test.ts`), run twice against two independently created fresh
+  databases. Routing rules are global shared state that would re-route another suite's approvals,
+  so `afterAll` deletes every rule, policy, assignment, saved view and approval this file created.
+
+### Follow-ups this slice leaves open
+
+- **Nothing drives the SLA sweep.** A scheduler (or a documented cron entry) is the obvious next
+  step; the endpoint is deliberately shaped for one.
+- **Saved views are not applied server-side**, and §3's keyset pagination over `GET /v1/approvals`
+  did not ship — that read is still `limit(100)`.
+- **Bulk reassign**, deliberately deferred (see deviation 3).
+- **Quorum composition** with ADR-0027's per-stage quorum.
+- **Escalation notification** — an actual push channel, which is ADR-0061's territory.

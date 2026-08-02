@@ -599,6 +599,14 @@ export const auditLog = pgTable(
         // "no unreviewed model reaches production data" an audited property
         // rather than a slide. Plain text column — no DDL needed.
         "model_card",
+        // ADR-0046: an admin creating or deleting an approval ROUTING RULE.
+        // Authoring one changes whose queue every matching approval lands in
+        // from that moment on, so it is a governed act in its own right. The
+        // ROUTING and SLA events those rules produce audit on the approval's
+        // OWN objectType (ruleIds `approval-routed`, `approval-sla-breached`,
+        // `approval-claimed`, `approval-bulk-*`), so "what happened to this
+        // approval" stays one query. Plain text column — no DDL needed.
+        "approval_assignment_rule",
       ],
     })
       .notNull()
@@ -2559,6 +2567,16 @@ export const orgSettings = pgTable(
      * ahead of time rather than as an outage on the day. */
     mrmExpiryWarnDays: integer("mrm_expiry_warn_days").notNull().default(30),
 
+    // --- ADR-0046 (migration 0058): review-workbench bulk fences ------------
+    /** hard cap on items per bulk approve/deny/reassign. Not a UI convenience:
+     * a bulk of 5,000 is indistinguishable from "approve everything". */
+    approvalBulkMaxItems: integer("approval_bulk_max_items").notNull().default(25),
+    /** true (default) = bulk is REFUSED on any approval attributed to a project
+     * whose compliance cascade demands PII blocking. Reviewers with large
+     * sensitive queues act item-by-item on the highest-risk classes; that
+     * friction IS the control (ADR-0046 §4), and it is a disclosed limit. */
+    approvalBulkSensitiveBlocked: boolean("approval_bulk_sensitive_blocked").notNull().default(true),
+
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -2568,6 +2586,10 @@ export const orgSettings = pgTable(
     check(
       "org_settings_mrm_expiry_warn_days_check",
       sql`${t.mrmExpiryWarnDays} >= 0 AND ${t.mrmExpiryWarnDays} <= 3650`,
+    ),
+    check(
+      "org_settings_approval_bulk_max_items_check",
+      sql`${t.approvalBulkMaxItems} >= 1 AND ${t.approvalBulkMaxItems} <= 500`,
     ),
   ],
 );
@@ -3126,3 +3148,183 @@ export const modelCardEvidence = pgTable(
 export type ModelCardRow = typeof modelCards.$inferSelect;
 export type ModelCardApprovalRow = typeof modelCardApprovals.$inferSelect;
 export type ModelCardEvidenceRow = typeof modelCardEvidence.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0046 (migration 0058) — THE REVIEW WORKBENCH.
+//
+// An ADDITIVE LAYER over the one `approvals` table, never a second store. The
+// `approvals` row keeps its NOT NULL `approverUserId` (ADR-0022's approver
+// visibility and ADR-0027's quorum both read it) and gains no columns; these
+// three tables describe WHERE it shows up, WHEN it is late, and WHO to widen it
+// to when it goes stale.
+//
+// An approval with no matching rule keeps exactly its current single-approver
+// behaviour, byte for byte — the rules table ships empty.
+// ---------------------------------------------------------------------------
+
+export const APPROVAL_ASSIGNEE_KINDS = ["user", "role", "team"] as const;
+export type ApprovalAssigneeKind = (typeof APPROVAL_ASSIGNEE_KINDS)[number];
+
+/** DELIBERATELY DOES NOT ADMIT auto-approve or auto-deny. A governance queue
+ * that clears itself by timeout is a bypass (ADR-0023/0027). The absence is a
+ * DB CHECK, not a convention. */
+export const APPROVAL_ESCALATE_ACTIONS = ["add_assignee", "reassign", "notify_only"] as const;
+export type ApprovalEscalateAction = (typeof APPROVAL_ESCALATE_ACTIONS)[number];
+
+export const APPROVAL_SLA_STATES = ["ok", "warning", "breached"] as const;
+export type ApprovalSlaState = (typeof APPROVAL_SLA_STATES)[number];
+
+export const approvalSlaPolicies = pgTable(
+  "approval_sla_policies",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    /** minutes from `approvals.requestedAt` */
+    warnAfterMinutes: integer("warn_after_minutes").notNull(),
+    breachAfterMinutes: integer("breach_after_minutes").notNull(),
+    escalateAction: text("escalate_action", { enum: APPROVAL_ESCALATE_ACTIONS })
+      .notNull()
+      .default("add_assignee"),
+    escalateToKind: text("escalate_to_kind", { enum: APPROVAL_ASSIGNEE_KINDS }),
+    escalateToId: uuid("escalate_to_id"),
+    enabled: boolean("enabled").notNull().default(true),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "approval_sla_policies_window_check",
+      sql`${t.warnAfterMinutes} >= 0 AND ${t.breachAfterMinutes} > ${t.warnAfterMinutes}`,
+    ),
+    check(
+      "approval_sla_policies_action_check",
+      sql`${t.escalateAction} IN ('add_assignee','reassign','notify_only')`,
+    ),
+    check(
+      "approval_sla_policies_kind_check",
+      sql`${t.escalateToKind} IS NULL OR ${t.escalateToKind} IN ('user','role','team')`,
+    ),
+    check(
+      "approval_sla_policies_target_check",
+      sql`${t.escalateAction} = 'notify_only' OR (${t.escalateToKind} IS NOT NULL AND ${t.escalateToId} IS NOT NULL)`,
+    ),
+    check(
+      "approval_sla_policies_reassign_check",
+      sql`${t.escalateAction} <> 'reassign' OR ${t.escalateToKind} = 'user'`,
+    ),
+    uniqueIndex("approval_sla_policies_name_uq").on(t.name),
+  ],
+);
+
+/** ROUTING. Matched on the SAME dimensions ADR-0018 established for workflow
+ * assignment rather than a second matching vocabulary. Conditions AND together;
+ * a rule with NO conditions matches NOTHING (DB CHECK) — the discipline
+ * `workflowAssignmentRules` already follows. */
+export const approvalAssignmentRules = pgTable(
+  "approval_assignment_rules",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    objectType: text("object_type"),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "cascade" }),
+    /** SERVER-RESOLVED from the attributed project's compliance classifications
+     * — never a client-supplied value (the ADR-0019 addendum's rule) */
+    dataSensitivity: text("data_sensitivity"),
+    /** matched against `approvals.stageId` as a prefix/glob */
+    stagePattern: text("stage_pattern"),
+    templateId: uuid("template_id").references(() => workflowTemplates.id, { onDelete: "cascade" }),
+    assigneeKind: text("assignee_kind", { enum: APPROVAL_ASSIGNEE_KINDS }).notNull(),
+    assigneeId: uuid("assignee_id").notNull(),
+    /** composes with ADR-0027's per-stage quorum; 1 = today */
+    quorum: integer("quorum").notNull().default(1),
+    /** lower wins; ties break on createdAt (oldest first) so matching is total */
+    priority: integer("priority").notNull().default(100),
+    slaPolicyId: uuid("sla_policy_id").references(() => approvalSlaPolicies.id, {
+      onDelete: "set null",
+    }),
+    enabled: boolean("enabled").notNull().default(true),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("approval_assignment_rules_kind_check", sql`${t.assigneeKind} IN ('user','role','team')`),
+    check("approval_assignment_rules_quorum_check", sql`${t.quorum} >= 1`),
+    check(
+      "approval_assignment_rules_conditions_check",
+      sql`${t.objectType} IS NOT NULL OR ${t.projectId} IS NOT NULL OR ${t.dataSensitivity} IS NOT NULL OR ${t.stagePattern} IS NOT NULL OR ${t.templateId} IS NOT NULL`,
+    ),
+    index("approval_assignment_rules_match_idx").on(t.enabled, t.priority, t.createdAt),
+  ],
+);
+
+/** ONE row per approval. Carries the routed owner, the claim state, the SLA
+ * clock and the escalation target. `warnAt`/`dueAt` are DERIVED from
+ * `approvals.requestedAt` + the policy, so a lazily materialized assignment
+ * computes the same deadlines an eagerly materialized one would have. */
+export const approvalAssignments = pgTable(
+  "approval_assignments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    approvalId: uuid("approval_id")
+      .notNull()
+      .references(() => approvals.id, { onDelete: "cascade" }),
+    /** NULL = no rule matched; the assignment mirrors the approval's own named
+     * approver, which is today's behaviour made explicit */
+    ruleId: uuid("rule_id").references(() => approvalAssignmentRules.id, { onDelete: "set null" }),
+    assigneeKind: text("assignee_kind", { enum: APPROVAL_ASSIGNEE_KINDS }).notNull(),
+    assigneeId: uuid("assignee_id").notNull(),
+    quorum: integer("quorum").notNull().default(1),
+    assignedAt: timestamp("assigned_at", { withTimezone: true }).notNull().defaultNow(),
+    claimedByUserId: uuid("claimed_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    slaPolicyId: uuid("sla_policy_id").references(() => approvalSlaPolicies.id, {
+      onDelete: "set null",
+    }),
+    warnAt: timestamp("warn_at", { withTimezone: true }),
+    dueAt: timestamp("due_at", { withTimezone: true }),
+    slaState: text("sla_state", { enum: APPROVAL_SLA_STATES }).notNull().default("ok"),
+    breachedAt: timestamp("breached_at", { withTimezone: true }),
+    escalatedAt: timestamp("escalated_at", { withTimezone: true }),
+    escalationAssigneeKind: text("escalation_assignee_kind", { enum: APPROVAL_ASSIGNEE_KINDS }),
+    escalationAssigneeId: uuid("escalation_assignee_id"),
+  },
+  (t) => [
+    check("approval_assignments_kind_check", sql`${t.assigneeKind} IN ('user','role','team')`),
+    check("approval_assignments_quorum_check", sql`${t.quorum} >= 1`),
+    check("approval_assignments_sla_state_check", sql`${t.slaState} IN ('ok','warning','breached')`),
+    check(
+      "approval_assignments_escalation_kind_check",
+      sql`${t.escalationAssigneeKind} IS NULL OR ${t.escalationAssigneeKind} IN ('user','role','team')`,
+    ),
+    uniqueIndex("approval_assignments_approval_uq").on(t.approvalId),
+    index("approval_assignments_assignee_idx").on(t.assigneeKind, t.assigneeId),
+    index("approval_assignments_due_idx").on(t.slaState, t.dueAt),
+  ],
+);
+
+/** named filter/sort presets. `userId` NULL = an admin-PUBLISHED shared view. */
+export const approvalSavedViews = pgTable(
+  "approval_saved_views",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    filters: jsonb("filters").$type<Record<string, unknown>>().notNull().default({}),
+    sort: text("sort").notNull().default("requested_at_desc"),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("approval_saved_views_user_name_uq")
+      .on(t.userId, t.name)
+      .where(sql`${t.userId} IS NOT NULL`),
+    uniqueIndex("approval_saved_views_shared_name_uq")
+      .on(t.name)
+      .where(sql`${t.userId} IS NULL`),
+  ],
+);
+
+export type ApprovalSlaPolicyRow = typeof approvalSlaPolicies.$inferSelect;
+export type ApprovalAssignmentRuleRow = typeof approvalAssignmentRules.$inferSelect;
+export type ApprovalAssignmentRow = typeof approvalAssignments.$inferSelect;
+export type ApprovalSavedViewRow = typeof approvalSavedViews.$inferSelect;

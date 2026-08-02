@@ -36,6 +36,7 @@ import GuardrailsPage from "./views/admin/governance/GuardrailsPage";
 import EvalsPage from "./views/admin/governance/EvalsPage";
 import ModelRiskPage from "./views/admin/governance/ModelRiskPage";
 import ApprovalsAdminPage from "./views/admin/governance/ApprovalsAdminPage";
+import ReviewWorkbenchPage from "./views/admin/governance/ReviewWorkbenchPage";
 import AuditLogPage from "./views/admin/governance/AuditLogPage";
 import WorkflowTemplatesPage from "./views/admin/governance/WorkflowTemplatesPage";
 import AgentsPage from "./views/admin/integrations/AgentsPage";
@@ -134,6 +135,7 @@ export default function App() {
                         <Route path="evals" element={<EvalsPage />} />
                         <Route path="model-risk" element={<ModelRiskPage />} />
                         <Route path="approvals" element={<ApprovalsAdminPage />} />
+                        <Route path="review-workbench" element={<ReviewWorkbenchPage />} />
                         <Route path="audit" element={<AuditLogPage />} />
                         <Route path="workflow-templates" element={<WorkflowTemplatesPage />} />
                         <Route path="agents" element={<AgentsPage />} />

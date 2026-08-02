@@ -71,6 +71,9 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       { label: "Model risk", to: "/admin/model-risk" },
       { label: "Simulation", to: "/admin/simulation" },
       { label: "Approvals queue", to: "/admin/approvals" },
+      // ADR-0046 — the SAME approvals, scaled: routing, SLA timers, escalation,
+      // workload and bulk triage. A layer on the one queue, never a second one.
+      { label: "Review workbench", to: "/admin/review-workbench" },
       { label: "Audit log", to: "/admin/audit" },
       { label: "Workflow templates", to: "/admin/workflow-templates" },
     ],
