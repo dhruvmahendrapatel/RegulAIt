@@ -1,10 +1,10 @@
 ---
 phase: eight-pillars-shipped-productizing
-last_updated: 2026-08-01
+last_updated: 2026-08-02
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-08-01-session-05.md
+last_session: sessions/2026-08-02-session-06.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -21,11 +21,16 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 **RegulAIt is a working, deployed product, not a scaffold.** All eight P0 pillars have shipped
-functionality; the gateway suite is at **~1000 tests** across 74+ files (**~1700** across the whole
-workspace); the schema is at **migration 0048**; **Accepted** decisions run to **ADR-0035**, and a
-**Proposed** enterprise-readiness set runs **0036–0061** (identity, guardrails, the seven
-launch-blocking differentiators, commercial plumbing) — see
-[docs/product/ENTERPRISE_READINESS_PLAN.md](../docs/product/ENTERPRISE_READINESS_PLAN.md). The product is served by a **React SPA** (`apps/web` —
+functionality; the gateway suite is at **1,191 tests** across 81 files (policy-kernel at 129); the
+schema is at **migration 0054**; **Accepted** decisions run to **ADR-0035** plus the first
+implemented tranche of the enterprise-readiness set — **0036, 0037, 0038, 0039, 0040, 0043 are
+now Accepted and built**. The remainder of that set (**0041, 0042, 0044–0061**) is still
+**Proposed** and is being implemented in order — see
+[docs/product/ENTERPRISE_READINESS_PLAN.md](../docs/product/ENTERPRISE_READINESS_PLAN.md).
+**Enterprise identity is now real**: SAML 2.0 *and* OIDC federate side by side, SCIM 2.0
+provisions and instantly deprovisions, IdP groups drive roles under default-deny, sessions are
+individually revocable inside an admin-defined network envelope, and an in-process Cedar ABAC
+layer can conditionally restrict — never widen — any call the RBAC kernel already allowed. The product is served by a **React SPA** (`apps/web` —
 React 18 + Vite + react-router + TanStack Query, an owned token design system, light/dark, six
 grouped nav sections) at **`/ui`**, which is now the *only* UI: `/`, `/app` and `/admin` all 302
 there. The template-literal shells are **deleted** as of ADR-0033 (−7,125 lines): the SPA is not
@@ -43,7 +48,11 @@ IP, so the address — and therefore the URL and its certificate — survives th
 live again** on a 2,000 min/month budget.
 **What is NOT done**: no real model provider is connected (the owner's key is parked and must not
 be raised until they raise it), and the deployment is a single EC2 box with Postgres in a
-container volume — **still no backup**, which is the largest single risk on the board.
+container volume — now with a **nightly verified `pg_dump` to S3** (ADR-0035, applied and proven
+by a real restore), so the largest remaining risks are the single point of failure itself and the
+fact that `REGULAIT_DATA_KEY` is not recorded out-of-band (a restore onto a new box recovers every
+row and leaves every credential undecryptable). Both are tracked in
+[docs/ops/DEPLOYMENT_READINESS_CHECKLIST.md](../docs/ops/DEPLOYMENT_READINESS_CHECKLIST.md).
 
 The infrastructure bootstrap phase (EPIC-01) is **complete**. The private GitHub repo
 [dhruvmahendrapatel/RegulAIt](https://github.com/dhruvmahendrapatel/RegulAIt) is live with the
@@ -1542,6 +1551,49 @@ to personal `dhruvmahendrapatel`.
 - The forecasted (not actual) monthly spend shown in `aws budgets describe-budgets` was ~$1.21 at
   last check — almost entirely the two KMS CMKs (state bucket + CloudTrail). Nothing alarming
   against the $5 cap, but worth a glance next session.
+
+**Enterprise-readiness build wave — identity + policy, 2026-08-02 (session-06).** The owner said
+"start building the ADRs", turning the 0036–0061 planning set from a document into a work queue.
+Six shipped in order, each its own migration, its own agent, and its own full-suite gate; the
+gateway suite went **1,004 → 1,191** with zero regressions and the policy kernel **93 → 129**.
+
+| ADR | Commit | Migration | What it makes true |
+|---|---|---|---|
+| 0043 | `59fef61` | 0049 | `mcp_servers.url` + `oidc_providers.issuerUrl` inside the egress guard — **every** admin-typed outbound URL is now behind one guard, one table, one pinned transport |
+| 0039 | `0358b64` | 0050 | Per-session revocation, self-service device list, `last_seen_ip`, org CIDR envelope (`off`/`at_login`/`continuous`) with a separate API-key knob |
+| 0036 | `a5e3216` | 0051 | SAML 2.0 SSO beside OIDC, `@node-saml/node-saml`, pinned-cert verification, replay seen-set, IdP-initiated opt-in |
+| 0037 | `ab4d308` | 0052 | SCIM 2.0 `/scim/v2` — provisioning and, critically, **instant IdP-driven deprovisioning** as `disabledAt`, never a delete |
+| 0038 | `4469d20` | 0053 | IdP group → role mapping: default-deny, additive, reconciled not accumulated |
+| 0040 | `3351839` | 0054 | In-process Cedar ABAC on the kernel **allow path only** — can forbid or require approval, can never grant |
+
+Five judgment calls worth remembering, because each one chose the safe side over the conventional
+one:
+1. **SCIM re-POST of an existing email returns 409, not the RFC-conventional 200-with-existing.**
+   A 200 would let an IdP-driven create silently *adopt* a pre-existing local account — including
+   an admin's. Refusal is audited as a deny.
+2. **A role held both directly and via a group is two rows**, keyed by a composite unique including
+   `origin`. The reconciler's `DELETE` is scoped `origin='group'`, so losing an admin's direct
+   grant is *structurally* impossible rather than merely avoided by correct code.
+3. **Missing groups claim ≠ empty groups claim.** An assertion that omits the claim means "no
+   signal, do not reconcile"; an explicitly empty array means "member of nothing, reconcile to
+   zero". Conflating them turns an IdP hiccup into an org-wide access strip.
+4. **node-saml checks neither the assertion `Recipient` nor the login-Response issuer** (it pins
+   `idpIssuer` only for logout). Both are checked in our code, against the assertion the library
+   already signature-verified, so no new signature-wrapping surface is created. Its
+   `acceptedClockSkewMs: -1` escape hatch — which disables timestamp checks entirely — is
+   unreachable from config; skew is clamped to 0–9 minutes.
+5. **The SAML correlation cache is the database**, not node-saml's in-memory default, which would
+   fail *open* across a restart or a second process.
+
+**A latent suite order-dependency was found and fixed at the source (`19d65b3`).** `saml.test.ts`
+created ~30 enabled providers and deleted none; when vitest's duration-ordering cache happened to
+run it before `auth.test.ts`, the ADR-0036-generalized `sso_only` guard returned 200, the assertion
+failed *before* the test could turn `ssoOnly` back off, and every subsequent password login 403'd —
+~20 unrelated failures cascading from one leak. Both files now snapshot/restore the org singleton
+and delete the providers they create; auth's `sso_only` block establishes its own precondition
+instead of inheriting a fresh DB. Proven by reproducing the exact cross-file order (22 failures
+before, green after). **The general lesson: any test touching the `ORG_SETTINGS_ID` singleton must
+restore it, because adding any new test file reshuffles the order and can surface this.**
 
 ## Standing guardrail
 Nothing gets a "production" designation, and nothing deploys to one, without the user's direct,
