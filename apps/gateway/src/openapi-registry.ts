@@ -109,6 +109,14 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/audit.csv": "public-stable",
   "POST /v1/audit/prune": "internal",
   "GET /v1/audit/retention": "internal",
+  // ADR-0060 — the tamper-evident chain's operator surface. `internal` on
+  // purpose: the response shape is a disclosure document (limits, anchor
+  // provenance, the legacy boundary) and is expected to grow as the anchor
+  // sinks do, so it is not frozen into the public-stable contract yet.
+  "GET /v1/audit/verify": "internal",
+  "POST /v1/audit/anchor": "internal",
+  "POST /v1/audit/anchors/flush": "internal",
+  "GET /v1/audit/anchors": "internal",
   "GET /v1/auth/oidc-providers": "internal",
   "POST /v1/auth/oidc-providers": "internal",
   "DELETE /v1/auth/oidc-providers/:providerId": "internal",
@@ -508,6 +516,10 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/audit": "audit",
   "GET /v1/audit.csv": "audit",
   "POST /v1/audit/prune": "audit",
+  "GET /v1/audit/verify": "audit",
+  "POST /v1/audit/anchor": "audit",
+  "POST /v1/audit/anchors/flush": "audit",
+  "GET /v1/audit/anchors": "audit",
   "GET /v1/audit/retention": "audit",
   "GET /v1/auth/oidc-providers": "auth",
   "POST /v1/auth/oidc-providers": "auth",

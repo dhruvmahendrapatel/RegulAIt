@@ -185,6 +185,9 @@ importers:
 
   packages/db:
     dependencies:
+      '@regulait/shared':
+        specifier: workspace:*
+        version: link:../shared
       drizzle-orm:
         specifier: ^0.44.2
         version: 0.44.7(@types/pg@8.20.0)(pg@8.22.0)

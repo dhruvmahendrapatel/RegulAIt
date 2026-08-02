@@ -652,6 +652,13 @@ export const auditLog = pgTable(
         // past. Plain text column — no DDL needed.
         "onboarding_step",
         "onboarding_import",
+        // ADR-0060 (migration 0067): the GENESIS row of the tamper-evident hash
+        // chain, and nothing else. It is an audit_log row rather than a row in
+        // some side table on purpose: the boundary between "un-chained legacy"
+        // and "covered by the chain" belongs IN the trail an auditor reads, in
+        // words, at the exact position where the guarantee starts. Plain text
+        // column — no DDL needed.
+        "audit_chain",
       ],
     })
       .notNull()
@@ -670,8 +677,81 @@ export const auditLog = pgTable(
     // are honestly un-backfillable (they never recorded a mode, ADR-0019),
     // and most rows (MCP calls, membership changes, …) have no mode at all.
     deployMode: text("deploy_mode", { enum: ["hosted", "byoc", "air_gapped"] }),
+    // --- ADR-0060 (migration 0067): the tamper-evident hash chain ------------
+    // All four are NULL together (a DB CHECK enforces all-or-none) on every row
+    // written BEFORE the chain existed. Those rows are un-chained legacy: the
+    // integrity guarantee does not cover them, and chaining them retroactively
+    // would mean rewriting them, which is indistinguishable from tampering.
+    // See migration 0067's header and `@regulait/shared`'s `audit-chain.ts`.
+    //
+    // FK-FREENESS IS PRESERVED: none of these reference anything. A row stays
+    // verifiable from its own bytes plus its predecessor's `rowHash` long after
+    // every user, server and project it names has been deleted.
+    /** strict total chain order. NOT `at` — timestamps collide and are not
+     * monotonic. Assigned as max(seq)+1 under an advisory lock, so a rolled-back
+     * transaction never burns a number and leaves a gap that would have to be
+     * reported as a possible deletion. */
+    seq: bigint("seq", { mode: "number" }),
+    /** SHA-256 over the canonical serialization of this row's immutable facts.
+     * Changes iff the RECORD was edited. */
+    contentHash: text("content_hash"),
+    /** the PRECEDING row's `rowHash` — see `auditRowHash()` for why it is not
+     * the predecessor's `contentHash`. 64 zeros at genesis. */
+    prevHash: text("prev_hash"),
+    /** `SHA-256(prevHash || contentHash)` — the linked value, and the thing the
+     * WORM anchor pins. Stored so the next append can link without recomputing,
+     * and so editing it directly is itself detectable. */
+    rowHash: text("row_hash"),
   },
-  (t) => [index("audit_log_user_at_idx").on(t.userId, t.at)],
+  (t) => [
+    index("audit_log_user_at_idx").on(t.userId, t.at),
+    uniqueIndex("audit_log_seq_uq").on(t.seq),
+  ],
+);
+
+/**
+ * ADR-0060 §4 — the local ledger of chain-head ANCHORS.
+ *
+ * A hash chain detects any edit by someone who cannot recompute the whole
+ * chain. It does NOT catch a DB admin who rewrites every row AND every hash:
+ * that forgery is internally consistent, and local verification blesses it.
+ * What closes the gap is pinning the chain HEAD somewhere that admin cannot
+ * rewrite — S3 Object Lock in compliance mode, and/or an independent external
+ * transparency log. A full recompute then diverges from the anchored head.
+ *
+ * This table is NOT the trust root. A row here is exactly as rewritable as any
+ * other row; `status`/`externalRef` are what say whether an externalized,
+ * genuinely immutable copy exists. In an air-gapped install anchors sit here as
+ * `pending` until connectivity resumes (§8.5's buffer-and-sync posture), and the
+ * verify response discloses the larger undetectable window rather than hiding
+ * it.
+ *
+ * FK-free, like `audit_log` itself and for the same reason.
+ */
+export const auditAnchors = pgTable(
+  "audit_anchors",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** the chain head that was anchored */
+    seq: bigint("seq", { mode: "number" }).notNull(),
+    rowHash: text("row_hash").notNull(),
+    /** `at` of the row at `seq`, so "the trail was intact as of…" needs no
+     * second lookup into a table that may have been tampered with since */
+    headAt: timestamp("head_at", { withTimezone: true }).notNull(),
+    algorithm: text("algorithm").notNull().default("sha256"),
+    /** `none` = no sink configured, so this anchor exists ONLY here and is NOT
+     * tamper-resistant. Recorded honestly rather than implying coverage. */
+    destination: text("destination", {
+      enum: ["local_worm", "s3_object_lock", "external_log", "none"],
+    }).notNull(),
+    status: text("status", { enum: ["pending", "flushed", "failed"] }).notNull().default("pending"),
+    externalRef: text("external_ref"),
+    flushedAt: timestamp("flushed_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    deployMode: text("deploy_mode", { enum: ["hosted", "byoc", "air_gapped"] }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("audit_anchors_seq_idx").on(t.seq), index("audit_anchors_status_idx").on(t.status, t.seq)],
 );
 
 // §3 approval requirement rules: a granted call matching a rule pauses for

@@ -463,6 +463,13 @@
       "when": 1785001000000,
       "tag": "0066_onboarding_migration",
       "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "7",
+      "when": 1785002000000,
+      "tag": "0067_tamper_evident_audit",
+      "breakpoints": true
     }
   ]
 }

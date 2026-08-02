@@ -2094,3 +2094,33 @@ export {
   type GroupRolePlan,
   type GroupRolePlanEntry,
 } from "./onboarding.js";
+
+// ADR-0060 — the tamper-evident `audit_log` hash chain's PURE half: the
+// canonical, deterministic serialization every row's `content_hash` is taken
+// over, the linked `row_hash`, the fixed genesis row, and the resumable
+// batch verifier. It lives here because two independent pieces of the system —
+// the WRITER in `@regulait/db` and the VERIFIER behind `GET /v1/audit/verify` —
+// must agree on it byte for byte; a one-byte disagreement reports tampering on
+// untouched data. No database, no clock, no I/O.
+export {
+  AUDIT_CHAIN_ALGORITHM,
+  AUDIT_GENESIS_CONTENT_HASH,
+  AUDIT_GENESIS_OBJECT_TYPE,
+  AUDIT_GENESIS_PREV_HASH,
+  AUDIT_GENESIS_ROW,
+  AUDIT_GENESIS_ROW_HASH,
+  AUDIT_GENESIS_RULE_ID,
+  AUDIT_GENESIS_SEQ,
+  AUDIT_LEGACY_DISCLOSURE,
+  AUDIT_PAYLOAD_VERSION,
+  auditContentHash,
+  auditRowHash,
+  canonicalAuditPayload,
+  canonicalJson,
+  sha256Hex,
+  verifyChainBatch,
+  type AuditChainFields,
+  type ChainBreak,
+  type ChainBreakKind,
+  type ChainedAuditRow,
+} from "./audit-chain.js";

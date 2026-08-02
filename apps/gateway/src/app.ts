@@ -125,6 +125,7 @@ import { registerSpendMonitorRoutes } from "./spend-monitor.js";
 import { registerLineageRoutes } from "./lineage.js";
 import { registerBillingRoutes } from "./billing.js";
 import { refuseIfSeatCapReached, registerLicensingRoutes } from "./licensing.js";
+import { registerAuditChainRoutes, type AnchorSink } from "./audit-chain.js";
 import {
   assignedApprovalIdsFor,
   ensureAssignment,
@@ -162,6 +163,12 @@ export interface BuildAppOptions {
    * directions without touching process.env — see hsts.ts for why this is a
    * deployment env var rather than an org_settings toggle. */
   hsts?: string | null;
+  /** ADR-0060: where audit-chain head anchors are externalized. Defaults to
+   * REGULAIT_AUDIT_ANCHOR_DIR (and to NO sink at all when that is unset, which
+   * is a disclosed state, not a misconfiguration). `null` forces no sink.
+   * Exposed so a test can drive a real WORM buffer without touching the
+   * environment. */
+  auditAnchorSink?: AnchorSink | null;
 }
 import { z } from "zod";
 import { registerMcpProxy } from "./mcp-proxy.js";
@@ -2606,6 +2613,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // is admin-only via the DEFAULT gate: installing a license changes the
   // commercial ceiling for the whole deployment.
   registerLicensingRoutes(app, db);
+
+  // ADR-0060 — the tamper-evident audit chain's operator surface. The CHAIN
+  // itself is not registered here: it is computed at the storage boundary in
+  // `@regulait/db`'s `createDb`, so every one of the 158 `insert(auditLog)`
+  // call sites in this app — and the next one written — is chained without
+  // knowing it. What lives here is verification and anchoring, both admin-only
+  // via the DEFAULT gate: `GET /v1/audit/verify` reports the whole trail's
+  // shape, and taking an anchor is a governed act that itself lands in the
+  // trail.
+  registerAuditChainRoutes(app, db, ...(opts.auditAnchorSink !== undefined ? [{ sink: opts.auditAnchorSink }] : []));
 
   registerAgentConnectorRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0034 — admin-registered custom LLM providers + the egress allow-list
