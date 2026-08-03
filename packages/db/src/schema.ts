@@ -5050,3 +5050,130 @@ export const copilotProposals = pgTable(
 
 export type CopilotQueryRow = typeof copilotQueries.$inferSelect;
 export type CopilotProposalRow = typeof copilotProposals.$inferSelect;
+// ADR-0059 (migration 0071) — POLICY SIMULATION / BLAST-RADIUS PREVIEW.
+//
+// THE DEFINING PROPERTY IS AN ABSENCE. A simulation writes exactly two kinds of
+// row — the run and its sampled flips — plus ONE audit row saying a simulation
+// happened. It writes no approvals, consumes no rate counters, meters no usage,
+// dispatches nothing, and never touches `abac_policies.active_version_id`. The
+// dry-run path does not import the dispatch core at all, which is what makes
+// "zero side effects" structural rather than a promise.
+//
+// `policy_version_id` is RESTRICT: a stored blast radius names the exact
+// immutable version it previewed (ADR-0048), and that version cannot be deleted
+// out from under the preview an admin relied on when they activated.
+// ---------------------------------------------------------------------------
+
+export const POLICY_SIMULATION_BUCKET_VALUES = [
+  "newly_denied",
+  "newly_approval_required",
+  "newly_allowed",
+  "unchanged",
+  "indeterminate",
+] as const;
+
+export const policySimulations = pgTable(
+  "policy_simulations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    policyId: uuid("policy_id").references(() => abacPolicies.id, { onDelete: "cascade" }),
+    policyVersionId: uuid("policy_version_id")
+      .notNull()
+      .references(() => abacPolicyVersions.id, { onDelete: "restrict" }),
+    /** stamped, so a stored preview stays readable after a rename */
+    policyName: text("policy_name").notNull(),
+    policyVersion: integer("policy_version").notNull(),
+    requestedByUserId: uuid("requested_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    /** the ADR-0047-shaped scope this run was PERMITTED to replay. NULL = org-
+     * wide (admin only). The stored value is what makes a later reader able to
+     * tell "nothing flipped" from "nothing in scope could have flipped". */
+    scopeUserIds: jsonb("scope_user_ids").$type<string[] | null>(),
+    scopeRuleId: text("scope_rule_id").notNull(),
+    windowDays: integer("window_days").notNull(),
+    windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
+    windowEnd: timestamp("window_end", { withTimezone: true }).notNull(),
+    rowCap: integer("row_cap").notNull(),
+    /** true when the cap was reached — the preview is then a LOWER BOUND, and
+     * saying so is the difference between a bounded answer and a wrong one */
+    capped: boolean("capped").notNull().default(false),
+    considered: integer("considered").notNull().default(0),
+    newlyDenied: integer("newly_denied").notNull().default(0),
+    newlyApprovalRequired: integer("newly_approval_required").notNull().default(0),
+    newlyAllowed: integer("newly_allowed").notNull().default(0),
+    unchanged: integer("unchanged").notNull().default(0),
+    indeterminate: integer("indeterminate").notNull().default(0),
+    affectedUsers: integer("affected_users").notNull().default(0),
+    affectedProjects: integer("affected_projects").notNull().default(0),
+    affectedTools: integer("affected_tools").notNull().default(0),
+    /** the NAMED blast radius: users, projects and tools, each with a count */
+    blastRadius: jsonb("blast_radius").$type<Record<string, unknown>>().notNull().default({}),
+    /** derived from the candidate's OWN source, never asserted by the caller */
+    fidelityExact: boolean("fidelity_exact").notNull().default(true),
+    fidelityCaveats: jsonb("fidelity_caveats").$type<unknown[]>().notNull().default([]),
+    headline: text("headline").notNull(),
+    note: text("note"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("policy_simulations_version_idx").on(t.policyVersionId, t.createdAt),
+    index("policy_simulations_requested_idx").on(t.requestedByUserId),
+  ],
+);
+
+/**
+ * A SAMPLED FLIP: one recorded decision that would have gone differently, kept
+ * so "which calls, exactly" is answerable rather than merely counted. Bounded —
+ * the parent row carries the full counts, these are the representative rows.
+ *
+ * FK-free on `audit_log_id` for the same reason `audit_log` itself is FK-free:
+ * the preview must survive the retention window of the row it cites.
+ */
+export const policySimulationFlips = pgTable(
+  "policy_simulation_flips",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    simulationId: uuid("simulation_id")
+      .notNull()
+      .references(() => policySimulations.id, { onDelete: "cascade" }),
+    auditLogId: uuid("audit_log_id").notNull(),
+    userId: uuid("user_id").notNull(),
+    userLabel: text("user_label"),
+    projectId: uuid("project_id"),
+    projectName: text("project_name"),
+    serverId: uuid("server_id").notNull(),
+    toolName: text("tool_name").notNull(),
+    recordedEffect: text("recorded_effect").notNull(),
+    simulatedEffect: text("simulated_effect").notNull(),
+    bucket: text("bucket", { enum: POLICY_SIMULATION_BUCKET_VALUES }).notNull(),
+    /** the candidate policy that fired on this row */
+    policyId: uuid("policy_id"),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    index("policy_simulation_flips_sim_idx").on(t.simulationId),
+    index("policy_simulation_flips_user_idx").on(t.userId),
+  ],
+);
+
+/**
+ * The singleton that turns ADR-0040's honest-risks note ("activating without
+ * previewing should be friction") into an enforceable posture. OFF by default:
+ * an existing deployment activates exactly as it did before. ON, activating a
+ * version that no completed simulation has previewed is REFUSED — and either
+ * way the activation audit row records whether a preview existed, so the
+ * omission is a permanent record rather than a missing one.
+ */
+export const policySimulationSettings = pgTable("policy_simulation_settings", {
+  id: text("id").primaryKey().default("singleton"),
+  requirePreviewBeforeActivate: boolean("require_preview_before_activate").notNull().default(false),
+  defaultWindowDays: integer("default_window_days").notNull().default(30),
+  defaultRowCap: integer("default_row_cap").notNull().default(5000),
+  updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type PolicySimulationRow = typeof policySimulations.$inferSelect;
+export type PolicySimulationFlipRow = typeof policySimulationFlips.$inferSelect;
+export type PolicySimulationSettingsRow = typeof policySimulationSettings.$inferSelect;

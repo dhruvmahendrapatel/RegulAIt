@@ -2250,6 +2250,37 @@ export {
   type RedTeamProbeSeed,
   type RedTeamSeverity,
 } from "./redteam.js";
+// ADR-0059 — policy simulation / blast-radius preview's pure half: the replay
+// classifier (total over recorded × candidate effect), the fidelity analysis
+// derived from the candidate's OWN source, the ADR-0047-shaped entitlement
+// scope decision, and the NAMED blast-radius summary — users, projects, tools
+// and specific calls, because a percentage without a name is not a preview.
+export {
+  ABAC_CANNOT_GRANT_NOTE,
+  POLICY_SIMULATION_BUCKETS,
+  POLICY_SIMULATION_DEFAULT_ROW_CAP,
+  POLICY_SIMULATION_DEFAULT_WINDOW_DAYS,
+  POLICY_SIMULATION_MAX_ROWS,
+  POLICY_SIMULATION_MAX_WINDOW_DAYS,
+  REPLAY_FIDELITY_DISCLOSURE,
+  UNREPLAYABLE_ATTRIBUTES,
+  analyzeReplayFidelity,
+  buildHeadline,
+  classifyReplay,
+  isFlip,
+  policySimulationSettingsSchema,
+  resolvePolicySimulationScope,
+  startPolicySimulationSchema,
+  summarizeBlastRadius,
+  type BlastRadius,
+  type CandidateEffect,
+  type PolicySimulationBucket,
+  type PolicySimulationScopeDecision,
+  type PolicySimulationScopeInput,
+  type RecordedEffect,
+  type ReplayFidelity,
+  type ReplayedDecision,
+} from "./policy-simulation.js";
 
 // ADR-0058 — REGULATORY COMPLIANCE PACKS, the pure half: the pack/control and
 // collector vocabularies, the satisfaction rule (an attestation-required

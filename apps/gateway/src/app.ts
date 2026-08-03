@@ -116,6 +116,7 @@ import { registerSamlRoutes } from "./saml.js";
 import { SCIM_ROUTES, registerScimAdminRoutes, registerScimRoutes } from "./scim.js";
 import { registerGroupRoleMappingRoutes } from "./group-role-api.js";
 import { registerAbacRoutes } from "./abac.js";
+import { registerPolicySimulationRoutes } from "./policy-simulation.js";
 import { registerGuardrailRoutes } from "./guardrails.js";
 import { registerEvalRoutes } from "./evals.js";
 import { applyModelCardApprovalDecision, registerMrmRoutes } from "./mrm.js";
@@ -2513,6 +2514,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // NON_ADMIN_ROUTES, because authoring a policy that can deny every governed
   // call in the org is precisely the kind of act a non-admin must not reach.
   registerAbacRoutes(app, db);
+  // ADR-0059 — POLICY SIMULATION / BLAST-RADIUS PREVIEW, the consumer ADR-0040
+  // promised when it shipped the single-tuple simulate hook. Dry-runs a
+  // PROPOSED policy version against recorded history and reports who it would
+  // newly block, by name. Strictly side-effect-free: the module cannot dispatch
+  // because the dispatch core is not reachable from it. POST
+  // /v1/policy-simulations is in NON_ADMIN_ROUTES and entitlement-scoped inside
+  // (ADR-0047's shape) — a team lead may ask "would this break my team" and may
+  // not use the same question to read another team's traffic.
+  registerPolicySimulationRoutes(app, db);
   // ADR-0042 — the guardrail engine's admin surface: the detector registry
   // (with each detector's honest limits), org/agent/connector mode config, the
   // resolved-policy explainer, the tuning sandbox and the recent-violations

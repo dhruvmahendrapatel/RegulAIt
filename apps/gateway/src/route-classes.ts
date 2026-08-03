@@ -125,6 +125,15 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/reports/runs",
   "GET /v1/reports/runs/:id",
   "GET /v1/reports/runs/:id/export",
+  // ADR-0059: running and reading a BLAST-RADIUS PREVIEW. Non-admin for the
+  // same reason report generation is — the team lead asking "would this rule
+  // break my team" is exactly the person it exists for — and scoped inside by
+  // `resolvePolicySimulationScope`, which REFUSES (never silently narrows) a
+  // request naming subjects outside the caller's team visibility. Changing the
+  // preview-required-before-activate dial is conspicuously NOT here.
+  "POST /v1/policy-simulations",
+  "GET /v1/policy-simulations",
+  "GET /v1/policy-simulations/:id",
   // ADR-0058: EVALUATING a compliance pack and reading the resulting scorecard.
   // Same reasoning, same function: the handler applies `evaluateReportAccess`
   // — ADR-0047's, not a second copy — and every evidence collector builds its

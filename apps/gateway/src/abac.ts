@@ -68,6 +68,10 @@ import {
 import type { AbacDecision } from "@regulait/policy-kernel";
 import { projectClassifications } from "./projects.js";
 import type { AbacPrincipalContext } from "./abac-principal.js";
+import {
+  loadPolicySimulationSettings,
+  versionHasBlastRadiusPreview,
+} from "./policy-simulation.js";
 
 export type { AbacPrincipalContext };
 
@@ -622,6 +626,35 @@ export function registerAbacRoutes(app: FastifyInstance, db: Db): void {
       );
     if (!target) return reply.status(404).send({ error: "unknown_version" });
 
+    // ADR-0059 / ADR-0040's honest-risks note: activating a policy that can deny
+    // every governed call in the org must not be a one-click default. The
+    // BLAST-RADIUS PREVIEW of this EXACT version is the friction. It is recorded
+    // unconditionally — an un-previewed activation is permanently legible in the
+    // audit row either way — and it BLOCKS only where the deployment has turned
+    // the dial on, because refusing retroactively would break every install that
+    // already has policies and no simulation history.
+    const preview = await versionHasBlastRadiusPreview(db, target.id);
+    if (!preview.previewed) {
+      const settings = await loadPolicySimulationSettings(db);
+      if (settings.requirePreviewBeforeActivate) {
+        await audit(
+          req.authCtx.userId ?? null,
+          policyId,
+          "abac-activation-refused-no-preview",
+          `activation of '${policy.name}' version ${target.version} REFUSED: this deployment requires a blast-radius preview of the exact version being activated, and none exists`,
+          { name: policy.name, version: target.version, versionId: target.id },
+        );
+        return reply.status(409).send({
+          error: "blast_radius_not_previewed",
+          detail:
+            `no blast-radius preview exists for version ${target.version} of '${policy.name}'. ` +
+            `POST /v1/policy-simulations with policyVersionId=${target.id} to see who this would newly ` +
+            "block before it goes live.",
+          policyVersionId: target.id,
+        });
+      }
+    }
+
     const [previous] = policy.activeVersionId
       ? await db
           .select({ version: abacPolicyVersions.version })
@@ -639,8 +672,39 @@ export function registerAbacRoutes(app: FastifyInstance, db: Db): void {
       rollingBack
         ? `admin rolled ABAC policy '${policy.name}' back from version ${previous!.version} to version ${target.version} — version ${previous!.version} still exists and can be re-activated`
         : `admin activated version ${target.version} of ABAC policy '${policy.name}' — it now denies or pauses matching calls that the RBAC layer allows`,
-      { name: policy.name, from: previous?.version ?? null, to: target.version, rollback: rollingBack });
-    return { policyId, activeVersion: target.version, enabled: true, rollback: rollingBack };
+      {
+        name: policy.name,
+        from: previous?.version ?? null,
+        to: target.version,
+        rollback: rollingBack,
+        // ADR-0059: whether anyone previewed WHO this would newly block, before
+        // it went live. Recorded on every activation, previewed or not — the
+        // omission has to be as legible as the preview.
+        blastRadiusPreviewed: preview.previewed,
+        blastRadiusSimulationId: preview.latest?.id ?? null,
+        ...(preview.latest
+          ? {
+              blastRadiusNewlyDenied: preview.latest.newlyDenied,
+              blastRadiusNewlyApprovalRequired: preview.latest.newlyApprovalRequired,
+              blastRadiusAffectedUsers: preview.latest.affectedUsers,
+            }
+          : {}),
+      });
+    return {
+      policyId,
+      activeVersion: target.version,
+      enabled: true,
+      rollback: rollingBack,
+      blastRadiusPreviewed: preview.previewed,
+      blastRadiusSimulationId: preview.latest?.id ?? null,
+      ...(preview.previewed
+        ? {}
+        : {
+            warning:
+              "activated WITHOUT a blast-radius preview: nobody checked whose calls this newly blocks. " +
+              "The omission is recorded on the activation audit row.",
+          }),
+    };
   });
 
   /** Take a policy OUT of the active set without deleting any history. */

@@ -1,7 +1,9 @@
 # ADR-0059: Policy-simulation blast radius — impact set + differential replay before commit
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-08-01
+- **Amended**: 2026-08-02 — implemented as **migration 0071**. See the amendment at the foot of
+  this file for what is genuinely enforced, what is structural, and the honest limits.
 
 ## Context
 
@@ -152,3 +154,91 @@ the load after it goes live.
   future); decide whether to widen `audit_log` to raise replay fidelity, weighed against
   PII/retention; surface the impact-set drill-down in the admin SPA beside the existing
   Access-preview; converge with ADR-0040 (ABAC) and ADR-0048 (versioning) when they land.
+
+---
+
+## Amendment — 2026-08-02: implemented as migration 0071
+
+**Status: Accepted.** Shipped as `packages/shared/src/policy-simulation.ts` (pure),
+`apps/gateway/src/policy-simulation.ts` (gateway), migration
+`packages/db/migrations/0071_policy_simulation.sql`, a blast-radius panel added to the existing
+`apps/web/src/views/admin/governance/SimulationPage.tsx`, and the proof-by-attack suite
+`apps/gateway/src/policy-simulation.test.ts` (19 tests).
+
+### This is the consumer ADR-0040 promised
+
+ADR-0040 shipped the *hook* — `POST /v1/abac/simulate`, one `(user, server, tool)` tuple — and
+named this ADR as the intended consumer of Cedar's analyzability. `POST /v1/policy-simulations` is
+that consumer: given a **proposed policy version**, it dry-runs the candidate against **recorded
+history** (`audit_log`, with project attribution reconstructed from `usage_events`) and reports
+what it *would have* newly denied or newly sent to approval, before activation. Attribute assembly
+is `assembleAbacRequest` — the very function enforcement calls, reused rather than re-implemented,
+so the preview cannot drift from the gate.
+
+### Genuinely enforced (asserted by test, not by comment)
+
+- **Zero dispatches, proved with a counter.** A provider spy wraps `resolveModelProvider` and
+  counts every dispatch; simulating a *forbid-everything* candidate — the policy most likely to
+  tempt an implementation into re-executing something — leaves the count at exactly **0**, and the
+  file's closing assertion re-checks it after every simulation it ran. Structurally, the module
+  cannot dispatch: `executeGovernedDispatch` is not reachable from it.
+- **No mutation.** `usage_events` count unchanged, approvals queue empty, and
+  `abac_policies.active_version_id` / `enabled` byte-identical before and after. The **only** new
+  row is one `audit_log` entry recording that a preview happened, under which scope, over which
+  window — deliberate, because a preview reads other people's traffic.
+- **The blast radius is concrete.** The output names the affected users (with labels), the
+  projects (with names), the tools, and persists a bounded sample of the **specific calls** that
+  would flip, `allow → forbid`. The test asserts real user ids and real project names out of real
+  history, not a percentage.
+- **The numbers reconcile.** The bucket counts are checked against an **independent SQL count** of
+  the historical rows, computed in the test rather than read back from the preview, and a DB CHECK
+  makes the five buckets sum to `considered` at the storage layer.
+- **Entitlement-scoped the way ADR-0047 scopes reports.** A team lead's preview replays only their
+  own team's history — the other team's users are *absent from every bucket*, not merely hidden in
+  a UI. Explicitly naming an out-of-team subject is **refused** (never silently narrowed — a silent
+  narrowing would let someone probe team membership by watching counts move) and the refusal is an
+  audit row. A narrower caller also cannot read a wider stored preview back out of the archive.
+- **Friction on activation.** Every activation records `blastRadiusPreviewed` on its audit row and
+  returns a warning when false; with `policy_simulation_settings.requirePreviewBeforeActivate` on,
+  the activation is **refused** (409) until that exact version has been previewed. Composed with
+  ADR-0048 versioning: a simulation always targets an immutable `abac_policy_versions` row, and the
+  FK is `RESTRICT` so the artifact an admin relied on cannot be deleted underneath the preview.
+
+### Structural, not behavioural
+
+- **The impact set (§1, "WHO") is delivered as the replay's named output, not as a separate
+  membership expansion.** The blast radius names the users, projects and tools that actually appear
+  in flipped history, which is strictly more concrete than expanding a rule's scope to its
+  membership — but it therefore says nothing about a subject who *would* be in scope and simply had
+  no traffic in the window. Expanding to agents, workflows and in-flight orchestration runs (§1 and
+  the pillar-7 composition note) is **not built**.
+- **The candidate is an ABAC policy version only.** §1's other deltas — a proposed
+  `approval_rules` / `rate_limits` / `data_scope_rules` row, a role grant — are not simulable yet.
+  The classifier and the storage shape are delta-agnostic, so adding them is a new candidate
+  evaluator rather than a rearchitecture, but today only the Cedar path exists.
+- **Everything runs synchronously under a row cap.** §"bounded cost" asks for large windows to run
+  asynchronously; there is no job runner here (the same admission ADR-0044 through ADR-0049 made),
+  so the caps (180 days, 20 000 rows) are the whole mitigation. When the cap is hit the run is
+  flagged `capped` and the counts are reported as a **lower bound** rather than a total.
+
+### Honest limits
+
+- **Replay fidelity is bounded, and the bound is derived from the candidate's own source.**
+  `analyzeReplayFidelity` scans the Cedar text for attributes the audit trail cannot reproduce —
+  decision-time rate counters, session origin, MFA state, and anything project-derived — and stamps
+  the caveats on the stored run. The caller never gets to assert its own fidelity.
+- **Project attribution is reconstructed, not recorded.** `audit_log` has no project column (its
+  FK-free, deletion-surviving shape is deliberate), so the project is inferred from `usage_events`
+  by `(user, server, tool)` inside the same window: exact when a user drives one tool from one
+  project, best-effort otherwise, and flagged whenever the candidate actually reads a
+  project-derived attribute. Widening `audit_log` instead is the PII/retention decision this ADR
+  deliberately deferred.
+- **`newly_allowed` is structurally always zero** for an ABAC candidate, because a Cedar `permit`
+  is not a grant (ADR-0040). The bucket is reported rather than hidden so the zero reads as a
+  property of the model instead of an absence of evidence.
+- **`/v1/evaluate` still writes its one audit row.** The follow-up asking whether the single-tuple
+  probe should also become side-effect-free is *not* resolved here; the blast-radius path simply
+  has its own pure path, which is what the ADR required.
+- **A preview is of the recorded past, never a promise about future traffic.** That sentence ships
+  on every response as `REPLAY_FIDELITY_DISCLOSURE` and renders on the admin screen next to the
+  numbers.
