@@ -377,6 +377,12 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/servers/:serverId/tools": "internal",
   "PATCH /v1/servers/:serverId/tools/:toolName/price": "internal",
   "GET /v1/setup/status": "internal",
+  // ADR-0063 — REGULAIT_DATA_KEY custody. Internal: an operator/admin console
+  // surface about this deployment's own envelope key, not an integration
+  // contract anyone builds against.
+  "GET /v1/security/data-key": "internal",
+  "GET /v1/security/data-key/attestations": "internal",
+  "POST /v1/security/data-key/attestations": "internal",
   // ADR-0061 — ChatOps approvals. Internal: an admin console surface plus a
   // provider-shaped callback whose contract is Slack's, not ours.
   "GET /v1/chatops/connections": "internal",
@@ -846,6 +852,9 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/servers/:serverId/tools": "servers",
   "PATCH /v1/servers/:serverId/tools/:toolName/price": "servers",
   "GET /v1/setup/status": "setup",
+  "GET /v1/security/data-key": "security",
+  "GET /v1/security/data-key/attestations": "security",
+  "POST /v1/security/data-key/attestations": "security",
   "GET /v1/chatops/connections": "chatops",
   "POST /v1/chatops/connections": "chatops",
   "DELETE /v1/chatops/connections/:connectionId": "chatops",

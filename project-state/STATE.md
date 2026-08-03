@@ -1,6 +1,6 @@
 ---
 phase: eight-pillars-shipped-productizing
-last_updated: 2026-08-02
+last_updated: 2026-08-03
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -21,9 +21,25 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 **RegulAIt is a working, deployed product, not a scaffold.** All eight P0 pillars have shipped
-functionality; the gateway suite is at **1,650 tests** across 102 files (policy-kernel 129,
-workflow-kernel 39, `packages/shared` 360); the schema is at **migration 0074**; and **every ADR
-is now Accepted — 0001 through 0062, with nothing left Proposed**.
+functionality; the gateway suite is at **1,689 tests** across 103 files (policy-kernel 129,
+workflow-kernel 39, `packages/shared` 360, model-provider 122); the schema is at **migration
+0075**; and **every ADR is now Accepted — 0001 through 0063, with nothing left Proposed**.
+**[ADR-0063](../docs/decisions/0063-data-key-custody.md) (migration 0075) closed the top deferred
+security item — the `REGULAIT_DATA_KEY` custody gap — without weakening the decision that created
+it.** ADR-0035 deliberately keeps the envelope key OUT of the backup, which is correct and
+unchanged; what was missing was the procedure around it. The gateway now derives a **non-secret**
+fingerprint of the key (`dk1:` + truncated `HMAC-SHA256(key, "regulait/data-key-fingerprint/v1")`),
+records it in `data_key_state`, prints it in the boot posture block beside proxy/HSTS/egress, and
+writes it into every backup's manifest, S3 object metadata, `RESULT=` line and status file — so a
+restore runbook answers *"do I have the right key for this dump?"* from `head-object`, **before**
+restoring. On boot it records the fingerprint on first run (probing real stored ciphertext first,
+so the very first boot after upgrade cannot record the WRONG key), verifies it thereafter, and
+**REFUSES TO START on a mismatch** — the restore-onto-a-new-box case — naming both fingerprints.
+Custody itself is an append-only, audited **attestation** whose limit is stated wherever it
+appears: it records a human's claim and cannot verify custody; what it buys is that its ABSENCE is
+visible on the boot line, in the portal, and in every backup run plus a separate `DataKeyAttested`
+metric. Full re-encryption under a new key is **named follow-up scope, deliberately not
+half-built**.
 **[ADR-0062](../docs/decisions/0062-mode-scoped-egress.md) (migration 0074) closed the last open
 finding in [docs/deployment/DATA_BOUNDARY.md](../docs/deployment/DATA_BOUNDARY.md) §4**: the
 ADR-0034/0043 egress guard adjudicated only admin-*typed* URLs, so on an air-gapped box a stored

@@ -205,6 +205,7 @@ import {
   startAuditPruneScheduler,
 } from "./org-settings.js";
 import { registerSetupStatusRoutes } from "./setup-status.js";
+import { registerDataKeyRoutes } from "./data-key.js";
 import { WEB_UI_ROUTES, defaultWebDistDir, registerWebServing } from "./web-serving.js";
 // ADR-0053 — the auth-class sets the two gates below branch on. They live in
 // their own module so the published OpenAPI document derives each route's
@@ -2689,6 +2690,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // Getting-started journey (admin-only via the default gate): one read-only
   // aggregation of real readiness signals the /admin checklist card renders.
   registerSetupStatusRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0063 — REGULAIT_DATA_KEY custody. Admin-only through the default gate.
+  // The fingerprint itself is not secret (that is the whole design), but "which
+  // key does this deployment's ciphertext belong to, and has any human said
+  // they hold it" is org-wide custody posture, not member-visible. The BOOT
+  // gate that refuses a mismatched key lives on the boot path (boot.ts), not
+  // here: constructing an app is not the act of putting a deployment in
+  // service, and a control that fired on construction is one every fixture
+  // would have to work around.
+  registerDataKeyRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0054 — the IN-PRODUCT first-run experience (the installer, ADR-0041,
   // owns deployment bring-up; nothing here duplicates it) plus the
   // migration/import tooling. Admin-only through the DEFAULT gate: every route

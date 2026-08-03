@@ -30,8 +30,35 @@ copy-paste. Read the box at the top before you type anything.
 > ```
 >
 > The key is deliberately **not** in the backup bucket — storing it beside the
-> ciphertext it protects would defeat the point. Recording it out-of-band is a
-> known open follow-up ([ADR-0035](../decisions/0035-nightly-pg-dump-to-s3.md)).
+> ciphertext it protects would defeat the point
+> ([ADR-0035](../decisions/0035-nightly-pg-dump-to-s3.md)).
+>
+> ### Since ADR-0063 you no longer have to guess whether you have the right key
+>
+> Every backup now carries a **non-secret fingerprint** of the key its ciphertext
+> was written under — `dk1:` followed by 32 hex characters. It is a truncated
+> HMAC, so it identifies the key and reveals nothing about it.
+>
+> **Check it BEFORE you restore, not after.** Without downloading the dump:
+>
+> ```bash
+> aws s3api head-object --bucket <bucket> \
+>   --key postgres/<host>/<stamp>/regulait-<stamp>.dump \
+>   --region us-east-1 --query Metadata
+> # -> { "datakey": "dk1:3f2a…", "datakeycustody": "attested", "sha256": "…" }
+> ```
+>
+> or from the sidecar: `manifest.json` → `data_key_fingerprint`.
+>
+> Compare that to the key you are about to configure. The gateway prints the
+> same string at boot (`data key: dk1:…`) and serves it at
+> `GET /v1/security/data-key`, and the admin portal renders it under
+> **Settings → Data key custody**.
+>
+> **If they differ, the gateway will refuse to start.** That is deliberate — see
+> [ADR-0063](../decisions/0063-data-key-custody.md). A gateway that boots with
+> the wrong key looks completely healthy and then fails every decryption days
+> later, by which time the old box is usually gone.
 
 ---
 
@@ -183,6 +210,11 @@ docker exec -i "$CID" sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" dropdb -U "$POSTGRE
 
 1. **Read the box at the top of this file.** If the old box is reachable at all,
    get `REGULAIT_DATA_KEY` off it first. Without it, credentials are gone.
+   Check which key you need first — it takes one command and costs nothing:
+   ```bash
+   aws s3api head-object --bucket <bucket> --key <the dump key> \
+     --region us-east-1 --query 'Metadata.datakey'
+   ```
 2. Rebuild: `terraform apply` in `infra/environments/regulait-dev-app`, upload
    the source bundle, wait for `docker compose up` to finish (watch
    `/var/log/app-boot.log`).
@@ -195,8 +227,29 @@ docker exec -i "$CID" sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" dropdb -U "$POSTGRE
    ```
 4. Copy the dump onto the box and follow section II from step 2.
 5. Re-install the backup timer (section VI) — a new instance has no timer.
-6. If you did **not** rescue the key: everything restores except credentials.
-   Re-enter every connector token, model API key and TOTP enrolment by hand.
+6. **Bring the gateway up and read its `data key:` boot line.** If you put back
+   the wrong key, it will not start — it prints both fingerprints and stops.
+   That is the intended behaviour, not a bug: fix the key and start again.
+7. If you did **not** rescue the key: everything restores except credentials.
+   The gateway will refuse to start against the restored database, because the
+   new key does not match the recorded fingerprint. Declare that deliberately —
+   this is a key rotation with no re-encryption, and it is a decision, not a
+   default:
+   ```bash
+   # the fingerprint the refusal names as `recorded`
+   REGULAIT_DATA_KEY_ROTATED_FROM=dk1:<the old fingerprint>
+   ```
+   Put that in `/opt/app/.env` (or the compose override) alongside the NEW
+   `REGULAIT_DATA_KEY`, start the gateway once, then **remove it** — it has been
+   consumed and the acceptance is in the audit log with both fingerprints.
+   Every connector token, model API key and TOTP enrolment must then be
+   re-entered by hand. Nothing re-encrypts the old ciphertext; it is dead.
+8. **Attest the new key** so this deployment does not repeat the exercise:
+   ```bash
+   curl -sS "$API/v1/security/data-key/attestations" \
+     -H "Authorization: Bearer <admin key>" -H 'Content-Type: application/json' \
+     -d '{"method":"password_manager","locationHint":"1Password vault: Platform Ops","confirmRecordedOutOfBand":true}'
+   ```
 
 ---
 
@@ -313,12 +366,29 @@ rehearsal: pg_restore completed clean
 rehearsal: table | source rows | restored rows
   OK   audit_log | 87 | 87
   …
+rehearsal: the restored copy needs data key dk1:3f2a… (custody: attested)
 rehearsal: scratch database dropped
-RESULT=OK reason=rehearsal-70-tables-matched
+RESULT=OK reason=rehearsal-70-tables-matched datakey=dk1:3f2a… custody=attested
 ```
 
 Any `DIFF` line, or `RESULT=FAIL`, means the backup you are relying on is not
 good. Treat it as an incident.
+
+`custody=UNATTESTED` is a **separate** incident of its own, and the job says so
+loudly in its log, in `manifest.json`, in the status file and as a
+`Backup/DataKeyAttested` CloudWatch datapoint of `0`. It means the dump is
+verified and may still be **unrestorable**, because nobody has recorded the key
+that decrypts its credentials anywhere but on this box. Fix it in one call:
+
+```bash
+curl -sS "$API/v1/security/data-key" -H "Authorization: Bearer <admin key>"   # read the fingerprint
+# record it out of band, THEN:
+curl -sS "$API/v1/security/data-key/attestations" \
+  -H "Authorization: Bearer <admin key>" -H 'Content-Type: application/json' \
+  -d '{"method":"password_manager","locationHint":"1Password vault: Platform Ops","confirmRecordedOutOfBand":true}'
+```
+
+`sudo bash pg-backup.sh --check` prints the live custody state at any time.
 
 ---
 
@@ -326,6 +396,10 @@ good. Treat it as an incident.
 
 - [ADR-0035](../decisions/0035-nightly-pg-dump-to-s3.md) — why this shape, what
   is not covered, the `REGULAIT_DATA_KEY` dependency
+- [ADR-0063](../decisions/0063-data-key-custody.md) — the key fingerprint, why a
+  mismatched key REFUSES to start rather than booting, the custody attestation
+  and its honest limits, and why full re-encryption is named follow-up scope
+  rather than half-built
 - [ADR-0032](../decisions/0032-scheduled-power-off-dev-infra.md) → [POWER_SCHEDULE.md](POWER_SCHEDULE.md)
   — the power window the schedule has to fit inside
 - `infra/modules/backup-target-s3/README.md` — the bucket/IAM threat model

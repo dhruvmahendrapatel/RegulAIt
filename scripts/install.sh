@@ -257,6 +257,35 @@ data_key_problem() {
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# ADR-0063 — the key's NON-SECRET fingerprint, computed identically to
+# apps/gateway/src/data-key.ts:
+#
+#   "dk1:" + first 16 bytes of HMAC-SHA256(key = the raw key bytes,
+#                                          msg = "regulait/data-key-fingerprint/v1")
+#
+# The installer prints this beside the key so an operator records BOTH: the
+# secret, and the string that lets them later prove they have the right one
+# without revealing it. `-macopt hexkey:` is what makes openssl treat the value
+# as 32 raw bytes rather than 64 ASCII characters — get that wrong and this
+# prints a plausible-looking value the gateway will never agree with.
+# ---------------------------------------------------------------------------
+DATA_KEY_FINGERPRINT_DOMAIN="regulait/data-key-fingerprint/v1"
+
+data_key_fingerprint() {
+  local k fp
+  k="$(printf '%s' "$1" | tr 'A-F' 'a-f')"
+  have openssl || { echo "(openssl unavailable — read it from the gateway boot log)"; return 0; }
+  fp="$(printf '%s' "$DATA_KEY_FINGERPRINT_DOMAIN" \
+        | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${k}" 2>/dev/null \
+        | sed 's/.*= //' | tr -d '\r\n' | cut -c1-32)"
+  if [ ${#fp} -ne 32 ]; then
+    echo "(could not compute — read it from the gateway boot log)"
+  else
+    echo "dk1:${fp}"
+  fi
+}
+
 # 0 = listening, 1 = free, 2 = could not tell.
 # Three probes, in decreasing fidelity. The last is bash's /dev/tcp, which only
 # proves something ACCEPTS a connection on loopback — weaker than reading the
@@ -422,6 +451,25 @@ else
   The key is written to $ENV_FILE and nowhere else. That file is on the same
   disk as the database it protects, which is exactly why an out-of-band copy is
   not optional.
+
+  ${C_BLD}Its fingerprint (ADR-0063) is:${C_RST}
+
+    ${C_BLD}$(data_key_fingerprint "$DATA_KEY")${C_RST}
+
+  That string is NOT secret — it is a truncated HMAC that identifies the key and
+  reveals nothing about it. Record it beside the key. The gateway prints the same
+  value at every boot, writes it into every backup's metadata, and REFUSES TO
+  START if the key it is given does not match the one this deployment's data was
+  encrypted under. So a restore onto a new box tells you immediately that you
+  have the wrong key, instead of coming up healthy and failing every decryption
+  a week later.
+
+  Once you have stored the key somewhere that is not this machine, say so:
+    Admin -> Settings -> Data key custody, or
+    POST /v1/security/data-key/attestations
+
+  Until somebody does, every backup run reports custody=UNATTESTED — because an
+  unattested backup is a backup that may not be restorable.
 
 BANNER
   if [ "$ASSUME_YES" != "1" ] && [ -t 0 ]; then
@@ -604,6 +652,10 @@ COMPOSE_PROJECT_NAME=$PROJECT
 # REGULAIT_DATA_KEY: AES-256-GCM key for every stored credential. Losing it
 # makes every credential ciphertext permanently undecryptable — see
 # docs/deployment/BACKUP_RESTORE.md. KEEP AN OUT-OF-BAND COPY.
+# ADR-0063: its non-secret fingerprint is $(data_key_fingerprint "$DATA_KEY").
+# The gateway records that value and REFUSES TO START under a different key.
+# A deliberate rotation is declared with REGULAIT_DATA_KEY_ROTATED_FROM=<old fp>
+# (single-use; remove it once consumed). Nothing re-encrypts existing ciphertext.
 REGULAIT_DATA_KEY=$DATA_KEY
 # Authenticates as a full admin with no user identity. Used ONCE to create the
 # first real admin, then should be removed from this file and the stack
@@ -850,6 +902,9 @@ cat <<SUMMARY
   ${C_BLD}RECORD OUT-OF-BAND (not on this machine)${C_RST}
     * REGULAIT_DATA_KEY  — without it a restore onto a new host leaves EVERY
                            stored credential permanently undecryptable.
+                           Fingerprint (not secret, record it alongside):
+                           $(data_key_fingerprint "$DATA_KEY")
+                           Then attest it: Admin -> Settings -> Data key custody.
 SUMMARY
 if [ "$SHOW_SECRETS" = "1" ]; then printf '                           %s\n' "$DATA_KEY"; fi
 cat <<SUMMARY

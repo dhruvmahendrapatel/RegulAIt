@@ -35,6 +35,37 @@ S3 bucket as your database backups defeats the entire envelope split.
 
 Generate one yourself with `openssl rand -hex 32`.
 
+### After the first boot: check the fingerprint and attest it (ADR-0063)
+
+The gateway derives a **non-secret fingerprint** of the key (`dk1:` + 32 hex, a truncated HMAC —
+it identifies the key and reveals nothing about it), records it, and prints it at every boot:
+
+```
+data key:  dk1:3f2a9c11d0be47e5a8c6210fb47d9e02 [recorded] — NO CUSTODY ATTESTATION ON FILE — …
+```
+
+Two things follow:
+
+1. **That string goes into every backup** (S3 object metadata `datakey`, and
+   `manifest.json` → `data_key_fingerprint`), so a future restore can check *before* restoring
+   whether the key on hand is the right one.
+2. **Starting the gateway with a different key against this database will REFUSE**, naming both
+   fingerprints. That is the point — see [ADR-0063](../decisions/0063-data-key-custody.md).
+
+Once the key is filed somewhere that is not this machine, say so. This is the step that turns the
+banner into a record:
+
+```bash
+curl -sS "$API/v1/security/data-key/attestations" \
+  -H "Authorization: Bearer <admin key>" -H 'Content-Type: application/json' \
+  -d '{"method":"password_manager","locationHint":"1Password vault: Platform Ops","confirmRecordedOutOfBand":true}'
+```
+
+or **Admin → Settings → Data key custody**. RegulAIt records your *claim*; it cannot verify custody
+and does not pretend to. What it does guarantee is that until somebody makes that claim, every
+backup run reports `custody=UNATTESTED` and the portal shows an alarm — because an unattested
+backup is a backup that may not be restorable.
+
 ---
 
 ## Requirements
