@@ -24,9 +24,11 @@
  *     `validUntil < now` on every call. The `expired` STATUS in the database is
  *     a cache the sweep refreshes for display and for the queue; the gate never
  *     reads it. So a deployment that never runs the sweep still stops
- *     dispatching under a lapsed risk acceptance. See the amendment: there is
- *     NO in-process scheduler in this codebase, and this design is exactly why
- *     that is survivable.
+ *     dispatching under a lapsed risk acceptance. ADR-0064 later added an
+ *     in-process scheduler that CAN drive the sweep — and this property is
+ *     precisely what makes that addition safe: turning the scheduler on buys
+ *     timeliness of the displayed status, never the enforcement itself, and
+ *     turning it off cannot un-enforce anything.
  *
  * WHAT THIS FILE DOES NOT DO — stated here because a governance product that
  * overstates itself is worse than one that ships less: it does not MEASURE bias
@@ -272,17 +274,24 @@ export async function applyModelCardApprovalDecision(
 // The expiry sweep
 // ---------------------------------------------------------------------------
 
+export const MRM_EXPIRY_SWEEP_NOTE =
+  "This refreshes the STORED status of lapsed sign-offs. It is a display/consistency job, not a " +
+  "control: dispatch enforcement recomputes expiry from validUntil on every call, so a lapse blocks " +
+  "whether or not this has run. ADR-0064's scheduler drives it when switched on (REGULAIT_SCHEDULER=on); " +
+  "this endpoint calls exactly the same function on demand.";
+
 /**
  * Flip every lapsed `approved` record to `expired` and audit each flip.
  *
- * READ THIS BEFORE TRUSTING IT: nothing in this codebase calls this on a timer.
- * There is no in-process scheduler and no job runner here. This exists so an
- * operator or an external cron can keep the STORED status (and therefore the
- * registry screen and any query filtering on `status`) truthful. Enforcement
- * does NOT depend on it — `mrmDispatchGate` recomputes expiry from
- * `validUntil` on every dispatch, so a lapse blocks whether or not this ever
- * runs. That split is deliberate: the sweep is a display/consistency job, the
- * gate is the control.
+ * READ THIS BEFORE TRUSTING IT: ENFORCEMENT DOES NOT DEPEND ON THIS FUNCTION.
+ * `mrmDispatchGate` recomputes expiry from `validUntil` on every dispatch, so a
+ * lapse blocks whether or not this has ever run. That split is deliberate and
+ * did not change when ADR-0064 gave the sweep a real driver: the sweep is a
+ * display/consistency job, the gate is the control.
+ *
+ * Two things call this, and they call THIS, not a copy: the ADR-0064
+ * `mrm-expiry-sweep` job (when REGULAIT_SCHEDULER=on, which is OFF by default)
+ * and `POST /v1/mrm/expiry-sweep`, which remains the manual/cron door.
  */
 export async function runMrmExpirySweep(
   db: Db,
@@ -393,9 +402,10 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
       revoked: count("revoked"),
       note:
         "Bias/fairness here is a RECORDED DECLARATION, not a measurement — RegulAIt does not run " +
-        "fairness tests. Expiry is enforced at dispatch by recomputing validUntil, not by a " +
-        "background job: there is no in-process scheduler, so POST /v1/mrm/expiry-sweep exists for " +
-        "an operator or cron to keep the stored statuses truthful.",
+        "fairness tests. Expiry is ENFORCED AT DISPATCH by recomputing validUntil, never by a " +
+        "background job. ADR-0064's scheduler keeps the STORED statuses truthful when it is switched " +
+        "on, and POST /v1/mrm/expiry-sweep does the same on demand; a deployment running neither " +
+        "still refuses a lapsed card at dispatch.",
     };
   });
 
@@ -761,19 +771,15 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
   });
 
   /**
-   * The sweep, as an ENDPOINT — because there is no scheduler in this codebase
-   * to hang it on, and pretending otherwise would be the exact dishonesty this
-   * project refuses. An operator or an external cron calls this; enforcement
-   * does not depend on it having run.
+   * The sweep, as an ENDPOINT. ADR-0064's scheduler drives the SAME function
+   * when it is switched on; this stays the manual/on-demand door. Enforcement
+   * does not depend on either having run.
    */
   app.post("/v1/mrm/expiry-sweep", async (req) => {
     const result = await runMrmExpirySweep(db, { actorUserId: req.authCtx.userId ?? null });
     return {
       ...result,
-      note:
-        "This endpoint refreshes the STORED status of lapsed sign-offs. Nothing calls it on a timer — " +
-        "there is no in-process scheduler here. Dispatch enforcement recomputes expiry from validUntil " +
-        "on every call, so a lapse blocks whether or not this has run.",
+      note: MRM_EXPIRY_SWEEP_NOTE,
     };
   });
 

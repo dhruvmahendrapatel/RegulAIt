@@ -706,6 +706,16 @@ export const auditLog = pgTable(
         // deployment would not come up is IN the trail rather than only in a
         // console someone had to be watching. Plain text column — no DDL.
         "data_key",
+        // ADR-0064: every pass of every scheduled sweep — start, outcome, and
+        // the count of what it touched — plus an admin enabling/disabling a job
+        // or changing its cadence. The row that matters is the FAILURE: a sweep
+        // that has not run for a month, on a product whose pitch is that
+        // nothing happens unobserved, must be findable in the same trail as
+        // everything else rather than in a separate health endpoint. The
+        // EFFECTS a sweep produces (an expired model card, a breached SLA, a
+        // generated report) keep auditing on their own objectType, so "what
+        // happened to this approval" stays one query. Plain text — no DDL.
+        "scheduler_job",
       ],
     })
       .notNull()
@@ -5302,3 +5312,124 @@ export const dataKeyAttestations = pgTable(
 
 export type DataKeyStateRow = typeof dataKeyState.$inferSelect;
 export type DataKeyAttestationRow = typeof dataKeyAttestations.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0064 (migration 0076) — THE IN-PROCESS SCHEDULER
+// ---------------------------------------------------------------------------
+
+/** the verdict of one pass. `skipped` is a first-class outcome, not a failure:
+ * another instance held the lease, or the job was disabled between the tick and
+ * the claim. "The other box ran it" must not look like "nothing ran it". */
+export const SCHEDULER_OUTCOMES = ["running", "ok", "failed", "skipped"] as const;
+export type SchedulerOutcome = (typeof SCHEDULER_OUTCOMES)[number];
+
+export const SCHEDULER_TRIGGERS = ["schedule", "manual"] as const;
+export type SchedulerTrigger = (typeof SCHEDULER_TRIGGERS)[number];
+
+/**
+ * One row per registered job — AND the lock.
+ *
+ * The claim is a short transaction that takes `FOR UPDATE` on this row, checks
+ * `enabled`/`next_due_at`/the lease, and writes a lease before committing. Two
+ * gateway instances pointed at one database therefore cannot both run the same
+ * job: the loser observes the winner's lease and records a `skipped` run.
+ * Correctness does not depend on there being exactly one process.
+ *
+ * `running` is paired with `lease_expires_at` deliberately — a boolean alone
+ * would strand a job forever if its holder was SIGKILLed mid-pass.
+ */
+export const schedulerJobs = pgTable(
+  "scheduler_jobs",
+  {
+    /** the STABLE job id chosen in code (e.g. `mrm-expiry-sweep`), used as the
+     * audit ruleId suffix. Text rather than uuid so a run ledger reads as
+     * English. */
+    name: text("name").primaryKey(),
+    /** synced from the code definition on every boot, so the row can never
+     * carry a description the code has moved on from */
+    description: text("description").notNull().default(""),
+    /** which ADR this job discharges */
+    adr: text("adr"),
+    /** off here = the tick loop skips this job even while the scheduler runs.
+     * Defaults on: the SCHEDULER is what is off by default, not the jobs. */
+    enabled: boolean("enabled").notNull().default(true),
+    /** a plain interval, not a cron expression: a parser is a dependency and an
+     * expression is a thing to get wrong, and no sweep here needs "the third
+     * Tuesday". An operator who needs wall-clock precision still has the
+     * endpoint and their own cron. */
+    intervalSeconds: integer("interval_seconds").notNull(),
+    /** the single source of "is it due" — read inside the claim transaction, so
+     * two instances cannot disagree about it */
+    nextDueAt: timestamp("next_due_at", { withTimezone: true }).notNull().defaultNow(),
+    lastRunAt: timestamp("last_run_at", { withTimezone: true }),
+    lastFinishedAt: timestamp("last_finished_at", { withTimezone: true }),
+    lastOutcome: text("last_outcome", { enum: ["ok", "failed", "skipped"] }),
+    lastError: text("last_error"),
+    lastItemsProcessed: integer("last_items_processed"),
+    lastDurationMs: integer("last_duration_ms"),
+    running: boolean("running").notNull().default(false),
+    /** the per-boot instance id of whoever holds the lease */
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    runs: integer("runs").notNull().default(0),
+    failures: integer("failures").notNull().default(0),
+    /** the number an alert should watch — a job red every night for a month is
+     * a different fact from one red row */
+    consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("scheduler_jobs_interval_check", sql`${t.intervalSeconds} >= 1`),
+    check(
+      "scheduler_jobs_last_outcome_check",
+      sql`${t.lastOutcome} IS NULL OR ${t.lastOutcome} IN ('ok', 'failed', 'skipped')`,
+    ),
+  ],
+);
+
+/**
+ * THE RUN LEDGER — one row per execution ATTEMPT, including the skipped ones.
+ *
+ * This table exists so that "did the MRM sweep actually run last night, and
+ * what did it do?" is answerable from the database rather than from a log
+ * someone had to be tailing. A row left at `running` with a NULL `finished_at`
+ * and a stale `started_at` is a process that died mid-pass — a diagnosis a
+ * design that only wrote the row on success could never offer.
+ */
+export const schedulerRuns = pgTable(
+  "scheduler_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    jobName: text("job_name")
+      .notNull()
+      .references(() => schedulerJobs.name, { onDelete: "cascade" }),
+    /** both triggers go through the SAME claim and the SAME job body, so a
+     * "run now" cannot race a scheduled pass */
+    trigger: text("trigger", { enum: SCHEDULER_TRIGGERS }).notNull().default("schedule"),
+    instanceId: text("instance_id").notNull(),
+    initiatedByUserId: uuid("initiated_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    durationMs: integer("duration_ms"),
+    outcome: text("outcome", { enum: SCHEDULER_OUTCOMES }).notNull().default("running"),
+    /** whatever the job counted — the number that answers "and what did it do?" */
+    itemsProcessed: integer("items_processed").notNull().default(0),
+    detail: jsonb("detail").$type<Record<string, unknown>>().notNull().default({}),
+    error: text("error"),
+  },
+  (t) => [
+    check(
+      "scheduler_runs_outcome_check",
+      sql`${t.outcome} IN ('running', 'ok', 'failed', 'skipped')`,
+    ),
+    check("scheduler_runs_trigger_check", sql`${t.trigger} IN ('schedule', 'manual')`),
+    index("scheduler_runs_job_idx").on(t.jobName, t.startedAt),
+    index("scheduler_runs_started_idx").on(t.startedAt),
+  ],
+);
+
+export type SchedulerJobRow = typeof schedulerJobs.$inferSelect;
+export type SchedulerRunRow = typeof schedulerRuns.$inferSelect;

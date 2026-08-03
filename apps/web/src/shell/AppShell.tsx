@@ -174,6 +174,11 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // under Compliance because it is a property of THIS installation, and it
       // is the one page whose absence of a record is itself the finding.
       { label: "Data key custody", to: "/admin/data-key" },
+      // ADR-0064 — the six governance sweeps and whether anything is actually
+      // driving them. In Settings for the same reason the data key is: it is a
+      // property of THIS installation, and the page whose row of null
+      // timestamps is itself the finding.
+      { label: "Scheduled jobs", to: "/admin/scheduler" },
       { label: "First-run setup", to: "/admin/first-run" },
       { label: "Getting started", to: "/admin/setup" },
     ],

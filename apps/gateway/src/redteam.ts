@@ -50,11 +50,16 @@
  *   probes ride ADR-0044's `EvalJudge` interface unchanged and are
  *   mechanism-proven, judgment-unverified.
  *
- *   NOT BUILT: there is still no in-process scheduler anywhere in this codebase
- *   (the same disclosure ADR-0044 through ADR-0049 made). "Continuous" here
- *   means an operator or cron drives `POST /v1/redteam/runs` with
- *   `trigger: 'scheduled'`; the run records which trigger fired it. Nothing in
- *   this process wakes itself up.
+ *   SCHEDULING (was NOT BUILT, now is — ADR-0064): this codebase has an
+ *   in-process scheduler, OFF by default. When it is switched on
+ *   (REGULAIT_SCHEDULER=on) the `redteam-sweep` job drives
+ *   `runScheduledRedTeamSweep` below, which re-probes the pairs a human has
+ *   already chosen to probe, under that human's own entitlements. When it is
+ *   off, "continuous" still means an operator or cron — now against
+ *   `POST /v1/redteam/scheduled-sweep`, which calls the identical function, or
+ *   `POST /v1/redteam/runs` for a single pair. `GET /v1/redteam/attack-classes`
+ *   reports which of those two worlds this deployment is in rather than
+ *   assuming.
  */
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
@@ -108,6 +113,7 @@ import {
 } from "@regulait/shared";
 import { runEvalSuite, type EvalRunOutcome } from "./evals.js";
 import { assertProjectAttribution } from "./projects.js";
+import { resolveSchedulerConfig } from "./scheduler.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -559,6 +565,103 @@ export async function runRedTeamSuite(
 }
 
 // ---------------------------------------------------------------------------
+// ADR-0057 — THE SCHEDULED SWEEP
+// ---------------------------------------------------------------------------
+
+export const REDTEAM_SWEEP_NOTE =
+  "The sweep re-probes every (published library × agent) pair that has ALREADY been probed at least " +
+  "once, as the user who ran the most recent probe of that pair — so it never exceeds that person's " +
+  "entitlements and never mints an identity of its own. It does NOT invent new pairs: a library nobody " +
+  "has ever pointed at an agent is not something a timer should start pointing. A pair whose last " +
+  "initiator is gone is SKIPPED and said so. Driven by ADR-0064's scheduler when it is on, and by this " +
+  "endpoint otherwise. Green still never means safe — see the coverage disclosure.";
+
+export interface RedTeamSweepResult {
+  ran: Array<{ libraryId: string; agentId: string; runId: string; regression: boolean; gatePassed: boolean | null }>;
+  skipped: Array<{ libraryId: string; agentId: string | null; reason: string }>;
+}
+
+/**
+ * ONE PASS of ADR-0057's "continuous" red teaming.
+ *
+ * ADR-0057 accepted the `scheduled` trigger and then disclosed that nothing
+ * drives it — "continuous" meant "an operator or cron". ADR-0064 supplies the
+ * driver. This function adds NO probing logic: it decides WHICH pairs to
+ * re-probe and hands each to `runRedTeamSuite` — the same function
+ * `POST /v1/redteam/runs` calls, which itself goes through `runEvalSuite` and
+ * therefore through the ordinary governed dispatch core.
+ *
+ * IT ONLY RE-PROBES WHAT A HUMAN ALREADY CHOSE TO PROBE. Enumerating every
+ * library against every agent would have a timer start spending money and
+ * sending adversarial prompts at pairings nobody selected. The prior-run set is
+ * the record of human intent, and the sweep stays inside it.
+ */
+export async function runScheduledRedTeamSweep(
+  db: Db,
+  dataKey: string | undefined,
+): Promise<RedTeamSweepResult> {
+  const published = await db
+    .select()
+    .from(redteamLibraries)
+    .where(eq(redteamLibraries.status, "published"));
+  const publishedIds = new Set(published.map((l) => l.id));
+
+  // newest first, so the FIRST row seen for a pair is its most recent probe —
+  // and therefore the identity the sweep inherits
+  const prior = await db.select().from(redteamRuns).orderBy(desc(redteamRuns.startedAt));
+
+  const ran: RedTeamSweepResult["ran"] = [];
+  const skipped: RedTeamSweepResult["skipped"] = [];
+  const seen = new Set<string>();
+
+  for (const run of prior) {
+    if (!publishedIds.has(run.libraryId)) continue;
+    if (!run.agentId) continue;
+    const key = `${run.libraryId}:${run.agentId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    if (!run.initiatedByUserId) {
+      skipped.push({
+        libraryId: run.libraryId,
+        agentId: run.agentId,
+        reason:
+          "the last probe's initiating user is gone — the sweep will not send adversarial prompts as " +
+          "somebody else, so run this pair manually once to re-establish whose authority it uses",
+      });
+      continue;
+    }
+
+    const outcome = await runRedTeamSuite(db, dataKey, {
+      libraryId: run.libraryId,
+      agentId: run.agentId,
+      userId: run.initiatedByUserId,
+      trigger: "scheduled",
+      ...(Array.isArray(run.gatingClasses) && run.gatingClasses.length
+        ? { gatingClasses: run.gatingClasses as RedTeamAttackClass[] }
+        : {}),
+      note: "ADR-0057 scheduled sweep",
+    });
+    if (!outcome.ok) {
+      skipped.push({
+        libraryId: run.libraryId,
+        agentId: run.agentId,
+        reason: `${outcome.error}${outcome.detail ? ` — ${outcome.detail}` : ""}`,
+      });
+      continue;
+    }
+    ran.push({
+      libraryId: run.libraryId,
+      agentId: run.agentId,
+      runId: outcome.run.id,
+      regression: outcome.run.regression === true,
+      gatePassed: outcome.run.gatePassed,
+    });
+  }
+  return { ran, skipped };
+}
+
+// ---------------------------------------------------------------------------
 // Admin + run API
 // ---------------------------------------------------------------------------
 
@@ -575,11 +678,23 @@ export function registerRedTeamRoutes(app: FastifyInstance, db: Db, opts: RedTea
     attackClasses: redTeamAttackClassRegistry(),
     severities: ["low", "medium", "high", "critical"],
     disclosure: RED_TEAM_COVERAGE_DISCLOSURE,
-    scheduling:
-      "There is no in-process scheduler in this build. 'Continuous' means an operator or cron drives " +
-      "POST /v1/redteam/runs with trigger: 'scheduled'; the run records which trigger fired it. Nothing " +
-      "here wakes itself up, and a missed schedule is silent — treat the run history as the health signal.",
+    // ADR-0064: 'continuous' now has a driver — when this deployment has one
+    // switched on. Whether it does is reported, never assumed.
+    scheduling: {
+      schedulerEnabled: resolveSchedulerConfig().enabled,
+      posture: resolveSchedulerConfig().reason,
+      note: REDTEAM_SWEEP_NOTE,
+    },
   }));
+
+  /**
+   * THE SWEEP, as an ENDPOINT. ADR-0064's in-process scheduler drives the SAME
+   * function when it is switched on; this is the manual/on-demand door.
+   */
+  app.post("/v1/redteam/scheduled-sweep", async () => {
+    const result = await runScheduledRedTeamSweep(db, opts.dataKey);
+    return { ...result, note: REDTEAM_SWEEP_NOTE, disclosure: RED_TEAM_COVERAGE_DISCLOSURE };
+  });
 
   app.get("/v1/redteam/libraries", async () => {
     const rows = await db

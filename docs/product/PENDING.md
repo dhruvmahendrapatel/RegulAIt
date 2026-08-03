@@ -52,17 +52,48 @@ These are cases where an ADR is Accepted and genuinely working, but a specific c
 
 ---
 
-## 4. One cross-cutting absence
+## 4. One cross-cutting absence — CLOSED by ADR-0064 (2026-08-03)
 
-**There is no in-process scheduler, anywhere.** Every "scheduled" capability is a *definition* plus
-an endpoint an operator or cron must call:
+**There is now an in-process scheduler.** [ADR-0064](../decisions/0064-in-process-scheduler.md)
+replaced the six ad-hoc "an operator or cron must call this endpoint" disclosures with one
+decision (migration 0076). All six are registered as jobs that **call the functions their
+endpoints already call** — four sweeps were extracted out of their Fastify handlers rather than
+duplicated, so there is exactly one implementation per sweep and the endpoints remain the
+manual/on-demand door:
 
 - ADR-0044 eval drift sweeps · ADR-0045 MRM expiry sweep · ADR-0046 SLA breach detection ·
   ADR-0047 report schedules · ADR-0049 spend evaluation · ADR-0057 red-team runs
 
-This was a deliberate, repeated choice — enforcement never *depends* on a sweep (MRM recomputes at
-dispatch; SLA breach is caught on read and on decide) — but "scheduled" currently means
-"something outside RegulAIt must call this". **It deserves one decision, not six ad-hoc ones.**
+External cron was rejected because ADR-0041 makes air-gapped the primary motion; a queue/worker
+service was rejected for the second process to operate inside a single-tenant BYOC install. The
+claim is a three-statement transaction taking `SELECT … FOR UPDATE` on the job's own row, so two
+instances on one database cannot double-fire — proven with two schedulers, independent pools, a
+counter reading exactly 1, and the loser recording a `skipped` run.
+
+**What remains, and must be understood rather than fixed:**
+
+- **It is OFF by default in every environment** (`REGULAIT_SCHEDULER=on` to enable). A fresh
+  install still runs no sweeps until an operator opts in. The boot line, the admin page and every
+  sweep endpoint's own response say so out loud, but an operator who reads none of them has the
+  pre-ADR-0064 behaviour.
+- **Timeliness is bounded by the box being up.** ADR-0032's nightly power-off means a sweep due
+  inside the off-window simply does not run — it is picked up once, late, on the first tick after
+  power-on. Catch-up policy is "once, late", deliberately.
+- **It is not a job queue.** No fan-out, retry policy or per-item durability; a job that must
+  outlive a deploy or run for hours needs a different mechanism, not a longer lease.
+- **Two of the six cost money.** `eval-drift-sweep` and `redteam-sweep` dispatch models on every
+  pass (hence a daily default, and scoped to pairs a human already chose). They run under the
+  entitlements of the human who pinned the baseline / last ran the probe, and skip with a stated
+  reason when that human is gone.
+- **Two capabilities deliberately got NO job**: billing-period close (ADR-0051) and licence
+  re-verification (ADR-0052). Cutting a period is a commercial act with an invoice on the other
+  side of it. Their disclosures now say *why* rather than claiming no scheduler exists.
+- **Escalation still notifies nobody** (ADR-0046's own gap, §3) — the SLA sweep detects a breach
+  on time now; pushing it anywhere is still ADR-0061 territory.
+
+The invariant that made all six survivable is unchanged and is now itself a test: MRM still
+refuses a lapsed card at dispatch with the scheduler disabled entirely, and SLA breach is still
+caught on read. **The sweeps buy timeliness, never correctness.**
 
 ---
 

@@ -205,6 +205,8 @@ import {
   startAuditPruneScheduler,
 } from "./org-settings.js";
 import { registerSetupStatusRoutes } from "./setup-status.js";
+import { registerSchedulerRoutes } from "./scheduler-api.js";
+import { schedulerJobRegistry } from "./scheduler-jobs.js";
 import { registerDataKeyRoutes } from "./data-key.js";
 import { WEB_UI_ROUTES, defaultWebDistDir, registerWebServing } from "./web-serving.js";
 // ADR-0053 — the auth-class sets the two gates below branch on. They live in
@@ -2736,6 +2738,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // here (rather than first) only for readability; the inventory hook at the top
   // of buildApp catches routes in any order.
   registerOpenApiRoutes(app);
+  // ADR-0064 — the in-process scheduler's OPERATOR SURFACE. Note what is NOT
+  // here: a timer. `buildApp` constructs routes and nothing else; the tick loop
+  // is started by the BOOT path (boot.ts) and only when REGULAIT_SCHEDULER says
+  // so. ~103 test files construct an app, and a scheduler that started on
+  // construction would slow every one of them and make some flaky — which is
+  // why "constructing the app starts no timer" is itself asserted in
+  // scheduler.test.ts rather than left as an intention.
+  registerSchedulerRoutes(app, db, { registry: schedulerJobRegistry({ dataKey: opts.dataKey }) });
   const stopAuditPruneScheduler = startAuditPruneScheduler(db);
   app.addHook("onClose", async () => stopAuditPruneScheduler());
   registerAnthropicCompat(app, db, { dataKey: opts.dataKey });

@@ -730,7 +730,10 @@ describe("(7) coverage-not-proof, stated in-product", () => {
     const classes = await app.inject({ method: "GET", url: "/v1/redteam/attack-classes", headers: AUTH });
     expect(classes.statusCode).toBe(200);
     expect(classes.json().disclosure).toMatch(/does not mean the agent is safe/);
-    expect(classes.json().scheduling).toMatch(/no in-process scheduler/);
+    // ADR-0064: `scheduling` is now a POSTURE object — whether this deployment
+    // actually has the loop switched on, reported rather than assumed.
+    expect(classes.json().scheduling.schedulerEnabled).toBe(false);
+    expect(classes.json().scheduling.posture).toMatch(/off/i);
     // every class states what it CANNOT tell you, next to what it does
     for (const c of classes.json().attackClasses as Array<{ limits: string }>) {
       expect(c.limits.length).toBeGreaterThan(40);

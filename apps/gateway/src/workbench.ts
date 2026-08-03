@@ -20,15 +20,16 @@
  *     CLAIM resolves a role/team assignment to the individual who claimed it.
  *     Both are audited.
  *
- *  2. SLA TIMERS ARE EVALUATED, NOT MERELY STORED — WITHOUT A SCHEDULER.
- *     THERE IS NO IN-PROCESS JOB RUNNER IN THIS CODEBASE. So breach evaluation
- *     runs LAZILY: on every read of the queue, on every decide, and on an
- *     explicit `POST /v1/approvals/sla/sweep` an operator or cron can call. The
- *     deadlines are a pure function of `approvals.requested_at` and the policy,
- *     so a lazily evaluated breach is byte-identical to what a timer would have
- *     produced — it just becomes visible when someone looks, or when the sweep
- *     is called. Nothing in this file claims a timer fires on its own, because
- *     none does.
+ *  2. SLA TIMERS ARE EVALUATED, NOT MERELY STORED — AND NOT BY THE TIMER.
+ *     Breach evaluation runs LAZILY: on every read of the queue, on every
+ *     decide, and on `POST /v1/approvals/sla/sweep`. The deadlines are a pure
+ *     function of `approvals.requested_at` and the policy, so a lazily
+ *     evaluated breach is byte-identical to what a timer would have produced —
+ *     it just becomes visible when someone looks. ADR-0064 added an in-process
+ *     scheduler that drives `runApprovalSlaSweep` below when it is switched on
+ *     (OFF by default), and that changes NOTHING about the above: the sweep
+ *     decides when somebody finds out, never whether a breach happened. A
+ *     deployment with the scheduler off detects breach exactly as it did.
  *
  *  3. ESCALATION NEVER DECIDES. On breach the work is moved toward someone who
  *     can decide it (`add_assignee` widens the queue, `reassign` moves the
@@ -430,6 +431,56 @@ async function userIsEligibleFor(
 }
 
 // ---------------------------------------------------------------------------
+// The SLA sweep
+// ---------------------------------------------------------------------------
+
+/**
+ * What the SLA sweep is, and — just as importantly — what it is NOT.
+ *
+ * ADR-0064 gave this a real scheduler, so "nothing calls this on a timer" is no
+ * longer true. What has NOT changed, and must not, is that the sweep is a
+ * TIMELINESS mechanism rather than a control: breach is ALSO evaluated whenever
+ * the queue is read and whenever an approval is decided, and the deadlines are
+ * a pure function of `requested_at`. A lazily detected breach is therefore
+ * identical to what a timer would have produced. The sweep only decides WHEN
+ * somebody finds out, never WHETHER.
+ */
+export const APPROVAL_SLA_SWEEP_NOTE =
+  "Breach is evaluated lazily too — whenever the queue is read and whenever an approval is decided — " +
+  "and the deadlines are a pure function of requested_at, so a lazily detected breach is identical to " +
+  "what this sweep produces. ADR-0064's in-process scheduler drives this job when it is switched on " +
+  "(REGULAIT_SCHEDULER=on); this endpoint remains the manual/on-demand path and calls exactly the same " +
+  "function. The sweep decides when somebody finds out, never whether.";
+
+/**
+ * ONE PASS over every pending approval: materialize its assignment if a routing
+ * rule applies, then evaluate its SLA.
+ *
+ * Extracted from `POST /v1/approvals/sla/sweep` for ADR-0064 so the scheduler
+ * and the endpoint share ONE implementation. Neither reimplements the other.
+ */
+export async function runApprovalSlaSweep(
+  db: Db,
+  opts: { actorUserId: string | null; now?: Date } = { actorUserId: null },
+): Promise<{ evaluated: number; breached: number; warned: number }> {
+  const now = opts.now ?? new Date();
+  const pending = await db.select().from(approvals).where(eq(approvals.status, "pending"));
+  let evaluated = 0;
+  let breached = 0;
+  let warned = 0;
+  for (const row of pending) {
+    const assignment = await ensureAssignment(db, row, opts.actorUserId);
+    if (!assignment || !assignment.dueAt) continue;
+    evaluated += 1;
+    const before = assignment.slaState;
+    const after = await evaluateAssignmentSla(db, row, assignment, now);
+    if (before !== "breached" && after.slaState === "breached") breached += 1;
+    else if (before === "ok" && after.slaState === "warning") warned += 1;
+  }
+  return { evaluated, breached, warned };
+}
+
+// ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
 
@@ -566,39 +617,13 @@ export function registerWorkbenchRoutes(app: FastifyInstance, db: Db, opts: Work
     return { deleted: true };
   });
 
-  // ---------------- the SLA sweep (admin / cron) ----------------
+  // ---------------- the SLA sweep (admin / cron / ADR-0064 scheduler) -------
 
-  /**
-   * The sweep an operator or an external cron calls. It exists BECAUSE there is
-   * no scheduler here — not as a supplement to one. Enforcement does not depend
-   * on it (the queue read and the decide path evaluate lazily), but a
-   * deployment where nobody opens the queue would otherwise never notice a
-   * breach, so this is the pull-based way to make one visible.
-   */
   app.post("/v1/approvals/sla/sweep", async (req) => {
-    const now = new Date();
-    const pending = await db.select().from(approvals).where(eq(approvals.status, "pending"));
-    let evaluated = 0;
-    let breached = 0;
-    let warned = 0;
-    for (const row of pending) {
-      const assignment = await ensureAssignment(db, row, req.authCtx.userId ?? null);
-      if (!assignment || !assignment.dueAt) continue;
-      evaluated += 1;
-      const before = assignment.slaState;
-      const after = await evaluateAssignmentSla(db, row, assignment, now);
-      if (before !== "breached" && after.slaState === "breached") breached += 1;
-      else if (before === "ok" && after.slaState === "warning") warned += 1;
-    }
+    const result = await runApprovalSlaSweep(db, { actorUserId: req.authCtx.userId ?? null });
     return {
-      evaluated,
-      breached,
-      warned,
-      note:
-        "Nothing calls this on a timer — there is no in-process scheduler in this deployment. Breach is " +
-        "ALSO evaluated whenever the queue is read or an approval is decided, and the deadlines are a pure " +
-        "function of requested_at, so a lazily detected breach is identical to what a timer would have " +
-        "produced. It becomes visible when someone looks, or when this endpoint is called.",
+      ...result,
+      note: APPROVAL_SLA_SWEEP_NOTE,
     };
   });
 

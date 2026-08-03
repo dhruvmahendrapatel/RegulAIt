@@ -596,7 +596,10 @@ describe("EXPIRY IS ENFORCED, not decorative", () => {
     const res = await app.inject({ method: "POST", url: "/v1/mrm/expiry-sweep", headers: AUTH });
     expect(res.statusCode).toBe(200);
     expect(res.json().expired).toBeGreaterThanOrEqual(1);
-    expect(res.json().note).toContain("no in-process scheduler");
+    // ADR-0064 gave the sweep a real driver. The property this asserts is
+    // unchanged and is the one that matters: the sweep is a display job, and
+    // dispatch enforcement does not depend on it having run.
+    expect(res.json().note).toContain("recomputes expiry from validUntil");
     const [row] = await db
       .select()
       .from(modelCardApprovals)

@@ -416,14 +416,14 @@ describe("ADR-0047 — schedules define, they do not fire", () => {
       payload: { cadence: "daily", recipientUserIds: [leadAId] },
     });
     expect(sched.statusCode).toBe(201);
-    expect(sched.json().note).toMatch(/Nothing drives it/);
+    expect(sched.json().note).toMatch(/with neither, nothing generates/);
     const scheduleId = sched.json().schedule.id as string;
     const afterCreate = await db.select().from(reportRuns).where(eq(reportRuns.definitionId, complianceDefId));
     expect(afterCreate.length).toBe(before.length);
 
     const sweep1 = await app.inject({ method: "POST", url: "/v1/reports/schedules/run-due", headers: AUTH });
     expect(sweep1.statusCode).toBe(200);
-    expect(sweep1.json().note).toMatch(/no in-process scheduler/i);
+    expect(sweep1.json().note).toMatch(/ADR-0064's in-process scheduler drives this/i);
     expect(sweep1.json().generated.some((g: { scheduleId: string }) => g.scheduleId === scheduleId)).toBe(true);
     const [row1] = await db.select().from(reportSchedules).where(eq(reportSchedules.id, scheduleId));
     expect(row1!.lastGeneratedAt).not.toBeNull();
@@ -442,11 +442,13 @@ describe("ADR-0047 — schedules define, they do not fire", () => {
     expect(scheduledRun).toBeTruthy();
   });
 
-  it("the overview discloses that no scheduler exists", async () => {
+  it("the overview reports whether a scheduler is actually driving the schedules", async () => {
     const res = await app.inject({ method: "GET", url: "/v1/reports/overview", headers: AUTH });
     expect(res.statusCode).toBe(200);
+    // ADR-0064: the scheduler is FORCED OFF under test, so this is still false —
+    // but it is now computed from the deployment's posture rather than hardcoded.
     expect(res.json().schedulerPresent).toBe(false);
-    expect(res.json().note).toMatch(/No in-process scheduler/);
+    expect(res.json().note).toMatch(/A deployment running neither generates NO scheduled reports/i);
   });
 });
 

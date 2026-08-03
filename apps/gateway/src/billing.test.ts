@@ -581,10 +581,14 @@ describe("ADR-0051 — period close is operator-driven and idempotent", () => {
     expect(again.json().period.id).toBe(orgPeriodId);
   });
 
-  it("discloses that no scheduler exists", async () => {
+  it("discloses that no scheduled job closes a period", async () => {
     const res = await app.inject({ method: "GET", url: "/v1/billing/periods", headers: AUTH });
+    // ADR-0064 added a scheduler and six jobs; cutting a billing period is
+    // deliberately not one of them, and the disclosure says WHY rather than
+    // claiming a scheduler does not exist.
     expect(res.json().schedulerPresent).toBe(false);
-    expect(res.json().note).toMatch(/no in-process scheduler/i);
+    expect(res.json().note).toMatch(/no scheduled job closes a billing period/i);
+    expect(res.json().note).toMatch(/commercial act a timer must not perform/i);
   });
 });
 
@@ -669,5 +673,6 @@ describe("ADR-0051 — admin gating and audit", () => {
     expect(res.json().backend.name).toBe("noop");
     expect(res.json().backend.capabilities.requiresNetwork).toBe(false);
     expect(res.json().note).toMatch(/READ-SIDE consumer of usage_events/);
+    expect(res.json().note).toMatch(/no SCHEDULED JOB closes a period/i);
   });
 });
