@@ -16,7 +16,20 @@ COPY packages ./packages
 COPY apps ./apps
 
 # builds every workspace package INCLUDING apps/web (vite → apps/web/dist)
-RUN pnpm install --frozen-lockfile && pnpm -r build
+#
+# NODE_OPTIONS is load-bearing on a small box, not tuning. Node sizes its
+# default old-space heap from available RAM; on the 2 GB dev instance
+# (ADR-0013) that lands near ~1 GB, and after the ADRs 0036-0061 wave the
+# gateway's type graph no longer fits — `tsc` died with SIGABRT / exit 134
+# ("Aborted (core dumped)"), which reads like a compiler crash but is a V8
+# out-of-memory. The box has 4 GB of swap sitting almost entirely unused, so
+# raising the ceiling lets the build spill there: slower, but it completes.
+#
+# Set on the build RUN only. The runtime CMD keeps Node's default, because a
+# serving process that needs 3 GB of heap is a leak to investigate, not a
+# limit to raise.
+RUN NODE_OPTIONS=--max-old-space-size=3072 pnpm install --frozen-lockfile \
+ && NODE_OPTIONS=--max-old-space-size=3072 pnpm -r build
 
 ENV PORT=3000
 EXPOSE 3000
