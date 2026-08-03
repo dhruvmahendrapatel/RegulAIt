@@ -88,6 +88,26 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
     throw err;
   }
 
+  // ADR-0064 — the scheduler's shutdown hook MUST be registered BEFORE listen.
+  //
+  // Fastify refuses `addHook` once the instance is listening
+  // (FST_ERR_INSTANCE_ALREADY_LISTENING), and it throws rather than warning. The
+  // hook was originally registered down beside `scheduler.start()` — i.e. after
+  // this line — which crash-looped the gateway on the very first deployment that
+  // actually set REGULAIT_SCHEDULER=on. It survived a 1,722-test suite because
+  // the scheduler is force-disabled under vitest and the loop's own tests drive a
+  // `Scheduler` directly, so "enabled" and "went through startGateway/listen"
+  // never held at the same time anywhere.
+  //
+  // So the hook is registered here, unconditionally, closing over the mutable
+  // `scheduler` binding assigned after listen. With the scheduler off it is an
+  // await on nothing. `scheduler.start()` stays after listen so a slow first
+  // sweep still cannot delay the deployment coming into service.
+  let scheduler: Scheduler | null = null;
+  app.addHook("onClose", async () => {
+    if (scheduler) await scheduler.stop();
+  });
+
   const address = await app.listen({ port, host });
 
   // ADR-0064 — the tick loop. OFF unless REGULAIT_SCHEDULER says on, in every
@@ -99,7 +119,6 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // scheduler off can still see on the admin screen exactly what would run.
   const schedulerConfig = resolveSchedulerConfig(env);
   const registry = schedulerJobRegistry({ dataKey: appOpts.dataKey });
-  let scheduler: Scheduler | null = null;
   try {
     await syncSchedulerJobs(db, registry);
   } catch (err) {
@@ -118,11 +137,8 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
     });
     scheduler.start();
     // Shutdown is the app's: closing the gateway stops the loop and WAITS for
-    // an in-flight job rather than abandoning it mid-sweep. See Scheduler.stop.
-    const live = scheduler;
-    app.addHook("onClose", async () => {
-      await live.stop();
-    });
+    // an in-flight job rather than abandoning it mid-sweep (see Scheduler.stop).
+    // The hook itself is registered above, before listen — see the note there.
   }
 
   log(`regulait gateway listening on ${address}`);

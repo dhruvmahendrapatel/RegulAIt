@@ -545,6 +545,55 @@ describe("off by default, and explicitly on", () => {
     expect(await jobRow(SCHEDULER_JOB_NAMES.mrmExpiry)).toBeDefined();
     await started.app.close();
   }, 60_000);
+
+  /**
+   * REGRESSION — the first real deployment with REGULAIT_SCHEDULER=on
+   * crash-looped, exit 1, before serving a single request:
+   *
+   *   FastifyError: Fastify instance is already listening. Cannot call "addHook"!
+   *       at startGateway (boot.js:96)
+   *
+   * The scheduler's `onClose` hook was registered next to `scheduler.start()`,
+   * which is deliberately AFTER `app.listen()` — and Fastify throws rather than
+   * warns when a hook is added to a listening instance.
+   *
+   * It survived the whole suite because the two conditions never met: the
+   * scheduler is force-disabled under vitest, and every other scheduler test
+   * drives a `Scheduler` directly instead of going through startGateway. The
+   * ONE existing startGateway test asserted the `off` path.
+   *
+   * So this test does the only thing that would have caught it: boots the real
+   * gateway, through the real listen, with the scheduler genuinely ENABLED —
+   * which needs an env with no VITEST key, since resolveSchedulerConfig forces
+   * off under test regardless of the variable.
+   */
+  it("REGRESSION: startGateway with the scheduler ENABLED listens and shuts down cleanly", async () => {
+    // strip the markers that force the scheduler off, or this asserts nothing
+    const { VITEST: _vitest, VITEST_WORKER_ID: _worker, ...rest } = process.env;
+    const enabledEnv = { ...rest, NODE_ENV: "production", REGULAIT_SCHEDULER: "on" };
+
+    // guard the guard: if this ever resolves to disabled the test is vacuous
+    expect(resolveSchedulerConfig(enabledEnv).enabled).toBe(true);
+
+    const started = await startGateway({
+      db,
+      migrationsFolder,
+      port: 0,
+      host: "127.0.0.1",
+      bootstrapToken: BOOT,
+      dataKey: DATA_KEY,
+      log: () => {},
+      env: enabledEnv,
+    });
+
+    // it got past listen (the bug threw before this line) and the loop is live
+    expect(started.scheduler).not.toBeNull();
+    expect(started.app.server.listening).toBe(true);
+
+    // and the onClose hook it registers actually stops the loop
+    await started.app.close();
+    expect(started.scheduler!.timerActive).toBe(false);
+  }, 60_000);
 });
 
 // ===========================================================================
