@@ -21,16 +21,36 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 **RegulAIt is a working, deployed product, not a scaffold.** All eight P0 pillars have shipped
-functionality; the gateway suite is at **1,191 tests** across 81 files (policy-kernel at 129); the
-schema is at **migration 0054**; **Accepted** decisions run to **ADR-0035** plus the first
-implemented tranche of the enterprise-readiness set — **0036, 0037, 0038, 0039, 0040, 0043 are
-now Accepted and built**. The remainder of that set (**0041, 0042, 0044–0061**) is still
-**Proposed** and is being implemented in order — see
-[docs/product/ENTERPRISE_READINESS_PLAN.md](../docs/product/ENTERPRISE_READINESS_PLAN.md).
-**Enterprise identity is now real**: SAML 2.0 *and* OIDC federate side by side, SCIM 2.0
-provisions and instantly deprovisions, IdP groups drive roles under default-deny, sessions are
-individually revocable inside an admin-defined network envelope, and an in-process Cedar ABAC
-layer can conditionally restrict — never widen — any call the RBAC kernel already allowed. The product is served by a **React SPA** (`apps/web` —
+functionality; the gateway suite is at **1,611 tests** across 100 files (policy-kernel 129,
+workflow-kernel 39, `packages/shared` 360); the schema is at **migration 0073**; and **every ADR
+is now Accepted — 0001 through 0061, with nothing left Proposed**. The entire
+enterprise-readiness set (**0036–0061**) was built, verified and merged in one session
+(PR #105, `27205e7`) — see
+[docs/product/ENTERPRISE_READINESS_PLAN.md](../docs/product/ENTERPRISE_READINESS_PLAN.md) for the
+bucketing and [docs/decisions/README.md](../docs/decisions/README.md) for what each one actually
+enforces.
+**Enterprise identity is real**: SAML 2.0 *and* OIDC federate side by side, SCIM 2.0 provisions
+and instantly deprovisions, IdP groups drive roles under default-deny, sessions are individually
+revocable inside an admin-defined network envelope, and an in-process Cedar ABAC layer can
+conditionally restrict — never widen — any call the RBAC kernel already allowed.
+**The governance surface is real too**: a guardrail engine at all three governed entry points, an
+eval harness that blocks promotion on regression, model-risk cards with an enforced expiry gate,
+a review workbench with per-item-authorized bulk actions, entitlement-scoped executive reporting,
+immutable prompt versioning with deterministic canary and rollback, spend forecasting that
+refuses to fabricate a number, a lineage graph that hides existence rather than just content,
+metering-derived billing, an offline-verified license, a published OpenAPI contract with
+drift-detection tests, a resumable onboarding wizard whose import cannot escalate privilege,
+shadow-AI discovery, a governance copilot that is itself governed, continuous red-teaming,
+compliance packs computed from the real ledgers, policy-simulation blast radius with a proven
+zero-dispatch guarantee, a hash-chained tamper-evident audit log, and ChatOps approvals bound to
+a real human.
+**Three things are deliberately NOT true yet, and are load-bearing caveats** (each recorded in its
+ADR's amendment rather than implied away): no model provider is connected, so every
+model-dependent claim is mechanism-proven and judgment-unverified; there is **no in-process
+scheduler**, so every "scheduled" sweep is an operator/cron-driven endpoint; and the
+**air-gapped boundary has a real hole** — the egress guard adjudicates only admin-*typed* URLs,
+so a built-in provider still reaches its vendor's public API with the network, not the
+application, as the backstop (`docs/deployment/DATA_BOUNDARY.md` §4). The product is served by a **React SPA** (`apps/web` —
 React 18 + Vite + react-router + TanStack Query, an owned token design system, light/dark, six
 grouped nav sections) at **`/ui`**, which is now the *only* UI: `/`, `/app` and `/admin` all 302
 there. The template-literal shells are **deleted** as of ADR-0033 (−7,125 lines): the SPA is not
@@ -1594,6 +1614,43 @@ and delete the providers they create; auth's `sso_only` block establishes its ow
 instead of inheriting a fresh DB. Proven by reproducing the exact cross-file order (22 failures
 before, green after). **The general lesson: any test touching the `ORG_SETTINGS_ID` singleton must
 restore it, because adding any new test file reshuffles the order and can surface this.**
+
+**The wave completed and deployed, 2026-08-02→03 (session-06, PR #105 `27205e7`).** All 26 ADRs
+(0036–0061) built across migrations 0049–0073; suite **1,004 → 1,611** across 100 files with no
+regression. Merged to `main` and **deployed to the dev box** — 73 migrations applied, live at
+`https://3-229-246-126.sslip.io/ui` on a valid Let's Encrypt certificate, login verified
+end-to-end over the public URL.
+
+Three things from the back half worth carrying forward:
+
+1. **ADR-0060's own §1 was wrong, and the implementation says so.** Specifying `prev_hash` as the
+   predecessor's `content_hash` builds *adjacent pairs*, not a chain — a deep edit plus a full
+   recompute lands on an identical head and the anchor catches nothing, contradicting the ADR's
+   own worked example. Built as the predecessor's `row_hash`, with the correction in the
+   amendment. **An ADR is a decision, not scripture; implementing one is also reviewing it.**
+2. **Parallel agents were a net loss and the record should say so.** Running two agents on one
+   repo bought perhaps an hour across the final four ADRs and cost a wasted suite run, a merge
+   repair, and — worst — a **defective commit reaching the remote**: `d61c5c8` was built from an
+   index predating `16174e8`, so it silently deleted 1,127 lines of ADR-0058 while appearing only
+   to add ADR-0059. Both agents detected the damage themselves and reported it accurately; the
+   push was the main session's error. Repaired by re-applying the corrected content onto the clean
+   sibling, resolving `schema.ts` as a union, hand-inserting journal entry 71 in `when`-ascending
+   order, and force-with-lease over the bad tip after proving the new HEAD was a strict superset.
+   **The file-partition strategy holds for isolated modules but not for the half-dozen files every
+   slice must touch, and git's index is not partitionable that way. Prefer sequential.**
+3. **A near-miss on false reporting.** An isolation run appeared to show the merge breaking
+   `workflow-stage-quorum.test.ts` — until it turned out the merged tree had been re-tested against
+   the database that had just run the full suite, while the baseline got a fresh one. On a
+   genuinely fresh database it passed 5/5. **When a comparison implicates your own change, check
+   that both sides were actually given the same conditions before reporting a regression.**
+
+Two suite-hygiene fixes landed as a side effect: the vitest default 5s timeout was too tight for
+~1,600 sequential real-Postgres e2e tests (raised to 20s — deliberately not "no timeout", so a hung
+request still fails), and `saml.test.ts` was leaking ~30 enabled SSO providers that cascaded into
+~20 unrelated failures depending on vitest's duration-ordering cache.
+
+**What is NOT built** is tracked in
+[docs/product/PENDING.md](../docs/product/PENDING.md) — read that before planning the next session.
 
 ## Standing guardrail
 Nothing gets a "production" designation, and nothing deploys to one, without the user's direct,
