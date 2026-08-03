@@ -587,11 +587,16 @@ export function registerBillingRoutes(app: FastifyInstance, db: Db): void {
     const rows = await db.select().from(billingPeriods).orderBy(desc(billingPeriods.periodStart));
     return {
       periods: rows,
+      // ADR-0064 added an in-process scheduler and SIX jobs. Closing a billing
+      // period is deliberately NOT one of them: a close is a commercial act
+      // with an invoice on the other side of it, and a timer must not be able
+      // to cut one. So this stays false, and it means what it always meant.
       schedulerPresent: false,
       note:
-        "There is no in-process scheduler in this deployment. A period stays open until an operator " +
-        "or an external cron calls POST /v1/billing/periods/:id/close; `closedAt` staying null is how " +
-        "that is visible rather than silent.",
+        "No scheduled job closes a billing period — ADR-0064's scheduler exists but deliberately has no " +
+        "job here, because cutting a period is a commercial act a timer must not perform. A period stays " +
+        "open until an operator or an external cron calls POST /v1/billing/periods/:id/close; `closedAt` " +
+        "staying null is how that is visible rather than silent.",
     };
   });
 
@@ -996,7 +1001,8 @@ export function registerBillingRoutes(app: FastifyInstance, db: Db): void {
         "Billing is a READ-SIDE consumer of usage_events — no counter is incremented at dispatch time, " +
         "so nothing here can drift from the cost dashboard. No payment processor is integrated and the " +
         "only backend is 'noop' (export-only, no network), which is ADR-0051 §6's air-gapped default. " +
-        "No in-process scheduler exists: drive POST /v1/billing/periods/:id/close from cron. " +
+        "No SCHEDULED JOB closes a period — ADR-0064's scheduler deliberately has none, because cutting " +
+        "a period is a commercial act; drive POST /v1/billing/periods/:id/close yourself. " +
         "`rating_mode` is never 'reconciled' because no provider-invoice importer exists yet.",
     };
   });

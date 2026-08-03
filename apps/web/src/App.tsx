@@ -65,6 +65,8 @@ import OrganizationPage from "./views/admin/settings/OrganizationPage";
 import GettingStartedPage from "./views/admin/settings/GettingStartedPage";
 import FirstRunPage from "./views/admin/settings/FirstRunPage";
 import LicensingPage from "./views/admin/settings/LicensingPage";
+import DataKeyPage from "./views/admin/settings/DataKeyPage";
+import SchedulerPage from "./views/admin/settings/SchedulerPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -178,6 +180,10 @@ export default function App() {
                         <Route path="infrastructure" element={<InfrastructurePage />} />
                         <Route path="organization" element={<OrganizationPage />} />
                         <Route path="licensing" element={<LicensingPage />} />
+                        {/* ADR-0063 */}
+                        <Route path="data-key" element={<DataKeyPage />} />
+                        {/* ADR-0064 */}
+                        <Route path="scheduler" element={<SchedulerPage />} />
                         <Route path="setup" element={<GettingStartedPage />} />
                         {/* ADR-0054: the ordered, resumable first-run FLOW. Distinct from
                             "setup" above, which is a read-only readiness mirror. */}

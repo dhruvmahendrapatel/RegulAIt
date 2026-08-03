@@ -32,6 +32,45 @@ collapses the envelope split into a single point of failure with extra steps.
 The installer prints this warning when it generates a key and refuses to proceed interactively
 until you acknowledge it. That is not ceremony.
 
+### The product now checks, and refuses (ADR-0063)
+
+You no longer have to *hope* the key you filed away is the right one.
+
+- The gateway derives a **non-secret fingerprint** of the key — `dk1:` plus 32 hex characters, a
+  truncated HMAC that identifies the key and reveals nothing about it — records it in the database
+  on first boot, and prints it at every boot:
+
+  ```
+  data key:  dk1:3f2a9c11d0be47e5a8c6210fb47d9e02 [verified] — custody attested
+  ```
+
+- **Every backup carries that fingerprint**, in the object's S3 metadata (`datakey`) and in
+  `manifest.json` (`data_key_fingerprint`). So before you restore anything you can answer *"do I
+  have the right key for this dump?"* by comparing two strings, without downloading it.
+
+- **If the running key does not match the recorded one, the gateway refuses to start**, naming both
+  fingerprints. That is the restore-onto-a-new-box case, and refusing is deliberate: a gateway that
+  boots with the wrong key renders every page and every credential list perfectly and then fails
+  every decryption days later — and an admin re-entering credentials in the meantime leaves rows
+  under two keys that neither can fully read. The one legitimate mismatch, a deliberate rotation,
+  has an explicit override (`REGULAIT_DATA_KEY_ROTATED_FROM=<the old fingerprint>`) that is audited
+  with both values.
+
+- **Attest custody.** Once the key is filed out of band, record that fact:
+
+  ```bash
+  curl -sS "$API/v1/security/data-key/attestations" \
+    -H "Authorization: Bearer <admin key>" -H 'Content-Type: application/json' \
+    -d '{"method":"password_manager","locationHint":"1Password vault: Platform Ops","confirmRecordedOutOfBand":true}'
+  ```
+
+  Or use **Admin → Settings → Data key custody**. Be clear about what this is: it records *your
+  claim*, and RegulAIt cannot verify custody — it cannot see inside your password manager. What it
+  guarantees is that the **absence** of that claim is impossible to overlook. Until someone
+  attests, the boot line says `NO CUSTODY ATTESTATION ON FILE`, the portal shows an alarm, and every
+  backup run logs `custody=UNATTESTED` and publishes a `DataKeyAttested` metric of `0` — because an
+  unattested backup is a backup that may not be restorable.
+
 ---
 
 ## What to back up
@@ -141,8 +180,14 @@ document still works and every credential is still gone.
 ## What is explicitly not covered
 
 - **The `REGULAIT_DATA_KEY` itself.** Deliberately. Backing the key up alongside the ciphertext it
-  protects defeats the split. That is your out-of-band job, and it is the highest-value follow-up
-  in ADR-0035.
+  protects defeats the split. That is your out-of-band job. ADR-0063 does everything the product
+  *can* do around it — fingerprint it, refuse to start under the wrong one, put the fingerprint in
+  the backup, and report loudly when nobody has attested custody — but it cannot store the key for
+  you, and it does not pretend to.
+- **Re-encryption under a new key.** `REGULAIT_DATA_KEY_ROTATED_FROM` re-records the fingerprint;
+  it does **not** re-encrypt anything. Ciphertext written under the old key stays unreadable and
+  those credentials must be re-entered. A resumable, transactional re-encryption over all twelve
+  ciphertext columns is named follow-up scope in ADR-0063, deliberately not half-built.
 - **Point-in-time recovery.** See above.
 - **Payload encryption beyond storage-level encryption.** A dump contains every user record and the
   entire audit log in the clear. Anyone who can read your backup destination can read all of it.

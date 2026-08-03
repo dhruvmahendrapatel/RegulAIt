@@ -2391,3 +2391,75 @@ export function resolveModelProvider(
       return sharedMock;
   }
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0062 — THE COMPILED VENDOR DEFAULTS, MADE VISIBLE
+// ---------------------------------------------------------------------------
+//
+// WHY THIS EXISTS. The ADR-0034/0043 egress guard adjudicates URLs a human
+// typed. It never saw the endpoint an adapter falls back to when no `baseUrl`
+// override exists, because "nobody can type a constant" is a complete answer to
+// SSRF. It is NOT an answer to "may this deployment talk to that vendor at all",
+// which is the question an AIR-GAPPED install is buying (ADR-0062).
+//
+// To adjudicate a compiled default you first have to be able to NAME it. Two of
+// these four lived only inside a vendor SDK's own default, so this repo's
+// `grep` for compiled absolute URLs (docs/deployment/DATA_BOUNDARY.md §1) did
+// not list them — the destination was real and invisible at the same time. They
+// are written down here so the set is complete and checkable.
+//
+// THE ENV VARS ARE PART OF THE ANSWER, not a footnote. `@anthropic-ai/sdk` and
+// `openai` both read their own `*_BASE_URL` environment variable when no
+// `baseURL` is passed, so on a box where one is set the SDK's real destination
+// is that value, not the vendor. `defaultBaseUrlFor` therefore reads the same
+// variables the SDK reads: what this function returns is what the adapter will
+// actually reach, which is the only thing worth adjudicating. (The gateway's
+// own env-key fallback ALREADY threads these into the guarded `baseUrl` path;
+// this covers the remaining case of a stored credential with no override on a
+// box that also sets the variable.)
+//
+// The literal constants are pinned against the SDKs' own defaults by a drift
+// test in `index.test.ts` — a constant that silently stopped matching the SDK
+// would make the guard adjudicate a host the adapter never contacts.
+
+/** `@anthropic-ai/sdk`'s own default base URL. */
+export const ANTHROPIC_DEFAULT_BASE = "https://api.anthropic.com";
+/** `openai`'s own default base URL. */
+export const OPENAI_DEFAULT_BASE = "https://api.openai.com/v1";
+export { GOOGLE_DEFAULT_BASE, XAI_DEFAULT_BASE };
+
+/**
+ * The endpoint a provider kind reaches when NO `baseUrl` override is supplied.
+ *
+ *   string     the destination, ready to be adjudicated against the egress
+ *              allow-list;
+ *   null       there is nothing to adjudicate — the adapter makes no network
+ *              call of its own (`mock`, in-process) or cannot exist without an
+ *              explicit, already-guarded `baseUrl` (`custom`, ADR-0034);
+ *   undefined  NOT STATICALLY KNOWABLE. Reserved for a kind whose default this
+ *              module cannot name. A caller under a strict posture must REFUSE
+ *              on undefined rather than assume it is safe — "we could not work
+ *              out where this goes" is not a reason to let it go there.
+ *
+ * `env` is injectable so the decision is testable without mutating the process.
+ */
+export function defaultBaseUrlFor(
+  kind: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null | undefined {
+  switch (kind) {
+    case "anthropic":
+      return env["ANTHROPIC_BASE_URL"] || ANTHROPIC_DEFAULT_BASE;
+    case "openai":
+      return env["OPENAI_BASE_URL"] || OPENAI_DEFAULT_BASE;
+    case "google":
+      return GOOGLE_DEFAULT_BASE;
+    case "xai":
+      return XAI_DEFAULT_BASE;
+    case "custom":
+    case "mock":
+      return null;
+    default:
+      return undefined;
+  }
+}

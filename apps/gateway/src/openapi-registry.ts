@@ -377,6 +377,24 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/servers/:serverId/tools": "internal",
   "PATCH /v1/servers/:serverId/tools/:toolName/price": "internal",
   "GET /v1/setup/status": "internal",
+  // ADR-0063 — REGULAIT_DATA_KEY custody. Internal: an operator/admin console
+  // surface about this deployment's own envelope key, not an integration
+  // contract anyone builds against.
+  "GET /v1/security/data-key": "internal",
+  "GET /v1/security/data-key/attestations": "internal",
+  "POST /v1/security/data-key/attestations": "internal",
+  // ADR-0064 — the in-process scheduler. Internal: an operator console surface
+  // about THIS deployment's own background loop. Nothing integrates against it,
+  // and "run now" on a job that spends model tokens is not a contract we want
+  // anyone building a client around.
+  "GET /v1/scheduler": "internal",
+  "GET /v1/scheduler/jobs/:name/runs": "internal",
+  "PATCH /v1/scheduler/jobs/:name": "internal",
+  "POST /v1/scheduler/jobs/:name/run": "internal",
+  // ADR-0044 §5 / ADR-0057 — the two sweeps that got an endpoint alongside
+  // their scheduler job, so the manual path exists and is the same function.
+  "POST /v1/evals/drift-sweep": "internal",
+  "POST /v1/redteam/scheduled-sweep": "internal",
   // ADR-0061 — ChatOps approvals. Internal: an admin console surface plus a
   // provider-shaped callback whose contract is Slack's, not ours.
   "GET /v1/chatops/connections": "internal",
@@ -846,6 +864,15 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/servers/:serverId/tools": "servers",
   "PATCH /v1/servers/:serverId/tools/:toolName/price": "servers",
   "GET /v1/setup/status": "setup",
+  "GET /v1/security/data-key": "security",
+  "GET /v1/security/data-key/attestations": "security",
+  "POST /v1/security/data-key/attestations": "security",
+  "GET /v1/scheduler": "scheduler",
+  "GET /v1/scheduler/jobs/:name/runs": "scheduler",
+  "PATCH /v1/scheduler/jobs/:name": "scheduler",
+  "POST /v1/scheduler/jobs/:name/run": "scheduler",
+  "POST /v1/evals/drift-sweep": "evals",
+  "POST /v1/redteam/scheduled-sweep": "redteam",
   "GET /v1/chatops/connections": "chatops",
   "POST /v1/chatops/connections": "chatops",
   "DELETE /v1/chatops/connections/:connectionId": "chatops",

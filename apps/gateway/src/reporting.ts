@@ -27,12 +27,14 @@
  *     org-wide rows (including spend attributed to no project) is an ADMIN
  *     under an org-scoped definition.
  *
- *  3. NOTHING HERE FIRES ON A TIMER, AND IT SAYS SO. There is no in-process
- *     scheduler in this codebase (ADR-0045's expiry sweep and ADR-0046's SLA
- *     evaluation are the same shape). `report_schedules` rows are schedule
- *     DEFINITIONS; `POST /v1/reports/schedules/run-due` is the endpoint an
- *     operator or an external cron drives, and its response says plainly that
- *     nothing calls it automatically.
+ *  3. GENERATION IS DRIVEN, AND THE DEPLOYMENT SAYS BY WHAT. `report_schedules`
+ *     rows are schedule DEFINITIONS. `runDueReportSchedules` below is the ONE
+ *     implementation that acts on them, reached two ways: by ADR-0064's
+ *     in-process scheduler (OFF by default) and by
+ *     `POST /v1/reports/schedules/run-due` for an operator or an external cron.
+ *     A deployment running neither generates NO scheduled reports, and
+ *     `lastGeneratedAt` staying null is how that stays visible rather than
+ *     silent.
  *
  * WHAT THIS FILE DOES NOT DO — stated here rather than only in the ADR:
  *   - It does not render PDF. ADR-0047 §3 flags the rendering dependency as
@@ -94,6 +96,7 @@ import {
 } from "@regulait/shared";
 import { securityHeaders } from "./security-headers.js";
 import { packControlsSection } from "./compliance-packs.js";
+import { resolveSchedulerConfig } from "./scheduler.js";
 
 /** the audit row's actor when the caller is the identity-less bootstrap token */
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
@@ -531,6 +534,87 @@ export async function canReadRun(
 }
 
 // ---------------------------------------------------------------------------
+// The schedule sweep
+// ---------------------------------------------------------------------------
+
+export const REPORT_SCHEDULE_SWEEP_NOTE =
+  "ADR-0064's in-process scheduler drives this when it is switched on (REGULAIT_SCHEDULER=on); this " +
+  "endpoint is the manual/on-demand path and calls exactly the same function. A deployment running " +
+  "neither generates NO scheduled reports, and `lastGeneratedAt` staying null is how that stays " +
+  "visible rather than silent. No artifact is delivered anywhere: recipients are recorded, not mailed.";
+
+/**
+ * ONE PASS over every enabled report schedule: generate the ones whose cadence
+ * has come due, advance their `lastGeneratedAt`, and audit the pass.
+ *
+ * Extracted from `POST /v1/reports/schedules/run-due` for ADR-0064 so the
+ * scheduler and the endpoint share ONE implementation.
+ *
+ * NOTE ON AUTHORITY. `generateReport` takes the ACTOR, and the actor's
+ * entitlement decides the effective scope of what is produced. Driven by the
+ * scheduler there is no human caller, so `isAdmin` defaults to true — a
+ * schedule is an admin-authored object (authoring one is not in
+ * NON_ADMIN_ROUTES) and generating it at the definition's declared scope is
+ * precisely what the admin who authored it asked for. Driven by the endpoint,
+ * the real caller's flags are passed through unchanged, so nothing about the
+ * manual path's authority changed.
+ */
+export async function runDueReportSchedules(
+  db: Db,
+  opts: { actorUserId: string | null; isAdmin?: boolean; now?: Date },
+): Promise<{
+  generated: Array<{ scheduleId: string; runId: string; definition: string }>;
+  skipped: Array<{ scheduleId: string; reason: string }>;
+}> {
+  const now = opts.now ?? new Date();
+  const isAdmin = opts.isAdmin ?? true;
+  const due = await db.select().from(reportSchedules).where(eq(reportSchedules.enabled, true));
+  const generated: Array<{ scheduleId: string; runId: string; definition: string }> = [];
+  const skipped: Array<{ scheduleId: string; reason: string }> = [];
+  for (const s of due) {
+    if (!scheduleIsDue(s.cadence, s.lastGeneratedAt, now)) {
+      skipped.push({ scheduleId: s.id, reason: "not yet due for its cadence" });
+      continue;
+    }
+    const [def] = await db
+      .select()
+      .from(reportDefinitions)
+      .where(eq(reportDefinitions.id, s.definitionId));
+    if (!def) {
+      skipped.push({ scheduleId: s.id, reason: "definition disappeared" });
+      continue;
+    }
+    const res = await generateReport(db, {
+      definition: def,
+      actor: { userId: opts.actorUserId, isAdmin },
+      trigger: "scheduled",
+      scheduleId: s.id,
+      now,
+    });
+    if (!res.ok) {
+      skipped.push({ scheduleId: s.id, reason: res.detail });
+      continue;
+    }
+    await db
+      .update(reportSchedules)
+      .set({ lastGeneratedAt: now, lastRunId: res.run.id })
+      .where(eq(reportSchedules.id, s.id));
+    generated.push({ scheduleId: s.id, runId: res.run.id, definition: def.name });
+  }
+  await db.insert(auditLog).values({
+    userId: opts.actorUserId ?? NO_IDENTITY,
+    objectType: "report",
+    objectId: null,
+    detail: { generated: generated.length, skipped: skipped.length },
+    effect: "allow",
+    ruleId: "report-schedule-swept",
+    ruleChain: [],
+    reason: `report schedule sweep: ${generated.length} generated, ${skipped.length} skipped`,
+  });
+  return { generated, skipped };
+}
+
+// ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
 
@@ -643,17 +727,18 @@ export function registerReportingRoutes(app: FastifyInstance, db: Db): void {
       req.authCtx.userId ?? null,
       row!.id,
       "report-schedule-created",
-      `admin scheduled report '${def.name}' ${body.cadence} — this records a CADENCE ONLY. There is no ` +
-        `in-process scheduler in this deployment: an operator or an external cron must call ` +
-        `POST /v1/reports/schedules/run-due, or nothing will ever be generated`,
+      `admin scheduled report '${def.name}' ${body.cadence} — this records a CADENCE ONLY. It is acted ` +
+        `on by ADR-0064's scheduler when that is switched on, or by an operator/cron calling ` +
+        `POST /v1/reports/schedules/run-due; with neither, nothing will ever be generated`,
       { definition: def.name, cadence: body.cadence, recipients: body.recipientUserIds?.length ?? 0 },
     );
     return reply.status(201).send({
       schedule: row,
       note:
-        "Schedule DEFINITION stored. Nothing drives it — call POST /v1/reports/schedules/run-due from " +
-        "cron/an operator. No delivery transport is wired: recipients are recorded for the entitlement " +
-        "check, not mailed.",
+        "Schedule DEFINITION stored. It is driven by ADR-0064's in-process scheduler when that is " +
+        "switched on (REGULAIT_SCHEDULER=on), and otherwise only by POST /v1/reports/schedules/run-due " +
+        "from cron/an operator — with neither, nothing generates. No delivery transport is wired: " +
+        "recipients are recorded for the entitlement check, not mailed.",
     });
   });
 
@@ -701,66 +786,17 @@ export function registerReportingRoutes(app: FastifyInstance, db: Db): void {
   });
 
   /**
-   * THE SWEEP, as an ENDPOINT — the same shape ADR-0045's expiry sweep and
-   * ADR-0046's SLA evaluation take, and for the same reason: there is no
-   * scheduler here to hang it on, and pretending otherwise would be the exact
-   * dishonesty this project refuses. Admin-only, because it generates at the
-   * DEFINITION's full scope.
+   * THE SWEEP, as an ENDPOINT. ADR-0064's in-process scheduler now drives the
+   * SAME function when it is switched on; this endpoint stays as the manual /
+   * on-demand path so there is exactly one implementation and two doors to it.
+   * Admin-only, because it generates at the DEFINITION's full scope.
    */
   app.post("/v1/reports/schedules/run-due", async (req) => {
-    const now = new Date();
-    const due = await db
-      .select()
-      .from(reportSchedules)
-      .where(eq(reportSchedules.enabled, true));
-    const generated: Array<{ scheduleId: string; runId: string; definition: string }> = [];
-    const skipped: Array<{ scheduleId: string; reason: string }> = [];
-    for (const s of due) {
-      if (!scheduleIsDue(s.cadence, s.lastGeneratedAt, now)) {
-        skipped.push({ scheduleId: s.id, reason: "not yet due for its cadence" });
-        continue;
-      }
-      const [def] = await db
-        .select()
-        .from(reportDefinitions)
-        .where(eq(reportDefinitions.id, s.definitionId));
-      if (!def) {
-        skipped.push({ scheduleId: s.id, reason: "definition disappeared" });
-        continue;
-      }
-      const res = await generateReport(db, {
-        definition: def,
-        actor: { userId: req.authCtx.userId ?? null, isAdmin: req.authCtx.isAdmin },
-        trigger: "scheduled",
-        scheduleId: s.id,
-        now,
-      });
-      if (!res.ok) {
-        skipped.push({ scheduleId: s.id, reason: res.detail });
-        continue;
-      }
-      await db
-        .update(reportSchedules)
-        .set({ lastGeneratedAt: now, lastRunId: res.run.id })
-        .where(eq(reportSchedules.id, s.id));
-      generated.push({ scheduleId: s.id, runId: res.run.id, definition: def.name });
-    }
-    await audit(
-      req.authCtx.userId ?? null,
-      null,
-      "report-schedule-swept",
-      `operator-driven schedule sweep: ${generated.length} generated, ${skipped.length} skipped`,
-      { generated: generated.length, skipped: skipped.length },
-    );
-    return {
-      generated,
-      skipped,
-      note:
-        "Nothing calls this on a timer — there is no in-process scheduler in this codebase. A " +
-        "deployment that never invokes this endpoint generates NO scheduled reports, and " +
-        "`lastGeneratedAt` staying null is how that is visible rather than silent. No artifact is " +
-        "delivered anywhere: recipients are recorded, not mailed.",
-    };
+    const result = await runDueReportSchedules(db, {
+      actorUserId: req.authCtx.userId ?? null,
+      isAdmin: req.authCtx.isAdmin,
+    });
+    return { ...result, note: REPORT_SCHEDULE_SWEEP_NOTE };
   });
 
   // --- generation + reads (NON-ADMIN reachable, entitlement-scoped) --------
@@ -900,10 +936,10 @@ export function registerReportingRoutes(app: FastifyInstance, db: Db): void {
         lastGeneratedAt: byDef.get(d.id)?.generatedAt ?? null,
         runCount: byDef.get(d.id)?.runs ?? 0,
       })),
-      schedulerPresent: false,
-      note:
-        "No in-process scheduler exists in this deployment. Schedules are definitions only; drive " +
-        "POST /v1/reports/schedules/run-due from cron. Spend figures are list-price ESTIMATES.",
+      // ADR-0064: whether a scheduler is actually DRIVING the schedules in this
+      // deployment, reported rather than hard-coded false.
+      schedulerPresent: resolveSchedulerConfig().enabled,
+      note: `${REPORT_SCHEDULE_SWEEP_NOTE} Spend figures are list-price ESTIMATES.`,
     };
   });
 }

@@ -27,6 +27,12 @@ in-session sign-off — see CLAUDE.md).
 - [ ] S3 backup retained as belt-and-suspenders; **cross-region copy (CRR)** enabled
 - [ ] Restore drill automated and run on a schedule (not just the one-time proof in ADR-0035)
 - [ ] `REGULAIT_DATA_KEY` in KMS/Secrets Manager, **recorded out-of-band** (deferred security D1)
+- [ ] …and **attested** — `POST /v1/security/data-key/attestations`, or Admin → Settings → Data key
+      custody ([ADR-0063](../decisions/0063-data-key-custody.md)). Until somebody does, every backup
+      run reports `custody=UNATTESTED` and publishes `Backup/DataKeyAttested=0`.
+- [ ] The key's fingerprint (`dk1:…`, from the gateway boot line or `GET /v1/security/data-key`)
+      recorded **alongside** the key. It is not secret, and it is what a future restore compares
+      against the dump's `manifest.json` / S3 `datakey` metadata before restoring anything.
 
 ### Observability & response
 - [ ] OpenTelemetry traces across gateway → kernels → providers

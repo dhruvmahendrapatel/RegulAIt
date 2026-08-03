@@ -1,9 +1,8 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createDb, runMigrations } from "@regulait/db";
-import { buildApp } from "./app.js";
-import { describeTrustProxy, resolveTrustProxy } from "./trusted-proxy.js";
-import { describeHsts, resolveHsts } from "./hsts.js";
+import { createDb } from "@regulait/db";
+import { startGateway } from "./boot.js";
+import { DataKeyBootError } from "./data-key.js";
 
 const connectionString =
   process.env.DATABASE_URL ?? "postgres://regulait:regulait@localhost:5432/regulait";
@@ -15,24 +14,25 @@ const migrationsFolder = path.resolve(
   "../../../packages/db/migrations",
 );
 
-const app = buildApp(db, {
-  bootstrapToken: process.env.REGULAIT_BOOTSTRAP_TOKEN,
-  dataKey: process.env.REGULAIT_DATA_KEY,
-});
-
-// migrations are idempotent — booting always converges the schema
-await runMigrations(db, migrationsFolder);
-
-app.listen({ port, host: "0.0.0.0" }).then((address) => {
-  console.log(`regulait gateway listening on ${address}`);
-  console.log(`  app UI:    ${address}/app`);
-  console.log(`  admin UI:  ${address}/admin`);
-  // ADR-0031: say out loud whose X-Forwarded-* this deployment believes —
-  // getting this wrong silently corrupts every client IP in the audit trail.
-  console.log(`  proxy:     ${describeTrustProxy(resolveTrustProxy())}`);
-  // ADR-0029 amendment: say out loud what this deployment pins browsers to.
-  // HSTS is the one header we cannot take back from the server, so the value
-  // belongs in the boot log next to the proxy posture rather than only in a
-  // response an operator has to think to look at.
-  console.log(`  hsts:      ${describeHsts(resolveHsts())}`);
-});
+// The whole sequence — build, migrate, ADR-0063 data-key gate, listen, print
+// the posture block — lives in boot.ts so a test can drive the REAL start
+// rather than a re-implementation of it. See that file for the ordering
+// contract.
+try {
+  await startGateway({
+    db,
+    migrationsFolder,
+    port,
+    bootstrapToken: process.env.REGULAIT_BOOTSTRAP_TOKEN,
+    dataKey: process.env.REGULAIT_DATA_KEY,
+  });
+} catch (err) {
+  if (err instanceof DataKeyBootError) {
+    // Not a stack trace. This is the message an operator reads at 3am in the
+    // middle of a restore, and it is the only signal that arrives while the
+    // correct key may still be recoverable from the source box.
+    console.error(`\n${err.message}\n`);
+    process.exit(1);
+  }
+  throw err;
+}

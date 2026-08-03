@@ -306,3 +306,26 @@ adapter), wrapped by a recording spy so "was the provider called at all" is asse
   would wedge delivery for no measurement gain.
 - **Re-verify the judge and the gate's judgment against a real provider** the moment one is
   connected. Until then, this ADR's §4 promise is delivered as a mechanism, not as a measurement.
+
+---
+
+## Amendment (2026-08-03) — this ADR's scheduling gap is closed by ADR-0064
+
+[ADR-0064](0064-in-process-scheduler.md) added an **in-process scheduler** to the gateway, with a
+Postgres row-lock claim so a second instance cannot double-fire a job, and registered this ADR's
+sweep as one of its six jobs. The sweep's logic was **not reimplemented** — the job calls the same
+function this ADR's endpoint calls, so there is exactly one implementation and the endpoint
+remains available for manual/on-demand runs.
+
+Three things about that are worth stating here rather than only in ADR-0064:
+
+1. **It is OFF by default**, in every environment (`REGULAIT_SCHEDULER`). A deployment that does
+   not opt in behaves exactly as this ADR originally described, and its endpoint is still the way
+   to drive the sweep from an operator's own cron.
+2. **Nothing about enforcement changed, and nothing was allowed to.** This ADR's sweep was
+   deliberately built so that correctness never depended on it having run; that property is
+   asserted in `scheduler.test.ts` precisely so a future change which moves a control into the
+   timer breaks a test rather than a customer. The scheduler buys **timeliness**.
+3. **Timeliness is bounded by the box being up.** [ADR-0032](0032-scheduled-power-off-dev-infra.md)
+   powers this deployment's infrastructure off nightly; a sweep due inside the off-window does not
+   run, is not queued, and is picked up once — late — on the first tick after power-on.

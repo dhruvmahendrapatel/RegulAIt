@@ -470,7 +470,7 @@ describe("ADR-0049 — the detector fires on a real spike AND stays silent on no
   it("FIRES on the runaway spike, with the evidence needed to re-derive it by hand", async () => {
     await enable(alphaId, "require_approval");
     const out = await evaluate(alphaId);
-    expect(out.note).toMatch(/no in-process scheduler/i);
+    expect(out.note).toMatch(/ADR-0064's in-process scheduler drives this/i);
     const result = out.results.find((r: { projectId: string }) => r.projectId === alphaId);
     expect(result.evaluated).toBe(true);
     const spike = result.verdicts.find((v: { signal: string }) => v.signal === "spend_spike");
@@ -525,8 +525,10 @@ describe("ADR-0049 — the detector fires on a real spike AND stays silent on no
     const [p] = await db.select().from(spendMonitorPolicies).where(eq(spendMonitorPolicies.projectId, alphaId));
     expect(p!.lastEvaluatedAt).not.toBeNull();
     const overview = await app.inject({ method: "GET", url: "/v1/spend/monitor-overview", headers: AUTH });
+    // ADR-0064: forced off under test, so still false — but now computed from
+    // the deployment's real posture rather than hardcoded.
     expect(overview.json().schedulerPresent).toBe(false);
-    expect(overview.json().note).toMatch(/No in-process scheduler/);
+    expect(overview.json().note).toMatch(/A deployment running neither raises NO anomalies/i);
   });
 
   it("a disabled policy computes nothing at all — OFF by default is real", async () => {

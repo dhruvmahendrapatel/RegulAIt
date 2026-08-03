@@ -542,6 +542,9 @@ describe("ADR-0052 — admin gating, disclosure and audit", () => {
     expect(s.keyring.pinnedKeyIds).toContain(KEY_ID);
     expect(s.enforcementPointsWired).toEqual(["user.provision", "agent.create"]);
     expect(s.note).toMatch(/no network call of any kind/);
+    // ADR-0064: a scheduler exists; licence re-verification deliberately has no
+    // job on it, and the disclosure names that rather than denying the scheduler
+    expect(s.note).toMatch(/scheduler deliberately has NO job here/i);
     expect(s.note).toMatch(/THIS HOST'S CLOCK/);
     expect(s.posture).toMatch(/governance\/safety\/audit layer keeps/i);
     // the reviewed action-class inventory is served, not just documented

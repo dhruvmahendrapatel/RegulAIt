@@ -463,10 +463,14 @@ describe("SLA timers are EVALUATED, and escalation never decides", () => {
     expect(row!.decidedBy).toBeNull();
   });
 
-  it("the sweep endpoint is a PULL, and says so — nothing calls it on a timer", async () => {
+  it("the sweep endpoint stays a PULL, and says the sweep is timeliness not correctness", async () => {
     const res = await app.inject({ method: "POST", url: "/v1/approvals/sla/sweep", headers: AUTH });
     expect(res.statusCode).toBe(200);
-    expect(res.json().note).toContain("no in-process scheduler");
+    // ADR-0064 gave this a scheduler job. The invariant asserted here is the one
+    // that must never regress: breach is ALSO caught lazily, so the sweep only
+    // decides when somebody finds out.
+    expect(res.json().note).toContain("evaluated lazily too");
+    expect(res.json().note).toContain("never whether");
     expect(typeof res.json().evaluated).toBe("number");
   });
 

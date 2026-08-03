@@ -663,6 +663,110 @@ export async function datasetIsFrozen(db: Db, dataset: EvalDatasetRow): Promise<
 }
 
 // ---------------------------------------------------------------------------
+// ADR-0044 §5 — THE DRIFT SWEEP
+// ---------------------------------------------------------------------------
+
+export const EVAL_DRIFT_SWEEP_NOTE =
+  "The sweep re-runs every PINNED BASELINE pair (dataset version × agent) as the user who pinned it — " +
+  "so it never exceeds that person's entitlements and never mints an identity of its own. A pair whose " +
+  "baseline has no surviving initiator is SKIPPED and said so, rather than run as somebody else. " +
+  "Regression is decided by the ordinary runner against the ordinary baseline; this only decides WHEN " +
+  "the comparison happens. Driven by ADR-0064's scheduler when it is on, and by this endpoint otherwise.";
+
+export interface EvalDriftSweepResult {
+  /** pairs the sweep actually re-ran */
+  ran: Array<{
+    datasetId: string;
+    agentId: string;
+    runId: string;
+    regression: boolean;
+    scoreDelta: number | null;
+  }>;
+  skipped: Array<{ datasetId: string; agentId: string | null; reason: string }>;
+}
+
+/**
+ * ONE PASS of the ADR-0044 §5 drift detector.
+ *
+ * ADR-0044 shipped the `scheduled` trigger and then disclosed, honestly, that
+ * nothing drives it — §5 was the one part of that ADR that did not ship, and it
+ * did not ship because there was no scheduler. This is the driver ADR-0064 lets
+ * us write, and it deliberately adds NO measurement logic: it decides WHICH
+ * pairs to re-measure and hands each to `runEvalSuite` — the same function
+ * `POST /v1/evals/runs` calls. Regression, the baseline comparison and the gate
+ * are all computed by that one runner.
+ *
+ * WHOSE AUTHORITY. A pinned baseline names the person who pinned/ran it. The
+ * sweep runs as THAT user, so an eval dispatch made by the scheduler is subject
+ * to exactly the entitlements, budget and audit attribution a manual run by that
+ * person would be. The scheduler has no identity of its own and never
+ * substitutes one — a pair whose initiator is gone is skipped with a reason,
+ * which is strictly better than quietly running it as an admin.
+ */
+export async function runEvalDriftSweep(
+  db: Db,
+  dataKey: string | undefined,
+): Promise<EvalDriftSweepResult> {
+  const pinned = await db
+    .select()
+    .from(evalRuns)
+    .where(and(eq(evalRuns.isBaseline, true), eq(evalRuns.status, "completed")))
+    .orderBy(asc(evalRuns.startedAt));
+
+  const ran: EvalDriftSweepResult["ran"] = [];
+  const skipped: EvalDriftSweepResult["skipped"] = [];
+  const seen = new Set<string>();
+
+  for (const base of pinned) {
+    if (!base.agentId) {
+      skipped.push({ datasetId: base.datasetId, agentId: null, reason: "baseline has no agent" });
+      continue;
+    }
+    const key = `${base.datasetId}:${base.agentId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    if (!base.initiatedByUserId) {
+      skipped.push({
+        datasetId: base.datasetId,
+        agentId: base.agentId,
+        reason:
+          "the baseline's initiating user is gone — the sweep will not run an eval as somebody else, " +
+          "so re-pin a baseline under a current user to resume drift detection for this pair",
+      });
+      continue;
+    }
+
+    const outcome = await runEvalSuite(db, dataKey, {
+      datasetId: base.datasetId,
+      agentId: base.agentId,
+      userId: base.initiatedByUserId,
+      trigger: "scheduled",
+      tolerance: base.tolerance,
+      minScore: base.minScore,
+      minPassRate: base.minPassRate,
+      note: "ADR-0044 §5 drift sweep",
+    });
+    if (!outcome.ok) {
+      skipped.push({
+        datasetId: base.datasetId,
+        agentId: base.agentId,
+        reason: `${outcome.error}${outcome.detail ? ` — ${outcome.detail}` : ""}`,
+      });
+      continue;
+    }
+    ran.push({
+      datasetId: base.datasetId,
+      agentId: base.agentId,
+      runId: outcome.run.id,
+      regression: outcome.run.regression === true,
+      scoreDelta: outcome.run.scoreDelta,
+    });
+  }
+  return { ran, skipped };
+}
+
+// ---------------------------------------------------------------------------
 // Admin + run API
 // ---------------------------------------------------------------------------
 
@@ -1011,6 +1115,19 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
         : `run ${run.id} unpinned as baseline`,
     });
     return { run: updated };
+  });
+
+  /**
+   * ADR-0044 §5 — THE DRIFT SWEEP, as an ENDPOINT. ADR-0064's in-process
+   * scheduler drives the SAME function when it is switched on; this endpoint is
+   * the manual/on-demand door to it. Admin-only through the default gate: the
+   * sweep re-runs every pinned baseline in the deployment, which is org-wide
+   * authority even though each individual run executes under the entitlements
+   * of whoever pinned it.
+   */
+  app.post("/v1/evals/drift-sweep", async () => {
+    const result = await runEvalDriftSweep(db, opts.dataKey);
+    return { ...result, note: EVAL_DRIFT_SWEEP_NOTE };
   });
 
   /** who ran what, most recently — the drift view the admin screen opens on */

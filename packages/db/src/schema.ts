@@ -696,6 +696,26 @@ export const auditLog = pgTable(
         // The copilot is a governed tenant, so its trail is this trail.
         "copilot_query",
         "copilot_proposal",
+        // ADR-0063: REGULAIT_DATA_KEY custody. The first-boot RECORD of this
+        // deployment's key fingerprint, every boot that VERIFIED it, an
+        // operator-declared ROTATION, every custody ATTESTATION — and the row
+        // that matters most: the boot REFUSED because the recorded fingerprint
+        // and the running key disagree, i.e. a restore onto a box that does not
+        // hold the key its ciphertext was written under. That refusal is
+        // written before the gateway declines to listen, so the reason a
+        // deployment would not come up is IN the trail rather than only in a
+        // console someone had to be watching. Plain text column — no DDL.
+        "data_key",
+        // ADR-0064: every pass of every scheduled sweep — start, outcome, and
+        // the count of what it touched — plus an admin enabling/disabling a job
+        // or changing its cadence. The row that matters is the FAILURE: a sweep
+        // that has not run for a month, on a product whose pitch is that
+        // nothing happens unobserved, must be findable in the same trail as
+        // everything else rather than in a separate health endpoint. The
+        // EFFECTS a sweep produces (an expired model card, a breached SLA, a
+        // generated report) keep auditing on their own objectType, so "what
+        // happened to this approval" stays one query. Plain text — no DDL.
+        "scheduler_job",
       ],
     })
       .notNull()
@@ -2553,6 +2573,10 @@ export const ORG_PII_MODES = ["none", "log", "warn", "block"] as const;
 export const MFA_REQUIREMENTS = ["off", "admins", "all"] as const;
 export const BUDGET_ENFORCEMENTS = ["block", "warn_only"] as const;
 export const APPROVAL_QUORUMS = ["all", "any"] as const;
+/** ADR-0062: the org's TIGHTENING dial over the deployment-wide egress
+ * posture. 'inherit' defers to the env-derived deploy mode; 'strict' raises
+ * the floor. There is deliberately no value that lowers it. */
+export const EGRESS_COMPILED_DEFAULT_POLICIES = ["inherit", "strict"] as const;
 
 export const orgSettings = pgTable(
   "org_settings",
@@ -2765,6 +2789,29 @@ export const orgSettings = pgTable(
      * sensitive queues act item-by-item on the highest-risk classes; that
      * friction IS the control (ADR-0046 §4), and it is a disclosed limit. */
     approvalBulkSensitiveBlocked: boolean("approval_bulk_sensitive_blocked").notNull().default(true),
+
+    // --- ADR-0062 (migration 0074): mode-scoped egress ----------------------
+    /** THE ONE ORG DIAL OVER THE COMPILED-VENDOR-DEFAULT POSTURE, and it can
+     * only TIGHTEN. The deployment-wide posture is derived from the
+     * environment (`REGULAIT_DEPLOY_MODE`, ADR-0062, following the ADR-0029
+     * HSTS precedent) because "is this installation air-gapped" is a
+     * deployment-shape fact an admin cannot judge from a portal — and because
+     * an air-gapped posture a compromised admin account can switch off from a
+     * web form is not one.
+     *
+     * 'inherit' (default) = today's behaviour: the env-derived mode decides.
+     * 'strict'            = adjudicate compiled vendor endpoints against
+     *                       `egress_allow_hosts` regardless of mode, so a
+     *                       hosted or BYOC box can opt in.
+     *
+     * Composition is MAX over {permissive < strict}: there is no value here
+     * that loosens an air_gapped deployment, by construction rather than by
+     * validation. */
+    egressCompiledDefaultPolicy: text("egress_compiled_default_policy", {
+      enum: EGRESS_COMPILED_DEFAULT_POLICIES,
+    })
+      .notNull()
+      .default("inherit"),
 
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -5177,3 +5224,212 @@ export const policySimulationSettings = pgTable("policy_simulation_settings", {
 export type PolicySimulationRow = typeof policySimulations.$inferSelect;
 export type PolicySimulationFlipRow = typeof policySimulationFlips.$inferSelect;
 export type PolicySimulationSettingsRow = typeof policySimulationSettings.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0063 (migration 0075) — REGULAIT_DATA_KEY CUSTODY.
+//
+// The envelope split (ADR-0035: the key is NOT in the backup) is deliberate and
+// correct. What was missing is the custody procedure around it, and its two
+// halves live here.
+//
+// NOTHING IN EITHER TABLE IS SECRET. `fingerprint` is a truncated HMAC-SHA256
+// over a fixed domain string, keyed by the data key — a PRF output, not an
+// encoding. It is designed to be printed in boot logs and written into backup
+// metadata, because a backup artifact that cannot say which key restores it is
+// the whole problem.
+// ---------------------------------------------------------------------------
+
+/** the fixed id of the `data_key_state` singleton row */
+export const DATA_KEY_STATE_ID = "singleton";
+
+/**
+ * WHICH KEY THIS DEPLOYMENT'S CIPHERTEXT WAS WRITTEN UNDER.
+ *
+ * Recorded on the first boot that has a key, compared on every boot after.
+ * A mismatch is the restore-onto-a-new-box case and the gateway refuses to
+ * start rather than serve an app whose every decryption silently fails.
+ */
+export const dataKeyState = pgTable(
+  "data_key_state",
+  {
+    id: text("id").primaryKey().default(DATA_KEY_STATE_ID),
+    fingerprint: text("fingerprint").notNull(),
+    recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
+    /** bumped by every boot that matched — "when did a running gateway last
+     * prove it holds this key", without reading a log */
+    lastVerifiedAt: timestamp("last_verified_at", { withTimezone: true }).notNull().defaultNow(),
+    /** set only by an explicit operator-declared rotation */
+    rotatedFrom: text("rotated_from"),
+    rotatedAt: timestamp("rotated_at", { withTimezone: true }),
+  },
+  (t) => [check("data_key_state_singleton", sql`${t.id} = 'singleton'`)],
+);
+
+/** where an operator says they put the key. Recorded, never verified. */
+export const DATA_KEY_ATTESTATION_METHODS = [
+  "password_manager",
+  "kms",
+  "escrow",
+  "offline",
+  "other",
+] as const;
+export type DataKeyAttestationMethod = (typeof DATA_KEY_ATTESTATION_METHODS)[number];
+
+/**
+ * AN APPEND-ONLY RECORD THAT A NAMED HUMAN SAYS THEY HAVE THE KEY.
+ *
+ * Be precise about what this is: it records a CLAIM, it does not verify
+ * custody — nothing in a server can reach into a password manager. Its value is
+ * the converse: the ABSENCE of a claim becomes a fact the product can see and
+ * report, on the boot line, in the admin surface and in every backup's own
+ * output. An unattested backup is a backup that may not be restorable, and that
+ * is now said out loud instead of being discovered during a restore.
+ *
+ * The fingerprint is stored per row rather than joined to the singleton so that
+ * after a rotation an attestation of the OLD key cannot silently appear to
+ * cover the new one.
+ */
+export const dataKeyAttestations = pgTable(
+  "data_key_attestations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    fingerprint: text("fingerprint").notNull(),
+    /** nullable so deleting a user cannot erase the attestation itself */
+    attestedByUserId: uuid("attested_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    /** captured as text at attestation time, for the same reason */
+    attestedByLabel: text("attested_by_label").notNull(),
+    method: text("method", { enum: DATA_KEY_ATTESTATION_METHODS }).notNull(),
+    /** a NON-SECRET pointer ("1Password vault: Platform Ops"). The API refuses
+     * anything that looks like key material. */
+    locationHint: text("location_hint"),
+    note: text("note"),
+    attestedAt: timestamp("attested_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("data_key_attestations_fingerprint_idx").on(t.fingerprint, t.attestedAt)],
+);
+
+export type DataKeyStateRow = typeof dataKeyState.$inferSelect;
+export type DataKeyAttestationRow = typeof dataKeyAttestations.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0064 (migration 0076) — THE IN-PROCESS SCHEDULER
+// ---------------------------------------------------------------------------
+
+/** the verdict of one pass. `skipped` is a first-class outcome, not a failure:
+ * another instance held the lease, or the job was disabled between the tick and
+ * the claim. "The other box ran it" must not look like "nothing ran it". */
+export const SCHEDULER_OUTCOMES = ["running", "ok", "failed", "skipped"] as const;
+export type SchedulerOutcome = (typeof SCHEDULER_OUTCOMES)[number];
+
+export const SCHEDULER_TRIGGERS = ["schedule", "manual"] as const;
+export type SchedulerTrigger = (typeof SCHEDULER_TRIGGERS)[number];
+
+/**
+ * One row per registered job — AND the lock.
+ *
+ * The claim is a short transaction that takes `FOR UPDATE` on this row, checks
+ * `enabled`/`next_due_at`/the lease, and writes a lease before committing. Two
+ * gateway instances pointed at one database therefore cannot both run the same
+ * job: the loser observes the winner's lease and records a `skipped` run.
+ * Correctness does not depend on there being exactly one process.
+ *
+ * `running` is paired with `lease_expires_at` deliberately — a boolean alone
+ * would strand a job forever if its holder was SIGKILLed mid-pass.
+ */
+export const schedulerJobs = pgTable(
+  "scheduler_jobs",
+  {
+    /** the STABLE job id chosen in code (e.g. `mrm-expiry-sweep`), used as the
+     * audit ruleId suffix. Text rather than uuid so a run ledger reads as
+     * English. */
+    name: text("name").primaryKey(),
+    /** synced from the code definition on every boot, so the row can never
+     * carry a description the code has moved on from */
+    description: text("description").notNull().default(""),
+    /** which ADR this job discharges */
+    adr: text("adr"),
+    /** off here = the tick loop skips this job even while the scheduler runs.
+     * Defaults on: the SCHEDULER is what is off by default, not the jobs. */
+    enabled: boolean("enabled").notNull().default(true),
+    /** a plain interval, not a cron expression: a parser is a dependency and an
+     * expression is a thing to get wrong, and no sweep here needs "the third
+     * Tuesday". An operator who needs wall-clock precision still has the
+     * endpoint and their own cron. */
+    intervalSeconds: integer("interval_seconds").notNull(),
+    /** the single source of "is it due" — read inside the claim transaction, so
+     * two instances cannot disagree about it */
+    nextDueAt: timestamp("next_due_at", { withTimezone: true }).notNull().defaultNow(),
+    lastRunAt: timestamp("last_run_at", { withTimezone: true }),
+    lastFinishedAt: timestamp("last_finished_at", { withTimezone: true }),
+    lastOutcome: text("last_outcome", { enum: ["ok", "failed", "skipped"] }),
+    lastError: text("last_error"),
+    lastItemsProcessed: integer("last_items_processed"),
+    lastDurationMs: integer("last_duration_ms"),
+    running: boolean("running").notNull().default(false),
+    /** the per-boot instance id of whoever holds the lease */
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    runs: integer("runs").notNull().default(0),
+    failures: integer("failures").notNull().default(0),
+    /** the number an alert should watch — a job red every night for a month is
+     * a different fact from one red row */
+    consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("scheduler_jobs_interval_check", sql`${t.intervalSeconds} >= 1`),
+    check(
+      "scheduler_jobs_last_outcome_check",
+      sql`${t.lastOutcome} IS NULL OR ${t.lastOutcome} IN ('ok', 'failed', 'skipped')`,
+    ),
+  ],
+);
+
+/**
+ * THE RUN LEDGER — one row per execution ATTEMPT, including the skipped ones.
+ *
+ * This table exists so that "did the MRM sweep actually run last night, and
+ * what did it do?" is answerable from the database rather than from a log
+ * someone had to be tailing. A row left at `running` with a NULL `finished_at`
+ * and a stale `started_at` is a process that died mid-pass — a diagnosis a
+ * design that only wrote the row on success could never offer.
+ */
+export const schedulerRuns = pgTable(
+  "scheduler_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    jobName: text("job_name")
+      .notNull()
+      .references(() => schedulerJobs.name, { onDelete: "cascade" }),
+    /** both triggers go through the SAME claim and the SAME job body, so a
+     * "run now" cannot race a scheduled pass */
+    trigger: text("trigger", { enum: SCHEDULER_TRIGGERS }).notNull().default("schedule"),
+    instanceId: text("instance_id").notNull(),
+    initiatedByUserId: uuid("initiated_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    durationMs: integer("duration_ms"),
+    outcome: text("outcome", { enum: SCHEDULER_OUTCOMES }).notNull().default("running"),
+    /** whatever the job counted — the number that answers "and what did it do?" */
+    itemsProcessed: integer("items_processed").notNull().default(0),
+    detail: jsonb("detail").$type<Record<string, unknown>>().notNull().default({}),
+    error: text("error"),
+  },
+  (t) => [
+    check(
+      "scheduler_runs_outcome_check",
+      sql`${t.outcome} IN ('running', 'ok', 'failed', 'skipped')`,
+    ),
+    check("scheduler_runs_trigger_check", sql`${t.trigger} IN ('schedule', 'manual')`),
+    index("scheduler_runs_job_idx").on(t.jobName, t.startedAt),
+    index("scheduler_runs_started_idx").on(t.startedAt),
+  ],
+);
+
+export type SchedulerJobRow = typeof schedulerJobs.$inferSelect;
+export type SchedulerRunRow = typeof schedulerRuns.$inferSelect;

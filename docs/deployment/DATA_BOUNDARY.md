@@ -5,6 +5,7 @@
   primary motion), [ADR-0015](../decisions/0015-byoc-deploy-modes-data-boundary.md) (the three
   modes and the code-enforced boundary), [ADR-0034](../decisions/0034-custom-llm-providers-egress-guard.md)
   and [ADR-0043](../decisions/0043-mcp-oidc-egress-guard.md) (the egress guard),
+  [ADR-0062](../decisions/0062-mode-scoped-egress.md) (mode-scoped egress — §4/§4.1),
   GOVERNANCE_LAYER_SPEC §8.4/§8.5
 - **Status of this document**: every claim below was checked against source, and the file names
   and line-level behaviours are cited so you can check them yourself. Where the code does **not**
@@ -47,9 +48,19 @@ grep -rnoE 'https?://[a-zA-Z0-9._-]+' apps/*/src packages/*/src --include='*.ts'
 At the time of writing that list is exactly: `api.github.com`, `gitlab.com`,
 `api.bitbucket.org`, `dev.azure.com`, `portal.azure.com`, `console.cloud.google.com`,
 `api.linear.app`, `api.monday.com`, `app.asana.com`, `slack.com`,
-`generativelanguage.googleapis.com`, `api.x.ai`, `169.254.169.254` (the AWS instance-metadata
+`generativelanguage.googleapis.com`, `api.x.ai`, `api.anthropic.com`, `api.openai.com`,
+`169.254.169.254` (the AWS instance-metadata
 address, which appears **only** in the egress guard that blocks it and in the comments explaining
 why), plus `localhost`/`127.0.0.1`/`*.internal` and `example.com`-style documentation strings.
+
+> **Updated 2026-08-03 ([ADR-0062](../decisions/0062-mode-scoped-egress.md)).** `api.anthropic.com`
+> and `api.openai.com` are **new to this list and not new to the product**. They were always the
+> destinations those two adapters reached with no `baseUrl` override — they simply lived inside
+> `@anthropic-ai/sdk`'s and `openai`'s own compiled defaults rather than in our source, so this
+> grep did not surface them. ADR-0062 needed to *name* every compiled destination in order to
+> adjudicate it, so they are now written down in `packages/model-provider/src/index.ts` and pinned
+> against the SDKs' actual defaults by a drift test. The set of places this software can reach did
+> not change; the set you can see from here did.
 
 Every one of those is a **default endpoint for a connector, git provider, PM tool or model
 provider that you have to create a row for before it is ever contacted.** None of them is
@@ -97,10 +108,10 @@ ADR-0034/0043 egress guard adjudicates it.
 
 | # | Surface | Fires when | Carries | Guarded? |
 | --- | --- | --- | --- | --- |
-| 1 | **Built-in model providers** (Anthropic, OpenAI, Google, xAI) at their compiled vendor endpoints | an agent using that provider is invoked **and** a platform/user credential or provider env var exists | prompts, system prompts, attached document text, tool definitions and results | **No — see §4** |
+| 1 | **Built-in model providers** (Anthropic, OpenAI, Google, xAI) at their compiled vendor endpoints | an agent using that provider is invoked **and** a platform/user credential or provider env var exists | prompts, system prompts, attached document text, tool definitions and results | **Mode-scoped** — refused unless allow-listed under a strict posture (`air_gapped`, or an org that opted in); unadjudicated under `hosted`/`byoc`. See §4 |
 | 2 | **Model credential `baseUrl` override** (`model_credentials`, `user_model_credentials`) | same, when a row sets `baseUrl` | same as #1 | **Yes** — write-time and every dispatch (`credential-egress.ts`) |
 | 3 | **Custom model providers** (`custom_model_providers`, ADR-0034) — Ollama, vLLM, LM Studio, an internal gateway | an agent bound to a custom provider is invoked | same as #1 | **Yes** — write-time, enable-time and every dispatch (`custom-providers.ts`) |
-| 4 | **Connectors** (Slack, Snowflake, webhook, …) at compiled vendor endpoints | a governed connector tool call | whatever the caller passes to the tool | **No** (no override typed) |
+| 4 | **Connectors** (Slack, Snowflake, webhook, …) at compiled vendor endpoints | a governed connector tool call | whatever the caller passes to the tool | **Mode-scoped**, same as #1 — and the same now applies to a git (#6) or PM (#7) row with no override. See §4 |
 | 5 | **Connector / git / PM `baseUrl` overrides** | as #4/#6/#7, when a row sets `baseUrl` | same | **Yes** — write-time and every call (`connection-egress.ts`) |
 | 6 | **Git providers** (GitHub, GitLab, Bitbucket, Azure DevOps) | a workflow reaches a PR/branch stage | branch names, diffs, PR bodies | override-only (see #5) |
 | 7 | **PM tools** (Azure DevOps, Jira, Linear, Asana, monday.com, webhook) | pillar-8 sync, approval mirroring | work-item fields, decisions, approvals | override-only (see #5) |
@@ -117,7 +128,13 @@ webhooks (`packages/pm-provider/src/inbound.ts`), and the IDE-compat endpoints (
 
 ---
 
-## 4. The finding: rows 1 and 4 are **not** behind the egress guard, by design
+## 4. The finding: rows 1 and 4 were **not** behind the egress guard — and now are, per mode
+
+> **Status of this section, 2026-08-03.** Everything below the horizontal rule is the finding
+> **exactly as it was originally written**, kept verbatim. It is what this document said while it
+> was true, and a trust artifact that quietly rewrites its own weakest point is worth less than one
+> that shows the repair. [ADR-0062](../decisions/0062-mode-scoped-egress.md) closed it; **§4.1 at
+> the end of this section describes what the code enforces now and what remains true.**
 
 This is the part a trust document is tempted to omit. We are not omitting it.
 
@@ -166,6 +183,67 @@ is air-gapped) would make row 1 code-enforced. It is not built. ADR-0015's A4 no
 identifies per-mode policy as belonging in pillar 1's rule-scoping model, with its own slice and
 its own ADR. Until that exists, §4 is the truth.
 
+### 4.1 What changed — ADR-0062, 2026-08-03
+
+The follow-up named in the paragraph above was built, with one deliberate difference from the
+sketch: the deployment-wide posture is **derived from the environment**, not from `org_settings`.
+"Is this installation air-gapped" is a fact about the box, not a row an admin can judge from a
+portal — and an air-gapped posture a compromised admin account could switch off from a web form
+would not be one. This follows the [ADR-0029](../decisions/0029-zero-cost-tls-caddy-sslip-letsencrypt.md)
+HSTS precedent exactly, and it is the same category as `REGULAIT_HSTS` and
+`REGULAIT_TRUSTED_PROXIES`.
+
+**The posture, per mode:**
+
+| `REGULAIT_DEPLOY_MODE` | compiled vendor endpoints | why |
+| --- | --- | --- |
+| unset (**default**) → `hosted` | not adjudicated | byte-identical to every deployment before this change |
+| `byoc` | not adjudicated | §5 already says this mode reaches real endpoints on purpose |
+| `air_gapped` | **refused unless the host is in `egress_allow_hosts`** | the mode's whole claim |
+
+`org_settings.egressCompiledDefaultPolicy` (`inherit` | `strict`) composes as
+`STRICTEST(env mode, org tightening)`. A hosted or BYOC admin **can** opt in to the strict posture.
+No value of that column loosens an air-gapped deployment — the enum has no such member.
+
+**What is enforced, concretely.** Under a strict posture, a governed call whose adapter would run
+on its compiled vendor endpoint — a model dispatch (row 1), a connector invoke (row 4), a git stage
+(row 6) or a PM sync (row 7) with no `baseUrl` override — is **refused before the adapter is
+constructed**, with a real 403 (or a failed workflow stage on the git path, which has no per-call
+HTTP boundary), a reason naming the host, and an audit row under the stable ruleId
+`compiled-default-egress-blocked`. The proof is not "a 4xx came back":
+`apps/gateway/src/mode-scoped-egress.test.ts` replaces `globalThis.fetch` with a **willing**
+recording spy that would answer 200, and asserts **zero** recorded requests plus the absence of the
+prompt's canary string from everything the spy saw.
+
+**To run a self-hosted model air-gapped**, nothing changes from the recommendation in §4 above —
+it is now the enforced path rather than the advised one. Register the endpoint as a **custom model
+provider** (Ollama / vLLM / LM Studio / an internal gateway) or set an explicit `baseUrl`, and add
+its host to **Egress Allow Hosts** with `allowPrivateRanges` (plus `allowPlaintextHttp` for an
+internal service with no public CA). The same suite proves a `127.0.0.1` endpoint serves a dispatch
+under `air_gapped` with zero public-internet traffic. An operator who deliberately wants one vendor
+reachable from an otherwise-sealed box adds that single host — a decision with a name, a row and an
+audit trail.
+
+**What remains true, and this is the part that matters:**
+
+1. **Recommendation 1 above is unchanged and is still the stronger control.** An air-gapped
+   deployment should have no default route and no egress-permitting security-group rule. ADR-0062
+   makes the *application* stop trying; it does not make the box unable to reach the internet.
+2. **It governs this gateway's governed calls, not the process.** Image pulls, `pnpm install`,
+   Caddy's ACME client, and the cloud SDKs used by the infra/deploy providers are all outside it —
+   rows 11, 12 and 13 are unaffected.
+3. **An operator who sets `REGULAIT_DEPLOY_MODE` wrong gets the wrong posture.** A *malformed*
+   value throws at boot rather than degrading to `hosted`, and the effective posture is printed in
+   the boot log next to the proxy and HSTS lines — but neither helps an operator who never sets it.
+4. **An adapter whose default is not statically knowable is refused, not adjudicated** (today: a
+   Snowflake connector, whose endpoint derives from the decrypted credential). It fails closed,
+   which is the right direction, but the strict posture is coarser than the typed-URL guard: it can
+   say "no" without saying where the call would have gone. The same applies to any provider adapter
+   added after ADR-0062 — it fails closed by default.
+5. **`hosted` and `byoc` are unchanged by default**, so for those deployments the finding above is
+   still a live description until an org opts in.
+6. Allow-listing a host says nothing about **what that host does with the data** — see §7.
+
 ---
 
 ## 5. Per-mode summary
@@ -175,7 +253,7 @@ its own ADR. Until that exists, §4 is the truth.
 | Question | Answer |
 | --- | --- |
 | Does anything reach RegulAIt (the vendor)? | **No.** No endpoint of ours exists in the product. §1 is checkable in five minutes. |
-| Does anything reach the public internet? | **Only what you configure**, and by §4 the network is the backstop for compiled endpoints. With nothing configured, nothing is attempted. |
+| Does anything reach the public internet? | **Only what you configure — and since [ADR-0062](../decisions/0062-mode-scoped-egress.md), only what you also allow-list.** In this mode a built-in model provider, connector, git or PM adapter running on its compiled vendor endpoint is refused by the application (403 + audit, adapter never constructed) unless that host is in `egress_allow_hosts`. The network is still the stronger backstop and §4.1 says so; it is no longer the only one. With nothing configured, nothing is attempted. |
 | Is TLS issuance an outbound call? | Not in this mode. `install.sh --mode air_gapped` **refuses** `--tls letsencrypt` and uses Caddy's internal CA (`tls internal`), which issues locally. |
 | Does the install pull images? | **No.** The air-gapped path runs `docker compose up --no-build` against pre-seeded images loaded from a file (`scripts/build-image-bundle.sh` on a connected host). |
 | Does an update phone home? | **No.** Update bundles are files. `scripts/verify-update-bundle.sh` verifies offline against a pinned public key and makes no network call — deliberately, since there is no revocation endpoint or timestamp authority to reach. |
@@ -191,7 +269,10 @@ Everything in `air_gapped` holds **except** that the deployment has internet, so
   account key, an inbound HTTP-01 challenge on :80). Choose `--tls internal` or `--tls none` if
   even that is unacceptable.
 - Images are pulled and the gateway image is built on the box (Docker Hub, npm registry).
-- Configured connectors/models/MCP/PM reach their real endpoints. That is the point of the mode.
+- Configured connectors/models/MCP/PM reach their real endpoints. That is the point of the mode,
+  and it is why ADR-0062 leaves `byoc` on the permissive posture by default. A BYOC operator who
+  wants the air-gapped posture sets `org_settings.egressCompiledDefaultPolicy = 'strict'` (or the
+  env var) — one line, and it can only tighten.
 - **Still nothing reaches RegulAIt.** The control plane is in your account, under your IAM, holding
   your `REGULAIT_DATA_KEY`. There is no upstream.
 
@@ -218,6 +299,7 @@ you"**, not a shared multi-tenant SaaS. Same artifact, different location. So:
 | Boot makes no network call | read `apps/gateway/src/main.ts` — 38 lines | 2 minutes |
 | Nothing leaves during normal operation | run the stack with **no default route**, or with `tcpdump`/VPC flow logs on, and exercise it | one afternoon |
 | The egress guard refuses what it claims to | `apps/gateway/src/egress-guard.test.ts` — it asserts IMDS, IPv4-mapped IPv6, userinfo-in-URL and DNS-rebind refusals | run `pnpm -r test` |
+| An air-gapped install refuses vendor endpoints, and the provider is never called | `apps/gateway/src/mode-scoped-egress.test.ts` — asserts **zero** requests reach a deliberately-willing fetch spy, not merely that a 403 came back | run `pnpm -r test` |
 | Air-gapped deploys retain metadata only | `apps/gateway/src/deploy-byoc.test.ts` | run `pnpm -r test` |
 | An update bundle is what it claims to be | `scripts/verify-update-bundle.sh <bundle>` — offline, against `infra/release-keys/` | seconds |
 | The installer refuses a weak data key | `scripts/install.sh --check --data-key $(printf 'a%.0s' $(seq 64))` | seconds |
@@ -238,6 +320,9 @@ That is the test we would ask for in your position.
 - It makes no claim about reproducible builds or build provenance. The update bundle proves *who
   signed it*, not *that it was built from a particular commit*. See
   `infra/release-keys/README.md` §"What signing does and does not prove".
-- §4 is a real gap between "air-gapped" as a marketing word and air-gapped as an enforced code
+- §4 **was** a real gap between "air-gapped" as a marketing word and air-gapped as an enforced code
   property. It is written here rather than in an internal ticket because a trust artifact that
-  omits its own weakest point is not a trust artifact.
+  omits its own weakest point is not a trust artifact. [ADR-0062](../decisions/0062-mode-scoped-egress.md)
+  closed it for `air_gapped`; §4.1 records what is enforced and the four things that remain true —
+  above all that the network is still the stronger control, and that an operator who never sets
+  `REGULAIT_DEPLOY_MODE` gets the permissive posture.

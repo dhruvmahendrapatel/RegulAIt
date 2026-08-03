@@ -26,6 +26,7 @@ import { createHash } from "node:crypto";
 import { evaluateAgent, evaluateConnector } from "@regulait/policy-kernel";
 import {
   ConnectorProviderError,
+  connectorDefaultBaseUrl,
   isConnectorProviderKind,
   parseSnowflakeCredential,
   resolveConnectorProvider,
@@ -42,6 +43,7 @@ import {
   type RoutingDecision,
 } from "@regulait/optimizer-kernel";
 import {
+  defaultBaseUrlFor,
   isModelProviderKind,
   ModelProviderError,
   resolveModelProvider,
@@ -123,6 +125,13 @@ import {
   refuseConnectionEgressWrite,
   type ConnectionSurface,
 } from "./connection-egress.js";
+// ADR-0062 — the deployment-wide egress posture and the compiled-vendor-default
+// admission decision it gates.
+import {
+  auditCompiledDefaultDenied,
+  decideCompiledDefault,
+  loadCompiledEgressContext,
+} from "./compiled-egress.js";
 
 const userIdParam = z.object({ userId: z.string().uuid() });
 const agentIdParam = z.object({ agentId: z.string().uuid() });
@@ -506,6 +515,20 @@ export async function executeGovernedDispatch(
   // NO OVERRIDE MEANS NO CHECK: with baseUrl null the adapter uses its compiled
   // vendor default, which no human can type, so there is nothing to decide and
   // the behaviour of every non-overriding deployment is byte-identical.
+  //
+  // ── AMENDED BY ADR-0062 (2026-08-03) ────────────────────────────────────────
+  // The paragraph above is kept verbatim because it is what this file shipped
+  // saying, and it remains exactly right AS AN SSRF ARGUMENT. It is not an
+  // egress POLICY. On an air-gapped deployment the compiled vendor default is
+  // the one destination that matters: storing a credential for a built-in
+  // provider — or merely exporting ANTHROPIC_API_KEY — makes this dispatch
+  // attempt the vendor's public API carrying the prompt, and nothing in the
+  // application refuses it (docs/deployment/DATA_BOUNDARY.md §4 recorded this
+  // as an open finding). So there IS something to decide, and it is decided in
+  // the `else` branch below: under a strict posture the compiled destination
+  // must be in the SAME `egress_allow_hosts` table every other surface uses.
+  // Under `hosted` (the default) nothing about this changes, down to the fetch
+  // implementation.
   let credentialFetch: typeof fetch | undefined;
   if (baseUrl) {
     const { decision, allowList } = await checkCredentialBaseUrl(db, baseUrl);
@@ -538,6 +561,36 @@ export async function executeGovernedDispatch(
     // HTTP request the SDK makes, pins plaintext http to the validated address,
     // refuses redirects. Built from the SAME allow-list snapshot just validated.
     credentialFetch = credentialGuardedFetch(allowList);
+  } else {
+    // ADR-0062 — THE COMPILED VENDOR DEFAULT. `mock` and `custom` resolve to
+    // "nothing to adjudicate" (no outbound call of its own; and a custom
+    // endpoint has already cleared the ADR-0034 guard above), so this branch is
+    // inert for them in every posture.
+    const { posture, allowList } = await loadCompiledEgressContext(db);
+    const decision = decideCompiledDefault({
+      posture,
+      surface: "model",
+      kind: served.provider,
+      defaultBaseUrl: defaultBaseUrlFor(served.provider),
+      allowList,
+    });
+    if (!decision.ok) {
+      await auditCompiledDefaultDenied(db, {
+        userId,
+        surface: "model",
+        objectId: served.id,
+        kind: served.provider,
+        decision,
+        posture,
+        detail: {
+          agentId: served.id,
+          model: served.model,
+          source: credentialOrigin,
+          ...(args.projectId ? { projectId: args.projectId } : {}),
+        },
+      });
+      return { ok: false, status: 403, error: "egress_blocked", detail: decision.reason };
+    }
   }
 
   // ADR-0023 `agents.systemPrompt` INVARIANT — enforced here in the ONE shared
@@ -3010,6 +3063,14 @@ export function registerAgentConnectorRoutes(
     // compiled vendor endpoint (slack/github/jira/... defaults), which nobody
     // can type, so a non-overriding connector behaves byte-identically — the
     // global fetch, no allow-list entry required.
+    //
+    // ── AMENDED BY ADR-0062 (2026-08-03) ────────────────────────────────────
+    // Still true as an SSRF argument, still not an egress policy. A connector
+    // is the surface that carries CUSTOMER DATA by construction, so a Slack or
+    // GitHub connector running on its compiled endpoint inside an air-gapped
+    // install is the exact thing that mode promises does not happen. Under a
+    // strict posture the compiled destination is adjudicated against the same
+    // `egress_allow_hosts` table; under `hosted` this is byte-identical.
     let connectorFetch: typeof fetch | undefined;
     if (baseUrl) {
       let guarded;
@@ -3041,6 +3102,41 @@ export function registerAgentConnectorRoutes(
         throw err;
       }
       connectorFetch = guarded.fetchImpl;
+    } else {
+      // ADR-0062 — the compiled connector endpoint. `snowflake` resolves to
+      // "not statically knowable" (its default is derived from the decrypted
+      // credential) and is therefore REFUSED under a strict posture rather
+      // than assumed safe; every kind that cannot exist without an explicit
+      // baseUrl resolves to "nothing to adjudicate".
+      const { posture, allowList } = await loadCompiledEgressContext(db);
+      const compiled = decideCompiledDefault({
+        posture,
+        surface: "connector",
+        kind: connector.providerKind,
+        defaultBaseUrl: connectorDefaultBaseUrl(connector.providerKind),
+        allowList,
+      });
+      if (!compiled.ok) {
+        await auditCompiledDefaultDenied(db, {
+          userId,
+          surface: "connector",
+          objectId: connectorId,
+          kind: connector.providerKind,
+          decision: compiled,
+          posture,
+          detail: {
+            connectorKind: connector.providerKind,
+            operation: body.operation,
+            ...(projectId ? { projectId } : {}),
+          },
+        });
+        return reply.status(403).send({
+          decision,
+          error: "egress_blocked",
+          code: compiled.code,
+          detail: `connector '${connector.name}': ${compiled.reason}`,
+        });
+      }
     }
 
     // Execute. A FAILED call (ConnectorProviderError) bills NOTHING and

@@ -607,8 +607,8 @@ export function registerLicensingRoutes(app: FastifyInstance, db: Db): void {
       posture: LICENSE_POSTURE_NOTE,
       note:
         "Verification is OFFLINE and makes no network call of any kind — there is no license server to " +
-        "reach and no revocation list to check, because the flagship deployment is air-gapped. There is " +
-        "no in-process scheduler either: POST /v1/licenses/verify is the endpoint an operator or an " +
+        "reach and no revocation list to check, because the flagship deployment is air-gapped. ADR-0064's " +
+        "scheduler deliberately has NO job here: POST /v1/licenses/verify is the endpoint an operator or an " +
         "external cron drives, and `lastVerifiedAt` staying null is how that is visible rather than " +
         "silent. Validity is decided against THIS HOST'S CLOCK, which is the customer's own machine — " +
         "an offline license cannot defend against clock tampering, and that is disclosed rather than " +

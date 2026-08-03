@@ -106,6 +106,13 @@ DB_SERVICE="${REGULAIT_BACKUP_DB_SERVICE:-db}"
 METRIC_NAMESPACE="${REGULAIT_BACKUP_METRIC_NAMESPACE:-Backup}"
 METRIC_NAME="${REGULAIT_BACKUP_METRIC_NAME:-BackupSuccess}"
 METRIC_TARGET="${REGULAIT_BACKUP_METRIC_TARGET:-regulait-dev-app-db}"
+# ADR-0063. A SECOND datapoint, deliberately separate from BackupSuccess: a
+# dump can be perfectly verified AND unrestorable, because the key that decrypts
+# its credential ciphertext is not in it (ADR-0035, on purpose) and nobody has
+# said they hold a copy. Folding that into BackupSuccess would either mask a
+# real dump failure or fail a run that genuinely succeeded, so it is its own
+# 1/0 an operator can alarm on independently.
+CUSTODY_METRIC_NAME="${REGULAIT_BACKUP_CUSTODY_METRIC_NAME:-DataKeyAttested}"
 
 # A dump smaller than this cannot be a real database and is treated as a
 # failure even if pg_dump exited 0.
@@ -215,6 +222,79 @@ ORDER BY 1;
 SQL
 }
 
+# --- ADR-0063: WHICH KEY RESTORES THIS DUMP -----------------------------------
+#
+# The dump contains every credential as AES-256-GCM ciphertext under
+# REGULAIT_DATA_KEY and — deliberately, ADR-0035 — does NOT contain that key.
+# So a dump on its own cannot answer the only question that matters at 3am:
+# "do I have the right key for this file?"
+#
+# It can now, because the gateway records a NON-SECRET fingerprint of its key
+# (`dk1:` + truncated HMAC-SHA256 over a fixed domain string) in
+# `data_key_state`. That row is inside the dump, and it is also lifted out here
+# into the manifest and the S3 object metadata, so the question is answerable
+# from `aws s3api head-object` WITHOUT downloading or restoring anything.
+#
+# Nothing secret leaves the database by doing this. The fingerprint is a PRF
+# output; publishing it is the entire design.
+DATA_KEY_FP="unknown"
+DATA_KEY_ATTESTATIONS="0"
+DATA_KEY_ATTESTED_AT=""
+DATA_KEY_ATTESTED_BY=""
+# attested | UNATTESTED | no-key-recorded | unknown
+DATA_KEY_CUSTODY="unknown"
+
+write_data_key_sql() {
+  cat > "$1" <<'SQL'
+SELECT coalesce((SELECT fingerprint FROM data_key_state LIMIT 1), 'none') AS fp,
+       (SELECT count(*) FROM data_key_attestations a
+         WHERE a.fingerprint = (SELECT fingerprint FROM data_key_state LIMIT 1)) AS n,
+       coalesce((SELECT max(attested_at)::text FROM data_key_attestations a
+         WHERE a.fingerprint = (SELECT fingerprint FROM data_key_state LIMIT 1)), '') AS at,
+       coalesce((SELECT attested_by_label FROM data_key_attestations a
+         WHERE a.fingerprint = (SELECT fingerprint FROM data_key_state LIMIT 1)
+         ORDER BY attested_at DESC LIMIT 1), '') AS who;
+SQL
+}
+
+# Never fatal. A pre-0075 database has no such tables and a backup of it is
+# still a backup — it simply cannot say which key restores it, and says THAT.
+read_data_key_custody() {
+  local sql="${WORK_DIR}/.datakey.$$.sql" out
+  mkdir -p "$WORK_DIR"
+  write_data_key_sql "$sql"
+  out=$(psql_file "${1:-$POSTGRES_DB}" "$sql" 2>/dev/null | tr -d '\r' | head -1)
+  rm -f "$sql"
+
+  if [ -z "$out" ]; then
+    DATA_KEY_CUSTODY="unknown"
+    log "datakey: WARNING could not read data_key_state (pre-ADR-0063 database?) — this dump cannot say which key restores it"
+    return 0
+  fi
+
+  DATA_KEY_FP=$(printf '%s' "$out" | cut -d'|' -f1)
+  DATA_KEY_ATTESTATIONS=$(printf '%s' "$out" | cut -d'|' -f2)
+  DATA_KEY_ATTESTED_AT=$(printf '%s' "$out" | cut -d'|' -f3)
+  DATA_KEY_ATTESTED_BY=$(printf '%s' "$out" | cut -d'|' -f4)
+
+  if [ "$DATA_KEY_FP" = "none" ]; then
+    DATA_KEY_CUSTODY="no-key-recorded"
+    log "datakey: no fingerprint recorded — the gateway has not booted with a REGULAIT_DATA_KEY against this database"
+  elif [ "${DATA_KEY_ATTESTATIONS:-0}" -ge 1 ] 2>/dev/null; then
+    DATA_KEY_CUSTODY="attested"
+    log "datakey: ${DATA_KEY_FP} — custody attested by ${DATA_KEY_ATTESTED_BY} at ${DATA_KEY_ATTESTED_AT}"
+  else
+    DATA_KEY_CUSTODY="UNATTESTED"
+    # Loud on purpose. This is the difference between a backup and a backup you
+    # can restore, and it is invisible until the day it is not.
+    log "datakey: ${DATA_KEY_FP} — *** NO CUSTODY ATTESTATION ON FILE ***"
+    log "datakey: nobody has recorded that this key is stored anywhere but this box. The key is"
+    log "datakey: NOT in this dump (ADR-0035, deliberately). Restoring it onto a new host without"
+    log "datakey: the key recovers every row and leaves EVERY credential permanently undecryptable."
+    log "datakey: Fix: record the key out-of-band, then POST /v1/security/data-key/attestations."
+  fi
+}
+
 # In local mode the same variable names are expected to be exported by the
 # caller/config, so the single-quoted command strings work unchanged.
 export POSTGRES_USER="${POSTGRES_USER:-regulait}"
@@ -240,18 +320,22 @@ RESULT="FAIL"
 REASON="did-not-run"
 OBJECT_URI=""
 
-publish_metric() {
-  local value="$1"
-  [ "$DRY_RUN" = "1" ] && { log "heartbeat: DRY RUN, not publishing ${METRIC_NAME}=${value}"; return 0; }
+publish_named_metric() {
+  local name="$1" value="$2"
+  [ "$DRY_RUN" = "1" ] && { log "heartbeat: DRY RUN, not publishing ${name}=${value}"; return 0; }
   command -v aws >/dev/null 2>&1 || return 0
   aws cloudwatch put-metric-data \
     --region "$REGION" \
     --namespace "$METRIC_NAMESPACE" \
-    --metric-name "$METRIC_NAME" \
+    --metric-name "$name" \
     --dimensions "Target=${METRIC_TARGET}" \
     --value "$value" \
     --unit Count >/dev/null 2>&1 \
-    || log "heartbeat: WARNING could not publish ${METRIC_NAME}=${value} (alarm may fire on absence)"
+    || log "heartbeat: WARNING could not publish ${name}=${value} (alarm may fire on absence)"
+}
+
+publish_metric() {
+  publish_named_metric "$METRIC_NAME" "$1"
 }
 
 finish() {
@@ -265,12 +349,21 @@ result=${RESULT}
 reason=${REASON}
 object=${OBJECT_URI}
 host=${HOSTTAG}
+data_key_fingerprint=${DATA_KEY_FP}
+data_key_custody=${DATA_KEY_CUSTODY}
+data_key_attestations=${DATA_KEY_ATTESTATIONS}
 EOF
 
   publish_metric "$([ "$RESULT" = "OK" ] && echo 1 || echo 0)"
+  # ADR-0063 — a separate 1/0. `unknown`/`no-key-recorded` publish 0 too: a run
+  # that could not establish custody is not evidence that custody exists.
+  publish_named_metric "$CUSTODY_METRIC_NAME" "$([ "$DATA_KEY_CUSTODY" = "attested" ] && echo 1 || echo 0)"
 
-  # This exact line is what the runbook greps for. Keep the shape stable.
-  log "RESULT=${RESULT} reason=${REASON} object=${OBJECT_URI:-none}"
+  # This exact line is what the runbook greps for. Keep the shape stable —
+  # ADR-0063's fields are APPENDED so `grep 'RESULT='` and every prefix parse
+  # of it keeps working, while "which key restores this, and did anyone say
+  # they have it" now travels with every result line.
+  log "RESULT=${RESULT} reason=${REASON} object=${OBJECT_URI:-none} datakey=${DATA_KEY_FP} custody=${DATA_KEY_CUSTODY}"
   log "=== pg-backup done (exit ${rc}) ==="
   exit "$rc"
 }
@@ -440,6 +533,11 @@ do_run() {
   # (c) A manifest of exact row counts, taken from the SAME server moments after
   #     the dump. This is what a restore is checked against — without it,
   #     "the restore worked" is an opinion.
+  # (d) ADR-0063: WHICH KEY restores this dump, and has anybody said they hold
+  #     it. Read from the SAME server, moments after the dump, for the same
+  #     reason the row counts are. Never fatal — see read_data_key_custody.
+  read_data_key_custody
+
   local manifest="${WORK_DIR}/regulait-${STAMP}.manifest.json"
   write_manifest "$manifest" "$bytes" "$sha" "$data_entries" || log "manifest: WARNING could not build row-count manifest"
 
@@ -458,7 +556,7 @@ do_run() {
     # here. --only-show-errors keeps the progress bar out of a systemd log.
     aws s3 cp "$dump" "$OBJECT_URI" \
       --region "$REGION" --only-show-errors \
-      --metadata "sha256=${sha},tabledata=${data_entries},srchost=${HOSTTAG}" \
+      --metadata "sha256=${sha},tabledata=${data_entries},srchost=${HOSTTAG},datakey=${DATA_KEY_FP},datakeycustody=${DATA_KEY_CUSTODY}" \
       || fail "s3-upload-failed"
 
     if [ -f "$manifest" ]; then
@@ -497,6 +595,14 @@ write_manifest() {
     echo "  \"dump_bytes\": ${bytes},"
     echo "  \"dump_sha256\": \"${sha}\","
     echo "  \"table_data_entries\": ${entries},"
+    # ADR-0063 — the answer to "do I have the right key for this dump?", in the
+    # sidecar, so it can be read WITHOUT restoring the dump to find out.
+    echo "  \"data_key_fingerprint\": \"${DATA_KEY_FP}\","
+    echo "  \"data_key_custody\": \"${DATA_KEY_CUSTODY}\","
+    echo "  \"data_key_attestations\": ${DATA_KEY_ATTESTATIONS:-0},"
+    echo "  \"data_key_attested_at\": \"${DATA_KEY_ATTESTED_AT}\","
+    echo "  \"data_key_attested_by\": \"${DATA_KEY_ATTESTED_BY//\"/}\","
+    echo "  \"data_key_note\": \"The KEY ITSELF IS NOT IN THIS BACKUP, deliberately (ADR-0035). This fingerprint is a non-secret HMAC-SHA256 identifier: compare it to the gateway boot log or GET /v1/security/data-key BEFORE restoring.\","
     echo "  \"row_counts\": {"
     printf '%s\n' "$counts" | awk -F'|' 'NF==2 {printf "%s    \"%s\": %s", (n++ ? ",\n" : ""), $1, $2} END {print ""}'
     echo "  }"
@@ -562,6 +668,15 @@ do_verify_restore() {
   local restored_file="${WORK_DIR}/.restored-counts.$$"
   printf '%s\n' "$restored" | awk -F'|' 'NF==2 {print $1"\t"$2}' | sort > "$restored_file"
 
+  # ADR-0063 — read the custody state OUT OF THE RESTORED COPY, not out of the
+  # live database. This is the rehearsal of the question that matters: a dump
+  # restored onto a new host tells you which key its ciphertext needs, and the
+  # rehearsal proves that answer survives the round trip.
+  read_data_key_custody "$scratch"
+  log "rehearsal: the restored copy needs data key ${DATA_KEY_FP} (custody: ${DATA_KEY_CUSTODY})"
+  log "rehearsal: that key is NOT in the dump, by design. Compare it to the gateway's boot log"
+  log "rehearsal: line ('data key: ...') or GET /v1/security/data-key before any real restore."
+
   local mismatches=0 compared=0
   if [ -f "$manifest" ]; then
     local source_file="${WORK_DIR}/.source-counts.$$"
@@ -621,6 +736,20 @@ do_check() {
   echo
   echo "--- last RESULT lines in the log ---"
   grep 'RESULT=' "$LOG" 2>/dev/null | tail -5 || echo "no RESULT lines in $LOG"
+  echo
+  echo "--- data key custody (ADR-0063) ---"
+  # Live, not from the status file: an operator running --check wants today's
+  # answer to "is this deployment's backup actually restorable".
+  if wait_for_db >/dev/null 2>&1; then
+    read_data_key_custody
+    echo "fingerprint = ${DATA_KEY_FP}"
+    echo "custody     = ${DATA_KEY_CUSTODY} (${DATA_KEY_ATTESTATIONS} attestation(s))"
+    [ -n "$DATA_KEY_ATTESTED_BY" ] && echo "attested by = ${DATA_KEY_ATTESTED_BY} at ${DATA_KEY_ATTESTED_AT}"
+    [ "$DATA_KEY_CUSTODY" = "UNATTESTED" ] && \
+      echo "*** the key that decrypts every credential in these dumps is not recorded anywhere but this box ***"
+  else
+    echo "database unavailable — cannot read data_key_state"
+  fi
   echo
   echo "--- newest objects in s3://${BUCKET}/${PREFIX}/ ---"
   if [ -n "$BUCKET" ]; then

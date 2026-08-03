@@ -32,15 +32,16 @@
  *     function. If ADR-0047's rules change, these change with them, because
  *     there is only one copy.
  *
- *  3. NOTHING FIRES ON A TIMER, AND IT SAYS SO. ADR-0049 §3 describes a
- *     scheduled evaluator. There is no in-process scheduler in this codebase
- *     (ADRs 0044/0045/0046/0047 all landed the same way, and inventing one
- *     inside a request-scoped Fastify process would be a worse lie than the
- *     gap). `spend_monitor_policies` rows are the evaluator's DEFINITION;
- *     `POST /v1/spend/anomalies/evaluate` is the endpoint an operator or an
- *     external cron drives, and its response says plainly that nothing calls
- *     it automatically. `lastEvaluatedAt` staying null is how a deployment
- *     that never wires the cron SEES that, rather than assuming it works.
+ *  3. THE EVALUATOR IS DRIVEN, NOT IMPLICIT — and the deployment says which.
+ *     ADR-0049 §3 describes a scheduled evaluator; ADR-0064 finally built the
+ *     scheduler that drives it. `runSpendAnomalyEvaluation` below is the ONE
+ *     implementation, reached two ways: by the ADR-0064 tick loop (when
+ *     REGULAIT_SCHEDULER=on, which is OFF by default) and by
+ *     `POST /v1/spend/anomalies/evaluate` for an operator or an external cron.
+ *     `spend_monitor_policies` rows remain the evaluator's DEFINITION, and
+ *     `lastEvaluatedAt` staying null is still how a deployment running neither
+ *     SEES that, rather than assuming it works. `GET /v1/spend/monitor-overview`
+ *     reports the live scheduler posture rather than a hard-coded `false`.
  *
  *  4. AN ALERT IS AN ITEM ON THE EXISTING APPROVALS QUEUE. When a policy's
  *     action escalates, this file inserts into `approvals` with the SAME shape
@@ -102,6 +103,7 @@ import {
   type ReportAccessDecision,
 } from "@regulait/shared";
 import { callerProjectIds, callerTeamIds, resolveScopeProjectIds } from "./reporting.js";
+import { resolveSchedulerConfig } from "./scheduler.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 /** a uuid that cannot exist, so an empty allow-list yields an empty result set
@@ -674,6 +676,78 @@ function hourRange(start: number, end: number): number[] {
 }
 
 // ---------------------------------------------------------------------------
+// The anomaly evaluator
+// ---------------------------------------------------------------------------
+
+export const SPEND_ANOMALY_SWEEP_NOTE =
+  "ADR-0064's in-process scheduler drives this when it is switched on (REGULAIT_SCHEDULER=on); this " +
+  "endpoint is the manual/on-demand path and calls exactly the same function. A deployment running " +
+  "neither raises NO anomalies, and a policy's `lastEvaluatedAt` staying null is how that stays visible " +
+  "rather than silent. A project below the baseline sample floor is reported as 'baseline building' and " +
+  "makes no claim either way. Spend figures are list-price ESTIMATES computed over usage_events.";
+
+/**
+ * ONE PASS of the anomaly evaluator over every project (or one named project).
+ *
+ * Extracted from `POST /v1/spend/anomalies/evaluate` for ADR-0064 so the
+ * scheduler and the endpoint share ONE implementation. Idempotence is a
+ * property of the DATA, not of the caller: the unique index on
+ * `(project, signal, window_start, window_end)` means a second pass over the
+ * same window raises nothing new, which is what makes it safe to run this both
+ * on a timer and by hand.
+ */
+export async function runSpendAnomalyEvaluation(
+  db: Db,
+  opts: { actorUserId: string | null; projectId?: string; now?: Date },
+): Promise<{ evaluatedAt: string; results: EvaluatedProject[] }> {
+  const now = opts.now ?? new Date();
+  const rows = await db
+    .select({
+      id: projects.id,
+      name: projects.name,
+      budgetApproverUserId: projects.budgetApproverUserId,
+    })
+    .from(projects)
+    .where(opts.projectId ? eq(projects.id, opts.projectId) : undefined);
+
+  const results: EvaluatedProject[] = [];
+  for (const p of rows) {
+    const policy = await effectivePolicy(db, p.id);
+    const out = await evaluateProjectAnomalies(db, {
+      projectId: p.id,
+      projectName: p.name,
+      budgetApproverUserId: p.budgetApproverUserId,
+      policy,
+      now,
+      actorUserId: opts.actorUserId,
+    });
+    results.push(out);
+    if (policy.enabled && "id" in policy) {
+      await db
+        .update(spendMonitorPolicies)
+        .set({ lastEvaluatedAt: now })
+        .where(eq(spendMonitorPolicies.id, policy.id));
+    }
+  }
+
+  const fired = results.flatMap((r) => r.verdicts.filter((v) => v.fired));
+  await db.insert(auditLog).values({
+    userId: opts.actorUserId ?? NO_IDENTITY,
+    objectType: "project",
+    objectId: opts.projectId ?? null,
+    detail: { phase: "spend-anomaly-sweep", projects: rows.length, fired: fired.length },
+    effect: "allow",
+    ruleId: "spend-anomaly-swept",
+    ruleChain: [],
+    reason:
+      `anomaly evaluation over ${rows.length} project(s): ` +
+      `${results.filter((r) => r.evaluated).length} evaluated, ${fired.length} signal(s) fired`,
+  });
+
+  return { evaluatedAt: now.toISOString(), results };
+}
+
+// ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
 
@@ -949,63 +1023,18 @@ export function registerSpendMonitorRoutes(app: FastifyInstance, db: Db): void {
   });
 
   /**
-   * THE EVALUATOR, as an ENDPOINT — the same shape ADR-0045's expiry sweep,
-   * ADR-0046's SLA evaluation and ADR-0047's schedule sweep take, and for the
-   * same reason: there is no scheduler here to hang it on, and pretending
-   * otherwise would be the exact dishonesty this project refuses. Admin-only,
-   * because it reads every project's ledger.
+   * THE EVALUATOR, as an ENDPOINT. ADR-0064's in-process scheduler now drives
+   * the SAME function when it is switched on; this endpoint stays as the
+   * manual / on-demand path. Admin-only, because it reads every project's
+   * ledger.
    */
   app.post("/v1/spend/anomalies/evaluate", async (req) => {
     const q = z.object({ projectId: z.string().uuid().optional() }).parse(req.body ?? {});
-    const now = new Date();
-    const rows = await db
-      .select({
-        id: projects.id,
-        name: projects.name,
-        budgetApproverUserId: projects.budgetApproverUserId,
-      })
-      .from(projects)
-      .where(q.projectId ? eq(projects.id, q.projectId) : undefined);
-
-    const results: EvaluatedProject[] = [];
-    for (const p of rows) {
-      const policy = await effectivePolicy(db, p.id);
-      const out = await evaluateProjectAnomalies(db, {
-        projectId: p.id,
-        projectName: p.name,
-        budgetApproverUserId: p.budgetApproverUserId,
-        policy,
-        now,
-        actorUserId: req.authCtx.userId ?? null,
-      });
-      results.push(out);
-      if (policy.enabled && "id" in policy) {
-        await db
-          .update(spendMonitorPolicies)
-          .set({ lastEvaluatedAt: now })
-          .where(eq(spendMonitorPolicies.id, policy.id));
-      }
-    }
-
-    const fired = results.flatMap((r) => r.verdicts.filter((v) => v.fired));
-    await audit(
-      req.authCtx.userId ?? null,
-      q.projectId ?? null,
-      "spend-anomaly-swept",
-      `operator-driven anomaly evaluation over ${rows.length} project(s): ` +
-        `${results.filter((r) => r.evaluated).length} evaluated, ${fired.length} signal(s) fired`,
-      { phase: "spend-anomaly-sweep", projects: rows.length, fired: fired.length },
-    );
-
-    return {
-      evaluatedAt: now.toISOString(),
-      results,
-      note:
-        "Nothing calls this on a timer — there is no in-process scheduler in this codebase. A " +
-        "deployment that never invokes this endpoint raises NO anomalies, and a policy's " +
-        "`lastEvaluatedAt` staying null is how that is visible rather than silent. A project below " +
-        "the baseline sample floor is reported as 'baseline building' and makes no claim either way.",
-    };
+    const result = await runSpendAnomalyEvaluation(db, {
+      actorUserId: req.authCtx.userId ?? null,
+      ...(q.projectId ? { projectId: q.projectId } : {}),
+    });
+    return { ...result, note: SPEND_ANOMALY_SWEEP_NOTE };
   });
 
   /** the read-side rollup the admin SPA's Spend monitor page renders */
@@ -1030,13 +1059,14 @@ export function registerSpendMonitorRoutes(app: FastifyInstance, db: Db): void {
       openAnomalies: openCount?.n ?? 0,
       recentAnomalies: recent,
       scheduledChanges: changes,
-      schedulerPresent: false,
+      // ADR-0064: a scheduler now EXISTS, and whether it is switched ON in this
+      // deployment is a different question — answered honestly rather than
+      // hard-coded. `false` here still means "nothing drives this on a timer".
+      schedulerPresent: resolveSchedulerConfig().enabled,
+      schedulerPosture: resolveSchedulerConfig().reason,
       floors: ANOMALY_ABSOLUTE_FLOORS,
       minBaselineSamples: MIN_BASELINE_SAMPLES,
-      note:
-        "No in-process scheduler exists in this deployment. Policies are definitions only; drive " +
-        "POST /v1/spend/anomalies/evaluate from cron. Forecasts and anomaly baselines are computed " +
-        "over usage_events, whose spend figures are list-price ESTIMATES.",
+      note: SPEND_ANOMALY_SWEEP_NOTE,
     };
   });
 }

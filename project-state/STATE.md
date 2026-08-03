@@ -1,6 +1,6 @@
 ---
 phase: eight-pillars-shipped-productizing
-last_updated: 2026-08-02
+last_updated: 2026-08-03
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -21,9 +21,35 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 **RegulAIt is a working, deployed product, not a scaffold.** All eight P0 pillars have shipped
-functionality; the gateway suite is at **1,611 tests** across 100 files (policy-kernel 129,
-workflow-kernel 39, `packages/shared` 360); the schema is at **migration 0073**; and **every ADR
-is now Accepted — 0001 through 0061, with nothing left Proposed**. The entire
+functionality; the gateway suite is at **1,689 tests** across 103 files (policy-kernel 129,
+workflow-kernel 39, `packages/shared` 360, model-provider 122); the schema is at **migration
+0075**; and **every ADR is now Accepted — 0001 through 0063, with nothing left Proposed**.
+**[ADR-0063](../docs/decisions/0063-data-key-custody.md) (migration 0075) closed the top deferred
+security item — the `REGULAIT_DATA_KEY` custody gap — without weakening the decision that created
+it.** ADR-0035 deliberately keeps the envelope key OUT of the backup, which is correct and
+unchanged; what was missing was the procedure around it. The gateway now derives a **non-secret**
+fingerprint of the key (`dk1:` + truncated `HMAC-SHA256(key, "regulait/data-key-fingerprint/v1")`),
+records it in `data_key_state`, prints it in the boot posture block beside proxy/HSTS/egress, and
+writes it into every backup's manifest, S3 object metadata, `RESULT=` line and status file — so a
+restore runbook answers *"do I have the right key for this dump?"* from `head-object`, **before**
+restoring. On boot it records the fingerprint on first run (probing real stored ciphertext first,
+so the very first boot after upgrade cannot record the WRONG key), verifies it thereafter, and
+**REFUSES TO START on a mismatch** — the restore-onto-a-new-box case — naming both fingerprints.
+Custody itself is an append-only, audited **attestation** whose limit is stated wherever it
+appears: it records a human's claim and cannot verify custody; what it buys is that its ABSENCE is
+visible on the boot line, in the portal, and in every backup run plus a separate `DataKeyAttested`
+metric. Full re-encryption under a new key is **named follow-up scope, deliberately not
+half-built**.
+**[ADR-0062](../docs/decisions/0062-mode-scoped-egress.md) (migration 0074) closed the last open
+finding in [docs/deployment/DATA_BOUNDARY.md](../docs/deployment/DATA_BOUNDARY.md) §4**: the
+ADR-0034/0043 egress guard adjudicated only admin-*typed* URLs, so on an air-gapped box a stored
+credential — or a bare `ANTHROPIC_API_KEY` — made an agent dispatch attempt the vendor's public API
+carrying the prompt, with only the absence of a network route stopping it. A deployment-wide egress
+posture is now derived from `REGULAIT_DEPLOY_MODE` (hosted/byoc permissive, `air_gapped` **strict**)
+and `org_settings.egressCompiledDefaultPolicy` may only TIGHTEN it — the env, not a portal toggle,
+per the ADR-0029 HSTS precedent, because an air-gapped posture a compromised admin could switch off
+from a web form is not one. Under a strict posture an adapter that would run on its *compiled*
+vendor endpoint is refused before it is constructed, against the same `egress_allow_hosts` table. The entire
 enterprise-readiness set (**0036–0061**) was built, verified and merged in one session
 (PR #105, `27205e7`) — see
 [docs/product/ENTERPRISE_READINESS_PLAN.md](../docs/product/ENTERPRISE_READINESS_PLAN.md) for the
@@ -44,13 +70,16 @@ shadow-AI discovery, a governance copilot that is itself governed, continuous re
 compliance packs computed from the real ledgers, policy-simulation blast radius with a proven
 zero-dispatch guarantee, a hash-chained tamper-evident audit log, and ChatOps approvals bound to
 a real human.
-**Three things are deliberately NOT true yet, and are load-bearing caveats** (each recorded in its
+**Two things are deliberately NOT true yet, and are load-bearing caveats** (each recorded in its
 ADR's amendment rather than implied away): no model provider is connected, so every
-model-dependent claim is mechanism-proven and judgment-unverified; there is **no in-process
-scheduler**, so every "scheduled" sweep is an operator/cron-driven endpoint; and the
-**air-gapped boundary has a real hole** — the egress guard adjudicates only admin-*typed* URLs,
-so a built-in provider still reaches its vendor's public API with the network, not the
-application, as the backstop (`docs/deployment/DATA_BOUNDARY.md` §4). The product is served by a **React SPA** (`apps/web` —
+model-dependent claim is mechanism-proven and judgment-unverified; and there is **no in-process
+scheduler**, so every "scheduled" sweep is an operator/cron-driven endpoint. The third caveat this
+paragraph used to carry — the **air-gapped boundary has a real hole**, because the egress guard
+adjudicated only admin-*typed* URLs and a built-in provider still reached its vendor's public API
+with the network rather than the application as the backstop — was **closed by ADR-0062**
+(migration 0074). It is now code-enforced under `REGULAIT_DEPLOY_MODE=air_gapped`, with the honest
+residual (a mis-set env var, an adapter whose default is not statically knowable, and the process-
+level surfaces the gateway does not mediate) recorded in `docs/deployment/DATA_BOUNDARY.md` §4.1. The product is served by a **React SPA** (`apps/web` —
 React 18 + Vite + react-router + TanStack Query, an owned token design system, light/dark, six
 grouped nav sections) at **`/ui`**, which is now the *only* UI: `/`, `/app` and `/admin` all 302
 there. The template-literal shells are **deleted** as of ADR-0033 (−7,125 lines): the SPA is not

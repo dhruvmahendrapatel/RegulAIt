@@ -661,6 +661,11 @@ export interface OrgSettings {
    * null. true (default) = private-LAN MCP URLs work with zero ceremony;
    * false = strict. IMDS/link-local stays blocked either way. */
   mcpPrivateRangesDefault?: boolean;
+  /** ADR-0062: TIGHTEN-ONLY dial over the deployment-wide egress posture.
+   * 'inherit' (default) defers to the server's REGULAIT_DEPLOY_MODE; 'strict'
+   * adjudicates compiled vendor endpoints against the egress allow-list even
+   * on a hosted/BYOC box. There is no value that loosens an air-gapped one. */
+  egressCompiledDefaultPolicy?: "inherit" | "strict";
   /** ADR-0039: org network envelope (CIDR blocks; null/empty = unrestricted) */
   sessionIpAllowlist?: string[] | null;
   /** ADR-0039: human-session knob — off | enforce_at_login | enforce_continuous */
