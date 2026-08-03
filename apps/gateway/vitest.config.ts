@@ -5,6 +5,22 @@ export default defineConfig({
     // Every test file shares one Postgres database; parallel workers would
     // race on migrations and seed data.
     fileParallelism: false,
+
+    // Vitest's default is 5s. Nearly every test here is a real HTTP round trip
+    // against a real Postgres — build an app, run a migration-checked schema,
+    // insert fixtures, assert — and the whole suite runs SEQUENTIALLY because
+    // of fileParallelism above. Under load (a second suite on the same box, a
+    // cold page cache, a busy CI runner) a normally-sub-second e2e test can
+    // drift past 5s and fail for no reason but timing: session-ip-policy.test.ts
+    // did exactly that on one run of a two-run verification and passed on the
+    // other, on identical code.
+    //
+    // 20s is deliberately not "no timeout": a genuinely hung request, a
+    // deadlock, or a promise that never settles still fails the suite. It just
+    // stops the clock being the assertion. Individual tests that legitimately
+    // need longer still set their own.
+    testTimeout: 20_000,
+    hookTimeout: 30_000,
     env: {
       // ADR-0031 item 4: the HTTP rate limiter is ON by default in a real
       // deployment (see rate-limit.ts). The suite drives thousands of requests

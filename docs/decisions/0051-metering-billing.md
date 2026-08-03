@@ -1,6 +1,6 @@
 # ADR-0051 — Metering & billing: meter at the gateway, bill through a provider-agnostic adapter
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-08-01
 - **Relates to**: ADR-0019 (per-user revocation + full attribution, the one usage ledger),
   ADR-0024 (metering is unconditional; attribution decides where the row lands), ADR-0041
@@ -156,3 +156,171 @@ the §8.4 data-boundary disclosure.
   of "an active seat".
 - Tax, currency, and multi-entity billing are explicitly out of scope here and belong to whichever
   billing backend is configured.
+
+## Implementation amendment — 2026-08-02 (migration 0063)
+
+Accepted and built. What follows is the honest record of what billing derives from, what it
+refuses to claim, and what is modelled but not exercised.
+
+### THE SCOPE SENTENCE — read this before anything else
+
+**No payment processor is integrated. Nothing in this slice charges anyone.**
+
+There is no Stripe, no Metronome, no Orb, and no network call of any kind on any billing path. What
+shipped is **metering-derived statement generation**: a rate card, a billing period, an append-only
+statement rated from the existing `usage_events` ledger, a CSV/JSON export, and a re-derivation
+check. `BillingProvider` is the port §2 specifies; `NoopBilling` — export-only, §6's BYOC/air-gapped
+default — is the only implementation, and `capabilities().requiresNetwork` is `false` and asserted.
+
+`GET /v1/billing/overview` returns `paymentProcessorIntegrated: false` and the admin page renders it
+as a badge, so the boundary is visible in the product rather than only in this document.
+
+### What shipped
+
+**Pure half — `packages/shared/src/billing.ts` (+ 23 unit tests):** the rate-card vocabulary, the
+exact-beats-wildcard `rateFor`, the deterministic `rateUsage` (order-independent and stateless — the
+property a re-derivation depends on, asserted directly), `seatLine`, `buildStatement`,
+`reconcileStatement`, the chargeback/showback CSV round trip, and the `BillingProvider` port with
+`NoopBilling`.
+
+**Gateway half — `apps/gateway/src/billing.ts` (+ 19 integration tests):** `countActiveSeats` (the
+ONE seat definition, see below), the pricing-snapshot load, `deriveStatement` over `usage_events`,
+`cutStatement` (access decision → derivation → append-only version → audit), and the routes:
+rate-card create/list/read, period open/list/close, statement cut/list/read/issue/reconcile/export,
+and the admin overview.
+
+**Migration 0063:** `rate_cards`, `rate_card_entries`, `billing_periods`, `billing_statements`,
+`billing_exports`.
+
+**Admin SPA:** `/admin/billing`, under **Cost & Optimization** next to the Cost dashboard and the
+spend forecast — deliberately, because billing is a *read* of the cost data beside it, and a
+statement that disagreed with the Cost dashboard would be the bug that placement makes obvious.
+
+### The four structural decisions
+
+1. **Billing is a READ-SIDE consumer of the one ledger.** Nothing was instrumented. `deriveStatement`
+   SELECTs `usage_events` for the window and hands the rows to the pure rating function. There is no
+   billing counter, no rollup table and nothing incremented at dispatch time, so a billing figure
+   *cannot* drift from the cost dashboard or from ADR-0047's reports. `billing_statements.payload` is
+   the artifact of a derivation and is never read back as an input to another computation.
+
+2. **Materialization is defensible only because it is reproducible, and that is TESTED.** An issued
+   invoice must not move when a price changes, which is a real reason to freeze a document. So a
+   statement carries `pricing_snapshot` — the exact rate-card entries used, copied at cut time — plus
+   `derived_through_at`, the cut instant that also closes the ledger window. `POST
+   /v1/billing/statements/:id/reconcile` replays *that snapshot* over *that window* and compares. The
+   test cuts, issues, then creates a rate-card version at **ten times** the price and asserts the
+   issued row's money is byte-identical *and* still reconciles.
+
+3. **Append-only, never edited (the ADR-0040/0048 precedent).** Rate cards are immutable `(name,
+   version)` rows with no UPDATE path for entries. Statements are `(period_id, version)` rows; a
+   re-cut appends N+1 and marks prior drafts `superseded`. Issuing is a one-way door: a second issue
+   is a 409, and a DB CHECK ties `issued` to the presence of `issued_at` so "issued" is a fact rather
+   than a label.
+
+4. **Entitlement scoping is ADR-0047's function CALLED, not a third copy.** `cutStatement` resolves
+   scope through ADR-0049's `resolveSpendAccess` adapter over `evaluateReportAccess`, and every
+   `usage_events` query is built with `inArray(project_id, thoseIds)` at QUERY CONSTRUCTION. An
+   invoice is exactly the shape in which one team's spend leaks. Additionally: a caller who can see
+   only *part* of a period's scope gets a version stamped `covers_full_scope: false`, which is
+   refused at issue time with `statement_partial_scope` — an understated document must never be able
+   to claim to be the period's invoice.
+
+### One definition of "an active seat"
+
+ADR-0052 §3 owns the definition; this ADR consumes it. `countActiveSeats` in
+`apps/gateway/src/billing.ts` is the single implementation and `licensing.ts` (ADR-0052) imports it
+rather than counting again. It respects ADR-0022 (deactivate ≠ delete): a disabled user keeps every
+FK and audit row and consumes **no** seat, because they cannot authenticate and cannot dispatch.
+Billing a suspended employee would be a real overcharge.
+
+### The estimated/reconciled split survived into the money
+
+`usage_events.cost_usd` is provider **list price** and is `null` on purpose for self-hosted models
+(ADR-0034). A rate card is a separate **commercial** number. Every statement line carries **both**
+(`billedUsd` and `ledgerEstimatedUsd`) and the statement carries `ledger_estimated_cost_usd` beside
+the billed total, so the two can never be mistaken for each other. A test asserts they are different
+numbers, and that a `cost_usd: null` row is still measured usage billable on our own card.
+
+**An event the rate card does not price is `UNPRICED` with a `null` amount — never zero.** A zero
+would be a silent under-bill that reads on an invoice as "we used it and it was free". The count
+rides the statement, the CSV and the admin page.
+
+### Deviations from the proposal above
+
+1. **`packages/billing-provider` was NOT created as a separate package.** The `BillingProvider`
+   interface and `NoopBilling` live in `packages/shared/src/billing.ts`. §2 specifies a package
+   mirroring `packages/model-provider`; a package with exactly one implementation and no second
+   backend to keep honest is ceremony rather than a boundary. The *interface* is real and no backend
+   name appears above it. Extracting the package is a follow-up for whenever a second backend exists.
+2. **`MetronomeBilling` / `OrbBilling` / `StripeBilling` do NOT exist**, not even as stubs. Each
+   would be a network client, and this slice makes no network call. They are absent rather than
+   present-and-throwing.
+3. **`rating_mode` is never `reconciled`.** The column, the vocabulary and the labelling are in
+   place, and `reconciledRatingAvailable: false` is on the overview. §5's provider-invoice importer
+   does not exist, so billing is honestly estimated and says so on every artifact.
+4. **The export idempotency grain is `(period, backend)`, not `(usage_events row, backend)`.** §1
+   says "each `usage_events` row is exported at most once per billing period, keyed by row id". A
+   statement covers a period's row set by construction, so shipping the period once *is* shipping
+   each of its rows once — the same guarantee without a table carrying one row per metered call
+   forever. Enforced by a unique index, so a double-bill is structurally impossible; the second
+   export is recognised and audited as `billing-statement-export-deduped`.
+5. **`fetchInvoice` returns `null` always.** There is no external system of record, so there is no
+   invoice to read back. Synthesising one would collapse §4's split between "money out, delegated"
+   and "internal allocation, ours".
+6. **Period close is an ENDPOINT, not a schedule.** There is no in-process scheduler in this codebase
+   (ADRs 0044–0049 all landed the same way). `POST /v1/billing/periods/:id/close` is what an operator
+   or an external cron drives; it is idempotent, and `closedAt` staying null is how a deployment that
+   never wires the cron sees that. Both the API note and the admin page say so in those words.
+7. **No tax, currency conversion, dunning or multi-entity billing.** Explicitly out of scope in the
+   ADR; absent rather than half-present. `currency` is recorded on a rate card and never converted.
+8. **A statement's period label is a date range, not a calendar name.** Periods are arbitrary
+   half-open windows rather than an enum of month/quarter, so the label is derived from the window.
+
+### What is genuinely verified vs. structural only
+
+**Genuinely verified end to end (19 gateway integration tests over real Postgres, 23 unit tests):**
+
+- **A statement's usage total EQUALS an independent sum of the ledger.** The test re-queries
+  `usage_events` and applies the rate card *by hand in the test* — deliberately not by calling the
+  shared rating function, so a bug there cannot make both sides wrong in the same direction.
+- **An issued invoice does not move when pricing changes**, asserted from the DB row after a 10×
+  rate-card version, including that it still reconciles.
+- **Re-issue is refused (409); re-cutting appends a version and leaves the issued row untouched**,
+  including its `issued_at`.
+- **A non-privileged caller cannot see another team's billing**: the org period 403s, a team lead's
+  view is asserted to be arithmetically smaller than the unscoped number and to contain the other
+  project's id nowhere in the payload or in the persisted `effective_project_ids`, and read/export/
+  reconcile of an admin org statement all 403 while the statement is absent from their list.
+- **Issuing a partial-scope version is refused.**
+- **Period close is idempotent** — second call reports `alreadyClosed`, returns the same statement
+  id, does not move `closedAt`, and creates no second version. Opening the same period twice returns
+  the existing row.
+- **Export dedupe**: a second export of the same period creates no second shipment row.
+- **Admin gating** on rate-card/period/close/overview, and **audit rows with stable ruleIds**:
+  `billing-rate-card-created`, `billing-period-opened`, `billing-period-closed`,
+  `billing-statement-cut`, `billing-statement-issued`, `billing-statement-exported`,
+  `billing-statement-export-deduped`, `billing-statement-reconciled`,
+  `billing-statement-reconcile-drift`, `billing-scope-denied`, `billing-statement-read-denied`,
+  `billing-statement-export-denied`, `billing-statement-issue-refused-partial`.
+- **Unpriced ≠ zero**, and a null-`cost_usd` self-hosted row billable on our own card.
+
+**Structural only — the shape exists and is honest, but nothing exercises it end to end:**
+
+- **`rating_mode: 'reconciled'`** — column, vocabulary and labelling exist; no importer writes it.
+- **`mcp_tool` as a billing dimension** — it is in the vocabulary, the DDL and `billingKeyFor`, and
+  a unit test covers the routing, but no gateway path writes `usage_events.object_type = 'mcp_tool'`
+  today, so no real statement has ever carried an MCP line.
+- **`syncSeats`** — implemented as a no-op on the only backend; the seat count reaches the statement,
+  not an external system.
+- **Multi-currency** — `currency` is recorded and never used in arithmetic.
+
+### Follow-ups this slice leaves open
+
+- A provider-invoice importer, to make `rating_mode: 'reconciled'` real per §5.
+- Extracting `packages/billing-provider` once a second backend justifies the boundary.
+- Emitting `usage_events` rows for MCP tool calls so the `mcp_tool` billing dimension carries data.
+- Initiative-scoped periods (`scopeKind: 'initiative'` is in the DDL and resolves, but no test or UI
+  path exercises it).
+- Wiring the cost-center/chargeback grouping already on `projects`/`initiatives` into the statement
+  lines, so a finance team gets allocation directly rather than by joining the CSV themselves.

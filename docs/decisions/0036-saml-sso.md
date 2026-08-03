@@ -1,6 +1,6 @@
 # ADR-0036: SAML 2.0 SSO as a second federated login path beside OIDC
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-08-01
 
 ## Context
@@ -138,3 +138,69 @@ provider no longer strands logins if a SAML provider is live, and vice versa.
   config; and generalizing the sso_only lockout guard to both provider families. Group/attribute
   → role mapping is **out of scope here** and specified in ADR-0038; this ADR provisions only the
   `default_role_id` baseline.
+
+## Implementation amendment (2026-08-02)
+
+Implemented as decided — migration **0051** (`saml_providers`, `saml_login_states`,
+`saml_assertion_ids`, and the widened `auth_sessions_origin_ck` CHECK), the routes
+`GET /auth/saml/providers`, `GET /auth/saml/:providerId/start`,
+`POST /auth/saml/:providerId/acs`, `GET /auth/saml/:providerId/metadata` and the admin CRUD at
+`/v1/auth/saml-providers` (audited as the new `saml_provider` `objectType`), the login-screen and
+admin-portal SAML surfaces in the SPA, and the generalized `sso_only` lockout guard. Gateway suite
+1067 → 1102 tests, all green.
+
+**Library.** `@node-saml/node-saml` **5.1.0**, pinned as a normal dependency of
+`apps/gateway`. It carries the entire XML-dsig burden — signature verification against the
+provider's pinned certificate list, `AudienceRestriction`, `NotBefore`/`NotOnOrAfter` with a
+bounded skew, `InResponseTo` correlation, and the single-assertion / signature-scope sanity checks.
+No canonicalization or reference resolution is written here, exactly as decided. The `xml-crypto`
+dev-dependency exists only so the TEST IdP can *produce* real signatures; nothing in the shipping
+path uses it directly.
+
+**Deviations and additions, all in the strict direction:**
+
+1. **Three checks the library does not perform are performed here** — and each one reads only the
+   assertion the library has ALREADY signature-verified (`profile.getAssertion()`), never the raw
+   POST body, so no new XSW surface is created:
+   - **Recipient**: node-saml validates Audience but does not compare
+     `SubjectConfirmationData/@Recipient` to the ACS URL. It is compared here, and a
+     `SubjectConfirmation` with no `Recipient` at all is refused rather than waved through.
+   - **Issuer**: node-saml enforces `idpIssuer` for logout messages only, not for a login
+     Response. The assertion `<Issuer>` is pinned here to `saml_providers.entity_id`.
+   - **Replay**: the assertion `ID` is inserted into `saml_assertion_ids`; the UNIQUE index IS the
+     refusal, so two concurrent presentations cannot both win a check-then-insert race.
+2. **IdP-initiated is refused twice.** `validateInResponseTo: always` already refuses an
+   unsolicited assertion inside the library; an explicit post-check refuses one whose
+   `InResponseTo` is absent. The redundancy is deliberate — a moved library default must not
+   silently turn unsolicited assertions into logins.
+3. **`want_authn_response_signed` defaults FALSE, not true.** Requiring both signatures by default
+   would break the (common) IdP that signs only the assertion. `want_assertions_signed` defaults
+   TRUE, and the API refuses the `(false, false)` pair outright — on create AND against the
+   effective stored pair on PATCH, so it cannot be reached in two steps.
+4. **Clock skew is clamped, not merely configurable.** `REGULAIT_SAML_CLOCK_SKEW_MINUTES` defaults
+   to 2 and is clamped to `[0, 9]`; node-saml's `acceptedClockSkewMs: -1` ("skip timestamp checks")
+   is unreachable from configuration.
+5. **The correlation cache is the database, not memory.** node-saml's default `CacheProvider` is
+   in-process, which would fail OPEN across a restart or a second gateway process. It is backed by
+   `saml_login_states` instead, which is also what makes the correlation row single-use.
+6. **`allow_idp_initiated` is a per-provider column** as decided; a REPLAYED *solicited* assertion
+   is refused by the single-use correlation row before it ever reaches the replay seen-set — a
+   strictly stronger refusal, and the test asserts both paths.
+7. **SP entity id is deployment-global and request-derived** (`REGULAIT_SAML_ENTITY_ID` pins it
+   explicitly), mirroring how the OIDC `redirect_uri` is derived. It is not a per-provider column;
+   `saml_providers.entity_id` is the IdP's, per the ADR.
+8. **ADR-0043 does not apply.** SAML SP-initiated login is a browser redirect and the ACS is
+   inbound — the gateway makes no server-side request to the IdP, so there is no egress to guard.
+   (An IdP-metadata-fetch feature would need one; none was built.)
+
+**Interplay confirmed:** `saml` was added to `SESSION_ORIGINS` and to migration 0046's CHECK
+constraint (without which every SAML session insert would 23514). ADR-0039 pre-wired `saml` into
+`HUMAN_SESSION_ORIGINS`; that is now exercised — an out-of-envelope SAML login is refused at the
+door with no cookie. ADR-0028's current-password bypass remains `api_key`-only: a `saml` session on
+a password-less account still cannot set a password without one. ADR-0022 holds: a deactivated
+account cannot sign in via SAML.
+
+**Still open (deliberately out of scope here):** group/attribute → role mapping is ADR-0038;
+Single Logout (SLO) is not implemented; encrypted assertions are only partly provisioned (the SP
+private key column and its write-only handling exist, the `decryptionPvk` wiring does not); and the
+certificate-rotation *runbook* the ADR calls load-bearing is documentation work, not code.

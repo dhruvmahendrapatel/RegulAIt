@@ -30,7 +30,6 @@ import {
   ne,
   or,
   count,
-  oidcProviders,
   orgSettings,
   ORG_SETTINGS_ID,
   rateLimits,
@@ -49,6 +48,8 @@ import {
 } from "@regulait/shared";
 import { z } from "zod";
 import { recordSchedulerFailure, recordSchedulerSuccess } from "./scheduler-health.js";
+import { evaluateIpEnvelope, isValidCidr } from "./net-policy.js";
+import { countEnabledSsoProviders } from "./sso-providers.js";
 
 export type { OrgSettingsRow };
 
@@ -332,7 +333,9 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db) {
   });
 
   app.put("/v1/org/settings", async (req, reply) => {
-    const body = updateOrgSettingsSchema.parse(req.body);
+    // ADR-0039: confirmIpLockout is a write-only confirm flag for the
+    // self-lockout guard below — stripped here so it never reaches the row.
+    const { confirmIpLockout, ...body } = updateOrgSettingsSchema.parse(req.body);
     // ADR-0022: the default infra-remediation approver must be a real, ACTIVE
     // user — a disabled or unknown default would silently dead-letter every
     // proposed remediation.
@@ -349,21 +352,58 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db) {
         });
       }
     }
-    // ADR-0025 lockout guard: sso_only without a single enabled OIDC provider
+    // ADR-0025 lockout guard: sso_only without a single enabled SSO provider
     // would strand every human login behind a door that does not exist.
+    // ADR-0036 GENERALIZED the count: OIDC and SAML are co-equal federated
+    // paths, so a SAML-only org can legitimately turn sso_only on and the
+    // guard must count both families through the SAME helper the provider
+    // CRUD surfaces use — two copies of this rule would drift.
     if (body.ssoOnly === true) {
-      const enabled = await db
-        .select({ id: oidcProviders.id })
-        .from(oidcProviders)
-        .where(eq(oidcProviders.enabled, true));
-      if (enabled.length === 0) {
+      const enabled = await countEnabledSsoProviders(db);
+      if (enabled.total === 0) {
         return reply.status(422).send({
           error: "sso_only_needs_a_provider",
-          detail: "enable at least one OIDC provider before turning sso_only on — otherwise nobody can sign in",
+          detail:
+            "enable at least one SSO provider (OIDC or SAML) before turning sso_only on — otherwise nobody can sign in",
         });
       }
     }
     const before = await loadOrgSettings(db);
+    // ADR-0039: CIDR blocks are validated at WRITE time — a malformed block
+    // would silently match nothing at evaluation time (fail closed per
+    // entry), so the honest failure is a 400 here, before anything is saved.
+    if (body.sessionIpAllowlist) {
+      const bad = body.sessionIpAllowlist.filter((c) => !isValidCidr(c));
+      if (bad.length > 0) {
+        return reply.status(400).send({
+          error: "invalid_cidr",
+          detail: `malformed CIDR block(s): ${bad.join(", ")} — nothing was saved`,
+          invalid: bad,
+        });
+      }
+    }
+    // ADR-0039 self-lockout guard (mirrors the sso_only guard above): saving
+    // an enforce_continuous posture whose allow-list excludes the admin's OWN
+    // current IP would revoke their session on their next request — refused
+    // unless the explicit confirm flag rides along, so a fat-fingered block
+    // cannot strand every admin out of the portal. (The BYOC/air-gapped
+    // operator recovery is the deploy-time bootstrap token, which ADR-0039
+    // keeps exempt from IP policy by design.)
+    if (body.sessionIpPolicy !== undefined || body.sessionIpAllowlist !== undefined) {
+      const nextPolicy = body.sessionIpPolicy ?? before.sessionIpPolicy;
+      const nextList =
+        body.sessionIpAllowlist !== undefined ? body.sessionIpAllowlist : before.sessionIpAllowlist;
+      if (nextPolicy === "enforce_continuous" && nextList && nextList.length > 0) {
+        const decision = evaluateIpEnvelope(nextList, req.ip ?? null);
+        if (!decision.allowed && confirmIpLockout !== true) {
+          return reply.status(409).send({
+            error: "ip_policy_lockout",
+            detail: `enforce_continuous with this allow-list excludes your own current IP (${req.ip ?? "undeterminable"}) — your session would be revoked on your next request. Pass confirmIpLockout: true to save anyway.`,
+            clientIp: req.ip ?? null,
+          });
+        }
+      }
+    }
     const [row] = await db
       .update(orgSettings)
       .set({

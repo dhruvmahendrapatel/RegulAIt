@@ -41,15 +41,74 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       { label: "Teams", to: "/admin/teams" },
       { label: "Client access", to: "/admin/client-access" },
       { label: "SSO & sessions", to: "/admin/sso" },
+      { label: "Provisioning (SCIM)", to: "/admin/provisioning" },
+      // ADR-0038: where an IdP group becomes a role — and where the ones that
+      // grant nothing are visible rather than silently inert.
+      { label: "Group → role mapping", to: "/admin/group-mappings" },
     ],
   },
   {
     group: "Governance",
     items: [
       { label: "Rules engine", to: "/admin/rules" },
+      // ADR-0040 — sits beside the rules engine because it is the same
+      // question ("what may this call do?") asked with attributes instead of
+      // static grants. It can only ever subtract from what Rules allows.
+      { label: "ABAC policies", to: "/admin/abac-policies" },
+      // ADR-0042 — the CONTENT gate, beside the destination and attribute
+      // gates. Independent controls that happen to share one interception
+      // point: what is in the payload vs. where the call may go vs. who may
+      // make it under which attributes.
+      { label: "Guardrails", to: "/admin/guardrails" },
+      // ADR-0044 — the QUALITY gate, beside the content/destination/attribute
+      // gates. Same question shape ("may this proceed?") asked of the agent's
+      // OUTPUT against a fixed dataset, and it blocks promotion the same way.
+      { label: "Evaluations", to: "/admin/evals" },
+      // ADR-0045 — the RISK-ACCEPTANCE gate, beside the quality gate. Evals ask
+      // "is this agent good on our cases?"; this asks "has a human accepted the
+      // risk of using it for this purpose, and is that acceptance still valid?"
+      // A high score is an input to that decision, never a substitute for it.
+      { label: "Model risk", to: "/admin/model-risk" },
+      // ADR-0057 — the SECURITY gate, beside the quality and risk gates. Evals
+      // ask "is this agent good on our cases?"; this asks "does it hold when
+      // someone attacks it?", measured through the live guardrails and blocking
+      // promotion through the same automated-check stage.
+      { label: "Red-teaming", to: "/admin/redteam" },
+      // ADR-0048 — the CHANGE-CONTROL layer under all of the above. The gates
+      // decide whether a call may proceed; this decides which VERSION of the
+      // governing artifact it proceeds under, and gives that change a canary
+      // and a one-click undo.
+      { label: "Prompt versions", to: "/admin/prompt-versions" },
       { label: "Simulation", to: "/admin/simulation" },
       { label: "Approvals queue", to: "/admin/approvals" },
+      // ADR-0046 — the SAME approvals, scaled: routing, SLA timers, escalation,
+      // workload and bulk triage. A layer on the one queue, never a second one.
+      { label: "Review workbench", to: "/admin/review-workbench" },
       { label: "Audit log", to: "/admin/audit" },
+      // ADR-0050 — the audit log answers "who did what"; this answers "what
+      // flowed into what". Adjacent on purpose: an e-discovery or DPIA question
+      // starts in one and finishes in the other, and keeping them apart is what
+      // makes both readable.
+      { label: "Data lineage", to: "/admin/lineage" },
+      // ADR-0047 — the BOARD-facing read of the same two ledgers the Cost
+      // dashboard and the Audit log render operationally. Nothing new is
+      // stored: a report is a read-only projection, scoped to the caller's own
+      // entitlement, and it says on its face that spend is a list-price
+      // estimate and that no scheduler drives its schedules.
+      { label: "Reports", to: "/admin/reports" },
+      // ADR-0055 — the land-and-expand wedge: what AI are we NOT governing?
+      // It sits in Governance rather than Integrations because a discovered row
+      // is a governance gap, not a connection to configure.
+      { label: "Shadow-AI discovery", to: "/admin/shadow-ai" },
+      // ADR-0056 — the natural-language front door onto the very ledgers this
+      // group renders. It sits here, not under Settings, because it IS a
+      // governance surface: a governed tenant reading the governance record
+      // with the caller's own entitlements and unable to change anything.
+      { label: "Governance copilot", to: "/admin/copilot" },
+      // ADR-0061 — the Approvals Queue's chat courier. It sits beside the queue
+      // it mirrors, because the identity link is a governance trust artifact and
+      // not an integration setting.
+      { label: "ChatOps approvals", to: "/admin/chatops" },
       { label: "Workflow templates", to: "/admin/workflow-templates" },
     ],
   },
@@ -73,6 +132,18 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
     group: "Cost & Optimization",
     items: [
       { label: "Cost dashboard", to: "/admin/cost" },
+      // ADR-0049 — budget-vs-FORECAST and spend-anomaly signals over the same
+      // measured ledger the Cost dashboard renders as actuals. Next to it
+      // because it is the same question asked forward in time rather than
+      // backward, and because a forecast that lived somewhere else would
+      // inevitably drift from the actuals it extrapolates.
+      { label: "Spend forecast & anomalies", to: "/admin/spend-monitor" },
+      // ADR-0051 — the same measured ledger again, turned into money. It sits
+      // here rather than under Settings because the honest framing is that
+      // billing is a READ of the cost data next to it: rate cards and invoices
+      // never touch the meter, and a statement that disagreed with the Cost
+      // dashboard would be the bug this placement makes obvious.
+      { label: "Metering & billing", to: "/admin/billing" },
       { label: "Optimization", to: "/admin/optimization" },
     ],
   },
@@ -80,6 +151,11 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
     group: "Compliance & Infra",
     items: [
       { label: "Compliance profiles", to: "/admin/compliance" },
+      // ADR-0058 — framework control mappings evidenced from the same ledgers
+      // everything else here reads. It sits directly under Compliance profiles
+      // because a pack DRIVES that cascade rather than forking it: one tag, one
+      // cascade, one audit trail.
+      { label: "Compliance packs", to: "/admin/compliance-packs" },
       { label: "Infrastructure", to: "/admin/infrastructure" },
     ],
   },
@@ -87,6 +163,12 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
     group: "Settings",
     items: [
       { label: "Organization", to: "/admin/organization" },
+      // ADR-0052 — the COMMERCIAL ceiling, deliberately beside the org-wide
+      // functional ceiling rather than under Cost: a license caps how many
+      // entitled users and which tier features exist, which is the same kind of
+      // org-level setting as the ones next to it. It is never a cost report.
+      { label: "Licensing & seats", to: "/admin/licensing" },
+      { label: "First-run setup", to: "/admin/first-run" },
       { label: "Getting started", to: "/admin/setup" },
     ],
   },

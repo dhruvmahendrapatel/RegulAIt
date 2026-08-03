@@ -41,8 +41,10 @@ export async function loadScopeMemberships(
     db.select({ teamId: teamMembers.teamId }).from(teamMembers).where(eq(teamMembers.userId, userId)),
   ]);
   return {
-    roleIds: assignments.map((a) => a.roleId),
-    teamIds: memberships.map((m) => m.teamId),
+    // ADR-0038: a role held BOTH directly and via an IdP group mapping is two
+    // `role_assignments` rows and ONE role — every caller wants the SET.
+    roleIds: [...new Set(assignments.map((a) => a.roleId))],
+    teamIds: [...new Set(memberships.map((m) => m.teamId))],
   };
 }
 
@@ -73,7 +75,11 @@ export async function loadEntitlements(
       .where(and(eq(revocations.userId, userId), eq(revocations.serverId, serverId))),
   ]);
 
-  const roleIds = assignments.map((a) => a.roleId);
+  // ADR-0038: DISTINCT — a role held both directly and via a group mapping is
+  // two assignment rows and one role. The kernel is unaffected either way (it
+  // receives role-derived GRANTS, never assignments), but the SET is what the
+  // pre-filter means.
+  const roleIds = [...new Set(assignments.map((a) => a.roleId))];
   const [rtGrants, rsGrants, roleRows] =
     roleIds.length === 0
       ? [[], [], []]
@@ -123,7 +129,7 @@ export async function loadRoleAgentGrants(db: Db, userId: string): Promise<RoleA
     .select({ roleId: roleAssignments.roleId })
     .from(roleAssignments)
     .where(eq(roleAssignments.userId, userId));
-  const roleIds = assignments.map((a) => a.roleId);
+  const roleIds = [...new Set(assignments.map((a) => a.roleId))];
   if (roleIds.length === 0) return [];
 
   const [grants, roleRows] = await Promise.all([
@@ -152,7 +158,7 @@ export async function loadRoleConnectorGrants(
     .select({ roleId: roleAssignments.roleId })
     .from(roleAssignments)
     .where(eq(roleAssignments.userId, userId));
-  const roleIds = assignments.map((a) => a.roleId);
+  const roleIds = [...new Set(assignments.map((a) => a.roleId))];
   if (roleIds.length === 0) return [];
 
   const [grants, roleRows] = await Promise.all([

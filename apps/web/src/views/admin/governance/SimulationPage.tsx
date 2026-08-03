@@ -1,16 +1,31 @@
 /**
- * Simulation / Access preview — the flagship precedence-chain visualizer.
- * "Would this call be allowed right now?" runs the live policy kernel via
- * POST /v1/evaluate without executing anything, then renders every rule
- * evaluated, in order, as a vertical chain: the terminal match highlighted,
- * each step badged with its outcome, grant/rule ids as copyable chips.
+ * Simulation / Access preview, and the BLAST RADIUS beside it.
+ *
+ * Two questions, deliberately on one screen because they are the two halves of
+ * "may I commit this change":
+ *
+ *  - **What would this decide, right now, for this one call?** (ADR-0040) The
+ *    precedence-chain visualizer: `POST /v1/evaluate` runs the live kernel
+ *    without executing anything, and every rule it walked renders in order.
+ *  - **Who would a PROPOSED policy version newly block?** (ADR-0059) The
+ *    single-tuple preview answers a question you thought to ask; the blast
+ *    radius answers the one you did not, by replaying real recorded history
+ *    against a candidate version that has never been activated. It NAMES the
+ *    users, the projects and the specific calls — a percentage without a name
+ *    is not something anyone can act on before committing.
+ *
+ * Two honesties rendered rather than documented: the dry-run/fidelity
+ * disclosure comes back on every response and is shown next to the numbers, and
+ * `newly allowed` is labelled as structurally zero (ABAC cannot grant) so the
+ * zero reads as a property of the model rather than an absence of evidence.
  */
 import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import type { EvaluateDecision, RuleTrace } from "../../../api/adminTypes";
 import { UUID_RE } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, CodeBlock, EmptyState, Field, IdChip, Select, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, CodeBlock, EmptyState, Field, IdChip, Input, Select, Table, type Tone } from "../../../ui/kit";
 import {
   optionEls,
   serverOpts,
@@ -132,8 +147,182 @@ export default function SimulationPage() {
         ) : (
           <DecisionView decision={result} label={evaluatedLabel} />
         )}
+
+        <BlastRadiusPanel />
       </div>
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0059 — blast radius
+// ---------------------------------------------------------------------------
+
+interface SimulationRow {
+  id: string;
+  policyName: string;
+  policyVersion: number;
+  considered: number;
+  newlyDenied: number;
+  newlyApprovalRequired: number;
+  newlyAllowed: number;
+  unchanged: number;
+  indeterminate: number;
+  affectedUsers: number;
+  affectedProjects: number;
+  affectedTools: number;
+  capped: boolean;
+  fidelityExact: boolean;
+  fidelityCaveats: Array<{ attribute: string; why: string }>;
+  headline: string;
+  windowDays: number;
+  blastRadius: {
+    users?: Array<{ userId: string; label: string | null; calls: number }>;
+    projects?: Array<{ projectId: string | null; name: string | null; calls: number }>;
+    tools?: Array<{ serverId: string; toolName: string; calls: number }>;
+  };
+  createdAt: string;
+}
+interface FlipRow {
+  id: string;
+  userLabel: string | null;
+  projectName: string | null;
+  toolName: string;
+  recordedEffect: string;
+  simulatedEffect: string;
+  occurredAt: string;
+}
+
+function BlastRadiusPanel() {
+  const act = useAction();
+  const [versionId, setVersionId] = useState("");
+  const [windowDays, setWindowDays] = useState("30");
+  const [sim, setSim] = useState<{ simulation: SimulationRow; samples: FlipRow[]; fidelity: string; abacCannotGrant: string } | null>(
+    null,
+  );
+  const history = useQuery({
+    queryKey: ["admin", "policy-simulations"],
+    queryFn: () => api.get<{ simulations: SimulationRow[]; fidelity: string }>("/v1/policy-simulations?limit=25"),
+  });
+
+  return (
+    <Card title="Blast radius — what would a PROPOSED policy version have changed?">
+      <div className={v.faint} style={{ marginBottom: "var(--s2)" }}>
+        {history.data?.fidelity}
+      </div>
+      <form
+        className={a.formRow}
+        onSubmit={(e) => {
+          e.preventDefault();
+          void act.run(async () => {
+            const r = await api.post<{
+              simulation: SimulationRow;
+              samples: FlipRow[];
+              fidelity: string;
+              abacCannotGrant: string;
+            }>("/v1/policy-simulations", {
+              policyVersionId: versionId,
+              windowDays: Number(windowDays) || 30,
+            });
+            setSim(r);
+            await history.refetch();
+          }, "Dry run complete — nothing was executed and nothing was activated");
+        }}
+      >
+        <Field label="Proposed policy version id" grow>
+          <Input value={versionId} onChange={(e) => setVersionId(e.target.value)} required />
+        </Field>
+        <Field label="Window (days)">
+          <Input value={windowDays} onChange={(e) => setWindowDays(e.target.value)} />
+        </Field>
+        <Button type="submit" variant="primary" disabled={act.busy}>
+          Preview
+        </Button>
+      </form>
+      {act.error && (
+        <div className={v.errLine} role="alert">
+          {act.error}
+        </div>
+      )}
+
+      {sim ? (
+        <>
+          <p style={{ margin: "var(--s2) 0 0", fontWeight: 650 }}>{sim.simulation.headline}</p>
+          {sim.simulation.capped ? (
+            <div className={v.faint}>
+              The row cap was reached, so these counts are a LOWER BOUND, not a total.
+            </div>
+          ) : null}
+          {sim.simulation.fidelityExact ? null : (
+            <div className={v.faint}>
+              Replay is not exact for this candidate:{" "}
+              {sim.simulation.fidelityCaveats.map((c) => `${c.attribute} — ${c.why}`).join(" · ")}
+            </div>
+          )}
+          <div className={v.row} style={{ marginTop: "var(--s2)", flexWrap: "wrap" }}>
+            <Badge tone="danger">newly blocked: {sim.simulation.newlyDenied}</Badge>
+            <Badge tone="warn">newly needs approval: {sim.simulation.newlyApprovalRequired}</Badge>
+            <Badge tone="neutral" title={sim.abacCannotGrant}>
+              newly allowed: {sim.simulation.newlyAllowed} (structurally always zero)
+            </Badge>
+            <Badge tone="ok">unchanged: {sim.simulation.unchanged}</Badge>
+            <Badge tone="info">could not be replayed exactly: {sim.simulation.indeterminate}</Badge>
+          </div>
+
+          <div className={v.sectionTitle}>Who — named, not counted</div>
+          <Table
+            rows={sim.simulation.blastRadius.users ?? []}
+            rowKey={(r) => r.userId}
+            columns={[
+              { key: "who", header: "User", render: (r) => r.label ?? r.userId },
+              { key: "calls", header: "Calls that would flip", render: (r) => r.calls },
+            ]}
+          />
+          <div className={v.sectionTitle}>Which projects</div>
+          <Table
+            rows={sim.simulation.blastRadius.projects ?? []}
+            rowKey={(r) => r.projectId ?? "unattributed"}
+            columns={[
+              { key: "p", header: "Project", render: (r) => r.name ?? "(unattributed)" },
+              { key: "calls", header: "Calls", render: (r) => r.calls },
+            ]}
+          />
+          <div className={v.sectionTitle}>A sample of the specific calls</div>
+          <Table
+            rows={sim.samples}
+            rowKey={(r) => r.id}
+            columns={[
+              { key: "who", header: "Who", render: (r) => r.userLabel ?? "—" },
+              { key: "tool", header: "Tool", render: (r) => <code>{r.toolName}</code> },
+              { key: "proj", header: "Project", render: (r) => r.projectName ?? "(unattributed)" },
+              {
+                key: "flip",
+                header: "Would change",
+                render: (r) => `${r.recordedEffect} → ${r.simulatedEffect}`,
+              },
+            ]}
+          />
+        </>
+      ) : (
+        <EmptyState
+          title="No preview run yet"
+          body="Paste a proposed policy version id. The dry run re-decides recorded history under that version — it dispatches nothing, queues nothing, and does not activate the policy."
+        />
+      )}
+
+      <div className={v.sectionTitle}>Previous previews</div>
+      <Table
+        rows={history.data?.simulations ?? []}
+        rowKey={(r) => r.id}
+        columns={[
+          { key: "p", header: "Policy", render: (r) => `${r.policyName} v${r.policyVersion}` },
+          { key: "win", header: "Window", render: (r) => `${r.windowDays}d` },
+          { key: "considered", header: "Calls examined", render: (r) => r.considered },
+          { key: "blocked", header: "Newly blocked", render: (r) => r.newlyDenied },
+          { key: "users", header: "Users", render: (r) => r.affectedUsers },
+        ]}
+      />
+    </Card>
   );
 }
 

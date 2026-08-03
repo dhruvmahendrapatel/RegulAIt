@@ -30,6 +30,8 @@
     "@google-cloud/os-config": "^4.3.2",
     "@kubernetes/client-node": "^1.4.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@node-saml/node-saml": "5.1.0",
+    "@regulait/api-client": "workspace:*",
     "@regulait/connector-provider": "workspace:*",
     "@regulait/db": "workspace:*",
     "@regulait/git-provider": "workspace:*",
@@ -43,9 +45,11 @@
     "@regulait/workflow-kernel": "workspace:*",
     "fastify": "^5.4.0",
     "openid-client": "^6.8.4",
-    "zod": "^3.25.67"
+    "zod": "^3.25.67",
+    "zod-to-json-schema": "3.25.2"
   },
   "devDependencies": {
-    "vitest": "^3.2.4"
+    "vitest": "^3.2.4",
+    "xml-crypto": "6.1.2"
   }
 }

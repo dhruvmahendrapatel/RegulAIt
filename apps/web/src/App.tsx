@@ -27,10 +27,24 @@ import RolesPage from "./views/admin/identity/RolesPage";
 import TeamsPage from "./views/admin/identity/TeamsPage";
 import ClientAccessPage from "./views/admin/identity/ClientAccessPage";
 import SsoPage from "./views/admin/identity/SsoPage";
+import ScimPage from "./views/admin/identity/ScimPage";
+import GroupMappingsPage from "./views/admin/identity/GroupMappingsPage";
 import RulesEnginePage from "./views/admin/governance/RulesEnginePage";
 import SimulationPage from "./views/admin/governance/SimulationPage";
+import AbacPoliciesPage from "./views/admin/governance/AbacPoliciesPage";
+import GuardrailsPage from "./views/admin/governance/GuardrailsPage";
+import EvalsPage from "./views/admin/governance/EvalsPage";
+import ModelRiskPage from "./views/admin/governance/ModelRiskPage";
+import RedTeamPage from "./views/admin/governance/RedTeamPage";
+import ReportsPage from "./views/admin/cost/ReportsPage";
+import PromptVersionsPage from "./views/admin/governance/PromptVersionsPage";
 import ApprovalsAdminPage from "./views/admin/governance/ApprovalsAdminPage";
+import ReviewWorkbenchPage from "./views/admin/governance/ReviewWorkbenchPage";
 import AuditLogPage from "./views/admin/governance/AuditLogPage";
+import ShadowAiPage from "./views/admin/governance/ShadowAiPage";
+import CopilotPage from "./views/admin/governance/CopilotPage";
+import ChatOpsPage from "./views/admin/governance/ChatOpsPage";
+import LineagePage from "./views/admin/governance/LineagePage";
 import WorkflowTemplatesPage from "./views/admin/governance/WorkflowTemplatesPage";
 import AgentsPage from "./views/admin/integrations/AgentsPage";
 import ModelCredentialsPage from "./views/admin/integrations/ModelCredentialsPage";
@@ -41,11 +55,16 @@ import GitConnectionsPage from "./views/admin/integrations/GitConnectionsPage";
 import PmConnectionsPage from "./views/admin/integrations/PmConnectionsPage";
 import DeployTargetsPage from "./views/admin/integrations/DeployTargetsPage";
 import CostDashboardPage from "./views/admin/cost/CostDashboardPage";
+import SpendMonitorPage from "./views/admin/cost/SpendMonitorPage";
+import BillingPage from "./views/admin/cost/BillingPage";
 import OptimizationPage from "./views/admin/cost/OptimizationPage";
 import ComplianceProfilesPage from "./views/admin/compliance/ComplianceProfilesPage";
+import CompliancePacksPage from "./views/admin/compliance/CompliancePacksPage";
 import InfrastructurePage from "./views/admin/compliance/InfrastructurePage";
 import OrganizationPage from "./views/admin/settings/OrganizationPage";
 import GettingStartedPage from "./views/admin/settings/GettingStartedPage";
+import FirstRunPage from "./views/admin/settings/FirstRunPage";
+import LicensingPage from "./views/admin/settings/LicensingPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -119,10 +138,27 @@ export default function App() {
                         <Route path="teams" element={<TeamsPage />} />
                         <Route path="client-access" element={<ClientAccessPage />} />
                         <Route path="sso" element={<SsoPage />} />
+                        <Route path="provisioning" element={<ScimPage />} />
+                        <Route path="group-mappings" element={<GroupMappingsPage />} />
                         <Route path="rules" element={<RulesEnginePage />} />
                         <Route path="simulation" element={<SimulationPage />} />
+                        <Route path="abac-policies" element={<AbacPoliciesPage />} />
+                        <Route path="guardrails" element={<GuardrailsPage />} />
+                        <Route path="evals" element={<EvalsPage />} />
+                        <Route path="model-risk" element={<ModelRiskPage />} />
+                        <Route path="redteam" element={<RedTeamPage />} />
+                        <Route path="reports" element={<ReportsPage />} />
+                        <Route path="prompt-versions" element={<PromptVersionsPage />} />
                         <Route path="approvals" element={<ApprovalsAdminPage />} />
+                        <Route path="review-workbench" element={<ReviewWorkbenchPage />} />
                         <Route path="audit" element={<AuditLogPage />} />
+                        <Route path="lineage" element={<LineagePage />} />
+                        {/* ADR-0055 */}
+                        <Route path="shadow-ai" element={<ShadowAiPage />} />
+                        {/* ADR-0056 */}
+                        <Route path="copilot" element={<CopilotPage />} />
+                        {/* ADR-0061 */}
+                        <Route path="chatops" element={<ChatOpsPage />} />
                         <Route path="workflow-templates" element={<WorkflowTemplatesPage />} />
                         <Route path="agents" element={<AgentsPage />} />
                         <Route path="model-credentials" element={<ModelCredentialsPage />} />
@@ -133,11 +169,19 @@ export default function App() {
                         <Route path="pm-connections" element={<PmConnectionsPage />} />
                         <Route path="deploy-targets" element={<DeployTargetsPage />} />
                         <Route path="cost" element={<CostDashboardPage />} />
+                        <Route path="spend-monitor" element={<SpendMonitorPage />} />
+                        <Route path="billing" element={<BillingPage />} />
                         <Route path="optimization" element={<OptimizationPage />} />
                         <Route path="compliance" element={<ComplianceProfilesPage />} />
+                        {/* ADR-0058 */}
+                        <Route path="compliance-packs" element={<CompliancePacksPage />} />
                         <Route path="infrastructure" element={<InfrastructurePage />} />
                         <Route path="organization" element={<OrganizationPage />} />
+                        <Route path="licensing" element={<LicensingPage />} />
                         <Route path="setup" element={<GettingStartedPage />} />
+                        {/* ADR-0054: the ordered, resumable first-run FLOW. Distinct from
+                            "setup" above, which is a read-only readiness mirror. */}
+                        <Route path="first-run" element={<FirstRunPage />} />
                         <Route path="*" element={<Navigate to="/admin/users" replace />} />
                       </Routes>
                     </RequireAdmin>

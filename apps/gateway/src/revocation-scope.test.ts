@@ -34,7 +34,11 @@ beforeAll(async () => {
   app = buildApp(db, { bootstrapToken: BOOT });
   const u = await app.inject({ method: "POST", headers: AUTH, url: "/v1/users", payload: { email: "o9-uma@example.com", displayName: "o9-uma" } });
   userId = u.json().id;
-  const s = await app.inject({ method: "POST", headers: AUTH, url: "/v1/servers", payload: { name: "o9-server", url: "https://o9.example.com" } });
+  // ADR-0043: never-fetched registry fixture — a resolvable public hostname would
+  // make CI depend on DNS and a .example one fails closed under the MCP egress
+  // guard's write-time check, so it points at the loopback dead port (discard),
+  // which the private-ranges-open default posture permits with zero ceremony.
+  const s = await app.inject({ method: "POST", headers: AUTH, url: "/v1/servers", payload: { name: "o9-server", url: "http://127.0.0.1:9" } });
   serverId = s.json().id;
   for (const tool of [{ name: "o9_read", kind: "read" }, { name: "o9_write", kind: "write" }]) {
     await app.inject({ method: "POST", headers: AUTH, url: `/v1/servers/${serverId}/tools`, payload: tool });

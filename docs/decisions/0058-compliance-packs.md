@@ -1,6 +1,6 @@
 # ADR-0058: Compliance Packs — pre-built control mappings and evidence collectors per framework
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-08-01
 
 ## Context
@@ -144,3 +144,153 @@ enforced/evidenced/partial/unaddressed model. Wiring evidence queries into the r
 internal-framework authoring path so a customer's own control set is a first-class pack. And a
 standing review cadence to update packs as frameworks change — with every generated report stamped
 with the pack version that produced it.
+
+## Amendment — 2026-08-02: implemented as VERSIONED DATA over REAL LEDGER QUERIES, with no certification claim (migration 0073)
+
+Implemented and accepted. What follows is the honest split between what this
+release genuinely enforces and what is structural — and, before either, the
+correction that matters most.
+
+### The correction this amendment makes, before anything else
+
+**A compliance pack produces a CONTROL-MAPPING REPORT. It does not produce
+compliance, and it certifies nothing.** Generating an EU AI Act pack report is
+not being compliant with the EU AI Act; generating a HIPAA pack report is not a
+Security Rule attestation; generating an ISO/IEC 42001 pack report is not a
+certification and is not an audit. RegulAIt maps a framework's controls onto
+platform configuration and counts the evidence its own ledgers hold. The
+customer plus their qualified advisors — counsel, a QSA, a certification body —
+own the final determination, and nothing in this release changes that.
+
+This is not left to a ToS. `COMPLIANCE_PACK_DISCLAIMER` is a **field on every
+scorecard object**, on every stored `compliance_pack_reports` row, on the pack
+list response and on the pack-backed `controls` section of an ADR-0047 report.
+The scorecard type has **no verdict field at all** — no `compliant`, no
+`passed`, no grade — so there is nothing for a console to render as one, and the
+unit suite asserts those properties are absent rather than merely unset.
+
+### Genuinely enforced by this release
+
+- **Evidence is a query, never a tick-box.** Migration 0073 contains **no
+  `satisfied` column, no control status, no `marked_met_by`.** There is nowhere
+  in the schema for a human to record that a control is met. `runCollector` is
+  the only path to a number and every branch of it is a `SELECT` against a
+  ledger that already exists — `audit_log`, `approvals`, `model_card_approvals`,
+  `eval_runs`, `guardrail_configs`, `abac_policies`, `lineage_edges`,
+  `usage_events`, `compliance_profiles`. The suite seeds evidence into the
+  period and asserts a control goes **satisfied**, deletes it and asserts the
+  same control goes **unsatisfied** again, with no other change: a control that
+  is always green fails that test.
+- **The threshold is compared, not ignored.** A control with
+  `min_evidence_count: 10000` is asserted unsatisfied on the same three rows
+  that satisfy a `min_evidence_count: 1` control in the same evaluation.
+- **An organisational control can never be auto-satisfied.** `attestation_required`
+  is checked in `assessPackControl` **before any count is consulted** and returns
+  there, so no path — not even a mis-authored control carrying both the flag and
+  a collector — reaches `satisfied`. A DB CHECK enforces the pairing
+  (`attestation_required = false OR collector = 'none'`) so the mis-authored row
+  cannot even be stored. Such controls report `attestation_required`, or
+  `attested` once a **named human** records a statement — a status deliberately
+  distinct from `satisfied` and counted separately on the scorecard. An expired
+  attestation falls back to `attestation_required` rather than standing forever.
+  The inverse attack is refused too: attesting to an **auto-evidenced** control
+  returns 409 and writes an audited `deny`, because a human statement must never
+  stand in for ledger evidence.
+- **Packs are data, and the suite proves it by moving the data.** A framework
+  that appears nowhere in this repository's source
+  (`acme-internal-ai-standard`) is POSTed, activated and evaluated against the
+  real ledgers with no code change. `framework` is free text precisely so a
+  customer's internal control set is a first-class pack without an enum
+  migration.
+- **Entitlement scoping is ADR-0047's, verbatim.** `evaluateReportAccess` is
+  reused rather than copied — one decision function, one set of refusals — and
+  every scoped collector builds its `WHERE` clause **from the returned project-id
+  list at query construction**, never as a filter over an already-computed
+  aggregate. The suite seeds 2 evidence rows in team A's project and 7 in team
+  B's, and asserts a team-A lead's scorecard counts **exactly 2** while the
+  admin's org-scoped run counts 9. A non-admin asking for org scope gets 403 with
+  an audited deny, and cannot read an artifact generated at a wider scope.
+- **Versioning is a database fact.** A partial unique index enforces at most one
+  `active` version per framework; activating v2 retires v1 in the same request.
+  `compliance_pack_reports.pack_version` stamps every artifact, and the suite
+  asserts a v1 report still reads v1 after v2 activates — a framework revision
+  never rewrites a report an auditor was already handed.
+- **ADR-0047's placeholder catalogue is retired.** `report_definitions.pack_id`
+  routes the `controls` section through the pack's real, ledger-evidenced
+  assessment (`catalogueSource: "pack"`, stamped with the pack version). A
+  definition naming no pack keeps the built-in set, whose note now says plainly
+  that it **is a fallback and not a framework mapping**.
+- **Every act is audited** with a stable `rule_id` through the ordinary audit
+  path: authoring, seeding, activating (and the retirement it causes), attesting,
+  evaluating — and the two refusals that matter, the unentitled evaluation and
+  the attestation on an auto-evidenced control.
+
+### How a pack is updated without a release
+
+A pack is rows, not a build artifact. A framework revision is a **new
+`compliance_packs` row** with the same `framework` and a higher `version`, its
+controls posted alongside it, then activated — which retires the previous version
+in the same request. Reports keep the version that produced them. A framework
+nobody shipped is the same POST with a new `framework` string.
+`DEFAULT_COMPLIANCE_PACKS` is a **seed** that `POST /v1/compliance/packs/seed`
+inserts as ordinary rows (idempotent per `framework@version`); the evaluator
+reads rows and nothing else, so emptying the tables makes it evaluate nothing.
+
+**The one boundary, stated rather than discovered.** A pack cannot add a new
+evidence *source*. `collector` names one of a fixed, parameterised vocabulary
+over ledgers that already exist — a pack is analyst-authored data, and one that
+could carry SQL would be an injection primitive wearing a control mapping's
+clothes. A control needing a ledger RegulAIt does not keep **must** be marked
+attestation-required; it is never silently reported as satisfied. That boundary
+is shipped as `COMPLIANCE_PACK_UPDATE_POLICY`, returned on the pack list and
+rendered on the console page.
+
+### Structural only — named plainly
+
+- **The six launch packs are a well-informed starting point, not a reviewed
+  mapping.** Every one carries `provenance.reviewedBy: null`, and the unit suite
+  asserts it stays null — the packs were authored from public framework
+  catalogues without domain review, and a pack that claimed a counsel review it
+  never had would be the exact overclaim this ADR refuses. §"Follow-up work"'s
+  "each reviewed with appropriate domain input" is **not done**. Control
+  selection is partial by construction: these map the controls this control plane
+  can speak to, not the frameworks in full.
+- **Packs do not drive the §8.3 cascade yet.** `cascade_tag` is recorded and
+  surfaced, and the ADR's design is that tagging an Initiative with it drives the
+  *existing* cascade — but this release wires **no automatic creation of a
+  `compliance_profiles` row from a pack**. An admin must still author the
+  profile. The evidence and scorecard half of §2/§3 ships; the **preset half of
+  §2 does not**, and a pack therefore currently enforces nothing by itself.
+- **No red-team gating presets.** §2's "packs also ship the red-team gating
+  presets ADR-0057 consumes" is not built here.
+- **No multi-pack conflict surfacing.** §"Framework overlap" inherits ADR-0027's
+  rules through the cascade, but nothing in this release evaluates two packs
+  together or surfaces a HIPAA-vs-PCI conflict; each pack is evaluated
+  independently.
+- **`coverage` is the mapping author's claim, not a verified property.** The
+  enforced/evidenced/partial/unaddressed class is what the pack author declared.
+  The *computed* status (satisfied / unsatisfied / attested / attestation-required
+  / unaddressed) is the part derived from the ledgers, and they are reported as
+  separate fields precisely so the declared claim cannot be mistaken for a
+  measurement.
+- **Configuration-shaped collectors count configuration, not operation.**
+  `guardrail_configs`, `abac_policies_active`, `model_cards_approved` and
+  `compliance_profile_cascade` evidence that a control is *configured* — a quiet
+  period is not proof a runtime control exists. Presence of evidence is never an
+  assertion that a control is operating effectively; an auditor judges
+  effectiveness, this counts rows.
+- **No CSV/PDF export of a scorecard.** JSON only, and the pack-backed ADR-0047
+  `controls` section rides that ADR's existing CSV. Same PDF posture as ADR-0047.
+
+### Migration
+
+`0073_compliance_packs.sql` — four tables: `compliance_packs` (versioned pack
+identity with provenance and a partial unique index enforcing one active version
+per framework), `compliance_pack_controls` (the mapping, with the DB CHECK that
+an attestation-required control carries no collector),
+`compliance_pack_attestations` (the one human-recordable input, and it is
+`attested`, never `satisfied`) and `compliance_pack_reports` (the immutable
+artifact, stamped with pack version and effective project ids). Plus
+`report_definitions.pack_id`, which retires ADR-0047's placeholder catalogue.
+`audit_log.object_type` gains `compliance_pack` as a TS-only widening — the
+column has no DB CHECK, so there is no DDL for it.

@@ -7,11 +7,13 @@ import {
   lte,
   agentRevocations,
   agents,
+  approvalAssignments,
   apiKeys,
   approvalDelegations,
   approvalRules,
   approvals,
   auditLog,
+  authSessions,
   backupRuns,
   certInventory,
   infraFindings,
@@ -24,6 +26,7 @@ import {
   isNull,
   mcpServers,
   mcpTools,
+  modelCards,
   or,
   orchestrationRuns,
   projectContextItems,
@@ -90,20 +93,51 @@ import {
   deleteRoleSchema,
   evaluateRequestSchema,
   setUserAdminSchema,
+  updateServerSchema,
   updateUserSchema,
 } from "@regulait/shared";
 import { governedEvaluate } from "./governed-evaluate.js";
+import { refuseMcpServerWrite } from "./mcp-egress.js";
 import { loadEntitlements } from "./entitlements.js";
 import {
   CSRF_HEADER,
   SESSION_COOKIE,
   authenticate,
+  clearSessionCookie,
   generateToken,
+  governingIpPolicy,
   readCookie,
   registerAuthRoutes,
+  requestIsSecure,
   resolveSession,
   type AuthContext,
 } from "./auth.js";
+import { registerSamlRoutes } from "./saml.js";
+import { SCIM_ROUTES, registerScimAdminRoutes, registerScimRoutes } from "./scim.js";
+import { registerGroupRoleMappingRoutes } from "./group-role-api.js";
+import { registerAbacRoutes } from "./abac.js";
+import { registerPolicySimulationRoutes } from "./policy-simulation.js";
+import { registerGuardrailRoutes } from "./guardrails.js";
+import { registerEvalRoutes } from "./evals.js";
+import { applyModelCardApprovalDecision, registerMrmRoutes } from "./mrm.js";
+import { registerRedTeamRoutes } from "./redteam.js";
+import { registerReportingRoutes } from "./reporting.js";
+import { registerConfigVersionRoutes } from "./config-versions.js";
+import { registerSpendMonitorRoutes } from "./spend-monitor.js";
+import { registerLineageRoutes } from "./lineage.js";
+import { registerBillingRoutes } from "./billing.js";
+import { refuseIfSeatCapReached, registerLicensingRoutes } from "./licensing.js";
+import { registerAuditChainRoutes, type AnchorSink } from "./audit-chain.js";
+import {
+  assignedApprovalIdsFor,
+  ensureAssignment,
+  evaluateAssignmentSla,
+  materializeAndEvaluate,
+  registerWorkbenchRoutes,
+  routingActive,
+} from "./workbench.js";
+import { abacPrincipalFromRequest } from "./abac-principal.js";
+import { evaluateIpEnvelope } from "./net-policy.js";
 import { activeDelegatorsFor, activeDelegationFrom } from "./delegations.js";
 
 declare module "fastify" {
@@ -131,6 +165,12 @@ export interface BuildAppOptions {
    * directions without touching process.env — see hsts.ts for why this is a
    * deployment env var rather than an org_settings toggle. */
   hsts?: string | null;
+  /** ADR-0060: where audit-chain head anchors are externalized. Defaults to
+   * REGULAIT_AUDIT_ANCHOR_DIR (and to NO sink at all when that is unset, which
+   * is a disclosed state, not a misconfiguration). `null` forces no sink.
+   * Exposed so a test can drive a real WORM buffer without touching the
+   * environment. */
+  auditAnchorSink?: AnchorSink | null;
 }
 import { z } from "zod";
 import { registerMcpProxy } from "./mcp-proxy.js";
@@ -166,6 +206,16 @@ import {
 } from "./org-settings.js";
 import { registerSetupStatusRoutes } from "./setup-status.js";
 import { WEB_UI_ROUTES, defaultWebDistDir, registerWebServing } from "./web-serving.js";
+// ADR-0053 — the auth-class sets the two gates below branch on. They live in
+// their own module so the published OpenAPI document derives each route's
+// documented credential requirement from the SAME objects that enforce it.
+import { AUTH_EXEMPT_ROUTES, NON_ADMIN_ROUTES } from "./route-classes.js";
+import { registerOpenApiRoutes, type RouteInventoryEntry } from "./openapi.js";
+import { registerOnboardingRoutes } from "./onboarding.js";
+import { registerShadowAiRoutes } from "./shadow-ai.js";
+import { registerCompliancePackRoutes } from "./compliance-packs.js";
+import { registerCopilotRoutes } from "./copilot.js";
+import { registerChatOpsRoutes } from "./chatops.js";
 import path from "node:path";
 import { registerSpaInlineScripts, securityHeaders } from "./security-headers.js";
 import { MergeConflictError, WorkflowStateError } from "@regulait/workflow-kernel";
@@ -298,6 +348,30 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   const trustProxy = opts.trustProxy ?? resolveTrustProxy();
   const app = Fastify({ logger: false, trustProxy });
 
+  // ADR-0053 — THE ROUTE INVENTORY. Registered FIRST, before any route, because
+  // Fastify's `onRoute` hook only fires for routes added after it. Every
+  // `app.get/post/...` call anywhere in this process — including the ones inside
+  // the ~40 `register*Routes` modules below — lands here.
+  //
+  // This is what makes spec drift DETECTABLE rather than aspirational: the
+  // OpenAPI document is built against this list, and `openapi.test.ts` fails
+  // when a registered route has no spec entry, or a spec entry names a route
+  // that no longer exists. Nobody has to remember to update a document.
+  //
+  // HEAD is excluded: Fastify auto-registers a HEAD twin for every GET, and
+  // documenting a route the author never wrote would be noise, not contract.
+  const routeInventory: RouteInventoryEntry[] = [];
+  app.addHook("onRoute", (r) => {
+    const methods = Array.isArray(r.method) ? r.method : [r.method];
+    for (const m of methods) {
+      if (m === "HEAD" || m === "OPTIONS") continue;
+      const key = `${m} ${r.url}`;
+      if (routeInventory.some((e) => `${e.method} ${e.url}` === key)) continue;
+      routeInventory.push({ method: m, url: r.url });
+    }
+  });
+  app.decorate("routeInventory", routeInventory);
+
   // ADR-0029 amendment — the Strict-Transport-Security value, resolved ONCE at
   // boot (never per request: the header must not depend on the database, and
   // an operator's posture must not drift mid-process). `undefined` means "not
@@ -424,28 +498,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // (login/mfa/key-exchange/OIDC — a browser has no credential yet; logout is
   // exempt so an expired session can still clear its cookie, and reads the
   // cookie in-route).
-  const AUTH_EXEMPT_ROUTES = new Set([
-    "/v1/pm/webhooks/:connectionName",
-    // /admin and /app are 302s to /ui (ADR-0026 phase-2 swap) — a browser
-    // hits a bookmark before it has any credential, so the redirect itself
-    // must not require one. The legacy shells they used to serve are GONE
-    // (ADR-0033); /legacy/* registers no route at all.
-    "/admin",
-    "/app",
-    "/",
-    "/health",
-    "/auth/login",
-    "/auth/mfa/verify",
-    "/auth/login-with-key",
-    "/auth/logout",
-    "/auth/oidc/providers",
-    "/auth/oidc/:providerId/start",
-    "/auth/oidc/callback",
-    // the /ui SPA shell (ADR-0026): a static, zero-data page like /app and
-    // /admin above — the browser hits it before it has any credential; every
-    // API call the page makes still authenticates normally.
-    ...WEB_UI_ROUTES,
-  ]);
+  // ADR-0053: the two sets below moved to route-classes.ts, VERBATIM, so the
+  // published OpenAPI document can derive each route's documented auth class
+  // from the very objects these hooks branch on. See that file's header.
   // ADR-0020 INTERCEPTION GATE. Runs in the onRequest phase — BEFORE auth — so
   // a surface the admin has not enabled answers Fastify's own 404 body and is
   // indistinguishable from a route that was never registered. Doing this after
@@ -531,7 +586,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     if (!authorization) {
       const cookieToken = readCookie(req.headers.cookie, SESSION_COOKIE);
       if (cookieToken) {
-        const session = await resolveSession(db, cookieToken, Boolean(opts.bootstrapToken));
+        // ADR-0039: the client IP rides into the SAME update as the idle-slide
+        // so last_seen_ip tracks where the session IS, not where it started
+        const session = await resolveSession(db, cookieToken, Boolean(opts.bootstrapToken), req.ip ?? null);
         if (session === "disabled") {
           return reply.status(401).send({
             error: "user_disabled",
@@ -554,6 +611,54 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
               });
             }
           }
+          // ADR-0039 enforce_continuous: EVERY authenticated use of a governed
+          // session is checked against the org envelope; an out-of-range
+          // request is refused AND the session force-revoked on the spot (the
+          // "trusted network only" posture — a laptop leaving the corporate
+          // VPN loses its session mid-flight). Fail closed: an undeterminable
+          // client IP under a non-empty allow-list is outside the envelope.
+          // Human sessions answer to session_ip_policy, exchanged api_key
+          // sessions to api_key_ip_policy; bootstrap is never restricted.
+          // Settings are re-read from the singleton row on every check, so a
+          // tightened allow-list binds on the very next request — no cache.
+          const org = await loadOrgSettings(db);
+          const ipPolicy = governingIpPolicy(org, session.origin);
+          if (ipPolicy === "enforce_continuous") {
+            const decision = evaluateIpEnvelope(org.sessionIpAllowlist, req.ip ?? null);
+            if (!decision.allowed) {
+              const knob = session.origin === "api_key" ? "api_key_ip_policy" : "session_ip_policy";
+              // ONE way sessions die: revoked_at — this is just a finer caller
+              await db
+                .update(authSessions)
+                .set({ revokedAt: new Date() })
+                .where(and(eq(authSessions.id, session.sessionId), isNull(authSessions.revokedAt)));
+              await db.insert(auditLog).values({
+                userId: session.ctx.userId ?? "00000000-0000-0000-0000-000000000000",
+                objectType: "user",
+                objectId: session.ctx.userId,
+                detail: {
+                  phase: "ip-policy-session-revoked",
+                  knob,
+                  policy: ipPolicy,
+                  sessionId: session.sessionId,
+                  origin: session.origin,
+                  clientIp: req.ip ?? null,
+                  reason: decision.reason,
+                  allowlist: org.sessionIpAllowlist ?? [],
+                },
+                effect: "deny",
+                ruleId: "ip-policy-session-revoked",
+                ruleChain: [],
+                reason: `session ${session.sessionId} force-revoked: request from ${req.ip ?? "an undeterminable client IP"} is outside the org IP allow-list under ${knob}='enforce_continuous'`,
+              });
+              void reply.header("set-cookie", clearSessionCookie(requestIsSecure(req)));
+              return reply.status(401).send({
+                error: "ip_not_allowed",
+                detail:
+                  "this session was signed out: requests from this network address are not permitted by organization policy",
+              });
+            }
+          }
           const route = `${req.method} ${req.routeOptions.url ?? ""}`;
           // gate 1: a one-time password must be replaced before anything else
           if (session.mustChangePassword && !AUTH_SELF_SERVICE_ROUTES.has(route)) {
@@ -564,7 +669,6 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           }
           // gate 2: org-mandated MFA enrollment (off|admins|all)
           if (!session.totpEnabled && !AUTH_SELF_SERVICE_ROUTES.has(route) && session.ctx.userId) {
-            const org = await loadOrgSettings(db);
             const mustEnroll =
               org.mfaRequired === "all" || (org.mfaRequired === "admins" && session.ctx.isAdmin);
             if (mustEnroll) {
@@ -592,101 +696,47 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       });
     }
     if (!ctx) return reply.status(401).send({ error: "unauthenticated" });
+    // ADR-0039: header API-key auth under api_key_ip_policy. Each request
+    // presents the credential anew, so ANY enforcing level checks every
+    // request (there is no session to distinguish "login" from "use", and
+    // nothing to revoke — the deny IS the whole enforcement). The bootstrap
+    // header is the break-glass path and is never IP-restricted; the human
+    // knob never touches this path in either direction.
+    if (ctx.via === "api-key") {
+      const org = await loadOrgSettings(db);
+      if (org.apiKeyIpPolicy !== "off") {
+        const decision = evaluateIpEnvelope(org.sessionIpAllowlist, req.ip ?? null);
+        if (!decision.allowed) {
+          await db.insert(auditLog).values({
+            userId: ctx.userId ?? "00000000-0000-0000-0000-000000000000",
+            objectType: "user",
+            objectId: ctx.userId,
+            detail: {
+              phase: "ip-policy-api-key-denied",
+              knob: "api_key_ip_policy",
+              policy: org.apiKeyIpPolicy,
+              clientIp: req.ip ?? null,
+              reason: decision.reason,
+              allowlist: org.sessionIpAllowlist ?? [],
+            },
+            effect: "deny",
+            ruleId: "ip-policy-api-key-denied",
+            ruleChain: [],
+            reason: `API-key request refused: ${req.ip ?? "an undeterminable client IP"} is outside the org IP allow-list under api_key_ip_policy='${org.apiKeyIpPolicy}'`,
+          });
+          return reply.status(401).send({
+            error: "ip_not_allowed",
+            detail: "API-key requests from this network address are not permitted by organization policy",
+          });
+        }
+      }
+    }
     req.authCtx = ctx;
   });
 
   // Everything is admin-only except the routes where a non-admin identity is
   // the point: deciding an approval (named approver), viewing one's own
   // visible tools, and calling tools through the proxy.
-  const NON_ADMIN_ROUTES = new Set([
-    "POST /v1/approvals/:approvalId/decide",
-    "GET /v1/users/:userId/servers/:serverId/tools",
-    "POST /mcp/:serverId",
-    "POST /v1/agents/:agentId/invoke",
-    // ADR-0020: the provider-shaped compatibility surfaces are the DEVELOPER's
-    // path — a non-admin calling from their IDE — exactly like the MCP proxy
-    // above. Their governance is the ordinary evaluateAgent entitlement check
-    // inside the shim, not admin-ness. The interception SETTINGS endpoints are
-    // deliberately NOT here: writing the posture stays admin-only.
-    "POST /v1/messages",
-    "POST /v1/chat/completions",
-    "POST /v1/connectors/:connectorId/invoke",
-    "POST /v1/conversations",
-    "GET /v1/conversations",
-    "GET /v1/conversations/:conversationId",
-    "DELETE /v1/conversations/:conversationId",
-    "GET /v1/users/:userId/agents",
-    "GET /v1/users/:userId/connectors",
-    "POST /v1/workflows/instances",
-    "POST /v1/workflows/instances/:instanceId/artifacts",
-    "POST /v1/workflows/instances/:instanceId/advance",
-    "POST /v1/workflows/instances/:instanceId/checks",
-    "POST /v1/workflows/instances/:instanceId/recheck",
-    "POST /v1/workflows/instances/:instanceId/deploy-override",
-    "POST /v1/workflows/instances/:instanceId/abort",
-    "GET /v1/workflows/instances/:instanceId",
-    "GET /v1/approvals",
-    "GET /v1/cost-events",
-    "GET /v1/usage-events",
-    "POST /v1/users/:userId/model-credentials",
-    "GET /v1/users/:userId/model-credentials",
-    "DELETE /v1/users/:userId/model-credentials/:provider",
-    "POST /v1/projects/:projectId/members",
-    "GET /v1/projects/:projectId/members",
-    "PATCH /v1/projects/:projectId/members/:userId",
-    "DELETE /v1/projects/:projectId/members/:userId",
-    "POST /v1/projects/:projectId/context",
-    "GET /v1/projects/:projectId/context",
-    "GET /v1/projects/:projectId/context/graph",
-    "POST /v1/projects/:projectId/context/promote",
-    "GET /v1/projects/:projectId/compliance",
-    "GET /v1/projects/:projectId/costs",
-    "GET /v1/projects/:projectId/costs.csv",
-    "POST /v1/runs",
-    "POST /v1/runs/decompose",
-    "POST /v1/runs/:runId/events",
-    "POST /v1/runs/:runId/nodes/:nodeId/dispatch",
-    "POST /v1/runs/:runId/auto",
-    "GET /v1/runs/:runId",
-    "POST /v1/runs/:runId/pm-sync",
-    "POST /v1/workflows/instances/:instanceId/pm-sync",
-    "GET /v1/pm/links",
-    "POST /v1/decisions",
-    "GET /v1/decisions",
-    "POST /v1/pm/webhooks/:connectionName",
-    "GET /admin",
-    "GET /app",
-    "GET /",
-    "GET /health",
-    // ADR-0026: the SPA shell, same static-page reasoning as /app above
-    ...WEB_UI_ROUTES.map((r) => `GET ${r}`),
-    // ADR-0025: the auth surface — login endpoints are pre-identity, the
-    // self-service endpoints (me/change-password/TOTP) are every signed-in
-    // human's own account. Admin-ness is not the point of any of them.
-    "POST /auth/login",
-    "POST /auth/mfa/verify",
-    "POST /auth/login-with-key",
-    "POST /auth/logout",
-    "GET /auth/me",
-    "POST /auth/change-password",
-    // ADR-0030: a user managing their OWN username — their own account, like
-    // change-password. Whether it is ALLOWED at all is the org's call
-    // (org_settings.username_self_service, default false = admin-managed);
-    // admin-ness is not the point of the route, so it is not the gate.
-    "POST /auth/username",
-    "POST /auth/totp/enroll",
-    "POST /auth/totp/activate",
-    "POST /auth/totp/disable",
-    "GET /auth/oidc/providers",
-    "GET /auth/oidc/:providerId/start",
-    "GET /auth/oidc/callback",
-    "GET /v1/me",
-    "GET /v1/model-providers/status",
-    "GET /v1/runs",
-    "GET /v1/workflows/instances",
-    "GET /v1/projects",
-    "GET /v1/users/directory",
-  ]);
   app.addHook("preHandler", async (req, reply) => {
     const route = `${req.method} ${req.routeOptions.url ?? ""}`;
     if (!NON_ADMIN_ROUTES.has(route) && !req.authCtx.isAdmin) {
@@ -721,6 +771,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   app.post("/v1/users", async (req, reply) => {
     const body = createUserSchema.parse(req.body);
+    // ADR-0052 — THE SEAT GATE. A seat is an entitled user, so provisioning one
+    // is an EXPANSION-class act: it is refused when the licensed cap is reached
+    // or the license has lapsed past its grace window. It is a GROWTH gate and
+    // never a service gate — nothing here can revoke, disable or degrade a user
+    // who already exists, and a deployment that is over cap (which happens
+    // legitimately when a smaller license is installed onto a larger estate)
+    // simply cannot add the NEXT one. With no license installed there is no
+    // authoritative cap and this is a no-op.
+    const seatRefusal = await refuseIfSeatCapReached(db, {
+      actorUserId: req.authCtx.userId ?? null,
+      email: body.email,
+    });
+    if (seatRefusal) return reply.status(seatRefusal.status).send(seatRefusal.body);
     const [row] = await db
       .insert(users)
       .values({ email: body.email, displayName: body.displayName, isAdmin: body.isAdmin ?? false })
@@ -971,8 +1034,57 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   app.post("/v1/servers", async (req, reply) => {
     const body = createServerSchema.parse(req.body);
+    // ADR-0043: WRITE-TIME egress check — a bad destination is an honest 400
+    // at the moment somebody types it, audited, not a surprise at first tool
+    // call. (Write-time is not sufficient — connectUpstream re-checks every
+    // time — but it is the earliest honest failure.)
+    const refusal = await refuseMcpServerWrite(db, {
+      url: body.url,
+      allowPrivateRanges: body.allowPrivateRanges ?? null,
+      userId: req.authCtx.userId ?? null,
+      phase: "registration",
+      label: `MCP server '${body.name}' url`,
+    });
+    if (refusal) return reply.status(400).send(refusal);
     const [row] = await db.insert(mcpServers).values(body).returning();
     return reply.status(201).send(row);
+  });
+
+  /** ADR-0043: update an MCP server's destination / private-range posture.
+   * Changing either re-runs the write-time egress check against the NEXT
+   * values (null allowPrivateRanges restores inheritance of the org default).
+   * Admin-only via the default gate, like the registry POST above. */
+  app.patch("/v1/servers/:serverId", async (req, reply) => {
+    const { serverId } = uuidParam.parse(req.params);
+    const body = updateServerSchema.parse(req.body);
+    const [before] = await db.select().from(mcpServers).where(eq(mcpServers.id, serverId));
+    if (!before) return reply.status(404).send({ error: "unknown_server" });
+    const nextUrl = body.url ?? before.url;
+    const nextFlag =
+      body.allowPrivateRanges !== undefined ? body.allowPrivateRanges : before.allowPrivateRanges;
+    if (body.url !== undefined || body.allowPrivateRanges !== undefined) {
+      const refusal = await refuseMcpServerWrite(db, {
+        url: nextUrl,
+        allowPrivateRanges: nextFlag,
+        userId: req.authCtx.userId ?? null,
+        serverId,
+        phase: "update",
+        label: `MCP server '${before.name}' url`,
+      });
+      if (refusal) return reply.status(400).send(refusal);
+    }
+    const [row] = await db
+      .update(mcpServers)
+      .set({
+        ...(body.name !== undefined ? { name: body.name } : {}),
+        ...(body.url !== undefined ? { url: body.url } : {}),
+        ...(body.allowPrivateRanges !== undefined
+          ? { allowPrivateRanges: body.allowPrivateRanges }
+          : {}),
+      })
+      .where(eq(mcpServers.id, serverId))
+      .returning();
+    return reply.send(row);
   });
 
   app.get("/v1/servers", async () => ({ servers: await db.select().from(mcpServers) }));
@@ -1153,12 +1265,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     return { removed: true };
   });
 
+  // ADR-0038: an admin assignment is always `origin='direct'` — the origin an
+  // IdP reconciliation can never touch. If a group mapping also implies this
+  // role the user simply holds two rows (migration 0053's UNIQUE includes
+  // origin); the direct one outlives any directory change.
   app.post("/v1/users/:userId/roles", async (req, reply) => {
     const { userId } = z.object({ userId: z.string().uuid() }).parse(req.params);
     const body = assignRoleSchema.parse(req.body);
     const [row] = await db
       .insert(roleAssignments)
-      .values({ userId, roleId: body.roleId })
+      .values({ userId, roleId: body.roleId, origin: "direct" })
       .returning();
     return reply.status(201).send(row);
   });
@@ -1167,14 +1283,43 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const params = z
       .object({ userId: z.string().uuid(), roleId: z.string().uuid() })
       .parse(req.params);
+    // ADR-0038: unassign removes the ADMIN-DIRECT assignment only. A
+    // group-derived one is owned by the reconciler — deleting it here would be
+    // undone by the holder's very next login/sync, so the honest answer is to
+    // say so and point at the two things that actually work (remove the
+    // mapping, or an ADR-0019 per-user revocation, which beats a role a
+    // mapping keeps re-adding).
     const deleted = await db
       .delete(roleAssignments)
       .where(
-        and(eq(roleAssignments.userId, params.userId), eq(roleAssignments.roleId, params.roleId)),
+        and(
+          eq(roleAssignments.userId, params.userId),
+          eq(roleAssignments.roleId, params.roleId),
+          eq(roleAssignments.origin, "direct"),
+        ),
       )
       .returning({ id: roleAssignments.id });
-    if (deleted.length === 0) return reply.status(404).send({ error: "not_assigned" });
-    return { removed: true };
+    const groupHeld = await db
+      .select({ id: roleAssignments.id })
+      .from(roleAssignments)
+      .where(
+        and(
+          eq(roleAssignments.userId, params.userId),
+          eq(roleAssignments.roleId, params.roleId),
+          eq(roleAssignments.origin, "group"),
+        ),
+      );
+    if (deleted.length === 0) {
+      if (groupHeld.length > 0) {
+        return reply.status(409).send({
+          error: "role_group_derived",
+          detail:
+            "this role is held via an IdP group mapping, not an admin assignment — delete the group→role mapping, or add a per-user revocation (ADR-0019), which beats a group-implied role",
+        });
+      }
+      return reply.status(404).send({ error: "not_assigned" });
+    }
+    return { removed: true, ...(groupHeld.length > 0 ? { stillHeldViaGroup: true } : {}) };
   });
 
   // ADR-0022: who holds a role — the missing read that makes assignments
@@ -1188,6 +1333,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         email: users.email,
         disabledAt: users.disabledAt,
         assignedAt: roleAssignments.createdAt,
+        // ADR-0038: WHY they hold it — an admin action, or an IdP group a
+        // mapping names. A holder listed twice holds it both ways.
+        origin: roleAssignments.origin,
       })
       .from(roleAssignments)
       .innerJoin(users, eq(users.id, roleAssignments.userId))
@@ -1204,11 +1352,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const body = deleteRoleSchema.parse(req.body ?? {});
     const [role] = await db.select().from(roles).where(eq(roles.id, roleId));
     if (!role) return reply.status(404).send({ error: "unknown_role" });
-    const holders = await db
+    const holderRows = await db
       .select({ userId: roleAssignments.userId, email: users.email })
       .from(roleAssignments)
       .innerJoin(users, eq(users.id, roleAssignments.userId))
       .where(eq(roleAssignments.roleId, roleId));
+    // ADR-0038: a user holding the role BOTH directly and via a group mapping
+    // has two assignment rows — they are one holder, counted once.
+    const holders = [...new Map(holderRows.map((h) => [h.userId, h])).values()];
     if (holders.length > 0 && !body.force) {
       return reply.status(409).send({
         error: "role_held",
@@ -1497,11 +1648,21 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
     // Full governed evaluation, but decision-only: unlike the proxy path this
     // endpoint never creates queue entries or consumes approvals.
-    const { decision } = await governedEvaluate(db, body.userId, body.serverId, {
-      serverId: tool.serverId,
-      name: tool.name,
-      kind: tool.kind,
-    });
+    const { decision } = await governedEvaluate(
+      db,
+      body.userId,
+      body.serverId,
+      { serverId: tool.serverId, name: tool.name, kind: tool.kind },
+      undefined,
+      null,
+      // ADR-0019 A4 attribution: this preview endpoint names no project.
+      null,
+      // ADR-0040: the ADMIN's own session facts are NOT the subject's — this
+      // endpoint previews a decision for `body.userId`, who may not be the
+      // caller, so the principal's session attributes are honestly unknown
+      // here. /v1/abac/simulate is where a hypothetical session can be named.
+      undefined,
+    );
 
     await db.insert(auditLog).values({
       userId: body.userId,
@@ -1700,14 +1861,43 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // delegate covers live decisions, they don't inherit the archive).
     const me = req.authCtx.userId ?? "";
     const delegators = !req.authCtx.isAdmin && me ? await activeDelegatorsFor(db, me) : [];
+
+    // ADR-0046 — THE LAZY HALF OF THE WORKBENCH, and the reason this queue does
+    // not need a scheduler it does not have.
+    //
+    // Before the visibility query runs, every PENDING approval is materialized
+    // against the routing rules and its SLA is evaluated. Two consequences:
+    //   - a role/team-routed approval acquires its assignment, which is what
+    //     makes it visible to that role's members below (a routed approval that
+    //     only becomes visible after someone already saw it would be useless);
+    //   - a breach that came due while nobody was looking is detected and
+    //     escalated NOW, at the first read, with the deadlines recomputed from
+    //     `requested_at` so the result is what a timer would have produced.
+    //
+    // Guarded by `routingActive`: with no enabled rule — the shipped state —
+    // this whole block is one COUNT and the queue behaves exactly as it did
+    // before migration 0058, writing nothing.
+    const workbenchOn = await routingActive(db);
+    if (workbenchOn) {
+      const pendingAll = await db.select().from(approvals).where(eq(approvals.status, "pending"));
+      await materializeAndEvaluate(db, pendingAll, me || null);
+    }
+    // ADR-0046 §1: routing decides WHOSE QUEUE a row shows in. A non-admin
+    // therefore also sees the rows assigned (or escalated) to a role or team
+    // they belong to — still not a widening of who may DECIDE, which the decide
+    // path re-checks against `approverUserId` independently.
+    const assignedIds = workbenchOn && !req.authCtx.isAdmin && me ? await assignedApprovalIdsFor(db, me) : [];
     const scopeCondition = req.authCtx.isAdmin
       ? undefined
-      : delegators.length
-        ? or(
+      : or(
+          ...[
             eq(approvals.approverUserId, me),
-            and(inArray(approvals.approverUserId, delegators), eq(approvals.status, "pending")),
-          )
-        : eq(approvals.approverUserId, me);
+            ...(delegators.length
+              ? [and(inArray(approvals.approverUserId, delegators), eq(approvals.status, "pending"))]
+              : []),
+            ...(assignedIds.length ? [inArray(approvals.id, assignedIds)] : []),
+          ],
+        );
     const conditions = [status ? eq(approvals.status, status) : undefined, scopeCondition].filter(
       (c) => c !== undefined,
     );
@@ -1717,6 +1907,18 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       .where(conditions.length > 0 ? and(...conditions) : undefined)
       .orderBy(desc(approvals.requestedAt))
       .limit(100);
+    const assignmentRows = rows.length
+      ? await db
+          .select()
+          .from(approvalAssignments)
+          .where(
+            inArray(
+              approvalAssignments.approvalId,
+              rows.map((r) => r.id),
+            ),
+          )
+      : [];
+    const assignmentFor = new Map(assignmentRows.map((a) => [a.approvalId, a]));
     // Display enrichment — purely additive to the row shape: names for the
     // requester/approver/decider and a label for the governed object, so the
     // inbox and queue can say WHO asked and WHAT is governed without the
@@ -1870,6 +2072,38 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       }
       return null;
     };
+    // ADR-0045: an MRM sign-off row carries its card id in the same `stageId`
+    // sentinel slot the infra/conflict rows use — no new column on `approvals`,
+    // because MRM riding the ONE queue is the whole point.
+    const MODEL_CARD_PREFIX = "__model_card__:";
+    const modelCardIds = ids(
+      rows.map((r) =>
+        r.stageId?.startsWith(MODEL_CARD_PREFIX) && uuidOk(r.stageId.slice(MODEL_CARD_PREFIX.length))
+          ? r.stageId.slice(MODEL_CARD_PREFIX.length)
+          : null,
+      ),
+    );
+    const modelCardRows = modelCardIds.length
+      ? await db.select().from(modelCards).where(inArray(modelCards.id, modelCardIds))
+      : [];
+    const modelCardAgentIds = ids(modelCardRows.map((c) => c.agentId));
+    const modelCardAgentRows = modelCardAgentIds.length
+      ? await db
+          .select({ id: agents.id, name: agents.name })
+          .from(agents)
+          .where(inArray(agents.id, modelCardAgentIds))
+      : [];
+    const modelCardAgentName = new Map(modelCardAgentRows.map((a) => [a.id, a.name]));
+    const modelCardById = new Map(modelCardRows.map((c) => [c.id, c]));
+    const modelCardLabelFor = (stageId: string | null): string | null => {
+      if (!stageId?.startsWith(MODEL_CARD_PREFIX)) return null;
+      const card = modelCardById.get(stageId.slice(MODEL_CARD_PREFIX.length));
+      if (!card) return null;
+      const subject = card.agentId
+        ? (modelCardAgentName.get(card.agentId) ?? "agent")
+        : "custom provider";
+      return `model risk sign-off · ${subject} · ${card.intendedUse}`;
+    };
     const delegatedFor = new Set(delegators);
     const contextConflictFor = (r: (typeof rows)[number]) => {
       if (!r.stageId?.startsWith(CONFLICT_PREFIX)) return {};
@@ -1906,6 +2140,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           (r.runId ? runLabel.get(r.runId) : null) ??
           (r.projectId ? projectLabel.get(r.projectId) : null) ??
           (r.objectType === "infra_operation" ? infraLabelFor(r.stageId) : null) ??
+          (r.objectType === "model_card" ? modelCardLabelFor(r.stageId) : null) ??
           r.toolName ??
           null,
         // ADR-0022: this row reached the caller via an active delegation —
@@ -1913,27 +2148,84 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         ...(r.approverUserId !== me && delegatedFor.has(r.approverUserId)
           ? { delegatedFrom: nameOf.get(r.approverUserId) ?? r.approverUserId }
           : {}),
+        // ADR-0046: the routing + SLA sidecar, purely additive. Absent when no
+        // routing rule is enabled, so a pre-0058 client sees the identical shape.
+        ...(assignmentFor.has(r.id)
+          ? {
+              assignment: (() => {
+                const a = assignmentFor.get(r.id)!;
+                return {
+                  assigneeKind: a.assigneeKind,
+                  assigneeId: a.assigneeId,
+                  ruleId: a.ruleId,
+                  quorum: a.quorum,
+                  claimedByUserId: a.claimedByUserId,
+                  claimable:
+                    a.assigneeKind !== "user" && a.claimedByUserId === null && r.status === "pending",
+                  slaState: a.slaState,
+                  warnAt: a.warnAt,
+                  dueAt: a.dueAt,
+                  breachedAt: a.breachedAt,
+                  escalatedAt: a.escalatedAt,
+                  escalationAssigneeKind: a.escalationAssigneeKind,
+                  escalationAssigneeId: a.escalationAssigneeId,
+                };
+              })(),
+            }
+          : {}),
         ...contextConflictFor(r),
       })),
     };
   });
 
-  app.post("/v1/approvals/:approvalId/decide", async (req, reply) => {
-    const { approvalId } = z.object({ approvalId: z.string().uuid() }).parse(req.params);
-    const body = decideApprovalSchema.parse(req.body);
-
+  /**
+   * THE ONE DECIDE PATH (ADR-0046).
+   *
+   * Extracted from the route handler so that the BULK endpoint can call the
+   * exact same function rather than reimplementing "approve an approval".
+   * Every guard below — bootstrap-cannot-decide, unknown, superseded,
+   * not-the-named-approver, the ADR-0022 delegation widening, the admin
+   * override with its required reason, the self-review reason, the single
+   * transaction with its downstream workflow/run/project/infra/model-card
+   * hooks, the post-commit execution and the PM mirror — therefore applies
+   * IDENTICALLY to a bulk item and to a single decision.
+   *
+   * This is the property ADR-0046 §4 turns on: a bulk action is N recorded
+   * decisions through one path, never one opaque event on a shortcut path. If
+   * a future change adds a check here, bulk inherits it for free; there is no
+   * second place to remember.
+   */
+  async function decideOneApproval(input: {
+    approvalId: string;
+    deciderUserId: string | null;
+    isAdmin: boolean;
+    body: z.infer<typeof decideApprovalSchema>;
+  }): Promise<{ ok: true; body: Record<string, unknown> } | { ok: false; status: number; body: Record<string, unknown> }> {
+    const fail = (status: number, payload: Record<string, unknown>) =>
+      ({ ok: false as const, status, body: payload });
     // The decider is the authenticated identity — a body-supplied id would be
     // trivially spoofable. The bootstrap token has no identity and cannot decide.
-    const deciderUserId = req.authCtx.userId;
-    if (!deciderUserId) return reply.status(403).send({ error: "bootstrap_cannot_decide" });
+    const deciderUserId = input.deciderUserId;
+    if (!deciderUserId) return fail(403, { error: "bootstrap_cannot_decide" });
+    const { approvalId, isAdmin } = input;
+    const body = input.body;
 
     const [row] = await db.select().from(approvals).where(eq(approvals.id, approvalId));
-    if (!row) return reply.status(404).send({ error: "unknown_approval" });
+    if (!row) return fail(404, { error: "unknown_approval" });
+    // ADR-0046: the OTHER lazy evaluation point. Deciding an approval that came
+    // due while nobody was looking must still record the breach — otherwise a
+    // queue that is only ever touched by a decision would never register one.
+    // Evaluating BEFORE the decision is deliberate: the breach is a fact about
+    // the wait, and it happened whether or not the decision now clears it.
+    if (row.status === "pending" && (await routingActive(db))) {
+      const assignment = await ensureAssignment(db, row, deciderUserId);
+      if (assignment) await evaluateAssignmentSla(db, row, assignment);
+    }
     // A superseded gate is dead, not decidable: its node was reassigned or
     // retried, its run turned terminal, or a newer artifact re-opened the
     // stage. Refuse loudly instead of accepting a decision about nothing.
     if (row.status === "superseded") {
-      return reply.status(409).send({
+      return fail(409, {
         error: "approval_superseded",
         detail: "this approval was superseded (its node, run, or stage moved on) and can no longer be decided",
       });
@@ -1950,11 +2242,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         : null;
     const adminOverride = row.approverUserId !== deciderUserId && !delegation;
     if (adminOverride) {
-      if (!req.authCtx.isAdmin) {
-        return reply.status(403).send({ error: "not_the_named_approver" });
+      if (!isAdmin) {
+        return fail(403, { error: "not_the_named_approver" });
       }
       if (!body.reason?.trim()) {
-        return reply.status(422).send({
+        return fail(422, {
           error: "override_reason_required",
           detail: "an admin deciding in place of the named approver must record a reason",
         });
@@ -1966,7 +2258,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // reason is required and the audit row is stamped selfReview.
     const selfReview = row.userId === row.approverUserId;
     if (selfReview && !body.reason?.trim()) {
-      return reply.status(400).send({
+      return fail(400, {
         error: "self_review_reason_required",
         detail: "this is a self-review (the approver is the requesting user); deciding it requires a recorded reason",
       });
@@ -2071,6 +2363,18 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       if (updated.objectType === "infra_operation") {
         await applyInfraApprovalDecision(tx as unknown as Db, updated, body.decision, deciderUserId);
       }
+      // ADR-0045 MRM sign-offs: the risk acceptance is recorded on the model
+      // card chain HERE, inside the one decide path, so it inherits every
+      // separation-of-duties guard above (named approver, admin-override
+      // reason, self-review reason, delegation) rather than inventing its own.
+      if (updated.objectType === "model_card") {
+        await applyModelCardApprovalDecision(
+          tx as unknown as Db,
+          updated,
+          body.decision,
+          deciderUserId,
+        );
+      }
       return { updated, postCommit };
     });
     if (!outcome.updated) {
@@ -2079,7 +2383,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         .select({ status: approvals.status })
         .from(approvals)
         .where(eq(approvals.id, approvalId));
-      return reply.status(409).send(
+      return fail(409, 
         current?.status === "superseded"
           ? {
               error: "approval_superseded",
@@ -2104,14 +2408,31 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // decision, it is surfaced in the response.
     const pmMirror = await mirrorApprovalDecision(db, opts.dataKey, outcome.updated, deciderUserId);
     return {
+      ok: true as const,
+      body: {
       ...outcome.updated,
       ...(adminOverride ? { adminOverride: true } : {}),
       ...(delegation ? { onBehalfOf: row.approverUserId, delegationId: delegation.id } : {}),
       ...(selfReview ? { selfReview: true } : {}),
       ...(pmMirror ? { pmMirror } : {}),
       ...(executionError ? { executionError } : {}),
+      },
     };
+  }
+
+  app.post("/v1/approvals/:approvalId/decide", async (req, reply) => {
+    const { approvalId } = z.object({ approvalId: z.string().uuid() }).parse(req.params);
+    const body = decideApprovalSchema.parse(req.body);
+    const outcome = await decideOneApproval({
+      approvalId,
+      deciderUserId: req.authCtx.userId,
+      isAdmin: req.authCtx.isAdmin,
+      body,
+    });
+    if (!outcome.ok) return reply.status(outcome.status).send(outcome.body);
+    return outcome.body;
   });
+
 
   // ADR-0026 phase 2 — the default-surface swap: the React SPA at /ui is the
   // product surface, so the historic shell URLs redirect there. The two
@@ -2171,6 +2492,172 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // for one-time passwords, MFA recovery, session revocation and SSO
   // provider CRUD.
   registerAuthRoutes(app, db, { bootstrapToken: opts.bootstrapToken, dataKey: opts.dataKey });
+  registerSamlRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0037 — SCIM 2.0 provisioning. TWO registrations on purpose, because
+  // they live on two different trust paths: `registerScimRoutes` mounts
+  // /scim/v2 inside its own encapsulated scope that authenticates ONLY on
+  // `scim_tokens` (auth-exempt above precisely so the human session/api-key
+  // hook cannot admit a user credential to it), while `registerScimAdminRoutes`
+  // mounts ordinary admin-gated /v1 endpoints for issuing and revoking those
+  // tokens. Deprovisioning through either DELETE or active:false lands on
+  // ADR-0022's `disabled_at` — never a row delete.
+  registerScimRoutes(app, db);
+  registerScimAdminRoutes(app, db);
+  // ADR-0038 — admin CRUD for IdP-group → role mappings, the "unmapped asserted
+  // groups" report, and the role-provenance read. Admin-only through the
+  // DEFAULT gate above (none of them appear in NON_ADMIN_ROUTES): creating a
+  // mapping delegates a role's grants to whoever administers the IdP group.
+  registerGroupRoleMappingRoutes(app, db);
+  // ADR-0040: ABAC policy-as-code admin surface (CRUD, versions, activate/
+  // rollback, the policy test runner, and the access-preview simulation hook).
+  // Admin-only through app.ts's DEFAULT gate — none of these routes appear in
+  // NON_ADMIN_ROUTES, because authoring a policy that can deny every governed
+  // call in the org is precisely the kind of act a non-admin must not reach.
+  registerAbacRoutes(app, db);
+  // ADR-0059 — POLICY SIMULATION / BLAST-RADIUS PREVIEW, the consumer ADR-0040
+  // promised when it shipped the single-tuple simulate hook. Dry-runs a
+  // PROPOSED policy version against recorded history and reports who it would
+  // newly block, by name. Strictly side-effect-free: the module cannot dispatch
+  // because the dispatch core is not reachable from it. POST
+  // /v1/policy-simulations is in NON_ADMIN_ROUTES and entitlement-scoped inside
+  // (ADR-0047's shape) — a team lead may ask "would this break my team" and may
+  // not use the same question to read another team's traffic.
+  registerPolicySimulationRoutes(app, db);
+  // ADR-0042 — the guardrail engine's admin surface: the detector registry
+  // (with each detector's honest limits), org/agent/connector mode config, the
+  // resolved-policy explainer, the tuning sandbox and the recent-violations
+  // view (a query over the ONE audit log, not a second ledger). Admin-only
+  // through the DEFAULT gate — none appear in NON_ADMIN_ROUTES, because
+  // relaxing a content control is exactly a privileged act.
+  registerGuardrailRoutes(app, db);
+  // ADR-0044 — the evaluation harness: golden dataset versions, the scorer
+  // registry, runs, per-case results and the baseline comparison. Authoring a
+  // dataset or moving a baseline changes what the promotion gate will accept,
+  // so all of it is admin-only through the DEFAULT gate — except POST
+  // /v1/evals/runs, which is in NON_ADMIN_ROUTES because its gate is the
+  // caller's own agent entitlement, checked inside the runner exactly as an
+  // invoke would check it.
+  registerEvalRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0045 — the model risk management registry: model cards, the
+  // recertification chain, evidence links onto ADR-0044 eval runs, the expiry
+  // sweep, and the org toggle that turns "reviewed for a stated purpose" into
+  // a dispatch gate. Every route is admin-only via the global gate (none
+  // appear in NON_ADMIN_ROUTES) — authoring or signing off a risk position is
+  // a privileged act by definition, and the SIGN-OFF DECISION itself is not
+  // here at all: it rides POST /v1/approvals/:approvalId/decide, which the
+  // named approver reaches as a non-admin exactly as before.
+  registerMrmRoutes(app, db);
+  // ADR-0057 — CONTINUOUS RED-TEAMING. Versioned attack libraries, the shipped
+  // corpus, and runs — every one of which is an ADR-0044 eval run underneath,
+  // so probes take the same governed dispatch, the same metering and the same
+  // audit trail as real traffic, and a regression blocks promotion through the
+  // SAME automated_check gate a failed CI check uses. Authoring a library is
+  // admin-only through the DEFAULT gate (it changes what the promotion gate
+  // measures); POST /v1/redteam/runs is in NON_ADMIN_ROUTES because its gate is
+  // the caller's own agent entitlement, checked inside the runner.
+  registerRedTeamRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0046 — the review workbench: routing rules, SLA policies + the lazy
+  // breach evaluation that stands in for the scheduler this codebase does not
+  // have, claiming, saved views, per-reviewer workload, and BULK. Bulk is
+  // handed `decideOneApproval` — the very function the single-decision route
+  // calls — so a bulk item cannot take a shortcut around any guard.
+  registerWorkbenchRoutes(app, db, { decideOne: decideOneApproval });
+  // ADR-0061 — CHATOPS APPROVALS. Handed the SAME `decideOneApproval` the
+  // portal route and the bulk endpoint use: the chat surface is a courier over
+  // the one decide path, never a second authority path. The inbound callback
+  // route authenticates on the workspace's signing secret in-route (it is in
+  // AUTH_EXEMPT_ROUTES / NON_ADMIN_ROUTES exactly like the PM webhook, and for
+  // the same reason: Slack holds no RegulAIt credential); every other route
+  // here is admin-only.
+  registerChatOpsRoutes(app, db, {
+    decideOne: decideOneApproval,
+    ...(opts.dataKey ? { dataKey: opts.dataKey } : {}),
+  });
+  // ADR-0047 — executive & compliance reporting: report definitions, schedule
+  // DEFINITIONS (nothing fires on a timer here — an operator drives
+  // POST /v1/reports/schedules/run-due), the immutable run ledger, and the
+  // CSV/JSON export. Authoring a definition or a schedule is admin-only through
+  // the DEFAULT gate; GENERATING and READING are reachable by a non-admin
+  // (NON_ADMIN_ROUTES below) because a team lead running their own team's
+  // scorecard is the point — and every one of those paths resolves the caller's
+  // entitlement to a CONCRETE project-id set and builds its ledger queries FROM
+  // that set, so a report can never show spend or audit data the caller could
+  // not see directly.
+  registerReportingRoutes(app, db);
+  // ADR-0048 — immutable versioning, canary rollout and one-click rollback for
+  // the governance artifacts the gateway reads. Following ADR-0040's precedent:
+  // immutable version rows plus an active pointer, activation is a pointer
+  // move, rollback is selecting an older row. ALL of it is admin-only through
+  // the DEFAULT gate (none of these appear in NON_ADMIN_ROUTES) — minting a
+  // prompt version, ramping a canary, promoting past the eval gate or rolling
+  // back changes what every subsequent dispatch in the org is governed by,
+  // which is privileged by definition. The dispatch-time RESOLUTION is not a
+  // route at all: it lives inside executeGovernedDispatch, so every caller
+  // inherits it, and the resolved version is stamped onto the usage_events row.
+  registerConfigVersionRoutes(app, db);
+  // ADR-0049 — cost forecasting and spend-anomaly detection over the MEASURED
+  // usage ledger. Two things about the wiring are load-bearing. First, the
+  // entitlement decision is ADR-0047's `evaluateReportAccess` CALLED, not
+  // re-implemented: a forecast and an anomaly alert are derived numbers, and a
+  // derived number is exactly the shape in which one team's spend leaks to
+  // another, so there is one copy of the rules. Second, enforcement escalates
+  // into the EXISTING approvals queue with a `__spend_anomaly__` stage
+  // sentinel — the same table, the same decide path, no second inbox. Reading
+  // a forecast/anomaly is non-admin-reachable (scoped inside the handler);
+  // authoring policies, recording scheduled changes and driving the evaluator
+  // stay admin.
+  registerSpendMonitorRoutes(app, db);
+  // ADR-0050 — the data-lineage / provenance graph. SUPPLIED-INPUTS provenance:
+  // which inputs the gateway handed to a dispatch and what it handed back,
+  // chained across runs through pillar 4's already-versioned context items. It
+  // does NOT claim which of those inputs influenced the output — intra-model
+  // attribution is not observable from outside a model — and every response
+  // carries that sentence rather than leaving it in an ADR. Capture rides the
+  // interception points that already exist (the context-write path and the
+  // orchestration dispatch path), so there is no second instrumentation pass.
+  // The three READ routes are non-admin-reachable and narrow to the caller's
+  // own project memberships at query construction; a node the caller cannot see
+  // 404s exactly as a nonexistent one does, because for a provenance graph
+  // confirming that something exists IS the disclosure.
+  registerLineageRoutes(app, db);
+  // ADR-0051 — metering & billing. Nothing here meters: `usage_events` and
+  // `cost_events` have been written unconditionally at the point of every
+  // governed call since ADR-0019/0024, and this is a READ-SIDE consumer of that
+  // one ledger, so no billing number can drift from the cost dashboard. Three
+  // things about the wiring are load-bearing. First, an issued statement is
+  // IMMUTABLE: rate cards are append-only versions, every statement freezes the
+  // pricing snapshot it was rated against, and re-cutting a period appends a
+  // version rather than editing one. Second, the entitlement decision is again
+  // ADR-0047's `evaluateReportAccess` CALLED (through ADR-0049's adapter), not
+  // a third copy — an invoice is exactly the shape in which one team's spend
+  // leaks. Third, there is no payment processor: `NoopBilling` (export-only, no
+  // network) is the only backend, which is ADR-0051 §6's air-gapped default.
+  registerBillingRoutes(app, db);
+  // ADR-0052 — licensing & seats. The load-bearing piece is that verification
+  // is OFFLINE: ADR-0041 makes air-gapped the primary motion, so there is no
+  // home to phone, and the license is a signed artifact checked locally against
+  // a pinned Ed25519 keyring — the same crypto posture as ADR-0041's update
+  // bundles, not a second scheme. Three postures are deliberate rather than
+  // defaulted: a FORGED or tampered artifact is refused outright and never
+  // displaces the installed one (fail closed); a MISSING license is not an
+  // error — the deployment runs UNLICENSED, fully governed, tier features
+  // closed, no seat cap enforced (fail open, because bricking a fresh install
+  // would make governance depend on commerce and leave no way to install the
+  // license); and on EXPIRY the split is by action class — governance, audit
+  // and approvals keep running while commercial expansion freezes. Every route
+  // is admin-only via the DEFAULT gate: installing a license changes the
+  // commercial ceiling for the whole deployment.
+  registerLicensingRoutes(app, db);
+
+  // ADR-0060 — the tamper-evident audit chain's operator surface. The CHAIN
+  // itself is not registered here: it is computed at the storage boundary in
+  // `@regulait/db`'s `createDb`, so every one of the 158 `insert(auditLog)`
+  // call sites in this app — and the next one written — is chained without
+  // knowing it. What lives here is verification and anchoring, both admin-only
+  // via the DEFAULT gate: `GET /v1/audit/verify` reports the whole trail's
+  // shape, and taking an anchor is a governed act that itself lands in the
+  // trail.
+  registerAuditChainRoutes(app, db, ...(opts.auditAnchorSink !== undefined ? [{ sink: opts.auditAnchorSink }] : []));
 
   registerAgentConnectorRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0034 — admin-registered custom LLM providers + the egress allow-list
@@ -2202,6 +2689,43 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // Getting-started journey (admin-only via the default gate): one read-only
   // aggregation of real readiness signals the /admin checklist card renders.
   registerSetupStatusRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0054 — the IN-PRODUCT first-run experience (the installer, ADR-0041,
+  // owns deployment bring-up; nothing here duplicates it) plus the
+  // migration/import tooling. Admin-only through the DEFAULT gate: every route
+  // here provisions users, seeds roles or classifies a project, which is
+  // exactly the authority a non-admin must not reach. None appear in
+  // NON_ADMIN_ROUTES.
+  registerOnboardingRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0055 — SHADOW-AI DISCOVERY. Admin-only by default (nothing here is in
+  // NON_ADMIN_ROUTES): uploading a customer's proxy export, editing the
+  // detection catalogue and dispositioning findings are all operator authority.
+  // The subsystem makes NO outbound request and can write only its own three
+  // tables — an evidence file cannot mint a user, role, grant or approval.
+  registerShadowAiRoutes(app, db);
+  // ADR-0058 — REGULATORY COMPLIANCE PACKS. Authoring/activating a pack and
+  // recording an attestation are admin (not in NON_ADMIN_ROUTES); EVALUATING a
+  // pack is reachable by a non-admin and runs ADR-0047's own
+  // `evaluateReportAccess`, so a scorecard never exceeds the caller's own
+  // visibility. Nothing here enforces anything: a pack drives the EXISTING
+  // §8.3 cascade via its tag, and every control's status is computed from a
+  // SELECT over the real ledgers — there is no column an admin can tick.
+  registerCompliancePackRoutes(app, db);
+  // ADR-0056 — THE AI GOVERNANCE COPILOT. The ultimate dogfood: our own
+  // flagship agent is a TENANT of the kernel it fronts. Its reads are narrowed
+  // to the INVOKING USER's own project scope at query construction (there is no
+  // copilot super-reader grant, and an identity-less caller is refused); its
+  // narration is an ordinary `executeGovernedDispatch` behind the ordinary
+  // `evaluateAgent` check, so it is entitlement-gated, metered into
+  // usage_events and audited like any other; the audit rows it reads are
+  // treated as UNTRUSTED INPUT through ADR-0042's guardrails; and it has no
+  // mutating tools at all — its only route to a change is a proposal that opens
+  // an ordinary Approvals-Queue item for a named human.
+  registerCopilotRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0053 — the published contract: the OpenAPI document, the versioning /
+  // deprecation policy, and the RFC-8594 Deprecation/Sunset headers. Registered
+  // here (rather than first) only for readability; the inventory hook at the top
+  // of buildApp catches routes in any order.
+  registerOpenApiRoutes(app);
   const stopAuditPruneScheduler = startAuditPruneScheduler(db);
   app.addHook("onClose", async () => stopAuditPruneScheduler());
   registerAnthropicCompat(app, db, { dataKey: opts.dataKey });

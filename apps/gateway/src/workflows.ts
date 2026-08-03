@@ -32,7 +32,10 @@ import {
   gitConnections,
   deployTargets,
   orchestrationRuns,
+  agents,
+  evalDatasets,
 } from "@regulait/db";
+import { runEvalSuite } from "./evals.js";
 import { resolveProvider, GitProviderError, IMPLEMENTED_GIT_PROVIDERS } from "@regulait/git-provider";
 import { resolveDeployProvider, liveDeployClients, DeployProviderError } from "./deploy.js";
 import { validateGraph } from "@regulait/orchestration-kernel";
@@ -311,6 +314,138 @@ export async function handleNestedRunCompletion(
   }
 }
 
+/** the shape one named check resolves to inside the check executor */
+interface CheckOutcome {
+  check: string;
+  status: "passed" | "failed";
+  severity: string | null;
+  detail: string;
+  /** ADR-0044: present only for eval-bound checks — the run id, the aggregate
+   * and the baseline delta, so the workflow rail can show WHY it went red */
+  eval?: Record<string, unknown>;
+}
+
+/**
+ * ADR-0044 — THE BLOCK-ON-REGRESSION GATE.
+ *
+ * Runs each eval binding declared on this check stage and turns the gate
+ * decision into an ordinary check result. Three properties are load-bearing:
+ *
+ *  1. IT REUSES THE EXISTING FAILURE PATH. A regression returns
+ *     `status: 'failed'`, which the caller folds into the same results array
+ *     every reported failure lands in, which raises the same `check_failed`
+ *     event, which routes to `blocked_on_check` (or the stage's rollback
+ *     target). There is no second mechanism and no special-cased status.
+ *
+ *  2. IT RUNS AS THE INSTANCE INITIATOR. Exactly like the nested-run path
+ *     (`planRun`), so the eval's dispatches are bounded by the initiating
+ *     user's entitlements and the instance's project budget. A workflow cannot
+ *     be used to reach a model its initiator may not reach.
+ *
+ *  3. A CHECK THAT COULD NOT RUN FAILS. An unknown dataset, an unknown agent,
+ *     a denied entitlement or a thrown error all produce `failed`, never a
+ *     pass. A quality gate that silently degrades to green is the specific
+ *     failure this whole ADR exists to prevent.
+ */
+async function runStageEvalChecks(
+  db: Db,
+  instance: { id: string; initiatorUserId: string; projectId: string | null },
+  stage: WorkflowDefinition["stages"][number],
+  dataKey: string | undefined,
+): Promise<Map<string, CheckOutcome>> {
+  const out = new Map<string, CheckOutcome>();
+  const bindings = stage.evals ?? [];
+  if (bindings.length === 0) return out;
+  const declared = new Set(stage.checks ?? []);
+  for (const binding of bindings) {
+    if (!declared.has(binding.check)) continue;
+    const fail = (detail: string, extra?: Record<string, unknown>): void => {
+      out.set(binding.check, {
+        check: binding.check,
+        status: "failed",
+        severity: "high",
+        detail,
+        eval: { dataset: binding.dataset, agent: binding.agent, ...(extra ?? {}) },
+      });
+    };
+    // resolve the PINNED dataset version: an explicit `version`, else the
+    // highest existing one at the moment the stage runs
+    const versions = await db
+      .select()
+      .from(evalDatasets)
+      .where(eq(evalDatasets.name, binding.dataset))
+      .orderBy(desc(evalDatasets.version));
+    const dataset = binding.version
+      ? versions.find((d) => d.version === binding.version)
+      : versions[0];
+    if (!dataset) {
+      fail(
+        `eval dataset '${binding.dataset}'${binding.version ? ` v${binding.version}` : ""} does not exist — the quality gate could not run, so it does not pass`,
+      );
+      continue;
+    }
+    const [agentRow] = await db.select().from(agents).where(eq(agents.name, binding.agent));
+    if (!agentRow) {
+      fail(`eval agent '${binding.agent}' is not in the registry — the quality gate could not run, so it does not pass`);
+      continue;
+    }
+    let judgeAgentId: string | null = null;
+    if (binding.judgeAgent) {
+      const [judgeRow] = await db.select().from(agents).where(eq(agents.name, binding.judgeAgent));
+      if (!judgeRow) {
+        fail(`eval judge agent '${binding.judgeAgent}' is not in the registry`);
+        continue;
+      }
+      judgeAgentId = judgeRow.id;
+    }
+    try {
+      const outcome = await runEvalSuite(db, dataKey, {
+        datasetId: dataset.id,
+        agentId: agentRow.id,
+        userId: instance.initiatorUserId,
+        trigger: "workflow",
+        judgeAgentId,
+        projectId: instance.projectId,
+        tolerance: binding.tolerance ?? 0.05,
+        minScore: binding.minScore ?? null,
+        minPassRate: binding.minPassRate ?? null,
+        requireBaseline: binding.requireBaseline ?? false,
+        workflow: { instanceId: instance.id, stageId: stage.id, checkName: binding.check },
+      });
+      if (!outcome.ok) {
+        fail(
+          `eval '${binding.dataset}' could not run against '${binding.agent}': ${outcome.error}${outcome.detail ? ` — ${outcome.detail}` : ""}`,
+          { error: outcome.error },
+        );
+        continue;
+      }
+      out.set(binding.check, {
+        check: binding.check,
+        status: outcome.gate.passed ? "passed" : "failed",
+        severity: outcome.gate.passed ? null : outcome.gate.regression ? "high" : "medium",
+        detail: `${binding.dataset} v${dataset.version} on '${binding.agent}': ${outcome.gate.reason}`,
+        eval: {
+          runId: outcome.run.id,
+          dataset: dataset.name,
+          datasetVersion: dataset.version,
+          agent: agentRow.name,
+          model: agentRow.model,
+          meanScore: outcome.aggregate.meanScore,
+          passRate: outcome.aggregate.passRate,
+          cases: outcome.aggregate.cases,
+          scoreDelta: outcome.gate.scoreDelta,
+          baselineRunId: outcome.baseline?.id ?? null,
+          regression: outcome.gate.regression,
+          costUsd: outcome.run.costUsd,
+        },
+      });
+    } catch (e) {
+      fail(`eval '${binding.dataset}' errored: ${(e as Error).message}`);
+    }
+  }
+  return out;
+}
+
 /**
  * Execute pending executable stages (git operations, nested build runs, and
  * automated checks) until the instance blocks on something else. Each stage's
@@ -440,7 +575,16 @@ async function runGitExecutions(
       const against = subjects.length ? subjects.join(", ") : "the built change set";
       const reported = normalizeCheckReports(context[`reported:${stage.id}`]);
       const byName = new Map(reported.map((r) => [r.check, r]));
+      // ADR-0044: checks bound to an evaluation dataset are decided by RUNNING
+      // it, here, under the instance initiator's entitlements — never by a
+      // reported result (POST .../checks refuses to report against them) and
+      // never by the offline auto-pass. A regression produces status 'failed',
+      // which then flows into the SAME check_failed event every other failing
+      // check uses; there is no second failure path.
+      const evalOutcomes = await runStageEvalChecks(db, instance, stage, dataKey);
       const results = (stage.checks ?? []).map((name) => {
+        const ev = evalOutcomes.get(name);
+        if (ev) return ev;
         const rep = byName.get(name);
         return rep
           ? {
@@ -452,6 +596,11 @@ async function runGitExecutions(
           : { check: name, status: "passed" as const, severity: null, detail: `ran against ${against}` };
       });
       context[`checks:${stage.id}`] = results;
+      if (evalOutcomes.size > 0) {
+        context[`evals:${stage.id}`] = Object.fromEntries(
+          [...evalOutcomes].map(([name, r]) => [name, r.eval]),
+        );
+      }
       delete context.executing;
       delete context.lastError;
       await db
@@ -1060,7 +1209,9 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       .from(roleAssignments)
       .innerJoin(roles, eq(roles.id, roleAssignments.roleId))
       .where(eq(roleAssignments.userId, userId));
-    const initiatorRoles = initiatorRoleRows.map((r) => r.name);
+    // ADR-0038: distinct — a role held both directly and via an IdP group
+    // mapping is two assignment rows and one role name.
+    const initiatorRoles = [...new Set(initiatorRoleRows.map((r) => r.name))];
     // ADR-0018 addendum (ADR-0019) — the 6th dim, resolved SERVER-SIDE like the
     // 5th: a change's data sensitivity is the set of compliance classification
     // tags its ATTRIBUTED PROJECT carries, i.e. the exact same source
@@ -1317,6 +1468,18 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       return reply.status(422).send({ error: "not_a_check_stage" });
     }
     const declared = new Set(stage.checks ?? []);
+    // ADR-0044: a check bound to an eval dataset is MACHINE-DECIDED. Accepting
+    // a reported result for one would let a human hand-wave the quality gate
+    // green, which is precisely the bypass a blocking gate exists to prevent —
+    // so it is refused loudly rather than ignored silently.
+    const evalBound = new Set((stage.evals ?? []).map((e) => e.check));
+    const usurped = body.results.filter((r) => evalBound.has(r.check)).map((r) => r.check);
+    if (usurped.length > 0) {
+      return reply.status(422).send({
+        error: "eval_check_cannot_be_reported",
+        detail: `check(s) ${usurped.join(", ")} are decided by running their eval dataset; a reported result cannot stand in for one`,
+      });
+    }
     const accepted = body.results.filter((r) => declared.has(r.check));
     if (accepted.length === 0) return reply.status(422).send({ error: "no_declared_checks_reported" });
 

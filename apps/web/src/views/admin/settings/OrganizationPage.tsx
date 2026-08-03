@@ -6,12 +6,13 @@
  * sessions.
  */
 import { useState, type ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { api } from "../../../api/client";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { api, ApiError } from "../../../api/client";
 import type { OrgSettingsResponse } from "../../../api/adminTypes";
 import { PageHeader } from "../../../shell/AppShell";
-import { Button, Card, Field, Input, Select } from "../../../ui/kit";
+import { Button, Card, ConfirmModal, Field, Input, Select, Textarea } from "../../../ui/kit";
 import { QueryGate, agentOpts, optionEls, useAction, useAgents } from "../adminKit";
+import { useToast } from "../../../ui/toast";
 import v from "../../views.module.css";
 
 const CLEAR = "__clear__";
@@ -132,6 +133,11 @@ function Loaded(props: { settings: Record<string, unknown> }) {
     customModelProvidersEnabled: str(s, "customModelProvidersEnabled"),
   });
 
+  // --- 2c. MCP egress posture (ADR-0043) -----------------------------------
+  const mcpEgress = useSection({
+    mcpPrivateRangesDefault: str(s, "mcpPrivateRangesDefault"),
+  });
+
   // --- 3. Budgets & limits -------------------------------------------------
   const budget = useSection({
     budgetEnforcement: str(s, "budgetEnforcement"),
@@ -150,6 +156,55 @@ function Loaded(props: { settings: Record<string, unknown> }) {
     approvalQuorum: str(s, "approvalQuorum"),
     approvalDelegationEnabled: str(s, "approvalDelegationEnabled"),
   });
+
+  // --- 7. Network access (ADR-0039) ----------------------------------------
+  // Not a useSection form: the save needs the confirm-on-lockout retry flow
+  // (a 409 ip_policy_lockout opens an explicit confirm modal, and only a
+  // confirmed resend carries confirmIpLockout: true).
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const [netForm, setNetForm] = useState({
+    sessionIpPolicy: str(s, "sessionIpPolicy") || "off",
+    apiKeyIpPolicy: str(s, "apiKeyIpPolicy") || "off",
+  });
+  const [ipAllowlistText, setIpAllowlistText] = useState<string>(
+    Array.isArray(s.sessionIpAllowlist) ? (s.sessionIpAllowlist as string[]).join("\n") : "",
+  );
+  const [netBusy, setNetBusy] = useState(false);
+  const [netError, setNetError] = useState<string | null>(null);
+  const [lockoutPrompt, setLockoutPrompt] = useState<string | null>(null);
+  const saveNet = async (confirmIpLockout: boolean) => {
+    setNetBusy(true);
+    setNetError(null);
+    const list = ipAllowlistText
+      .split(/[\n,]+/)
+      .map((x) => x.trim())
+      .filter(Boolean);
+    try {
+      await put({
+        sessionIpPolicy: netForm.sessionIpPolicy,
+        apiKeyIpPolicy: netForm.apiKeyIpPolicy,
+        sessionIpAllowlist: list.length ? list : null,
+        ...(confirmIpLockout ? { confirmIpLockout: true } : {}),
+      });
+      setLockoutPrompt(null);
+      toast("Network access policy saved (audited)", "success");
+      void qc.invalidateQueries({ queryKey: ["admin"] });
+    } catch (err) {
+      if (err instanceof ApiError && err.payload.error === "ip_policy_lockout") {
+        // the gateway's self-lockout guard: continuing requires an explicit,
+        // eyes-open confirm — surfaced as a modal, never silently retried
+        setLockoutPrompt(
+          err.payload.detail ??
+            "This allow-list excludes your own current IP under continuous enforcement — saving would sign you out on your next request.",
+        );
+      } else {
+        setNetError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      setNetBusy(false);
+    }
+  };
 
   // --- 5. Audit retention --------------------------------------------------
   const retention = useSection({
@@ -352,6 +407,32 @@ function Loaded(props: { settings: Record<string, unknown> }) {
         </SectionShell>
       </Card>
 
+      <Card title="3b · MCP egress posture (ADR-0043)">
+        <SectionShell
+          title="Private ranges for MCP servers"
+          busy={mcpEgress.act.busy}
+          error={mcpEgress.act.error}
+          submitLabel="Save MCP egress posture"
+          onSubmit={() =>
+            void mcpEgress.act.run(
+              () => put({ mcpPrivateRangesDefault: asBool(mcpEgress.f.mcpPrivateRangesDefault!) }),
+              "MCP egress posture saved (audited)",
+            )
+          }
+          help="The default for MCP servers that never took an explicit per-server decision (their flag is 'inherit'). Open (default) = a self-hosted MCP server on a private address (http://mcp.internal:9000, http://localhost:3000) works with zero ceremony — the guard fires on the risky public-internet case, not the ordinary internal one. Strict = every server needs its own explicit allow-private-ranges flag (set on the MCP servers page) or an egress allow entry with the private-range opt-in. Either way, link-local / instance-metadata (169.254.0.0/16) and the other never-legitimate ranges stay unconditionally blocked, and a public-internet MCP URL still requires an egress allow entry."
+        >
+          <Field label="Private-range default for MCP servers">
+            <Select
+              value={mcpEgress.f.mcpPrivateRangesDefault}
+              onChange={(e) => mcpEgress.set("mcpPrivateRangesDefault", e.target.value)}
+            >
+              <option value="true">open (default — private-LAN MCP servers just work)</option>
+              <option value="false">strict (each server needs an explicit opt-in)</option>
+            </Select>
+          </Field>
+        </SectionShell>
+      </Card>
+
       <Card title="4 · Budgets & limits">
         <SectionShell
           title="Budget enforcement + worker/size ceilings"
@@ -461,6 +542,55 @@ function Loaded(props: { settings: Record<string, unknown> }) {
           {numField(retention, "Prune interval (hours)", "pruneIntervalHours")}
           {numField(retention, "Org default retention (days, 0 = none)", "defaultAuditRetentionDays")}
         </SectionShell>
+      </Card>
+
+      <Card title="7 · Network access — IP allow-listing (ADR-0039)">
+        <SectionShell
+          title="Trusted-network policy"
+          busy={netBusy}
+          error={netError}
+          submitLabel="Save network access policy"
+          onSubmit={() => void saveNet(false)}
+          help="Confine sign-ins to your corporate networks by CIDR (IPv4 + IPv6, one block per line; empty = no restriction — the upgrade-safe default). The HUMAN knob governs password/SSO sessions: 'enforce at login' refuses new sign-ins from outside the list (existing sessions untouched); 'enforce continuously' also checks every request and force-signs-out a session the moment it leaves the envelope (fail-closed: an undeterminable client IP counts as outside). The API-KEY knob is a deliberately SEPARATE choice for automation (CI runners, IDEs, key-exchanged sessions) over the same list — so 'humans confined, CI not' is a visible chosen state, and tightening one path never silently locks out the other. The deploy-time bootstrap token is never IP-restricted (break-glass recovery). Malformed CIDR blocks are refused at save time; saving a continuous policy that excludes your own current IP demands an explicit confirmation. Behind a TLS-terminating proxy the gateway must trust it (REGULAIT_TRUSTED_PROXIES) or the observed client IP is the proxy's. Every denial and forced sign-out is audited with the IP and the policy that fired."
+        >
+          <Field label="Human session policy">
+            <Select
+              value={netForm.sessionIpPolicy}
+              onChange={(e) => setNetForm((f) => ({ ...f, sessionIpPolicy: e.target.value }))}
+            >
+              <option value="off">off — no IP restriction (default)</option>
+              <option value="enforce_at_login">enforce at login — new sign-ins only</option>
+              <option value="enforce_continuous">enforce continuously — force sign-out when outside</option>
+            </Select>
+          </Field>
+          <Field label="API-key policy (separate knob)">
+            <Select
+              value={netForm.apiKeyIpPolicy}
+              onChange={(e) => setNetForm((f) => ({ ...f, apiKeyIpPolicy: e.target.value }))}
+            >
+              <option value="off">off — automation unrestricted (default)</option>
+              <option value="enforce_at_login">enforce at key-exchange sign-in</option>
+              <option value="enforce_continuous">enforce continuously — every request</option>
+            </Select>
+          </Field>
+          <Field label="Allowed CIDR blocks (one per line)">
+            <Textarea
+              rows={4}
+              value={ipAllowlistText}
+              onChange={(e) => setIpAllowlistText(e.target.value)}
+              placeholder={"10.0.0.0/8\n203.0.113.0/24\n2001:db8::/32"}
+            />
+          </Field>
+        </SectionShell>
+        <ConfirmModal
+          open={lockoutPrompt !== null}
+          title="This policy would lock YOU out"
+          body={lockoutPrompt ?? ""}
+          danger
+          confirmLabel="Save anyway (sign me out)"
+          onCancel={() => setLockoutPrompt(null)}
+          onConfirm={() => void saveNet(true)}
+        />
       </Card>
     </div>
   );

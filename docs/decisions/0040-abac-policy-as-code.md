@@ -1,6 +1,6 @@
 # ADR-0040: ABAC / policy-as-code layered on the default-deny kernel (Cedar over OPA)
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-08-01
 
 ## Context
@@ -152,3 +152,189 @@ kernel — the same "absent input = unchanged behavior" discipline every prior k
   session-origin already available); CI policy-unit-test harness; export-to-repo of the policy set;
   extending access-preview to ABAC; and **ADR-0059 (policy-simulation)** for dry-running a proposed
   policy version against historical requests before activation.
+
+---
+
+## Implementation amendment — 2026-08-02 (migration 0054)
+
+**Status: Accepted.** Implemented as decided: Cedar, in-process, evaluated **inside** the policy
+kernel on the **allow path only**, restricting-only, versioned, testable, simulatable. This section
+records what shipped, the shapes chosen where the ADR left them open, and the deviations — stated
+plainly rather than buried.
+
+### 1. The engine, as it actually embeds
+
+`@cedar-policy/cedar-wasm@4.12.0` (Apache-2.0, the Rust Cedar core compiled to WebAssembly),
+imported from its `/nodejs` entry point. It loads and evaluates **synchronously in-process**: no
+sidecar, no network hop, nothing to run in an air-gapped deployment beyond the gateway itself —
+which was the decisive argument over an OPA service and is now a fact rather than a plan.
+
+It lives behind a thin internal interface (`AbacEngine`: `validate(source, schemaVersion)` →
+errors, `evaluate(policies, request)` → verdict) in **`packages/policy-kernel/src/abac.ts`**, which
+is the only module in the repository that imports Cedar. Swapping to Rego means implementing that
+interface again; nothing else moves. `packages/policy-kernel/src/index.ts` — the pure evaluator —
+does **not** import it, so `import "@regulait/policy-kernel"` never loads the wasm module.
+
+### 2. Where ABAC sits in the kernel, exactly
+
+`EvaluationInput` gains an optional `abacDecision` (a verdict the gateway computed, never a policy
+the kernel parses). Its position in the fixed rule order:
+
+```
+grant check (allow-list → role → read-all → role read-all)   ← ungranted = default-deny, ABAC never runs
+lead-ceiling                                                  (ADR-0027 §5.1)
+ABAC forbid            ← NEW: terminal, like the lead ceiling
+data-scope
+rate-limit
+ABAC require_approval  ← NEW: folded into the ONE approval step
+approval-required                                             (the pre-existing rules)
+allow
+```
+
+A `forbid` is terminal for the same reason the lead ceiling is: a call an attribute policy refuses
+is refused regardless of data scope, rate limits or approvals. A `require_approval` is deliberately
+**not** terminal at that point — it is evaluated at the approval step, so a data-scope or
+rate-limit **deny still wins over an ABAC pause** (a pause must never become an escape hatch), and
+an already-approved queue entry satisfies it through the same `approvedApprovalId` mechanism a
+rule-driven approval uses. When both an ABAC pause and an approval *rule* match, the ABAC policy
+governs (it is the more specific, conditional statement); with no ABAC input the approval path is
+byte-identical to before.
+
+`RuleName` gains **`abac-forbid`**, which carries `outcome: "deny" | "require-approval" |
+"satisfied-by-approval"`. `ruleId` on a forbid/pause is the **policy id**, so
+`approvals.rule_id` — the same uuid column an approval rule fills — points at the policy, and one
+audit query still answers "why was this denied".
+
+**Fail-closed detail the ADR did not specify:** a `require_approval` verdict that names no approver
+degrades to a **deny**, not to an allow. There is nobody to route the queue entry to, and an
+enforcement layer that opens when it is misconfigured is worse than none. (The write-time
+validation and a DB CHECK both make that state unreachable through the API; the kernel refuses it
+anyway.)
+
+### 3. The versioning shape
+
+Two tables, because a single table would have to be UPDATEd in place and that destroys the thing a
+governance surface exists to preserve:
+
+- **`abac_policies`** — the stable **identity**: `name` (unique), `description`, `enabled`, and
+  `active_version_id`, a pointer at whichever version is live. Its `id` is what lands in `ruleId`,
+  in the `abac-forbid` trace and in `approvals.rule_id`, so it survives every edit.
+- **`abac_policy_versions`** — **immutable** rows: `version` (unique per policy), `source`,
+  `schema_version`, `mode`, `timezone`, `approver_user_id`, `test_cases`, `author_user_id`,
+  `created_at`.
+
+Editing a policy **INSERTs** version max+1 and changes nothing until it is activated. Activation is
+a single audited UPDATE of the pointer. **Rollback is that same operation aimed at an older row** —
+there is deliberately no separate rollback verb, and the version rolled away from still exists and
+is still re-activatable, so a rollback is itself revertible. `mode` is CHECK-constrained to
+`('forbid','require_approval')`: there is no column in this schema that can widen entitlement.
+
+A newly created policy is **`enabled = false`**. Authoring is safe; activating is the governed act.
+That is the ADR's "activating a forbid without previewing its blast radius should be friction, not
+a one-click default", made structural.
+
+### 4. Attributes, and what "server-derived" means here
+
+Assembled at the gateway (`apps/gateway/src/abac.ts`), never inside the kernel — which is what lets
+the simulation surface reproduce an enforcement decision exactly.
+
+- **principal**: user id, role **names and ids** (including ADR-0038 group-derived ones), team
+  names, `isAdmin`, `sessionOrigin` (the ADR-0028 origin recorded on the session row), and
+  `mfaCompleted`.
+- **resource**: `serverId`/`serverName`/`toolName`, `kind` (read/write), `priceTier`
+  (`unpriced|free|metered` — a tier, not a figure), the attributed `projectId`/`projectName`, and
+  that project's `classifications` (the §8.3 cascade tags) plus a scalar `dataSensitivity`.
+  `projectId`, `projectName` and `dataSensitivity` are declared **optional** in the Cedar schema, so
+  strict validation forces a policy to guard them with `has` rather than let an unattributed call
+  read as a match.
+- **context**: `deployModes` and `environments` (both **sets**, derived exactly as ADR-0027's A4
+  deploy context is — the attributed project's in-flight workflow instances → their deploy targets),
+  `hour`/`minute`/`dayOfWeek` computed **in the policy's declared timezone**, the `timezone` itself,
+  and `rateLimitUsagePct` (the rate signal already computed at the call site).
+
+`mfaCompleted` is derived as "a cookie session belonging to an account with TOTP active" — which,
+given the two-step login gate, is precisely the set of sessions that presented a second factor.
+Header API-key and bootstrap requests report `false` and origin `api_key`/`bootstrap`. The
+derivation lives in its own file (`abac-principal.ts`) with no access to `req.headers`, so "could a
+client fake this?" is answerable by reading one function.
+
+**Time.** Policies are grouped by declared IANA zone and each group is evaluated against
+hour/minute/day computed in *that* zone. A zone this runtime cannot resolve is refused at write
+time; at evaluation an unresolvable zone falls back to **UTC**, never to the host's locale. The
+gateway test file sets `process.env.TZ = "Asia/Tokyo"` for exactly this reason: every time-of-day
+assertion in it would still pass against a server-clock implementation if the server clock agreed
+with the policy, so it is forced to disagree.
+
+### 5. Write-time validation
+
+Cedar **strict** validation against the versioned schema runs before anything is stored, and the
+API refuses on failure. In addition to the attribute check the ADR asked for, the validator refuses:
+a Cedar **`permit`** (ABAC can never grant, and storing an inert `permit` would mislead an admin
+into thinking they had widened access); an action the schema does not declare; a policy **template**;
+and **more than one statement** in one stored policy (the row's uuid is the Cedar policy id, so
+"which policy denied this" must be unambiguous).
+
+The schema is **code**, versioned by the `schema_version` string on each policy version, because the
+attributes a policy may reference are exactly the attributes the gateway assembles and the two must
+move together. `GET /v1/abac/schema` publishes it as readable Cedar for the editor.
+
+### 6. What shipped
+
+- **Migration 0054** (`0054_abac_policies`): the two tables above, the circular
+  `active_version_id` FK (`ON DELETE SET NULL` — losing the pointer deactivates, never
+  cascade-deletes), the mode + approver CHECKs, and the `enabled` index the hot path uses.
+- **`packages/policy-kernel/src/abac.ts`** — the Cedar wrapper, the versioned schema (`v1`), the
+  timezone arithmetic, and the "a Cedar deny with no satisfied forbid is a NO-MATCH, not a denial"
+  distinction that keeps a `permit`-less policy set from refusing everything.
+- **`packages/policy-kernel/src/index.ts`** — the `AbacDecision` input, the `abac-forbid`
+  `RuleName`, and the two composition points above.
+- **`apps/gateway/src/abac.ts`** — the policy-set load (one indexed query; zero further cost when
+  nothing is active), attribute assembly, the policy test runner, and the admin surface:
+  `GET /v1/abac/schema`, `POST /v1/abac/validate`, `GET|POST /v1/abac/policies`,
+  `GET /v1/abac/policies/:id`, `POST /v1/abac/policies/:id/versions`,
+  `POST /v1/abac/policies/:id/activate` (also the rollback), `.../deactivate`, `DELETE`,
+  `POST /v1/abac/policies/:id/test`, `POST /v1/abac/test` (the CI entry point), and
+  `POST /v1/abac/simulate`.
+- **`apps/gateway/src/governed-evaluate.ts`** — the single MCP choke point, wired.
+- **SPA**: an admin *ABAC policies* screen under Governance — source editor with write-time
+  validation errors surfaced against it, the version list with per-version Activate (= rollback)
+  and Run tests, and the attribute schema rendered on the page so an author is never guessing.
+- **Audit**: `objectType: "abac_policy"` for admin acts, with `abac-policy-activated` and
+  `abac-policy-rolled-back` distinguished and carrying `from`/`to` version numbers. Policy
+  *decisions* audit as ordinary governed rows — one audit trail, as required.
+- **Tests**: 36 new in `packages/policy-kernel` (93 → 129) and 20 in
+  `apps/gateway/src/abac-policy.test.ts` (1171 → 1191), including the ADR's named invariants:
+  ABAC cannot rescue a default-denied call *and leaves no trace on one*; an empty/deactivated
+  policy set is byte-identical to the pre-ADR-0040 kernel on a representative allow **and** deny,
+  `ruleChain` compared in full; forbid → deny with the policy id in `ruleId`; require_approval →
+  a row in the **existing** `approvals` table decided by the **existing** endpoint; the 12:00-allow
+  / 23:00-deny conditional policy with the declared timezone proved against a deliberately wrong
+  process TZ; header- and body-supplied `environment`/`deployMode` failing to reach the context;
+  an undefined attribute refused at write; and v2 → rollback-to-v1 restoring v1's decisions with
+  v2's row intact.
+
+### 7. Deviations from the ADR as written — stated, not buried
+
+1. **One action, `McpToolCall`.** The ADR's resource bag names "the agent/connector/MCP-server-tool
+   being called". Only the MCP tool path has a single gateway choke point (`governedEvaluate`) where
+   the attribute context can be assembled once and enforced for **every** caller; `evaluateAgent`
+   has six call sites and `evaluateConnector` one, and wiring them piecemeal would create the exact
+   failure this ADR exists to prevent — a policy an admin believes is enforced that silently is not
+   on some paths. So agent and connector actions are **absent from the Cedar schema**, not
+   present-and-unwired: a policy naming them fails validation at write time. Adding them is a schema
+   version bump plus wiring, and is tracked as follow-up.
+2. **Budget signals are not in the context bag.** The ADR lists "request-rate/budget signals already
+   available at the call site". Rate is (`rateLimitUsagePct`); project-budget consumption is *not*
+   available at `governedEvaluate` without new queries, so it is deferred rather than faked.
+3. **`environment` is a SET, not a scalar** (`context.environments`), because attributed work can be
+   in flight toward targets in more than one environment at once — the same reason ADR-0027's A4
+   deploy context is a set. Policies use `.contains("production")`.
+4. **`dataSensitivity` is derived, not a new column.** It is the project's compliance
+   classifications (the source ADR-0018's 6th assignment dimension already treats as authoritative),
+   exposed as a set plus a scalar convenience. No new sensitivity taxonomy was invented.
+5. **Export-to-repo of the policy set** (listed under follow-up work) is not implemented; the
+   `source` column is the artifact and `GET /v1/abac/policies/:id` returns every version's text, so
+   the export is a thin wrapper rather than a missing capability.
+6. **Visibility (`visibleTools`) is unchanged.** ABAC affects execution decisions, not which tools a
+   user is *offered*. Filtering the manifest by an attribute policy would need the request context
+   at list time and is deliberately out of scope here.

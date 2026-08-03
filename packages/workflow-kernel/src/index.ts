@@ -90,6 +90,41 @@ const stageSchema = z.object({
   /** automated_check with onFailure:"rollback": the id of the rollback stage to
    * jump to when this check fails. */
   rollbackStageId: z.string().min(1).optional(),
+  /** automated_check (ADR-0044): bind a NAMED CHECK to an evaluation dataset.
+   * The gateway runs the pinned dataset against the named agent through the
+   * governed dispatch core and resolves the check from the result — a score
+   * that regresses past `tolerance` against the stored baseline makes the check
+   * FAIL, which routes through this stage's existing onFailure path (block or
+   * rollback) like any other failed check. Deliberately NOT a new stage type:
+   * a quality gate is an automated check, and inventing a second failure
+   * mechanism beside `check_failed` would give the pipeline two ways to say no.
+   *
+   * Every entry's `check` must also appear in `checks` — a binding for a check
+   * the stage does not declare would silently never run. */
+  evals: z
+    .array(
+      z.object({
+        /** the declared check this eval decides */
+        check: z.string().min(1),
+        /** dataset NAME (versions are pinned by `version`, else latest) */
+        dataset: z.string().min(1),
+        version: z.number().int().positive().optional(),
+        /** the agent under test, by registry NAME */
+        agent: z.string().min(1),
+        /** judge agent NAME, for llm_as_judge cases */
+        judgeAgent: z.string().min(1).optional(),
+        /** how far the mean score may fall below the baseline before the check
+         * fails. 0 = any drop is a regression. Default 0.05. */
+        tolerance: z.number().min(0).max(1).optional(),
+        /** absolute floors, independent of any baseline */
+        minScore: z.number().min(0).max(1).optional(),
+        minPassRate: z.number().min(0).max(1).optional(),
+        /** true = a missing baseline FAILS rather than standing as the first
+         * reference. For a gate that must never pass un-compared. */
+        requireBaseline: z.boolean().optional(),
+      }),
+    )
+    .optional(),
 });
 export type Stage = z.infer<typeof stageSchema>;
 
@@ -186,6 +221,36 @@ export const workflowDefinitionSchema = z
           code: z.ZodIssueCode.custom,
           message: `${s.type} stage '${s.id}' needs a deploy target (connection)`,
         });
+      }
+      // ADR-0044: an eval binding is only meaningful on a check stage, and only
+      // for a check that stage actually declares. Both mistakes are refused
+      // LOUDLY at template validation rather than silently ignored at runtime —
+      // a quality gate that quietly never runs is worse than no gate.
+      if (s.evals?.length) {
+        if (s.type !== "automated_check") {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `stage '${s.id}' (${s.type}) cannot carry eval bindings — only an automated_check stage can`,
+          });
+        } else {
+          const declared = new Set(s.checks ?? []);
+          const seen = new Set<string>();
+          for (const e of s.evals) {
+            if (!declared.has(e.check)) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: `check stage '${s.id}' binds an eval to check '${e.check}', which the stage does not declare`,
+              });
+            }
+            if (seen.has(e.check)) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: `check stage '${s.id}' binds check '${e.check}' to more than one eval dataset`,
+              });
+            }
+            seen.add(e.check);
+          }
+        }
       }
       if (s.type === "automated_check" && s.onFailure === "rollback") {
         if (!s.rollbackStageId) {

@@ -2,6 +2,419 @@ import { z } from "zod";
 
 export { detectPII, type PiiHit, type PiiCategory } from "./pii.js";
 
+// ADR-0044 — the evaluation harness's pure half: the scorer registry (six
+// deterministic kinds plus the model-backed judge's deterministic prompt/parse
+// halves), the aggregate math, and the baseline-comparison gate decision that
+// the workflow automated-check stage blocks on.
+export {
+  EVAL_SCORER_KINDS,
+  DETERMINISTIC_SCORER_KINDS,
+  isDeterministicScorer,
+  evalScorerRegistry,
+  evalScorerConfigSchema,
+  evalScorerKindSchema,
+  validateScorerConfig,
+  validateAgainstSchema,
+  scoreDeterministic,
+  buildJudgePrompt,
+  parseJudgeVerdict,
+  aggregateEvalResults,
+  evaluateEvalGate,
+  createEvalDatasetSchema,
+  createEvalCaseSchema,
+  startEvalRunSchema,
+  setEvalBaselineSchema,
+  type EvalScorerKind,
+  type EvalScorerInfo,
+  type EvalScorerConfig,
+  type EvalScore,
+  type EvalScoreDetail,
+  type DeterministicScoreInput,
+  type EvalJudge,
+  type EvalJudgeRequest,
+  type EvalJudgeVerdict,
+  type EvalAggregate,
+  type EvalGateInput,
+  type EvalGateDecision,
+} from "./evals.js";
+
+// ADR-0045 — the model risk management registry's pure half: the effective
+// status computation (which recomputes expiry from validUntil rather than
+// trusting the swept status cache), the card-completeness assessment, the
+// dispatch-gate decision, and the honest declared-vs-enforced posture label.
+export {
+  MODEL_CARD_APPROVAL_STATUSES,
+  BIAS_FAIRNESS_STATUSES,
+  biasFairnessEntrySchema,
+  createModelCardSchema,
+  updateModelCardSchema,
+  requestModelCardSignOffSchema,
+  attachModelCardEvidenceSchema,
+  revokeModelCardApprovalSchema,
+  effectiveApprovalStatus,
+  isLiveApproval,
+  daysUntilExpiry,
+  cardState,
+  assessBiasFairness,
+  assessCardCompleteness,
+  evaluateMrmGate,
+  mrmPosture,
+  type MrmApprovalStatus,
+  type BiasFairnessStatus,
+  type BiasFairnessEntryInput,
+  type MrmApprovalLike,
+  type MrmCardState,
+  type BiasFairnessAssessment,
+  type CardCompleteness,
+  type MrmGateReason,
+  type MrmGateDecision,
+  type MrmGateCard,
+} from "./mrm.js";
+
+// ADR-0046 — the review workbench's pure half: rule matching (total, so two
+// equally-specific rules never produce a non-deterministic queue), the DERIVED
+// SLA clock that makes lazy breach evaluation honest, and the bulk fences.
+export {
+  APPROVAL_ASSIGNEE_KINDS,
+  APPROVAL_ESCALATE_ACTIONS,
+  APPROVAL_SLA_STATES,
+  stagePatternMatches,
+  ruleMatches,
+  selectAssignmentRule,
+  slaDeadlines,
+  evaluateSla,
+  bulkCapRefusal,
+  bulkSensitivityFenced,
+  createApprovalSlaPolicySchema,
+  createApprovalAssignmentRuleSchema,
+  bulkDecideApprovalsSchema,
+  createApprovalSavedViewSchema,
+  type ApprovalAssigneeKind,
+  type ApprovalEscalateAction,
+  type ApprovalSlaState,
+  type ApprovalRoutingContext,
+  type AssignmentRuleLike,
+  type SlaPolicyLike,
+  type SlaEvaluation,
+  type BulkRefusalReason,
+} from "./workbench.js";
+
+// ADR-0047 — executive & compliance reporting's pure half: the period
+// resolution, the ENTITLEMENT decision (which returns the exact project-id set
+// a generation may query, so scoping is applied at query construction rather
+// than as a post-hoc filter over an already-leaked aggregate), the section
+// assembly, the gap-rendering control assessment, and the CSV round trip.
+export {
+  REPORT_KINDS,
+  REPORT_SCOPE_KINDS,
+  REPORT_PERIODS,
+  REPORT_FORMATS,
+  REPORT_ENTITLEMENT_SCOPES,
+  REPORT_SECTIONS,
+  REPORT_CADENCES,
+  REPORT_ESTIMATE_DISCLAIMER,
+  BUILT_IN_CONTROLS,
+  createReportDefinitionSchema,
+  createReportScheduleSchema,
+  updateReportScheduleSchema,
+  generateReportSchema,
+  resolveReportPeriod,
+  evaluateReportAccess,
+  buildSpendSection,
+  buildGovernanceSection,
+  buildWorkflowSection,
+  assessControls,
+  reportCsvRows,
+  renderReportCsv,
+  parseReportCsv,
+  defaultSectionsFor,
+  scheduleIsDue,
+  round6,
+  type ReportKind,
+  type ReportScopeKind,
+  type ReportPeriod,
+  type ReportFormat,
+  type ReportEntitlementScope,
+  type ReportSection,
+  type ReportCadence,
+  type ResolvedPeriod,
+  type ReportAccessInput,
+  type ReportAccessDecision,
+  type SpendLine,
+  type SpendSection,
+  type GovernanceSection,
+  type WorkflowSection,
+  type ControlAssessment,
+  type ComplianceSection,
+  type ReportPayload,
+  type ReportCsvRow,
+} from "./reporting.js";
+
+// ADR-0048 — immutable config versioning / canary / rollback's pure half: the
+// DETERMINISTIC bucketing (a pure function of a stable key, so a multi-turn run
+// cannot flip mid-conversation and the split is reproducible from a ledger row
+// months later), the version resolution, and the eval-gated promotion decision.
+export {
+  CONFIG_ARTIFACT_TYPES,
+  CONFIG_VERSION_STATUSES,
+  LIVE_CANARY_ARTIFACT_TYPES,
+  canaryIsLive,
+  createConfigVersionSchema,
+  activateConfigVersionSchema,
+  startCanarySchema,
+  promoteCanarySchema,
+  rollbackConfigSchema,
+  fnv1a32,
+  canaryBucket,
+  resolveVersion,
+  promptFromBody,
+  evaluatePromotion,
+  stableKeyFor,
+  type ConfigArtifactType,
+  type ConfigVersionStatus,
+  type CreateConfigVersion,
+  type VersionLike,
+  type ResolvedVersion,
+  type EvalEvidence,
+  type PromotionDecision,
+} from "./config-versions.js";
+
+// ADR-0049 — cost forecasting and spend-anomaly detection's pure half: the two
+// documented projectors (run-rate and EWMA) with a real confidence interval and
+// an explicit insufficient-data refusal, the Iglewicz–Hoaglin modified-z
+// anomaly rule with its cold-start and absolute-floor rails, and the
+// enforcement decision that routes through the EXISTING Approvals Queue while
+// respecting ADR-0027 §9's compliance cost floor.
+export {
+  FORECAST_METHODS,
+  ANOMALY_SIGNALS,
+  ANOMALY_METHODS,
+  ANOMALY_ACTIONS,
+  ANOMALY_STATUSES,
+  ANOMALY_SENSITIVITIES,
+  SENSITIVITY_Z,
+  ANOMALY_ABSOLUTE_FLOORS,
+  MIN_BASELINE_SAMPLES,
+  MIN_FORECAST_DAYS,
+  MIN_FORECAST_ELAPSED_FRACTION,
+  FORECAST_DISCLAIMER,
+  ANOMALY_DISCLAIMER,
+  spendMonitorPolicySchema,
+  scheduledSpendChangeSchema,
+  forecastQuerySchema,
+  decideAnomalySchema,
+  mean,
+  median,
+  stddev,
+  mad,
+  modifiedZ,
+  ewma,
+  bucketDaily,
+  activeHours,
+  budgetBreachDay,
+  forecastSpend,
+  detectAnomaly,
+  detectUnusualModel,
+  decideEnforcement,
+  type ForecastMethod,
+  type AnomalySignal,
+  type AnomalyMethod,
+  type AnomalyAction,
+  type AnomalyStatus,
+  type AnomalySensitivity,
+  type SpendMonitorPolicyInput,
+  type ForecastInput,
+  type ForecastResult,
+  type AnomalyInput,
+  type AnomalyVerdict,
+  type EnforcementInput,
+  type EnforcementDecision,
+} from "./forecasting.js";
+
+// ADR-0050 — the data-lineage / provenance graph's pure half: the node/edge
+// vocabularies, the derived natural key that keeps two captures of the same
+// real thing on ONE node, and the bounded, cycle-safe, visibility-filtered
+// traversal. `LINEAGE_COMPLETENESS_NOTE` is the scope sentence every answer
+// carries: this is SUPPLIED-INPUTS provenance, never intra-model attribution.
+export {
+  LINEAGE_NODE_KINDS,
+  LINEAGE_SUBTYPES,
+  LINEAGE_EDGE_KINDS,
+  LINEAGE_DIRECTIONS,
+  LINEAGE_MAX_DEPTH,
+  LINEAGE_DEFAULT_DEPTH,
+  LINEAGE_MAX_NODES,
+  LINEAGE_COMPLETENESS_NOTE,
+  lineageNaturalKey,
+  lineageQuerySchema,
+  traverseLineage,
+  directRunLineage,
+  type LineageNodeKind,
+  type LineageSubtype,
+  type LineageEdgeKind,
+  type LineageDirection,
+  type LineageEdgeLike,
+  type TraversalInput,
+  type TraversalResult,
+} from "./lineage.js";
+
+// ADR-0051 — metering & billing's pure half: the rate-card vocabulary, the
+// exact-beats-wildcard rate lookup, the deterministic ledger→money rating
+// function (an unpriced event is UNPRICED, never zero), the statement assembly
+// and its re-derivation check, the chargeback/showback CSV, and the
+// `BillingProvider` port whose only implementation is the export-only,
+// network-free `NoopBilling` (ADR-0051 §6's air-gapped default).
+export {
+  BILLING_DIMENSIONS,
+  RATE_UNITS,
+  RATING_MODES,
+  STATEMENT_STATUSES,
+  BILLING_SCOPE_KINDS,
+  BILLING_BACKENDS,
+  RATE_WILDCARD,
+  BILLING_DISCLAIMER,
+  EMPTY_PRICING_SNAPSHOT,
+  NoopBilling,
+  billingProviders,
+  rateFor,
+  billingKeyFor,
+  rateUsage,
+  seatLine,
+  buildStatement,
+  reconcileStatement,
+  statementCsvRows,
+  renderStatementCsv,
+  parseStatementCsv,
+  billingScopeKey,
+  rateEntrySchema,
+  createRateCardSchema,
+  createBillingPeriodSchema,
+  generateStatementSchema,
+  issueStatementSchema,
+  type BillingDimension,
+  type RateUnit,
+  type RatingMode,
+  type StatementStatus,
+  type BillingScopeKind,
+  type BillingBackend,
+  type RateEntry,
+  type PricingSnapshot,
+  type RatableEvent,
+  type UsageLine,
+  type RatedUsage,
+  type SeatLine,
+  type StatementPayload,
+  type ReconcileDiff,
+  type ReconcileResult,
+  type StatementCsvRow,
+  type BillingCapabilities,
+  type MeteredUsage,
+  type PushResult,
+  type BillingProvider,
+  type CreateRateCard,
+  type CreateBillingPeriod,
+} from "./billing.js";
+
+// ADR-0052 — licensing & seats' pure half: the offline license document shape,
+// the validity-window evaluation, the reviewed ACTION-CLASS inventory and the
+// split-posture decision (governance fails OPEN past expiry, commercial
+// expansion fails CLOSED), the seat-grant decision over ADR-0022's
+// deactivate-never-delete definition, and the default-CLOSED tier feature read.
+// No crypto here — verification lives in the gateway half, offline, against a
+// pinned keyring.
+export {
+  LICENSE_SCHEMA_ID,
+  LICENSE_DEPLOYMENT_MODES,
+  LICENSE_FEATURES,
+  LICENSE_STATES,
+  LICENSE_ACTION_CLASSES,
+  LICENSE_ACTION_INVENTORY,
+  LICENSE_POSTURE_NOTE,
+  SEAT_DEFINITION_NOTE,
+  classifyAction,
+  canonicalLicenseBytes,
+  licenseDocumentSchema,
+  installLicenseSchema,
+  evaluateLicenseWindow,
+  evaluateLicensedAction,
+  evaluateSeatGrant,
+  featureEnabled,
+  type LicenseDeploymentMode,
+  type LicenseFeature,
+  type LicenseState,
+  type LicenseActionClass,
+  type ClassifiedAction,
+  type LicenseDocument,
+  type WindowEvaluation,
+  type LicenseDecision,
+  type LicenseDecisionInput,
+  type SeatDecision,
+  type FeatureDecision,
+  type InstallLicense,
+} from "./licensing.js";
+
+// ADR-0042 — the guardrail engine's pure half: the detector registry, the
+// block|warn|log verbs (piiMode's triad, plus an `off` member), the
+// MAX-of-strictness composition that makes the compliance cascade a ceiling,
+// and the counts-only evaluation result.
+export {
+  GUARDRAIL_DETECTOR_IDS,
+  GUARDRAIL_MODES,
+  GUARDRAIL_DETECTORS,
+  GUARDRAIL_DEFAULT_MODES,
+  guardrailRegistry,
+  evaluateGuardrails,
+  composeGuardrailModes,
+  composeGuardrailTerms,
+  guardrailCategoryList,
+  guardrailWithheldMarker,
+  strictestMode,
+  modeAtLeast,
+  type GuardrailDetectorId,
+  type GuardrailMode,
+  type GuardrailModes,
+  type GuardrailTerms,
+  type GuardrailHit,
+  type GuardrailPhase,
+  type GuardrailDetector,
+  type GuardrailFinding,
+  type GuardrailEvaluation,
+} from "./guardrails.js";
+
+/** ADR-0042 admin write shapes. A mode is one of the four verbs; a partial map
+ * lets an admin change one detector without restating the others.
+ *
+ * `pii` is deliberately NOT writable here. PII's mode is the §8.3 compliance
+ * cascade's `piiMode` and nothing else — offering a second place to set it
+ * would create two sources of truth for one control, and the weaker one would
+ * eventually win an argument it should not be in. */
+export const guardrailModeSchema = z.enum(["off", "log", "warn", "block"]);
+export const guardrailModeMapSchema = z
+  .object({
+    prompt_injection: guardrailModeSchema.optional(),
+    jailbreak: guardrailModeSchema.optional(),
+    toxicity: guardrailModeSchema.optional(),
+    semantic_dlp: guardrailModeSchema.optional(),
+  })
+  .strict();
+const guardrailTermListSchema = z.array(z.string().min(1).max(120)).max(200);
+export const guardrailTermMapSchema = z
+  .object({
+    prompt_injection: guardrailTermListSchema.optional(),
+    jailbreak: guardrailTermListSchema.optional(),
+    toxicity: guardrailTermListSchema.optional(),
+    semantic_dlp: guardrailTermListSchema.optional(),
+  })
+  .strict();
+export const putGuardrailConfigSchema = z.object({
+  modes: guardrailModeMapSchema.optional(),
+  customTerms: guardrailTermMapSchema.optional(),
+});
+export const guardrailSampleSchema = z.object({
+  text: z.string().max(200_000),
+  phase: z.enum(["input", "output"]).default("input"),
+});
+
 export const toolKindSchema = z.enum(["read", "write"]);
 export type ToolKind = z.infer<typeof toolKindSchema>;
 
@@ -79,7 +492,22 @@ export const deleteTeamSchema = z
 export const createServerSchema = z.object({
   name: z.string().min(1),
   url: z.string().url(),
+  /** ADR-0043: may this server's URL resolve into ordinary private LAN space?
+   * null/absent = inherit the org default (mcpPrivateRangesDefault). IMDS /
+   * link-local and the other unconditional ranges are never opened by this. */
+  allowPrivateRanges: z.boolean().nullable().optional(),
 });
+
+/** ADR-0043: PATCH /v1/servers/:serverId — re-runs the egress guard whenever
+ * the destination or the private-range posture changes (null restores
+ * inheritance of the org default). */
+export const updateServerSchema = z
+  .object({
+    name: z.string().min(1).optional(),
+    url: z.string().url().optional(),
+    allowPrivateRanges: z.boolean().nullable().optional(),
+  })
+  .strict();
 
 export const createToolSchema = z.object({
   name: z.string().min(1),
@@ -871,6 +1299,19 @@ export const dispatchNodeSchema = z.object({
   /** pillar 7: override the node's declared tool-loop turn cap for this
    * dispatch (still gateway-bounded) */
   maxTurns: z.number().int().min(1).max(20).optional(),
+  /**
+   * ADR-0050: shared-context KEYS to supply to this worker as system context.
+   * Each resolves to the CURRENT ACCEPTED REVISION of that key in the run's own
+   * project — never a cross-project read, and never "the key as it was later".
+   * Absent (the default) is byte-identical to the pre-lineage dispatch.
+   *
+   * This exists so that supplied-input lineage records something that was
+   * genuinely supplied: the same list drives BOTH the injection into the
+   * worker's system prompt AND the `flowed_into` edges. Recording an input the
+   * worker never received would be exactly the fiction ADR-0050 is written
+   * against, and deriving both from one list is what makes that impossible.
+   */
+  contextKeys: z.array(z.string().min(1).max(200)).max(20).optional(),
 });
 
 export const runEventSchema = z.object({
@@ -965,6 +1406,10 @@ export const upsertComplianceProfileSchema = z.object({
   maxProjectBudgetUsd: z.number().positive().max(100_000_000).nullable().optional(),
   /** O2: enforcement floor — 'block' forces blocking even in a warn_only org */
   budgetEnforcement: z.enum(["block", "warn_only"]).nullable().optional(),
+  /** ADR-0042: the guardrail FLOOR this framework forces onto every project
+   * carrying its tag. MAX-composed with every other setting, so it can only
+   * raise a layer. */
+  guardrailModes: guardrailModeMapSchema.nullable().optional(),
 });
 
 // PILLAR 3 (§8.2): the governed infrastructure-operations layer.
@@ -1047,6 +1492,16 @@ export const contributeContextSchema = z.object({
   baseRevision: z.number().int().positive().optional(),
   /** contributing team for provenance; must be one of the writer's teams */
   teamId: z.string().uuid().nullable().optional(),
+  /**
+   * ADR-0050: the orchestration run + task-graph node that PRODUCED this write.
+   * Optional and purely declarative — it is what turns a context write into a
+   * `run --produced--> item(vN)` lineage edge, which is in turn what makes
+   * lineage chain ACROSS runs (the item is then a source for whichever later
+   * dispatch consumes it). Omitted = the write is recorded as an item version
+   * with no producing run, which is the honest answer for a human's edit.
+   */
+  producedByRunId: z.string().uuid().optional(),
+  producedByNodeId: z.string().min(1).max(64).optional(),
 });
 
 export const promoteContextSchema = z.object({
@@ -1152,6 +1607,8 @@ export const orgPiiModeSchema = z.enum(["none", "log", "warn", "block"]);
 export const budgetEnforcementSchema = z.enum(["block", "warn_only"]);
 export const approvalQuorumSchema = z.enum(["all", "any"]);
 export const mfaRequirementSchema = z.enum(["off", "admins", "all"]);
+/** ADR-0039: the shared level set of both IP-policy knobs. */
+export const ipPolicySchema = z.enum(["off", "enforce_at_login", "enforce_continuous"]);
 
 export const updateOrgSettingsSchema = z
   .object({
@@ -1189,6 +1646,11 @@ export const updateOrgSettingsSchema = z
     /** ADR-0034: master switch for admin-registered custom LLM providers.
      * false refuses registration/enable and stops every custom dispatch (409). */
     customModelProvidersEnabled: z.boolean().optional(),
+    /** ADR-0043: the org default for MCP servers whose allowPrivateRanges is
+     * null. true (default) = private-LAN MCP URLs work with zero ceremony;
+     * false = strict, requiring an explicit per-server flag or an allow entry.
+     * IMDS/link-local stays unconditionally blocked either way. */
+    mcpPrivateRangesDefault: z.boolean().optional(),
     // budgets
     budgetEnforcement: budgetEnforcementSchema.optional(),
     budgetHardBlockPct: z.number().int().min(1).max(100).optional(),
@@ -1241,6 +1703,17 @@ export const updateOrgSettingsSchema = z
      * turning it off does not delete anyone's username, it stops self-service
      * writes. */
     usernameSelfService: z.boolean().optional(),
+    // ADR-0039 (migration 0050): org network envelope + the two policy knobs.
+    // CIDR syntax is validated in the route (400 on any malformed block) —
+    // zod holds the shape, the gateway's own parser is the authority.
+    sessionIpAllowlist: z.array(z.string().trim().min(1).max(64)).max(256).nullable().optional(),
+    sessionIpPolicy: ipPolicySchema.optional(),
+    apiKeyIpPolicy: ipPolicySchema.optional(),
+    /** ADR-0039 self-lockout guard (mirrors the sso_only guard): saving
+     * enforce_continuous with an allow-list that excludes the caller's own
+     * current IP is refused (409) unless this explicit confirm rides along.
+     * Write-only — stripped before the settings row is updated. */
+    confirmIpLockout: z.boolean().optional(),
   })
   .strict()
   .superRefine((v, ctx) => {
@@ -1433,6 +1906,11 @@ const oidcDomainSchema = z
   .toLowerCase()
   .regex(/^[a-z0-9.-]+\.[a-z]{2,}$/, "not a domain");
 
+/** ADR-0038: the name of the claim/attribute carrying groups. Nullable, and
+ * NULL is the meaningful default: no name configured = no group signal at all
+ * from this provider = nothing ever reconciled from its logins. */
+const groupsClaimSchema = z.string().trim().min(1).max(512).nullable();
+
 export const createOidcProviderSchema = z
   .object({
     name: z.string().trim().min(1).max(200),
@@ -1443,6 +1921,11 @@ export const createOidcProviderSchema = z
     allowedEmailDomains: z.array(oidcDomainSchema).min(1).max(50).nullable().optional(),
     defaultRoleId: z.string().uuid().nullable().optional(),
     jitProvisioning: z.boolean().optional(),
+    /** ADR-0038: which id_token claim carries group membership. null/absent =
+     * this provider emits NO group signal, so a login through it never
+     * reconciles group-derived roles. Naming it grants nothing on its own — an
+     * asserted group confers nothing until an admin maps it to a role. */
+    groupsClaim: groupsClaimSchema.optional(),
   })
   .strict();
 export type CreateOidcProvider = z.infer<typeof createOidcProviderSchema>;
@@ -1458,6 +1941,414 @@ export const updateOidcProviderSchema = z
     allowedEmailDomains: z.array(oidcDomainSchema).min(1).max(50).nullable().optional(),
     defaultRoleId: z.string().uuid().nullable().optional(),
     jitProvisioning: z.boolean().optional(),
+    groupsClaim: groupsClaimSchema.optional(),
   })
   .strict();
 export type UpdateOidcProvider = z.infer<typeof updateOidcProviderSchema>;
+
+// --- ADR-0036: SAML 2.0 providers (the OIDC twin) ---------------------------
+
+/** an IdP signing certificate, PEM. Pinned OUT OF BAND — assertions verify
+ * against these and never against a certificate embedded in the document,
+ * which is what defeats signature-wrapping. */
+const samlCertSchema = z
+  .string()
+  .trim()
+  .regex(
+    /^-----BEGIN CERTIFICATE-----[\s\S]+-----END CERTIFICATE-----$/,
+    "not a PEM certificate (-----BEGIN CERTIFICATE----- … -----END CERTIFICATE-----)",
+  );
+
+/** the shared field set. `idpSigningCerts` is a LIST so a certificate ROLLOVER
+ * can stage the incoming cert next to the outgoing one — SAML has no
+ * `.well-known` auto-refresh, so an expired pinned cert fails CLOSED (logins
+ * stop, the safe direction) and staging is the only way to avoid an outage. */
+const samlProviderFields = {
+  name: z.string().trim().min(1).max(200),
+  /** the IdP's entity id / Issuer; an assertion's <Issuer> is pinned to it */
+  entityId: z.string().trim().min(1).max(1024),
+  idpSsoUrl: z.string().url(),
+  idpSigningCerts: z.array(samlCertSchema).min(1).max(5),
+  enabled: z.boolean(),
+  allowedEmailDomains: z.array(oidcDomainSchema).min(1).max(50).nullable(),
+  defaultRoleId: z.string().uuid().nullable(),
+  jitProvisioning: z.boolean(),
+  wantAssertionsSigned: z.boolean(),
+  wantAuthnResponseSigned: z.boolean(),
+  allowIdpInitiated: z.boolean(),
+  /** SAML attribute name carrying the email when the NameID is not an
+   * emailAddress. NEVER a username: ADR-0030's second identifier is
+   * locally-editable and must never be an SSO mapping target. */
+  emailAttribute: z.string().trim().min(1).max(512).nullable(),
+  /** ADR-0038: the SAML attribute carrying group membership (`groups`,
+   * `memberOf`, …). null = no group signal from this provider. */
+  groupsAttribute: groupsClaimSchema,
+  /** OPTIONAL SP private key (PEM) for request signing / encrypted assertions.
+   * WRITE-ONLY: stored AES-256-GCM under REGULAIT_DATA_KEY and never returned. */
+  spPrivateKey: z.string().min(1).max(16384),
+  spCertificate: z
+    .string()
+    .trim()
+    .regex(
+      /^-----BEGIN CERTIFICATE-----[\s\S]+-----END CERTIFICATE-----$/,
+      "not a PEM certificate",
+    ),
+};
+
+/**
+ * The one posture rule both schemas share: a provider may NOT be configured so
+ * that an UNSIGNED assertion could be accepted. Turning wantAssertionsSigned
+ * off is only coherent when the whole authn response is signed instead — so
+ * the pair (false, false) is refused at the API rather than quietly handed to
+ * the library. `undefined` on a PATCH means "unchanged"; the effective pair is
+ * re-checked against the stored row in the route.
+ */
+const signaturePostureOk = (v: {
+  wantAssertionsSigned?: boolean | undefined;
+  wantAuthnResponseSigned?: boolean | undefined;
+}) => !(v.wantAssertionsSigned === false && v.wantAuthnResponseSigned !== true);
+export const SAML_SIGNATURE_POSTURE_MESSAGE =
+  "wantAssertionsSigned may only be turned off when wantAuthnResponseSigned is on — otherwise an unsigned assertion could be accepted";
+
+export const createSamlProviderSchema = z
+  .object({
+    name: samlProviderFields.name,
+    entityId: samlProviderFields.entityId,
+    idpSsoUrl: samlProviderFields.idpSsoUrl,
+    idpSigningCerts: samlProviderFields.idpSigningCerts,
+    enabled: samlProviderFields.enabled.optional(),
+    allowedEmailDomains: samlProviderFields.allowedEmailDomains.optional(),
+    defaultRoleId: samlProviderFields.defaultRoleId.optional(),
+    jitProvisioning: samlProviderFields.jitProvisioning.optional(),
+    wantAssertionsSigned: samlProviderFields.wantAssertionsSigned.optional(),
+    wantAuthnResponseSigned: samlProviderFields.wantAuthnResponseSigned.optional(),
+    allowIdpInitiated: samlProviderFields.allowIdpInitiated.optional(),
+    emailAttribute: samlProviderFields.emailAttribute.optional(),
+    groupsAttribute: samlProviderFields.groupsAttribute.optional(),
+    spPrivateKey: samlProviderFields.spPrivateKey.optional(),
+    spCertificate: samlProviderFields.spCertificate.optional(),
+  })
+  .strict()
+  .refine(signaturePostureOk, { message: SAML_SIGNATURE_POSTURE_MESSAGE });
+export type CreateSamlProvider = z.infer<typeof createSamlProviderSchema>;
+
+/** partial update; spPrivateKey is WRITE-ONLY (rotate by writing, never read) */
+export const updateSamlProviderSchema = z
+  .object({
+    name: samlProviderFields.name.optional(),
+    entityId: samlProviderFields.entityId.optional(),
+    idpSsoUrl: samlProviderFields.idpSsoUrl.optional(),
+    idpSigningCerts: samlProviderFields.idpSigningCerts.optional(),
+    enabled: samlProviderFields.enabled.optional(),
+    allowedEmailDomains: samlProviderFields.allowedEmailDomains.optional(),
+    defaultRoleId: samlProviderFields.defaultRoleId.optional(),
+    jitProvisioning: samlProviderFields.jitProvisioning.optional(),
+    wantAssertionsSigned: samlProviderFields.wantAssertionsSigned.optional(),
+    wantAuthnResponseSigned: samlProviderFields.wantAuthnResponseSigned.optional(),
+    allowIdpInitiated: samlProviderFields.allowIdpInitiated.optional(),
+    emailAttribute: samlProviderFields.emailAttribute.optional(),
+    groupsAttribute: samlProviderFields.groupsAttribute.optional(),
+    spPrivateKey: samlProviderFields.spPrivateKey.optional(),
+    spCertificate: samlProviderFields.spCertificate.optional(),
+  })
+  .strict();
+export type UpdateSamlProvider = z.infer<typeof updateSamlProviderSchema>;
+
+// ADR-0054 — the first-run wizard and the migration/import tooling's PURE half:
+// the step graph and its transition rule, the starter role templates, the
+// compliance packs (which are cascade seeds, not a second configuration path),
+// and the import planners. The planners are shared by dry-run and apply, so a
+// preview is never computed differently from the thing it previews; the row
+// schemas are `.strict()` so an import payload has nowhere to put a privilege
+// it was not granted.
+export {
+  ONBOARDING_STEPS,
+  ONBOARDING_STEP_KEYS,
+  ONBOARDING_STEP_STATUSES,
+  STARTER_ROLE_TEMPLATES,
+  COMPLIANCE_PACKS,
+  COMPLIANCE_PACK_TAGS,
+  onboardingStepKeySchema,
+  updateOnboardingStepSchema,
+  applyCompliancePackSchema,
+  userImportRowSchema,
+  userImportSchema,
+  groupRoleImportRowSchema,
+  groupRoleImportSchema,
+  blockedBy,
+  transitionRefusal,
+  screenForEscalation,
+  planUserImport,
+  planGroupRoleImport,
+  parseCsv,
+  csvToUserRows,
+  type OnboardingStepDef,
+  type OnboardingStepStatus,
+  type StarterRoleTemplate,
+  type CompliancePack,
+  type EscalationFinding,
+  type ExistingUser,
+  type UserImportRow,
+  type UserImportPlan,
+  type UserImportPlanEntry,
+  type GroupRolePlan,
+  type GroupRolePlanEntry,
+} from "./onboarding.js";
+
+// ADR-0060 — the tamper-evident `audit_log` hash chain's PURE half: the
+// canonical, deterministic serialization every row's `content_hash` is taken
+// over, the linked `row_hash`, the fixed genesis row, and the resumable
+// batch verifier. It lives here because two independent pieces of the system —
+// the WRITER in `@regulait/db` and the VERIFIER behind `GET /v1/audit/verify` —
+// must agree on it byte for byte; a one-byte disagreement reports tampering on
+// untouched data. No database, no clock, no I/O.
+export {
+  AUDIT_CHAIN_ALGORITHM,
+  AUDIT_GENESIS_CONTENT_HASH,
+  AUDIT_GENESIS_OBJECT_TYPE,
+  AUDIT_GENESIS_PREV_HASH,
+  AUDIT_GENESIS_ROW,
+  AUDIT_GENESIS_ROW_HASH,
+  AUDIT_GENESIS_RULE_ID,
+  AUDIT_GENESIS_SEQ,
+  AUDIT_LEGACY_DISCLOSURE,
+  AUDIT_PAYLOAD_VERSION,
+  auditContentHash,
+  auditRowHash,
+  canonicalAuditPayload,
+  canonicalJson,
+  sha256Hex,
+  verifyChainBatch,
+  type AuditChainFields,
+  type ChainBreak,
+  type ChainBreakKind,
+  type ChainedAuditRow,
+} from "./audit-chain.js";
+
+// ADR-0055 — SHADOW-AI DISCOVERY, the pure half: the untrusted-evidence
+// envelope (bounds + the pre-parse escalation screen), the catalogue shape and
+// its shipped seed, the linear matchers (no regex ever comes from data), the
+// severity/confidence model and the correlation/dedup. No database, no network,
+// no collector — see the module header for exactly what a customer must feed it.
+export {
+  AI_MATCH_TYPES,
+  AI_SIGNATURE_KINDS,
+  DEFAULT_AI_SIGNATURES,
+  EVIDENCE_KINDS,
+  EVIDENCE_MAX_BYTES,
+  EVIDENCE_MAX_ROWS,
+  HOST_MAX,
+  KEY_FRAGMENT_KEPT,
+  KEY_FRAGMENT_MAX,
+  SHADOW_AI_CONFIDENCES,
+  SHADOW_AI_DISPOSITIONS,
+  SHADOW_AI_FORBIDDEN_KEYS,
+  SHADOW_AI_SEVERITIES,
+  analyzeImport,
+  catalogueSignatureSchema,
+  classifyObservation,
+  codeScanRowSchema,
+  confidenceFor,
+  correlateObservations,
+  correlationKey,
+  coverageScorecard,
+  egressLogRowSchema,
+  evidenceImportSchema,
+  hostMatchesSignature,
+  keyMatchesSignature,
+  normalizeEvidenceHost,
+  observationsFromImport,
+  packageMatchesSignature,
+  redactKeyFragment,
+  saasExportRowSchema,
+  screenEvidencePayload,
+  selfReportedRowSchema,
+  type AiMatchType,
+  type AiSignature,
+  type AiSignatureKind,
+  type CatalogueSignatureInput,
+  type Classification,
+  type CorrelatedFinding,
+  type CoverageInput,
+  type CoverageScorecard,
+  type EvidenceImport,
+  type EvidenceKind,
+  type EvidenceScreenFinding,
+  type Observation,
+  type ShadowAiConfidence,
+  type ShadowAiDisposition,
+  type ShadowAiSeverity,
+  type ShadowAiSubjectKind,
+} from "./shadow-ai.js";
+
+// ADR-0061 — CHATOPS APPROVALS, the pure half: signature verification and the
+// replay window (the FIRST wall — a forged callback must be cheap to reject,
+// before mapping, entitlement or any DB work), strict interaction parsing (the
+// payload is an ASSERTION, never authorization), the ADR-0046 sensitivity fence
+// applied to a courier, and card composition. Nothing here decides anything.
+export {
+  CHATOPS_ACTIONS,
+  CHATOPS_MAX_BODY_BYTES,
+  CHATOPS_PROVIDERS,
+  CHATOPS_REPLAY_WINDOW_SECONDS,
+  SLACK_SIGNATURE_HEADER,
+  SLACK_TIMESTAMP_HEADER,
+  TEAMS_AUTHORIZATION_HEADER,
+  chatContentFenced,
+  chatDecidable,
+  composeApprovalCard,
+  composeDecidedCard,
+  parseChatInteraction,
+  parseSlackInteraction,
+  parseTeamsInteraction,
+  slackSignature,
+  slackSignatureBaseString,
+  teamsSignature,
+  verifyChatSignature,
+  type ApprovalCard,
+  type ApprovalCardInput,
+  type ChatInteraction,
+  type ChatOpsAction,
+  type ChatOpsProvider,
+  type ChatSignatureFailure,
+  type ChatSignatureInput,
+  type ChatSignatureResult,
+} from "./chatops.js";
+// ADR-0057 — continuous red-teaming's pure half: the attack-class registry
+// (each class next to what it CANNOT tell you), the versioned built-in probe
+// corpus, the oracle validator that refuses a probe which can never report a
+// defeat, the per-class aggregate math, and the per-class regression gate —
+// itself a thin composition over ADR-0044's `evaluateEvalGate`, because a
+// red-team suite IS an eval suite with adversarial cases and inverted polarity.
+export {
+  RED_TEAM_ATTACK_CLASSES,
+  RED_TEAM_CANARY,
+  RED_TEAM_COVERAGE_DISCLOSURE,
+  RED_TEAM_ORIGIN_TAG,
+  RED_TEAM_SEVERITIES,
+  RED_TEAM_SEVERITY_WEIGHT,
+  aggregateRedTeamByClass,
+  attachRedTeamEvidenceSchema,
+  builtinRedTeamLibrary,
+  createRedTeamLibrarySchema,
+  createRedTeamProbeSchema,
+  evaluateRedTeamGate,
+  redTeamAttackClassRegistry,
+  redTeamAttackClassSchema,
+  redTeamOverallAggregate,
+  redTeamSeveritySchema,
+  severityRank,
+  startRedTeamRunSchema,
+  validateRedTeamProbe,
+  type RedTeamAttackClass,
+  type RedTeamAttackClassInfo,
+  type RedTeamClassAggregate,
+  type RedTeamClassVerdict,
+  type RedTeamGateDecision,
+  type RedTeamGateInput,
+  type RedTeamProbeOutcome,
+  type RedTeamProbeSeed,
+  type RedTeamSeverity,
+} from "./redteam.js";
+// ADR-0059 — policy simulation / blast-radius preview's pure half: the replay
+// classifier (total over recorded × candidate effect), the fidelity analysis
+// derived from the candidate's OWN source, the ADR-0047-shaped entitlement
+// scope decision, and the NAMED blast-radius summary — users, projects, tools
+// and specific calls, because a percentage without a name is not a preview.
+export {
+  ABAC_CANNOT_GRANT_NOTE,
+  POLICY_SIMULATION_BUCKETS,
+  POLICY_SIMULATION_DEFAULT_ROW_CAP,
+  POLICY_SIMULATION_DEFAULT_WINDOW_DAYS,
+  POLICY_SIMULATION_MAX_ROWS,
+  POLICY_SIMULATION_MAX_WINDOW_DAYS,
+  REPLAY_FIDELITY_DISCLOSURE,
+  UNREPLAYABLE_ATTRIBUTES,
+  analyzeReplayFidelity,
+  buildHeadline,
+  classifyReplay,
+  isFlip,
+  policySimulationSettingsSchema,
+  resolvePolicySimulationScope,
+  startPolicySimulationSchema,
+  summarizeBlastRadius,
+  type BlastRadius,
+  type CandidateEffect,
+  type PolicySimulationBucket,
+  type PolicySimulationScopeDecision,
+  type PolicySimulationScopeInput,
+  type RecordedEffect,
+  type ReplayFidelity,
+  type ReplayedDecision,
+} from "./policy-simulation.js";
+
+// ADR-0058 — REGULATORY COMPLIANCE PACKS, the pure half: the pack/control and
+// collector vocabularies, the satisfaction rule (an attestation-required
+// control returns BEFORE any count is consulted, so it can never reach
+// 'satisfied'), the verdict-free scorecard, and the six launch packs as SEED
+// DATA the gateway inserts as ordinary rows.
+export {
+  COMPLIANCE_PACK_DISCLAIMER,
+  COMPLIANCE_PACK_FRAMEWORKS,
+  COMPLIANCE_PACK_UPDATE_POLICY,
+  CONTROL_COVERAGE_CLASSES,
+  CONTROL_EVALUATION_STATUSES,
+  DEFAULT_COMPLIANCE_PACKS,
+  EVIDENCE_COLLECTORS,
+  PACK_STATUSES,
+  assessPackControl,
+  buildPackScorecard,
+  collectorParamsSchema,
+  createCompliancePackSchema,
+  evaluatePackSchema,
+  packAttestationSchema,
+  packControlSchema,
+  type CollectorParams,
+  type CompliancePackFramework,
+  type ControlCoverageClass,
+  type ControlEvaluationStatus,
+  type CreateCompliancePackInput,
+  type EvaluatePackInput,
+  type EvidenceCollectorId,
+  type PackAttestationInput,
+  type PackControlAssessment,
+  type PackControlInput,
+  type PackControlSpec,
+  type PackScorecard,
+  type PackStatus,
+} from "./compliance-packs.js";
+
+// ADR-0056 — THE AI GOVERNANCE COPILOT, the pure half: the read-only tool
+// vocabulary (four tools, no mutating one), the deterministic NL -> structured
+// query step (testable without a provider, and unsteerable by the data it
+// reads), the grounded answer renderer (composed from COUNTS, so it cannot
+// hallucinate a figure), the narrator INTERFACE + prompt/parse/cross-check
+// following ADR-0044's judge pattern, and the proposal record builder.
+export {
+  COPILOT_DECISION_SUPPORT_NOTICE,
+  COPILOT_PROPOSAL_KINDS,
+  COPILOT_SCOPE_CAVEAT,
+  COPILOT_TIMEFRAMES,
+  COPILOT_TOOLS,
+  COPILOT_TOOL_SPECS,
+  buildNarrationPrompt,
+  buildProposalRecord,
+  copilotAskSchema,
+  copilotProposalSchema,
+  narrationIsGrounded,
+  parseNarration,
+  planCopilotQuery,
+  renderGroundedAnswer,
+  type CopilotAskInput,
+  type CopilotEvidence,
+  type CopilotNarration,
+  type CopilotNarrationRequest,
+  type CopilotNarrator,
+  type CopilotProposalInput,
+  type CopilotProposalKind,
+  type CopilotQueryPlan,
+  type CopilotTimeframe,
+  type CopilotTool,
+  type CopilotToolSpec,
+  type GroundedAnswer,
+} from "./copilot.js";

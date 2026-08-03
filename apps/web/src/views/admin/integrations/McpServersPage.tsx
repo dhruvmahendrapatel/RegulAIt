@@ -61,6 +61,11 @@ export default function McpServersPage() {
                     <span className={v.mono}>{fmtUsd(s.pricePerCallUsd)}</span>
                   ),
               },
+              {
+                key: "privateRanges",
+                header: "Private ranges",
+                render: (s) => <PrivateRangesCell key={s.id} server={s} />,
+              },
               { key: "id", header: "Proxy id", render: (s) => <IdChip id={s.id} /> },
             ]}
             rows={servers.data?.servers ?? []}
@@ -91,10 +96,23 @@ export default function McpServersPage() {
   );
 }
 
+/** ADR-0043: the per-server private-range flag as the SPA offers it — the
+ * tri-state maps to boolean|null on the wire (null = inherit the org default,
+ * mcpPrivateRangesDefault). */
+const PRIVATE_RANGE_OPTS = (
+  <>
+    <option value="inherit">inherit org default</option>
+    <option value="true">allow private ranges</option>
+    <option value="false">deny private ranges</option>
+  </>
+);
+const privateRangeValue = (s: string): boolean | null => (s === "inherit" ? null : s === "true");
+
 function RegisterServerForm() {
   const act = useAction();
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
+  const [privateRanges, setPrivateRanges] = useState("inherit");
   return (
     <form
       className={a.formRow}
@@ -102,11 +120,20 @@ function RegisterServerForm() {
       onSubmit={(e) => {
         e.preventDefault();
         void act
-          .run(() => api.post("/v1/servers", { name, url }), "Server registered")
+          .run(
+            () =>
+              api.post("/v1/servers", {
+                name,
+                url,
+                allowPrivateRanges: privateRangeValue(privateRanges),
+              }),
+            "Server registered",
+          )
           .then((ok) => {
             if (ok) {
               setName("");
               setUrl("");
+              setPrivateRanges("inherit");
             }
           });
       }}
@@ -117,8 +144,62 @@ function RegisterServerForm() {
       <Field label="URL" grow>
         <Input required value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://mcp.internal/repo" />
       </Field>
+      <Field label="Private ranges (ADR-0043)">
+        <Select
+          value={privateRanges}
+          onChange={(e) => setPrivateRanges(e.target.value)}
+          title="May this server's URL resolve into private LAN space (RFC1918 / loopback)? 'inherit' follows the org default. Link-local / instance metadata is never opened; a public-internet URL always needs an egress allow entry."
+        >
+          {PRIVATE_RANGE_OPTS}
+        </Select>
+      </Field>
       <Button type="submit" variant="primary" disabled={act.busy}>
         Register
+      </Button>
+      {act.error && (
+        <span className={v.errLine} role="alert">
+          {act.error}
+        </span>
+      )}
+    </form>
+  );
+}
+
+/** ADR-0043: edit one server's private-range posture in place — the PATCH
+ * re-runs the write-time egress check server-side, so an edit that would make
+ * the stored URL unreachable is an honest 400 here, not a surprise at the next
+ * tool call. */
+function PrivateRangesCell(props: { server: McpServer }) {
+  const act = useAction();
+  const stored =
+    props.server.allowPrivateRanges == null ? "inherit" : String(props.server.allowPrivateRanges);
+  const [value, setValue] = useState(stored);
+  return (
+    <form
+      className={v.row}
+      // the registry rows are clickable (they toggle the tools card) — editing
+      // the posture must not also toggle the row (the IdChip precedent)
+      onClick={(e) => e.stopPropagation()}
+      onSubmit={(e) => {
+        e.preventDefault();
+        void act.run(
+          () =>
+            api.patch(`/v1/servers/${props.server.id}`, {
+              allowPrivateRanges: privateRangeValue(value),
+            }),
+          `Private-range posture for ${props.server.name} saved`,
+        );
+      }}
+    >
+      <Select
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        aria-label={`Private-range posture for ${props.server.name}`}
+      >
+        {PRIVATE_RANGE_OPTS}
+      </Select>
+      <Button type="submit" size="sm" disabled={act.busy || value === stored}>
+        Save
       </Button>
       {act.error && (
         <span className={v.errLine} role="alert">

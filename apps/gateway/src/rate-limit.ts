@@ -49,6 +49,11 @@ export interface RateLimitConfig {
   authWindowMs: number;
   /** requests per window for a caller presenting an API key (its own bucket) */
   apiKeyMax: number;
+  /** ADR-0037: requests per window for one SCIM token. A full directory sync
+   * is BURSTY by nature, so this bucket is generous — its job is to bound a
+   * misconfigured or runaway IdP connector, not to fail legitimate syncs. */
+  scimMax: number;
+  scimWindowMs: number;
 }
 
 export const RATE_LIMIT_DEFAULTS: Readonly<RateLimitConfig> = Object.freeze({
@@ -61,6 +66,13 @@ export const RATE_LIMIT_DEFAULTS: Readonly<RateLimitConfig> = Object.freeze({
   authMax: 10,
   authWindowMs: 300_000,
   apiKeyMax: 6000,
+  // ADR-0037: 3000 provisioning calls per minute per token. An Okta/Entra
+  // full-sync of a large directory pushes thousands of requests in a burst and
+  // must not be throttled into a half-synced state; a connector stuck in a
+  // retry loop is bounded well below that. The 429 carries Retry-After, which
+  // is the SCIM-correct backpressure signal every connector honours.
+  scimMax: 3000,
+  scimWindowMs: 60_000,
 });
 
 /** the unauthenticated, credential-accepting endpoints */
@@ -105,8 +117,23 @@ export function resolveRateLimitConfig(
       RATE_LIMIT_DEFAULTS.authWindowMs,
     ),
     apiKeyMax: envInt(env, "REGULAIT_API_KEY_RATE_LIMIT_MAX", RATE_LIMIT_DEFAULTS.apiKeyMax),
+    scimMax: envInt(env, "REGULAIT_SCIM_RATE_LIMIT_MAX", RATE_LIMIT_DEFAULTS.scimMax),
+    scimWindowMs: envInt(
+      env,
+      "REGULAIT_SCIM_RATE_LIMIT_WINDOW_MS",
+      RATE_LIMIT_DEFAULTS.scimWindowMs,
+    ),
     ...override,
   };
+}
+
+/** true when this request is on the ADR-0037 SCIM surface. Matched on the URL
+ * PATH rather than on the route table so it holds for a 404 under /scim/v2 as
+ * well — an unmatched path must not fall back into the generous global bucket
+ * and become a way to probe the surface for free. */
+export function isScimRateLimited(req: FastifyRequest): boolean {
+  const url = req.routeOptions?.url ?? req.url.split("?")[0]!;
+  return url.startsWith("/scim/v2/") || url === "/scim/v2";
 }
 
 /** true when this request is one of the credential-accepting endpoints */
@@ -130,6 +157,17 @@ export function isAuthRateLimited(req: FastifyRequest): boolean {
  */
 export function rateLimitKey(req: FastifyRequest): string {
   if (isAuthRateLimited(req)) return `auth:${req.ip}`;
+  // ADR-0037: the SCIM surface is limited PER scim_token, not per IP and not
+  // in the shared api-key bucket. One IdP connector calls from one address for
+  // thousands of users, so an IP bucket would either throttle a legitimate
+  // sync or have to be so wide it bounds nothing; and a runaway connector must
+  // not be able to spend the allowance of the org's real API clients.
+  if (isScimRateLimited(req)) {
+    const auth = req.headers.authorization;
+    return typeof auth === "string" && auth.toLowerCase().startsWith("bearer ")
+      ? `scim:${auth.slice(7, 39)}`
+      : `scim:anon:${req.ip}`;
+  }
   const auth = req.headers.authorization;
   if (typeof auth === "string" && auth.toLowerCase().startsWith("bearer ")) {
     return `key:${auth.slice(7, 39)}`;
@@ -139,10 +177,13 @@ export function rateLimitKey(req: FastifyRequest): string {
 
 export function rateLimitMax(cfg: RateLimitConfig, key: string): number {
   if (key.startsWith("auth:")) return cfg.authMax;
+  if (key.startsWith("scim:")) return cfg.scimMax;
   if (key.startsWith("key:")) return cfg.apiKeyMax;
   return cfg.globalMax;
 }
 
 export function rateLimitWindowMs(cfg: RateLimitConfig, key: string): number {
-  return key.startsWith("auth:") ? cfg.authWindowMs : cfg.globalWindowMs;
+  if (key.startsWith("auth:")) return cfg.authWindowMs;
+  if (key.startsWith("scim:")) return cfg.scimWindowMs;
+  return cfg.globalWindowMs;
 }

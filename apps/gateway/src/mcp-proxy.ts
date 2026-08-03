@@ -2,7 +2,6 @@ import type { FastifyInstance } from "fastify";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   CallToolRequestSchema,
   ErrorCode,
@@ -27,8 +26,23 @@ import {
 import { visibleTools, type Decision, type ToolRef } from "@regulait/policy-kernel";
 import { selectTools } from "@regulait/optimizer-kernel";
 import type { ModelToolDef } from "@regulait/model-provider";
-import { setToolPriceSchema, type PiiHit } from "@regulait/shared";
+import {
+  setToolPriceSchema,
+  guardrailCategoryList,
+  guardrailWithheldMarker,
+  type PiiHit,
+} from "@regulait/shared";
+import {
+  flattenFindings,
+  guardrailOutcome,
+  recordGuardrailDecision,
+  resolveGuardrailPolicy,
+  runGuardrails,
+  type DispatchGuardrails,
+} from "./guardrails.js";
 import { governedEvaluate } from "./governed-evaluate.js";
+import { abacPrincipalFromRequest, type AbacPrincipalContext } from "./abac-principal.js";
+import { guardedMcpConnect, McpEgressBlockedError } from "./mcp-egress.js";
 import { loadEntitlements } from "./entitlements.js";
 import { effectiveTechniqueMode, loadOrgSettings } from "./org-settings.js";
 import {
@@ -74,10 +88,17 @@ function toolKind(tool: Tool): "read" | "write" {
   return tool.annotations?.readOnlyHint === true ? "read" : "write";
 }
 
-export async function connectUpstream(url: string): Promise<Client> {
-  const client = new Client({ name: "regulait-gateway", version: "0.1.0" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(url)));
-  return client;
+/** ADR-0043: the upstream connect now runs the egress guard EVERY time — the
+ * per-server private-range flag (org default when null) opens ordinary private
+ * LAN only, IMDS/link-local is refused unconditionally, and a public MCP host
+ * needs an egress_allow_hosts entry. A refusal is audited and throws
+ * McpEgressBlockedError with nothing leaving the box; on allow, every HTTP
+ * request of the session goes through the pinned guarded fetch. */
+export async function connectUpstream(
+  db: Db,
+  serverRow: { id: string; url: string; allowPrivateRanges: boolean | null },
+): Promise<Client> {
+  return guardedMcpConnect(db, serverRow);
 }
 
 /** The one governed tool-call primitive, shared by the MCP proxy route (a
@@ -96,10 +117,20 @@ export async function connectUpstream(url: string): Promise<Client> {
  * core; MCP upstreams authenticate via their registered URL, so it is unused
  * today. */
 export type GovernedToolCallOutcome =
-  | { kind: "allowed"; content: unknown; pii?: McpPii; costUsd?: number | null }
+  | {
+      kind: "allowed";
+      content: unknown;
+      pii?: McpPii;
+      guardrails?: DispatchGuardrails;
+      costUsd?: number | null;
+    }
   | { kind: "unknown_tool" }
   | { kind: "denied"; decision: Decision }
   | { kind: "pii_blocked"; reason: string; pii: McpPii }
+  /** ADR-0042: a content-safety detector refused the tool ARGUMENTS. Distinct
+   * from `denied` (entitlement) and `pii_blocked` (§8.4's own classifier) so a
+   * caller — and the audit trail — can tell the three apart. */
+  | { kind: "guardrail_blocked"; reason: string; guardrails: DispatchGuardrails }
   | { kind: "approval_required"; approvalId: string; decision: Decision }
   | { kind: "approval_consumed_race"; approvalId: string };
 
@@ -133,6 +164,12 @@ export async function executeGovernedToolCall(
      * row lands with projectId NULL in the Unattributed bucket) but with no
      * PII enforcement, and it can never hit a project budget. */
     projectId?: string | null;
+    /** ADR-0040: the session facts the ABAC principal bag needs (origin,
+     * authentication strength). A session is a property of the REQUEST, so the
+     * route supplies it; a worker loop with no HTTP request behind it supplies
+     * nothing and the attributes degrade to the honest 'unknown'/false, never
+     * to a silently-strong claim a policy could be fooled by. */
+    principal?: AbacPrincipalContext;
   },
 ): Promise<GovernedToolCallOutcome> {
   const { userId, serverId, toolName } = args;
@@ -162,7 +199,7 @@ export async function executeGovernedToolCall(
   };
   try {
     if (!kind) {
-      upstream = await connectUpstream(serverRow.url);
+      upstream = await connectUpstream(db, serverRow);
       const upstreamTools = await syncUpstreamTools(db, serverId, upstream);
       const found = upstreamTools.find((t) => t.name === toolName);
       if (!found) return { kind: "unknown_tool" };
@@ -179,6 +216,9 @@ export async function executeGovernedToolCall(
       // A4: attribution feeds the deploy-context derivation for mode-scoped
       // rules (lazily — no mode-scoped rules loaded = no extra queries).
       projectId,
+      // ADR-0040: the ABAC principal bag's session facts, when a request is
+      // behind this call.
+      args.principal,
     );
 
     await db.insert(auditLog).values({
@@ -309,6 +349,43 @@ export async function executeGovernedToolCall(
       }
     }
 
+    // ADR-0042 GUARDRAIL ENGINE, MCP path. This entry point matters more than
+    // the other two for prompt-injection specifically: ADR-0034's amendment
+    // showed a governed pipe can carry ATTACKER-CHOSEN BYTES back, so tool
+    // OUTPUT is exactly the surface the ADR names as in-scope. Both phases run
+    // here — arguments in, tool result out — with PII excluded (its dedicated
+    // path is directly above).
+    const mcpGuardrails = await resolveGuardrailPolicy(db, { projectId });
+    let mgInput: ReturnType<typeof runGuardrails> | null = null;
+    if (mcpGuardrails.active) {
+      mgInput = runGuardrails(mcpGuardrails, "input", JSON.stringify(args.arguments ?? null));
+      const outcome = guardrailOutcome(mgInput);
+      if (outcome) {
+        await recordGuardrailDecision(db, {
+          userId,
+          objectType: "mcp_server",
+          objectId: serverId,
+          projectId,
+          evaluation: mgInput,
+          outcome,
+          detail: { toolName, serverId },
+        });
+      }
+      if (mgInput.action === "block") {
+        const reason = `tool arguments blocked by guardrail: ${guardrailCategoryList(mgInput.blocking)}`;
+        return {
+          kind: "guardrail_blocked",
+          reason,
+          guardrails: {
+            action: "block",
+            phase: "input",
+            findings: flattenFindings(mgInput.findings),
+            withheld: false,
+          },
+        };
+      }
+    }
+
     if (approvedApprovalId) {
       // Atomically consume the approval; losing the race means another call
       // already spent it, so this call must go back through the queue.
@@ -322,7 +399,7 @@ export async function executeGovernedToolCall(
       }
     }
 
-    if (!upstream) upstream = await connectUpstream(serverRow.url);
+    if (!upstream) upstream = await connectUpstream(db, serverRow);
     // An upstream FAILURE throws out of here before any metering — a failed
     // call bills nothing, exactly like a failed model dispatch or connector
     // invoke.
@@ -352,6 +429,32 @@ export async function executeGovernedToolCall(
         ? { mode: piiMode, action: piiAction, inputHits, outputHits, withheld }
         : null;
 
+    // ADR-0042 OUTPUT phase — the tool RESULT. This is the injection-carrying
+    // surface: a compromised or hostile MCP server answers with text that the
+    // orchestrator will feed straight back to a model as context. A block is
+    // bill-and-withhold, identical to the PII rule directly above.
+    let mgOutput: ReturnType<typeof runGuardrails> | null = null;
+    let mgWithheld = false;
+    if (mcpGuardrails.active) {
+      mgOutput = runGuardrails(mcpGuardrails, "output", JSON.stringify(content ?? null));
+      if (mgOutput.action === "block") {
+        mgWithheld = true;
+        resultContent = {
+          content: [{ type: "text", text: guardrailWithheldMarker(mgOutput.blocking) }],
+          isError: true,
+        };
+      }
+    }
+    const mgFindings = [...(mgInput?.findings ?? []), ...(mgOutput?.findings ?? [])];
+    const mcpGuardrailView: DispatchGuardrails | null = mgFindings.length
+      ? {
+          action: mgWithheld ? "block" : mgFindings.some((f) => f.action === "warn") ? "warn" : "log",
+          phase: mgWithheld ? "output" : mgInput?.findings.length ? "input" : "output",
+          findings: flattenFindings(mgFindings),
+          withheld: mgWithheld,
+        }
+      : null;
+
     // PILLAR 5 (ADR-0019, widened by ADR-0024 O11): EVERY allowed, executed
     // tool call bills the server's flat per-call list price onto the SAME
     // usage ledger the model and connector paths write. Attribution decides
@@ -377,8 +480,32 @@ export async function executeGovernedToolCall(
         toolName,
         // §8.4 COUNTS ONLY — never the matched substrings
         ...(pii ? { pii: { mode: pii.mode, action: pii.action, inputHits, outputHits } } : {}),
+        // ADR-0042 COUNTS ONLY, same contract
+        ...(mcpGuardrailView
+          ? {
+              guardrails: {
+                action: mcpGuardrailView.action,
+                findings: mcpGuardrailView.findings,
+                withheld: mgWithheld,
+              },
+            }
+          : {}),
       },
     });
+    if (mgOutput) {
+      const outcome = guardrailOutcome(mgOutput);
+      if (outcome) {
+        await recordGuardrailDecision(db, {
+          userId,
+          objectType: "mcp_server",
+          objectId: serverId,
+          projectId,
+          evaluation: mgOutput,
+          outcome,
+          detail: { toolName, serverId },
+        });
+      }
+    }
     // §8.4 audit rows for a PII event (never for a clean payload): an OUTPUT
     // block is a deny; a warn is an allow with 'pii-warned'; log stays silent
     // (its counts are already in the usage detail above).
@@ -418,6 +545,7 @@ export async function executeGovernedToolCall(
       kind: "allowed",
       content: resultContent,
       ...(pii ? { pii } : {}),
+      ...(mcpGuardrailView ? { guardrails: mcpGuardrailView } : {}),
       // ADR-0024 (O11): every executed call is metered, so the cost is always
       // reported back — attributed or not. O10: tool-first resolution.
       costUsd: pricePerCallUsd,
@@ -482,7 +610,7 @@ export async function resolveNodeToolContext(
     if (!serverRow) continue;
     let upstream: Client | null = null;
     try {
-      upstream = await connectUpstream(serverRow.url);
+      upstream = await connectUpstream(db, serverRow);
       const upstreamTools = await syncUpstreamTools(db, serverId, upstream);
       const entitlements = await loadEntitlements(db, userId, serverId);
       const refs: ToolRef[] = upstreamTools.map((t) => ({
@@ -626,7 +754,23 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
       }
     }
 
-    const upstream = await connectUpstream(serverRow.url);
+    // ADR-0043: the connect-time egress verdict surfaces HERE, before the
+    // reply is hijacked into an MCP transport, as the route's ordinary
+    // pre-hijack refusal shape — a plain 403 naming the real reason. The
+    // refusal is already audited inside the guard and nothing left the box.
+    let upstream: Client;
+    try {
+      upstream = await connectUpstream(db, serverRow);
+    } catch (err) {
+      if (err instanceof McpEgressBlockedError) {
+        return reply.status(403).send({
+          error: "egress_blocked",
+          code: err.decision.code,
+          detail: err.decision.reason,
+        });
+      }
+      throw err;
+    }
 
     const proxy = new Server(
       { name: "regulait-gateway", version: "0.1.0" },
@@ -700,6 +844,9 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
         toolName,
         arguments: request.params.arguments,
         projectId,
+        // ADR-0040: SERVER-DERIVED session facts. These come from the resolved
+        // session row, never from a header the caller could set.
+        principal: abacPrincipalFromRequest(req),
       });
 
       switch (outcome.kind) {
@@ -713,6 +860,10 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
         // §8.4 input block: denied pre-call, nothing executed, nothing billed.
         // The message names CATEGORIES only, never the matched content.
         case "pii_blocked":
+          throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${outcome.reason}`);
+        // ADR-0042 input block: same shape, same honesty — a real MCP error,
+        // never a fabricated empty success, and CATEGORIES only in the message.
+        case "guardrail_blocked":
           throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${outcome.reason}`);
         case "approval_required": {
           // name the approver by display name when the kernel carried one — the

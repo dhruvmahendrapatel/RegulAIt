@@ -33,8 +33,26 @@ export interface UserSession {
   idleExpiresAt: string | null;
   lastSeenAt: string | null;
   ip: string | null;
+  /** ADR-0039: where the session was LAST used (ip = where it started) */
+  lastSeenIp: string | null;
   userAgent: string | null;
+  /** ADR-0039: derived browser+OS family — display only, never a control */
+  deviceLabel: string;
+  origin: string;
   revokedAt: string | null;
+}
+
+/** ADR-0039: the caller's own live sessions (GET /auth/sessions) */
+export interface OwnSession {
+  id: string;
+  createdAt: string;
+  expiresAt: string;
+  lastSeenAt: string | null;
+  ip: string | null;
+  lastSeenIp: string | null;
+  origin: string;
+  deviceLabel: string;
+  current: boolean;
 }
 
 export interface OidcProvider {
@@ -45,7 +63,88 @@ export interface OidcProvider {
   allowedEmailDomains: string[] | null;
   defaultRoleId: string | null;
   jitProvisioning: boolean;
+  /** ADR-0038: which id_token claim carries group membership. null = this
+   * provider emits no group signal, so its logins never reconcile roles. */
+  groupsClaim: string | null;
   enabled: boolean;
+}
+
+/** ADR-0036 — the SAML twin. Note what is NOT here: the SP private key is
+ * write-only at the API, so the UI only ever learns WHETHER one is set. */
+export interface SamlProvider {
+  id: string;
+  name: string;
+  /** the IdP's entity id / Issuer — assertions are pinned to it */
+  entityId: string;
+  idpSsoUrl: string;
+  /** PEM list: a rollover stages the incoming cert beside the outgoing one */
+  idpSigningCerts: string[];
+  allowedEmailDomains: string[] | null;
+  defaultRoleId: string | null;
+  jitProvisioning: boolean;
+  wantAssertionsSigned: boolean;
+  wantAuthnResponseSigned: boolean;
+  allowIdpInitiated: boolean;
+  emailAttribute: string | null;
+  /** ADR-0038: which SAML attribute carries group membership. null = this
+   * provider emits no group signal. */
+  groupsAttribute: string | null;
+  spPrivateKeySet: boolean;
+  spCertificate: string | null;
+  enabled: boolean;
+}
+
+/** ADR-0037 — a SCIM provisioning bearer token. The secret itself is NEVER in
+ * this shape: it is returned exactly once by the issue/rotate endpoints and
+ * only its sha256 is stored. */
+export interface ScimToken {
+  id: string;
+  name: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+}
+
+export interface ScimStatus {
+  tokens: ScimToken[];
+  activeTokens: number;
+  lastUsedAt: string | null;
+  counts: {
+    provisionedUsers: number;
+    deactivatedUsers: number;
+    groups: number;
+    memberships: number;
+    /** ADR-0038: distinct synced groups an admin has mapped to a role. The gap
+     * between this and `groups` is how many synced groups are inert. */
+    mappedGroups: number;
+  };
+  /** permanently false: an UNMAPPED group is inert, and there is deliberately
+   * no "default role for unmapped groups" setting to flip it (ADR-0038) */
+  unmappedGroupsGrantEntitlement: boolean;
+  /** permanently false: isAdmin is not a role and is not group-derivable */
+  isAdminGroupDerivable: boolean;
+}
+
+/** ADR-0038: an admin-curated IdP-group -> role mapping. */
+export interface GroupRoleMapping {
+  id: string;
+  source: "saml" | "oidc" | "scim";
+  externalGroup: string;
+  roleId: string;
+  roleName: string;
+  createdAt: string;
+}
+
+/** ADR-0038: a group some identity path has asserted, and what (if anything)
+ * it is mapped to. An entry with `mapped: false` grants nothing. */
+export interface AssertedGroup {
+  source: "saml" | "oidc" | "scim";
+  externalGroup: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  seenCount: number;
+  mapped: boolean;
+  roles: Array<{ roleId: string; roleName: string }>;
 }
 
 export interface Role {
@@ -211,6 +310,10 @@ export interface McpServer {
   /** PILLAR 5: the server's FLAT list price per allowed tool call. Null =
    * unpriced (cost stays an honest null, never invented). */
   pricePerCallUsd?: number | null;
+  /** ADR-0043: may this server's URL resolve into ordinary private LAN space?
+   * null = inherit the org default (mcpPrivateRangesDefault). IMDS/link-local
+   * is never opened by this flag. */
+  allowPrivateRanges?: boolean | null;
   createdAt?: string;
 }
 
@@ -554,9 +657,92 @@ export interface OrgSettings {
   /** ADR-0034 master switch. Off refuses registration/enablement and stops
    * every custom-provider dispatch with a 409 before anything leaves the box. */
   customModelProvidersEnabled?: boolean;
+  /** ADR-0043: the org default for MCP servers whose allowPrivateRanges is
+   * null. true (default) = private-LAN MCP URLs work with zero ceremony;
+   * false = strict. IMDS/link-local stays blocked either way. */
+  mcpPrivateRangesDefault?: boolean;
+  /** ADR-0039: org network envelope (CIDR blocks; null/empty = unrestricted) */
+  sessionIpAllowlist?: string[] | null;
+  /** ADR-0039: human-session knob — off | enforce_at_login | enforce_continuous */
+  sessionIpPolicy?: "off" | "enforce_at_login" | "enforce_continuous";
+  /** ADR-0039: the separate automation knob, same levels over the same list */
+  apiKeyIpPolicy?: "off" | "enforce_at_login" | "enforce_continuous";
 }
 
 export interface OrgSettingsResponse {
   settings: OrgSettings;
   envKeys?: Array<{ provider: string; envVar: string; present: boolean }>;
+}
+
+// ---- ADR-0040 ABAC / policy-as-code --------------------------------------
+
+export interface AbacValidationIssue {
+  message: string;
+  help?: string | null;
+}
+
+export interface AbacValidation {
+  ok: boolean;
+  errors: AbacValidationIssue[];
+  warnings: AbacValidationIssue[];
+}
+
+export interface AbacSchemaInfo {
+  engine: string;
+  versions: string[];
+  current: string;
+  modes: string[];
+  schemaText: string | null;
+  /** stated by the server so the UI never has to infer it */
+  abacCanGrant: false;
+}
+
+export interface AbacPolicySummary {
+  id: string;
+  name: string;
+  description?: string | null;
+  enabled: boolean;
+  activeVersionId: string | null;
+  createdAt: string;
+  /** null when nothing is activated yet (the left-join columns) */
+  activeVersion?: number | null;
+  mode?: "forbid" | "require_approval" | null;
+  timezone?: string | null;
+  schemaVersion?: string | null;
+  source?: string | null;
+  approverUserId?: string | null;
+}
+
+export interface AbacPolicyVersion {
+  id: string;
+  policyId: string;
+  version: number;
+  source: string;
+  schemaVersion: string;
+  mode: "forbid" | "require_approval";
+  timezone: string;
+  approverUserId: string | null;
+  testCases: Array<Record<string, unknown>> | null;
+  authorUserId: string | null;
+  createdAt: string;
+}
+
+export interface AbacPolicyDetail {
+  policy: AbacPolicySummary;
+  versions: AbacPolicyVersion[];
+}
+
+export interface AbacTestRun {
+  policyId: string;
+  version: number;
+  total: number;
+  passed: number;
+  failed: number;
+  results: Array<{
+    name: string;
+    expected: "match" | "no_match";
+    actual: "match" | "no_match";
+    passed: boolean;
+    effect: string;
+  }>;
 }

@@ -165,8 +165,12 @@ async function ensureServer(name: string, url: string): Promise<string> {
   if (existing) return existing.id;
   return (await call("POST", "/v1/servers", { name, url })).id;
 }
-const repoServerId = await ensureServer("repo-tools", "https://repo-tools.mcp.invalid/mcp");
-const warehouseServerId = await ensureServer("data-warehouse", "https://data-warehouse.mcp.invalid/mcp");
+// ADR-0043: demo registry rows are never connected to, but /v1/servers now
+// runs the egress guard at write time and RESOLVES every destination — a
+// `.invalid` hostname fails closed. The loopback dead port (discard) is
+// permitted with zero ceremony under the private-ranges-open default posture.
+const repoServerId = await ensureServer("repo-tools", "http://127.0.0.1:9/repo-mcp");
+const warehouseServerId = await ensureServer("data-warehouse", "http://127.0.0.1:9/warehouse-mcp");
 
 async function ensureTools(
   serverId: string,

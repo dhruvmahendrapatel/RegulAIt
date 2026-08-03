@@ -72,6 +72,35 @@ docker compose --profile tls -f docker-compose.yml \
 Runbook and caveats: [docs/ops/TLS.md](docs/ops/TLS.md). Decision:
 [ADR-0029](docs/decisions/0029-zero-cost-tls-caddy-sslip-letsencrypt.md).
 
+### Deploy it into your own environment (BYOC / air-gapped)
+
+The quickstart above is local dev. To stand RegulAIt up in a customer's own cloud account or on an
+air-gapped host — [ADR-0041](docs/decisions/0041-byoc-primary-motion.md) makes that the primary
+motion — there is one command:
+
+```bash
+./scripts/install.sh --mode byoc --domain regulait.acme.example --tls letsencrypt
+./scripts/install.sh --check --mode air_gapped --domain x.corp.local --dir /tmp/plan  # dry run
+```
+
+It preflights docker/compose/ports/disk, **refuses a missing or weak `REGULAIT_DATA_KEY`**, renders
+`.env` + a compose override deterministically (re-running converges; it never destroys data), and
+brings the stack up. The air-gapped path pulls and builds nothing — it runs pre-seeded images
+loaded from a file and refuses Let's Encrypt, whose ACME challenge is an outbound call by
+construction.
+
+Updates are **signed bundles verified offline against a pinned public key**
+(`scripts/build-update-bundle.sh` / `verify-update-bundle.sh` / `apply-update-bundle.sh`); the
+verifier fails closed on a bad or missing signature, an unknown key, a modified/missing/unlisted
+file, and a downgrade.
+
+| | |
+|---|---|
+| Install, TLS choices, air-gapped image bundle | [docs/deployment/INSTALL.md](docs/deployment/INSTALL.md) |
+| Signed updates, key custody and rotation | [docs/deployment/UPGRADE.md](docs/deployment/UPGRADE.md) |
+| Backup / restore, and the `REGULAIT_DATA_KEY` custody warning | [docs/deployment/BACKUP_RESTORE.md](docs/deployment/BACKUP_RESTORE.md) |
+| **What crosses the boundary, per mode, verified against source** | [docs/deployment/DATA_BOUNDARY.md](docs/deployment/DATA_BOUNDARY.md) |
+
 ### Hardening knobs (ADR-0031) — safe defaults, no configuration required
 
 | Variable | Default | What it does |

@@ -5,15 +5,37 @@ import {
   integer,
   boolean,
   doublePrecision,
+  foreignKey,
   index,
   jsonb,
   numeric,
   pgTable,
   text,
   timestamp,
+  unique,
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
+
+// ADR-0042 (migration 0055) — the guardrail vocabulary, declared HERE rather
+// than imported from @regulait/shared because this package deliberately has no
+// dependency on it. The two definitions are kept in lockstep by the gateway,
+// which imports both and would not type-check if they diverged.
+/** the detector classes the guardrail registry evaluates */
+export const GUARDRAIL_DETECTOR_IDS = [
+  "pii",
+  "prompt_injection",
+  "jailbreak",
+  "toxicity",
+  "semantic_dlp",
+] as const;
+export type GuardrailDetectorId = (typeof GUARDRAIL_DETECTOR_IDS)[number];
+/** `log|warn|block` is exactly the piiMode triad; `off` is the per-detector
+ * "do not run this at all" that piiMode expresses as a NULL cascade result */
+export const GUARDRAIL_MODES = ["off", "log", "warn", "block"] as const;
+export type GuardrailMode = (typeof GUARDRAIL_MODES)[number];
+/** admin-supplied extra vocabulary per detector, additive across scopes */
+export type GuardrailTermMap = Partial<Record<GuardrailDetectorId, string[]>>;
 
 export const users = pgTable("users", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -51,12 +73,28 @@ export const users = pgTable("users", {
   /** replay guard: the highest RFC 6238 time-step already consumed — a code
    * for a step <= this is refused even inside the ±1 validation window. */
   totpLastUsedStep: bigint("totp_last_used_step", { mode: "number" }),
+  /** ADR-0037 (migration 0052): the IdP's OWN id for this user, as asserted on
+   * the SCIM `externalId` attribute. NULL for every locally-created user and
+   * every pre-0052 row — none was invented. Unique among non-null values.
+   *
+   * It exists for exactly one reason: email is the SCIM join key, so an IdP
+   * that changes someone's primary email would otherwise mint a SECOND
+   * account. A connector that correlates by SCIM id first can find the
+   * existing row and re-map the email onto it. */
+  scimExternalId: text("scim_external_id"),
   /** login lockout counters (org_settings dials set the thresholds) */
   failedLoginCount: integer("failed_login_count").notNull().default(0),
   lastFailedLoginAt: timestamp("last_failed_login_at", { withTimezone: true }),
   lockedUntil: timestamp("locked_until", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+},
+  (t) => [
+    // ADR-0037: unique among NON-NULL values (Postgres treats NULLs as
+    // distinct), so an IdP id maps to at most one account while every user
+    // that never came from an IdP keeps a null.
+    uniqueIndex("users_scim_external_id_uq").on(t.scimExternalId),
+  ],
+);
 
 // --- ADR-0025: server-side browser sessions ---------------------------------
 // The cookie carries a 256-bit random token; only its sha256 is stored — a DB
@@ -68,14 +106,27 @@ export const users = pgTable("users", {
  * - `password`  — POST /auth/login (password, no MFA required)
  * - `api_key`   — POST /auth/login-with-key with a user's API key
  * - `oidc`      — the OIDC callback minted it
+ * - `saml`      — ADR-0036 (migration 0051): the SAML Assertion Consumer
+ *   Service minted it. Co-equal with `oidc`: same session machinery, same
+ *   default-deny JIT posture, and — like `oidc` — it NEVER receives the
+ *   ADR-0028 current-password bypass (that bypass is `api_key`-only).
  * - `bootstrap` — POST /auth/login-with-key with the deploy-time bootstrap token
  * - `unknown`   — a pre-0046 row. The true origin is unknowable and was NOT
  *   invented at backfill time; `unknown` never receives the ADR-0028
  *   current-password bypass (fail closed).
  * Sessions completed through MFA are `password` — the second factor does not
  * change WHICH credential established the session. */
-export const SESSION_ORIGINS = ["password", "api_key", "oidc", "bootstrap", "unknown"] as const;
+export const SESSION_ORIGINS = ["password", "api_key", "oidc", "saml", "bootstrap", "unknown"] as const;
 export type SessionOrigin = (typeof SESSION_ORIGINS)[number];
+
+/** ADR-0039 (migration 0050): the IP-policy levels shared by BOTH knobs
+ * (session_ip_policy for human sessions, api_key_ip_policy for the automation
+ * path). off = today; enforce_at_login gates session CREATION only;
+ * enforce_continuous gates every authenticated use and force-revokes an
+ * out-of-envelope session on the spot. Fail-closed: an undeterminable client
+ * IP under an enforcing policy is denied. */
+export const IP_POLICIES = ["off", "enforce_at_login", "enforce_continuous"] as const;
+export type IpPolicy = (typeof IP_POLICIES)[number];
 
 export const authSessions = pgTable(
   "auth_sessions",
@@ -97,12 +148,24 @@ export const authSessions = pgTable(
     idleMinutes: integer("idle_minutes").notNull(),
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
     ip: text("ip"),
+    /** ADR-0039 (migration 0050): where the session was LAST used (`ip` above
+     * stays the creation-time record). Written in the SAME update as the
+     * idle-slide on every authenticated use — no extra query. Nullable:
+     * pre-0050 rows carry no record and none was invented. */
+    lastSeenIp: text("last_seen_ip"),
     userAgent: text("user_agent"),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
   },
   (t) => [
     index("auth_sessions_user_idx").on(t.userId),
-    check("auth_sessions_origin_ck", sql`${t.origin} IN ('password', 'api_key', 'oidc', 'bootstrap', 'unknown')`),
+    // ADR-0036 (migration 0051) widened this to admit 'saml'. The constraint
+    // is the wall that would otherwise make every SAML session insert fail —
+    // adding the origin to SESSION_ORIGINS without widening it here would
+    // typecheck and then 23514 at runtime.
+    check(
+      "auth_sessions_origin_ck",
+      sql`${t.origin} IN ('password', 'api_key', 'oidc', 'saml', 'bootstrap', 'unknown')`,
+    ),
   ],
 );
 
@@ -133,6 +196,15 @@ export const oidcProviders = pgTable("oidc_providers", {
   defaultRoleId: uuid("default_role_id").references(() => roles.id, { onDelete: "set null" }),
   /** default-deny: an unknown subject with JIT off is 403'd and audited */
   jitProvisioning: boolean("jit_provisioning").notNull().default(false),
+  /** ADR-0038 (migration 0053): which id_token claim carries group membership
+   * (commonly `groups`, sometimes `roles` or a vendor-namespaced URI).
+   *
+   * NULL — the default, and every pre-0053 row — means this provider emits NO
+   * group signal, so a login through it never reconciles group-derived roles.
+   * Naming the claim is an explicit admin act, exactly like naming an email
+   * attribute. Naming it does NOT grant anything: an asserted group still
+   * confers nothing until an admin maps it (`group_role_mappings`). */
+  groupsClaim: text("groups_claim"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
@@ -154,6 +226,180 @@ export const oidcLoginStates = pgTable("oidc_login_states", {
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
 });
 
+// --- ADR-0036: SAML 2.0 SSO (migration 0051) ---------------------------------
+// A SAML twin of oidcProviders, shape-for-shape, so the admin surface, the JIT
+// policy and the audit objectType extend by ANALOGY rather than by a new
+// pattern. The two federated paths are co-equal: same createSession, same
+// default-deny posture, same allowed-domain backstop.
+export const samlProviders = pgTable("saml_providers", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull().unique(),
+  /** the IdP's entity id / Issuer. Our SP entity id is deployment-global (it
+   * is derived per-request, exactly like the OIDC redirect_uri); THIS column
+   * is the value we pin an assertion's <Issuer> against. */
+  entityId: text("entity_id").notNull(),
+  /** the IdP SingleSignOn endpoint an SP-initiated AuthnRequest 302s to */
+  idpSsoUrl: text("idp_sso_url").notNull(),
+  /** the IdP's X.509 signing certificate(s), PEM. A LIST so a certificate
+   * ROLLOVER can stage the incoming cert before the IdP cuts over — an
+   * assertion signed by ANY pinned cert verifies. Signatures are verified
+   * against these pinned certs, NEVER against a cert embedded in the
+   * document: that pinning is what defeats signature-wrapping. */
+  idpSigningCerts: jsonb("idp_signing_certs").$type<string[]>().notNull(),
+  enabled: boolean("enabled").notNull().default(true),
+  /** NULL = any domain; else the asserted email's domain must be listed. The
+   * MANDATORY backstop — an IdP email attribute is only as trustworthy as the
+   * IdP's own verification, so an empty list is a conscious admin choice. */
+  allowedEmailDomains: jsonb("allowed_email_domains").$type<string[]>(),
+  /** role granted to JIT-provisioned users (never admin); NULL = no role */
+  defaultRoleId: uuid("default_role_id").references(() => roles.id, { onDelete: "set null" }),
+  /** default-deny: an unknown subject with JIT off is 403'd and audited */
+  jitProvisioning: boolean("jit_provisioning").notNull().default(false),
+  /** posture flags handed straight to the library. Defaulting BOTH signature
+   * requirements on would break the (common) IdP that signs only the
+   * assertion, so want_authn_response_signed defaults false while
+   * want_assertions_signed defaults TRUE — at least one signature over the
+   * assertion is always required, and turning want_assertions_signed off is
+   * refused at the API (see samlProviderSchema). */
+  wantAssertionsSigned: boolean("want_assertions_signed").notNull().default(true),
+  wantAuthnResponseSigned: boolean("want_authn_response_signed").notNull().default(false),
+  /** IdP-initiated SSO is a known CSRF / stolen-assertion surface: OPT-IN per
+   * provider. Off (the default) means an assertion with no matching
+   * outstanding InResponseTo correlation row is REFUSED. */
+  allowIdpInitiated: boolean("allow_idp_initiated").notNull().default(false),
+  /** the SAML attribute carrying the email when the NameID format is not
+   * emailAddress. NULL = try the usual suspects (NameID/emailAddress, the
+   * `email`/`mail` profile keys, urn:oid:0.9.2342.19200300.100.1.3). */
+  emailAttribute: text("email_attribute"),
+  /** OPTIONAL SP-side private key for request signing / encrypted assertions.
+   * AES-256-GCM under REGULAIT_DATA_KEY, WRITE-ONLY at the API — byte-identical
+   * handling to oidc_providers.client_secret_ciphertext and the TOTP secret. */
+  spPrivateKeyCiphertext: text("sp_private_key_ciphertext"),
+  /** the matching SP public certificate (PEM) — public by definition, it is
+   * published in our SP metadata for the IdP admin to consume. */
+  spCertificate: text("sp_certificate"),
+  /** ADR-0038 (migration 0053): the SAML attribute carrying group membership
+   * (`groups`, `memberOf`, `http://schemas.xmlsoap.org/claims/Group`, …).
+   *
+   * NULL — the default, and every pre-0053 row — means this provider emits NO
+   * group signal, so a login through it never reconciles group-derived roles.
+   * Naming it grants nothing on its own: an asserted group confers nothing
+   * until an admin maps it (`group_role_mappings`). */
+  groupsAttribute: text("groups_attribute"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** the twin of oidcLoginStates: one row per SP-initiated AuthnRequest. The
+ * request id is what the IdP echoes back as InResponseTo, so this row IS the
+ * correlation proof that the login was solicited; relay_state and returnTo
+ * live server-side, never in the browser. SINGLE-USE (claimed-and-deleted)
+ * and swept by expiry. */
+export const samlLoginStates = pgTable("saml_login_states", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  providerId: uuid("provider_id")
+    .notNull()
+    .references(() => samlProviders.id, { onDelete: "cascade" }),
+  /** the AuthnRequest ID — matched against the response's InResponseTo */
+  requestId: text("request_id").notNull().unique(),
+  relayState: text("relay_state").notNull().unique(),
+  /** post-login browser destination — restricted to /app or /admin */
+  returnTo: text("return_to").notNull().default("/app"),
+  /** the ACS URL this request named; the assertion's Recipient must match it */
+  acsUrl: text("acs_url").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+});
+
+/** REPLAY seen-set: the assertion ID of every accepted assertion, kept until
+ * its validity window closes. The SAML analogue of the single-use OIDC state
+ * row and the TOTP lastUsedStep guard — a captured assertion presented twice
+ * inside its own NotOnOrAfter is refused the second time. Swept by expiry. */
+export const samlAssertionIds = pgTable("saml_assertion_ids", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  providerId: uuid("provider_id")
+    .notNull()
+    .references(() => samlProviders.id, { onDelete: "cascade" }),
+  /** globally unique: an assertion ID is required to be unique by the spec,
+   * and scoping the guard per-provider would let a second registered provider
+   * re-play the first one's assertion. */
+  assertionId: text("assertion_id").notNull().unique(),
+  seenAt: timestamp("seen_at", { withTimezone: true }).notNull().defaultNow(),
+  /** the assertion's own NotOnOrAfter (plus the accepted skew): after this the
+   * assertion is refused on its own merits and the row can be swept. */
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+});
+
+// --- ADR-0037: SCIM 2.0 provisioning (migration 0052) ------------------------
+// The IdP-machine-to-gateway plumbing an enterprise provisioning engine talks
+// to. Three tables and one column, and the most important thing about all of
+// them is what they do NOT contain: no hard-delete path for a user. SCIM's
+// `DELETE /Users/:id` and `PATCH active:false` both land on ADR-0022's
+// `users.disabled_at`, so offboarding is instant, complete (sessions revoked,
+// keys stop authenticating) and REVERSIBLE.
+
+/**
+ * One bearer credential per configured IdP integration — deliberately the
+ * `api_keys` shape field for field: a 256-bit random token whose sha256 is the
+ * only thing ever stored, minted and shown exactly once, revocable, with a
+ * `lastUsedAt` that makes "is this integration actually running?" answerable
+ * from the admin portal.
+ *
+ * This is a DISTINCT trust path from `users`: the SCIM routes authenticate on
+ * this table and on nothing else — never a session cookie, never a user API
+ * key — so a leaked SCIM token carries provisioning power and no user
+ * identity, and rotating it touches no human account.
+ */
+export const scimTokens = pgTable("scim_tokens", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  /** operator-facing label, and the ATTRIBUTION name written into every audit
+   * row this token's requests produce ("okta-prod deactivated x@y") */
+  name: text("name").notNull().unique(),
+  tokenHash: text("token_hash").notNull().unique(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+});
+
+/**
+ * A group as the IdP asserts it. `externalId` is the IdP's own id and is what
+ * a replayed full sync converges on; it is nullable (RFC 7643 makes it
+ * optional and not every connector sends one on create) but UNIQUE among
+ * non-null values, so a group that has one can exist exactly once.
+ *
+ * A row here grants NOTHING. It is inbound sync state. Turning membership into
+ * entitlement is an admin-defined, default-deny mapping — ADR-0038 — and is
+ * deliberately absent here so SCIM cannot become a privilege-escalation path.
+ */
+export const scimGroups = pgTable("scim_groups", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  externalId: text("external_id").unique(),
+  displayName: text("display_name").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** group → user membership. The UNIQUE(group, user) index is what makes a
+ * replayed full-org sync CONVERGE rather than duplicate — the reconciler
+ * computes deltas, and the index is the backstop if two syncs race. */
+export const scimGroupMembers = pgTable(
+  "scim_group_members",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    groupId: uuid("group_id")
+      .notNull()
+      .references(() => scimGroups.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("scim_group_members_group_user_uq").on(t.groupId, t.userId),
+    index("scim_group_members_user_idx").on(t.userId),
+  ],
+);
+
 export const mcpServers = pgTable("mcp_servers", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: text("name").notNull().unique(),
@@ -163,6 +409,14 @@ export const mcpServers = pgTable("mcp_servers", {
   // never invented (agents' costPerMTok null-safety). A tool call is a discrete
   // governed unit of work, so it is priced per call rather than per token.
   pricePerCallUsd: doublePrecision("price_per_call_usd"),
+  /** ADR-0043 (migration 0049): may this server's URL resolve into ordinary
+   * private LAN space (RFC1918 / loopback / ULA)? NULL = inherit the org
+   * default (org_settings.mcpPrivateRangesDefault, true by default — the
+   * self-hosted `http://mcp.internal:9000` case is the ORDINARY deployment).
+   * 169.254.0.0/16 (IMDS) and the other unconditional ranges are NEVER opened
+   * by this flag; a PUBLIC-internet URL still needs an egress_allow_hosts
+   * entry regardless of it. */
+  allowPrivateRanges: boolean("allow_private_ranges"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -276,6 +530,11 @@ export const auditLog = pgTable(
         // as objectType "user"; admin CRUD of an SSO provider audits as
         // "oidc_provider". Plain text column — no DDL needed.
         "oidc_provider",
+        // ADR-0036: admin CRUD of a SAML provider, and every SAML assertion
+        // refusal that is a property of the PROVIDER rather than of a user
+        // (unsolicited assertion, replay, audience/recipient/issuer mismatch).
+        // Plain text column — no DDL needed.
+        "saml_provider",
         // ADR-0034: admin registration/update/enable/removal of a CUSTOM LLM
         // provider, every egress-allow-list change, and the per-dispatch
         // destination-host record (the point of a governance product is that
@@ -295,6 +554,148 @@ export const auditLog = pgTable(
         // needed.
         "git_connection",
         "pm_connection",
+        // ADR-0043: an `mcp_servers.url` refused by the egress guard — at
+        // write time (the 400 on POST/PATCH /v1/servers) or at connect time
+        // (the audited refusal a re-pointed or pre-0049 row now gets). Plain
+        // text column — no DDL needed.
+        "mcp_server",
+        // ADR-0037: SCIM group sync. Group CRUD and every membership
+        // add/remove audits here; SCIM USER provisioning keeps objectType
+        // "user" so "what happened to this account" stays one query. Plain
+        // text column — no DDL needed.
+        "scim_group",
+        // ADR-0037: an admin issuing / rotating / revoking a SCIM bearer
+        // token. The token is a provisioning-power credential on its own trust
+        // path, so its lifecycle is a governed act in its own right rather
+        // than a footnote on some user's row. Plain text column — no DDL.
+        "scim_token",
+        // ADR-0038: admin CRUD of a group→role mapping, AND every group→role
+        // reconciliation an identity event triggers (the asserted groups, the
+        // mappings that fired, and each role_assignments insert/remove with its
+        // origin). This is what makes "why does this user hold this role?"
+        // resolve to either an admin action or a named group+mapping. Plain
+        // text column — no DDL needed.
+        "group_role_mapping",
+        // ADR-0040: admin CRUD of an ABAC/Cedar policy — create, new version,
+        // ACTIVATE, ROLLBACK, deactivate, delete. Activation is the act that
+        // makes a policy start denying real calls, so it is a governed act in
+        // its own right and lands here with the from/to version numbers. The
+        // DECISIONS those policies produce audit as ordinary governed rows
+        // (objectType "mcp_tool", ruleId = the policy id) — one audit trail,
+        // exactly as the ADR requires. Plain text column — no DDL needed.
+        "abac_policy",
+        // ADR-0044: an evaluation RUN — its verdict (passed / regressed /
+        // failed), the dataset version and agent snapshot it measured, which
+        // judge scored it and what it cost — plus an admin pinning or clearing
+        // a baseline, which changes what every later gate is compared against.
+        // The eval's own DISPATCHES audit as ordinary "agent" rows through
+        // executeGovernedDispatch, so the trail stays single. Plain text
+        // column — no DDL needed.
+        "eval_run",
+        // ADR-0045: a MODEL CARD — authoring/editing a card, requesting a
+        // sign-off, the decided sign-off, a revocation, an expiry sweep flip,
+        // and every DISPATCH REFUSED because the model has no unexpired
+        // approved card. The refusal is the one that matters: it is what makes
+        // "no unreviewed model reaches production data" an audited property
+        // rather than a slide. Plain text column — no DDL needed.
+        "model_card",
+        // ADR-0046: an admin creating or deleting an approval ROUTING RULE.
+        // Authoring one changes whose queue every matching approval lands in
+        // from that moment on, so it is a governed act in its own right. The
+        // ROUTING and SLA events those rules produce audit on the approval's
+        // OWN objectType (ruleIds `approval-routed`, `approval-sla-breached`,
+        // `approval-claimed`, `approval-bulk-*`), so "what happened to this
+        // approval" stays one query. Plain text column — no DDL needed.
+        "approval_assignment_rule",
+        // ADR-0047: an admin authoring a report DEFINITION or SCHEDULE, every
+        // report GENERATION (with the effective scope it was permitted to
+        // query), every EXPORT, and — the row that matters — every generation
+        // REFUSED because the caller's entitlement did not cover the scope.
+        // A report aggregates across teams, so "who was told no" is as much
+        // the record as "what was produced". Plain text column — no DDL needed.
+        "report",
+        // ADR-0048: an admin creating a new immutable VERSION of a governance
+        // artifact (a base system prompt, a rules-engine artifact), starting or
+        // adjusting a CANARY, PROMOTING one to active — with or without the
+        // ADR-0044 eval gate, the override being audited with its reason — and
+        // ROLLING BACK. Activation is the act that changes what every
+        // subsequent dispatch is governed by, so it is a governed act in its
+        // own right. The DISPATCHES those versions serve stamp the version onto
+        // `usage_events` rather than emitting a second audit row, so the trail
+        // stays single. Plain text column — no DDL needed.
+        "config_version",
+        // ADR-0051: an admin authoring an immutable RATE CARD version, opening
+        // or CLOSING a billing period, every statement CUT (with the effective
+        // scope it was permitted to total), the one-way ISSUE, every EXPORT,
+        // every RE-DERIVATION and its drift, and — the rows that matter — every
+        // cut REFUSED because the caller's entitlement did not cover the scope
+        // and every issue REFUSED because the version covered only part of it.
+        // An invoice is the shape in which one team's spend leaks and the shape
+        // in which history gets quietly restated, so both refusals are records.
+        // Plain text column — no DDL needed.
+        "rate_card",
+        "billing_period",
+        "billing_statement",
+        // ADR-0052: an admin INSTALLING a signed license, every operator-driven
+        // re-verification, the escalating grace/expiry warnings, and — the rows
+        // that matter most — every REFUSED artifact (tampered, signed by an
+        // unpinned key, malformed) and every act refused because the license
+        // lapsed or the seat cap was reached. A refused forgery is exactly the
+        // row an operator needs, and it exists even though the artifact never
+        // became a license. Plain text column — no DDL needed.
+        "license",
+        // ADR-0054: the first-run wizard's checklist transitions, and every
+        // IMPORT — planned, applied, and (the rows that matter) REFUSED. An
+        // import is bulk state-mutation power handed to a file someone else
+        // wrote, so "an import tried to mint an admin and was refused" has to
+        // be a row an operator can find, not an error message that scrolled
+        // past. Plain text column — no DDL needed.
+        "onboarding_step",
+        "onboarding_import",
+        // ADR-0060 (migration 0067): the GENESIS row of the tamper-evident hash
+        // chain, and nothing else. It is an audit_log row rather than a row in
+        // some side table on purpose: the boundary between "un-chained legacy"
+        // and "covered by the chain" belongs IN the trail an auditor reads, in
+        // words, at the exact position where the guarantee starts. Plain text
+        // column — no DDL needed.
+        "audit_chain",
+        // ADR-0055: shadow-AI discovery. An admin editing the detection
+        // CATALOGUE (which providers are detectable at all), an evidence
+        // IMPORT — including the refused ones, which are the rows that matter —
+        // and every disposition/remediation-link on a FINDING. The discovery
+        // engine is governed by the kernel it feeds (ADR-0055 §5): there is no
+        // privileged scan identity that reads without an audit row. Plain text
+        // column — no DDL needed.
+        "ai_endpoint_signature",
+        "shadow_ai_import",
+        "shadow_ai_finding",
+        // ADR-0061: ChatOps approvals. Admin CRUD of a chat WORKSPACE and of a
+        // chat→RegulAIt IDENTITY LINK (the trust artifact that decides which
+        // human a Slack click binds to), the outbound mirror of an approval,
+        // and — the rows that matter — every inbound callback REFUSED because
+        // the chat identity mapped to nobody, to a non-approver, or to an
+        // approval whose sensitivity makes it in-app only. The DECISION itself
+        // audits as an ordinary approval row through the one decide path, so
+        // the trail stays single. Plain text column — no DDL needed.
+        "chatops_connection",
+        "chat_identity_link",
+        // ADR-0058: authoring/seeding a compliance PACK, ACTIVATING a version
+        // (and the retirement of the one it supersedes), recording an
+        // ATTESTATION on an organisational control, every pack EVALUATION with
+        // the effective scope it was permitted to query — and the two rows that
+        // matter: every evaluation REFUSED because the caller's entitlement did
+        // not cover the scope, and every attestation REFUSED because the
+        // control is auto-evidenced and a human statement must not stand in for
+        // ledger evidence. Plain text column — no DDL needed.
+        "compliance_pack",
+        // ADR-0056: the governance COPILOT. Every question asked of it, with
+        // the exact entitlement scope its retrieval was narrowed to; every
+        // narration dispatch; every proposal it opened in the Approvals Queue;
+        // and the refusals — a narrator agent the invoking user may not call,
+        // and a guardrail hit on evidence read out of the audit log itself.
+        // The copilot is a governed tenant, so its trail is this trail.
+        "copilot_query",
+        "copilot_proposal",
       ],
     })
       .notNull()
@@ -313,8 +714,81 @@ export const auditLog = pgTable(
     // are honestly un-backfillable (they never recorded a mode, ADR-0019),
     // and most rows (MCP calls, membership changes, …) have no mode at all.
     deployMode: text("deploy_mode", { enum: ["hosted", "byoc", "air_gapped"] }),
+    // --- ADR-0060 (migration 0067): the tamper-evident hash chain ------------
+    // All four are NULL together (a DB CHECK enforces all-or-none) on every row
+    // written BEFORE the chain existed. Those rows are un-chained legacy: the
+    // integrity guarantee does not cover them, and chaining them retroactively
+    // would mean rewriting them, which is indistinguishable from tampering.
+    // See migration 0067's header and `@regulait/shared`'s `audit-chain.ts`.
+    //
+    // FK-FREENESS IS PRESERVED: none of these reference anything. A row stays
+    // verifiable from its own bytes plus its predecessor's `rowHash` long after
+    // every user, server and project it names has been deleted.
+    /** strict total chain order. NOT `at` — timestamps collide and are not
+     * monotonic. Assigned as max(seq)+1 under an advisory lock, so a rolled-back
+     * transaction never burns a number and leaves a gap that would have to be
+     * reported as a possible deletion. */
+    seq: bigint("seq", { mode: "number" }),
+    /** SHA-256 over the canonical serialization of this row's immutable facts.
+     * Changes iff the RECORD was edited. */
+    contentHash: text("content_hash"),
+    /** the PRECEDING row's `rowHash` — see `auditRowHash()` for why it is not
+     * the predecessor's `contentHash`. 64 zeros at genesis. */
+    prevHash: text("prev_hash"),
+    /** `SHA-256(prevHash || contentHash)` — the linked value, and the thing the
+     * WORM anchor pins. Stored so the next append can link without recomputing,
+     * and so editing it directly is itself detectable. */
+    rowHash: text("row_hash"),
   },
-  (t) => [index("audit_log_user_at_idx").on(t.userId, t.at)],
+  (t) => [
+    index("audit_log_user_at_idx").on(t.userId, t.at),
+    uniqueIndex("audit_log_seq_uq").on(t.seq),
+  ],
+);
+
+/**
+ * ADR-0060 §4 — the local ledger of chain-head ANCHORS.
+ *
+ * A hash chain detects any edit by someone who cannot recompute the whole
+ * chain. It does NOT catch a DB admin who rewrites every row AND every hash:
+ * that forgery is internally consistent, and local verification blesses it.
+ * What closes the gap is pinning the chain HEAD somewhere that admin cannot
+ * rewrite — S3 Object Lock in compliance mode, and/or an independent external
+ * transparency log. A full recompute then diverges from the anchored head.
+ *
+ * This table is NOT the trust root. A row here is exactly as rewritable as any
+ * other row; `status`/`externalRef` are what say whether an externalized,
+ * genuinely immutable copy exists. In an air-gapped install anchors sit here as
+ * `pending` until connectivity resumes (§8.5's buffer-and-sync posture), and the
+ * verify response discloses the larger undetectable window rather than hiding
+ * it.
+ *
+ * FK-free, like `audit_log` itself and for the same reason.
+ */
+export const auditAnchors = pgTable(
+  "audit_anchors",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** the chain head that was anchored */
+    seq: bigint("seq", { mode: "number" }).notNull(),
+    rowHash: text("row_hash").notNull(),
+    /** `at` of the row at `seq`, so "the trail was intact as of…" needs no
+     * second lookup into a table that may have been tampered with since */
+    headAt: timestamp("head_at", { withTimezone: true }).notNull(),
+    algorithm: text("algorithm").notNull().default("sha256"),
+    /** `none` = no sink configured, so this anchor exists ONLY here and is NOT
+     * tamper-resistant. Recorded honestly rather than implying coverage. */
+    destination: text("destination", {
+      enum: ["local_worm", "s3_object_lock", "external_log", "none"],
+    }).notNull(),
+    status: text("status", { enum: ["pending", "flushed", "failed"] }).notNull().default("pending"),
+    externalRef: text("external_ref"),
+    flushedAt: timestamp("flushed_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    deployMode: text("deploy_mode", { enum: ["hosted", "byoc", "air_gapped"] }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("audit_anchors_seq_idx").on(t.seq), index("audit_anchors_status_idx").on(t.status, t.seq)],
 );
 
 // §3 approval requirement rules: a granted call matching a rule pauses for
@@ -399,7 +873,24 @@ export const approvals = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
     objectType: text("object_type", {
-      enum: ["mcp_tool", "workflow", "run", "project", "infra_operation"],
+      // ADR-0045: 'model_card' — an MRM sign-off / recertification request.
+      // The column has no DB CHECK (see migration 0001), so this is a TS-only
+      // widening with no DDL, exactly like the values ADR-0011/0016/0017 added.
+      // The whole point is that MRM does NOT get a second queue.
+      // ADR-0056: 'copilot_proposal' — a policy-tightening / grant-revocation
+      // diff the governance copilot PROPOSED. Same reasoning as 'model_card'
+      // above: the copilot does NOT get a second inbox, and its only route to a
+      // change is an ordinary row in this one queue, applied by a named human
+      // under their own identity.
+      enum: [
+        "mcp_tool",
+        "workflow",
+        "run",
+        "project",
+        "infra_operation",
+        "model_card",
+        "copilot_proposal",
+      ],
     })
       .notNull()
       .default("mcp_tool"),
@@ -532,9 +1023,94 @@ export const roleAssignments = pgTable(
     roleId: uuid("role_id")
       .notNull()
       .references(() => roles.id, { onDelete: "cascade" }),
+    /** ADR-0038 (migration 0053) — WHY this user holds this role.
+     *
+     * `direct`  an admin assigned it. NEVER touched by an IdP reconciliation.
+     * `group`   a currently-mapped, currently-asserted IdP group implies it.
+     *           Owned end-to-end by the group reconciler and removed by it the
+     *           moment the group or the mapping goes away.
+     *
+     * DEFAULT 'direct' backfills every pre-0053 row as admin-direct, which is
+     * exactly what they are — no group mapping existed to have created them. */
+    origin: text("origin", { enum: ["direct", "group"] }).notNull().default("direct"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [uniqueIndex("role_assignments_user_role_uq").on(t.userId, t.roleId)],
+  (t) => [
+    // ADR-0038: the unique key INCLUDES origin so a role held BOTH ways lives
+    // in two rows. That is what makes "a sync can never remove an admin's
+    // direct grant" structural rather than merely careful: the reconciler's
+    // DELETE is scoped to origin='group', and a direct assignment is a
+    // different ROW, not a different column value on the same row.
+    uniqueIndex("role_assignments_user_role_origin_uq").on(t.userId, t.roleId, t.origin),
+    index("role_assignments_user_origin_idx").on(t.userId, t.origin),
+  ],
+);
+
+// --- ADR-0038: IdP group → RegulAIt role mapping (migration 0053) ------------
+// The bridge from "an external directory asserts membership" to "this user
+// holds this role". Default-deny (an unmapped group confers nothing), additive
+// (it enters at the role_assignments layer the kernel already reads, so it can
+// never mint an entitlement a role does not carry), and subordinate to the
+// per-user layer (ADR-0019 revocations still beat a group-implied role).
+
+/** the identity paths that can assert a group. `scim` is a synced group's
+ * external id (or its displayName when the connector sent no externalId);
+ * `saml`/`oidc` are the raw attribute/claim values from the assertion. */
+export const GROUP_SOURCES = ["saml", "oidc", "scim"] as const;
+export type GroupSource = (typeof GROUP_SOURCES)[number];
+
+/**
+ * The admin-curated many-to-many. A group with NO row here grants NOTHING —
+ * there is deliberately no "default role for unmapped groups" column, because
+ * that would be a default-allow backdoor into pillar 1.
+ *
+ * The only thing a mapping can point at is a `roles` row. There is no column
+ * here that reaches `users.isAdmin`, and there never will be: `isAdmin` is not
+ * a role and is not group-derivable.
+ *
+ * `source` is part of the unique key because "Engineering" asserted by SAML and
+ * "Engineering" synced by SCIM are two assertions from two different trust
+ * paths — an admin opts into each separately.
+ */
+export const groupRoleMappings = pgTable(
+  "group_role_mappings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    source: text("source", { enum: GROUP_SOURCES }).notNull(),
+    /** the group identifier exactly as the IdP asserts it */
+    externalGroup: text("external_group").notNull(),
+    roleId: uuid("role_id")
+      .notNull()
+      .references(() => roles.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("group_role_mappings_source_group_role_uq").on(t.source, t.externalGroup, t.roleId),
+    index("group_role_mappings_source_group_idx").on(t.source, t.externalGroup),
+  ],
+);
+
+/**
+ * Sighting log for the "unmapped asserted groups" report (ADR-0038 honest-risk
+ * #3: group-name drift in the IdP silently breaks a mapping — the group becomes
+ * unmapped, which is the SAFE direction, but access disappears and nobody knows
+ * why). One row per (source, externalGroup) ever seen in a sync or a login.
+ *
+ * Records sightings ONLY. A row here grants nothing and implies nothing; it
+ * exists so an admin can see "your IdP keeps asserting 'Engineering-EMEA' and
+ * nothing is mapped to it".
+ */
+export const assertedGroups = pgTable(
+  "asserted_groups",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    source: text("source", { enum: GROUP_SOURCES }).notNull(),
+    externalGroup: text("external_group").notNull(),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    seenCount: integer("seen_count").notNull().default(1),
+  },
+  (t) => [uniqueIndex("asserted_groups_source_group_uq").on(t.source, t.externalGroup)],
 );
 
 // §5 subtractive per-user override: suppresses role-derived entitlements
@@ -1279,9 +1855,23 @@ export const usageEvents = pgTable(
     providerMessageId: text("provider_message_id"),
     /** PILLAR 5 attribution; FK-free like the rest of the ledger */
     projectId: uuid("project_id"),
+    /** ADR-0048 §3 — THE STAMP. Which immutable config version (today: which
+     * agent base-system-prompt version) actually served this dispatch, and
+     * whether it was serving as a CANARY. This is the whole point of a canary:
+     * a regression observed in the metrics must be traceable to the version
+     * that caused it. FK-free like the rest of the ledger, and the integer is
+     * stored alongside the id so the answer survives a pruned version row.
+     * NULL = no versioned artifact governed this row (a connector/MCP row, or
+     * an agent that has never had a base prompt). */
+    configVersionId: uuid("config_version_id"),
+    configVersion: integer("config_version"),
+    configCanary: boolean("config_canary").notNull().default(false),
     detail: jsonb("detail"),
   },
-  (t) => [index("usage_events_user_idx").on(t.userId, t.at)],
+  (t) => [
+    index("usage_events_user_idx").on(t.userId, t.at),
+    index("usage_events_config_version_idx").on(t.configVersionId),
+  ],
 );
 
 // MODEL DISPATCH: per-user provider credentials (BYO key). Resolution order
@@ -1442,6 +2032,14 @@ export const complianceProfiles = pgTable("compliance_profiles", {
    * rules); 'warn_only' can never relax a stricter org setting (surfaced as
    * an inert declaration). Null = no opinion. */
   budgetEnforcement: text("budget_enforcement", { enum: ["block", "warn_only"] }),
+  /** ADR-0042 (migration 0055): the guardrail FLOOR this framework forces onto
+   * every project carrying its tag — a partial map detector -> mode, e.g.
+   * {"prompt_injection":"block"}. Composed MAX-of-strictness across a
+   * project's profiles exactly as `piiMode` is, and then composed by the same
+   * MAX with the org/agent/connector setting, so a framework can only ever
+   * RAISE a layer and a local setting can never relax below it. NULL (every
+   * pre-0055 row) = this framework has no guardrail opinion. */
+  guardrailModes: jsonb("guardrail_modes").$type<Partial<Record<GuardrailDetectorId, GuardrailMode>>>(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -2117,12 +2715,2465 @@ export const orgSettings = pgTable(
      * and the ordinary per-user agent grant), so an org that wants it gone
      * entirely flips this and an org that never registers one is unaffected. */
     customModelProvidersEnabled: boolean("custom_model_providers_enabled").notNull().default(true),
+    /** ADR-0043 (migration 0049): the org default for MCP servers whose
+     * allowPrivateRanges is null. TRUE (default) = a self-hosted MCP server on
+     * a private address Just Works with zero ceremony — the guard fires on the
+     * risky public-internet case, not the ordinary internal one (ADR-0041's
+     * BYOC/air-gapped buyer). FALSE = strict: every server needs an explicit
+     * per-server allowPrivateRanges=true (or an egress_allow_hosts entry with
+     * the private-range opt-in) before a private-range URL is reachable.
+     * Link-local/IMDS stays unconditionally blocked in BOTH postures. */
+    mcpPrivateRangesDefault: boolean("mcp_private_ranges_default").notNull().default(true),
+    /** ADR-0039 (migration 0050): the org network envelope — CIDR blocks
+     * (IPv4 + IPv6) interactive access must come from. NULL/empty = no
+     * restriction (today; upgrade locks nobody out). Malformed entries are
+     * refused at write time and match NOTHING at evaluation time. */
+    sessionIpAllowlist: jsonb("session_ip_allowlist").$type<string[]>(),
+    /** ADR-0039: the HUMAN-session knob (origins password|oidc|saml). See
+     * IP_POLICIES. Exchanged api_key sessions and bootstrap are NOT governed
+     * by this — automation has its own knob below, bootstrap has none. */
+    sessionIpPolicy: text("session_ip_policy", { enum: IP_POLICIES }).notNull().default("off"),
+    /** ADR-0039: the SEPARATE automation knob (header API-key auth +
+     * origin='api_key' sessions), same levels over the SAME allow-list — a
+     * conscious second choice so tightening the human policy never silently
+     * locks out CI, and neither knob can exempt the other's path. The
+     * bootstrap origin is never IP-restricted. */
+    apiKeyIpPolicy: text("api_key_ip_policy", { enum: IP_POLICIES }).notNull().default("off"),
+
+    // --- ADR-0045 (migration 0057): model risk management -------------------
+    /** THE DISPATCH GATE. false (default) = today's behaviour, byte-identical:
+     * cards are documentation. true = `executeGovernedDispatch` refuses any
+     * agent whose model has no model card carrying an UNEXPIRED approved
+     * sign-off (409 `mrm_approval_required`, audited, effect deny).
+     *
+     * Deliberately the exact shape of `keyCustodyEnforced` above (ADR-0024):
+     * one org toggle, refuse-with-a-named-reason, fully reversible — turning
+     * it off restores dispatch and destroys no card data. Default-off means no
+     * deployment acquires a production hard-stop by accident. */
+    mrmEnforced: boolean("mrm_enforced").notNull().default(false),
+    /** how many days before `valid_until` a signed-off card counts as
+     * "expiring soon" — the window the registry surfaces lapses in as WORK
+     * ahead of time rather than as an outage on the day. */
+    mrmExpiryWarnDays: integer("mrm_expiry_warn_days").notNull().default(30),
+
+    // --- ADR-0046 (migration 0058): review-workbench bulk fences ------------
+    /** hard cap on items per bulk approve/deny/reassign. Not a UI convenience:
+     * a bulk of 5,000 is indistinguishable from "approve everything". */
+    approvalBulkMaxItems: integer("approval_bulk_max_items").notNull().default(25),
+    /** true (default) = bulk is REFUSED on any approval attributed to a project
+     * whose compliance cascade demands PII blocking. Reviewers with large
+     * sensitive queues act item-by-item on the highest-risk classes; that
+     * friction IS the control (ADR-0046 §4), and it is a disclosed limit. */
+    approvalBulkSensitiveBlocked: boolean("approval_bulk_sensitive_blocked").notNull().default(true),
 
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [check("org_settings_singleton", sql`${t.id} = 'singleton'`)],
+  (t) => [
+    check("org_settings_singleton", sql`${t.id} = 'singleton'`),
+    check(
+      "org_settings_mrm_expiry_warn_days_check",
+      sql`${t.mrmExpiryWarnDays} >= 0 AND ${t.mrmExpiryWarnDays} <= 3650`,
+    ),
+    check(
+      "org_settings_approval_bulk_max_items_check",
+      sql`${t.approvalBulkMaxItems} >= 1 AND ${t.approvalBulkMaxItems} <= 500`,
+    ),
+  ],
 );
 
 export type OrgSettingsRow = typeof orgSettings.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0040 (migration 0054) — ABAC / policy-as-code
+// ---------------------------------------------------------------------------
+//
+// Attribute-conditional policy, written in Cedar, evaluated in-process INSIDE
+// the policy kernel's allow path. Two tables, deliberately:
+//
+//   `abacPolicies`         the stable IDENTITY (name, in-the-active-set flag,
+//                          pointer at the live version). Its id is what lands
+//                          in a decision's `ruleId`, in the `abac-forbid`
+//                          rule-chain entry and in `approvals.ruleId`, so it
+//                          survives every edit.
+//   `abacPolicyVersions`   IMMUTABLE. Editing a policy INSERTs version max+1;
+//                          activation UPDATEs the pointer; ROLLBACK is that
+//                          same update aimed at an older row, so history is
+//                          never lost and a rollback is itself revertible.
+//
+// ABAC CAN ONLY SUBTRACT: `mode` admits 'forbid' and 'require_approval' only,
+// there is no column that could widen entitlement, and the engine wrapper
+// refuses a Cedar `permit` at write time. Empty tables = pre-ADR-0040
+// behaviour exactly.
+
+/** what a matching ABAC policy does to a call the RBAC layer already allowed */
+export const ABAC_POLICY_MODES = ["forbid", "require_approval"] as const;
+
+export const abacPolicies = pgTable(
+  "abac_policies",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull().unique(),
+    description: text("description"),
+    /** in the active set? FALSE for every newly created policy — activating is
+     * a deliberate, audited act, never a side effect of authoring. */
+    enabled: boolean("enabled").notNull().default(false),
+    /** which immutable version is live. NULL = nothing activated yet. */
+    activeVersionId: uuid("active_version_id"),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("abac_policies_enabled_idx").on(t.enabled)],
+);
+
+export const abacPolicyVersions = pgTable(
+  "abac_policy_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    policyId: uuid("policy_id")
+      .notNull()
+      .references(() => abacPolicies.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    /** the Cedar source, exactly as authored — this column IS the artifact */
+    source: text("source").notNull(),
+    /** the attribute-schema version it was validated against at write time */
+    schemaVersion: text("schema_version").notNull(),
+    mode: text("mode", { enum: ABAC_POLICY_MODES }).notNull(),
+    /** IANA zone the policy's time-of-day attributes are computed in — never
+     * the server's incidental locale, never a client clock */
+    timezone: text("timezone").notNull().default("UTC"),
+    /** required when mode='require_approval' (DB CHECK): the Approvals-Queue
+     * approver a paused call routes to — the SAME queue, not a parallel one */
+    approverUserId: uuid("approver_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** policy unit tests travelling WITH the version they describe */
+    testCases: jsonb("test_cases").$type<AbacPolicyTestCase[]>(),
+    authorUserId: uuid("author_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("abac_policy_versions_policy_version_uq").on(t.policyId, t.version),
+    index("abac_policy_versions_policy_idx").on(t.policyId, t.version),
+    check("abac_policy_versions_mode_check", sql`${t.mode} IN ('forbid','require_approval')`),
+    check(
+      "abac_policy_versions_approver_check",
+      sql`${t.mode} <> 'require_approval' OR ${t.approverUserId} IS NOT NULL`,
+    ),
+  ],
+);
+
+/** one stored policy unit test: a hypothetical request + the expected verdict */
+export interface AbacPolicyTestCase {
+  name: string;
+  /** ISO instant the case is evaluated at — pins time-of-day cases */
+  at?: string | null;
+  principal: {
+    id?: string | null;
+    roles?: string[];
+    roleIds?: string[];
+    teams?: string[];
+    isAdmin?: boolean;
+    sessionOrigin?: string;
+    mfaCompleted?: boolean;
+  };
+  resource: {
+    serverId?: string | null;
+    serverName?: string | null;
+    toolName: string;
+    kind: "read" | "write";
+    priceTier?: string;
+    projectId?: string | null;
+    projectName?: string | null;
+    classifications?: string[];
+    dataSensitivity?: string | null;
+  };
+  context?: {
+    deployModes?: string[];
+    environments?: string[];
+    rateLimitUsagePct?: number;
+  };
+  /** 'match' = this policy is expected to fire; 'no_match' = it must not */
+  expect: "match" | "no_match";
+}
+
+export type AbacPolicyRow = typeof abacPolicies.$inferSelect;
+export type AbacPolicyVersionRow = typeof abacPolicyVersions.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0042 (migration 0055) — the guardrail engine's configuration
+// ---------------------------------------------------------------------------
+//
+// One row per SCOPE. `scope='org'` (scope_id NULL, at most one row by partial
+// unique index) is the deployment-wide default; `scope='agent'|'connector'`
+// rows override it for one registry object. Effective mode per detector is
+//
+//     MAX-of-strictness( compliance-cascade floor , override ?? org default )
+//
+// which is the single rule that makes the §8.3 cascade a CEILING rather than a
+// peer: a framework can raise a layer to `block`, and no local row can lower
+// it, because MAX has no way to lower anything.
+//
+// There is deliberately NO guardrail_violations table. Every guardrail
+// decision — block, warn AND log — lands in the one `auditLog`, so "what did
+// this deployment's guardrails do" is answered by the same query that answers
+// every other governance question.
+export const guardrailConfigs = pgTable(
+  "guardrail_configs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scope: text("scope", { enum: ["org", "agent", "connector"] }).notNull(),
+    /** NULL iff scope='org' (DB CHECK) — the org default has no target */
+    scopeId: uuid("scope_id"),
+    // The four ADR-0042 layers. PII is absent on purpose: it stays governed by
+    // the §8.3 cascade's own piiMode, byte-for-byte as ADR-0019 left it.
+    promptInjectionMode: text("prompt_injection_mode", { enum: GUARDRAIL_MODES })
+      .notNull()
+      .default("log"),
+    jailbreakMode: text("jailbreak_mode", { enum: GUARDRAIL_MODES }).notNull().default("log"),
+    toxicityMode: text("toxicity_mode", { enum: GUARDRAIL_MODES }).notNull().default("log"),
+    semanticDlpMode: text("semantic_dlp_mode", { enum: GUARDRAIL_MODES }).notNull().default("log"),
+    /** the org's own vocabulary per detector; additive across scopes */
+    customTerms: jsonb("custom_terms").$type<GuardrailTermMap>().notNull().default({}),
+    updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("guardrail_configs_scope_check", sql`${t.scope} IN ('org','agent','connector')`),
+    check(
+      "guardrail_configs_scope_id_check",
+      sql`(${t.scope} = 'org') = (${t.scopeId} IS NULL)`,
+    ),
+    check(
+      "guardrail_configs_prompt_injection_check",
+      sql`${t.promptInjectionMode} IN ('off','log','warn','block')`,
+    ),
+    check("guardrail_configs_jailbreak_check", sql`${t.jailbreakMode} IN ('off','log','warn','block')`),
+    check("guardrail_configs_toxicity_check", sql`${t.toxicityMode} IN ('off','log','warn','block')`),
+    check(
+      "guardrail_configs_semantic_dlp_check",
+      sql`${t.semanticDlpMode} IN ('off','log','warn','block')`,
+    ),
+  ],
+);
+
+export type GuardrailConfigRow = typeof guardrailConfigs.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0044 (migration 0056) — THE AGENT EVALUATION & REGRESSION HARNESS.
+//
+// The existing gates prove a dispatch was governed, metered and audited. None
+// of them can say whether a prompt edit, a routing-tier drop or a swapped
+// custom-provider endpoint made the agent WORSE. These four tables are the
+// durable record that answers that: a pinned dataset version, a run against a
+// snapshotted agent config, a scored result per case, and the stored
+// comparison against a baseline run — which IS the regression signal.
+// ---------------------------------------------------------------------------
+
+/** the scorer kinds; kept in lockstep with @regulait/shared's EVAL_SCORER_KINDS
+ * (this package deliberately has no dependency on that one — see the note on
+ * GUARDRAIL_DETECTOR_IDS above) */
+export const EVAL_SCORER_KINDS = [
+  "exact",
+  "contains",
+  "regex",
+  "json_schema",
+  "numeric",
+  "rubric",
+  "llm_as_judge",
+] as const;
+export type EvalScorerKindDb = (typeof EVAL_SCORER_KINDS)[number];
+
+export const EVAL_RUN_TRIGGERS = ["manual", "workflow", "scheduled"] as const;
+export const EVAL_RUN_STATUSES = ["running", "completed", "error", "denied"] as const;
+
+/** ONE ROW PER (name, version). A version is frozen the moment a run references
+ * it; editing cases mints N+1 instead of mutating N, which is what makes a red
+ * gate un-arguable. */
+export const evalDatasets = pgTable(
+  "eval_datasets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    version: integer("version").notNull().default(1),
+    note: text("note"),
+    /** dataset-level DEFAULT scorer; a case may override both */
+    scorerKind: text("scorer_kind", { enum: EVAL_SCORER_KINDS }).notNull().default("contains"),
+    scorerConfig: jsonb("scorer_config").$type<Record<string, unknown>>().notNull().default({}),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("eval_datasets_version_check", sql`${t.version} >= 1`),
+    check(
+      "eval_datasets_scorer_kind_check",
+      sql`${t.scorerKind} IN ('exact','contains','regex','json_schema','numeric','rubric','llm_as_judge')`,
+    ),
+    uniqueIndex("eval_datasets_name_version_uq").on(t.name, t.version),
+    unique("eval_datasets_id_version_uq").on(t.id, t.version),
+  ],
+);
+
+export const evalCases = pgTable(
+  "eval_cases",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    datasetId: uuid("dataset_id").notNull(),
+    /** kept honest by the composite FK below, never by convention */
+    datasetVersion: integer("dataset_version").notNull(),
+    input: text("input").notNull(),
+    /** string | number | object | array; NULL for reference-free scorers */
+    expected: jsonb("expected"),
+    rubric: jsonb("rubric"),
+    tags: jsonb("tags").$type<string[]>().notNull().default([]),
+    /** NULL = inherit the dataset's default scorer */
+    scorerKind: text("scorer_kind", { enum: EVAL_SCORER_KINDS }),
+    scorerConfig: jsonb("scorer_config").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "eval_cases_scorer_kind_check",
+      sql`${t.scorerKind} IS NULL OR ${t.scorerKind} IN ('exact','contains','regex','json_schema','numeric','rubric','llm_as_judge')`,
+    ),
+    foreignKey({
+      name: "eval_cases_dataset_version_fk",
+      columns: [t.datasetId, t.datasetVersion],
+      foreignColumns: [evalDatasets.id, evalDatasets.version],
+    }).onDelete("cascade"),
+    index("eval_cases_dataset_idx").on(t.datasetId, t.datasetVersion),
+  ],
+);
+
+export const evalRuns = pgTable(
+  "eval_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    datasetId: uuid("dataset_id").notNull(),
+    datasetVersion: integer("dataset_version").notNull(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    customProviderId: uuid("custom_provider_id").references(() => customModelProviders.id, {
+      onDelete: "set null",
+    }),
+    /** the SNAPSHOT of what was measured — the four ADR-0044 levers, so
+     * "B regressed against A" sits next to "and here is what differed" */
+    agentName: text("agent_name").notNull(),
+    model: text("model"),
+    tier: integer("tier"),
+    /** a hash, not the text: the prompt itself is a governance artifact that
+     * lives in `agents` and must not acquire a drifting second copy */
+    systemPromptHash: text("system_prompt_hash"),
+    /** ADR-0044 §6: the judge is pinned on the run */
+    judgeAgentId: uuid("judge_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    /** which judge IMPLEMENTATION scored it — a model-backed judge, or a
+     * deterministic stand-in. Recorded so a score can never be mistaken for a
+     * model's opinion when no model produced it. */
+    judgeImpl: text("judge_impl"),
+    trigger: text("trigger", { enum: EVAL_RUN_TRIGGERS }).notNull(),
+    status: text("status", { enum: EVAL_RUN_STATUSES }).notNull().default("running"),
+    mode: text("mode").notNull().default("execute"),
+    initiatedByUserId: uuid("initiated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
+    workflowInstanceId: uuid("workflow_instance_id").references(() => workflowInstances.id, {
+      onDelete: "set null",
+    }),
+    workflowStageId: text("workflow_stage_id"),
+    workflowCheckName: text("workflow_check_name"),
+    tolerance: doublePrecision("tolerance").notNull().default(0.05),
+    minScore: doublePrecision("min_score"),
+    minPassRate: doublePrecision("min_pass_rate"),
+    cases: integer("cases").notNull().default(0),
+    passedCases: integer("passed_cases").notNull().default(0),
+    meanScore: doublePrecision("mean_score"),
+    passRate: doublePrecision("pass_rate"),
+    /** roll-up of the metered usage_events rows this run produced — display
+     * only; `usage_events` remains the one ledger */
+    costUsd: doublePrecision("cost_usd").notNull().default(0),
+    inputTokens: integer("input_tokens").notNull().default(0),
+    outputTokens: integer("output_tokens").notNull().default(0),
+    /** the STORED comparison, so a verdict stays reconstructible after the
+     * baseline moves */
+    baselineRunId: uuid("baseline_run_id"),
+    scoreDelta: doublePrecision("score_delta"),
+    passRateDelta: doublePrecision("pass_rate_delta"),
+    gatePassed: boolean("gate_passed"),
+    regression: boolean("regression"),
+    gateReason: text("gate_reason"),
+    isBaseline: boolean("is_baseline").notNull().default(false),
+    error: text("error"),
+    note: text("note"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (t) => [
+    check("eval_runs_trigger_check", sql`${t.trigger} IN ('manual','workflow','scheduled')`),
+    check("eval_runs_status_check", sql`${t.status} IN ('running','completed','error','denied')`),
+    check("eval_runs_tolerance_check", sql`${t.tolerance} >= 0 AND ${t.tolerance} <= 1`),
+    foreignKey({
+      name: "eval_runs_dataset_version_fk",
+      columns: [t.datasetId, t.datasetVersion],
+      foreignColumns: [evalDatasets.id, evalDatasets.version],
+    }).onDelete("restrict"),
+    foreignKey({
+      name: "eval_runs_baseline_run_id_fk",
+      columns: [t.baselineRunId],
+      foreignColumns: [t.id],
+    }).onDelete("set null"),
+    index("eval_runs_dataset_idx").on(t.datasetId, t.datasetVersion, t.startedAt),
+    index("eval_runs_agent_idx").on(t.agentId, t.startedAt),
+    /** at most ONE pinned baseline per (dataset version, agent) — two would
+     * make "the" comparison ambiguous */
+    uniqueIndex("eval_runs_baseline_uq")
+      .on(t.datasetId, t.datasetVersion, t.agentId)
+      .where(sql`${t.isBaseline}`),
+  ],
+);
+
+export const evalResults = pgTable(
+  "eval_results",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => evalRuns.id, { onDelete: "cascade" }),
+    caseId: uuid("case_id").references(() => evalCases.id, { onDelete: "set null" }),
+    scorerKind: text("scorer_kind", { enum: EVAL_SCORER_KINDS }).notNull(),
+    score: doublePrecision("score").notNull(),
+    passed: boolean("passed").notNull(),
+    latencyMs: integer("latency_ms"),
+    costUsd: doublePrecision("cost_usd"),
+    inputTokens: integer("input_tokens").notNull().default(0),
+    outputTokens: integer("output_tokens").notNull().default(0),
+    /** TRUNCATED, and carrying the withheld marker instead of the content when
+     * a PII/guardrail block acted — the eval path is not a storage bypass */
+    outputText: text("output_text"),
+    judgeRationale: text("judge_rationale"),
+    /** why the DISPATCH failed — distinct from "the answer scored badly" */
+    error: text("error"),
+    detail: jsonb("detail").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("eval_results_score_check", sql`${t.score} >= 0 AND ${t.score} <= 1`),
+    uniqueIndex("eval_results_run_case_uq").on(t.runId, t.caseId),
+  ],
+);
+
+export type EvalDatasetRow = typeof evalDatasets.$inferSelect;
+export type EvalCaseRow = typeof evalCases.$inferSelect;
+export type EvalRunRow = typeof evalRuns.$inferSelect;
+export type EvalResultRow = typeof evalResults.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0045 (migration 0057) — THE MODEL RISK MANAGEMENT REGISTRY.
+//
+// The `agents` / `customModelProviders` registries say how to REACH a model and
+// who may INVOKE it. They say nothing about whether a human has REVIEWED AND
+// ACCEPTED THE RISK of using it for a stated purpose — the question NIST AI RMF,
+// ISO/IEC 42001 and the EU AI Act's high-risk documentation duties put at the
+// centre. These three tables are that missing state, and (with
+// `org_settings.mrmEnforced`) the gate that makes it enforceable rather than
+// documentation theatre.
+//
+// WHAT THIS IS NOT: a bias-testing engine. `biasFairness` is a structured SLOT
+// (ADR-0045 §2) — the place an assessment is recorded and its ABSENCE is
+// visible. The platform requires and records an assessment; it does not perform
+// one, and no field here should ever be read as if it did.
+// ---------------------------------------------------------------------------
+
+export const MODEL_CARD_APPROVAL_STATUSES = [
+  "draft",
+  "pending",
+  "approved",
+  "denied",
+  "expired",
+  "revoked",
+  "superseded",
+] as const;
+export type ModelCardApprovalStatus = (typeof MODEL_CARD_APPROVAL_STATUSES)[number];
+
+export const MODEL_CARD_EVIDENCE_KINDS = ["eval_run", "external"] as const;
+export type ModelCardEvidenceKind = (typeof MODEL_CARD_EVIDENCE_KINDS)[number];
+
+/** ADR-0045 §2: one declared bias/fairness assessment SLOT on a card. */
+export interface BiasFairnessEntry {
+  /** what was assessed (e.g. "gender", "dialect", "age-bracket refusal rate") */
+  dimension: string;
+  /** how (e.g. "counterfactual prompt set", "vendor model card §4") */
+  method: string;
+  /** an `eval_runs` id, a URL, or a document reference — free-form on purpose:
+   * the platform records where the evidence lives, it does not fetch it */
+  resultRef?: string | null;
+  status: "not_assessed" | "in_progress" | "assessed" | "waived";
+  assessedAt?: string | null;
+  assessedBy?: string | null;
+  note?: string | null;
+}
+
+/** ONE RISK POSITION on ONE (model, purpose). A second intended use is a second
+ * card — never an edit of this one, because the two decisions can differ. */
+export const modelCards = pgTable(
+  "model_cards",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** EXACTLY ONE of agentId / customProviderId is set (DB CHECK) — the
+     * discriminated-union discipline ADR-0034 established */
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+    customProviderId: uuid("custom_provider_id").references(() => customModelProviders.id, {
+      onDelete: "cascade",
+    }),
+    intendedUse: text("intended_use").notNull(),
+    /** provenance / training-data / retention claims AS THE PROVIDER STATES
+     * THEM — recorded as claims, never as our verification of them */
+    dataClaims: jsonb("data_claims").$type<Record<string, unknown>>().notNull().default({}),
+    limitations: text("limitations"),
+    /** ADR-0045 §2 — a SLOT, not an engine. An empty list is a visibly
+     * incomplete card, which is the point. */
+    biasFairness: jsonb("bias_fairness").$type<BiasFairnessEntry[]>().notNull().default([]),
+    /** e.g. ['nist-ai-rmf:MEASURE-2.11','iso-42001:8.3']. A MAPPING an auditor
+     * can follow — never a claim that anything is CERTIFIED. */
+    standardRefs: jsonb("standard_refs").$type<string[]>().notNull().default([]),
+    note: text("note"),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "model_cards_subject_check",
+      sql`(${t.agentId} IS NOT NULL AND ${t.customProviderId} IS NULL) OR (${t.agentId} IS NULL AND ${t.customProviderId} IS NOT NULL)`,
+    ),
+    check("model_cards_intended_use_check", sql`length(btrim(${t.intendedUse})) > 0`),
+    uniqueIndex("model_cards_agent_use_uq")
+      .on(t.agentId, t.intendedUse)
+      .where(sql`${t.agentId} IS NOT NULL`),
+    uniqueIndex("model_cards_provider_use_uq")
+      .on(t.customProviderId, t.intendedUse)
+      .where(sql`${t.customProviderId} IS NOT NULL`),
+    index("model_cards_agent_idx").on(t.agentId),
+    index("model_cards_provider_idx").on(t.customProviderId),
+  ],
+);
+
+/** THE CHAIN. A recertification is a NEW row pointing at the one it supersedes;
+ * nothing here is edited in place, so "who accepted what risk, when, and until
+ * when" is durable history rather than a last-writer-wins column. */
+export const modelCardApprovals = pgTable(
+  "model_card_approvals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    cardId: uuid("card_id")
+      .notNull()
+      .references(() => modelCards.id, { onDelete: "cascade" }),
+    status: text("status", { enum: MODEL_CARD_APPROVAL_STATUSES }).notNull().default("pending"),
+    approverUserId: uuid("approver_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    requestedByUserId: uuid("requested_by_user_id"),
+    /** THE LINK TO THE ONE QUEUE (ADR-0045 §3): the `approvals` row this
+     * sign-off request rides. MRM does not get a second inbox. */
+    approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    decidedBy: uuid("decided_by"),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    decisionReason: text("decision_reason"),
+    /** the recertification date — the field the DISPATCH GATE evaluates
+     * against `now()`. `status` is a swept cache of that comparison; the gate
+     * never trusts it alone. */
+    validUntil: timestamp("valid_until", { withTimezone: true }),
+    supersedesId: uuid("supersedes_id"),
+    requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "model_card_approvals_status_check",
+      sql`${t.status} IN ('draft','pending','approved','denied','expired','revoked','superseded')`,
+    ),
+    foreignKey({
+      name: "model_card_approvals_supersedes_id_fk",
+      columns: [t.supersedesId],
+      foreignColumns: [t.id],
+    }).onDelete("set null"),
+    index("model_card_approvals_card_idx").on(t.cardId, t.requestedAt),
+    index("model_card_approvals_status_idx").on(t.status, t.validUntil),
+    /** at most ONE live sign-off request per card — two concurrent requests
+     * would let two humans accept two different risk positions on one purpose */
+    uniqueIndex("model_card_approvals_one_pending_uq")
+      .on(t.cardId)
+      .where(sql`${t.status} = 'pending'`),
+  ],
+);
+
+/** ADR-0045 §5: the measured evidence behind a risk decision. An `eval_runs`
+ * reference is ON DELETE RESTRICT — a run cited as evidence cannot be deleted
+ * out from under the sign-off that rests on it. */
+export const modelCardEvidence = pgTable(
+  "model_card_evidence",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    cardId: uuid("card_id")
+      .notNull()
+      .references(() => modelCards.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: MODEL_CARD_EVIDENCE_KINDS }).notNull(),
+    evalRunId: uuid("eval_run_id").references(() => evalRuns.id, { onDelete: "restrict" }),
+    externalRef: text("external_ref"),
+    label: text("label"),
+    note: text("note"),
+    attachedByUserId: uuid("attached_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    attachedAt: timestamp("attached_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("model_card_evidence_kind_check", sql`${t.kind} IN ('eval_run','external')`),
+    check(
+      "model_card_evidence_shape_check",
+      sql`(${t.kind} = 'eval_run' AND ${t.evalRunId} IS NOT NULL AND ${t.externalRef} IS NULL) OR (${t.kind} = 'external' AND ${t.externalRef} IS NOT NULL AND ${t.evalRunId} IS NULL)`,
+    ),
+    index("model_card_evidence_card_idx").on(t.cardId),
+    uniqueIndex("model_card_evidence_run_uq")
+      .on(t.cardId, t.evalRunId)
+      .where(sql`${t.evalRunId} IS NOT NULL`),
+  ],
+);
+
+export type ModelCardRow = typeof modelCards.$inferSelect;
+export type ModelCardApprovalRow = typeof modelCardApprovals.$inferSelect;
+export type ModelCardEvidenceRow = typeof modelCardEvidence.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0046 (migration 0058) — THE REVIEW WORKBENCH.
+//
+// An ADDITIVE LAYER over the one `approvals` table, never a second store. The
+// `approvals` row keeps its NOT NULL `approverUserId` (ADR-0022's approver
+// visibility and ADR-0027's quorum both read it) and gains no columns; these
+// three tables describe WHERE it shows up, WHEN it is late, and WHO to widen it
+// to when it goes stale.
+//
+// An approval with no matching rule keeps exactly its current single-approver
+// behaviour, byte for byte — the rules table ships empty.
+// ---------------------------------------------------------------------------
+
+export const APPROVAL_ASSIGNEE_KINDS = ["user", "role", "team"] as const;
+export type ApprovalAssigneeKind = (typeof APPROVAL_ASSIGNEE_KINDS)[number];
+
+/** DELIBERATELY DOES NOT ADMIT auto-approve or auto-deny. A governance queue
+ * that clears itself by timeout is a bypass (ADR-0023/0027). The absence is a
+ * DB CHECK, not a convention. */
+export const APPROVAL_ESCALATE_ACTIONS = ["add_assignee", "reassign", "notify_only"] as const;
+export type ApprovalEscalateAction = (typeof APPROVAL_ESCALATE_ACTIONS)[number];
+
+export const APPROVAL_SLA_STATES = ["ok", "warning", "breached"] as const;
+export type ApprovalSlaState = (typeof APPROVAL_SLA_STATES)[number];
+
+export const approvalSlaPolicies = pgTable(
+  "approval_sla_policies",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    /** minutes from `approvals.requestedAt` */
+    warnAfterMinutes: integer("warn_after_minutes").notNull(),
+    breachAfterMinutes: integer("breach_after_minutes").notNull(),
+    escalateAction: text("escalate_action", { enum: APPROVAL_ESCALATE_ACTIONS })
+      .notNull()
+      .default("add_assignee"),
+    escalateToKind: text("escalate_to_kind", { enum: APPROVAL_ASSIGNEE_KINDS }),
+    escalateToId: uuid("escalate_to_id"),
+    enabled: boolean("enabled").notNull().default(true),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "approval_sla_policies_window_check",
+      sql`${t.warnAfterMinutes} >= 0 AND ${t.breachAfterMinutes} > ${t.warnAfterMinutes}`,
+    ),
+    check(
+      "approval_sla_policies_action_check",
+      sql`${t.escalateAction} IN ('add_assignee','reassign','notify_only')`,
+    ),
+    check(
+      "approval_sla_policies_kind_check",
+      sql`${t.escalateToKind} IS NULL OR ${t.escalateToKind} IN ('user','role','team')`,
+    ),
+    check(
+      "approval_sla_policies_target_check",
+      sql`${t.escalateAction} = 'notify_only' OR (${t.escalateToKind} IS NOT NULL AND ${t.escalateToId} IS NOT NULL)`,
+    ),
+    check(
+      "approval_sla_policies_reassign_check",
+      sql`${t.escalateAction} <> 'reassign' OR ${t.escalateToKind} = 'user'`,
+    ),
+    uniqueIndex("approval_sla_policies_name_uq").on(t.name),
+  ],
+);
+
+/** ROUTING. Matched on the SAME dimensions ADR-0018 established for workflow
+ * assignment rather than a second matching vocabulary. Conditions AND together;
+ * a rule with NO conditions matches NOTHING (DB CHECK) — the discipline
+ * `workflowAssignmentRules` already follows. */
+export const approvalAssignmentRules = pgTable(
+  "approval_assignment_rules",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    objectType: text("object_type"),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "cascade" }),
+    /** SERVER-RESOLVED from the attributed project's compliance classifications
+     * — never a client-supplied value (the ADR-0019 addendum's rule) */
+    dataSensitivity: text("data_sensitivity"),
+    /** matched against `approvals.stageId` as a prefix/glob */
+    stagePattern: text("stage_pattern"),
+    templateId: uuid("template_id").references(() => workflowTemplates.id, { onDelete: "cascade" }),
+    assigneeKind: text("assignee_kind", { enum: APPROVAL_ASSIGNEE_KINDS }).notNull(),
+    assigneeId: uuid("assignee_id").notNull(),
+    /** composes with ADR-0027's per-stage quorum; 1 = today */
+    quorum: integer("quorum").notNull().default(1),
+    /** lower wins; ties break on createdAt (oldest first) so matching is total */
+    priority: integer("priority").notNull().default(100),
+    slaPolicyId: uuid("sla_policy_id").references(() => approvalSlaPolicies.id, {
+      onDelete: "set null",
+    }),
+    enabled: boolean("enabled").notNull().default(true),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("approval_assignment_rules_kind_check", sql`${t.assigneeKind} IN ('user','role','team')`),
+    check("approval_assignment_rules_quorum_check", sql`${t.quorum} >= 1`),
+    check(
+      "approval_assignment_rules_conditions_check",
+      sql`${t.objectType} IS NOT NULL OR ${t.projectId} IS NOT NULL OR ${t.dataSensitivity} IS NOT NULL OR ${t.stagePattern} IS NOT NULL OR ${t.templateId} IS NOT NULL`,
+    ),
+    index("approval_assignment_rules_match_idx").on(t.enabled, t.priority, t.createdAt),
+  ],
+);
+
+/** ONE row per approval. Carries the routed owner, the claim state, the SLA
+ * clock and the escalation target. `warnAt`/`dueAt` are DERIVED from
+ * `approvals.requestedAt` + the policy, so a lazily materialized assignment
+ * computes the same deadlines an eagerly materialized one would have. */
+export const approvalAssignments = pgTable(
+  "approval_assignments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    approvalId: uuid("approval_id")
+      .notNull()
+      .references(() => approvals.id, { onDelete: "cascade" }),
+    /** NULL = no rule matched; the assignment mirrors the approval's own named
+     * approver, which is today's behaviour made explicit */
+    ruleId: uuid("rule_id").references(() => approvalAssignmentRules.id, { onDelete: "set null" }),
+    assigneeKind: text("assignee_kind", { enum: APPROVAL_ASSIGNEE_KINDS }).notNull(),
+    assigneeId: uuid("assignee_id").notNull(),
+    quorum: integer("quorum").notNull().default(1),
+    assignedAt: timestamp("assigned_at", { withTimezone: true }).notNull().defaultNow(),
+    claimedByUserId: uuid("claimed_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    slaPolicyId: uuid("sla_policy_id").references(() => approvalSlaPolicies.id, {
+      onDelete: "set null",
+    }),
+    warnAt: timestamp("warn_at", { withTimezone: true }),
+    dueAt: timestamp("due_at", { withTimezone: true }),
+    slaState: text("sla_state", { enum: APPROVAL_SLA_STATES }).notNull().default("ok"),
+    breachedAt: timestamp("breached_at", { withTimezone: true }),
+    escalatedAt: timestamp("escalated_at", { withTimezone: true }),
+    escalationAssigneeKind: text("escalation_assignee_kind", { enum: APPROVAL_ASSIGNEE_KINDS }),
+    escalationAssigneeId: uuid("escalation_assignee_id"),
+  },
+  (t) => [
+    check("approval_assignments_kind_check", sql`${t.assigneeKind} IN ('user','role','team')`),
+    check("approval_assignments_quorum_check", sql`${t.quorum} >= 1`),
+    check("approval_assignments_sla_state_check", sql`${t.slaState} IN ('ok','warning','breached')`),
+    check(
+      "approval_assignments_escalation_kind_check",
+      sql`${t.escalationAssigneeKind} IS NULL OR ${t.escalationAssigneeKind} IN ('user','role','team')`,
+    ),
+    uniqueIndex("approval_assignments_approval_uq").on(t.approvalId),
+    index("approval_assignments_assignee_idx").on(t.assigneeKind, t.assigneeId),
+    index("approval_assignments_due_idx").on(t.slaState, t.dueAt),
+  ],
+);
+
+/** named filter/sort presets. `userId` NULL = an admin-PUBLISHED shared view. */
+export const approvalSavedViews = pgTable(
+  "approval_saved_views",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    filters: jsonb("filters").$type<Record<string, unknown>>().notNull().default({}),
+    sort: text("sort").notNull().default("requested_at_desc"),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("approval_saved_views_user_name_uq")
+      .on(t.userId, t.name)
+      .where(sql`${t.userId} IS NOT NULL`),
+    uniqueIndex("approval_saved_views_shared_name_uq")
+      .on(t.name)
+      .where(sql`${t.userId} IS NULL`),
+  ],
+);
+
+export type ApprovalSlaPolicyRow = typeof approvalSlaPolicies.$inferSelect;
+export type ApprovalAssignmentRuleRow = typeof approvalAssignmentRules.$inferSelect;
+export type ApprovalAssignmentRow = typeof approvalAssignments.$inferSelect;
+export type ApprovalSavedViewRow = typeof approvalSavedViews.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0047 (migration 0059) — EXECUTIVE & COMPLIANCE REPORTING.
+//
+// A READ-ONLY PROJECTION over the ledgers that already exist. There is no
+// rollup/summary table here on purpose: a denormalized copy of spend drifts
+// from `usage_events`, and a board report that disagrees with the cost
+// dashboard is worse than no board report. Every figure is computed at
+// generation time from `usage_events` / `audit_log` / `approvals` under a WHERE
+// clause built from the CALLER'S OWN entitlement.
+// ---------------------------------------------------------------------------
+
+export const REPORT_KINDS = ["exec_summary", "team_scorecard", "compliance"] as const;
+export const REPORT_SCOPE_KINDS = ["org", "initiative", "team", "project"] as const;
+export const REPORT_PERIODS = [
+  "current_month",
+  "last_month",
+  "current_quarter",
+  "last_quarter",
+  "last_30_days",
+] as const;
+export const REPORT_FORMATS = ["csv", "json", "both"] as const;
+export const REPORT_ENTITLEMENT_SCOPES = ["org", "team", "project"] as const;
+export const REPORT_CADENCES = ["daily", "weekly", "monthly", "quarterly"] as const;
+export const REPORT_TRIGGERS = ["manual", "scheduled"] as const;
+
+export const reportDefinitions = pgTable(
+  "report_definitions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    kind: text("kind", { enum: REPORT_KINDS }).notNull(),
+    scopeKind: text("scope_kind", { enum: REPORT_SCOPE_KINDS }).notNull().default("org"),
+    /** NULL exactly when scopeKind='org' (DB CHECK) */
+    scopeId: uuid("scope_id"),
+    period: text("period", { enum: REPORT_PERIODS }).notNull().default("current_month"),
+    sections: jsonb("sections").$type<string[]>(),
+    format: text("format", { enum: REPORT_FORMATS }).notNull().default("json"),
+    /** THE GRANT a caller must hold. 'org' is admin-only, and the DB refuses to
+     * pair it with anything but an org-scoped definition. */
+    entitlementScope: text("entitlement_scope", { enum: REPORT_ENTITLEMENT_SCOPES })
+      .notNull()
+      .default("project"),
+    description: text("description"),
+    /** ADR-0058 (migration 0073): the compliance pack whose control mapping the
+     * `controls` section is computed from. NULL keeps ADR-0047's built-in
+     * fallback set — which now says, in its own note, that it is a fallback and
+     * that a pack should be attached. Set, and the section is computed from the
+     * pack's controls against the real ledgers, stamped with the pack version. */
+    packId: uuid("pack_id"),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("report_definitions_name_uq").on(t.name),
+    index("report_definitions_kind_idx").on(t.kind),
+  ],
+);
+
+/** the schedule DEFINITION. Nothing in this codebase fires it — an operator or
+ * an external cron drives POST /v1/reports/schedules/run-due. */
+export const reportSchedules = pgTable(
+  "report_schedules",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    definitionId: uuid("definition_id")
+      .notNull()
+      .references(() => reportDefinitions.id, { onDelete: "cascade" }),
+    cadence: text("cadence", { enum: REPORT_CADENCES }).notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    recipientUserIds: jsonb("recipient_user_ids").$type<string[]>(),
+    lastGeneratedAt: timestamp("last_generated_at", { withTimezone: true }),
+    lastRunId: uuid("last_run_id"),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("report_schedules_definition_idx").on(t.definitionId),
+    index("report_schedules_enabled_idx").on(t.enabled),
+  ],
+);
+
+/** one immutable row per generation. `effectiveProjectIds` is the honest record
+ * of what the generator was PERMITTED to query — NULL means org-wide. */
+export const reportRuns = pgTable(
+  "report_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    definitionId: uuid("definition_id")
+      .notNull()
+      .references(() => reportDefinitions.id, { onDelete: "cascade" }),
+    scheduleId: uuid("schedule_id").references(() => reportSchedules.id, { onDelete: "set null" }),
+    requestedByUserId: uuid("requested_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    trigger: text("trigger", { enum: REPORT_TRIGGERS }).notNull().default("manual"),
+    period: text("period", { enum: REPORT_PERIODS }).notNull(),
+    periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
+    periodEnd: timestamp("period_end", { withTimezone: true }).notNull(),
+    /** COPIED at generation time so a later edit to the definition cannot
+     * retroactively widen who may read an already-generated artifact */
+    entitlementScope: text("entitlement_scope", { enum: REPORT_ENTITLEMENT_SCOPES }).notNull(),
+    effectiveProjectIds: jsonb("effective_project_ids").$type<string[] | null>(),
+    format: text("format", { enum: REPORT_FORMATS }).notNull().default("json"),
+    payload: jsonb("payload").notNull(),
+    rowCount: integer("row_count").notNull().default(0),
+    generatedAt: timestamp("generated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("report_runs_definition_at_idx").on(t.definitionId, t.generatedAt),
+    index("report_runs_requested_by_idx").on(t.requestedByUserId),
+  ],
+);
+
+export type ReportDefinitionRow = typeof reportDefinitions.$inferSelect;
+export type ReportScheduleRow = typeof reportSchedules.$inferSelect;
+export type ReportRunRow = typeof reportRuns.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0048 (migration 0060) — IMMUTABLE VERSIONING, CANARY, ROLLBACK for the
+// governance artifacts the gateway actually reads.
+//
+// Follows ADR-0040's precedent (`abac_policies` + `abac_policy_versions`)
+// rather than inventing a second shape: immutable version rows plus an ACTIVE
+// pointer, where activation is a pointer move and rollback is selecting an
+// older row. What it adds is the CANARY status (a deterministic, sticky
+// percentage split) and the STAMP on `usage_events`, so a regression observed
+// in the metrics is traceable to the version that caused it.
+// ---------------------------------------------------------------------------
+
+export const CONFIG_ARTIFACT_TYPES = [
+  "agent_system_prompt",
+  "agent_config",
+  "approval_rule",
+  "rate_limit",
+  "data_scope_rule",
+  "compliance_profile",
+] as const;
+export type ConfigArtifactType = (typeof CONFIG_ARTIFACT_TYPES)[number];
+
+export const CONFIG_VERSION_STATUSES = [
+  "draft",
+  "canary",
+  "active",
+  "rolled_back",
+  "superseded",
+] as const;
+export type ConfigVersionStatus = (typeof CONFIG_VERSION_STATUSES)[number];
+
+export const CONFIG_ACTIVATION_ACTIONS = [
+  "created",
+  "activated",
+  "canary_started",
+  "canary_adjusted",
+  "promoted",
+  "rolled_back",
+  "abandoned",
+] as const;
+export type ConfigActivationAction = (typeof CONFIG_ACTIVATION_ACTIONS)[number];
+
+export const configVersions = pgTable(
+  "config_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    artifactType: text("artifact_type", { enum: CONFIG_ARTIFACT_TYPES }).notNull(),
+    artifactId: uuid("artifact_id").notNull(),
+    version: integer("version").notNull(),
+    /** the artifact VERBATIM — this column IS the thing rollback re-points at */
+    body: jsonb("body").$type<Record<string, unknown>>().notNull(),
+    label: text("label"),
+    parentVersion: integer("parent_version"),
+    status: text("status", { enum: CONFIG_VERSION_STATUSES }).notNull().default("draft"),
+    /** 1..99 exactly when status='canary' (DB CHECK, both directions) */
+    canaryPct: integer("canary_pct"),
+    authorUserId: uuid("author_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("config_versions_artifact_version_uq").on(t.artifactType, t.artifactId, t.version),
+    // ADR-0048 §1's invariant, in the DATABASE rather than in a comment
+    uniqueIndex("config_versions_one_active_uq")
+      .on(t.artifactType, t.artifactId)
+      .where(sql`${t.status} = 'active'`),
+    uniqueIndex("config_versions_one_canary_uq")
+      .on(t.artifactType, t.artifactId)
+      .where(sql`${t.status} = 'canary'`),
+    index("config_versions_artifact_status_idx").on(t.artifactType, t.artifactId, t.status),
+  ],
+);
+
+/** the APPEND-ONLY record of which version was active when. `status` on
+ * `config_versions` tells you the present; this is what makes the past
+ * reconstructable. */
+export const configActivationEvents = pgTable(
+  "config_activation_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    artifactType: text("artifact_type", { enum: CONFIG_ARTIFACT_TYPES }).notNull(),
+    artifactId: uuid("artifact_id").notNull(),
+    versionId: uuid("version_id")
+      .notNull()
+      .references(() => configVersions.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    fromVersionId: uuid("from_version_id"),
+    fromVersion: integer("from_version"),
+    action: text("action", { enum: CONFIG_ACTIVATION_ACTIONS }).notNull(),
+    canaryPct: integer("canary_pct"),
+    actorUserId: uuid("actor_user_id").references(() => users.id, { onDelete: "set null" }),
+    reason: text("reason"),
+    /** ADR-0048 §4: the eval run that gated this promotion, when one did */
+    evalRunId: uuid("eval_run_id").references(() => evalRuns.id, { onDelete: "set null" }),
+    /** ...and the honest escape hatch when nothing gated it. A DB CHECK forces
+     * an override to carry a non-empty reason. */
+    override: boolean("override").notNull().default(false),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("config_activation_events_artifact_at_idx").on(t.artifactType, t.artifactId, t.at)],
+);
+
+export type ConfigVersionRow = typeof configVersions.$inferSelect;
+export type ConfigActivationEventRow = typeof configActivationEvents.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0049 (migration 0061) — COST FORECASTING and SPEND-ANOMALY DETECTION.
+//
+// Nothing below stores a rollup of spend. `usage_events` stays the single
+// source of truth for every dollar; these tables hold a POLICY (what to look
+// for), a DECIDED FUTURE FACT (a scheduled change), or an OBSERVATION ARTIFACT
+// (a forecast that was computed, an anomaly that was flagged) — never a number
+// another surface could disagree with. The vocabularies are declared here in
+// the same lockstep-with-@regulait/shared style as the guardrail ids above:
+// this package deliberately has no dependency on shared, and the gateway
+// imports both, so a divergence fails to type-check.
+// ---------------------------------------------------------------------------
+
+export const ANOMALY_SENSITIVITY_VALUES = ["low", "medium", "high"] as const;
+export const ANOMALY_ACTION_VALUES = ["alert", "require_approval"] as const;
+export const ANOMALY_SIGNAL_VALUES = [
+  "spend_spike",
+  "token_volume",
+  "unusual_model",
+  "off_hours",
+  "egress_volume",
+] as const;
+export const ANOMALY_METHOD_VALUES = ["mad_z", "pct_over_baseline", "share_of_history"] as const;
+export const ANOMALY_STATUS_VALUES = ["open", "acknowledged", "dismissed"] as const;
+export const FORECAST_METHOD_VALUES = ["run_rate", "ewma"] as const;
+
+/** The admin dial (ADR-0021 conventions). One row per project plus at most one
+ * ORG-WIDE DEFAULT (projectId null). `enabled` defaults FALSE — ADR-0049 §3's
+ * OFF-by-default posture, so a deployment that never turns this on behaves
+ * byte-identically to before migration 0061. `lastEvaluatedAt` staying null is
+ * how "nothing fires on a timer" is VISIBLE rather than merely documented. */
+export const spendMonitorPolicies = pgTable(
+  "spend_monitor_policies",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** null = the org-wide default; a project row overrides it */
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "cascade" }),
+    enabled: boolean("enabled").notNull().default(false),
+    sensitivity: text("sensitivity", { enum: ANOMALY_SENSITIVITY_VALUES }).notNull().default("medium"),
+    baselineDays: integer("baseline_days").notNull().default(30),
+    /** ADR-0049 §5's alert-not-block bias, as the column default */
+    action: text("action", { enum: ANOMALY_ACTION_VALUES }).notNull().default("alert"),
+    /** null = evaluate every signal in the vocabulary */
+    signals: jsonb("signals").$type<string[]>(),
+    activeHourStart: integer("active_hour_start"),
+    activeHourEnd: integer("active_hour_end"),
+    lastEvaluatedAt: timestamp("last_evaluated_at", { withTimezone: true }),
+    updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("spend_monitor_policies_project_uq")
+      .on(t.projectId)
+      .where(sql`${t.projectId} IS NOT NULL`),
+  ],
+);
+
+/** ADR-0049 §1's scheduled-change adjustment: a DECIDED future delta, signed,
+ * with a mandatory reason. The forecast adds these on top of the extrapolation;
+ * nothing else is ever anticipated. */
+export const spendScheduledChanges = pgTable(
+  "spend_scheduled_changes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    /** SIGNED: a decommissioned expensive agent is a negative number */
+    deltaUsd: doublePrecision("delta_usd").notNull(),
+    effectiveAt: timestamp("effective_at", { withTimezone: true }).notNull(),
+    reason: text("reason").notNull(),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("spend_scheduled_changes_project_effective_idx").on(t.projectId, t.effectiveAt)],
+);
+
+/** The append-only flag ledger. Every row carries the signal, the method, the
+ * baseline, the threshold, the score and the window, so a flag is re-derivable
+ * by hand months later (§5: no unexplained risk score). `approvalId` points at
+ * the item on the ONE Approvals Queue — that column existing, rather than a
+ * parallel status machine, IS §4's "no new inbox" guarantee. */
+export const spendAnomalies = pgTable(
+  "spend_anomalies",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    /** §2's per-user narrowing; null = a project-level flag */
+    subjectUserId: uuid("subject_user_id"),
+    signal: text("signal", { enum: ANOMALY_SIGNAL_VALUES }).notNull(),
+    method: text("method", { enum: ANOMALY_METHOD_VALUES }).notNull(),
+    observed: doublePrecision("observed").notNull(),
+    baselineMedian: doublePrecision("baseline_median"),
+    baselineMad: doublePrecision("baseline_mad"),
+    baselineSamples: integer("baseline_samples").notNull(),
+    score: doublePrecision("score"),
+    threshold: doublePrecision("threshold"),
+    absoluteFloor: doublePrecision("absolute_floor").notNull(),
+    windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
+    windowEnd: timestamp("window_end", { withTimezone: true }).notNull(),
+    /** the full sentence a human reads; never a bare number */
+    explanation: text("explanation").notNull(),
+    action: text("action", { enum: ANOMALY_ACTION_VALUES }).notNull(),
+    approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    status: text("status", { enum: ANOMALY_STATUS_VALUES }).notNull().default("open"),
+    decidedByUserId: uuid("decided_by_user_id"),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    decisionReason: text("decision_reason"),
+    detail: jsonb("detail"),
+    detectedAt: timestamp("detected_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("spend_anomalies_project_detected_idx").on(t.projectId, t.detectedAt),
+    index("spend_anomalies_status_idx").on(t.status),
+    /** idempotent re-evaluation: one row per (project, signal, window) however
+     * many times an operator drives the sweep */
+    uniqueIndex("spend_anomalies_window_uq").on(t.projectId, t.signal, t.windowStart, t.windowEnd),
+  ],
+);
+
+/** The forecast ARTIFACT, mirroring ADR-0047's `report_runs`. `sufficient` is a
+ * real column and `projectedSpendUsd` is nullable, with a DB CHECK tying them
+ * together: an insufficient-data answer is stored AS SUCH, so the history can
+ * never be mined for a number that was never claimed. */
+export const spendForecastRuns = pgTable(
+  "spend_forecast_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    requestedByUserId: uuid("requested_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    scopeKind: text("scope_kind", { enum: ["org", "initiative", "team", "project"] }).notNull(),
+    scopeId: uuid("scope_id"),
+    /** the honest record of what this forecast was PERMITTED to see; null =
+     * the org-wide set, reachable only by an admin under an org-scoped request */
+    effectiveProjectIds: jsonb("effective_project_ids").$type<string[] | null>(),
+    method: text("method", { enum: FORECAST_METHOD_VALUES }).notNull(),
+    period: text("period").notNull(),
+    periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
+    periodEnd: timestamp("period_end", { withTimezone: true }).notNull(),
+    sufficient: boolean("sufficient").notNull(),
+    projectedSpendUsd: doublePrecision("projected_spend_usd"),
+    lowUsd: doublePrecision("low_usd"),
+    highUsd: doublePrecision("high_usd"),
+    spendToDateUsd: doublePrecision("spend_to_date_usd").notNull(),
+    payload: jsonb("payload").notNull(),
+    generatedAt: timestamp("generated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("spend_forecast_runs_generated_idx").on(t.generatedAt)],
+);
+
+export type SpendMonitorPolicyRow = typeof spendMonitorPolicies.$inferSelect;
+export type SpendScheduledChangeRow = typeof spendScheduledChanges.$inferSelect;
+export type SpendAnomalyRow = typeof spendAnomalies.$inferSelect;
+export type SpendForecastRunRow = typeof spendForecastRuns.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0050 (migration 0062) — the DATA-LINEAGE / PROVENANCE GRAPH.
+//
+// SUPPLIED-INPUTS provenance: which inputs the gateway handed to a dispatch and
+// what that dispatch produced, chained across runs through pillar 4's already-
+// versioned context items. It deliberately does NOT model which of those inputs
+// influenced the output — that is intra-model attribution and is not observable
+// from outside a model, so it is not represented here and is not claimed.
+//
+// This is a DERIVED READ-MODEL over the append-only ledgers
+// (`project_context_items`, `usage_events`, `audit_log`), which remain the
+// source of truth: if it were lost it could be rebuilt from them.
+//
+// ORIENTATION: every edge points in the DIRECTION OF DATA FLOW (`from` =
+// upstream). `derived_from` is therefore stored predecessor → successor
+// (v1 → v2) despite how its name reads, so `backward` means "where did this
+// come from" uniformly with no per-edge-kind special case.
+// ---------------------------------------------------------------------------
+
+export const LINEAGE_NODE_KIND_VALUES = ["source", "run", "output"] as const;
+export const LINEAGE_SUBTYPE_VALUES = [
+  "context_item",
+  "workflow_artifact",
+  "connector_result",
+  "mcp_result",
+  "document",
+  "run_node",
+  "agent_dispatch",
+  "dispatch_output",
+  "pull_request",
+  "pm_work_item",
+] as const;
+export const LINEAGE_EDGE_KIND_VALUES = ["flowed_into", "produced", "derived_from"] as const;
+
+export const lineageNodes = pgTable(
+  "lineage_nodes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** THE ENTITLEMENT BOUNDARY: every lineage query narrows to the caller's
+     * visible projects at query construction, because for lineage the mere
+     * EXISTENCE of a node is the sensitive fact. */
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: LINEAGE_NODE_KIND_VALUES }).notNull(),
+    subtype: text("subtype", { enum: LINEAGE_SUBTYPE_VALUES }).notNull(),
+    /** the DEDUPE IDENTITY, derived (never random) so two captures of the same
+     * real thing land on one node rather than silently forking the graph */
+    naturalKey: text("natural_key").notNull(),
+    refId: uuid("ref_id"),
+    refKey: text("ref_key"),
+    /** the SPECIFIC version consumed — lineage never points at "the current
+     * value of the key", which is the whole reason provenance versions */
+    version: integer("version"),
+    label: text("label").notNull(),
+    /** GOVERNANCE §8.4: metadata by DEFAULT. A DB CHECK ties the flag and the
+     * column together in both directions. */
+    contentRecorded: boolean("content_recorded").notNull().default(false),
+    content: text("content"),
+    detail: jsonb("detail"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("lineage_nodes_project_natural_key_uq").on(t.projectId, t.naturalKey),
+    index("lineage_nodes_project_kind_idx").on(t.projectId, t.kind),
+    index("lineage_nodes_ref_idx").on(t.refId),
+  ],
+);
+
+export const lineageEdges = pgTable(
+  "lineage_edges",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** denormalised so the entitlement narrowing is a SQL predicate rather than
+     * a post-join filter */
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    fromNodeId: uuid("from_node_id")
+      .notNull()
+      .references(() => lineageNodes.id, { onDelete: "cascade" }),
+    toNodeId: uuid("to_node_id")
+      .notNull()
+      .references(() => lineageNodes.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: LINEAGE_EDGE_KIND_VALUES }).notNull(),
+    /** FK-free like the ledgers: a lineage record is a governance record that
+     * must survive deletion of the run row it describes */
+    runId: uuid("run_id"),
+    nodeId: text("node_id"),
+    detail: jsonb("detail"),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    /** idempotent capture: one edge per (from, to, kind), however many times a
+     * node is re-dispatched */
+    uniqueIndex("lineage_edges_from_to_kind_uq").on(t.fromNodeId, t.toNodeId, t.kind),
+    index("lineage_edges_from_idx").on(t.fromNodeId),
+    index("lineage_edges_to_idx").on(t.toNodeId),
+    index("lineage_edges_run_idx").on(t.runId),
+    index("lineage_edges_project_idx").on(t.projectId),
+  ],
+);
+
+export type LineageNodeRow = typeof lineageNodes.$inferSelect;
+export type LineageEdgeRow = typeof lineageEdges.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0051 (migration 0063) — METERING & BILLING.
+//
+// Nothing here meters. `usage_events` (measured) and `cost_events` (estimated
+// list price) have been written unconditionally at the point of every governed
+// call since ADR-0019/0024; these tables are a READ-SIDE consumer of that one
+// ledger and add no counter that could drift from it.
+//
+// FOUR STRUCTURAL DECISIONS, all about money not being quietly editable:
+//  1. rate cards are IMMUTABLE (name, version) rows — a price change is a new
+//     version, never an UPDATE;
+//  2. a statement carries its own `pricingSnapshot`, so re-derivation replays
+//     the frozen price and a newer card cannot reach backwards;
+//  3. statements are APPEND-ONLY versions (the ADR-0040/0048 precedent) and an
+//     issued one is never edited;
+//  4. `effectiveProjectIds` is frozen at generation exactly as ADR-0047's
+//     `report_runs` freezes it — widening a scope later must not widen an
+//     already-cut document's audience.
+// ---------------------------------------------------------------------------
+
+export const BILLING_DIMENSION_VALUES = ["model", "connector", "mcp_tool", "seat"] as const;
+export const RATE_UNIT_VALUES = [
+  "per_1k_input_tokens",
+  "per_1k_output_tokens",
+  "per_call",
+  "per_seat_month",
+] as const;
+export const BILLING_PERIOD_STATUS_VALUES = ["open", "closed"] as const;
+export const BILLING_STATEMENT_STATUS_VALUES = ["draft", "issued", "superseded"] as const;
+export const BILLING_RATING_MODE_VALUES = ["estimated", "reconciled"] as const;
+export const BILLING_BACKEND_VALUES = ["noop"] as const;
+
+export const rateCards = pgTable(
+  "rate_cards",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    /** append-only: a "change" writes (name, version+1) and supersedes this */
+    version: integer("version").notNull(),
+    currency: text("currency").notNull().default("USD"),
+    status: text("status", { enum: ["active", "superseded"] }).notNull().default("active"),
+    description: text("description"),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("rate_cards_name_version_uq").on(t.name, t.version),
+    index("rate_cards_status_idx").on(t.status),
+  ],
+);
+
+/** Never updated — there is no UPDATE path in the gateway and no updatedAt
+ * column here, because an editable price is an editable invoice. */
+export const rateCardEntries = pgTable(
+  "rate_card_entries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    rateCardId: uuid("rate_card_id")
+      .notNull()
+      .references(() => rateCards.id, { onDelete: "cascade" }),
+    dimension: text("dimension", { enum: BILLING_DIMENSION_VALUES }).notNull(),
+    /** the model name / connector id / tool name, or '*' — exact beats wildcard */
+    matchKey: text("match_key").notNull().default("*"),
+    unit: text("unit", { enum: RATE_UNIT_VALUES }).notNull(),
+    unitPriceUsd: doublePrecision("unit_price_usd").notNull(),
+  },
+  (t) => [
+    uniqueIndex("rate_card_entries_card_key_uq").on(t.rateCardId, t.dimension, t.matchKey, t.unit),
+  ],
+);
+
+export const billingPeriods = pgTable(
+  "billing_periods",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scopeKind: text("scope_kind", { enum: ["org", "initiative", "team", "project"] }).notNull(),
+    scopeId: uuid("scope_id"),
+    /** derived ('org' when scopeId is null) so the UNIQUE index below actually
+     * holds — Postgres treats NULLs in a unique index as DISTINCT, which would
+     * otherwise let the same org month be opened twice */
+    scopeKey: text("scope_key").notNull(),
+    periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
+    periodEnd: timestamp("period_end", { withTimezone: true }).notNull(),
+    status: text("status", { enum: BILLING_PERIOD_STATUS_VALUES }).notNull().default("open"),
+    rateCardId: uuid("rate_card_id").references(() => rateCards.id, { onDelete: "set null" }),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    closedByUserId: uuid("closed_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("billing_periods_scope_window_uq").on(t.scopeKind, t.scopeKey, t.periodStart, t.periodEnd),
+    index("billing_periods_status_idx").on(t.status),
+  ],
+);
+
+export const billingStatements = pgTable(
+  "billing_statements",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    periodId: uuid("period_id")
+      .notNull()
+      .references(() => billingPeriods.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    status: text("status", { enum: BILLING_STATEMENT_STATUS_VALUES }).notNull().default("draft"),
+    ratingMode: text("rating_mode", { enum: BILLING_RATING_MODE_VALUES }).notNull().default("estimated"),
+
+    rateCardId: uuid("rate_card_id").references(() => rateCards.id, { onDelete: "set null" }),
+    rateCardName: text("rate_card_name").notNull(),
+    rateCardVersion: integer("rate_card_version").notNull(),
+    /** THE FROZEN PRICE. Re-derivation replays this, never the live card. */
+    pricingSnapshot: jsonb("pricing_snapshot").notNull(),
+
+    entitlementScope: text("entitlement_scope", { enum: ["org", "team", "project"] }).notNull(),
+    /** the honest record of what this artifact was PERMITTED to see; null =
+     * the org-wide set, only ever produced for an admin on an org period */
+    effectiveProjectIds: jsonb("effective_project_ids").$type<string[] | null>(),
+    /** false = a partial-visibility personal view; it may never be ISSUED */
+    coversFullScope: boolean("covers_full_scope").notNull().default(false),
+
+    /** the cut instant — re-derivation replays the ledger as of here */
+    derivedThroughAt: timestamp("derived_through_at", { withTimezone: true }).notNull(),
+
+    sourceUsageEventCount: integer("source_usage_event_count").notNull(),
+    measuredInputTokens: bigint("measured_input_tokens", { mode: "number" }).notNull(),
+    measuredOutputTokens: bigint("measured_output_tokens", { mode: "number" }).notNull(),
+    unpricedEventCount: integer("unpriced_event_count").notNull(),
+    /** the anchor back to the cost dashboard; kept SEPARATE from the billed
+     * total because §5 refuses to flatten estimate and commercial price */
+    ledgerEstimatedCostUsd: doublePrecision("ledger_estimated_cost_usd").notNull(),
+
+    seatCount: integer("seat_count").notNull(),
+    usageSubtotalUsd: doublePrecision("usage_subtotal_usd").notNull(),
+    seatSubtotalUsd: doublePrecision("seat_subtotal_usd").notNull(),
+    totalUsd: doublePrecision("total_usd").notNull(),
+
+    payload: jsonb("payload").notNull(),
+    generatedByUserId: uuid("generated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    generatedAt: timestamp("generated_at", { withTimezone: true }).notNull().defaultNow(),
+    issuedByUserId: uuid("issued_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    issuedAt: timestamp("issued_at", { withTimezone: true }),
+    issueReason: text("issue_reason"),
+  },
+  (t) => [
+    uniqueIndex("billing_statements_period_version_uq").on(t.periodId, t.version),
+    index("billing_statements_period_idx").on(t.periodId),
+    index("billing_statements_status_idx").on(t.status),
+  ],
+);
+
+/** ADR-0051 §1: "a double-bill is structurally impossible". The idempotency
+ * grain is (period, backend) — a statement covers a period's row set by
+ * construction, so shipping the period once IS shipping each of its rows once. */
+export const billingExports = pgTable(
+  "billing_exports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    statementId: uuid("statement_id")
+      .notNull()
+      .references(() => billingStatements.id, { onDelete: "cascade" }),
+    periodId: uuid("period_id")
+      .notNull()
+      .references(() => billingPeriods.id, { onDelete: "cascade" }),
+    backend: text("backend", { enum: BILLING_BACKEND_VALUES }).notNull().default("noop"),
+    format: text("format", { enum: ["csv", "json"] }).notNull(),
+    rowCount: integer("row_count").notNull(),
+    usageEventCount: integer("usage_event_count").notNull(),
+    totalUsd: doublePrecision("total_usd").notNull(),
+    exportedByUserId: uuid("exported_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    exportedAt: timestamp("exported_at", { withTimezone: true }).notNull().defaultNow(),
+    detail: jsonb("detail"),
+  },
+  (t) => [
+    uniqueIndex("billing_exports_period_backend_uq").on(t.periodId, t.backend),
+    index("billing_exports_statement_idx").on(t.statementId),
+  ],
+);
+
+export type RateCardRow = typeof rateCards.$inferSelect;
+export type RateCardEntryRow = typeof rateCardEntries.$inferSelect;
+export type BillingPeriodRow = typeof billingPeriods.$inferSelect;
+export type BillingStatementRow = typeof billingStatements.$inferSelect;
+export type BillingExportRow = typeof billingExports.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0052 (migration 0064) — LICENSING & SEAT MANAGEMENT.
+//
+// A signed, OFFLINE-verifiable license file. ADR-0041 makes BYOC/air-gapped the
+// primary motion, so there is no home to phone: the artifact is verified
+// locally against a pinned Ed25519 public key, reusing ADR-0041's update-bundle
+// posture rather than inventing a second crypto scheme.
+//
+// `document` is the EXACT BYTES the signature covers, stored verbatim so the
+// row stays independently re-verifiable forever. The parsed columns beside it
+// are a denormalised READ MODEL, never the authority.
+//
+// A partial unique index keeps EXACTLY ONE license active, so "which license is
+// in force" is never a question answered by picking the newest row. A forged
+// artifact never reaches this table: verification precedes the insert and a
+// refusal leaves the installed license exactly where it was.
+// ---------------------------------------------------------------------------
+
+export const LICENSE_DEPLOYMENT_MODE_VALUES = ["hosted", "byoc", "airgapped"] as const;
+export const LICENSE_STATUS_VALUES = ["active", "superseded"] as const;
+export const LICENSE_VERIFICATION_TRIGGER_VALUES = ["install", "periodic", "manual"] as const;
+export const LICENSE_VERIFICATION_STATE_VALUES = [
+  "absent",
+  "not_yet_valid",
+  "valid",
+  "grace",
+  "expired",
+  "invalid",
+] as const;
+
+export const licenses = pgTable(
+  "licenses",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+
+    // --- THE SIGNED ARTIFACT (the authority) ---
+    document: text("document").notNull(),
+    documentSha256: text("document_sha256").notNull(),
+    signature: text("signature").notNull(),
+    signingKeyId: text("signing_key_id").notNull(),
+
+    // --- THE PARSED READ MODEL (convenience, never the authority) ---
+    licenseId: text("license_id").notNull(),
+    tenant: text("tenant").notNull(),
+    tier: text("tier").notNull(),
+    seatCap: integer("seat_cap").notNull(),
+    features: jsonb("features").$type<string[]>().notNull().default([]),
+    deploymentMode: text("deployment_mode", { enum: LICENSE_DEPLOYMENT_MODE_VALUES }).notNull(),
+    issuedAt: timestamp("issued_at", { withTimezone: true }).notNull(),
+    notBefore: timestamp("not_before", { withTimezone: true }).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    graceDays: integer("grace_days").notNull(),
+    /** OPT-IN, never the default — a total shutdown on expiry, available only
+     * because some customers' own contracts require it */
+    hardStopOnExpiry: boolean("hard_stop_on_expiry").notNull().default(false),
+
+    status: text("status", { enum: LICENSE_STATUS_VALUES }).notNull().default("active"),
+    installedByUserId: uuid("installed_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    installedAt: timestamp("installed_at", { withTimezone: true }).notNull().defaultNow(),
+    supersededAt: timestamp("superseded_at", { withTimezone: true }),
+  },
+  (t) => [uniqueIndex("licenses_document_sha_uq").on(t.documentSha256)],
+);
+
+/** The verification trail. ADR-0052 §1's "periodic timer" is an ENDPOINT here
+ * (there is no in-process scheduler in this codebase), and an empty table — or
+ * a `last checked` that stops moving — is how a deployment that never wired the
+ * cron SEES that. Every REFUSAL lands here too, including artifacts that were
+ * refused and therefore never became a `licenses` row. */
+export const licenseVerifications = pgTable(
+  "license_verifications",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** null when the artifact was refused and never became a row */
+    licenseRowId: uuid("license_row_id").references(() => licenses.id, { onDelete: "set null" }),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+    trigger: text("trigger", { enum: LICENSE_VERIFICATION_TRIGGER_VALUES }).notNull(),
+    ok: boolean("ok").notNull(),
+    state: text("state", { enum: LICENSE_VERIFICATION_STATE_VALUES }).notNull(),
+    ruleId: text("rule_id").notNull(),
+    reason: text("reason").notNull(),
+    seatCap: integer("seat_cap"),
+    activeSeats: integer("active_seats"),
+    signingKeyId: text("signing_key_id"),
+    checkedByUserId: uuid("checked_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    detail: jsonb("detail"),
+  },
+  (t) => [index("license_verifications_at_idx").on(t.at), index("license_verifications_ok_idx").on(t.ok)],
+);
+
+export type LicenseRow = typeof licenses.$inferSelect;
+export type LicenseVerificationRow = typeof licenseVerifications.$inferSelect;
+
+// ===========================================================================
+// ADR-0054 — ONBOARDING WIZARD & MIGRATION/IMPORT TOOLING (migration 0066)
+// ===========================================================================
+//
+// Only TWO tables, and the shortness of that list is the design. Everything the
+// wizard produces — roles, group→role mappings, compliance profiles,
+// classifications — lands in the tables it would have landed in had an admin
+// clicked through the existing console, because ADR-0054 §4 requires the output
+// to be ordinary governed state that the policy-as-code path can export and
+// replay. What genuinely exists nowhere else is HOW FAR THROUGH the wizard this
+// deployment is, and WHAT AN IMPORT DID.
+
+/**
+ * The resumable checklist. `stepKey` is the PRIMARY KEY, and that single fact
+ * is the whole idempotence guarantee: there is exactly one row per step in the
+ * deployment, so a write can only ever be an upsert and "ran the step twice"
+ * and "ran it once" are indistinguishable states. There is no wizard-session
+ * id and no per-attempt row, so a piecemeal BYOC install cannot accumulate two
+ * contradictory answers to "is the IdP connected?".
+ *
+ * The status is what an ADMIN ASSERTED, not proof. `GET /v1/onboarding`
+ * composes it with a live readiness signal computed from the objects that
+ * actually exist and reports both, so a step marked done whose provider was
+ * later deleted reads `done` + `satisfied: false` instead of lying.
+ */
+export const onboardingSteps = pgTable("onboarding_steps", {
+  stepKey: text("step_key").primaryKey(),
+  status: text("status", { enum: ["pending", "in_progress", "done", "skipped"] })
+    .notNull()
+    .default("pending"),
+  /** evidence the console shows beside the step — which provider, which file,
+   * how many rows. Never a credential; the route screens before storing. */
+  detail: jsonb("detail").$type<Record<string, unknown>>(),
+  startedAt: timestamp("started_at", { withTimezone: true }),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+  completedByUserId: uuid("completed_by_user_id").references(() => users.id, {
+    onDelete: "set null",
+  }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * Every import — planned, applied, AND REFUSED. The refusals are the rows that
+ * matter: a payload that tried to set `isAdmin` is refused by the strict row
+ * schema and by the pre-parse escalation screen, and the refusal lands here
+ * beside an `audit_log` deny, because "somebody uploaded a file that tried to
+ * mint administrators" has to be findable months later.
+ *
+ * `mode` separates the preview from the act, and both compute their plan with
+ * the same pure planner in `@regulait/shared` — a dry run that is computed
+ * differently from the apply it previews is worse than no dry run.
+ */
+export const onboardingImports = pgTable(
+  "onboarding_imports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kind: text("kind", { enum: ["users", "group_roles"] }).notNull(),
+    mode: text("mode", { enum: ["dry_run", "apply"] }).notNull(),
+    status: text("status", { enum: ["planned", "applied", "refused"] }).notNull(),
+    /** fingerprint of the exact screened bytes — "which file did this?" without
+     * retaining a directory export forever */
+    payloadSha256: text("payload_sha256").notNull(),
+    rowCount: integer("row_count").notNull().default(0),
+    plan: jsonb("plan").$type<Record<string, unknown>>().notNull(),
+    /** null for a dry run and for a refusal — nothing happened, which is the
+     * correct record rather than an empty object implying it did */
+    result: jsonb("result").$type<Record<string, unknown>>(),
+    /** the same stable id that names the audit_log row, so the two join on a
+     * value a human can read */
+    ruleId: text("rule_id").notNull(),
+    reason: text("reason").notNull(),
+    requestedByUserId: uuid("requested_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    appliedAt: timestamp("applied_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("onboarding_imports_created_idx").on(t.createdAt),
+    index("onboarding_imports_kind_idx").on(t.kind),
+    index("onboarding_imports_status_idx").on(t.status),
+  ],
+);
+
+export type OnboardingStepRow = typeof onboardingSteps.$inferSelect;
+export type OnboardingImportRow = typeof onboardingImports.$inferSelect;
+
+// ===========================================================================
+// ADR-0055 — SHADOW-AI DISCOVERY (migration 0068)
+//
+// The importer/analyzer half of the ADR. RegulAIt ships NO COLLECTOR — see the
+// migration header — so these three tables model EVIDENCE THAT ARRIVED, the
+// CATALOGUE it is matched against, and the CONCLUSIONS drawn. Nothing here
+// implies the platform watched anything itself.
+// ===========================================================================
+
+/**
+ * THE CATALOGUE, AND IT IS DATA (ADR-0055 §1). The matcher in
+ * `@regulait/shared` holds no provider name at all: empty this table and
+ * discovery matches nothing. Adding detection for a new provider — including a
+ * customer's private in-house endpoint — is a row here, never a deploy.
+ *
+ * There is deliberately no `pattern` column: an admin-editable regex evaluated
+ * against imported strings is a ReDoS primitive. Keys are prefix + minimum
+ * length, hosts are exact-or-dot-boundary-suffix. Both linear.
+ */
+export const aiEndpointSignatures = pgTable(
+  "ai_endpoint_signatures",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    provider: text("provider").notNull(),
+    kind: text("kind", { enum: ["hostname", "sdk_package", "api_key_prefix", "web_app"] }).notNull(),
+    /** a hostname, a package name, or a key PREFIX — never a regular expression */
+    value: text("value").notNull(),
+    matchType: text("match_type", { enum: ["exact_host", "host_suffix", "package", "key_prefix"] }).notNull(),
+    /** key signatures only: the minimum length of the FULL observed key */
+    minLength: integer("min_length"),
+    /** the governed thing that would REPLACE this usage — what makes a finding
+     * actionable rather than a complaint. SET NULL on agent delete: retiring an
+     * agent must never delete the evidence of ungoverned usage. */
+    replacementAgentId: uuid("replacement_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    replacementNote: text("replacement_note"),
+    /** 'regulait-seed', 'admin', or a vendor advisory URL — with lastUpdatedAt,
+     * this is the STALENESS DISCLOSURE the ADR asks for, per row */
+    provenance: text("provenance").notNull().default("admin"),
+    enabled: boolean("enabled").notNull().default(true),
+    lastUpdatedAt: timestamp("last_updated_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("ai_endpoint_signatures_provider_idx").on(t.provider)],
+);
+
+/**
+ * Every evidence file — planned, applied AND REFUSED. The refusals are the rows
+ * that matter: a payload that tried to smuggle a privilege word into a
+ * description of network traffic is refused twice over (a pre-parse screen and
+ * strict row schemas with no such field) and the refusal lands here beside an
+ * `audit_log` deny.
+ *
+ * WHAT AN IMPORT CAN DO, EXHAUSTIVELY: write rows into `shadowAiFindings`.
+ */
+export const shadowAiImports = pgTable(
+  "shadow_ai_imports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kind: text("kind", { enum: ["egress_log", "code_scan", "saas_export", "self_reported"] }).notNull(),
+    mode: text("mode", { enum: ["dry_run", "apply"] }).notNull(),
+    status: text("status", { enum: ["planned", "applied", "refused"] }).notNull(),
+    source: text("source"),
+    payloadSha256: text("payload_sha256").notNull(),
+    rowCount: integer("row_count").notNull().default(0),
+    summary: jsonb("summary").$type<Record<string, unknown>>().notNull(),
+    ruleId: text("rule_id").notNull(),
+    reason: text("reason").notNull(),
+    requestedByUserId: uuid("requested_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    appliedAt: timestamp("applied_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("shadow_ai_imports_created_idx").on(t.createdAt),
+    index("shadow_ai_imports_kind_idx").on(t.kind),
+    index("shadow_ai_imports_status_idx").on(t.status),
+  ],
+);
+
+/**
+ * THE CORRELATED INVENTORY. The unique index on
+ * (subjectKind, subject, provider) is the dedup story: a second import
+ * re-observing the same usage widens `signalSources`, extends `lastSeenAt` and
+ * raises confidence — it never creates a second row.
+ *
+ * Severity (what the signal IMPLIES) and confidence (how many INDEPENDENT
+ * collectors corroborate it) are separate axes and are never collapsed into one
+ * score — that collapse is exactly the flat alert stream ADR-0055 §6 refuses.
+ */
+export const shadowAiFindings = pgTable(
+  "shadow_ai_findings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    subjectKind: text("subject_kind", { enum: ["host", "repo", "saas_app", "system"] }).notNull(),
+    subject: text("subject").notNull(),
+    provider: text("provider").notNull(),
+    signalSources: jsonb("signal_sources").$type<string[]>().notNull(),
+    signatureKinds: jsonb("signature_kinds").$type<string[]>().notNull(),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+    observationCount: integer("observation_count").notNull().default(0),
+    severity: text("severity", { enum: ["low", "medium", "high", "critical"] }).notNull(),
+    confidence: text("confidence", { enum: ["low", "medium", "high"] }).notNull(),
+    disposition: text("disposition", {
+      enum: ["open", "confirmed", "sanctioned", "false_positive", "remediated"],
+    })
+      .notNull()
+      .default("open"),
+    /** carried through from the CATALOGUE — never from the imported file */
+    replacementAgentId: uuid("replacement_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    replacementNote: text("replacement_note"),
+    /** bounded leads, redacted key fragments only — never a credential */
+    evidence: jsonb("evidence").$type<Array<Record<string, unknown>>>().notNull(),
+    lastImportId: uuid("last_import_id").references(() => shadowAiImports.id, { onDelete: "set null" }),
+    dispositionReason: text("disposition_reason"),
+    dispositionByUserId: uuid("disposition_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    dispositionAt: timestamp("disposition_at", { withTimezone: true }),
+    /** the workflow instance opened to pull this usage into governance */
+    remediationInstanceId: uuid("remediation_instance_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("shadow_ai_findings_severity_idx").on(t.severity),
+    index("shadow_ai_findings_disposition_idx").on(t.disposition),
+    index("shadow_ai_findings_last_seen_idx").on(t.lastSeenAt),
+  ],
+);
+
+export type AiEndpointSignatureRow = typeof aiEndpointSignatures.$inferSelect;
+export type ShadowAiImportRow = typeof shadowAiImports.$inferSelect;
+export type ShadowAiFindingRow = typeof shadowAiFindings.$inferSelect;
+
+// ===========================================================================
+// ADR-0061 — CHATOPS APPROVALS (migration 0069)
+//
+// THERE IS NO chat_approvals TABLE AND NO SECOND STATUS COLUMN. A ChatOps
+// decision is written by the SAME `decideOneApproval` the portal calls, into
+// the SAME `approvals` row, with `decidedBy` = the mapped RegulAIt human. The
+// chat surface is a COURIER, never a second authority path — and the absence of
+// anywhere else to record a decision is what makes that structural.
+// ===========================================================================
+
+/**
+ * The workspace. The OUTBOUND bot token is NOT here: `connectorId` points at an
+ * ordinary `connectors` row whose ordinary `connectorCredentials` row holds it,
+ * so it rides the same encrypted-at-rest, write-only credential store and the
+ * same connector-provider adapter as every other integration.
+ *
+ * What genuinely does not exist elsewhere is the INBOUND signing secret — the
+ * connector machinery models credentials we PRESENT, and this is one we VERIFY
+ * WITH. Encrypted under REGULAIT_DATA_KEY; no endpoint returns it.
+ */
+export const chatopsConnections = pgTable("chatops_connections", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull().unique(),
+  provider: text("provider", { enum: ["slack", "teams"] }).notNull(),
+  connectorId: uuid("connector_id")
+    .notNull()
+    .references(() => connectors.id, { onDelete: "cascade" }),
+  signingSecretCiphertext: text("signing_secret_ciphertext").notNull(),
+  defaultChannel: text("default_channel").notNull(),
+  /** ADR-0061's sensitivity dial. FALSE (the default) = an approval whose
+   * project is in PII mode `block` posts a LINK with no buttons: a chat tap is
+   * not a re-authenticated session, so the most sensitive classes are in-app
+   * only until an admin deliberately opts this workspace in. */
+  allowFencedDecide: boolean("allow_fenced_decide").notNull().default(false),
+  enabled: boolean("enabled").notNull().default(true),
+  createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * THE CRUX (ADR-0061 §2). A chat interaction arrives under the BOT's connection
+ * carrying a chat user id — an ASSERTION. This admin-managed table is what turns
+ * it into a RegulAIt human. Never self-asserted: a self-serve claim would let
+ * anyone in the workspace bind themselves to an approver.
+ *
+ * `emailVerifiedSource` is an honesty column: `idp`/`scim` when the deployment
+ * really did verify the email federated, `admin_asserted` when it is what an
+ * admin typed. Either way the email must match an existing user — an admin can
+ * bind an existing principal, never invent one.
+ */
+export const chatIdentityLinks = pgTable(
+  "chat_identity_links",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => chatopsConnections.id, { onDelete: "cascade" }),
+    chatUserId: text("chat_user_id").notNull(),
+    chatUserEmail: text("chat_user_email").notNull(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    emailVerifiedSource: text("email_verified_source", { enum: ["idp", "scim", "admin_asserted"] }).notNull(),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("chat_identity_links_chat_user_uq").on(t.connectionId, t.chatUserId),
+    uniqueIndex("chat_identity_links_user_uq").on(t.connectionId, t.userId),
+  ],
+);
+
+/** What we posted. `redacted` records that the sensitivity fence fired and a
+ * link went to chat instead of the content — the question a compliance reviewer
+ * asks about a third-party workspace, answerable without re-reading Slack. */
+export const chatopsMessages = pgTable(
+  "chatops_messages",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => chatopsConnections.id, { onDelete: "cascade" }),
+    approvalId: uuid("approval_id")
+      .notNull()
+      .references(() => approvals.id, { onDelete: "cascade" }),
+    channel: text("channel").notNull(),
+    messageRef: text("message_ref"),
+    redacted: boolean("redacted").notNull().default(false),
+    decidable: boolean("decidable").notNull().default(true),
+    postedAt: timestamp("posted_at", { withTimezone: true }).notNull().defaultNow(),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+  },
+  (t) => [index("chatops_messages_approval_idx").on(t.approvalId)],
+);
+
+/**
+ * THE DOUBLE-CLICK GUARD. The status machine already makes a double-DECIDE
+ * impossible (`decideOneApproval` updates WHERE status = 'pending'), but a
+ * second click must also not write a second AUDIT row. The unique index makes
+ * the second callback resolve to the first one's recorded outcome.
+ *
+ * ONLY SUCCESSFUL decisions are recorded. A refusal deliberately gets no row: it
+ * must be audited every time (repeated attempts by an unentitled principal are
+ * the signal), and an admin who then creates the missing identity link must be
+ * able to have the person click again.
+ */
+export const chatopsInteractions = pgTable(
+  "chatops_interactions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => chatopsConnections.id, { onDelete: "cascade" }),
+    /** no FK: the record of who decided outlives the approval's own retention */
+    approvalId: uuid("approval_id").notNull(),
+    chatUserId: text("chat_user_id").notNull(),
+    action: text("action", { enum: ["approve", "reject"] }).notNull(),
+    decidedByUserId: uuid("decided_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    outcome: text("outcome", { enum: ["decided", "already_decided"] }).notNull(),
+    detail: jsonb("detail").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("chatops_interactions_idem_uq").on(t.connectionId, t.approvalId, t.chatUserId, t.action),
+    index("chatops_interactions_approval_idx").on(t.approvalId),
+  ],
+);
+
+export type ChatOpsConnectionRow = typeof chatopsConnections.$inferSelect;
+export type ChatIdentityLinkRow = typeof chatIdentityLinks.$inferSelect;
+export type ChatOpsMessageRow = typeof chatopsMessages.$inferSelect;
+export type ChatOpsInteractionRow = typeof chatopsInteractions.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0057 (migration 0070) — CONTINUOUS RED-TEAMING.
+//
+// WHAT IS NOT HERE, AND THAT IS THE POINT
+//
+//   There is no second runner, no second results table, no second gate. A
+//   red-team probe is materialized into an `eval_cases` row, run by ADR-0044's
+//   `runEvalSuite` through `executeGovernedDispatch`, and scored by the same
+//   deterministic scorers — so `eval_runs`/`eval_results` remain the ONE record
+//   of what was sent and what came back, and the promotion block is the SAME
+//   `automated_check` → `blocked_on_check` route a failed CI check takes.
+//
+//   The four tables below add exactly what an eval run cannot express: which
+//   ATTACK LIBRARY VERSION scored it, which ATTACK CLASS each case belongs to,
+//   how SEVERE a defeat is, and which probes actually got through.
+//
+//   Red-team results reach a model card through the EXISTING
+//   `model_card_evidence` table with `kind = 'eval_run'` (ADR-0045 §5). There
+//   is deliberately no parallel evidence or approvals surface.
+// ---------------------------------------------------------------------------
+
+export const RED_TEAM_ATTACK_CLASS_VALUES = [
+  "prompt_injection",
+  "jailbreak",
+  "data_exfiltration",
+  "pii_leak",
+  "bias",
+] as const;
+
+export const RED_TEAM_SEVERITY_VALUES = ["low", "medium", "high", "critical"] as const;
+
+/**
+ * A VERSIONED ATTACK LIBRARY. Attacks are data, not code (ADR-0057 §1): adding
+ * a probe is a row, never a redeploy. A library version FREEZES on publish —
+ * the moment it is materialized into an eval dataset that a run can score
+ * against — because a result stamped with a library version is meaningless if
+ * the library can move underneath it. Editing a published library mints the
+ * next version, exactly as an eval dataset does.
+ */
+export const redteamLibraries = pgTable(
+  "redteam_libraries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    version: integer("version").notNull().default(1),
+    note: text("note"),
+    status: text("status", { enum: ["draft", "published"] })
+      .notNull()
+      .default("draft"),
+    /** the eval dataset this library version was materialized into. NULL until
+     * published. This column is the whole "reuse ADR-0044's harness" decision,
+     * expressed in the schema: there is no red-team runner to point at. */
+    evalDatasetId: uuid("eval_dataset_id").references(() => evalDatasets.id, {
+      onDelete: "restrict",
+    }),
+    evalDatasetVersion: integer("eval_dataset_version"),
+    publishedAt: timestamp("published_at", { withTimezone: true }),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("redteam_libraries_name_version_uq").on(t.name, t.version)],
+);
+
+/** One adversarial probe: the prompt, the class it attacks, how bad a defeat
+ * is, and the ORACLE that decides whether the agent complied with something it
+ * should have refused. The oracle is an ordinary ADR-0044 scorer config with
+ * inverted meaning — `forbidden` markers describe the DISCLOSURE. */
+export const redteamProbes = pgTable(
+  "redteam_probes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    libraryId: uuid("library_id")
+      .notNull()
+      .references(() => redteamLibraries.id, { onDelete: "cascade" }),
+    probeKey: text("probe_key").notNull(),
+    attackClass: text("attack_class", { enum: RED_TEAM_ATTACK_CLASS_VALUES }).notNull(),
+    severity: text("severity", { enum: RED_TEAM_SEVERITY_VALUES }).notNull().default("high"),
+    input: text("input").notNull(),
+    scorerKind: text("scorer_kind").notNull(),
+    scorerConfig: jsonb("scorer_config").$type<Record<string, unknown>>().notNull().default({}),
+    expected: jsonb("expected"),
+    note: text("note"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("redteam_probes_library_key_uq").on(t.libraryId, t.probeKey),
+    index("redteam_probes_class_idx").on(t.attackClass),
+  ],
+);
+
+/**
+ * ONE RED-TEAM RUN — the security reading of exactly one `eval_runs` row.
+ *
+ * `eval_run_id` is UNIQUE and RESTRICT: a red-team verdict can never be
+ * detached from the governed, metered, audited dispatches that produced it, and
+ * two verdicts can never claim the same evidence.
+ */
+export const redteamRuns = pgTable(
+  "redteam_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    libraryId: uuid("library_id")
+      .notNull()
+      .references(() => redteamLibraries.id, { onDelete: "restrict" }),
+    /** stamped, so the result stays readable after the library row is renamed */
+    libraryName: text("library_name").notNull(),
+    libraryVersion: integer("library_version").notNull(),
+    evalRunId: uuid("eval_run_id")
+      .notNull()
+      .references(() => evalRuns.id, { onDelete: "restrict" }),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    agentName: text("agent_name").notNull(),
+    model: text("model"),
+    /** the ADR-0023 system prompt the agent carried WHEN PROBED — a red-team
+     * result is about a configuration, not about a name */
+    systemPromptHash: text("system_prompt_hash"),
+    initiatedByUserId: uuid("initiated_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    projectId: uuid("project_id"),
+    trigger: text("trigger").notNull().default("manual"),
+    probes: integer("probes").notNull().default(0),
+    resisted: integer("resisted").notNull().default(0),
+    defeated: integer("defeated").notNull().default(0),
+    resistRate: doublePrecision("resist_rate"),
+    meanScore: doublePrecision("mean_score"),
+    /** the per-attack-class aggregates, verbatim from `aggregateRedTeamByClass` */
+    classSummary: jsonb("class_summary").$type<unknown[]>().notNull().default([]),
+    /** which classes BLOCKED; the rest are reporting-only (ADR-0057 §6) */
+    gatingClasses: jsonb("gating_classes").$type<string[]>().notNull().default([]),
+    baselineRunId: uuid("baseline_run_id"),
+    gatePassed: boolean("gate_passed"),
+    regression: boolean("regression").notNull().default(false),
+    gateReason: text("gate_reason"),
+    costUsd: doublePrecision("cost_usd").notNull().default(0),
+    note: text("note"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("redteam_runs_eval_run_uq").on(t.evalRunId),
+    index("redteam_runs_agent_idx").on(t.agentId, t.startedAt),
+    index("redteam_runs_library_idx").on(t.libraryId),
+  ],
+);
+
+/**
+ * A DEFEAT. One row per probe that got through, pointing at the `eval_results`
+ * row holding the actual transcript — so "which attack succeeded, and what did
+ * the agent say" is one join, and the finding cannot drift from the evidence.
+ *
+ * Findings are records, not a queue: remediation runs through the EXISTING
+ * workflow/approvals surfaces, never a second inbox (ADR-0057 §5).
+ */
+export const redteamFindings = pgTable(
+  "redteam_findings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => redteamRuns.id, { onDelete: "cascade" }),
+    probeId: uuid("probe_id").references(() => redteamProbes.id, { onDelete: "set null" }),
+    probeKey: text("probe_key").notNull(),
+    attackClass: text("attack_class", { enum: RED_TEAM_ATTACK_CLASS_VALUES }).notNull(),
+    severity: text("severity", { enum: RED_TEAM_SEVERITY_VALUES }).notNull(),
+    score: doublePrecision("score").notNull(),
+    /** the eval_results row with the full transcript and scorer evidence */
+    evalResultId: uuid("eval_result_id").references(() => evalResults.id, { onDelete: "set null" }),
+    outputSnippet: text("output_snippet"),
+    detail: jsonb("detail").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("redteam_findings_run_idx").on(t.runId),
+    index("redteam_findings_class_idx").on(t.attackClass, t.severity),
+  ],
+);
+
+export type RedTeamLibraryRow = typeof redteamLibraries.$inferSelect;
+export type RedTeamProbeRow = typeof redteamProbes.$inferSelect;
+export type RedTeamRunRow = typeof redteamRuns.$inferSelect;
+export type RedTeamFindingRow = typeof redteamFindings.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0058 (migration 0073) — REGULATORY COMPLIANCE PACKS
+// ---------------------------------------------------------------------------
+//
+// A PACK IS ROWS. That is the entire schema decision. There is no pack file
+// baked into the image, no framework enum a new regulation would have to be
+// added to, and no code path that reads a hard-coded catalogue:
+// `DEFAULT_COMPLIANCE_PACKS` in `@regulait/shared` is a SEED an endpoint
+// inserts, and the evaluator reads only these tables. Empty them and the
+// evaluator evaluates nothing.
+//
+// WHAT IS DELIBERATELY ABSENT: a `satisfied` column. Nowhere in these tables
+// can an admin record that a control is met. Satisfaction is COMPUTED, at
+// evaluation time, from a SELECT over `audit_log` / `approvals` /
+// `model_card_approvals` / `eval_runs` / `guardrail_configs` / `abac_policies`
+// / `lineage_edges` / `usage_events` / `compliance_profiles`. A tick-box would
+// have been the whole feature's failure mode, so there is no box.
+//
+// The one thing a human CAN record is an ATTESTATION — and it lives in its own
+// table, resolves to its own status (`attested`, never `satisfied`), and
+// carries the human who made it. An organisational control (training, incident
+// response, post-market monitoring) is not observable from a control plane, so
+// it is reported as outstanding until a named person says otherwise.
+
+export const compliancePacks = pgTable(
+  "compliance_packs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** free text ON PURPOSE — a customer's internal control framework is a
+     * first-class pack (ADR-0058 §5) and must not need an enum migration */
+    framework: text("framework").notNull(),
+    /** a framework revision is a NEW ROW with a higher version, activated;
+     * reports keep the version that produced them, so history never rewrites */
+    version: integer("version").notNull(),
+    title: text("title").notNull(),
+    description: text("description"),
+    /** where the mapping came from + who reviewed it. This is what makes
+     * staleness LEGIBLE — it cannot make a mapping authoritative. */
+    provenance: jsonb("provenance").$type<Record<string, unknown>>().notNull().default({}),
+    /** the §8.3 cascade tag this pack drives. A pack ENFORCES NOTHING itself:
+     * tagging an Initiative with this drives the EXISTING cascade. */
+    cascadeTag: text("cascade_tag"),
+    status: text("status", { enum: ["draft", "active", "retired"] }).notNull().default("draft"),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    activatedAt: timestamp("activated_at", { withTimezone: true }),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("compliance_packs_framework_version_uq").on(t.framework, t.version),
+    /** AT MOST ONE ACTIVE VERSION PER FRAMEWORK. Two active versions would mean
+     * two answers to "which mapping evidenced this report". */
+    uniqueIndex("compliance_packs_one_active_uq")
+      .on(t.framework)
+      .where(sql`status = 'active'`),
+    check("compliance_packs_version_check", sql`${t.version} >= 1`),
+  ],
+);
+
+export const compliancePackControls = pgTable(
+  "compliance_pack_controls",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    packId: uuid("pack_id")
+      .notNull()
+      .references(() => compliancePacks.id, { onDelete: "cascade" }),
+    /** the FRAMEWORK's own identifier — 'eu-ai-act:art-12-record-keeping' */
+    controlRef: text("control_ref").notNull(),
+    title: text("title").notNull(),
+    description: text("description"),
+    /** the mapping author's DECLARED posture (ADR-0058 §4) */
+    coverage: text("coverage", { enum: ["enforced", "evidenced", "partial", "unaddressed"] }).notNull(),
+    /** a NAMED, PARAMETERISED query over a ledger that already exists. Not SQL:
+     * a pack is analyst-authored data and must not be an injection primitive. */
+    collector: text("collector").notNull(),
+    collectorParams: jsonb("collector_params").$type<Record<string, unknown>>().notNull().default({}),
+    minEvidenceCount: integer("min_evidence_count").notNull().default(1),
+    /** TRUE = organisational control. The evaluator returns before it looks at
+     * any count, so this can NEVER resolve to 'satisfied'. */
+    attestationRequired: boolean("attestation_required").notNull().default(false),
+    ownerNote: text("owner_note"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("compliance_pack_controls_ref_uq").on(t.packId, t.controlRef),
+    index("compliance_pack_controls_pack_idx").on(t.packId),
+    check("compliance_pack_controls_min_evidence_check", sql`${t.minEvidenceCount} >= 1`),
+    /** the pairing rule, in the DATABASE: an attestation-required control has
+     * no collector, so no ledger row can quietly satisfy it */
+    check(
+      "compliance_pack_controls_attestation_check",
+      sql`(${t.attestationRequired} = false) OR (${t.collector} = 'none')`,
+    ),
+  ],
+);
+
+/** The ONE thing a human may record — and it is not "satisfied". An attestation
+ * is the customer's own statement about an organisational control, attributed
+ * to them, optionally time-boxed, and reported as `attested` (a distinct status
+ * from `satisfied`) so a scorecard reader can always tell which is which. */
+export const compliancePackAttestations = pgTable(
+  "compliance_pack_attestations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    packId: uuid("pack_id")
+      .notNull()
+      .references(() => compliancePacks.id, { onDelete: "cascade" }),
+    controlRef: text("control_ref").notNull(),
+    statement: text("statement").notNull(),
+    evidenceRef: text("evidence_ref"),
+    validUntil: timestamp("valid_until", { withTimezone: true }),
+    attestedByUserId: uuid("attested_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    attestedAt: timestamp("attested_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("compliance_pack_attestations_lookup_idx").on(t.packId, t.controlRef, t.attestedAt)],
+);
+
+/** The generated ARTIFACT — the same posture as `report_runs` (ADR-0047): it is
+ * what a generation produced, never an input to another computation. It records
+ * the pack VERSION that produced it and the EXACT project ids the caller was
+ * entitled to, so "whose evidence is in here" is answerable forever. */
+export const compliancePackReports = pgTable(
+  "compliance_pack_reports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** no cascade delete: the artifact outlives a retired pack */
+    packId: uuid("pack_id").notNull(),
+    framework: text("framework").notNull(),
+    packVersion: integer("pack_version").notNull(),
+    requestedByUserId: uuid("requested_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    scopeKind: text("scope_kind").notNull(),
+    scopeId: uuid("scope_id"),
+    entitlementScope: text("entitlement_scope").notNull(),
+    /** NULL = org-wide (admin under an org-scoped request) */
+    effectiveProjectIds: jsonb("effective_project_ids").$type<string[] | null>(),
+    periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
+    periodEnd: timestamp("period_end", { withTimezone: true }).notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+    generatedAt: timestamp("generated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("compliance_pack_reports_pack_idx").on(t.packId, t.generatedAt)],
+);
+
+export type CompliancePackRow = typeof compliancePacks.$inferSelect;
+export type CompliancePackControlRow = typeof compliancePackControls.$inferSelect;
+export type CompliancePackAttestationRow = typeof compliancePackAttestations.$inferSelect;
+export type CompliancePackReportRow = typeof compliancePackReports.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0056 (migration 0072) — THE AI GOVERNANCE COPILOT
+// ---------------------------------------------------------------------------
+//
+// THE TABLE THAT IS NOT HERE: anything the copilot can mutate.
+//
+// The copilot is a READ-MOSTLY tenant of the platform it governs. It writes
+// exactly two tables — a record of what it was ASKED and what it RETRIEVED, and
+// a record of what it PROPOSED — and neither is a control-plane object. There
+// is no `copilot_applied_changes`, no `copilot_policy_writes`, and no column
+// anywhere below that names a grant, a role, a rule or an entitlement to
+// change. A proposal carries a DIFF and points at an ordinary `approvals` row;
+// applying it is a normal governed action performed by the APPROVER under their
+// own identity, never by the copilot.
+//
+// `scope_project_ids` is the honesty column. Every retrieval is narrowed, at
+// query construction, to the project ids the INVOKING USER is entitled to, and
+// the set it was narrowed to is recorded on the query row. "Could the copilot
+// have seen team B's rows when Alice asked?" is therefore answerable from the
+// ledger, forever, without re-running anything.
+
+export const copilotQueries = pgTable(
+  "copilot_queries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** WHOSE entitlements, whose budget, whose audit trail. Not nullable: an
+     * identity-less copilot query is a contradiction — there would be no
+     * entitlement set to inherit. */
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    question: text("question").notNull(),
+    /** the STRUCTURED tool call the NL step produced. Recorded so "why did it
+     * run that query" is answerable without a model. */
+    plan: jsonb("plan").$type<Record<string, unknown>>().notNull(),
+    /** counts + bounded samples the retrieval returned, already scoped */
+    evidence: jsonb("evidence").$type<Record<string, unknown>>().notNull(),
+    /** the GROUNDED answer — composed from counts, never from model recall */
+    answer: text("answer").notNull(),
+    /** 'grounded' = no model was involved. 'model' = a narration was layered on
+     * top of the grounded answer by a governed dispatch. */
+    generation: text("generation", { enum: ["grounded", "model"] }).notNull().default("grounded"),
+    /** the registry agent that narrated, when one did. FK-free deliberately —
+     * the record of what was answered outlives the agent row. */
+    narratorAgentId: uuid("narrator_agent_id"),
+    /** the EXACT project ids the retrieval was permitted to touch. NULL =
+     * org-wide (admin). This is what makes containment auditable. */
+    scopeProjectIds: jsonb("scope_project_ids").$type<string[] | null>(),
+    /** pillar 5: the project the narration dispatch billed to, when there was one */
+    projectId: uuid("project_id"),
+    /** ADR-0042: set when a guardrail acted on the retrieved evidence or on the
+     * answer. The audit log is an injection surface and this is where a hit on
+     * it becomes visible. */
+    guardrailAction: text("guardrail_action"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("copilot_queries_user_idx").on(t.userId, t.createdAt)],
+);
+
+/** THE ONLY ROUTE FROM THE COPILOT TO A CHANGE — and it is not a change. A row
+ * here is a diff plus the evidence for it, bound to an ordinary `approvals`
+ * row. The copilot has written nothing to the control plane. */
+export const copilotProposals = pgTable(
+  "copilot_proposals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    queryId: uuid("query_id")
+      .notNull()
+      .references(() => copilotQueries.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    title: text("title").notNull(),
+    rationale: text("rationale").notNull(),
+    /** the concrete, reviewable change — RECORDED, never applied by this module */
+    diff: jsonb("diff").$type<Record<string, unknown>>().notNull(),
+    /** the query result that justifies it, copied at proposal time so a later
+     * ledger change cannot silently restate the justification */
+    evidence: jsonb("evidence").$type<Record<string, unknown>>().notNull(),
+    /** THE LINK TO THE ONE QUEUE (ADR-0045's rule, applied again): the copilot
+     * does not get a second inbox. */
+    approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    proposedByUserId: uuid("proposed_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("copilot_proposals_query_idx").on(t.queryId)],
+);
+
+export type CopilotQueryRow = typeof copilotQueries.$inferSelect;
+export type CopilotProposalRow = typeof copilotProposals.$inferSelect;
+// ADR-0059 (migration 0071) — POLICY SIMULATION / BLAST-RADIUS PREVIEW.
+//
+// THE DEFINING PROPERTY IS AN ABSENCE. A simulation writes exactly two kinds of
+// row — the run and its sampled flips — plus ONE audit row saying a simulation
+// happened. It writes no approvals, consumes no rate counters, meters no usage,
+// dispatches nothing, and never touches `abac_policies.active_version_id`. The
+// dry-run path does not import the dispatch core at all, which is what makes
+// "zero side effects" structural rather than a promise.
+//
+// `policy_version_id` is RESTRICT: a stored blast radius names the exact
+// immutable version it previewed (ADR-0048), and that version cannot be deleted
+// out from under the preview an admin relied on when they activated.
+// ---------------------------------------------------------------------------
+
+export const POLICY_SIMULATION_BUCKET_VALUES = [
+  "newly_denied",
+  "newly_approval_required",
+  "newly_allowed",
+  "unchanged",
+  "indeterminate",
+] as const;
+
+export const policySimulations = pgTable(
+  "policy_simulations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    policyId: uuid("policy_id").references(() => abacPolicies.id, { onDelete: "cascade" }),
+    policyVersionId: uuid("policy_version_id")
+      .notNull()
+      .references(() => abacPolicyVersions.id, { onDelete: "restrict" }),
+    /** stamped, so a stored preview stays readable after a rename */
+    policyName: text("policy_name").notNull(),
+    policyVersion: integer("policy_version").notNull(),
+    requestedByUserId: uuid("requested_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    /** the ADR-0047-shaped scope this run was PERMITTED to replay. NULL = org-
+     * wide (admin only). The stored value is what makes a later reader able to
+     * tell "nothing flipped" from "nothing in scope could have flipped". */
+    scopeUserIds: jsonb("scope_user_ids").$type<string[] | null>(),
+    scopeRuleId: text("scope_rule_id").notNull(),
+    windowDays: integer("window_days").notNull(),
+    windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
+    windowEnd: timestamp("window_end", { withTimezone: true }).notNull(),
+    rowCap: integer("row_cap").notNull(),
+    /** true when the cap was reached — the preview is then a LOWER BOUND, and
+     * saying so is the difference between a bounded answer and a wrong one */
+    capped: boolean("capped").notNull().default(false),
+    considered: integer("considered").notNull().default(0),
+    newlyDenied: integer("newly_denied").notNull().default(0),
+    newlyApprovalRequired: integer("newly_approval_required").notNull().default(0),
+    newlyAllowed: integer("newly_allowed").notNull().default(0),
+    unchanged: integer("unchanged").notNull().default(0),
+    indeterminate: integer("indeterminate").notNull().default(0),
+    affectedUsers: integer("affected_users").notNull().default(0),
+    affectedProjects: integer("affected_projects").notNull().default(0),
+    affectedTools: integer("affected_tools").notNull().default(0),
+    /** the NAMED blast radius: users, projects and tools, each with a count */
+    blastRadius: jsonb("blast_radius").$type<Record<string, unknown>>().notNull().default({}),
+    /** derived from the candidate's OWN source, never asserted by the caller */
+    fidelityExact: boolean("fidelity_exact").notNull().default(true),
+    fidelityCaveats: jsonb("fidelity_caveats").$type<unknown[]>().notNull().default([]),
+    headline: text("headline").notNull(),
+    note: text("note"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("policy_simulations_version_idx").on(t.policyVersionId, t.createdAt),
+    index("policy_simulations_requested_idx").on(t.requestedByUserId),
+  ],
+);
+
+/**
+ * A SAMPLED FLIP: one recorded decision that would have gone differently, kept
+ * so "which calls, exactly" is answerable rather than merely counted. Bounded —
+ * the parent row carries the full counts, these are the representative rows.
+ *
+ * FK-free on `audit_log_id` for the same reason `audit_log` itself is FK-free:
+ * the preview must survive the retention window of the row it cites.
+ */
+export const policySimulationFlips = pgTable(
+  "policy_simulation_flips",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    simulationId: uuid("simulation_id")
+      .notNull()
+      .references(() => policySimulations.id, { onDelete: "cascade" }),
+    auditLogId: uuid("audit_log_id").notNull(),
+    userId: uuid("user_id").notNull(),
+    userLabel: text("user_label"),
+    projectId: uuid("project_id"),
+    projectName: text("project_name"),
+    serverId: uuid("server_id").notNull(),
+    toolName: text("tool_name").notNull(),
+    recordedEffect: text("recorded_effect").notNull(),
+    simulatedEffect: text("simulated_effect").notNull(),
+    bucket: text("bucket", { enum: POLICY_SIMULATION_BUCKET_VALUES }).notNull(),
+    /** the candidate policy that fired on this row */
+    policyId: uuid("policy_id"),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    index("policy_simulation_flips_sim_idx").on(t.simulationId),
+    index("policy_simulation_flips_user_idx").on(t.userId),
+  ],
+);
+
+/**
+ * The singleton that turns ADR-0040's honest-risks note ("activating without
+ * previewing should be friction") into an enforceable posture. OFF by default:
+ * an existing deployment activates exactly as it did before. ON, activating a
+ * version that no completed simulation has previewed is REFUSED — and either
+ * way the activation audit row records whether a preview existed, so the
+ * omission is a permanent record rather than a missing one.
+ */
+export const policySimulationSettings = pgTable("policy_simulation_settings", {
+  id: text("id").primaryKey().default("singleton"),
+  requirePreviewBeforeActivate: boolean("require_preview_before_activate").notNull().default(false),
+  defaultWindowDays: integer("default_window_days").notNull().default(30),
+  defaultRowCap: integer("default_row_cap").notNull().default(5000),
+  updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type PolicySimulationRow = typeof policySimulations.$inferSelect;
+export type PolicySimulationFlipRow = typeof policySimulationFlips.$inferSelect;
+export type PolicySimulationSettingsRow = typeof policySimulationSettings.$inferSelect;

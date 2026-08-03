@@ -24,6 +24,7 @@ import {
   sql,
   users,
   type Db,
+  type IpPolicy,
   type OrgSettingsRow,
   type SessionOrigin,
 } from "@regulait/db";
@@ -44,6 +45,12 @@ import { z } from "zod";
 import * as oidc from "openid-client";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { loadOrgSettings } from "./org-settings.js";
+import { countEnabledSsoProviders, SSO_ONLY_LAST_PROVIDER } from "./sso-providers.js";
+import { evaluateIpEnvelope } from "./net-policy.js";
+import { deviceLabel } from "./device-label.js";
+import { checkEgress, createGuardedFetch, type EgressDenied } from "./egress-guard.js";
+import { loadEgressAllowList } from "./custom-providers.js";
+import { normalizeAssertedGroups, reconcileGroupRoles } from "./group-roles.js";
 
 export interface AuthContext {
   /** null only for the bootstrap token (header or exchanged session), which
@@ -301,6 +308,8 @@ export async function createSession(
       idleExpiresAt: new Date(now + Math.min(idleMs, lifetimeMs)),
       idleMinutes: org.sessionIdleMinutes,
       ip: req.ip ?? null,
+      // ADR-0039: last_seen starts where the session starts
+      lastSeenIp: req.ip ?? null,
       userAgent: typeof req.headers["user-agent"] === "string" ? req.headers["user-agent"].slice(0, 512) : null,
     })
     .returning({ id: authSessions.id });
@@ -319,6 +328,10 @@ export async function resolveSession(
   db: Db,
   token: string,
   bootstrapConfigured: boolean,
+  /** ADR-0039: the requesting client IP; when provided it is written into
+   * last_seen_ip in the SAME update as the idle-slide (no extra query).
+   * Omitted (undefined) leaves the stored value untouched. */
+  clientIp?: string | null,
 ): Promise<SessionAuth | null | "disabled"> {
   const [row] = await db
     .select({
@@ -346,7 +359,11 @@ export async function resolveSession(
     if (!bootstrapConfigured) return null;
     await db
       .update(authSessions)
-      .set({ idleExpiresAt: new Date(now + row.idleMinutes * 60_000), lastSeenAt: new Date(now) })
+      .set({
+        idleExpiresAt: new Date(now + row.idleMinutes * 60_000),
+        lastSeenAt: new Date(now),
+        ...(clientIp !== undefined ? { lastSeenIp: clientIp } : {}),
+      })
       .where(eq(authSessions.id, row.id));
     return {
       ctx: { userId: null, isAdmin: true, via: "session" },
@@ -359,7 +376,11 @@ export async function resolveSession(
   if (row.disabledAt) return "disabled";
   await db
     .update(authSessions)
-    .set({ idleExpiresAt: new Date(now + row.idleMinutes * 60_000), lastSeenAt: new Date(now) })
+    .set({
+      idleExpiresAt: new Date(now + row.idleMinutes * 60_000),
+      lastSeenAt: new Date(now),
+      ...(clientIp !== undefined ? { lastSeenIp: clientIp } : {}),
+    })
     .where(eq(authSessions.id, row.id));
   return {
     ctx: { userId: row.userId, isAdmin: row.isAdmin ?? false, via: "session" },
@@ -368,6 +389,31 @@ export async function resolveSession(
     totpEnabled: row.totpEnabled ?? false,
     origin: row.origin,
   };
+}
+
+// --- ADR-0039: which IP-policy knob governs a session origin ---------------
+
+/** the origins the HUMAN knob (session_ip_policy) governs. 'saml' is listed
+ * for ADR-0036 forward-compatibility even though the origin enum does not
+ * carry it yet — when SAML lands its sessions are governed from day one. */
+export const HUMAN_SESSION_ORIGINS: ReadonlySet<string> = new Set(["password", "oidc", "saml"]);
+
+/**
+ * ADR-0039 — ONE rule for which knob binds a session origin:
+ *  - password | oidc | saml -> session_ip_policy (interactive humans);
+ *  - api_key                -> api_key_ip_policy (automation gets its own,
+ *    consciously separate knob — tightening the human policy never silently
+ *    locks out CI, and neither knob can EXEMPT the other's path);
+ *  - bootstrap              -> never restricted (the deploy-time break-glass
+ *    path, already scoped to "dies when the bootstrap token is unset");
+ *  - unknown                -> not governed. A pre-0046 row's true origin is
+ *    unknowable; the ADR enumerates the governed origins explicitly, and
+ *    inventing coverage here would revoke grandfathered sessions on upgrade.
+ */
+export function governingIpPolicy(org: OrgSettingsRow, origin: SessionOrigin): IpPolicy {
+  if (HUMAN_SESSION_ORIGINS.has(origin)) return org.sessionIpPolicy;
+  if (origin === "api_key") return org.apiKeyIpPolicy;
+  return "off";
 }
 
 // --- ADR-0028: the current-password requirement, in ONE place ---------------
@@ -502,7 +548,7 @@ export function otpauthUri(email: string, secretBase32: string): string {
 
 // --- audit helper -----------------------------------------------------------
 
-function auditAuth(
+export function auditAuth(
   db: Db,
   actorUserId: string | null,
   targetUserId: string | null,
@@ -510,7 +556,7 @@ function auditAuth(
   effect: "allow" | "deny",
   reason: string,
   detail: Record<string, unknown>,
-  objectType: "user" | "oidc_provider" = "user",
+  objectType: "user" | "oidc_provider" | "saml_provider" | "scim_group" | "scim_token" = "user",
 ) {
   return db.insert(auditLog).values({
     userId: actorUserId ?? NIL_UUID,
@@ -522,6 +568,17 @@ function auditAuth(
     ruleChain: [],
     reason,
   });
+}
+
+/** ADR-0043: thrown when an OIDC issuer fails the egress guard at discovery
+ * time. The /start and /callback routes turn it into an honest 403
+ * `egress_blocked`; the refusal is audited before the throw and nothing has
+ * left the box. */
+export class OidcEgressBlockedError extends Error {
+  constructor(readonly decision: EgressDenied) {
+    super(`egress blocked (${decision.code}): ${decision.reason}`);
+    this.name = "OidcEgressBlockedError";
+  }
 }
 
 // --- routes -----------------------------------------------------------------
@@ -574,6 +631,64 @@ function requireCsrfHeader(req: FastifyRequest, reply: FastifyReply): boolean {
   return true;
 }
 
+/**
+ * ADR-0039 enforce_at_login (and stricter): may a NEW session be minted for
+ * this request? Called at every session-CREATION site with the knob that
+ * governs the origin being created. Any enforcing level refuses creation from
+ * outside the envelope — a session minted under `enforce_continuous` would die
+ * on its first use anyway, so refusing at the door is the same policy stated
+ * honestly. Refusal = 401 + audit, NO cookie. Returns true when the login was
+ * refused (caller returns immediately).
+ *
+ * Module-level and exported (ADR-0036): the SAML ACS is a session-creation
+ * site living in another file and MUST answer to the same function, not to a
+ * second copy of the rule that could drift.
+ */
+export async function refuseIpBlockedLogin(
+  db: Db,
+  req: FastifyRequest,
+  reply: FastifyReply,
+  org: OrgSettingsRow,
+  knob: "session_ip_policy" | "api_key_ip_policy",
+  detail: { method: string; userId?: string | null; email?: string; provider?: string },
+): Promise<boolean> {
+  const policy = knob === "session_ip_policy" ? org.sessionIpPolicy : org.apiKeyIpPolicy;
+  if (policy === "off") return false;
+  const decision = evaluateIpEnvelope(org.sessionIpAllowlist, req.ip ?? null);
+  if (decision.allowed) return false;
+  await auditAuth(db, null, detail.userId ?? null, "ip-policy-login-denied", "deny",
+    `session creation (${detail.method}) refused by ${knob}='${policy}': client IP ${req.ip ?? "unknown"} is ${decision.reason === "no_client_ip" ? "undeterminable (fail closed)" : "outside the org IP allow-list"}`,
+    {
+      phase: "ip-policy-login",
+      knob,
+      policy,
+      clientIp: req.ip ?? null,
+      reason: decision.reason,
+      allowlist: org.sessionIpAllowlist ?? [],
+      ...detail,
+    });
+  await reply.status(401).send({
+    error: "ip_not_allowed",
+    detail: "sign-in from this network address is not permitted by organization policy",
+  });
+  return true;
+}
+
+/**
+ * ADR-0025's identity anchor, module-level so BOTH federated paths share ONE
+ * implementation: SSO maps on the verified/asserted EMAIL, case-insensitively,
+ * and never on `users.username` (ADR-0030's locally-editable second
+ * identifier — a compromised or misconfigured IdP attribute must not be able
+ * to impersonate another account through it).
+ */
+export async function loadUserByEmail(db: Db, email: string) {
+  const [row] = await db
+    .select()
+    .from(users)
+    .where(sql`lower(${users.email}) = ${email.toLowerCase()}`);
+  return row ?? null;
+}
+
 export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRouteOptions = {}) {
   const setSession = async (
     reply: FastifyReply,
@@ -586,13 +701,16 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     void reply.header("set-cookie", sessionCookie(token, requestIsSecure(req), maxAgeSeconds));
   };
 
-  const loadUserByEmail = async (email: string) => {
-    const [row] = await db
-      .select()
-      .from(users)
-      .where(sql`lower(${users.email}) = ${email.toLowerCase()}`);
-    return row ?? null;
-  };
+  /** thin binder over the module-level rule (shared with the SAML ACS) */
+  const refuseIpBlocked = (
+    req: FastifyRequest,
+    reply: FastifyReply,
+    org: OrgSettingsRow,
+    knob: "session_ip_policy" | "api_key_ip_policy",
+    detail: { method: string; userId?: string | null; email?: string; provider?: string },
+  ) => refuseIpBlockedLogin(db, req, reply, org, knob, detail);
+
+  const loadUserByEmailHere = (email: string) => loadUserByEmail(db, email);
 
   /** ADR-0030: resolve either namespace with the SAME shape of query and the
    * same absence semantics — a miss returns null and the caller then walks
@@ -600,7 +718,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
    * unknown username is indistinguishable from an unknown email, which is
    * indistinguishable from a wrong password. */
   const loadUserByIdentifier = async (identifier: string) => {
-    if (identifierKind(identifier) === "email") return loadUserByEmail(identifier);
+    if (identifierKind(identifier) === "email") return loadUserByEmailHere(identifier);
     const [row] = await db
       .select()
       .from(users)
@@ -623,6 +741,12 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
         error: "sso_required",
         detail: "password login is disabled for this organization — use single sign-on",
       });
+    }
+
+    // ADR-0039: an out-of-envelope address never even reaches password
+    // processing — refused before any credential is examined, no cookie.
+    if (await refuseIpBlocked(req, reply, org, "session_ip_policy", { method: "password" })) {
+      return reply;
     }
 
     // ADR-0030: ONE field, either namespace. `body.identifier` is what the
@@ -715,6 +839,13 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
   app.post("/auth/mfa/verify", async (req, reply) => {
     if (!requireCsrfHeader(req, reply)) return reply;
     const body = mfaVerifySchema.parse(req.body);
+    const org = await loadOrgSettings(db);
+    // ADR-0039: the second login step is still session CREATION — the policy
+    // may have tightened between the password step and this one, and a
+    // pending-MFA token must not be a side door around the envelope.
+    if (await refuseIpBlocked(req, reply, org, "session_ip_policy", { method: "password+totp" })) {
+      return reply;
+    }
     const now = new Date();
     const [pending] = await db
       .select()
@@ -736,7 +867,6 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     // consume: the pending token is single-use, the step is burned forever
     await db.delete(authMfaPending).where(eq(authMfaPending.id, pending.id));
     await db.update(users).set({ totpLastUsedStep: step }).where(eq(users.id, user.id));
-    const org = await loadOrgSettings(db);
     // ADR-0028: the second factor does not change WHICH credential established
     // the session — a MFA-completed login is still 'password' origin.
     await setSession(reply, req, user.id, org, "password");
@@ -768,6 +898,18 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     }
     if (!ctx) return reply.status(401).send({ error: "invalid_key" });
     const org = await loadOrgSettings(db);
+    // ADR-0039: an exchanged API-key session is the AUTOMATION path — governed
+    // by api_key_ip_policy, never by the human knob. The bootstrap exchange is
+    // the break-glass path and is never IP-restricted.
+    if (
+      ctx.via === "api-key" &&
+      (await refuseIpBlocked(req, reply, org, "api_key_ip_policy", {
+        method: "api-key-exchange",
+        userId: ctx.userId,
+      }))
+    ) {
+      return reply;
+    }
     // ADR-0028: the deploy-time bootstrap token and a user's API key are two
     // different credentials and get two different origins — only 'api_key'
     // (a real user identity) can ever open the current-password bypass.
@@ -1172,23 +1314,56 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     allowedEmailDomains: p.allowedEmailDomains,
     defaultRoleId: p.defaultRoleId,
     jitProvisioning: p.jitProvisioning,
+    /** ADR-0038: null = this provider emits no group signal, so its logins
+     * never reconcile group-derived roles. */
+    groupsClaim: p.groupsClaim,
     createdAt: p.createdAt,
     updatedAt: p.updatedAt,
     // client_secret_ciphertext deliberately absent: secrets are WRITE-ONLY
   });
 
-  /** discovery against the provider's issuer. http:// issuers (dev/test IdPs)
-   * need the explicit insecure opt-in; https needs nothing. */
+  /** ADR-0043: one issuer-URL egress decision against the SAME default-deny
+   * `egress_allow_hosts` table every other guarded surface uses. An OIDC
+   * issuer is configured once, by an admin, at setup — one allow entry is a
+   * one-time act, not per-call friction — so the ordinary allow-list posture
+   * applies (NOT the MCP private-ranges-open default). */
+  const oidcIssuerDecision = async (issuerUrl: string) => {
+    const allowList = await loadEgressAllowList(db);
+    const decision = await checkEgress(issuerUrl, { allowList });
+    return { decision, allowList };
+  };
+
+  /** discovery against the provider's issuer — now THROUGH the egress guard
+   * (ADR-0043). The issuer is re-validated on every discovery (a write-time
+   * verdict is not a fact about the future, and rows written before this
+   * guard existed are in the live database right now), and the discovery +
+   * token + JWKS fetches all ride `createGuardedFetch`, so they inherit the
+   * ADR-0034 pinned transport and redirect refusal. `allowInsecureRequests`
+   * for an http:// issuer is no longer free: checkEgress only passes plaintext
+   * http when the issuer host's allow entry set allowPlaintextHttp, so the
+   * insecure opt-in is a per-host admin decision, not a side effect of typing
+   * 'http://'. A refusal throws OidcEgressBlockedError with nothing leaving
+   * the box, audited. */
   const oidcConfigFor = async (provider: typeof oidcProviders.$inferSelect) => {
     if (!opts.dataKey) throw new Error("REGULAIT_DATA_KEY required for OIDC");
+    const { decision, allowList } = await oidcIssuerDecision(provider.issuerUrl);
+    if (!decision.ok) {
+      await auditAuth(db, null, provider.id, "oidc-egress-blocked", "deny",
+        `OIDC discovery refused for provider '${provider.name}': ${decision.reason}`,
+        { phase: "oidc-discovery", provider: provider.name, issuerUrl: provider.issuerUrl, code: decision.code },
+        "oidc_provider");
+      throw new OidcEgressBlockedError(decision);
+    }
     const secret = decryptSecret(opts.dataKey, provider.clientSecretCiphertext);
-    return oidc.discovery(
-      new URL(provider.issuerUrl),
-      provider.clientId,
-      secret,
-      undefined,
-      provider.issuerUrl.startsWith("http://") ? { execute: [oidc.allowInsecureRequests] } : undefined,
-    );
+    return oidc.discovery(new URL(provider.issuerUrl), provider.clientId, secret, undefined, {
+      // the guarded fetch is assigned onto the resolved Configuration too, so
+      // the token-endpoint and JWKS requests of the login flow are guarded —
+      // not just the discovery document fetch
+      [oidc.customFetch]: createGuardedFetch({ allowList }),
+      // only reachable for http:// when the host's allow entry opted in —
+      // checkEgress refused plaintext without allowPlaintextHttp above
+      ...(decision.protocol === "http:" ? { execute: [oidc.allowInsecureRequests] } : {}),
+    });
   };
 
   const baseUrlFor = (req: FastifyRequest): string => {
@@ -1216,7 +1391,21 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       .where(and(eq(oidcProviders.id, providerId), eq(oidcProviders.enabled, true)));
     if (!provider) return reply.status(404).send({ error: "unknown_provider" });
     if (!opts.dataKey) return reply.status(409).send({ error: "data_key_required" });
-    const config = await oidcConfigFor(provider);
+    let config: oidc.Configuration;
+    try {
+      config = await oidcConfigFor(provider);
+    } catch (err) {
+      // ADR-0043: a guard refusal is a governance decision with a reason an
+      // operator needs, not a 500 — already audited inside oidcConfigFor.
+      if (err instanceof OidcEgressBlockedError) {
+        return reply.status(403).send({
+          error: "egress_blocked",
+          code: err.decision.code,
+          detail: err.decision.reason,
+        });
+      }
+      throw err;
+    }
     const codeVerifier = oidc.randomPKCECodeVerifier();
     const codeChallenge = await oidc.calculatePKCECodeChallenge(codeVerifier);
     const state = oidc.randomState();
@@ -1262,7 +1451,21 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       .from(oidcProviders)
       .where(and(eq(oidcProviders.id, login.providerId), eq(oidcProviders.enabled, true)));
     if (!provider) return reply.status(401).send({ error: "unknown_provider" });
-    const config = await oidcConfigFor(provider);
+    let config: oidc.Configuration;
+    try {
+      config = await oidcConfigFor(provider);
+    } catch (err) {
+      // ADR-0043: same honest refusal on the callback leg — the issuer may
+      // have been re-pointed, or its allow entry withdrawn, mid-login.
+      if (err instanceof OidcEgressBlockedError) {
+        return reply.status(403).send({
+          error: "egress_blocked",
+          code: err.decision.code,
+          detail: err.decision.reason,
+        });
+      }
+      throw err;
+    }
 
     const currentUrl = new URL(login.redirectUri);
     const qs = req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "";
@@ -1302,7 +1505,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       return reply.status(403).send({ error: "email_domain_not_allowed" });
     }
 
-    let user = await loadUserByEmail(email);
+    let user = await loadUserByEmailHere(email);
     if (user?.disabledAt) {
       await auditAuth(db, null, user.id, "oidc-login-failed", "deny",
         `OIDC login refused: account '${email}' is deactivated`,
@@ -1342,7 +1545,43 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
         { phase: "oidc-jit", provider: provider.name, email, sub: claims.sub, defaultRoleId: provider.defaultRoleId });
     }
 
+    // ADR-0038 — group → role reconciliation from the id_token's groups claim.
+    //
+    // THE FAIL-SAFE, spelled out because getting it wrong is a mass access
+    // strip: `provider.groupsClaim` null means this provider emits no group
+    // signal at all; a claim that is CONFIGURED but ABSENT from this id_token is
+    // also "no signal" (an IdP hiccup or a renamed claim must not read as "in
+    // zero groups"). Both leave existing group-derived roles exactly as they
+    // are. A claim that is PRESENT — including an empty array — is
+    // authoritative, and an empty one reconciles the user to zero group-derived
+    // roles. `normalizeAssertedGroups` returns null for the first case and an
+    // array for the second, so the distinction is a type at the boundary rather
+    // than a convention.
+    if (provider.groupsClaim) {
+      const asserted = normalizeAssertedGroups(
+        (claims as Record<string, unknown>)[provider.groupsClaim],
+      );
+      await reconcileGroupRoles(db, user.id, "oidc", asserted, {
+        kind: "oidc-login",
+        actor: `oidc provider '${provider.name}'`,
+        actorUserId: user.id,
+        detail: { providerId: provider.id, provider: provider.name, groupsClaim: provider.groupsClaim, sub: claims.sub },
+      });
+    }
+
     const org = await loadOrgSettings(db);
+    // ADR-0039: SSO is a human login — the identity provider vouching for the
+    // user does not move the request inside the org's network envelope.
+    if (
+      await refuseIpBlocked(req, reply, org, "session_ip_policy", {
+        method: "oidc",
+        userId: user.id,
+        email,
+        provider: provider.name,
+      })
+    ) {
+      return reply;
+    }
     await setSession(reply, req, user.id, org, "oidc"); // ADR-0028
     await auditAuth(db, user.id, user.id, "login-succeeded", "allow",
       `user '${email}' signed in via OIDC provider '${provider.name}'`,
@@ -1369,6 +1608,24 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       const [role] = await db.select().from(roles).where(eq(roles.id, body.defaultRoleId));
       if (!role) return reply.status(422).send({ error: "unknown_role" });
     }
+    // ADR-0043: WRITE-TIME egress check against the ordinary default-deny
+    // allow-list — a non-permitted issuer is an honest 400 before the row is
+    // stored, audited. (Discovery re-checks every login; this is the earliest
+    // honest failure.)
+    {
+      const { decision } = await oidcIssuerDecision(body.issuerUrl);
+      if (!decision.ok) {
+        await auditAuth(db, req.authCtx.userId, null, "oidc-egress-blocked", "deny",
+          `OIDC provider '${body.name}' registration refused: issuer ${decision.reason}`,
+          { phase: "provider-created", name: body.name, issuerUrl: body.issuerUrl, code: decision.code },
+          "oidc_provider");
+        return reply.status(400).send({
+          error: "egress_blocked",
+          code: decision.code,
+          detail: decision.reason,
+        });
+      }
+    }
     const [row] = await db
       .insert(oidcProviders)
       .values({
@@ -1380,6 +1637,10 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
         allowedEmailDomains: body.allowedEmailDomains ?? null,
         defaultRoleId: body.defaultRoleId ?? null,
         jitProvisioning: body.jitProvisioning ?? false,
+        // ADR-0038: naming the claim turns the group SIGNAL on. It grants
+        // nothing by itself — an asserted group confers nothing until an admin
+        // maps it (`group_role_mappings`), and no mapping reaches isAdmin.
+        groupsClaim: body.groupsClaim ?? null,
       })
       .returning();
     await auditAuth(db, req.authCtx.userId, null, "oidc-provider-created", "allow",
@@ -1401,21 +1662,30 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       const [role] = await db.select().from(roles).where(eq(roles.id, body.defaultRoleId));
       if (!role) return reply.status(422).send({ error: "unknown_role" });
     }
+    // ADR-0043: moving the issuer re-runs the write-time egress check
+    if (body.issuerUrl !== undefined) {
+      const { decision } = await oidcIssuerDecision(body.issuerUrl);
+      if (!decision.ok) {
+        await auditAuth(db, req.authCtx.userId, providerId, "oidc-egress-blocked", "deny",
+          `OIDC provider '${existing.name}' issuer change refused: ${decision.reason}`,
+          { phase: "provider-updated", name: existing.name, issuerUrl: body.issuerUrl, code: decision.code },
+          "oidc_provider");
+        return reply.status(400).send({
+          error: "egress_blocked",
+          code: decision.code,
+          detail: decision.reason,
+        });
+      }
+    }
     // lockout guard: disabling the LAST enabled provider while sso_only is on
-    // would strand every human login
+    // would strand every human login. ADR-0036 GENERALIZED the count to both
+    // provider families — with a live SAML provider, disabling the last OIDC
+    // one no longer strands anybody, and the guard must not pretend otherwise.
     if (body.enabled === false && existing.enabled) {
       const org = await loadOrgSettings(db);
       if (org.ssoOnly) {
-        const stillEnabled = await db
-          .select({ id: oidcProviders.id })
-          .from(oidcProviders)
-          .where(and(eq(oidcProviders.enabled, true), ne(oidcProviders.id, providerId)));
-        if (stillEnabled.length === 0) {
-          return reply.status(409).send({
-            error: "sso_only_needs_a_provider",
-            detail: "sso_only is on and this is the last enabled OIDC provider — turn sso_only off first",
-          });
-        }
+        const remaining = await countEnabledSsoProviders(db, { oidcId: providerId });
+        if (remaining.total === 0) return reply.status(409).send(SSO_ONLY_LAST_PROVIDER);
       }
     }
     const { clientSecret, ...rest } = body;
@@ -1442,16 +1712,9 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
     if (existing.enabled) {
       const org = await loadOrgSettings(db);
       if (org.ssoOnly) {
-        const stillEnabled = await db
-          .select({ id: oidcProviders.id })
-          .from(oidcProviders)
-          .where(and(eq(oidcProviders.enabled, true), ne(oidcProviders.id, providerId)));
-        if (stillEnabled.length === 0) {
-          return reply.status(409).send({
-            error: "sso_only_needs_a_provider",
-            detail: "sso_only is on and this is the last enabled OIDC provider — turn sso_only off first",
-          });
-        }
+        // ADR-0036: OIDC + SAML counted together (see countEnabledSsoProviders)
+        const remaining = await countEnabledSsoProviders(db, { oidcId: providerId });
+        if (remaining.total === 0) return reply.status(409).send(SSO_ONLY_LAST_PROVIDER);
       }
     }
     await db.delete(oidcProviders).where(eq(oidcProviders.id, providerId));
@@ -1463,6 +1726,13 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
   });
 
   // ---- admin visibility: a user's live sessions (+ revoke) -----------------
+  // ADR-0039: list access is itself audited, rows carry last_seen_ip and the
+  // derived (non-authoritative) device label, and revocation exists at BOTH
+  // granularities — one session or all of them. Every death is still just
+  // revoked_at; resolveSession stays the single enforcement path.
+
+  const revokeReasonSchema = z.object({ reason: z.string().trim().min(1).max(500).optional() });
+
   app.get("/v1/users/:userId/sessions", async (req) => {
     const { userId } = userIdParam.parse(req.params);
     const rows = await db
@@ -1473,16 +1743,24 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
         idleExpiresAt: authSessions.idleExpiresAt,
         lastSeenAt: authSessions.lastSeenAt,
         ip: authSessions.ip,
+        lastSeenIp: authSessions.lastSeenIp,
         userAgent: authSessions.userAgent,
+        origin: authSessions.origin,
         revokedAt: authSessions.revokedAt,
       })
       .from(authSessions)
       .where(eq(authSessions.userId, userId));
-    return { sessions: rows };
+    await auditAuth(db, req.authCtx.userId, userId, "session-list-viewed", "allow",
+      `admin viewed the session list for user ${userId} (${rows.length} session(s))`,
+      { phase: "session-list", via: "admin", count: rows.length });
+    return {
+      sessions: rows.map((s) => ({ ...s, deviceLabel: deviceLabel(s.userAgent) })),
+    };
   });
 
   app.post("/v1/users/:userId/sessions/revoke", async (req, reply) => {
     const { userId } = userIdParam.parse(req.params);
+    const body = revokeReasonSchema.parse(req.body ?? {});
     const [target] = await db.select({ email: users.email }).from(users).where(eq(users.id, userId));
     if (!target) return reply.status(404).send({ error: "unknown_user" });
     const revoked = await db
@@ -1491,8 +1769,133 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       .where(and(eq(authSessions.userId, userId), isNull(authSessions.revokedAt)))
       .returning({ id: authSessions.id });
     await auditAuth(db, req.authCtx.userId, userId, "sessions-revoked-by-admin", "allow",
-      `admin revoked ${revoked.length} live session(s) for '${target.email}'`,
-      { phase: "sessions-revoked", email: target.email, count: revoked.length });
+      `admin revoked ${revoked.length} live session(s) for '${target.email}'${body.reason ? `: ${body.reason}` : ""}`,
+      { phase: "sessions-revoked", email: target.email, count: revoked.length, reason: body.reason ?? null });
+    return { revoked: revoked.length };
+  });
+
+  /** ADR-0039: single-session (single-device) revocation — kill ONE
+   * suspicious session without signing the user out everywhere. Registered
+   * beside revoke-all; the static `revoke` segment wins over `:sessionId`, so
+   * the existing route is untouched. */
+  app.post("/v1/users/:userId/sessions/:sessionId/revoke", async (req, reply) => {
+    const { userId, sessionId } = z
+      .object({ userId: z.string().uuid(), sessionId: z.string().uuid() })
+      .parse(req.params);
+    const body = revokeReasonSchema.parse(req.body ?? {});
+    const [target] = await db.select({ email: users.email }).from(users).where(eq(users.id, userId));
+    if (!target) return reply.status(404).send({ error: "unknown_user" });
+    // scoped to the named user: a session id under someone else's account is
+    // indistinguishable from one that never existed
+    const [session] = await db
+      .select({ id: authSessions.id, revokedAt: authSessions.revokedAt })
+      .from(authSessions)
+      .where(and(eq(authSessions.id, sessionId), eq(authSessions.userId, userId)));
+    if (!session) return reply.status(404).send({ error: "unknown_session" });
+    if (session.revokedAt) {
+      return reply.status(409).send({ error: "already_revoked", revokedAt: session.revokedAt });
+    }
+    await db.update(authSessions).set({ revokedAt: new Date() }).where(eq(authSessions.id, sessionId));
+    await auditAuth(db, req.authCtx.userId, userId, "session-revoked-by-admin", "allow",
+      `admin revoked session ${sessionId} for '${target.email}'${body.reason ? `: ${body.reason}` : ""}`,
+      { phase: "session-revoked", email: target.email, sessionId, reason: body.reason ?? null });
+    return { ok: true, revokedSessionId: sessionId };
+  });
+
+  // ---- ADR-0039: self-service session management ---------------------------
+  // The account-security affordance: see your own live sessions, kill one you
+  // don't recognize, or "sign out my other devices". Every route operates ONLY
+  // on the caller's own rows — ownership is part of the WHERE clause, never a
+  // post-hoc check, so another user's session id 404s without leaking that it
+  // exists. Non-admin by design (NON_ADMIN_ROUTES in app.ts); CSRF is enforced
+  // by the global cookie-mutation hook like every state-changing route.
+
+  app.get("/auth/sessions", async (req, reply) => {
+    const userId = req.authCtx.userId;
+    if (!userId) return reply.status(403).send({ error: "no_user_identity" });
+    const now = new Date();
+    const rows = await db
+      .select({
+        id: authSessions.id,
+        createdAt: authSessions.createdAt,
+        expiresAt: authSessions.expiresAt,
+        lastSeenAt: authSessions.lastSeenAt,
+        ip: authSessions.ip,
+        lastSeenIp: authSessions.lastSeenIp,
+        userAgent: authSessions.userAgent,
+        origin: authSessions.origin,
+      })
+      .from(authSessions)
+      .where(
+        and(
+          eq(authSessions.userId, userId),
+          isNull(authSessions.revokedAt),
+          gt(authSessions.expiresAt, now),
+          gt(authSessions.idleExpiresAt, now),
+        ),
+      );
+    await auditAuth(db, userId, userId, "session-list-viewed", "allow",
+      `user viewed their own session list (${rows.length} live session(s))`,
+      { phase: "session-list", via: "self", count: rows.length });
+    return {
+      sessions: rows.map((s) => ({
+        id: s.id,
+        createdAt: s.createdAt,
+        expiresAt: s.expiresAt,
+        lastSeenAt: s.lastSeenAt,
+        ip: s.ip,
+        lastSeenIp: s.lastSeenIp,
+        origin: s.origin,
+        deviceLabel: deviceLabel(s.userAgent),
+        current: s.id === (req.sessionAuth?.sessionId ?? null),
+      })),
+    };
+  });
+
+  app.post("/auth/sessions/:sessionId/revoke", async (req, reply) => {
+    const { sessionId } = z.object({ sessionId: z.string().uuid() }).parse(req.params);
+    const userId = req.authCtx.userId;
+    if (!userId) return reply.status(403).send({ error: "no_user_identity" });
+    // ownership IS the predicate: only the caller's own live session can match
+    const revoked = await db
+      .update(authSessions)
+      .set({ revokedAt: new Date() })
+      .where(
+        and(
+          eq(authSessions.id, sessionId),
+          eq(authSessions.userId, userId),
+          isNull(authSessions.revokedAt),
+        ),
+      )
+      .returning({ id: authSessions.id });
+    if (revoked.length === 0) return reply.status(404).send({ error: "unknown_session" });
+    const wasCurrent = sessionId === (req.sessionAuth?.sessionId ?? null);
+    await auditAuth(db, userId, userId, "session-revoked-by-self", "allow",
+      `user revoked their own session ${sessionId}${wasCurrent ? " (their current session — self sign-out)" : ""}`,
+      { phase: "session-revoked", via: "self", sessionId, wasCurrent });
+    return { ok: true, revokedSessionId: sessionId, wasCurrent };
+  });
+
+  app.post("/auth/sessions/revoke-others", async (req, reply) => {
+    const userId = req.authCtx.userId;
+    if (!userId) return reply.status(403).send({ error: "no_user_identity" });
+    // caller on a session keeps exactly that session; an API-key caller has
+    // no current session, so ALL of their browser sessions are revoked
+    const keepId = req.sessionAuth?.sessionId ?? null;
+    const revoked = await db
+      .update(authSessions)
+      .set({ revokedAt: new Date() })
+      .where(
+        and(
+          eq(authSessions.userId, userId),
+          isNull(authSessions.revokedAt),
+          ...(keepId ? [ne(authSessions.id, keepId)] : []),
+        ),
+      )
+      .returning({ id: authSessions.id });
+    await auditAuth(db, userId, userId, "sessions-revoked-others", "allow",
+      `user signed out ${revoked.length} other session(s)${keepId ? " (current session kept)" : ""}`,
+      { phase: "sessions-revoked", via: "self", count: revoked.length, keptSessionId: keepId });
     return { revoked: revoked.length };
   });
 }

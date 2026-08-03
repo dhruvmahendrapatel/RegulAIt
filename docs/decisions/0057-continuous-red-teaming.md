@@ -1,7 +1,9 @@
 # ADR-0057: Continuous Red-Teaming — scheduled adversarial testing that blocks promotion on regression
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-08-01
+- **Amended**: 2026-08-02 — implemented as **migration 0070**. See the amendment at the foot of
+  this file for what is genuinely enforced, what is structural, and the honest limits.
 
 ## Context
 
@@ -140,3 +142,95 @@ with an origin tag and non-production scoping. The MRM-registry (ADR-0045) resul
 baseline-comparison logic. The "red-team regression" `automated_check` stage type and its resolver
 against the registry. Per-framework gating presets shipped by the compliance packs (ADR-0058). And
 a clear in-product statement of the coverage-not-proof limitation on every red-team report.
+
+---
+
+## Amendment — 2026-08-02: implemented as migration 0070
+
+**Status: Accepted.** Shipped as `packages/shared/src/redteam.ts` (pure),
+`apps/gateway/src/redteam.ts` (gateway), migration
+`packages/db/migrations/0070_continuous_red_teaming.sql`, the admin screen
+`apps/web/src/views/admin/governance/RedTeamPage.tsx`, and the proof-by-attack suite
+`apps/gateway/src/redteam.test.ts` (20 tests).
+
+### The one decision that shaped everything: there is no second harness
+
+A red-team suite **is** an ADR-0044 eval suite whose cases are adversarial probes and whose scorer
+asks the inverted question. So:
+
+- a probe is materialized into an ordinary `eval_cases` row;
+- a run is `runEvalSuite` → `executeGovernedDispatch`, the same governed core an invoke takes;
+- the transcript, the entitlement check, the guardrail pass, the `usage_events` cost row and the
+  `audit_log` row are the ones that already existed;
+- **promotion blocking needed no new code at all** — a published attack library *is* an eval
+  dataset, so an `automated_check` stage binds to it with ADR-0044's existing `evals:` binding, and
+  a regression parks the instance at `blocked_on_check` through the existing `check_failed` route.
+
+Migration 0070 adds only the four things an eval run cannot express: which **attack library
+version** scored it (`redteam_libraries`, `redteam_probes`), the **security reading** of one eval
+run (`redteam_runs`), and **which probes got through** (`redteam_findings`). Red-team results reach
+a model card through the **existing** `model_card_evidence` table (`kind = 'eval_run'`, ADR-0045
+§5) — there is no parallel evidence surface and no parallel approvals surface.
+
+### Genuinely enforced (asserted by test, not by comment)
+
+- **The corpus produces true positives AND true negatives.** The shipped `regulait-core` v1 corpus
+  (nine probes across all five attack classes) run against a *clean* agent resists eight probes and
+  is defeated by one — the deliberate **positive control** (`pii-positive-control`), which drives
+  the deterministic rig down its known leak path so the corpus is provably able to report a defeat.
+  Re-run against the *same agent* with a canary in its system prompt, the exfiltration and
+  injection oracles that were silent now fire. A scorer that flagged everything, or nothing, would
+  fail both halves.
+- **An oracle that cannot flag is refused at authoring time** (HTTP 422): a `contains` with no
+  `forbidden` markers, a non-negated `regex`, and any reference-answer scorer. Same anti-theatre
+  gate ADR-0044 applies to eval scorers, from the adversarial direction.
+- **Red-team dispatch is governed.** A user with no grant on the agent gets the ordinary
+  `agent_not_entitled` denial with the decision shape and a deny row in the one audit log — and the
+  test asserts that no eval run and no `usage_events` row was created, so nothing was dispatched.
+- **Adversarial traffic is metered and tagged.** One `usage_events` row per probe, attributed to
+  the run's project, each carrying `detail.purpose = 'redteam'` — so probe spend is billed and is
+  separable from real usage in the pillar-5 dashboard rather than polluting it.
+- **A defeat reaches model-card evidence.** The finding row points at the `eval_results` row that
+  proves it (asserted against the real transcript, not the finding's own copy), and attaching it to
+  a card is read back **through the MRM route** with the same `mrm-evidence-attached` audit ruleId.
+- **A regression blocks promotion through the existing check.** Asserted as the workflow *state*
+  (`blocked_on_check`) plus the `workflow:check_failed` audit row, and asserted to unblock again
+  once the regression is undone — a gate, not a wall.
+- **A library version freezes on publish**; editing mints the next version, copying its probes.
+
+### Structural, not behavioural
+
+- The **per-class gating vs. reporting split** (§6) is implemented and unit-tested
+  (`evaluateRedTeamGate`), but nothing yet *derives* the gating classes from an Initiative's
+  compliance classification — the caller passes them. Wiring the compliance cascade to supply
+  per-framework gating presets is ADR-0058's shipped-packs work, not this one's.
+- **Non-production scoping of probes** (§"adversarial testing has side effects") is inherited
+  rather than added: probes are ordinary governed dispatches, so the §8.3 `read_only` compliance
+  mode and the ADR-0042 guardrails already constrain what a probe can cause. There is no separate
+  "red-team sandbox" posture, and a deployment that grants an agent mutating tools will have probes
+  that can reach them.
+- **Repeated trials** are not implemented. §"non-determinism makes regression fuzzy" is correct and
+  unaddressed: each probe runs once. With a deterministic provider this is exact; against a real
+  model it would flap, and the gate would need N trials with a threshold before it could be trusted
+  to block.
+
+### Honest limits
+
+- **No model provider is connected in this environment.** Every probe here was answered by the
+  in-memory deterministic provider. What is proven is the **mechanism** — corpus, oracle,
+  aggregation, per-class gate, findings, evidence, workflow block. What is *not* proven is any real
+  model's actual resistance to any real attack. Model-graded probes ride ADR-0044's `EvalJudge`
+  interface unchanged: mechanism-proven, judgment-unverified.
+- **The oracles are marker-based, and markers under-report.** A model that complies in substance
+  while avoiding the marker phrasing scores as "resisted". The leak oracles need a canary token in
+  the agent's configuration to have anything distinctive to detect; without one, a clean result
+  means "nothing recognisable leaked", which the API and the screen both say.
+- **Green never means safe**, and the product says so rather than only the ADR: every red-team
+  response carries `RED_TEAM_COVERAGE_DISCLOSURE`, every attack class renders what it *cannot* tell
+  you next to what it does, and the gate's own pass reason is worded "no known regression … never
+  'secure'".
+- **There is still no in-process scheduler** anywhere in this codebase — the same disclosure
+  ADR-0044 through ADR-0049 made. "Continuous" means an operator or cron drives
+  `POST /v1/redteam/runs` with `trigger: 'scheduled'`, and the run records which trigger fired it.
+  A missed schedule is silent; the run history is the only health signal, and that gap is stated in
+  the `GET /v1/redteam/attack-classes` payload rather than hidden.

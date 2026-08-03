@@ -83,7 +83,11 @@ beforeAll(async () => {
   const pia = await makeUser("a4-pia@example.com");
   piaId = pia.id;
   piaAuth = pia.auth;
-  const s = await app.inject({ method: "POST", headers: AUTH, url: "/v1/servers", payload: { name: "a4-server", url: "https://a4.example.com" } });
+  // ADR-0043: never-fetched registry fixture — a resolvable public hostname would
+  // make CI depend on DNS and a .example one fails closed under the MCP egress
+  // guard's write-time check, so it points at the loopback dead port (discard),
+  // which the private-ranges-open default posture permits with zero ceremony.
+  const s = await app.inject({ method: "POST", headers: AUTH, url: "/v1/servers", payload: { name: "a4-server", url: "http://127.0.0.1:9" } });
   serverId = s.json().id;
   for (const tool of [{ name: "a4_read", kind: "read" }, { name: "a4_write", kind: "write" }]) {
     await app.inject({ method: "POST", headers: AUTH, url: `/v1/servers/${serverId}/tools`, payload: tool });

@@ -153,6 +153,45 @@ export interface ToolRef {
   kind: ToolKind;
 }
 
+/**
+ * ADR-0040 — the ABAC / policy-as-code verdict, supplied BY THE GATEWAY.
+ *
+ * The kernel stays pure: it never parses a Cedar policy, never looks an
+ * attribute up, never touches I/O. It receives an already-computed verdict and
+ * composes it into the fixed rule order like any other check.
+ *
+ * THE INVARIANT — **ABAC NEVER GRANTS.** This input is consulted strictly on
+ * the ALLOW path (after a grant has been found), exactly like ADR-0019's
+ * revocations and §5.1's lead ceiling, so it can only ever turn an allow into a
+ * deny or a require_approval. An ungranted call is default-denied before this
+ * is even looked at, and no Cedar `permit` can rescue it: a Cedar `permit` here
+ * means nothing more than "does not forbid".
+ *
+ * ABSENT INPUT = TODAY. undefined/null (which is what the gateway passes when
+ * the deployment has NO active ABAC policies) adds no rule-chain entry and
+ * changes no decision — byte-identical to the pre-ADR-0040 kernel, the same
+ * discipline every prior kernel extension follows.
+ */
+export type AbacEffect = "permit" | "forbid" | "require_approval";
+
+export interface AbacDecision {
+  /** 'permit' = no forbid matched (Cedar's permit is NOT a grant here) */
+  effect: AbacEffect;
+  /** the matched policy's stable id — becomes `ruleId` on a forbid/approval */
+  policyId?: string | null;
+  /** display name of the matched policy — reason prose only */
+  policyName?: string | null;
+  /** the activated version number of the matched policy — reason prose only */
+  policyVersion?: number | null;
+  /** every policy that matched, for the audit prose (the first one governs) */
+  matchedPolicyIds?: readonly string[];
+  /** required when effect is require_approval: who must sign off */
+  approverUserId?: string | null;
+  approverName?: string | null;
+  /** the policy author's justification/annotation — reason prose only */
+  reason?: string | null;
+}
+
 export interface EvaluationInput {
   userId: string;
   serverId: string;
@@ -202,6 +241,16 @@ export interface EvaluationInput {
    * order (data-scope → rate-limit → approval) unchanged.
    */
   deployContext?: readonly string[] | null;
+  /**
+   * ADR-0040: the ABAC verdict the gateway computed for this call from the
+   * active Cedar policy set. See AbacDecision — allow-path only, never grants,
+   * absent = byte-identical to the pre-ADR-0040 kernel.
+   */
+  // `| undefined` is explicit (not merely `?:`) because the gateway builds this
+  // input with spreads and conditional fields under exactOptionalPropertyTypes:
+  // "the deployment has no ABAC policies" must be expressible as a plain
+  // undefined, not only as an omitted key.
+  abacDecision?: AbacDecision | null | undefined;
 }
 
 export interface Decision {
@@ -237,6 +286,8 @@ export type RuleName =
   | "rate-limit"
   | "approval-required"
   | "lead-ceiling"
+  /** ADR-0040: an attribute-conditional Cedar policy forbade (or paused) the call */
+  | "abac-forbid"
   | "default-deny";
 
 export const DEFAULT_DENY_RULE_ID = "default-deny";
@@ -475,6 +526,32 @@ export function evaluate(input: EvaluationInput): Decision {
     chain.push({ rule: "lead-ceiling", outcome: "allow" });
   }
 
+  // ADR-0040 ABAC. Reached ONLY on the allow path — an ungranted call already
+  // returned default-deny above, so a Cedar policy can never rescue it; ABAC
+  // can only subtract. Positioned exactly like the lead ceiling (and, on the
+  // agent/connector paths, the ADR-0019 revocations): a call an
+  // attribute-conditional policy forbids is forbidden regardless of data
+  // scope, rate limits or approvals, so the forbid is terminal here. The
+  // "require approval" mode is NOT terminal here — it is folded into the ONE
+  // approval step below, so an ABAC-paused call rides the SAME §3 Approvals
+  // Queue as a rule-paused one rather than a parallel mechanism.
+  // Absent input (no active policies) pushes NOTHING: byte-identical to today.
+  const abac = input.abacDecision ?? null;
+  if (abac && abac.effect === "forbid") {
+    const policyId = abac.policyId ?? "abac-forbid";
+    chain.push({ rule: "abac-forbid", outcome: "deny", grantId: policyId });
+    return {
+      effect: "deny",
+      ruleId: policyId,
+      ruleChain: chain,
+      reason:
+        `tool '${tool.name}' on server ${serverRef} is granted to user ${userRef} but forbidden ` +
+        `by ABAC policy ${refLabel(policyId, abac.policyName)}` +
+        (abac.policyVersion != null ? ` (v${abac.policyVersion})` : "") +
+        (abac.reason ? ` — ${abac.reason}` : ""),
+    };
+  }
+
   // PILLAR 1: the rule set arrives already scope-filtered by the gateway, so
   // the kernel match collapses the subject/server dimensions through the two
   // helpers (which keep legacy per-user, per-server rules identical) and adds
@@ -533,6 +610,52 @@ export function evaluate(input: EvaluationInput): Decision {
     };
   }
   chain.push({ rule: "rate-limit", outcome: "no-match" });
+
+  // ADR-0040: an ABAC policy in "require approval" mode pauses the call —
+  // through the SAME §3 Approvals Queue, satisfied by the SAME already-approved
+  // entry, producing the same require_approval effect. It is checked here (one
+  // step ahead of the rule-driven approvals below) because it is the more
+  // specific, attribute-conditional statement; when no ABAC policy applies this
+  // block is skipped entirely and the approval path is byte-identical to today.
+  // FAIL CLOSED: a require_approval verdict with no approver is unusable (there
+  // is nobody to route the queue entry to), so it degrades to a DENY rather
+  // than quietly letting the call through.
+  if (abac && abac.effect === "require_approval") {
+    const policyId = abac.policyId ?? "abac-forbid";
+    if (!abac.approverUserId) {
+      chain.push({ rule: "abac-forbid", outcome: "deny", grantId: policyId });
+      return {
+        effect: "deny",
+        ruleId: policyId,
+        ruleChain: chain,
+        reason:
+          `ABAC policy ${refLabel(policyId, abac.policyName)} requires approval for this call but ` +
+          `names no approver — failing closed`,
+      };
+    }
+    if (input.approvedApprovalId) {
+      chain.push({
+        rule: "abac-forbid",
+        outcome: "satisfied-by-approval",
+        grantId: input.approvedApprovalId,
+      });
+    } else {
+      chain.push({ rule: "abac-forbid", outcome: "require-approval", grantId: policyId });
+      return {
+        effect: "require_approval",
+        ruleId: policyId,
+        ruleChain: chain,
+        reason:
+          `call to '${tool.name}' on server ${serverRef} requires sign-off by approver ` +
+          `${refLabel(abac.approverUserId, abac.approverName)} under ABAC policy ` +
+          `${refLabel(policyId, abac.policyName)}` +
+          (abac.policyVersion != null ? ` (v${abac.policyVersion})` : "") +
+          (abac.reason ? ` — ${abac.reason}` : ""),
+        approverUserId: abac.approverUserId,
+        ...(abac.approverName ? { approverName: abac.approverName } : {}),
+      };
+    }
+  }
 
   // PILLAR 1: first matching approval rule across any scope pauses the call —
   // a broader fleet/role/team rule requires sign-off just as a user rule does.

@@ -63,6 +63,13 @@ export interface OidcProvidersResponse {
   providers: Array<{ id: string; name: string }>;
 }
 
+/** ADR-0036 — the SAML login-screen list. Same shape as the OIDC one on
+ * purpose: to the person signing in the two federated paths are one concept,
+ * and the login page should not make them look like different products. */
+export interface SamlProvidersResponse {
+  providers: Array<{ id: string; name: string }>;
+}
+
 // ---- agents / chat -------------------------------------------------------
 
 export interface GrantedAgent {

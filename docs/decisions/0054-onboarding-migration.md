@@ -1,7 +1,7 @@
 # ADR-0054 — Onboarding & migration: an admin setup wizard and import tooling for day-one time-to-value
 
-- **Status**: Proposed
-- **Date**: 2026-08-01
+- **Status**: Accepted
+- **Date**: 2026-08-01 (amended 2026-08-02 on implementation)
 - **Relates to**: ADR-0036 (SAML SSO), ADR-0037 / ADR-0038 (IdP provisioning + group→role mapping),
   ADR-0010 (PM inbound sync adapters), ADR-0040 (ABAC / policy-as-code), the compliance-classification
   cascade (GOVERNANCE_LAYER_SPEC §8.3), ADR-0041 (BYOC / air-gapped as the primary motion), the
@@ -142,3 +142,120 @@ and nothing about setup requires an outbound call to a RegulAIt-hosted service.
   exist yet.
 - Which frameworks ship as first-party compliance packs (vs. custom) is a product decision this ADR
   defers.
+
+---
+
+## Amendment — 2026-08-02 (implementation)
+
+Accepted and built, with **three deviations stated plainly**.
+
+### Migration 0066 — two tables, and the shortness of that list is the design
+
+`packages/db/migrations/0066_onboarding_migration.sql`.
+
+Everything the wizard produces lands in the tables it would have landed in had an admin clicked
+through the existing console — `roles`, `group_role_mappings`, `compliance_profiles`,
+`projects.classifications`, `users`. That is §4, and it is what makes the result exportable and
+replayable. What genuinely exists nowhere else is HOW FAR THROUGH the wizard this deployment is,
+and WHAT AN IMPORT DID:
+
+- **`onboarding_steps`** — `step_key` is the **primary key**, and that single fact is the whole
+  idempotence story. One row per step in the entire deployment means a write can only be an
+  upsert, so "ran the step twice" and "ran it once" are the same row. There is no wizard-session
+  id, so a piecemeal BYOC install cannot accumulate two contradictory answers to "is the IdP
+  connected?". A CHECK ties `status='done'` to `completed_at IS NOT NULL`, so an interrupted write
+  either landed as a complete transition or did not land.
+- **`onboarding_imports`** — every import, *including the refused ones*. A payload that tried to
+  mint an administrator is a row here plus an `audit_log` deny, because that is exactly the event
+  an operator needs to find months later, and a browser error message is not findable.
+
+(Migration **0065 was deliberately skipped** — ADR-0053 needed no schema.)
+
+### What was built
+
+| Piece | Where |
+| --- | --- |
+| Step graph, transition rule, starter templates, compliance packs, import planners, escalation screen, RFC-4180 CSV reader | `packages/shared/src/onboarding.ts` |
+| The eight routes | `apps/gateway/src/onboarding.ts` |
+| Schema + migration | `packages/db/src/schema.ts`, `packages/db/migrations/0066_onboarding_migration.sql` |
+| The first-run SPA surface | `apps/web/src/views/admin/settings/FirstRunPage.tsx` (`/admin/first-run`) |
+| Proof-by-attack suite (31 tests) | `apps/gateway/src/onboarding.test.ts` |
+
+Routes: `GET /v1/onboarding`, `POST /v1/onboarding/steps/:stepKey`,
+`POST /v1/onboarding/roles/seed`, `POST /v1/onboarding/compliance-pack`,
+`POST /v1/onboarding/imports/users`, `POST /v1/onboarding/imports/group-roles`,
+`GET /v1/onboarding/imports`, `GET /v1/onboarding/export`. All admin-only through the default
+gate; all tagged `internal` in the ADR-0053 spec, because an admin-console surface must stay free
+to move.
+
+### It complements ADR-0041's installer, and does not overlap it
+
+`scripts/install.sh` brings the DEPLOYMENT up — containers, TLS, the data key, the bootstrap
+token. By the time anything here runs, that is done and an admin is looking at a console. Nothing
+here touches deployment concerns and nothing in the installer touches these. The two are named in
+each other's headers so the boundary is not folklore.
+
+### Deviation 1 — the checklist reports what an admin ASSERTED *and* what the deployment SAYS
+
+The ADR describes a persisted checklist. A persisted checklist alone becomes a lie the first time
+someone tears down the provider they ticked the box for. So `GET /v1/onboarding` returns `status`
+(recorded) **and** `satisfied` (computed live from the objects that actually exist) as separate
+fields, plus `drift: true` when they disagree. `resumeAt` answers "where was I?" from a query
+rather than from the admin's memory. This is additive to the ADR and is asserted by test: a step
+marked done whose backing rows are deleted reads `done` + `satisfied: false` + `drift: true`, not
+green.
+
+### Deviation 2 — there is no "Admin" starter role template
+
+§1.3 lists "e.g. Admin, Builder, Reviewer, Viewer". Four templates ship — **Builder, Reviewer,
+Viewer, Operator** — and `Admin` deliberately does not. In this product platform-admin is
+`users.is_admin`, a per-user flag, and ADR-0038 pins structurally that there is no code path from a
+group (or a role) to it. A starter role *named* "Admin" that cannot make anyone an admin would be a
+trap: an operator would assign it, believe they had delegated administration, and be wrong.
+
+Related: **starter roles are seeded with no grants at all**, and the response says so. A template
+pre-wired to "all servers, read-write" would demo beautifully and would be a governance product
+shipping a default-allow. The value a template carries is the role STRUCTURE, not pre-granted
+access.
+
+### Deviation 3 — PM project/work-item import is NOT built
+
+§3 names three importers. Two ship (users & groups; group→role mappings, importable *and*
+exportable as data — the export's `groupRoleMappings` is a valid import payload, and the round trip
+is tested). **PM projects & work items are not implemented** and are not claimed. That importer
+needs a bulk/dry-run/reconcile layer over the ADR-0010 adapters that does not exist, and the ADR
+itself lists exactly that layer as follow-up. Shipping a half-reconciling PM importer would be
+worse than saying it is not here.
+
+### The privilege-escalation guarantee, and how it is proved
+
+An import payload is a file someone else wrote. Four walls, in order:
+
+1. `screenForEscalation` runs on the **raw body before any parse** and refuses a payload carrying a
+   privilege word at any depth — `isAdmin`, `is_admin`, `IS-ADMIN`, `grants`, `permissions`,
+   `superuser`. A 422 with the rule id `onboarding-import-privilege-refused`, an `audit_log` deny,
+   and a `refused` row. **Not a silent strip** — a strip would leave the importer believing the
+   administrators landed, which is the worse outcome.
+2. The row schemas are `.strict()` and have **no privilege field to parse into**. Even bypassing
+   (1), there is no code path that reads one.
+3. Provisioning calls `refuseIfSeatCapReached` — the *same* function `POST /v1/users` calls. Bulk
+   arrival is not a way past ADR-0052's seat cap.
+4. `isAdmin` is not in the insert's values object. Not `false` — **absent**.
+
+And role membership is never named by the file: a row carries GROUPS, and what a group confers is
+decided by a mapping an admin authored. A group→role import naming a role that does not exist is
+refused **whole** rather than creating it, because a file that defines an entitlement bundle is a
+file defining policy, and policy is authored, not imported.
+
+Asserted by test: the `isAdmin` attack tried four ways (JSON, snake_case, CSV column, a `grants`
+key), each refused, audited, recorded — and each asserted to have created **no user at all**; the
+unknown-role import refused whole with no role and no mapping created; the seat cap enforced
+against a real signed license; every import applied leaving `isAdmin === false` on every row.
+
+### Still follow-up
+
+- The PM project / work-item importer (the bulk/dry-run/reconcile layer over the ADR-0010 adapters).
+- Wiring the export into the ADR-0040 policy-as-code versioning path rather than serving it as a
+  document.
+- Which frameworks ship as first-party packs beyond the four here (HIPAA, PCI-DSS, SOC 2, GDPR), and
+  who owns keeping their numbers current as the frameworks move.

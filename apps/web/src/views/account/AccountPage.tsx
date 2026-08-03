@@ -5,10 +5,13 @@
  */
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useSearchParams } from "react-router-dom";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
+import type { OwnSession } from "../../api/adminTypes";
+import { ago } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
-import { Badge, Button, Card, CodeBlock, Field, IdChip, Input } from "../../ui/kit";
+import { Badge, Button, Card, CodeBlock, EmptyState, Field, IdChip, Input, Table } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
 import ModelKeysCard from "./ModelKeysCard";
 import v from "../views.module.css";
@@ -20,11 +23,13 @@ export default function AccountPage() {
   const section = params.get("section");
   const pwRef = useRef<HTMLDivElement>(null);
   const mfaRef = useRef<HTMLDivElement>(null);
+  const sessionsRef = useRef<HTMLDivElement>(null);
   const keysRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (section === "password") pwRef.current?.scrollIntoView({ block: "start" });
     if (section === "mfa") mfaRef.current?.scrollIntoView({ block: "start" });
+    if (section === "sessions") sessionsRef.current?.scrollIntoView({ block: "start" });
     if (section === "keys") keysRef.current?.scrollIntoView({ block: "start" });
   }, [section]);
 
@@ -74,11 +79,131 @@ export default function AccountPage() {
         <div ref={mfaRef}>
           <MfaCard totpEnabled={Boolean(auth?.totpEnabled)} onChanged={() => void refresh()} />
         </div>
+        <div ref={sessionsRef}>
+          <SessionsCard />
+        </div>
         <div ref={keysRef}>
           <ModelKeysCard />
         </div>
       </div>
     </>
+  );
+}
+
+/**
+ * ADR-0039 — the account-security session list: every live session for THIS
+ * account (device label, where it is now, when it was last seen), with
+ * per-session revoke and "sign out other devices". The device label is a
+ * derived display string, never a security control.
+ */
+function SessionsCard() {
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const q = useQuery({
+    queryKey: ["account", "sessions"],
+    queryFn: () => api.get<{ sessions: OwnSession[] }>("/auth/sessions"),
+  });
+  const sessions = q.data?.sessions ?? [];
+  const others = sessions.filter((x) => !x.current);
+
+  const run = async (fn: () => Promise<unknown>, okMsg: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await fn();
+      toast(okMsg, "success");
+      await qc.invalidateQueries({ queryKey: ["account", "sessions"] });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card
+      title={
+        <span className={v.rowTight}>
+          Devices & sessions
+          <Badge>{sessions.length} live</Badge>
+        </span>
+      }
+    >
+      {error && (
+        <div className={v.errLine} role="alert" style={{ marginBottom: "var(--s1)" }}>
+          {error}
+        </div>
+      )}
+      <div className={v.stack}>
+        <Table<OwnSession>
+          columns={[
+            {
+              key: "device",
+              header: "Device",
+              render: (x) => (
+                <span className={v.rowTight}>
+                  {x.deviceLabel}
+                  {x.current && <Badge tone="primary">this device</Badge>}
+                </span>
+              ),
+            },
+            {
+              key: "ip",
+              header: "IP",
+              render: (x) => <span className={v.mono}>{x.lastSeenIp ?? x.ip ?? "—"}</span>,
+            },
+            { key: "signedIn", header: "Signed in", render: (x) => ago(x.createdAt) },
+            { key: "seen", header: "Last seen", render: (x) => ago(x.lastSeenAt) },
+            { key: "origin", header: "Via", render: (x) => <span className={v.mono}>{x.origin}</span> },
+            {
+              key: "actions",
+              header: "",
+              render: (x) =>
+                x.current ? null : (
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    disabled={busy}
+                    onClick={() =>
+                      void run(
+                        () => api.post(`/auth/sessions/${x.id}/revoke`),
+                        "Session signed out (audited)",
+                      )
+                    }
+                  >
+                    Sign out
+                  </Button>
+                ),
+            },
+          ]}
+          rows={sessions}
+          rowKey={(x) => x.id}
+          empty={<EmptyState title="No live sessions" body="Sessions appear here when you sign in from a browser." />}
+        />
+        <div className={v.row}>
+          <span className={v.faint}>
+            Don't recognize a session? Sign it out — it stops authenticating immediately, and every
+            revocation is audited.
+          </span>
+          <span className={v.grow} />
+          <Button
+            size="sm"
+            variant="danger"
+            disabled={busy || others.length === 0}
+            onClick={() =>
+              void run(
+                () => api.post("/auth/sessions/revoke-others"),
+                "All other devices were signed out (audited)",
+              )
+            }
+          >
+            Sign out other devices
+          </Button>
+        </div>
+      </div>
+    </Card>
   );
 }
 

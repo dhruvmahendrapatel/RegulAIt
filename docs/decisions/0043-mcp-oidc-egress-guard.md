@@ -1,7 +1,7 @@
 # ADR-0043 — Bring `mcp_servers.url` and `oidc_providers.issuerUrl` inside the egress guard
 
-- **Status**: Proposed
-- **Date**: 2026-08-01
+- **Status**: Accepted
+- **Date**: 2026-08-01 (implemented 2026-08-02 — see the amendment at the end)
 - **Relates to**: ADR-0034 (custom LLM providers behind the default-deny egress guard, and its
   three amendments — this ADR resolves the two surfaces those amendments deliberately left open),
   ADR-0025/0028/0030 (auth — the OIDC login path), ADR-0023 (`mcpMode`, MCP proxy), ADR-0024
@@ -156,3 +156,89 @@ validated-address pin, same SNI/cert-verification-preserved behaviour.
   are named but unbuilt. What is decided now is the posture question ADR-0034 blocked on:
   MCP = private-ranges-open-by-default with an IMDS carve-out and a strict toggle; OIDC = ordinary
   default-deny allow-list at write + discovery time; both inherit pinned-fetch.
+
+---
+
+## Amendment (2026-08-02) — implemented
+
+- **Status**: Accepted and shipped. **Migration 0049** (`0049_mcp_oidc_egress`):
+  `mcp_servers.allow_private_ranges` (nullable — null inherits) and
+  `org_settings.mcp_private_ranges_default` (boolean NOT NULL DEFAULT true). No other DDL; the
+  `mcp_server` audit `objectType` is the usual TS-only extension of the plain text column.
+
+### What was built, where
+
+- **The guard grew one option, not a second mechanism.** `EgressCheckOptions.privateLan`
+  (`egress-guard.ts`) switches `checkEgress` into a private-LAN-aware mode used ONLY by the MCP
+  path: the blocked-range list is split into *ordinary private LAN* (RFC1918, loopback, ULA —
+  what the flag opens) and *unconditional* ranges (link-local/IMDS, CGNAT, multicast, reserved,
+  `0.0.0.0/8` and the IPv6 analogues), with the unconditional half refused before any flag or
+  allow entry is consulted. The union of the two halves is byte-identical to the pre-0049 list,
+  and the classic path (every other surface) is untouched.
+- **MCP**: `apps/gateway/src/mcp-egress.ts` (posture loader, write-time refusal helper, guarded
+  connect); `connectUpstream` now takes `(db, serverRow)` and runs the guard on **every** connect,
+  handing the MCP client transport `createGuardedFetch` — so every request of the session is
+  re-validated, pinned (ADR-0034 amendment #3) and redirect-refused. Write-time 400
+  `egress_blocked` on `POST /v1/servers` and on a **new** `PATCH /v1/servers/:serverId`
+  (`{name?, url?, allowPrivateRanges?}` — no update route existed before; the per-server flag
+  needed one). Refusals audited as `mcp-server-egress-blocked` (`objectType: mcp_server`) with
+  the phase (`registration`/`update`/`connect`). The proxy route surfaces a connect-time refusal
+  as its ordinary pre-hijack 403.
+- **OIDC**: write-time check on `POST`/`PATCH /v1/auth/oidc-providers` (400 `egress_blocked`,
+  audited `oidc-egress-blocked`); discovery re-validates on every login leg and passes
+  `createGuardedFetch` via openid-client v6's `[customFetch]` discovery option, which the library
+  assigns onto the resolved `Configuration` — so the token-endpoint and JWKS fetches are guarded
+  too, not just the discovery document. `allowInsecureRequests` is only ever set when the guard
+  passed an `http://` issuer, which requires the host entry's `allowPlaintextHttp` — exactly the
+  gating this ADR demanded.
+- **SPA**: the org toggle on Settings → Organization ("MCP egress posture"), and the per-server
+  tri-state (inherit / allow / deny) on the MCP servers page (register form + per-row editor,
+  the existing form patterns).
+
+### Deviations from the letter of the ADR, recorded honestly
+
+1. **The IPv6 side of the carve-out had to be spelled out.** The ADR names `169.254.0.0/16`;
+   the implementation also refuses `fe80::/10` (the v6 link-local twin), IPv4-mapped/NAT64
+   embeddings of any unconditional v4 range, and **`fd00:ec2::/32`** — AWS's reserved ULA prefix
+   where the IPv6 IMDS endpoint (`fd00:ec2::254`) lives — while ordinary ULA (`fc00::/7`
+   otherwise) counts as private LAN. Treating all of ULA as open would have re-opened IMDS over
+   IPv6; treating all of it as blocked would have broken legitimate v6 LANs.
+2. **On the MCP path, an `egress_allow_hosts` entry's `allowPrivateRanges` is also narrowed to
+   private-LAN-only.** The ADR carved IMDS out of the *per-server flag*; the implementation
+   carves it out of the whole surface, so even an allow entry for the IMDS address itself (with
+   both opt-ins) cannot open it from the MCP path. The classic surfaces keep their pre-existing
+   semantics unchanged (pinned by a test), per the "do not change existing behavior" constraint.
+3. **Only refusals are audited on the MCP connect path** (write-time refusals likewise). The ADR
+   required "a refused connect is an audited failure" and that holds; a per-connect `allow`
+   destination row (the connector-surface pattern) was **not** added, because the proxy connects
+   upstream on every tools/list and tool call and the ledger already meters those — noted here so
+   the asymmetry is a decision, not an accident.
+4. **Fixture moves, per the ADR-0034 precedent**: three registry-only test fixtures
+   (`a4-mode-dimension`, `app.test`, `revocation-scope`) and the two seeded demo servers moved
+   from unresolvable `.example`/`.invalid` hostnames to the loopback dead port
+   (`http://127.0.0.1:9`), which the default posture permits with zero ceremony; `auth.test.ts`
+   gained the explicit `127.0.0.1` allow entry (private-range + plaintext opt-ins) for its fake
+   IdP — exactly the sequence an operator with a self-hosted Keycloak performs. No assertion was
+   weakened; no guard behaviour was relaxed for tests.
+
+### Evidence
+
+- `mcp-oidc-egress.test.ts`, **20 tests**, proof-by-attack: zero-ceremony private MCP server
+  end-to-end through the guarded transport (real upstream, real MCP client, manifest synced);
+  strict toggle refusing at write time AND at connect time for an existing inherit-posture row;
+  the per-server flag re-opening it (and a PATCH that would strand the stored URL refused);
+  IMDS refused at write time **with `allow_private_ranges=true`**, and a row inserted directly
+  into Postgres refused at connect **even with the IMDS address itself allow-listed with both
+  opt-ins**; public MCP URL refused without an allow entry / accepted with one; plaintext-to-
+  public needing the opt-in; hostname-resolution and split-DNS attacks against the private-LAN
+  mode; the v6 carve-outs; the classic path's pre-existing opt-in semantics pinned unchanged;
+  OIDC provider refused at write time (nothing stored, audited), `allowInsecureRequests` gated
+  on the plaintext opt-in, live discovery through the guarded fetch with the allow entry
+  withdrawn stopping the very next `/start`, a directly-inserted provider refused at discovery
+  time (row kept verbatim), and a PATCH to a blocked issuer refused with the stored issuer
+  unchanged.
+- **Suite**: workspace **1703 → 1723**, gateway **994/74 files → 1014/75 files**. Delta **+20**,
+  all of it `mcp-oidc-egress.test.ts`. Zero pre-existing assertions changed — one suite gained
+  an allow entry in `beforeAll`, five fixture URLs moved.
+- `pnpm -r build` clean; migrations 0001–0049 apply cleanly to a freshly created database; full
+  gateway suite green.
