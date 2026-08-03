@@ -12,6 +12,11 @@ import {
   openAiUsesResponsesApi,
   CustomProvider,
   resolveModelProvider,
+  ANTHROPIC_DEFAULT_BASE,
+  OPENAI_DEFAULT_BASE,
+  GOOGLE_DEFAULT_BASE,
+  XAI_DEFAULT_BASE,
+  defaultBaseUrlFor,
 } from "./index.js";
 
 function anthropicJson(body: unknown, status = 200): Response {
@@ -2743,5 +2748,59 @@ describe("CustomProvider (ADR-0034)", () => {
     await expect(provider.dispatch({ model: "m", input: "hi" })).rejects.toThrowError(
       /custom dispatch failed/,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0062 — the compiled vendor defaults
+// ---------------------------------------------------------------------------
+
+describe("ADR-0062 compiled vendor defaults", () => {
+  it("DRIFT CHECK: the constants are what the SDKs themselves default to", async () => {
+    // The whole guard rests on this. If an SDK upgrade moves its default and
+    // this constant does not, a strict deployment would adjudicate a host the
+    // adapter never contacts — i.e. it would allow-list the wrong thing and
+    // block the right one. Asked of the SDKs directly, not asserted from
+    // memory.
+    const { default: Anthropic } = await import("@anthropic-ai/sdk");
+    const { default: OpenAI } = await import("openai");
+    // constructed with an explicitly EMPTY baseURL environment, so this
+    // measures the compiled default rather than whatever the box exports
+    const savedA = process.env["ANTHROPIC_BASE_URL"];
+    const savedO = process.env["OPENAI_BASE_URL"];
+    delete process.env["ANTHROPIC_BASE_URL"];
+    delete process.env["OPENAI_BASE_URL"];
+    try {
+      expect(new Anthropic({ apiKey: "x" }).baseURL).toBe(ANTHROPIC_DEFAULT_BASE);
+      expect(new OpenAI({ apiKey: "x" }).baseURL).toBe(OPENAI_DEFAULT_BASE);
+    } finally {
+      if (savedA !== undefined) process.env["ANTHROPIC_BASE_URL"] = savedA;
+      if (savedO !== undefined) process.env["OPENAI_BASE_URL"] = savedO;
+    }
+  });
+
+  it("the Google and xAI adapters reach the base this registry reports", async () => {
+    let seen: string | null = null;
+    const spy = (async (url: string | URL | Request) => {
+      seen = String(url);
+      return new Response(
+        JSON.stringify({
+          candidates: [{ content: { parts: [{ text: "hi" }] }, finishReason: "STOP" }],
+          usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+    const google = new GoogleProvider({ apiKey: "k", fetchImpl: spy });
+    await google.dispatch({ model: "gemini-x", input: "hi" });
+    expect(seen).not.toBeNull();
+    expect(String(seen).startsWith(GOOGLE_DEFAULT_BASE)).toBe(true);
+    expect(new URL(XAI_DEFAULT_BASE).hostname).toBe("api.x.ai");
+  });
+
+  it("the tri-state distinguishes 'no network call' from 'we cannot say'", () => {
+    expect(defaultBaseUrlFor("mock", {})).toBeNull();
+    expect(defaultBaseUrlFor("custom", {})).toBeNull();
+    expect(defaultBaseUrlFor("a-kind-that-does-not-exist", {})).toBeUndefined();
   });
 });

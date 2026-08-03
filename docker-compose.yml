@@ -74,6 +74,23 @@ services:
       # Harmless with the `tls` profile OFF: 172.28.0.2 simply does not exist,
       # so nothing is trusted and req.ip is the socket peer.
       REGULAIT_TRUSTED_PROXIES: ${REGULAIT_TRUSTED_PROXIES:-172.28.0.2}
+      # ADR-0062 — THE DEPLOYMENT-WIDE EGRESS POSTURE. hosted|byoc|air_gapped;
+      # unset defaults to `hosted`, which is byte-identical to every deployment
+      # before ADR-0062. On `air_gapped` a model/connector/git/PM adapter that
+      # would run on its COMPILED vendor endpoint (api.anthropic.com,
+      # slack.com, api.github.com, ...) is REFUSED unless that host is in the
+      # egress allow-list — the same table the typed-URL guard uses.
+      #
+      # It lives here rather than in org_settings for the same reason
+      # REGULAIT_HSTS does (ADR-0029): it is a deployment-shape fact an admin
+      # cannot judge from a portal, and an air-gapped posture a compromised
+      # admin account could switch off from a web form is not one. org_settings
+      # may TIGHTEN it and can never loosen it. A malformed value throws at
+      # boot; the effective posture is printed in the boot log.
+      #
+      # `scripts/install.sh --mode` writes this into the rendered .env, so an
+      # installed deployment gets its real mode without anyone editing a file.
+      REGULAIT_DEPLOY_MODE: ${REGULAIT_DEPLOY_MODE:-}
       # ADR-0036 (SAML 2.0 SSO) — both OPTIONAL, both bounded:
       #  - REGULAIT_SAML_ENTITY_ID pins the deployment-global SP entity id.
       #    Unset, it is derived from the request host (like the OIDC

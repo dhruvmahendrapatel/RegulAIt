@@ -55,6 +55,23 @@
  * behaviour of every non-overriding deployment is byte-identical — down to the
  * fetch implementation, which stays the global one.
  *
+ * ── AMENDED, 2026-08-03 (ADR-0062) ──────────────────────────────────────────
+ * The paragraph immediately above is kept verbatim because it is what this
+ * module shipped saying, and it remains exactly right AS AN SSRF ARGUMENT — you
+ * cannot smuggle `169.254.169.254` into a constant. It was never an egress
+ * POLICY, and on an air-gapped deployment the policy is the whole point: a
+ * Slack or GitHub connector on its compiled endpoint is an outbound connection
+ * carrying customer data, and until ADR-0062 nothing in the application refused
+ * it (`docs/deployment/DATA_BOUNDARY.md` §4 recorded this as an open finding).
+ *
+ * The fix does NOT live in this module, deliberately: this module adapts TYPED
+ * destinations onto the allow-list, and a compiled constant is a different
+ * question (an admission decision on a vendor, with no DNS and no transport
+ * change). It lives in `compiled-egress.ts`, gated by `deploy-posture.ts`, and
+ * it decides against the SAME `egress_allow_hosts` table — there is still ONE
+ * egress allow-list in this codebase. Under `hosted` (the default) every word
+ * above still describes the behaviour exactly.
+ *
  * ONE OPT-IN, NOT TWO — same deliberate difference the credential amendment
  * recorded. A custom LLM provider row carries its own `allow_plaintext_http`
  * column, so plaintext http there needs two opt-ins. None of these three tables

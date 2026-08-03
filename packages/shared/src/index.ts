@@ -1609,6 +1609,8 @@ export const approvalQuorumSchema = z.enum(["all", "any"]);
 export const mfaRequirementSchema = z.enum(["off", "admins", "all"]);
 /** ADR-0039: the shared level set of both IP-policy knobs. */
 export const ipPolicySchema = z.enum(["off", "enforce_at_login", "enforce_continuous"]);
+/** ADR-0062: tighten-only. See `egressCompiledDefaultPolicy` below. */
+export const egressCompiledDefaultPolicySchema = z.enum(["inherit", "strict"]);
 
 export const updateOrgSettingsSchema = z
   .object({
@@ -1651,6 +1653,12 @@ export const updateOrgSettingsSchema = z
      * false = strict, requiring an explicit per-server flag or an allow entry.
      * IMDS/link-local stays unconditionally blocked either way. */
     mcpPrivateRangesDefault: z.boolean().optional(),
+    /** ADR-0062: the org's TIGHTENING dial over the deployment-wide egress
+     * posture. 'inherit' (default) defers to the env-derived deploy mode;
+     * 'strict' adjudicates compiled vendor endpoints against the egress
+     * allow-list regardless of mode. There is deliberately NO value that
+     * loosens an air_gapped deployment — the enum has no such member. */
+    egressCompiledDefaultPolicy: egressCompiledDefaultPolicySchema.optional(),
     // budgets
     budgetEnforcement: budgetEnforcementSchema.optional(),
     budgetHardBlockPct: z.number().int().min(1).max(100).optional(),

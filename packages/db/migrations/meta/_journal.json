@@ -512,6 +512,13 @@
       "when": 1785008000000,
       "tag": "0073_compliance_packs",
       "breakpoints": true
+    },
+    {
+      "idx": 74,
+      "version": "7",
+      "when": 1785009000000,
+      "tag": "0074_mode_scoped_egress",
+      "breakpoints": true
     }
   ]
 }

@@ -1373,3 +1373,31 @@ export function resolvePmProvider(config: PmConnectionConfig, fetchImpl?: FetchL
       return sharedMock;
   }
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0062 — the compiled vendor defaults, made adjudicable
+// ---------------------------------------------------------------------------
+//
+// See the note in `@regulait/model-provider`. `azure_devops`, `jira` and
+// `generic_webhook` all require an explicit baseUrl (the registry throws
+// without one), so they have no compiled destination to adjudicate.
+
+export { LINEAR_DEFAULT_BASE, ASANA_DEFAULT_BASE, MONDAY_DEFAULT_BASE };
+
+export function pmDefaultBaseUrl(provider: string): string | null | undefined {
+  switch (provider) {
+    case "linear":
+      return LINEAR_DEFAULT_BASE;
+    case "asana":
+      return ASANA_DEFAULT_BASE;
+    case "monday":
+      return MONDAY_DEFAULT_BASE;
+    case "azure_devops":
+    case "jira":
+    case "generic_webhook":
+    case "mock":
+      return null;
+    default:
+      return undefined;
+  }
+}

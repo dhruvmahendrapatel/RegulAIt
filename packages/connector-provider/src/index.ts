@@ -1331,3 +1331,38 @@ export function resolveConnectorProvider(
       });
   }
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0062 — the compiled vendor defaults, made adjudicable
+// ---------------------------------------------------------------------------
+//
+// See the long note in `@regulait/model-provider`. Same contract, same
+// tri-state, same rule: `undefined` means "this module cannot say where the
+// adapter would go", and a strict posture must refuse rather than guess.
+//
+// `snowflake` is the honest `undefined` here. Its default is derived from the
+// DECRYPTED CREDENTIAL (`https://<account>.snowflakecomputing.com`), so it is
+// knowable at call time but not statically, and this registry deliberately does
+// not take a credential. An air-gapped deployment that wants a Snowflake
+// connector sets an explicit `baseUrl` — which is the guarded path anyway.
+
+export function connectorDefaultBaseUrl(kind: string): string | null | undefined {
+  switch (kind) {
+    case "slack":
+      return SLACK_DEFAULT_BASE_URL;
+    case "github":
+      return GITHUB_DEFAULT_BASE_URL;
+    // these cannot be constructed without an explicit baseUrl (the adapter
+    // throws), so a null override never reaches a compiled destination
+    case "http":
+    case "generic":
+    case "webhook":
+    case "jira":
+      return null;
+    case "mock":
+      return null;
+    default:
+      // includes `snowflake` — credential-derived, see above
+      return undefined;
+  }
+}

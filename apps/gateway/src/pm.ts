@@ -22,6 +22,7 @@ import {
   parseInboundWebhook,
   resolveApprovalAction,
   resolveDecisionAction,
+  pmDefaultBaseUrl,
   resolvePmProvider,
   resolveStatus,
   resolveTaskFields,
@@ -40,6 +41,13 @@ import {
   guardConnectionCall,
   refuseConnectionEgressWrite,
 } from "./connection-egress.js";
+// ADR-0062 — the compiled PM endpoint, adjudicated under a strict posture.
+import {
+  auditCompiledDefaultDenied,
+  CompiledDefaultEgressBlockedError,
+  decideCompiledDefault,
+  loadCompiledEgressContext,
+} from "./compiled-egress.js";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 
@@ -78,6 +86,14 @@ const CONNECTION_COLUMNS = {
  *
  * A null `baseUrl` (mock, and Linear/Asana/monday on their vendor defaults) is
  * unchecked and gets the global fetch: nobody can type a compiled endpoint.
+ *
+ * ── AMENDED BY ADR-0062 (2026-08-03) ─────────────────────────────────────────
+ * The last paragraph holds under the default (`hosted`) posture and only there.
+ * Under a strict posture — an air-gapped deployment, or an org that opted in —
+ * the compiled Linear/Asana/monday endpoint is adjudicated against the SAME
+ * `egress_allow_hosts` table, and a refusal throws
+ * `CompiledDefaultEgressBlockedError`, which both pm-sync endpoints turn into
+ * the same honest 403 the guarded path produces.
  */
 async function providerFor(
   db: Db,
@@ -104,6 +120,33 @@ async function providerFor(
         detail: { connection: conn.name, provider: conn.provider, ...(ctx.detail ?? {}) },
       })
     ).fetchImpl;
+  } else {
+    // ADR-0062 — the compiled PM endpoint (api.linear.app, app.asana.com,
+    // api.monday.com). Under a strict posture the host must be in the same
+    // egress allow-list. The refusal throws, exactly like the guarded path's
+    // does, so the two PM-sync endpoints that already map
+    // `ConnectionEgressBlockedError` to a 403 get an equivalent honest failure
+    // and every other caller sees the same shape it sees today.
+    const { posture, allowList } = await loadCompiledEgressContext(db);
+    const compiled = decideCompiledDefault({
+      posture,
+      surface: "pm_connection",
+      kind: conn.provider,
+      defaultBaseUrl: pmDefaultBaseUrl(conn.provider),
+      allowList,
+    });
+    if (!compiled.ok) {
+      await auditCompiledDefaultDenied(db, {
+        userId: ctx.userId ?? null,
+        surface: "pm_connection",
+        objectId: conn.id,
+        kind: conn.provider,
+        decision: compiled,
+        posture,
+        detail: { connection: conn.name, ...(ctx.detail ?? {}) },
+      });
+      throw new CompiledDefaultEgressBlockedError("pm_connection", compiled);
+    }
   }
   return resolvePmProvider(
     {
@@ -397,7 +440,13 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
     } catch (err) {
       // ADR-0034 amendment #2 — a real 403 at the HTTP boundary that exists on
       // this path, with nothing having left the box and the attempt audited.
-      if (err instanceof ConnectionEgressBlockedError) {
+      // ADR-0062: the compiled-vendor-default refusal is the same governance
+      // decision reached one branch earlier, so it gets the same 403 rather
+      // than surfacing as an opaque 500.
+      if (
+        err instanceof ConnectionEgressBlockedError ||
+        err instanceof CompiledDefaultEgressBlockedError
+      ) {
         return reply
           .status(403)
           .send({ error: "egress_blocked", code: err.decision.code, detail: err.decision.reason });
@@ -572,7 +621,13 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
       });
     } catch (err) {
       // ADR-0034 amendment #2 — see the run pm-sync endpoint above.
-      if (err instanceof ConnectionEgressBlockedError) {
+      // ADR-0062: the compiled-vendor-default refusal is the same governance
+      // decision reached one branch earlier, so it gets the same 403 rather
+      // than surfacing as an opaque 500.
+      if (
+        err instanceof ConnectionEgressBlockedError ||
+        err instanceof CompiledDefaultEgressBlockedError
+      ) {
         return reply
           .status(403)
           .send({ error: "egress_blocked", code: err.decision.code, detail: err.decision.reason });

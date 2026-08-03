@@ -4,6 +4,7 @@ import { createDb, runMigrations } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { describeTrustProxy, resolveTrustProxy } from "./trusted-proxy.js";
 import { describeHsts, resolveHsts } from "./hsts.js";
+import { describeEgressPosture, resolveDeployMode } from "./deploy-posture.js";
 
 const connectionString =
   process.env.DATABASE_URL ?? "postgres://regulait:regulait@localhost:5432/regulait";
@@ -35,4 +36,8 @@ app.listen({ port, host: "0.0.0.0" }).then((address) => {
   // belongs in the boot log next to the proxy posture rather than only in a
   // response an operator has to think to look at.
   console.log(`  hsts:      ${describeHsts(resolveHsts())}`);
+  // ADR-0062: say out loud what this box will REFUSE to reach. An operator who
+  // believes their install is air-gapped and has not set the variable must be
+  // able to see that from the boot log rather than from a packet capture.
+  console.log(`  egress:    ${describeEgressPosture(resolveDeployMode())}`);
 });

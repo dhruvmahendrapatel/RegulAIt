@@ -2553,6 +2553,10 @@ export const ORG_PII_MODES = ["none", "log", "warn", "block"] as const;
 export const MFA_REQUIREMENTS = ["off", "admins", "all"] as const;
 export const BUDGET_ENFORCEMENTS = ["block", "warn_only"] as const;
 export const APPROVAL_QUORUMS = ["all", "any"] as const;
+/** ADR-0062: the org's TIGHTENING dial over the deployment-wide egress
+ * posture. 'inherit' defers to the env-derived deploy mode; 'strict' raises
+ * the floor. There is deliberately no value that lowers it. */
+export const EGRESS_COMPILED_DEFAULT_POLICIES = ["inherit", "strict"] as const;
 
 export const orgSettings = pgTable(
   "org_settings",
@@ -2765,6 +2769,29 @@ export const orgSettings = pgTable(
      * sensitive queues act item-by-item on the highest-risk classes; that
      * friction IS the control (ADR-0046 §4), and it is a disclosed limit. */
     approvalBulkSensitiveBlocked: boolean("approval_bulk_sensitive_blocked").notNull().default(true),
+
+    // --- ADR-0062 (migration 0074): mode-scoped egress ----------------------
+    /** THE ONE ORG DIAL OVER THE COMPILED-VENDOR-DEFAULT POSTURE, and it can
+     * only TIGHTEN. The deployment-wide posture is derived from the
+     * environment (`REGULAIT_DEPLOY_MODE`, ADR-0062, following the ADR-0029
+     * HSTS precedent) because "is this installation air-gapped" is a
+     * deployment-shape fact an admin cannot judge from a portal — and because
+     * an air-gapped posture a compromised admin account can switch off from a
+     * web form is not one.
+     *
+     * 'inherit' (default) = today's behaviour: the env-derived mode decides.
+     * 'strict'            = adjudicate compiled vendor endpoints against
+     *                       `egress_allow_hosts` regardless of mode, so a
+     *                       hosted or BYOC box can opt in.
+     *
+     * Composition is MAX over {permissive < strict}: there is no value here
+     * that loosens an air_gapped deployment, by construction rather than by
+     * validation. */
+    egressCompiledDefaultPolicy: text("egress_compiled_default_policy", {
+      enum: EGRESS_COMPILED_DEFAULT_POLICIES,
+    })
+      .notNull()
+      .default("inherit"),
 
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

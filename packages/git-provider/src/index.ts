@@ -327,3 +327,31 @@ export function resolveProvider(
       return sharedMock;
   }
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0062 — the compiled vendor defaults, made adjudicable
+// ---------------------------------------------------------------------------
+//
+// See the note in `@regulait/model-provider`. `azure_devops` requires an
+// explicit organization URL (the adapter throws without one), so it has no
+// compiled destination to adjudicate.
+
+export const GITHUB_DEFAULT_API_BASE = "https://api.github.com";
+export const GITLAB_DEFAULT_API_BASE = "https://gitlab.com/api/v4";
+export const BITBUCKET_DEFAULT_API_BASE = "https://api.bitbucket.org/2.0";
+
+export function gitDefaultBaseUrl(provider: string): string | null | undefined {
+  switch (provider) {
+    case "github":
+      return GITHUB_DEFAULT_API_BASE;
+    case "gitlab":
+      return GITLAB_DEFAULT_API_BASE;
+    case "bitbucket":
+      return BITBUCKET_DEFAULT_API_BASE;
+    case "azure_devops":
+    case "mock":
+      return null;
+    default:
+      return undefined;
+  }
+}

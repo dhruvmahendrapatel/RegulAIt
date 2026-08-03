@@ -138,6 +138,11 @@ function Loaded(props: { settings: Record<string, unknown> }) {
     mcpPrivateRangesDefault: str(s, "mcpPrivateRangesDefault"),
   });
 
+  // --- 2d. Deployment egress posture (ADR-0062) ----------------------------
+  const compiledEgress = useSection({
+    egressCompiledDefaultPolicy: str(s, "egressCompiledDefaultPolicy"),
+  });
+
   // --- 3. Budgets & limits -------------------------------------------------
   const budget = useSection({
     budgetEnforcement: str(s, "budgetEnforcement"),
@@ -428,6 +433,36 @@ function Loaded(props: { settings: Record<string, unknown> }) {
             >
               <option value="true">open (default — private-LAN MCP servers just work)</option>
               <option value="false">strict (each server needs an explicit opt-in)</option>
+            </Select>
+          </Field>
+        </SectionShell>
+      </Card>
+
+      <Card title="3c · Compiled vendor endpoints (ADR-0062)">
+        <SectionShell
+          title="Deployment egress posture"
+          busy={compiledEgress.act.busy}
+          error={compiledEgress.act.error}
+          submitLabel="Save egress posture"
+          onSubmit={() =>
+            void compiledEgress.act.run(
+              () =>
+                put({
+                  egressCompiledDefaultPolicy: compiledEgress.f
+                    .egressCompiledDefaultPolicy as "inherit" | "strict",
+                }),
+              "Deployment egress posture saved (audited)",
+            )
+          }
+          help="The egress guard has always adjudicated URLs a human typed. It did not adjudicate the endpoint a built-in adapter falls back to with no baseUrl override — api.anthropic.com, slack.com, api.github.com and friends — because nobody can type a constant. That is a complete answer to SSRF and no answer at all to 'may this installation reach that vendor'. This dial can only TIGHTEN: the deployment-wide posture comes from the server's REGULAIT_DEPLOY_MODE (air_gapped is always strict, and nothing here can loosen it, because 'is this box air-gapped' is not something a portal toggle can know). Strict = a dispatch that would run on a compiled vendor endpoint is refused with a 403 and audited unless that host is in Egress Allow Hosts; a self-hosted model on a private address keeps working once allow-listed. Inherit = today's behaviour on a hosted or BYOC box."
+        >
+          <Field label="Compiled vendor endpoints">
+            <Select
+              value={compiledEgress.f.egressCompiledDefaultPolicy}
+              onChange={(e) => compiledEgress.set("egressCompiledDefaultPolicy", e.target.value)}
+            >
+              <option value="inherit">inherit (default — the server's deploy mode decides)</option>
+              <option value="strict">strict (adjudicate them even on a hosted/BYOC box)</option>
             </Select>
           </Field>
         </SectionShell>

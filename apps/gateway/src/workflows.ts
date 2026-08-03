@@ -36,7 +36,12 @@ import {
   evalDatasets,
 } from "@regulait/db";
 import { runEvalSuite } from "./evals.js";
-import { resolveProvider, GitProviderError, IMPLEMENTED_GIT_PROVIDERS } from "@regulait/git-provider";
+import {
+  resolveProvider,
+  gitDefaultBaseUrl,
+  GitProviderError,
+  IMPLEMENTED_GIT_PROVIDERS,
+} from "@regulait/git-provider";
 import { resolveDeployProvider, liveDeployClients, DeployProviderError } from "./deploy.js";
 import { validateGraph } from "@regulait/orchestration-kernel";
 import { inTransaction, planRun, type ApprovalPostCommit, type DbOrTx } from "./orchestration.js";
@@ -47,6 +52,13 @@ import {
 } from "./projects.js";
 import { decryptSecret, encryptSecret as encryptTokenOnce } from "./secrets.js";
 import { guardConnectionCall, refuseConnectionEgressWrite } from "./connection-egress.js";
+// ADR-0062 — the compiled git endpoint, adjudicated under a strict posture.
+import {
+  auditCompiledDefaultDenied,
+  CompiledDefaultEgressBlockedError,
+  decideCompiledDefault,
+  loadCompiledEgressContext,
+} from "./compiled-egress.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { activeDelegatorsFor } from "./delegations.js";
 import {
@@ -848,6 +860,8 @@ async function runGitExecutions(
       // there is no per-git-call HTTP boundary to 403 from) with nothing
       // leaving the box. A null baseUrl means the vendor default, which nobody
       // can type: unchecked, unguarded fetch, byte-identical behaviour.
+      // ADR-0062 amends that last sentence for a STRICT posture only — see the
+      // `else` branch below.
       let gitFetch: typeof fetch | undefined;
       if (conn.baseUrl) {
         gitFetch = (
@@ -866,6 +880,38 @@ async function runGitExecutions(
             },
           })
         ).fetchImpl;
+      } else {
+        // ADR-0062 — the compiled git endpoint (api.github.com, gitlab.com,
+        // api.bitbucket.org). Under a strict posture the host must be in the
+        // same egress allow-list; the refusal THROWS, so it becomes this
+        // stage's `execution_failed` with nothing leaving the box — the
+        // existing refusal shape on this path, which has no per-call HTTP
+        // boundary to 403 from. Under `hosted` this is byte-identical.
+        const { posture, allowList } = await loadCompiledEgressContext(db);
+        const compiled = decideCompiledDefault({
+          posture,
+          surface: "git_connection",
+          kind: conn.provider,
+          defaultBaseUrl: gitDefaultBaseUrl(conn.provider),
+          allowList,
+        });
+        if (!compiled.ok) {
+          await auditCompiledDefaultDenied(db, {
+            userId: actorUserId,
+            surface: "git_connection",
+            objectId: conn.id,
+            kind: conn.provider,
+            decision: compiled,
+            posture,
+            detail: {
+              connection: conn.name,
+              instanceId,
+              stageId: stage.id,
+              action: stage.action,
+            },
+          });
+          throw new CompiledDefaultEgressBlockedError("git_connection", compiled);
+        }
       }
       const provider = resolveProvider(
         {

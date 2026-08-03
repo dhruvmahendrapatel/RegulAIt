@@ -584,10 +584,18 @@ render_env() {
 # Compose loads this file automatically from the project directory.
 
 # ---- deployment identity ---------------------------------------------------
-# NOTE, stated honestly: REGULAIT_DEPLOY_MODE is INSTALLER-LEVEL metadata. No
-# gateway code reads it. ADR-0015's mode (hosted|byoc|air_gapped) is a column on
-# the deploy_targets ROW, set per target in the admin console — this line
-# records what this host was installed as, for operators and for support.
+# REGULAIT_DEPLOY_MODE records what this host was installed as, and since
+# ADR-0062 (2026-08-03) THE GATEWAY READS IT. (It used to be installer-level
+# metadata only, and this comment used to say so.)
+#
+# It is distinct from ADR-0015's per-target mode, which stays a column on the
+# deploy_targets ROW: that is "where does THIS deploy land", this is "what shape
+# is THIS INSTALLATION". On `air_gapped` the gateway refuses any model,
+# connector, git or PM adapter that would run on its COMPILED vendor endpoint
+# unless that host is in the egress allow-list; `hosted` and `byoc` keep the
+# pre-0062 behaviour. org_settings may tighten this and can never loosen it.
+# A malformed value throws at boot rather than degrading to `hosted`, and the
+# effective posture is printed in the boot log.
 REGULAIT_DEPLOY_MODE=$MODE
 REGULAIT_VERSION=$VERSION
 COMPOSE_PROJECT_NAME=$PROJECT
