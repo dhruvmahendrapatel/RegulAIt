@@ -171,13 +171,45 @@ than mis-parsing.
 *Recorded because Slice D was planned from a paragraph that was half wrong — its
 OpenAI-compatible endpoint already existed. Check the codebase before writing the brief.*
 
-### Slice F — Observability / tracing parity
+### Slice F — Observability / tracing parity — **SHIPPED 2026-08-07, [ADR-0070](../decisions/0070-trace-observability.md) (migration 0082)**
 **Parity target:** Langfuse, Helicone, LangSmith.
 **Gap:** no span-level trace view of a multi-agent run (ADR-0053's orchestration produces a
 DAG but not an inspectable trace tree with per-span tokens, latency, cost and tool I/O), no
 prompt-playground diffing against a live trace, no session/thread grouping.
 **Build:** a trace model over the existing run records, a trace-tree UI, and OpenTelemetry
 GenAI-semantic-convention export so traces can leave for a customer's own stack.
+
+**Premise verified before building** (Slice D's was not): there was **no trace or span model
+anywhere in the schema and no OpenTelemetry dependency in any package**, while every FACT a trace
+is made of already existed across `orchestration_runs`, `usage_events`, the hash-chained
+`audit_log` and the guardrail/eval ledgers. The gap was the **shape**.
+
+**What shipped:** `traces`/`trace_spans` recorded from the ONE governed dispatch core and the ONE
+governed tool-call primitive, so the invoke path, both compat shims, orchestration workers, evals,
+the copilot and decompose are all traced without a line of their own. A span **references**
+(`usage_event_id`, `audit_log_id`, `run_id`, `node_id`, `agent_id`) rather than restating; the only
+denormalisation is the five fields a tree must render without an N+1, copied FROM the ledger row in
+the same call, with the suite joining them back and asserting equality. **A governance DENY is a
+PRESENT span carrying its reason** — the recorder wraps the dispatch attempt so every early return
+in it is traced, and the pillar-1 entitlement denial (which never reaches the core) gets its own
+`policy` span at both entry points. A fallback hop is a CHILD of the attempt that failed; a run is
+four real levels (run → node → model turn → the tool call that turn made). Session/thread grouping
+via `traces.session_id` + `GET /v1/sessions`. A trace-tree UI at **`/admin/traces`** that leads with
+the traces where governance refused something and prints each deny reason inline. OTLP/HTTP JSON
+export over the published `gen_ai.*` conventions, hand-rolled (no OTel SDK), **opt-in with no
+default endpoint**, through the ADR-0034/0043 egress guard at write time and on every export.
+
+**Read this before citing it.** A lost span is a hole the API **reports** (`partial: true`) rather
+than prevents — the recorder never fails the call it traces. Governed **connector calls, workflow
+stages and eval-run grouping are DECLARED span kinds with nothing writing them yet**; adding each is
+a writer, not a migration. **No prompt-playground diffing** — that part of this slice's paragraph
+was not built. No sampling and no per-project tracing policy: it is org-wide on or org-wide off.
+Streaming is traced at completion, so there is no time-to-first-token anywhere. The exporter is a
+**pull** with no spooling, no retry and **no already-exported marker**, so an overlapping re-run
+re-sends. The OTLP **span id is the first 8 bytes** of our uuid (the trace id is exact), and a DENY
+exports as OTel status **ERROR** because OTel's enum has no member meaning "deliberately refused" —
+in somebody else's Grafana a refusal will look like a failure. And **nothing has been verified
+against a live OTLP collector**; `dryRun: true` exists so an operator can read the exact body first.
 
 ---
 
