@@ -4,7 +4,7 @@ last_updated: 2026-08-07
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-08-07-session-08.md
+last_session: sessions/2026-08-07-session-09.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,64 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**Slice C of the parity wave shipped, 2026-08-07 — [ADR-0069](../docs/decisions/0069-cross-vendor-cost-consolidation.md)
+(migration 0081), cross-vendor cost consolidation. This is THE WEDGE** — the one gap session 07's
+research found genuinely unserved by any incumbent, because per-seat SaaS spend is **invoice-side,
+not call-side**: every gateway attributes the traffic through it, and nobody consolidates one
+human's Claude Code seat + Copilot seat + raw OpenAI key + Bedrock account into a per-person figure
+FP&A can charge back. A pre-slice grep confirmed **no importer, no vendor-account→user identity
+resolution, and — the load-bearing gap — no `metered` vs `imported` distinction anywhere in the cost
+model**; every figure was implicitly metered with nothing to say so. **The blended total does not
+exist as a matter of TYPE**: `consolidate()`'s return shape has no field for metered+imported, no
+route computes one, and both suites walk the entire response body — every number at every depth,
+numbers spelled inside sentences included — asserting the blend appears nowhere (fixtures chosen so
+61.11 + 146.30 = 207.41 can arise no other way; a future convenience `total` fails four tests).
+**The distinction is a CHECK constraint, not a convention**: imported money lives in its own table
+with `basis` pinned to `'imported'` in the database — a column on `usage_events` would have been
+less code and was rejected because every existing statement/forecast/budget query reads that table
+and one missed `WHERE` puts an unverifiable restated figure inside a customer's invoice.
+**Five adapters** on the model-provider/infra-provider playbook (registry + declared capabilities +
+an honest `limits` string the API returns): `generic_mapped` (CSV *or* JSON, deliberately the good
+one — the long tail is longer than any preset list; header inference **refuses on ambiguity**),
+`openai_console`, `anthropic_console`, `aws_cur` and `seat_roster` (the wedge case — and its price
+is an **operator assertion**, stamped `derivedFrom` on every line). **Never trust the file**:
+character-scanned parsers (no regex over imported text, ADR-0055's rule verbatim), an ambiguous
+`07/08/2026` **refused** rather than guessed, an empty amount refused because it is not zero,
+`rows_parsed = rows_accepted + rows_refused` as a DB CHECK, and every refusal naming its **file line
+number** — the suite parses the same file clean and then corrupted and asserts the corrupt parse
+does not simply return less money. **Identity resolution is admin-authored and honest**: alias →
+exact email → domain rule → unresolved, in that precedence so a human's correction beats a
+mechanical match; ambiguity resolves to NOBODY; an unmatched account stays visible as its own
+unattributed subject and is **never spread pro-rata**; every line records HOW it matched and every
+correction re-resolves stored lines and audits its blast radius; deleting a user un-attributes their
+spend rather than deleting it. **Default-deny both ways** — importing and fleet-wide reads are
+admin-only, the single non-admin route refuses unless the caller IS that user. Re-applying identical
+bytes is a real **409** (partial unique index); the correction path is revoke-then-reimport, and the
+revoked batch row survives. **PII**: the same ADR-0042/0065 ingest path, with the **account column
+exempt by construction** — the email IS the join key — disclosed in the code, in every response, on
+the registry and in the ADR. Gateway **1859 → 1889 tests / 108 → 109 files**; shared **427 → 477**;
+policy-kernel 129, model-provider 122, infra-provider 174, training-provider 58 unchanged.
+**Disclosed rather than closed**: the three vendor presets are built against **DECLARED header sets
+never verified against a live console** (they refuse naming the missing column rather than
+mis-parsing, and `generic_mapped` is the escape hatch — this is the biggest honest gap and the
+owner's first follow-up); `aws_cur` reads unblended cost only so a Savings-Plan-heavy account will
+not reconcile; **imported figures never enter billing statements, budgets, forecasts, the optimizer
+or any enforcement path** (reporting-only, deliberately — we will not block work on a number we
+cannot verify); no FX conversion; no invoice-total reconciliation; no cross-chunk dedup for an
+operator-split CUR; `users.cost_center` has no history; **no scheduled re-import** (nothing to poll
+— the view reports its own staleness instead); and **no SPA page** (API + CSV only, same posture as
+ADR-0066).
+
+**Slice B shipped the same day — [ADR-0068](../docs/decisions/0068-redteam-depth.md) (migration
+0080), red-team probe-corpus depth**: N-trial runs with a Wilson-interval ASR and per-trial outcomes
+stored, an offline versioned corpus v2 across ten attack classes, multi-turn crescendo/many-shot
+sequences, and agentic probes whose induced tool/connector call is adjudicated by the **real**
+entitlement kernel and never executed. Read its "what this explicitly does NOT give you" before
+citing any rate: `trials` defaults to 1 and a one-trial run is labelled `single-trial`, probe
+grading is unverified because no provider is connected, and against the deterministic provider N
+trials buy a denominator rather than variance. See
+[docs/decisions/README.md](../docs/decisions/README.md) for the full row.
 
 **Slice A of the parity wave shipped, 2026-08-07 — [ADR-0067](../docs/decisions/0067-groundedness-evaluation.md)
 (migration 0079), groundedness/faithfulness/hallucination measurement.** A pre-slice grep found **no

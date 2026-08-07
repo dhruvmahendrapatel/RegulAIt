@@ -359,6 +359,14 @@ describe("applying an import", () => {
     expect(audits[0]!.reason).toContain("1 stored line(s) re-attributed");
   });
 
+  it("the mappings list is reachable (the static segment beats the :importId param) and states its precedence", async () => {
+    const res = await get("/v1/cost-imports/mappings");
+    expect(res.statusCode).toBe(200);
+    expect(res.json().aliases).toHaveLength(1);
+    expect(res.json().posture).toMatch(/admin alias -> exact email -> domain rule -> unresolved/);
+    expect(res.json().posture).toMatch(/never broken by guessing/);
+  });
+
   it("removing the alias puts the line back to unattributed — visible, not deleted", async () => {
     const [alias] = await db.select().from(vendorAccountAliases);
     const res = await del(`/v1/cost-imports/mappings/${alias!.id}`);
