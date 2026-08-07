@@ -1,6 +1,6 @@
 ---
-phase: eight-pillars-shipped-productizing
-last_updated: 2026-08-03
+phase: competitive-parity-wave
+last_updated: 2026-08-07
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -20,6 +20,45 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**Competitive-parity wave started, 2026-08-07 — ADR-0066 (migration 0078) is Slice D of
+[docs/product/COMPETITIVE_PARITY_PLAN.md](../docs/product/COMPETITIVE_PARITY_PLAN.md).** That plan
+exists because session 07's research **falsified all three assumed differentiators** (per-user
+gateway governance, in-gateway cost attribution, governed SDLC workflow are each already served by
+LiteLLM/Portkey/Cloudflare/Helicone/Langfuse); read its §0 before repeating the claim. With RegulAIt
+likely to ship as **freeware**, parity gaps are adoption blockers rather than competitive risks,
+which is the basis on which the wave is worth doing. **Slice D shipped four things, each designed so
+it may only ever NARROW** — the same ceiling shape ADR-0062 used for egress: (1) **`GET /v1/models`**,
+the discovery endpoint every off-the-shelf OpenAI client calls at setup and without which a tool
+fails *before* the first completion — one route, two envelopes (OpenAI by default, Anthropic when
+the SDK's `anthropic-version` header is present), both rendered from one entitlement filter that
+runs the **same `evaluateAgent` the dispatch path runs**, so an ungranted model is ABSENT rather
+than listed-then-403'd (proved with two users on disjoint grants, neither seeing the other's);
+(2) **virtual keys** (`rglv_`, reusing the api_keys sha256 hashing verbatim) carrying an owning
+user, optional model allow-list, optional USD budget + spend counter, optional expiry, revocation
+and an optional pinned platform credential the holder never sees — `isAdmin` hard-coded **false**
+whatever the owner is, and a **default-deny five-route allow-list** that makes minting keys,
+editing grants and reading credentials structurally unreachable (plus a by-kind refusal at
+`/auth/login-with-key`, since exchanging a virtual key for a session would hand back the identity
+it exists to narrow); (3) **per-key model allow-lists enforced at BOTH the compat surfaces and the
+native dispatch path**, inside the one `dispatchOnce` core against the SERVED agent *and* at the
+entry points against the REQUESTED agent (because `dispatch:false` never reaches the core); and
+(4) **provider fallback chains** whose subtle rule is that **a governance DENY is not a failure** —
+only a transport/upstream error triggers a hop, entitlement is re-evaluated per hop from scratch
+in the same mode, egress posture is re-evaluated per hop because each hop runs the whole core, and
+every hop is audited and disclosed. Gateway suite **1,764 → 1,815 tests across 106 files**.
+Disclosed rather than closed: no load balancing, no retry/backoff, no per-key budget *period*
+(lifetime cap; rotate the key), no per-key rate limits, pinning is platform-credential-only,
+fallback is one level deep by construction, `GET /v1/models` is gated on the interception surfaces,
+each failed hop bills its own usage row, and there is **no SPA page** for either feature (API-only).
+
+**Note on the two preceding slices, which shipped after this file was last caught up**:
+[ADR-0064](../docs/decisions/0064-in-process-scheduler.md) (migration 0076) added the in-process
+scheduler that six ADRs' sweeps had been missing, and
+[ADR-0065](../docs/decisions/0065-regulait-llm.md) (migration 0077) added RegulAIt-LLM. The
+paragraph below still describes the world as of ADR-0063 and has NOT been rewritten; treat
+[docs/decisions/README.md](../docs/decisions/README.md) as the authority for anything after 0063.
+
 **RegulAIt is a working, deployed product, not a scaffold.** All eight P0 pillars have shipped
 functionality; the gateway suite is at **1,689 tests** across 103 files (policy-kernel 129,
 workflow-kernel 39, `packages/shared` 360, model-provider 122); the schema is at **migration
