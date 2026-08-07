@@ -65,7 +65,7 @@ is written. Read ADR-0067's "What this explicitly does NOT give you" before citi
 the lexical metrics are blind to negation flips and swapped attribution, and the judges' judgment is
 unverified because no provider is connected.
 
-### Slice B — Red-team probe corpus depth
+### Slice B — Red-team probe corpus depth — **SHIPPED 2026-08-07, [ADR-0068](../decisions/0068-redteam-depth.md) (migration 0080)**
 **Parity target:** garak, promptfoo red-team, PyRIT.
 **We have:** ADR-0057 probe runner, scheduled sweeps, per-class results.
 **Gap:** the corpus is thin; probes run once rather than over repeated trials; no multi-turn
@@ -75,6 +75,22 @@ retrieved content, exfiltration-via-connector); no attack-success-rate statistic
 ASR reporting; multi-turn probe sequences; agentic probes that specifically exercise *our*
 tool/connector surface — which is a thing garak cannot do because it does not sit at a tool
 gateway. Per-class gating presets driven by the compliance cascade.
+**Shipped:** N-trial runs with a Wilson-interval ASR and per-trial outcomes stored
+(`redteam_trials`, `redteam_probe_trials`); an offline, versioned corpus v2 across **ten** attack
+classes (v1 frozen, and still the seed default); multi-turn crescendo/many-shot sequences through
+the provider's native `messages` array, scored on the whole assistant transcript; agentic probes
+whose induced tool/connector call is adjudicated by the **real** entitlement kernel — with
+"the model was induced and pillar 1 refused" recorded as a first-class positive result — and which
+**never execute anything**; and gating presets composed from the existing §8.3 compliance cascade,
+tighten-only.
+**Read this before citing it:** `trials` defaults to **1**, and a one-trial run is labelled
+`single-trial`, not a measured ASR. **Probe grading is unverified because no model provider is
+connected** — mechanism proven, instrument not — and against the deterministic provider N trials buy
+a *denominator*, not observed variance (measured ASR here is always 0 or 1). An agentic probe whose
+target this install has not registered is **`not_run`, never `passed`**. And ADR-0057's existing
+inversion — a guardrail-BLOCKED dispatch is scored as a DEFEAT in the eval path — was deliberately
+**not** changed (it would move every stored baseline); it is now named on the per-trial row and
+counted in `platform_held`, with unification left as owner follow-up.
 
 ### Slice C — Cross-vendor cost consolidation *(the wedge)*
 **Parity target:** none — this is the gap research identified as genuinely unserved.
