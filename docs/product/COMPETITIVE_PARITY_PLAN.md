@@ -139,7 +139,7 @@ point at us with a base-URL change.
 **Why it matters most for freeware:** the OpenAI-compatible endpoint is the single lowest-
 friction adoption path. Without it, trying RegulAIt means rewriting integration code.
 
-### Slice E — Shadow-AI discovery, honest version
+### Slice E — Shadow-AI discovery, honest version — **SHIPPED 2026-08-07, [ADR-0071](../decisions/0071-shadow-ai-format-adapters.md) (no migration — see below)**
 **Parity target:** Witness AI, Harmonic, Zscaler/Netskope AI modules.
 **We have:** ADR-0055 ingest of customer-supplied evidence.
 **Gap:** those products discover via network/CASB position. We do not have that position and
@@ -170,6 +170,44 @@ than mis-parsing.
 
 *Recorded because Slice D was planned from a paragraph that was half wrong — its
 OpenAI-compatible endpoint already existed. Check the codebase before writing the brief.*
+
+**What shipped:** five adapters on ADR-0069's registry playbook — `cef` and `leef` (published
+grammars, header escaping and extension `\=` escaping honoured), `w3c_extended` (driven by the
+file's own `#Fields:` directive, honoured again if redeclared mid-file), `proxy_common` (Squid
+native / NCSA common / NCSA combined, with the layout an operator ASSERTION because these formats
+carry no header and a mis-sniffed layout reads the client-IP column as the destination), and
+`generic_mapped` over CSV *or* JSON producing **all four** evidence kinds. **An adapter LAYER, not a
+subsystem**: no new table, no new evidence kind, and `processEvidenceImport` is now ONE function
+that both the row-shaped `POST /v1/shadow-ai/imports` and the new `POST /v1/shadow-ai/imports/raw`
+end in — proved by asserting the two routes compute an **identical** analysis from the same
+evidence. Every adapter validates its output against **ADR-0055's own row schemas**, which is what
+turns a `rows.417.destinationHost` zod path into a refusal naming line 418 of the operator's file.
+**No migration, and that is a decision** (ADR-0071 §6): `shadow_ai_imports.summary` is already jsonb
+and carries the adapter, the format basis, the fields read, the three row counts and the bounded
+refusal list; 0083 remains unused.
+
+**Read this before citing it.** **Nothing here has been run against a real export from any vendor's
+product by this project** — the grammars are implemented from their published specifications, every
+`published-spec` adapter says so in its own `verification` string (asserted by a test so it cannot
+be softened), and that is the biggest gap in the slice. **There is no vendor-named adapter at
+all** — no `zscaler`, no `okta`, and a test asserts it: a CASB/SSO app-access export has no
+published format, and the vendor's name is the part a buyer trusts, so `generic_mapped` with an
+explicit mapping is the answer instead. Only a FIXED key list is read from CEF/LEEF, so a product
+using custom `cs1Label` slots gets every line refused. One record must be one line: no multi-line
+reassembly, no gzip, no multipart upload, 2 MB inline. The 5,000-row bound means a real proxy log
+must be chunked or pre-aggregated, and each log line counts as ONE request unless the format carries
+a count. **Re-posting the same file doubles a finding's `observationCount`** — ADR-0055 has no
+duplicate-payload 409, which is pre-existing and deliberately unchanged here. A row whose host does
+not normalise is still DROPPED-and-counted rather than refused (ADR-0055's contract, left alone as
+ADR-0067 left `llm_as_judge`; named follow-up). A naive timestamp is read as UTC. A LEEF feed that
+declares a `devTimeFormat` has **every** row refused rather than have RegulAIt guess a strftime
+pattern. The log grammars produce `egress_log` only. And there is no SPA page — API only, same
+posture as Slices C and D.
+
+**The honesty line held.** Coverage is unchanged by this slice and says so at the new surface:
+RegulAIt still ships no collector, sits on no network path and discovers nothing; an adapter reads a
+file you exported, so coverage remains exactly what you exported. Emptying the signature catalogue
+makes every adapter match nothing — asserted, because "detection is data" had to stay true here too.
 
 ### Slice F — Observability / tracing parity — **SHIPPED 2026-08-07, [ADR-0070](../decisions/0070-trace-observability.md) (migration 0082)**
 **Parity target:** Langfuse, Helicone, LangSmith.
@@ -245,3 +283,35 @@ Journal entries must be appended in **`when`-ascending order** or Drizzle silent
 
 At the time of writing: **1,723 tests / 104 files**, migration 0076 (0077 in flight for
 ADR-0065). Every ADR 0001–0064 Accepted.
+
+---
+
+## 5. Wave complete — 2026-08-07
+
+All six slices shipped in one wave, sequentially, each with its own ADR and a full suite run before
+the next was dispatched:
+
+| Slice | ADR | Migration | What it closed |
+|---|---|---|---|
+| A | [0067](../decisions/0067-groundedness-evaluation.md) | 0079 | groundedness / faithfulness / hallucination measurement |
+| B | [0068](../decisions/0068-redteam-depth.md) | 0080 | red-team corpus depth, N-trial ASR, multi-turn and agentic vectors |
+| C | [0069](../decisions/0069-cross-vendor-cost-consolidation.md) | 0081 | cross-vendor per-user cost consolidation — **the wedge** |
+| D | [0066](../decisions/0066-gateway-parity.md) | 0078 | virtual keys, per-key allow-lists, fallback chains, `GET /v1/models` |
+| E | [0071](../decisions/0071-shadow-ai-format-adapters.md) | none | shadow-AI evidence format adapters |
+| F | [0070](../decisions/0070-trace-observability.md) | 0082 | trace/span observability and OTLP export |
+
+**Baselines at the close of the wave**: gateway **1,926 tests / 111 files**; `packages/shared` 550;
+policy-kernel 129; model-provider 122; infra-provider 174; training-provider 58. Schema at migration
+**0082**; the next migration number is **0083**.
+
+**Three things this wave is not.** (1) It did not create a moat — §0's finding stands, the
+differentiators were falsified and these were **adoption blockers**, closed on that basis. (2) It
+did not connect a model provider, so every model-dependent claim across Slices A, B and F remains
+mechanism-proven and judgment-unverified. (3) It did not verify anything against a live third-party
+system: Slice C's vendor presets, Slice E's format adapters and Slice F's OTLP exporter are all
+built against declared formats or published specifications, each says so in its own API surface, and
+each is the first follow-up for its slice.
+
+**Read every slice's "read this before citing it" note before quoting a capability from this file.**
+Each one names what was disclosed rather than closed, and those notes are the load-bearing half of
+the wave.
