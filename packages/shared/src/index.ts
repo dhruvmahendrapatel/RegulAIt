@@ -2280,6 +2280,61 @@ export {
   type ShadowAiSubjectKind,
 } from "./shadow-ai.js";
 
+// ADR-0071 — SHADOW-AI EVIDENCE FORMAT ADAPTERS, the pure half: the layer BELOW
+// ADR-0055 that turns a raw CEF/LEEF/W3C/Squid/NCSA log or a mapped CSV/JSON
+// export into the evidence rows ADR-0055 already accepts. An adapter layer, not
+// a second pipeline: every adapter validates its output against ADR-0055's OWN
+// row schemas, so a row shape cannot drift from the pipeline that consumes it.
+// Not one regular expression is evaluated over file content anywhere in it, and
+// every unparseable line refuses with its FILE LINE NUMBER.
+export {
+  AttributeBag,
+  EVIDENCE_ADAPTERS,
+  EVIDENCE_ADAPTER_IDS,
+  EVIDENCE_ADAPTER_POSTURE,
+  EVIDENCE_FORMAT_BASES,
+  EVIDENCE_KIND_FIELDS,
+  EVIDENCE_SOURCE_FORMATS,
+  EvidenceFormatError,
+  PROXY_LAYOUTS,
+  RAW_EVIDENCE_MALFORMED_POLICIES,
+  cefAdapter,
+  describeEvidenceAdapters,
+  genericEvidenceConfigSchema,
+  genericMappedEvidenceAdapter,
+  getEvidenceAdapter,
+  inferEvidenceMapping,
+  leefAdapter,
+  leefConfigSchema,
+  numberedLines,
+  parseCefExtension,
+  parseCefLine,
+  parseClfTimestamp,
+  parseCountCell,
+  parseEvidenceTimestamp,
+  parseLeefLine,
+  proxyCommonAdapter,
+  proxyCommonConfigSchema,
+  rawEvidenceImportRequestSchema,
+  resolveLeefDelimiter,
+  splitUnescaped,
+  tokenizeClf,
+  tokenizeW3c,
+  unescapeLogValue,
+  w3cExtendedAdapter,
+  type CefRecord,
+  type EvidenceAdapter,
+  type EvidenceAdapterCapabilities,
+  type EvidenceAdapterInput,
+  type EvidenceFormatBasis,
+  type EvidenceParseResult,
+  type EvidenceRowRefusal,
+  type EvidenceSourceFormat,
+  type ProxyLayout,
+  type RawEvidenceImportRequest,
+  type RawEvidenceMalformedPolicy,
+} from "./evidence-adapters.js";
+
 // ADR-0069 — CROSS-VENDOR COST CONSOLIDATION, the pure half: the adapter
 // registry (a new vendor is a new adapter, not a new code path), the
 // character-scanned amount/date parsers that refuse rather than guess, the
