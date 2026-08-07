@@ -1,7 +1,9 @@
 import type { FastifyInstance } from "fastify";
 import {
+  agentFallbacks,
   agentGrants,
   agents,
+  asc,
   auditLog,
   connectorCredentials,
   connectorGrants,
@@ -66,6 +68,7 @@ import {
   invokeAgentSchema,
   invokeConnectorSchema,
   setAgentEnabledSchema,
+  setAgentFallbacksSchema,
   setAgentPolicySchema,
   setAgentSystemPromptSchema,
 } from "@regulait/shared";
@@ -134,6 +137,16 @@ import {
   decideCompiledDefault,
   loadCompiledEgressContext,
 } from "./compiled-egress.js";
+// ADR-0066 — the virtual-key ceiling (allow-list + budget) and the per-key
+// spend counter. Applied INSIDE the one dispatch core, so every caller of it
+// inherits both without a check of its own.
+import {
+  loadVirtualKeyContext,
+  recordVirtualKeySpend,
+  virtualKeyAllowListRefusal,
+  virtualKeyBudgetRefusal,
+  type VirtualKeyContext,
+} from "./virtual-keys.js";
 
 const userIdParam = z.object({ userId: z.string().uuid() });
 const agentIdParam = z.object({ agentId: z.string().uuid() });
@@ -188,6 +201,10 @@ export type DispatchOutcome =
         pii?: DispatchPii;
         /** ADR-0042: present only when a guardrail detector produced hits */
         guardrails?: DispatchGuardrails;
+        /** ADR-0066 §4: present ONLY when the primary target failed at the
+         * transport layer and a configured fallback hop served instead. Its
+         * presence is the disclosure — a fallback is never silent. */
+        fallback?: DispatchFallback;
       };
     }
   | {
@@ -197,55 +214,301 @@ export type DispatchOutcome =
       detail?: string;
       pii?: DispatchPii;
       guardrails?: DispatchGuardrails;
+      /** ADR-0066 §4: present when a chain was attempted and exhausted, so the
+       * caller sees WHICH hops were tried and why each one did not serve. */
+      fallback?: DispatchFallback;
     };
 
-/** The one governed-dispatch core, shared by the direct invoke path and the
- * orchestration worker-node path. The served agent is an INPUT — this
- * function never picks a model; governance and (where applicable) routing
- * have already happened upstream. Config problems (no model id, unknown
- * provider, missing credential) fail explicit, never fall back to a
- * different model. Every execution lands one MEASURED row in usage_events. */
+/** ADR-0066 §4 — what happened on the way to the answer. One entry per hop
+ * ATTEMPTED, in order, including the hops that were skipped for governance
+ * reasons: a chain that quietly dropped an unentitled hop would make a
+ * fallback look like a routing decision nobody made. */
+export interface DispatchFallback {
+  /** the agent the caller actually asked for (chain position -1) */
+  primaryAgentId: string;
+  /** the agent that ultimately served; null when the whole chain failed */
+  servedAgentId: string | null;
+  hops: Array<{
+    position: number;
+    agentId: string;
+    agentName: string;
+    outcome: "served" | "denied" | "failed" | "unavailable";
+    /** why this hop did not serve; absent on the hop that did */
+    reason?: string;
+  }>;
+}
+
+/** The arguments of the one governed-dispatch core. Extracted as a named type
+ * by ADR-0066 so the fallback driver and the single-attempt body share exactly
+ * one definition rather than two that agree today. */
+export interface GovernedDispatchArgs {
+  userId: string;
+  /** the agent to execute — caller has already governance-checked it */
+  served: AgentRow | undefined;
+  requestedAgentId: string;
+  /** routing counterfactual for measured savings; null = no routing happened */
+  baseline?: AgentRow | null;
+  input: string;
+  /** multi-turn: the FULL ordered history including the newest user turn;
+   * when present the provider ignores `input` (model-provider contract) */
+  messages?: ModelChatMessage[] | undefined;
+  /** system context (e.g. a nested run's signed-off workflow artifacts) */
+  system?: string | undefined;
+  /** pillar-6 prompt caching: mark `system` cacheable on the outgoing request
+   * (Anthropic ephemeral breakpoint). Purely a cost annotation — the served
+   * agent, model, entitlement, and output are unchanged. */
+  cacheSystem?: boolean | undefined;
+  /** pillar 7: tools the worker may call this turn. When absent the request
+   * is byte-identical to the tool-free dispatch. */
+  tools?: ModelToolDef[] | undefined;
+  /** ADR-0020 long tail: constrain which tools the model may/must call.
+   * Pure ModelDispatchRequest threading — validated upstream by the shims. */
+  toolChoice?: ModelToolChoice | undefined;
+  /** ADR-0020 long tail: structured-output constraint. The caller has
+   * already checked the served provider can honour it. */
+  responseFormat?: ModelResponseFormat | undefined;
+  /** ADR-0020 long tail: Anthropic extended thinking. The caller has
+   * already checked the served provider can honour it. */
+  thinking?: { budgetTokens: number } | undefined;
+  maxTokens?: number | undefined;
+  /** pillar 5 attribution: the project this call bills to */
+  projectId?: string | null | undefined;
+  /** streaming delta callback, forwarded to the provider */
+  onText?: ((delta: string) => void) | undefined;
+  /** streaming thinking-delta callback, forwarded to the provider */
+  onThinking?: ModelDispatchRequest["onThinking"] | undefined;
+  detail?: Record<string, unknown>;
+  /** ADR-0066 §2/§3 — the virtual key this call arrived on, when it did. Its
+   * allow-list and budget are applied INSIDE the core so no caller can forget
+   * them; absent/null on every ordinary path, where every check below is a
+   * no-op and the behaviour is byte-identical to pre-0066. */
+  virtualKey?: VirtualKeyContext | null | undefined;
+  /** ADR-0066 §4 — the mode a FALLBACK HOP is re-evaluated under. Only the
+   * chain driver reads it; a hop must be entitlement-checked in the same mode
+   * the primary was, or a `plan`-only grant could serve an `execute` call. */
+  mode?: string | undefined;
+}
+
+/**
+ * ADR-0066 §4 — THE ONE GOVERNED-DISPATCH ENTRY POINT, now with fallback.
+ *
+ * Shared by the direct invoke path, both compat shims, the orchestration
+ * worker-node path, evals, the copilot and decompose. The served agent is an
+ * INPUT — this function never picks a model; governance and (where applicable)
+ * routing have already happened upstream.
+ *
+ * What it adds over `dispatchOnce` is the chain, and the chain has exactly four
+ * rules, each of which is a test in `gateway-parity.test.ts`:
+ *
+ *  1. **A GOVERNANCE DENY IS NOT A FAILURE.** Only a transport/upstream error
+ *     (`model_dispatch_failed`) triggers the chain. An entitlement denial, a
+ *     PII or guardrail block, an egress refusal, an MRM refusal, an exhausted
+ *     project or key budget, a missing credential, an undispatchable agent —
+ *     every one of those is a DECISION, and retrying a decision somewhere else
+ *     is how a governance product turns into a bypass. This is the subtle one
+ *     and it is asserted directly.
+ *  2. **ENTITLEMENT IS RE-EVALUATED PER HOP, FROM SCRATCH.** A hop never
+ *     inherits the primary's allow. It runs the caller's own `evaluateAgent`
+ *     again — same grants, same revocations, same tier ceiling, same mode — and
+ *     a hop the caller may not use is SKIPPED and audited, never served.
+ *  3. **EGRESS POSTURE IS RE-EVALUATED PER HOP**, because each hop runs the
+ *     whole of `dispatchOnce`, including ADR-0062's compiled-default admission
+ *     and ADR-0034's baseUrl guard. There is no shortcut path.
+ *  4. **EVERY HOP IS AUDITED.** A fallback is visible in the trail and in the
+ *     response (`result.fallback`), never silent. "Which model actually
+ *     answered, and why not the one I asked for" must be answerable afterwards.
+ *
+ * An agent with no `agent_fallbacks` rows — every agent, until an admin
+ * configures one — takes exactly one extra indexed SELECT on the failure path
+ * only, and is otherwise byte-identical to the pre-0066 core.
+ */
 export async function executeGovernedDispatch(
   db: Db,
   dataKey: string | undefined,
-  args: {
-    userId: string;
-    /** the agent to execute — caller has already governance-checked it */
-    served: AgentRow | undefined;
-    requestedAgentId: string;
-    /** routing counterfactual for measured savings; null = no routing happened */
-    baseline?: AgentRow | null;
-    input: string;
-    /** multi-turn: the FULL ordered history including the newest user turn;
-     * when present the provider ignores `input` (model-provider contract) */
-    messages?: ModelChatMessage[] | undefined;
-    /** system context (e.g. a nested run's signed-off workflow artifacts) */
-    system?: string | undefined;
-    /** pillar-6 prompt caching: mark `system` cacheable on the outgoing request
-     * (Anthropic ephemeral breakpoint). Purely a cost annotation — the served
-     * agent, model, entitlement, and output are unchanged. */
-    cacheSystem?: boolean | undefined;
-    /** pillar 7: tools the worker may call this turn. When absent the request
-     * is byte-identical to the tool-free dispatch. */
-    tools?: ModelToolDef[] | undefined;
-    /** ADR-0020 long tail: constrain which tools the model may/must call.
-     * Pure ModelDispatchRequest threading — validated upstream by the shims. */
-    toolChoice?: ModelToolChoice | undefined;
-    /** ADR-0020 long tail: structured-output constraint. The caller has
-     * already checked the served provider can honour it. */
-    responseFormat?: ModelResponseFormat | undefined;
-    /** ADR-0020 long tail: Anthropic extended thinking. The caller has
-     * already checked the served provider can honour it. */
-    thinking?: { budgetTokens: number } | undefined;
-    maxTokens?: number | undefined;
-    /** pillar 5 attribution: the project this call bills to */
-    projectId?: string | null | undefined;
-    /** streaming delta callback, forwarded to the provider */
-    onText?: ((delta: string) => void) | undefined;
-    /** streaming thinking-delta callback, forwarded to the provider */
-    onThinking?: ModelDispatchRequest["onThinking"] | undefined;
-    detail?: Record<string, unknown>;
-  },
+  args: GovernedDispatchArgs,
+): Promise<DispatchOutcome> {
+  const primary = await dispatchOnce(db, dataKey, args);
+  if (primary.ok) return primary;
+  // RULE 1. Everything except a transport/upstream failure is a decision.
+  if (primary.error !== "model_dispatch_failed") return primary;
+  if (!args.served) return primary;
+
+  const chain = await db
+    .select()
+    .from(agentFallbacks)
+    .where(eq(agentFallbacks.agentId, args.served.id))
+    .orderBy(asc(agentFallbacks.position));
+  if (chain.length === 0) return primary;
+
+  const primaryAgent = args.served;
+  const hops: DispatchFallback["hops"] = [];
+
+  // The caller's entitlement inputs, loaded ONCE for the whole chain — the same
+  // inputs, in the same shape, that `compat-core.ts` and the invoke path build.
+  // Loading them once is a query optimisation, not a policy shortcut: each hop
+  // still runs its own `evaluateAgent` against them.
+  const [grants, roleGrants, revocationRows, [policy]] = await Promise.all([
+    db.select().from(agentGrants).where(eq(agentGrants.userId, args.userId)),
+    loadRoleAgentGrants(db, args.userId),
+    loadAgentRevocations(db, args.userId),
+    db.select().from(userAgentPolicies).where(eq(userAgentPolicies.userId, args.userId)),
+  ]);
+  let ceilingTier: number | null = null;
+  if (policy?.ceilingAgentId) {
+    const [ceiling] = await db
+      .select({ tier: agents.tier })
+      .from(agents)
+      .where(eq(agents.id, policy.ceilingAgentId));
+    ceilingTier = ceiling?.tier ?? null;
+  }
+  const hopMode = args.mode ?? "execute";
+
+  const auditHop = async (
+    hop: { position: number; agentId: string; agentName: string },
+    effect: "allow" | "deny",
+    ruleId: string,
+    reason: string,
+    extra: Record<string, unknown> = {},
+  ) => {
+    await db.insert(auditLog).values({
+      userId: args.userId,
+      objectType: "agent",
+      objectId: hop.agentId,
+      detail: {
+        phase: "fallback",
+        primaryAgentId: primaryAgent.id,
+        primaryAgentName: primaryAgent.name,
+        position: hop.position,
+        mode: hopMode,
+        ...(args.projectId ? { projectId: args.projectId } : {}),
+        ...(args.virtualKey ? { virtualKeyId: args.virtualKey.id } : {}),
+        ...extra,
+      },
+      effect,
+      ruleId,
+      ruleChain: [],
+      reason,
+    });
+  };
+
+  for (const link of chain) {
+    const [hopAgent] = await db.select().from(agents).where(eq(agents.id, link.fallbackAgentId));
+    const label = { position: link.position, agentId: link.fallbackAgentId, agentName: hopAgent?.name ?? "(unknown)" };
+    if (!hopAgent || !hopAgent.enabled) {
+      const reason = hopAgent
+        ? `fallback hop '${hopAgent.name}' is disabled`
+        : `fallback hop ${link.fallbackAgentId} no longer exists`;
+      hops.push({ ...label, outcome: "unavailable", reason });
+      await auditHop(label, "deny", "fallback-hop-unavailable", reason);
+      continue;
+    }
+    // RULE 2 — re-evaluate, never inherit.
+    const decision = evaluateAgent({
+      userId: args.userId,
+      agent: {
+        id: hopAgent.id,
+        name: hopAgent.name,
+        tier: hopAgent.tier,
+        enabled: hopAgent.enabled,
+        modes: hopAgent.modes ?? null,
+      },
+      mode: hopMode,
+      agentGrants: grants,
+      roleAgentGrants: roleGrants,
+      agentRevocations: revocationRows,
+      ceilingTier,
+    });
+    if (decision.effect !== "allow") {
+      hops.push({ ...label, outcome: "denied", reason: decision.reason });
+      await auditHop(label, "deny", "fallback-hop-denied", decision.reason, {
+        kernelRuleId: decision.ruleId,
+      });
+      continue;
+    }
+    // The virtual key's own ceiling applies to hops too — a fallback must not
+    // be the way a key reaches a model its allow-list excludes.
+    if (args.virtualKey) {
+      const refusal = virtualKeyAllowListRefusal(args.virtualKey, hopAgent);
+      if (refusal) {
+        hops.push({ ...label, outcome: "denied", reason: refusal.detail });
+        await auditHop(label, "deny", refusal.ruleId, refusal.detail);
+        continue;
+      }
+    }
+
+    const outcome = await dispatchOnce(db, dataKey, {
+      ...args,
+      served: hopAgent,
+      // The baseline is a ROUTING counterfactual; a fallback is not routing, so
+      // carrying the primary's baseline here would invent a savings figure for
+      // a decision the optimizer never made.
+      baseline: null,
+      detail: {
+        ...(args.detail ?? {}),
+        fallbackFromAgentId: primaryAgent.id,
+        fallbackPosition: link.position,
+      },
+    });
+    if (outcome.ok) {
+      hops.push({ ...label, outcome: "served" });
+      await auditHop(
+        label,
+        "allow",
+        "fallback-hop-served",
+        `primary agent '${primaryAgent.name}' failed at the transport layer; fallback hop ${link.position} ('${hopAgent.name}') served instead`,
+      );
+      return {
+        ok: true,
+        result: {
+          ...outcome.result,
+          fallback: { primaryAgentId: primaryAgent.id, servedAgentId: hopAgent.id, hops },
+        },
+      };
+    }
+    const reason = outcome.detail ?? outcome.error;
+    // A hop that is itself DENIED (its own PII/guardrail/budget/egress verdict)
+    // is recorded as denied, not failed — the distinction is the whole point of
+    // rule 1 and it must survive into the trail.
+    const isFailure = outcome.error === "model_dispatch_failed";
+    hops.push({ ...label, outcome: isFailure ? "failed" : "denied", reason });
+    await auditHop(
+      label,
+      "deny",
+      isFailure ? "fallback-hop-failed" : "fallback-hop-denied",
+      reason,
+      { hopError: outcome.error },
+    );
+  }
+
+  await auditHop(
+    { position: -1, agentId: primaryAgent.id, agentName: primaryAgent.name },
+    "deny",
+    "fallback-chain-exhausted",
+    `every configured fallback for '${primaryAgent.name}' was exhausted; returning the primary failure`,
+    { attempted: hops.length },
+  );
+  // The ORIGINAL failure is what the caller gets back — a chain that swapped in
+  // the last hop's error would hide which target they actually asked for.
+  return {
+    ...primary,
+    fallback: { primaryAgentId: primaryAgent.id, servedAgentId: null, hops },
+  };
+}
+
+/**
+ * ONE governed dispatch ATTEMPT. This is the pre-ADR-0066 body of
+ * `executeGovernedDispatch`, unchanged except for the two virtual-key checks
+ * and the per-key spend counter. It never recurses and knows nothing about
+ * fallback chains, which is what makes the driver above's rules provable.
+ *
+ * Config problems (no model id, unknown provider, missing credential) fail
+ * explicit, never fall back to a different model. Every execution lands one
+ * MEASURED row in usage_events.
+ */
+async function dispatchOnce(
+  db: Db,
+  dataKey: string | undefined,
+  args: GovernedDispatchArgs,
 ): Promise<DispatchOutcome> {
   const { userId, served, requestedAgentId, baseline } = args;
   if (!served || !served.model || !isModelProviderKind(served.provider)) {
@@ -257,6 +520,43 @@ export async function executeGovernedDispatch(
         ? `agent '${served.name}' needs a model id and a known provider (got provider '${served.provider}', model '${served.model ?? "none"}')`
         : "served agent not found in registry",
     };
+  }
+
+  // ADR-0066 §2/§3 — THE VIRTUAL-KEY CEILING. Placed FIRST, before the MRM
+  // gate and before any provider work, for the same reason every gate below is
+  // where it is: a refusal here must cost nothing — no tokens, no usage row, no
+  // network. Both checks are pure functions of the key row, so on every
+  // ordinary call (`virtualKey` absent) this block is two null checks.
+  //
+  // THE INVARIANT. This runs AFTER the caller's `evaluateAgent` — every caller
+  // of this function has already made that decision — and can therefore only
+  // ever SUBTRACT from it. There is no branch here that turns a deny into an
+  // allow, which is what makes "a key can only narrow" a property of the code
+  // rather than of the documentation.
+  const vk = args.virtualKey ?? null;
+  if (vk) {
+    const allowList = virtualKeyAllowListRefusal(vk, served);
+    const refusal = allowList ?? virtualKeyBudgetRefusal(vk);
+    if (refusal) {
+      await db.insert(auditLog).values({
+        userId,
+        objectType: "virtual_key",
+        objectId: vk.id,
+        detail: {
+          phase: "dispatch",
+          agentId: served.id,
+          agentName: served.name,
+          model: served.model,
+          ...(vk.budgetUsd !== null ? { budgetUsd: vk.budgetUsd, spentUsd: vk.spentUsd } : {}),
+          ...(args.projectId ? { projectId: args.projectId } : {}),
+        },
+        effect: "deny",
+        ruleId: refusal.ruleId,
+        ruleChain: [],
+        reason: refusal.detail,
+      });
+      return { ok: false, status: refusal.status, error: refusal.error, detail: refusal.detail };
+    }
   }
 
   // ADR-0045 — MODEL RISK MANAGEMENT GATE. Placed HERE: after the caller's
@@ -478,7 +778,52 @@ export async function executeGovernedDispatch(
     // flipping the toggle off restores them (reversible). Without custody:
     // BYO key — the BILLING user's own credential wins over the platform one;
     // their spend rides their key, and the ledger records which was used.
-    const custody = (await loadInterceptionSettings(db)).keyCustodyEnforced;
+    //
+    // ADR-0066 §2 — THE PINNED UPSTREAM CREDENTIAL, and why it is FIRST.
+    // A virtual key exists so a developer can call a vendor without ever
+    // holding the vendor's key. When the key names an upstream platform
+    // credential, THAT credential is what this dispatch uses — ahead of the
+    // owner's BYO key, ahead of the ordinary platform lookup, ahead of the env
+    // fallback — because "which vendor account does this key's traffic land on"
+    // is a decision the key's issuer made, not one the holder gets to change by
+    // pasting a credential of their own. A provider mismatch REFUSES rather
+    // than falling through to a different key: silently burning a credential
+    // the issuer did not name is precisely the accounting lie this feature
+    // exists to prevent. The key material is decrypted here and, as everywhere
+    // else in this codebase, is never returned to any caller.
+    if (vk?.upstreamCredentialId) {
+      const [pinned] = await db
+        .select()
+        .from(modelCredentials)
+        .where(eq(modelCredentials.id, vk.upstreamCredentialId));
+      if (!pinned) {
+        return {
+          ok: false,
+          status: 409,
+          error: "virtual_key_credential_missing",
+          detail: `virtual key '${vk.name}' pins an upstream credential that no longer exists`,
+        };
+      }
+      if (pinned.provider !== served.provider) {
+        return {
+          ok: false,
+          status: 409,
+          error: "virtual_key_credential_provider_mismatch",
+          detail:
+            `virtual key '${vk.name}' is pinned to the '${pinned.provider}' platform credential, but agent ` +
+            `'${served.name}' dispatches on provider '${served.provider}'. The call is refused rather than ` +
+            `billed to a credential this key was not issued against.`,
+        };
+      }
+      apiKey = decryptSecret(dataKey, pinned.keyCiphertext);
+      baseUrl = pinned.baseUrl;
+      credentialSource = "platform";
+      credentialId = pinned.id;
+      credentialOrigin = "platform_credential";
+    }
+    const custody = vk?.upstreamCredentialId
+      ? true
+      : (await loadInterceptionSettings(db)).keyCustodyEnforced;
     const [userCred] = custody
       ? [undefined]
       : await db
@@ -490,11 +835,15 @@ export async function executeGovernedDispatch(
               eq(userModelCredentials.provider, served.provider),
             ),
           );
-    const [platformCred] = userCred
-      ? [undefined]
-      : await db.select().from(modelCredentials).where(eq(modelCredentials.provider, served.provider));
+    const [platformCred] =
+      userCred || vk?.upstreamCredentialId
+        ? [undefined]
+        : await db.select().from(modelCredentials).where(eq(modelCredentials.provider, served.provider));
     const cred = userCred ?? platformCred;
-    if (cred) {
+    if (apiKey !== null) {
+      // the virtual key's pinned credential already resolved above; the whole
+      // BYO/platform/env chain is deliberately skipped, not merely outranked
+    } else if (cred) {
       credentialSource = userCred ? "user" : "platform";
       credentialId = cred.id;
       credentialOrigin = userCred ? "user_credential" : "platform_credential";
@@ -895,6 +1244,10 @@ export async function executeGovernedDispatch(
     configVersionId: promptVersion?.versionId ?? null,
     configVersion: promptVersion?.version ?? null,
     configCanary: promptVersion?.canary ?? false,
+    // ADR-0066 §2 — WHICH VIRTUAL KEY PAID. Attribution rides the ONE existing
+    // ledger rather than a parallel per-key table, so per-key spend, per-project
+    // spend and the pillar-5 rollups are the same numbers by construction.
+    virtualKeyId: vk?.id ?? null,
     detail: {
       credentialSource,
       ...(promptVersion
@@ -993,6 +1346,13 @@ export async function executeGovernedDispatch(
       reason: `PII detected (${piiCategoryList([...inputHits, ...outputHits])}) — warned, dispatch proceeded`,
     });
   }
+  // ADR-0066 §2 — move the MEASURED cost onto the key's enforcement counter,
+  // in the same position and with the same discipline as the project budget
+  // just below: the crossing dispatch is billed honestly, and it is the NEXT
+  // call that the pre-gate refuses. An unpriced agent adds nothing rather than
+  // an invented figure.
+  if (vk) await recordVirtualKeySpend(db, vk.id, costUsd);
+
   // first budget crossing is allowed (measured cost arrives after the call)
   // but alerts immediately; the pre-gate blocks everything after it. Below the
   // cap, the softer configurable threshold raises a distinct non-blocking signal.
@@ -1056,6 +1416,8 @@ async function performDispatch(
     system?: string | undefined;
     cacheSystem?: boolean | undefined;
     onText?: ((delta: string) => void) | undefined;
+    /** ADR-0066: the virtual key this invoke arrived on, when it did */
+    virtualKey?: VirtualKeyContext | null | undefined;
   },
 ): Promise<DispatchOutcome> {
   const { userId, requestedAgentId, registry, routing, body } = args;
@@ -1071,6 +1433,11 @@ async function performDispatch(
     maxTokens: body.maxTokens,
     projectId: args.projectId,
     onText: args.onText,
+    virtualKey: args.virtualKey ?? null,
+    // ADR-0066 §4: a fallback hop is re-evaluated in the SAME mode the primary
+    // was entitled under — a `plan`-only grant must not serve an `execute` call
+    // just because it appears in a chain.
+    mode: body.mode,
     detail: { mode: body.mode, ...(body.conversationId ? { conversationId: body.conversationId } : {}) },
   });
 }
@@ -1606,6 +1973,114 @@ export function registerAgentConnectorRoutes(
 
   app.get("/v1/agents", async () => ({ agents: await db.select().from(agents) }));
 
+  // -------------------------------------------------------------------------
+  // ADR-0066 §4 — PROVIDER FALLBACK CHAINS (admin-only via the default gate).
+  //
+  // The chain is CONFIGURATION, not entitlement: putting an agent in a chain
+  // grants nobody anything. Every hop is re-evaluated against the CALLER's own
+  // grants at dispatch time, so an admin can configure a chain full of models
+  // that a particular user will never reach — and that user's calls will simply
+  // skip them, audibly. This is why the write path validates existence and
+  // shape but deliberately does NOT validate anybody's entitlement: a chain is
+  // not a promise about who may use it.
+  // -------------------------------------------------------------------------
+  app.get("/v1/agents/:agentId/fallbacks", async (req, reply) => {
+    const { agentId } = agentIdParam.parse(req.params);
+    const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
+    if (!agent) return reply.status(404).send({ error: "unknown_agent" });
+    const rows = await db
+      .select({
+        position: agentFallbacks.position,
+        agentId: agentFallbacks.fallbackAgentId,
+        name: agents.name,
+        provider: agents.provider,
+        model: agents.model,
+        enabled: agents.enabled,
+      })
+      .from(agentFallbacks)
+      .innerJoin(agents, eq(agentFallbacks.fallbackAgentId, agents.id))
+      .where(eq(agentFallbacks.agentId, agentId))
+      .orderBy(asc(agentFallbacks.position));
+    return reply.send({ agentId, fallbacks: rows });
+  });
+
+  app.put("/v1/agents/:agentId/fallbacks", async (req, reply) => {
+    const { agentId } = agentIdParam.parse(req.params);
+    const body = setAgentFallbacksSchema.parse(req.body);
+    const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
+    if (!agent) return reply.status(404).send({ error: "unknown_agent" });
+
+    if (body.fallbackAgentIds.includes(agentId)) {
+      return reply.status(422).send({
+        error: "self_fallback",
+        detail:
+          "an agent cannot be its own fallback — the primary already failed, and re-trying it is a loop expressed as configuration",
+      });
+    }
+    if (new Set(body.fallbackAgentIds).size !== body.fallbackAgentIds.length) {
+      return reply.status(422).send({
+        error: "duplicate_fallback",
+        detail: "a fallback chain must name each target at most once",
+      });
+    }
+    if (body.fallbackAgentIds.length > 0) {
+      const found = await db
+        .select({ id: agents.id, model: agents.model, provider: agents.provider })
+        .from(agents)
+        .where(inArray(agents.id, body.fallbackAgentIds));
+      const known = new Set(found.map((a) => a.id));
+      const missing = body.fallbackAgentIds.filter((id) => !known.has(id));
+      if (missing.length > 0) {
+        return reply.status(422).send({
+          error: "unknown_fallback_agent",
+          detail: `no agent with id(s): ${missing.join(", ")}`,
+        });
+      }
+      // A hop with no model id can never dispatch (ADR-0016: `model` NULL means
+      // decision-only). Accepting it would build a chain with a guaranteed dead
+      // rung, which fails at 3am rather than at configuration time.
+      const undispatchable = found.filter((a) => !a.model || !isModelProviderKind(a.provider));
+      if (undispatchable.length > 0) {
+        return reply.status(422).send({
+          error: "fallback_not_dispatchable",
+          detail:
+            `these agents cannot serve a dispatch and so cannot be fallbacks: ` +
+            undispatchable.map((a) => a.id).join(", "),
+        });
+      }
+    }
+
+    // Replace the whole ordered chain in one transaction — a partial chain is
+    // never a valid intermediate state, and PUT-the-list avoids every
+    // position-renumbering bug an incremental API would have.
+    await db.transaction(async (tx) => {
+      await tx.delete(agentFallbacks).where(eq(agentFallbacks.agentId, agentId));
+      if (body.fallbackAgentIds.length > 0) {
+        await tx.insert(agentFallbacks).values(
+          body.fallbackAgentIds.map((fallbackAgentId, position) => ({
+            agentId,
+            fallbackAgentId,
+            position,
+          })),
+        );
+      }
+    });
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "agent",
+      objectId: agentId,
+      detail: { phase: "fallback-chain", chain: body.fallbackAgentIds },
+      effect: "allow",
+      ruleId: "fallback-chain-configured",
+      ruleChain: [],
+      reason:
+        body.fallbackAgentIds.length === 0
+          ? `fallback chain cleared for agent '${agent.name}'`
+          : `fallback chain for agent '${agent.name}' set to ${body.fallbackAgentIds.length} hop(s); each hop is re-entitled per caller at dispatch time`,
+    });
+    return reply.send({ agentId, fallbackAgentIds: body.fallbackAgentIds });
+  });
+
   // §4 new-agent-onboarding policy is opt-in by definition here: disabling is
   // platform-wide, but even an enabled agent reaches nobody without a grant.
   app.post("/v1/agents/:agentId/enabled", async (req, reply) => {
@@ -1796,6 +2271,42 @@ export function registerAgentConnectorRoutes(
 
     const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
     if (!agent) return reply.status(404).send({ error: "unknown_agent" });
+
+    // ADR-0066 §3 — THE PER-KEY ALLOW-LIST ON THE NATIVE DISPATCH PATH.
+    // The same check runs inside the dispatch core for the SERVED agent (so
+    // pillar-6 routing cannot route around it, and neither can a fallback hop).
+    // It ALSO runs here, on the REQUESTED agent, for two reasons a check in
+    // only one place would miss: `dispatch: false` never reaches the core at
+    // all, so a decision-only invoke would otherwise answer for a model the key
+    // may not touch; and refusing at the entry point names the agent the caller
+    // actually asked for instead of whatever routing settled on.
+    //
+    // The BUDGET is checked here as well, and not only in the core, for a
+    // reason the core cannot see: a semantic-cache HIT returns before the core
+    // is ever called. That hit costs $0, so leaving it unchecked would not
+    // overspend — but it would make an exhausted key work intermittently
+    // (fine on a prompt somebody asked before, 402 on a new one), which is both
+    // baffling to the holder and a free oracle for probing what is cached. An
+    // exhausted key refuses, consistently.
+    const invokeVirtualKey = await loadVirtualKeyContext(db, req);
+    if (invokeVirtualKey) {
+      const refusal =
+        virtualKeyAllowListRefusal(invokeVirtualKey, agent) ??
+        virtualKeyBudgetRefusal(invokeVirtualKey);
+      if (refusal) {
+        await db.insert(auditLog).values({
+          userId,
+          objectType: "virtual_key",
+          objectId: invokeVirtualKey.id,
+          detail: { phase: "invoke", agentId: agent.id, agentName: agent.name, model: agent.model },
+          effect: "deny",
+          ruleId: refusal.ruleId,
+          ruleChain: [],
+          reason: refusal.detail,
+        });
+        return reply.status(refusal.status).send({ error: refusal.error, detail: refusal.detail });
+      }
+    }
 
     // ADR-0021: the org-wide functional defaults, loaded ONCE per request
     // (the interception-settings pattern) and threaded to every consumption
@@ -2593,6 +3104,7 @@ export function registerAgentConnectorRoutes(
           system: dispatchSystem,
           cacheSystem: promptCache.cacheSystem,
           onText: (delta) => send("delta", { text: delta }),
+          virtualKey: invokeVirtualKey,
         });
         await persistTurns(outcome);
         await storeSemanticCacheIf(outcome);
@@ -2651,6 +3163,7 @@ export function registerAgentConnectorRoutes(
           input: dispatchInput,
           system: dispatchSystem,
           cacheSystem: promptCache.cacheSystem,
+          virtualKey: invokeVirtualKey,
         });
         await persistTurns(dispatchOutcome);
         await storeSemanticCacheIf(dispatchOutcome);
@@ -2708,6 +3221,10 @@ export function registerAgentConnectorRoutes(
         ...(dispatchOutcome.detail ? { detail: dispatchOutcome.detail } : {}),
         ...(dispatchOutcome.pii ? { pii: dispatchOutcome.pii } : {}),
         ...(dispatchOutcome.guardrails ? { guardrails: dispatchOutcome.guardrails } : {}),
+        // ADR-0066 §4: an EXHAUSTED chain must be as visible as a successful
+        // one. Without this the caller sees only the primary's failure and has
+        // no way to know that three governed alternatives were tried.
+        ...(dispatchOutcome.fallback ? { fallback: dispatchOutcome.fallback } : {}),
         ...suppressionFlag,
       });
     }

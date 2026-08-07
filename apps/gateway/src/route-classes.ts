@@ -90,6 +90,23 @@ export const NON_ADMIN_ROUTES = new Set([
   // deliberately NOT here: writing the posture stays admin-only.
   "POST /v1/messages",
   "POST /v1/chat/completions",
+  // ADR-0066 §1 — the discovery endpoint. Non-admin for exactly the reason the
+  // two shims above are: it is the DEVELOPER's setup call, and its governance
+  // is the per-caller entitlement filter inside the handler, not admin-ness.
+  // The list is scoped to the caller, so a non-admin learns nothing about
+  // models they were not granted — an ungranted model is ABSENT, not 403'd.
+  "GET /v1/models",
+  // ADR-0066 §2 — a user may issue, inspect and revoke virtual keys for
+  // THEMSELVES. That is a strict narrowing of their own entitlements and needs
+  // no admin. Issuing on behalf of another user, and pinning which platform
+  // credential a key burns, both refuse in-handler unless the caller is admin.
+  // Note these are NOT in VIRTUAL_KEY_ALLOWED_ROUTES: a virtual key cannot
+  // reach them, so a key can never mint another key.
+  "POST /v1/virtual-keys",
+  "GET /v1/virtual-keys",
+  "GET /v1/virtual-keys/:keyId/usage",
+  "PATCH /v1/virtual-keys/:keyId",
+  "DELETE /v1/virtual-keys/:keyId",
   "POST /v1/connectors/:connectorId/invoke",
   "POST /v1/conversations",
   "GET /v1/conversations",

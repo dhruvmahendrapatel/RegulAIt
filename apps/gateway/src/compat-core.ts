@@ -67,6 +67,12 @@ import { loadAgentRevocations, loadRoleAgentGrants } from "./entitlements.js";
 import { assertProjectAttribution, projectPiiMode } from "./projects.js";
 import { PROJECT_HEADER } from "./mcp-proxy.js";
 import { effectiveTechniqueMode, loadOrgSettings } from "./org-settings.js";
+import {
+  loadVirtualKeyContext,
+  virtualKeyAdmits,
+  virtualKeyAllowListRefusal,
+  type VirtualKeyContext,
+} from "./virtual-keys.js";
 
 export { PROJECT_HEADER };
 
@@ -87,18 +93,32 @@ export const COMPAT_MODE = "execute";
 export const COMPAT_ANTHROPIC_ROUTE = "POST /v1/messages";
 export const COMPAT_OPENAI_ROUTE = "POST /v1/chat/completions";
 export const MCP_PROXY_ROUTE = "POST /mcp/:serverId";
+/** ADR-0066 §1 — the discovery endpoint both provider SDKs call at setup.
+ * ONE route serving TWO envelopes, chosen by the `anthropic-version` header. */
+export const COMPAT_MODELS_ROUTE = "GET /v1/models";
 
 /** Routes that additionally accept the RegulAIt API key in `x-api-key`. Not a
  * weaker credential — the SAME key, under the header name Anthropic clients
- * send, so an `ANTHROPIC_BASE_URL`-based tool authenticates unmodified. */
-export const API_KEY_HEADER_ROUTES: ReadonlySet<string> = new Set([COMPAT_ANTHROPIC_ROUTE]);
+ * send, so an `ANTHROPIC_BASE_URL`-based tool authenticates unmodified.
+ * ADR-0066 adds `GET /v1/models`: the Anthropic SDK sends the same header on
+ * its model-list call, and a discovery endpoint that refused the credential the
+ * very next call will use would be a strange place to stop. */
+export const API_KEY_HEADER_ROUTES: ReadonlySet<string> = new Set([
+  COMPAT_ANTHROPIC_ROUTE,
+  COMPAT_MODELS_ROUTE,
+]);
 
 /** Routes whose existence is admin-configurable (ADR-0020). A disabled surface
  * answers Fastify's own 404 body, so it is indistinguishable from a route that
- * was never registered — we do not advertise a surface the admin turned off. */
+ * was never registered — we do not advertise a surface the admin turned off.
+ *
+ * ADR-0066 gates `GET /v1/models` the same way, on EITHER compat surface being
+ * enabled: a deployment that intercepts nothing should not answer a discovery
+ * call, and a client that can list models must be able to call one. */
 export const INTERCEPTION_GATED_ROUTES: ReadonlySet<string> = new Set([
   COMPAT_ANTHROPIC_ROUTE,
   COMPAT_OPENAI_ROUTE,
+  COMPAT_MODELS_ROUTE,
   MCP_PROXY_ROUTE,
 ]);
 
@@ -443,6 +463,10 @@ export interface CompatPrepared {
   /** COMPAT_IGNORED_FIELDS actually present on this request — accepted, not
    * honoured, and disclosed rather than dropped in silence. */
   ignoredFields: string[];
+  /** ADR-0066 §2/§3: the virtual key this compat call arrived on, threaded to
+   * the dispatch core so the key's allow-list and budget bind here exactly as
+   * they bind on the native invoke path. null on an ordinary API key. */
+  virtualKey: VirtualKeyContext | null;
 }
 
 export type CompatError = { status: number; error: string; detail: string };
@@ -621,6 +645,36 @@ export async function prepareCompatCall(
       ceilingTier,
     });
 
+  // ADR-0066 §3 — THE PER-KEY ALLOW-LIST AT THE COMPAT SURFACE. Loaded once
+  // here and threaded onto `prepared`, so the dispatch core sees it too and the
+  // two surfaces cannot diverge. Checked against the REQUESTED agent BEFORE
+  // routing, so the refusal names what the client asked for; the core re-checks
+  // the SERVED agent, which is what stops a router override or a fallback hop
+  // from becoming a way past the list.
+  const virtualKey = await loadVirtualKeyContext(db, req);
+  if (virtualKey) {
+    const refusal = virtualKeyAllowListRefusal(virtualKey, requested);
+    if (refusal) {
+      await db.insert(auditLog).values({
+        userId,
+        objectType: "virtual_key",
+        objectId: virtualKey.id,
+        detail: {
+          surface: "compat",
+          requestedModel: args.requestedModel,
+          agentId: requested.id,
+          agentName: requested.name,
+          ...(projectId ? { projectId } : {}),
+        },
+        effect: "deny",
+        ruleId: refusal.ruleId,
+        ruleChain: [],
+        reason: refusal.detail,
+      });
+      return { ok: false, status: refusal.status, error: refusal.error, detail: refusal.detail };
+    }
+  }
+
   const decision = evalFor(requested);
   if (decision.effect !== "allow") {
     await db.insert(auditLog).values({
@@ -650,7 +704,15 @@ export async function prepareCompatCall(
   let served = requested;
   let routerOverrode = false;
   if (mode === "router_decides") {
-    const entitled = registry.filter((a) => evalFor(a).effect === "allow");
+    // ADR-0066: the router chooses only among targets the caller is entitled to
+    // AND — on a virtual key — that the key admits. Filtering here rather than
+    // letting the core refuse afterwards means a key's allow-list narrows the
+    // routing search space instead of turning a legitimate downroute into a 403.
+    const entitled = registry.filter(
+      (a) =>
+        evalFor(a).effect === "allow" &&
+        (!virtualKey || virtualKeyAdmits(virtualKey, { id: a.id, model: a.model })),
+    );
     const configured = await configuredProviders(db, dataKey, userId);
     const candidateRows = entitled.filter(
       (a) =>
@@ -737,6 +799,7 @@ export async function prepareCompatCall(
       streamingSuppressed,
       useStream: args.stream && !streamingSuppressed,
       ignoredFields: args.ignoredFields ?? [],
+      virtualKey,
     },
   };
 }
@@ -796,6 +859,8 @@ export async function executeCompatCall(
     projectId: prepared.projectId,
     ...(args.onText ? { onText: args.onText } : {}),
     ...(args.onThinking ? { onThinking: args.onThinking } : {}),
+    virtualKey: prepared.virtualKey,
+    mode: COMPAT_MODE,
     detail: {
       surface: `compat_${args.surface}`,
       mode: COMPAT_MODE,

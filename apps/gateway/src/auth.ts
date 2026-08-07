@@ -1,5 +1,4 @@
 import {
-  createHash,
   createHmac,
   randomBytes,
   scryptSync,
@@ -51,6 +50,13 @@ import { deviceLabel } from "./device-label.js";
 import { checkEgress, createGuardedFetch, type EgressDenied } from "./egress-guard.js";
 import { loadEgressAllowList } from "./custom-providers.js";
 import { normalizeAssertedGroups, reconcileGroupRoles } from "./group-roles.js";
+import { hashToken } from "./token-hash.js";
+import { isVirtualKeyToken, resolveVirtualKey, touchVirtualKey } from "./virtual-keys.js";
+
+/** ADR-0066 kept this exported from `auth.ts` — the implementation moved to
+ * `token-hash.ts` so `virtual-keys.ts` can share it without an import cycle,
+ * and every existing `import { hashToken } from "./auth.js"` is unchanged. */
+export { hashToken };
 
 export interface AuthContext {
   /** null only for the bootstrap token (header or exchanged session), which
@@ -59,8 +65,27 @@ export interface AuthContext {
   isAdmin: boolean;
   /** "session" = ADR-0025 cookie session (password, MFA, SSO or key-exchange
    * login). The API-key and bootstrap header paths are byte-identical to
-   * pre-0042. */
-  via: "bootstrap" | "api-key" | "session";
+   * pre-0042. "virtual-key" is ADR-0066's scoped proxy credential: it resolves
+   * to a real user (`userId` is the OWNER, whose entitlements are its ceiling)
+   * but is NEVER admin, whatever the owner is, and reaches only the routes in
+   * `VIRTUAL_KEY_ALLOWED_ROUTES`. */
+  via: "bootstrap" | "api-key" | "session" | "virtual-key";
+  /** ADR-0066: set only when `via === "virtual-key"`. The dispatch core reads
+   * it to apply the key's allow-list and budget, and the ledger stamps it. */
+  virtualKeyId?: string;
+}
+
+/**
+ * ADR-0066 — a credential that really exists but may not be used, and the
+ * reason. Distinguished from `null` (nothing matched) so the holder — who by
+ * definition possesses the real token — learns why, exactly as ADR-0022's
+ * "disabled" marker does for a deactivated user's API key.
+ */
+export const AUTH_REFUSALS = ["disabled", "virtual_key_revoked", "virtual_key_expired"] as const;
+export type AuthRefusal = (typeof AUTH_REFUSALS)[number];
+
+export function isAuthRefusal(x: AuthContext | null | AuthRefusal): x is AuthRefusal {
+  return typeof x === "string";
 }
 
 export const TOKEN_PREFIX = "rgl_";
@@ -68,10 +93,6 @@ export const TOKEN_PREFIX = "rgl_";
 export function generateToken(): { token: string; tokenHash: string } {
   const token = TOKEN_PREFIX + randomBytes(24).toString("hex");
   return { token, tokenHash: hashToken(token) };
-}
-
-export function hashToken(token: string): string {
-  return createHash("sha256").update(token).digest("hex");
 }
 
 function safeEqual(a: string, b: string): boolean {
@@ -92,13 +113,43 @@ export async function authenticate(
   db: Db,
   bootstrapToken: string | undefined,
   authorizationHeader: string | undefined,
-): Promise<AuthContext | null | "disabled"> {
+): Promise<AuthContext | null | AuthRefusal> {
   if (!authorizationHeader?.startsWith("Bearer ")) return null;
   const token = authorizationHeader.slice("Bearer ".length).trim();
   if (token.length === 0) return null;
 
   if (bootstrapToken && safeEqual(token, bootstrapToken)) {
     return { userId: null, isAdmin: true, via: "bootstrap" };
+  }
+
+  // ADR-0066 — VIRTUAL KEYS. The `rglv_` prefix makes the two credential kinds
+  // disjoint, so this branch cannot change the api_keys path in any way: an
+  // ordinary `rgl_` token never reaches it, and an `rglv_` token never reaches
+  // the api_keys lookup below.
+  //
+  // THE LINE THAT MATTERS: `isAdmin` is hard-coded false. A virtual key issued
+  // by an admin is not an admin — a scoped, budgeted proxy credential that
+  // silently carried admin would be the exact opposite of what it is for. Its
+  // `userId` IS the owner, so every downstream entitlement check evaluates the
+  // owner's grants, which is what makes the key a CEILING rather than a bypass.
+  if (isVirtualKeyToken(token)) {
+    const resolved = await resolveVirtualKey(db, token);
+    if (!resolved.ok) {
+      if (resolved.reason === "revoked") return "virtual_key_revoked";
+      if (resolved.reason === "expired") return "virtual_key_expired";
+      return null;
+    }
+    // ADR-0022: a deactivated owner's virtual keys stop authenticating for the
+    // same reason their API keys do — the ceiling belongs to a person who is
+    // no longer allowed in.
+    if (resolved.ownerDisabled) return "disabled";
+    await touchVirtualKey(db, resolved.row.id);
+    return {
+      userId: resolved.row.userId,
+      isAdmin: false,
+      via: "virtual-key",
+      virtualKeyId: resolved.row.id,
+    };
   }
 
   const [row] = await db
@@ -896,7 +947,30 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
         detail: "this account has been deactivated — an admin can reactivate it",
       });
     }
+    // ADR-0066: a revoked or expired virtual key is refused here for the same
+    // reason it is refused everywhere else, and says which.
+    if (isAuthRefusal(ctx)) {
+      return reply.status(401).send({
+        error: ctx,
+        detail:
+          ctx === "virtual_key_revoked"
+            ? "this virtual key has been revoked"
+            : "this virtual key has expired",
+      });
+    }
     if (!ctx) return reply.status(401).send({ error: "invalid_key" });
+    // ADR-0066 — THE ESCALATION THIS ENDPOINT WOULD OTHERWISE BE. A virtual key
+    // is a NARROWED credential: not admin, budgeted, and confined to the
+    // dispatch surfaces. A browser session is the OWNER'S FULL IDENTITY. If
+    // this exchange accepted one, every restriction on the key would evaporate
+    // in a single POST — so it refuses, by kind, before anything else happens.
+    if (ctx.via === "virtual-key") {
+      return reply.status(403).send({
+        error: "virtual_key_not_exchangeable",
+        detail:
+          "a virtual key is a scoped, budgeted dispatch credential and cannot be exchanged for a browser session — that would hand back the full identity the key exists to narrow",
+      });
+    }
     const org = await loadOrgSettings(db);
     // ADR-0039: an exchanged API-key session is the AUTOMATION path — governed
     // by api_key_ip_policy, never by the human knob. The bootstrap exchange is

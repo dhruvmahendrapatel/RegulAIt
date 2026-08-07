@@ -2139,6 +2139,24 @@ export class MockModelProvider implements ModelProvider {
       };
     }
 
+    // ADR-0066 §4 test/demo affordance: a genuine UPSTREAM/TRANSPORT failure,
+    // the ONLY class of failure that may trigger a provider fallback chain.
+    // Deliberately a thrown `ModelProviderError` and NOT a refusal — the whole
+    // point of ADR-0066's rule 1 is that those two are different, and a suite
+    // proving "a refusal does not fall back, an upstream error does" needs both
+    // reachable without a network. Same sentinel discipline as `<<refuse>>` and
+    // `<<emit-ssn>>` above: the mock never invents this.
+    //
+    // TWO FORMS, because a fallback test needs the primary to fail and the hop
+    // to succeed on the SAME prompt (the chain re-sends the caller's input
+    // verbatim, which is itself the correct behaviour):
+    //   `<<upstream-error>>`            — every model fails (chain exhaustion)
+    //   `<<upstream-error:some-model>>` — only that model id fails
+    const scopedFailure = /<<upstream-error:([^>]+)>>/.exec(lastUser);
+    if (scopedFailure ? scopedFailure[1]!.trim() === req.model : lastUser.includes("<<upstream-error>>")) {
+      throw new ModelProviderError(`mock: simulated upstream failure for model '${req.model}'`, 503);
+    }
+
     // ADR-0020 long tail: deterministic extended-thinking support so the
     // whole thinking path (blocks, signature, SSE deltas, ledger) is testable
     // with zero external keys. The thinking tokens are counted as OUTPUT

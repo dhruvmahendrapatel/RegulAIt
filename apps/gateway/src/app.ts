@@ -183,6 +183,7 @@ import {
 import {
   API_KEY_HEADER_ROUTES,
   COMPAT_ANTHROPIC_ROUTE,
+  COMPAT_MODELS_ROUTE,
   INTERCEPTION_GATED_ROUTES,
   MCP_PROXY_ROUTE,
   PROJECT_HEADER,
@@ -194,6 +195,8 @@ import {
 } from "./compat-core.js";
 import { registerAnthropicCompat } from "./compat-anthropic.js";
 import { registerOpenAiCompat } from "./compat-openai.js";
+import { registerModelsDiscovery } from "./compat-models.js";
+import { registerVirtualKeyRoutes, VIRTUAL_KEY_ALLOWED_ROUTES } from "./virtual-keys.js";
 import { registerConversationRoutes } from "./conversations.js";
 import { applyProjectApprovalDecision, registerProjectRoutes } from "./projects.js";
 import { applyInfraApprovalDecision, registerInfraRoutes } from "./infra.js";
@@ -539,8 +542,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       }
       return;
     }
+    // ADR-0066: `GET /v1/models` is the discovery endpoint for BOTH shims, so
+    // it exists when EITHER is enabled. A deployment that intercepts nothing
+    // still answers the same indistinguishable 404, and a client that can list
+    // models can always call at least one of them.
     const orgEnabled =
-      route === COMPAT_ANTHROPIC_ROUTE ? settings.anthropicCompatEnabled : settings.openaiCompatEnabled;
+      route === COMPAT_MODELS_ROUTE
+        ? settings.anthropicCompatEnabled || settings.openaiCompatEnabled
+        : route === COMPAT_ANTHROPIC_ROUTE
+          ? settings.anthropicCompatEnabled
+          : settings.openaiCompatEnabled;
     if (!(await interceptionScopeRulesExist(db))) {
       if (!orgEnabled) return reply.status(404).send(notFoundBody(req.method, req.url));
       return;
@@ -551,13 +562,22 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       if (typeof alt === "string" && alt.length > 0) authorization = `Bearer ${alt}`;
     }
     const ctx = await authenticate(db, opts.bootstrapToken, authorization);
-    const userId = ctx && ctx !== "disabled" ? ctx.userId : null;
+    // ADR-0066: `authenticate` may now answer with a refusal STRING for a
+    // credential that exists but may not be used (deactivated owner, revoked or
+    // expired virtual key). None of those resolves to an identity, so scope
+    // rules fall back to the org level exactly as an invalid token does — a
+    // probe still cannot detect that scope rules exist.
+    const userId = typeof ctx === "object" && ctx !== null ? ctx.userId : null;
     const projectHeader = req.headers[PROJECT_HEADER];
     const projectId =
       typeof projectHeader === "string" && UUID_ANY_RE.test(projectHeader) ? projectHeader : null;
     const policy = await resolveInterceptionPolicy(db, { userId, projectId }, settings);
     const enabled =
-      route === COMPAT_ANTHROPIC_ROUTE ? policy.anthropicCompatEnabled : policy.openaiCompatEnabled;
+      route === COMPAT_MODELS_ROUTE
+        ? policy.anthropicCompatEnabled || policy.openaiCompatEnabled
+        : route === COMPAT_ANTHROPIC_ROUTE
+          ? policy.anthropicCompatEnabled
+          : policy.openaiCompatEnabled;
     if (!enabled) {
       return reply.status(404).send(notFoundBody(req.method, req.url));
     }
@@ -702,6 +722,18 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         detail: "this account has been deactivated — an admin can reactivate it",
       });
     }
+    // ADR-0066: a virtual key that really exists but is revoked or expired says
+    // so, rather than reading as a bad token. Only someone holding the real
+    // token ever sees this, so it leaks nothing.
+    if (ctx === "virtual_key_revoked" || ctx === "virtual_key_expired") {
+      return reply.status(401).send({
+        error: ctx,
+        detail:
+          ctx === "virtual_key_revoked"
+            ? "this virtual key has been revoked and authenticates nothing"
+            : "this virtual key has expired — its issuer can mint a new one",
+      });
+    }
     if (!ctx) return reply.status(401).send({ error: "unauthenticated" });
     // ADR-0039: header API-key auth under api_key_ip_policy. Each request
     // presents the credential anew, so ANY enforcing level checks every
@@ -709,7 +741,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // nothing to revoke — the deny IS the whole enforcement). The bootstrap
     // header is the break-glass path and is never IP-restricted; the human
     // knob never touches this path in either direction.
-    if (ctx.via === "api-key") {
+    // ADR-0066: a virtual key is a programmatic header credential like an API
+    // key, so it answers to the SAME api_key_ip_policy. Leaving it out would
+    // have made "issue a virtual key" a way around the network envelope.
+    if (ctx.via === "api-key" || ctx.via === "virtual-key") {
       const org = await loadOrgSettings(db);
       if (org.apiKeyIpPolicy !== "off") {
         const decision = evaluateIpEnvelope(org.sessionIpAllowlist, req.ip ?? null);
@@ -739,6 +774,29 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       }
     }
     req.authCtx = ctx;
+  });
+
+  // ADR-0066 — THE VIRTUAL-KEY ROUTE CEILING. Runs BEFORE the admin gate,
+  // because it is a stricter statement than "is this caller an admin": a
+  // virtual key reaches the dispatch surfaces and nothing else, whatever its
+  // owner may reach with their own credential.
+  //
+  // It is an ALLOW-LIST, not a deny-list, and that is the whole design. A route
+  // added tomorrow is unreachable on a virtual key until someone deliberately
+  // names it here — so the failure mode of forgetting is a 403, not a hole. The
+  // routes most worth keeping out are the ones that would dissolve the ceiling:
+  // minting credentials, editing grants, and reading model credentials.
+  app.addHook("preHandler", async (req, reply) => {
+    if (req.authCtx.via !== "virtual-key") return;
+    const route = `${req.method} ${req.routeOptions.url ?? ""}`;
+    if (!VIRTUAL_KEY_ALLOWED_ROUTES.has(route)) {
+      return reply.status(403).send({
+        error: "virtual_key_scope",
+        detail:
+          `a virtual key may only reach this deployment's model-dispatch surfaces (${[...VIRTUAL_KEY_ALLOWED_ROUTES].join(", ")}); ` +
+          `'${route}' is not one of them. Use the owner's own API key or session for anything else.`,
+      });
+    }
   });
 
   // Everything is admin-only except the routes where a non-admin identity is
@@ -2779,6 +2837,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   app.addHook("onClose", async () => stopAuditPruneScheduler());
   registerAnthropicCompat(app, db, { dataKey: opts.dataKey });
   registerOpenAiCompat(app, db, { dataKey: opts.dataKey });
+  // ADR-0066 §1 — `GET /v1/models`. Gated by the same onRequest hook as the two
+  // shims (on EITHER being enabled), and entitlement-filtered per caller inside
+  // the handler, so what a client can list is exactly what it can call.
+  registerModelsDiscovery(app, db);
+  // ADR-0066 §2 — virtual keys. `GET/POST/PATCH/DELETE /v1/virtual-keys*` are
+  // in NON_ADMIN_ROUTES because a user may issue and revoke keys for THEMSELVES
+  // (a strict narrowing of their own entitlements); the handlers enforce
+  // owner-or-admin per row, and the admin-only fields refuse in-handler.
+  registerVirtualKeyRoutes(app, db);
 
   // ADR-0031 item 2: the audit read surface used to be hard-capped at 100 rows
   // with a userId filter (plus PR #79's deployMode) and nothing else — for a

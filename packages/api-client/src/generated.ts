@@ -10,7 +10,7 @@
 // Regenerate with:  REGULAIT_WRITE_API_ARTIFACTS=1 pnpm --filter @regulait/gateway exec vitest run src/openapi.test.ts
 //
 // Spec version: 1.0.0
-// Operations:   64
+// Operations:   70
 //
 // RESPONSES ARE `unknown` BY DESIGN. The gateway's routes declare request
 // schemas but not response schemas, so there is nothing to derive a response
@@ -325,6 +325,14 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
+ * GET /v1/models
+ * @stability public-beta — auth: user
+   */
+  getV1Models<T = unknown>(options?: RequestOptions): Promise<T> {
+    return this.request<T>("GET", `/v1/models`, undefined, options);
+  }
+
+  /**
  * This document. `?include=all` additionally renders internal routes (admin only) — those carry no compatibility guarantee.
  * @stability public-stable — auth: user
    */
@@ -585,6 +593,48 @@ export class GeneratedRegulAItClient extends BaseClient {
   }
 
   /**
+ * GET /v1/virtual-keys
+ * @stability public-beta — auth: user
+   */
+  getV1VirtualKeys<T = unknown>(options?: RequestOptions): Promise<T> {
+    return this.request<T>("GET", `/v1/virtual-keys`, undefined, options);
+  }
+
+  /**
+ * POST /v1/virtual-keys
+ * @stability public-beta — auth: user
+ * @remarks this route declares no request schema in the spec, so `body` is untyped.
+   */
+  postV1VirtualKeys<T = unknown>(body?: unknown, options?: RequestOptions): Promise<T> {
+    return this.request<T>("POST", `/v1/virtual-keys`, body, options);
+  }
+
+  /**
+ * PATCH /v1/virtual-keys/:keyId
+ * @stability public-beta — auth: user
+ * @remarks this route declares no request schema in the spec, so `body` is untyped.
+   */
+  patchV1VirtualKeysByKeyId<T = unknown>(keyId: string, body?: unknown, options?: RequestOptions): Promise<T> {
+    return this.request<T>("PATCH", `/v1/virtual-keys/${encodeURIComponent(keyId)}`, body, options);
+  }
+
+  /**
+ * DELETE /v1/virtual-keys/:keyId
+ * @stability public-beta — auth: user
+   */
+  deleteV1VirtualKeysByKeyId<T = unknown>(keyId: string, options?: RequestOptions): Promise<T> {
+    return this.request<T>("DELETE", `/v1/virtual-keys/${encodeURIComponent(keyId)}`, undefined, options);
+  }
+
+  /**
+ * GET /v1/virtual-keys/:keyId/usage
+ * @stability public-beta — auth: user
+   */
+  getV1VirtualKeysByKeyIdUsage<T = unknown>(keyId: string, options?: RequestOptions): Promise<T> {
+    return this.request<T>("GET", `/v1/virtual-keys/${encodeURIComponent(keyId)}/usage`, undefined, options);
+  }
+
+  /**
  * Workflow instances.
  * @stability public-stable — auth: user
    */
@@ -763,6 +813,11 @@ export const OPERATIONS: ReadonlyArray<{ id: string; method: string; path: strin
     "path": "/v1/messages"
   },
   {
+    "id": "getV1Models",
+    "method": "GET",
+    "path": "/v1/models"
+  },
+  {
     "id": "getV1OpenapiJson",
     "method": "GET",
     "path": "/v1/openapi.json"
@@ -921,6 +976,31 @@ export const OPERATIONS: ReadonlyArray<{ id: string; method: string; path: strin
     "id": "getV1UsersByUserIdServersByServerIdTools",
     "method": "GET",
     "path": "/v1/users/{userId}/servers/{serverId}/tools"
+  },
+  {
+    "id": "getV1VirtualKeys",
+    "method": "GET",
+    "path": "/v1/virtual-keys"
+  },
+  {
+    "id": "postV1VirtualKeys",
+    "method": "POST",
+    "path": "/v1/virtual-keys"
+  },
+  {
+    "id": "patchV1VirtualKeysByKeyId",
+    "method": "PATCH",
+    "path": "/v1/virtual-keys/{keyId}"
+  },
+  {
+    "id": "deleteV1VirtualKeysByKeyId",
+    "method": "DELETE",
+    "path": "/v1/virtual-keys/{keyId}"
+  },
+  {
+    "id": "getV1VirtualKeysByKeyIdUsage",
+    "method": "GET",
+    "path": "/v1/virtual-keys/{keyId}/usage"
   },
   {
     "id": "getV1WorkflowsInstances",
