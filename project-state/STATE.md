@@ -4,7 +4,7 @@ last_updated: 2026-08-07
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-08-07-session-09.md
+last_session: sessions/2026-08-07-session-10.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,59 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**Slice F of the parity wave shipped, 2026-08-07 — [ADR-0070](../docs/decisions/0070-trace-observability.md)
+(migration 0082), trace/span observability.** The premise was **verified by grep before anything was
+written** (Slice D's was not, and was half wrong): there was **no trace or span model anywhere in
+`schema.ts` and no OpenTelemetry dependency in any package.json**, while every FACT a trace is made
+of already existed and was already governed — `orchestration_runs` and its node statuses, the
+`usage_events` ledger, the hash-chained `audit_log`, the guardrail/eval/red-team/lineage ledgers.
+**The gap was the SHAPE, not the data**: nothing could say *this call happened inside that node,
+which happened inside that run; this tool call was asked for by that specific model turn; and the
+reason there is no model call under this branch at all is that pillar 1 said no.* That last clause
+is the whole slice — **a governance product's most valuable trace is the one that shows why NOTHING
+happened**, and no incumbent (Langfuse/Helicone/LangSmith) is positioned to record it because none
+of them is the thing that refused. **The recorder WRAPS the one dispatch attempt rather than being
+scattered through it, and that is the argument**: `dispatchOnce` became `dispatchAttempt` with a
+thin traced wrapper taking its name, so all ~12 of its early returns (virtual-key ceiling, MRM,
+project budget, §8.4 PII, ADR-0042 guardrails, both egress refusals, missing credential,
+undispatchable agent) land as `denied` spans carrying their stated reason **without the core
+mentioning tracing at all** — a thirteenth refusal cannot forget to be traced. The pillar-1
+entitlement denial never reaches the core, so it gets its own `policy` span at the invoke route AND
+in the compat core; without that, the most common refusal in the product would be the one thing with
+no trace. **A span REFERENCES, it does not restate** (`usage_event_id`, `audit_log_id`, `run_id`,
+`node_id`, `agent_id`); the only duplication is the five fields a tree must render without an N+1,
+copied FROM the ledger row in the same call, with the suite **joining back by `usage_event_id` and
+asserting equality** rather than trusting the copy. An ADR-0066 **fallback hop is a CHILD of the
+attempt that failed**; an orchestration run is **four real levels** (run → node → model turn → the
+tool call that turn made), asserted by parent id and depth against a real run with a real MCP
+upstream — a flat list relabelled fails every line. `seq` (not the timestamp) orders siblings,
+because millisecond timestamps collide in-process. **Content rides the EXISTING ADR-0042/0044/0065
+posture** (already-adjudicated text + truncation + the withheld marker; a refusal ABOUT the input
+stores the marker, not the prompt), and **retention rides the §8.3 cascade's audit floor with no new
+knob** — one would let an operator keep prompts for a year under a framework that says ninety days.
+**Reading a trace is default-deny with a self exception** on ADR-0069's precedent: a non-admin
+naming somebody else gets a **403, not a narrowed result set**. Export is the published `gen_ai.*`
+OTel conventions over a **hand-rolled OTLP/HTTP JSON encoder** (the SDK rejected — we serialise
+stored rows, we do not instrument a live process, and its background exporter assumes opening a
+socket is fine), with **no default endpoint anywhere**, a real 409 when none is configured, and the
+ADR-0034/0043 egress guard applied at write time AND on every export. **The SPA ships a trace-tree
+page at `/admin/traces`** that leads with the traces where governance refused something and prints
+each deny reason inline. **Measured**: a 2,000-span tree reads in **42 ms in ONE query**, assembles
+in 7 ms, encodes to OTLP in 23 ms; the recorder costs two statements per span (≈400 spans/s).
+Gateway **1,889 → 1,907 tests / 109 → 110 files**; shared **480 → 500**; policy-kernel 129,
+model-provider 122, infra-provider 174, training-provider 58 unchanged.
+**Disclosed rather than closed** (twelve items in the ADR): a lost span is a **hole the API reports**
+(`partial: true`) rather than prevents — the recorder never fails the call it traces; **connector
+calls, workflow stages and eval-run grouping are DECLARED span kinds with nothing writing them**;
+there is **no prompt-playground diffing** (named in the slice's own paragraph, not built); no
+sampling and **no per-project tracing policy** (org-wide on/off only); no time-to-first-token
+(streaming is traced at completion); the exporter is a **pull with no spooling, no retry and no
+already-exported marker**, so an overlapping re-run re-sends; the OTLP **span id is the first 8
+bytes** of our uuid (the trace id is exact); a DENY exports as OTel status **ERROR** because OTel's
+enum has no member meaning "deliberately refused", so in somebody else's Grafana a refusal looks
+like a failure; and **nothing has been verified against a live OTLP collector** (`dryRun: true`
+exists so an operator can read the exact body first).
 
 **Slice C of the parity wave shipped, 2026-08-07 — [ADR-0069](../docs/decisions/0069-cross-vendor-cost-consolidation.md)
 (migration 0081), cross-vendor cost consolidation. This is THE WEDGE** — the one gap session 07's
