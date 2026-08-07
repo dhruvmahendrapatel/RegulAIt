@@ -21,6 +21,71 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**Slice E of the parity wave shipped, 2026-08-07 — [ADR-0071](../docs/decisions/0071-shadow-ai-format-adapters.md),
+shadow-AI evidence format adapters. THE PARITY WAVE IS COMPLETE** — six slices, one ADR each,
+dispatched sequentially; see [COMPETITIVE_PARITY_PLAN.md](../docs/product/COMPETITIVE_PARITY_PLAN.md)
+§5 for the closing summary and the three things the wave is *not*. **This slice needed NO MIGRATION
+and that is a decision, not an omission**: 0083 was budgeted and is deliberately unused, because
+`shadow_ai_imports.summary` is already `jsonb NOT NULL` and carries the adapter id, the format
+basis, the fields actually read, the three row counts and the bounded refusal list — adding four
+columns to store what jsonb already stores would be migration cost with no query that needs it
+(nothing filters imports by adapter). **The plan's original Slice E paragraph asked for importers
+ADR-0055 had ALREADY SHIPPED** — four evidence kinds, dry-run/apply, payload fingerprints, per-row
+provenance, forbidden-key screening, correlation, the coverage scorecard — and the paragraph was
+corrected in the plan file before the slice started, which is the Slice D mistake caught by grepping
+first. **The genuine gap was one layer down**: ADR-0055 accepts rows *already normalised to its zod
+schemas*, so a customer had to hand-write the transform — and a hand-written transform is exactly
+the ten-minute `split("|")` that works on the first three lines of the sample and mis-parses every
+escaped line for ever afterwards. **Five adapters** on ADR-0069's registry playbook: `cef` and
+`leef` (published grammars, header `\|` escaping and CEF's `\=` extension escaping honoured),
+`w3c_extended` (driven by the file's OWN `#Fields:` directive, honoured again if it is redeclared
+mid-file), `proxy_common` (Squid native / NCSA common / combined, with the layout a REQUIRED
+operator assertion because those formats carry no header and a mis-sniffed layout reads the
+client-IP column as the destination), and `generic_mapped` over CSV *or* JSON producing **all four**
+evidence kinds. **An adapter LAYER, not a subsystem, and that is the structural claim**: no new
+table, no new evidence kind, and `processEvidenceImport` is now ONE function that both the
+row-shaped `POST /v1/shadow-ai/imports` and the new `POST /v1/shadow-ai/imports/raw` end in — the
+suite **proves** it by asserting the two routes compute a byte-identical analysis from the same
+evidence rather than asserting reuse in prose. Every adapter validates its output against
+**ADR-0055's OWN row schemas**, which is what turns a `rows.417.destinationHost` zod path into a
+refusal naming **line 418 of the file the operator has open**. **The escapes ARE the slice**:
+`CEF:0|Acme\|Corp|…|suser=alice\=admin` parses correctly and the unit suite asserts the naive
+`split()` gives a DIFFERENT answer, so a regression to string-splitting fails a test rather than
+shipping a confident wrong host; **not one regular expression is evaluated over file content
+anywhere** (ADR-0055's NO-REGEX-FROM-DATA rule verbatim — a CEF extension is precisely the
+attacker-shaped string that turns a lazy alternation into a ReDoS). **Every line is read or REFUSED
+WITH ITS 1-BASED FILE LINE NUMBER, and `onMalformedRow` DEFAULTS to refusing the WHOLE FILE**,
+because the one unrecoverable failure for a discovery product is a quietly smaller inventory that
+looks complete; `report_and_continue` is the explicit opt-in and still lists every refusal.
+An unreadable epoch unit, `07/08/2026`, a W3C token-count mismatch, an NCSA line whose target is a
+path (an origin-server log names no destination), a LEEF 2.0 sixth field that is not a delimiter, a
+declared `devTimeFormat`, and an ambiguous `host`/`url` header pair each REFUSE with the reason
+stated. **Three honesty fields, not one**: `capabilities` + a machine-readable `formatBasis`
+(`published-spec` / `declared-format` / `operator-mapped`) + a `verification` sentence + `limits`,
+all returned by `GET /v1/shadow-ai/adapters` — and every published-spec adapter says outright that
+it **has NOT been run against a real vendor export**, asserted by a test so it cannot be quietly
+softened. **No vendor-named preset ships, deliberately** (no `zscaler`, no `okta` — a test asserts
+it): ADR-0069 disclosed its declared-header presets as its own biggest gap, a CASB/SSO export has no
+published format at all, and the vendor's name is the part a buyer trusts. PII posture is
+**ADR-0055's, unchanged and strictly NARROWER** — unmapped fields are discarded, so a CEF `msg` or
+`cs1Label` never reaches the database; no ingest scan was added because an evidence row's only PII
+is the `sourceIdentity` the feature exists to record. Coverage honesty is preserved verbatim at the
+new surface, and emptying the catalogue makes every adapter match nothing (asserted — "detection is
+data" had to stay true here too). Gateway **1,907 → 1,926 tests / 110 → 111 files**; shared
+**500 → 550**; policy-kernel 129, model-provider 122, infra-provider 174, training-provider 58
+unchanged. **Disclosed rather than closed** (thirteen items in the ADR): **nothing has been run
+against a real export from any vendor's product** — the biggest gap and the owner's first follow-up;
+there is no vendor-named adapter at all; only a FIXED key list is read from CEF/LEEF, so a product
+using custom `cs1Label` slots gets every line refused; one record must be one line (no multi-line
+reassembly, no gzip, no multipart, 2 MB inline); the 5,000-row bound means a real proxy log must be
+chunked or pre-aggregated and each log line counts as ONE request unless the format carries a count;
+**re-posting the same file doubles a finding's `observationCount`** because ADR-0055 has no
+duplicate-payload 409 (pre-existing, unchanged, now named); a row whose host does not normalise is
+still DROPPED-and-counted rather than refused — ADR-0055's contract, left alone exactly as ADR-0067
+left `llm_as_judge`, named follow-up; a naive timestamp is read as UTC; a LEEF feed declaring
+`devTimeFormat` has EVERY row refused; the log grammars produce `egress_log` only; and there is no
+SPA page.
+
 **Slice F of the parity wave shipped, 2026-08-07 — [ADR-0070](../docs/decisions/0070-trace-observability.md)
 (migration 0082), trace/span observability.** The premise was **verified by grep before anything was
 written** (Slice D's was not, and was half wrong): there was **no trace or span model anywhere in
