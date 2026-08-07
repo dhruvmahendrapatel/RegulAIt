@@ -137,6 +137,13 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/approvals/views",
   "POST /v1/approvals/views",
   "DELETE /v1/approvals/views/:id",
+  // ADR-0069 — a person may read THEIR OWN consolidated (metered + imported)
+  // spend. The handler refuses unless the caller IS that user, so this widens
+  // nothing: cross-user cost visibility stays an admin surface, because a
+  // colleague's imported per-seat spend is exactly the figure that must not
+  // leak sideways. Every other cost-import route — uploading a file, asserting
+  // an identity mapping, reading fleet-wide — is absent here on purpose.
+  "GET /v1/users/:userId/cost-consolidated",
   "GET /v1/cost-events",
   "GET /v1/usage-events",
   // ADR-0047: a team lead generating and reading THEIR OWN scorecard. Every

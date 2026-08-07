@@ -223,6 +223,7 @@ import { AUTH_EXEMPT_ROUTES, NON_ADMIN_ROUTES } from "./route-classes.js";
 import { registerOpenApiRoutes, type RouteInventoryEntry } from "./openapi.js";
 import { registerOnboardingRoutes } from "./onboarding.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
+import { registerCostImportRoutes } from "./cost-import.js";
 import { registerCompliancePackRoutes } from "./compliance-packs.js";
 import { registerCopilotRoutes } from "./copilot.js";
 import { registerChatOpsRoutes } from "./chatops.js";
@@ -2801,6 +2802,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // The subsystem makes NO outbound request and can write only its own three
   // tables — an evidence file cannot mint a user, role, grant or approval.
   registerShadowAiRoutes(app, db);
+  // ADR-0069 — CROSS-VENDOR COST CONSOLIDATION. Admin-only by default: the ONLY
+  // route here in NON_ADMIN_ROUTES is `GET /v1/users/:userId/cost-consolidated`,
+  // which refuses in-handler unless the caller IS that user. Uploading a file
+  // that restates a named colleague's spend, asserting that a vendor account is
+  // a particular human, and reading fleet-wide spend are all operator authority.
+  // The subsystem makes NO outbound request and can write only its own four
+  // tables plus `users.cost_center`; imported money lives in a separate table
+  // under a CHECK that pins `basis = 'imported'`, so nothing it writes can ever
+  // be read back as metered.
+  registerCostImportRoutes(app, db);
   // ADR-0058 — REGULATORY COMPLIANCE PACKS. Authoring/activating a pack and
   // recording an attestation are admin (not in NON_ADMIN_ROUTES); EVALUATING a
   // pack is reachable by a non-admin and runs ADR-0047's own
