@@ -3079,8 +3079,23 @@ export const EVAL_SCORER_KINDS = [
   "numeric",
   "rubric",
   "llm_as_judge",
+  // ADR-0067 (migration 0079) — groundedness. Four locally computable, two
+  // model-backed and refusing rather than degrading.
+  "claim_support",
+  "context_precision",
+  "context_recall",
+  "answer_relevance",
+  "groundedness_judge",
+  "answer_relevance_judge",
 ] as const;
 export type EvalScorerKindDb = (typeof EVAL_SCORER_KINDS)[number];
+
+/** The literal list the three CHECK constraints below carry. Written once so a
+ * kind added to the array above cannot be forgotten in one constraint and
+ * remembered in another. */
+const EVAL_SCORER_KINDS_SQL = sql.raw(
+  EVAL_SCORER_KINDS.map((k) => `'${k}'`).join(","),
+);
 
 export const EVAL_RUN_TRIGGERS = ["manual", "workflow", "scheduled"] as const;
 export const EVAL_RUN_STATUSES = ["running", "completed", "error", "denied"] as const;
@@ -3105,7 +3120,7 @@ export const evalDatasets = pgTable(
     check("eval_datasets_version_check", sql`${t.version} >= 1`),
     check(
       "eval_datasets_scorer_kind_check",
-      sql`${t.scorerKind} IN ('exact','contains','regex','json_schema','numeric','rubric','llm_as_judge')`,
+      sql`${t.scorerKind} IN (${EVAL_SCORER_KINDS_SQL})`,
     ),
     uniqueIndex("eval_datasets_name_version_uq").on(t.name, t.version),
     unique("eval_datasets_id_version_uq").on(t.id, t.version),
@@ -3123,6 +3138,25 @@ export const evalCases = pgTable(
     /** string | number | object | array; NULL for reference-free scorers */
     expected: jsonb("expected"),
     rubric: jsonb("rubric"),
+    /**
+     * ADR-0067 (migration 0079) — THE RETRIEVED/REFERENCE CONTEXT. One entry per
+     * chunk; chunk boundaries are load-bearing, because a claim supported only
+     * by stitching two chunks together is exactly the fabrication mode a
+     * groundedness metric exists to catch, and a single blob would score it as
+     * supported.
+     *
+     * STORAGE POSTURE: this is authored content, stored beside `input` and
+     * `expected` under the same authority — it is not a new data class. When it
+     * rides the prompt (the default) it passes through the SAME §8.4 PII
+     * classifier and ADR-0042 guardrails as any other dispatch input. It is
+     * NEVER a way to smuggle content past those gates.
+     */
+    context: jsonb("context").$type<string[]>().notNull().default([]),
+    /** true = the context is prepended to the prompt, so the metric measures
+     * the model against material it actually saw. false = held back and used
+     * for scoring only. Two different questions; this flag records which was
+     * asked. */
+    contextInPrompt: boolean("context_in_prompt").notNull().default(true),
     tags: jsonb("tags").$type<string[]>().notNull().default([]),
     /** NULL = inherit the dataset's default scorer */
     scorerKind: text("scorer_kind", { enum: EVAL_SCORER_KINDS }),
@@ -3132,7 +3166,7 @@ export const evalCases = pgTable(
   (t) => [
     check(
       "eval_cases_scorer_kind_check",
-      sql`${t.scorerKind} IS NULL OR ${t.scorerKind} IN ('exact','contains','regex','json_schema','numeric','rubric','llm_as_judge')`,
+      sql`${t.scorerKind} IS NULL OR ${t.scorerKind} IN (${EVAL_SCORER_KINDS_SQL})`,
     ),
     foreignKey({
       name: "eval_cases_dataset_version_fk",

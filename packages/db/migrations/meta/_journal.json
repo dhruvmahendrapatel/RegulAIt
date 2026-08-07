@@ -547,6 +547,13 @@
       "when": 1785013000000,
       "tag": "0078_gateway_parity",
       "breakpoints": true
+    },
+    {
+      "idx": 79,
+      "version": "7",
+      "when": 1785014000000,
+      "tag": "0079_groundedness",
+      "breakpoints": true
     }
   ]
 }
