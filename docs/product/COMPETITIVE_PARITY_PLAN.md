@@ -150,6 +150,27 @@ shadow-AI findings model with provenance on every row.
 **Honesty line:** state plainly in the UI that this is evidence ingestion, not traffic
 observation, and that coverage equals whatever the customer exported.
 
+**SCOPE CORRECTED 2026-08-07 — most of this is already built; do not re-plan from the paragraph
+above.** ADR-0055 already ships `shadow_ai_imports` with four evidence kinds (`egress_log`,
+`code_scan`, `saas_export`, `self_reported`), dry-run/apply modes, payload SHA-256, per-row
+provenance, forbidden-key stripping and honest refusal. The four artefact families named above
+already map onto those kinds. What is genuinely missing is **narrower and one layer lower**:
+ADR-0055 accepts rows *already normalised* to its zod schema, so today a customer must transform
+their own export into RegulAIt's row shape by hand. There are **no format adapters** — nothing
+reads a CEF/LEEF/W3C/CLF proxy log, a Zscaler/Netskope CSV, or an SSO app-access export and
+produces those rows.
+
+So Slice E is now an **adapter slice, not a subsystem**: reuse
+[ADR-0069](../decisions/0069-cross-vendor-cost-consolidation.md)'s registry pattern
+(`packages/shared/src/cost-import.ts` — declared capabilities + honest `limits` string + refuse
+naming the missing column) to turn raw vendor exports into `EVIDENCE_KINDS` rows. Same honesty
+rule as ADR-0069's vendor presets: an adapter built against a *declared* format that nobody here
+has verified against a live export must say so, and refuse by naming the missing field rather
+than mis-parsing.
+
+*Recorded because Slice D was planned from a paragraph that was half wrong — its
+OpenAI-compatible endpoint already existed. Check the codebase before writing the brief.*
+
 ### Slice F — Observability / tracing parity
 **Parity target:** Langfuse, Helicone, LangSmith.
 **Gap:** no span-level trace view of a multi-agent run (ADR-0053's orchestration produces a
