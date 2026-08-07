@@ -1928,6 +1928,12 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       // ADR-0042: the guardrail FLOOR this framework forces. MAX-composed with
       // every other setting downstream, so it can only ever raise a layer.
       guardrailModes: body.guardrailModes ?? null,
+      // ADR-0068 §5: the framework's red-team opinion — gating classes, a floor
+      // on trials per probe, and a severity floor. Null = no opinion, which is
+      // every pre-0080 row and leaves a run exactly as the caller asked for it.
+      redteamGatingClasses: body.redteamGatingClasses ?? null,
+      redteamMinTrials: body.redteamMinTrials ?? null,
+      redteamFailOnSeverity: body.redteamFailOnSeverity ?? null,
     };
     const [row] = await db
       .insert(complianceProfiles)

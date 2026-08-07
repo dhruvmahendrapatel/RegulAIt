@@ -357,6 +357,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/redteam/runs": "internal",
   "POST /v1/redteam/runs": "internal",
   "GET /v1/redteam/runs/:id": "internal",
+  // ADR-0068: the per-trial record behind an ASR
+  "GET /v1/redteam/runs/:id/trials": "internal",
   "POST /v1/redteam/runs/:id/evidence": "internal",
   "GET /v1/redteam/summary": "internal",
   "POST /v1/policy-simulations": "internal",
@@ -874,6 +876,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/redteam/runs": "redteam",
   "POST /v1/redteam/runs": "redteam",
   "GET /v1/redteam/runs/:id": "redteam",
+  "GET /v1/redteam/runs/:id/trials": "redteam",
   "POST /v1/redteam/runs/:id/evidence": "redteam",
   "GET /v1/redteam/summary": "redteam",
   "POST /v1/policy-simulations": "policy-simulation",

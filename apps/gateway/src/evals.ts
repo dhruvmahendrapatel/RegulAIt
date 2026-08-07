@@ -271,7 +271,17 @@ interface CaseScore {
 }
 
 /** the entitlement inputs, loaded once for both the agent under test and the
- * judge — the SAME evaluateAgent path an ordinary invoke takes */
+ * judge — the SAME evaluateAgent path an ordinary invoke takes.
+ *
+ * EXPORTED (ADR-0068) so the red-team SEQUENCE runner takes literally this
+ * decider rather than a second implementation that agrees today. A multi-turn
+ * or agentic probe cannot be an `eval_cases` row, so it does not enter
+ * `runEvalSuite` — but it must meet the identical entitlement gate, and the way
+ * to guarantee that is to share the function rather than the intent. */
+export async function buildAgentDecider(db: Db, userId: string) {
+  return agentDecider(db, userId);
+}
+
 async function agentDecider(db: Db, userId: string) {
   const [grants, roleGrants, revocations, [policy]] = await Promise.all([
     db.select().from(agentGrants).where(eq(agentGrants.userId, userId)),
