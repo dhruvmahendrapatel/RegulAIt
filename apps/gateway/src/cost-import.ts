@@ -98,7 +98,6 @@ import {
   type Db,
 } from "@regulait/db";
 import {
-  ANY_VENDOR,
   COST_IMPORT_MAX_BYTES,
   CostImportFormatError,
   IMPORTED_BASIS_STATEMENT,
