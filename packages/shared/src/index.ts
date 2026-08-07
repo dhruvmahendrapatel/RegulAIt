@@ -1,4 +1,8 @@
 import { z } from "zod";
+// ADR-0068 §5: the attack-class vocabulary is needed IN SCOPE here (not merely
+// re-exported below) so the compliance-profile schema validates a framework's
+// red-team gating classes against the one authoritative list.
+import { RED_TEAM_ATTACK_CLASSES } from "./redteam.js";
 
 export { detectPII, type PiiHit, type PiiCategory } from "./pii.js";
 
@@ -1470,6 +1474,13 @@ export const upsertComplianceProfileSchema = z.object({
    * carrying its tag. MAX-composed with every other setting, so it can only
    * raise a layer. */
   guardrailModes: guardrailModeMapSchema.nullable().optional(),
+  /** ADR-0068 §5: this framework's RED-TEAM opinion, on the same row as its PII
+   * mode and guardrail floor rather than in a parallel config. Composed by the
+   * cascade's existing rules (union / MAX / strictest-wins) and applied
+   * TIGHTEN-ONLY, so a framework can raise a red-team bar and never lower one. */
+  redteamGatingClasses: z.array(z.enum(RED_TEAM_ATTACK_CLASSES)).max(16).nullable().optional(),
+  redteamMinTrials: z.number().int().min(1).max(25).nullable().optional(),
+  redteamFailOnSeverity: z.enum(["low", "medium", "high", "critical"]).nullable().optional(),
 });
 
 // PILLAR 3 (§8.2): the governed infrastructure-operations layer.
@@ -2295,35 +2306,77 @@ export {
 // itself a thin composition over ADR-0044's `evaluateEvalGate`, because a
 // red-team suite IS an eval suite with adversarial cases and inverted polarity.
 export {
+  RED_TEAM_AGENTIC_ATTACK_CLASSES,
+  RED_TEAM_AGENTIC_VECTORS,
   RED_TEAM_ATTACK_CLASSES,
   RED_TEAM_CANARY,
+  RED_TEAM_CORE_ATTACK_CLASSES,
+  RED_TEAM_CORPUS_VERSIONS,
   RED_TEAM_COVERAGE_DISCLOSURE,
+  RED_TEAM_LATEST_CORPUS_VERSION,
   RED_TEAM_ORIGIN_TAG,
   RED_TEAM_SEVERITIES,
   RED_TEAM_SEVERITY_WEIGHT,
   aggregateRedTeamByClass,
+  applyRedTeamPreset,
   attachRedTeamEvidenceSchema,
+  builtinRedTeamCorpus,
   builtinRedTeamLibrary,
+  builtinRedTeamLibraryV2,
+  composeRedTeamPreset,
   createRedTeamLibrarySchema,
   createRedTeamProbeSchema,
   evaluateRedTeamGate,
+  isSequenceProbe,
+  redTeamAgenticVectorSchema,
   redTeamAttackClassRegistry,
   redTeamAttackClassSchema,
   redTeamOverallAggregate,
+  redTeamProbeToolSchema,
   redTeamSeveritySchema,
+  seedRedTeamCorpusSchema,
   severityRank,
   startRedTeamRunSchema,
+  validateRedTeamAgentic,
   validateRedTeamProbe,
+  type RedTeamAgenticVector,
+  type RedTeamAgenticVectorKind,
   type RedTeamAttackClass,
   type RedTeamAttackClassInfo,
   type RedTeamClassAggregate,
   type RedTeamClassVerdict,
+  type RedTeamCompliancePreset,
+  type RedTeamEffectivePreset,
   type RedTeamGateDecision,
   type RedTeamGateInput,
   type RedTeamProbeOutcome,
   type RedTeamProbeSeed,
+  type RedTeamProbeTool,
+  type RedTeamRunSettings,
   type RedTeamSeverity,
 } from "./redteam.js";
+// ADR-0068 — attack-success-rate statistics. Pure: the Wilson score interval,
+// the per-probe trial roll-up whose denominator is never separable from its
+// rate, the pooled per-class ASR, and the `not_run` status that keeps an unrun
+// probe out of every aggregate rather than letting it read as resisted.
+export {
+  RED_TEAM_ASR_DISCLOSURE,
+  RED_TEAM_DEFAULT_TRIALS,
+  RED_TEAM_DEFAULT_Z,
+  RED_TEAM_MAX_TRIALS,
+  aggregateAsrByClass,
+  describeAsr,
+  measurementQuality,
+  summarizeProbeAsr,
+  trialCostNote,
+  wilsonInterval,
+  type RedTeamClassAsr,
+  type RedTeamMeasurementQuality,
+  type RedTeamProbeAsr,
+  type RedTeamProbeStatus,
+  type RedTeamTrialOutcome,
+  type WilsonInterval,
+} from "./redteam-stats.js";
 // ADR-0059 — policy simulation / blast-radius preview's pure half: the replay
 // classifier (total over recorded × candidate effect), the fidelity analysis
 // derived from the candidate's OWN source, the ADR-0047-shaped entitlement
