@@ -63,8 +63,10 @@ import {
   type EvalRunRow,
 } from "@regulait/db";
 import { evaluateAgent, type AgentDecision } from "@regulait/policy-kernel";
+import { isModelProviderKind } from "@regulait/model-provider";
 import {
   aggregateEvalResults,
+  buildGroundednessJudgePrompt,
   buildJudgePrompt,
   createEvalCaseSchema,
   createEvalDatasetSchema,
@@ -72,6 +74,9 @@ import {
   evalScorerRegistry,
   evaluateEvalGate,
   isDeterministicScorer,
+  isJudgeBackedScorer,
+  judgeAvailabilityFor,
+  parseGroundednessVerdict,
   parseJudgeVerdict,
   scoreDeterministic,
   setEvalBaselineSchema,
@@ -85,8 +90,14 @@ import {
   type EvalScore,
   type EvalScorerConfig,
   type EvalScorerKind,
+  type JudgeBackedScorerKind,
 } from "@regulait/shared";
-import { executeGovernedDispatch, type AgentRow } from "./agents-connectors.js";
+import {
+  agentProviderToken,
+  configuredProviders,
+  executeGovernedDispatch,
+  type AgentRow,
+} from "./agents-connectors.js";
 import { loadAgentRevocations, loadRoleAgentGrants } from "./entitlements.js";
 import { assertProjectAttribution } from "./projects.js";
 
@@ -138,7 +149,24 @@ export class ModelBackedJudge implements EvalJudge {
   }
 
   async judge(req: EvalJudgeRequest): Promise<EvalJudgeVerdict> {
-    const prompt = buildJudgePrompt(req, this.ctx.threshold);
+    // ADR-0067: the metric decides the prompt and the parser. A groundedness
+    // judgement is a different question from ADR-0044's reference-comparison
+    // grading, and asking the second while reporting the first would be the
+    // same dishonesty as falling back to a lexical proxy.
+    const grounded =
+      req.metric === "groundedness_judge" || req.metric === "answer_relevance_judge";
+    const prompt = grounded
+      ? buildGroundednessJudgePrompt(
+          {
+            question: req.caseInput,
+            answer: req.output,
+            context: req.context ?? [],
+            metric: req.metric as "groundedness_judge" | "answer_relevance_judge",
+            instructions: req.instructions ?? null,
+          },
+          this.ctx.threshold,
+        )
+      : buildJudgePrompt(req, this.ctx.threshold);
     const outcome = await executeGovernedDispatch(this.db, this.dataKey, {
       userId: this.ctx.userId,
       served: this.ctx.judgeAgent,
@@ -148,12 +176,18 @@ export class ModelBackedJudge implements EvalJudge {
       input: prompt,
       maxTokens: 1024,
       projectId: this.ctx.projectId,
-      detail: { purpose: "eval-judge", evalRunId: this.ctx.evalRunId },
+      detail: {
+        purpose: "eval-judge",
+        evalRunId: this.ctx.evalRunId,
+        ...(req.metric ? { metric: req.metric } : {}),
+      },
     });
     if (!outcome.ok) {
       throw new Error(`judge dispatch failed: ${outcome.error}${outcome.detail ? ` — ${outcome.detail}` : ""}`);
     }
-    const parsed = parseJudgeVerdict(outcome.result.outputText, this.ctx.threshold);
+    const parsed = grounded
+      ? parseGroundednessVerdict(outcome.result.outputText, this.ctx.threshold)
+      : parseJudgeVerdict(outcome.result.outputText, this.ctx.threshold);
     if (!parsed.ok) throw new Error(`judge verdict unusable: ${parsed.error}`);
     return parsed.verdict;
   }
@@ -217,6 +251,8 @@ export type EvalRunOutcome =
       error: string;
       detail?: string;
       decision?: AgentDecision;
+      /** ADR-0067: on a judge-availability refusal, the metrics that forced it */
+      metrics?: JudgeBackedScorerKind[];
     };
 
 interface CaseScore {
@@ -334,6 +370,39 @@ function resolveScorer(
   return { kind, config: parsed.success ? parsed.data : {} };
 }
 
+/** the case's retrieved/reference context, normalised */
+export function caseContext(c: EvalCaseRow): string[] {
+  const raw = c.context as unknown;
+  return Array.isArray(raw) ? raw.filter((x): x is string => typeof x === "string") : [];
+}
+
+/**
+ * ADR-0067 — THE PROMPT THE MODEL ACTUALLY SEES.
+ *
+ * A case with no context, or one that holds its context back for scoring only,
+ * dispatches its `input` VERBATIM — so every pre-ADR-0067 case is byte-identical
+ * and no existing baseline moves.
+ *
+ * When context rides the prompt the framing is deliberately MINIMAL: the chunks
+ * are labelled and the question is restated, and that is all. We do NOT inject
+ * "answer only from the context" or "say so if the context is silent". Two
+ * reasons. It would make every score partly a measurement of an instruction we
+ * wrote rather than of the agent under test; and an injected abstention
+ * instruction would systematically trip `answer_relevance`'s non-committal
+ * detector, quietly coupling two metrics that must stay independent. An author
+ * who wants those instructions writes them into the case `input`, where they
+ * are visible on the case row.
+ */
+export function composeCaseInput(c: EvalCaseRow): string {
+  const ctx = caseContext(c);
+  if (ctx.length === 0 || c.contextInPrompt === false) return c.input;
+  return [
+    "CONTEXT:",
+    ...ctx.map((chunk, i) => `[${i + 1}] ${chunk}`),
+    `QUESTION: ${c.input}`,
+  ].join("\n\n");
+}
+
 /**
  * THE RUNNER. Executes every case of a pinned dataset version through the
  * governed dispatch core as the initiating user, scores each, persists a
@@ -414,6 +483,73 @@ export async function runEvalSuite(
     .where(and(eq(evalCases.datasetId, dataset.id), eq(evalCases.datasetVersion, dataset.version)))
     .orderBy(asc(evalCases.createdAt), asc(evalCases.id));
 
+  // ------------------------------------------------------------------
+  // ADR-0067 §4 — THE HONESTY LINE, ENFORCED BEFORE ANYTHING IS WRITTEN.
+  //
+  // A metric that needs a model must REFUSE when no model is reachable. It must
+  // not fall back to the lexical estimate and report it under the judged name,
+  // because that would tell a regulated buyer their hallucination rate is
+  // MEASURED when it was ESTIMATED.
+  //
+  // The refusal is placed HERE — after the cases are known, before the
+  // `eval_runs` row is inserted — so a refused run leaves NO run row, NO
+  // eval_results row, and no half-scored suite a later reader could mistake for
+  // a measurement. `judgeAvailabilityFor` is a pure function in
+  // @regulait/shared, tested exhaustively without a database.
+  // ------------------------------------------------------------------
+  const scorerKinds = cases.map((c) => resolveScorer(dataset, c).kind);
+  let judgeDispatchable = false;
+  let judgeUndispatchableDetail: string | null = null;
+  if (opts.judge) {
+    // an injected judge implementation IS the judge — it needs no credential
+    judgeDispatchable = true;
+  } else if (judgeAgent) {
+    if (!judgeAgent.model) {
+      judgeUndispatchableDetail = `judge agent '${judgeAgent.name}' has no model id`;
+    } else if (!isModelProviderKind(judgeAgent.provider)) {
+      judgeUndispatchableDetail = `judge agent '${judgeAgent.name}' has unknown provider '${judgeAgent.provider}'`;
+    } else {
+      const configured = await configuredProviders(db, dataKey, opts.userId);
+      if (configured.has(agentProviderToken(judgeAgent))) judgeDispatchable = true;
+      else {
+        judgeUndispatchableDetail = `no model credential (user or platform) is configured for provider '${judgeAgent.provider}'`;
+      }
+    }
+  }
+  const availability = judgeAvailabilityFor(scorerKinds, {
+    named: Boolean(opts.judge) || Boolean(judgeAgent),
+    dispatchable: judgeDispatchable,
+    detail: judgeUndispatchableDetail,
+  });
+  if (!availability.available) {
+    await db.insert(auditLog).values({
+      userId: opts.userId,
+      objectType: "eval_run",
+      objectId: dataset.id,
+      detail: {
+        phase: "judge-availability",
+        purpose,
+        ...originDetail,
+        agentId: agent.id,
+        datasetName: dataset.name,
+        datasetVersion: dataset.version,
+        metrics: availability.metrics,
+        judgeAgentId: judgeAgent?.id ?? null,
+      },
+      effect: "deny",
+      ruleId: availability.error,
+      ruleChain: [],
+      reason: availability.reason,
+    });
+    return {
+      ok: false,
+      status: 422,
+      error: availability.error,
+      detail: availability.reason,
+      metrics: availability.metrics,
+    };
+  }
+
   const tolerance = opts.tolerance ?? 0.05;
   const [run] = await db
     .insert(evalRuns)
@@ -460,15 +596,20 @@ export async function runEvalSuite(
   const scores: CaseScore[] = [];
   for (const c of cases) {
     const { kind, config } = resolveScorer(dataset, c);
+    const context = caseContext(c);
     const started = Date.now();
     // THE GOVERNED DISPATCH. `served` is passed explicitly — the harness
     // measures the agent it was asked to measure, never a routed substitute.
+    // ADR-0067: the case's context rides the INPUT when the case says it
+    // should, which means it passes through the same §8.4 PII classifier and
+    // ADR-0042 guardrails as any other prompt — context is content, never a
+    // storage or a policy bypass.
     const outcome = await executeGovernedDispatch(db, dataKey, {
       userId: opts.userId,
       served: agent as AgentRow,
       requestedAgentId: agent.id,
       baseline: null,
-      input: c.input,
+      input: composeCaseInput(c),
       maxTokens: 2048,
       projectId: opts.projectId ?? null,
       detail: {
@@ -509,10 +650,15 @@ export async function runEvalSuite(
     let caseError: string | null = null;
     if (isDeterministicScorer(kind)) {
       scored = scoreDeterministic({
-        kind: kind as Exclude<EvalScorerKind, "llm_as_judge">,
+        kind: kind as Exclude<EvalScorerKind, JudgeBackedScorerKind>,
         expected: c.expected ?? null,
         output,
         config,
+        // ADR-0067: the RAW case input is what `answer_relevance` measures
+        // against, never the context-framed prompt — otherwise the context's
+        // own terms would inflate the question's coverage.
+        caseInput: c.input,
+        context,
       });
     } else if (!judge) {
       // No judge configured for a judge-scored case: fail LOUDLY. Passing it
@@ -527,8 +673,27 @@ export async function runEvalSuite(
           rubric: c.rubric ?? null,
           output,
           instructions: config.instructions ?? null,
+          ...(isJudgeBackedScorer(kind) ? { metric: kind } : {}),
+          context,
         });
-        scored = { score: verdict.score, passed: verdict.passed, detail: { judge: judge.id } };
+        scored = {
+          score: verdict.score,
+          passed: verdict.passed,
+          detail: {
+            judge: judge.id,
+            // ADR-0067: the judged metric always says a MODEL produced this
+            // number, so a stored result can never be read as a local
+            // computation.
+            method: "model-judged",
+            metric: kind,
+            ...(verdict.claims?.length
+              ? {
+                  claims: verdict.claims,
+                  unsupportedClaims: verdict.claims.filter((cl) => !cl.supported),
+                }
+              : {}),
+          },
+        };
         rationale = verdict.rationale;
       } catch (e) {
         scored = { score: 0, passed: false, detail: { judge: judge.id, failed: true } };
@@ -648,6 +813,101 @@ export async function runEvalSuite(
   });
 
   return { ok: true, run: finished!, aggregate, gate, baseline };
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0067 — THE GROUNDEDNESS SUMMARY
+// ---------------------------------------------------------------------------
+
+/** the ADR-0067 kinds, in the order a report should read them */
+const GROUNDEDNESS_KINDS = [
+  "claim_support",
+  "groundedness_judge",
+  "context_precision",
+  "context_recall",
+  "answer_relevance",
+  "answer_relevance_judge",
+] as const;
+
+export interface GroundednessMetricSummary {
+  metric: string;
+  /** 'local-lexical' or 'model-judged' — the ONE field that stops a lexical
+   * estimate being read as an entailment measurement */
+  method: "local-lexical" | "model-judged";
+  cases: number;
+  meanScore: number;
+  minScore: number;
+  passedCases: number;
+  /** how many claims failed support across every case scored by this metric */
+  unsupportedClaims: number;
+}
+
+export interface GroundednessSummary {
+  metrics: GroundednessMetricSummary[];
+  /** the failing claims themselves, capped — what a compliance reviewer opens
+   * the report to read. Each is already truncated model output carrying the
+   * ADR-0044 PII/guardrail posture. */
+  unsupportedClaims: Array<{ caseId: string | null; metric: string; claim: string; score?: number; reason?: string }>;
+  note: string;
+}
+
+const UNSUPPORTED_CLAIM_REPORT_MAX = 100;
+
+/**
+ * Roll the per-case groundedness evidence up into the block a model card and a
+ * regression report both read. Computed on read from `eval_results` — there is
+ * deliberately no stored copy, because a second copy of a measurement is a
+ * second thing that can be wrong.
+ */
+export function summarizeGroundedness(
+  results: ReadonlyArray<{ caseId: string | null; scorerKind: string; score: number; passed: boolean; detail: Record<string, unknown> }>,
+): GroundednessSummary | null {
+  const relevant = results.filter((r) =>
+    (GROUNDEDNESS_KINDS as readonly string[]).includes(r.scorerKind),
+  );
+  if (relevant.length === 0) return null;
+  const metrics: GroundednessMetricSummary[] = [];
+  const claims: GroundednessSummary["unsupportedClaims"] = [];
+  for (const kind of GROUNDEDNESS_KINDS) {
+    const rows = relevant.filter((r) => r.scorerKind === kind);
+    if (rows.length === 0) continue;
+    let unsupported = 0;
+    for (const r of rows) {
+      const list = r.detail.unsupportedClaims;
+      if (!Array.isArray(list)) continue;
+      unsupported += list.length;
+      for (const c of list) {
+        if (claims.length >= UNSUPPORTED_CLAIM_REPORT_MAX) break;
+        const rec = c as Record<string, unknown>;
+        claims.push({
+          caseId: r.caseId,
+          metric: kind,
+          claim: String(rec.claim ?? ""),
+          ...(typeof rec.score === "number" ? { score: rec.score } : {}),
+          ...(typeof rec.reason === "string" ? { reason: rec.reason } : {}),
+        });
+      }
+    }
+    metrics.push({
+      metric: kind,
+      method: isJudgeBackedScorer(kind) ? "model-judged" : "local-lexical",
+      cases: rows.length,
+      meanScore: Number((rows.reduce((a, r) => a + r.score, 0) / rows.length).toFixed(4)),
+      minScore: Math.min(...rows.map((r) => r.score)),
+      passedCases: rows.filter((r) => r.passed).length,
+      unsupportedClaims: unsupported,
+    });
+  }
+  return {
+    metrics,
+    unsupportedClaims: claims,
+    note:
+      "`method` is load-bearing. 'local-lexical' means IDF-weighted overlap against the case's context — " +
+      "real, free, offline, and blind to negation flips, swapped attribution and invalid reasoning. " +
+      "'model-judged' means a governed judge dispatch decided entailment. A run can never carry a " +
+      "model-judged figure that no model produced: ADR-0067 refuses the run outright rather than " +
+      "substituting the lexical estimate.",
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -783,10 +1043,22 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
   app.get("/v1/evals/scorers", async () => ({
     scorers: evalScorerRegistry(),
     note:
-      "Six of the seven scorers are pure functions — same output, same score, no cost, no variance. " +
-      "llm_as_judge is a governed model call: it costs tokens, it varies run to run, and the judge is " +
-      "itself an agent that can regress. Build a BLOCKING gate on the deterministic ones and treat the " +
-      "judge as corroboration.",
+      "Ten of the thirteen scorers are pure functions — same output, same score, no cost, no variance. " +
+      "Three (llm_as_judge, groundedness_judge, answer_relevance_judge) are governed model calls: they " +
+      "cost tokens, they vary run to run, and the judge is itself an agent that can regress. Build a " +
+      "BLOCKING gate on the deterministic ones and treat a judge as corroboration. ADR-0067: a run whose " +
+      "cases use a model-backed scorer is REFUSED with 422 when no dispatchable judge agent is named — " +
+      "these metrics never silently degrade to the lexical estimate under the judged name, because a " +
+      "hallucination rate that was estimated must never be reported as measured.",
+    groundedness: {
+      deterministic: ["claim_support", "context_precision", "context_recall", "answer_relevance"],
+      modelBacked: ["groundedness_judge", "answer_relevance_judge"],
+      note:
+        "The deterministic four are IDF-weighted lexical overlap against the case's `context`. They " +
+        "genuinely catch fabricated names and figures and whole-cloth invention; they are blind to " +
+        "negation flips, swapped attribution and invalid reasoning, and they score a synonym-only " +
+        "paraphrase as unsupported. Each scorer's `limits` string says so where an admin reads it.",
+    },
   }));
 
   /** datasets, newest version of each name first, with case counts and the
@@ -868,7 +1140,10 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
     // A scorer that cannot discriminate is refused HERE, at authoring time —
     // an eval suite where no case can fail is theatre, and it is far cheaper to
     // reject it now than to explain a green gate later.
-    const bad = validateScorerConfig(kind, cfg, body.expected ?? null);
+    // ADR-0067: a groundedness scorer with no context is refused at authoring
+    // time for exactly the reason a `contains` with no needles is — it would
+    // report a number that no output could ever change.
+    const bad = validateScorerConfig(kind, cfg, body.expected ?? null, body.context);
     if (bad) return reply.status(422).send({ error: "unusable_scorer_config", detail: bad });
     const [row] = await db
       .insert(evalCases)
@@ -878,6 +1153,8 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
         input: body.input,
         expected: (body.expected ?? null) as never,
         rubric: (body.rubric ?? null) as never,
+        context: body.context,
+        contextInPrompt: body.contextInPrompt,
         tags: body.tags,
         scorerKind: body.scorerKind ?? null,
         scorerConfig: body.scorerConfig ?? null,
@@ -933,6 +1210,12 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
           input: c.input,
           expected: c.expected as never,
           rubric: c.rubric as never,
+          // ADR-0067: context travels with the case into the next version. A
+          // copy that dropped it would silently turn every groundedness case
+          // into an unscoreable one at exactly the moment an author thought
+          // they were making a safe edit.
+          context: c.context,
+          contextInPrompt: c.contextInPrompt,
           tags: c.tags,
           scorerKind: c.scorerKind,
           scorerConfig: c.scorerConfig,
@@ -975,6 +1258,9 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
         error: outcome.error,
         ...(outcome.detail ? { detail: outcome.detail } : {}),
         ...(outcome.decision ? { decision: outcome.decision } : {}),
+        // ADR-0067: on a judge-availability refusal, name the metrics that
+        // forced it — a caller must be able to fix the run without guessing.
+        ...(outcome.metrics ? { metrics: outcome.metrics } : {}),
       });
     }
     return reply.status(201).send({
@@ -1065,7 +1351,14 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
         ...r,
         input: r.caseId ? (caseMap.get(r.caseId)?.input ?? null) : null,
         expected: r.caseId ? (caseMap.get(r.caseId)?.expected ?? null) : null,
+        // ADR-0067: how much context the case supplied and whether the model
+        // saw it. The chunk TEXT is on the case, not repeated per result.
+        contextChunks: r.caseId ? (caseMap.get(r.caseId)?.context ?? []).length : 0,
+        contextInPrompt: r.caseId ? (caseMap.get(r.caseId)?.contextInPrompt ?? null) : null,
       })),
+      // ADR-0067: null unless this run scored a groundedness metric, so an
+      // ordinary run's payload is unchanged in shape apart from one null field.
+      groundedness: summarizeGroundedness(results),
       baseline,
       diff,
     };

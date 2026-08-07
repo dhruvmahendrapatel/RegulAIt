@@ -47,6 +47,7 @@ import {
   customModelProviders,
   desc,
   eq,
+  evalResults,
   evalRuns,
   inArray,
   lte,
@@ -77,6 +78,7 @@ import {
   type MrmGateDecision,
 } from "@regulait/shared";
 import { loadOrgSettings } from "./org-settings.js";
+import { summarizeGroundedness } from "./evals.js";
 
 const ORG_SETTINGS_ID = "singleton";
 /** the audit row's actor when the caller is the identity-less bootstrap token —
@@ -348,11 +350,27 @@ async function cardView(db: Db, card: ModelCardRow, now: Date, warnDays: number)
     .from(modelCardApprovals)
     .where(eq(modelCardApprovals.cardId, card.id))
     .orderBy(desc(modelCardApprovals.requestedAt));
-  const evidence = await db
+  const evidenceRows = await db
     .select()
     .from(modelCardEvidence)
     .where(eq(modelCardEvidence.cardId, card.id))
     .orderBy(asc(modelCardEvidence.attachedAt));
+  // ADR-0067 — A MODEL CARD THAT CITES AN EVAL RUN NOW CARRIES ITS
+  // GROUNDEDNESS FIGURES. "Hallucination rate" is the number a regulated
+  // reviewer looks for on a model card, and before this it was measurable but
+  // not readable from the artifact the sign-off actually rests on. The
+  // `method` field on every metric says whether a MODEL judged it or a lexical
+  // method estimated it — a card must never let those two be confused.
+  const evidence = await Promise.all(
+    evidenceRows.map(async (e) => {
+      if (!e.evalRunId) return { ...e, groundedness: null };
+      const results = await db
+        .select()
+        .from(evalResults)
+        .where(eq(evalResults.runId, e.evalRunId));
+      return { ...e, groundedness: summarizeGroundedness(results) };
+    }),
+  );
   const state = cardState(chain, now, warnDays);
   return {
     ...card,

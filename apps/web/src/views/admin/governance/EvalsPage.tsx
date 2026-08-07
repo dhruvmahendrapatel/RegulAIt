@@ -70,6 +70,9 @@ interface CaseRow {
   id: string;
   input: string;
   expected: unknown;
+  /** ADR-0067 — the retrieved/reference context this case is scored against */
+  context?: string[];
+  contextInPrompt?: boolean;
   scorerKind: string | null;
   tags: string[];
 }
@@ -172,6 +175,11 @@ export default function EvalsPage() {
   const [caseExpected, setCaseExpected] = useState("");
   const [caseScorer, setCaseScorer] = useState("");
   const [caseConfig, setCaseConfig] = useState("");
+  // ADR-0067: the retrieved/reference context a groundedness metric scores
+  // against. Blank-line-separated, because CHUNK BOUNDARIES are the metric —
+  // a claim stitched out of two chunks is the fabrication it exists to catch.
+  const [caseContext, setCaseContext] = useState("");
+  const [caseContextInPrompt, setCaseContextInPrompt] = useState(true);
 
   // --- run form
   const [runAgent, setRunAgent] = useState("");
@@ -342,9 +350,15 @@ export default function EvalsPage() {
                         ...(caseConfig
                           ? { scorerConfig: JSON.parse(caseConfig) as Record<string, unknown> }
                           : {}),
+                        context: caseContext
+                          .split(/\n\s*\n/)
+                          .map((c) => c.trim())
+                          .filter(Boolean),
+                        contextInPrompt: caseContextInPrompt,
                       });
                       setCaseInput("");
                       setCaseExpected("");
+                      setCaseContext("");
                       await detail.refetch();
                       await datasets.refetch();
                     }, "Case added");
@@ -358,6 +372,27 @@ export default function EvalsPage() {
                       required
                     />
                   </Field>
+                  <Field label="Retrieved / reference context — one chunk per blank-line-separated block (groundedness metrics only)">
+                    <Textarea
+                      value={caseContext}
+                      onChange={(e) => setCaseContext(e.target.value)}
+                      rows={3}
+                    />
+                  </Field>
+                  <div className={v.faint}>
+                    Chunk boundaries matter: each claim is scored against the single best-matching
+                    chunk, so a claim that only holds up when fragments of two chunks are stitched
+                    together is correctly reported as unsupported.{" "}
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={caseContextInPrompt}
+                        onChange={(e) => setCaseContextInPrompt(e.target.checked)}
+                      />{" "}
+                      Include the context in the prompt (uncheck to hold it back and score against it
+                      only)
+                    </label>
+                  </div>
                   <div className={a.formRow}>
                     <Field label="Expected / reference" grow>
                       <Input value={caseExpected} onChange={(e) => setCaseExpected(e.target.value)} />
@@ -392,6 +427,14 @@ export default function EvalsPage() {
                         : typeof r.expected === "string"
                           ? r.expected.slice(0, 80)
                           : JSON.stringify(r.expected).slice(0, 80),
+                  },
+                  {
+                    key: "context",
+                    header: "Context",
+                    render: (r) =>
+                      (r.context ?? []).length === 0
+                        ? "—"
+                        : `${(r.context ?? []).length} chunk(s)${r.contextInPrompt === false ? " (scoring only)" : ""}`,
                   },
                   { key: "scorer", header: "Scorer", render: (r) => <code>{r.scorerKind ?? "(default)"}</code> },
                 ]}
