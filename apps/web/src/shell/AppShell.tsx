@@ -105,6 +105,11 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // governance surface: a governed tenant reading the governance record
       // with the caller's own entitlements and unable to change anything.
       { label: "Governance copilot", to: "/admin/copilot" },
+      // ADR-0070 — sits in Governance, not in a new "Observability" group,
+      // because the question it answers is a governance question: "why did
+      // nothing happen?". The audit log says a decision was taken; the trace
+      // says where in the call it landed and what it stopped.
+      { label: "Traces", to: "/admin/traces" },
       // ADR-0061 — the Approvals Queue's chat courier. It sits beside the queue
       // it mirrors, because the identity link is a governance trust artifact and
       // not an integration setting.
