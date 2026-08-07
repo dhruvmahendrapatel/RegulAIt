@@ -92,7 +92,7 @@ inversion — a guardrail-BLOCKED dispatch is scored as a DEFEAT in the eval pat
 **not** changed (it would move every stored baseline); it is now named on the per-trial row and
 counted in `platform_held`, with unification left as owner follow-up.
 
-### Slice C — Cross-vendor cost consolidation *(the wedge)*
+### Slice C — Cross-vendor cost consolidation *(the wedge)* — **SHIPPED 2026-08-07, [ADR-0069](../decisions/0069-cross-vendor-cost-consolidation.md) (migration 0081)**
 **Parity target:** none — this is the gap research identified as genuinely unserved.
 **We have:** ADR-0049/0051 per-call attribution for traffic through our gateway.
 **Gap:** spend that never touches our gateway — per-seat SaaS (Claude Code, Copilot,
@@ -103,6 +103,31 @@ account emails → RegulAIt users, and a consolidated per-person/per-cost-centre
 labels each figure `metered` (we saw the call) vs `imported` (we were told).
 **Honesty line:** imported figures are a customer's own export, restated. Never presented as
 if we metered them.
+**Shipped:** an import path reusing ADR-0055's evidence-import idiom, with a five-adapter registry
+(`generic_mapped` over CSV *or* JSON — the one deliberately made good, because the long tail is
+longer than any preset list — plus `openai_console`, `anthropic_console`, `aws_cur` and
+`seat_roster`, each declaring capabilities **and an honest `limits` string the API returns**); an
+admin-authored identity-resolution layer (**alias → exact email → domain rule → unresolved**, in
+that precedence so a human's correction beats a mechanical match, with every line recording HOW it
+matched and every correction re-resolving stored lines and auditing its blast radius); and a
+consolidated per-person / per-cost-centre view fed by the existing `usage_events` +
+`projects.cost_center` machinery plus one new person-level key, `users.cost_center`.
+**The honesty spine is a CHECK constraint, not a convention**: imported money lives in its own
+table with `basis = 'imported'` pinned in the database, and `consolidate()`'s return type has **no
+field** for metered+imported — both suites walk the entire response body, numbers spelled inside
+sentences included, and assert the blend appears nowhere.
+**Read this before citing it:** the three vendor presets are built against **declared** header sets
+that nobody here has verified against a live console — they refuse the file naming the missing
+column rather than mis-parsing, and `generic_mapped` is the escape hatch, but expect to check.
+`seat_roster`'s money is an **operator assertion**, not a figure read from the roster, and one price
+is applied to every row. `aws_cur` reads `lineItem/UnblendedCost` only, so a Savings-Plan- or
+RI-heavy account will not reconcile to the invoice, and it imports whatever the file contains with
+no AI-service filter. **Imported figures never enter billing statements, budgets, forecasts, the
+optimizer or any enforcement path** — they are reporting-only, deliberately, because we will not
+block someone's work on a number we cannot verify. There is no FX conversion (a mixed-currency
+subject reports `usd: null` with a stated reason), **no scheduled re-import** (there is nothing to
+poll — RegulAIt holds no vendor billing-API credential, and the view reports its own staleness
+instead), no cross-chunk dedup for a CUR split by the operator, and no SPA page (API + CSV only).
 
 ### Slice D — Gateway parity — **SHIPPED 2026-08-07, [ADR-0066](../decisions/0066-gateway-parity.md) (migration 0078)**
 **Parity target:** LiteLLM, Portkey, Cloudflare AI Gateway.
