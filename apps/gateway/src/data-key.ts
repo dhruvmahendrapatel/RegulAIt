@@ -243,6 +243,12 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   { table: "pm_connections", column: "webhook_secret_ciphertext", what: "PM webhook secrets" },
   { table: "deploy_targets", column: "credential_ciphertext", what: "deploy-target credentials" },
   { table: "chatops_connections", column: "signing_secret_ciphertext", what: "ChatOps signing secrets" },
+  // ADR-0065: the credential a REMOTE training backend needs before it will do
+  // anything. It belongs on this list for the same reason every other entry
+  // does — a restore onto a box that does not hold the key its ciphertext was
+  // written under must be detectable, and a column missing from here is a
+  // credential the custody probe would silently never look at.
+  { table: "training_backend_configs", column: "key_ciphertext", what: "training backend API keys" },
 ];
 
 export interface CiphertextProbe {

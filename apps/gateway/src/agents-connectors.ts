@@ -116,6 +116,8 @@ import {
 } from "./org-settings.js";
 import { loadInterceptionSettings } from "./compat-core.js";
 import { resolveCustomProviderForDispatch } from "./custom-providers.js";
+import { resolveArtifactProviderForDispatch } from "./regulait-llm.js";
+import type { ArtifactModelProvider } from "@regulait/training-provider";
 import { egressRefusal } from "./egress-guard.js";
 import { refuseIfExpansionBlocked } from "./licensing.js";
 import { checkCredentialBaseUrl, credentialGuardedFetch } from "./credential-egress.js";
@@ -423,13 +425,49 @@ export async function executeGovernedDispatch(
     customDestination = customProvider.destination;
   }
 
+  // ADR-0065 — A MODEL THIS DEPLOYMENT TRAINED, served from its stored
+  // artifact. Placed HERE, in the same position as the custom-endpoint branch
+  // above, for the same reason: everything before it (entitlement, the MRM
+  // gate, the project budget, §8.4 PII) has already run, so a home-trained
+  // model is governed by exactly the machinery a bought one is, and this branch
+  // contributes only a provider instance. Notably it makes NO network call and
+  // needs NO credential, which is what lets a custom model work on an
+  // air-gapped install.
+  let artifactProvider: ArtifactModelProvider | null = null;
+  if (served.provider === "regulait_llm") {
+    const resolved = await resolveArtifactProviderForDispatch(db, served.id);
+    if (!resolved.ok) {
+      await db.insert(auditLog).values({
+        userId,
+        objectType: "training_artifact",
+        objectId: null,
+        detail: {
+          phase: "dispatch",
+          agentId: served.id,
+          agentName: served.name,
+          error: resolved.error,
+          ...(args.projectId ? { projectId: args.projectId } : {}),
+        },
+        effect: "deny",
+        ruleId: `llm-${resolved.error}`,
+        ruleChain: [],
+        reason: resolved.detail,
+      });
+      return { ok: false, status: resolved.status, error: resolved.error, detail: resolved.detail };
+    }
+    artifactProvider = resolved.provider;
+  }
+
   let apiKey: string | null = null;
   let baseUrl: string | null = null;
   let credentialSource: "user" | "platform" | "none" = "none";
   /** which row (if any) supplied the baseUrl override — for the egress audit */
   let credentialId: string | null = null;
   let credentialOrigin: "user_credential" | "platform_credential" | "environment" | null = null;
-  if (served.provider !== "mock" && served.provider !== "custom") {
+  // `regulait_llm` joins `mock` and `custom` in needing no vendor credential:
+  // the artifact is in our own database and is queried in-process, so there is
+  // no key to decrypt and no env fallback to consult.
+  if (served.provider !== "mock" && served.provider !== "custom" && served.provider !== "regulait_llm") {
     if (!dataKey) {
       return { ok: false, status: 503, error: "no_data_key", detail: "set REGULAIT_DATA_KEY" };
     }
@@ -668,7 +706,9 @@ export async function executeGovernedDispatch(
   try {
     // the custom path brings its own already-guarded provider instance; every
     // other provider resolves exactly as before
-    const provider = customProvider?.ok
+    const provider = artifactProvider
+      ? artifactProvider
+      : customProvider?.ok
       ? customProvider.provider
       : resolveModelProvider(
           { provider: served.provider, apiKey, baseUrl },
@@ -1109,7 +1149,14 @@ export async function configuredProviders(
   dataKey: string | undefined,
   userId: string,
 ): Promise<Set<string>> {
-  const set = new Set<string>(["mock"]);
+  // ADR-0065: `regulait_llm` joins `mock` as credential-free — a locally
+  // trained artifact is served from our own database with no vendor key and no
+  // outbound call, so it is always "configured". An agent of this kind whose
+  // artifact is missing still fails honestly at dispatch (409
+  // `artifact_not_registered`); what this set decides is only whether the
+  // router may consider it, and a router that skipped every home-trained model
+  // would make the whole feature unreachable from the invoke path.
+  const set = new Set<string>(["mock", "regulait_llm"]);
   // ADR-0034 — CUSTOM PROVIDERS ARE DISPATCHABLE PER ENDPOINT, NOT PER KIND.
   // Every other entry in this set is a provider KIND ("anthropic"), because a
   // stored key makes every agent of that kind servable. A custom endpoint is

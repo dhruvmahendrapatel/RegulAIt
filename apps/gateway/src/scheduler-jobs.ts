@@ -1,5 +1,5 @@
 /**
- * ADR-0064 — THE SIX JOBS.
+ * ADR-0064 — THE SCHEDULED JOBS (six at ADR-0064; a seventh at ADR-0065).
  *
  * This file is deliberately thin, and that is the whole point of it. Every
  * entry here CALLS the function the corresponding endpoint already calls.
@@ -37,6 +37,7 @@ import { runDueReportSchedules } from "./reporting.js";
 import { runSpendAnomalyEvaluation } from "./spend-monitor.js";
 import { runEvalDriftSweep } from "./evals.js";
 import { runScheduledRedTeamSweep } from "./redteam.js";
+import { runTrainingJobPollSweep } from "./regulait-llm.js";
 import { toRegistry, type SchedulerJobDefinition, type SchedulerJobRegistry } from "./scheduler.js";
 
 const HOUR = 3600;
@@ -57,6 +58,7 @@ export const SCHEDULER_JOB_NAMES = {
   spendAnomalies: "spend-anomaly-sweep",
   evalDrift: "eval-drift-sweep",
   redteam: "redteam-sweep",
+  trainingPoll: "training-job-poll-sweep",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -183,6 +185,33 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
             regressions: out.ran.filter((r) => r.regression).length,
             skipped: out.skipped.length,
           },
+        };
+      },
+    },
+    {
+      // ADR-0065 — the seventh, and the first one that is not a sweep over
+      // stored state. A REMOTE training job runs for hours on somebody else's
+      // compute, so something has to ask how it is getting on and settle it
+      // when it finishes. That something is a scheduler job and not a
+      // setInterval, for the reason ADR-0064 was written: a module-level timer
+      // double-fires the moment there are two gateway instances, and is
+      // invisible when it stops.
+      //
+      // It makes NO model dispatch and mints no identity: it polls a job the
+      // initiating user already started and writes the outcome back. In-process
+      // (local/mock) jobs are never polled — they are finished by the time
+      // their start call returns.
+      name: SCHEDULER_JOB_NAMES.trainingPoll,
+      description:
+        "Poll every RegulAIt-LLM training job still running on a REMOTE backend and settle the ones that " +
+        "finished. In-process jobs are never polled; they complete synchronously.",
+      adr: "ADR-0065",
+      defaultIntervalSeconds: 5 * 60,
+      run: async (ctx) => {
+        const out = await runTrainingJobPollSweep(ctx.db, { dataKey: opts.dataKey });
+        return {
+          itemsProcessed: out.polled.length,
+          detail: { polled: out.polled.length, skipped: out.skipped.length },
         };
       },
     },

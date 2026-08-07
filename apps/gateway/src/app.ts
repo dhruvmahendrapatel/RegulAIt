@@ -177,6 +177,10 @@ import { registerMcpProxy } from "./mcp-proxy.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
 import { registerCustomProviderRoutes } from "./custom-providers.js";
 import {
+  applyTrainingJobApprovalDecision,
+  registerRegulAItLlmRoutes,
+} from "./regulait-llm.js";
+import {
   API_KEY_HEADER_ROUTES,
   COMPAT_ANTHROPIC_ROUTE,
   INTERCEPTION_GATED_ROUTES,
@@ -2378,6 +2382,23 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           deciderUserId,
         );
       }
+      // ADR-0065 RegulAIt-LLM: an over-threshold training job. Same reasoning
+      // as the MRM sign-off above — model training does not get a second
+      // inbox, so the decision lands HERE, inside the one decide path, and
+      // inherits every separation-of-duties guard it applies (named approver,
+      // admin-override reason, self-review reason, delegation). The job's
+      // actual START is the returned post-commit closure: training makes a
+      // network call on a remote backend, and holding the approvals
+      // transaction open across it would lock the one queue every other
+      // governed action shares.
+      if (updated.objectType === "training_job") {
+        postCommit = await applyTrainingJobApprovalDecision(
+          tx as unknown as Db,
+          updated,
+          body.decision,
+          deciderUserId,
+        );
+      }
       return { updated, postCommit };
     });
     if (!outcome.updated) {
@@ -2667,6 +2688,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // that makes their admin-suppliable baseUrl safe to have. Every route is
   // admin-only via the global gate (none appear in NON_ADMIN_ROUTES).
   registerCustomProviderRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0065 — REGULAIT-LLM. Registered next to the custom-provider surface
+  // because it answers the adjacent question: that one is "which model that we
+  // do not own may our people reach?", this one is "which model may our people
+  // BUILD, from what data, and under whose sign-off?". Everything except
+  // POST /v1/llm/jobs is admin-only through the default gate; that one route is
+  // in NON_ADMIN_ROUTES because its gate is the caller's own entitlement to the
+  // base agent, checked inside the handler exactly as an invoke would check it.
+  registerRegulAItLlmRoutes(app, db, { dataKey: opts.dataKey });
   registerConversationRoutes(app, db);
   registerProjectRoutes(app, db);
   registerInfraRoutes(app, db, opts.dataKey);

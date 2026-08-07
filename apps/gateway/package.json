@@ -42,6 +42,7 @@
     "@regulait/pm-provider": "workspace:*",
     "@regulait/policy-kernel": "workspace:*",
     "@regulait/shared": "workspace:*",
+    "@regulait/training-provider": "workspace:*",
     "@regulait/workflow-kernel": "workspace:*",
     "fastify": "^5.4.0",
     "openid-client": "^6.8.4",

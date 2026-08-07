@@ -45,6 +45,7 @@ import ShadowAiPage from "./views/admin/governance/ShadowAiPage";
 import CopilotPage from "./views/admin/governance/CopilotPage";
 import ChatOpsPage from "./views/admin/governance/ChatOpsPage";
 import LineagePage from "./views/admin/governance/LineagePage";
+import RegulAItLlmPage from "./views/admin/llm/RegulAItLlmPage";
 import WorkflowTemplatesPage from "./views/admin/governance/WorkflowTemplatesPage";
 import AgentsPage from "./views/admin/integrations/AgentsPage";
 import ModelCredentialsPage from "./views/admin/integrations/ModelCredentialsPage";
@@ -155,6 +156,8 @@ export default function App() {
                         <Route path="review-workbench" element={<ReviewWorkbenchPage />} />
                         <Route path="audit" element={<AuditLogPage />} />
                         <Route path="lineage" element={<LineagePage />} />
+                        {/* ADR-0065 */}
+                        <Route path="regulait-llm" element={<RegulAItLlmPage />} />
                         {/* ADR-0055 */}
                         <Route path="shadow-ai" element={<ShadowAiPage />} />
                         {/* ADR-0056 */}

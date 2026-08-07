@@ -121,6 +121,11 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // question ("what can our models talk to?") asked about an endpoint we
       // do not own, rather than a vendor we do.
       { label: "Custom LLM providers", to: "/admin/custom-providers" },
+      // ADR-0065 — sits directly under Custom LLM providers because it answers
+      // the adjacent question. That one is "which model that we do not own may
+      // our people reach?"; this one is "which model may our people BUILD, out
+      // of what data, and under whose sign-off?".
+      { label: "RegulAIt-LLM", to: "/admin/regulait-llm" },
       { label: "Connectors", to: "/admin/connectors" },
       { label: "MCP servers", to: "/admin/mcp-servers" },
       { label: "Git connections", to: "/admin/git-connections" },

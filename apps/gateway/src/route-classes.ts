@@ -75,6 +75,14 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/users/:userId/servers/:serverId/tools",
   "POST /mcp/:serverId",
   "POST /v1/agents/:agentId/invoke",
+  // ADR-0065 — creating a training job. Its gate is the caller's OWN
+  // entitlement to the base agent the customisation is anchored to, checked
+  // inside the handler by the same `evaluateAgent` path an invoke takes: a
+  // person who may not use a model may not train a derivative of it. Every
+  // other RegulAIt-LLM route stays admin-only through the default gate, because
+  // uploading a corpus, configuring a backend credential and promoting an
+  // artifact to a dispatchable agent are all org-wide acts.
+  "POST /v1/llm/jobs",
   // ADR-0020: the provider-shaped compatibility surfaces are the DEVELOPER's
   // path — a non-admin calling from their IDE — exactly like the MCP proxy
   // above. Their governance is the ordinary evaluateAgent entitlement check

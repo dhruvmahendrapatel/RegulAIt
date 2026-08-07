@@ -648,11 +648,11 @@ describe("clean shutdown", () => {
 });
 
 // ===========================================================================
-// 6. THE SIX JOBS — registered, and (for four of them) wired end to end
+// 6. THE REGISTERED JOBS — six from ADR-0064 plus ADR-0065's training poll
 // ===========================================================================
 
-describe("all six sweeps are registered", () => {
-  it("the registry names exactly the six, each with an ADR and a cadence", async () => {
+describe("every sweep is registered", () => {
+  it("the registry names exactly them, each with an ADR and a cadence", async () => {
     const registry = schedulerJobRegistry({ dataKey: DATA_KEY });
     expect([...registry.keys()].sort()).toEqual(
       [
@@ -662,6 +662,9 @@ describe("all six sweeps are registered", () => {
         SCHEDULER_JOB_NAMES.redteam,
         SCHEDULER_JOB_NAMES.reportSchedules,
         SCHEDULER_JOB_NAMES.spendAnomalies,
+        // ADR-0065: remote training jobs run on somebody else's compute for
+        // hours; polling them is a scheduler job, never a setInterval.
+        SCHEDULER_JOB_NAMES.trainingPoll,
       ].sort(),
     );
     for (const def of registry.values()) {

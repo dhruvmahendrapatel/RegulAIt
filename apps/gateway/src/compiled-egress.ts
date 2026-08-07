@@ -66,7 +66,15 @@ export type CompiledEgressSurface =
   | "model"
   | "connector"
   | "git_connection"
-  | "pm_connection";
+  | "pm_connection"
+  // ADR-0065: a REMOTE TRAINING BACKEND. It belongs here for exactly the
+  // reason the other four do — with no admin-typed baseUrl it reaches the
+  // vendor's compiled default, which the SSRF guard never saw because nobody
+  // could type it. On an air-gapped install that destination is the whole
+  // question, and shipping a training feature that quietly posted the
+  // customer's corpus to a SaaS endpoint would be the worst possible way to
+  // discover this surface had been left out.
+  | "training_backend";
 
 export type CompiledDefaultDenyCode =
   | "compiled_default_not_allowlisted"
@@ -94,6 +102,7 @@ const SURFACE_LABEL: Record<CompiledEgressSurface, string> = {
   connector: "connector",
   git_connection: "git connection",
   pm_connection: "PM connection",
+  training_backend: "training backend",
 };
 
 /**
@@ -197,7 +206,15 @@ export async function auditCompiledDefaultDenied(
 ): Promise<void> {
   await db.insert(auditLog).values({
     userId: args.userId ?? NIL_USER,
-    objectType: args.surface === "model" ? "agent" : args.surface,
+    // the audit vocabulary names the OBJECT, not the surface: a model surface
+    // files under 'agent', and ADR-0065's training surface files under
+    // 'training_job', so "what happened to this training run" stays one query.
+    objectType:
+      args.surface === "model"
+        ? "agent"
+        : args.surface === "training_backend"
+          ? "training_job"
+          : args.surface,
     objectId: args.objectId ?? null,
     detail: {
       ...(args.detail ?? {}),
