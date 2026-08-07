@@ -4,7 +4,7 @@ last_updated: 2026-08-07
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-08-02-session-06.md
+last_session: sessions/2026-08-07-session-08.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,45 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**Slice A of the parity wave shipped, 2026-08-07 — [ADR-0067](../docs/decisions/0067-groundedness-evaluation.md)
+(migration 0079), groundedness/faithfulness/hallucination measurement.** A pre-slice grep found **no
+groundedness, faithfulness, hallucination or claim-attribution metric anywhere in the codebase** —
+the one measurement a regulated buyer asks for by name, and one that could not have been added by
+configuration because `eval_cases` had nowhere to put the CONTEXT an answer is supposed to rest on.
+Migration 0079 adds `eval_cases.context` (an **array**, one entry per retrieved chunk — chunk
+boundaries are the metric: a claim stitched out of fragments of three unrelated documents is exactly
+the fabrication this catches, and a single blob scores it as supported; there is a test asserting the
+stitched claim is refused) plus `context_in_prompt`, which records whether the model SAW the context
+or whether it was held back for scoring only. Context is **not a bypass** — when it rides the prompt
+it IS the dispatch input and takes the same §8.4 PII and ADR-0042 guardrail path; extracted claims are
+slices of `outputText` AFTER the withheld-marker substitution. A case with no context dispatches
+byte-identically, so **no existing baseline moved**. **Four metrics that genuinely work offline with
+no key** — `claim_support` (IDF-weighted coverage of the single best chunk, failing claims stored
+VERBATIM, fabricated FIGURES named and capped below threshold outright), `context_precision`
+(retrieval utilisation), `context_recall` (measures the RETRIEVER — high support with low recall is
+the signature of a model faithful to context that never held the answer), `answer_relevance` (with an
+abstention detector scoring 0 and saying why). **Proved adversarially**: every score assertion is
+paired with its opposite over the SAME context and the GAP asserted — end to end through the real
+harness a grounded answer scores **1.00** and a same-length same-topic fabricated one **0.00**;
+precision 1.00 tight vs 0.20 padded; relevance 0.73 vs 0.00. **The honesty line is the point**:
+`groundedness_judge` / `answer_relevance_judge` return a real **422** (`judge_required` /
+`judge_not_dispatchable`) from a pure, exhaustively-tested `judgeAvailabilityFor` placed BEFORE the
+`eval_runs` insert, and the suite asserts **no run row, no result row, not one dispatched token** —
+they never degrade to the lexical proxy under the judged name. The tokenizer was **hoisted** (not
+copied) out of `training-provider` into `@regulait/shared`, which now owns the one tokenizer.
+Gateway **1,815 → 1,835 tests / 106 → 107 files**; shared **360 → 402**; policy-kernel 129,
+model-provider 122, infra-provider 174, training-provider 58 all unchanged. **Disclosed rather than
+closed, and several limits are THEMSELVES tests so they cannot silently become untrue**: the lexical
+metrics cannot see negation flips (flagged, not scored) or swapped attribution, and score a
+synonym-only paraphrase as unsupported (a false positive — the direction that hurts);
+`context_precision` is utilisation, not Ragas's rank-aware precision; `answer_relevance` scores a
+fluent falsehood HIGH; the judges' JUDGMENT is unverified because no provider is connected (plumbing
+proven, instrument not); **ADR-0044's `llm_as_judge` deliberately still scores an unjudgeable case
+zero rather than refusing** — unifying it would change an accepted ADR's contract from inside a slice
+about a different metric, so it is named follow-up for the owner; and there is no retrieval
+integration, no embedding similarity, and no groundedness *reporting* screen (the eval page gained a
+context field so the new kinds are authorable, and the model card renders the summary).
 
 **Competitive-parity wave started, 2026-08-07 — ADR-0066 (migration 0078) is Slice D of
 [docs/product/COMPETITIVE_PARITY_PLAN.md](../docs/product/COMPETITIVE_PARITY_PLAN.md).** That plan
