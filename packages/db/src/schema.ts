@@ -716,6 +716,20 @@ export const auditLog = pgTable(
         // generated report) keep auditing on their own objectType, so "what
         // happened to this approval" stays one query. Plain text — no DDL.
         "scheduler_job",
+        // ADR-0065 (RegulAIt-LLM): the three objects of the custom-model
+        // lifecycle. `training_dataset` carries the INGEST SCAN verdict — the
+        // row that matters, because a corpus refused for containing PII is the
+        // governance win this feature exists for, and nobody else catches it at
+        // ingest. `training_job` carries creation, the approval routing of an
+        // over-threshold run, start/success/failure, and — distinctly — every
+        // HONEST REFUSAL by a credential-less real backend, so "we never tried"
+        // is never mistakable for "we tried and it worked". `training_artifact`
+        // carries registration for inference, which is the moment a thing
+        // somebody trained becomes a thing the platform will dispatch to.
+        // Plain text column — no DDL needed.
+        "training_dataset",
+        "training_job",
+        "training_artifact",
       ],
     })
       .notNull()
@@ -902,6 +916,12 @@ export const approvals = pgTable(
       // above: the copilot does NOT get a second inbox, and its only route to a
       // change is an ordinary row in this one queue, applied by a named human
       // under their own identity.
+      // ADR-0065: 'training_job' — an over-threshold RegulAIt-LLM training run
+      // waiting on a named human. Same reasoning as 'model_card' above: model
+      // training does NOT get a second inbox, and the only route from
+      // `pending_approval` to `queued` is an ordinary row in this one queue
+      // decided through the one decide path, with its separation-of-duties
+      // guards, delegation window and admin override intact.
       enum: [
         "mcp_tool",
         "workflow",
@@ -910,6 +930,7 @@ export const approvals = pgTable(
         "infra_operation",
         "model_card",
         "copilot_proposal",
+        "training_job",
       ],
     })
       .notNull()
@@ -2813,6 +2834,22 @@ export const orgSettings = pgTable(
       .notNull()
       .default("inherit"),
 
+    // --- ADR-0065 (migration 0077): RegulAIt-LLM ----------------------------
+    /** THE MASTER SWITCH over custom-model creation, following ADR-0034's
+     * `customModelProvidersEnabled` precedent: a capability an org may not want
+     * at all should be refusable in ONE place, honestly, rather than by
+     * removing every grant one at a time and hoping none was missed. */
+    llmTrainingEnabled: boolean("llm_training_enabled").notNull().default(true),
+    /** where the ONE Approvals Queue takes over. A job whose ESTIMATED cost is
+     * at or above this does not start — it queues as an ordinary approval
+     * (objectType 'training_job') and starts only once a named human approves.
+     * 5 USD is a deliberately low default: the wrong failure mode here is a
+     * surprise bill, and an org that wants unattended training raises it on
+     * purpose rather than discovering it was already raised. */
+    llmTrainingApprovalThresholdUsd: doublePrecision("llm_training_approval_threshold_usd")
+      .notNull()
+      .default(5),
+
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -3973,6 +4010,13 @@ export const LINEAGE_SUBTYPE_VALUES = [
   "dispatch_output",
   "pull_request",
   "pm_work_item",
+  // ADR-0065 (migration 0077) — the RegulAIt-LLM training chain: a pinned
+  // dataset VERSION (source), the job that consumed it (run), and the model
+  // that came out (output). Kept in lockstep with LINEAGE_SUBTYPES in
+  // @regulait/shared and with the DB CHECK in migration 0077.
+  "training_dataset",
+  "training_job",
+  "model_artifact",
 ] as const;
 export const LINEAGE_EDGE_KIND_VALUES = ["flowed_into", "produced", "derived_from"] as const;
 
@@ -5433,3 +5477,247 @@ export const schedulerRuns = pgTable(
 
 export type SchedulerJobRow = typeof schedulerJobs.$inferSelect;
 export type SchedulerRunRow = typeof schedulerRuns.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0065 (migration 0077) — REGULAIT-LLM: custom-model creation & training.
+// ---------------------------------------------------------------------------
+//
+// The scope sentence, repeated here because a caveat that lives only in a
+// migration comment is a caveat nobody reads: these tables record MODEL
+// CUSTOMISATION under governance, not a claim to train frontier models. The
+// `local` backend really runs — a TF-IDF retrieval index or a logistic-
+// regression classifier trained by actual gradient descent, both queryable
+// afterwards — and it is labelled with the method it really used. The four
+// real remote adapters refuse honestly without a credential.
+
+/** What a training run actually DID. The first two are what this deployment
+ * can genuinely produce in-process; the last three are LLM fine-tuning and are
+ * reachable only on a credentialed remote backend. */
+export const TRAINING_METHODS = [
+  "retrieval_index",
+  "text_classifier",
+  "lora_sft",
+  "full_sft",
+  "dpo",
+] as const;
+export type TrainingMethod = (typeof TRAINING_METHODS)[number];
+
+export const TRAINING_BACKEND_KINDS = [
+  "local",
+  "mock",
+  "huggingface",
+  "together",
+  "bedrock",
+  "vertex",
+] as const;
+export type TrainingBackendKind = (typeof TRAINING_BACKEND_KINDS)[number];
+
+export const TRAINING_DATASET_FORMATS = [
+  "prompt_completion",
+  "classification",
+  "documents",
+] as const;
+export type TrainingDatasetFormat = (typeof TRAINING_DATASET_FORMATS)[number];
+
+/** `refused` is TERMINAL and deliberately distinct from `failed`: "we never
+ * tried, because nothing was configured" and "we tried and it broke" are
+ * different facts about a model, and collapsing them is how a credential-less
+ * backend comes to look like a flaky one. */
+export const TRAINING_JOB_STATUSES = [
+  "pending_approval",
+  "queued",
+  "running",
+  "succeeded",
+  "failed",
+  "cancelled",
+  "refused",
+] as const;
+export type TrainingJobStatus = (typeof TRAINING_JOB_STATUSES)[number];
+
+export const TRAINING_SCAN_VERDICTS = ["clean", "flagged", "blocked"] as const;
+export type TrainingScanVerdict = (typeof TRAINING_SCAN_VERDICTS)[number];
+
+/**
+ * THE IMMUTABLE, VERSIONED, PII-SCANNED CORPUS.
+ *
+ * `(id, version)` is UNIQUE so `training_jobs` can carry a real composite FK at
+ * it — the same mechanism `eval_datasets`/`eval_runs` use (ADR-0044), for the
+ * same reason: a claim about a model is worthless if the data behind it can be
+ * edited after the claim was made. Editing a version mints the next one.
+ */
+export const trainingDatasets = pgTable(
+  "training_datasets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    version: integer("version").notNull().default(1),
+    note: text("note"),
+    format: text("format", { enum: TRAINING_DATASET_FORMATS }).notNull().default("prompt_completion"),
+    rowCount: integer("row_count").notNull().default(0),
+    /** total characters across every row — the cost estimator's input, so
+     * "is this expensive?" is answerable before the job rather than after */
+    charCount: integer("char_count").notNull().default(0),
+    checksum: text("checksum").notNull().default(""),
+    /** the ADR-0042 / §8.4 INGEST verdict, kept on the data rather than only in
+     * an audit row that will have scrolled away by the time anyone asks */
+    piiVerdict: text("pii_verdict", { enum: TRAINING_SCAN_VERDICTS }).notNull().default("clean"),
+    /** the mode actually in force, AFTER MAX-composition with the project's
+     * compliance floor — "why was this accepted?" is unanswerable without it */
+    piiMode: text("pii_mode", { enum: GUARDRAIL_MODES }).notNull().default("block"),
+    /** COUNTS ONLY. Never matched text — the same contract every detector
+     * surface in this product honours. */
+    scanFindings: jsonb("scan_findings").$type<Record<string, unknown>>().notNull().default({}),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("training_datasets_name_version_uq").on(t.name, t.version),
+    // THE COMPOSITE FK TARGET — the whole immutability mechanism
+    unique("training_datasets_id_version_uq").on(t.id, t.version),
+    check("training_datasets_version_check", sql`${t.version} >= 1`),
+  ],
+);
+
+export const trainingDatasetRows = pgTable(
+  "training_dataset_rows",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    datasetId: uuid("dataset_id").notNull(),
+    /** a row belongs to a dataset VERSION, not a dataset — which is what makes
+     * minting v2 a copy rather than an edit */
+    datasetVersion: integer("dataset_version").notNull(),
+    idx: integer("idx").notNull(),
+    input: text("input").notNull(),
+    /** NULL is legal for the `documents` format: retrieval material has nothing
+     * to predict, and inventing a label there would be the first lie */
+    output: text("output"),
+    tags: jsonb("tags").$type<string[]>().notNull().default([]),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      name: "training_dataset_rows_dataset_fk",
+      columns: [t.datasetId, t.datasetVersion],
+      foreignColumns: [trainingDatasets.id, trainingDatasets.version],
+    }).onDelete("cascade"),
+    unique("training_dataset_rows_idx_uq").on(t.datasetId, t.datasetVersion, t.idx),
+    index("training_dataset_rows_version_idx").on(t.datasetId, t.datasetVersion, t.idx),
+  ],
+);
+
+/** Where a REAL backend's credential and endpoint live. Registration is not
+ * enablement (the ADR-0034 posture, verbatim): nothing is contacted until an
+ * admin enables it, and the base URL is adjudicated by the egress guard on
+ * write AND on every use. */
+export const trainingBackendConfigs = pgTable(
+  "training_backend_configs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    backend: text("backend", { enum: TRAINING_BACKEND_KINDS }).notNull().unique(),
+    enabled: boolean("enabled").notNull().default(false),
+    baseUrl: text("base_url"),
+    /** AES-256-GCM under REGULAIT_DATA_KEY. Write-only; no route returns it. */
+    keyCiphertext: text("key_ciphertext"),
+    allowPlaintextHttp: boolean("allow_plaintext_http").notNull().default(false),
+    /** non-secret per-backend settings: a region, a project id, a namespace */
+    settings: jsonb("settings").$type<Record<string, unknown>>().notNull().default({}),
+    lastTestedAt: timestamp("last_tested_at", { withTimezone: true }),
+    lastTestError: text("last_test_error"),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+);
+
+export const trainingJobs = pgTable(
+  "training_jobs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    datasetId: uuid("dataset_id").notNull(),
+    /** kept honest by the composite FK below, never by convention */
+    datasetVersion: integer("dataset_version").notNull(),
+    backend: text("backend", { enum: TRAINING_BACKEND_KINDS }).notNull(),
+    /** WHAT WAS ACTUALLY DONE — how a reader tells a retrieval index from a
+     * fine-tune without trusting a label somebody typed */
+    method: text("method", { enum: TRAINING_METHODS }).notNull(),
+    /** NULL for a local retrieval index, which derives from no model at all */
+    baseModel: text("base_model"),
+    /** the registry agent this customisation is ANCHORED to: whose entitlement
+     * gated the job, and whose tier the artifact inherits when registered */
+    baseAgentId: uuid("base_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    hyperparameters: jsonb("hyperparameters").$type<Record<string, unknown>>().notNull().default({}),
+    status: text("status", { enum: TRAINING_JOB_STATUSES }).notNull().default("queued"),
+    progress: doublePrecision("progress").notNull().default(0),
+    externalJobId: text("external_job_id"),
+    error: text("error"),
+    /** what the approval gate compared against BEFORE the job ran */
+    estimatedCostUsd: doublePrecision("estimated_cost_usd").notNull().default(0),
+    /** what actually landed in `usage_events`. Keeping both is what makes "the
+     * estimate was wrong" a visible fact rather than a lost one. */
+    costUsd: doublePrecision("cost_usd"),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
+    initiatedByUserId: uuid("initiated_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    /** the ONE Approvals Queue row gating an over-threshold job. NULL = under
+     * threshold, no approval was ever required. */
+    approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    durationMs: integer("duration_ms"),
+  },
+  (t) => [
+    foreignKey({
+      name: "training_jobs_dataset_fk",
+      columns: [t.datasetId, t.datasetVersion],
+      foreignColumns: [trainingDatasets.id, trainingDatasets.version],
+    }).onDelete("restrict"),
+    check("training_jobs_progress_check", sql`${t.progress} >= 0 AND ${t.progress} <= 1`),
+    index("training_jobs_status_idx").on(t.status, t.createdAt),
+    index("training_jobs_dataset_idx").on(t.datasetId, t.datasetVersion),
+  ],
+);
+
+export const trainingArtifacts = pgTable(
+  "training_artifacts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    jobId: uuid("job_id")
+      .notNull()
+      .references(() => trainingJobs.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    method: text("method", { enum: TRAINING_METHODS }).notNull(),
+    baseModel: text("base_model"),
+    /** inline = the artifact IS `payload` and is queryable in-process (what the
+     * local backend produces). remote = it lives at `location` on the backend
+     * and cannot be queried here, which the API says rather than pretends. */
+    kind: text("kind", { enum: ["inline", "remote"] }).notNull().default("inline"),
+    /** the real, queryable model: the TF-IDF index or the learned weights.
+     * jsonb because it IS structured data and a reader should be able to see
+     * the vocabulary a model learned. */
+    payload: jsonb("payload").$type<Record<string, unknown>>(),
+    location: text("location"),
+    /** whatever the trainer MEASURED. Never a figure nothing computed. */
+    metrics: jsonb("metrics").$type<Record<string, unknown>>().notNull().default({}),
+    /** the registry agent this was registered as, so the platform dispatches to
+     * it through the ordinary governed path */
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    /** ADR-0045: a home-trained model is subject to the MRM gate exactly like a
+     * vendor one, and this is the card carrying its risk position */
+    modelCardId: uuid("model_card_id").references(() => modelCards.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("training_artifacts_job_uq").on(t.jobId),
+    index("training_artifacts_agent_idx").on(t.agentId),
+  ],
+);
+
+export type TrainingDatasetRow = typeof trainingDatasets.$inferSelect;
+export type TrainingDatasetRowRow = typeof trainingDatasetRows.$inferSelect;
+export type TrainingBackendConfigRow = typeof trainingBackendConfigs.$inferSelect;
+export type TrainingJobRow = typeof trainingJobs.$inferSelect;
+export type TrainingArtifactRow = typeof trainingArtifacts.$inferSelect;

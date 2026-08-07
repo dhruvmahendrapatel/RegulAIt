@@ -1696,6 +1696,12 @@ export const updateOrgSettingsSchema = z
     imageTokenEstimateTokens: z.number().int().min(1).max(100_000).optional(),
     sharedContextMaxChars: z.number().int().min(100).max(100_000).optional(),
     nodeOutputMaxChars: z.number().int().min(100).max(20_000).optional(),
+    // ADR-0065 (migration 0077) — RegulAIt-LLM. Two dials only: the master
+    // switch (ADR-0034's `customModelProvidersEnabled` precedent) and the
+    // estimated-cost threshold at which a training job stops being something a
+    // user starts and becomes something the ONE Approvals Queue decides.
+    llmTrainingEnabled: z.boolean().optional(),
+    llmTrainingApprovalThresholdUsd: z.number().min(0).max(1_000_000).optional(),
     // ADR-0025 sign-in policy dials
     passwordMinLength: z.number().int().min(8).max(128).optional(),
     passwordRequireClasses: z.number().int().min(1).max(4).optional(),

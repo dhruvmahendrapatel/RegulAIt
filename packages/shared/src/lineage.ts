@@ -75,6 +75,15 @@ export const LINEAGE_SUBTYPES = [
   "dispatch_output", // the text a run produced
   "pull_request",
   "pm_work_item",
+  // ADR-0065 — the RegulAIt-LLM training chain. A dataset VERSION is a source
+  // (the same "always point at a version, never at the key" rule the context
+  // store follows), a training job is a run, and the model that came out is an
+  // output. No new node KIND was needed, because a training run is a run — and
+  // that is the point: "what data is behind this model?" is answered by the
+  // same traversal that answers "what flowed into this dispatch?".
+  "training_dataset",
+  "training_job",
+  "model_artifact",
 ] as const;
 export type LineageSubtype = (typeof LINEAGE_SUBTYPES)[number];
 
