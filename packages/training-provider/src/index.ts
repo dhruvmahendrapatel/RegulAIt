@@ -53,6 +53,10 @@
  */
 
 import type { ModelDispatchRequest, ModelDispatchResult, ModelProvider } from "@regulait/model-provider";
+// ADR-0067: the ONE tokenizer + TF-IDF vector primitives, hoisted into the leaf
+// package so this file, the groundedness metrics and any future consumer cannot
+// acquire three different opinions about what a word is. Re-exported below.
+import { tokenize, weightedVector, STOPWORDS } from "@regulait/shared";
 
 // ---------------------------------------------------------------------------
 // Vocabularies
@@ -249,31 +253,17 @@ export interface TrainingBackend {
 // Pure: tokenisation
 // ---------------------------------------------------------------------------
 
-/** A deliberately small stop list. Big enough to stop "the" dominating every
- * TF-IDF vector, small enough that it cannot silently delete a domain term. */
-const STOPWORDS = new Set([
-  "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "how", "in", "is", "it", "of",
-  "on", "or", "that", "the", "this", "to", "was", "what", "when", "where", "which", "who", "will",
-  "with", "you", "your", "do", "does", "did", "i", "we", "our",
-]);
-
 /**
- * Lowercase, split on non-alphanumerics, drop single characters and stopwords.
+ * THE TOKENIZER LIVES IN `@regulait/shared` (ADR-0067).
  *
- * Deliberately boring and deliberately shared: the index build and the query
- * MUST tokenise identically or a retrieval index silently returns nothing, and
- * the failure mode ("it answers, just always wrongly") is the kind that
- * survives a demo.
+ * It was written here first, and ADR-0067's groundedness metrics needed exactly
+ * the same primitives. Rather than let the codebase acquire a second opinion
+ * about what a word is — the failure mode being an index built one way and
+ * queried another, which "answers, just always wrongly" — it was HOISTED into
+ * the leaf package and is re-exported here so every existing caller and test is
+ * unchanged.
  */
-export function tokenize(text: string): string[] {
-  const out: string[] = [];
-  for (const raw of text.toLowerCase().split(/[^a-z0-9]+/)) {
-    if (raw.length < 2) continue;
-    if (STOPWORDS.has(raw)) continue;
-    out.push(raw);
-  }
-  return out;
-}
+export { tokenize, weightedVector, STOPWORDS };
 
 /** FNV-1a, 32-bit. A dependency-free content digest — this is a CHANGE
  * DETECTOR for dataset versions, not a security primitive, and it is labelled
@@ -617,25 +607,6 @@ export function buildRetrievalIndex(rows: TrainingRow[], opts: { topK?: number }
     builtRows: n,
     vocabularySize: Object.keys(idf).length,
   };
-}
-
-/** term-frequency × idf, then L2-normalised. Shared by build and query so the
- * two cannot disagree about what a vector is. */
-function weightedVector(tokens: string[], idf: Record<string, number>): Record<string, number> {
-  const tf = new Map<string, number>();
-  for (const t of tokens) tf.set(t, (tf.get(t) ?? 0) + 1);
-  const vec: Record<string, number> = {};
-  let norm = 0;
-  for (const [term, count] of tf) {
-    const w = (idf[term] ?? 0) * (1 + Math.log(count));
-    if (w === 0) continue;
-    vec[term] = w;
-    norm += w * w;
-  }
-  norm = Math.sqrt(norm);
-  if (norm === 0) return {};
-  for (const term of Object.keys(vec)) vec[term] = vec[term]! / norm;
-  return vec;
 }
 
 export interface RetrievalMatch {

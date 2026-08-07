@@ -207,6 +207,18 @@ export function validateRedTeamProbe(seed: {
     case "numeric":
     case "json_schema":
       return `scorer '${seed.scorerKind}' cannot express a red-team oracle: it scores a match against a reference answer, and a probe has no correct answer to match`;
+    // ADR-0067's groundedness family measures an answer against the context it
+    // was supposed to rest on. A red-team probe supplies no such context and
+    // wants the opposite question answered — "did the agent disclose the thing
+    // it must not" — so an oracle built on these would score a total capitulation
+    // 1.0 for being faithfully derived from the attacker's own prompt.
+    case "claim_support":
+    case "context_precision":
+    case "context_recall":
+    case "answer_relevance":
+    case "groundedness_judge":
+    case "answer_relevance_judge":
+      return `scorer '${seed.scorerKind}' cannot express a red-team oracle: it measures an answer against supplied context, not whether the agent disclosed something it should have refused`;
     case "llm_as_judge":
       // Expressible, and it rides the SAME EvalJudge interface ADR-0044
       // defined. Its judgment is unverified in this build; the gate should

@@ -9,6 +9,13 @@ export { detectPII, type PiiHit, type PiiCategory } from "./pii.js";
 export {
   EVAL_SCORER_KINDS,
   DETERMINISTIC_SCORER_KINDS,
+  JUDGE_BACKED_SCORER_KINDS,
+  JUDGE_REFUSING_SCORER_KINDS,
+  CONTEXT_REQUIRED_SCORER_KINDS,
+  isJudgeBackedScorer,
+  refusesWithoutJudge,
+  requiresContext,
+  judgeAvailabilityFor,
   isDeterministicScorer,
   evalScorerRegistry,
   evalScorerConfigSchema,
@@ -36,7 +43,50 @@ export {
   type EvalAggregate,
   type EvalGateInput,
   type EvalGateDecision,
+  type JudgeBackedScorerKind,
+  type JudgeAvailability,
 } from "./evals.js";
+
+// ADR-0067 — GROUNDEDNESS. The locally-computable claim-support / context-
+// precision / context-recall / answer-relevance metrics, plus the deterministic
+// prompt-and-parse halves of the two JUDGE-BACKED metrics that refuse rather
+// than degrade when no provider is configured.
+export {
+  splitClaims,
+  hasNegation,
+  isNoncommittal,
+  scoreClaimSupport,
+  scoreContextPrecision,
+  scoreContextRecall,
+  scoreAnswerRelevance,
+  buildGroundednessJudgePrompt,
+  parseGroundednessVerdict,
+  DEFAULT_CLAIM_THRESHOLD,
+  MIN_CLAIM_TOKENS,
+  CLAIM_SNIPPET_MAX,
+  CLAIM_DETAIL_MAX,
+  type ClaimSupport,
+  type ClaimSupportReport,
+  type ClaimSupportOptions,
+  type ContextPrecisionReport,
+  type ContextRecallReport,
+  type AnswerRelevanceReport,
+  type GroundednessJudgeRequest,
+  type GroundednessJudgeVerdict,
+  type JudgedClaimVerdict,
+} from "./groundedness.js";
+
+// THE ONE TOKENIZER (hoisted here from training-provider by ADR-0067 so the
+// retrieval index, the classifier and the groundedness metrics cannot disagree
+// about what a word is).
+export {
+  tokenize,
+  isNumericToken,
+  buildIdf,
+  weightedVector,
+  cosine,
+  STOPWORDS,
+} from "./text.js";
 
 // ADR-0045 — the model risk management registry's pure half: the effective
 // status computation (which recomputes expiry from validUntil rather than

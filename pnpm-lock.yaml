@@ -288,6 +288,9 @@ importers:
       '@regulait/model-provider':
         specifier: workspace:*
         version: link:../model-provider
+      '@regulait/shared':
+        specifier: workspace:*
+        version: link:../shared
     devDependencies:
       '@types/node':
         specifier: 26.1.1
