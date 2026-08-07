@@ -30,8 +30,13 @@ import {
   setToolPriceSchema,
   guardrailCategoryList,
   guardrailWithheldMarker,
+  toolPayloadPreview,
   type PiiHit,
 } from "@regulait/shared";
+// ADR-0070 — the tool span. A governed tool call is the other half of what a
+// trace tree must show: which tool the model asked for, with which arguments,
+// what came back, and — the row that matters — the ones governance refused.
+import { beginTrace, finishTrace, recordSpan, type TraceContext } from "./tracing.js";
 import {
   flattenFindings,
   guardrailOutcome,
@@ -170,7 +175,74 @@ export async function executeGovernedToolCall(
      * nothing and the attributes degrade to the honest 'unknown'/false, never
      * to a silently-strong claim a policy could be fooled by. */
     principal?: AbacPrincipalContext;
+    /** ADR-0070 — the trace this tool call's span hangs from. Absent/null =
+     * record nothing (every pre-0070 caller, byte-identical). Supplied by the
+     * MCP proxy route and by the orchestration worker loop, where a tool call
+     * is a CHILD of the model turn that asked for it. */
+    trace?: TraceContext | null | undefined;
+    /** the model's own tool_use id, when the call came out of a worker loop —
+     * stamped onto the span as OTel's `gen_ai.tool.call.id` */
+    toolCallId?: string | undefined;
   },
+): Promise<GovernedToolCallOutcome> {
+  // ADR-0070 — the tool span. Wrapped exactly like the dispatch core's: the
+  // governed body below is untouched, this times it and records ONE span from
+  // whatever it returned. A refusal (entitlement, PII, guardrail, pending
+  // approval) is a `denied` span carrying its reason, not an absent one.
+  const traceStartedAt = new Date();
+  const outcome = await executeGovernedToolCallInner(db, _dataKey, args);
+  if (args.trace) {
+    const denied =
+      outcome.kind === "denied" ||
+      outcome.kind === "pii_blocked" ||
+      outcome.kind === "guardrail_blocked" ||
+      outcome.kind === "approval_required";
+    const reason =
+      outcome.kind === "denied"
+        ? outcome.decision.reason
+        : outcome.kind === "pii_blocked" || outcome.kind === "guardrail_blocked"
+          ? outcome.reason
+          : outcome.kind === "approval_required"
+            ? `tool call requires approval '${outcome.approvalId}' before it may run`
+            : outcome.kind === "approval_consumed_race"
+              ? `approval '${outcome.approvalId}' was already consumed`
+              : outcome.kind === "unknown_tool"
+                ? `tool '${args.toolName}' is not in this server's manifest`
+                : null;
+    const capture = args.trace.policy.captureContent;
+    const max = args.trace.policy.previewMaxChars;
+    await recordSpan(db, args.trace, {
+      kind: "tool",
+      name: args.toolName,
+      status: denied ? "denied" : outcome.kind === "unknown_tool" ? "error" : "ok",
+      statusReason: reason,
+      startedAt: traceStartedAt,
+      mcpServerId: args.serverId,
+      costUsd: outcome.kind === "allowed" ? (outcome.costUsd ?? null) : null,
+      // TOOL I/O. Arguments are what the model asked for; content is what the
+      // governed path already decided the caller may see — on a PII/guardrail
+      // withhold, that is the marker, not the payload.
+      inputText: capture ? toolPayloadPreview(args.arguments, max) : null,
+      outputText:
+        capture && outcome.kind === "allowed" ? toolPayloadPreview(outcome.content, max) : null,
+      contentWithheld:
+        outcome.kind === "allowed"
+          ? !!(outcome.pii?.withheld || outcome.guardrails?.withheld)
+          : denied,
+      attributes: {
+        outcome: outcome.kind,
+        ...(args.toolCallId ? { toolCallId: args.toolCallId } : {}),
+        ...(args.projectId ? { projectId: args.projectId } : {}),
+      },
+    });
+  }
+  return outcome;
+}
+
+async function executeGovernedToolCallInner(
+  db: Db,
+  _dataKey: string | undefined,
+  args: Parameters<typeof executeGovernedToolCall>[2],
 ): Promise<GovernedToolCallOutcome> {
   const { userId, serverId, toolName } = args;
   const projectId = args.projectId ?? null;
@@ -836,6 +908,18 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
 
     proxy.setRequestHandler(CallToolRequestSchema, async (request) => {
       const toolName = request.params.name;
+      // ADR-0070 — a direct proxy tool call is its own one-span trace, grouped
+      // by the SERVER as the session so an operator can read a client's whole
+      // conversation with one MCP server as one thing. `beginTrace` returns
+      // null when tracing is off, and every line below then no-ops.
+      const toolTrace = await beginTrace(db, {
+        kind: "tool",
+        name: `mcp ${toolName}`,
+        userId,
+        projectId,
+        sessionId: `mcp:${serverId}`,
+        rootRefId: serverId,
+      });
       // The proxy route is now a thin governance-to-MCP-error mapper over the
       // shared primitive; the identical logic serves the worker loop too.
       const outcome = await executeGovernedToolCall(db, undefined, {
@@ -847,7 +931,13 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
         // ADR-0040: SERVER-DERIVED session facts. These come from the resolved
         // session row, never from a header the caller could set.
         principal: abacPrincipalFromRequest(req),
+        trace: toolTrace,
       });
+      await finishTrace(
+        db,
+        toolTrace,
+        outcome.kind === "allowed" ? "ok" : outcome.kind === "unknown_tool" ? "error" : "denied",
+      );
 
       switch (outcome.kind) {
         case "unknown_tool":

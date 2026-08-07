@@ -759,6 +759,16 @@ export const auditLog = pgTable(
         // credential to a contractor, and it should be one query.
         // Plain text column — no DDL needed.
         "virtual_key",
+        // ADR-0070 (trace observability): the READ surface, not the recorder.
+        // Recording a span emits no audit row — it would double the trail for
+        // every governed call and say nothing the existing row does not. What
+        // IS audited here is who READ whose trace and was refused, plus every
+        // OTLP export (and every export the egress guard, a missing endpoint,
+        // or the collector itself refused). A trace carries another person's
+        // prompts and tool arguments, so a cross-user read attempt is exactly
+        // the kind of event that belongs in the trail.
+        // Plain text column — no DDL needed.
+        "trace",
       ],
     })
       .notNull()
@@ -2899,6 +2909,28 @@ export const orgSettings = pgTable(
     llmTrainingApprovalThresholdUsd: doublePrecision("llm_training_approval_threshold_usd")
       .notNull()
       .default(5),
+
+    // --- ADR-0070 (migration 0082): trace observability ---------------------
+    /** THE MASTER SWITCH. Defaults ON, because a governance product whose
+     * trace is off by default answers "why did nothing happen" with "we did
+     * not record it". Off = no trace or span row is written anywhere, and
+     * every instrumented path is byte-identical to pre-0070. */
+    tracingEnabled: boolean("tracing_enabled").notNull().default(true),
+    /** May only ever NARROW. Off keeps the tree, the timings, the costs and
+     * every deny reason, and stops storing prompts/outputs at all. */
+    tracingCaptureContent: boolean("tracing_capture_content").notNull().default(true),
+    /** the truncation ceiling on a stored preview — the same 4000 default
+     * `eval_results.output_text` uses (ADR-0044), not a new posture */
+    tracingPreviewMaxChars: integer("tracing_preview_max_chars").notNull().default(4000),
+    /** ADR-0041: THERE IS NO DEFAULT ENDPOINT. Null (the shipped state) means
+     * no exporter exists and no outbound connection is ever attempted. When an
+     * admin types one it is adjudicated by the SAME ADR-0034/0062 egress guard
+     * `mcp_servers.url` is, on every export, not merely at write time. */
+    tracingOtlpEndpoint: text("tracing_otlp_endpoint"),
+    /** operator-supplied export headers (e.g. an OTLP collector's auth header).
+     * Values are returned REDACTED by the settings read surface. */
+    tracingOtlpHeaders: jsonb("tracing_otlp_headers"),
+    tracingOtlpServiceName: text("tracing_otlp_service_name").notNull().default("regulait-gateway"),
 
     updatedBy: uuid("updated_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -6289,3 +6321,157 @@ export type CostImportBatchRow = typeof costImportBatches.$inferSelect;
 export type ImportedCostLineRow = typeof importedCostLines.$inferSelect;
 export type VendorAccountAliasRow = typeof vendorAccountAliases.$inferSelect;
 export type VendorDomainRuleRow = typeof vendorDomainRules.$inferSelect;
+
+// ===========================================================================
+// ADR-0070 (migration 0082) — TRACE / SPAN OBSERVABILITY
+//
+// The SHAPE that was missing, over facts that already existed. Read the
+// migration header before changing anything here; the two invariants that
+// matter are repeated on the columns that hold them:
+//
+//   1. A span REFERENCES `usage_events` / `audit_log` / a run / a node. It
+//      does not restate them. The only denormalised fields are the five a
+//      tree view must render without an N+1 (`provider`, `model`, tokens,
+//      `cost_usd`), each written FROM the referenced row in the same call.
+//   2. A governance DENY is a PRESENT span with `status = 'denied'` and a
+//      `statusReason`. It is never an absent one.
+// ===========================================================================
+
+/** what kind of thing a trace is the tree of */
+export const TRACE_KINDS = ["dispatch", "run", "workflow", "conversation", "tool", "eval"] as const;
+export type TraceKind = (typeof TRACE_KINDS)[number];
+
+/** `denied` is deliberately NOT a flavour of `error`: an entitlement refusal,
+ * a PII or guardrail block, an exhausted budget and an egress refusal are
+ * DECISIONS, and the trace exists to show them as such. */
+export const TRACE_STATUSES = ["running", "ok", "error", "denied"] as const;
+export type TraceStatus = (typeof TRACE_STATUSES)[number];
+
+export const TRACE_SPAN_KINDS = [
+  /** an orchestration run (ADR-0053) — the container */
+  "run",
+  /** one node of that run's DAG */
+  "run_node",
+  /** one governed model dispatch attempt */
+  "llm",
+  /** ADR-0066 §4 — a fallback hop, recorded as a CHILD of the attempt that
+   * failed, so "which model actually answered, and why not the one I asked
+   * for" reads off the tree rather than out of the audit log */
+  "fallback_hop",
+  /** a governed MCP tool call */
+  "tool",
+  /** a governed connector call */
+  "connector",
+  /** an ADR-0042 guardrail verdict recorded on its own */
+  "guardrail",
+  /** a pillar-1 entitlement/policy decision recorded on its own */
+  "policy",
+  /** a workflow stage (ADR-0021/0027) */
+  "workflow_stage",
+  /** one case of an eval run (ADR-0044/0067) */
+  "eval_case",
+] as const;
+export type TraceSpanKind = (typeof TRACE_SPAN_KINDS)[number];
+
+export const traces = pgTable(
+  "traces",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** SESSION/THREAD GROUPING. A multi-turn conversation is one session id
+     * across many traces; a long-running workflow is another. NULL = a
+     * one-shot trace belonging to no session. */
+    sessionId: text("session_id"),
+    kind: text("kind", { enum: TRACE_KINDS }).notNull(),
+    /** the id of the thing this is the trace OF, in ITS table. FK-free. */
+    rootRefId: text("root_ref_id"),
+    name: text("name").notNull(),
+    /** whose trace this is. Reading it is default-deny and entitlement-gated
+     * on exactly this column (ADR-0069's `/v1/users/:userId/cost-consolidated`
+     * precedent): self, or an entitled admin, never "any authenticated user". */
+    userId: uuid("user_id").notNull(),
+    projectId: uuid("project_id"),
+    status: text("status", { enum: TRACE_STATUSES }).notNull().default("running"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+    durationMs: integer("duration_ms"),
+    /** rollups maintained as spans land, so the LIST view is one query rather
+     * than a fan-out over every span of every trace on the page */
+    spanCount: integer("span_count").notNull().default(0),
+    deniedSpanCount: integer("denied_span_count").notNull().default(0),
+    inputTokens: integer("input_tokens").notNull().default(0),
+    outputTokens: integer("output_tokens").notNull().default(0),
+    /** null = nothing under this trace was priced. Never an invented figure. */
+    costUsd: doublePrecision("cost_usd"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("traces_user_started_idx").on(t.userId, t.startedAt),
+    index("traces_session_idx").on(t.sessionId, t.startedAt),
+    index("traces_project_idx").on(t.projectId, t.startedAt),
+    index("traces_root_idx").on(t.kind, t.rootRefId),
+    index("traces_started_idx").on(t.startedAt),
+  ],
+);
+
+export const traceSpans = pgTable(
+  "trace_spans",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    traceId: uuid("trace_id")
+      .notNull()
+      .references(() => traces.id, { onDelete: "cascade" }),
+    /** self-reference; NULL = a root span of this trace */
+    parentSpanId: uuid("parent_span_id"),
+    /** DETERMINISTIC SIBLING ORDER. Millisecond timestamps collide on a fast
+     * in-process path, and a tree whose children reorder between two reads is
+     * not a trace. Every read orders by (parentSpanId, seq). */
+    seq: integer("seq").notNull(),
+    kind: text("kind", { enum: TRACE_SPAN_KINDS }).notNull(),
+    name: text("name").notNull(),
+    status: text("status", { enum: TRACE_STATUSES }).notNull().default("running"),
+    /** WHY. On a denied span this is the governance reason verbatim. */
+    statusReason: text("status_reason"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+    durationMs: integer("duration_ms"),
+
+    // --- references, not copies ------------------------------------------
+    /** the `usage_events` row this span's cost/token figures were copied FROM.
+     * The reconciliation test joins on this and asserts equality. */
+    usageEventId: uuid("usage_event_id"),
+    /** the `audit_log` row carrying the governance decision, when one exists */
+    auditLogId: uuid("audit_log_id"),
+    runId: uuid("run_id"),
+    nodeId: text("node_id"),
+    agentId: uuid("agent_id"),
+    mcpServerId: uuid("mcp_server_id"),
+    connectorId: uuid("connector_id"),
+
+    // --- denormalised for tree rendering (justified in ADR-0070) ----------
+    provider: text("provider"),
+    model: text("model"),
+    inputTokens: integer("input_tokens"),
+    outputTokens: integer("output_tokens"),
+    costUsd: doublePrecision("cost_usd"),
+
+    // --- content, through the EXISTING ADR-0042/§8.4 posture --------------
+    inputPreview: text("input_preview"),
+    outputPreview: text("output_preview"),
+    /** true = what is stored is a withheld marker, not the text. Recorded so a
+     * reader is never left guessing whether a short preview is short because
+     * the answer was short. */
+    contentWithheld: boolean("content_withheld").notNull().default(false),
+
+    attributes: jsonb("attributes"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("trace_spans_trace_idx").on(t.traceId, t.seq),
+    index("trace_spans_parent_idx").on(t.parentSpanId),
+    index("trace_spans_usage_idx").on(t.usageEventId),
+    index("trace_spans_run_idx").on(t.runId),
+  ],
+);
+
+export type TraceRow = typeof traces.$inferSelect;
+export type TraceSpanRow = typeof traceSpans.$inferSelect;

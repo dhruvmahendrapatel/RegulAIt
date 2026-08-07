@@ -147,6 +147,18 @@ import {
   virtualKeyBudgetRefusal,
   type VirtualKeyContext,
 } from "./virtual-keys.js";
+// ADR-0070 — the trace recorder. Wrapped AROUND the one dispatch attempt so
+// every governed caller (invoke, both compat shims, orchestration workers,
+// evals, the copilot, decompose) is traced without a line of its own, and so a
+// governance DENY becomes a PRESENT span carrying its reason.
+import {
+  beginTrace,
+  finishTrace,
+  loadTracingPolicy,
+  recordSpan,
+  traceForRoot,
+  type TraceContext,
+} from "./tracing.js";
 
 const userIdParam = z.object({ userId: z.string().uuid() });
 const agentIdParam = z.object({ agentId: z.string().uuid() });
@@ -206,6 +218,9 @@ export type DispatchOutcome =
          * presence is the disclosure — a fallback is never silent. */
         fallback?: DispatchFallback;
       };
+      /** ADR-0070: where this call landed in the trace tree. Present whenever
+       * tracing is enabled; absent when the org switched it off. */
+      trace?: DispatchTraceRef;
     }
   | {
       ok: false;
@@ -217,7 +232,16 @@ export type DispatchOutcome =
       /** ADR-0066 §4: present when a chain was attempted and exhausted, so the
        * caller sees WHICH hops were tried and why each one did not serve. */
       fallback?: DispatchFallback;
+      /** ADR-0070: a REFUSAL gets a trace reference too — that is the whole
+       * point. The span it names carries `status: 'denied'` and the reason. */
+      trace?: DispatchTraceRef;
     };
+
+/** ADR-0070 — the trace coordinates of one dispatch attempt. */
+export interface DispatchTraceRef {
+  traceId: string;
+  spanId: string | null;
+}
 
 /** ADR-0066 §4 — what happened on the way to the answer. One entry per hop
  * ATTEMPTED, in order, including the hops that were skipped for governance
@@ -287,6 +311,23 @@ export interface GovernedDispatchArgs {
    * chain driver reads it; a hop must be entitlement-checked in the same mode
    * the primary was, or a `plan`-only grant could serve an `execute` call. */
   mode?: string | undefined;
+  /** ADR-0070 — the trace this attempt's span hangs from.
+   *
+   *  - UNDEFINED (every ordinary caller): the core RESOLVES one from
+   *    `detail.runId` / `detail.conversationId`, or opens a standalone trace,
+   *    and closes it. Nothing to remember at any call site.
+   *  - a context: the caller owns the tree (the orchestration run path, the
+   *    fallback driver) and this attempt hangs under `parentSpanId`.
+   *  - EXPLICIT NULL: record nothing. Used by the fallback driver's own
+   *    bookkeeping and by anything that has already recorded the span itself.
+   */
+  trace?: TraceContext | null | undefined;
+  /** ADR-0070 — override the span's displayed name. Absent = derived from the
+   * served agent. Used by the fallback driver to label a hop. */
+  traceSpanName?: string | undefined;
+  /** ADR-0070 — the span kind this attempt records as. Defaults to `llm`; the
+   * fallback driver passes `fallback_hop`. */
+  traceSpanKind?: "llm" | "fallback_hop" | undefined;
 }
 
 /**
@@ -332,6 +373,42 @@ export async function executeGovernedDispatch(
   // RULE 1. Everything except a transport/upstream failure is a decision.
   if (primary.error !== "model_dispatch_failed") return primary;
   if (!args.served) return primary;
+
+  // ADR-0070 — RULE 5 (added by this ADR, and the reason a trace exists at all
+  // for this feature): EVERY HOP IS A SPAN, NESTED UNDER THE ATTEMPT THAT
+  // FAILED. A silent fallback is precisely what a trace is for, and ADR-0066's
+  // audit rows — while complete — require knowing to go looking. The hop spans
+  // hang from the primary attempt's span so the tree reads "I asked for X, it
+  // failed at the transport layer, and here is what was tried instead". A hop
+  // SKIPPED for governance reasons is a span too, `status: 'denied'`, for the
+  // same reason ADR-0066 audits it: a chain that quietly dropped an unentitled
+  // hop would make a fallback look like a routing decision nobody made.
+  const hopTrace: TraceContext | null = primary.trace
+    ? {
+        traceId: primary.trace.traceId,
+        parentSpanId: primary.trace.spanId,
+        sessionId: null,
+        policy: await loadTracingPolicy(db),
+      }
+    : null;
+  const recordSkippedHop = async (
+    label: { position: number; agentId: string; agentName: string },
+    reason: string,
+    ruleId: string,
+  ) => {
+    if (!hopTrace) return;
+    const at = new Date();
+    await recordSpan(db, hopTrace, {
+      kind: "fallback_hop",
+      name: `fallback ${label.position}: ${label.agentName}`,
+      status: "denied",
+      statusReason: reason,
+      startedAt: at,
+      endedAt: at,
+      agentId: label.agentId,
+      attributes: { fallbackPosition: label.position, ruleId, primaryAgentId: args.served!.id },
+    });
+  };
 
   const chain = await db
     .select()
@@ -400,6 +477,7 @@ export async function executeGovernedDispatch(
         : `fallback hop ${link.fallbackAgentId} no longer exists`;
       hops.push({ ...label, outcome: "unavailable", reason });
       await auditHop(label, "deny", "fallback-hop-unavailable", reason);
+      await recordSkippedHop(label, reason, "fallback-hop-unavailable");
       continue;
     }
     // RULE 2 — re-evaluate, never inherit.
@@ -423,6 +501,7 @@ export async function executeGovernedDispatch(
       await auditHop(label, "deny", "fallback-hop-denied", decision.reason, {
         kernelRuleId: decision.ruleId,
       });
+      await recordSkippedHop(label, decision.reason, "fallback-hop-denied");
       continue;
     }
     // The virtual key's own ceiling applies to hops too — a fallback must not
@@ -432,6 +511,7 @@ export async function executeGovernedDispatch(
       if (refusal) {
         hops.push({ ...label, outcome: "denied", reason: refusal.detail });
         await auditHop(label, "deny", refusal.ruleId, refusal.detail);
+        await recordSkippedHop(label, refusal.detail, refusal.ruleId);
         continue;
       }
     }
@@ -439,6 +519,10 @@ export async function executeGovernedDispatch(
     const outcome = await dispatchOnce(db, dataKey, {
       ...args,
       served: hopAgent,
+      // ADR-0070: this hop's span is a CHILD of the primary attempt's span.
+      trace: hopTrace,
+      traceSpanKind: "fallback_hop",
+      traceSpanName: `fallback ${link.position}: ${hopAgent.name}`,
       // The baseline is a ROUTING counterfactual; a fallback is not routing, so
       // carrying the primary's baseline here would invent a savings figure for
       // a decision the optimizer never made.
@@ -463,6 +547,9 @@ export async function executeGovernedDispatch(
           ...outcome.result,
           fallback: { primaryAgentId: primaryAgent.id, servedAgentId: hopAgent.id, hops },
         },
+        // the trace the CALLER is handed is the one containing the whole story:
+        // the failed primary attempt AND the hop that served under it.
+        ...(primary.trace ? { trace: primary.trace } : {}),
       };
     }
     const reason = outcome.detail ?? outcome.error;
@@ -496,6 +583,211 @@ export async function executeGovernedDispatch(
 }
 
 /**
+ * ADR-0070 — what the traced attempt could not learn from the outcome alone.
+ * Populated by `dispatchAttempt` as it writes the rows the span REFERENCES.
+ * Deliberately a mutable sink rather than an addition to `DispatchOutcome`:
+ * the ids of the ledger and audit rows are plumbing, and no caller of the
+ * dispatch core should have to think about them.
+ */
+interface DispatchTraceSink {
+  usageEventId?: string | null;
+  auditLogId?: string | null;
+  /** the served provider/model, known even on refusals that never dispatched */
+  provider?: string | null;
+  model?: string | null;
+  /** the text the caller may see — post-PII/guardrail substitution */
+  outputText?: string | null;
+  contentWithheld?: boolean;
+  stopReason?: string | null;
+}
+
+/**
+ * ADR-0070 — resolve which trace this attempt belongs to when the caller did
+ * not name one. Three cases, in this order:
+ *
+ *   `detail.runId`     -> the RUN's tree (so every node dispatch of a run lands
+ *                         in one tree rather than N unrelated ones). This is a
+ *                         fallback: the orchestration path passes an explicit
+ *                         context so the dispatch nests under its node span.
+ *   `detail.conversationId` -> a per-turn trace grouped by the conversation as
+ *                         the SESSION id. That is the thread grouping: a
+ *                         multi-turn conversation reads as one thing.
+ *   otherwise          -> a standalone one-shot trace.
+ */
+async function resolveDispatchTrace(
+  db: Db,
+  args: GovernedDispatchArgs,
+): Promise<{ ctx: TraceContext | null; owned: boolean }> {
+  if (args.trace !== undefined) return { ctx: args.trace, owned: false };
+  const policy = await loadTracingPolicy(db);
+  if (!policy.enabled) return { ctx: null, owned: false };
+  const detail = args.detail ?? {};
+  const runId = typeof detail["runId"] === "string" ? (detail["runId"] as string) : null;
+  const conversationId =
+    typeof detail["conversationId"] === "string" ? (detail["conversationId"] as string) : null;
+  if (runId) {
+    const ctx = await traceForRoot(
+      db,
+      {
+        kind: "run",
+        name: `run ${runId}`,
+        userId: args.userId,
+        projectId: args.projectId ?? null,
+        sessionId: runId,
+        rootRefId: runId,
+      },
+      policy,
+    );
+    // NOT owned: a run's trace is closed when the run reaches a terminal state,
+    // not when one of its dispatches returns.
+    return { ctx, owned: false };
+  }
+  const ctx = await beginTrace(
+    db,
+    {
+      kind: conversationId ? "conversation" : "dispatch",
+      name: args.served ? `dispatch ${args.served.name}` : "dispatch",
+      userId: args.userId,
+      projectId: args.projectId ?? null,
+      sessionId: conversationId,
+      rootRefId: conversationId,
+    },
+    policy,
+  );
+  return { ctx, owned: !!ctx };
+}
+
+/**
+ * ADR-0070 — ONE governed dispatch attempt, TRACED.
+ *
+ * This is a thin wrapper and it is deliberately the ONLY place a dispatch span
+ * is written. Everything governance-bearing stays in `dispatchAttempt` below,
+ * untouched; this function times it, records exactly one span from whatever
+ * came back, and returns the outcome with the span's coordinates attached.
+ *
+ * THE RULE THIS SHAPE EXISTS TO ENFORCE: **a refusal produces a span too.**
+ * Every early return in `dispatchAttempt` — a virtual key's allow-list, the
+ * MRM gate, a project budget, a §8.4 PII block, an ADR-0042 guardrail block, an
+ * egress refusal, a missing credential, an undispatchable agent — flows through
+ * here and lands as `status: 'denied'` carrying its stated reason. A trace that
+ * showed only the calls that happened would answer "why did nothing happen"
+ * with silence, which is the single question this feature exists for.
+ *
+ * `model_dispatch_failed` is the one non-decision: it records as `error`, not
+ * `denied`, because it is a transport fault rather than a verdict — the same
+ * distinction ADR-0066's rule 1 draws when deciding whether to hop.
+ */
+async function dispatchOnce(
+  db: Db,
+  dataKey: string | undefined,
+  args: GovernedDispatchArgs,
+): Promise<DispatchOutcome> {
+  const { ctx, owned } = await resolveDispatchTrace(db, args);
+  const startedAt = new Date();
+  const sink: DispatchTraceSink = {};
+  let outcome: DispatchOutcome;
+  try {
+    outcome = await dispatchAttempt(db, dataKey, args, sink);
+  } catch (err) {
+    // An unexpected throw is still a thing that happened to a governed call.
+    if (ctx) {
+      await recordSpan(db, ctx, {
+        kind: args.traceSpanKind ?? "llm",
+        name: args.traceSpanName ?? (args.served ? args.served.name : "dispatch"),
+        status: "error",
+        statusReason: (err as Error)?.message ?? "dispatch threw",
+        startedAt,
+        agentId: args.served?.id ?? null,
+        provider: sink.provider ?? args.served?.provider ?? null,
+        model: sink.model ?? args.served?.model ?? null,
+        ...(args.projectId ? { attributes: { projectId: args.projectId } } : {}),
+      });
+      if (owned) await finishTrace(db, ctx, "error", startedAt);
+    }
+    throw err;
+  }
+
+  if (!ctx) return outcome;
+
+  const detail = args.detail ?? {};
+  const runId = typeof detail["runId"] === "string" ? (detail["runId"] as string) : null;
+  const nodeId = typeof detail["nodeId"] === "string" ? (detail["nodeId"] as string) : null;
+  const attributes: Record<string, unknown> = {
+    requestedAgentId: args.requestedAgentId,
+    ...(args.projectId ? { projectId: args.projectId } : {}),
+    ...(args.virtualKey ? { virtualKeyId: args.virtualKey.id } : {}),
+    ...(typeof detail["turn"] === "number" ? { turn: detail["turn"] } : {}),
+    ...(typeof args.traceSpanKind === "string" && args.traceSpanKind === "fallback_hop"
+      ? { fallbackPosition: detail["fallbackPosition"] ?? null }
+      : {}),
+  };
+
+  let spanId: string | null;
+  if (outcome.ok) {
+    const r = outcome.result;
+    attributes["stopReason"] = r.stopReason;
+    if (r.refusal) attributes["providerRefusal"] = true;
+    if (r.credentialSource) attributes["credentialSource"] = r.credentialSource;
+    if (r.pii) attributes["pii"] = { mode: r.pii.mode, action: r.pii.action, withheld: r.pii.withheld };
+    if (r.guardrails) {
+      attributes["guardrails"] = { action: r.guardrails.action, withheld: r.guardrails.withheld };
+    }
+    spanId = await recordSpan(db, ctx, {
+      kind: args.traceSpanKind ?? "llm",
+      name: args.traceSpanName ?? (args.served ? args.served.name : "dispatch"),
+      status: "ok",
+      startedAt,
+      agentId: r.servedAgentId,
+      runId,
+      nodeId,
+      // THE REFERENCE. The five denormalised figures below were copied FROM
+      // this row, in the same call that inserted it.
+      usageEventId: sink.usageEventId ?? null,
+      provider: sink.provider ?? args.served?.provider ?? null,
+      model: r.model,
+      inputTokens: r.usage.inputTokens,
+      outputTokens: r.usage.outputTokens,
+      costUsd: r.costUsd,
+      inputText: args.input,
+      // ALREADY-ADJUDICATED text: the withheld marker is already substituted.
+      outputText: r.outputText,
+      contentWithheld: !!(r.pii?.withheld || r.guardrails?.withheld),
+      attributes,
+    });
+    if (owned) await finishTrace(db, ctx, "ok", startedAt);
+    return { ...outcome, trace: { traceId: ctx.traceId, spanId } };
+  }
+
+  attributes["error"] = outcome.error;
+  const isTransport = outcome.error === "model_dispatch_failed";
+  spanId = await recordSpan(db, ctx, {
+    kind: args.traceSpanKind ?? "llm",
+    name: args.traceSpanName ?? (args.served ? args.served.name : "dispatch"),
+    status: isTransport ? "error" : "denied",
+    statusReason: outcome.detail ?? outcome.error,
+    startedAt,
+    agentId: args.served?.id ?? null,
+    runId,
+    nodeId,
+    auditLogId: sink.auditLogId ?? null,
+    provider: sink.provider ?? args.served?.provider ?? null,
+    model: sink.model ?? args.served?.model ?? null,
+    // A refusal that never dispatched has no input preview worth storing when
+    // the refusal WAS about the input (a PII/guardrail block): storing the very
+    // text a block refused would defeat the block. `pii_blocked` and
+    // `guardrail_blocked` therefore carry the marker, not the prompt.
+    inputText:
+      outcome.error === "pii_blocked" || outcome.error === "guardrail_blocked"
+        ? (outcome.detail ?? null)
+        : args.input,
+    contentWithheld: outcome.error === "pii_blocked" || outcome.error === "guardrail_blocked",
+    attributes,
+  });
+  if (owned) await finishTrace(db, ctx, isTransport ? "error" : "denied", startedAt);
+  return { ...outcome, trace: { traceId: ctx.traceId, spanId } };
+}
+
+/**
  * ONE governed dispatch ATTEMPT. This is the pre-ADR-0066 body of
  * `executeGovernedDispatch`, unchanged except for the two virtual-key checks
  * and the per-key spend counter. It never recurses and knows nothing about
@@ -504,11 +796,16 @@ export async function executeGovernedDispatch(
  * Config problems (no model id, unknown provider, missing credential) fail
  * explicit, never fall back to a different model. Every execution lands one
  * MEASURED row in usage_events.
+ *
+ * ADR-0070 renamed this from `dispatchOnce` and wrapped it (above). Nothing in
+ * this body decides anything about tracing beyond populating `sink` with the
+ * ids of rows it was already writing.
  */
-async function dispatchOnce(
+async function dispatchAttempt(
   db: Db,
   dataKey: string | undefined,
   args: GovernedDispatchArgs,
+  sink: DispatchTraceSink = {},
 ): Promise<DispatchOutcome> {
   const { userId, served, requestedAgentId, baseline } = args;
   if (!served || !served.model || !isModelProviderKind(served.provider)) {
@@ -521,6 +818,10 @@ async function dispatchOnce(
         : "served agent not found in registry",
     };
   }
+  // ADR-0070: the served provider/model, known here and therefore attachable to
+  // EVERY span below including the refusals that never reach the provider.
+  sink.provider = served.provider;
+  sink.model = served.model;
 
   // ADR-0066 §2/§3 — THE VIRTUAL-KEY CEILING. Placed FIRST, before the MRM
   // gate and before any provider work, for the same reason every gate below is
@@ -538,7 +839,7 @@ async function dispatchOnce(
     const allowList = virtualKeyAllowListRefusal(vk, served);
     const refusal = allowList ?? virtualKeyBudgetRefusal(vk);
     if (refusal) {
-      await db.insert(auditLog).values({
+      const [vkRow] = await db.insert(auditLog).values({
         userId,
         objectType: "virtual_key",
         objectId: vk.id,
@@ -554,7 +855,8 @@ async function dispatchOnce(
         ruleId: refusal.ruleId,
         ruleChain: [],
         reason: refusal.detail,
-      });
+      }).returning({ id: auditLog.id });
+      sink.auditLogId = vkRow?.id ?? null;
       return { ok: false, status: refusal.status, error: refusal.error, detail: refusal.detail };
     }
   }
@@ -619,7 +921,7 @@ async function dispatchOnce(
         outputHits: [],
         withheld: false,
       };
-      await db.insert(auditLog).values({
+      const [piiRow] = await db.insert(auditLog).values({
         userId,
         objectType: "agent",
         objectId: served.id,
@@ -632,7 +934,8 @@ async function dispatchOnce(
         ruleId: "pii-blocked",
         ruleChain: [],
         reason,
-      });
+      }).returning({ id: auditLog.id });
+      sink.auditLogId = piiRow?.id ?? null;
       return { ok: false, status: 403, error: "pii_blocked", detail: reason, pii };
     }
   }
@@ -660,7 +963,7 @@ async function dispatchOnce(
     guardrailInput = runGuardrails(guardrails, "input", args.input);
     const outcome = guardrailOutcome(guardrailInput);
     if (outcome) {
-      await recordGuardrailDecision(db, {
+      sink.auditLogId = await recordGuardrailDecision(db, {
         userId,
         objectType: "agent",
         objectId: served.id,
@@ -700,7 +1003,7 @@ async function dispatchOnce(
   if (served.provider === "custom") {
     customProvider = await resolveCustomProviderForDispatch(db, dataKey, served.customProviderId);
     if (!customProvider.ok) {
-      await db.insert(auditLog).values({
+      const [cpRow] = await db.insert(auditLog).values({
         userId,
         objectType: "custom_model_provider",
         objectId: served.customProviderId,
@@ -714,7 +1017,8 @@ async function dispatchOnce(
         ruleId: `custom-provider-${customProvider.error}`,
         ruleChain: [],
         reason: customProvider.detail,
-      });
+      }).returning({ id: auditLog.id });
+      sink.auditLogId = cpRow?.id ?? null;
       return {
         ok: false,
         status: customProvider.status,
@@ -923,7 +1227,7 @@ async function dispatchOnce(
       const reason =
         `model credential baseUrl override for provider '${served.provider}' ` +
         `(${credentialOrigin ?? "unknown source"}): ${decision.reason}`;
-      await db.insert(auditLog).values({
+      const [egRow] = await db.insert(auditLog).values({
         userId,
         objectType: "model_credential",
         objectId: credentialId,
@@ -941,7 +1245,8 @@ async function dispatchOnce(
         ruleId: "model-credential-egress-blocked",
         ruleChain: [],
         reason,
-      });
+      }).returning({ id: auditLog.id });
+      sink.auditLogId = egRow?.id ?? null;
       return { ok: false, status: 403, error: "egress_blocked", detail: reason };
     }
     // the same guarded fetch the custom-provider path uses: re-validates every
@@ -1220,7 +1525,7 @@ async function dispatchOnce(
       }
     : {};
 
-  await db.insert(usageEvents).values({
+  const [usageRow] = await db.insert(usageEvents).values({
     userId,
     objectType: "agent",
     agentId: served.id,
@@ -1265,7 +1570,11 @@ async function dispatchOnce(
       ...piiDetail,
       ...guardrailDetail,
     },
-  });
+  }).returning({ id: usageEvents.id });
+  // ADR-0070 — THE REFERENCE. The span's provider/model/token/cost fields are
+  // copied from THIS row, and `tracing.test.ts` joins on this id and asserts
+  // they still agree rather than trusting the copy.
+  sink.usageEventId = usageRow?.id ?? null;
   // ADR-0042: the OUTPUT-phase guardrail audit row — one row into the SINGLE
   // existing audit log, with detector, category counts, mode and outcome. A
   // block is `effect: 'deny'`; warn and log are allows.
@@ -3170,7 +3479,7 @@ export function registerAgentConnectorRoutes(
       }
     }
 
-    await db.insert(auditLog).values({
+    const [decisionAuditRow] = await db.insert(auditLog).values({
       userId,
       objectType: "agent",
       objectId: agent.id,
@@ -3199,9 +3508,52 @@ export function registerAgentConnectorRoutes(
       ruleId: decision.ruleId,
       ruleChain: decision.ruleChain,
       reason: decision.reason,
-    });
+    }).returning({ id: auditLog.id });
 
+    // ADR-0070 — THE MOST VALUABLE SPAN IN THIS PRODUCT: the one that shows why
+    // NOTHING happened.
+    //
+    // Every refusal INSIDE the dispatch core (virtual-key ceiling, MRM gate,
+    // project budget, §8.4 PII, ADR-0042 guardrails, egress, missing
+    // credential) already becomes a `denied` span, because the core's traced
+    // wrapper records one from whatever the attempt returned. A pillar-1
+    // ENTITLEMENT denial never reaches the core at all — it is decided here, at
+    // the entry point, and returned — so without this block the single most
+    // common governance refusal in the product would be the ONE thing with no
+    // trace. It gets a one-span `dispatch` trace whose root is a `policy` span
+    // carrying the kernel's own reason and REFERENCING the audit row just
+    // written. No usage row exists (nothing was billed) and none is invented.
     if (decision.effect !== "allow") {
+      const denyTrace = await beginTrace(db, {
+        kind: "dispatch",
+        name: `denied: ${agent.name}`,
+        userId,
+        projectId,
+        ...(convo ? { sessionId: convo.conversation.id, rootRefId: convo.conversation.id } : {}),
+      });
+      if (denyTrace) {
+        const at = new Date();
+        await recordSpan(db, denyTrace, {
+          kind: "policy",
+          name: `entitlement: ${agent.name}`,
+          status: "denied",
+          statusReason: decision.reason,
+          startedAt: at,
+          endedAt: at,
+          agentId: agent.id,
+          auditLogId: decisionAuditRow?.id ?? null,
+          model: agent.model,
+          provider: agent.provider,
+          attributes: {
+            mode: body.mode,
+            ruleId: decision.ruleId,
+            ruleChain: decision.ruleChain,
+            effect: decision.effect,
+            ...(projectId ? { projectId } : {}),
+          },
+        });
+        await finishTrace(db, denyTrace, "denied", at);
+      }
       // A denied conversation turn is recorded honestly (detail.denied, no
       // assistant turn) but never replayed to a provider on later turns —
       // loadOwnConversation filters it out of the model-bound history.
@@ -3225,13 +3577,24 @@ export function registerAgentConnectorRoutes(
         // one. Without this the caller sees only the primary's failure and has
         // no way to know that three governed alternatives were tried.
         ...(dispatchOutcome.fallback ? { fallback: dispatchOutcome.fallback } : {}),
+        ...(dispatchOutcome.trace ? { trace: dispatchOutcome.trace } : {}),
         ...suppressionFlag,
       });
     }
     return reply.send({
       decision,
       routing,
-      ...(dispatchOutcome ? { dispatch: dispatchOutcome.result } : {}),
+      // ADR-0070: the trace coordinates ride out with the dispatch, so a caller
+      // (and the SPA) can open the tree for the call it just made without
+      // guessing which of its traces was theirs.
+      ...(dispatchOutcome
+        ? {
+            dispatch: {
+              ...dispatchOutcome.result,
+              ...(dispatchOutcome.trace ? { trace: dispatchOutcome.trace } : {}),
+            },
+          }
+        : {}),
       ...(convoContext?.publicDetail ? { compaction: convoContext.publicDetail } : {}),
       ...suppressionFlag,
     });

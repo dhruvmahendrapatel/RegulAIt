@@ -568,6 +568,13 @@
       "when": 1785016000000,
       "tag": "0081_cross_vendor_cost",
       "breakpoints": true
+    },
+    {
+      "idx": 82,
+      "version": "7",
+      "when": 1785017000000,
+      "tag": "0082_trace_observability",
+      "breakpoints": true
     }
   ]
 }

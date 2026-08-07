@@ -144,6 +144,18 @@ export const NON_ADMIN_ROUTES = new Set([
   // leak sideways. Every other cost-import route — uploading a file, asserting
   // an identity mapping, reading fleet-wide — is absent here on purpose.
   "GET /v1/users/:userId/cost-consolidated",
+  // ADR-0070 — a person may list and read THEIR OWN traces, and only their own.
+  // Every one of these four is self-scoped INSIDE the handler: a non-admin who
+  // passes `userId` for somebody else gets a 403 rather than a silently-ignored
+  // parameter, and a non-admin reading another person's trace id gets a 403
+  // naming why. A trace carries prompts, tool arguments and outputs — the most
+  // sensitive data in this system — so this is default-deny with a self
+  // exception, exactly like the consolidated-cost route directly above it. The
+  // exporter routes (`/v1/tracing/*`) are conspicuously NOT here: configuring
+  // and firing an outbound telemetry pipe is an admin act.
+  "GET /v1/traces",
+  "GET /v1/traces/:traceId",
+  "GET /v1/sessions",
   "GET /v1/cost-events",
   "GET /v1/usage-events",
   // ADR-0047: a team lead generating and reading THEIR OWN scorecard. Every

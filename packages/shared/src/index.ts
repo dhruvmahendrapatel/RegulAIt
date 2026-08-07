@@ -1773,6 +1773,19 @@ export const updateOrgSettingsSchema = z
     // user starts and becomes something the ONE Approvals Queue decides.
     llmTrainingEnabled: z.boolean().optional(),
     llmTrainingApprovalThresholdUsd: z.number().min(0).max(1_000_000).optional(),
+    // ADR-0070 (migration 0082) — trace observability. Three dials and an
+    // exporter. `tracingEnabled` is the master switch (ADR-0034's
+    // `customModelProvidersEnabled` precedent); `tracingCaptureContent` may
+    // only ever NARROW (off keeps the tree, timings, costs and every deny
+    // reason, and stores no prompt or output at all); `tracingOtlpEndpoint` is
+    // null by default and is adjudicated by the egress guard at write time AND
+    // on every export — there is deliberately no default endpoint anywhere.
+    tracingEnabled: z.boolean().optional(),
+    tracingCaptureContent: z.boolean().optional(),
+    tracingPreviewMaxChars: z.number().int().min(0).max(20_000).optional(),
+    tracingOtlpEndpoint: z.string().trim().min(1).max(2048).nullable().optional(),
+    tracingOtlpHeaders: z.record(z.string(), z.string().max(4096)).nullable().optional(),
+    tracingOtlpServiceName: z.string().trim().min(1).max(200).optional(),
     // ADR-0025 sign-in policy dials
     passwordMinLength: z.number().int().min(8).max(128).optional(),
     passwordRequireClasses: z.number().int().min(1).max(4).optional(),
@@ -2542,3 +2555,32 @@ export {
   type CopilotToolSpec,
   type GroundedAnswer,
 } from "./copilot.js";
+
+// ADR-0070 — TRACE / SPAN OBSERVABILITY, the pure half: the cycle-safe,
+// order-deterministic tree builder (the ONE place parentage is decided), the
+// preview truncation that adds a length limit and makes no second PII decision,
+// the OTel GenAI semantic-convention attribute mapping, and a hand-rolled
+// OTLP/HTTP JSON encoder (no OTel SDK — see the ADR).
+export {
+  OTEL_STATUS_ERROR,
+  OTEL_STATUS_OK,
+  OTEL_STATUS_UNSET,
+  OTLP_EXPORT_LIMITS,
+  TRACE_TRUNCATION_MARKER,
+  buildOtlpPayload,
+  buildSpanTree,
+  flattenSpanTree,
+  otelAttributesForSpan,
+  otelStatus,
+  otlpSpanId,
+  otlpTraceId,
+  summariseSpanTree,
+  toolPayloadPreview,
+  tracePreview,
+  type OtelAttrContext,
+  type OtlpBuildInput,
+  type SpanNode,
+  type SpanRecord,
+  type TraceRecord,
+  type TreeTotals,
+} from "./tracing.js";

@@ -34,6 +34,7 @@ import {
   ORG_SETTINGS_ID,
   rateLimits,
   revocations,
+  traces,
   users,
   type Db,
   type OrgSettingsRow,
@@ -47,6 +48,9 @@ import {
   updateOrgSettingsSchema,
 } from "@regulait/shared";
 import { z } from "zod";
+// ADR-0070: the OTLP export endpoint is an admin-typed outbound URL and takes
+// the SAME write-time egress adjudication every other one takes (ADR-0043).
+import { checkCredentialBaseUrl } from "./credential-egress.js";
 import { recordSchedulerFailure, recordSchedulerSuccess } from "./scheduler-health.js";
 import { evaluateIpEnvelope, isValidCidr } from "./net-policy.js";
 import { countEnabledSsoProviders } from "./sso-providers.js";
@@ -219,10 +223,16 @@ export async function runAuditPruneOnce(
   db: Db,
   actorUserId: string | null,
   auto: boolean,
-): Promise<{ deleted: number; retainedDays: number | null; floorSource: string[] }> {
+): Promise<{
+  deleted: number;
+  /** ADR-0070: traces removed under the SAME §8.3 floor, in the same pass */
+  tracesDeleted: number;
+  retainedDays: number | null;
+  floorSource: string[];
+}> {
   const f = await retentionFloor(db);
   if (f.retainedDays == null || f.cutoff == null) {
-    return { deleted: 0, retainedDays: null, floorSource: [] };
+    return { deleted: 0, tracesDeleted: 0, retainedDays: null, floorSource: [] };
   }
   // A4: prune under the COMPOSED floor — the global cutoff, minus rows a
   // longer per-mode override still retains (MAX-only: never shortens).
@@ -255,7 +265,36 @@ export async function runAuditPruneOnce(
     ruleChain: [],
     reason: `pruned ${deleted.length} audit row(s) older than ${f.retainedDays}d (floor from [${f.floorSource.join(", ")}])${auto ? " — scheduled auto-prune" : ""}`,
   });
-  return { deleted: deleted.length, retainedDays: f.retainedDays, floorSource: f.floorSource };
+  // ADR-0070 — TRACES PRUNE ON THE SAME FLOOR, IN THE SAME PASS.
+  //
+  // This is why migration 0082 added no trace-retention knob. A span carries
+  // prompts, tool arguments and outputs — the most sensitive data in this
+  // system — and a separate dial would let an operator keep them for a year
+  // under a framework whose cascade says ninety days. So trace retention IS the
+  // §8.3 audit-retention floor, composed exactly the same way, applied here.
+  //
+  // The per-deploy-mode overrides above are deliberately NOT applied: they key
+  // off `audit_log.deploy_mode`, which a trace has no equivalent of, and
+  // inventing one would mean guessing. The global floor is used, which is the
+  // SHORTER of the two and therefore the safe direction. Spans go with their
+  // trace by ON DELETE CASCADE — one delete, no orphans.
+  let tracesDeleted = 0;
+  try {
+    const removed = await db
+      .delete(traces)
+      .where(lt(traces.startedAt, f.cutoff))
+      .returning({ id: traces.id });
+    tracesDeleted = removed.length;
+  } catch {
+    // never let trace pruning fail the audit prune it rides along with
+    tracesDeleted = 0;
+  }
+  return {
+    deleted: deleted.length,
+    tracesDeleted,
+    retainedDays: f.retainedDays,
+    floorSource: f.floorSource,
+  };
 }
 
 /**
@@ -326,10 +365,27 @@ export function envKeyPresence(): Array<{ provider: string; envVar: string; pres
  * from NON_ADMIN_ROUTES, exactly like the interception settings endpoints.
  * PUT is a partial update; every write is audited (objectType org_settings)
  * with the changed keys in the detail. */
+/**
+ * ADR-0070 — the ONE redaction this settings surface performs. An OTLP
+ * collector header is conventionally a bearer token, and this endpoint is
+ * admin-readable, so the VALUES never leave: the key names do (an operator has
+ * to be able to see which headers are set) and each value renders as a fixed
+ * marker. Same discipline as every credential surface in this codebase — the
+ * write is accepted, the read never returns the secret.
+ */
+export function redactSettings(row: OrgSettingsRow): OrgSettingsRow {
+  const headers = row.tracingOtlpHeaders as Record<string, string> | null;
+  if (!headers) return row;
+  return {
+    ...row,
+    tracingOtlpHeaders: Object.fromEntries(Object.keys(headers).map((k) => [k, "[redacted]"])),
+  };
+}
+
 export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db) {
   app.get("/v1/org/settings", async () => {
     const settings = await loadOrgSettings(db);
-    return { settings, envKeys: envKeyPresence() };
+    return { settings: redactSettings(settings), envKeys: envKeyPresence() };
   });
 
   app.put("/v1/org/settings", async (req, reply) => {
@@ -404,6 +460,25 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db) {
         }
       }
     }
+    // ADR-0070 — THE OTLP ENDPOINT IS AN ADMIN-TYPED OUTBOUND URL, so it goes
+    // behind ADR-0043's guard at WRITE time exactly as `mcp_servers.url` and
+    // `oidc_providers.issuerUrl` do. Refusing here means an operator learns the
+    // host is not allow-listed while they are configuring it, rather than at
+    // 3am when an export silently 403s. It is re-adjudicated on every export
+    // anyway (DNS can be re-pointed, an allow entry can be withdrawn) — this is
+    // the early, honest failure, not the enforcement point.
+    if (body.tracingOtlpEndpoint) {
+      const { decision } = await checkCredentialBaseUrl(db, body.tracingOtlpEndpoint);
+      if (!decision.ok) {
+        return reply.status(400).send({
+          error: "egress_blocked",
+          detail:
+            `the OTLP endpoint was refused by the egress guard: ${decision.reason}. Nothing was saved. ` +
+            `Add the host to the egress allow-list first — RegulAIt does not open an outbound ` +
+            `telemetry connection to a destination no admin approved.`,
+        });
+      }
+    }
     const [row] = await db
       .update(orgSettings)
       .set({
@@ -434,7 +509,7 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db) {
           ? `org settings updated: ${Object.keys(changed).join(", ")}`
           : "org settings written with no effective change",
     });
-    return reply.send({ settings: after });
+    return reply.send({ settings: redactSettings(after) });
   });
 
   // -------------------------------------------------------------------------

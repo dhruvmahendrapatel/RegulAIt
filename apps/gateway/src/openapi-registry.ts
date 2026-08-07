@@ -168,6 +168,15 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // vocabulary is still settling: adding a vendor adapter changes the accepted
   // `adapter` values, and a public-stable contract would freeze that list.
   "GET /v1/cost-consolidated": "internal",
+  // ADR-0070 — trace observability. INTERNAL on purpose: a trace's span shape
+  // is exactly the kind of thing that should stay free to move while the
+  // feature settles, and pinning it into the published contract now would
+  // freeze a data model one week old.
+  "GET /v1/traces": "internal",
+  "GET /v1/traces/:traceId": "internal",
+  "GET /v1/sessions": "internal",
+  "GET /v1/tracing/config": "internal",
+  "POST /v1/tracing/export": "internal",
   "GET /v1/cost-imports": "internal",
   "POST /v1/cost-imports": "internal",
   "GET /v1/cost-imports/adapters": "internal",
@@ -709,6 +718,11 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/conversations/:conversationId": "conversations",
   "GET /v1/cost-events": "cost-events",
   "GET /v1/cost-consolidated": "cost-imports",
+  "GET /v1/traces": "tracing",
+  "GET /v1/traces/:traceId": "tracing",
+  "GET /v1/sessions": "tracing",
+  "GET /v1/tracing/config": "tracing",
+  "POST /v1/tracing/export": "tracing",
   "GET /v1/cost-imports": "cost-imports",
   "POST /v1/cost-imports": "cost-imports",
   "GET /v1/cost-imports/adapters": "cost-imports",

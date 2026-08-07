@@ -66,6 +66,9 @@ import {
 import { loadAgentRevocations, loadRoleAgentGrants } from "./entitlements.js";
 import { assertProjectAttribution, projectPiiMode } from "./projects.js";
 import { PROJECT_HEADER } from "./mcp-proxy.js";
+// ADR-0070 — the compat surfaces' entitlement refusal gets a `policy` deny span
+// too: an SDK pointed at this gateway has no RegulAIt UI to look in.
+import { beginTrace, finishTrace, recordSpan } from "./tracing.js";
 import { effectiveTechniqueMode, loadOrgSettings } from "./org-settings.js";
 import {
   loadVirtualKeyContext,
@@ -677,7 +680,7 @@ export async function prepareCompatCall(
 
   const decision = evalFor(requested);
   if (decision.effect !== "allow") {
-    await db.insert(auditLog).values({
+    const [row] = await db.insert(auditLog).values({
       userId,
       objectType: "agent",
       objectId: requested.id,
@@ -692,7 +695,40 @@ export async function prepareCompatCall(
       ruleId: decision.ruleId,
       ruleChain: decision.ruleChain,
       reason: decision.reason,
+    }).returning({ id: auditLog.id });
+    // ADR-0070 — an entitlement refusal on a COMPAT surface gets the same
+    // `policy` deny span the native invoke path's does. An off-the-shelf SDK
+    // pointed at this gateway is precisely the caller most likely to be
+    // confused by "why did nothing happen", and it has no RegulAIt UI to check.
+    const denyTrace = await beginTrace(db, {
+      kind: "dispatch",
+      name: `denied: ${requested.name}`,
+      userId,
+      projectId,
     });
+    if (denyTrace) {
+      const at = new Date();
+      await recordSpan(db, denyTrace, {
+        kind: "policy",
+        name: `entitlement: ${requested.name}`,
+        status: "denied",
+        statusReason: decision.reason,
+        startedAt: at,
+        endedAt: at,
+        agentId: requested.id,
+        auditLogId: row?.id ?? null,
+        provider: requested.provider,
+        model: requested.model,
+        attributes: {
+          surface: "compat",
+          mode: COMPAT_MODE,
+          requestedModel: args.requestedModel,
+          ruleId: decision.ruleId,
+          effect: decision.effect,
+        },
+      });
+      await finishTrace(db, denyTrace, "denied", at);
+    }
     return { ok: false, status: 403, error: "agent_denied", detail: decision.reason };
   }
 

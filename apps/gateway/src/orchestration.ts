@@ -12,11 +12,14 @@ import {
   orchestrationRunEvents,
   orchestrationRuns,
   projectContextItems,
+  traceSpans,
+  traces,
   userAgentPolicies,
   users,
   workflowArtifacts,
   workflowInstances,
   type Db,
+  type TraceStatus,
 } from "@regulait/db";
 import type { WorkflowDefinition } from "@regulait/workflow-kernel";
 import { evaluateAgent, type AgentDecision } from "@regulait/policy-kernel";
@@ -61,6 +64,15 @@ import {
   executeGovernedDispatch,
   type SkippedCandidate,
 } from "./agents-connectors.js";
+// ADR-0070 — the run's trace tree: run -> node -> model turn -> tool call.
+import {
+  childContext,
+  closeSpan,
+  finishTrace,
+  openSpan,
+  traceForRoot,
+  type TraceContext,
+} from "./tracing.js";
 import { executeGovernedToolCall, resolveNodeToolContext } from "./mcp-proxy.js";
 import { loadAgentRevocations, loadRoleAgentGrants } from "./entitlements.js";
 import { assertProjectAttribution, projectPiiMode } from "./projects.js";
@@ -518,7 +530,130 @@ function composeSystem(a: string | undefined, b: string | undefined): string | u
   return parts.length === 0 ? undefined : parts.join("\n\n");
 }
 
+/**
+ * ADR-0070 — THE RUN'S TREE.
+ *
+ * An orchestration run is the shape a trace exists for: a DAG of nodes, each of
+ * which is a bounded agentic loop of model turns and governed tool calls. Until
+ * now that structure lived in `orchestration_run_events` (an append-only list)
+ * and in `state.nodeStatuses` (a map). Neither is a causal tree, and neither
+ * says which model turn asked for which tool call.
+ *
+ * So: one `run` span per run (created once, reused by every node), one
+ * `run_node` span per node dispatch under it, one `llm` span per TURN of that
+ * node's loop under THAT, and every tool call the turn made under the turn.
+ * Four real levels, from four real relationships — not a flat list relabelled.
+ *
+ * Every early return below (unknown node, not in progress, entitlement denied,
+ * budget blocked, dispatch failed) closes the node span with its own status and
+ * reason. A node that never ran is a `denied` span saying why, because the
+ * whole point is that the tree explains an absence.
+ */
+/** The run's own display name: the graph's `run` label (its title), falling
+ * back to a short id. */
+function runSpanName(run: RunRow): string {
+  const label = (run.graph as TaskGraph).run;
+  return typeof label === "string" && label.length > 0 ? label : `run ${run.id.slice(0, 8)}`;
+}
+
+async function ensureRunSpan(
+  db: Db,
+  ctx: TraceContext | null,
+  run: RunRow,
+): Promise<string | null> {
+  if (!ctx) return null;
+  try {
+    const [existing] = await db
+      .select({ id: traceSpans.id })
+      .from(traceSpans)
+      .where(
+        and(eq(traceSpans.traceId, ctx.traceId), eq(traceSpans.kind, "run"), eq(traceSpans.runId, run.id)),
+      )
+      .limit(1);
+    if (existing) return existing.id;
+  } catch {
+    return null;
+  }
+  return openSpan(db, ctx, {
+    kind: "run",
+    name: runSpanName(run),
+    startedAt: run.createdAt ?? new Date(),
+    runId: run.id,
+    attributes: { initiatingUserId: run.initiatingUserId, ...(run.projectId ? { projectId: run.projectId } : {}) },
+  });
+}
+
 async function dispatchRunNode(
+  db: Db,
+  dataKey: string | undefined,
+  run: RunRow,
+  nodeId: string,
+  args: {
+    input?: string | undefined;
+    maxTokens?: number | undefined;
+    maxTurns?: number | undefined;
+    onDelta?: ((text: string) => void) | undefined;
+    contextKeys?: string[] | undefined;
+  },
+  actorUserId: string,
+): Promise<NodeDispatchOutcome> {
+  const runCtx = await traceForRoot(db, {
+    kind: "run",
+    name: runSpanName(run),
+    userId: run.initiatingUserId,
+    projectId: run.projectId ?? null,
+    sessionId: run.id,
+    rootRefId: run.id,
+  });
+  const runSpanId = await ensureRunSpan(db, runCtx, run);
+  const nodeCtx = childContext(runCtx, runSpanId);
+  const nodeSpanId = await openSpan(db, nodeCtx, {
+    kind: "run_node",
+    name: nodeId,
+    startedAt: new Date(),
+    runId: run.id,
+    nodeId,
+  });
+  const outcome = await dispatchRunNodeInner(
+    db,
+    dataKey,
+    run,
+    nodeId,
+    args,
+    actorUserId,
+    childContext(nodeCtx, nodeSpanId),
+  );
+  // Every non-ok outcome is a DECISION about this node, so the node span says
+  // which one, verbatim, rather than merely ending.
+  const [status, reason]: [TraceStatus, string | null] =
+    outcome.kind === "ok"
+      ? ["ok", null]
+      : outcome.kind === "dispatch_failed"
+        ? ["error", `${outcome.error}${outcome.detail ? `: ${outcome.detail}` : ""}`]
+        : outcome.kind === "entitlement_denied"
+          ? ["denied", outcome.decision.reason]
+          : outcome.kind === "budget_blocked_measured"
+            ? [
+                "denied",
+                `run measured spend $${outcome.measuredSpentUsd} is at or over the $${outcome.capUsd} cap; ` +
+                  `further dispatches are blocked until the overage is approved`,
+              ]
+            : outcome.kind === "node_budget_blocked_measured"
+              ? [
+                  "denied",
+                  `node measured spend $${outcome.measuredNodeUsd} is at or over its delegated ` +
+                    `per-node cap of $${outcome.nodeCapUsd}`,
+                ]
+              : outcome.kind === "unknown_node"
+                ? ["error", `node '${nodeId}' is not in this run's graph`]
+                : outcome.kind === "unknown_agent"
+                  ? ["error", `node '${nodeId}' owner agent no longer exists`]
+                  : ["error", `node '${nodeId}' is not in progress`];
+  await closeSpan(db, nodeSpanId, status, reason);
+  return outcome;
+}
+
+async function dispatchRunNodeInner(
   db: Db,
   dataKey: string | undefined,
   run: RunRow,
@@ -538,6 +673,9 @@ async function dispatchRunNode(
     contextKeys?: string[] | undefined;
   },
   actorUserId: string,
+  /** ADR-0070 — the node's span; every model turn and tool call below hangs
+   * from it. Null when tracing is off, and every use of it then no-ops. */
+  nodeTrace: TraceContext | null,
 ): Promise<NodeDispatchOutcome> {
   const graph = run.graph as TaskGraph;
   const state = run.state as RunState;
@@ -711,6 +849,9 @@ async function dispatchRunNode(
       baseline: null,
       input: firstInput,
       messages,
+      // ADR-0070: this turn's `llm` span is a CHILD of the node span.
+      trace: nodeTrace,
+      traceSpanName: `turn ${turn + 1}: ${servedAgent?.name ?? node.ownerAgentId}`,
       ...(systemPrompt !== undefined ? { system: systemPrompt } : {}),
       ...(toolDefs.length > 0 ? { tools: toolDefs } : {}),
       maxTokens: args.maxTokens,
@@ -857,6 +998,11 @@ async function dispatchRunNode(
       }
     }
 
+    // ADR-0070: every tool call this turn makes hangs from THIS turn's span, so
+    // the tree answers "which model turn asked for this tool" rather than
+    // merely "this run touched this tool at some point".
+    const turnTrace = childContext(nodeTrace, outcome.trace?.spanId ?? null);
+
     const toolCalls = outcome.result.stopReason === "tool_use" ? (outcome.result.toolCalls ?? []) : [];
     if (toolCalls.length === 0) break; // a final text answer — the loop is done
 
@@ -902,6 +1048,8 @@ async function dispatchRunNode(
           // already attribution-checked when the run was created, so no second
           // membership check is needed here.
           projectId: run.projectId ?? null,
+          trace: turnTrace,
+          toolCallId: tc.id,
         });
         switch (toolOut.kind) {
           case "allowed":
@@ -1333,7 +1481,42 @@ async function applyRunEvent(
   const applied = await applyRunEventTx(db, runId, event, actorUserId);
   const postCommit = nestedCompletionPostCommit(applied.run, actorUserId, dataKey);
   if (postCommit) await postCommit(db);
+  // ADR-0070 — a run's trace and its root span close when the RUN turns
+  // terminal, not when one of its dispatches returns. A run that is still going
+  // therefore reads as `running` rather than as `ok` after its first node, and
+  // a `completed` run's trace duration is the run's elapsed time.
+  await closeRunTrace(db, applied.run);
   return applied;
+}
+
+/** Close the run's trace + root `run` span on a terminal transition. Silent and
+ * best-effort (recorder rule 2): observability never fails the run it observes. */
+export async function closeRunTrace(db: Db, run: RunRow): Promise<void> {
+  if (run.status !== "completed" && run.status !== "aborted") return;
+  const status: TraceStatus = run.status === "completed" ? "ok" : "error";
+  try {
+    const [t] = await db
+      .select({ id: traces.id })
+      .from(traces)
+      .where(and(eq(traces.kind, "run"), eq(traces.rootRefId, run.id)))
+      .orderBy(desc(traces.startedAt))
+      .limit(1);
+    if (!t) return;
+    const [rootSpan] = await db
+      .select({ id: traceSpans.id })
+      .from(traceSpans)
+      .where(and(eq(traceSpans.traceId, t.id), eq(traceSpans.kind, "run")))
+      .limit(1);
+    await closeSpan(
+      db,
+      rootSpan?.id ?? null,
+      status,
+      run.status === "aborted" ? "run aborted" : null,
+    );
+    await finishTrace(db, { traceId: t.id, parentSpanId: null, sessionId: run.id, policy: { enabled: true, captureContent: false, previewMaxChars: 0 } }, status);
+  } catch {
+    /* recorder rule 2 */
+  }
 }
 
 /** Decide-endpoint hook (§3): approving an escalated node re-opens it for

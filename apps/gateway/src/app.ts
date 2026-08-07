@@ -224,6 +224,7 @@ import { registerOpenApiRoutes, type RouteInventoryEntry } from "./openapi.js";
 import { registerOnboardingRoutes } from "./onboarding.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
 import { registerCostImportRoutes } from "./cost-import.js";
+import { registerTracingRoutes } from "./tracing.js";
 import { registerCompliancePackRoutes } from "./compliance-packs.js";
 import { registerCopilotRoutes } from "./copilot.js";
 import { registerChatOpsRoutes } from "./chatops.js";
@@ -2812,6 +2813,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // under a CHECK that pins `basis = 'imported'`, so nothing it writes can ever
   // be read back as metered.
   registerCostImportRoutes(app, db);
+  // ADR-0070 — TRACE / SPAN OBSERVABILITY. The read surface for the trees the
+  // dispatch core, the MCP tool path and the orchestration path record, plus
+  // the opt-in OTLP exporter. Listing and reading traces is default-deny with a
+  // SELF exception applied in-handler (`NON_ADMIN_ROUTES` above); configuring
+  // and firing the exporter is admin-only through the default gate. No trace
+  // route can change anything a governance decision depends on — it is a read
+  // surface over rows other subsystems already wrote.
+  registerTracingRoutes(app, db);
   // ADR-0058 — REGULATORY COMPLIANCE PACKS. Authoring/activating a pack and
   // recording an attestation are admin (not in NON_ADMIN_ROUTES); EVALUATING a
   // pack is reachable by a non-admin and runs ADR-0047's own
