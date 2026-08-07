@@ -86,6 +86,15 @@ export const users = pgTable("users", {
   failedLoginCount: integer("failed_login_count").notNull().default(0),
   lastFailedLoginAt: timestamp("last_failed_login_at", { withTimezone: true }),
   lockedUntil: timestamp("locked_until", { withTimezone: true }),
+  /** ADR-0069 (migration 0081): the customer's own cost-centre code for this
+   * PERSON. `projects.cost_center` and `initiatives.cost_center` already carry
+   * the code for a governed unit of work, and metered spend rolls up through
+   * them — but per-seat SaaS spend imported from a vendor invoice belongs to a
+   * human, not to a project, and there was nowhere to put the chargeback key
+   * for it. NULL = no cost centre; imported lines for that person roll up under
+   * "(no cost centre)" rather than being guessed from their memberships, which
+   * would be ambiguous the moment somebody belongs to two. */
+  costCenter: text("cost_center"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 },
   (t) => [
@@ -669,6 +678,18 @@ export const auditLog = pgTable(
         "ai_endpoint_signature",
         "shadow_ai_import",
         "shadow_ai_finding",
+        // ADR-0069: cross-vendor cost consolidation. Every IMPORT of a vendor
+        // export — including the refused ones (too large, duplicate bytes,
+        // unmappable file, ingest-scan blocked), which are again the rows that
+        // matter — every REVOCATION of an applied batch, and every change to
+        // the identity-resolution rules. An admin asserting "this vendor
+        // account is this person" is a chargeback decision somebody may have to
+        // defend months later, so the assertion, its stated reason and the
+        // number of stored lines it re-attributed all land here. Plain text
+        // column — no DDL needed.
+        "cost_import_batch",
+        "vendor_account_alias",
+        "vendor_domain_rule",
         // ADR-0061: ChatOps approvals. Admin CRUD of a chat WORKSPACE and of a
         // chat→RegulAIt IDENTITY LINK (the trust artifact that decides which
         // human a Slack click binds to), the outbound mirror of an approval,
@@ -6039,3 +6060,232 @@ export const agentFallbacks = pgTable(
 
 export type VirtualKeyRow = typeof virtualKeys.$inferSelect;
 export type AgentFallbackRow = typeof agentFallbacks.$inferSelect;
+
+// ===========================================================================
+// ADR-0069 — CROSS-VENDOR COST CONSOLIDATION (migration 0081)
+//
+// The gap this closes: `usage_events` is a METERED ledger — every row is a call
+// RegulAIt itself intercepted, entitled, dispatched and priced. Spend that
+// never touched the gateway (per-seat SaaS like Claude Code or Copilot, a raw
+// vendor key used outside RegulAIt, a Bedrock line on a cloud bill) had nowhere
+// to live at all, so a per-person chargeback figure was structurally impossible
+// no matter how good the metering was.
+//
+// THE ONE RULE THESE TABLES ENFORCE STRUCTURALLY. Imported money lives in a
+// DIFFERENT TABLE from metered money, and `imported_cost_lines.basis` carries a
+// CHECK constraint admitting the single value 'imported'. There is therefore no
+// row anywhere that could be read as metered when it was not — not by a buggy
+// query, not by a future writer, not by an operator with psql. The distinction
+// is a schema property, not a convention.
+//
+// WHAT AN IMPORT CAN WRITE, EXHAUSTIVELY: one `cost_import_batches` row and its
+// `imported_cost_lines`. No schema below has a field naming a role, a grant, an
+// entitlement, an agent, an approval or a budget; `resolved_user_id` can only
+// ever point at a user that ALREADY EXISTS, and the alias/domain-rule rows that
+// can make that pointer are admin-authored, never file-supplied.
+// ===========================================================================
+
+/**
+ * Every import — planned, applied AND REFUSED. The refusals are the rows that
+ * matter, exactly as in `shadow_ai_imports` and `onboarding_imports`: an
+ * operator has to be able to find "somebody uploaded a July invoice twice" or
+ * "somebody uploaded a file whose amount column was in cents" months later.
+ *
+ * `rows_parsed = rows_accepted + rows_refused` ALWAYS. That identity is the
+ * whole claim that nothing was silently dropped, and it is asserted in the
+ * suite rather than merely intended.
+ */
+export const costImportBatches = pgTable(
+  "cost_import_batches",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    adapter: text("adapter").notNull(),
+    vendor: text("vendor").notNull(),
+    format: text("format", { enum: ["csv", "json"] }).notNull(),
+    mode: text("mode", { enum: ["dry_run", "apply"] }).notNull(),
+    status: text("status", { enum: ["planned", "applied", "refused", "revoked"] }).notNull(),
+    /** a filename or a sentence about where the file came from — provenance a
+     * human wrote, kept beside the fingerprint of what actually arrived */
+    source: text("source"),
+    /** fingerprint of the exact bytes parsed. The partial unique index below
+     * makes a re-apply of the SAME bytes a refusal rather than a double count. */
+    payloadSha256: text("payload_sha256").notNull(),
+    rowsParsed: integer("rows_parsed").notNull().default(0),
+    rowsAccepted: integer("rows_accepted").notNull().default(0),
+    rowsRefused: integer("rows_refused").notNull().default(0),
+    /** the window the accepted lines actually span — derived from the rows, not
+     * asserted by the uploader */
+    periodStart: timestamp("period_start", { withTimezone: true }),
+    periodEnd: timestamp("period_end", { withTimezone: true }),
+    /** null whenever the batch carries more than one currency: there is no
+     * honest single total for a mixed-currency file and RegulAIt does no FX */
+    totalUsd: doublePrecision("total_usd"),
+    /** every per-row refusal, each with its file line number and reason */
+    refusals: jsonb("refusals").$type<Array<Record<string, unknown>>>().notNull(),
+    summary: jsonb("summary").$type<Record<string, unknown>>().notNull(),
+    /** ADR-0042/§8.4: the ingest scan verdict + COUNTS ONLY, never a match */
+    piiMode: text("pii_mode"),
+    scanVerdict: text("scan_verdict", { enum: ["clean", "flagged", "blocked"] }),
+    scanFindings: jsonb("scan_findings").$type<Record<string, unknown>>(),
+    ruleId: text("rule_id").notNull(),
+    reason: text("reason").notNull(),
+    requestedByUserId: uuid("requested_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    appliedAt: timestamp("applied_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedByUserId: uuid("revoked_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    index("cost_import_batches_created_idx").on(t.createdAt),
+    index("cost_import_batches_status_idx").on(t.status),
+    index("cost_import_batches_vendor_idx").on(t.vendor),
+    check(
+      "cost_import_batches_row_identity_check",
+      sql`${t.rowsParsed} = ${t.rowsAccepted} + ${t.rowsRefused}`,
+    ),
+  ],
+);
+
+/**
+ * THE RESTATED LINES. One row per accepted line of a customer's export.
+ *
+ * `basis` is CHECK-constrained to 'imported' and exists precisely so the
+ * distinction cannot be lost in a join, a view, a CSV or a future refactor. A
+ * consolidated figure that blended these into `usage_events` would be the exact
+ * dishonesty ADR-0069 exists to prevent, and the constraint is the cheapest
+ * possible structural guard against it.
+ *
+ * `resolved_user_id` is FK'd with ON DELETE SET NULL: deleting a user must
+ * un-attribute their imported spend, never delete the spend. The money was
+ * real whether or not the person is still on the roster.
+ */
+export const importedCostLines = pgTable(
+  "imported_cost_lines",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    batchId: uuid("batch_id")
+      .notNull()
+      .references(() => costImportBatches.id, { onDelete: "cascade" }),
+    /** ALWAYS 'imported'. See the CHECK below. */
+    basis: text("basis").notNull().default("imported"),
+    vendor: text("vendor").notNull(),
+    adapter: text("adapter").notNull(),
+    /** the 1-based line number in the uploaded file — the traceability anchor
+     * for a disputed chargeback */
+    sourceRow: integer("source_row").notNull(),
+    /** the vendor account identifier EXACTLY as the file spelled it */
+    accountRef: text("account_ref").notNull(),
+    /** trimmed + lowercased; the join key resolution runs against */
+    accountKey: text("account_key").notNull(),
+    resolvedUserId: uuid("resolved_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** HOW the match was made — exact_email | admin_alias | domain_rule |
+     * unresolved. A chargeback nobody can trace to a rule is a chargeback
+     * nobody can defend, so this is NOT NULL. */
+    resolutionMethod: text("resolution_method", {
+      enum: ["exact_email", "admin_alias", "domain_rule", "unresolved"],
+    }).notNull(),
+    resolutionDetail: text("resolution_detail").notNull(),
+    resolutionMappingId: uuid("resolution_mapping_id"),
+    resolutionDomainRuleId: uuid("resolution_domain_rule_id"),
+    /** a cost centre the FILE asserted. The resolved user's own `cost_center`
+     * is the lower-precedence fallback and is resolved at read time, so an
+     * admin correcting a person's cost centre restates history correctly
+     * instead of leaving every already-imported line stale. */
+    costCenter: text("cost_center"),
+    periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
+    periodEnd: timestamp("period_end", { withTimezone: true }).notNull(),
+    amount: doublePrecision("amount").notNull(),
+    currency: text("currency").notNull().default("USD"),
+    billingKind: text("billing_kind", { enum: ["seat", "usage", "commit", "other"] }).notNull(),
+    service: text("service"),
+    description: text("description"),
+    quantity: doublePrecision("quantity"),
+    unit: text("unit"),
+    /** bounded, adapter-authored structured notes (e.g. seat_roster's
+     * "derivedFrom: operator-asserted seat price"). Never a dump of the row. */
+    detail: jsonb("detail").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("imported_cost_lines_batch_idx").on(t.batchId),
+    index("imported_cost_lines_user_idx").on(t.resolvedUserId, t.periodStart),
+    index("imported_cost_lines_period_idx").on(t.periodStart, t.periodEnd),
+    index("imported_cost_lines_account_idx").on(t.accountKey),
+    // THE HONESTY SPINE, AS A CONSTRAINT. Nothing can ever store a line here
+    // that claims to have been metered.
+    check("imported_cost_lines_basis_check", sql`${t.basis} = 'imported'`),
+    check("imported_cost_lines_period_check", sql`${t.periodEnd} > ${t.periodStart}`),
+    // an unresolved line must carry no user, and a resolved one must carry one:
+    // the pair is what makes "unattributed" a real, countable state rather than
+    // a null that might mean anything
+    check(
+      "imported_cost_lines_resolution_check",
+      sql`(${t.resolutionMethod} = 'unresolved') = (${t.resolvedUserId} IS NULL)`,
+    ),
+  ],
+);
+
+/**
+ * AN ADMIN-ASSERTED ALIAS: "this vendor account is this person."
+ *
+ * The only way a non-email account identifier (an AWS account id, a vendor's
+ * internal user id) ever attributes to a human, and the correction path when a
+ * mechanical match is wrong. `reason` is NOT NULL because an assertion nobody
+ * has to justify is an assertion nobody can review; every create and delete
+ * also writes an `audit_log` row.
+ *
+ * `vendor = '*'` means "any vendor". A vendor-specific alias beats it.
+ */
+export const vendorAccountAliases = pgTable(
+  "vendor_account_aliases",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    vendor: text("vendor").notNull().default("*"),
+    /** normalized (trimmed + lowercased) */
+    accountKey: text("account_key").notNull(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    reason: text("reason").notNull(),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("vendor_account_aliases_uq").on(t.vendor, t.accountKey),
+    index("vendor_account_aliases_user_idx").on(t.userId),
+  ],
+);
+
+/**
+ * A DOMAIN REWRITE RULE: "an account at `from_domain` is the person with the
+ * same local part at `to_domain`."
+ *
+ * The realistic case is a company whose vendor seats are billed against
+ * `@acme-corp.com` while its RegulAIt directory is `@acme.com`. It is a RULE,
+ * not a guess: the rewritten address must match an existing user exactly, and
+ * two rules that produce two different people produce NO match at all (see
+ * `resolveVendorAccount`). Lossy by nature, so every line records which rule
+ * matched it.
+ */
+export const vendorDomainRules = pgTable(
+  "vendor_domain_rules",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    vendor: text("vendor").notNull().default("*"),
+    fromDomain: text("from_domain").notNull(),
+    toDomain: text("to_domain").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    reason: text("reason").notNull(),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("vendor_domain_rules_uq").on(t.vendor, t.fromDomain, t.toDomain),
+    check("vendor_domain_rules_distinct_check", sql`lower(${t.fromDomain}) <> lower(${t.toDomain})`),
+  ],
+);
+
+export type CostImportBatchRow = typeof costImportBatches.$inferSelect;
+export type ImportedCostLineRow = typeof importedCostLines.$inferSelect;
+export type VendorAccountAliasRow = typeof vendorAccountAliases.$inferSelect;
+export type VendorDomainRuleRow = typeof vendorDomainRules.$inferSelect;
