@@ -46,7 +46,7 @@ competitive risks. That is the basis on which the parity wave below is worth doi
 
 Each slice is scoped to be one ADR + one migration, dispatched **sequentially** — see §3.
 
-### Slice A — Groundedness & hallucination evaluation
+### Slice A — Groundedness & hallucination evaluation — **SHIPPED 2026-08-07, [ADR-0067](../decisions/0067-groundedness-evaluation.md) (migration 0079)**
 **Parity target:** Langfuse / Braintrust / Arize Phoenix / Ragas.
 **We have:** ADR-0044 eval datasets, scored runs, drift baselines, LLM-as-judge scaffolding.
 **Gap:** no groundedness/faithfulness metric — the specific measurement a regulated buyer
@@ -58,6 +58,12 @@ metrics that activate only with a provider. Per-metric thresholds feeding the ex
 sweep and the ADR-0045 model card.
 **Honesty line:** metrics that need a model must say so and refuse rather than degrade
 silently to a lexical proxy under the same name.
+**Shipped:** `eval_cases.context` (array of chunks) + `context_in_prompt`; four locally-computable
+metrics (`claim_support` with verbatim unsupported-claim extraction, `context_precision`,
+`context_recall`, `answer_relevance`); two judge-backed metrics returning a real 422 before any row
+is written. Read ADR-0067's "What this explicitly does NOT give you" before citing any of these —
+the lexical metrics are blind to negation flips and swapped attribution, and the judges' judgment is
+unverified because no provider is connected.
 
 ### Slice B — Red-team probe corpus depth
 **Parity target:** garak, promptfoo red-team, PyRIT.
@@ -82,7 +88,7 @@ labels each figure `metered` (we saw the call) vs `imported` (we were told).
 **Honesty line:** imported figures are a customer's own export, restated. Never presented as
 if we metered them.
 
-### Slice D — Gateway parity
+### Slice D — Gateway parity — **SHIPPED 2026-08-07, [ADR-0066](../decisions/0066-gateway-parity.md) (migration 0078)**
 **Parity target:** LiteLLM, Portkey, Cloudflare AI Gateway.
 **Gap:** virtual keys (issue a scoped key that proxies to a real vendor key the holder never
 sees), per-key model allow-lists and budgets, semantic/exact response caching with a cache-hit
