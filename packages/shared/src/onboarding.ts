@@ -589,14 +589,44 @@ export function planGroupRoleImport(
  * leading zero from someone's employee id.
  */
 export function parseCsv(text: string): string[][] {
-  const rows: string[][] = [];
+  return parseCsvRecords(text)
+    .map((r) => r.cells)
+    .filter((r) => r.some((cell) => cell.trim().length > 0));
+}
+
+/**
+ * The same reader, but every record keeps the 1-based LINE NUMBER of the
+ * physical line it started on, and blank records are NOT dropped.
+ *
+ * ADR-0069 needs this: an importer that refuses a malformed row has to name the
+ * row, and "row 14" has to mean line 14 of the file the operator is looking at.
+ * Filtering blanks first \u2014 which `parseCsv` does, correctly, for its own
+ * caller \u2014 renumbers everything after the first blank line and turns a precise
+ * refusal into a wrong one. `parseCsv` is now defined in terms of this so there
+ * is still exactly ONE CSV parser in the codebase.
+ *
+ * Character-scanned, never regex-driven: the input is an untrusted file.
+ */
+export function parseCsvRecords(text: string): Array<{ line: number; cells: string[] }> {
+  const rows: Array<{ line: number; cells: string[] }> = [];
   let row: string[] = [];
   let field = "";
   let inQuotes = false;
   let i = 0;
+  let line = 1;
+  let recordLine = 1;
   const src = text.replace(/^\uFEFF/, "");
+  const pushRow = () => {
+    row.push(field);
+    rows.push({ line: recordLine, cells: row });
+    row = [];
+    field = "";
+  };
   while (i < src.length) {
     const c = src[i]!;
+    // a newline INSIDE a quoted field still advances the physical line counter,
+    // so the next record's reported line number stays true to the file
+    if (c === "\n" && inQuotes) line += 1;
     if (inQuotes) {
       if (c === '"') {
         if (src[i + 1] === '"') {
@@ -628,21 +658,17 @@ export function parseCsv(text: string): string[][] {
       continue;
     }
     if (c === "\n") {
-      row.push(field);
-      rows.push(row);
-      row = [];
-      field = "";
+      pushRow();
+      line += 1;
+      recordLine = line;
       i += 1;
       continue;
     }
     field += c;
     i += 1;
   }
-  if (field.length > 0 || row.length > 0) {
-    row.push(field);
-    rows.push(row);
-  }
-  return rows.filter((r) => r.some((cell) => cell.trim().length > 0));
+  if (field.length > 0 || row.length > 0) pushRow();
+  return rows;
 }
 
 /**
