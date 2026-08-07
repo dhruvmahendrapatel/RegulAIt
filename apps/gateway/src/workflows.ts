@@ -1648,7 +1648,14 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       db
         .select()
         .from(approvals)
-        .where(and(eq(approvals.instanceId, instanceId), eq(approvals.status, "pending"))),
+        .where(and(eq(approvals.instanceId, instanceId), eq(approvals.status, "pending")))
+        // Ordered on purpose. Without an ORDER BY, Postgres is free to return
+        // these rows in any order it likes, and under a quorum of `all` there
+        // is one pending row PER approver — so "the first pending gate" is a
+        // different approval from one request to the next. That is a wart for
+        // anything rendering the queue, and it silently broke a test that had
+        // been reading the first row as though it were the caller's own.
+        .orderBy(approvals.requestedAt, approvals.id),
     ]);
     // name the approver on each pending gate so "awaiting <who>" is renderable
     const approverIds = [...new Set(pendingApprovals.map((a) => a.approverUserId))];

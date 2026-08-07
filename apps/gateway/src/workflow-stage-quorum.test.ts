@@ -61,9 +61,28 @@ async function start(changeType: string): Promise<string> {
   return r.json().id as string;
 }
 
-async function decideAs(instanceId: string, who: { authorization: string }, decision = "approved" as const) {
+/**
+ * Decide the gate approval THAT BELONGS TO `whoId`.
+ *
+ * The `approverUserId` match is load-bearing, not defensive. Under a quorum of
+ * `all` this instance has one pending gate approval PER approver, and only the
+ * named approver may decide their own (`not_the_named_approver`, 403). This
+ * helper used to take the first gate approval in the list, which is only ever
+ * correct by luck: the route's query carries no ORDER BY, so the order is
+ * whatever Postgres hands back. It passed locally for months and failed in CI
+ * the first time the physical row order came back the other way round — ana
+ * trying to decide bob's approval, and the platform correctly refusing.
+ */
+async function decideAs(
+  instanceId: string,
+  whoId: string,
+  who: { authorization: string },
+  decision = "approved" as const,
+) {
   const view = await app.inject({ method: "GET", headers: who, url: `/v1/workflows/instances/${instanceId}` });
-  const gate = (view.json().pendingApprovals ?? []).find((a: { stageId: string }) => a.stageId === "gate");
+  const gate = (view.json().pendingApprovals ?? []).find(
+    (a: { stageId: string; approverUserId: string }) => a.stageId === "gate" && a.approverUserId === whoId,
+  );
   expect(gate).toBeTruthy();
   const d = await app.inject({ method: "POST", headers: who, url: `/v1/approvals/${gate.id}/decide`, payload: { decision } });
   expect(d.statusCode).toBe(200);
@@ -113,7 +132,7 @@ describe("stage quorum overrides the org default in BOTH directions", () => {
     expect(tpl.statusCode).toBe(201);
     const id = await start("wq-any-change");
     expect(await status(id)).toBe("blocked_on_approval");
-    await decideAs(id, anaAuth);
+    await decideAs(id, anaId, anaAuth);
     expect(await status(id)).toBe("completed");
     // bob's pending row was superseded, not left decidable
     const rows = await db
@@ -132,9 +151,9 @@ describe("stage quorum overrides the org default in BOTH directions", () => {
       const tpl = await makeTemplate("wq-all", "wq-all-change", { quorum: "all" });
       expect(tpl.statusCode).toBe(201);
       const id = await start("wq-all-change");
-      await decideAs(id, anaAuth);
+      await decideAs(id, anaId, anaAuth);
       expect(await status(id)).toBe("blocked_on_approval"); // the stage override held
-      await decideAs(id, bobAuth);
+      await decideAs(id, bobId, bobAuth);
       expect(await status(id)).toBe("completed");
     } finally {
       await app.inject({
@@ -147,9 +166,9 @@ describe("stage quorum overrides the org default in BOTH directions", () => {
     const tpl = await makeTemplate("wq-default", "wq-default-change", {});
     expect(tpl.statusCode).toBe(201);
     const id = await start("wq-default-change");
-    await decideAs(id, anaAuth);
+    await decideAs(id, anaId, anaAuth);
     expect(await status(id)).toBe("blocked_on_approval"); // org 'all' governs
-    await decideAs(id, bobAuth);
+    await decideAs(id, bobId, bobAuth);
     expect(await status(id)).toBe("completed");
   });
 });
