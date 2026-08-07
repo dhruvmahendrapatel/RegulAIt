@@ -2095,6 +2095,21 @@ export const complianceProfiles = pgTable("compliance_profiles", {
    * RAISE a layer and a local setting can never relax below it. NULL (every
    * pre-0055 row) = this framework has no guardrail opinion. */
   guardrailModes: jsonb("guardrail_modes").$type<Partial<Record<GuardrailDetectorId, GuardrailMode>>>(),
+  /** ADR-0068 §5 (migration 0080) — this framework's RED-TEAM opinion, on the
+   * SAME row as its PII mode and guardrail floor rather than in a parallel
+   * config: the attack classes it forces into the gating set, the minimum
+   * trials per probe it requires, and the severity floor at or above which a
+   * defeat fails its class outright. Composed by the cascade's existing rules
+   * (union / MAX / strictest-wins) and applied TIGHTEN-ONLY, so a framework can
+   * raise a red-team bar and never lower one. NULL (every pre-0080 row) = this
+   * framework has no red-team opinion and the caller's request stands. */
+  redteamGatingClasses: jsonb("redteam_gating_classes").$type<string[]>(),
+  redteamMinTrials: integer("redteam_min_trials"),
+  // literal rather than RED_TEAM_SEVERITY_VALUES: that const is declared far
+  // below this table and would be in its temporal dead zone at module load.
+  redteamFailOnSeverity: text("redteam_fail_on_severity", {
+    enum: ["low", "medium", "high", "critical"],
+  }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -4791,12 +4806,24 @@ export type ChatOpsInteractionRow = typeof chatopsInteractions.$inferSelect;
 //   is deliberately no parallel evidence or approvals surface.
 // ---------------------------------------------------------------------------
 
+/** ADR-0068 (migration 0080) extended this from five to ten. These are Drizzle
+ * TYPE-level enums over plain `text` columns — there is no Postgres ENUM TYPE.
+ * There IS, however, a CHECK constraint from migration 0070 naming the five
+ * original values, so 0080 drops and re-adds it with the widened list rather
+ * than relaxing it away: a constraint that lists the vocabulary is what stops a
+ * typo'd attack class becoming a class nobody ever gates on. The new list is a
+ * strict superset, so no existing row is invalidated. */
 export const RED_TEAM_ATTACK_CLASS_VALUES = [
   "prompt_injection",
   "jailbreak",
   "data_exfiltration",
   "pii_leak",
   "bias",
+  "indirect_prompt_injection",
+  "tool_abuse",
+  "excessive_agency",
+  "system_prompt_extraction",
+  "encoding_evasion",
 ] as const;
 
 export const RED_TEAM_SEVERITY_VALUES = ["low", "medium", "high", "critical"] as const;
@@ -4826,6 +4853,11 @@ export const redteamLibraries = pgTable(
       onDelete: "restrict",
     }),
     evalDatasetVersion: integer("eval_dataset_version"),
+    /** ADR-0068 §2 — which SHIPPED corpus version seeded this library, when one
+     * did. NULL = hand-authored, or seeded before 0080 (which was always
+     * corpus v1). Stamped so a result is reproducible against a stated corpus,
+     * not merely against a library row somebody could have edited. */
+    corpusVersion: integer("corpus_version"),
     publishedAt: timestamp("published_at", { withTimezone: true }),
     createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -4848,6 +4880,20 @@ export const redteamProbes = pgTable(
     attackClass: text("attack_class", { enum: RED_TEAM_ATTACK_CLASS_VALUES }).notNull(),
     severity: text("severity", { enum: RED_TEAM_SEVERITY_VALUES }).notNull().default("high"),
     input: text("input").notNull(),
+    /** ADR-0068 §3 — the REST of a multi-turn sequence, in order. NULL/[] (every
+     * pre-0080 row) = an ordinary single-turn probe, materialized into an
+     * `eval_cases` row exactly as before. A probe WITH turns cannot be an eval
+     * case (a case is one input) and runs through the sequence runner instead —
+     * same `executeGovernedDispatch`, same scorer, same audit and cost path. */
+    turns: jsonb("turns").$type<string[]>(),
+    /** ADR-0068 §4 — tools the agent HOLDS for this probe. A declaration, never
+     * a grant: the induced call is adjudicated against the real entitlement
+     * layer and is never executed. */
+    tools: jsonb("tools").$type<Array<Record<string, unknown>>>(),
+    /** ADR-0068 §4 — the agentic vector: which tool/connector the probe tries to
+     * induce, named by NAME so an offline corpus can ship without ids from an
+     * install it has never seen. */
+    agentic: jsonb("agentic").$type<Record<string, unknown>>(),
     scorerKind: text("scorer_kind").notNull(),
     scorerConfig: jsonb("scorer_config").$type<Record<string, unknown>>().notNull().default({}),
     expected: jsonb("expected"),
@@ -4905,6 +4951,38 @@ export const redteamRuns = pgTable(
     regression: boolean("regression").notNull().default(false),
     gateReason: text("gate_reason"),
     costUsd: doublePrecision("cost_usd").notNull().default(0),
+    // --- ADR-0068 §1: N trials and attack-success-rate statistics -----------
+    /** trials per probe. 1 (the default, and every pre-0080 row) = the ADR-0057
+     * single-shot behaviour, and `measurementQuality` labels it `single-trial`
+     * so it is never reported as a measured rate. */
+    trials: integer("trials").notNull().default(1),
+    /** POOLED attack-success rate across every usable trial of every measured
+     * probe: defeats / trials. NULL when no probe produced a usable trial. */
+    asr: doublePrecision("asr"),
+    /** the Wilson score interval on `asr`, stored so the denominator can never
+     * be separated from the rate */
+    asrLower: doublePrecision("asr_lower"),
+    asrUpper: doublePrecision("asr_upper"),
+    /** total usable trials — the DENOMINATOR of `asr` */
+    asrTrials: integer("asr_trials").notNull().default(0),
+    /** 'not-run' | 'single-trial' | 'low-power' | 'measured' */
+    measurementQuality: text("measurement_quality"),
+    /** probes with NO usable trial: an unregistered agentic target, or every
+     * dispatch errored. Excluded from every rate above, counted here, and NEVER
+     * counted as resisted. */
+    notRunProbes: integer("not_run_probes").notNull().default(0),
+    /** per-probe ASR summaries verbatim from `summarizeProbeAsr`, including the
+     * per-trial outcome list a reviewer needs to see the variance */
+    probeStats: jsonb("probe_stats").$type<unknown[]>().notNull().default([]),
+    /** ADR-0068 §4: how many probes induced the model successfully but were
+     * STOPPED by this deployment's own entitlement layer. A first-class result,
+     * not an absence — it is the evidence that pillar 1 held. */
+    platformHeld: integer("platform_held").notNull().default(0),
+    /** ADR-0068 §2: the shipped corpus version behind this result, when known */
+    corpusVersion: integer("corpus_version"),
+    /** ADR-0068 §5: what the compliance cascade TIGHTENED on this run, and
+     * which framework tags said so. Empty on an unclassified project. */
+    presetTightened: jsonb("preset_tightened").$type<string[]>().notNull().default([]),
     note: text("note"),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
@@ -4913,6 +4991,77 @@ export const redteamRuns = pgTable(
     uniqueIndex("redteam_runs_eval_run_uq").on(t.evalRunId),
     index("redteam_runs_agent_idx").on(t.agentId, t.startedAt),
     index("redteam_runs_library_idx").on(t.libraryId),
+  ],
+);
+
+/**
+ * ADR-0068 §1 — ONE TRIAL of a red-team run.
+ *
+ * `redteam_runs.eval_run_id` stays UNIQUE and RESTRICT (a verdict is never
+ * detachable from its evidence); it now points at the FIRST trial's eval run.
+ * This table holds all N, so "which governed, metered, audited eval runs
+ * produced this ASR" is one query rather than a claim.
+ *
+ * `eval_run_id` is nullable because a trial that contained ONLY sequence /
+ * agentic probes has no eval run — those probes cannot be `eval_cases` rows.
+ * They still ride `executeGovernedDispatch`, so they are still metered into
+ * `usage_events` and still audited; they simply have no eval-run wrapper.
+ */
+export const redteamTrials = pgTable(
+  "redteam_trials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => redteamRuns.id, { onDelete: "cascade" }),
+    /** 1-based */
+    trial: integer("trial").notNull(),
+    evalRunId: uuid("eval_run_id").references(() => evalRuns.id, { onDelete: "set null" }),
+    probes: integer("probes").notNull().default(0),
+    defeated: integer("defeated").notNull().default(0),
+    errored: integer("errored").notNull().default(0),
+    costUsd: doublePrecision("cost_usd").notNull().default(0),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("redteam_trials_run_trial_uq").on(t.runId, t.trial)],
+);
+
+/**
+ * ADR-0068 §1 — ONE PROBE IN ONE TRIAL. The per-trial outcomes, stored rather
+ * than only aggregated, because "2/3 failed" and "40/60 failed" must be
+ * distinguishable by a reviewer reading the record and not merely by whoever
+ * computed the mean. This is also where an agentic probe's ADJUDICATION lands:
+ * what the model was induced to call, what the entitlement kernel decided, and
+ * the fact — always — that nothing was executed.
+ */
+export const redteamProbeTrials = pgTable(
+  "redteam_probe_trials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => redteamRuns.id, { onDelete: "cascade" }),
+    probeKey: text("probe_key").notNull(),
+    attackClass: text("attack_class", { enum: RED_TEAM_ATTACK_CLASS_VALUES }).notNull(),
+    severity: text("severity", { enum: RED_TEAM_SEVERITY_VALUES }).notNull(),
+    trial: integer("trial").notNull(),
+    /** true = the agent COMPLIED with what it should have refused */
+    defeated: boolean("defeated").notNull(),
+    score: doublePrecision("score").notNull(),
+    /** why this trial produced no usable result. NOT NULL here means the trial
+     * is excluded from the ASR denominator — never scored as resisted. */
+    error: text("error"),
+    /** how many governed dispatches this trial made (a multi-turn probe makes
+     * one per turn) */
+    turnsDispatched: integer("turns_dispatched").notNull().default(1),
+    outputSnippet: text("output_snippet"),
+    /** the ADR-0068 §4 adjudication, when this probe had an agentic vector */
+    adjudication: jsonb("adjudication").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("redteam_probe_trials_run_idx").on(t.runId, t.probeKey),
+    uniqueIndex("redteam_probe_trials_uq").on(t.runId, t.probeKey, t.trial),
   ],
 );
 
@@ -4952,6 +5101,8 @@ export type RedTeamLibraryRow = typeof redteamLibraries.$inferSelect;
 export type RedTeamProbeRow = typeof redteamProbes.$inferSelect;
 export type RedTeamRunRow = typeof redteamRuns.$inferSelect;
 export type RedTeamFindingRow = typeof redteamFindings.$inferSelect;
+export type RedTeamTrialRow = typeof redteamTrials.$inferSelect;
+export type RedTeamProbeTrialRow = typeof redteamProbeTrials.$inferSelect;
 
 // ---------------------------------------------------------------------------
 // ADR-0058 (migration 0073) — REGULATORY COMPLIANCE PACKS
