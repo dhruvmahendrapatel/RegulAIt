@@ -618,7 +618,16 @@ describe("G3 MCP PII enforcement", () => {
     // the spend is honest: the tool really ran
     const after = await usageRows(blockProject);
     expect(after.length).toBe(before.length + 1);
-    const row = after[after.length - 1]!;
+    // The new row is identified by IDENTITY, not by position. `usageRows` is an
+    // unordered SELECT, so "the last element" is whatever Postgres happened to
+    // hand back last — not the row this call just wrote. That distinction is
+    // invisible until the physical row order changes, which is exactly how this
+    // failed in CI while passing locally: the tail element was an `agent` row
+    // from an earlier test in the same project.
+    const seen = new Set(before.map((r) => r.id));
+    const fresh = after.filter((r) => !seen.has(r.id));
+    expect(fresh).toHaveLength(1);
+    const row = fresh[0]!;
     expect(row.objectType).toBe("mcp_tool");
     expect((row.detail as { pii?: { action: string } }).pii?.action).toBe("block");
     expect(JSON.stringify(row.detail)).not.toContain(SSN);
