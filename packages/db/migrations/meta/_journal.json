@@ -540,6 +540,13 @@
       "when": 1785012000000,
       "tag": "0077_regulait_llm",
       "breakpoints": true
+    },
+    {
+      "idx": 78,
+      "version": "7",
+      "when": 1785013000000,
+      "tag": "0078_gateway_parity",
+      "breakpoints": true
     }
   ]
 }

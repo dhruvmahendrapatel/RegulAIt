@@ -712,6 +712,16 @@ export const setAgentSystemPromptSchema = z.object({
   systemPrompt: z.string().min(1).max(20_000).nullable(),
 });
 
+/** ADR-0066 §4: replace an agent's ORDERED provider fallback chain. PUT-the-
+ * whole-list on purpose — a partial chain is never a valid intermediate state,
+ * and an incremental API would need position renumbering, which is where this
+ * kind of feature grows its bugs. An empty array clears the chain, explicitly.
+ * The cap is deliberate: a chain longer than this is not a resilience strategy,
+ * it is a request that will take minutes to fail. */
+export const setAgentFallbacksSchema = z.object({
+  fallbackAgentIds: z.array(z.string().uuid()).max(8),
+});
+
 export const createAgentGrantSchema = z.object({
   userId: z.string().uuid(),
   agentId: z.string().uuid(),

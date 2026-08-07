@@ -730,6 +730,14 @@ export const auditLog = pgTable(
         "training_dataset",
         "training_job",
         "training_artifact",
+        // ADR-0066 (gateway parity): a virtual key's whole lifecycle — issued,
+        // updated, revoked — plus every dispatch it was REFUSED, by its own
+        // allow-list or its own budget. Kept as its own object type rather than
+        // filed under `agent` because "what did this key do, and what was it
+        // stopped from doing" is the question an operator asks when handing a
+        // credential to a contractor, and it should be one query.
+        // Plain text column — no DDL needed.
+        "virtual_key",
       ],
     })
       .notNull()
@@ -1907,6 +1915,12 @@ export const usageEvents = pgTable(
     configVersionId: uuid("config_version_id"),
     configVersion: integer("config_version"),
     configCanary: boolean("config_canary").notNull().default(false),
+    /** ADR-0066 §2 — WHICH VIRTUAL KEY PAID FOR THIS ROW. FK-free like every
+     * other attribution column here: a revoked-and-deleted key must not take
+     * its spend history with it. NULL = the call arrived on an ordinary API
+     * key, a session, or an internal (scheduler/orchestration) path, which is
+     * every pre-0066 row. */
+    virtualKeyId: uuid("virtual_key_id"),
     detail: jsonb("detail"),
   },
   (t) => [
@@ -5721,3 +5735,122 @@ export type TrainingDatasetRowRow = typeof trainingDatasetRows.$inferSelect;
 export type TrainingBackendConfigRow = typeof trainingBackendConfigs.$inferSelect;
 export type TrainingJobRow = typeof trainingJobs.$inferSelect;
 export type TrainingArtifactRow = typeof trainingArtifacts.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0066 (migration 0078) — GATEWAY PARITY: virtual keys and fallback chains.
+// ---------------------------------------------------------------------------
+
+/** The `rglv_` prefix is what makes a virtual key visibly NOT an ordinary
+ * `rgl_` API key in a log line, a `.env` file or a screenshot. Both hash with
+ * the same sha256 and neither is ever stored in plaintext. */
+export const VIRTUAL_KEY_PREFIX = "rglv_";
+
+/**
+ * ADR-0066 §2 — A VIRTUAL KEY: an issued credential that resolves to an
+ * upstream vendor credential the holder never sees, and that can only ever
+ * NARROW its owner's entitlements.
+ *
+ * The ceiling invariant, which is the whole point of the table: a dispatch on
+ * this key is allowed iff the OWNING USER is entitled to the served agent AND
+ * the key's own allow-list admits it. `allowedModels` can therefore never
+ * widen anything — it is intersected with, not substituted for, the policy
+ * kernel's answer. A key that lists a model its owner was never granted still
+ * denies, and `gateway-parity.test.ts` asserts exactly that.
+ *
+ * Deliberately a SEPARATE TABLE from `api_keys` rather than nullable columns on
+ * it: an ordinary API key IS the user (it carries their admin-ness and reaches
+ * every route they may), and a virtual key is a scoped, budgeted, expiring
+ * proxy that reaches only the dispatch surfaces. Conflating them would have
+ * made every existing `api_keys` read a place where a caller could forget to
+ * check a budget.
+ */
+export const virtualKeys = pgTable(
+  "virtual_keys",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** operator-chosen label — what appears in the portal and the audit row */
+    name: text("name").notNull(),
+    /** the human whose entitlements are this key's CEILING. Cascade: a deleted
+     * user's keys are meaningless, and leaving them would leave a credential
+     * with no ceiling to intersect against. */
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    /** sha256 of the issued token, exactly as `api_keys.token_hash`. The token
+     * itself is returned ONCE, at creation, and is not recoverable. */
+    tokenHash: text("token_hash").notNull().unique(),
+    /** NULL = no per-key model restriction (the owner's entitlements alone are
+     * the ceiling). A non-empty list admits a dispatch whose served agent
+     * matches by provider-native model id OR by agent id — the two things a
+     * client can actually name, so a key issued against `GET /v1/models`
+     * output and a key issued against an agent id both work. */
+    allowedModels: jsonb("allowed_models").$type<string[]>(),
+    /** NULL = no per-key budget. When set, spend is enforced BEFORE dispatch
+     * against `spent_usd`; the first crossing is allowed (measured cost is only
+     * knowable after the call) and every call after it is refused 402. */
+    budgetUsd: doublePrecision("budget_usd"),
+    /** running MEASURED spend on this key, incremented from the same costUsd
+     * that lands in `usage_events`. An unpriced agent adds 0 rather than an
+     * invented figure — and `usage_events.virtual_key_id` remains the ledger
+     * of record, this column being the enforcement counter. */
+    spentUsd: doublePrecision("spent_usd").notNull().default(0),
+    /** the PLATFORM credential this key proxies to. NULL = the ordinary
+     * resolution chain applies (owner's BYO credential → platform → env).
+     * When set, that one credential is pinned for every dispatch on this key,
+     * and a served agent whose provider does not match is refused rather than
+     * quietly falling through to a different key. */
+    upstreamCredentialId: uuid("upstream_credential_id").references(() => modelCredentials.id, {
+      onDelete: "restrict",
+    }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    index("virtual_keys_user_idx").on(t.userId),
+    check("virtual_keys_budget_check", sql`${t.budgetUsd} IS NULL OR ${t.budgetUsd} >= 0`),
+  ],
+);
+
+/**
+ * ADR-0066 §4 — AN ORDERED PROVIDER FALLBACK CHAIN, per agent.
+ *
+ * A row says: "when `agent_id` fails at the TRANSPORT layer, try
+ * `fallback_agent_id` next." Deliberately agent→agent rather than
+ * agent→provider: entitlement in this system is granted on AGENTS, so a chain
+ * expressed in providers would name hops the policy kernel has no opinion
+ * about, and re-evaluating entitlement per hop — the property that makes this
+ * safe — would be impossible.
+ *
+ * A hop is NOT a widening. Every hop runs the caller's own `evaluateAgent`
+ * again, from scratch; a hop the caller is not entitled to is skipped and
+ * audited, never inherited from the first hop's decision.
+ */
+export const agentFallbacks = pgTable(
+  "agent_fallbacks",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    fallbackAgentId: uuid("fallback_agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    /** 0-based order the chain is attempted in */
+    position: integer("position").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("agent_fallbacks_position_uq").on(t.agentId, t.position),
+    uniqueIndex("agent_fallbacks_target_uq").on(t.agentId, t.fallbackAgentId),
+    // a chain that starts by trying the agent it is a chain FOR is an infinite
+    // loop expressed as data; refuse it in the database, not only in a handler
+    check("agent_fallbacks_no_self_check", sql`${t.agentId} <> ${t.fallbackAgentId}`),
+    index("agent_fallbacks_agent_idx").on(t.agentId, t.position),
+  ],
+);
+
+export type VirtualKeyRow = typeof virtualKeys.$inferSelect;
+export type AgentFallbackRow = typeof agentFallbacks.$inferSelect;
