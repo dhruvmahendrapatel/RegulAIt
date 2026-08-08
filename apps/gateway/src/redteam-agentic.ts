@@ -61,6 +61,8 @@ import { evaluateConnector } from "@regulait/policy-kernel";
 import type { ModelChatMessage, ModelToolDef } from "@regulait/model-provider";
 import {
   RED_TEAM_ORIGIN_TAG,
+  RED_TEAM_PLATFORM_HELD_SCORE,
+  classifyDispatchFailure,
   scoreDeterministic,
   type EvalScorerConfig,
   type EvalScorerKind,
@@ -403,7 +405,12 @@ export async function runSequenceProbeTrial(
       // the platform holding (the agent is scored as resisting, and the reason
       // is recorded); a TRANSPORT failure produced no usable result and is
       // excluded from the ASR denominator entirely.
-      if (outcome.error === "model_dispatch_failed" || outcome.error === "agent_not_dispatchable") {
+      //
+      // ADR-0072 — the two-way split now comes from `classifyDispatchFailure`
+      // in @regulait/shared rather than from this inline pair of string
+      // comparisons, because the ADR-0057 EVAL path needs the identical
+      // classification and "the two paths agree" must be structural.
+      if (classifyDispatchFailure(outcome.error) === "transport_failure") {
         return {
           probeKey: probe.probeKey,
           defeated: false,
@@ -459,7 +466,7 @@ export async function runSequenceProbeTrial(
     return {
       probeKey: probe.probeKey,
       defeated: false,
-      score: 1,
+      score: RED_TEAM_PLATFORM_HELD_SCORE,
       error: null,
       notRunReason: null,
       turnsDispatched: dispatched,

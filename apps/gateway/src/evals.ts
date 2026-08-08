@@ -65,6 +65,8 @@ import {
 import { evaluateAgent, type AgentDecision } from "@regulait/policy-kernel";
 import { isModelProviderKind } from "@regulait/model-provider";
 import {
+  SCORING_SEMANTICS_CHANGELOG,
+  SCORING_SEMANTICS_VERSION,
   aggregateEvalResults,
   buildGroundednessJudgePrompt,
   buildJudgePrompt,
@@ -79,6 +81,7 @@ import {
   parseGroundednessVerdict,
   parseJudgeVerdict,
   scoreDeterministic,
+  scoringSemanticsMismatchReason,
   setEvalBaselineSchema,
   startEvalRunSchema,
   validateScorerConfig,
@@ -323,6 +326,24 @@ async function agentDecider(db: Db, userId: string) {
  *   3. the most recent completed run that did not itself fail its gate.
  * A run is never compared against itself.
  */
+export interface BaselineResolution {
+  /** the run to compare against, or null when there is no COMPARABLE one */
+  baseline: EvalRunRow | null;
+  /**
+   * ADR-0072 — completed runs that would have been eligible but were excluded
+   * purely because they were scored under a different semantics version. This
+   * is the difference between "you have no history" and "your history predates
+   * the correction", and a gate reason must be able to tell them apart.
+   */
+  incomparableCandidates: number;
+  /**
+   * ADR-0072 — set when the ADMIN-PINNED (`is_baseline`) run for this scope was
+   * excluded for semantics. A human chose that run; quietly substituting a
+   * different one is a comparison nobody asked for, so the gate refuses instead.
+   */
+  pinnedIncomparable: { runId: string; semantics: number } | null;
+}
+
 export async function resolveBaselineRun(
   db: Db,
   opts: {
@@ -331,11 +352,32 @@ export async function resolveBaselineRun(
     agentId: string;
     explicitRunId?: string | null | undefined;
     excludeRunId?: string | null | undefined;
+    /** ADR-0072 — the semantics the CURRENT run was scored under */
+    semantics?: number;
   },
-): Promise<EvalRunRow | null> {
+): Promise<BaselineResolution> {
+  const semantics = opts.semantics ?? SCORING_SEMANTICS_VERSION;
+  const none: BaselineResolution = {
+    baseline: null,
+    incomparableCandidates: 0,
+    pinnedIncomparable: null,
+  };
   if (opts.explicitRunId) {
     const [row] = await db.select().from(evalRuns).where(eq(evalRuns.id, opts.explicitRunId));
-    return row && row.status === "completed" ? row : null;
+    if (!row || row.status !== "completed") return none;
+    // An EXPLICITLY named incomparable run is returned as-is, with the mismatch
+    // reported: the caller pinned it deliberately, so the honest answer is a
+    // stated refusal to compare, not a silent substitution. `runEvalSuite`
+    // refuses this case BEFORE the run row is inserted; the gate refuses it
+    // again if anything ever reaches it by another path.
+    if (row.scoringSemantics !== semantics) {
+      return {
+        baseline: null,
+        incomparableCandidates: 1,
+        pinnedIncomparable: { runId: row.id, semantics: row.scoringSemantics },
+      };
+    }
+    return { baseline: row, incomparableCandidates: 0, pinnedIncomparable: null };
   }
   const scope = and(
     eq(evalRuns.datasetId, opts.datasetId),
@@ -344,19 +386,37 @@ export async function resolveBaselineRun(
     eq(evalRuns.status, "completed"),
     opts.excludeRunId ? ne(evalRuns.id, opts.excludeRunId) : undefined,
   );
+  // The ADMIN PIN is looked up WITHOUT the semantics filter on purpose: an
+  // operator whose pinned baseline is stranded must be told so by name.
   const [pinned] = await db
     .select()
     .from(evalRuns)
     .where(and(scope, eq(evalRuns.isBaseline, true)))
     .limit(1);
-  if (pinned) return pinned;
+  if (pinned) {
+    if (pinned.scoringSemantics !== semantics) {
+      return {
+        baseline: null,
+        incomparableCandidates: 1,
+        pinnedIncomparable: { runId: pinned.id, semantics: pinned.scoringSemantics },
+      };
+    }
+    return { baseline: pinned, incomparableCandidates: 0, pinnedIncomparable: null };
+  }
   const [latest] = await db
     .select()
     .from(evalRuns)
-    .where(and(scope, ne(evalRuns.gatePassed, false)))
+    .where(and(scope, ne(evalRuns.gatePassed, false), eq(evalRuns.scoringSemantics, semantics)))
     .orderBy(desc(evalRuns.startedAt))
     .limit(1);
-  return latest ?? null;
+  if (latest) {
+    return { baseline: latest, incomparableCandidates: 0, pinnedIncomparable: null };
+  }
+  const [{ n } = { n: 0 }] = await db
+    .select({ n: count() })
+    .from(evalRuns)
+    .where(and(scope, ne(evalRuns.gatePassed, false), ne(evalRuns.scoringSemantics, semantics)));
+  return { baseline: null, incomparableCandidates: Number(n ?? 0), pinnedIncomparable: null };
 }
 
 function aggregateOf(run: EvalRunRow): EvalAggregate {
@@ -495,17 +555,21 @@ export async function runEvalSuite(
 
   // ------------------------------------------------------------------
   // ADR-0067 §4 — THE HONESTY LINE, ENFORCED BEFORE ANYTHING IS WRITTEN.
+  // ADR-0072 — NOW COVERING `llm_as_judge` TOO.
   //
   // A metric that needs a model must REFUSE when no model is reachable. It must
   // not fall back to the lexical estimate and report it under the judged name,
   // because that would tell a regulated buyer their hallucination rate is
-  // MEASURED when it was ESTIMATED.
+  // MEASURED when it was ESTIMATED — and it must not score the case ZERO
+  // either, because a zero is a MEASUREMENT and "we had no instrument" is not.
+  // ADR-0044's original score-0-with-`no_judge_configured` behaviour is GONE:
+  // that zero was averaged into `meanScore`, compared against a drift baseline,
+  // read by a promotion gate as a bad answer, and citable on a model card.
   //
   // The refusal is placed HERE — after the cases are known, before the
   // `eval_runs` row is inserted — so a refused run leaves NO run row, NO
-  // eval_results row, and no half-scored suite a later reader could mistake for
-  // a measurement. `judgeAvailabilityFor` is a pure function in
-  // @regulait/shared, tested exhaustively without a database.
+  // eval_results row, and not one dispatched token. `judgeAvailabilityFor` is a
+  // pure function in @regulait/shared, tested exhaustively without a database.
   // ------------------------------------------------------------------
   const scorerKinds = cases.map((c) => resolveScorer(dataset, c).kind);
   let judgeDispatchable = false;
@@ -560,10 +624,54 @@ export async function runEvalSuite(
     };
   }
 
+  // ------------------------------------------------------------------
+  // ADR-0072 — THE CROSS-SEMANTICS BASELINE REFUSAL, ALSO BEFORE ANY WRITE.
+  //
+  // An EXPLICITLY pinned baseline that predates the scoring correction is a
+  // request to compare two different measurements. Refusing it here — before
+  // the run row, before a single dispatched token — is both cheaper and more
+  // honest than running the suite and then declining to render a delta: the
+  // operator's real task is to re-pin, and they learn that immediately.
+  // ------------------------------------------------------------------
+  if (opts.baselineRunId) {
+    const [pinned] = await db.select().from(evalRuns).where(eq(evalRuns.id, opts.baselineRunId));
+    if (pinned && pinned.scoringSemantics !== SCORING_SEMANTICS_VERSION) {
+      const reason = scoringSemanticsMismatchReason(
+        SCORING_SEMANTICS_VERSION,
+        pinned.scoringSemantics,
+      );
+      await db.insert(auditLog).values({
+        userId: opts.userId,
+        objectType: "eval_run",
+        objectId: dataset.id,
+        detail: {
+          phase: "baseline-semantics",
+          purpose,
+          ...originDetail,
+          agentId: agent.id,
+          baselineRunId: pinned.id,
+          baselineSemantics: pinned.scoringSemantics,
+          currentSemantics: SCORING_SEMANTICS_VERSION,
+        },
+        effect: "deny",
+        ruleId: "baseline_semantics_mismatch",
+        ruleChain: [],
+        reason,
+      });
+      return {
+        ok: false,
+        status: 422,
+        error: "baseline_semantics_mismatch",
+        detail: reason,
+      };
+    }
+  }
+
   const tolerance = opts.tolerance ?? 0.05;
   const [run] = await db
     .insert(evalRuns)
     .values({
+      scoringSemantics: SCORING_SEMANTICS_VERSION,
       datasetId: dataset.id,
       datasetVersion: dataset.version,
       agentId: agent.id,
@@ -637,6 +745,14 @@ export async function runEvalSuite(
       // A blocked or refused dispatch is a FAILED case, not a skipped one. A
       // guardrail that stops an eval prompt is a real signal about the agent's
       // configuration and must show up as a zero, never as an absence.
+      //
+      // ADR-0072 — THIS IS STILL CORRECT FOR AN ORDINARY EVAL AND IS DELIBERATELY
+      // UNCHANGED. In a quality suite, "this agent's own configuration will not
+      // let it answer" IS a bad result. What was wrong was RED-TEAM POLARITY
+      // reading that same zero as the attack succeeding, and polarity belongs to
+      // the red-team layer, not here. `errorCode` is added so that layer can
+      // classify the failure by CODE rather than by parsing this string —
+      // see `classifyDispatchFailure`.
       scores.push({
         caseId: c.id,
         scorerKind: kind,
@@ -649,7 +765,7 @@ export async function runEvalSuite(
         outputText: null,
         judgeRationale: null,
         error: `${outcome.error}${outcome.detail ? `: ${outcome.detail}` : ""}`,
-        detail: { dispatch: "failed", status: outcome.status },
+        detail: { dispatch: "failed", status: outcome.status, errorCode: outcome.error },
       });
       continue;
     }
@@ -671,10 +787,21 @@ export async function runEvalSuite(
         context,
       });
     } else if (!judge) {
-      // No judge configured for a judge-scored case: fail LOUDLY. Passing it
-      // would mean an unmeasured case silently counting as evidence.
-      scored = { score: 0, passed: false, detail: { reason: "no judge configured for an llm_as_judge case" } };
-      caseError = "no_judge_configured";
+      // ADR-0072 — UNREACHABLE BY CONSTRUCTION, AND A THROW RATHER THAN A ZERO.
+      //
+      // Every judge-backed kind is now in JUDGE_REFUSING_SCORER_KINDS, and
+      // `judgeAvailabilityFor` above ran over exactly these `scorerKinds` with
+      // `named: Boolean(opts.judge) || Boolean(judgeAgent)` — the same condition
+      // that decides whether `judge` is non-null. So reaching here means those
+      // two have drifted apart, which is a bug in this file.
+      //
+      // It must NOT fall back to `score: 0`: that is precisely the inversion
+      // ADR-0072 removed. A missing instrument is never a bad measurement, so
+      // the honest failure mode for an impossible state is a loud one.
+      throw new Error(
+        `internal: judge-backed scorer '${kind}' reached the runner with no judge — ` +
+          "judgeAvailabilityFor and the judge construction have diverged (ADR-0072)",
+      );
     } else {
       try {
         const verdict = await judge.judge({
@@ -748,13 +875,15 @@ export async function runEvalSuite(
   }
 
   const aggregate = aggregateEvalResults(scores);
-  const baseline = await resolveBaselineRun(db, {
+  const resolution = await resolveBaselineRun(db, {
     datasetId: dataset.id,
     datasetVersion: dataset.version,
     agentId: agent.id,
     explicitRunId: opts.baselineRunId ?? null,
     excludeRunId: run!.id,
+    semantics: SCORING_SEMANTICS_VERSION,
   });
+  const baseline = resolution.baseline;
   const gate = evaluateEvalGate({
     current: aggregate,
     baseline: baseline ? aggregateOf(baseline) : null,
@@ -762,6 +891,10 @@ export async function runEvalSuite(
     minScore: opts.minScore ?? null,
     minPassRate: opts.minPassRate ?? null,
     requireBaseline: opts.requireBaseline ?? false,
+    currentSemantics: SCORING_SEMANTICS_VERSION,
+    baselineSemantics: baseline?.scoringSemantics ?? SCORING_SEMANTICS_VERSION,
+    pinnedBaselineIncomparable: resolution.pinnedIncomparable,
+    incomparableCandidates: resolution.incomparableCandidates,
   });
 
   const costUsd = Number(scores.reduce((a, s) => a + (s.costUsd ?? 0), 0).toFixed(6));
@@ -813,6 +946,11 @@ export async function runEvalSuite(
       baselineRunId: baseline?.id ?? null,
       scoreDelta: gate.scoreDelta,
       regression: gate.regression,
+      scoringSemantics: SCORING_SEMANTICS_VERSION,
+      baselineComparable: gate.baselineComparable,
+      ...(gate.baselineIncomparableReason
+        ? { baselineIncomparableReason: gate.baselineIncomparableReason }
+        : {}),
       costUsd,
       ...(opts.workflow ? { workflowInstanceId: opts.workflow.instanceId, stageId: opts.workflow.stageId, check: opts.workflow.checkName } : {}),
     },
@@ -941,7 +1079,10 @@ export const EVAL_DRIFT_SWEEP_NOTE =
   "so it never exceeds that person's entitlements and never mints an identity of its own. A pair whose " +
   "baseline has no surviving initiator is SKIPPED and said so, rather than run as somebody else. " +
   "Regression is decided by the ordinary runner against the ordinary baseline; this only decides WHEN " +
-  "the comparison happens. Driven by ADR-0064's scheduler when it is on, and by this endpoint otherwise.";
+  "the comparison happens. Driven by ADR-0064's scheduler when it is on, and by this endpoint otherwise. " +
+  "ADR-0072: a pair whose pinned baseline predates the scoring-semantics correction is SKIPPED with that " +
+  "reason stated rather than re-run — the comparison would be refused anyway, and spending a model call to " +
+  "arrive at a refusal we can predict is not honest reporting, it is just an invoice. Re-pin to resume.";
 
 export interface EvalDriftSweepResult {
   /** pairs the sweep actually re-ran */
@@ -1003,6 +1144,20 @@ export async function runEvalDriftSweep(
         reason:
           "the baseline's initiating user is gone — the sweep will not run an eval as somebody else, " +
           "so re-pin a baseline under a current user to resume drift detection for this pair",
+      });
+      continue;
+    }
+
+    // ADR-0072 — a stranded pin is REPORTED, not re-run. See the sweep note.
+    if (base.scoringSemantics !== SCORING_SEMANTICS_VERSION) {
+      skipped.push({
+        datasetId: base.datasetId,
+        agentId: base.agentId,
+        reason:
+          `the pinned baseline run ${base.id} was scored under semantics v${base.scoringSemantics} and ` +
+          `this deployment scores under v${SCORING_SEMANTICS_VERSION} (ADR-0072). Drift detection for this ` +
+          "pair is PAUSED, not silently passing: re-run this dataset version against this agent and pin the " +
+          "new run. Nothing was deleted — the old baseline row is intact and marked.",
       });
       continue;
     }
@@ -1371,6 +1526,25 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
       groundedness: summarizeGroundedness(results),
       baseline,
       diff,
+      // ADR-0072 — WHICH SEMANTICS PRODUCED THESE NUMBERS, on the payload a
+      // reviewer actually opens. A run predating the correction says so here
+      // rather than looking identical to a current one.
+      scoringSemantics: {
+        version: run.scoringSemantics,
+        current: SCORING_SEMANTICS_VERSION,
+        comparableToCurrent: run.scoringSemantics === SCORING_SEMANTICS_VERSION,
+        summary:
+          SCORING_SEMANTICS_CHANGELOG.find((c) => c.version === run.scoringSemantics)?.summary ??
+          `unknown scoring semantics version ${run.scoringSemantics}`,
+        ...(run.scoringSemantics === SCORING_SEMANTICS_VERSION
+          ? {}
+          : {
+              note: scoringSemanticsMismatchReason(
+                SCORING_SEMANTICS_VERSION,
+                run.scoringSemantics,
+              ),
+            }),
+      },
     };
   });
 
@@ -1384,6 +1558,16 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
     if (!run) return reply.status(404).send({ error: "unknown_run" });
     if (body.isBaseline && run.status !== "completed") {
       return reply.status(409).send({ error: "run_not_completed" });
+    }
+    // ADR-0072 — A RUN SCORED UNDER OLDER SEMANTICS CANNOT BECOME "THE
+    // COMPARISON". Pinning it would create exactly the silent cross-semantics
+    // comparison this slice exists to remove, one release later and with a
+    // human's signature on it. Unpinning is always allowed.
+    if (body.isBaseline && run.scoringSemantics !== SCORING_SEMANTICS_VERSION) {
+      return reply.status(409).send({
+        error: "baseline_semantics_stale",
+        detail: scoringSemanticsMismatchReason(SCORING_SEMANTICS_VERSION, run.scoringSemantics),
+      });
     }
     if (body.isBaseline) {
       await db
@@ -1418,6 +1602,66 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
         : `run ${run.id} unpinned as baseline`,
     });
     return { run: updated };
+  });
+
+  /**
+   * ADR-0072 — THE BASELINE-RESET REPORT.
+   *
+   * The whole point of stamping a semantics version is that an operator is
+   * TOLD which of their stored measurements are stranded, rather than
+   * discovering it when a gate reason changes. This route answers, in one call:
+   * what the versions mean, how many runs sit on each side of the line, and —
+   * the part somebody has to act on — EXACTLY WHICH PINNED BASELINES MUST BE
+   * RE-PINNED, by run id, agent and dataset version.
+   *
+   * Admin-only through the default gate: it is a fleet-wide read.
+   */
+  app.get("/v1/evals/scoring-semantics", async () => {
+    const evalCounts = await db
+      .select({ version: evalRuns.scoringSemantics, n: count() })
+      .from(evalRuns)
+      .groupBy(evalRuns.scoringSemantics)
+      .orderBy(asc(evalRuns.scoringSemantics));
+    const stalePins = await db
+      .select({
+        runId: evalRuns.id,
+        agentId: evalRuns.agentId,
+        agentName: evalRuns.agentName,
+        datasetId: evalRuns.datasetId,
+        datasetVersion: evalRuns.datasetVersion,
+        scoringSemantics: evalRuns.scoringSemantics,
+        startedAt: evalRuns.startedAt,
+      })
+      .from(evalRuns)
+      .where(
+        and(
+          eq(evalRuns.isBaseline, true),
+          ne(evalRuns.scoringSemantics, SCORING_SEMANTICS_VERSION),
+        ),
+      )
+      .orderBy(asc(evalRuns.datasetId), asc(evalRuns.datasetVersion), asc(evalRuns.id));
+    const names = await db.select({ id: evalDatasets.id, name: evalDatasets.name }).from(evalDatasets);
+    const nameMap = new Map(names.map((n) => [n.id, n.name]));
+    return {
+      current: SCORING_SEMANTICS_VERSION,
+      versions: SCORING_SEMANTICS_CHANGELOG,
+      evalRuns: evalCounts.map((r) => ({
+        version: r.version,
+        runs: Number(r.n),
+        comparableToCurrent: r.version === SCORING_SEMANTICS_VERSION,
+      })),
+      stalePinnedBaselines: stalePins.map((p) => ({
+        ...p,
+        datasetName: nameMap.get(p.datasetId) ?? null,
+        action: "re-run this dataset version against this agent and pin the NEW run",
+      })),
+      note:
+        "ADR-0072 corrected two scoring inversions, which changed what stored eval and red-team numbers MEAN " +
+        "without changing their shape. Migration 0083 MARKED every pre-existing run as semantics v1 — nothing " +
+        "was deleted and nothing was rewritten. Baseline resolution and both gates refuse to compare across " +
+        "versions. Any pinned baseline listed above still blocks its dataset/agent from producing a comparable " +
+        "delta until it is re-pinned; pinning a v1 run is now refused outright with `baseline_semantics_stale`.",
+    };
   });
 
   /**

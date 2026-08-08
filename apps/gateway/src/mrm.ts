@@ -62,6 +62,7 @@ import {
   type ModelCardRow,
 } from "@regulait/db";
 import {
+  SCORING_SEMANTICS_VERSION,
   assessCardCompleteness,
   attachModelCardEvidenceSchema,
   cardState,
@@ -72,6 +73,7 @@ import {
   mrmPosture,
   requestModelCardSignOffSchema,
   revokeModelCardApprovalSchema,
+  scoringSemanticsSummary,
   updateModelCardSchema,
   type BiasFairnessEntryInput,
   type MrmGateCard,
@@ -361,14 +363,46 @@ async function cardView(db: Db, card: ModelCardRow, now: Date, warnDays: number)
   // not readable from the artifact the sign-off actually rests on. The
   // `method` field on every metric says whether a MODEL judged it or a lexical
   // method estimated it — a card must never let those two be confused.
+  //
+  // ADR-0072 — A CITED RUN ALSO CARRIES THE SEMANTICS THAT PRODUCED IT. A model
+  // card is the artifact a sign-off rests on, and ADR-0072 changed what an eval
+  // number MEANS without changing its shape. A card citing a pre-correction run
+  // must say so on its face; otherwise the one place a reviewer looks is the
+  // one place the change is invisible.
   const evidence = await Promise.all(
     evidenceRows.map(async (e) => {
-      if (!e.evalRunId) return { ...e, groundedness: null };
+      if (!e.evalRunId) return { ...e, groundedness: null, scoringSemantics: null };
       const results = await db
         .select()
         .from(evalResults)
         .where(eq(evalResults.runId, e.evalRunId));
-      return { ...e, groundedness: summarizeGroundedness(results) };
+      const [run] = await db
+        .select({ v: evalRuns.scoringSemantics })
+        .from(evalRuns)
+        .where(eq(evalRuns.id, e.evalRunId));
+      const version = run?.v ?? null;
+      return {
+        ...e,
+        groundedness: summarizeGroundedness(results),
+        scoringSemantics:
+          version === null
+            ? null
+            : {
+                version,
+                current: SCORING_SEMANTICS_VERSION,
+                comparableToCurrent: version === SCORING_SEMANTICS_VERSION,
+                summary: scoringSemanticsSummary(version),
+                ...(version === SCORING_SEMANTICS_VERSION
+                  ? {}
+                  : {
+                      note:
+                        "This evidence predates ADR-0072's scoring-semantics correction. The figures are " +
+                        "exactly what was measured at the time and have not been altered — but they are not " +
+                        "comparable to a run scored under the current semantics, and must not be presented " +
+                        "as though they were.",
+                    }),
+              },
+      };
     }),
   );
   const state = cardState(chain, now, warnDays);
