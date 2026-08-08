@@ -64,7 +64,7 @@ version. **Any baseline pinned before 2026-08-07 must be re-pinned.** Two existi
 **REWRITTEN, not deleted**, each carrying a comment naming what changed and why: ADR-0067's
 judge-boundary test (which had pinned the asymmetry in both directions and now pins the *unified*
 boundary in both directions) and ADR-0044's `no_judge_configured` test. Gateway
-**1,926 -> 1,957 tests / 111 -> 112 files**; shared **554 -> 561**; policy-kernel 129,
+**1,926 -> 1,942 tests / 111 -> 112 files**; shared **554 -> 561**; policy-kernel 129,
 model-provider 122, infra-provider 174, training-provider 58 unchanged. **Disclosed rather than
 closed** (eight items in the ADR): the `eval_results` row for a blocked probe **still stores
 `score: 0`** — correct for an ordinary quality suite, since polarity belongs to the red-team layer,

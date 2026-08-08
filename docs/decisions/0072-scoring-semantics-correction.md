@@ -234,3 +234,24 @@ pair produces no delta and its gate refuses.
    in place leaves rows stamped 2 that were produced by v1 code. There is no down migration in this
    project by convention, and this is the first ADR where that convention has a sharp edge worth
    naming.
+
+---
+
+## 7. Verification
+
+Full gateway suite on a freshly created database, plus every package suite:
+
+| suite | before | after |
+| --- | --- | --- |
+| gateway | 1,926 tests / 111 files | **1,942 / 112** |
+| `@regulait/shared` | 554 | **561** |
+| policy-kernel | 129 | 129 |
+| model-provider | 122 | 122 |
+| infra-provider | 174 | 174 |
+| training-provider | 58 | 58 |
+
+The gateway's +16 is: **+15** from the new `scoring-semantics.test.ts` and **+1** from the ADR-0044
+test being rewritten as two (the new contract, plus a companion asserting no `no_judge_configured`
+row can exist anywhere). The shared package's +7 is the ADR-0067 boundary test rewritten in place
+plus seven new gate-refusal cases. `pnpm -r build`, `pnpm --filter @regulait/web build` and
+`pnpm -r typecheck` are clean.
