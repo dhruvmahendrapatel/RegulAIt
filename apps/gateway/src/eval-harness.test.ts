@@ -638,9 +638,11 @@ describe("(5) a dataset version is immutable once a run has scored it", () => {
 // implementation satisfies. What they prove: the runner calls the judge with
 // the case input, the reference and the agent's output; the verdict's score,
 // pass flag and rationale are persisted; the judge implementation is recorded
-// on the run; and an llm_as_judge case with NO judge fails loudly rather than
-// passing silently. What they do NOT prove: that a real model grades anything
-// correctly. The mechanism is verified; the measurement is not.
+// on the run; and (ADR-0072, changed from ADR-0044's original contract) an
+// llm_as_judge case with NO judge REFUSES the whole run with a 422 and writes
+// nothing at all, rather than scoring the case zero. What they do NOT prove:
+// that a real model grades anything correctly. The mechanism is verified; the
+// measurement is not.
 // ---------------------------------------------------------------------------
 
 class StubJudge implements EvalJudge {
@@ -759,23 +761,69 @@ describe("(6) the model-backed judge interface, exercised with a stub", () => {
     expect(result!.score).toBe(0);
   });
 
-  it("an llm_as_judge case with NO judge configured FAILS loudly rather than passing", async () => {
+  /**
+   * REWRITTEN BY ADR-0072 (2026-08-07). WHAT CHANGED AND WHY.
+   *
+   * This test previously asserted ADR-0044's original contract: an
+   * `llm_as_judge` case with no judge configured produced a run row and an
+   * `eval_results` row scored 0 with `error: 'no_judge_configured'`. That was
+   * loud, which is why ADR-0067 left it alone — but it was wrong IN KIND. A
+   * MISSING INSTRUMENT was being recorded as a BAD MEASUREMENT: the zero was
+   * averaged into `meanScore`, compared against a drift baseline, read by a
+   * promotion gate as "the model answered badly", and made citable by an
+   * ADR-0045 model card.
+   *
+   * ADR-0072 unifies `llm_as_judge` onto ADR-0067's posture: a real 422 from a
+   * pure availability check placed BEFORE the `eval_runs` INSERT. The test is
+   * rewritten to assert the NEW contract — and it asserts the three absences
+   * (no run row, no result row, no dispatched token) rather than merely the
+   * status code, because "it returned 422" and "it wrote nothing" are different
+   * claims and only the second one makes the correction real.
+   */
+  it("ADR-0072: an llm_as_judge case with NO judge REFUSES the run and writes NOTHING", async () => {
+    const runsBefore = await db.select({ id: evalRuns.id }).from(evalRuns);
+    const resultsBefore = await db.select({ id: evalResults.id }).from(evalResults);
+    resetProviderCalls();
+
     const outcome = await runEvalSuite(db, DATA_KEY, {
       datasetId: judgedDataset,
       agentId: subjectAgentId,
       userId: erinId,
       trigger: "manual",
     });
-    expect(outcome.ok).toBe(true);
-    if (!outcome.ok) return;
-    expect(outcome.aggregate.passedCases).toBe(0);
-    const [result] = await db
-      .select()
+
+    // A REAL typed refusal, not a scored run.
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.status).toBe(422);
+    expect(outcome.error).toBe("judge_required");
+    expect(outcome.metrics).toEqual(["llm_as_judge"]);
+    expect(outcome.detail).toMatch(/NOT fall back/);
+
+    // NO RUN ROW, NO RESULT ROW. Identified by set-difference on id rather than
+    // by position or by count, so a concurrent suite cannot make this pass or
+    // fail for the wrong reason.
+    const beforeRunIds = new Set(runsBefore.map((r) => r.id));
+    const runsAfter = await db.select({ id: evalRuns.id }).from(evalRuns);
+    expect(runsAfter.filter((r) => !beforeRunIds.has(r.id))).toEqual([]);
+    const beforeResultIds = new Set(resultsBefore.map((r) => r.id));
+    const resultsAfter = await db.select({ id: evalResults.id }).from(evalResults);
+    expect(resultsAfter.filter((r) => !beforeResultIds.has(r.id))).toEqual([]);
+
+    // NOT ONE DISPATCHED TOKEN. The refusal is placed before the case loop, so
+    // the agent under test is never called at all.
+    expect(providerCalls()).toHaveLength(0);
+  });
+
+  /** ADR-0072 — the OLD path is gone, asserted directly rather than implied by
+   * the test above. If anything ever re-introduces a `no_judge_configured`
+   * result row, this fails. */
+  it("ADR-0072: no `no_judge_configured` result row exists anywhere in this database", async () => {
+    const rows = await db
+      .select({ id: evalResults.id })
       .from(evalResults)
-      .where(eq(evalResults.runId, outcome.run.id));
-    expect(result!.error).toBe("no_judge_configured");
-    expect(result!.score).toBe(0);
-    expect(outcome.run.judgeImpl).toBeNull();
+      .where(eq(evalResults.error, "no_judge_configured"));
+    expect(rows).toEqual([]);
   });
 });
 

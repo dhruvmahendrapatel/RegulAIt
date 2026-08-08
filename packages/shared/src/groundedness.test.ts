@@ -13,7 +13,11 @@ import {
 import {
   DETERMINISTIC_SCORER_KINDS,
   JUDGE_BACKED_SCORER_KINDS,
+  JUDGE_REFUSING_SCORER_KINDS,
+  SCORING_SEMANTICS_CHANGELOG,
+  SCORING_SEMANTICS_VERSION,
   evalScorerRegistry,
+  evaluateEvalGate,
   isJudgeBackedScorer,
   judgeAvailabilityFor,
   refusesWithoutJudge,
@@ -390,21 +394,178 @@ describe("judgeAvailabilityFor — the typed refusal", () => {
     expect(a.metrics.sort()).toEqual(["answer_relevance_judge", "groundedness_judge"]);
   });
 
-  it("does NOT refuse for ADR-0044's llm_as_judge — that kind keeps its own behaviour", () => {
-    // The asymmetry is deliberate and disclosed (ADR-0067 §4): `llm_as_judge`
-    // already had an accepted, tested behaviour — score 0 with a named error,
-    // which is loud rather than silent. Unifying the two would change an
-    // accepted ADR's contract from inside a slice about a different metric, so
-    // it is named as follow-up rather than taken. This test pins the boundary
-    // so the asymmetry cannot drift by accident in either direction.
-    expect(judgeAvailabilityFor(["llm_as_judge"], { named: false, dispatchable: false }))
-      .toEqual({ available: true });
-    expect(refusesWithoutJudge("llm_as_judge")).toBe(false);
-    expect(refusesWithoutJudge("groundedness_judge")).toBe(true);
-    // …but it is still classified as model-backed, so it is never in the
-    // deterministic set and the registry never calls it free or offline.
+  /**
+   * REWRITTEN BY ADR-0072 (2026-08-07). WHAT CHANGED AND WHY.
+   *
+   * This test previously asserted the OPPOSITE — that `llm_as_judge` does NOT
+   * refuse, because ADR-0067 deliberately left ADR-0044's score-0-with-a-named-
+   * error behaviour alone rather than amend an accepted ADR from inside a slice
+   * about a different metric. It pinned the boundary in both directions so the
+   * asymmetry could not drift by ACCIDENT.
+   *
+   * ADR-0072 removes the asymmetry ON PURPOSE, with the owner's explicit
+   * approval and an explicit baseline reset (semantics v1 → v2). The reason is
+   * that the old behaviour was wrong in KIND, not merely weaker: a MISSING
+   * INSTRUMENT was recorded as a BAD MEASUREMENT, then averaged into
+   * `meanScore`, compared against a drift baseline, read by a promotion gate as
+   * "the model answered badly", and made citable by an ADR-0045 model card.
+   *
+   * So the test is REWRITTEN rather than deleted, and it still pins the
+   * boundary in BOTH directions — the boundary has simply moved.
+   */
+  it("ADR-0072: llm_as_judge NOW refuses too — the boundary is judge-backed vs deterministic", () => {
+    // Direction 1 — every judge-backed kind refuses, llm_as_judge included.
+    for (const kind of JUDGE_BACKED_SCORER_KINDS) {
+      expect(refusesWithoutJudge(kind)).toBe(true);
+      const a = judgeAvailabilityFor([kind], { named: false, dispatchable: false });
+      expect(a.available).toBe(false);
+      if (a.available) throw new Error("unreachable");
+      expect(a.error).toBe("judge_required");
+      expect(a.metrics).toEqual([kind]);
+    }
+    // and it names llm_as_judge specifically when it is the metric in play
+    const named = judgeAvailabilityFor(["exact", "llm_as_judge"], {
+      named: false,
+      dispatchable: false,
+    });
+    if (named.available) throw new Error("unreachable");
+    expect(named.metrics).toEqual(["llm_as_judge"]);
+
+    // Direction 2 — NO deterministic kind refuses. A future model-backed scorer
+    // that forgot to declare itself would fail this half.
+    for (const kind of DETERMINISTIC_SCORER_KINDS) {
+      expect(refusesWithoutJudge(kind)).toBe(false);
+      expect(judgeAvailabilityFor([kind], { named: false, dispatchable: false })).toEqual({
+        available: true,
+      });
+    }
+
+    // The two predicates now have identical membership, which is the ADR-0072
+    // claim stated as an assertion rather than as prose.
+    expect([...JUDGE_REFUSING_SCORER_KINDS].sort()).toEqual([...JUDGE_BACKED_SCORER_KINDS].sort());
     expect(isJudgeBackedScorer("llm_as_judge")).toBe(true);
     expect(DETERMINISTIC_SCORER_KINDS).not.toContain("llm_as_judge");
+  });
+});
+
+/**
+ * ADR-0072 — THE BASELINE RESET, PROVED AT THE PURE LAYER.
+ *
+ * The gate is where a cross-semantics comparison would actually do its damage,
+ * so it is where the refusal is tested exhaustively and without a database.
+ */
+describe("ADR-0072 — the gate refuses to compare across scoring semantics", () => {
+  const agg = (meanScore: number, passRate: number) => ({
+    cases: 10,
+    passedCases: Math.round(passRate * 10),
+    failedCases: 10 - Math.round(passRate * 10),
+    meanScore,
+    passRate,
+  });
+
+  it("computes a delta normally when both sides share semantics", () => {
+    const g = evaluateEvalGate({
+      current: agg(0.9, 0.9),
+      baseline: agg(0.8, 0.8),
+      tolerance: 0.05,
+      currentSemantics: 2,
+      baselineSemantics: 2,
+    });
+    expect(g.baselineComparable).toBe(true);
+    expect(g.baselineIncomparableReason).toBeNull();
+    expect(g.scoreDelta).toBeCloseTo(0.1, 4);
+  });
+
+  it("computes NO delta across semantics — the number never exists to be trusted", () => {
+    const g = evaluateEvalGate({
+      current: agg(0.9, 0.9),
+      // a baseline that would look like a huge improvement if compared
+      baseline: agg(0.3, 0.3),
+      tolerance: 0.05,
+      currentSemantics: 2,
+      baselineSemantics: 1,
+    });
+    expect(g.scoreDelta).toBeNull();
+    expect(g.passRateDelta).toBeNull();
+    expect(g.baselineComparable).toBe(false);
+    expect(g.baselineIncomparableReason).toMatch(/SCORING-SEMANTICS MISMATCH/);
+    expect(g.reason).toMatch(/RE-PIN/);
+  });
+
+  it("a cross-semantics REGRESSION is not reported as a regression either — silence cuts both ways", () => {
+    const g = evaluateEvalGate({
+      current: agg(0.2, 0.2),
+      baseline: agg(0.95, 0.95),
+      tolerance: 0.05,
+      currentSemantics: 2,
+      baselineSemantics: 1,
+    });
+    // Under the old code this would have been a loud REGRESSION computed from
+    // two incomparable numbers. It is now a disclosed absence of comparison.
+    expect(g.regression).toBe(false);
+    expect(g.scoreDelta).toBeNull();
+    expect(g.baselineComparable).toBe(false);
+  });
+
+  it("an ADMIN-PINNED incomparable baseline FAILS the gate and names the run to re-pin", () => {
+    const g = evaluateEvalGate({
+      current: agg(1, 1),
+      baseline: null,
+      tolerance: 0.05,
+      currentSemantics: 2,
+      pinnedBaselineIncomparable: { runId: "run-abc", semantics: 1 },
+    });
+    expect(g.passed).toBe(false);
+    expect(g.baselineComparable).toBe(false);
+    expect(g.reason).toContain("run-abc");
+    expect(g.reason).toMatch(/RE-PIN/);
+  });
+
+  it("distinguishes 'no history' from 'all history is stranded'", () => {
+    const fresh = evaluateEvalGate({
+      current: agg(1, 1),
+      baseline: null,
+      tolerance: 0.05,
+    });
+    expect(fresh.passed).toBe(true);
+    expect(fresh.baselineComparable).toBe(true);
+    expect(fresh.reason).not.toMatch(/stranded/);
+
+    const stranded = evaluateEvalGate({
+      current: agg(1, 1),
+      baseline: null,
+      tolerance: 0.05,
+      incomparableCandidates: 7,
+    });
+    expect(stranded.passed).toBe(true);
+    expect(stranded.reason).toContain("7 earlier completed run(s)");
+    expect(stranded.reason).toMatch(/stranded/);
+    // and it says plainly that nothing was destroyed
+    expect(stranded.reason).toMatch(/not lost and has not been rewritten/);
+  });
+
+  it("requireBaseline FAILS rather than passing when the only history is stranded", () => {
+    const g = evaluateEvalGate({
+      current: agg(1, 1),
+      baseline: null,
+      tolerance: 0.05,
+      requireBaseline: true,
+      incomparableCandidates: 3,
+    });
+    expect(g.passed).toBe(false);
+    expect(g.reason).toMatch(/requires one/);
+    expect(g.reason).toContain("3 earlier completed run(s)");
+  });
+
+  it("the changelog names both corrections and the version is 2", () => {
+    expect(SCORING_SEMANTICS_VERSION).toBe(2);
+    const v2 = SCORING_SEMANTICS_CHANGELOG.find((c) => c.version === 2)!;
+    expect(v2.adr).toBe("ADR-0072");
+    expect(v2.summary).toMatch(/REFUSES the whole run/);
+    expect(v2.summary).toMatch(/PLATFORM HOLD/);
+    const v1 = SCORING_SEMANTICS_CHANGELOG.find((c) => c.version === 1)!;
+    expect(v1.summary).toMatch(/scored 0/);
+    expect(v1.summary).toMatch(/ATTACK SUCCEEDING/);
   });
 });
 
