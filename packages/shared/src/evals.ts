@@ -85,32 +85,113 @@ export function isJudgeBackedScorer(kind: string): kind is JudgeBackedScorerKind
 }
 
 /**
- * ADR-0067 §4 — THE KINDS THAT REFUSE A RUN OUTRIGHT when no model is
- * reachable, as opposed to the kinds that merely score the case zero.
+ * THE KINDS THAT REFUSE A RUN OUTRIGHT when no model is reachable.
  *
- * THIS IS DELIBERATELY *NOT* ALL THREE JUDGE-BACKED KINDS, AND THE ASYMMETRY IS
- * A DECISION RATHER THAN AN OVERSIGHT.
+ * ADR-0072 (2026-08-07) — THIS IS NOW ALL THREE JUDGE-BACKED KINDS, AND THE
+ * PREVIOUS ASYMMETRY IS GONE ON PURPOSE.
  *
- * ADR-0044's `llm_as_judge` already had an accepted, tested behaviour: an
- * unjudgeable case scores 0 with `error: 'no_judge_configured'` on the result
- * row. That is LOUD — it is not a silent pass, and it is not a lexical proxy
- * wearing a judged metric's name, which is the specific dishonesty ADR-0067
- * exists to prevent.
+ * ADR-0067 introduced this list with only its own two kinds in it, and said in
+ * writing that ADR-0044's `llm_as_judge` keeping its score-0-with-a-named-error
+ * behaviour was the weaker posture, left alone only because changing it would
+ * amend an accepted ADR from inside a slice about a different metric. ADR-0072
+ * is that amendment, taken deliberately and with an explicit baseline reset.
  *
- * It is nonetheless the WEAKER posture, and ADR-0067 says so in writing: a zero
- * meaning "we could not measure this" is aggregated into `meanScore`, compared
- * against a baseline, and read by a gate as though it meant "the agent answered
- * badly". Unifying the two would be the better end state. It would also change
- * an ACCEPTED ADR's contract from inside a slice about a different metric, so it
- * is named as follow-up for the owner to decide rather than taken here.
+ * The reason the old behaviour was wrong IN KIND rather than merely weak: a
+ * MISSING INSTRUMENT was being recorded as a BAD MEASUREMENT. The zero was then
+ * averaged into `meanScore`, compared against a drift baseline, read by a
+ * promotion gate as "the model answered badly", and stored where an ADR-0045
+ * model card could cite it. Nothing downstream could tell "we could not measure
+ * this" from "we measured it and it was terrible".
+ *
+ * So `refusesWithoutJudge` and `isJudgeBackedScorer` are now the same predicate
+ * over the same members — but they remain SEPARATE names, because they answer
+ * different questions ("does this cost tokens?" vs "does a missing judge kill
+ * the run?") and a future scorer could legitimately answer them differently.
+ * The boundary test in `groundedness.test.ts` pins the membership in BOTH
+ * directions so neither can drift by accident.
  */
 export const JUDGE_REFUSING_SCORER_KINDS = [
+  "llm_as_judge",
   "groundedness_judge",
   "answer_relevance_judge",
 ] as const;
 
 export function refusesWithoutJudge(kind: string): boolean {
   return (JUDGE_REFUSING_SCORER_KINDS as readonly string[]).includes(kind);
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0072 — SCORING SEMANTICS VERSIONING (the baseline reset)
+// ---------------------------------------------------------------------------
+
+/**
+ * WHAT A STORED SCORE MEANS, VERSIONED.
+ *
+ * ADR-0072 changed the MEANING of two stored numbers without changing their
+ * shape, which is the single most dangerous kind of change a measurement system
+ * can make: every old row still parses, still averages, still renders, and is
+ * no longer comparable to a new one. A drift gate that silently compares across
+ * that boundary reports a regression (or an improvement) that never happened —
+ * exactly the class of bug ADR-0072 exists to remove, so it must not introduce
+ * one.
+ *
+ * The fix is to make the semantics a FIELD on the row rather than a fact about
+ * the deploy date. Every `eval_runs` / `redteam_runs` row states which semantics
+ * produced it; migration 0083 stamps every pre-existing row as version 1 by
+ * DEFAULT and mutates nothing else. History is MARKED, never rewritten and never
+ * deleted.
+ *
+ * Version 1 — ADR-0044 + ADR-0057 + ADR-0067 as originally accepted:
+ *   • an `llm_as_judge` case with no judge scored 0 and was averaged in
+ *   • a governance-BLOCKED red-team dispatch scored as a probe DEFEAT
+ * Version 2 — ADR-0072:
+ *   • a missing judge REFUSES the run (422) and writes nothing
+ *   • a governance-blocked red-team dispatch is a PLATFORM HOLD, never a defeat
+ */
+export const SCORING_SEMANTICS_VERSION = 2;
+
+/** the semantics every row written before ADR-0072 was produced under */
+export const LEGACY_SCORING_SEMANTICS_VERSION = 1;
+
+export const SCORING_SEMANTICS_CHANGELOG: ReadonlyArray<{
+  version: number;
+  adr: string;
+  summary: string;
+}> = [
+  {
+    version: 1,
+    adr: "ADR-0044 / ADR-0057 / ADR-0067",
+    summary:
+      "An llm_as_judge case with no judge configured scored 0 and was averaged into meanScore. A red-team probe whose dispatch was stopped by a governance decision was scored as a failed eval case, which red-team polarity read as the ATTACK SUCCEEDING.",
+  },
+  {
+    version: 2,
+    adr: "ADR-0072",
+    summary:
+      "A judge-backed case with no dispatchable judge REFUSES the whole run with a 422 before any row is written — a missing instrument is never recorded as a bad measurement. A governance-blocked red-team dispatch is a PLATFORM HOLD: the probe is not defeated, it is counted in platform_held, and it never enters the attack-success rate as a success.",
+  },
+];
+
+export function scoringSemanticsSummary(version: number): string {
+  return (
+    SCORING_SEMANTICS_CHANGELOG.find((c) => c.version === version)?.summary ??
+    `unknown scoring semantics version ${version}`
+  );
+}
+
+/**
+ * THE ONE SENTENCE an operator needs when their history straddles the change.
+ * Deliberately names re-pinning, because a pinned baseline is the case a person
+ * has to act on rather than merely read about.
+ */
+export function scoringSemanticsMismatchReason(current: number, baseline: number): string {
+  return (
+    `SCORING-SEMANTICS MISMATCH: this run was scored under semantics v${current} and the baseline was scored under ` +
+    `v${baseline}. Those numbers are not comparable — v${baseline}: ${scoringSemanticsSummary(baseline)} ` +
+    `v${current}: ${scoringSemanticsSummary(current)} ` +
+    `Comparing them would report a drift that never happened, so no delta is computed. ` +
+    `RE-PIN the baseline: run this dataset version and agent again under the current semantics and pin THAT run.`
+  );
 }
 
 /** The scorer kinds that need no model, no network and no key. */
@@ -214,7 +295,7 @@ export function evalScorerRegistry(): EvalScorerInfo[] {
       summary:
         "A judge agent from the registry scores the output against `expected`/`rubric`. The judge call runs through the one governed dispatch core, so it is entitlement-checked, metered into usage_events, and audited like any other dispatch.",
       limits:
-        "NON-DETERMINISTIC AND NOT FREE. Scores jitter run to run, the judge is itself an agent that can regress, and a gate built purely on it will occasionally red a good change. Corroboration, not a load-bearing gate.",
+        "NEEDS A PROVIDER AND REFUSES WITHOUT ONE (ADR-0072, changed from ADR-0044's original behaviour): a run whose cases use this metric is rejected with 422 before any row is written when no dispatchable judge agent is named — it no longer scores the case zero, because a missing instrument is not a bad answer. Beyond that: NON-DETERMINISTIC AND NOT FREE. Scores jitter run to run, the judge is itself an agent that can regress, and a gate built purely on it will occasionally red a good change. Corroboration, not a load-bearing gate.",
     },
     // ------------------------------------------------------------------
     // ADR-0067 — groundedness
@@ -791,9 +872,9 @@ export function judgeAvailabilityFor(
   scorerKinds: ReadonlyArray<string>,
   judge: { named: boolean; dispatchable: boolean; detail?: string | null },
 ): JudgeAvailability {
-  // Only the ADR-0067 kinds refuse; ADR-0044's `llm_as_judge` keeps its own
-  // accepted score-zero-with-a-named-error behaviour. See the comment on
-  // JUDGE_REFUSING_SCORER_KINDS for why that asymmetry is deliberate.
+  // ADR-0072: EVERY judge-backed kind refuses, `llm_as_judge` included. A
+  // missing instrument is never recorded as a bad measurement. See the comment
+  // on JUDGE_REFUSING_SCORER_KINDS.
   const metrics = [
     ...new Set(scorerKinds.filter(refusesWithoutJudge)),
   ] as JudgeBackedScorerKind[];
@@ -941,6 +1022,32 @@ export interface EvalGateInput {
   minPassRate?: number | null | undefined;
   /** true = a missing baseline FAILS instead of passing as "first reference" */
   requireBaseline?: boolean | undefined;
+  /**
+   * ADR-0072 — the scoring semantics that produced `current`. Defaults to the
+   * current version; supplied explicitly so the gate can be tested across the
+   * boundary without a database.
+   */
+  currentSemantics?: number | undefined;
+  /** ADR-0072 — the scoring semantics that produced `baseline`. */
+  baselineSemantics?: number | undefined;
+  /**
+   * ADR-0072 — an ADMIN-PINNED baseline that was EXCLUDED from resolution
+   * because it predates the current scoring semantics. This is not a missing
+   * baseline: a human deliberately pinned that run, and silently falling back
+   * to some other run would be a comparison they did not ask for. The gate
+   * REFUSES and names the run to re-pin.
+   */
+  pinnedBaselineIncomparable?:
+    | { runId: string; semantics: number }
+    | null
+    | undefined;
+  /**
+   * ADR-0072 — how many otherwise-eligible completed runs were skipped during
+   * auto-resolution purely because they predate the current semantics. Reported
+   * so "you have no baseline yet" and "your entire history predates the
+   * correction" are never the same sentence.
+   */
+  incomparableCandidates?: number | undefined;
 }
 
 export interface EvalGateDecision {
@@ -952,6 +1059,14 @@ export interface EvalGateDecision {
   scoreDelta: number | null;
   passRateDelta: number | null;
   reason: string;
+  /**
+   * ADR-0072 — false when a baseline existed but could not honestly be compared
+   * to this run. A consumer reading `scoreDelta: null` alone cannot tell "first
+   * run ever" from "the history is not comparable"; this field can.
+   */
+  baselineComparable: boolean;
+  /** ADR-0072 — the stated reason, whenever `baselineComparable` is false. */
+  baselineIncomparableReason: string | null;
 }
 
 /**
@@ -963,10 +1078,33 @@ export interface EvalGateDecision {
  * on the grounds that it "did not regress".
  */
 export function evaluateEvalGate(input: EvalGateInput): EvalGateDecision {
-  const { current, baseline, tolerance } = input;
+  const { current, tolerance } = input;
+  const currentSemantics = input.currentSemantics ?? SCORING_SEMANTICS_VERSION;
+  const baselineSemantics = input.baselineSemantics ?? currentSemantics;
+
+  // ADR-0072 — THE CROSS-SEMANTICS REFUSAL, APPLIED BEFORE THE DELTA EXISTS.
+  // A baseline scored under different semantics is not a weaker baseline, it is
+  // a different measurement, and subtracting one from the other produces a
+  // number with no meaning. It is dropped here rather than divided — the delta
+  // is never computed at all, so there is nothing for a later reader to find and
+  // trust.
+  const semanticsMismatch = Boolean(input.baseline) && baselineSemantics !== currentSemantics;
+  const baseline = semanticsMismatch ? null : input.baseline;
   const scoreDelta = baseline ? round4(current.meanScore - baseline.meanScore) : null;
   const passRateDelta = baseline ? round4(current.passRate - baseline.passRate) : null;
-  const base = { scoreDelta, passRateDelta };
+  const incomparableReason = semanticsMismatch
+    ? scoringSemanticsMismatchReason(currentSemantics, baselineSemantics)
+    : input.pinnedBaselineIncomparable
+      ? `the ADMIN-PINNED baseline run ${input.pinnedBaselineIncomparable.runId} was scored under semantics ` +
+        `v${input.pinnedBaselineIncomparable.semantics}. ` +
+        scoringSemanticsMismatchReason(currentSemantics, input.pinnedBaselineIncomparable.semantics)
+      : null;
+  const base = {
+    scoreDelta,
+    passRateDelta,
+    baselineComparable: incomparableReason === null,
+    baselineIncomparableReason: incomparableReason,
+  };
 
   if (current.cases === 0) {
     return { ...base, passed: false, regression: false, reason: "the dataset version has no cases — an empty suite cannot certify anything" };
@@ -987,20 +1125,42 @@ export function evaluateEvalGate(input: EvalGateInput): EvalGateDecision {
       reason: `pass rate ${current.passRate} is below the required floor ${input.minPassRate}`,
     };
   }
+  // ADR-0072 — AN ADMIN-PINNED BASELINE THAT PREDATES THE CORRECTION FAILS THE
+  // GATE. A human pinned that specific run as "the comparison"; quietly using a
+  // different run, or quietly passing with no comparison at all, would both be
+  // answers to a question nobody asked. The refusal names the run so re-pinning
+  // is a task rather than a discovery.
+  if (input.pinnedBaselineIncomparable) {
+    return {
+      ...base,
+      passed: false,
+      regression: false,
+      reason: `BASELINE NOT COMPARABLE — ${incomparableReason}`,
+    };
+  }
   if (!baseline) {
+    const stranded = semanticsMismatch
+      ? ` ${incomparableReason}`
+      : (input.incomparableCandidates ?? 0) > 0
+        ? ` NOTE: ${input.incomparableCandidates} earlier completed run(s) exist for this dataset version and agent, but every one of them was scored under an older scoring semantics (ADR-0072) and NONE was compared against. This history is not lost and has not been rewritten — it is marked and stranded. Re-run and re-pin to establish a comparable baseline.`
+        : "";
     if (input.requireBaseline) {
       return {
         ...base,
         passed: false,
         regression: false,
-        reason: "no baseline run exists for this dataset version and agent, and this check requires one",
+        reason:
+          "no comparable baseline run exists for this dataset version and agent, and this check requires one." +
+          stranded,
       };
     }
     return {
       ...base,
       passed: true,
       regression: false,
-      reason: `no baseline for this dataset version and agent — this run stands as the first reference (mean ${current.meanScore}, pass rate ${current.passRate})`,
+      reason:
+        `no comparable baseline for this dataset version and agent — this run stands as the first reference under scoring semantics v${currentSemantics} (mean ${current.meanScore}, pass rate ${current.passRate}).` +
+        stranded,
     };
   }
   if (scoreDelta! < -tolerance) {

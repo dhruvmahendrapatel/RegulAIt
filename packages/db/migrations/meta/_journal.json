@@ -575,6 +575,13 @@
       "when": 1785017000000,
       "tag": "0082_trace_observability",
       "breakpoints": true
+    },
+    {
+      "idx": 83,
+      "version": "7",
+      "when": 1785018000000,
+      "tag": "0083_scoring_semantics",
+      "breakpoints": true
     }
   ]
 }

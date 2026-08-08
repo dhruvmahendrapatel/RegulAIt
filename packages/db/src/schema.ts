@@ -3165,6 +3165,15 @@ const EVAL_SCORER_KINDS_SQL = sql.raw(
   EVAL_SCORER_KINDS.map((k) => `'${k}'`).join(","),
 );
 
+/**
+ * ADR-0072 (migration 0083) — the scoring-semantics version stamped on every
+ * new `eval_runs` / `redteam_runs` row. Declared here rather than imported from
+ * @regulait/shared for the same reason GUARDRAIL_DETECTOR_IDS is; the gateway
+ * imports both and asserts they are equal, so a divergence fails a test rather
+ * than shipping.
+ */
+export const SCORING_SEMANTICS_VERSION = 2;
+
 export const EVAL_RUN_TRIGGERS = ["manual", "workflow", "scheduled"] as const;
 export const EVAL_RUN_STATUSES = ["running", "completed", "error", "denied"] as const;
 
@@ -3300,6 +3309,19 @@ export const evalRuns = pgTable(
     regression: boolean("regression"),
     gateReason: text("gate_reason"),
     isBaseline: boolean("is_baseline").notNull().default(false),
+    /**
+     * ADR-0072 — WHICH SCORING SEMANTICS PRODUCED THIS ROW.
+     *
+     * ADR-0072 changed the MEANING of two stored numbers without changing their
+     * shape. Migration 0083 stamps every pre-existing row `1` and leaves it
+     * otherwise untouched — history is MARKED, never rewritten and never
+     * deleted. Baseline resolution and both gates refuse to compare across
+     * versions, so a run scored before the correction can never be silently
+     * subtracted from one scored after it.
+     */
+    scoringSemantics: integer("scoring_semantics")
+      .notNull()
+      .default(SCORING_SEMANTICS_VERSION),
     error: text("error"),
     note: text("note"),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
@@ -3307,6 +3329,7 @@ export const evalRuns = pgTable(
   },
   (t) => [
     check("eval_runs_trigger_check", sql`${t.trigger} IN ('manual','workflow','scheduled')`),
+    check("eval_runs_scoring_semantics_check", sql`${t.scoringSemantics} >= 1`),
     check("eval_runs_status_check", sql`${t.status} IN ('running','completed','error','denied')`),
     check("eval_runs_tolerance_check", sql`${t.tolerance} >= 0 AND ${t.tolerance} <= 1`),
     foreignKey({
@@ -5036,6 +5059,13 @@ export const redteamRuns = pgTable(
     /** ADR-0068 §5: what the compliance cascade TIGHTENED on this run, and
      * which framework tags said so. Empty on an unclassified project. */
     presetTightened: jsonb("preset_tightened").$type<string[]>().notNull().default([]),
+    /** ADR-0072 — the scoring semantics behind this verdict. Version 1 scored a
+     * governance-BLOCKED probe dispatch as a DEFEAT; version 2 scores it as a
+     * PLATFORM HOLD. A v1 resist rate and a v2 resist rate are different
+     * measurements, and `resolveRedTeamBaseline` will not compare them. */
+    scoringSemantics: integer("scoring_semantics")
+      .notNull()
+      .default(SCORING_SEMANTICS_VERSION),
     note: text("note"),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     finishedAt: timestamp("finished_at", { withTimezone: true }),

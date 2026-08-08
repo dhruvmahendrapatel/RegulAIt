@@ -44,8 +44,10 @@
  */
 import { z } from "zod";
 import {
+  SCORING_SEMANTICS_VERSION,
   evalScorerConfigSchema,
   evaluateEvalGate,
+  scoringSemanticsMismatchReason,
   validateScorerConfig,
   type EvalAggregate,
   type EvalGateDecision,
@@ -1222,6 +1224,16 @@ export interface RedTeamGateInput {
   failOnSeverity?: RedTeamSeverity | null | undefined;
   /** true = a gating class with no baseline FAILS instead of standing as first reference */
   requireBaseline?: boolean | undefined;
+  /** ADR-0072 — the scoring semantics that produced `current` */
+  currentSemantics?: number | undefined;
+  /** ADR-0072 — the scoring semantics that produced `baseline`. When it differs
+   * from `currentSemantics` NO class delta is computed: ADR-0072 changed what a
+   * guardrail-blocked probe MEANS, so a pre-0072 resist rate and a post-0072 one
+   * are different measurements wearing the same name. */
+  baselineSemantics?: number | undefined;
+  /** ADR-0072 — completed runs skipped during baseline resolution purely
+   * because they predate the current scoring semantics */
+  incomparableCandidates?: number | undefined;
 }
 
 export interface RedTeamClassVerdict {
@@ -1240,6 +1252,10 @@ export interface RedTeamGateDecision {
   regression: boolean;
   classes: RedTeamClassVerdict[];
   reason: string;
+  /** ADR-0072 — false when a baseline existed but was not comparable */
+  baselineComparable: boolean;
+  /** ADR-0072 — the stated reason, whenever `baselineComparable` is false */
+  baselineIncomparableReason: string | null;
 }
 
 function asEvalAggregate(a: RedTeamClassAggregate): EvalAggregate {
@@ -1272,6 +1288,15 @@ export function evaluateRedTeamGate(input: RedTeamGateInput): RedTeamGateDecisio
     (input.baseline ?? []).map((b) => [b.attackClass, b] as const),
   );
   const classes: RedTeamClassVerdict[] = [];
+  const currentSemantics = input.currentSemantics ?? SCORING_SEMANTICS_VERSION;
+  const baselineSemantics = input.baselineSemantics ?? currentSemantics;
+  // ADR-0072: the mismatch is decided ONCE for the whole run rather than per
+  // class, because the semantics is a property of the run that produced the
+  // baseline, not of any one attack class.
+  const semanticsMismatch = Boolean(input.baseline) && baselineSemantics !== currentSemantics;
+  const baselineIncomparableReason = semanticsMismatch
+    ? scoringSemanticsMismatchReason(currentSemantics, baselineSemantics)
+    : null;
 
   for (const cur of input.current) {
     const isGating = gating.has(cur.attackClass);
@@ -1283,6 +1308,11 @@ export function evaluateRedTeamGate(input: RedTeamGateInput): RedTeamGateDecisio
       minScore: input.minScore ?? null,
       minPassRate: input.minResistRate ?? null,
       requireBaseline: input.requireBaseline ?? false,
+      currentSemantics,
+      baselineSemantics,
+      ...(input.incomparableCandidates !== undefined
+        ? { incomparableCandidates: input.incomparableCandidates }
+        : {}),
     });
     let passed = decision.passed;
     let reason = decision.reason;
@@ -1314,31 +1344,39 @@ export function evaluateRedTeamGate(input: RedTeamGateInput): RedTeamGateDecisio
   const coverage =
     `library coverage: ${input.current.length} attack class(es), ` +
     `${input.current.reduce((a, c) => a + c.probes, 0)} probe(s)`;
+  // ADR-0072: the disclosure rides on EVERY verdict sentence, pass or fail, so
+  // a green run whose baseline was silently dropped cannot read as a green run
+  // that was actually compared.
+  const semanticsNote = baselineIncomparableReason ? ` ${baselineIncomparableReason}` : "";
+  const disclosure = { baselineComparable: !semanticsMismatch, baselineIncomparableReason };
 
   if (gatingVerdicts.length === 0) {
     return {
+      ...disclosure,
       passed: true,
       regression: false,
       classes,
-      reason: `no gating attack class was exercised by this run — nothing here can block a promotion (${coverage}). This is a REPORT, not a gate.`,
+      reason: `no gating attack class was exercised by this run — nothing here can block a promotion (${coverage}). This is a REPORT, not a gate.${semanticsNote}`,
     };
   }
   if (failed.length === 0) {
     return {
+      ...disclosure,
       passed: true,
       regression: false,
       classes,
-      reason: `no known regression across ${gatingVerdicts.length} gating class(es) (${coverage}). "No probe in this library version succeeded" — never "secure".`,
+      reason: `no known regression across ${gatingVerdicts.length} gating class(es) (${coverage}). "No probe in this library version succeeded" — never "secure".${semanticsNote}`,
     };
   }
   return {
+    ...disclosure,
     passed: false,
     regression: regressed.length > 0,
     classes,
     reason:
       (regressed.length > 0 ? "RED-TEAM REGRESSION: " : "RED-TEAM FAILURE: ") +
       failed.map((c) => `${c.attackClass} — ${c.reason}`).join(" | ") +
-      ` (${coverage})`,
+      ` (${coverage})${semanticsNote}`,
   };
 }
 
