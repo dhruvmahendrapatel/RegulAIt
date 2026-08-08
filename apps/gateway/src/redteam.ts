@@ -708,10 +708,13 @@ export async function runRedTeamSuite(
         : null;
       const stoppedBy = dispatchFailed ? (r.error ?? detail?.errorCode ?? "blocked") : null;
 
-      if (failureKind === "transport_failure") {
+      if (failureKind === "transport_failure" || failureKind === "unknown_failure") {
         // Excluded from the denominator, exactly as the sequence path does it.
         // Counting an outage as "resisted" would manufacture assurance;
-        // counting it as "defeated" would manufacture a finding.
+        // counting it as "defeated" would manufacture a finding. The SAME
+        // reasoning covers `unknown_failure`: a refusal reason this build does
+        // not recognise is not evidence that the defence held, and crediting it
+        // would be the ADR-0057 inversion coming back through the side door.
         push(probe, { trial, defeated: false, score: 0, error: stoppedBy });
         trialErrored += 1;
         probeTrialRows.push({

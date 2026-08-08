@@ -410,7 +410,11 @@ export async function runSequenceProbeTrial(
       // in @regulait/shared rather than from this inline pair of string
       // comparisons, because the ADR-0057 EVAL path needs the identical
       // classification and "the two paths agree" must be structural.
-      if (classifyDispatchFailure(outcome.error) === "transport_failure") {
+      // Anything that is not a RECOGNISED governance stop is excluded — both a
+      // transport failure and an unrecognised code. See the allow-list note in
+      // `redteam-stats.ts`: crediting an unknown refusal as a platform hold is
+      // a fail-open in a security metric.
+      if (classifyDispatchFailure(outcome.error) !== "governance_stop") {
         return {
           probeKey: probe.probeKey,
           defeated: false,

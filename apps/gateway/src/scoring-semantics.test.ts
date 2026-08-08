@@ -221,11 +221,24 @@ describe("(1) classifyDispatchFailure — the shared definition", () => {
       "pii_blocked",
       "agent_not_entitled",
       "project_budget_exceeded",
-      "egress_not_allowed",
+      // `egress_blocked` — this list previously said `egress_not_allowed`,
+      // which no code path emits. It passed only because the classifier was a
+      // DENY-list that credited every unrecognised code as a governance stop,
+      // so an assertion about a NON-EXISTENT code was vacuously true. The
+      // allow-list turned it into a failure, which is the point of the
+      // allow-list.
+      "egress_blocked",
       "mrm_approval_required",
       "virtual_key_model_not_allowed",
     ]) {
       expect(classifyDispatchFailure(code)).toBe("governance_stop");
+    }
+  });
+
+  it("a code no dispatch path emits is NOT a governance stop, however plausible", () => {
+    // the invented name this list used to carry, plus its neighbours
+    for (const code of ["egress_not_allowed", "agent_not_permitted", "pii_denied"]) {
+      expect(classifyDispatchFailure(code)).toBe("unknown_failure");
     }
   });
 });
