@@ -89,8 +89,13 @@ connected** — mechanism proven, instrument not — and against the determinist
 a *denominator*, not observed variance (measured ASR here is always 0 or 1). An agentic probe whose
 target this install has not registered is **`not_run`, never `passed`**. And ADR-0057's existing
 inversion — a guardrail-BLOCKED dispatch is scored as a DEFEAT in the eval path — was deliberately
-**not** changed (it would move every stored baseline); it is now named on the per-trial row and
-counted in `platform_held`, with unification left as owner follow-up.
+**not** changed by this slice (it would move every stored baseline); it was named on the per-trial
+row and counted in `platform_held`. **That follow-up was taken on 2026-08-07 by
+[ADR-0072](../decisions/0072-scoring-semantics-correction.md)** (migration 0083), together with
+ADR-0067's `llm_as_judge` follow-up, under an explicit scoring-semantics reset: a governance stop is
+now a PLATFORM HOLD and is never an attack success, and both gates refuse to compare a pre-0072
+baseline against a post-0072 run. **Any red-team baseline pinned before that date is stranded and
+must be re-established** — the numbers quoted in this paragraph were produced under semantics v1.
 
 ### Slice C — Cross-vendor cost consolidation *(the wedge)* — **SHIPPED 2026-08-07, [ADR-0069](../decisions/0069-cross-vendor-cost-consolidation.md) (migration 0081)**
 **Parity target:** none — this is the gap research identified as genuinely unserved.

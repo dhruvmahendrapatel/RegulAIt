@@ -214,14 +214,19 @@ said so.
   produces an identical outcome, so measured ASR here is always exactly 0 or 1 and
   `varianceObserved` is always false. The spread the design exists to capture cannot be demonstrated
   in this environment; the interval arithmetic is proven independently in the pure suite.
-- **ADR-0057 records a guardrail-BLOCKED dispatch as a DEFEAT, and this ADR does not fix it.**
-  ADR-0044's runner scores a blocked dispatch as a failed case; ADR-0057 reads a failed case as a
-  defeat. So a guardrail stopping an attack prompt currently reads as the attack succeeding.
-  Changing the score would move every stored baseline, which is the unilateral scope creep this
-  project's history warns against — so instead the per-trial row **names** it
-  (`vector: "eval-dispatch-blocked"`) and `platform_held` counts it, making the number legible. The
-  ADR-0068 sequence path scores the same situation correctly (platform held, agent resisting).
-  **Unifying the two is named follow-up for the owner**, exactly as ADR-0067 left `llm_as_judge`.
+- **~~ADR-0057 records a guardrail-BLOCKED dispatch as a DEFEAT, and this ADR does not fix it.~~
+  FIXED 2026-08-07 by [ADR-0072](0072-scoring-semantics-correction.md).** As shipped, ADR-0044's
+  runner scored a blocked dispatch as a failed case and ADR-0057 read a failed case as a defeat, so
+  a guardrail stopping an attack prompt read as the attack succeeding. This ADR declined to change
+  it (it would move every stored baseline) and instead **named** it on the per-trial row
+  (`vector: "eval-dispatch-blocked"`) with `platform_held` counting it. **ADR-0072 took the fix**,
+  with the owner's explicit approval and an explicit baseline reset (migration 0083,
+  `scoring_semantics` 1 → 2): a governance stop is now a **platform hold** — the probe resisted,
+  score 1, counted in `platform_held`, never an attack success anywhere including the aggregate
+  ASR — and the eval path and this ADR's sequence path now share **one**
+  `classifyDispatchFailure`, so they agree on the same input by construction. The companion
+  follow-up this bullet compared itself to, ADR-0067's `llm_as_judge`, was taken in the same
+  slice.
 - **An agentic probe measures STATED/EMITTED intent, adjudicated — not an executed call.** The model
   emits a real `tool_use` through the real provider interface and that call is really adjudicated,
   but nothing runs, so this proves what the entitlement layer would have decided and not what the

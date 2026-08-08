@@ -1,5 +1,5 @@
 ---
-phase: competitive-parity-wave-complete
+phase: post-parity-corrections
 last_updated: 2026-08-07
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
@@ -21,11 +21,68 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**ADR-0072 shipped, 2026-08-07 — [the two scoring inversions, fixed together with an explicit
+baseline reset](../docs/decisions/0072-scoring-semantics-correction.md) (migration 0083, the number
+ADR-0071 deliberately left unused).** This is a CORRECTION slice, not a feature slice, and it amends
+two **Accepted** ADRs with the owner's explicit approval. Both bugs were the same shape: **the
+system recorded an ABSENCE OF MEASUREMENT, or a SUCCESS OF THE DEFENCE, as a bad number** — which
+then flowed into an average, a drift comparison, a promotion gate and a compliance artifact.
+**(1) ADR-0044 scored an `llm_as_judge` case with NO judge as 0** (`no_judge_configured`). Loud,
+which is exactly why ADR-0067 left it alone — but wrong IN KIND: a **missing instrument** recorded
+as a **bad measurement**, averaged into `mean_score`, deltaed against a baseline, read by the gate
+as "the agent answered badly", and citable as measured evidence by an ADR-0045 model card. It now
+takes ADR-0067's posture **exactly** — a real **422** from `judgeAvailabilityFor` placed **before**
+the `eval_runs` INSERT, with the suite asserting **no run row, no result row and not one dispatched
+token** — and the old score-0 branch is an unreachable **throw**, deliberately not a fallback,
+because a fallback to zero is the very thing being removed. **(2) ADR-0057 scored a
+guardrail-BLOCKED probe as a DEFEAT**, so **the platform holding looked identical to the platform
+failing** — in the per-probe outcome, the class aggregate, the pooled ASR and the gate. ADR-0068
+found it, named it on the per-trial row, counted `platform_held`, and declined to fix it because it
+would move every stored baseline — while **its own sequence path already scored the same input
+correctly**. Both paths now call **one** `classifyDispatchFailure`: a governance stop is a
+**platform hold** (resisted, score 1, counted, never an attack success anywhere including the
+aggregate ASR); a transport failure is excluded from the ASR **denominator**. The new suite runs
+**the same probe text down BOTH paths** against the same agent under the same blocking guardrail and
+asserts they agree field by field — an assertion that would have FAILED before this slice.
+**The baseline reset is the part that makes this safe, and it is explicit.** Both fixes change what
+stored numbers MEAN without changing their SHAPE, which is the most dangerous kind of change a
+measurement system can make. Migration 0083 adds `scoring_semantics` to `eval_runs` and
+`redteam_runs`; every pre-existing row is stamped **1** by the column DEFAULT and everything after
+**2**. **History is MARKED, never rewritten and never deleted**, and `audit_log` is not touched at
+all, so ADR-0060's hash chain is unaffected *by construction* rather than by care. Comparison
+refuses in **four** places: auto-resolution filters on the column; an explicitly pinned pre-0072
+baseline is a **422 before the run row exists**; an admin-pinned stranded baseline **FAILS the gate
+and names the run to re-pin** (never silently swapped for another); and pinning a v1 run is refused
+with **409 `baseline_semantics_stale`**. Both gates gained `baselineComparable` +
+`baselineIncomparableReason`, because `scoreDelta: null` alone cannot distinguish "first run ever"
+from "not comparable". **The product REPORTS the reset rather than leaving an operator to discover
+it**: `GET /v1/evals/scoring-semantics` returns the changelog, per-version run counts and **exactly
+which pinned baselines are stranded, by run id, with the action to take**; the ADR-0044 drift sweep
+**PAUSES** a stranded pair with the reason stated instead of spending a model call to reach a
+refusal it can predict; the run detail and every ADR-0045 model-card evidence entry carry the
+version. **Any baseline pinned before 2026-08-07 must be re-pinned.** Two existing tests were
+**REWRITTEN, not deleted**, each carrying a comment naming what changed and why: ADR-0067's
+judge-boundary test (which had pinned the asymmetry in both directions and now pins the *unified*
+boundary in both directions) and ADR-0044's `no_judge_configured` test. Gateway
+**1,926 -> 1,957 tests / 111 -> 112 files**; shared **554 -> 561**; policy-kernel 129,
+model-provider 122, infra-provider 174, training-provider 58 unchanged. **Disclosed rather than
+closed** (eight items in the ADR): the `eval_results` row for a blocked probe **still stores
+`score: 0`** — correct for an ordinary quality suite, since polarity belongs to the red-team layer,
+and the adjudication row is the authority; **`classifyDispatchFailure` is a DENY-LIST of transport
+codes**, so a future transport code would be mis-read as a platform hold — it fails **towards**
+claiming the defence worked, the wrong direction, named rather than hidden; there is **no SPA page**
+(API only); nothing re-verifies a judged metric because no provider is connected; `redteam_runs` has
+no admin-pinned-baseline concept so its reset is the resolution filter only; the version is global,
+not per-dataset; pre-0072 `redteam_probe_trials` rows are not individually marked; and there is **no
+down migration**, so rolling the code back with the column in place leaves rows stamped 2 that v1
+code produced.
+
 **Slice E of the parity wave shipped, 2026-08-07 — [ADR-0071](../docs/decisions/0071-shadow-ai-format-adapters.md),
 shadow-AI evidence format adapters. THE PARITY WAVE IS COMPLETE** — six slices, one ADR each,
 dispatched sequentially; see [COMPETITIVE_PARITY_PLAN.md](../docs/product/COMPETITIVE_PARITY_PLAN.md)
 §5 for the closing summary and the three things the wave is *not*. **This slice needed NO MIGRATION
-and that is a decision, not an omission**: 0083 was budgeted and is deliberately unused, because
+and that is a decision, not an omission**: 0083 was budgeted and left unused (it was later claimed
+by ADR-0072), because
 `shadow_ai_imports.summary` is already `jsonb NOT NULL` and carries the adapter id, the format
 basis, the fields actually read, the three row counts and the bounded refusal list — adding four
 columns to store what jsonb already stores would be migration cost with no query that needs it
