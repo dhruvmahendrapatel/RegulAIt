@@ -5,6 +5,24 @@ import { and, auditLog, createDb, eq, runMigrations, usageEvents, type Db } from
 import { buildApp } from "./app.js";
 
 /**
+ * The most recent row by `at`.
+ *
+ * NEVER index a bare SELECT's result by position. Postgres does not promise
+ * insertion order without an ORDER BY, and two CI failures in this repo came
+ * from exactly that: a test read `rows[rows.length - 1]` as "the row just
+ * written", passed locally for months, and failed the first time the physical
+ * row order came back the other way round. Sorting by the column that actually
+ * carries the ordering makes the assertion mean what it says.
+ */
+function latestRow<T extends { at: Date }>(rows: readonly T[]): T {
+  const sorted = [...rows].sort((a, b) => a.at.getTime() - b.at.getTime());
+  const last = sorted[sorted.length - 1];
+  if (!last) throw new Error("latestRow: no rows");
+  return last;
+}
+
+
+/**
  * §8.4 PII ENFORCEMENT (pillar 3) — the compliance cascade's piiMode turned
  * into a real enforcement point at every PROJECT-ATTRIBUTED model + connector
  * dispatch, plus audit-log retention pruning to the global floor.
@@ -169,7 +187,7 @@ describe("§8.4 model dispatch PII enforcement", () => {
     expect(await usageCount(blockProj)).toBe(before + 1);
     // and the withheld usage row records COUNTS only, never the substring
     const rows = await db.select().from(usageEvents).where(eq(usageEvents.projectId, blockProj));
-    const latest = rows[rows.length - 1]!;
+    const latest = latestRow(rows);
     const detail = latest.detail as { pii?: { action: string; outputHits: unknown[] } };
     expect(detail.pii?.action).toBe("block");
     expect(JSON.stringify(detail)).not.toContain(SSN);
@@ -211,7 +229,7 @@ describe("§8.4 model dispatch PII enforcement", () => {
     expect(d.outputText).not.toContain("output withheld"); // no user-visible change
     expect(await usageCount(logProj)).toBe(before + 1);
     const rows = await db.select().from(usageEvents).where(eq(usageEvents.projectId, logProj));
-    const detail = rows[rows.length - 1]!.detail as { pii?: { action: string; inputHits: unknown[] } };
+    const detail = latestRow(rows).detail as { pii?: { action: string; inputHits: unknown[] } };
     expect(detail.pii?.action).toBe("log");
     expect(JSON.stringify(detail)).not.toContain(SSN); // counts only
   });

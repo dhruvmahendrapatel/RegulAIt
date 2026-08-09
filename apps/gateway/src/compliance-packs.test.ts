@@ -60,6 +60,24 @@ import {
 import { COMPLIANCE_PACK_DISCLAIMER, DEFAULT_COMPLIANCE_PACKS } from "@regulait/shared";
 import { COMPLIANCE_PACK_RULE_IDS } from "./compliance-packs.js";
 
+/**
+ * The most recent row by `at`.
+ *
+ * NEVER index a bare SELECT's result by position. Postgres does not promise
+ * insertion order without an ORDER BY, and two CI failures in this repo came
+ * from exactly that: a test read `rows[rows.length - 1]` as "the row just
+ * written", passed locally for months, and failed the first time the physical
+ * row order came back the other way round. Sorting by the column that actually
+ * carries the ordering makes the assertion mean what it says.
+ */
+function latestRow<T extends { at: Date }>(rows: readonly T[]): T {
+  const sorted = [...rows].sort((a, b) => a.at.getTime() - b.at.getTime());
+  const last = sorted[sorted.length - 1];
+  if (!last) throw new Error("latestRow: no rows");
+  return last;
+}
+
+
 const { buildApp } = await import("./app.js");
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -516,7 +534,7 @@ describe("ADR-0058 — the artifact never claims compliance", () => {
       .from(auditLog)
       .where(eq(auditLog.ruleId, COMPLIANCE_PACK_RULE_IDS.evaluated));
     expect(rows.length).toBeGreaterThan(0);
-    const latest = rows[rows.length - 1]!;
+    const latest = latestRow(rows);
     expect(latest.reason).toMatch(/CONTROL-MAPPING/);
     expect(latest.detail).toHaveProperty("effectiveProjectIds");
   });

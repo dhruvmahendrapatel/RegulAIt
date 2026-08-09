@@ -67,6 +67,24 @@ import {
 import { planCopilotQuery, type CopilotNarration, type CopilotNarrator } from "@regulait/shared";
 import { COPILOT_RULE_IDS } from "./copilot.js";
 
+/**
+ * The most recent row by `at`.
+ *
+ * NEVER index a bare SELECT's result by position. Postgres does not promise
+ * insertion order without an ORDER BY, and two CI failures in this repo came
+ * from exactly that: a test read `rows[rows.length - 1]` as "the row just
+ * written", passed locally for months, and failed the first time the physical
+ * row order came back the other way round. Sorting by the column that actually
+ * carries the ordering makes the assertion mean what it says.
+ */
+function latestRow<T extends { at: Date }>(rows: readonly T[]): T {
+  const sorted = [...rows].sort((a, b) => a.at.getTime() - b.at.getTime());
+  const last = sorted[sorted.length - 1];
+  if (!last) throw new Error("latestRow: no rows");
+  return last;
+}
+
+
 const { buildApp } = await import("./app.js");
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -320,14 +338,14 @@ describe("ADR-0056 — the narrator is a governed tenant, not an exemption", () 
     // the copilot's own model call is measured in the SAME ledger every other
     // dispatch lands in — it has no private budget
     expect(after.length).toBeGreaterThan(before.length);
-    expect(after[after.length - 1]!.projectId).toBe(projectA);
+    expect(latestRow(after).projectId).toBe(projectA);
 
     const asked = await db
       .select()
       .from(auditLog)
       .where(eq(auditLog.ruleId, COPILOT_RULE_IDS.asked));
     expect(asked.length).toBeGreaterThan(0);
-    expect(asked[asked.length - 1]!.detail).toHaveProperty("scopeProjectIds");
+    expect(latestRow(asked).detail).toHaveProperty("scopeProjectIds");
   });
 });
 
@@ -450,7 +468,7 @@ describe("ADR-0056 — the copilot proposes; it never mutates", () => {
       .from(auditLog)
       .where(eq(auditLog.ruleId, COPILOT_RULE_IDS.proposalOpened));
     expect(opened.length).toBeGreaterThan(0);
-    expect(opened[opened.length - 1]!.reason).toMatch(/NOTHING WAS APPLIED/);
+    expect(latestRow(opened).reason).toMatch(/NOTHING WAS APPLIED/);
   });
 
   it("refuses a proposal built on another user's query — the evidence-laundering path", async () => {

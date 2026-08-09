@@ -18,6 +18,24 @@ import { buildApp } from "./app.js";
 import { AGENT_HEADER, PROJECT_HEADER } from "./compat-core.js";
 
 /**
+ * The most recent row by `at`.
+ *
+ * NEVER index a bare SELECT's result by position. Postgres does not promise
+ * insertion order without an ORDER BY, and two CI failures in this repo came
+ * from exactly that: a test read `rows[rows.length - 1]` as "the row just
+ * written", passed locally for months, and failed the first time the physical
+ * row order came back the other way round. Sorting by the column that actually
+ * carries the ordering makes the assertion mean what it says.
+ */
+function latestRow<T extends { at: Date }>(rows: readonly T[]): T {
+  const sorted = [...rows].sort((a, b) => a.at.getTime() - b.at.getTime());
+  const last = sorted[sorted.length - 1];
+  if (!last) throw new Error("latestRow: no rows");
+  return last;
+}
+
+
+/**
  * ADR-0020 / ROADMAP Batch H — IDE / existing-agent interception, end to end.
  *
  * The claims under test, in order of how much damage getting them wrong would
@@ -256,7 +274,7 @@ describe("interception posture is admin-configurable and default-deny", () => {
       .from(auditLog)
       .where(eq(auditLog.ruleId, "interception-settings-updated"));
     expect(rows.length).toBeGreaterThan(0);
-    const detail = rows[rows.length - 1]!.detail as { changed?: Record<string, unknown> };
+    const detail = latestRow(rows).detail as { changed?: Record<string, unknown> };
     expect(detail.changed).toBeDefined();
   });
 });

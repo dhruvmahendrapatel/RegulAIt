@@ -63,6 +63,24 @@ import {
 } from "@regulait/db";
 import { buildApp } from "./app.js";
 
+/**
+ * The most recent row by `at`.
+ *
+ * NEVER index a bare SELECT's result by position. Postgres does not promise
+ * insertion order without an ORDER BY, and two CI failures in this repo came
+ * from exactly that: a test read `rows[rows.length - 1]` as "the row just
+ * written", passed locally for months, and failed the first time the physical
+ * row order came back the other way round. Sorting by the column that actually
+ * carries the ordering makes the assertion mean what it says.
+ */
+function latestRow<T extends { at: Date }>(rows: readonly T[]): T {
+  const sorted = [...rows].sort((a, b) => a.at.getTime() - b.at.getTime());
+  const last = sorted[sorted.length - 1];
+  if (!last) throw new Error("latestRow: no rows");
+  return last;
+}
+
+
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
 
@@ -382,7 +400,7 @@ describe("GET /v1/models — entitlement-filtered discovery", () => {
     await app.inject({ method: "GET", url: "/v1/models", headers: adaAuth });
     const after = await auditRows("models-listed", adaId);
     expect(after.length).toBe(before + 1);
-    expect(after[after.length - 1]!.effect).toBe("allow");
+    expect(latestRow(after).effect).toBe("allow");
   });
 
   it("404s — indistinguishably — when BOTH compat surfaces are off", async () => {
@@ -938,7 +956,7 @@ describe("fallback chains: only a TRANSPORT failure triggers one", () => {
 
     const served = await auditRows("fallback-hop-served", adaId);
     expect(served.length).toBeGreaterThan(0);
-    expect(served[served.length - 1]!.detail).toMatchObject({ primaryAgentId });
+    expect(latestRow(served).detail).toMatchObject({ primaryAgentId });
   });
 
   it("A GOVERNANCE DENY DOES NOT FALL BACK — zero hops attempted, zero audit rows", async () => {
