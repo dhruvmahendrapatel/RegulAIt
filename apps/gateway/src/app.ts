@@ -123,6 +123,7 @@ import { applyModelCardApprovalDecision, registerMrmRoutes } from "./mrm.js";
 import { registerRedTeamRoutes } from "./redteam.js";
 import { registerReportingRoutes } from "./reporting.js";
 import { registerConfigVersionRoutes } from "./config-versions.js";
+import { ConfigVersionUnresolvableError } from "./rule-versions.js";
 import { registerSpendMonitorRoutes } from "./spend-monitor.js";
 import { registerLineageRoutes } from "./lineage.js";
 import { registerBillingRoutes } from "./billing.js";
@@ -452,6 +453,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     }
     if (err instanceof MergeConflictError) {
       return reply.status(422).send({ error: "template_merge_conflict", detail: err.message });
+    }
+    // ADR-0073: a governance artifact has stored versions but none is active.
+    // A real refusal with the reason stated, never a call that proceeds with the
+    // rule/profile silently absent.
+    if (err instanceof ConfigVersionUnresolvableError) {
+      return reply.status(409).send({ error: "config_version_unresolvable", detail: err.message });
     }
     const pgCode = (err as { cause?: { code?: string } }).cause?.code;
     if (pgCode === "23505") return reply.status(409).send({ error: "conflict" });

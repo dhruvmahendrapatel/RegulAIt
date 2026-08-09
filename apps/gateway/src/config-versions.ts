@@ -58,15 +58,21 @@ import type { FastifyInstance } from "fastify";
 import {
   agents,
   and,
+  approvalRules,
   asc,
   auditLog,
+  complianceProfiles,
   configActivationEvents,
+  configCanaryObservations,
   configVersions,
   count,
+  dataScopeRules,
   desc,
   eq,
   evalRuns,
   isNotNull,
+  projects,
+  rateLimits,
   sql,
   usageEvents,
   type ConfigArtifactType,
@@ -75,18 +81,26 @@ import {
 } from "@regulait/db";
 import {
   CONFIG_ARTIFACT_TYPES,
+  VERSIONED_RULE_FIELDS,
   activateConfigVersionSchema,
+  applyRuleBody,
   canaryIsLive,
+  canaryModeNote,
+  canaryModeOf,
   createConfigVersionSchema,
   evaluatePromotion,
+  isRuleArtifact,
   promoteCanarySchema,
   promptFromBody,
   resolveVersion,
   rollbackConfigSchema,
+  ruleBodyFrom,
   startCanarySchema,
   stableKeyFor,
+  validateRuleVersionBody,
   type ResolvedVersion,
 } from "@regulait/shared";
+import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -98,6 +112,66 @@ const artifactParam = z.object({
 // ---------------------------------------------------------------------------
 // Loading + resolution
 // ---------------------------------------------------------------------------
+
+/**
+ * ADR-0073 — the table each rule/profile artifact type versions.
+ *
+ * Two jobs, both load-bearing:
+ *   - the BASELINE: the first version of an artifact is minted FROM this row,
+ *     so ADR-0048 §7's behaviour-preserving default holds without a migration
+ *     that would have flipped every existing rule onto the version path at once;
+ *   - the READ-MODEL: `activateVersion` writes the newly-active body back here,
+ *     exactly as it already does for `agents.systemPrompt`, so every surface
+ *     that lists rules (the admin API, the SPA, ADR-0059's simulation) shows
+ *     what is actually enforced without learning about `config_versions`.
+ *     DISPATCH never trusts it — `applyRuleVersions` reads `config_versions`
+ *     whenever a version row exists.
+ */
+const RULE_TABLES = {
+  approval_rule: approvalRules,
+  rate_limit: rateLimits,
+  data_scope_rule: dataScopeRules,
+  compliance_profile: complianceProfiles,
+} as const;
+
+type RuleArtifactType = keyof typeof RULE_TABLES;
+
+function ruleTableFor(t: ConfigArtifactType) {
+  return (RULE_TABLES as Record<string, (typeof RULE_TABLES)[RuleArtifactType] | undefined>)[t];
+}
+
+async function loadRuleRow(
+  db: Db,
+  artifactType: ConfigArtifactType,
+  artifactId: string,
+): Promise<Record<string, unknown> | null> {
+  const table = ruleTableFor(artifactType);
+  if (!table) return null;
+  const [row] = await db.select().from(table).where(eq(table.id, artifactId));
+  return (row as Record<string, unknown> | undefined) ?? null;
+}
+
+/** write the active body back onto the artifact's own row — the read-model
+ * half. Only versionable fields are ever written. */
+async function writeRuleReadModel(
+  db: Db,
+  artifactType: ConfigArtifactType,
+  artifactId: string,
+  body: Record<string, unknown>,
+): Promise<void> {
+  const table = ruleTableFor(artifactType);
+  if (!table) return;
+  const allowed = VERSIONED_RULE_FIELDS[artifactType] ?? [];
+  const patch: Record<string, unknown> = {};
+  for (const f of allowed) {
+    if (Object.prototype.hasOwnProperty.call(body, f)) patch[f] = body[f];
+  }
+  if (Object.keys(patch).length === 0) return;
+  await db
+    .update(table)
+    .set(patch as never)
+    .where(eq(table.id, artifactId));
+}
 
 export async function loadVersions(
   db: Db,
@@ -192,7 +266,63 @@ export async function newVersion(
     reason?: string | null;
   },
 ): Promise<{ version: ConfigVersionRow; activated: boolean }> {
-  const existing = await loadVersions(db, args.artifactType, args.artifactId);
+  let existing = await loadVersions(db, args.artifactType, args.artifactId);
+
+  // ADR-0073 — THE LAZY BASELINE (ADR-0048 §7's behaviour-preserving default,
+  // applied at the moment versioning starts for THIS artifact).
+  //
+  // Migration 0060 backfilled agent prompts; rules were never backfilled,
+  // because a migration-time backfill would have moved every existing rule onto
+  // the version path in one step. So the first version an admin creates for a
+  // rule mints v1 = the rule EXACTLY AS IT STANDS RIGHT NOW, active, and the
+  // requested body becomes v2.
+  //
+  // Without this, creating a draft v1 would leave the artifact with version rows
+  // and no active version — which `resolveForShadow` correctly treats as
+  // unresolvable and DENIES. Minting the baseline is what keeps that fail-closed
+  // branch reserved for genuine corruption instead of firing on an admin's first
+  // ever edit.
+  if (existing.length === 0 && isRuleArtifact(args.artifactType)) {
+    const row = await loadRuleRow(db, args.artifactType, args.artifactId);
+    if (row) {
+      const [baseline] = await db
+        .insert(configVersions)
+        .values({
+          artifactType: args.artifactType,
+          artifactId: args.artifactId,
+          version: 1,
+          body: ruleBodyFrom(args.artifactType, row),
+          label: "v1 (pre-versioning baseline)",
+          parentVersion: null,
+          status: "active",
+          authorUserId: args.authorUserId,
+        })
+        .returning();
+      await db.insert(configActivationEvents).values({
+        artifactType: args.artifactType,
+        artifactId: args.artifactId,
+        versionId: baseline!.id,
+        version: 1,
+        action: "activated",
+        actorUserId: args.authorUserId,
+        reason:
+          "v1 baseline captured from the live rule at the moment it was first versioned — " +
+          "behaviour is unchanged by its creation",
+      });
+      await auditConfig(
+        db,
+        args.authorUserId,
+        args.artifactId,
+        "config-version-baseline-captured",
+        `version 1 of ${args.artifactType} was captured from the live rule because this artifact was ` +
+          `versioned for the first time — nothing about the rule changed, and it is now the ACTIVE version ` +
+          `the kernel resolves`,
+        { artifactType: args.artifactType, version: 1 },
+      );
+      existing = await loadVersions(db, args.artifactType, args.artifactId);
+    }
+  }
+
   const next = existing.reduce((m, v) => Math.max(m, v.version), 0) + 1;
   const parent = existing.find((v) => v.status === "active")?.version ?? null;
   const [row] = await db
@@ -309,6 +439,12 @@ export async function activateVersion(
       .set({ systemPrompt: promptFromBody(updated.body) })
       .where(eq(agents.id, args.artifactId));
   }
+  // ADR-0073: the SAME read-model discipline for rule/compliance artifacts. The
+  // rule's own row is rewritten to the newly-active body, so every listing
+  // surface shows what is enforced. This is a convenience for READERS — the
+  // kernel resolves through `config_versions`, so a rollback would change
+  // evaluation even if this write had never happened.
+  await writeRuleReadModel(db, args.artifactType, args.artifactId, updated.body);
 
   await auditConfig(
     db,
@@ -367,12 +503,16 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
       active,
       canary,
       history: events,
-      canaryMode: canaryIsLive(artifactType) ? "live" : "shadow",
-      note: canaryIsLive(artifactType)
-        ? "Canary traffic is served LIVE and stamped onto usage_events.config_version_id."
-        : "This artifact type canaries in SHADOW per ADR-0048 §2 — a partially-enforced deny would " +
-          "non-deterministically block real work. NOTE: shadow evaluation for rule types is NOT yet " +
-          "wired into the rules engine; a stored rule canary changes nothing at all today.",
+      // ADR-0073 — THREE modes, not two, because "live" and "shadow" were being
+      // asked to carry a third meaning they cannot: `agent_config` is neither
+      // served nor shadowed, and calling it "shadow" claimed a measurement that
+      // did not exist. `canaryIsLive` keeps its meaning (does the canary SERVE)
+      // and stays false for every rule type for ever — flipping it would make a
+      // rule canary ENFORCE a partial deny, which §2 forbids.
+      canaryMode: canaryModeOf(artifactType),
+      canaryIsLive: canaryIsLive(artifactType),
+      canaryIsEvaluated: canaryModeOf(artifactType) !== "inert",
+      note: canaryModeNote(artifactType),
     };
   });
 
@@ -382,6 +522,21 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
     if (artifactType === "agent_system_prompt") {
       const [agent] = await db.select({ id: agents.id }).from(agents).where(eq(agents.id, artifactId));
       if (!agent) return reply.status(404).send({ error: "unknown_agent" });
+    }
+    // ADR-0073 — a rule version must name a REAL rule and may only carry
+    // ENFORCING fields. Both are real refusals rather than a stored version
+    // that would be silently ignored at evaluation time.
+    if (isRuleArtifact(artifactType)) {
+      const row = await loadRuleRow(db, artifactType, artifactId);
+      if (!row) {
+        return reply.status(404).send({
+          error: "unknown_artifact",
+          detail: `no ${artifactType} with id ${artifactId} exists; a version of a rule that does not exist would ` +
+            `never be loaded by any evaluation`,
+        });
+      }
+      const rejection = validateRuleVersionBody(artifactType, body.body);
+      if (rejection) return reply.status(422).send({ error: rejection.error, detail: rejection.reason });
     }
     const res = await newVersion(db, {
       artifactType,
@@ -503,13 +658,22 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
       artifactId,
       adjust ? "config-canary-adjusted" : "config-canary-started",
       `version ${target.version} of ${artifactType} is now the canary at ${body.pct}% — ` +
-        (canaryIsLive(artifactType)
-          ? "routing is deterministic on a stable key (run, else conversation, else user), so a multi-turn " +
-            "conversation cannot flip mid-run, and every dispatch records which version served it"
-          : "this artifact type canaries in SHADOW and enforces nothing; rule-type shadow evaluation is not yet wired"),
-      { artifactType, version: target.version, pct: body.pct, live: canaryIsLive(artifactType) },
+        canaryModeNote(artifactType),
+      {
+        artifactType,
+        version: target.version,
+        pct: body.pct,
+        live: canaryIsLive(artifactType),
+        canaryMode: canaryModeOf(artifactType),
+      },
     );
-    return { canaryVersion: row!.version, pct: row!.canaryPct, live: canaryIsLive(artifactType) };
+    return {
+      canaryVersion: row!.version,
+      pct: row!.canaryPct,
+      live: canaryIsLive(artifactType),
+      canaryMode: canaryModeOf(artifactType),
+      note: canaryModeNote(artifactType),
+    };
   });
 
   /** abandon the canary WITHOUT touching the active version (§5) */
@@ -635,6 +799,153 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
       note:
         "Read from usage_events — the ONE spend ledger. Every dispatch carries the version that served it, " +
         "so a regression in these numbers is attributable to a specific version rather than to a time window.",
+    };
+  });
+
+  // -------------------------------------------------------------------------
+  // ADR-0073 — WHAT WOULD CHANGE IF I PROMOTED THIS.
+  //
+  // The question an operator has to answer before promoting a rule canary, and
+  // the one ADR-0048 could not answer at all because nothing evaluated the
+  // candidate. Read straight off `config_canary_observations`.
+  // -------------------------------------------------------------------------
+
+  /** every artifact currently carrying a canary, with its divergence counts —
+   * the index the SPA needs to show "there is something waiting on you" */
+  app.get("/v1/config-versions/canaries", async () => {
+    const canaries = await db
+      .select()
+      .from(configVersions)
+      .where(eq(configVersions.status, "canary"))
+      .orderBy(asc(configVersions.artifactType), asc(configVersions.artifactId));
+    const counts = canaries.length
+      ? await db
+          .select({
+            candidateVersionId: configCanaryObservations.candidateVersionId,
+            observed: count(),
+            diverged: sql<number>`coalesce(sum(CASE WHEN ${configCanaryObservations.diverged} THEN 1 ELSE 0 END), 0)::int`,
+            failed: sql<number>`coalesce(sum(CASE WHEN ${configCanaryObservations.failed} THEN 1 ELSE 0 END), 0)::int`,
+          })
+          .from(configCanaryObservations)
+          .groupBy(configCanaryObservations.candidateVersionId)
+      : [];
+    const byId = new Map(counts.map((c) => [c.candidateVersionId, c]));
+    return {
+      canaries: canaries.map((c) => {
+        const seen = byId.get(c.id);
+        return {
+          artifactType: c.artifactType,
+          artifactId: c.artifactId,
+          version: c.version,
+          label: c.label,
+          canaryPct: c.canaryPct,
+          canaryMode: canaryModeOf(c.artifactType),
+          observed: Number(seen?.observed ?? 0),
+          diverged: Number(seen?.diverged ?? 0),
+          failed: Number(seen?.failed ?? 0),
+        };
+      }),
+      note:
+        "`observed` counts SAMPLED decisions only — canaryPct is the shadow sampling rate, so a divergence " +
+        "count is a count within the sample and never a fleet-wide total. An `inert` canaryMode means " +
+        "nothing evaluates this artifact type at all and every count will stay zero.",
+    };
+  });
+
+  app.get("/v1/config-versions/:artifactType/:artifactId/divergence", async (req) => {
+    const { artifactType, artifactId } = artifactParam.parse(req.params);
+    const versions = await loadVersions(db, artifactType, artifactId);
+    const canary = versions.find((v) => v.status === "canary") ?? null;
+    const active = versions.find((v) => v.status === "active") ?? null;
+
+    const rows = canary
+      ? await db
+          .select()
+          .from(configCanaryObservations)
+          .where(eq(configCanaryObservations.candidateVersionId, canary.id))
+          .orderBy(desc(configCanaryObservations.at))
+          .limit(200)
+      : [];
+    const [totals] = canary
+      ? await db
+          .select({
+            observed: count(),
+            diverged: sql<number>`coalesce(sum(CASE WHEN ${configCanaryObservations.diverged} THEN 1 ELSE 0 END), 0)::int`,
+            failed: sql<number>`coalesce(sum(CASE WHEN ${configCanaryObservations.failed} THEN 1 ELSE 0 END), 0)::int`,
+          })
+          .from(configCanaryObservations)
+          .where(eq(configCanaryObservations.candidateVersionId, canary.id))
+      : [{ observed: 0, diverged: 0, failed: 0 }];
+
+    // The compliance cascade's candidate effect does NOT vary per request — it
+    // is a pure function of the profile bodies and a project's tags — so it is
+    // computed HERE, over the real projects, rather than written once per call
+    // into an observation table as N identical rows.
+    let projectImpact: Array<Record<string, unknown>> | null = null;
+    let projectImpactNote: string | null = null;
+    if (artifactType === "compliance_profile" && canary) {
+      const [profile] = await db
+        .select()
+        .from(complianceProfiles)
+        .where(eq(complianceProfiles.id, artifactId));
+      if (profile) {
+        const all = await db
+          .select({ id: projects.id, name: projects.name, classifications: projects.classifications })
+          .from(projects);
+        const affected = all
+          .filter((p) => ((p.classifications ?? []) as string[]).includes(profile.tag))
+          .slice(0, 50);
+        projectImpact = [];
+        for (const p of affected) {
+          const tags = (p.classifications ?? []) as string[];
+          const activeSet = await complianceProfilesForTags(db, tags);
+          const candidateSet = activeSet.map((row) =>
+            row.id === artifactId ? applyRuleBody("compliance_profile", row, canary.body) : row,
+          );
+          const before = effectiveCompliancePolicy(activeSet) as Record<string, unknown>;
+          const after = effectiveCompliancePolicy(candidateSet) as Record<string, unknown>;
+          const changed = Object.keys(after).filter(
+            (k) => JSON.stringify(before[k]) !== JSON.stringify(after[k]),
+          );
+          projectImpact.push({
+            projectId: p.id,
+            projectName: p.name,
+            classifications: tags,
+            diverged: changed.length > 0,
+            changed,
+            before,
+            after,
+          });
+        }
+        projectImpactNote =
+          `Computed live from the candidate body against every project carrying '${profile.tag}' ` +
+          `(first 50). This is NOT sampled and NOT stored — a compliance profile's effect does not vary ` +
+          `per request, so recording one observation row per call would store the same answer repeatedly.`;
+      }
+    }
+
+    return {
+      artifactType,
+      artifactId,
+      canaryMode: canaryModeOf(artifactType),
+      activeVersion: active?.version ?? null,
+      candidateVersion: canary?.version ?? null,
+      canaryPct: canary?.canaryPct ?? null,
+      totals: {
+        observed: Number(totals?.observed ?? 0),
+        diverged: Number(totals?.diverged ?? 0),
+        failed: Number(totals?.failed ?? 0),
+      },
+      observations: rows,
+      projectImpact,
+      projectImpactNote,
+      note: canary
+        ? canaryModeNote(artifactType) +
+          " `observed` is the number of SAMPLED decisions, not the number of decisions — at " +
+          `${canary.canaryPct}% roughly that share of callers are shadowed. A non-zero \`failed\` means the ` +
+          "candidate's evaluation THREW on that decision: the served answer was unaffected, and the " +
+          "comparison for that call did not happen — do not read `diverged` as complete while `failed` > 0."
+        : "there is no canary on this artifact, so there is nothing to compare against the active version",
     };
   });
 }

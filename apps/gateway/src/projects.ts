@@ -61,6 +61,7 @@ import {
   type WorkflowDefinition,
 } from "@regulait/workflow-kernel";
 import { loadOrgSettings, orgDefaultPiiMode, retentionFloor, runAuditPruneOnce } from "./org-settings.js";
+import { ConfigVersionUnresolvableError, resolveRuleVersions } from "./rule-versions.js";
 
 type ProjectRow = typeof projects.$inferSelect;
 
@@ -387,10 +388,37 @@ export async function complianceProfilesForTags(
   return profilesForTags(db, tags);
 }
 
+/**
+ * ADR-0073 — a compliance profile's ACTIVE VERSION governs, not its table row.
+ *
+ * This is the ONE funnel every §8.3 cascade consumer goes through
+ * (`projectPiiMode`, `projectMcpMode`, `complianceProfilesForTags` for the
+ * guardrail floor and the pillar-3 infra floors), so wiring it here wires all
+ * of them without any of them learning about `config_versions` — the same
+ * single-choke-point discipline `executeGovernedDispatch` gives the prompt path.
+ *
+ * A profile with no version rows resolves to its own row: byte-identical
+ * pre-ADR-0073 behaviour. A profile with version rows but NO active version
+ * REFUSES — dropping a compliance profile would relax `piiMode`,
+ * `mcpDefaultMode` and every floor it carries, which is precisely the direction
+ * this may never fail in.
+ *
+ * NOTE ON THE SHADOW: a compliance-profile candidate's effect is a pure
+ * function of the profile bodies and the project's tags — it does not vary per
+ * request. Evaluating it here would write one identical observation row per
+ * call, so it is computed instead where it is read, over the real projects, by
+ * `GET /v1/config-versions/:type/:id/divergence`. Stated rather than implied.
+ */
 async function profilesForTags(db: Db, tags: string[]): Promise<ComplianceProfileRow[]> {
   if (tags.length === 0) return [];
   const rows = await db.select().from(complianceProfiles);
-  return rows.filter((p) => tags.includes(p.tag));
+  const matched = rows.filter((p) => tags.includes(p.tag));
+  if (matched.length === 0) return matched;
+  const resolved = await resolveRuleVersions(db, "compliance_profile", matched, tags.slice().sort().join(","));
+  if (resolved.unresolvable.length > 0) {
+    throw new ConfigVersionUnresolvableError(resolved.unresolvable[0]!.reason);
+  }
+  return resolved.served;
 }
 
 // --- §8.4 PII enforcement (pillar 3) -------------------------------------

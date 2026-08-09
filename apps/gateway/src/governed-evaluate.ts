@@ -21,6 +21,13 @@ import {
 import { evaluate, type Decision, type ToolRef } from "@regulait/policy-kernel";
 import { loadEntitlements, loadScopeMemberships } from "./entitlements.js";
 import { evaluateAbacForToolCall, loadActiveAbacPolicies, type AbacPrincipalContext } from "./abac.js";
+import {
+  applyRuleVersions,
+  loadVersionsForArtifacts,
+  recordCanaryFailure,
+  recordCanaryObservations,
+  type CandidateNote,
+} from "./rule-versions.js";
 
 /**
  * PILLAR 1 rule scoping: the SQL pre-filter that widens a rule load from the
@@ -209,7 +216,70 @@ export async function governedEvaluate(
   // Display names for the decision's reason prose — the ids in ruleId /
   // ruleChain / stored audit fields stay authoritative, but the sentence a
   // human reads (simulation verdicts, proxy denials) names things by name.
-  const nameIds = [...new Set([userId, ...aRules.map((r) => r.approverUserId)])];
+  // ---------------------------------------------------------------------
+  // ADR-0073 — RESOLVE EACH RULE THROUGH `config_versions`.
+  //
+  // ONE query for all three rule types (not one per rule, and not one per
+  // type). A rule with no version rows resolves to its own table row, which is
+  // byte-identical pre-ADR-0073 behaviour; a rule with an ACTIVE version is
+  // governed by that version's body, which is what makes activating and rolling
+  // back genuinely change evaluation; a rule with version rows but NO active
+  // version is UNRESOLVABLE and denies below, because skipping a restriction is
+  // a widening.
+  //
+  // `stableKey` = the calling user: a tool-call evaluation has no run or
+  // conversation, and per-user stickiness is what makes a shadow sample a
+  // coherent picture of one person's day rather than a scatter.
+  // ---------------------------------------------------------------------
+  const ruleIds = [...aRules.map((r) => r.id), ...limits.map((l) => l.id), ...scopeRules.map((r) => r.id)];
+  const versionMap = await loadVersionsForArtifacts(
+    db,
+    ["approval_rule", "rate_limit", "data_scope_rule"],
+    ruleIds,
+  );
+  const aResolved = applyRuleVersions("approval_rule", aRules, versionMap, userId);
+  const limitsResolved = applyRuleVersions("rate_limit", limits, versionMap, userId);
+  const scopeResolved = applyRuleVersions("data_scope_rule", scopeRules, versionMap, userId);
+  const unresolvable = [
+    ...aResolved.unresolvable.map((u) => ({ ...u, artifactType: "approval_rule" as const })),
+    ...limitsResolved.unresolvable.map((u) => ({ ...u, artifactType: "rate_limit" as const })),
+    ...scopeResolved.unresolvable.map((u) => ({ ...u, artifactType: "data_scope_rule" as const })),
+  ];
+
+  // DEFAULT-DENY SURVIVES VERSION RESOLUTION. There is no branch anywhere above
+  // or below on which "I could not find the active version" ends in an allow.
+  if (unresolvable.length > 0) {
+    const first = unresolvable[0]!;
+    return {
+      decision: {
+        effect: "deny",
+        ruleId: "config-version-unresolvable",
+        ruleChain: [{ rule: "default-deny", outcome: "deny", grantId: first.artifactId }],
+        reason:
+          `governance configuration is in an indeterminate state and the call is refused rather than ` +
+          `evaluated without it: ${first.reason}` +
+          (unresolvable.length > 1 ? ` (and ${unresolvable.length - 1} more)` : ""),
+      },
+      approvedApprovalId: null,
+    };
+  }
+
+  const servedARules = aResolved.served;
+  const servedLimits = limitsResolved.served;
+  const servedScopeRules = scopeResolved.served;
+
+  // Display names for the decision's reason prose — the ids in ruleId /
+  // ruleChain / stored audit fields stay authoritative, but the sentence a
+  // human reads (simulation verdicts, proxy denials) names things by name.
+  // The CANDIDATE's approvers are looked up too, so a shadow observation's
+  // stored reason reads the same way the served one would.
+  const nameIds = [
+    ...new Set([
+      userId,
+      ...servedARules.map((r) => r.approverUserId),
+      ...(aResolved.candidate ?? []).map((r) => r.approverUserId),
+    ]),
+  ];
   const nameRows = nameIds.length
     ? await db
         .select({ id: users.id, displayName: users.displayName, email: users.email })
@@ -218,36 +288,45 @@ export async function governedEvaluate(
     : [];
   const nameOf = new Map(nameRows.map((u) => [u.id, u.displayName || u.email]));
 
+  // Each widened limit keeps its OWN per-subject count/window (no summing).
+  // The count is always this user's allowed calls in the window; an
+  // all-servers limit counts across every server, a server-scoped one stays
+  // pinned to this server (identical to the legacy behaviour).
+  const countFor = async (l: { serverScope: string; toolName: string | null; windowSeconds: number }) => {
+    const windowStart = new Date(Date.now() - l.windowSeconds * 1000);
+    const conditions = [
+      eq(auditLog.userId, userId),
+      eq(auditLog.effect, "allow"),
+      gte(auditLog.at, windowStart),
+    ];
+    if (l.serverScope !== "all") conditions.push(eq(auditLog.serverId, serverId));
+    if (l.toolName) conditions.push(eq(auditLog.toolName, l.toolName));
+    const [row] = await db
+      .select({ value: count() })
+      .from(auditLog)
+      .where(and(...conditions));
+    return Number(row?.value ?? 0);
+  };
+
   const limitsWithCounts = await Promise.all(
-    limits.map(async (l) => {
-      const windowStart = new Date(Date.now() - l.windowSeconds * 1000);
-      // Each widened limit keeps its OWN per-subject count/window (no summing).
-      // The count is always this user's allowed calls in the window; an
-      // all-servers limit counts across every server, a server-scoped one stays
-      // pinned to this server (identical to the legacy behaviour).
-      const conditions = [
-        eq(auditLog.userId, userId),
-        eq(auditLog.effect, "allow"),
-        gte(auditLog.at, windowStart),
-      ];
-      if (l.serverScope !== "all") conditions.push(eq(auditLog.serverId, serverId));
-      if (l.toolName) conditions.push(eq(auditLog.toolName, l.toolName));
-      const [row] = await db
-        .select({ value: count() })
-        .from(auditLog)
-        .where(and(...conditions));
-      return { ...l, currentCount: Number(row?.value ?? 0) };
-    }),
+    servedLimits.map(async (l) => ({ ...l, currentCount: await countFor(l) })),
   );
 
   const approvedApprovalId = approvedRows[0]?.id ?? null;
 
   // A4: derive the deploy context ONLY when some loaded rule is mode-scoped —
   // zero extra queries on the default path (no mode-scoped rules = today).
+  // The CANDIDATE rows are consulted too: a candidate that ADDS a deploy-mode
+  // scope must be shadowed against a real deploy context, not against null.
+  const modeScopedIn = (rows: Array<{ deployMode: string | null }>) =>
+    rows.some((r) => r.deployMode != null);
   const anyModeScoped =
-    aRules.some((r) => r.deployMode != null) ||
-    limits.some((l) => l.deployMode != null) ||
-    scopeRules.some((r) => r.deployMode != null);
+    modeScopedIn(servedARules) ||
+    modeScopedIn(servedLimits) ||
+    modeScopedIn(servedScopeRules) ||
+    modeScopedIn(aResolved.candidate ?? []) ||
+    modeScopedIn(limitsResolved.candidate ?? []) ||
+    modeScopedIn(scopeResolved.candidate ?? []);
   const deployContext =
     anyModeScoped && projectId ? await deriveDeployContext(db, projectId) : null;
 
@@ -283,25 +362,109 @@ export async function governedEvaluate(
       )
     : null;
 
-  const decision = evaluate({
-    userId,
-    serverId,
-    userName: nameOf.get(userId) ?? null,
-    serverName: serverRows[0]?.name ?? null,
-    tool,
-    ...entitlements,
-    approvalRules: aRules.map((r) => ({
-      ...r,
-      approverName: nameOf.get(r.approverUserId) ?? null,
-    })),
-    rateLimits: limitsWithCounts,
-    dataScopeRules: scopeRules,
-    args,
-    approvedApprovalId,
-    ceilingTools: ceilingTools ?? null,
-    deployContext,
-    abacDecision,
-  });
+  /** the kernel call, parameterised ONLY by the three rule sets — so the served
+   * pass and the shadow pass differ in the rule bodies and in NOTHING ELSE.
+   * Anything else varying between them would make a divergence unattributable
+   * to the version change it is supposed to measure. */
+  const evaluateWith = (
+    rules: typeof servedARules,
+    limitRows: typeof limitsWithCounts,
+    scopes: typeof servedScopeRules,
+  ) =>
+    evaluate({
+      userId,
+      serverId,
+      userName: nameOf.get(userId) ?? null,
+      serverName: serverRows[0]?.name ?? null,
+      tool,
+      ...entitlements,
+      approvalRules: rules.map((r) => ({
+        ...r,
+        approverName: nameOf.get(r.approverUserId) ?? null,
+      })),
+      rateLimits: limitRows,
+      dataScopeRules: scopes,
+      args,
+      approvedApprovalId,
+      ceilingTools: ceilingTools ?? null,
+      deployContext,
+      abacDecision,
+    });
+
+  // THE SERVED DECISION. Computed to completion, from the ACTIVE bodies alone,
+  // BEFORE any shadow work starts. Everything after this point is measurement.
+  const decision = evaluateWith(servedARules, limitsWithCounts, servedScopeRules);
+
+  // ---------------------------------------------------------------------
+  // ADR-0073 §2 — THE SHADOW PASS.
+  //
+  // The candidate is evaluated in parallel and recorded. It cannot reach the
+  // return value: `decision` is already bound, and the whole block is wrapped
+  // so that a candidate which THROWS produces a recorded failure and a
+  // completely unchanged answer. A canary that can break production is worse
+  // than no canary.
+  // ---------------------------------------------------------------------
+  const notes: CandidateNote[] = [
+    ...aResolved.notes,
+    ...limitsResolved.notes,
+    ...scopeResolved.notes,
+  ];
+  if (notes.length > 0) {
+    const ctx = {
+      userId,
+      serverId,
+      toolName: tool.name,
+      projectId: projectId ?? null,
+      detail: { toolKind: tool.kind },
+    };
+    try {
+      // a candidate limit may move the WINDOW or the TOOL it counts, so its
+      // count is recomputed rather than inherited — inheriting it would make a
+      // window change look like no change at all.
+      const candidateLimits = await Promise.all(
+        (limitsResolved.candidate ?? servedLimits).map(async (l) => {
+          const twin = limitsWithCounts.find((s) => s.id === l.id);
+          const same =
+            twin != null && twin.windowSeconds === l.windowSeconds && twin.toolName === l.toolName;
+          return { ...l, currentCount: same ? twin.currentCount : await countFor(l) };
+        }),
+      );
+      const shadow = evaluateWith(
+        aResolved.candidate ?? servedARules,
+        candidateLimits,
+        scopeResolved.candidate ?? servedScopeRules,
+      );
+      await recordCanaryObservations(
+        db,
+        notes,
+        {
+          servedEffect: decision.effect,
+          servedRuleId: decision.ruleId,
+          servedReason: decision.reason,
+          candidateEffect: shadow.effect,
+          candidateRuleId: shadow.ruleId,
+          candidateReason: shadow.reason,
+        },
+        ctx,
+      );
+    } catch (err) {
+      // deliberately broad: ANY failure of the measurement must leave the
+      // served decision alone. Recording the failure is best-effort too — if
+      // even that write fails there is nothing safe left to do, and the served
+      // decision is still correct.
+      try {
+        await recordCanaryFailure(
+          db,
+          notes,
+          err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+          ctx,
+          { effect: decision.effect, ruleId: decision.ruleId, reason: decision.reason },
+        );
+      } catch {
+        /* the served decision is unaffected either way */
+      }
+    }
+  }
 
   return { decision, approvedApprovalId };
 }
