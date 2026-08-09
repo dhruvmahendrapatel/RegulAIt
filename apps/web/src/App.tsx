@@ -29,6 +29,7 @@ import ClientAccessPage from "./views/admin/identity/ClientAccessPage";
 import SsoPage from "./views/admin/identity/SsoPage";
 import ScimPage from "./views/admin/identity/ScimPage";
 import GroupMappingsPage from "./views/admin/identity/GroupMappingsPage";
+import VirtualKeysPage from "./views/admin/identity/VirtualKeysPage";
 import RulesEnginePage from "./views/admin/governance/RulesEnginePage";
 import SimulationPage from "./views/admin/governance/SimulationPage";
 import AbacPoliciesPage from "./views/admin/governance/AbacPoliciesPage";
@@ -57,6 +58,7 @@ import GitConnectionsPage from "./views/admin/integrations/GitConnectionsPage";
 import PmConnectionsPage from "./views/admin/integrations/PmConnectionsPage";
 import DeployTargetsPage from "./views/admin/integrations/DeployTargetsPage";
 import CostDashboardPage from "./views/admin/cost/CostDashboardPage";
+import CostConsolidationPage from "./views/admin/cost/CostConsolidationPage";
 import SpendMonitorPage from "./views/admin/cost/SpendMonitorPage";
 import BillingPage from "./views/admin/cost/BillingPage";
 import OptimizationPage from "./views/admin/cost/OptimizationPage";
@@ -144,6 +146,8 @@ export default function App() {
                         <Route path="sso" element={<SsoPage />} />
                         <Route path="provisioning" element={<ScimPage />} />
                         <Route path="group-mappings" element={<GroupMappingsPage />} />
+                        {/* ADR-0066 */}
+                        <Route path="virtual-keys" element={<VirtualKeysPage />} />
                         <Route path="rules" element={<RulesEnginePage />} />
                         <Route path="simulation" element={<SimulationPage />} />
                         <Route path="abac-policies" element={<AbacPoliciesPage />} />
@@ -177,6 +181,8 @@ export default function App() {
                         <Route path="pm-connections" element={<PmConnectionsPage />} />
                         <Route path="deploy-targets" element={<DeployTargetsPage />} />
                         <Route path="cost" element={<CostDashboardPage />} />
+                        {/* ADR-0069 */}
+                        <Route path="cost-consolidation" element={<CostConsolidationPage />} />
                         <Route path="spend-monitor" element={<SpendMonitorPage />} />
                         <Route path="billing" element={<BillingPage />} />
                         <Route path="optimization" element={<OptimizationPage />} />

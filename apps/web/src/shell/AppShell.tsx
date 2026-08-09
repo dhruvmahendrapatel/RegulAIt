@@ -40,6 +40,12 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       { label: "Roles", to: "/admin/roles" },
       { label: "Teams", to: "/admin/teams" },
       { label: "Client access", to: "/admin/client-access" },
+      // ADR-0066 — sits beside Client access because it answers the adjacent
+      // question. That one is "which programmatic client may reach us at all?";
+      // this one is "which narrowed credential did we hand a developer INSTEAD
+      // of the vendor key?". A virtual key is an entitlement ceiling, not an
+      // integration setting, which is why it is here and not under Cost.
+      { label: "Virtual keys", to: "/admin/virtual-keys" },
       { label: "SSO & sessions", to: "/admin/sso" },
       { label: "Provisioning (SCIM)", to: "/admin/provisioning" },
       // ADR-0038: where an IdP group becomes a role — and where the ones that
@@ -142,6 +148,12 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
     group: "Cost & Optimization",
     items: [
       { label: "Cost dashboard", to: "/admin/cost" },
+      // ADR-0069 — directly under the Cost dashboard, because it is the same
+      // question asked of money RegulAIt never metered: a Copilot seat, a raw
+      // vendor key, a cloud AI bill. The two are deliberately adjacent AND
+      // deliberately separate: the dashboard reports what we observed, this
+      // reports what we were told, and nothing adds them together.
+      { label: "Cross-vendor consolidation", to: "/admin/cost-consolidation" },
       // ADR-0049 — budget-vs-FORECAST and spend-anomaly signals over the same
       // measured ledger the Cost dashboard renders as actuals. Next to it
       // because it is the same question asked forward in time rather than
