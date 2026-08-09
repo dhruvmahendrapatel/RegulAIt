@@ -1,10 +1,10 @@
 ---
-phase: post-parity-corrections
-last_updated: 2026-08-07
+phase: parity-surfaces
+last_updated: 2026-08-09
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-08-07-session-11.md
+last_session: sessions/2026-08-09-session-12.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,48 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**The three API-only parity features got a user-facing surface, 2026-08-09 — NO new ADR and NO
+migration, deliberately.** The owner's second request was competitor parity and *"maybe we will
+release this as a freeware"*. Six parity ADRs shipped, but **three of them disclosed "there is no
+SPA page"** — and on a freeware tool a feature nobody can reach without `curl` is, from a user's
+point of view, not built. This slice is a UI layer over already-accepted decisions, so it amends
+those ADRs with **dated, appended amendments** rather than superseding them; the Accepted text of
+0066, 0069, 0071 and 0072 is untouched. **Three pages**: `/admin/virtual-keys` (ADR-0066, nav
+*Identity & Access*) issues a key showing the plaintext **exactly once**, never fetches it again,
+leads with the ceiling rule (*a key only ever NARROWS* — listing a model does not grant it), and
+renders the enforcement counter and the `usage_events` total **apart** so a disagreement would be
+visible; `/admin/cost-consolidation` (ADR-0069, nav *Cost*) uploads/pastes an export, prints each
+adapter's `limits` **verbatim from the registry**, dry-runs with **rows accepted vs refused and
+every refusal's file line number**, applies, and carries the identity-mapping surface and the
+consolidated per-person/per-cost-centre view; the shadow-AI page (ADR-0071) gained a **raw-file
+import** card printing each adapter's `verification` sentence **verbatim** — including the four
+that say outright they have **never been run against a real vendor export** — with the
+whole-file-refusal default and its opt-out labelled as an opt-out. **The ADR-0069 honesty rule
+survived into the layout, which is the point**: `metered` and `imported` render in two
+separately-ruled columns and are **never summed**, and the browser spec **computes** each
+subject's `metered + imported` from the API's own answer and asserts that number appears nowhere
+in the document — so the guarantee cannot quietly stop being tested if seeded spend moves.
+ADR-0072's stranded-baseline report is now a card on `/admin/evals` (versions, per-version run
+counts labelled comparable/NOT, and every stranded pin by run id with the action); ADR-0067's four
+groundedness scorers and its `eval_cases.context` field were **already** authorable and needed no
+work — verified in the browser rather than assumed. **Two real bugs were found only by driving a
+browser, and both are fixed**: (1) `apps/web/src/api/client.ts` called `.join()` on an
+`issues[].path` the gateway had already joined into a **string**, so the TypeError escaped from the
+`ApiError` constructor and **every such refusal rendered as a JavaScript error instead of its
+reason** — the exact failure the "honest refusals" rule exists to prevent; (2) `RequireAdmin`
+**silently bounced** a non-admin to Home, which is a disappearance rather than a refusal — it now
+renders a real "you don't have access" statement, with the gateway still refusing independently.
+Two CSS classes referenced by ~15 admin screens (`.statRow`, `.grid`) were **never defined**, so
+those stat rows had no layout at all; both are now defined once. **Verification**: gateway
+**1,943 / 112 files unchanged** (no gateway source touched), shared 566, policy-kernel 129,
+model-provider 122, infra-provider 174, training-provider 58 — all unchanged; `pnpm -r build`,
+`pnpm -r typecheck` and `pnpm --filter @regulait/web build` clean; the **full Playwright suite is
+63 → 82 tests**, all green, with zero console errors and 19 screenshots. **Disclosed rather than
+closed**: ADR-0066's **fallback chains still have no page**; adapter configuration is a raw JSON
+textarea rather than a per-adapter form builder; the cost page has no bulk cost-centre editor; and
+the *adapters have still never met a real vendor export* — the page makes that visible, it does not
+make it untrue.
 
 **ADR-0072 shipped, 2026-08-07 — [the two scoring inversions, fixed together with an explicit
 baseline reset](../docs/decisions/0072-scoring-semantics-correction.md) (migration 0083, the number
