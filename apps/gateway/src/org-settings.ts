@@ -19,11 +19,9 @@
 import type { FastifyInstance } from "fastify";
 import {
   and,
-  approvalRules,
   auditLog,
   complianceProfiles,
   connectorRevocations,
-  dataScopeRules,
   eq,
   isNull,
   lt,
@@ -32,7 +30,6 @@ import {
   count,
   orgSettings,
   ORG_SETTINGS_ID,
-  rateLimits,
   revocations,
   traces,
   users,
@@ -51,6 +48,10 @@ import { z } from "zod";
 // ADR-0070: the OTLP export endpoint is an admin-typed outbound URL and takes
 // the SAME write-time egress adjudication every other one takes (ADR-0043).
 import { checkCredentialBaseUrl } from "./credential-egress.js";
+// ADR-0074: `deployMode` is a VERSIONED field on all three restriction-rule
+// types, so this PATCH may not write the row directly — it goes through the one
+// choke point, which mints and activates a version when the rule is versioned.
+import { applyRuleEdit, currentEffectiveBody, isRuleEditRefusal } from "./rule-writes.js";
 import { recordSchedulerFailure, recordSchedulerSuccess } from "./scheduler-health.js";
 import { evaluateIpEnvelope, isValidCidr } from "./net-policy.js";
 import { countEnabledSsoProviders } from "./sso-providers.js";
@@ -519,10 +520,20 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db) {
   // mode scope is a policy-posture edit, and this keeps the rule-creation
   // endpoints byte-identical (default = mode-unscoped = today).
   // -------------------------------------------------------------------------
-  const RULE_TABLES = {
-    approvals: approvalRules,
-    "rate-limits": rateLimits,
-    "data-scopes": dataScopeRules,
+  /**
+   * ADR-0074 — the rule kind an admin names in the URL, mapped to the
+   * `config_versions` ARTIFACT TYPE rather than to a drizzle table.
+   *
+   * The table map this used to be was the reason the defect was invisible to a
+   * naive `.update(approvalRules)` grep: the write went through a local
+   * variable. `deployMode` is a VERSIONED field for all three types, so the
+   * write now goes through the one choke point and mints a version when the
+   * artifact is versioned.
+   */
+  const RULE_ARTIFACT_TYPES = {
+    approvals: "approval_rule",
+    "rate-limits": "rate_limit",
+    "data-scopes": "data_scope_rule",
   } as const;
 
   app.patch("/v1/rules/:kind/:ruleId/deploy-mode", async (req, reply) => {
@@ -530,33 +541,34 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db) {
       .object({ kind: ruleKindParamSchema, ruleId: z.string().uuid() })
       .parse(req.params);
     const body = setRuleDeployModeSchema.parse(req.body);
-    const table = RULE_TABLES[kind];
-    const [before] = await db.select().from(table).where(eq(table.id, ruleId));
-    if (!before) return reply.status(404).send({ error: "unknown_rule" });
-    const [row] = await db
-      .update(table)
-      .set({ deployMode: body.deployMode })
-      .where(eq(table.id, ruleId))
-      .returning();
-    await db.insert(auditLog).values({
-      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
-      objectType: "restriction_rule",
-      objectId: ruleId,
-      detail: {
-        phase: "rule-deploy-mode",
-        ruleKind: kind,
-        before: before.deployMode ?? null,
-        after: body.deployMode,
-      },
-      effect: "allow",
-      ruleId: "rule-deploy-mode-set",
-      ruleChain: [],
+    // read the current scope first, so the audit row keeps the before/after
+    // pair A4 shipped — the choke point adds the versioning half beside it
+    // rather than replacing a record somebody already reads
+    const beforeMode =
+      ((await currentEffectiveBody(db, RULE_ARTIFACT_TYPES[kind], ruleId))?.deployMode as string | null) ?? null;
+    const res = await applyRuleEdit<{ id: string; deployMode: string | null }>(db, {
+      artifactType: RULE_ARTIFACT_TYPES[kind],
+      artifactId: ruleId,
+      patch: { deployMode: body.deployMode ?? null },
+      actorUserId: req.authCtx.userId ?? null,
+      label: `deploy-mode set via PATCH /v1/rules/${kind}/:id/deploy-mode`,
       reason:
         body.deployMode == null
-          ? `${kind} rule '${ruleId}' deploy-mode scope cleared (mode-unscoped — applies to every call)`
-          : `${kind} rule '${ruleId}' scoped to deploy mode '${body.deployMode}' — it now binds only to calls whose attributed work lands on a ${body.deployMode} deploy target`,
+          ? `${kind} rule deploy-mode scope cleared (mode-unscoped — applies to every call)`
+          : `${kind} rule scoped to deploy mode '${body.deployMode}'`,
+      auditObjectType: "restriction_rule",
+      auditRuleId: "rule-deploy-mode-set",
+      auditDetail: {
+        phase: "rule-deploy-mode",
+        ruleKind: kind,
+        before: beforeMode,
+        after: body.deployMode ?? null,
+      },
     });
-    return reply.send(row);
+    if (isRuleEditRefusal(res)) {
+      return reply.status(res.status).send({ error: res.error, detail: res.detail });
+    }
+    return reply.send({ ...res.row, versionMinted: res.mintedVersion, note: res.note });
   });
 
   // -------------------------------------------------------------------------

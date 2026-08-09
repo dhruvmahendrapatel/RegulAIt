@@ -62,6 +62,9 @@ import {
 } from "@regulait/workflow-kernel";
 import { loadOrgSettings, orgDefaultPiiMode, retentionFloor, runAuditPruneOnce } from "./org-settings.js";
 import { ConfigVersionUnresolvableError, resolveRuleVersions } from "./rule-versions.js";
+// ADR-0074: a compliance-profile UPDATE rewrites twelve versioned fields, so it
+// goes through the one choke point rather than straight at the read-model.
+import { applyRuleEdit, isRuleEditRefusal } from "./rule-writes.js";
 
 type ProjectRow = typeof projects.$inferSelect;
 
@@ -1963,12 +1966,55 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
       redteamMinTrials: body.redteamMinTrials ?? null,
       redteamFailOnSeverity: body.redteamFailOnSeverity ?? null,
     };
-    const [row] = await db
+    // ADR-0074 — THIS ROUTE IS CREATE-*OR-UPDATE*, and the update half was a
+    // silent no-op for enforcement.
+    //
+    // `tag` is UNIQUE, so the `onConflictDoUpdate` this used to be is the ONLY
+    // edit path a compliance profile has (there is no PATCH). Every field it
+    // rewrites except `tag` is a VERSIONED field, and `profilesForTags` resolves
+    // compliance profiles through `config_versions` — so tightening `piiMode`
+    // on an already-versioned framework profile returned 201, showed the new
+    // value in the list and in the SPA, and changed nothing about what was
+    // enforced. One profile edit cascades into PII handling, MCP data-scope
+    // defaults, retention, budget ceilings, guardrail floors and red-team
+    // gating at once, which makes it the highest-blast-radius writer of the set.
+    //
+    // The two halves are now separated explicitly rather than left to ON
+    // CONFLICT. CREATE stays a plain insert (a brand-new row cannot have
+    // versions, so its row is what the kernel resolves — invariant 4). UPDATE
+    // goes through the one choke point. `onConflictDoNothing` closes the race:
+    // if a concurrent request created the row between the two statements, this
+    // one falls through to the edit path instead of clobbering it.
+    const [created] = await db
       .insert(complianceProfiles)
       .values(values)
-      .onConflictDoUpdate({ target: complianceProfiles.tag, set: values })
+      .onConflictDoNothing({ target: complianceProfiles.tag })
       .returning();
-    return reply.status(201).send(row);
+    if (created) return reply.status(201).send(created);
+
+    const [existing] = await db
+      .select({ id: complianceProfiles.id })
+      .from(complianceProfiles)
+      .where(eq(complianceProfiles.tag, body.tag));
+    if (!existing) return reply.status(409).send({ error: "compliance_profile_write_conflict" });
+
+    // Every versioned field is passed, including the explicit nulls — this
+    // route's semantics have always been TOTAL REPLACE, and expressing that as
+    // a version keeps it visible and rollback-able instead of changing it.
+    const { tag: _tag, ...versioned } = values;
+    const res = await applyRuleEdit<ComplianceProfileRow>(db, {
+      artifactType: "compliance_profile",
+      artifactId: existing.id,
+      patch: versioned,
+      actorUserId: req.authCtx.userId ?? null,
+      label: `compliance profile '${body.tag}' set via POST /v1/compliance/profiles`,
+      auditObjectType: "compliance_profile",
+      auditRuleId: "compliance-profile-upserted",
+    });
+    if (isRuleEditRefusal(res)) {
+      return reply.status(res.status).send({ error: res.error, detail: res.detail });
+    }
+    return reply.status(201).send({ ...res.row, versionMinted: res.mintedVersion, note: res.note });
   });
 
   app.get("/v1/compliance/profiles", async () => ({
