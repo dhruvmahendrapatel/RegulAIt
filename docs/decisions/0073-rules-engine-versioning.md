@@ -270,3 +270,67 @@ and every surface says `inert` and "changes nothing and measures nothing".
 12. **Nothing here is proven against a real model provider**, which remains true of the whole
     product (PENDING §1 P1). It does not bear on this slice: the rules engine is deterministic and
     provider-independent.
+
+---
+
+## Amendment — 2026-08-09: gap 10 is closed, and its description above was imprecise
+
+*This section is appended. Nothing above it has been edited; the Accepted decision stands unchanged,
+and this records only that one of its stated gaps has been closed — and corrects how that gap was
+described. See [ADR-0074](0074-rule-read-model-write-choke-point.md).*
+
+### The correction
+
+Disclosure 10 says a versioned rule *"edited through the old CRUD surface"* would have its row and
+its active version disagree. That sentence implies a body-edit CRUD route exists. **It does not.**
+There has never been a `PUT`/`PATCH` route that edits `toolName`, `maxCalls`, `windowSeconds`,
+`argPath`, `allowedValues`, `writeOnly` or `approverUserId`. `POST /v1/rules/approvals`,
+`/v1/rules/data-scopes` and `/v1/rules/rate-limits` are **pure creates** — no `ON CONFLICT`, a
+`defaultRandom()` id, and no unique constraint an upsert could target — so a row they write cannot
+have a `config_versions` row at the instant it is written, `resolveForShadow` returns `served: null`,
+and the raw row is served. They were never the defect.
+
+**The actual defect was narrower in surface and worse in kind.** Exactly three routes wrote a
+VERSIONED column without minting a version, and all three were live:
+
+1. **`PATCH /v1/rules/:kind/:ruleId/deploy-mode`** (`org-settings.ts`). `deployMode` is a versioned
+   field for all three restriction types. The handler did a bare
+   `db.update(table).set({ deployMode })` through a module-local table map — which is why a
+   `.update(approvalRules)` grep never found it — wrote a confident audit row claiming the scope
+   changed, and returned 200 with the updated row. One click on the rules list in the admin portal.
+2. **`POST /v1/compliance/profiles`** (`projects.ts`). Not a create route: an
+   `onConflictDoUpdate` on the UNIQUE `tag`, i.e. **the only edit path a compliance profile has**.
+   Every field it rewrote except `tag` is versioned, and `profilesForTags` resolves profiles through
+   `config_versions` — so tightening `piiMode` on a versioned framework profile returned 201, showed
+   the new value everywhere, and changed nothing about PII handling, MCP data-scope defaults,
+   retention, budget ceilings, guardrail floors or red-team gating.
+3. **`POST /v1/onboarding/compliance-pack`** (`onboarding.ts`). The same upsert. It computes
+   `plan.profile: "update" | "create"` in its own dry-run, so it knew it was overwriting.
+
+The disclosure was also incomplete in a second way: it framed the outcome as "dispatch keeps serving
+the version", which is true only when the active body NAMES the field. `RULE_BODY_SCHEMAS` make
+every field optional, so a hand-authored partial body that omits `deployMode` falls through to the
+row and the write **does** take effect. Auto-baselined artifacts are never partial (`ruleBodyFrom`
+copies every field with `?? null`), so in practice most installs got the vanishing case — but an
+admin could not tell which one they got from the 200 response. Both outcomes are wrong.
+
+### What is now true
+
+ADR-0074 routes all three through one choke point (`applyRuleEdit`), which classifies the patch by
+field class and mints + activates a version when — and only when — a versioned artifact's enforcing
+field actually moves. `rule-write-guard.test.ts` enumerates every `.insert`/`.update` against the
+four tables, including writes through a variable, and fails when an un-audited one appears.
+`rule-write-versioning.test.ts` asserts the fix **through a real governed decision**, which is the
+assertion that was missing and is why the defect shipped: a test that checked the row or the version
+count would have passed against the broken code.
+
+ADR-0074 also closed one thing this ADR did not name at all: `activateVersion` wrote both read-models
+(`agents.systemPrompt` and the rule row) **after** its transaction committed, so a crash in that
+window reproduced the same divergence with no bad writer involved. Both writes now run inside the
+transaction.
+
+**Still not closed by this amendment**: disclosures 1–9, 11 and 12 stand exactly as written. In
+particular `agent_config` is still vocabulary only, a rule canary still never serves, there is still
+no pruning, the compliance-profile shadow is still computed at read time over the first 50 projects
+and never stored historically, and the divergence signal is still not fed to ADR-0059's
+blast-radius preview.

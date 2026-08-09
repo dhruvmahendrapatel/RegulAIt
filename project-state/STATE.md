@@ -21,6 +21,73 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**ADR-0074 shipped, 2026-08-09 — [an ordinary admin edit of a versioned rule now changes what is ENFORCED, not only what is DISPLAYED](../docs/decisions/0074-rule-read-model-write-choke-point.md).
+NO MIGRATION — every column already existed.** ADR-0073 (below) made the ACTIVE `config_versions`
+row the thing that enforces, which demoted the four rule tables to a **read-model**. Its own gap 10
+named the consequence and left it open: any writer that mutated a VERSIONED column without minting a
+version produced **silent divergence** — the admin saw their edit in the row, in `GET /v1/rules/*`
+and in the SPA, and enforcement never moved. **In a governance product that is worse than a
+refusal.** Gap 10 also described the defect wrongly, and the amendment on ADR-0073 corrects it: it
+said a rule *"edited through the old CRUD surface"*, implying a body-edit route that **has never
+existed**. The three `POST /v1/rules/*` routes are pure creates and were never the defect. The real
+set was: **`PATCH /v1/rules/:kind/:id/deploy-mode`** — a bare update **through a module-local table
+map**, so a `.update(approvalRules)` grep never found it, and one click on the admin rules list;
+**`POST /v1/compliance/profiles`**, which is **not a create route** but an `onConflictDoUpdate` on
+the UNIQUE `tag`, i.e. the ONLY edit path a compliance profile has, silently under-enforcing PII
+mode, MCP defaults, retention, budget ceilings, ADR-0042 guardrail floors and ADR-0068 red-team
+gating **at once**; and **`POST /v1/onboarding/compliance-pack`**, the same upsert, which computes
+`plan.profile: "update"` in its own dry-run and therefore *knew* it was overwriting. Worse, the
+outcome was **non-uniform** — `RULE_BODY_SCHEMAS` make every field optional, so against a partial
+active body the write *did* take effect, and the same 200 meant "discarded" on one artifact and
+"applied" on another with no way to tell. **The fix is one choke point, not three patches**:
+`applyRuleEdit` classifies the patch by field class — selection-only or unversioned artifact → plain
+row write (ADR-0073 §2 and invariant 4, byte-identical pre-0073); effective no-op → **mint nothing**
+(the onboarding pack is *designed* to be re-run); enforcing change on a versioned artifact → **mint
+AND activate**; versions present with none active → **409 refusing the write**, naming the activate
+route, because default-deny extends to WRITES. **The load-bearing line**: the body is composed onto
+the **ACTIVE BODY**, never onto the row — the row may already be drifted, and minting from it would
+promote that drift into an enforcing version, i.e. the fix would ratify the bug. Atomicity is
+**structural**: the mint branch never writes the enforcing columns itself, it lets
+`activateVersion`'s `writeRuleReadModel` do it — and that write **moved inside the transaction**,
+closing a crash window that reproduced the same divergence with no bad writer involved (this also
+reorders ADR-0048's agent-prompt read-model write). **Auto-activation bypasses no gate**, answerable
+from code: `evaluatePromotion` gates promoting a CANARY; direct activation has never been gated and
+`newVersion(activate:true)` is the shipped pattern. **The structural guard, because a point fix does
+not close a class**: `rule-write-guard.test.ts` enumerates every drizzle `.insert`/`.update` in every
+gateway source — **including writes through a variable**, which is how the worst writer hid — pins
+the set against an audited list where every entry states why it is safe, refuses aliased imports and
+raw SQL, and pins that only two modules may import `newVersion`. Verified by attack: adding a bare
+`db.update(complianceProfiles)` to an unrelated file makes it red. **Because an ordinary edit can now
+move a shadow canary's baseline**, ADR-0072's posture is applied to the comparison — a live ADR-0073
+read defect fixed on the way: both surfaces aggregated on `candidate_version_id` **alone** while
+`active_version_id` was already stored, pooling comparisons against different baselines into one
+`diverged` count that fed a promotion decision. Now every aggregate is keyed on **(candidate,
+active)**, the stranded set is **reported beside the totals and never folded in**, the ledger records
+`the shadow comparison baseline moved here`, and `POST …/promote` **refuses** a mixed-baseline sample
+(`canary-promote-stale-baseline`) unless overridden with a reason — **the gate lands on the
+PROMOTION, never on the EDIT**, so an incident edit is never blocked by a measurement. A NULL
+baseline counts as NOT comparable, because that failure direction matters. Orphaned versions
+(`artifact_id` is polymorphic so there is no FK; deleting a user, server, role, team or **approver**
+cascades the rule away and leaves an `active` version behind) are now **disclosed** by both read
+surfaces instead of rendering as a live governed artifact — deliberately **not** deleted, since they
+are the record of what governed the calls made while the rule existed. **Every assertion is a
+governed DECISION, never a column** — a test reading the row or the version count would have passed
+against the broken code, which is exactly why the defect shipped; with the fix disabled **12 of the
+15 new cases fail**. **Verification**: gateway **1,968 → 1,989 tests / 113 → 115 files** on a freshly
+created DB with **no existing gateway test rewritten**; shared **579 → 593**; Playwright **86 → 88**,
+zero console errors; policy-kernel 129, model-provider 122, infra-provider 174, training-provider 58,
+workflow-kernel 39, orchestration-kernel 27, optimizer-kernel 69, pm-provider 62, git-provider 51,
+connector-provider 58 all unchanged; `pnpm -r build`, `pnpm -r typecheck`, `pnpm --filter
+@regulait/web build` clean. **Disclosed rather than closed** (eleven items in the ADR): **operational
+bypasses remain** — a manual `psql`, a `pg_restore` of a pre-versioning backup or an air-gapped
+database dump all desynchronise a row with no application code involved, and **nothing in the schema
+prevents it**; existing drift is corrected **opportunistically on the next edit**, with no backfill
+and **no drift report** naming currently-drifted artifacts; partial version bodies are still
+authorable; ADR-0073's **read-side asymmetry stands** — `redteam.ts`, `cost-import.ts`,
+`compliance-packs.ts` and `setup-status.ts` read compliance profiles RAW and so fail **OPEN** in the
+same state the cascade fails closed; orphans are disclosed, **not tombstoned** (the AFTER DELETE
+trigger is its own slice); and the guard is a source scan over the gateway's own sources only.
+
 **ADR-0073 shipped, 2026-08-09 — [the rules engine now reads `config_versions`](../docs/decisions/0073-rules-engine-versioning.md)
 (migration 0084). This closes the LONGEST-STANDING DECLARED GAP in the project**, `PENDING.md` §3's
 ADR-0048 row: *"the shadow canary for rules evaluates nothing"*. ADR-0048 shipped immutable
