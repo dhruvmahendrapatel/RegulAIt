@@ -231,6 +231,14 @@ export {
   validateRuleVersionBody,
   ruleBodyFrom,
   applyRuleBody,
+  // ADR-0074 — the pure half of the read-model write choke point
+  partitionRulePatch,
+  composeRuleBody,
+  effectiveRuleBody,
+  ruleBodiesEqual,
+  planRuleEdit,
+  assessCanaryBaseline,
+  evaluateBaselineFreshness,
   resolveForShadow,
   createConfigVersionSchema,
   activateConfigVersionSchema,
@@ -253,6 +261,12 @@ export {
   type CanaryMode,
   type RuleBodyRejection,
   type ShadowResolution,
+  type RulePatchPartition,
+  type RuleEditPlan,
+  type RuleEditPlanKind,
+  type BaselineBucket,
+  type BaselineAssessment,
+  type StaleBaselineDecision,
 } from "./config-versions.js";
 
 // ADR-0049 — cost forecasting and spend-anomaly detection's pure half: the two

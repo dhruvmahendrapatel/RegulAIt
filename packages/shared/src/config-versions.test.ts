@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   applyRuleBody,
+  assessCanaryBaseline,
+  evaluateBaselineFreshness,
+  planRuleEdit,
   canaryBucket,
   canaryIsEvaluated,
   canaryIsLive,
@@ -401,5 +404,189 @@ describe("ADR-0073 shadow resolution", () => {
     // and must not double-serve them
     expect(r.candidate).toBeNull();
     expect(r.served!.version).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0074 — classifying an ordinary CRUD edit against the versioned field set
+// ---------------------------------------------------------------------------
+
+describe("ADR-0074 — planRuleEdit decides what a CRUD write IS, before anything is written", () => {
+  const row = {
+    id: "11111111-1111-4111-8111-111111111111",
+    scope: "user",
+    userId: "u1",
+    toolName: "tool_a",
+    maxCalls: 10,
+    windowSeconds: 60,
+    deployMode: null,
+  };
+  const versioned = (body: Record<string, unknown>) => [{ status: "active", body }];
+
+  it("a patch touching NO enforcing field is a plain row write, even on a versioned artifact", () => {
+    const p = planRuleEdit({
+      artifactType: "rate_limit",
+      row,
+      patch: { userId: "u2" },
+      versions: versioned({ maxCalls: 10 }),
+    });
+    expect(p.kind).toBe("row");
+    expect(p.body).toBeNull();
+    expect(p.rowPatch).toEqual({ userId: "u2" });
+  });
+
+  it("an UNVERSIONED artifact is a plain row write — invariant 4, byte-identical pre-ADR-0073", () => {
+    const p = planRuleEdit({ artifactType: "rate_limit", row, patch: { maxCalls: 5 }, versions: [] });
+    expect(p.kind).toBe("row");
+    expect(p.rowPatch).toEqual({ maxCalls: 5 });
+  });
+
+  it("a versioned artifact with an enforcing change MINTS, and the body is TOTAL", () => {
+    const p = planRuleEdit({
+      artifactType: "rate_limit",
+      row,
+      patch: { maxCalls: 5 },
+      versions: versioned({ maxCalls: 10 }),
+    });
+    expect(p.kind).toBe("mint");
+    expect(p.changed).toEqual(["maxCalls"]);
+    // every versionable field is stated explicitly, so no later reader has to
+    // know which layer a value came from
+    expect(p.body).toEqual({ toolName: "tool_a", maxCalls: 5, windowSeconds: 60, deployMode: null });
+  });
+
+  it("THE DRIFT CASE: the body is composed onto the ACTIVE BODY, never onto the drifted row", () => {
+    // the row says 999 (a pre-ADR-0074 bare write that was silently discarded);
+    // the ACTIVE version says 10. Minting from the row would promote the drift
+    // into an enforcing version — i.e. ratify the bug.
+    const drifted = { ...row, maxCalls: 999 };
+    const p = planRuleEdit({
+      artifactType: "rate_limit",
+      row: drifted,
+      patch: { windowSeconds: 120 },
+      versions: versioned({ maxCalls: 10, windowSeconds: 60 }),
+    });
+    expect(p.kind).toBe("mint");
+    expect(p.body!.maxCalls).toBe(10);
+    expect(p.changed).toEqual(["windowSeconds"]);
+  });
+
+  it("a PARTIAL active body still inherits the row underneath it", () => {
+    const p = planRuleEdit({
+      artifactType: "rate_limit",
+      row,
+      patch: { maxCalls: 5 },
+      // the active body names nothing but maxCalls; windowSeconds comes from
+      // the row exactly as applyRuleBody would have taken it at dispatch
+      versions: versioned({ maxCalls: 10 }),
+    });
+    expect(p.body!.windowSeconds).toBe(60);
+  });
+
+  it("an effective NO-OP mints nothing — an idempotent re-apply is not a policy change", () => {
+    const p = planRuleEdit({
+      artifactType: "rate_limit",
+      row,
+      patch: { maxCalls: 10, windowSeconds: 60 },
+      versions: versioned({ maxCalls: 10, windowSeconds: 60 }),
+    });
+    expect(p.kind).toBe("no_change");
+    expect(p.changed).toEqual([]);
+  });
+
+  it("versions with NO active version REFUSE the write and name the remedy", () => {
+    const p = planRuleEdit({
+      artifactType: "rate_limit",
+      row,
+      patch: { maxCalls: 5 },
+      versions: [{ status: "superseded", body: { maxCalls: 10 } }],
+    });
+    expect(p.kind).toBe("unresolvable");
+    expect(p.reason).toMatch(/activate a version explicitly/);
+  });
+
+  it("a field this artifact type has no column for is REPORTED, never dropped", () => {
+    const p = planRuleEdit({
+      artifactType: "rate_limit",
+      row,
+      patch: { argPath: "database" },
+      versions: versioned({ maxCalls: 10 }),
+    });
+    expect(p.unknownFields).toEqual(["argPath"]);
+  });
+
+  it("key order in a jsonb field does not fake a change", () => {
+    const p = planRuleEdit({
+      artifactType: "compliance_profile",
+      row: { id: "11111111-1111-4111-8111-111111111111", guardrailModes: { b: "block", a: "warn" } },
+      patch: { guardrailModes: { a: "warn", b: "block" } },
+      versions: versioned({ guardrailModes: { b: "block", a: "warn" } }),
+    });
+    expect(p.kind).toBe("no_change");
+  });
+});
+
+describe("ADR-0074 — a shadow comparison whose baseline moved", () => {
+  it("separates the current pair from the stranded ones and never pools them", () => {
+    const a = assessCanaryBaseline({
+      activeVersionId: "v-now",
+      buckets: [
+        { activeVersionId: "v-now", observed: 4, diverged: 1, failed: 0 },
+        { activeVersionId: "v-old", observed: 6, diverged: 5, failed: 0 },
+      ],
+    });
+    expect(a.current.observed).toBe(4);
+    expect(a.current.diverged).toBe(1);
+    expect(a.strandedObserved).toBe(6);
+    expect(a.stale).toBe(true);
+    expect(a.note).toMatch(/no longer active/);
+  });
+
+  it("a NULL baseline is NOT comparable — it must never bucket with the current one", () => {
+    // Rows written before the artifact had an active version carry null.
+    // Treating them as a match would fail towards ALLOWING a promotion on an
+    // unattributable sample, which is the wrong direction.
+    const a = assessCanaryBaseline({
+      activeVersionId: "v-now",
+      buckets: [{ activeVersionId: null, observed: 3, diverged: 3, failed: 0 }],
+    });
+    expect(a.current.observed).toBe(0);
+    expect(a.strandedObserved).toBe(3);
+    expect(a.stale).toBe(true);
+    expect(a.note).toMatch(/recorded no baseline at all/);
+  });
+
+  it("a clean sample is not stale and the gate allows", () => {
+    const a = assessCanaryBaseline({
+      activeVersionId: "v-now",
+      buckets: [{ activeVersionId: "v-now", observed: 9, diverged: 2, failed: 0 }],
+    });
+    expect(a.stale).toBe(false);
+    expect(evaluateBaselineFreshness({ assessment: a, override: false, reason: null }).allowed).toBe(true);
+  });
+
+  it("a stale sample REFUSES promotion, and the refusal names the exit", () => {
+    const a = assessCanaryBaseline({
+      activeVersionId: "v-now",
+      buckets: [
+        { activeVersionId: "v-now", observed: 1, diverged: 0, failed: 0 },
+        { activeVersionId: "v-old", observed: 8, diverged: 8, failed: 0 },
+      ],
+    });
+    const d = evaluateBaselineFreshness({ assessment: a, override: false, reason: null });
+    expect(d.allowed).toBe(false);
+    expect(d.ruleId).toBe("canary-promote-stale-baseline");
+    expect(d.reason).toMatch(/Re-point the canary/);
+  });
+
+  it("an override without a reason is refused; with one it is allowed and says so", () => {
+    const a = assessCanaryBaseline({
+      activeVersionId: "v-now",
+      buckets: [{ activeVersionId: "v-old", observed: 8, diverged: 8, failed: 0 }],
+    });
+    expect(evaluateBaselineFreshness({ assessment: a, override: true, reason: "  " }).allowed).toBe(false);
+    const ok = evaluateBaselineFreshness({ assessment: a, override: true, reason: "incident" });
+    expect(ok.allowed).toBe(true);
+    expect(ok.reason).toMatch(/MIXED-BASELINE/);
   });
 });

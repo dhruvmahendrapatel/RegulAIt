@@ -633,6 +633,13 @@ export const auditLog = pgTable(
         // `usage_events` rather than emitting a second audit row, so the trail
         // stays single. Plain text column — no DDL needed.
         "config_version",
+        // ADR-0074: an admin editing a COMPLIANCE PROFILE through the ordinary
+        // CRUD surface (`POST /v1/compliance/profiles`, or the onboarding pack
+        // re-applied). Its own type rather than `config_version`, because the
+        // row records the ADMIN'S GESTURE and whether it minted a version — the
+        // `config_version` rows are what `activateVersion` writes underneath it.
+        // Plain text column — no DDL needed.
+        "compliance_profile",
         // ADR-0051: an admin authoring an immutable RATE CARD version, opening
         // or CLOSING a billing period, every statement CUT (with the effective
         // scope it was permitted to total), the one-way ISSUE, every EXPORT,

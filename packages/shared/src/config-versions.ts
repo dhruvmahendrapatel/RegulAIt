@@ -539,6 +539,349 @@ export function applyRuleBody<T extends Record<string, unknown>>(
 }
 
 // ---------------------------------------------------------------------------
+// ADR-0074 — CLASSIFYING AN ORDINARY CRUD EDIT AGAINST THE VERSIONED FIELD SET
+// ---------------------------------------------------------------------------
+
+/**
+ * ADR-0073 made the ACTIVE version the thing that enforces and demoted the rule
+ * table row to a read-model. That left the read-model with a second class of
+ * writer — the ordinary admin CRUD routes — which wrote enforcing columns
+ * without minting a version, so dispatch went on serving the old body while
+ * every listing surface showed the new one. ADR-0074 routes those writes through
+ * one choke point, and this is the pure half of it: the classification that
+ * decides which of three things a given patch is.
+ *
+ * `versioned` — fields that decide what a LOADED rule DOES. Changing one of
+ *               these on a versioned artifact is a POLICY CHANGE and must
+ *               become a version.
+ * `selection` — fields that decide WHICH callers the rule is loaded for. These
+ *               are deliberately un-versionable (see the scope comment above),
+ *               so editing one is a plain row write with nothing to mint.
+ * `unknown`   — a key this artifact type has no column for. Reported rather
+ *               than dropped: a silently-ignored field looks like a change that
+ *               did not happen, which is the exact failure this ADR exists to
+ *               remove.
+ */
+export interface RulePatchPartition {
+  versioned: Record<string, unknown>;
+  selection: Record<string, unknown>;
+  unknown: string[];
+}
+
+export function partitionRulePatch(
+  artifactType: ConfigArtifactType,
+  patch: Record<string, unknown>,
+): RulePatchPartition {
+  const allowed = VERSIONED_RULE_FIELDS[artifactType] ?? [];
+  const out: RulePatchPartition = { versioned: {}, selection: {}, unknown: [] };
+  for (const [k, v] of Object.entries(patch)) {
+    if (allowed.includes(k)) out.versioned[k] = v;
+    else if (RULE_SELECTION_FIELDS.includes(k) || RULE_IDENTITY_FIELDS.includes(k)) out.selection[k] = v;
+    else out.unknown.push(k);
+  }
+  return out;
+}
+
+/**
+ * THE LOAD-BEARING LINE OF ADR-0074, and the one place naive "mint a version on
+ * every CRUD write" gets it wrong.
+ *
+ * The new body is composed onto the ACTIVE VERSION'S BODY, not onto the table
+ * row. The row is a read-model that may ALREADY have drifted — every rule that
+ * was versioned and then touched by a pre-0074 bare writer is drifted right
+ * now. Minting from the row would promote that accumulated drift into an
+ * enforcing version, i.e. the fix would ratify the bug it is fixing. Composing
+ * onto the active body CORRECTS the drift instead.
+ *
+ * The row is still the fallback layer underneath, because a hand-authored
+ * active body may be PARTIAL (every field in `RULE_BODY_SCHEMAS` is optional)
+ * and `applyRuleBody` leaves an omitted field coming from the row. So the
+ * order is row → active body → patch, and the result is TOTALISED through
+ * `ruleBodyFrom` so the minted version states every enforcing field explicitly
+ * and no later reader has to know which layer a value came from.
+ */
+export function composeRuleBody(
+  artifactType: ConfigArtifactType,
+  row: Record<string, unknown>,
+  activeBody: Record<string, unknown>,
+  patch: Record<string, unknown>,
+): Record<string, unknown> {
+  const effective = applyRuleBody(artifactType, row, activeBody);
+  return ruleBodyFrom(artifactType, applyRuleBody(artifactType, effective, patch));
+}
+
+/** the body the artifact ENFORCES today, totalised the same way — the thing a
+ * composed body must be compared against to answer "did this edit change
+ * anything?" */
+export function effectiveRuleBody(
+  artifactType: ConfigArtifactType,
+  row: Record<string, unknown>,
+  activeBody: Record<string, unknown>,
+): Record<string, unknown> {
+  return composeRuleBody(artifactType, row, activeBody, {});
+}
+
+/** key-order-independent structural comparison. Needed because a compliance
+ * profile's `guardrailModes` is a jsonb record whose key order is whatever
+ * Postgres returned, and an accidental "changed" verdict would mint a version
+ * and move a canary's baseline for nothing. */
+function canonical(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(canonical);
+  if (v && typeof v === "object") {
+    const o = v as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(o).sort()) out[k] = canonical(o[k]);
+    return out;
+  }
+  return v;
+}
+
+export function ruleBodiesEqual(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
+  return JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
+}
+
+/**
+ * ADR-0074 — WHAT A CRUD EDIT IS, decided before anything is written.
+ *
+ * Four outcomes, and the branch names are the vocabulary the ADR, the audit
+ * rows and the API responses all use:
+ *
+ *   `row`          the patch touches no versioned field (or the artifact has no
+ *                  version rows at all) → a plain row UPDATE, mint nothing.
+ *                  The second half of that is invariant 4: an unversioned rule
+ *                  stays byte-identical to pre-ADR-0073 behaviour, and the §5
+ *                  lazy baseline stays lazy.
+ *   `no_change`    the artifact IS versioned and the composed body is equal to
+ *                  what it already enforces → mint nothing. Without this, an
+ *                  idempotent re-apply (the onboarding compliance pack is
+ *                  explicitly designed to be re-run) would mint a version and
+ *                  fill the activation ledger with meaningless moves.
+ *   `mint`         the artifact IS versioned, one version is active, and the
+ *                  composed body differs → mint + activate.
+ *   `unresolvable` version rows exist and NONE is active → REFUSE. There is no
+ *                  authoritative base body to compose onto, so minting would be
+ *                  a guess. Default-deny extends to WRITES, not only to reads,
+ *                  and repairing an unresolvable artifact belongs on the
+ *                  explicit audited activate route rather than on a CRUD write
+ *                  that would silently pick a winner.
+ */
+export type RuleEditPlanKind = "row" | "no_change" | "mint" | "unresolvable";
+
+export interface RuleEditPlan {
+  kind: RuleEditPlanKind;
+  /** the body to mint, set exactly when `kind === "mint"` */
+  body: Record<string, unknown> | null;
+  /** the body the artifact enforces right now, for the audit diff */
+  before: Record<string, unknown> | null;
+  /** the enforcing fields whose value this edit actually moves */
+  changed: string[];
+  /** the non-versioned columns to write straight to the row, always */
+  rowPatch: Record<string, unknown>;
+  unknownFields: string[];
+  reason: string;
+}
+
+export function planRuleEdit(input: {
+  artifactType: ConfigArtifactType;
+  row: Record<string, unknown>;
+  patch: Record<string, unknown>;
+  /** every stored version of this artifact; empty for an unversioned rule */
+  versions: Array<{ status: string; body: Record<string, unknown> }>;
+}): RuleEditPlan {
+  const { artifactType, row, patch } = input;
+  const part = partitionRulePatch(artifactType, patch);
+  const base: Omit<RuleEditPlan, "kind" | "reason"> = {
+    body: null,
+    before: null,
+    changed: [],
+    rowPatch: part.selection,
+    unknownFields: part.unknown,
+  };
+
+  if (Object.keys(part.versioned).length === 0) {
+    return {
+      ...base,
+      rowPatch: patch,
+      kind: "row",
+      reason:
+        "this edit touches no enforcing field, so there is no policy change to version — selection columns " +
+        "decide which callers a rule is loaded for, not what it does",
+    };
+  }
+  if (input.versions.length === 0) {
+    return {
+      ...base,
+      rowPatch: patch,
+      kind: "row",
+      reason:
+        "this artifact has no stored versions, so its own row is what the kernel resolves — the write is " +
+        "byte-identical to pre-ADR-0073 behaviour and minting here would drag an unversioned rule onto the " +
+        "version path through ordinary CRUD",
+    };
+  }
+  const active = input.versions.find((v) => v.status === "active") ?? null;
+  if (!active) {
+    return {
+      ...base,
+      kind: "unresolvable",
+      reason:
+        `${artifactType} has ${input.versions.length} stored version(s) but NONE is active, so there is no ` +
+        `authoritative body to apply this edit to. Refusing the write rather than guessing a base — activate a ` +
+        `version explicitly (POST /v1/config-versions/${artifactType}/:id/activate) and repeat the edit.`,
+    };
+  }
+
+  const before = effectiveRuleBody(artifactType, row, active.body);
+  const after = composeRuleBody(artifactType, row, active.body, part.versioned);
+  const changed = Object.keys(after).filter(
+    (k) => !ruleBodiesEqual({ v: before[k] }, { v: after[k] }),
+  );
+  if (changed.length === 0) {
+    return {
+      ...base,
+      before,
+      kind: "no_change",
+      reason:
+        "the composed body is identical to what this artifact already enforces, so no version is minted — " +
+        "an idempotent re-apply must not fill the activation ledger with moves that changed nothing",
+    };
+  }
+  return {
+    ...base,
+    body: after,
+    before,
+    changed,
+    kind: "mint",
+    reason:
+      `this edit changes ${changed.join(", ")} on a VERSIONED artifact, so it is minted as a new version and ` +
+      `activated — writing the row alone would leave dispatch serving the old body`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0074 — THE BASELINE A SHADOW COMPARISON WAS MEASURED AGAINST
+// ---------------------------------------------------------------------------
+
+/**
+ * A shadow observation records BOTH sides: `candidate_version_id` and
+ * `active_version_id`. ADR-0073's two read surfaces aggregated on the candidate
+ * ALONE, so observations taken against baseline v3 and against v4 pooled into
+ * one `diverged` count with no seam — the number's shape unchanged, its meaning
+ * changed, and it flowed into a promotion decision.
+ *
+ * ADR-0074 makes an ordinary admin edit able to move that baseline (that is the
+ * whole point of the write fix), so the seam stops being hypothetical. The
+ * posture is ADR-0072's, verbatim: mark history, never rewrite it, and refuse
+ * the COMPARISON rather than the CHANGE.
+ *
+ * A NULL `activeVersionId` is treated as NOT comparable, never as a match. Rows
+ * written before an artifact had an active version carry null, and bucketing
+ * them with the current baseline would fail towards ALLOWING a promotion on an
+ * unattributable sample — the wrong direction.
+ */
+export interface BaselineBucket {
+  activeVersionId: string | null;
+  observed: number;
+  diverged: number;
+  failed: number;
+}
+
+export interface BaselineAssessment {
+  /** observations measured against the version that is active RIGHT NOW */
+  current: BaselineBucket;
+  /** observations measured against a baseline that has since moved */
+  stranded: BaselineBucket[];
+  /** observations that never recorded which baseline they used */
+  unattributed: BaselineBucket | null;
+  strandedObserved: number;
+  stale: boolean;
+  note: string | null;
+}
+
+export function assessCanaryBaseline(input: {
+  activeVersionId: string | null;
+  buckets: BaselineBucket[];
+}): BaselineAssessment {
+  const empty: BaselineBucket = { activeVersionId: input.activeVersionId, observed: 0, diverged: 0, failed: 0 };
+  let current = empty;
+  const stranded: BaselineBucket[] = [];
+  let unattributed: BaselineBucket | null = null;
+  for (const b of input.buckets) {
+    if (b.activeVersionId == null) unattributed = b;
+    else if (input.activeVersionId != null && b.activeVersionId === input.activeVersionId) current = b;
+    else stranded.push(b);
+  }
+  const strandedObserved =
+    stranded.reduce((n, b) => n + b.observed, 0) + (unattributed?.observed ?? 0);
+  const stale = strandedObserved > 0;
+  return {
+    current,
+    stranded,
+    unattributed,
+    strandedObserved,
+    stale,
+    note: stale
+      ? `${strandedObserved} observation(s) compared this candidate against a version that is no longer active` +
+        (unattributed ? ` (${unattributed.observed} of them recorded no baseline at all)` : "") +
+        `; they are reported separately and are NOT included in the totals above, because pooling them would ` +
+        `average two different comparisons into one number`
+      : null,
+  };
+}
+
+/**
+ * The promote-time gate that goes with it. It lands on the PROMOTION, never on
+ * the EDIT: an urgent policy change is never blocked by a running measurement,
+ * and the only thing that becomes harder is ACTING ON a measurement whose
+ * baseline moved — which is precisely the thing that should be hard.
+ *
+ * Mirrors ADR-0072 §3.2 case 3, including its refusal to silently re-scope: a
+ * human chose this comparison, and quietly substituting the post-seam subset is
+ * an answer to a question nobody asked.
+ */
+export interface StaleBaselineDecision {
+  allowed: boolean;
+  ruleId: string;
+  reason: string;
+}
+
+export function evaluateBaselineFreshness(input: {
+  assessment: BaselineAssessment;
+  override: boolean;
+  reason: string | null | undefined;
+}): StaleBaselineDecision {
+  const a = input.assessment;
+  if (!a.stale) {
+    return { allowed: true, ruleId: "canary-baseline-current", reason: "every observation was measured against the version that is active now" };
+  }
+  const why =
+    `${a.strandedObserved} of this canary's observation(s) were measured against a baseline that has since ` +
+    `moved, and ${a.current.observed} against the version active now. The sample you are promoting on is not ` +
+    `one comparison.`;
+  if (!input.override) {
+    return {
+      allowed: false,
+      ruleId: "canary-promote-stale-baseline",
+      reason:
+        `${why} Re-point the canary (POST …/canary) to start a fresh comparison window against the current ` +
+        `active version, or promote with an explicit override and a reason.`,
+    };
+  }
+  if (!input.reason || input.reason.trim().length === 0) {
+    return {
+      allowed: false,
+      ruleId: "canary-promote-override-no-reason",
+      reason: "an override of the stale-baseline refusal must state why; an unexplained bypass is not accepted",
+    };
+  }
+  return {
+    allowed: true,
+    ruleId: "canary-promote-stale-baseline-override",
+    reason: `promoted on a MIXED-BASELINE sample (${why}) — manual override: ${input.reason}`,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // ADR-0073 — SHADOW RESOLUTION
 // ---------------------------------------------------------------------------
 
