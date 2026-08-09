@@ -17,7 +17,7 @@ import type {
 } from "../../../api/adminTypes";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Button, Card, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, Input, Select, Table } from "../../../ui/kit";
 import {
   optionEls,
   roleOpts,
@@ -251,6 +251,8 @@ export default function RulesEnginePage() {
         sub="A rule targets one user, an assigned role, a team, or the whole fleet — on one server or all of them. Every governed call evaluates them in the same fixed precedence the Simulation view visualizes."
       />
       <div className={v.stack}>
+        <ShadowCanaryCard />
+
         <Card title="Deploy-mode scoping (ADR-0027 A4)">
           <div className={v.faint}>
             Every rule below carries a <strong>deploy-mode scope</strong>, editable inline on its row. A
@@ -448,5 +450,252 @@ function RuleForm(props: {
         </span>
       )}
     </form>
+  );
+}
+
+
+// ---------------------------------------------------------------------------
+// ADR-0073 — WHAT WOULD CHANGE IF I PROMOTED THIS.
+//
+// A rule canary never serves: the ACTIVE version alone enforces, and the
+// candidate is evaluated in parallel purely to record what it WOULD have
+// decided. That measurement is worthless if the operator deciding whether to
+// promote cannot see it, which is what this card is for. Every number here is
+// read from stored observations, never recomputed in the browser.
+// ---------------------------------------------------------------------------
+
+interface CanaryRow {
+  artifactType: string;
+  artifactId: string;
+  version: number;
+  label: string | null;
+  canaryPct: number | null;
+  canaryMode: "live" | "shadow" | "inert";
+  observed: number;
+  diverged: number;
+  failed: number;
+}
+
+interface ObservationRow {
+  id: string;
+  at: string;
+  userId: string | null;
+  toolName: string | null;
+  bucket: number | null;
+  servedEffect: string | null;
+  servedRuleId: string | null;
+  servedReason: string | null;
+  candidateEffect: string | null;
+  candidateReason: string | null;
+  diverged: boolean;
+  failed: boolean;
+  failureReason: string | null;
+}
+
+interface ProjectImpactRow {
+  projectId: string;
+  projectName: string;
+  diverged: boolean;
+  changed: string[];
+  before: Record<string, unknown>;
+  after: Record<string, unknown>;
+}
+
+interface Divergence {
+  canaryMode: "live" | "shadow" | "inert";
+  activeVersion: number | null;
+  candidateVersion: number | null;
+  canaryPct: number | null;
+  totals: { observed: number; diverged: number; failed: number };
+  observations: ObservationRow[];
+  projectImpact: ProjectImpactRow[] | null;
+  projectImpactNote: string | null;
+  note: string;
+}
+
+const effectTone = (e: string | null | undefined) =>
+  e === "allow" ? "ok" : e === "deny" ? "danger" : e === "require_approval" ? "warn" : "neutral";
+
+function ShadowCanaryCard() {
+  const [selected, setSelected] = useState<CanaryRow | null>(null);
+  const names = useNameMaps();
+
+  const canaries = useQuery({
+    queryKey: ["admin", "config-canaries"],
+    queryFn: () =>
+      api.get<{ canaries: CanaryRow[]; note: string }>("/v1/config-versions/canaries"),
+  });
+
+  const divergence = useQuery({
+    queryKey: ["admin", "config-divergence", selected?.artifactType, selected?.artifactId],
+    enabled: !!selected,
+    queryFn: () =>
+      api.get<Divergence>(
+        `/v1/config-versions/${selected!.artifactType}/${selected!.artifactId}/divergence`,
+      ),
+  });
+
+  const rows = canaries.data?.canaries ?? [];
+
+  return (
+    <Card title="Rule versions — shadow canaries (ADR-0073)">
+      <div className={v.faint}>
+        A rule version canary <strong>never enforces</strong>. The <strong>active</strong> version alone
+        decides, and the candidate is evaluated in parallel on a deterministic sample of decisions purely
+        to record what it <em>would</em> have decided — because a partially-enforced deny would
+        non-deterministically block real work. <code>canary %</code> is the shadow{" "}
+        <strong>sampling rate</strong>, not a share of enforcement, so every count below is a count within
+        the sample and never a fleet-wide total. A non-zero <strong>failed</strong> means the candidate's
+        evaluation threw on that decision: the served answer was unaffected and that comparison did not
+        happen, so <strong>diverged</strong> is not complete while failures exist.
+      </div>
+      <Table<CanaryRow>
+        columns={[
+          { key: "type", header: "Artifact", render: (r) => <span className={v.mono}>{r.artifactType}</span> },
+          {
+            key: "id",
+            header: "Id",
+            render: (r) => <span className={v.mono}>{r.artifactId.slice(0, 8)}…</span>,
+          },
+          { key: "version", header: "Candidate", render: (r) => `v${r.version}${r.label ? ` — ${r.label}` : ""}` },
+          { key: "pct", header: "Sampling %", align: "right", render: (r) => r.canaryPct ?? "—" },
+          {
+            key: "mode",
+            header: "Mode",
+            render: (r) => (
+              <Badge
+                tone={r.canaryMode === "inert" ? "danger" : r.canaryMode === "shadow" ? "warn" : "ok"}
+                title={
+                  r.canaryMode === "inert"
+                    ? "nothing resolves this artifact type — the canary changes nothing and measures nothing"
+                    : r.canaryMode === "shadow"
+                      ? "evaluated in parallel, never enforcing"
+                      : "served live"
+                }
+              >
+                {r.canaryMode}
+              </Badge>
+            ),
+          },
+          { key: "observed", header: "Sampled", align: "right", render: (r) => r.observed },
+          {
+            key: "diverged",
+            header: "Would change",
+            align: "right",
+            render: (r) =>
+              r.diverged > 0 ? <Badge tone="warn">{r.diverged}</Badge> : <span>{r.diverged}</span>,
+          },
+          {
+            key: "failed",
+            header: "Failed",
+            align: "right",
+            render: (r) => (r.failed > 0 ? <Badge tone="danger">{r.failed}</Badge> : <span>0</span>),
+          },
+          {
+            key: "act",
+            header: "",
+            render: (r) => (
+              <Button size="sm" onClick={() => setSelected(r)}>
+                What would change
+              </Button>
+            ),
+          },
+        ]}
+        rows={rows}
+        rowKey={(r) => `${r.artifactType}:${r.artifactId}`}
+        loading={canaries.isLoading}
+        empty={
+          <EmptyState
+            title="No config canaries running"
+            body="Start one from the versioning API to measure what a rule change would do before it enforces anything."
+          />
+        }
+      />
+
+      {selected && (
+        <div style={{ marginTop: "var(--s2)" }}>
+          <div className={v.faint}>
+            <strong>
+              {selected.artifactType} {selected.artifactId.slice(0, 8)}… — active v
+              {divergence.data?.activeVersion ?? "?"} vs candidate v
+              {divergence.data?.candidateVersion ?? "?"}
+            </strong>
+            {divergence.data?.note ? ` — ${divergence.data.note}` : ""}
+          </div>
+          <Table<ObservationRow>
+            columns={[
+              { key: "at", header: "When", render: (o) => ago(o.at) },
+              {
+                key: "who",
+                header: "Caller",
+                render: (o) => names.userName.get(o.userId ?? "") ?? o.userId?.slice(0, 8) ?? "—",
+              },
+              { key: "tool", header: "Tool", render: (o) => o.toolName ?? "—" },
+              {
+                key: "served",
+                header: "Served (enforced)",
+                render: (o) => <Badge tone={effectTone(o.servedEffect)}>{o.servedEffect ?? "—"}</Badge>,
+              },
+              {
+                key: "candidate",
+                header: "Candidate would",
+                render: (o) =>
+                  o.failed ? (
+                    <Badge tone="danger" title={o.failureReason ?? ""}>
+                      evaluation failed
+                    </Badge>
+                  ) : (
+                    <Badge tone={effectTone(o.candidateEffect)}>{o.candidateEffect ?? "—"}</Badge>
+                  ),
+              },
+              {
+                key: "why",
+                header: "Reason it would give",
+                render: (o) => (o.failed ? (o.failureReason ?? "") : (o.candidateReason ?? "")),
+              },
+            ]}
+            rows={divergence.data?.observations ?? []}
+            rowKey={(o) => o.id}
+            loading={divergence.isLoading}
+            empty={
+              <EmptyState
+                title="Nothing sampled yet"
+                body="No governed decision has been evaluated against this candidate. Nothing has changed and nothing has been measured."
+              />
+            }
+          />
+          {divergence.data?.projectImpact && (
+            <>
+              <div className={v.faint} style={{ marginTop: "var(--s2)" }}>
+                {divergence.data.projectImpactNote}
+              </div>
+              <Table<ProjectImpactRow>
+                columns={[
+                  { key: "p", header: "Project", render: (p) => p.projectName },
+                  {
+                    key: "d",
+                    header: "Would change",
+                    render: (p) =>
+                      p.diverged ? <Badge tone="warn">yes</Badge> : <Badge tone="neutral">no</Badge>,
+                  },
+                  { key: "f", header: "Dimensions", render: (p) => p.changed.join(", ") || "—" },
+                  {
+                    key: "b",
+                    header: "Before → after",
+                    render: (p) =>
+                      p.changed
+                        .map((k) => `${k}: ${JSON.stringify(p.before[k])} → ${JSON.stringify(p.after[k])}`)
+                        .join("; ") || "—",
+                  },
+                ]}
+                rows={divergence.data.projectImpact}
+                rowKey={(p) => p.projectId}
+                empty={<EmptyState title="No project carries this framework tag" />}
+              />
+            </>
+          )}
+        </div>
+      )}
+    </Card>
   );
 }
