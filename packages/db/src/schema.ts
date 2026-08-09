@@ -3959,8 +3959,67 @@ export const configActivationEvents = pgTable(
   (t) => [index("config_activation_events_artifact_at_idx").on(t.artifactType, t.artifactId, t.at)],
 );
 
+/**
+ * ADR-0073 (migration 0084) — THE SHADOW CANARY'S OUTPUT.
+ *
+ * One row per SAMPLED governed decision while a rule/compliance-profile canary
+ * is running: what the ACTIVE version decided (which is what the caller
+ * actually got), what the CANDIDATE version WOULD have decided, and whether
+ * they differ. Deliberately NOT `audit_log`: that table is the hash-chained
+ * record of decisions that were SERVED, and a shadow evaluation is by
+ * definition not one — putting it there would place a decision nobody was
+ * subject to inside the ledger an auditor reads as what happened.
+ *
+ * FK-free on purpose, exactly like `audit_log`: an observation must survive the
+ * deletion of the user, server or project it describes, otherwise the evidence
+ * for "this candidate would have denied Dana" disappears with Dana.
+ */
+export const configCanaryObservations = pgTable(
+  "config_canary_observations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    artifactType: text("artifact_type", { enum: CONFIG_ARTIFACT_TYPES }).notNull(),
+    artifactId: uuid("artifact_id").notNull(),
+    candidateVersionId: uuid("candidate_version_id").notNull(),
+    candidateVersion: integer("candidate_version").notNull(),
+    activeVersionId: uuid("active_version_id"),
+    activeVersion: integer("active_version"),
+    /** the sampling rate in force when this was recorded — so a divergence
+     * COUNT is never mistaken for a fleet-wide count */
+    canaryPct: integer("canary_pct"),
+    bucket: integer("bucket"),
+    userId: uuid("user_id"),
+    serverId: uuid("server_id"),
+    toolName: text("tool_name"),
+    projectId: uuid("project_id"),
+    /** the decision the caller ACTUALLY got — the active version's */
+    servedEffect: text("served_effect"),
+    servedRuleId: text("served_rule_id"),
+    servedReason: text("served_reason"),
+    /** what the candidate WOULD have produced. Null exactly when `failed`. */
+    candidateEffect: text("candidate_effect"),
+    candidateRuleId: text("candidate_rule_id"),
+    candidateReason: text("candidate_reason"),
+    diverged: boolean("diverged").notNull().default(false),
+    /** the candidate evaluation THREW. The served decision was unaffected by
+     * construction (it was already computed); the failure is recorded rather
+     * than swallowed, because a canary that fails silently is a canary that
+     * reports "no divergences" while measuring nothing. */
+    failed: boolean("failed").notNull().default(false),
+    failureReason: text("failure_reason"),
+    detail: jsonb("detail").$type<Record<string, unknown>>(),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("config_canary_obs_artifact_at_idx").on(t.artifactType, t.artifactId, t.at),
+    index("config_canary_obs_diverged_idx").on(t.artifactType, t.artifactId, t.diverged, t.at),
+    index("config_canary_obs_version_idx").on(t.candidateVersionId, t.diverged),
+  ],
+);
+
 export type ConfigVersionRow = typeof configVersions.$inferSelect;
 export type ConfigActivationEventRow = typeof configActivationEvents.$inferSelect;
+export type ConfigCanaryObservationRow = typeof configCanaryObservations.$inferSelect;
 
 // ---------------------------------------------------------------------------
 // ADR-0049 (migration 0061) — COST FORECASTING and SPEND-ANOMALY DETECTION.

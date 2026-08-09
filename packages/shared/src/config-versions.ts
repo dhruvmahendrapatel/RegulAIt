@@ -72,6 +72,102 @@ export function canaryIsLive(t: ConfigArtifactType): boolean {
   return LIVE_CANARY_ARTIFACT_TYPES.includes(t);
 }
 
+/**
+ * ADR-0073 — THE SECOND PREDICATE, and the reason there has to be one.
+ *
+ * `canaryIsLive` answers "does the canary SERVE traffic?". Until ADR-0073 it
+ * was also being read as "is the canary WORTH ANYTHING?", because for rule
+ * types the answer to both was no: the kernels read their own tables and a
+ * stored rule canary was a row, not a control.
+ *
+ * Those are two different questions and ADR-0073 separates them, because
+ * conflating them makes one of the two answers a lie whichever way you flip
+ * the flag:
+ *
+ *   - Flipping `canaryIsLive` to true for `approval_rule` would make
+ *     `resolveVersion` SERVE the canary — i.e. enforce a candidate `deny` on a
+ *     percentage of real work. That is the outage-with-a-percentage-sign §2
+ *     exists to forbid, and it is exactly what a shadow canary must never do.
+ *   - Leaving it false and saying nothing keeps claiming the canary is inert
+ *     after it has become a genuine measurement.
+ *
+ * So: `canaryIsLive` keeps its meaning unchanged and stays FALSE for every
+ * restriction rule for ever. `canaryIsEvaluated` is the new one — true when
+ * something genuinely computes what the candidate WOULD have decided, whether
+ * by serving it (prompts) or by shadowing it (rules and compliance profiles).
+ *
+ * `agent_config` is in NEITHER set: nothing resolves it at dispatch and nothing
+ * shadows it. It is still vocabulary-only, and that is the one part of
+ * ADR-0048's deviation 1/2 this slice does not close.
+ */
+export const SHADOW_CANARY_ARTIFACT_TYPES: readonly ConfigArtifactType[] = [
+  "approval_rule",
+  "rate_limit",
+  "data_scope_rule",
+  "compliance_profile",
+];
+
+export function canaryIsShadowEvaluated(t: ConfigArtifactType): boolean {
+  return SHADOW_CANARY_ARTIFACT_TYPES.includes(t);
+}
+
+/**
+ * The artifact types something in the product ACTUALLY RESOLVES. This is a
+ * statement of FACT, where `LIVE_CANARY_ARTIFACT_TYPES` is a statement of
+ * INTENT — ADR-0048 declared `agent_config` a live-canary type and then never
+ * wired a resolver for it, so for two waves `canaryIsLive('agent_config')`
+ * answered "yes" about something nothing reads.
+ *
+ * Keeping the two separate is what lets ADR-0073 close the rule half honestly
+ * without either rewriting ADR-0048's declared intent or letting the API keep
+ * claiming a measurement that does not exist.
+ */
+export const RESOLVED_ARTIFACT_TYPES: readonly ConfigArtifactType[] = [
+  "agent_system_prompt",
+  ...SHADOW_CANARY_ARTIFACT_TYPES,
+];
+
+/** true when a canary of this type genuinely produces a signal — served
+ * (live) or shadowed. False for the types nothing reads at all. */
+export function canaryIsEvaluated(t: ConfigArtifactType): boolean {
+  return RESOLVED_ARTIFACT_TYPES.includes(t);
+}
+
+export type CanaryMode = "live" | "shadow" | "inert";
+
+export function canaryModeOf(t: ConfigArtifactType): CanaryMode {
+  if (!canaryIsEvaluated(t)) return "inert";
+  if (canaryIsLive(t)) return "live";
+  return "shadow";
+}
+
+/** the sentence the lineage endpoint discloses. One place, so the API and the
+ * SPA cannot drift from what the resolver actually does. */
+export function canaryModeNote(t: ConfigArtifactType): string {
+  switch (canaryModeOf(t)) {
+    case "live":
+      return (
+        "Canary traffic is served LIVE and stamped onto usage_events.config_version_id — the " +
+        "candidate version genuinely answers a share of requests."
+      );
+    case "shadow":
+      return (
+        "This artifact type canaries in SHADOW per ADR-0048 §2 — a partially-enforced deny would " +
+        "non-deterministically block real work, so the ACTIVE version alone enforces. Since " +
+        "ADR-0073 the candidate IS genuinely evaluated in parallel on every sampled decision and " +
+        "each divergence is recorded in config_canary_observations, so you can see what would " +
+        "change BEFORE promoting. canary_pct is the SHADOW SAMPLING RATE here, not a share of " +
+        "enforcement."
+      );
+    default:
+      return (
+        "This artifact type is VOCABULARY ONLY: versions of it can be stored, activated and " +
+        "rolled back, but nothing resolves them at dispatch and nothing shadows them. A canary " +
+        "here changes nothing and measures nothing (ADR-0048 deviation 2, still open)."
+      );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Shapes
 // ---------------------------------------------------------------------------
@@ -238,6 +334,290 @@ export function resolveVersion(input: {
 export function promptFromBody(body: Record<string, unknown>): string | null {
   const v = body["systemPrompt"];
   return typeof v === "string" && v.length > 0 ? v : null;
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0073 — WHAT A RULE VERSION'S BODY MAY CONTAIN
+// ---------------------------------------------------------------------------
+
+/**
+ * THE SCOPE LINE, and it is load-bearing rather than tidy-minded.
+ *
+ * A pillar-1 rule row has two kinds of column:
+ *
+ *   SELECTION columns  — `scope`, `serverScope`, `userId`, `roleId`, `teamId`,
+ *                        `serverId`. `scopedRuleWhere` turns these into the SQL
+ *                        predicate that decides WHICH rows are loaded for this
+ *                        caller at all, and the kernel re-checks the user-scope
+ *                        id it must never widen.
+ *   ENFORCING columns  — everything below. These decide what a LOADED rule
+ *                        DOES.
+ *
+ * Only the enforcing columns are versioned. Versioning a selection column would
+ * create a version whose stored body claims the rule applies to somebody the
+ * pre-filter never loads it for — a rule that is simultaneously "active" and
+ * unreachable, which is the single most dangerous thing a governance config can
+ * be. Rebinding a rule to a different subject is a NEW RULE, not a new version
+ * of an old one; the API refuses it with a stated reason rather than accepting
+ * a body it would then have to ignore.
+ *
+ * `id`, `createdAt` are identity, not definition, and are likewise refused.
+ */
+export const VERSIONED_RULE_FIELDS: Partial<Record<ConfigArtifactType, readonly string[]>> = {
+  approval_rule: ["toolName", "writeOnly", "approverUserId", "deployMode"],
+  rate_limit: ["toolName", "maxCalls", "windowSeconds", "deployMode"],
+  data_scope_rule: ["toolName", "argPath", "allowedValues", "deployMode"],
+  compliance_profile: [
+    "requiredTemplateIds",
+    "mcpDefaultMode",
+    "auditRetentionDays",
+    "piiMode",
+    "backupRetentionDays",
+    "patchCadenceDays",
+    "maxProjectBudgetUsd",
+    "budgetEnforcement",
+    "guardrailModes",
+    "redteamGatingClasses",
+    "redteamMinTrials",
+    "redteamFailOnSeverity",
+  ],
+};
+
+/** columns whose presence in a version body is REFUSED, with the reason named
+ * per group so the 4xx tells an admin what to do instead */
+export const RULE_SELECTION_FIELDS: readonly string[] = [
+  "scope",
+  "serverScope",
+  "userId",
+  "roleId",
+  "teamId",
+  "serverId",
+  "tag",
+];
+export const RULE_IDENTITY_FIELDS: readonly string[] = ["id", "createdAt"];
+
+/** true for the artifact types whose versions overlay a row in that type's own
+ * table (as opposed to `agent_system_prompt`, whose body is free-form text) */
+export function isRuleArtifact(t: ConfigArtifactType): boolean {
+  return VERSIONED_RULE_FIELDS[t] != null;
+}
+
+export interface RuleBodyRejection {
+  error: string;
+  reason: string;
+}
+
+/**
+ * The TYPE of each versionable field, because the key check alone is not
+ * enough. A stored `{"windowSeconds": "sixty"}` would type-check as
+ * `Record<string, unknown>`, activate cleanly, and then throw inside the rate
+ * limit's window arithmetic on the SERVED path — turning a bad edit into an
+ * outage rather than a refusal. Every field is optional (a version body may be
+ * partial and the omitted fields keep the row's value); none is untyped.
+ */
+const deployModeField = z.enum(["hosted", "byoc", "air_gapped"]).nullish();
+const RULE_BODY_SCHEMAS: Partial<Record<ConfigArtifactType, z.ZodTypeAny>> = {
+  approval_rule: z.object({
+    toolName: z.string().min(1).nullish(),
+    writeOnly: z.boolean().optional(),
+    approverUserId: z.string().uuid().optional(),
+    deployMode: deployModeField,
+  }),
+  rate_limit: z.object({
+    toolName: z.string().min(1).nullish(),
+    maxCalls: z.number().int().min(0).optional(),
+    windowSeconds: z.number().int().positive().optional(),
+    deployMode: deployModeField,
+  }),
+  data_scope_rule: z.object({
+    toolName: z.string().min(1).nullish(),
+    argPath: z.string().min(1).optional(),
+    allowedValues: z.array(z.string()).optional(),
+    deployMode: deployModeField,
+  }),
+  compliance_profile: z.object({
+    requiredTemplateIds: z.array(z.string()).nullish(),
+    mcpDefaultMode: z.enum(["read_only", "read_write"]).optional(),
+    auditRetentionDays: z.number().int().positive().nullish(),
+    piiMode: z.enum(["block", "warn", "log"]).optional(),
+    backupRetentionDays: z.number().int().positive().nullish(),
+    patchCadenceDays: z.number().int().positive().nullish(),
+    maxProjectBudgetUsd: z.number().nonnegative().nullish(),
+    budgetEnforcement: z.enum(["block", "warn_only"]).nullish(),
+    guardrailModes: z.record(z.string()).nullish(),
+    redteamGatingClasses: z.array(z.string()).nullish(),
+    redteamMinTrials: z.number().int().positive().nullish(),
+    redteamFailOnSeverity: z.enum(["low", "medium", "high", "critical"]).nullish(),
+  }),
+};
+
+/**
+ * Validate a proposed rule-version body. Refuses — with a real reason, never a
+ * silent drop — a body that names a selection column, an identity column, or a
+ * field this artifact type has no such column for. A typo'd field name that was
+ * quietly ignored would produce a version that looks like a change and is not
+ * one, which for a governance artifact is worse than an error.
+ */
+export function validateRuleVersionBody(
+  artifactType: ConfigArtifactType,
+  body: Record<string, unknown>,
+): RuleBodyRejection | null {
+  const allowed = VERSIONED_RULE_FIELDS[artifactType];
+  if (!allowed) return null;
+  for (const key of Object.keys(body)) {
+    if (allowed.includes(key)) continue;
+    if (RULE_SELECTION_FIELDS.includes(key)) {
+      return {
+        error: "selection_field_not_versionable",
+        reason:
+          `'${key}' selects WHICH callers this ${artifactType} is loaded for; it is not part of what the ` +
+          `rule does. Versioning it would store a version that claims to apply to a subject the rule ` +
+          `query never loads it for. Create a separate rule bound to the new subject instead.`,
+      };
+    }
+    if (RULE_IDENTITY_FIELDS.includes(key)) {
+      return {
+        error: "identity_field_not_versionable",
+        reason: `'${key}' is the artifact's identity, not its definition — a new version cannot change it.`,
+      };
+    }
+    return {
+      error: "unknown_versioned_field",
+      reason:
+        `'${key}' is not a versionable field of ${artifactType}. Versionable: ${allowed.join(", ")}. ` +
+        `Refused rather than ignored, because a silently-dropped field looks like a change that did not happen.`,
+    };
+  }
+  const schema = RULE_BODY_SCHEMAS[artifactType];
+  if (schema) {
+    const parsed = schema.safeParse(body);
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0]!;
+      return {
+        error: "invalid_versioned_field",
+        reason:
+          `'${issue.path.join(".") || "(body)"}' ${issue.message}. A version body is TYPE-CHECKED before it is ` +
+          `stored: an activated version carrying the wrong type would throw on the SERVED evaluation path, ` +
+          `turning a bad edit into an outage instead of a refusal.`,
+      };
+    }
+  }
+  return null;
+}
+
+/** the version body for a rule row as it stands TODAY — the §7
+ * behaviour-preserving baseline, extracted rather than hand-typed so a new
+ * column cannot be forgotten by a human writing a migration. */
+export function ruleBodyFrom(
+  artifactType: ConfigArtifactType,
+  row: Record<string, unknown>,
+): Record<string, unknown> {
+  const allowed = VERSIONED_RULE_FIELDS[artifactType] ?? [];
+  const out: Record<string, unknown> = {};
+  for (const f of allowed) out[f] = row[f] ?? null;
+  return out;
+}
+
+/**
+ * Overlay a version body onto a rule row. Total and field-wise: only the
+ * versionable fields are ever written, so a body that omits a field leaves the
+ * table's value in place rather than nulling it — which matters because the
+ * table row is the read-model `activateVersion` keeps in sync, and a partial
+ * body must never silently clear a limit.
+ */
+export function applyRuleBody<T extends Record<string, unknown>>(
+  artifactType: ConfigArtifactType,
+  row: T,
+  body: Record<string, unknown>,
+): T {
+  const allowed = VERSIONED_RULE_FIELDS[artifactType] ?? [];
+  const out = { ...row } as Record<string, unknown>;
+  for (const f of allowed) {
+    if (Object.prototype.hasOwnProperty.call(body, f)) out[f] = body[f];
+  }
+  return out as T;
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0073 — SHADOW RESOLUTION
+// ---------------------------------------------------------------------------
+
+export interface ShadowResolution {
+  /** the version that ENFORCES. Null only when the artifact has no versions at
+   * all (pre-versioning fallback) or is unresolvable — see `unresolvable`. */
+  served: VersionLike | null;
+  /** the version to evaluate IN PARALLEL and never enforce. Null when there is
+   * no canary, or when this stable key fell outside the sampling rate. */
+  candidate: VersionLike | null;
+  /** a canary exists but this key was not sampled — recorded so a zero
+   * observation count is distinguishable from "no canary" */
+  candidateSampledOut: boolean;
+  bucket: number | null;
+  /**
+   * DEFAULT-DENY: set when version rows EXIST for this artifact but none of
+   * them is `active`. There is then no answer to "what does this rule say", and
+   * the caller must fail closed with this reason rather than treat the rule as
+   * absent — a dropped RESTRICTION is a widening, which is precisely the
+   * direction a governance kernel may never fail in.
+   */
+  unresolvable: string | null;
+}
+
+/**
+ * Resolve one rule/profile artifact for enforcement plus shadow.
+ *
+ * `canaryPct` is honoured here as a SAMPLING RATE on the same deterministic
+ * stable key `canaryBucket` already uses, not as a share of enforcement. Two
+ * consequences, both deliberate:
+ *
+ *   - the same caller is sampled consistently, so a divergence report is not a
+ *     scatter of unrelated one-off decisions;
+ *   - an operator can shadow 5% of a busy fleet without writing an observation
+ *     row per call, and 100% when they want the complete blast radius.
+ *
+ * Nothing about the sampling can reach the served decision: `served` is the
+ * active version whatever the bucket says.
+ */
+export function resolveForShadow(input: {
+  artifactType: ConfigArtifactType;
+  artifactId: string;
+  versions: VersionLike[];
+  stableKey: string;
+}): ShadowResolution {
+  const none: ShadowResolution = {
+    served: null,
+    candidate: null,
+    candidateSampledOut: false,
+    bucket: null,
+    unresolvable: null,
+  };
+  if (input.versions.length === 0) return none;
+
+  const active = input.versions.find((v) => v.status === "active") ?? null;
+  if (!active) {
+    return {
+      ...none,
+      unresolvable:
+        `${input.artifactType} ${input.artifactId} has ${input.versions.length} stored version(s) but NONE is ` +
+        `active, so there is no authoritative definition of this rule. Refusing the call rather than ` +
+        `evaluating without it — an unresolvable restriction that is skipped is a silent widening.`,
+    };
+  }
+
+  const canary = canaryIsShadowEvaluated(input.artifactType)
+    ? (input.versions.find((v) => v.status === "canary") ?? null)
+    : null;
+  if (!canary) return { ...none, served: active };
+
+  const bucket = canaryBucket(input.artifactId, input.stableKey);
+  const sampled = bucket < (canary.canaryPct ?? 0);
+  return {
+    served: active,
+    candidate: sampled ? canary : null,
+    candidateSampledOut: !sampled,
+    bucket,
+    unresolvable: null,
+  };
 }
 
 // ---------------------------------------------------------------------------
