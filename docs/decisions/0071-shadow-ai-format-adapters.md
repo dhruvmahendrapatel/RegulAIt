@@ -342,3 +342,40 @@ Read this before citing any of it.
 - **Files**: `packages/shared/src/evidence-adapters.ts` (+ its unit suite),
   `apps/gateway/src/shadow-ai.ts` (pipeline extraction + two routes),
   `apps/gateway/src/shadow-ai-adapters.test.ts`, `apps/gateway/src/openapi-registry.ts`.
+
+---
+
+## Amendment — 2026-08-09: the SPA surface exists
+
+*This section is appended. Nothing above it has been edited; the Accepted decision stands
+unchanged, and this records only that one of its stated gaps has been closed.*
+
+Disclosure 12, **"No SPA page — `/admin` still shows ADR-0055's shadow-AI page unchanged"**, is now
+obsolete. `ShadowAiPage.tsx` gained an **Import a raw log file (format adapters)** card that drives
+`GET /v1/shadow-ai/adapters` and `POST /v1/shadow-ai/imports/raw`. It is an addition to the existing
+page rather than a second one — the same structural claim §1 makes about the routes. **No contract
+changed and no migration was written.**
+
+The three things §3 and §4 required the screen to carry, all asserted in a browser:
+
+- **Each adapter's `verification` sentence is printed VERBATIM**, from the registry, before an
+  operator can import. For `cef`, `leef`, `w3c_extended` and `proxy_common` that sentence says
+  outright that the adapter **has not been run against a real export from any vendor's product**.
+  The spec asserts the string is on screen and that changing adapter changes it, so the honesty
+  field cannot decay into UI copy that drifts from the code.
+- **`formatBasis` is a badge, not prose**: *published grammar* / *declared format (unverified)* /
+  *you mapped it*. The registry table below the form lists all five with their verification claims,
+  and the page states plainly that **no vendor-named preset ships, deliberately**.
+- **The safe default is the default, and the opt-out is labelled as one.** `refuse_file` is
+  pre-selected; choosing `report_and_continue` raises an inline warning that the resulting inventory
+  will be smaller than the file. Both paths list every refusal with its 1-based line number — the
+  spec drives a three-line CEF file whose second line is not a CEF record and asserts the screen
+  names line 2 in both modes, and that the accepted lines really did reach ADR-0055's inventory.
+
+**Still not closed by this amendment**: disclosures 1–11 and 13 stand exactly as written. In
+particular **nothing has been run against a real export from any vendor's product** — the page makes
+that visible, it does not make it untrue.
+
+Evidence: `apps/web/src/views/admin/governance/ShadowAiPage.tsx`, driven in Chromium by
+`apps/web/e2e/phase6-parity-ui.spec.ts` (four tests, zero console errors, screenshots
+`phase6-12`…`phase6-15`).

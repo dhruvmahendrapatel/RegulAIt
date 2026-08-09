@@ -255,3 +255,32 @@ test being rewritten as two (the new contract, plus a companion asserting no `no
 row can exist anywhere). The shared package's +7 is the ADR-0067 boundary test rewritten in place
 plus seven new gate-refusal cases. `pnpm -r build`, `pnpm --filter @regulait/web build` and
 `pnpm -r typecheck` are clean.
+
+---
+
+## Amendment — 2026-08-09: the stranded-baseline report is on the evals page
+
+*This section is appended. Nothing above it has been edited; the Accepted decision stands
+unchanged, and this records only that one of its stated gaps has been closed.*
+
+Disclosure 3, **"No SPA page — the scoring-semantics report and the stranded-pin list are API-only.
+The evals admin page is unchanged and does not show the version"**, is now obsolete.
+`/admin/evals` leads with a **Scoring semantics** card rendering `GET /v1/evals/scoring-semantics`.
+**No contract changed and no migration was written.**
+
+It exists because *"an operator is TOLD which of their stored measurements are stranded, rather
+than discovering it when a gate reason changes"* is the whole justification for stamping a version
+at all, and an operator who has to `curl` for that list is, in practice, not told. The card shows
+the current version, the per-version run counts labelled **comparable / NOT comparable to today**,
+the changelog stating what a score MEANT under each version, and — the part somebody has to act on
+— every stranded pinned baseline by run id, agent, dataset version and the action to take. When
+none is stranded it says so in words rather than rendering an empty table.
+
+**Still not closed by this amendment**: disclosures 1, 2 and 4–8 stand exactly as written. In
+particular the classifier is still a deny-list that fails towards claiming the defence worked, and
+nothing re-verifies a judged metric because no model provider is connected.
+
+Evidence: `apps/web/src/views/admin/governance/EvalsPage.tsx`, driven in Chromium by
+`apps/web/e2e/phase6-parity-ui.spec.ts` (screenshots `phase6-16`, `phase6-17`). The same spec
+confirms ADR-0067's four groundedness scorers and its `eval_cases.context` authoring field are
+already reachable on that page, so no work was needed there.

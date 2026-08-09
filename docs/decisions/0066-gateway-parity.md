@@ -336,3 +336,39 @@ Stated here rather than discovered later.
 - Semantic-cache hits are already reported through the pillar-5 dashboard (the parity brief lists
   "cache-hit cost saving" under Slice D); nothing here changed it, and no claim is made that it was
   part of this slice.
+
+---
+
+## Amendment — 2026-08-09: the SPA page exists
+
+*This section is appended. Nothing above it has been edited; the Accepted decision stands
+unchanged, and this records only that one of its stated gaps has been closed.*
+
+Two of this ADR's disclosures — **"No UI"** under *What this explicitly does NOT give you*, and
+**"An admin SPA page for both features"** under *Follow-up* — are now **partly obsolete for virtual
+keys**. `/admin/virtual-keys` ships in the React SPA (nav: **Identity & Access**, beside *Client
+access*), built entirely on the routes this ADR already specified. **No contract changed, no
+migration was written and no ADR was superseded.**
+
+What the page renders, and why each item is there rather than in this document:
+
+- **The ceiling leads the page.** "A virtual key only ever NARROWS" is the first card, with the
+  three-clause allow rule (owner entitled **and** allow-list admits **and** budget not exhausted)
+  spelled out, plus the route allow-list and the sentence *a key issued by an admin is not an
+  admin*. The most likely operator error is believing that listing a model on a key **grants** it;
+  the page says otherwise where the allow-list is typed.
+- **The token is shown exactly once**, through the existing `RevealCard` affordance ("shown once",
+  "this will not be shown again"). The page has no field for a token, never fetches one after
+  issuance, and an e2e test asserts the plaintext is absent from the DOM and from the list payload
+  after a reload.
+- **`spentUsd` and the `usage_events` total are rendered apart**, with the disagreement case
+  called out in words rather than reconciled away.
+- **Revocation is confirmed and never deletes**; a revoked key stays listed with its history.
+
+**Still not closed by this amendment**: fallback chains have no page (they remain API-only); there
+is still no load balancing, no per-key budget period, and no MCP-proxy access for a virtual key.
+Everything else in *What this explicitly does NOT give you* stands as written.
+
+Evidence: `apps/web/src/views/admin/identity/VirtualKeysPage.tsx`, driven in Chromium by
+`apps/web/e2e/phase6-parity-ui.spec.ts` (five tests, zero console errors, screenshots
+`phase6-01`…`phase6-05`).

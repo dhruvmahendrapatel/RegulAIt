@@ -319,3 +319,44 @@ Read this before citing any figure this slice produces.
 - The follow-up the owner should weigh first is **verifying the three vendor presets against real
   exports**; the second is deciding whether imported spend should ever inform a budget, which is a
   policy question this ADR deliberately did not answer.
+
+---
+
+## Amendment — 2026-08-09: the SPA page exists
+
+*This section is appended. Nothing above it has been edited; the Accepted decision stands
+unchanged, and this records only that one of its stated gaps has been closed.*
+
+The disclosure **"There is no SPA page. API-only, exactly as ADR-0066 shipped"** is now obsolete.
+`/admin/cost-consolidation` ships in the React SPA (nav: **Cost & Optimization**, directly under
+*Cost dashboard*), built entirely on the routes this ADR already specified. **No contract changed
+and no migration was written.** The CSV export remains, as the FP&A hand-off, on the page itself.
+
+**§1's honesty rule survived into the layout, which was the only way this page could be worth
+shipping.** `metered` and `imported` are rendered in two separately-ruled columns, each printing
+its own basis word and what that word MEANS, with the subject's `coverage` sentence underneath.
+There is no cell for a combined figure because there is no field for one — and the e2e spec
+**computes** each subject's `metered.usd + imported.usd` from the API's own answer and asserts that
+number appears nowhere in the rendered document, so the guarantee cannot quietly stop being tested
+if the seeded metered spend moves.
+
+The other three things the page had to carry:
+
+- **Each adapter's `limits` string is printed verbatim** where it is chosen, read from the registry
+  rather than restated in the UI — the spec asserts that switching adapter switches the sentence.
+  §"the three vendor presets are built against DECLARED header sets never verified against a live
+  console" is a thing an operator must read **before** trusting a parse.
+- **Refusals name their file line.** The dry run shows parsed / accepted / refused and a table of
+  every refusal with its 1-based line number; the spec imports a file whose third line carries
+  `07/08/2026` and asserts the screen names line 3 and the ambiguity.
+- **Unattributed spend is its own visible subject**, never hidden and never spread; mapping the
+  account moves the money to a person, and the page proves the row disappears only because it moved.
+
+**Still not closed by this amendment**: everything else in *What this explicitly does NOT give you*
+stands as written — the unverified vendor presets remain the biggest gap, imported figures still
+enter no budget/forecast/enforcement path, there is still no FX conversion, no invoice
+reconciliation, and no scheduled re-import (the page renders per-vendor staleness instead).
+
+Evidence: `apps/web/src/views/admin/cost/CostConsolidationPage.tsx`, driven in Chromium by
+`apps/web/e2e/phase6-parity-ui.spec.ts` (six tests, zero console errors, screenshots
+`phase6-06`…`phase6-11`).
