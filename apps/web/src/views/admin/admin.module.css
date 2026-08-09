@@ -249,3 +249,72 @@
 .formRow > * {
   min-width: 0;
 }
+
+/* ---------------------------------------------------------------------------
+   The honest-refusal panel (ADR-0066 / ADR-0069 / ADR-0071 surfaces).
+   Distinct from .effectBanner, which is a single centred row: a refusal here
+   carries the gateway's sentence AND a per-line refusal table under it, so it
+   has to be a column that can grow.
+   --------------------------------------------------------------------------- */
+.outcome {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: var(--s2);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.outcomeOk {
+  border-color: var(--ok);
+  background: var(--ok-soft);
+  color: var(--ok-soft-text);
+}
+.outcomeDeny {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger-soft-text);
+}
+
+/* two bases, side by side, NEVER added together (ADR-0069). The rule is a
+   layout as well as a type: the columns are separated by a real divider so a
+   reader cannot mistake them for two parts of one figure. */
+.basisSplit {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--s2);
+}
+.basisCell {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--s2);
+  background: var(--surface-1);
+  min-width: 0;
+}
+.basisCellMetered {
+  border-left: 3px solid var(--ok);
+}
+.basisCellImported {
+  border-left: 3px solid var(--warn);
+}
+.basisLabel {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+.basisMoney {
+  font-family: var(--font-mono);
+  font-size: var(--text-lg);
+  font-weight: 700;
+}
+
+/* The admin console's stat-tile row. Referenced by ShadowAiPage, BillingPage,
+   LicensingPage, DataKeyPage, SchedulerPage, CopilotPage and CompliancePacks
+   but never defined, so those rows had no layout at all. Same shape as
+   `views.module.css .grid`. */
+.statRow {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--s2);
+}

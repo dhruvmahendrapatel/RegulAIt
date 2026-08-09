@@ -15,7 +15,14 @@ export interface ApiErrorPayload {
   detail?: string;
   message?: string;
   raw?: string;
-  issues?: Array<{ path?: Array<string | number>; message: string }>;
+  /**
+   * A zod-shaped issue list. `path` arrives BOTH WAYS across this API: zod's
+   * own `flatten()` sends an array, and most hand-written handlers send it
+   * already joined (`path: i.path.join(".")`). Both spellings are real and the
+   * type says so — assuming the array shape is what made every such refusal
+   * render as a TypeError instead of its reason.
+   */
+  issues?: Array<{ path?: Array<string | number> | string; message: string }>;
   decision?: { reason?: string };
   [k: string]: unknown;
 }
@@ -38,7 +45,13 @@ function errDetails(json: ApiErrorPayload | null): string[] {
   const out: string[] = [];
   if (Array.isArray(json.issues)) {
     for (const i of json.issues) {
-      out.push(((i.path ?? []).join(".") || "body") + ": " + i.message);
+      // NEVER let formatting a refusal throw. This used to call `.join` on a
+      // path the gateway had already joined into a string, so the TypeError
+      // escaped from the ApiError constructor and the operator was shown a
+      // JavaScript error instead of the reason the platform gave. A refusal
+      // that cannot be rendered is, in practice, a refusal with no reason.
+      const path = Array.isArray(i.path) ? i.path.join(".") : typeof i.path === "string" ? i.path : "";
+      out.push((path || "body") + ": " + i.message);
     }
   }
   if (typeof json.detail === "string") out.push(json.detail);
@@ -95,7 +108,11 @@ export const api = {
   post: <T>(path: string, body?: unknown) => request<T>("POST", path, body ?? {}),
   patch: <T>(path: string, body?: unknown) => request<T>("PATCH", path, body ?? {}),
   put: <T>(path: string, body?: unknown) => request<T>("PUT", path, body ?? {}),
-  del: <T>(path: string) => request<T>("DELETE", path),
+  /** DELETE, optionally carrying a body — some revocations require an audited
+   * reason (ADR-0069's `DELETE /v1/cost-imports/:id`), and a reason posted in a
+   * query string is a reason nobody can quote back. Omitting the body keeps the
+   * request byte-identical to what every pre-existing caller sent. */
+  del: <T>(path: string, body?: unknown) => request<T>("DELETE", path, body),
 };
 
 /**

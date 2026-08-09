@@ -120,3 +120,13 @@
   border-top: 1px solid var(--border);
   margin: var(--s2) 0;
 }
+
+/* A responsive row of stat tiles. `v.grid` is referenced by a dozen admin
+   screens (TracesPage, the cost dashboards, …) but had never been defined, so
+   those rows rendered as unstyled stacked blocks. Defining it here fixes every
+   one of them at once rather than editing each call site. */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--s2);
+}
