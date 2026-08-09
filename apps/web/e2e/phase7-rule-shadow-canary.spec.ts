@@ -268,3 +268,95 @@ test.describe("ADR-0073 — a rule canary measures without enforcing, and the sc
     track.assertClean("canary abandoned");
   });
 });
+
+/**
+ * ADR-0074 — an ordinary admin edit of a VERSIONED rule becomes a version, and
+ * the operator is told so on the page.
+ *
+ * Before ADR-0074 the deploy-mode select on this very page wrote the rule row
+ * and the change was discarded at dispatch: the select showed the new scope,
+ * the list showed the new scope, and enforcement never moved. The browser is
+ * where that lie was told, so it is where the fix has to be visible.
+ */
+test.describe("ADR-0074 — a deploy-mode edit on a versioned rule mints a version, visibly", () => {
+  let page: Page;
+  let track: ConsoleTracker;
+  let ruleId = "";
+
+  test.beforeAll(async ({ browser }) => {
+    ({ page, track } = await adminSession(browser));
+  });
+
+  test("the page states what an enforcing edit does to a versioned rule", async () => {
+    await page.goto("/ui/admin/rules");
+    await expect(page.getByRole("heading", { name: "Rules engine", exact: true })).toBeVisible();
+    const note = page.getByTestId("deploy-mode-versioning-note");
+    await expect(note).toBeVisible();
+    await expect(note).toContainText("mints a new version and activates it");
+    // and the honest refusal is named rather than discovered during an incident
+    await expect(note).toContainText("refused");
+    await shot(page, "phase7-03-deploy-mode-versioning-note");
+    track.assertClean("deploy-mode versioning disclosure");
+  });
+
+  test("setting the scope from the SPA mints a version and the row says which", async () => {
+    const stamp = Date.now();
+    const u = await page.request.post("/v1/users", {
+      headers: CSRF,
+      data: { email: `e2e-dm-${stamp}@example.com`, displayName: "e2e deploy-mode subject" },
+    });
+    expect(u.status()).toBe(201);
+    const subjectId = ((await u.json()) as { id: string }).id;
+    const srv = await page.request.post("/v1/servers", {
+      headers: CSRF,
+      data: { name: `e2e-dm-${stamp}`, url: "http://127.0.0.1:9" },
+    });
+    expect(srv.status()).toBe(201);
+    const srvId = ((await srv.json()) as { id: string }).id;
+
+    const created = await page.request.post("/v1/rules/rate-limits", {
+      headers: CSRF,
+      data: {
+        scope: "user",
+        userId: subjectId,
+        serverScope: "server",
+        serverId: srvId,
+        maxCalls: 100000,
+        windowSeconds: 3600,
+      },
+    });
+    expect(created.status()).toBe(201);
+    ruleId = ((await created.json()) as { id: string }).id;
+
+    // VERSION it — this is what makes the row a read-model. v1 is minted from
+    // the live rule as the lazy baseline and stays active; v2 is a draft.
+    const v2 = await page.request.post(`/v1/config-versions/rate_limit/${ruleId}`, {
+      headers: CSRF,
+      data: { body: { maxCalls: 5 }, label: "e2e — a draft nobody activated" },
+    });
+    expect(v2.status()).toBe(201);
+
+    await page.goto("/ui/admin/rules");
+    const select = page.getByTestId(`deploy-mode-${ruleId}`);
+    await expect(select).toBeVisible();
+    await select.selectOption("air_gapped");
+
+    // the page tells the operator the edit became a version — the fact that
+    // used to be untrue and unsayable
+    const minted = page.getByTestId(`deploy-mode-version-${ruleId}`);
+    await expect(minted).toBeVisible();
+    await expect(minted).toContainText("v3");
+    await shot(page, "phase7-04-deploy-mode-minted-version");
+
+    // and it is the ACTIVE version, not a draft — i.e. it is what enforces
+    const lineage = (await (
+      await page.request.get(`/v1/config-versions/rate_limit/${ruleId}`)
+    ).json()) as { active: { version: number; body: Record<string, unknown> } };
+    expect(lineage.active.version).toBe(3);
+    expect(lineage.active.body.deployMode).toBe("air_gapped");
+    // the draft v2 was NOT swept into it: the edit composed onto the ACTIVE
+    // body, so maxCalls is still the baseline's, not the unactivated draft's
+    expect(lineage.active.body.maxCalls).toBe(100000);
+    track.assertClean("deploy-mode minted a version");
+  });
+});

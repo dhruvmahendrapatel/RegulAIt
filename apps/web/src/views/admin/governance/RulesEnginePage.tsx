@@ -157,6 +157,13 @@ const DEPLOY_MODES: RuleDeployMode[] = ["hosted", "byoc", "air_gapped"];
  */
 function DeployModeCell(props: { kind: RuleKind; rule: RuleBase }) {
   const act = useAction();
+  // ADR-0074: `deployMode` is a VERSIONED field. On a rule somebody has
+  // versioned, this PATCH mints and activates a new version rather than writing
+  // the row — before ADR-0074 it wrote the row and the change was silently
+  // discarded at dispatch. The operator is told which of the two happened,
+  // because "your edit is live" and "your edit is live AS VERSION 4, and is
+  // rollback-able" are different facts and only one of them used to be true.
+  const [minted, setMinted] = useState<number | null>(null);
   const current = props.rule.deployMode ?? "";
   return (
     <span className={v.stackTight}>
@@ -167,9 +174,15 @@ function DeployModeCell(props: { kind: RuleKind; rule: RuleBase }) {
         disabled={act.busy}
         onChange={(e) => {
           const next = e.target.value === "" ? null : (e.target.value as RuleDeployMode);
+          setMinted(null);
           void act.run(
-            () =>
-              api.patch(`/v1/rules/${props.kind}/${props.rule.id}/deploy-mode`, { deployMode: next }),
+            async () => {
+              const r = await api.patch<{ versionMinted: number | null }>(
+                `/v1/rules/${props.kind}/${props.rule.id}/deploy-mode`,
+                { deployMode: next },
+              );
+              setMinted(r.versionMinted ?? null);
+            },
             next === null
               ? "Scope cleared — this rule applies to every call"
               : `Rule scoped to ${next} deploy targets`,
@@ -183,6 +196,12 @@ function DeployModeCell(props: { kind: RuleKind; rule: RuleBase }) {
           </option>
         ))}
       </Select>
+      {minted != null && (
+        <span className={v.faint} data-testid={`deploy-mode-version-${props.rule.id}`}>
+          This rule is versioned — the change was minted and activated as <strong>v{minted}</strong>, and
+          can be rolled back.
+        </span>
+      )}
       {act.error && (
         <span className={v.errLine} role="alert">
           {act.error}
@@ -261,6 +280,14 @@ export default function RulesEnginePage() {
             client-asserted — and an unattributed call (or one with no in-flight deploy-bound work) never
             matches a mode-scoped rule. Mode scoping only narrows WHICH restrictions apply; it can never
             mint an allow. Every change here is audited.
+          </div>
+          <div className={v.faint} style={{ marginTop: "var(--s1)" }} data-testid="deploy-mode-versioning-note">
+            <strong>ADR-0074:</strong> deploy-mode is an <em>enforcing</em> field. If a rule has been
+            versioned, changing it here <strong>mints a new version and activates it</strong> — writing the
+            row alone would have shown you the new scope while dispatch went on serving the old one. If the
+            rule has no versions, nothing is minted and the write behaves exactly as it always did. If the
+            rule has versions but none is active, the edit is <strong>refused</strong> with a 409 naming the
+            activate endpoint, rather than guessing which version your change applies to.
           </div>
         </Card>
 
@@ -474,6 +501,12 @@ interface CanaryRow {
   observed: number;
   diverged: number;
   failed: number;
+  /** ADR-0074 — observations measured against a baseline that has since moved.
+   * Reported beside the totals, never folded into them. */
+  staleBaselineObservations: number;
+  baselineMoved: boolean;
+  /** ADR-0074 — the artifact this canary points at no longer exists */
+  artifactDeleted: boolean;
 }
 
 interface ObservationRow {
@@ -507,6 +540,14 @@ interface Divergence {
   candidateVersion: number | null;
   canaryPct: number | null;
   totals: { observed: number; diverged: number; failed: number };
+  staleBaseline: {
+    observed: number;
+    unattributed: number;
+    buckets: Array<{ activeVersion: number | null; observed: number; diverged: number }>;
+    note: string | null;
+  };
+  artifactDeleted: boolean;
+  candidateInheritedFields: string[];
   observations: ObservationRow[];
   projectImpact: ProjectImpactRow[] | null;
   projectImpactNote: string | null;
@@ -592,6 +633,27 @@ function ShadowCanaryCard() {
             render: (r) => (r.failed > 0 ? <Badge tone="danger">{r.failed}</Badge> : <span>0</span>),
           },
           {
+            key: "stale",
+            header: "Stale baseline",
+            align: "right",
+            render: (r) =>
+              r.artifactDeleted ? (
+                <Badge tone="danger" title="the artifact these versions describe no longer exists">
+                  artifact deleted
+                </Badge>
+              ) : r.baselineMoved ? (
+                <Badge
+                  tone="warn"
+                  title="the active version moved while this canary was running — these observations compared against a baseline that is no longer current and are NOT in the counts to the left"
+                  data-testid={`canary-stale-${r.artifactId}`}
+                >
+                  {r.staleBaselineObservations}
+                </Badge>
+              ) : (
+                <span>0</span>
+              ),
+          },
+          {
             key: "act",
             header: "",
             render: (r) => (
@@ -622,6 +684,31 @@ function ShadowCanaryCard() {
             </strong>
             {divergence.data?.note ? ` — ${divergence.data.note}` : ""}
           </div>
+          {divergence.data && divergence.data.staleBaseline.observed > 0 && (
+            <div className={v.errLine} role="status" data-testid="stale-baseline-note">
+              <strong>The comparison baseline moved.</strong> {divergence.data.staleBaseline.note}. The counts
+              above cover only the observations measured against the version that is active now. Promoting on
+              this sample is refused until you re-point the canary (which starts a fresh comparison window) or
+              override with a stated reason — a mixed-baseline sample is not one comparison.
+              {divergence.data.staleBaseline.buckets.length > 0 && (
+                <>
+                  {" "}
+                  Stranded:{" "}
+                  {divergence.data.staleBaseline.buckets
+                    .map((b) => `${b.observed} against v${b.activeVersion ?? "?"} (${b.diverged} diverged)`)
+                    .join(", ")}
+                  .
+                </>
+              )}
+            </div>
+          )}
+          {divergence.data?.artifactDeleted && (
+            <div className={v.errLine} role="status">
+              <strong>The artifact these versions describe no longer exists.</strong> The version rows and the
+              activation ledger are kept deliberately — they are the record of what governed the calls made
+              while it existed — but nothing here can enforce again and these counts will never move.
+            </div>
+          )}
           <Table<ObservationRow>
             columns={[
               { key: "at", header: "When", render: (o) => ago(o.at) },
