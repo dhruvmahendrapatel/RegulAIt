@@ -9,12 +9,15 @@
  *  1. The Rules engine page states the invariant an operator must not get wrong
  *     — a rule canary NEVER enforces, and `canary %` is the SAMPLING rate, not
  *     a share of enforcement.
- *  2. A candidate that would PAUSE a call the active version ALLOWS shows up as
+ *  2. A candidate that would DENY a call the active version does not shows up as
  *     a real divergence row naming both sides AND the sentence the caller would
- *     have been given — while the caller was, in fact, allowed.
- *  3. A candidate whose evaluation THREW is rendered as `evaluation failed`,
- *     not as a divergence, so "would change: 0" cannot be read as "safe" while
- *     the comparison never happened.
+ *     have been given — while the served decision is asserted UNCHANGED, as the
+ *     whole object, before and after the canary exists.
+ *  3. Abandoning the canary takes it off the operator's queue.
+ *
+ * (The throwing-candidate case is proved in the gateway suite, where a corrupt
+ * row can be written directly; it is not reachable through the admin API, which
+ * type-checks version bodies.)
  *
  * Zero console errors throughout; screenshots land in E2E_SHOTS_DIR.
  */
@@ -122,13 +125,17 @@ test.describe("ADR-0073 — a rule canary measures without enforcing, and the sc
   let userId = "";
   let serverId = "";
   let toolName = "";
+  let served: Record<string, unknown> = {};
 
   test.beforeAll(async ({ browser }) => {
     ({ page, track } = await adminSession(browser));
   });
 
   const gotoPage = async () => {
-    await page.goto("/ui/admin/governance/rules");
+    // a full navigation, not a nav click: clicking the link while already on
+    // this route does not remount, so the cached (empty) canary list would be
+    // what the assertions saw.
+    await page.goto("/ui/admin/rules");
     await expect(page.getByRole("heading", { name: "Rules engine", exact: true })).toBeVisible();
   };
 
@@ -141,10 +148,10 @@ test.describe("ADR-0073 — a rule canary measures without enforcing, and the sc
     track.assertClean("rules engine landing");
   });
 
-  test("sets up a rule whose CANDIDATE would pause a call the ACTIVE version allows", async () => {
-    // own fixtures rather than seeded ones: the assertion below is that a
-    // GRANTED call stays allowed while a candidate would pause it, so the
-    // grant has to be one this spec knows exists.
+  test("sets up a rule whose CANDIDATE would DENY a call the ACTIVE version does not", async () => {
+    // own fixtures rather than seeded ones: the assertion is that the SERVED
+    // decision is unchanged while the candidate would decide differently, so
+    // the rule under test has to be one this spec created.
     const stamp = Date.now();
     const u = await page.request.post("/v1/users", {
       headers: CSRF,
@@ -172,68 +179,85 @@ test.describe("ADR-0073 — a rule canary measures without enforcing, and the sc
     });
     expect(grant.status()).toBe(201);
 
-    // an approval rule that pauses a DIFFERENT tool — so today's decision is allow
-    const created = await page.request.post("/v1/rules/approvals", {
-      headers: CSRF,
-      data: {
-        scope: "user",
-        userId,
-        serverScope: "server",
-        serverId,
-        toolName: `${toolName}__e2e_absent`,
-        approverUserId: userId,
-      },
-    });
-    expect(created.status()).toBe(201);
-    ruleId = ((await created.json()) as { id: string }).id;
-
     const before = await page.request.post("/v1/evaluate", {
       headers: CSRF,
       data: { userId, serverId, toolName },
     });
     expect(before.status()).toBe(200);
-    expect(((await before.json()) as { effect: string }).effect).toBe("allow");
+    // whatever the seeded fleet rules make of this call is the reference — the
+    // point is that the shadow does not move it, not that it is any particular
+    // effect. (A seeded fleet approval rule makes it require_approval here.)
+    served = (await before.json()) as Record<string, unknown>;
+    expect(served.effect).not.toBe("deny");
 
-    // v2 would pause the tool the user is actually calling
-    const v2 = await page.request.post(`/v1/config-versions/approval_rule/${ruleId}`, {
-      headers: CSRF,
-      data: { body: { toolName }, label: "e2e — pause this tool" },
-    });
-    expect(v2.status()).toBe(201);
-    // 99% sampling: the point is to observe, and this rule is exercised once
-    const canary = await page.request.post(`/v1/config-versions/approval_rule/${ruleId}/canary`, {
-      headers: CSRF,
-      data: { version: 2, pct: 99 },
-    });
-    expect(canary.status()).toBe(200);
-    expect(((await canary.json()) as { live: boolean }).live).toBe(false);
-  });
+    // SHADOW SAMPLING IS DETERMINISTIC PER (artifact, user): a canary at 99%
+    // legitimately leaves ~1% of stable keys unsampled, and both ids are random
+    // per run. So mint a fresh rule id until this user falls inside the sample
+    // rather than asserting on a decision that was correctly not sampled.
+    // Expected iterations: ~1.01.
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const created = await page.request.post("/v1/rules/rate-limits", {
+        headers: CSRF,
+        data: {
+          scope: "user",
+          userId,
+          serverScope: "server",
+          serverId,
+          maxCalls: 100000,
+          windowSeconds: 3600,
+        },
+      });
+      expect(created.status()).toBe(201);
+      ruleId = ((await created.json()) as { id: string }).id;
 
-  test("THE CALLER IS STILL ALLOWED — the shadow did not enforce", async () => {
-    const after = await page.request.post("/v1/evaluate", {
-      headers: CSRF,
-      data: { userId, serverId, toolName },
-    });
-    expect(after.status()).toBe(200);
-    expect(((await after.json()) as { effect: string }).effect).toBe("allow");
+      // the candidate would refuse the call outright
+      const v2 = await page.request.post(`/v1/config-versions/rate_limit/${ruleId}`, {
+        headers: CSRF,
+        data: { body: { maxCalls: 0 }, label: "e2e — would deny" },
+      });
+      expect(v2.status()).toBe(201);
+      const canary = await page.request.post(`/v1/config-versions/rate_limit/${ruleId}/canary`, {
+        headers: CSRF,
+        data: { version: 2, pct: 99 },
+      });
+      expect(canary.status()).toBe(200);
+      expect(((await canary.json()) as { live: boolean }).live).toBe(false);
+
+      const after = await page.request.post("/v1/evaluate", {
+        headers: CSRF,
+        data: { userId, serverId, toolName },
+      });
+      expect(after.status()).toBe(200);
+      // THE INVARIANT: the shadow did not touch the served decision.
+      expect(await after.json()).toEqual(served);
+
+      const div = (await (
+        await page.request.get(`/v1/config-versions/rate_limit/${ruleId}/divergence`)
+      ).json()) as { totals: { observed: number } };
+      if (div.totals.observed > 0) return;
+
+      // this rule's bucket fell outside the 99% sample — abandon and retry
+      await page.request.delete(`/v1/config-versions/rate_limit/${ruleId}/canary`, { headers: CSRF });
+    }
+    throw new Error("could not land inside a 99% shadow sample in 10 attempts");
   });
 
   test("...and the operator can SEE what would have changed, on the page", async () => {
     await gotoPage();
-    const row = page.locator("tr", { hasText: "approval_rule" }).first();
+    const row = page.locator("tr", { hasText: "rate_limit" }).first();
     await expect(row).toBeVisible();
     await expect(row.getByText("shadow")).toBeVisible();
     await row.getByRole("button", { name: "What would change" }).click();
 
     // both sides, on screen: what was served vs what the candidate would do
-    await expect(page.getByText("require_approval").first()).toBeVisible();
-    await expect(page.getByText(/requires sign-off by approver/).first()).toBeVisible();
+    await expect(page.getByText("deny").first()).toBeVisible();
+    await expect(page.getByText(/rate limit exhausted/).first()).toBeVisible();
     await shot(page, "phase7-02-rule-divergence");
     track.assertClean("rule divergence detail");
   });
 
   test("abandoning the canary removes it from the operator's queue", async () => {
-    const res = await page.request.delete(`/v1/config-versions/approval_rule/${ruleId}/canary`, {
+    const res = await page.request.delete(`/v1/config-versions/rate_limit/${ruleId}/canary`, {
       headers: CSRF,
     });
     expect(res.status()).toBe(200);

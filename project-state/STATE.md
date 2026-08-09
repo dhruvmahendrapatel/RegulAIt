@@ -1,10 +1,10 @@
 ---
-phase: parity-surfaces
+phase: gap-closure
 last_updated: 2026-08-09
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-08-09-session-12.md
+last_session: sessions/2026-08-09-session-13.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,66 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**ADR-0073 shipped, 2026-08-09 — [the rules engine now reads `config_versions`](../docs/decisions/0073-rules-engine-versioning.md)
+(migration 0084). This closes the LONGEST-STANDING DECLARED GAP in the project**, `PENDING.md` §3's
+ADR-0048 row: *"the shadow canary for rules evaluates nothing"*. ADR-0048 shipped immutable
+versioning/canary/rollback and wired ONE artifact type (`agent_system_prompt`) through the dispatch
+core; for `approval_rule`, `rate_limit`, `data_scope_rule` and `compliance_profile` it shipped
+**storage only**, and said so in capitals. So activating a rule version changed nothing, **rolling one
+back changed nothing** — the gesture an operator reaches for during an incident — and §2's shadow
+canary evaluated nothing at all. Now `governedEvaluate` overlays the **ACTIVE** version of every
+loaded rule onto its row before the kernel is called, and `projects.ts:profilesForTags` — the ONE
+funnel every §8.3 cascade consumer already goes through — does the same for compliance profiles, so
+`projectPiiMode`, `projectMcpMode`, the ADR-0042 guardrail floor and the pillar-3 infra floors all
+inherit it without learning `config_versions` exists. **Deliberately the same shape as the prompt
+path, not a second mechanism**: fall back to the table row when no version rows exist
+(byte-identical pre-0073 behaviour), the table row becomes a read-model rewritten by the same
+`activateVersion`, and dispatch never trusts it. **The shadow canary genuinely evaluates**: the
+served decision is computed to completion FIRST from the active bodies alone, then the candidate runs
+through the SAME kernel call parameterised by the candidate bodies **and nothing else**, and both
+sides' effect/ruleId/full reason land in `config_canary_observations` — deliberately NOT `audit_log`,
+which since ADR-0060 is the hash-chained record of decisions that were SERVED. `canary_pct` is
+honoured as a shadow **SAMPLING RATE** on ADR-0048's existing deterministic bucket. **Proved
+adversarially in both directions at once**: the ENTIRE served decision object is captured before any
+candidate exists and asserted **deep-equal** while a candidate that would PAUSE the call is running,
+AND the same run asserts a divergence row naming `allow` vs `require_approval` — a canary that
+recorded nothing passes the first and fails the second, one that enforced passes the second and fails
+the first. A corrupt candidate written straight into `config_versions` **throws**, the served answer
+is byte-identical, and the failure is recorded as `failed` (never as a divergence). Promotion then
+genuinely changes the served decision and **rollback restores it end to end**. **Default-deny
+survives**: version rows with NO active version are UNRESOLVABLE and DENY
+(`config-version-unresolvable`), or a real **409** in the compliance path. Resolution is **ONE
+indexed query per evaluation** across all three rule types, not an N+1; ADR-0048 §7's baseline is
+applied **lazily** (the first version of a rule mints `v1 (pre-versioning baseline)` from the live
+row) rather than by migration backfill. Only **ENFORCING** columns are versionable — a body naming a
+SELECTION column (`userId`, `serverId`, `scope`, `tag`) is a real **422** naming what to do instead,
+and bodies are **type-checked** so a stored `windowSeconds: "sixty"` cannot activate and then throw
+on the SERVED path. **`canaryIsLive` was NOT flipped for rules, deliberately, and this is the one
+place the slice brief was not followed**: it is read by `resolveVersion` and means "the canary
+SERVES", so flipping it would enforce a candidate deny on a share of real work — the exact outage §2
+forbids, and a direct contradiction of the same brief's own invariant. The vocabulary is split
+instead: `canaryIsLive` (still false for rules, pinned by a test), `canaryIsEvaluated` (now true for
+all four rule types) and `canaryModeOf` → `live | shadow | inert`; `inert` exists because ADR-0048
+DECLARED `agent_config` a live-canary type and never wired a resolver, so the API had been answering
+"live" about something nothing reads. **The SPA surfaces it**: `/admin/governance/rules` gained a
+shadow-canary card listing every running canary with sampled/would-change/failed counts and, per
+decision, what was served versus what the candidate would have done including the sentence the caller
+would have been given. **Verification**: gateway **1,943 → 1,968 tests / 112 → 113 files** on a
+freshly created DB; shared **566 → 579**; the full Playwright suite **82 → 86**, all green with zero console errors; policy-kernel 129, model-provider 122, infra-provider 174,
+training-provider 58, workflow-kernel 39, orchestration-kernel 27, pm-provider 62, git-provider 51 all
+unchanged; `pnpm -r build`, `pnpm -r typecheck` and `pnpm --filter @regulait/web build` clean.
+ADR-0048's test asserting the endpoint said "NOT yet wired" was **REWRITTEN, not deleted**, with a
+comment naming what changed. **Disclosed rather than closed** (twelve items in the ADR): **`agent_config`
+is still vocabulary-only** and now reports `inert` instead of being mislabelled `live`; the **ordinary
+rule-CRUD routes do NOT mint a version**, so a versioned rule edited through the old CRUD surface has
+its row and its active version disagree and **dispatch keeps serving the version** — the sharpest
+one; a rule canary still never serves, by design; `canary_pct` is capped at 99 by ADR-0048's DB CHECK
+so ~1% of keys are never shadowed; the shadow pass is **inline and awaited**; **no pruning** — one
+more monotonically-growing table; the **compliance-profile shadow is computed at READ time over the
+first 50 tagged projects** (its effect does not vary per request) and is **never stored
+historically**; the divergence is **not fed to ADR-0059's blast-radius preview**; and rebinding a
+rule to a different subject is a new rule, not a new version.
 
 **The three API-only parity features got a user-facing surface, 2026-08-09 — NO new ADR and NO
 migration, deliberately.** The owner's second request was competitor parity and *"maybe we will

@@ -220,6 +220,13 @@ and every surface says `inert` and "changes nothing and measures nothing".
   `canaryMode: shadow` for rules; `inert` for `agent_config`; and the endpoint no longer contains
   the string `NOT yet wired`. ADR-0048's own test asserting that string was **rewritten, not
   deleted**, with a comment naming what changed and why.
+- **THE OPERATOR SURFACE IS DRIVEN IN A REAL BROWSER.** `apps/web/e2e/phase7-rule-shadow-canary.spec.ts`
+  (Playwright **82 → 86**, zero console errors): the invariant is asserted on the rendered page, a
+  candidate that would DENY is set up through the API, the served decision is asserted **unchanged as
+  the whole object**, and the divergence — including the sentence the caller would have been given —
+  is read off the screen. The spec mints a fresh rule id until the subject falls inside the 99%
+  sample rather than asserting on a decision that was correctly not sampled, and the candidate
+  produces a DENY so the divergence is unambiguous against the seeded fleet rules.
 - **SAMPLING IS STICKY AND BOUNDED.** The pure suite asserts the same key lands on the same side six
   times running, that ~1% is sampled at pct 1 and ~99% at pct 99, and that a key outside the sample
   is reported as `candidateSampledOut` so a zero count is distinguishable from "no canary".
