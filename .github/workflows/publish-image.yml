@@ -1,0 +1,98 @@
+name: Publish image
+
+# Publishes the gateway image to GitHub Container Registry so it can be pulled
+# instead of built.
+#
+# ── Why this is its OWN workflow, and manual ─────────────────────────────────
+# `ci.yml` carries measured arithmetic for a 2,000 min/month Actions allowance,
+# and its `docker-build` job deliberately SELF-SKIPS on PRs that cannot change
+# the image. Publishing on every push would roughly double the image spend and
+# produce a tag nobody asked for. So this is `workflow_dispatch` only: a
+# publish is an act someone decides to perform, and it costs a run only when
+# they do. `ci.yml`'s budget comment stays true because none of its jobs moved.
+#
+# ── No third-party actions, on purpose ───────────────────────────────────────
+# `ci.yml` states the rule: "a third-party action in the CI path is a
+# supply-chain surface". A registry-publishing job is the LAST place to relax
+# that — it is the step that signs artefacts with a token that can write
+# packages. So this uses the Docker CLI already present on the runner plus
+# `actions/checkout`, and nothing else.
+#
+# ── Visibility ───────────────────────────────────────────────────────────────
+# The repository is PRIVATE, so the package GHCR creates inherits that and a
+# pull requires `docker login ghcr.io` with a PAT carrying `read:packages`.
+# Making it public is a disclosure decision about an image built from a private
+# repository — it is deliberately NOT automated here. Change it by hand under
+# the package's settings if that is what you want.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Extra tag to publish (in addition to the commit SHA). Use "latest" only for a build you would hand someone.'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve image reference
+        id: ref
+        run: |
+          set -euo pipefail
+          # GHCR requires a lowercase path; the owner login is not guaranteed to be.
+          owner="$(printf '%s' "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          echo "image=ghcr.io/${owner}/regulait" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          IMAGE='${{ steps.ref.outputs.image }}'
+          SHA='${{ steps.ref.outputs.sha }}'
+          # Always tag by commit, so a pulled image is traceable to a tree. The
+          # optional input tag is additive and never replaces that.
+          docker build -t "${IMAGE}:sha-${SHA}" .
+          if [ -n "${{ inputs.tag }}" ]; then
+            docker tag "${IMAGE}:sha-${SHA}" "${IMAGE}:${{ inputs.tag }}"
+          fi
+
+      - name: Push
+        run: |
+          set -euo pipefail
+          IMAGE='${{ steps.ref.outputs.image }}'
+          SHA='${{ steps.ref.outputs.sha }}'
+          docker push "${IMAGE}:sha-${SHA}"
+          if [ -n "${{ inputs.tag }}" ]; then
+            docker push "${IMAGE}:${{ inputs.tag }}"
+          fi
+
+      - name: Say what was published
+        run: |
+          IMAGE='${{ steps.ref.outputs.image }}'
+          SHA='${{ steps.ref.outputs.sha }}'
+          {
+            echo "### Published"
+            echo ""
+            echo '```'
+            echo "docker pull ${IMAGE}:sha-${SHA}"
+            [ -n "${{ inputs.tag }}" ] && echo "docker pull ${IMAGE}:${{ inputs.tag }}"
+            echo '```'
+            echo ""
+            echo "The repository is private, so the package is too — \`docker login ghcr.io\` with a PAT carrying \`read:packages\` before pulling."
+          } >> "$GITHUB_STEP_SUMMARY"
