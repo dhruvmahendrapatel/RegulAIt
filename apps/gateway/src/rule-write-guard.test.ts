@@ -51,6 +51,11 @@ interface AuditedWriter {
   method: "insert" | "update";
   expr: string;
   why: string;
+  /** how many occurrences of this exact triple are expected. Defaults to 1.
+   * Present because `file|method|expr` is NOT unique — three entries carry the
+   * generic expression `table` — so without a count a second writer reusing an
+   * audited triple is invisible. See `foundWriterCounts`. */
+  count?: number;
 }
 
 const AUDITED_WRITERS: AuditedWriter[] = [
@@ -67,6 +72,11 @@ const AUDITED_WRITERS: AuditedWriter[] = [
   {
     file: "rule-writes.ts",
     method: "update",
+    // THREE occurrences — one per branch of `applyRuleEdit` (minted /
+    // no_change / row). The count is stated because the set-based version of
+    // this guard collapsed all three into one entry and would not have noticed
+    // a fourth being added.
+    count: 3,
     expr: "table",
     why:
       "`applyRuleEdit` — the choke point. It writes the row DIRECTLY only for columns that are not versionable " +
@@ -177,18 +187,50 @@ function dbImports(src: string): Set<string> {
  * The `.set(` / `.values(` / `.returning(` lookahead is what separates a drizzle
  * builder from `hash.update(bytes)`.
  */
-function writesIn(src: string): Array<{ method: "insert" | "update"; expr: string }> {
+/** comments stripped, so prose describing a write (`db.update(...).set(...)` in
+ * a doc block) is not mistaken for one. Strings are left alone: a table name
+ * inside a string is raw SQL, which the raw-SQL assertion below already covers. */
+function stripComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+}
+
+function writesIn(raw: string): Array<{ method: "insert" | "update"; expr: string }> {
+  const src = stripComments(raw);
   const imports = dbImports(src);
   const out: Array<{ method: "insert" | "update"; expr: string }> = [];
-  const re = /\b[A-Za-z_$][\w$]*\s*\.\s*(insert|update)\(\s*([A-Za-z_$][\w$]*)\s*\)/g;
+  // ADR-0074 AMENDMENT (2026-08-09) — the ARGUMENT is captured as ANY
+  // expression, not as a bare identifier.
+  //
+  // The first cut required `([A-Za-z_$][\w$]*)`, so it could only see
+  // `.update(approvalRules)` and `.update(table)`. Three ordinary shapes were
+  // invisible to it — `.update(schema.complianceProfiles)` (valid: the db
+  // package re-exports `schema`), `.update(RULE_TABLES[kind])`, and
+  // `.update(tableFor(kind))` — and the middle one is EXACTLY the shape the
+  // original ADR-0073 defect had. A scan that cannot see the shape of the bug
+  // it was written for is not a guard.
+  const re = /\b[A-Za-z_$][\w$]*\s*\.\s*(insert|update)\(\s*([^()]*(?:\([^()]*\))?[^()]*?)\s*\)/g;
   for (const m of src.matchAll(re)) {
     const method = m[1] as "insert" | "update";
-    const expr = m[2]!;
+    const expr = m[2]!.trim().replace(/\s+/g, " ");
+    if (!expr) continue;
     const direct = RULE_TABLE_SYMBOLS.includes(expr);
     if (!direct) {
-      if (imports.has(expr)) continue; // a different, statically-named table
+      // A bare identifier imported from @regulait/db that is NOT one of the
+      // four is a different, statically-named table — genuinely uninteresting.
+      // This is the ONLY exemption, and it requires the name to resolve.
+      if (/^[A-Za-z_$][\w$]*$/.test(expr) && imports.has(expr)) continue;
       const tail = src.slice(m.index! + m[0].length, m.index! + m[0].length + 240);
       if (!/\.\s*(set|values|returning)\(/.test(tail)) continue; // not a drizzle builder
+      // Everything else reaching here is an expression this scan CANNOT
+      // statically resolve to a table — `schema.x`, `MAP[k]`, `f(k)`, a
+      // ternary. It is pinned as if it were a rule-table write.
+      //
+      // FAIL CLOSED, deliberately, and for the same reason ADR-0072 inverted
+      // `classifyDispatchFailure` from a deny-list to an allow-list: an
+      // unrecognised thing treated as safe is a fail-OPEN in a safety check.
+      // The cost of this direction is a spurious audit entry for a write that
+      // turns out to be harmless; the cost of the other direction is the bug
+      // this file exists to prevent, back and invisible.
     }
     out.push({ method, expr });
   }
@@ -197,19 +239,54 @@ function writesIn(src: string): Array<{ method: "insert" | "update"; expr: strin
 
 const FILES = sourceFiles(SRC);
 
-function foundWriters(): Set<string> {
-  const found = new Set<string>();
+/**
+ * ADR-0074 AMENDMENT (2026-08-09) — writers are COUNTED, not set-deduplicated.
+ *
+ * The first cut built a Set of `file|method|expr` triples and reported the set
+ * difference against the audited list. That detects a new SHAPE and is blind to
+ * a new WRITER: three audited entries carry the generic expression text
+ * `table`, so a SECOND `db.update(table)` added to a file that already has one
+ * — say a new `PATCH /v1/rules/:kind/:id/tool-name` writing a VERSIONED field
+ * through a module-local map — collided with an existing triple and passed
+ * untouched. That is not a hypothetical: it is the attack an adversarial
+ * verifier actually performed against this file.
+ *
+ * Counting closes it in both directions. An added writer raises the count and
+ * fails; a removed one lowers it and fails as a stale entry, so the audit list
+ * cannot rot into a wish.
+ */
+function foundWriterCounts(): Map<string, number> {
+  const found = new Map<string, number>();
   for (const file of FILES) {
     const src = readFileSync(file, "utf8");
-    for (const w of writesIn(src)) found.add(`${path.basename(file)}|${w.method}|${w.expr}`);
+    for (const w of writesIn(src)) {
+      const key = `${path.basename(file)}|${w.method}|${w.expr}`;
+      found.set(key, (found.get(key) ?? 0) + 1);
+    }
   }
   return found;
 }
 
+function auditedCounts(): Map<string, number> {
+  const audited = new Map<string, number>();
+  for (const w of AUDITED_WRITERS) {
+    const key = `${w.file}|${w.method}|${w.expr}`;
+    audited.set(key, (audited.get(key) ?? 0) + (w.count ?? 1));
+  }
+  return audited;
+}
+
 describe("ADR-0074 — the rule tables have an ENUMERATED writer set", () => {
   it("every direct or dynamic write against the four rule tables is audited", () => {
-    const audited = new Set(AUDITED_WRITERS.map((w) => `${w.file}|${w.method}|${w.expr}`));
-    const unaudited = [...foundWriters()].filter((f) => !audited.has(f)).sort();
+    const audited = auditedCounts();
+    const found = foundWriterCounts();
+    // An UNAUDITED writer is now either a triple nobody declared, or MORE
+    // occurrences of a declared triple than were declared. The second case is
+    // the one the set-based version could not see.
+    const unaudited = [...found.entries()]
+      .filter(([key, n]) => n > (audited.get(key) ?? 0))
+      .map(([key, n]) => `${key} (found ${n}, audited ${audited.get(key) ?? 0})`)
+      .sort();
     expect(
       unaudited,
       "A NEW WRITE against one of the four rule tables — or through a table reference this scan cannot " +
@@ -221,10 +298,12 @@ describe("ADR-0074 — the rule tables have an ENUMERATED writer set", () => {
   });
 
   it("...and every audited entry still exists, so the list cannot rot into a wish", () => {
-    const found = foundWriters();
-    const stale = AUDITED_WRITERS.filter((w) => !found.has(`${w.file}|${w.method}|${w.expr}`)).map(
-      (w) => `${w.file}|${w.method}|${w.expr}`,
-    );
+    const found = foundWriterCounts();
+    const audited = auditedCounts();
+    const stale = [...audited.entries()]
+      .filter(([key, n]) => n > (found.get(key) ?? 0))
+      .map(([key, n]) => `${key} (audited ${n}, found ${found.get(key) ?? 0})`)
+      .sort();
     expect(stale, "an audited writer no longer exists — delete its entry rather than leaving a stale claim").toEqual(
       [],
     );

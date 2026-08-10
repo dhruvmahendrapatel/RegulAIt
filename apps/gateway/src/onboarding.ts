@@ -544,6 +544,13 @@ export function registerOnboardingRoutes(
       pack: pack.tag,
       plan,
       profile,
+      // ADR-0074 AMENDMENT (2026-08-09): `classifiedProject` was dropped when
+      // `versionMinted` was added, which is an unannounced response-shape
+      // change on a shipped route. No consumer reads it today — the wizard SPA
+      // renders `plan.classification` — but "nobody uses it" is not a reason to
+      // remove a field silently, and the ADR's change list did not mention it.
+      // Restored; `versionMinted` is ADDITIVE beside it.
+      classifiedProject: project && !alreadyClassified ? project.name : null,
       // ADR-0074: null on a create (nothing to version) and on a re-apply that
       // changed nothing; a version number when the pack genuinely moved an
       // enforcing field on a profile somebody had already versioned.

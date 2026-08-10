@@ -568,13 +568,47 @@ export interface RulePatchPartition {
   unknown: string[];
 }
 
+/**
+ * ADR-0074 AMENDMENT (2026-08-09) — `undefined` IS AN ABSENT FIELD, NOT AN
+ * EXPLICIT NULL.
+ *
+ * The choke point replaced calls that read `db.update(t).set(patch)`, and
+ * drizzle's `.set()` OMITS a key whose value is `undefined` from the generated
+ * SQL — `{ deployMode: undefined }` writes nothing at all. The first cut of
+ * `partitionRulePatch` walked `Object.entries`, so the key landed in
+ * `versioned` with the value `undefined`; `applyRuleBody` then copies it
+ * because it tests `hasOwnProperty`, and the composed body would say
+ * `deployMode: undefined` → totalised to `null` by `ruleBodyFrom`. A patch
+ * that under the OLD code changed nothing would, under the choke point, have
+ * WIPED a versioned field and minted a version claiming the admin asked for
+ * it.
+ *
+ * No route can send it today — every caller builds its patch with `?? null` and
+ * zod strips unknown keys — but "no caller does this right now" is exactly the
+ * assurance that expires. A function every rule write in the product funnels
+ * through must not carry "present-but-undefined means wipe it" semantics
+ * waiting for the first caller that spreads an optional object into a patch.
+ *
+ * Dropping the key rather than refusing it is the behaviour-preserving choice:
+ * `undefined` is JavaScript's "I am not saying anything about this field", it is
+ * what `JSON.parse` never produces, and it is what drizzle already did.
+ */
+export function definedRulePatch(patch: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === undefined) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
 export function partitionRulePatch(
   artifactType: ConfigArtifactType,
   patch: Record<string, unknown>,
 ): RulePatchPartition {
   const allowed = VERSIONED_RULE_FIELDS[artifactType] ?? [];
   const out: RulePatchPartition = { versioned: {}, selection: {}, unknown: [] };
-  for (const [k, v] of Object.entries(patch)) {
+  for (const [k, v] of Object.entries(definedRulePatch(patch))) {
     if (allowed.includes(k)) out.versioned[k] = v;
     else if (RULE_SELECTION_FIELDS.includes(k) || RULE_IDENTITY_FIELDS.includes(k)) out.selection[k] = v;
     else out.unknown.push(k);
@@ -688,7 +722,11 @@ export function planRuleEdit(input: {
   /** every stored version of this artifact; empty for an unversioned rule */
   versions: Array<{ status: string; body: Record<string, unknown> }>;
 }): RuleEditPlan {
-  const { artifactType, row, patch } = input;
+  const { artifactType, row } = input;
+  // strip `undefined`-valued keys ONCE, here, so `rowPatch` cannot carry one
+  // either: `db.update(t).set({ a: undefined })` generates an empty SET clause
+  // and errors, and `Object.keys(...).length > 0` would have let it through.
+  const patch = definedRulePatch(input.patch);
   const part = partitionRulePatch(artifactType, patch);
   const base: Omit<RuleEditPlan, "kind" | "reason"> = {
     body: null,

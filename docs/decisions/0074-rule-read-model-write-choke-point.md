@@ -450,3 +450,59 @@ no existing gateway test was rewritten. The shared package's +14 is entirely new
 `planRuleEdit`, `assessCanaryBaseline` and `evaluateBaselineFreshness`.
 
 `pnpm -r build`, `pnpm --filter @regulait/web build` and `pnpm -r typecheck` are clean.
+
+---
+
+## Amendment — 2026-08-09: the structural guard was NOT complete, and said it was
+
+Three independent adversarial verifiers reviewed this ADR as shipped. Two found the
+mint-on-write core sound. The third returned **defective**, and it was right: the guard in
+`rule-write-guard.test.ts` did **not** close the class, while this document and the index row
+said it did. In a governance product an Accepted ADR asserting a false safety property is worse
+than the defect it documents, because it stops the next person looking.
+
+Two demonstrated bypasses, both since fixed:
+
+1. **The audit was a SET of `file|method|expr` triples**, compared by set difference. That detects
+   a new *shape* and is blind to a new *writer*: three audited entries carry the generic expression
+   text `table`, so a **second** `db.update(table)` added to a file that already had one collided
+   with an existing triple and passed untouched. A verifier demonstrated it with a new
+   `PATCH /v1/rules/:kind/:id/tool-name` route writing the **versioned** `toolName`.
+   Writers are now **counted**, and a mismatch fails in **both** directions — an added writer
+   raises the count, a removed one lowers it and is reported as a stale entry.
+
+2. **The write regex required a BARE IDENTIFIER argument**, so `db.update(schema.complianceProfiles)`
+   (valid — the db package re-exports `schema`), `db.update(RULE_TABLES[kind])` and
+   `db.update(tableFor(kind))` were invisible. The middle one is *exactly the shape the original
+   ADR-0073 defect had*. The scan now captures any argument expression and **fails closed**: an
+   expression it cannot statically resolve to a table is pinned as if it were a rule-table write.
+   That direction is deliberate and is the same correction ADR-0072 made to
+   `classifyDispatchFailure` — an unrecognised thing treated as safe is a fail-OPEN in a safety
+   check.
+
+**Fixing the scan immediately found a real gap the old one had been hiding**: `rule-writes.ts`
+contains **three** `db.update(table)` calls — one per branch of `applyRuleEdit` — and only one was
+audited. The set-based guard had collapsed them and would not have noticed a fourth.
+
+**Verified by attack.** All three bypasses were re-run against the corrected guard and each now
+makes it fail: a duplicate `db.update(table)` in an audited file; `db.update(schema.complianceProfiles)`;
+and `db.update(MAP[kind])`.
+
+### What the guard can and cannot see — stated precisely, replacing any earlier claim
+
+**It CAN see**: any `.insert(EXPR)` / `.update(EXPR)` in a non-test `.ts` file under
+`apps/gateway/src`, whatever `EXPR` is, including dynamic and namespaced references; a change in the
+NUMBER of such writes; an audited entry that no longer exists; an aliased import of the four tables;
+and raw SQL naming the four tables.
+
+**It CANNOT see**: a write from **outside** `apps/gateway/src` (other packages, migrations executing
+DML, anything running against the database directly); a write assembled so the call site is not
+syntactically `X.insert(...)`/`X.update(...)` (a builder held in a variable and invoked later, a
+`Reflect`/dynamic dispatch); or anything reaching Postgres without going through this codebase at
+all. It is a **source enumeration**, not a runtime interceptor, and it proves the *list is complete
+and each entry was reasoned about* — never that a listed writer is correct. Correctness is
+`rule-write-versioning.test.ts`'s job, and it asserts through the kernel.
+
+The honest claim is therefore: **the class is closed for writers inside the gateway's own source
+tree, by an enumeration that fails closed on anything it cannot resolve.** It is not, and cannot be,
+a guarantee about writes that never pass through this code.

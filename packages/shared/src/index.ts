@@ -232,6 +232,7 @@ export {
   ruleBodyFrom,
   applyRuleBody,
   // ADR-0074 — the pure half of the read-model write choke point
+  definedRulePatch,
   partitionRulePatch,
   composeRuleBody,
   effectiveRuleBody,

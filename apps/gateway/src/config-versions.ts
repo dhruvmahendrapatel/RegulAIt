@@ -123,6 +123,19 @@ const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
  */
 export type DbOrTx = Pick<Db, "select" | "update" | "insert">;
 
+/**
+ * ADR-0074 AMENDMENT (2026-08-09) — the same structural trick, widened for the
+ * helpers that must also OPEN a transaction: `newVersion` and `activateVersion`
+ * now serialize on the artifact's own row, so they need `transaction`.
+ *
+ * Satisfied by the top-level `Db` and by a drizzle transaction handle alike.
+ * `tx.transaction()` opens a SAVEPOINT rather than a second connection, so the
+ * nesting `applyRuleEdit → newVersion → activateVersion` runs in ONE database
+ * transaction, and ADR-0060's audit-chain wrapper propagates through every
+ * level of it.
+ */
+export type DbOrTxDeep = Pick<Db, "select" | "update" | "insert" | "transaction">;
+
 const artifactParam = z.object({
   artifactType: z.enum(CONFIG_ARTIFACT_TYPES),
   artifactId: z.string().uuid(),
@@ -167,11 +180,55 @@ export async function loadRuleRow(
   db: DbOrTx,
   artifactType: ConfigArtifactType,
   artifactId: string,
+  opts?: { forUpdate?: boolean },
 ): Promise<Record<string, unknown> | null> {
   const table = ruleTableFor(artifactType);
   if (!table) return null;
-  const [row] = await db.select().from(table).where(eq(table.id, artifactId));
+  const q = db.select().from(table).where(eq(table.id, artifactId));
+  const [row] = await (opts?.forUpdate ? q.for("update") : q);
   return (row as Record<string, unknown> | undefined) ?? null;
+}
+
+/**
+ * ADR-0074 AMENDMENT (2026-08-09) — SERIALIZE EVERY WRITER OF ONE ARTIFACT ON
+ * THAT ARTIFACT'S OWN ROW.
+ *
+ * ADR-0074 as accepted closed the "a writer forgot to mint a version" class but
+ * left every one of its own reads UNLOCKED, which reintroduced the same
+ * end-state — an admin's edit silently discarded — through a narrower window:
+ *
+ *   T1 `applyRuleEdit` reads versions, finds NONE, and plans a plain row write
+ *      (invariant 4).
+ *   T2 `newVersion` for the same artifact captures the lazy v1 baseline from the
+ *      row as T1 read it, and activates it.
+ *   T1 writes the row. T2's `writeRuleReadModel` — or the next activation —
+ *      overwrites it, and the minted v1 does not contain T1's edit either.
+ *
+ * The natural mutex is the artifact's OWN ROW, exactly as ADR-0064's scheduler
+ * claim locks the job row: `SELECT … FOR UPDATE` on `config_versions` cannot
+ * work here because the decisive case is `versions.length === 0`, and an empty
+ * result set locks nothing. The rule row, by contrast, always exists — every one
+ * of these paths 404s without it — so it is a lock that is there to take before
+ * the first version ever is.
+ *
+ * BLOCKING, not `SKIP LOCKED`: the loser must apply its edit on top of the
+ * winner's state, not decline to.
+ *
+ * LOCK ORDER, stated so it stays true: this lock is always taken BEFORE
+ * ADR-0060's global audit-chain advisory lock, never after. Every path that
+ * takes both (`applyRuleEdit`, `newVersion`) takes this one as its first
+ * statement, so the two cannot form a cycle.
+ *
+ * `agent_system_prompt` has no rule row and is therefore NOT serialized here —
+ * see the ADR amendment's residual list.
+ */
+export async function lockRuleArtifact(
+  tx: DbOrTx,
+  artifactType: ConfigArtifactType,
+  artifactId: string,
+): Promise<void> {
+  if (!isRuleArtifact(artifactType)) return;
+  await loadRuleRow(tx, artifactType, artifactId, { forUpdate: true });
 }
 
 /**
@@ -206,7 +263,7 @@ export async function writeRuleReadModel(
 }
 
 export async function loadVersions(
-  db: Db,
+  db: DbOrTx,
   artifactType: ConfigArtifactType,
   artifactId: string,
 ): Promise<ConfigVersionRow[]> {
@@ -262,7 +319,7 @@ export async function resolveAgentPromptVersion(
 // ---------------------------------------------------------------------------
 
 async function auditConfig(
-  db: Db,
+  db: Pick<Db, "insert">,
   actor: string | null,
   artifactId: string,
   ruleId: string,
@@ -285,9 +342,26 @@ async function auditConfig(
 /**
  * Create the next immutable version. NEVER touches the previous row: the whole
  * point is that "editing" a governance artifact is an append.
+ *
+ * ADR-0074 AMENDMENT (2026-08-09): the whole body now runs in ONE transaction,
+ * opened here, whose first statement takes `lockRuleArtifact`. Two reasons, and
+ * the second is the one that made it necessary:
+ *
+ *  - the LAZY v1 BASELINE reads the rule row and mints it as the artifact's
+ *    first active version. Read unlocked, it races an `applyRuleEdit` that saw
+ *    `versions.length === 0` and is about to write the row directly, and the
+ *    admin's edit is discarded — the defect ADR-0074 exists to remove, arrived
+ *    at through concurrency instead of through a forgetful writer;
+ *  - "mint" and "activate" become atomic, so a crash between them can no longer
+ *    leave an artifact with version rows and no active one, which
+ *    `resolveForShadow` treats as unresolvable and DENIES fleet-wide.
+ *
+ * Called from inside `applyRuleEdit`'s transaction this opens a SAVEPOINT and
+ * re-takes a row lock the enclosing transaction already holds — both are no-ops,
+ * which is why the nesting is safe rather than merely tolerated.
  */
 export async function newVersion(
-  db: Db,
+  db: DbOrTxDeep,
   args: {
     artifactType: ConfigArtifactType;
     artifactId: string;
@@ -298,6 +372,24 @@ export async function newVersion(
     reason?: string | null;
   },
 ): Promise<{ version: ConfigVersionRow; activated: boolean }> {
+  return db.transaction(async (tx) => mintVersionLocked(tx, args));
+}
+
+async function mintVersionLocked(
+  db: DbOrTxDeep,
+  args: {
+    artifactType: ConfigArtifactType;
+    artifactId: string;
+    body: Record<string, unknown>;
+    label?: string | null;
+    authorUserId: string | null;
+    activate?: boolean;
+    reason?: string | null;
+  },
+): Promise<{ version: ConfigVersionRow; activated: boolean }> {
+  // FIRST STATEMENT. Everything below reads state that a concurrent writer of
+  // the same artifact could otherwise move underneath it.
+  await lockRuleArtifact(db, args.artifactType, args.artifactId);
   let existing = await loadVersions(db, args.artifactType, args.artifactId);
 
   // ADR-0073 — THE LAZY BASELINE (ADR-0048 §7's behaviour-preserving default,
@@ -407,9 +499,16 @@ export async function newVersion(
  *
  * The previous active becomes `superseded` (moved forward) or `rolled_back`
  * (moved backward). Either way ITS ROW SURVIVES and can be re-activated.
+ *
+ * ADR-0074 AMENDMENT (2026-08-09): the version set is now read INSIDE the
+ * transaction, after `lockRuleArtifact`. Read outside it, the pointer move was
+ * decided from a snapshot a concurrent activation could already have
+ * invalidated — two activations could each demote the other's target, and an
+ * `applyRuleEdit` that had just concluded "no versions, write the row" could
+ * have its write overwritten by the read-model write below.
  */
 export async function activateVersion(
-  db: Db,
+  db: DbOrTxDeep,
   args: {
     artifactType: ConfigArtifactType;
     artifactId: string;
@@ -420,26 +519,29 @@ export async function activateVersion(
     promotion?: { ruleId: string; evalRunId: string | null; override: boolean; reason: string } | null;
   },
 ): Promise<{ target: ConfigVersionRow; previous: ConfigVersionRow | null; rollback: boolean }> {
-  const versions = await loadVersions(db, args.artifactType, args.artifactId);
-  const target = versions.find((v) => v.version === args.version);
-  if (!target) throw new Error("unknown_version");
-  const previous = versions.find((v) => v.status === "active") ?? null;
-  const rollback = previous != null && previous.version > target.version;
+  const outcome = await db.transaction(async (tx) => {
+    // FIRST STATEMENT — see `lockRuleArtifact`. Everything read below is read
+    // under it, so the pointer move is decided from state nobody else can move.
+    await lockRuleArtifact(tx, args.artifactType, args.artifactId);
+    const versions = await loadVersions(tx, args.artifactType, args.artifactId);
+    const target = versions.find((v) => v.version === args.version);
+    if (!target) throw new Error("unknown_version");
+    const previous = versions.find((v) => v.status === "active") ?? null;
+    const rollback = previous != null && previous.version > target.version;
 
-  // ADR-0074 — THE BASELINE SEAM. If a shadow canary is running on this
-  // artifact, moving the active version moves the baseline every observation
-  // already collected was measured against. The canary is NOT invalidated and
-  // the edit is NOT refused (a measurement may not veto a policy change); the
-  // seam is RECORDED here, timestamped, so an operator reading the ledger can
-  // see where the comparison changed meaning. The refusal lands on the
-  // PROMOTION instead — see the stale-baseline gate on POST …/promote.
-  const inFlightCanary = versions.find((v) => v.status === "canary" && v.id !== target.id) ?? null;
-  const seamNote = inFlightCanary
-    ? ` — activated while version ${inFlightCanary.version} was canarying at ${inFlightCanary.canaryPct ?? 0}%, ` +
-      `so the shadow comparison baseline moved here`
-    : "";
+    // ADR-0074 — THE BASELINE SEAM. If a shadow canary is running on this
+    // artifact, moving the active version moves the baseline every observation
+    // already collected was measured against. The canary is NOT invalidated and
+    // the edit is NOT refused (a measurement may not veto a policy change); the
+    // seam is RECORDED here, timestamped, so an operator reading the ledger can
+    // see where the comparison changed meaning. The refusal lands on the
+    // PROMOTION instead — see the stale-baseline gate on POST …/promote.
+    const inFlightCanary = versions.find((v) => v.status === "canary" && v.id !== target.id) ?? null;
+    const seamNote = inFlightCanary
+      ? ` — activated while version ${inFlightCanary.version} was canarying at ${inFlightCanary.canaryPct ?? 0}%, ` +
+        `so the shadow comparison baseline moved here`
+      : "";
 
-  const updated = await db.transaction(async (tx) => {
     // clear the old pointers FIRST — the partial unique indexes admit exactly
     // one active and one canary row per artifact, so a "set new then clear old"
     // ordering would violate them.
@@ -493,8 +595,10 @@ export async function activateVersion(
     // kernel resolves through `config_versions`, so a rollback would change
     // evaluation even if this write had never happened.
     await writeRuleReadModel(tx, args.artifactType, args.artifactId, row!.body);
-    return row!;
+    return { updated: row!, target, previous, rollback, inFlightCanary, seamNote };
   });
+
+  const { updated, target, previous, rollback, inFlightCanary, seamNote } = outcome;
 
   await auditConfig(
     db,

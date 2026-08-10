@@ -12,6 +12,7 @@ import {
   canaryModeOf,
   evaluatePromotion,
   isRuleArtifact,
+  partitionRulePatch,
   resolveForShadow,
   ruleBodyFrom,
   validateRuleVersionBody,
@@ -523,6 +524,93 @@ describe("ADR-0074 — planRuleEdit decides what a CRUD write IS, before anythin
       versions: versioned({ guardrailModes: { b: "block", a: "warn" } }),
     });
     expect(p.kind).toBe("no_change");
+  });
+
+  // -------------------------------------------------------------------------
+  // ADR-0074 AMENDMENT (2026-08-09) — `undefined` is an ABSENT field.
+  //
+  // The choke point replaced `db.update(t).set(patch)`, and drizzle OMITS an
+  // `undefined` value from the generated SQL. The first cut walked
+  // `Object.entries`, so the key reached `versioned`, and `applyRuleBody`
+  // (which tests `hasOwnProperty`) then copied it — a patch that used to write
+  // nothing would have WIPED a versioned field and minted a version saying the
+  // admin asked for it. Not reachable from today's zod-typed routes; pinned
+  // because the choke point is the one function every rule write funnels
+  // through and it must not carry that semantic waiting for a caller.
+  // -------------------------------------------------------------------------
+  it("a versioned key present with value `undefined` does NOT null the field and does NOT mint", () => {
+    const p = planRuleEdit({
+      artifactType: "rate_limit",
+      row,
+      patch: { maxCalls: undefined },
+      versions: versioned({ maxCalls: 10, windowSeconds: 60 }),
+    });
+    expect(p.kind).toBe("row");
+    expect(p.changed).toEqual([]);
+    expect(p.body).toBeNull();
+    // and it is not smuggled into the row write either — `.set({})` on drizzle
+    // generates an empty SET clause and errors
+    expect(p.rowPatch).toEqual({});
+  });
+
+  it("`undefined` beside a REAL change is dropped, and only the real field moves", () => {
+    const p = planRuleEdit({
+      artifactType: "rate_limit",
+      row,
+      patch: { maxCalls: 5, windowSeconds: undefined, deployMode: undefined },
+      versions: versioned({ maxCalls: 10, windowSeconds: 60 }),
+    });
+    expect(p.kind).toBe("mint");
+    expect(p.changed).toEqual(["maxCalls"]);
+    expect(p.body).toEqual({ toolName: "tool_a", maxCalls: 5, windowSeconds: 60, deployMode: null });
+  });
+
+  it("an EXPLICIT null is still an explicit null — clearing a field is a real edit", () => {
+    const p = planRuleEdit({
+      artifactType: "rate_limit",
+      row,
+      patch: { toolName: null },
+      versions: versioned({ toolName: "tool_a", maxCalls: 10 }),
+    });
+    expect(p.kind).toBe("mint");
+    expect(p.changed).toEqual(["toolName"]);
+    expect(p.body!.toolName).toBeNull();
+  });
+
+  it("a SELECTION key present with value `undefined` never reaches the row write", () => {
+    const p = planRuleEdit({
+      artifactType: "rate_limit",
+      row,
+      patch: { userId: undefined },
+      versions: versioned({ maxCalls: 10 }),
+    });
+    expect(p.kind).toBe("row");
+    expect(p.rowPatch).toEqual({});
+  });
+
+  it("an UNKNOWN key present with value `undefined` is not reported as a dropped field", () => {
+    // nothing was asked for, so there is nothing to refuse — reporting it would
+    // 422 a request that under the pre-choke-point `.set()` was a no-op
+    const p = planRuleEdit({
+      artifactType: "rate_limit",
+      row,
+      patch: { argPath: undefined },
+      versions: versioned({ maxCalls: 10 }),
+    });
+    expect(p.unknownFields).toEqual([]);
+    expect(p.kind).toBe("row");
+  });
+
+  it("partitionRulePatch itself drops undefined, so no other caller inherits the trap", () => {
+    const part = partitionRulePatch("rate_limit", {
+      maxCalls: undefined,
+      userId: undefined,
+      argPath: undefined,
+      windowSeconds: 30,
+    });
+    expect(part.versioned).toEqual({ windowSeconds: 30 });
+    expect(part.selection).toEqual({});
+    expect(part.unknown).toEqual([]);
   });
 });
 

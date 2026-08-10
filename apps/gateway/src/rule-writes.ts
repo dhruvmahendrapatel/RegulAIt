@@ -102,7 +102,15 @@ import {
   validateRuleVersionBody,
   type RuleEditPlan,
 } from "@regulait/shared";
-import { loadRuleRow, loadVersions, newVersion, ruleTableFor, writeRuleReadModel } from "./config-versions.js";
+import {
+  loadRuleRow,
+  loadVersions,
+  lockRuleArtifact,
+  newVersion,
+  ruleTableFor,
+  writeRuleReadModel,
+  type DbOrTxDeep,
+} from "./config-versions.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
 
@@ -198,6 +206,46 @@ export async function applyRuleEdit<T = Record<string, unknown>>(
       detail: `${args.artifactType} has no rule table, so there is no read-model to edit`,
     };
   }
+
+  // ADR-0074 AMENDMENT (2026-08-09) — ONE TRANSACTION, TAKEN BEHIND THE
+  // ARTIFACT'S OWN ROW LOCK.
+  //
+  // As accepted, this function read the row and the version set with no lock and
+  // then wrote based on what it had read. That reintroduced the ADR's own defect
+  // through a narrower window: an edit that observed `versions.length === 0` and
+  // planned a plain row write (invariant 4) could be running concurrently with a
+  // `newVersion` capturing the lazy v1 baseline from the same pre-edit row — and
+  // whichever committed second silently discarded the other. Nothing about that
+  // outcome is distinguishable, afterwards, from the bug this ADR exists to
+  // remove.
+  //
+  // `lockRuleArtifact` is `SELECT … FOR UPDATE` on the rule's own row, in the
+  // style of ADR-0064's scheduler claim. It is the rule ROW rather than the
+  // version set because the decisive case is that the version set is EMPTY, and
+  // `FOR UPDATE` over an empty result locks nothing at all.
+  //
+  // Everything from the lock to the audit row is now one transaction, so a
+  // failure part-way leaves no half-applied edit either.
+  return db.transaction(async (tx) => applyRuleEditLocked<T>(tx, table, args));
+}
+
+async function applyRuleEditLocked<T>(
+  db: DbOrTxDeep,
+  table: NonNullable<ReturnType<typeof ruleTableFor>>,
+  args: {
+    artifactType: ConfigArtifactType;
+    artifactId: string;
+    patch: Record<string, unknown>;
+    actorUserId: string | null;
+    label: string;
+    reason?: string | null;
+    auditObjectType: AuditObjectType;
+    auditRuleId: string;
+    auditDetail?: Record<string, unknown>;
+  },
+): Promise<RuleEditResult<T>> {
+  // FIRST STATEMENT. Both reads below happen under it.
+  await lockRuleArtifact(db, args.artifactType, args.artifactId);
 
   const row = await loadRuleRow(db, args.artifactType, args.artifactId);
   if (!row) {
