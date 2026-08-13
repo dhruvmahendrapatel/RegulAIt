@@ -429,3 +429,40 @@ fresh database.
 7. **Hash agility.** The algorithm is not stored per row; a rollover re-chains
    from a new genesis, and `AUDIT_PAYLOAD_VERSION` is already inside the hash so
    the two segments cannot be confused.
+
+---
+
+## Amendment — 2026-08-13: anchoring is default-ON, and that does not change the claim
+
+Found while driving audit + approvals end-to-end. A default install answered
+`/v1/audit/verify` with `anchor.checked: false`, `source: "none"` — the chain was
+running, but nothing captured its head, so the only integrity evidence lived
+inside the very table an attacker edits. Nothing scheduled anchoring either: the
+six ADR-0064 sweeps do not include it, so `POST /v1/audit/anchor` was reachable
+only by hand.
+
+**Changed.** `resolveAnchorSink` now returns the `LocalWormSink` when nothing
+overrides it (default buffer `./audit-anchors`), and `boot.ts` captures the head
+on its own interval — deliberately NOT on the ADR-0064 scheduler, because those
+sweeps mutate governed state and one of them (ADR-0057 red-team) costs money per
+run, so "turn on anchoring" must not silently mean "start running red-team
+sweeps". `REGULAIT_AUDIT_ANCHOR=off` restores the previous posture, which remains
+legitimate and disclosed.
+
+**What this does NOT do, stated plainly because the temptation is the opposite.**
+It does not make the trail tamper-RESISTANT. `LocalWormSink.tamperResistant` is
+still `false`, `/v1/audit/verify` still reports `tamperResistant: false`, and the
+disclosure now reads *"An adversary who can rewrite audit_log can rewrite it
+too."* A directory on the same host stops a fat-fingered overwrite and stops root
+from nothing. What it buys is narrower and real: the head is written to a second
+artifact, so the bar moves from "recompute one table" to "recompute one table AND
+the anchor rows AND the anchor files", and the buffer exists from first boot so
+pointing an install at genuinely immutable storage becomes configuration rather
+than code plus a backfill.
+
+**The S3 Object-Lock sink is still not wired**, and that is what would make
+`tamperResistant` true. The bucket is terraform in
+`infra/modules/audit-anchor-worm-s3/`, nothing has been applied to any cloud
+account, and this amendment does not change that. A test pins
+`tamperResistant === false` for the default sink so the claim cannot drift
+upward without the sink that earns it.

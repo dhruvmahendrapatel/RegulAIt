@@ -34,7 +34,12 @@ import {
   auditRowHash,
 } from "@regulait/shared";
 import { buildApp } from "./app.js";
-import { LocalWormSink, type AnchorSink } from "./audit-chain.js";
+import {
+  DEFAULT_ANCHOR_DIR,
+  LocalWormSink,
+  resolveAnchorSink,
+  type AnchorSink,
+} from "./audit-chain.js";
 import { NON_ADMIN_ROUTES } from "./route-classes.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 
@@ -701,5 +706,41 @@ describe("ADR-0060: the chain covers rows written by ordinary governed routes", 
     expect(after.length).toBe(before.length);
     expect(Number(after.at(-1)!.seq)).toBe(Number(before.at(-1)!.seq));
     expect((await verify()).status).toBe("ok");
+  });
+});
+
+describe("anchoring is on by default, and does not overclaim", () => {
+  it("configures the local buffer with no env at all", () => {
+    const sink = resolveAnchorSink({} as NodeJS.ProcessEnv);
+    expect(sink, "a bare install must anchor rather than anchor nothing").not.toBeNull();
+    expect(sink!.destination).toBe("local_worm");
+  });
+
+  it("the default sink still reports tamperResistant:false — the whole point", () => {
+    // If this ever flips to true without the S3 Object-Lock sink behind it, the
+    // product is claiming an immutability it does not have. A local directory
+    // stops a fat-fingered overwrite; it stops root from nothing. This
+    // assertion is the guard on that claim, not a description of a limitation.
+    const sink = resolveAnchorSink({} as NodeJS.ProcessEnv);
+    expect(sink!.tamperResistant).toBe(false);
+  });
+
+  it("REGULAIT_AUDIT_ANCHOR=off restores the disclosed no-sink posture", () => {
+    expect(resolveAnchorSink({ REGULAIT_AUDIT_ANCHOR: "off" } as NodeJS.ProcessEnv)).toBeNull();
+    expect(resolveAnchorSink({ REGULAIT_AUDIT_ANCHOR: "OFF" } as NodeJS.ProcessEnv)).toBeNull();
+  });
+
+  it("an explicit dir still wins over the default", () => {
+    const sink = resolveAnchorSink({ REGULAIT_AUDIT_ANCHOR_DIR: "/tmp/custom-anchors" } as NodeJS.ProcessEnv);
+    expect(sink).not.toBeNull();
+    expect(DEFAULT_ANCHOR_DIR).not.toBe("/tmp/custom-anchors");
+  });
+
+  it("an empty dir falls back to the default rather than to no sink", () => {
+    // `REGULAIT_AUDIT_ANCHOR_DIR=""` reads as "I did not set this", not as
+    // "disable anchoring" — that is what REGULAIT_AUDIT_ANCHOR=off is for.
+    const sink = resolveAnchorSink({ REGULAIT_AUDIT_ANCHOR_DIR: "   " } as NodeJS.ProcessEnv);
+    expect(sink).not.toBeNull();
+    expect(sink!.destination).toBe("local_worm");
   });
 });

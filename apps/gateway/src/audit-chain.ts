@@ -147,23 +147,44 @@ export class LocalWormSink implements AnchorSink {
   }
 }
 
+/** where the local anchor buffer lands when nothing overrides it */
+export const DEFAULT_ANCHOR_DIR = "./audit-anchors";
+
 /**
  * Resolve the configured sink, or `null` for "no sink".
  *
- * `null` is a legitimate, DISCLOSED state, not a misconfiguration to paper
- * over: an install with no WORM target still gets the chain (which catches
- * everything short of a full recompute), and every anchor is recorded with
- * `destination: 'none'` so nobody can mistake it for externalized.
+ * DEFAULT-ON, AND HONEST ABOUT WHAT THAT DOES NOT BUY. The local buffer is now
+ * the default rather than opt-in, because an install that anchors nothing keeps
+ * its only integrity evidence inside the very table an attacker edits. Writing
+ * the head to a second artifact raises the bar from "rewrite one table" to
+ * "rewrite one table AND the anchor rows AND the anchor files".
  *
- * `REGULAIT_AUDIT_ANCHOR_DIR` selects the local buffer. The S3 Object-Lock sink
- * is deliberately NOT wired here yet — see the ADR amendment: the bucket is
+ * It does NOT make the trail tamper-RESISTANT, and this function must never be
+ * read as if it did. `LocalWormSink.tamperResistant` is `false` and says why: a
+ * directory on the same host stops a fat-fingered overwrite, and stops root from
+ * nothing. Against an adversary with total database and filesystem write, a full
+ * recompute still passes verification. The verify report says exactly that, and
+ * turning this default on does not change one word of it.
+ *
+ * The value that IS real: the buffer exists from the first boot, so pointing an
+ * install at a medium that genuinely is immutable becomes a configuration change
+ * rather than a code change and a backfill.
+ *
+ * `REGULAIT_AUDIT_ANCHOR_DIR` moves the buffer. `REGULAIT_AUDIT_ANCHOR=off`
+ * restores the previous `null` posture, which remains a legitimate, DISCLOSED
+ * state — every anchor written without a sink records `destination: 'none'` so
+ * nobody can mistake it for externalized.
+ *
+ * The S3 Object-Lock sink is still deliberately NOT wired — the bucket is
  * terraform (`infra/modules/audit-anchor-worm-s3/`), nothing has been applied to
  * any cloud account, and shipping a half-configured S3 writer that silently
- * no-ops would be exactly the false assurance this ADR exists to avoid.
+ * no-ops would be exactly the false assurance this ADR exists to avoid. That
+ * sink, not this default, is what would make `tamperResistant` true.
  */
 export function resolveAnchorSink(env: NodeJS.ProcessEnv = process.env): AnchorSink | null {
+  if ((env.REGULAIT_AUDIT_ANCHOR ?? "").trim().toLowerCase() === "off") return null;
   const dir = env.REGULAIT_AUDIT_ANCHOR_DIR?.trim();
-  return dir ? new LocalWormSink(dir) : null;
+  return new LocalWormSink(dir && dir.length > 0 ? dir : DEFAULT_ANCHOR_DIR);
 }
 
 // --- reading the chain head --------------------------------------------------
