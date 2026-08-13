@@ -177,6 +177,110 @@ export interface SkippedCandidate {
 
 /** §8.4 PII enforcement outcome threaded onto a dispatch. COUNTS ONLY —
  * inputHits/outputHits are per-category counts, never the matched text. */
+/**
+ * The project's PII input gate, hoisted so it can run BEFORE the two things
+ * that used to sit in front of it and let PII through:
+ *
+ *  1. the semantic-cache serve — a cache hit returned the cached output and the
+ *     request never reached `dispatchAttempt`, where the only PII gate lived. A
+ *     PII prompt cached under an ungated (no-project) call was then served
+ *     verbatim on a HIPAA-attributed replay. This is a compliance BYPASS, found
+ *     driving pillar 3 end-to-end.
+ *  2. the per-technique cost_events writes (`model_routing`, `context_compaction`,
+ *     …) — those were written in the handler BEFORE dispatch, so a call that
+ *     `dispatchAttempt` then blocked on PII still left phantom estimate rows
+ *     attributed to the project, skewing savings-by-technique reporting.
+ *
+ * Running the input gate here fixes both: a blocked call returns 403 before any
+ * cache serve and before any estimate row is written. `dispatchAttempt` keeps
+ * its own input+output gate — that path is also reached by orchestration and
+ * worker-node dispatch, which do not pass through this handler, so it is
+ * defense-in-depth, not redundancy. Both gates share one audit shape and one
+ * `pii-blocked` rule id, and a clean input simply passes both.
+ *
+ * Returns the block result (already audited) or null when the input is clean or
+ * the project has no PII mode.
+ */
+async function enforceProjectInputPii(
+  db: Db,
+  userId: string,
+  agentObjectId: string,
+  projectId: string | null,
+  input: string | undefined,
+): Promise<{ status: 403; error: "pii_blocked"; detail: string; pii: DispatchPii } | null> {
+  const piiMode = await projectPiiMode(db, projectId);
+  if (!piiMode) return null;
+  const chk = enforcePII(piiMode, { input });
+  if (chk.action !== "block") return null;
+  const detail = `input contains PII: ${piiCategoryList(chk.hits)}`;
+  const pii: DispatchPii = {
+    mode: piiMode,
+    action: "block",
+    inputHits: chk.hits,
+    outputHits: [],
+    withheld: false,
+  };
+  await db.insert(auditLog).values({
+    userId,
+    objectType: "agent",
+    objectId: agentObjectId,
+    detail: {
+      phase: "pii",
+      pii: { mode: piiMode, action: "block", phase: "input", inputHits: chk.hits, outputHits: [] },
+      ...(projectId ? { projectId } : {}),
+    },
+    effect: "deny",
+    ruleId: "pii-blocked",
+    ruleChain: [],
+    reason: detail,
+  });
+  return { status: 403, error: "pii_blocked", detail, pii };
+}
+
+/**
+ * The OUTPUT counterpart for the cache-hit path. The input may be clean while
+ * the CACHED output carries PII (it was generated under a different, ungated
+ * attribution). Serving that cached output on a project whose mode is `block`
+ * would leak it, so the cached text is checked before it is served, with the
+ * same audit shape as the input gate above.
+ */
+async function enforceProjectCachedOutputPii(
+  db: Db,
+  userId: string,
+  agentObjectId: string,
+  projectId: string | null,
+  outputText: string,
+): Promise<{ status: 403; error: "pii_blocked"; detail: string; pii: DispatchPii } | null> {
+  const piiMode = await projectPiiMode(db, projectId);
+  if (!piiMode) return null;
+  const chk = enforcePII(piiMode, { output: outputText });
+  if (chk.action !== "block") return null;
+  const detail = `cached output withheld: contains PII (${piiCategoryList(chk.hits)})`;
+  const pii: DispatchPii = {
+    mode: piiMode,
+    action: "block",
+    inputHits: [],
+    outputHits: chk.hits,
+    withheld: true,
+  };
+  await db.insert(auditLog).values({
+    userId,
+    objectType: "agent",
+    objectId: agentObjectId,
+    detail: {
+      phase: "pii",
+      pii: { mode: piiMode, action: "block", phase: "output", inputHits: [], outputHits: chk.hits },
+      semanticCache: { hit: true },
+      ...(projectId ? { projectId } : {}),
+    },
+    effect: "deny",
+    ruleId: "pii-blocked",
+    ruleChain: [],
+    reason: detail,
+  });
+  return { status: 403, error: "pii_blocked", detail, pii };
+}
+
 export interface DispatchPii {
   mode: PiiMode;
   /** the effective action on this dispatch: 'block' (output withheld here, or
@@ -2748,6 +2852,21 @@ export function registerAgentConnectorRoutes(
     let dispatchOutcome: DispatchOutcome | null = null;
     let convoContext: PreparedConversationContext | null = null;
     if (decision.effect === "allow") {
+      // §8.4 PII INPUT GATE — hoisted ahead of BOTH the semantic-cache serve and
+      // the per-technique cost_events writes below, so a PII-bearing prompt can
+      // neither be answered from cache without adjudication nor leave phantom
+      // estimate rows before it is blocked. dispatchAttempt keeps its own gate
+      // for the orchestration/worker-node paths that never reach this handler.
+      // Runs only when dispatching (a decision-only invoke sends nothing to a
+      // model and produces no output to leak).
+      if (body.dispatch === true) {
+        const inputBlock = await enforceProjectInputPii(db, userId, agent.id, projectId, body.input);
+        if (inputBlock) {
+          return reply
+            .status(inputBlock.status)
+            .send({ decision, error: inputBlock.error, detail: inputBlock.detail, pii: inputBlock.pii, ...suppressionFlag });
+        }
+      }
       // PILLAR 6 §8/§10 SEMANTIC CACHING (REAL cache) — opt-in per-(user,agent)
       // EXACT-MATCH response cache. When enabled, an identical (whitespace/
       // case-normalized) single-turn input already answered for the SAME
@@ -2802,6 +2921,21 @@ export function registerAgentConnectorRoutes(
           )
           .limit(1);
         if (hit && hit.normalizedInput === cacheNorm) {
+          // The input was gated above; the CACHED OUTPUT may still carry PII it
+          // acquired under a different, ungated attribution. Withhold it rather
+          // than serve it on a project whose mode is `block`.
+          const outputBlock = await enforceProjectCachedOutputPii(
+            db,
+            userId,
+            agent.id,
+            projectId,
+            hit.outputText,
+          );
+          if (outputBlock) {
+            return reply
+              .status(outputBlock.status)
+              .send({ decision, error: outputBlock.error, detail: outputBlock.detail, pii: outputBlock.pii, ...suppressionFlag });
+          }
           // HIT: no provider call, no usage_events (no real spend). One
           // semantic_caching cost_events row estimates the WHOLE call saved —
           // full cached input+output tokens at the invoked agent's list price

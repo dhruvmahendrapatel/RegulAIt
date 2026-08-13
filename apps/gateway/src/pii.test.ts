@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { and, auditLog, createDb, eq, runMigrations, usageEvents, type Db } from "@regulait/db";
+import { and, auditLog, costEvents, createDb, eq, runMigrations, usageEvents, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 
 /**
@@ -334,3 +334,66 @@ describe("§8.4 audit-log retention pruning", () => {
     expect(meta.length).toBeGreaterThan(0);
   });
 });
+
+describe("§8.4 the semantic cache must not become a PII bypass", () => {
+  // Found driving pillar 3 end-to-end: a cache HIT returned the cached output
+  // and the request never reached dispatchAttempt, where the only PII gate
+  // lived. So a PII prompt cached under an ungated (no-project) call was served
+  // verbatim on a block-classified replay. These two tests pin that shut, and
+  // are written to FAIL if the gates are removed (verified by reverting).
+
+  it("a PII prompt cached with NO project is refused when replayed on a block project", async () => {
+    const shared = `please summarise: my SSN is ${SSN}`;
+    // 1. fill the cache under NO project — legitimately ungated
+    const fill = await invokeCache(shared, undefined);
+    expect(fill.statusCode).toBe(200);
+
+    // 2. replay the identical prompt attributed to the block project
+    const replay = await invokeCache(shared, blockProj);
+    expect(replay.statusCode, "the cached PII prompt must NOT be served on a block project").toBe(403);
+    expect(replay.json().error).toBe("pii_blocked");
+
+    // NON-VACUOUS: the SAME prompt on a plain project still serves from cache,
+    // so 403 is the gate biting, not the cache being broken.
+    const plainReplay = await invokeCache(shared, plainProj);
+    expect(plainReplay.statusCode).toBe(200);
+  });
+
+  it("a blocked cache replay writes NO estimate cost_events row for the project", async () => {
+    const shared = `cache me: contact SSN ${SSN}`;
+    await invokeCache(shared, undefined); // fill, ungated
+    // DELTAS around the blocked replay, not absolute counts: earlier tests in
+    // this file legitimately bill blockProj (the block-OUTPUT case writes a
+    // usage row), so what this asserts is that the REFUSAL itself adds nothing.
+    const costBefore = (
+      await db.select().from(costEvents).where(eq(costEvents.projectId, blockProj))
+    ).length;
+    const usageBefore = await usageCount(blockProj);
+
+    const replay = await invokeCache(shared, blockProj);
+    expect(replay.statusCode).toBe(403);
+
+    const costAfter = (
+      await db.select().from(costEvents).where(eq(costEvents.projectId, blockProj))
+    ).length;
+    // the estimate ledger must not gain a phantom row for a call that was refused
+    expect(costAfter, "a blocked call must not leave a semantic_caching estimate row").toBe(costBefore);
+    // and no NEW measured spend either
+    expect(await usageCount(blockProj), "a blocked call must not bill the project").toBe(usageBefore);
+  });
+});
+
+async function invokeCache(input: string, projectId: string | undefined) {
+  return app.inject({
+    method: "POST",
+    url: `/v1/agents/${agentId}/invoke`,
+    headers: danaAuth,
+    payload: {
+      mode: "execute",
+      input,
+      dispatch: true,
+      semanticCache: true,
+      ...(projectId ? { projectId } : {}),
+    },
+  });
+}

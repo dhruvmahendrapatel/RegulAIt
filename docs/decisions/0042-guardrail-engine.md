@@ -343,3 +343,46 @@ bundle. policy-kernel 129 tests green (unchanged). Full gateway suite **1191 →
 twice on two independently created fresh databases to catch order-dependence; the new file deletes
 every `guardrail_configs` row it created in `afterAll`, because the org-default row is a singleton
 every other suite's dispatches read.
+
+---
+
+## Amendment — 2026-08-13: the semantic cache was a PII bypass
+
+Found driving pillar 3 end-to-end, and confirmed against a live gateway before
+and after the fix.
+
+**The defect.** §8.4's PII gate lived only inside `dispatchAttempt`. A semantic
+cache HIT returns the cached response and never calls it. So:
+
+1. dispatch a PII-bearing prompt with **no project** — legitimately ungated, and
+   the response is cached under `(user, agent)`;
+2. replay the identical prompt attributed to a **`block`-classified** project —
+   served from cache, HTTP 200, PII returned verbatim, gate never ran.
+
+The cache key is `(userId, agentId, promptHash)` and deliberately excludes the
+project, which is correct for cache *correctness* and wrong for *adjudication*:
+attribution changes what is allowed, so it must be re-adjudicated per call even
+when the answer is reused.
+
+**The fix.** The project PII **input** gate is hoisted into the route handler,
+ahead of both the cache lookup and the per-technique `cost_events` writes. A new
+**cached-output** gate withholds a cached response whose text carries PII the
+attributed project blocks — the input may be clean while the cached output is
+not, because it was generated under a different attribution.
+
+`dispatchAttempt` keeps its own input+output gate. That is defense-in-depth, not
+redundancy: orchestration and worker-node dispatch reach it without passing
+through this handler.
+
+**Second defect, same root cause, fixed by the same hoist.** The per-technique
+estimate rows (`model_routing`, `context_compaction`, …) were written *before*
+dispatch, so a call `dispatchAttempt` then blocked on PII still left phantom
+`cost_events` attributed to the project — skewing savings-by-technique
+reporting. Measured spend (`usage_events`) was always correct; only the estimate
+ledger was polluted. Both now write nothing for a refused call.
+
+Two tests pin this, verified non-vacuous by disabling the gates and watching
+both go red (`expected 200 to be 403`): the cross-attribution replay is refused
+while the same prompt on an unclassified project still serves from cache, and a
+blocked replay adds **zero** rows to `cost_events` and `usage_events` (asserted
+as deltas — earlier tests in that file legitimately bill the same project).
