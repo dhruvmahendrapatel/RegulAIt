@@ -460,4 +460,105 @@ describe("finding 6: self-review is exposed, reason-gated, and audited", () => {
     expect(stamped.detail.selfReview).toBe(true);
     expect(stamped.reason).toContain("risk accepted");
   });
+
+  // ADR-0022 delegation must not become the way AROUND finding 6. The guard
+  // above compares the REQUESTER to the NAMED APPROVER, which says nothing
+  // about who actually decided: an approver who delegates to the requester
+  // hands them their own gate. Separation of duties is a property of the
+  // decider, so the flag has to be too.
+  it("a delegation back to the requester is still a self-review", async () => {
+    const tpl = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/templates",
+      payload: {
+        name: "df-deleg-selfreview",
+        definition: {
+          workflow: "df-deleg-selfreview",
+          stages: [
+            { id: "intake", type: "trigger" },
+            { id: "requirements", type: "artifact_generation", output: "requirements_file" },
+            { id: "signoff", type: "human_approval", approvers: [adaId] },
+          ],
+        },
+      },
+    });
+    expect(tpl.statusCode).toBe(201);
+    await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/workflows/assignment-rules",
+      payload: { templateId: tpl.json().id, changeType: "df-deleg-self" },
+    });
+    const started = await app.inject({
+      method: "POST", headers: rexAuth, url: "/v1/workflows/instances",
+      payload: {
+        change: {
+          description: "rex's change, ada's gate",
+          paths: ["src/deleg.ts"],
+          changeType: "df-deleg-self",
+          environment: "staging",
+        },
+      },
+    });
+    expect(started.statusCode).toBe(201);
+    const instanceId = started.json().id;
+    await app.inject({
+      method: "POST", headers: rexAuth, url: `/v1/workflows/instances/${instanceId}/artifacts`,
+      payload: { stageId: "requirements", content: "# Requirements\n\n1. Ada is meant to sign this." },
+    });
+
+    // ada is the named approver and rex is the requester — NOT a self-review yet
+    const signoff = await approvalRow(adaAuth, (a) => a.instanceId === instanceId, "pending");
+    expect(signoff).toBeTruthy();
+    expect(signoff.approverUserId).toBe(adaId);
+    expect(signoff.userId).toBe(rexId);
+    expect(signoff.selfReview).toBe(false);
+
+    // ada delegates to rex — the requester now holds his own approval
+    const now = Date.now();
+    const deleg = await app.inject({
+      method: "POST", headers: AUTH, url: "/v1/delegations",
+      payload: {
+        fromUserId: adaId,
+        toUserId: rexId,
+        startsAt: new Date(now - 60_000).toISOString(),
+        endsAt: new Date(now + 3_600_000).toISOString(),
+        reason: "ada is out",
+      },
+    });
+    expect(deleg.statusCode).toBe(201);
+
+    // rex's inbox badges it before he can act on it — the warning has to be
+    // visible at the point of decision, not only in the audit trail after
+    const inRexInbox = await approvalRow(rexAuth, (a) => a.instanceId === instanceId, "pending");
+    expect(inRexInbox).toBeTruthy();
+    expect(inRexInbox.selfReview).toBe(true);
+    expect(inRexInbox.delegatedFrom).toBeTruthy();
+    // ...and stays an ordinary arm's-length gate for everyone else
+    const inAdaInbox = await approvalRow(adaAuth, (a) => a.instanceId === instanceId, "pending");
+    expect(inAdaInbox.selfReview).toBe(false);
+
+    // rex deciding his own request is a self-review however he got there:
+    // refused without a recorded reason
+    const bare = await app.inject({
+      method: "POST", headers: rexAuth, url: `/v1/approvals/${signoff.id}/decide`,
+      payload: { decision: "approved" },
+    });
+    expect(bare.statusCode).toBe(400);
+    expect(bare.json().error).toBe("self_review_reason_required");
+    const [still] = await db.select().from(approvals).where(eq(approvals.id, signoff.id));
+    expect(still!.status).toBe("pending");
+
+    // with a reason it goes through, flagged, and stamped as both the
+    // delegated decision it is and the self-review it also is
+    const decided = await app.inject({
+      method: "POST", headers: rexAuth, url: `/v1/approvals/${signoff.id}/decide`,
+      payload: { decision: "approved", reason: "ada delegated to me before leaving; risk accepted" },
+    });
+    expect(decided.statusCode).toBe(200);
+    expect(decided.json().selfReview).toBe(true);
+    const audit = await app.inject({ method: "GET", headers: AUTH, url: `/v1/audit?userId=${rexId}` });
+    const stampedRow = audit.json().entries.find(
+      (e: { ruleId: string; detail: { approvalId?: string } | null }) =>
+        e.ruleId === "approval-self-review" && e.detail?.approvalId === signoff.id,
+    );
+    expect(stampedRow).toBeTruthy();
+  });
 });

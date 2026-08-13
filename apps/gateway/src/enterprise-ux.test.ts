@@ -338,10 +338,12 @@ describe("#79c dry-run deploy honesty", () => {
     expect(inst.status).toBe("blocked_on_deploy");
     expect(inst.context["deploy:deploy"].dryRun).toBe(true);
     expect(inst.context.lastError).toContain("dry-run deploy cannot satisfy a production deploy gate");
-    // the governed escape: the operator confirms an out-of-band deploy
+    // the governed escape: an out-of-band deploy is confirmed by hand. pia
+    // initiated this instance, so it is a self-attestation and the reason is
+    // mandatory (see the deploy-override separation-of-duties tests below).
     const ov = await app.inject({
       method: "POST", headers: piaAuth, url: `/v1/workflows/instances/${id}/deploy-override`,
-      payload: { stageId: "deploy" },
+      payload: { stageId: "deploy", reason: "shipped through the standard release pipeline out-of-band" },
     });
     expect(ov.statusCode).toBe(200);
     expect((await view(id)).status).toBe("completed");

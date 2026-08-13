@@ -2230,10 +2230,22 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     return {
       approvals: rows.map((r) => ({
         ...r,
-        // Finding-6 separation-of-duties surface: the approver IS the user
-        // who triggered the governed action — the UI badges it, deciding it
-        // requires a recorded reason.
-        selfReview: r.userId === r.approverUserId,
+        // Finding-6 separation-of-duties surface: the person who would sign
+        // IS the user who triggered the governed action — the UI badges it,
+        // deciding it requires a recorded reason. Three ways that happens,
+        // matching the decide-time test in `decideOneApproval`:
+        //   · the template named the requester as the approver outright;
+        //   · it is ALREADY decided and the requester is who signed it —
+        //     historical fact, so an admin or auditor reading the row back
+        //     sees the badge too, not just the person who did it;
+        //   · it is still pending and reached THIS viewer, who is the
+        //     requester, through a delegation from the named approver.
+        // The last one is viewer-relative on purpose: the same row is an
+        // ordinary arm's-length gate in everyone else's inbox.
+        selfReview:
+          r.userId === r.approverUserId ||
+          (r.decidedBy !== null && r.decidedBy === r.userId) ||
+          (r.status === "pending" && r.userId === me && delegatedFor.has(r.approverUserId)),
         requestedByName: nameOf.get(r.userId) ?? null,
         approverName: nameOf.get(r.approverUserId) ?? null,
         decidedByName: r.decidedBy ? (nameOf.get(r.decidedBy) ?? null) : null,
@@ -2354,11 +2366,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         });
       }
     }
-    // Separation-of-duties guard: the named approver IS the user who
+    // Separation-of-duties guard: the person deciding IS the person who
     // triggered the governed action. Still decidable (alternate-approver
     // routing is deliberately out of scope) but never silently — a recorded
     // reason is required and the audit row is stamped selfReview.
-    const selfReview = row.userId === row.approverUserId;
+    //
+    // Both disjuncts are load-bearing. The named-approver one is the shape a
+    // template writes directly (`approvers: ["requesting_user"]`). The
+    // DECIDER one closes the delegation route around it: an approver who
+    // delegates to the requester hands them their own gate, and comparing
+    // only requester-to-named-approver reads that as an arm's-length review.
+    // Separation of duties is a property of who actually signed, so this
+    // asks that question of the identity that actually signed.
+    const selfReview = row.userId === row.approverUserId || row.userId === deciderUserId;
     if (selfReview && !body.reason?.trim()) {
       return fail(400, {
         error: "self_review_reason_required",

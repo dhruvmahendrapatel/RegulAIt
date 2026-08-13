@@ -1303,6 +1303,12 @@ export function deployTargetProviderConfig(
  * they deployed out-of-band (or accepts the condition) and the pipeline advances. */
 export const deployOverrideSchema = z.object({
   stageId: z.string().min(1),
+  /** Why the parked deploy is being cleared by hand ("deployed out-of-band",
+   * "condition accepted"). Optional for an arm's-length operator; REQUIRED
+   * when the person clearing the gate is the instance's own initiator, who is
+   * otherwise self-attesting that their own change shipped. Same shape and
+   * same reasoning as the self-review reason on an approval decision. */
+  reason: z.string().min(1).max(2000).optional(),
 });
 
 export const createGitConnectionSchema = z.object({

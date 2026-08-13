@@ -138,3 +138,105 @@ per-user interception-surface rollout stays roadmap §6 O13 — not built here.
 - The BYOC dry-run shapes can no longer masquerade as production deploys; a
   live AWS client (ADR-0015 A1) is now the only way through a production gate
   besides an explicit, audited override.
+
+## Amendment — 2026-08-13: the self-review guard did NOT survive a delegation
+
+Found reviewing pillar 2 end-to-end. §3 above ends with a flat claim:
+
+> The self-review reason guard still applies through a delegation.
+
+It did not. The guard was written, and nothing tested that sentence.
+
+**The defect.** `decideOneApproval` computed separation-of-duties as a property
+of the *row*:
+
+```ts
+const selfReview = row.userId === row.approverUserId;
+```
+
+That asks whether the template named the requester as the approver. It says
+nothing about who actually signed. So an approver who delegates to the
+requester hands them their own gate, and the requester decides it as an
+ordinary arm's-length review: HTTP 200, no reason required, no `selfReview`
+flag on the response, no `approval-self-review` audit row. The one control
+standing between a requester and their own governed change was routed around
+by a feature two sections up in this same ADR.
+
+Concretely: rex opens a change, ada is the named approver, ada delegates to
+rex, rex approves rex — silently.
+
+**The fix.** Separation of duties is a property of the *decider*, so ask that
+question of the identity that actually signed:
+
+```ts
+const selfReview = row.userId === row.approverUserId || row.userId === deciderUserId;
+```
+
+Both disjuncts are load-bearing: the first is the shape a template writes
+directly (`approvers: ["requesting_user"]`), the second closes the delegation
+route around it. The decision stays *possible* — alternate-approver routing is
+still out of scope, and an org that wants none of this has the
+`approval_delegation_enabled` master switch — but it is never again silent: a
+recorded reason is required and the audit row is stamped, exactly as §3 always
+claimed.
+
+The inbox badge moved with it. `GET /v1/approvals` now reports `selfReview` for
+three cases, matching decide-time: the template named the requester outright;
+the row is already decided and the requester is who signed it (historical fact,
+so an auditor reading it back sees the badge, not only the person who did it);
+or it is pending and reached **this viewer**, who is the requester, through a
+delegation. The last is viewer-relative on purpose — the same row is an
+ordinary gate in everyone else's inbox. The warning has to be visible at the
+point of decision, not only in the trail afterwards.
+
+**Status of the claim.** §3's sentence is now true rather than aspirational,
+and `demo-fixes.test.ts` pins it: the delegated self-decision is refused
+without a reason, badged in the requester's inbox, unbadged in the delegator's,
+and stamped in the audit trail once decided.
+
+## Amendment — 2026-08-13: the deploy-override escape had no second party either
+
+Found in the same pass, and it is the same defect wearing different clothes.
+
+§6 calls `deploy-override` "the governed **operator** escape", and §2 records
+that the driving routes keep "the strict admin/**initiator** gate". Both
+sentences are true and together they are the bug: the word *operator* was
+carrying a separation-of-duties assumption the gate never enforced. The
+endpoint took `{ stageId }` and nothing else — there was no `reason` field in
+the schema to supply.
+
+So the requester of a change could clear the deploy gate on their own change.
+And that gate parks for exactly one reason: governance found **no authorized
+way to deploy** — a missing target, an unmet condition, or a dry-run refused
+against production (§6's rule with teeth). "It shipped some other way" is
+therefore an *attestation*, and the person attesting was allowed to be the only
+person in the room. This repo's own test suite showed it: the pre-existing case
+in `workflow-deploy.test.ts` drove the override as the instance initiator under
+the comment *"operator resolves the handoff"*.
+
+It was never invisible — `applyEvent` has always written a
+`workflow:deploy_override` audit row naming the actor. What was missing is
+**why**, and any distinction between an operator closing out a handoff and a
+requester waving their own change through.
+
+**The decision.** Treat it exactly as §3's self-review, because it is one:
+
+- the override still **works** — an operator is not always on hand, and
+  refusing outright would strand the instance at a stage nothing else can
+  clear;
+- when the caller **is the instance initiator**, a reason is mandatory —
+  `400 deploy_override_reason_required`, and nothing moves;
+- an arm's-length admin clearing someone else's parked deploy stays a one-click
+  action, matching how §3 treats an admin override versus a self-review;
+- either way, a supplied reason is written to a dedicated
+  `workflow:deploy-override-attested` audit row carrying `selfAttested` and the
+  initiator's id, so the trail distinguishes the two cases instead of flattening
+  them into one generic event row.
+
+**Deliberately not done.** Requiring a *second person* (routing the override to
+an approver) would be the stronger control, and it is the obvious follow-up.
+It is out of scope here for the same reason §3 left alternate-approver routing
+alone: it needs a routing policy to say *who*, and inventing one silently is
+worse than making the existing self-attestation honest. What ships now is the
+guarantee that this escape can never again be taken quietly by the one person
+with an interest in taking it.

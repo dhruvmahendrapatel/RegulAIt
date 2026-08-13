@@ -1606,12 +1606,44 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     const loaded = await loadInstanceFor(req, instanceId);
     if (loaded.error) return sendLoadError(reply, loaded.error);
     if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_drive" });
+    // Separation of duties on the manual-deploy handoff, same rule the
+    // Approvals Queue applies to a self-review. This endpoint clears a stage
+    // that parked precisely BECAUSE governance found no authorized way to
+    // deploy — so "it went out another way" is an attestation, and when the
+    // person attesting is the one who asked for the change in the first
+    // place, there is no second party in it at all. Still permitted (an
+    // operator is not always on hand, and refusing outright would strand the
+    // instance) but never silent: a recorded reason, and an audit row that
+    // says plainly it was self-attested. An arm's-length admin clearing
+    // someone else's handoff stays a one-click action.
+    const selfAttested = req.authCtx.userId === loaded.instance.initiatorUserId;
+    if (selfAttested && !body.reason?.trim()) {
+      return reply.status(400).send({
+        error: "deploy_override_reason_required",
+        detail:
+          "you initiated this change, so clearing its own deploy gate is a self-attestation; record why it is safe to advance (e.g. how it was actually deployed)",
+      });
+    }
     const r = await applyEvent(
       db,
       loaded.instance.id,
       { kind: "deploy_override", stageId: body.stageId },
       req.authCtx.userId,
     );
+    if (selfAttested || body.reason?.trim()) {
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId,
+        objectType: "workflow",
+        objectId: loaded.instance.id,
+        detail: { stageId: body.stageId, selfAttested, initiatorUserId: loaded.instance.initiatorUserId },
+        effect: "allow",
+        ruleId: "workflow:deploy-override-attested",
+        ruleChain: [],
+        reason: selfAttested
+          ? `initiator cleared their own parked deploy: ${body.reason!.trim()}`
+          : `operator cleared a parked deploy: ${body.reason!.trim()}`,
+      });
+    }
     await runGitExecutions(db, loaded.instance.id, r.effects, req.authCtx.userId, opts.dataKey);
     const [fresh] = await db
       .select()
