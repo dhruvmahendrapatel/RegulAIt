@@ -39,3 +39,10 @@ Thumbs.db
 # agent worktrees (session tooling, never source)
 .claude/worktrees/
 infra/modules/*/.terraform.lock.hcl
+
+# Runtime WORM anchor artifacts (ADR-0060). Written by the default
+# LocalWormSink into DEFAULT_ANCHOR_DIR on every local run since anchoring
+# became default-ON. They are machine-local tamper-evidence records: an
+# anchor stored inside the very repo it attests to, where any commit can
+# rewrite it, proves nothing — and it collides across machines.
+audit-anchors/
