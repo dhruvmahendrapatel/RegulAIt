@@ -238,6 +238,32 @@ const visibleToolsParams = z.object({
   userId: z.string().uuid(),
   serverId: z.string().uuid(),
 });
+
+/**
+ * A server grant is ONLY ever a read-only-all grant: the kernel matches it at
+ * `server-read-only-all` / `role-server-read-only-all`, both of which require
+ * `readOnlyAll` AND a read-kind tool. So `readOnlyAll: false` writes a row that
+ * confers nothing — and, worse, one that then LISTS as a grant in
+ * `GET /v1/roles/:id/grants`, so an admin building a bundle sees "1 server
+ * grant" and reasonably concludes the role opens that server. It does not.
+ *
+ * That is the same defect this product already refuses to ship elsewhere:
+ * ADR-0038's group→role mapping makes an inert mapping VISIBLE rather than
+ * letting it read as an entitlement. Here there is nothing worth recording, so
+ * the honest answer is to refuse the write rather than store a lie — a refusal
+ * is a fact an operator can act on; a grant that grants nothing is not.
+ *
+ * Scope of a grant is expressed by TOOL grants; `readOnlyAll: false` has no
+ * meaning to express.
+ */
+const INERT_SERVER_GRANT = {
+  error: "inert_server_grant",
+  reason:
+    "a server grant with readOnlyAll=false confers nothing — the kernel only matches a " +
+    "server grant for read-kind tools when readOnlyAll is true, so this row would list as " +
+    "a grant while granting no access. Send readOnlyAll: true for read-all on this server, " +
+    "or grant individual tools with POST /v1/grants/tools (or the role's /grants/tools).",
+} as const;
 /** ADR-0031: documented ceiling on one /v1/audit page. A caller that wants more
  * than this pages with `cursor`, or takes the streamed CSV export. */
 export const AUDIT_MAX_PAGE_SIZE = 1000;
@@ -1186,6 +1212,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   app.post("/v1/grants/servers", async (req, reply) => {
     const body = createServerGrantSchema.parse(req.body);
+    if (!body.readOnlyAll) return reply.status(400).send(INERT_SERVER_GRANT);
     const [row] = await db.insert(serverGrants).values(body).returning();
     return reply.status(201).send(row);
   });
@@ -1231,6 +1258,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   app.post("/v1/roles/:roleId/grants/servers", async (req, reply) => {
     const { roleId } = z.object({ roleId: z.string().uuid() }).parse(req.params);
     const body = createRoleServerGrantSchema.parse(req.body);
+    if (!body.readOnlyAll) return reply.status(400).send(INERT_SERVER_GRANT);
     const [row] = await db
       .insert(roleServerGrants)
       .values({ roleId, serverId: body.serverId, readOnlyAll: body.readOnlyAll })

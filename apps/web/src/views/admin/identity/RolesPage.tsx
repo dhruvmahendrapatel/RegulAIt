@@ -269,7 +269,6 @@ function RoleGrantsPanel(props: { roleId: string }) {
   const [toolServerId, setToolServerId] = useState("");
   const [toolName, setToolName] = useState("");
   const [srvId, setSrvId] = useState("");
-  const [readOnlyAll, setReadOnlyAll] = useState("true");
   const serverTools = useServerTools(toolServerId || null);
   const [unassign, setUnassign] = useState<RoleAssignment | null>(null);
   const [removeGrant, setRemoveGrant] = useState<{ kind: string; id: string; label: string } | null>(null);
@@ -413,7 +412,11 @@ function RoleGrantsPanel(props: { roleId: string }) {
                 () =>
                   api.post(`/v1/roles/${props.roleId}/grants/servers`, {
                     serverId: srvId,
-                    readOnlyAll: readOnlyAll === "true",
+                    // A server grant IS a read-all grant: the kernel only ever
+                    // matches one for read-kind tools. readOnlyAll:false is
+                    // refused by the gateway because it would store a row that
+                    // lists as a grant while granting nothing.
+                    readOnlyAll: true,
                   }),
                 "Server granted",
               );
@@ -424,12 +427,10 @@ function RoleGrantsPanel(props: { roleId: string }) {
                 {optionEls(serverOpts(servers.data?.servers), "— select —")}
               </Select>
             </Field>
-            <Field label="Read-only all">
-              <Select value={readOnlyAll} onChange={(e) => setReadOnlyAll(e.target.value)}>
-                <option value="true">true</option>
-                <option value="false">false</option>
-              </Select>
-            </Field>
+            <span className={v.hint}>
+              Grants every <strong>read</strong> tool on the server. Write tools still need an
+              individual tool grant.
+            </span>
             <Button type="submit" size="sm" disabled={act.busy}>
               Grant MCP server
             </Button>

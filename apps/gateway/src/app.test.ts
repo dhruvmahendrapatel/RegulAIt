@@ -133,6 +133,57 @@ describe("gateway vertical slice", () => {
     expect(res.json().effect).toBe("deny");
   });
 
+  it("refuses an INERT server grant — readOnlyAll:false grants nothing, on both the user and the role route", async () => {
+    // Found by driving pillar 1 end-to-end: the row was accepted, then listed
+    // as a grant in GET /v1/roles/:id/grants, so an admin building a bundle saw
+    // "1 server grant" for a role that opened nothing. A grant that grants
+    // nothing is a lie an operator acts on; a refusal is a fact.
+    const direct = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/grants/servers",
+      payload: { userId, serverId, readOnlyAll: false },
+    });
+    expect(direct.statusCode).toBe(400);
+    expect(direct.json().error).toBe("inert_server_grant");
+    // the refusal must say what to do instead, not just "no"
+    expect(direct.json().reason).toContain("readOnlyAll: true");
+
+    const role = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/roles",
+      payload: { name: `inert-probe-${Date.now()}` },
+    });
+    const roleId = role.json().id;
+    const viaRole = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: `/v1/roles/${roleId}/grants/servers`,
+      payload: { serverId, readOnlyAll: false },
+    });
+    expect(viaRole.statusCode).toBe(400);
+    expect(viaRole.json().error).toBe("inert_server_grant");
+
+    // NOT VACUOUS: nothing was written by either refusal, and the very same
+    // bodies with readOnlyAll:true still succeed — so this asserts the boundary
+    // rather than that server grants are broken.
+    const grants = await app.inject({
+      method: "GET",
+      headers: AUTH,
+      url: `/v1/roles/${roleId}/grants`,
+    });
+    expect(grants.json().servers).toEqual([]);
+
+    const ok = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: `/v1/roles/${roleId}/grants/servers`,
+      payload: { serverId, readOnlyAll: true },
+    });
+    expect(ok.statusCode).toBe(201);
+  });
+
   it("read-only-all server grant exposes read tools but never write tools", async () => {
     const grantRes = await app.inject({
       method: "POST",

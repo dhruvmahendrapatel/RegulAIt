@@ -115,6 +115,16 @@
   font-size: var(--text-sm);
 }
 
+/* An inline note next to a control, explaining what it will actually do.
+   `--rg-ink-muted` is the lowest ink step that is still AA for body copy —
+   anything fainter is decorative and must not carry meaning. */
+.hint {
+  color: var(--rg-ink-muted);
+  font-size: var(--text-sm);
+  max-width: 46ch;
+  align-self: center;
+}
+
 .divider {
   border: none;
   border-top: 1px solid var(--border);
