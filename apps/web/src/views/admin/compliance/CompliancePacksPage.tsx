@@ -181,7 +181,7 @@ export default function CompliancePacksPage() {
 
       <Card title="What a pack is, and what it is not">
         <p className={v.faint}>
-          A pack maps a framework's controls onto RegulAIt configuration and counts the evidence this
+          A pack maps a framework's controls onto regulAIt configuration and counts the evidence this
           deployment's own ledgers hold. It does not certify compliance and does not substitute for an
           auditor or for counsel.
         </p>
@@ -302,7 +302,7 @@ export default function CompliancePacksPage() {
         <p className={v.faint}>
           A pack is data. Your own internal control framework is a first-class pack authored with the same
           schema — no code change, no release. Collectors are a fixed vocabulary over ledgers that already
-          exist; a control needing a ledger RegulAIt does not keep must be marked attestation-required
+          exist; a control needing a ledger regulAIt does not keep must be marked attestation-required
           rather than silently reported as satisfied.
         </p>
         <Field label="Pack JSON" grow>

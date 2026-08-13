@@ -6,12 +6,13 @@
  * product surface — there are no outbound bridges left.
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { NavLink, useNavigate } from "react-router-dom";
+import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
 import type { Approval } from "../api/types";
 import { useSession } from "../session/SessionContext";
 import { useTheme } from "../ui/useTheme";
+import { Lockup, WORDMARK } from "../ui/Brand";
 import s from "./shell.module.css";
 
 interface NavEntry {
@@ -136,7 +137,7 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // the adjacent question. That one is "which model that we do not own may
       // our people reach?"; this one is "which model may our people BUILD, out
       // of what data, and under whose sign-off?".
-      { label: "RegulAIt-LLM", to: "/admin/regulait-llm" },
+      { label: "regulAIt-LLM", to: "/admin/regulait-llm" },
       { label: "Connectors", to: "/admin/connectors" },
       { label: "MCP servers", to: "/admin/mcp-servers" },
       { label: "Git connections", to: "/admin/git-connections" },
@@ -207,6 +208,15 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
   },
 ];
 
+/**
+ * route path → the nav section it lives under, so a page header can state where
+ * it is without every view repeating what the nav already declares. Workspace
+ * routes are deliberately absent: they are top-level, so they have no trail.
+ */
+const GROUP_OF_PATH = new Map<string, string>(
+  ADMIN_GROUPS.flatMap((g) => g.items.map((n) => [n.to, g.group] as const)),
+);
+
 export default function AppShell(props: { children: ReactNode }) {
   const { auth, signOut } = useSession();
   const { theme, toggle } = useTheme();
@@ -276,12 +286,18 @@ export default function AppShell(props: { children: ReactNode }) {
 
   return (
     <div className={s.shell}>
-      <aside className={[s.side, sideOpen ? s.sideOpen : ""].join(" ")} aria-label="Primary navigation">
+      {/* The first focusable element on the page — before the sidebar — so a
+          keyboard user reaches content in one tab rather than tabbing through
+          every nav item first. */}
+      <a href="#rgMain" className="rg-skip-link">
+        Skip to main content
+      </a>
+      <aside
+        className={[s.side, "rgRail", sideOpen ? s.sideOpen : ""].join(" ")}
+        aria-label="Primary navigation"
+      >
         <div className={s.brand}>
-          <span className={s.brandWord}>
-            regul<em>ai</em>t
-          </span>
-          <span className={s.brandTag}>governed</span>
+          <Lockup descriptor="governed" tone="onDark" />
         </div>
         <input
           ref={filterRef}
@@ -332,6 +348,8 @@ export default function AppShell(props: { children: ReactNode }) {
         {/* The two "legacy ↗" bridges are gone: ADR-0033 deleted the
             single-file shells they pointed at, so a link here would be a dead
             end — the exact failure phase 1 refused to ship. */}
+        {/* No endorsement line here: the brand puts it in footers, sign-in
+            screens and legal surfaces — never in the app chrome. */}
         <div className={s.sideFoot}>Governed AI delivery platform</div>
       </aside>
 
@@ -346,7 +364,7 @@ export default function AppShell(props: { children: ReactNode }) {
             ☰
           </button>
           <span className={s.topbarSpacer} />
-          <span className={s.orgName}>RegulAIt workspace</span>
+          <span className={s.orgName}>{WORDMARK} workspace</span>
           <button
             className={s.iconBtn}
             aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
@@ -420,16 +438,61 @@ export default function AppShell(props: { children: ReactNode }) {
             )}
           </div>
         </header>
-        <main className={s.content}>{props.children}</main>
+        {/* tabindex="-1" makes this a valid skip-link target without adding it
+            to the tab order. It must keep a resolved height — see .content. */}
+        <main id="rgMain" tabIndex={-1} className={s.content}>
+          {props.children}
+        </main>
       </div>
     </div>
   );
 }
 
-/** consistent page header — every view uses it */
-export function PageHeader(props: { title: string; sub?: ReactNode; actions?: ReactNode }) {
+/**
+ * Consistent page header — every view uses it.
+ *
+ * Breadcrumb as kicker, then title, then the primary action right-aligned. The
+ * breadcrumb *states where you are* rather than offering navigation, which is
+ * why its items are plain text and only the last carries `aria-current="page"`.
+ */
+export function PageHeader(props: {
+  title: string;
+  crumbs?: string[];
+  sub?: ReactNode;
+  actions?: ReactNode;
+}) {
+  // Where a page sits is already known: it is the nav group the current route
+  // belongs to. Deriving the crumb from GROUP_OF_PATH means every admin screen
+  // gets a correct trail without 60-odd views each hand-passing one, and the
+  // trail cannot drift from the navigation it describes.
+  const { pathname } = useLocation();
+  const derived = GROUP_OF_PATH.get(pathname.replace(/\/+$/, "") || "/");
+  const crumbs = props.crumbs ?? (derived ? [derived] : undefined);
+  // No crumbs means there is no trail to state — rendering the title alone as a
+  // breadcrumb would just repeat the <h1> immediately below it, to the eye and
+  // to a screen reader both.
+  const trail = crumbs?.length ? [...crumbs, props.title] : [];
   return (
     <>
+      {trail.length > 0 && (
+        <nav aria-label="Breadcrumb">
+          <ol className={s.crumbs}>
+            {trail.map((c, i) => {
+              const last = i === trail.length - 1;
+              return (
+                <li key={`${c}-${i}`} className={last ? s.crumbCurrent : undefined}>
+                  {i > 0 && (
+                    <span className={s.crumbSep} aria-hidden>
+                      /{" "}
+                    </span>
+                  )}
+                  <span {...(last ? { "aria-current": "page" as const } : {})}>{c}</span>
+                </li>
+              );
+            })}
+          </ol>
+        </nav>
+      )}
       <div style={{ display: "flex", alignItems: "flex-start", gap: "var(--s2)" }}>
         <h1 className={s.pageTitle} tabIndex={-1} style={{ flex: 1 }}>
           {props.title}

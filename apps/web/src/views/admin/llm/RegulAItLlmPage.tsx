@@ -327,7 +327,7 @@ export default function RegulAItLlmPage() {
   return (
     <>
       <PageHeader
-        title="RegulAIt-LLM"
+        title="regulAIt-LLM"
         sub={
           "Build a model out of your own data, under the same governance every bought model already has: " +
           "the corpus is scanned for personal data BEFORE it is accepted, each version freezes the moment " +
@@ -986,7 +986,7 @@ export default function RegulAItLlmPage() {
                 <div className={v.faint} style={{ marginTop: "var(--s2)" }}>
                   This artifact's weights live on the training backend
                   {artifactDetail.data.artifact.location ? ` (${artifactDetail.data.artifact.location})` : ""}.
-                  RegulAIt holds a reference and cannot run inference against it here — register the endpoint
+                  regulAIt holds a reference and cannot run inference against it here — register the endpoint
                   that serves it as a custom LLM provider instead.
                 </div>
               )}

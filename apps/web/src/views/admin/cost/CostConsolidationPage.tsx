@@ -198,7 +198,7 @@ interface ConsolidatedResponse {
 /** what an operator has to be told about each adapter before they pick it */
 const ADAPTER_HINT: Record<string, string> = {
   generic_mapped:
-    "Leave the configuration blank to let RegulAIt infer the column mapping from the header row — it REFUSES on ambiguity rather than guessing. Supply {\"mapping\":{\"account\":\"…\",\"amount\":\"…\"}} to name the columns yourself.",
+    "Leave the configuration blank to let regulAIt infer the column mapping from the header row — it REFUSES on ambiguity rather than guessing. Supply {\"mapping\":{\"account\":\"…\",\"amount\":\"…\"}} to name the columns yourself.",
   seat_roster:
     "This format carries no money. The per-seat price is an OPERATOR ASSERTION and is stamped on every line as `derivedFrom` — supply it in the configuration below.",
 };
@@ -223,7 +223,7 @@ function BasisPair(props: { subject: Subject }) {
   return (
     <div className={a.basisSplit}>
       <div className={[a.basisCell, a.basisCellMetered].join(" ")}>
-        <div className={a.basisLabel}>metered — RegulAIt observed and priced these calls</div>
+        <div className={a.basisLabel}>metered — regulAIt observed and priced these calls</div>
         <div className={a.basisMoney}>{fmtUsd(s.metered.usd)}</div>
         <div className={v.faint}>
           {s.metered.events} call(s)
@@ -389,8 +389,8 @@ export default function CostConsolidationPage() {
         <Card title="Two kinds of number, never added">
           <div className={v.stack}>
             <p>
-              <strong>metered</strong> means RegulAIt saw the call and priced it.{" "}
-              <strong>imported</strong> means RegulAIt was <em>told</em>, by a file you exported. Nothing
+              <strong>metered</strong> means regulAIt saw the call and priced it.{" "}
+              <strong>imported</strong> means regulAIt was <em>told</em>, by a file you exported. Nothing
               on this page adds them together, and{" "}
               <strong>no combined total exists to render</strong> — the API has no field for one.
             </p>
@@ -602,7 +602,7 @@ export default function CostConsolidationPage() {
               {result.resolution.unattributedLines > 0 && (
                 <div className={v.errLine} role="alert" data-testid="ci-unattributed">
                   {result.resolution.unattributedLines} accepted line(s), worth{" "}
-                  {fmtUsd(result.resolution.unattributedAmount)}, resolved to no RegulAIt user. They are
+                  {fmtUsd(result.resolution.unattributedAmount)}, resolved to no regulAIt user. They are
                   retained and reported as <strong>unattributed spend</strong>. Map the account below to
                   attribute them.
                 </div>

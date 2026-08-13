@@ -1,10 +1,10 @@
 ---
-phase: parity-wave-and-gap-closure-complete
-last_updated: 2026-08-09
+phase: brand-and-ui-structure-adopted
+last_updated: 2026-08-13
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
-last_session: sessions/2026-08-09-session-14.md
+last_session: sessions/2026-08-13-session-15.md
 roadmap: ../docs/product/ROADMAP.md
 ---
 
@@ -20,6 +20,44 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**ADR-0075 shipped, 2026-08-13 — [the regulAIt brand package and the regulAIt UI Structures contract are adopted in the SPA](../docs/decisions/0075-brand-identity-and-ui-structure-adoption.md).
+NO MIGRATION — this is presentation only; no schema, no API, no governance semantics.** The owner
+supplied two standards, and they settle their own precedence: *"the brand package wins on colour,
+type and the mark. This document wins on structure and markup contracts."* A third artefact in the
+same archive — an **"Organic" design system** (cream, terracotta, Caprasimo) — is **not adopted**,
+and the evidence is decisive rather than a judgement call: it is a generic design-system export with
+its own `theme.json` and no product, while UI Structures is titled *"UI structures for regulAIt
+apps"*, points at the brand package by name, and is itself rendered in Gantari/Figtree/IBM Plex Mono
+over Graphite and Signal Cyan. The two regulAIt artefacts agree; Organic disagrees with both.
+`apps/web/src/theme/tokens.css` is rewritten around the `--rg-*` token **names** the contract
+specifies (*"Names are the API"*) with **values** from the brand: the twelve-step Graphite ramp,
+Signal Cyan 500/400/700, the four product accents, and the four-step severity scale with AA-passing
+`-deep` text steps. **The whole palette swapped from one file with zero component edits**, because a
+survey found **zero hardcoded hex outside `src/theme/`** — the SPA's pre-existing token discipline
+is what made this cheap, and the original names remain as one-directional aliases. Gantari, Figtree
+and IBM Plex Mono are **self-hosted** (~90KB; both display faces are variable, so one woff2 each) —
+a brand rule that is also an ADR-0062 air-gap requirement, since an off-origin font request would
+break air-gapped mode. The sidebar becomes the app's only dark surface and does not invert with the
+theme; the mark's AI node is pinned to Signal Cyan; and the brand's forbidden spellings are
+corrected in user-visible copy — the wordmark is **`regulAIt`**, and the app had been shipping
+"RegulAIt" on every screen. UI Structures' **seven accessibility invariants are now asserted in a
+real browser** (`apps/web/e2e/brand-contract.spec.ts`): `main#rgMain` must resolve to a non-zero
+box, and the skip link must genuinely be the first tab stop under a real Tab press. That choice is
+the point — the doc's own Traps section records a page that returned **200 while rendering its full
+markup into a zero-height container**, which any stylesheet assertion would have passed.
+
+**Two process lessons from writing that spec, both worth keeping.** First, **a priming click
+invalidates a focus test**: clicking before pressing Tab sets the document's *sequential focus
+navigation starting point*, so Tab resumed past the sidebar and the correct skip link "failed" — and
+the first fix attempted was a CSS change to markup that was never broken. Second, **a green contract
+can be green for the wrong reason**: the wordmark check passed on its first run because the route
+list did not cover the pages carrying the offending copy *and* a word-boundary regex let
+"RegulAIt-LLM" through on a trailing hyphen. Tightening both made it fail on 14 of 15 routes. That
+is the same lesson as ADR-0072's three scoring inversions — *check that the test can fail.*
+
+### Previously
+
 
 **ADR-0074 shipped, 2026-08-09 — [an ordinary admin edit of a versioned rule now changes what is ENFORCED, not only what is DISPLAYED](../docs/decisions/0074-rule-read-model-write-choke-point.md).
 NO MIGRATION — every column already existed.** ADR-0073 (below) made the ACTIVE `config_versions`

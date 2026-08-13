@@ -17,7 +17,7 @@ import v from "../../views.module.css";
 
 const META: Record<string, { why: string; to?: string; cta: string; app?: boolean }> = {
   model_provider: {
-    why: "Until a real key is configured every dispatch runs on the MOCK provider — answers are simulated and spend is $0. This is the step that makes RegulAIt real.",
+    why: "Until a real key is configured every dispatch runs on the MOCK provider — answers are simulated and spend is $0. This is the step that makes regulAIt real.",
     to: "/admin/model-credentials",
     cta: "Add a credential",
   },

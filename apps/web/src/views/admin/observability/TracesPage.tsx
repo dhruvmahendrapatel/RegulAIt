@@ -261,7 +261,7 @@ export default function TracesPage() {
                 </div>
                 {!config.data.otlp.configured && (
                   <p className={v.dim}>
-                    No OTLP endpoint is configured, so RegulAIt opens no outbound telemetry
+                    No OTLP endpoint is configured, so regulAIt opens no outbound telemetry
                     connection at all. <strong>That is the shipped state, not a fault</strong> —
                     air-gapped is the primary deployment mode and traces are fully usable locally.
                     Set <code>tracingOtlpEndpoint</code> in Organization settings to export; the

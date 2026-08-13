@@ -1073,7 +1073,7 @@ export function registerRegulAItLlmRoutes(app: FastifyInstance, db: Db, opts: Re
         };
       }),
       note:
-        "RegulAIt-LLM is MODEL CUSTOMISATION under governance. The 'local' backend really runs — it " +
+        "regulAIt-LLM is MODEL CUSTOMISATION under governance. The 'local' backend really runs — it " +
         "builds a TF-IDF retrieval index or trains a bag-of-words classifier by gradient descent, in " +
         "this process, and the artifact answers from your data. It does NOT fine-tune a language model " +
         "and never says it does. The four remote backends do fine-tune, on the vendor's compute, and " +
@@ -1826,7 +1826,7 @@ export function registerRegulAItLlmRoutes(app: FastifyInstance, db: Db, opts: Re
       note:
         "An artifact produced by the 'local' backend is a retrieval index or a small classifier and can " +
         "be queried here. An artifact from a remote backend is a REFERENCE to weights that live on the " +
-        "vendor's side — RegulAIt cannot run inference against it and does not claim to.",
+        "vendor's side — regulAIt cannot run inference against it and does not claim to.",
     };
   });
 

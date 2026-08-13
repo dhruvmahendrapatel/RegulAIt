@@ -506,6 +506,6 @@ describe("an adapter cannot mint governance, and the catalogue still decides eve
   it("the coverage statement survives: findings still say no collector ships", async () => {
     const res = await get("/v1/shadow-ai/findings");
     expect(res.statusCode).toBe(200);
-    expect(res.json().coverage.statement).toMatch(/RegulAIt ships no collector/);
+    expect(res.json().coverage.statement).toMatch(/regulAIt ships no collector/);
   });
 });

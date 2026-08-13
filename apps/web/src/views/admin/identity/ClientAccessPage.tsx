@@ -55,7 +55,7 @@ const LADDER: Record<
   },
   voluntary: {
     bypass: "trivially bypassable",
-    note: "HONOR SYSTEM. A developer points their IDE at RegulAIt, and nothing prevents them from pointing it straight back at the vendor. Key custody or network egress is what makes interception non-bypassable — not this setting.",
+    note: "HONOR SYSTEM. A developer points their IDE at regulAIt, and nothing prevents them from pointing it straight back at the vendor. Key custody or network egress is what makes interception non-bypassable — not this setting.",
   },
   managed: {
     bypass: "developer can undo locally",
@@ -63,11 +63,11 @@ const LADDER: Record<
   },
   key_custody: {
     bypass: "no — no key, no call (when ENFORCED below)",
-    note: "The org never issues raw vendor keys, only RegulAIt keys. With 'enforce key custody' ON this deployment makes it real: per-user BYO credentials are refused (409) and dispatch uses org/platform credentials only. Declared without the toggle, it is a statement — not a mechanism.",
+    note: "The org never issues raw vendor keys, only regulAIt keys. With 'enforce key custody' ON this deployment makes it real: per-user BYO credentials are refused (409) and dispatch uses org/platform credentials only. Declared without the toggle, it is a statement — not a mechanism.",
   },
   network: {
     bypass: "no",
-    note: "RegulAIt is the only sanctioned egress to the vendor APIs. Enforced by YOUR network (egress allowlist), never by this product — the recipe is in docs/product/IDE_INTEGRATION.md (Network rung).",
+    note: "regulAIt is the only sanctioned egress to the vendor APIs. Enforced by YOUR network (egress allowlist), never by this product — the recipe is in docs/product/IDE_INTEGRATION.md (Network rung).",
   },
 };
 
@@ -92,7 +92,7 @@ export default function ClientAccessPage() {
     <>
       <PageHeader
         title="Client access"
-        sub="RegulAIt governs calls that ARRIVE at it. These settings decide which arrival surfaces exist, how a model string resolves onto a governed agent, and which rung of the interception ladder this organisation is on — labeled honestly. Both provider-shaped surfaces are OFF until you turn them on; while off they answer 404 and are indistinguishable from not existing."
+        sub="regulAIt governs calls that ARRIVE at it. These settings decide which arrival surfaces exist, how a model string resolves onto a governed agent, and which rung of the interception ladder this organisation is on — labeled honestly. Both provider-shaped surfaces are OFF until you turn them on; while off they answer 404 and are indistinguishable from not existing."
       />
       <QueryGate loading={q.isLoading} error={q.error} onRetry={() => void q.refetch()}>
         {q.data && <Loaded data={q.data} />}
@@ -266,7 +266,7 @@ function PostureForm(props: { cur: InterceptionSettings }) {
               ["map_by_model", "Resolve to the governed agent whose model id matches the request. Several matches tie-break on lowest tier, then oldest. Least developer friction."],
               ["require_agent", "The caller MUST send x-regulait-agent-id; the model string is advisory. Missing header is a 400. Strictest, explicit attribution per call."],
               ["router_decides", "The requested model is a HINT the pillar-6 router may override for cost. The response always carries the model actually served, and the audit row records requested-vs-served."],
-              ["Unmapped model", "Always 403 default-deny, in every mode. RegulAIt never passes an ungoverned call through to the vendor."],
+              ["Unmapped model", "Always 403 default-deny, in every mode. regulAIt never passes an ungoverned call through to the vendor."],
               ["Attribution (compat)", "ON rejects any compat call without an x-regulait-project-id header, rather than running it as untracked spend — but only enable it for clients that can send custom headers (see the matrix below)."],
               ["Attribution (MCP)", "Every MCP tool call is METERED whether or not it is attributed; an unattributed call lands in the explicit Unattributed bucket (Cost dashboard). Together the two require-toggles close the unattributed gap entirely."],
               ["Key custody", "ON: per-user BYO model credentials are refused (409, audited) and dispatch resolution skips stored user credentials. Existing user rows are kept but inert; turning it back off restores them."],
@@ -579,11 +579,11 @@ function buildSnippet(opts: {
   switch (opts.client) {
     case "claude-code":
       snip =
-        `# Model calls -> RegulAIt (Anthropic-shaped)\n` +
+        `# Model calls -> regulAIt (Anthropic-shaped)\n` +
         `export ANTHROPIC_BASE_URL="${base}"\n` +
         `export ANTHROPIC_API_KEY="${KEYPH}"\n` +
         (pid ? `export ANTHROPIC_CUSTOM_HEADERS="x-regulait-project-id: ${pid}"\n` : "") +
-        `\n# Tool calls -> RegulAIt (governed MCP proxy)\n` +
+        `\n# Tool calls -> regulAIt (governed MCP proxy)\n` +
         `claude mcp add --transport http regulait ${mcpUrl} --header "Authorization: Bearer ${KEYPH}"` +
         (pid ? ` --header "x-regulait-project-id: ${pid}"` : "") +
         `\n\n# or as .mcp.json in the repo root\n${mcpJson}`;

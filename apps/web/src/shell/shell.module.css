@@ -4,10 +4,17 @@
   min-height: 100vh;
 }
 
-/* ---- sidebar ---- */
+/* ---- sidebar ----
+   "The dark sidebar is the app's only dark surface. Everything else sits on
+   canvas." It therefore reads from the `--rg-dark-*` stack, which holds the same
+   values in both themes — the rail does not invert with the theme toggle.
+
+   Sidebar sections are headings, not nested menus: one level, always visible,
+   no disclosure to hunt through. */
 .side {
-  background: var(--surface-1);
-  border-right: 1px solid var(--border);
+  background: var(--rg-dark-surface);
+  border-right: 1px solid var(--rg-dark-line);
+  color: var(--rg-dark-ink);
   padding: var(--s2) var(--s1);
   display: flex;
   flex-direction: column;
@@ -20,98 +27,97 @@
 
 .brand {
   display: flex;
-  align-items: baseline;
-  gap: var(--s1);
+  align-items: center;
   padding: var(--s0) var(--s1) var(--s2);
-}
-.brandWord {
-  font-size: var(--text-lg);
-  font-weight: 700;
-  letter-spacing: -0.02em;
-}
-.brandWord em {
-  font-style: normal;
-  color: var(--primary);
-}
-.brandTag {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
-  color: var(--text-faint);
 }
 
 .navFilter {
   margin: 0 var(--s0) var(--s1);
   padding: 5px 10px;
   font-size: var(--text-sm);
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: var(--surface-0);
-  color: var(--text);
+  border-radius: var(--rg-r-sm);
+  border: 1px solid var(--rg-dark-line);
+  background: var(--rg-dark-raised);
+  color: var(--rg-dark-ink);
   width: calc(100% - var(--s1));
 }
 .navFilter::placeholder {
-  color: var(--text-faint);
+  color: var(--rg-dark-muted);
 }
 
 .section {
-  font-size: 10.5px;
-  font-weight: 650;
+  font-family: var(--rg-font);
+  font-size: 9.5px;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.1em;
-  color: var(--text-faint);
-  padding: var(--s2) var(--s1) var(--s0);
+  letter-spacing: 0.15em;
+  color: var(--rg-dark-muted);
+  padding: var(--s2) var(--s1) 7px;
 }
 
+/* The rail's active/hover indicator is a Signal left edge, not a filled pill —
+   Signal Cyan means interactive, and nothing else in the rail is coloured. */
 .navItem {
   display: flex;
   align-items: center;
   gap: var(--s1);
-  padding: 6px var(--s1);
+  padding: 5px var(--s1);
   border: none;
-  border-radius: var(--radius-sm);
+  border-left: 2px solid transparent;
   background: none;
-  color: var(--text-dim);
+  color: var(--rg-dark-ink);
+  opacity: 0.82;
   font-size: var(--text-sm);
   font-weight: 500;
   cursor: pointer;
   text-align: left;
   width: 100%;
   text-decoration: none;
+  transition: opacity var(--rg-dur-fast) var(--rg-ease),
+    background-color var(--rg-dur-fast) var(--rg-ease);
 }
 .navItem:hover {
-  background: var(--surface-2);
-  color: var(--text);
+  background: var(--rg-dark-raised);
+  border-left-color: var(--rg-signal);
+  opacity: 1;
+  color: var(--rg-dark-ink);
   text-decoration: none;
 }
 .navItemActive {
   composes: navItem;
-  background: var(--primary-soft);
-  color: var(--primary-soft-text);
+  background: var(--rg-dark-raised);
+  border-left-color: var(--rg-signal);
+  color: var(--rg-signal-400);
+  opacity: 1;
   font-weight: 600;
 }
 .navCount {
   margin-left: auto;
+  font-family: var(--rg-font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: var(--text-xs);
-  font-weight: 650;
-  background: var(--primary);
-  color: var(--text-invert);
-  border-radius: 999px;
+  font-weight: 500;
+  background: var(--rg-signal);
+  color: var(--rg-900);
+  border-radius: var(--rg-r-pill);
   padding: 0 7px;
   line-height: 1.7;
 }
 .navExt {
   margin-left: auto;
   font-size: 10px;
-  color: var(--text-faint);
+  color: var(--rg-dark-muted);
 }
 
 .sideFoot {
   margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   padding: var(--s2) var(--s1) var(--s0);
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--rg-dark-line);
   font-size: var(--text-xs);
-  color: var(--text-faint);
+  color: var(--rg-dark-muted);
 }
 
 /* ---- main column ---- */
@@ -240,24 +246,64 @@
   color: var(--danger);
 }
 
+/* main#rgMain — the skip-link target and the landmark.
+   `flex: 1` inside the column flex parent is what gives this a resolved height.
+   The UI Structures doc records the failure this guards against: inserting an
+   auto-height box into a percentage-height chain collapsed the child to 0px and
+   four pages rendered their full markup into a zero-height container while the
+   server returned 200 the whole time. Do not wrap this element without
+   re-checking that the height still resolves — `apps/web/e2e/a11y-contract.spec.ts`
+   asserts it in a real browser for exactly this reason. */
 .content {
   flex: 1;
+  min-height: 0;
   padding: var(--s3);
   max-width: 1180px;
   width: 100%;
   min-width: 0;
 }
+.content:focus {
+  outline: none;
+}
+
+/* ---- page header: breadcrumb as kicker, then title ----
+   The breadcrumb states where you are rather than offering navigation, so only
+   the last item is marked current. */
+.crumbs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 6px;
+  padding: 0;
+  list-style: none;
+  font-family: var(--rg-font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: var(--rg-kicker-track);
+  text-transform: uppercase;
+  color: var(--rg-ink-muted);
+}
+.crumbSep {
+  color: var(--rg-ink-faint);
+}
+.crumbCurrent {
+  color: var(--rg-signal-700);
+}
 
 .pageTitle {
+  font-family: var(--rg-font-display);
   font-size: var(--text-2xl);
   font-weight: 700;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.02em;
+  line-height: var(--rg-heading-line);
+  color: var(--rg-ink);
 }
 .pageSub {
-  color: var(--text-dim);
+  color: var(--rg-ink-muted);
   font-size: var(--text-sm);
   margin-top: var(--s0);
   margin-bottom: var(--s3);
+  max-width: 66ch;
 }
 
 .hamburger {

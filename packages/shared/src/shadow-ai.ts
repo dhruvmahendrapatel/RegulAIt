@@ -814,7 +814,7 @@ export function coverageScorecard(inputs: readonly CoverageInput[]): CoverageSco
     sourcesPossible: EVIDENCE_KINDS.length,
     statement:
       `Discovery has analyzed ${sourcesOn} of ${EVIDENCE_KINDS.length} evidence classes. ` +
-      `RegulAIt ships no collector: every finding below derives from evidence you supplied, so this inventory ` +
+      `regulAIt ships no collector: every finding below derives from evidence you supplied, so this inventory ` +
       `reduces shadow AI — it does not prove its absence.`,
   };
 }

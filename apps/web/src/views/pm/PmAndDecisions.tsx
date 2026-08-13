@@ -105,7 +105,7 @@ export function PmLinksCard(props: { parent: Parent }) {
     <Card title="PM work items">
       <div className={v.row}>
         <span className={v.faint} style={{ flex: 1 }}>
-          RegulAIt stores the <strong>link</strong>, not a copy — your PM tool owns the priority,
+          regulAIt stores the <strong>link</strong>, not a copy — your PM tool owns the priority,
           description and acceptance criteria. Reading live fetches them from the tool right now;
           there is no cached copy to serve stale.
         </span>
@@ -148,7 +148,7 @@ export function PmLinksCard(props: { parent: Parent }) {
             </Badge>
           )}
           <span className={v.dim} style={{ fontSize: "var(--text-xs)" }}>
-            Surfaced, never auto-fixed here: status ownership is RegulAIt&apos;s, so a PM state can
+            Surfaced, never auto-fixed here: status ownership is regulAIt&apos;s, so a PM state can
             never drive this run&apos;s state machine. Auto-resolution is a per-connection admin
             policy.
           </span>

@@ -1252,13 +1252,22 @@ function buildImportedSide(rows: readonly ImportedInput[]): ImportedSide {
     cur.lines += 1;
     byCurrency.set(r.currency, cur);
 
-    const vk = `${r.vendor} ${r.currency}`;
+    // NUL joins these composite map keys because it cannot occur in a vendor
+    // name or a currency code, so no pair of fields can collide by concatenation.
+    //
+    // It MUST stay written as the escape `\u0000` and never as a literal NUL byte.
+    // One literal NUL anywhere in a source file makes grep and ripgrep classify
+    // the WHOLE file as binary and skip it silently. This file held two, so it was
+    // invisible to every text search over the repo: a wordmark sweep missed a
+    // user-visible string on line ~1350 for exactly that reason, and a security or
+    // rename sweep would miss it the same way. `file` reports it as `data`.
+    const vk = `${r.vendor}\u0000${r.currency}`;
     const v = byVendor.get(vk) ?? { vendor: r.vendor, currency: r.currency, amount: 0, lines: 0 };
     v.amount += r.amount;
     v.lines += 1;
     byVendor.set(vk, v);
 
-    const kk = `${r.billingKind} ${r.currency}`;
+    const kk = `${r.billingKind}\u0000${r.currency}`;
     const k = byKind.get(kk) ?? { billingKind: r.billingKind, currency: r.currency, amount: 0, lines: 0 };
     k.amount += r.amount;
     k.lines += 1;
@@ -1347,7 +1356,7 @@ export function consolidate(input: {
       label:
         k === null
           ? input.by === "user"
-            ? "(unattributed — no RegulAIt user resolved)"
+            ? "(unattributed — no regulAIt user resolved)"
             : "(no cost centre)"
           : (input.labels?.get(k) ?? k),
       attributed: k !== null,

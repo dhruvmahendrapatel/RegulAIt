@@ -307,7 +307,7 @@ export default function ShadowAiPage() {
 
       <Card title="What this does, and what it cannot do">
         <p className={v.faint}>
-          RegulAIt ships no collector. Everything below analyzes evidence you export and upload.
+          regulAIt ships no collector. Everything below analyzes evidence you export and upload.
         </p>
         <p className={v.dim}>{findings.data?.coverage.statement ?? "Loading coverage…"}</p>
         <p className={v.dim}>{findings.data?.posture}</p>
@@ -566,7 +566,7 @@ export default function ShadowAiPage() {
         </QueryGate>
       </Card>
 
-      <Card title="Import evidence (rows already in RegulAIt's shape)">
+      <Card title="Import evidence (rows already in regulAIt's shape)">
         <p className={v.faint}>
           An evidence file is untrusted input: size-bounded, schema-checked, and refused outright if it carries a
           governance-shaped field. The most it can ever do is write findings.

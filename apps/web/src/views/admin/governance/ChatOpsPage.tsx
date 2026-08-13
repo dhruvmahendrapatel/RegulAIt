@@ -87,7 +87,7 @@ export default function ChatOpsPage() {
         <p className={v.faint}>
           A chat tap is not a re-authenticated session. Inbound callbacks are verified against the workspace signing
           secret over the exact raw body, inside a replay window, before anything else happens; the chat user id is then
-          mapped to a RegulAIt human and the one decide path re-checks entitlement server-side.
+          mapped to a regulAIt human and the one decide path re-checks entitlement server-side.
         </p>
       </Card>
 
@@ -202,7 +202,7 @@ export default function ChatOpsPage() {
         </div>
       </Card>
 
-      <Card title="Chat ↔ RegulAIt identity links">
+      <Card title="Chat ↔ regulAIt identity links">
         <p className={v.faint}>{links.data?.posture ?? ""}</p>
         <QueryGate loading={links.isLoading} error={links.error} onRetry={refresh}>
           <Table<IdentityLink>
@@ -248,7 +248,7 @@ export default function ChatOpsPage() {
         <Field label="Chat user id">
           <Input value={chatUserId} onChange={(e) => setChatUserId(e.target.value)} placeholder="U0123456789" />
         </Field>
-        <Field label="RegulAIt user email (must already exist)">
+        <Field label="regulAIt user email (must already exist)">
           <Input value={linkEmail} onChange={(e) => setLinkEmail(e.target.value)} />
         </Field>
         <div className={v.row}>

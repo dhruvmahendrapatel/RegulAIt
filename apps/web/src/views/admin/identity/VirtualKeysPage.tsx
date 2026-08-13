@@ -243,7 +243,7 @@ export default function VirtualKeysPage() {
       <PageHeader
         title="Virtual keys"
         sub={
-          "A credential RegulAIt mints and hands to a developer INSTEAD of the vendor key we hold. It carries an " +
+          "A credential regulAIt mints and hands to a developer INSTEAD of the vendor key we hold. It carries an " +
           "owning user, an optional model allow-list, an optional lifetime budget and an optional expiry."
         }
       />

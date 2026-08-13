@@ -1,0 +1,43 @@
+/**
+ * regulAIt brand typefaces — Gantari (display), Figtree (body), IBM Plex Mono (data).
+ *
+ * Self-hosted by contract: the UI Structures doc requires "Self-hosted — no CDN,
+ * no network dependency". These files are imported through Vite so they are
+ * fingerprinted and rewritten against `base`, and they load from our own origin
+ * — which also keeps them working in the air-gapped deployment mode (ADR-0062).
+ *
+ * Gantari and Figtree are variable fonts: one file covers the whole weight range,
+ * so the `font-weight` descriptor is a range, not a single value.
+ */
+
+@font-face {
+  font-family: "Gantari";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("./fonts/gantari-var-latin.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Figtree";
+  font-style: normal;
+  font-weight: 300 900;
+  font-display: swap;
+  src: url("./fonts/figtree-var-latin.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./fonts/ibmplexmono-400-latin.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("./fonts/ibmplexmono-500-latin.woff2") format("woff2");
+}

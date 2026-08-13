@@ -366,10 +366,10 @@ test.describe("ADR-0069 cross-vendor cost consolidation — metered and imported
 
     const subjects = page.getByTestId("cc-subjects");
     // both basis words are rendered, each labelled with what it MEANS
-    await expect(subjects.getByText(/metered — RegulAIt observed and priced/).first()).toBeVisible();
+    await expect(subjects.getByText(/metered — regulAIt observed and priced/).first()).toBeVisible();
     await expect(subjects.getByText(/imported — restated from a file you supplied/).first()).toBeVisible();
     // the unattributed subject is a row of its own
-    await expect(subjects.getByText(/unattributed — no RegulAIt user resolved/)).toBeVisible();
+    await expect(subjects.getByText(/unattributed — no regulAIt user resolved/)).toBeVisible();
     await expect(page.getByTestId("cc-note")).toContainText("no combined figure");
 
     // THE ASSERTION THIS FEATURE EXISTS FOR: nowhere on the rendered page does
@@ -444,7 +444,7 @@ test.describe("ADR-0069 cross-vendor cost consolidation — metered and imported
     );
     // the unattributed row is gone: the money moved to a person, it did not vanish
     await expect(
-      page.getByTestId("cc-subjects").getByText(/unattributed — no RegulAIt user resolved/),
+      page.getByTestId("cc-subjects").getByText(/unattributed — no regulAIt user resolved/),
     ).toHaveCount(0);
     await shot(page, "phase6-10-cost-identity-mapping");
     track.assertClean("identity mapping");
