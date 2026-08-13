@@ -1,7 +1,8 @@
 # One command to a usable product:  docker compose up --build
-# Then open http://localhost:3000/ui (the React SPA — ADR-0026; the legacy
-# shells stay at /app and /admin). Demo API keys and one-time passwords are
-# printed once in the gateway container log (docker compose logs gateway).
+# Then open http://localhost:3000/ui — the React SPA, and the WHOLE product
+# surface. The single-file /app and /admin shells were deleted by ADR-0033 and
+# those paths now 404. One-time sign-in passwords and demo API keys are printed
+# once, at the end of the first-boot log (docker compose logs gateway).
 # The image build stage runs `pnpm -r build`, which includes the web bundle,
 # so /ui is always built inside the container.
 #

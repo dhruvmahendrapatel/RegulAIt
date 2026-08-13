@@ -21,21 +21,28 @@ The fastest path (Docker):
 
 ```bash
 docker compose up --build
-# demo API keys are printed once in the gateway log:
-docker compose logs gateway | grep rgl_
+# one-time sign-in passwords AND demo API keys are printed once, at the end of
+# the gateway's first-boot log:
+docker compose logs gateway | grep -A20 "demo data"
 ```
 
-Then open **http://localhost:3000/app** and sign in:
+Then open **http://localhost:3000/ui** and sign in with a username (not an email)
+plus the one-time password from that log. Each persona is forced to set a real
+password on first sign-in.
 
-- **dana** (requester) — start in the **Playground**: the mock agents reply instantly with
+- **dana** (requester) — start in **Chat**: the mock agents reply instantly with
   streamed output and a full governance/routing/cost trace, no external API keys needed.
   Then check **Runs** (auto-advance the seeded multi-agent run) and **Workflows**.
 - **avery** (approver) — the **Inbox** has a real sign-off waiting.
-- **admin** — **http://localhost:3000/admin** for the governance console and the
-  Cost & Projects dashboard. Add a model credential there (anthropic/openai/google/xai)
-  and the corresponding seeded agents start doing real dispatches. On a self-hosted box
-  you can skip the paste and set the provider's API-key env var instead (below) — the
-  Playground then defaults to Claude automatically.
+- **admin** — the whole governance console lives in the same shell: **Rules engine**,
+  **Approvals queue**, **Audit log**, **Cost dashboard**. Add a model credential under
+  **Model credentials** (anthropic/openai/google/xai) and the corresponding seeded agents
+  start doing real dispatches. On a self-hosted box you can skip the paste and set the
+  provider's API-key env var instead (below) — Chat then defaults to Claude automatically.
+
+> **`/ui` is the whole product surface.** The single-file `/app` and `/admin` shells were
+> deleted by [ADR-0033](docs/decisions/0033-delete-legacy-template-literal-uis.md); those paths
+> now 404 rather than redirect, deliberately, so a stale bookmark fails loudly.
 
 Without Docker:
 
