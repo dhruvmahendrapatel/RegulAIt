@@ -33,12 +33,30 @@ import {
   auditContentHash,
   auditRowHash,
 } from "@regulait/shared";
+import {
+  CreateBucketCommand,
+  DeleteObjectCommand,
+  GetObjectCommand,
+  GetObjectLockConfigurationCommand,
+  ListObjectVersionsCommand,
+  PutObjectCommand,
+  PutObjectLockConfigurationCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
 import { buildApp } from "./app.js";
 import {
+  captureAnchor,
   DEFAULT_ANCHOR_DIR,
+  DEFAULT_S3_ANCHOR_PREFIX,
+  DEFAULT_S3_ANCHOR_RETENTION_DAYS,
   LocalWormSink,
   resolveAnchorSink,
+  resolveS3AnchorConfig,
+  S3_LOCK_OBSERVATION_TTL_MS,
+  S3ObjectLockSink,
+  verifyAuditChain,
   type AnchorSink,
+  type S3SendClient,
 } from "./audit-chain.js";
 import { NON_ADMIN_ROUTES } from "./route-classes.js";
 import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
@@ -742,5 +760,528 @@ describe("anchoring is on by default, and does not overclaim", () => {
     const sink = resolveAnchorSink({ REGULAIT_AUDIT_ANCHOR_DIR: "   " } as NodeJS.ProcessEnv);
     expect(sink).not.toBeNull();
     expect(sink!.destination).toBe("local_worm");
+  });
+});
+
+// -----------------------------------------------------------------------------
+// The S3 Object-Lock sink. Same principle as the rest of this file: the claim
+// under test is an ADVERSARIAL one ("nobody can rewrite this"), so the tests
+// try to make the sink LIE — by handing it a bucket that enforces nothing, by
+// breaking the call it uses to find out, and finally, against a real MinIO, by
+// attacking an anchor it has already written.
+// -----------------------------------------------------------------------------
+
+/**
+ * A transport that never leaves the process, carrying REAL command objects.
+ *
+ * Only `send` is faked. The commands the sink builds are the SDK's own, so a
+ * test cannot accidentally pass by asserting against a command shape this file
+ * invented — which is the failure mode of a fully hand-rolled S3 double.
+ */
+class FakeS3 implements S3SendClient {
+  readonly puts: Array<Record<string, any>> = [];
+  readonly gets: Array<Record<string, any>> = [];
+  constructor(
+    private readonly opts: {
+      lock?: Record<string, any> | undefined;
+      lockError?: Error | undefined;
+      versions?: Array<{ Key: string; VersionId: string }> | undefined;
+      bodies?: Record<string, string> | undefined;
+    } = {},
+  ) {}
+
+  async send(command: any): Promise<any> {
+    if (command instanceof GetObjectLockConfigurationCommand) {
+      if (this.opts.lockError) throw this.opts.lockError;
+      return { ObjectLockConfiguration: this.opts.lock };
+    }
+    if (command instanceof PutObjectCommand) {
+      this.puts.push(command.input);
+      return {};
+    }
+    if (command instanceof ListObjectVersionsCommand) {
+      return { Versions: this.opts.versions ?? [], IsTruncated: false };
+    }
+    if (command instanceof GetObjectCommand) {
+      this.gets.push(command.input);
+      const body = (this.opts.bodies ?? {})[command.input.VersionId ?? "current"];
+      if (body === undefined) throw new Error(`no body for version ${String(command.input.VersionId)}`);
+      return { Body: { transformToString: async () => body } };
+    }
+    throw new Error(`unexpected command ${command?.constructor?.name}`);
+  }
+}
+
+const S3_CONFIG = {
+  bucket: "anchors",
+  prefix: "audit-anchors",
+  region: "us-east-1",
+  endpoint: "http://minio:9000",
+  forcePathStyle: true,
+  retentionDays: 365,
+  credentials: { accessKeyId: "k", secretAccessKey: "s" },
+};
+
+const lockConfig = (mode?: "COMPLIANCE" | "GOVERNANCE") => ({
+  ObjectLockEnabled: "Enabled",
+  ...(mode ? { Rule: { DefaultRetention: { Mode: mode, Days: 365 } } } : {}),
+});
+
+describe("ADR-0060: tamperResistant is OBSERVED, never configured", () => {
+  it("says true ONLY when the bucket itself reports COMPLIANCE", async () => {
+    const sink = new S3ObjectLockSink(S3_CONFIG, new FakeS3({ lock: lockConfig("COMPLIANCE") }));
+    const obs = await sink.observe();
+    expect(obs.mode).toBe("compliance");
+    expect(obs.tamperResistant).toBe(true);
+    expect(sink.tamperResistant).toBe(true);
+    expect(obs.disclosure).toMatch(/COMPLIANCE/);
+    // even the good case discloses what it does NOT stop
+    expect(obs.disclosure).toMatch(/DESTROYED/i);
+  });
+
+  it("says FALSE for GOVERNANCE, and says why a privileged user still wins", async () => {
+    // GOVERNANCE is the trap: it looks like Object Lock, it is Object Lock, and
+    // it is worthless against the one adversary this ADR is written about,
+    // because s3:BypassGovernanceRetention is a permission an administrator can
+    // grant themselves.
+    const sink = new S3ObjectLockSink(S3_CONFIG, new FakeS3({ lock: lockConfig("GOVERNANCE") }));
+    const obs = await sink.observe();
+    expect(obs.mode).toBe("governance");
+    expect(obs.tamperResistant).toBe(false);
+    expect(obs.disclosure).toMatch(/BypassGovernanceRetention/);
+    expect(obs.disclosure).toMatch(/delete/i);
+  });
+
+  it("says false when Object Lock is enabled but nothing is retained by default", async () => {
+    const sink = new S3ObjectLockSink(S3_CONFIG, new FakeS3({ lock: lockConfig() }));
+    const obs = await sink.observe();
+    expect(obs.mode).toBe("no_default_retention");
+    expect(obs.tamperResistant).toBe(false);
+  });
+
+  it("says false when the bucket has no Object Lock at all", async () => {
+    const sink = new S3ObjectLockSink(S3_CONFIG, new FakeS3({ lock: undefined }));
+    const obs = await sink.observe();
+    expect(obs.mode).toBe("object_lock_absent");
+    expect(obs.tamperResistant).toBe(false);
+  });
+
+  it("FAILS CLOSED when it cannot ask — an unobserved medium is a mutable one", async () => {
+    const sink = new S3ObjectLockSink(S3_CONFIG, new FakeS3({ lockError: new Error("AccessDenied") }));
+    const obs = await sink.observe();
+    expect(obs.mode).toBe("unobserved");
+    expect(obs.tamperResistant).toBe(false);
+    expect(obs.disclosure).toMatch(/AccessDenied/);
+  });
+
+  it("reports false BEFORE it has observed anything", () => {
+    // The getter cannot go and ask (the interface is synchronous), so the
+    // window before the first observation must read as the conservative value.
+    // Too pessimistic is a disclosure; too generous is a lie.
+    const sink = new S3ObjectLockSink(S3_CONFIG, new FakeS3({ lock: lockConfig("COMPLIANCE") }));
+    expect(sink.tamperResistant).toBe(false);
+    expect(sink.lockMode).toBe("unobserved");
+  });
+
+  it("cannot be talked into true by configuration — the env has no such switch", async () => {
+    // Everything an operator can set, set as favourably as it can be set, on a
+    // bucket that answers GOVERNANCE. If this ever comes back true, some flag
+    // has been allowed to overrule the medium.
+    const env = {
+      REGULAIT_AUDIT_ANCHOR_S3_BUCKET: "anchors",
+      REGULAIT_AUDIT_ANCHOR_S3_ENDPOINT: "http://minio:9000",
+      REGULAIT_AUDIT_ANCHOR_S3_ACCESS_KEY_ID: "k",
+      REGULAIT_AUDIT_ANCHOR_S3_SECRET_ACCESS_KEY: "s",
+      REGULAIT_AUDIT_ANCHOR_S3_RETENTION_DAYS: "3650",
+    } as NodeJS.ProcessEnv;
+    const config = resolveS3AnchorConfig(env)!;
+    const sink = new S3ObjectLockSink(config, new FakeS3({ lock: lockConfig("GOVERNANCE") }));
+    await sink.observe();
+    expect(sink.tamperResistant).toBe(false);
+  });
+
+  it("re-asks rather than trusting a stale yes", async () => {
+    // A bucket downgraded from COMPLIANCE to GOVERNANCE must stop being called
+    // tamper-resistant. A cached `true` outliving the fact is the exact lie the
+    // class exists to prevent, so the observation expires.
+    expect(S3_LOCK_OBSERVATION_TTL_MS).toBeGreaterThan(0);
+    expect(S3_LOCK_OBSERVATION_TTL_MS).toBeLessThanOrEqual(300_000);
+  });
+});
+
+describe("ADR-0060: what the S3 sink actually writes", () => {
+  it("locks every anchor in COMPLIANCE mode, for the configured retention", async () => {
+    const fake = new FakeS3({ lock: lockConfig("COMPLIANCE") });
+    const sink = new S3ObjectLockSink({ ...S3_CONFIG, retentionDays: 10 }, fake);
+    const ref = await sink.write({
+      seq: 42,
+      rowHash: "a".repeat(64),
+      headAt: new Date().toISOString(),
+      algorithm: "sha256",
+      payloadVersion: "regulait.audit.v1",
+      capturedAt: new Date().toISOString(),
+    });
+    const put = fake.puts[0]!;
+    expect(put.ObjectLockMode).toBe("COMPLIANCE");
+    const days = (put.ObjectLockRetainUntilDate.getTime() - Date.now()) / 86_400_000;
+    expect(days).toBeGreaterThan(9.9);
+    expect(days).toBeLessThan(10.1);
+    // zero-padded so lexicographic key order IS chain order — readLatest relies
+    // on that instead of sorting a decade of anchors
+    expect(put.Key).toBe(`audit-anchors/anchor-${"0".repeat(18)}42.json`);
+    expect(ref).toBe(`s3://anchors/audit-anchors/anchor-${"0".repeat(18)}42.json`);
+  });
+
+  it("omits the lock headers ONLY on a bucket that positively has no lock", async () => {
+    // S3 rejects a locked PUT to an unlocked bucket. Sending it anyway would
+    // trade a disclosed-weak anchor for NO anchor, which is the worse of the
+    // two — the weak one at least still has to be forged in two places.
+    const fake = new FakeS3({ lock: undefined });
+    const sink = new S3ObjectLockSink(S3_CONFIG, fake);
+    await sink.write({
+      seq: 1,
+      rowHash: "b".repeat(64),
+      headAt: new Date().toISOString(),
+      algorithm: "sha256",
+      payloadVersion: "regulait.audit.v1",
+      capturedAt: new Date().toISOString(),
+    });
+    expect(fake.puts[0]!.ObjectLockMode).toBeUndefined();
+    expect(sink.tamperResistant).toBe(false);
+  });
+
+  it("reads the FIRST version of an anchor, not the current one", async () => {
+    // Object Lock protects a VERSION, not a NAME: writing the same key again is
+    // allowed and makes the attacker's bytes current, with the locked original
+    // underneath. A reader that took the current version would hand the forged
+    // head to verification — the sink would become the vehicle for the forgery
+    // it exists to catch.
+    const original = JSON.stringify({
+      seq: 7,
+      rowHash: "c".repeat(64),
+      headAt: "2026-08-13T00:00:00.000Z",
+      algorithm: "sha256",
+      payloadVersion: "regulait.audit.v1",
+      capturedAt: "2026-08-13T00:00:00.000Z",
+    });
+    const forged = JSON.stringify({
+      seq: 7,
+      rowHash: "d".repeat(64),
+      headAt: "2026-08-13T00:00:00.000Z",
+      algorithm: "sha256",
+      payloadVersion: "regulait.audit.v1",
+      capturedAt: "2026-08-13T00:00:00.000Z",
+    });
+    const key = `audit-anchors/anchor-${"0".repeat(19)}7.json`;
+    const fake = new FakeS3({
+      lock: lockConfig("COMPLIANCE"),
+      // S3 lists versions newest-first
+      versions: [
+        { Key: key, VersionId: "v2-forged" },
+        { Key: key, VersionId: "v1-locked" },
+      ],
+      bodies: { "v1-locked": original, "v2-forged": forged },
+    });
+    const sink = new S3ObjectLockSink(S3_CONFIG, fake);
+    const record = await sink.readLatest();
+    expect(record!.rowHash).toBe("c".repeat(64));
+    expect(fake.gets[0]!.VersionId).toBe("v1-locked");
+  });
+
+  it("takes the HIGHEST seq across keys, not the last one listed", async () => {
+    const mk = (n: number) => `audit-anchors/anchor-${String(n).padStart(20, "0")}.json`;
+    const body = (seq: number) =>
+      JSON.stringify({
+        seq,
+        rowHash: String(seq).padStart(64, "0"),
+        headAt: "2026-08-13T00:00:00.000Z",
+        algorithm: "sha256",
+        payloadVersion: "regulait.audit.v1",
+        capturedAt: "2026-08-13T00:00:00.000Z",
+      });
+    const fake = new FakeS3({
+      lock: lockConfig("COMPLIANCE"),
+      versions: [
+        { Key: mk(9), VersionId: "v9" },
+        { Key: mk(11), VersionId: "v11" },
+        { Key: mk(10), VersionId: "v10" },
+      ],
+      bodies: { v9: body(9), v10: body(10), v11: body(11) },
+    });
+    const sink = new S3ObjectLockSink(S3_CONFIG, fake);
+    expect((await sink.readLatest())!.seq).toBe(11);
+  });
+
+  it("returns null rather than throwing when it cannot read back", async () => {
+    // The terraform writer grant denies s3:GetObject ON PURPOSE, so a
+    // least-privilege install is write-only and lands here every time.
+    // Verification must degrade to the honest weaker source, not 500.
+    const sink = new S3ObjectLockSink(S3_CONFIG, new FakeS3({ lock: lockConfig("COMPLIANCE"), versions: [] }));
+    expect(await sink.readLatest()).toBeNull();
+  });
+
+  it("records the anchor as s3_object_lock, and the destination needs no migration", async () => {
+    const fake = new FakeS3({ lock: lockConfig("GOVERNANCE") });
+    const sink = new S3ObjectLockSink(S3_CONFIG, fake);
+    const result = await captureAnchor(db, sink, null);
+    expect(result!.destination).toBe("s3_object_lock");
+    expect(result!.status).toBe("flushed");
+    expect(result!.externalRef).toMatch(/^s3:\/\/anchors\//);
+    // observed GOVERNANCE, so the anchor the admin just took is reported as
+    // NOT evidence — at the moment they take it, not in a footnote
+    expect(result!.tamperResistant).toBe(false);
+    const row = await db.execute(sql`select destination from audit_anchors where id = ${result!.anchorId}`);
+    expect((row as unknown as { rows: Array<{ destination: string }> }).rows[0]!.destination).toBe("s3_object_lock");
+  });
+});
+
+describe("ADR-0060: sink precedence", () => {
+  const s3Env = {
+    REGULAIT_AUDIT_ANCHOR_S3_BUCKET: "anchors",
+    REGULAIT_AUDIT_ANCHOR_S3_ENDPOINT: "http://minio:9000",
+  } as NodeJS.ProcessEnv;
+
+  it("off beats everything, including a fully configured bucket", () => {
+    expect(resolveAnchorSink({ ...s3Env, REGULAIT_AUDIT_ANCHOR: "off" })).toBeNull();
+  });
+
+  it("a configured bucket beats the local buffer", () => {
+    const sink = resolveAnchorSink(s3Env);
+    expect(sink!.destination).toBe("s3_object_lock");
+  });
+
+  it("falls back to the local buffer when no bucket is named", () => {
+    expect(resolveAnchorSink({ REGULAIT_AUDIT_ANCHOR_S3_ENDPOINT: "http://minio:9000" } as NodeJS.ProcessEnv)!.destination).toBe(
+      "local_worm",
+    );
+    expect(resolveAnchorSink({ REGULAIT_AUDIT_ANCHOR_S3_BUCKET: "   " } as NodeJS.ProcessEnv)!.destination).toBe("local_worm");
+  });
+
+  it("defaults the rest of the S3 config so a named bucket is enough", () => {
+    const config = resolveS3AnchorConfig(s3Env)!;
+    expect(config.prefix).toBe(DEFAULT_S3_ANCHOR_PREFIX);
+    expect(config.retentionDays).toBe(DEFAULT_S3_ANCHOR_RETENTION_DAYS);
+    expect(config.region).toBe("us-east-1");
+    // a custom endpoint means path style: `<bucket>.minio` does not resolve on
+    // a compose network
+    expect(config.forcePathStyle).toBe(true);
+    expect(config.credentials).toBeUndefined();
+    // no endpoint = real AWS = virtual-host addressing
+    expect(resolveS3AnchorConfig({ REGULAIT_AUDIT_ANCHOR_S3_BUCKET: "b" } as NodeJS.ProcessEnv)!.forcePathStyle).toBe(false);
+  });
+
+  it("refuses a nonsense retention rather than locking anchors for zero days", () => {
+    for (const bad of ["0", "-5", "nonsense", ""]) {
+      const config = resolveS3AnchorConfig({ ...s3Env, REGULAIT_AUDIT_ANCHOR_S3_RETENTION_DAYS: bad })!;
+      expect(config.retentionDays).toBe(DEFAULT_S3_ANCHOR_RETENTION_DAYS);
+    }
+    expect(resolveS3AnchorConfig({ ...s3Env, REGULAIT_AUDIT_ANCHOR_S3_RETENTION_DAYS: "30" })!.retentionDays).toBe(30);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// REAL PROOF, against a real S3 Object Lock implementation.
+//
+// Everything above is stubbed, and a stub can only prove that the sink grades
+// an answer correctly — never that the medium enforces anything. The claim on
+// the box is "nobody can rewrite this", and the only way to test that claim is
+// to TRY, with the same credentials the gateway itself holds, against a server
+// that actually implements Object Lock.
+//
+// SKIPS CLEANLY when no such server is reachable, because a suite that silently
+// passed without one would be asserting the guarantee rather than testing it.
+// Point REGULAIT_TEST_S3_ENDPOINT at any S3-compatible endpoint with Object
+// Lock support, or run MinIO with the compose defaults:
+//
+//   minio server /tmp/anchors --address 127.0.0.1:9000
+//   (MINIO_ROOT_USER=regulait MINIO_ROOT_PASSWORD=regulait-dev-minio)
+// -----------------------------------------------------------------------------
+
+const MINIO_ENDPOINT = process.env.REGULAIT_TEST_S3_ENDPOINT ?? "http://127.0.0.1:9000";
+const MINIO_KEY = process.env.REGULAIT_TEST_S3_ACCESS_KEY_ID ?? "regulait";
+const MINIO_SECRET = process.env.REGULAIT_TEST_S3_SECRET_ACCESS_KEY ?? "regulait-dev-minio";
+const minioReachable = await fetch(`${MINIO_ENDPOINT}/minio/health/live`, { signal: AbortSignal.timeout(2_000) })
+  .then((r) => r.ok)
+  .catch(() => false);
+
+describe.skipIf(!minioReachable)("ADR-0060: proof by attack against a REAL Object-Lock bucket", () => {
+  const suffix = randomUUID().slice(0, 8);
+  const COMPLIANCE_BUCKET = `regulait-anchors-compliance-${suffix}`;
+  const GOVERNANCE_BUCKET = `regulait-anchors-governance-${suffix}`;
+  const UNLOCKED_BUCKET = `regulait-anchors-unlocked-${suffix}`;
+
+  /** the credentials the GATEWAY uses — the attacker in these tests is the
+   * gateway's own compromised credential, which is the realistic case */
+  const credentials = { accessKeyId: MINIO_KEY, secretAccessKey: MINIO_SECRET };
+  const s3 = new S3Client({ region: "us-east-1", endpoint: MINIO_ENDPOINT, forcePathStyle: true, credentials });
+
+  /** Each test gets its OWN key prefix in the shared bucket. Not tidiness:
+   * these tests plant fabricated anchors at high `seq` values, and `readLatest`
+   * takes the highest, so a shared prefix would make every later test read some
+   * earlier test's attack payload. Nothing can be cleaned up afterwards either
+   * — that is what COMPLIANCE mode means. */
+  const configFor = (bucket: string, prefix: string) => ({
+    bucket,
+    prefix: `audit-anchors-${prefix}`,
+    region: "us-east-1",
+    endpoint: MINIO_ENDPOINT,
+    forcePathStyle: true,
+    retentionDays: 1,
+    credentials,
+  });
+
+  const anchorAt = (seq: number, rowHash: string) => ({
+    seq,
+    rowHash,
+    headAt: "2026-08-13T00:00:00.000Z",
+    algorithm: "sha256",
+    payloadVersion: "regulait.audit.v1",
+    capturedAt: "2026-08-13T00:00:00.000Z",
+  });
+
+  beforeAll(async () => {
+    // `ObjectLockEnabledForBucket` at CREATION is not a style choice: Object
+    // Lock cannot be turned on afterwards, which is why the compose init
+    // container does exactly this and why a bucket made without it is
+    // unfixable.
+    await s3.send(new CreateBucketCommand({ Bucket: COMPLIANCE_BUCKET, ObjectLockEnabledForBucket: true }));
+    await s3.send(
+      new PutObjectLockConfigurationCommand({
+        Bucket: COMPLIANCE_BUCKET,
+        ObjectLockConfiguration: { ObjectLockEnabled: "Enabled", Rule: { DefaultRetention: { Mode: "COMPLIANCE", Days: 1 } } },
+      }),
+    );
+    await s3.send(new CreateBucketCommand({ Bucket: GOVERNANCE_BUCKET, ObjectLockEnabledForBucket: true }));
+    await s3.send(
+      new PutObjectLockConfigurationCommand({
+        Bucket: GOVERNANCE_BUCKET,
+        ObjectLockConfiguration: { ObjectLockEnabled: "Enabled", Rule: { DefaultRetention: { Mode: "GOVERNANCE", Days: 1 } } },
+      }),
+    );
+    await s3.send(new CreateBucketCommand({ Bucket: UNLOCKED_BUCKET }));
+  }, 60_000);
+
+  // No afterAll cleanup for the compliance bucket, and that is the point: its
+  // objects cannot be deleted for a day by anyone, including this suite.
+
+  it("observes COMPLIANCE from the bucket and only then reports tamper-resistant", async () => {
+    const sink = new S3ObjectLockSink(configFor(COMPLIANCE_BUCKET, "observe"));
+    const obs = await sink.observe();
+    expect(obs.mode).toBe("compliance");
+    expect(obs.tamperResistant).toBe(true);
+  });
+
+  it("observes GOVERNANCE and refuses to call it tamper-resistant", async () => {
+    const sink = new S3ObjectLockSink(configFor(GOVERNANCE_BUCKET, "observe"));
+    expect((await sink.observe()).mode).toBe("governance");
+    expect(sink.tamperResistant).toBe(false);
+  });
+
+  it("observes a plain bucket as unlocked, and still writes to it", async () => {
+    const sink = new S3ObjectLockSink(configFor(UNLOCKED_BUCKET, "observe"));
+    expect((await sink.observe()).mode).toBe("object_lock_absent");
+    await sink.write(anchorAt(1, "e".repeat(64)));
+    expect((await sink.readLatest())!.rowHash).toBe("e".repeat(64));
+    expect(sink.tamperResistant).toBe(false);
+  });
+
+  it("round-trips a real anchor through the real SDK path", async () => {
+    const sink = new S3ObjectLockSink(configFor(COMPLIANCE_BUCKET, "roundtrip"));
+    const ref = await sink.write(anchorAt(100, "f".repeat(64)));
+    expect(ref).toBe(`s3://${COMPLIANCE_BUCKET}/audit-anchors-roundtrip/anchor-${String(100).padStart(20, "0")}.json`);
+    const back = await sink.readLatest();
+    expect(back).toEqual(anchorAt(100, "f".repeat(64)));
+  });
+
+  it("REFUSES to let the gateway's own credential destroy an anchor it wrote", async () => {
+    const sink = new S3ObjectLockSink(configFor(COMPLIANCE_BUCKET, "destroy"));
+    const rowHash = "1".repeat(64);
+    await sink.write(anchorAt(200, rowHash));
+    const key = `audit-anchors-destroy/anchor-${String(200).padStart(20, "0")}.json`;
+
+    const versions = await s3.send(new ListObjectVersionsCommand({ Bucket: COMPLIANCE_BUCKET, Prefix: key }));
+    const versionId = versions.Versions!.find((v) => v.Key === key)!.VersionId!;
+
+    // THE ASSERTION THE WHOLE FEATURE RESTS ON. Not "we asked for COMPLIANCE" —
+    // the server refusing the delete, to the identity that created the object.
+    await expect(
+      s3.send(new DeleteObjectCommand({ Bucket: COMPLIANCE_BUCKET, Key: key, VersionId: versionId })),
+    ).rejects.toThrow(/WORM|retention|denied/i);
+
+    // and it is still there, byte for byte
+    const still = await s3.send(new GetObjectCommand({ Bucket: COMPLIANCE_BUCKET, Key: key, VersionId: versionId }));
+    expect(JSON.parse(await still.Body!.transformToString())).toEqual(anchorAt(200, rowHash));
+  });
+
+  it("survives a MASKING attack: the anchor read back is the locked one, not the attacker's", async () => {
+    // MEASURED, NOT ASSUMED, and it contradicts the naive expectation: S3
+    // Object Lock protects a VERSION, not a NAME. Overwriting the key and
+    // deleting it without a version id are BOTH ALLOWED — the first makes the
+    // attacker's bytes current, the second hides the key behind a delete
+    // marker. Neither is refused, and a sink that read the current version
+    // would hand verification a forged head and call it evidence.
+    //
+    // What the lock guarantees is that the original version survives both. So
+    // the sink reads the FIRST version, and this test is what says that
+    // decision is load-bearing rather than fussy.
+    const sink = new S3ObjectLockSink(configFor(COMPLIANCE_BUCKET, "mask"));
+    const honest = "2".repeat(64);
+    await sink.write(anchorAt(300, honest));
+    const key = `audit-anchors-mask/anchor-${String(300).padStart(20, "0")}.json`;
+
+    // attack 1: overwrite the key with a forged head, same credentials
+    await s3.send(
+      new PutObjectCommand({ Bucket: COMPLIANCE_BUCKET, Key: key, Body: JSON.stringify(anchorAt(300, "3".repeat(64))) }),
+    );
+    expect((await sink.readLatest())!.rowHash).toBe(honest);
+
+    // attack 2: delete the key without naming a version — a delete marker,
+    // which makes a plain ListObjectsV2/GetObject behave as if it were gone
+    await s3.send(new DeleteObjectCommand({ Bucket: COMPLIANCE_BUCKET, Key: key }));
+    expect((await sink.readLatest())!.rowHash).toBe(honest);
+  });
+
+  it("carries the observed mode into the verify report's disclosure", async () => {
+    const sink = new S3ObjectLockSink(configFor(COMPLIANCE_BUCKET, "verify"));
+    await captureAnchor(db, sink, null);
+    const report = await verifyAuditChain(db, sink);
+    expect(report.anchor.source).toBe("worm_sink");
+    expect(report.anchor.sinkMode).toBe("compliance");
+    expect(report.anchor.tamperResistant).toBe(true);
+    expect(report.anchor.disclosure).toMatch(/COMPLIANCE/);
+    // the head just anchored is the head, so nothing is left unpinned
+    expect(report.anchor.matches).toBe(true);
+    expect(report.anchor.unanchoredRows).toBe(0);
+  });
+
+  it("reports GOVERNANCE in the verify report instead of a bare false", async () => {
+    // "not tamper-resistant" is not enough for an admin to act on. The reason —
+    // a privileged principal can still delete this — is what tells them to
+    // change the bucket rather than the anchor cadence.
+    const sink = new S3ObjectLockSink(configFor(GOVERNANCE_BUCKET, "verify"));
+    await captureAnchor(db, sink, null);
+    const report = await verifyAuditChain(db, sink);
+    expect(report.anchor.sinkMode).toBe("governance");
+    expect(report.anchor.tamperResistant).toBe(false);
+    expect(report.anchor.disclosure).toMatch(/BypassGovernanceRetention/);
+  });
+
+  it("lets an attacker raise a FALSE ALARM, never a false pass", async () => {
+    // The one thing a writer with the gateway's credential can still do to a
+    // compliance bucket is ADD: plant an anchor at a `seq` that never existed.
+    // They cannot withdraw it afterwards — the lock cuts both ways. So the
+    // damage is a verification that reports a MISMATCH, which is noisy and
+    // wrong in the SAFE direction. The direction that matters — making a
+    // tampered chain verify clean — stays closed, because they cannot alter
+    // the anchors already written.
+    const sink = new S3ObjectLockSink(configFor(COMPLIANCE_BUCKET, "plant"));
+    await captureAnchor(db, sink, null);
+    expect((await verifyAuditChain(db, sink)).anchor.matches).toBe(true);
+
+    await sink.write(anchorAt(9_000_000, "9".repeat(64)));
+    const report = await verifyAuditChain(db, sink);
+    expect(report.anchor.seq).toBe(9_000_000);
+    expect(report.anchor.matches).toBe(false);
+    expect(report.anchor.actualRowHash).toBeNull();
   });
 });

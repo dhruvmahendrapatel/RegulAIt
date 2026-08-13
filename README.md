@@ -63,6 +63,36 @@ pnpm --filter @regulait/gateway start   # migrations run on boot
 
 Tests (`pnpm -r test`) need `DATABASE_URL` pointing at a scratch database.
 
+### Tamper-evident audit anchoring (no cloud account needed)
+
+The compose stack brings up **MinIO with a real S3 Object Lock bucket in
+COMPLIANCE mode**, created automatically before the gateway starts. Nothing to
+configure — `docker compose up --build` gets it. The audit hash chain's head is
+anchored there, and for the retention period no principal can delete or alter a
+written anchor, so a full-recompute forgery diverges from a head nobody can
+rewrite.
+
+```bash
+curl -s localhost:3000/v1/audit/verify -H "authorization: Bearer dev-bootstrap" | jq .anchor
+# → { "source": "worm_sink", "sinkMode": "compliance", "tamperResistant": true, "disclosure": "…" }
+```
+
+`tamperResistant` is read from the bucket at runtime (`GetObjectLockConfiguration`),
+never from configuration — a GOVERNANCE-mode bucket, a missing default retention,
+or an unreadable lock config all report `false` with a disclosure saying why.
+Point it at real S3 (or any S3-compatible endpoint) by setting
+`REGULAIT_AUDIT_ANCHOR_S3_BUCKET` and friends; `REGULAIT_AUDIT_ANCHOR=off`
+disables anchoring entirely. Decision:
+[ADR-0060](docs/decisions/0060-tamper-evident-audit.md).
+
+> Object Lock protects a **version**, not a name: a later write to the same key
+> adds a version rather than replacing it, so verification deliberately reads
+> the *first* version. It stops edit and forgery — it does not stop the whole
+> volume being destroyed, which is a different and much louder attack.
+>
+> On a dev box those anchors genuinely cannot be deleted for the retention
+> period. To reclaim the space, drop the volume: `docker compose down -v`.
+
 ### TLS
 
 The deployed dev box serves **HTTPS with a real Let's Encrypt certificate** at

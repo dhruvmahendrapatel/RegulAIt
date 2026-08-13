@@ -15,6 +15,7 @@
     "@aws-sdk/client-acm": "^3.700.0",
     "@aws-sdk/client-backup": "^3.700.0",
     "@aws-sdk/client-ecs": "3.1098.0",
+    "@aws-sdk/client-s3": "^3.1109.0",
     "@aws-sdk/client-ssm": "^3.700.0",
     "@aws-sdk/client-sts": "^3.700.0",
     "@azure/arm-compute": "^24.1.0",

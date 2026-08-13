@@ -466,3 +466,164 @@ than code plus a backfill.
 account, and this amendment does not change that. A test pins
 `tamperResistant === false` for the default sink so the claim cannot drift
 upward without the sink that earns it.
+
+---
+
+## Amendment — 2026-08-13 (second): the S3 Object-Lock sink is wired, and it runs locally
+
+Follow-up 1 above — *"the interface and record exist; the writer does not. Until
+it lands, no install has a tamper-resistant anchor"* — is closed. This amendment
+states exactly what that buys and, more importantly, what it does not.
+
+### What shipped
+
+| Piece | Where |
+| --- | --- |
+| `S3ObjectLockSink` — writes anchors under `ObjectLockMode: COMPLIANCE` with a configurable retention | `apps/gateway/src/audit-chain.ts` |
+| `AnchorSink.observe()` + `AnchorSinkObservation` — an optional method for a sink whose immutability is a property of a REMOTE medium | same |
+| `resolveS3AnchorConfig` / `resolveAnchorSink` precedence: `off` → none, S3 bucket configured → S3, else the local buffer | same |
+| `anchor.sinkMode` on `GET /v1/audit/verify`, and the observed disclosure on `GET /v1/audit/anchors` | same |
+| MinIO + a one-shot bucket-creation container, **on by default**, no profile | `docker-compose.yml` |
+| 33 new tests, 9 of them against a real Object-Lock server | `apps/gateway/src/audit-chain.test.ts` |
+
+No migration. `audit_anchors.destination` already permitted `s3_object_lock`;
+migration 0067 declares that column as plain `text NOT NULL` with the enum
+enforced in the Drizzle schema, so nothing needed widening — asserted by a test
+that captures an anchor through the S3 sink and reads the stored value back.
+
+### The rule: `tamperResistant` is OBSERVED, never configured
+
+There is no environment variable that can set that boolean, and that is the
+whole design. On construction the sink calls `GetObjectLockConfiguration` and
+grades what the BUCKET says:
+
+| what the bucket answers | `tamperResistant` | why |
+| --- | --- | --- |
+| Object Lock enabled, default retention **COMPLIANCE** | `true` | nobody can delete the version, including the account root |
+| default retention **GOVERNANCE** | **`false`** | `s3:BypassGovernanceRetention` is a permission an administrator can grant themselves — i.e. the exact adversary this ADR is written about |
+| enabled, no default retention rule | `false` | the bucket compels nothing; immutability would depend on every writer remembering |
+| Object Lock absent | `false` | it is a local directory that happens to be far away |
+| the call errored | `false`, fail closed | an unobserved medium is graded as a mutable one |
+
+Our own `PutObject` asking for COMPLIANCE proves nothing — that request is ours
+to lie about. Only the medium's answer counts. The observation expires after a
+minute rather than being cached for the process lifetime, because a bucket
+downgraded from COMPLIANCE to GOVERNANCE must stop being called tamper-resistant
+without waiting for a restart: a `true` that has silently become false is the
+precise failure this class exists to prevent.
+
+The observed mode is reported, not just the boolean. `anchor.sinkMode:
+"governance"` comes with a disclosure naming `s3:BypassGovernanceRetention`,
+because "not tamper-resistant" does not tell an admin to go and change the
+bucket, and the reason does.
+
+### Measured, and it contradicts the obvious expectation
+
+Run against a real MinIO with a COMPLIANCE bucket, using the same credential the
+gateway writes with:
+
+- `DeleteObject` on the locked **version** — **refused** (`Object is WORM
+  protected`). That is the guarantee, and it holds against the object's own
+  creator.
+- `PutObject` to the **same key** — **ALLOWED.** Object Lock protects a version,
+  not a name. The attacker's bytes become current and the locked original sits
+  underneath.
+- `DeleteObject` with no version id — **ALLOWED.** It writes a delete marker, and
+  a plain `ListObjectsV2`/`GetObject` then behaves as though the anchor is gone.
+
+So a sink that read the current version would have handed verification a forged
+head and called it evidence — the control would have become the vehicle for the
+forgery it exists to catch. `readLatest` therefore lists **versions** and reads
+the **first** version of the highest key. Our writer emits a given `seq` exactly
+once, so the earliest version of a key is by definition the one written under
+lock, and it is the one nobody can change. Both attacks are exercised as tests.
+
+What an attacker with the write credential *can* still do is add a NEW anchor at
+a fabricated higher `seq`. They cannot withdraw it afterwards — the lock cuts
+both ways — and it will not match the table, so verification reports a mismatch.
+They can raise a **false alarm; they cannot manufacture a false pass.** There is
+a test for that asymmetry, because it is the right way round for an integrity
+control and it should stay that way.
+
+### Local by default, and why that is not a downgrade
+
+`docker compose up --build` now brings up MinIO and a one-shot `mc` container
+that creates the anchor bucket **with Object Lock at creation time** (it cannot
+be enabled afterwards) and sets a COMPLIANCE default retention. Not behind a
+profile, unlike `tls`: enabling TLS has a cost outside the box (a failed ACME
+challenge burns a rate limit), this has none, and an audit anchor that needs an
+extra flag is one most installs will not have.
+
+This is the same code path a customer runs. Object Lock is an S3 API contract,
+not an AWS feature; endpoint, region, credentials, path-style and retention are
+configuration, so the gateway talks to MinIO on a laptop, to a customer's
+on-prem object store in an air-gapped install, and to real AWS S3 through one
+`S3ObjectLockSink`. Pointing an install at
+`infra/modules/audit-anchor-worm-s3`'s bucket is a `.env` change. Retention
+defaults to 365 days, matching that module's `retention_days`, so the two cannot
+drift into an anchor that expires before the rows it pins.
+
+### What this does NOT buy — stated plainly, because the temptation is to round it up
+
+**Compliance-mode Object Lock prevents EDIT and FORGERY of an anchor. It does
+not prevent DESTRUCTION.** Someone with host or Docker access can drop the
+`minio_data` volume, and someone with the customer's cloud account can close the
+account; neither is stopped by anything here, and no amount of retention
+configuration changes that.
+
+Those are different attacks and they fail differently, which is the point:
+
+- **Destruction is LOUD.** The anchor is missing, and verification says so —
+  `anchor.source` falls back to `"database"` with `tamperResistant: false`, or
+  to `"none"`. An auditor sees an absence where evidence should be.
+- **Forgery is SILENT.** A full recompute by an adversary with total database
+  write is internally consistent and passes local verification with no signal at
+  all. That is the attack this sink closes, and it is the one worth closing,
+  because the other one announces itself.
+
+Nothing else in the earlier threat model moves. The residual window
+(`unanchoredRows`) is unchanged — rows written since the last anchor are not
+pinned. `LocalWormSink` still reports `tamperResistant: false` and the test
+pinning that is still there. An adversary who holds both the database and the
+anchor store is still outside this control's reach, which remains the argument
+for the customer holding their own bucket in BYOC, and for an independent
+transparency log that nobody here holds yet.
+
+### Verification of this change
+
+`tsc --noEmit` clean. `apps/gateway/src/audit-chain.test.ts`: **65 tests, all
+green** (33 new). The 9 real-server tests run against any S3-compatible
+endpoint with Object Lock (`REGULAIT_TEST_S3_ENDPOINT`, default
+`http://127.0.0.1:9000` with the compose credentials) and **skip cleanly when
+none is reachable** — a suite that passed silently without one would be
+asserting the guarantee rather than testing it.
+
+The new tests were confirmed non-vacuous by breaking the implementation four
+ways and watching them go red: grading GOVERNANCE as compliant (5 fail),
+reading the current version instead of the first (2 fail, including the real
+masking attack), dropping `ObjectLockMode` from the write (7 fail, including the
+delete-refused test — i.e. that test passes only because the object is genuinely
+locked), and failing open when the lock configuration cannot be read (1 fail).
+
+### Follow-ups this leaves open
+
+1. **The compose credential is MinIO's root user.** Fine for a laptop, wrong
+   anywhere shared: a real deployment wants a scoped user that can `PutObject`
+   under the prefix and nothing else — the MinIO equivalent of the terraform
+   writer grant, which deliberately withholds delete, retention-shortening and
+   lock-weakening.
+2. **The terraform writer grant cannot read anchors back**, by design
+   (`s3:GetObject` is denied). `readLatest` degrades honestly to `null` and
+   verification falls back to the database row, but a *reader* credential with
+   `s3:GetObject` + `s3:ListBucketVersions` is what makes a least-privilege
+   install able to verify against its own WORM copy. It does not exist yet.
+3. **An independent external transparency log** — still nobody's. The ADR is
+   explicit that no single party should hold both the WORM copy and the log,
+   and today the same operator holds the only copy.
+4. **Anchor cadence and retention into the compliance cascade** (unchanged from
+   the first amendment's follow-up 5). 365 days is a default, not a judgement
+   about any workload.
+5. **Destruction detection.** Verification reports a missing anchor, but nothing
+   alerts on one. "The anchor store went empty" is exactly the kind of loud
+   event that should reach the approvals/alerting path rather than waiting for
+   someone to call the endpoint.
