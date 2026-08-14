@@ -2109,6 +2109,24 @@ region-allowlist SCP; OQ-002 (budget cap) resolved to $5/month; OQ-003 (GitHub a
 to personal `dhruvmahendrapatel`.
 
 ## Known follow-ups (not urgent, not blocking)
+- **`planning` is a vocabulary item, not a control (pillar 2 §2 stage 2).** The workflow spec
+  says a planning stage is "forced planning-only reasoning first — no code/state mutation
+  possible in this stage." The kernel is honest in its comment ("planning is a mode marker, not
+  a blocker here") and auto-completes it, so an instance never rests there and nothing consumes
+  the marker. The *ordering* guarantee is real and verified — nothing can build before sign-off,
+  because the build stage sits after the approval gate and `runGitExecutions` re-validates the
+  current stage under a row lock. What is missing is narrower: while a change is being planned,
+  a direct `POST /v1/agents/:id/invoke` with `mode: "execute"` is not constrained by the
+  instance. Closing it needs invoke→instance attribution, which does not exist today (the invoke
+  body carries `projectId`, never an `instanceId`) — a feature, not a fix. Until then the spec
+  sentence is stronger than the code; noted here so nobody quotes it as shipped.
+- **A deploy-override still has no second party.** ADR-0022's 2026-08-13 amendment made the
+  initiator's self-attestation loud (recorded reason + `workflow:deploy-override-attested`), but
+  routing the override to a genuine approver is the stronger control and needs a routing policy
+  to say *who*.
+- **Deployment-wide PII floor for unattributed dispatches.** Raised with the owner, unanswered:
+  today the §8.4 PII gate is project-scoped by design, so a dispatch attributed to no project is
+  ungated. Worth an explicit decision either way.
 - Security Hub's default standards enabled **both** AWS Foundational Security Best Practices and
   CIS AWS Foundations Benchmark v1.2.0 (the latter wasn't explicitly requested — AWS enables it
   by default alongside FSBP). Harmless; disable the CIS subscription later if its findings become
