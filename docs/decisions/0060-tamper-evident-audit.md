@@ -627,3 +627,39 @@ locked), and failing open when the lock configuration cannot be read (1 fail).
    alerts on one. "The anchor store went empty" is exactly the kind of loud
    event that should reach the approvals/alerting path rather than waiting for
    someone to call the endpoint.
+
+## Amendment — 2026-08-13: the terraform default stays GOVERNANCE (owner decision)
+
+The local-WORM amendment above left one question open: local compose now
+defaults to COMPLIANCE, while `infra/modules/audit-anchor-worm-s3` still
+defaults `object_lock_mode` to GOVERNANCE — so a laptop is *stronger* than the
+unapplied AWS default. Put to the owner; **the decision is to keep GOVERNANCE as
+the terraform default.** No terraform was changed, and none has been applied.
+
+The asymmetry is deliberate, and the reason it is not an inconsistency is that
+the two defaults answer different questions:
+
+- **Compose is disposable.** A COMPLIANCE bucket on a laptop costs a
+  `docker compose down -v` to reclaim, and the dev box is exactly where an
+  operator should meet the real behaviour — including the surprise that the
+  anchors genuinely cannot be deleted. Shipping the weaker mode locally would
+  teach the wrong lesson in the one place the lesson is free.
+- **A cloud bucket is not disposable.** COMPLIANCE cannot be shortened, lifted
+  or bypassed by anyone, including the account root, until retention expires —
+  and the module's default retention is 365 days. A terraform default that
+  quietly creates a year of undeletable objects in someone's AWS account is a
+  default that makes an irreversible decision on a human's behalf. That is the
+  same reasoning as CLAUDE.md's standing production guardrail: the irreversible
+  step is the one that gets an explicit human yes.
+
+So COMPLIANCE in the cloud stays **opt-in by a human who has read the paragraph
+at `main.tf:36`**, which already says GOVERNANCE does not deliver the guarantee
+this ADR is written against.
+
+This costs nothing in honesty, because the grading is observed rather than
+configured: a GOVERNANCE bucket reports `tamperResistant: false` from
+`/v1/audit/verify` with a disclosure naming `s3:BypassGovernanceRetention` as
+the reason. An install that takes the default is told, in the product, that it
+has accident-resistance and not evidence. The weaker default can never
+masquerade as the stronger one — which is what makes leaving it weak
+acceptable.
