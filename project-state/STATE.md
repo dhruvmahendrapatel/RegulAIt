@@ -2127,17 +2127,16 @@ region-allowlist SCP; OQ-002 (budget cap) resolved to $5/month; OQ-003 (GitHub a
 to personal `dhruvmahendrapatel`.
 
 ## Known follow-ups (not urgent, not blocking)
-- **`planning` is a vocabulary item, not a control (pillar 2 §2 stage 2).** The workflow spec
-  says a planning stage is "forced planning-only reasoning first — no code/state mutation
-  possible in this stage." The kernel is honest in its comment ("planning is a mode marker, not
-  a blocker here") and auto-completes it, so an instance never rests there and nothing consumes
-  the marker. The *ordering* guarantee is real and verified — nothing can build before sign-off,
-  because the build stage sits after the approval gate and `runGitExecutions` re-validates the
-  current stage under a row lock. What is missing is narrower: while a change is being planned,
-  a direct `POST /v1/agents/:id/invoke` with `mode: "execute"` is not constrained by the
-  instance. Closing it needs invoke→instance attribution, which does not exist today (the invoke
-  body carries `projectId`, never an `instanceId`) — a feature, not a fix. Until then the spec
-  sentence is stronger than the code; noted here so nobody quotes it as shipped.
+- ~~`planning` is a vocabulary item, not a control~~ **CLOSED 2026-08-15 by
+  [ADR-0079](../docs/decisions/0079-plan-only-stage-enforcement.md).** The kernel now RESTS at a
+  planning stage (`blocked_on_plan`, left by an explicit `/advance`), an invoke may name an
+  `instanceId` (validated on the initiator-or-admin bar), and a mutating mode against an instance
+  parked there is refused `409 plan_only_stage` before dispatch, cache or billing. The
+  mutating-mode rule is an ALLOW-LIST (`plan/review/chat/ask/read`) so a mode invented later fails
+  closed. Honest limits kept in the ADR: attribution is OPT-IN (an invoke naming no instance is as
+  unconstrained as before — mandatory attribution would need its own floor decision, like
+  ADR-0021's), the rule binds declared intent rather than prompt semantics, and the MCP/compat
+  paths carry no instanceId.
 - **A deploy-override still has no second party.** ADR-0022's 2026-08-13 amendment made the
   initiator's self-attestation loud (recorded reason + `workflow:deploy-override-attested`), but
   routing the override to a genuine approver is the stronger control and needs a routing policy
