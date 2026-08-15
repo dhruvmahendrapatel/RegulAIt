@@ -1,5 +1,5 @@
 ---
-phase: brand-and-ui-structure-adopted
+phase: feature-review-wave-closed-and-market-queue-building
 last_updated: 2026-08-13
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
@@ -20,6 +20,24 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-08-15 — the ten-slice feature review is CLOSED and the market-analysis build queue is
+under way.** Every pillar was driven end-to-end and attacked with probes written to fail if
+enforcement regressed. Four governance holes were found live and closed (inert server grant;
+the semantic cache as a PII bypass; the self-review guard not surviving a delegation; the
+deploy-override with no second party), one ledger-honesty defect fixed (a refused dispatch
+claiming pillar-6 savings), and pillar 7's inheritance attacked and found genuinely holding.
+Local WORM anchoring (MinIO Object Lock, COMPLIANCE, observed grading) ships in compose by
+default; the deployment-wide PII floor closed the attribution dodge; `mistakes.md` is now an
+owner-mandated bootstrap read. A fresh market analysis
+([MARKET_ANALYSIS_2026-08.md](../docs/product/MARKET_ANALYSIS_2026-08.md)) found the gateway
+category absorbed by security vendors and named the **compliance cascade as the single most
+defensible claim** — so three queue items shipped against it: the P5 cost-reconciliation +
+roster wedge (ADR-0076), the cascade as the demo's headline path plus a cascade-derived
+template gallery (ADR-0077), and the tighten-only delegation conformance contract (ADR-0078).
+Gateway suite **2108 passing / 126 files**; GitHub Actions are exhausted, so internal
+validation on fresh scratch databases is the gate. The queue's top two items (a live model
+provider, live-instrument verification) are blocked on credentials the owner keeps parked.
 
 **ADR-0075 shipped, 2026-08-13 — [the regulAIt brand package and the regulAIt UI Structures contract are adopted in the SPA](../docs/decisions/0075-brand-identity-and-ui-structure-adoption.md).
 NO MIGRATION — this is presentation only; no schema, no API, no governance semantics.** The owner
