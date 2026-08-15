@@ -30,15 +30,23 @@ Then open **http://localhost:3000/ui** and sign in with a username (not an email
 plus the one-time password from that log. Each persona is forced to set a real
 password on first sign-in.
 
-- **dana** (requester) — start in **Chat**: the mock agents reply instantly with
-  streamed output and a full governance/routing/cost trace, no external API keys needed.
-  Then check **Runs** (auto-advance the seeded multi-agent run) and **Workflows**.
-- **avery** (approver) — the **Inbox** has a real sign-off waiting.
+The headline is the **compliance cascade** (§8.3): one `hipaa` tag on a project forces a
+sign-off stage, blocks PII, and floors audit retention — nobody configured any of it per-change.
+
+- **dana** (requester) — start in **Chat** billed to *hipaa-project*: paste a prompt with an
+  SSN (e.g. 123-45-6789) and watch it **denied before the model runs** (red "PII blocked"
+  badge, zero cost) — that's the tag's `piiMode`. The mock agents need no external API keys.
+  Then check **Runs** and **Workflows**.
+- **avery** (approver) — the **Inbox** holds the cascade story: *"Redact and export the
+  oncology cohort (PHI)"* is parked at **compliance-signoff**, a stage no rule routed — the
+  tag cascaded it into an ordinary feature change. Two more sign-offs wait behind it.
 - **admin** — the whole governance console lives in the same shell: **Rules engine**,
-  **Approvals queue**, **Audit log**, **Cost dashboard**. Add a model credential under
-  **Model credentials** (anthropic/openai/google/xai) and the corresponding seeded agents
-  start doing real dispatches. On a self-hosted box you can skip the paste and set the
-  provider's API-key env var instead (below) — Chat then defaults to Claude automatically.
+  **Approvals queue**, **Audit log** (see the seeded `pii-blocked` deny; retention floored
+  at the tag's 2555 days), **Cost dashboard**, and under **Workflows** a **template gallery**
+  whose stages are annotated live with which compliance profiles demand them. Add a model
+  credential under **Model credentials** (anthropic/openai/google/xai) and the corresponding
+  seeded agents start doing real dispatches; on a self-hosted box set the provider's API-key
+  env var instead (below).
 
 > **`/ui` is the whole product surface.** The single-file `/app` and `/admin` shells were
 > deleted by [ADR-0033](docs/decisions/0033-delete-legacy-template-literal-uis.md); those paths

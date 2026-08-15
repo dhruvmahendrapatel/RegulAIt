@@ -982,6 +982,56 @@ if (!averyInstances.some((i: Json) => i.change?.description === AVERY_CHANGE)) {
   );
 }
 
+// --- THE CASCADE HEADLINE (§8.3, MARKET_ANALYSIS 2026-08 §3 → item 4) ------
+// One compliance tag on hipaa-project does all the forcing; nobody configured
+// any of it per-change. Dana proposes an ordinary 'feature' change on the
+// HIPAA project: the assignment rule routes standard-change, and the project's
+// classification cascades sensitive-data in ON TOP. The requirements artifact
+// is submitted and the standard sign-off approved, so the instance comes to
+// rest EXACTLY at 'compliance-signoff' — the stage that exists only because of
+// the tag — pending in Avery's inbox on first open. The same tag already
+// blocks an SSN prompt in Dana's chat (piiMode) and floors audit retention at
+// 2555d. Idempotent by description, like every instance seed here.
+const CASCADE_CHANGE = "Redact and export the oncology cohort (PHI)";
+{
+  const danaInstances3 =
+    (await call("GET", "/v1/workflows/instances", undefined, danaAuth)).instances ?? [];
+  if (!danaInstances3.some((i: Json) => i.change?.description === CASCADE_CHANGE)) {
+    const inst = await call(
+      "POST",
+      "/v1/workflows/instances",
+      {
+        projectId: hipaaProjectId,
+        change: {
+          description: CASCADE_CHANGE,
+          paths: ["src/phi/cohort-export.ts"],
+          changeType: "feature",
+          environment: "staging",
+        },
+      },
+      danaAuth,
+    );
+    await call(
+      "POST",
+      `/v1/workflows/instances/${inst.id}/artifacts`,
+      {
+        stageId: "requirements",
+        content:
+          "# Requirements: oncology cohort export\n\n1. Export carries identifiers, timestamps and " +
+          "purpose-of-use codes — never clinical content.\n2. Every export is itself an audited event " +
+          "with a named requester.\n3. Redaction runs before anything leaves the clinical boundary.",
+      },
+      danaAuth,
+    );
+    // Avery approves the STANDARD sign-off so the instance advances to the
+    // cascade-forced compliance gate and parks there — that pending row is the
+    // cascade story sitting in his inbox.
+    const view = await call("GET", `/v1/workflows/instances/${inst.id}`, undefined, averyAuth);
+    const gate = (view.pendingApprovals ?? []).find((a: Json) => a.stageId === "signoff");
+    if (gate) await call("POST", `/v1/approvals/${gate.id}/decide`, { decision: "approved" }, averyAuth);
+  }
+}
+
 // --- deploy-verify-rollback pipeline (pillar 2 tail, ADR-0015) -------------
 // A governed MOCK deploy target + a deploy→verify→rollback template, driven to
 // rest at the three newer workflow statuses so every state has a live example
@@ -1175,6 +1225,23 @@ RegulAIt demo data ready.
     dana   ${keys.dana}
     avery  ${keys.avery}
 ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecret}\n` : ""}
+  THE HEADLINE — the §8.3 compliance cascade, live out of the box. ONE tag
+  ('hipaa' on hipaa-project) forces everything below; nobody configured any of
+  it per-change:
+    · avery  Inbox: '${CASCADE_CHANGE}' is parked at
+             'compliance-signoff' — a stage no assignment rule routed; the tag
+             cascaded the sensitive-data template into an ordinary feature
+             change (watch: approving it completes the governed flow).
+    · dana   Chat billed to hipaa-project: paste a prompt containing an SSN
+             (e.g. 123-45-6789) — DENIED before the model runs, red 'PII
+             blocked' badge, zero cost (the tag's piiMode 'block'; the seed
+             already left one such deny in /admin → Audit).
+    · admin  /admin → Workflows: the template GALLERY annotates, per stage,
+             which compliance profiles demand it — derived live from the same
+             cascade rules, so editing the profile moves the gallery. Audit
+             retention is floored at the tag's 2555 days; the hipaa backup
+             target's 2555d retention floor overrides its own 30d policy.
+
   Governance: 2 MCP servers with 8 tools (read + write), a 'repo-analyst' role
   granting read-only-all, per-user tool grants layered on top, 2 revocations,
   scoped policy rules (user + a FLEET write-approval + a ROLE-scoped rate limit,
@@ -1250,7 +1317,8 @@ ${pmWebhookSecret ? `\n    demo-pm webhook secret (shown ONCE)  ${pmWebhookSecre
   git connections.
 
   Still to do in the demo — nothing is seeded finished:
-    · avery  Inbox: TWO workflow sign-offs (standard + the pipeline);
+    · avery  Inbox: THREE workflow sign-offs (standard + the pipeline + the
+             cascade-forced compliance gate above);
              Workflows: an instance awaiting its requirements artifact;
              Runs: a planned run to start.
     · dana   Inbox: a shared-context conflict to arbitrate; Runs: a node
