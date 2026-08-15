@@ -2124,6 +2124,13 @@ to personal `dhruvmahendrapatel`.
   initiator's self-attestation loud (recorded reason + `workflow:deploy-override-attested`), but
   routing the override to a genuine approver is the stronger control and needs a routing policy
   to say *who*.
+- **Two pillar-6 savings-semantics questions (slice-5 probe, 2026-08-15), deliberately not decided in code:**
+  (a) a semantic-cache HIT on a budget-blocked project is served (the cache sits before the
+  budget gate) — $0 spend, but the `semantic_caching` savings row claims an avoided dispatch
+  that would itself have been refused; (b) decision-only invokes write a `model_routing`
+  estimate row with savings although nothing dispatches (pinned behaviour). Both are honest
+  as estimates, misleading if the dashboard is ever read as "realized savings" — an owner
+  call on reporting semantics, not a code defect.
 - ~~Deployment-wide PII floor for unattributed dispatches~~ **RESOLVED 2026-08-13** — owner said
   build it. ADR-0021 amendment: `defaultPiiMode` now governs wherever no compliance framework
   does, including unattributed model/connector/MCP/cache/streaming/training-ingest calls.
