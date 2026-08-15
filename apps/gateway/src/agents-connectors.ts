@@ -3016,6 +3016,26 @@ export function registerAgentConnectorRoutes(
         }
       }
 
+      // PILLAR-6 HONESTY: the per-technique cost_events rows below are only
+      // ESTIMATES for the dispatch this handler is about to attempt. They used
+      // to be inserted eagerly, BEFORE performDispatch — but the dispatch core
+      // still holds refusal gates of its own (virtual-key ceiling, MRM,
+      // project budget, §8.4 PII, ADR-0042 guardrail input, egress, missing
+      // credential), so a dispatch those gates refused had already left
+      // phantom savings rows attributed to the project. That is the same
+      // disease the enforceProjectInputPii hoist fixed for PII only (see its
+      // comment), proved by probe: a 409 project_budget_exceeded left a
+      // model_routing row claiming savings for a call that never ran. So the
+      // rows are STAGED here and flushed only once the outcome is known: a
+      // decision-only invoke flushes immediately (the routing DECISION is the
+      // deliverable, pinned behaviour), a dispatching invoke flushes only on a
+      // successful outcome — bill-and-withhold outcomes included, because that
+      // dispatch really ran and really billed.
+      const pendingCostEvents: Array<typeof costEvents.$inferInsert> = [];
+      const flushPendingCostEvents = async () => {
+        if (pendingCostEvents.length > 0) await db.insert(costEvents).values(pendingCostEvents);
+      };
+
       const registry = await db.select().from(agents).where(eq(agents.enabled, true));
       const entitled = registry.filter(
         (a) =>
@@ -3171,7 +3191,7 @@ export function registerAgentConnectorRoutes(
       // passthrough, org toggle on, still records its passthrough decision,
       // exactly as today).
       if (org.routingEnabled) {
-        await db.insert(costEvents).values({
+        pendingCostEvents.push({
           userId,
           objectType: "agent",
           objectId: agent.id,
@@ -3208,7 +3228,7 @@ export function registerAgentConnectorRoutes(
           servedRow?.costPerMTokIn != null
             ? Number(((convoContext.savedTokensEst / 1e6) * servedRow.costPerMTokIn).toFixed(6))
             : null;
-        await db.insert(costEvents).values({
+        pendingCostEvents.push({
           userId,
           objectType: "agent",
           objectId: agent.id,
@@ -3278,7 +3298,7 @@ export function registerAgentConnectorRoutes(
                 ).toFixed(6),
               )
             : null;
-        await db.insert(costEvents).values({
+        pendingCostEvents.push({
           userId,
           objectType: "agent",
           objectId: agent.id,
@@ -3323,7 +3343,7 @@ export function registerAgentConnectorRoutes(
           servedRow?.costPerMTokOut != null
             ? Number(((editPlan.estimatedTokensSaved / 1e6) * servedRow.costPerMTokOut).toFixed(6))
             : null;
-        await db.insert(costEvents).values({
+        pendingCostEvents.push({
           userId,
           objectType: "agent",
           objectId: agent.id,
@@ -3360,7 +3380,7 @@ export function registerAgentConnectorRoutes(
           servedRow?.costPerMTokIn != null
             ? Number(((fpp.estimatedTokensSaved / 1e6) * servedRow.costPerMTokIn).toFixed(6))
             : null;
-        await db.insert(costEvents).values({
+        pendingCostEvents.push({
           userId,
           objectType: "agent",
           objectId: agent.id,
@@ -3526,6 +3546,12 @@ export function registerAgentConnectorRoutes(
       // the payload the JSON path returns. Denials never reach this branch
       // (they respond as plain JSON before any stream opens), and the audit
       // row + usage ledger are written identically after completion.
+      //
+      // A DECISION-ONLY invoke first: nothing further can refuse it, so the
+      // staged estimate rows (only model_routing can be pending here) land now
+      // — the routing decision itself is the recorded event, exactly as before.
+      if (!body.dispatch) await flushPendingCostEvents();
+
       if (body.dispatch && useStream) {
         reply.hijack();
         reply.raw.writeHead(200, {
@@ -3549,6 +3575,9 @@ export function registerAgentConnectorRoutes(
           onText: (delta) => send("delta", { text: delta }),
           virtualKey: invokeVirtualKey,
         });
+        // savings are only claimed for work that happened (see the staging
+        // comment above) — a refused/failed stream leaves the ledger untouched
+        if (outcome.ok) await flushPendingCostEvents();
         await persistTurns(outcome);
         await storeSemanticCacheIf(outcome);
         await db.insert(auditLog).values({
@@ -3608,6 +3637,9 @@ export function registerAgentConnectorRoutes(
           cacheSystem: promptCache.cacheSystem,
           virtualKey: invokeVirtualKey,
         });
+        // savings are only claimed for work that happened (see the staging
+        // comment above) — a refused/failed dispatch leaves the ledger untouched
+        if (dispatchOutcome.ok) await flushPendingCostEvents();
         await persistTurns(dispatchOutcome);
         await storeSemanticCacheIf(dispatchOutcome);
       }
