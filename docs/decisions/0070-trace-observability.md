@@ -346,3 +346,186 @@ Read this before citing anything above.
   free to move while the feature settles, and pinning a one-week-old data model into the published
   contract would be a promise nobody should make yet.
 - The SPA gains `/admin/traces` under **Governance**, beside the audit log.
+
+---
+
+## Amendment — 2026-08-15: the two disclosed gaps, closed
+
+*This section is appended. Nothing above it has been edited; the Accepted decision stands as
+written, and this records only what has changed since. Where a statement above is now false, this
+amendment says so explicitly rather than leaving the reader to reconcile them.*
+
+Two of the "What this explicitly does NOT give you" items were the same kind of defect the rest of
+this repository keeps correcting — **a promise the code does not keep, and a number whose meaning
+inverts** — so both are closed here rather than carried.
+
+### Gap A — three declared span kinds nothing wrote (in fact FOUR)
+
+Disclosure 2 named `connector`, `workflow_stage` and `eval_case` as declared span kinds with no
+writer. A pre-work grep of every `recordSpan`/`openSpan` call site found the disclosure itself was
+incomplete: **`guardrail` was a fourth**, declared in `TRACE_SPAN_KINDS` and in migration 0082's
+CHECK constraint, emitted by nothing, and named nowhere in this ADR. Six kinds were written
+(`run`, `run_node`, `llm`, `fallback_hop`, `tool`, `policy`); four were vocabulary only.
+
+A span-kind list is a claim about coverage. Three of the four are now written by real seams and
+the fourth is **removed**, on the rule that a kind is either emitted where a genuine seam exists
+or deleted — never left as a label.
+
+**`connector` — emitted at `POST /v1/connectors/:connectorId/invoke`.** This is where customer data
+actually moves, so a trace that showed only the connector calls that succeeded would lose exactly
+the records that matter. It is recorded by a **wrapper**, for the same reason the dispatch core's
+span is: the handler has fourteen exits and eleven of them are refusals. The governed body now
+answers into a small recorder (`ConnectorReplyRecorder`) instead of the Fastify reply, and one span
+is written from whatever came back — so a fifteenth refusal added below cannot forget to be traced,
+because nothing in the body mentions tracing. The span REFERENCES the `usage_events` row the call
+billed (`.returning({ id })` at the one insert) and copies its figure from it in the same call;
+input/output previews ride the existing §8.4/ADR-0042 posture, with a `pii_blocked` /
+`guardrail_blocked` refusal storing the refusal string rather than the payload the block refused.
+**Polarity**: every 4xx this route produces is a DECISION (entitlement, PII, guardrail, egress,
+missing credential, unrecognised provider) and records as `denied`; only a 5xx — a 502 from the
+upstream connector, a 503 for a missing data key — is an `error`. That is the same line
+`dispatchOnce` draws when it calls `model_dispatch_failed` its one non-decision.
+
+**`workflow_stage` — emitted at `applyEvent`,** the ONE choke point every workflow state change
+goes through (sign-off, abort, artifact submission, a failing required check, a blocked deploy, a
+rollback, a nested-run completion). `traceForRoot` gives one tree per INSTANCE keyed on the
+instance id, so a multi-day workflow reads as one thing and each transition is a sibling span in
+`seq` order. `approval_denied`, `abort`, `check_failed` and `deploy_blocked` are `denied` spans —
+a human or a required gate refusing to let a change proceed is the workflow engine *working*.
+`execution_failed` is the one non-decision and records as `error`. A transition the precondition
+skipped writes nothing, because nothing changed.
+
+**`eval_case` — emitted in `runEvalSuite`'s case loop,** closing the gap disclosure 2 described
+precisely ("an eval's dispatches DO produce `llm` spans, they are simply not grouped under an
+eval-run tree"). One `eval` trace per run, one `eval_case` span per case, and the governed dispatch
+hangs UNDER its case because the case span is passed down as the parent context — the same nesting
+`run → run_node → llm` uses, from the same primitive. A dispatch the platform refused closes the
+case span via **`classifyDispatchFailure`**, the same shared classifier ADR-0072 unified the
+red-team paths onto, so `denied` and `error` cannot drift apart here into a third opinion. **A low
+score is NOT a failed span** — a measurement is not a fault, and only the judge instrument falling
+over makes a case span anything other than `ok`. The `eval_results` row still scores a blocked
+dispatch 0, unchanged, exactly as ADR-0072 §2.2 decided.
+
+**`guardrail` — REMOVED from `TRACE_SPAN_KINDS` rather than given a writer.** An ADR-0042 verdict
+is not a call that was ATTEMPTED; it is a property OF one, and it is already carried by the span it
+acted on — the verdict in `attributes.guardrails`, a withholding in `content_withheld`, and a BLOCK
+*is* that span's `denied` status with `guardrail_blocked` as its reason. A child `guardrail` span
+would restate what its parent already says (violating this ADR's rule 1) and would double-count the
+refusal in `traces.denied_span_count`. It is also the alternative this ADR already rejected under
+"emitting a span on every governance evaluation everywhere".
+
+**What keeps this true**: `tracing.test.ts` now enumerates `TRACE_SPAN_KINDS` and requires every
+member to have been written by a path *that file itself drove*, restricted to its own users so a
+sibling suite cannot lend it a kind. It asserts the converse too (nothing writes a kind the
+vocabulary has never heard of), and that `guardrail` is in neither set. Adding a kind to the list
+without a writer turns it red.
+
+**Deliberately not done**: migration 0082's `trace_spans_kind_check` still PERMITS `'guardrail'`.
+A CHECK is a bound on what may be written, not a claim about what is; narrowing it would cost a
+schema migration for no behavioural change.
+
+### Gap B — a governance DENY exported as OTel status ERROR
+
+Disclosure 8 stated the problem in its own words: *"In someone else's Grafana, a governance refusal
+will look like a failure."* That is the **third** appearance of the inversion ADR-0057 and ADR-0072
+fixed twice elsewhere — a guardrail-BLOCKED probe scored as a defeat, a missing judge scored as a
+bad answer, and now **defences working exported identically to defences failing**. For a product
+whose entire pitch is that it is the thing that refuses, an export format in which its refusals are
+indistinguishable from its outages is not a fidelity loss to disclose; it is a bug to fix.
+
+The original reasoning was that OTel's status enum "has exactly three members and none of them means
+'deliberately refused'", so `UNSET` would hide a refusal from an error filter. The premise is true
+and the conclusion does not follow: making a refusal *visible as an outage* is worse than making it
+invisible, because it manufactures incidents out of the product working. The correct place for the
+distinction is an **attribute**, which is what a trace backend actually filters on.
+
+**The mapping, checked against the specification on 2026-08-15 rather than recalled:**
+
+| RegulAIt status | OTel StatusCode | basis |
+|---|---|---|
+| `ok` | `Ok` (1) | unchanged |
+| `denied` | **`Unset` (0)** | the operation contains no error |
+| `error` | `Error` (2) | unchanged |
+| `running` | `Unset` (0) | unchanged |
+
+- **OpenTelemetry trace API specification**, `specification/trace/api.md`
+  (`open-telemetry/opentelemetry-specification`, `main`, retrieved 2026-08-15): the three codes are
+  `Unset` — *"The default status"*; `Ok` — *"validated by an Application developer or Operator to
+  have completed successfully"*; `Error` — *"The operation contains an error."* A governance refusal
+  contains no error. The same spec: `Description` *"MUST only be used with the `Error` `StatusCode`
+  value"* and *"MUST be IGNORED for `StatusCode` `Ok` & `Unset`"* — which is why a denied span now
+  carries **no status message at all** and its reason rides an attribute instead. Leaving the reason
+  in the status message would have put it in a field receivers are required to discard.
+- **OpenTelemetry HTTP semantic conventions**, `docs/http/http-spans.md`
+  (`open-telemetry/semantic-conventions`, `main`, retrieved 2026-08-15), supply the precedent for
+  the exact shape of this call: *"For HTTP status codes in the 4xx range span status MUST be left
+  unset in case of `SpanKind.SERVER` and SHOULD be set to `Error` in case of `SpanKind.CLIENT`."*
+  A deliberate 4xx issued **by** the instrumented server is not that server's error. A pillar-1
+  refusal is that case exactly: the gateway, acting as the server, refused its caller. The CLIENT
+  half of the rule does not reach us — a denied span never made an upstream request, so there is no
+  upstream status to reflect.
+- **`error.type`** (`open-telemetry/semantic-conventions`, `docs/registry/attributes/error.md`,
+  retrieved 2026-08-15): *"Describes a class of error the operation ended with"*, and
+  instrumentations *"SHOULD NOT set `error.type`"* when the operation completed successfully.
+
+**The distinction is queryable by attribute, not by prose.** `regulait.outcome` is emitted on
+**every** span (`ok` | `denied` | `error` | `running`), so `regulait.outcome = "denied"` is one
+filter clause in any backend's query language — and a span with no `regulait.outcome` is
+recognisably an *old* export rather than an ambiguous one. A denied span additionally carries
+`regulait.decision`, `regulait.reason` (the refusal's own words) and the new **`regulait.rule.id`**
+(the kernel's rule id where the recorder had one, otherwise the dispatch core's error code — the
+string an operator greps for). A genuine failure carries the **published** `error.type`, so an
+error dashboard built by somebody who has never heard of RegulAIt keeps showing outages and stops
+showing the governance layer holding.
+
+**Two existing tests were REWRITTEN in place, not deleted** — one in `packages/shared`, one in the
+gateway — each carrying a comment naming what it used to pin and why it changed. Both now assert
+the boundary in **both** directions, and the gateway's runs against a refusal the real kernel
+produced. A **control** test requires a genuine transport failure to still export as `Error` with
+`error.type` present, because "map everything to Unset" would have bought honesty about refusals by
+hiding real outages. Reverting `otelStatus` to the old mapping fails two tests in the shared suite
+and two in the gateway.
+
+**The SPA says it too.** `/admin/traces` already rendered `DENIED` as its own word with its own
+tone; what it did not say was how that status would read in somebody else's backend. The Posture
+card now carries the status→OTel mapping in the page's existing `KV` idiom, and a denied span's
+inline reason line states that it exports as `Unset` with `regulait.outcome=denied`. An operator
+who has to open an ADR to predict their own dashboard has not been told.
+
+### What this amendment does NOT change
+
+Disclosures 1, 3, 4, 5, 6, 7, 9, 10, 11 and 12 stand exactly as written. In particular: a lost span
+is still a hole the API reports rather than prevents; there is still no sampling and no per-project
+tracing policy; the exporter is still a pull with no spooling and no already-exported marker; the
+OTLP span id is still the first 8 bytes of our uuid; and **nothing here has still been verified
+against a live OTLP collector** — the encoder is spec-shaped and unit-tested, and whether a
+particular Langfuse/Grafana/Honeycomb build accepts it unmodified remains unverified.
+
+Three things this amendment adds to that list:
+
+1. **The `workflow_stage` recorder may share the caller's open transaction.** `applyEvent` is
+   handed the approvals-decide endpoint's own transaction, so the span write there runs inside it.
+   The recorder's writes are simple and swallow their own errors, but a failure would poison that
+   transaction rather than merely losing a span — the one place in the tracing layer where rule 2
+   ("tracing never fails the call it is tracing") is weaker than elsewhere. It was accepted because
+   the alternative was not tracing an approval DENIAL, which is the most valuable workflow span
+   there is.
+2. **A workflow trace closes only on a terminal instance status.** An instance parked at
+   `blocked_on_approval` for a week has an open `running` trace, which is correct and also means
+   the trace list shows long-lived running rows.
+3. **`connector` spans do not nest under anything.** A connector call made from inside an
+   orchestration run still opens its own one-span trace rather than hanging under the node that
+   asked for it, because the connector route is reached directly by an HTTP caller and carries no
+   run context. Named follow-up, not a claim of coverage.
+
+### Verification
+
+Full gateway suite on a freshly created database: **127 files, 2,118 → 2,124 passing**, the 9 MinIO
+skips unchanged. `@regulait/shared` **619 → 622**. The gateway's +6 and shared's +3 are entirely
+`tracing.test.ts` in each package (six new cases in the gateway — four seam tests plus the
+enumeration plus the failure CONTROL; three in shared). `pnpm -r typecheck` and
+`pnpm --filter @regulait/web build` are clean. No migration.
+
+Non-vacuity was measured, not assumed. Disabling the connector writer fails 3 gateway cases;
+disabling the `workflow_stage` writer fails 2; removing the `eval_case` parent link fails 1;
+restoring `denied → ERROR` fails 2 in shared and 2 in the gateway.

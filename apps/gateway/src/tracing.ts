@@ -82,6 +82,19 @@ import { loadOrgSettings } from "./org-settings.js";
 import { loadEgressAllowList } from "./custom-providers.js";
 import { checkEgress, createGuardedFetch } from "./egress-guard.js";
 
+/**
+ * The subset of the drizzle client the RECORDER uses, declared structurally so
+ * a TRANSACTION can record too.
+ *
+ * Added 2026-08-15 with the `workflow_stage` writer: a workflow transition is
+ * decided inside a transaction (the approvals-decide endpoint hands its OWN
+ * open transaction down), and a recorder that only accepted the root `Db`
+ * could not have traced the single most valuable workflow event there is —
+ * an approval DENIED. Nothing here uses `$client`, so widening the parameter
+ * costs nothing and hides nothing.
+ */
+export type SpanWriter = Pick<Db, "insert" | "update" | "select">;
+
 export const TRACE_RULE_IDS = {
   read: "trace-read",
   exported: "traces-exported",
@@ -112,9 +125,9 @@ export interface TracingPolicy {
   previewMaxChars: number;
 }
 
-export async function loadTracingPolicy(db: Db): Promise<TracingPolicy> {
+export async function loadTracingPolicy(db: SpanWriter): Promise<TracingPolicy> {
   try {
-    const org = await loadOrgSettings(db);
+    const org = await loadOrgSettings(db as Db);
     return {
       enabled: org.tracingEnabled !== false,
       captureContent: org.tracingCaptureContent !== false,
@@ -154,7 +167,7 @@ export interface BeginTraceArgs {
  * "record nothing", which is what makes the disabled path byte-identical.
  */
 export async function beginTrace(
-  db: Db,
+  db: SpanWriter,
   args: BeginTraceArgs,
   policy?: TracingPolicy,
 ): Promise<TraceContext | null> {
@@ -186,7 +199,7 @@ export async function beginTrace(
  * ONE tree rather than N unrelated ones.
  */
 export async function traceForRoot(
-  db: Db,
+  db: SpanWriter,
   args: BeginTraceArgs,
   policy?: TracingPolicy,
 ): Promise<TraceContext | null> {
@@ -257,7 +270,7 @@ export interface RecordSpanArgs {
  * reads is not a trace.
  */
 export async function recordSpan(
-  db: Db,
+  db: SpanWriter,
   ctx: TraceContext | null,
   args: RecordSpanArgs,
 ): Promise<string | null> {
@@ -325,7 +338,7 @@ export async function recordSpan(
 
 /** Open a CONTAINER span (a run, a node) that will be closed later. */
 export async function openSpan(
-  db: Db,
+  db: SpanWriter,
   ctx: TraceContext | null,
   args: Omit<RecordSpanArgs, "status" | "endedAt"> & { status?: TraceStatus },
 ): Promise<string | null> {
@@ -335,7 +348,7 @@ export async function openSpan(
 /** Close a container span opened above. Duration is recomputed from the stored
  * `startedAt`, so a container's elapsed time is real rather than zero. */
 export async function closeSpan(
-  db: Db,
+  db: SpanWriter,
   spanId: string | null,
   status: TraceStatus,
   statusReason?: string | null,
@@ -369,7 +382,7 @@ export async function closeSpan(
  * write. Omitting it re-reads the stored value.
  */
 export async function finishTrace(
-  db: Db,
+  db: SpanWriter,
   ctx: TraceContext | null,
   status: TraceStatus,
   startedAt?: Date,

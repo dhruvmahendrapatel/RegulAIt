@@ -60,6 +60,7 @@ import {
   loadCompiledEgressContext,
 } from "./compiled-egress.js";
 import { loadOrgSettings } from "./org-settings.js";
+import { finishTrace, recordSpan, traceForRoot } from "./tracing.js";
 import { activeDelegatorsFor } from "./delegations.js";
 import {
   advanceStageSchema,
@@ -124,7 +125,7 @@ async function applyEvent(
   // re-opens, and aborts serialize instead of racing read-modify-write. When
   // the caller already holds a transaction (the decide endpoint), this nests
   // as a savepoint so the whole flow commits or rolls back together.
-  return inTransaction(db, async (tx) => {
+  const applied = await inTransaction(db, async (tx) => {
     const [instance] = await tx
       .select()
       .from(workflowInstances)
@@ -182,8 +183,114 @@ async function applyEvent(
         }
       }
     }
-    return { state, effects };
+    return {
+      state,
+      effects,
+      span: {
+        userId: instance.initiatorUserId,
+        projectId: instance.projectId,
+        status: state.status,
+      },
+    };
   });
+  await recordWorkflowStageSpan(db, instanceId, event, applied);
+  return applied;
+}
+
+/**
+ * ADR-0070 amendment (2026-08-15) — THE `workflow_stage` SPAN.
+ *
+ * `workflow_stage` was a DECLARED span kind with no writer. It is emitted here,
+ * at `applyEvent`, for the same reason the dispatch span is emitted at the one
+ * dispatch core: **this is the ONE choke point every workflow state change goes
+ * through.** Sign-off, abort, artifact submission, a failing required check, a
+ * blocked deploy, a rollback, a nested-run completion — all of them are an
+ * `applyEvent` call, and none of them mentions tracing. A fifteenth event kind
+ * added to the kernel tomorrow is traced without anybody remembering to.
+ *
+ * ONE TRACE PER INSTANCE, not one per event: `traceForRoot` reuses the
+ * instance's tree, so a multi-day workflow reads as one thing (its `session_id`
+ * is the instance id) and each transition is a sibling span in `seq` order.
+ * That is what makes "where did this change stall, and who stopped it"
+ * answerable off the indentation instead of by reading the event table.
+ *
+ * WHAT IS A REFUSAL HERE, and why. `approval_denied`, `abort`, `check_failed`
+ * and `deploy_blocked` are DECISIONS — a human or a required gate refused to
+ * let the change proceed, which is the workflow engine WORKING. They are
+ * `denied` spans carrying the reason. `execution_failed` is the one
+ * non-decision: it is a git/build/deploy fault and records as `error`, exactly
+ * as `model_dispatch_failed` does in the dispatch core. Scoring a gate that
+ * held as a failure is the ADR-0057/0072 inversion, and this is the third
+ * place in the product where the line has to be drawn deliberately.
+ *
+ * A SKIPPED transition (the precondition said the event no longer applies)
+ * writes NOTHING: nothing changed, so there is nothing to say.
+ */
+async function recordWorkflowStageSpan(
+  db: DbOrTx,
+  instanceId: string,
+  event: WorkflowEvent,
+  applied: {
+    state: InstanceState;
+    skipped?: boolean;
+    span?: { userId: string; projectId: string | null; status: string };
+  },
+): Promise<void> {
+  if (applied.skipped || !applied.span) return;
+  const stageId = "stageId" in event ? event.stageId : null;
+  const decided: Record<string, string> = {
+    approval_denied: "stage approval was DENIED by an approver",
+    abort: "the workflow instance was aborted",
+  };
+  let status: "ok" | "denied" | "error" = "ok";
+  let reason: string | null = null;
+  if (event.kind === "execution_failed") {
+    // the ONE non-decision: a git/build/deploy fault, not a verdict
+    status = "error";
+    reason = event.error;
+  } else if (event.kind === "check_failed") {
+    status = "denied";
+    reason = `required checks failed, stage is blocked: ${event.failures.join(", ")}`;
+  } else if (event.kind === "deploy_blocked") {
+    status = "denied";
+    reason = event.reason;
+  } else if (decided[event.kind]) {
+    status = "denied";
+    reason = decided[event.kind]!;
+  }
+  const at = new Date();
+  const ctx = await traceForRoot(db, {
+    kind: "workflow",
+    name: `workflow ${instanceId}`,
+    userId: applied.span.userId,
+    projectId: applied.span.projectId,
+    sessionId: instanceId,
+    rootRefId: instanceId,
+  });
+  if (!ctx) return;
+  await recordSpan(db, ctx, {
+    kind: "workflow_stage",
+    name: stageId ? `${stageId}: ${event.kind}` : event.kind,
+    status,
+    statusReason: reason,
+    startedAt: at,
+    endedAt: at,
+    attributes: {
+      event: event.kind,
+      ...(stageId ? { stageId } : {}),
+      instanceStatus: applied.span.status,
+      // the rule id the SAME transition wrote onto the audit trail, so the two
+      // records name each other rather than each inventing a vocabulary
+      ruleId: `workflow:${event.kind}`,
+      ...(applied.span.projectId ? { projectId: applied.span.projectId } : {}),
+    },
+  });
+  // The instance's trace closes when the INSTANCE does — not when one of its
+  // transitions returns, exactly as a run's trace closes with the run.
+  const terminal = ["completed", "denied", "aborted", "rolled_back"];
+  if (terminal.includes(applied.span.status)) {
+    await finishTrace(db, ctx, applied.span.status === "completed" ? "ok" : "denied");
+  }
 }
 
 /**

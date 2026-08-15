@@ -6515,17 +6515,39 @@ export const TRACE_SPAN_KINDS = [
   "fallback_hop",
   /** a governed MCP tool call */
   "tool",
-  /** a governed connector call */
+  /** a governed connector call (`POST /v1/connectors/:id/invoke`) */
   "connector",
-  /** an ADR-0042 guardrail verdict recorded on its own */
-  "guardrail",
   /** a pillar-1 entitlement/policy decision recorded on its own */
   "policy",
-  /** a workflow stage (ADR-0021/0027) */
+  /** one workflow-instance state transition (ADR-0021/0027) */
   "workflow_stage",
   /** one case of an eval run (ADR-0044/0067) */
   "eval_case",
 ] as const;
+/**
+ * EVERY KIND IN THIS LIST IS WRITTEN BY A REAL PATH, and
+ * `apps/gateway/src/tracing.test.ts` enumerates the list and proves it. A
+ * declared kind nothing emits is a vocabulary promising coverage the product
+ * does not have, which is the same class of dishonesty this repo keeps fixing.
+ *
+ * `guardrail` WAS declared here and was REMOVED on 2026-08-15 (ADR-0070
+ * amendment) rather than given a writer. Nothing ever wrote it, and ADR-0070's
+ * own disclosure of the unwritten kinds did not even name it. It is removed
+ * instead of emitted because an ADR-0042 verdict is not a call that was
+ * ATTEMPTED — it is a property OF one, and it is already on the span it acted
+ * on: the verdict rides `attributes.guardrails`, a withholding rides
+ * `content_withheld`, and a BLOCK *is* that span's `denied` status with
+ * `guardrail_blocked` as its reason. A child `guardrail` span would restate
+ * what the parent already says and would double-count the refusal in
+ * `traces.denied_span_count` — i.e. exactly the "a span REFERENCES, it does not
+ * restate" rule the ADR is built on, and exactly the "a span on every
+ * governance evaluation" alternative it rejected.
+ *
+ * The migration-0082 CHECK constraint still PERMITS 'guardrail'; that is
+ * deliberate and needs no migration. A CHECK is a bound on what may be
+ * written, not a claim about what is — and narrowing it would cost a schema
+ * migration for no behavioural change.
+ */
 export type TraceSpanKind = (typeof TRACE_SPAN_KINDS)[number];
 
 export const traces = pgTable(

@@ -70,6 +70,7 @@ import {
   aggregateEvalResults,
   buildGroundednessJudgePrompt,
   buildJudgePrompt,
+  classifyDispatchFailure,
   createEvalCaseSchema,
   createEvalDatasetSchema,
   evalScorerConfigSchema,
@@ -102,6 +103,7 @@ import {
   type AgentRow,
 } from "./agents-connectors.js";
 import { loadAgentRevocations, loadRoleAgentGrants } from "./entitlements.js";
+import { beginTrace, childContext, closeSpan, finishTrace, openSpan } from "./tracing.js";
 import { assertProjectAttribution } from "./projects.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
@@ -711,11 +713,53 @@ export async function runEvalSuite(
         })
       : null);
 
+  /**
+   * ADR-0070 amendment (2026-08-15) — THE EVAL-RUN TREE.
+   *
+   * `eval_case` was a DECLARED span kind with no writer. ADR-0070's own
+   * disclosure named the shape of the gap precisely: "an eval's dispatches DO
+   * produce `llm` spans, they are simply not grouped under an eval-run tree" —
+   * so a hundred-case suite scattered a hundred unrelated one-span traces and
+   * the question a reader actually has ("which CASES did governance refuse, and
+   * what did the rest cost?") could only be answered by joining `eval_results`
+   * back to the ledger by hand.
+   *
+   * One trace per RUN, one `eval_case` span per case, and the governed dispatch
+   * hangs UNDER its case because the case span is passed as the parent context
+   * — the same nesting `run -> run_node -> llm` uses, from the same primitive.
+   * Nothing about scoring, gating or metering changes; `beginTrace` returns null
+   * when tracing is off and every line below then no-ops.
+   */
+  const evalTrace = await beginTrace(db, {
+    kind: "eval",
+    name: `eval ${dataset.name}@${dataset.version} → ${agent.name}`,
+    userId: opts.userId,
+    projectId: opts.projectId ?? null,
+    sessionId: `eval:${run!.id}`,
+    rootRefId: run!.id,
+  });
+
   const scores: CaseScore[] = [];
   for (const c of cases) {
     const { kind, config } = resolveScorer(dataset, c);
     const context = caseContext(c);
     const started = Date.now();
+    const caseStartedAt = new Date();
+    const caseSpanId = await openSpan(db, evalTrace, {
+      kind: "eval_case",
+      name: `case ${c.id}`,
+      startedAt: caseStartedAt,
+      agentId: agent.id,
+      attributes: {
+        evalRunId: run!.id,
+        evalCaseId: c.id,
+        scorerKind: kind,
+        datasetName: dataset.name,
+        datasetVersion: dataset.version,
+        ...(opts.projectId ? { projectId: opts.projectId } : {}),
+      },
+    });
+    const caseTrace = childContext(evalTrace, caseSpanId);
     // THE GOVERNED DISPATCH. `served` is passed explicitly — the harness
     // measures the agent it was asked to measure, never a routed substitute.
     // ADR-0067: the case's context rides the INPUT when the case says it
@@ -730,6 +774,8 @@ export async function runEvalSuite(
       input: composeCaseInput(c),
       maxTokens: 2048,
       projectId: opts.projectId ?? null,
+      // the dispatch's own span nests UNDER this case (null when tracing is off)
+      trace: caseTrace,
       detail: {
         purpose,
         ...originDetail,
@@ -767,6 +813,24 @@ export async function runEvalSuite(
         error: `${outcome.error}${outcome.detail ? `: ${outcome.detail}` : ""}`,
         detail: { dispatch: "failed", status: outcome.status, errorCode: outcome.error },
       });
+      // ADR-0070/0072 — THE CASE SPAN'S POLARITY IS THE SHARED CLASSIFIER'S, so
+      // "a governance layer refused this case" and "the upstream fell over" are
+      // not the same span status. It is deliberately the SAME
+      // `classifyDispatchFailure` the red-team layer calls, rather than a
+      // second inline pair of string comparisons — the disagreement between two
+      // such copies is exactly what ADR-0072 was written to remove. An
+      // unrecognised code lands on `unknown_failure`, which records as `error`:
+      // it must not be allowed to claim the defence held.
+      //
+      // The eval RESULT row still scores 0 here, and that is still correct for
+      // a quality suite (ADR-0072 §2.2's deliberate non-change). A span is not a
+      // score; it says what HAPPENED to the call.
+      await closeSpan(
+        db,
+        caseSpanId,
+        classifyDispatchFailure(outcome.error) === "governance_stop" ? "denied" : "error",
+        `${outcome.error}${outcome.detail ? `: ${outcome.detail}` : ""}`,
+      );
       continue;
     }
 
@@ -852,7 +916,14 @@ export async function runEvalSuite(
       error: caseError,
       detail: scored.detail,
     });
+    // THE CASE RAN. A LOW SCORE IS NOT A FAILED SPAN — it is a measurement, and
+    // recording a measured-bad answer as `error` would be the same class of
+    // inversion ADR-0072 removed twice. The only thing that makes this span
+    // anything other than `ok` is the judge INSTRUMENT falling over, which is a
+    // fault in the harness rather than a verdict about the agent.
+    await closeSpan(db, caseSpanId, caseError ? "error" : "ok", caseError);
   }
+  await finishTrace(db, evalTrace, "ok");
 
   if (scores.length > 0) {
     await db.insert(evalResults).values(
