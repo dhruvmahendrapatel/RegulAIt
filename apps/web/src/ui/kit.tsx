@@ -148,6 +148,9 @@ export function statusTone(status: string): Tone {
       return "info";
     case "blocked_on_approval":
     case "blocked_on_artifact":
+    // ADR-0079: plan-only is a normal, expected resting state, not a failure —
+    // same tone as the other "waiting on a human" statuses.
+    case "blocked_on_plan":
     case "awaiting_trigger":
     case "in_review":
     case "pending":

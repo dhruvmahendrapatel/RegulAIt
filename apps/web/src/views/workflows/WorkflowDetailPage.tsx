@@ -151,6 +151,47 @@ export default function WorkflowDetailPage() {
           </div>
         </Card>
 
+        {/* PILLAR 2 §2 stage 2 (ADR-0079): the plan-only stage, made visible.
+            The card says what the stage forbids, what it still allows, and the
+            one action that leaves it — the same shape as the deploy-hold and
+            failed-check cards below. */}
+        {inst.status === "blocked_on_plan" && current && (
+          <Card title="Plan only">
+            <span className={v.rowTight}>
+              <Badge tone="warn">planning</Badge>
+              <span className={v.dim}>
+                this change is in forced planning — nothing builds from it yet.
+              </span>
+            </span>
+            <div className={v.dim} style={{ marginTop: "var(--s2)" }}>
+              While it rests at <span className={v.mono}>{current.id}</span>, an agent call that
+              names this workflow (<span className={v.mono}>instanceId</span>) is <strong>refused
+              in a mutating mode</strong> — <span className={v.mono}>execute</span>, or any mode
+              not on the plan-safe list. <span className={v.mono}>plan</span>,{" "}
+              <span className={v.mono}>review</span>, <span className={v.mono}>chat</span>,{" "}
+              <span className={v.mono}>ask</span> and <span className={v.mono}>read</span> go
+              through. A call that names no workflow is not constrained by this stage.
+            </div>
+            <div className={v.row} style={{ marginTop: "var(--s2)" }}>
+              <Button
+                variant="primary"
+                title="Record that planning is finished and move to the next stage — build work attributed to this change stops being refused"
+                onClick={() =>
+                  void act(
+                    () =>
+                      api.post(`/v1/workflows/instances/${inst.id}/advance`, {
+                        stageId: current.id,
+                      }),
+                    "Planning finished — plan-only lifted",
+                  )
+                }
+              >
+                Finish planning
+              </Button>
+            </div>
+          </Card>
+        )}
+
         {inst.status === "blocked_on_artifact" && current && (
           <Card title={`Submit ${current.output ?? "artifact"}`}>
             <textarea
