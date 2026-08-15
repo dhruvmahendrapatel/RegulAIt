@@ -82,12 +82,15 @@ import {
   auditLog,
   complianceProfiles,
   costImportBatches,
+  costReconciliationRuns,
   desc,
   eq,
   gte,
   importedCostLines,
   inArray,
   initiatives,
+  isNotNull,
+  isNull,
   lt,
   projects,
   sql,
@@ -98,6 +101,7 @@ import {
   type Db,
 } from "@regulait/db";
 import {
+  ANY_VENDOR,
   COST_IMPORT_MAX_BYTES,
   CostImportFormatError,
   IMPORTED_BASIS_STATEMENT,
@@ -108,8 +112,10 @@ import {
   evaluateGuardrails,
   getCostImportAdapter,
   normalizeAccountKey,
+  parseRosterExport,
   renderConsolidatedCsv,
   resolveVendorAccount,
+  rosterIngestRequestSchema,
   vendorAliasRequestSchema,
   vendorDomainRuleRequestSchema,
   type AccountResolution,
@@ -118,12 +124,15 @@ import {
   type ImportedInput,
   type MeteredInput,
   type ParsedCostLine,
+  type RosterEntry,
+  type RosterRowRefusal,
   type VendorAliasRow,
   type VendorDomainRuleRow,
 } from "@regulait/shared";
 import { effectiveIngestMode } from "./regulait-llm.js";
 import { resolveGuardrailPolicy } from "./guardrails.js";
 import { orgDefaultPiiMode, loadOrgSettings } from "./org-settings.js";
+import { reinstateLinesSupersededBy } from "./cost-reconcile.js";
 import { securityHeaders } from "./security-headers.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
@@ -144,6 +153,9 @@ export const COST_IMPORT_RULE_IDS = {
   domainRuleDeleted: "cost-import-domain-rule-deleted",
   costCenterSet: "cost-import-user-cost-center-set",
   consolidatedRead: "cost-import-consolidated-read",
+  rosterPlanned: "cost-import-roster-planned",
+  rosterApplied: "cost-import-roster-applied",
+  rosterRefused: "cost-import-roster-refused",
 } as const;
 
 /** the exemption, in one place so the code, the response and the ADR cannot
@@ -155,6 +167,15 @@ export const COST_IMPORT_PII_POSTURE =
   "free-text field (service, description, cost centre) is scanned through the same ADR-0042 detectors and §8.4 " +
   "counts-only reporting as the dispatch and training-ingest paths, at a mode composed MAX with the org/compliance " +
   "floor. Unmapped columns are discarded before storage rather than retained.";
+
+/** ADR-0076: the same posture, restated for a roster ingest */
+export const ROSTER_PII_POSTURE =
+  "A roster IS personal data, and its ACCOUNT and EMAIL columns are identity JOIN KEYS — exempt from the PII gate " +
+  "by the same construction COST_IMPORT_PII_POSTURE discloses for the vendor account column: blocking the join key " +
+  "would make per-user attribution impossible rather than safe. The ONLY other field a roster retains is the cost " +
+  "centre, which is scanned through the same ADR-0042 detectors at a mode composed MAX with the org/compliance " +
+  "floor, counts only. Every unmapped column a SCIM export drags along (display names, titles, phone numbers, " +
+  "manager chains) is discarded at parse and never reaches storage.";
 
 // ---------------------------------------------------------------------------
 // The org-wide PII floor.
@@ -187,13 +208,13 @@ interface ScanResult {
 }
 
 /**
- * The ingest scan. Runs over the NON-IDENTITY free text only — see
- * `COST_IMPORT_PII_POSTURE` above for why the account column is exempt and why
- * that exemption is disclosed rather than hidden.
+ * The ingest scan over arbitrary NON-IDENTITY free text. `scanCostLines`
+ * (imports) and the roster ingest both end here, so the two surfaces can
+ * never drift apart on posture.
  */
-export async function scanCostLines(
+export async function scanFreeTexts(
   db: Db,
-  lines: readonly ParsedCostLine[],
+  texts: readonly string[],
   requested: GuardrailMode | undefined,
 ): Promise<ScanResult> {
   const policy = await resolveGuardrailPolicy(db, { projectId: null });
@@ -205,9 +226,7 @@ export async function scanCostLines(
   let hasPii = false;
   let guardrailBlocked = false;
 
-  for (const line of lines) {
-    // DELIBERATELY NOT `accountRef`. See COST_IMPORT_PII_POSTURE.
-    const text = [line.service, line.description, line.costCenter, line.unit].filter(Boolean).join("\n");
+  for (const text of texts) {
     if (text.length === 0) continue;
     for (const hit of detectPII(text)) {
       hasPii = true;
@@ -242,6 +261,24 @@ export async function scanCostLines(
   const summary = [piiSummary && `PII: ${piiSummary}`, guardSummary && `content: ${guardSummary}`].filter(Boolean).join("; ");
   const blocked = (hasPii && mode === "block") || guardrailBlocked;
   return { verdict: blocked ? "blocked" : "flagged", mode, findings, summary };
+}
+
+/**
+ * The ingest scan for a cost import. Runs over the NON-IDENTITY free text only
+ * — see `COST_IMPORT_PII_POSTURE` above for why the account column is exempt
+ * and why that exemption is disclosed rather than hidden.
+ */
+export async function scanCostLines(
+  db: Db,
+  lines: readonly ParsedCostLine[],
+  requested: GuardrailMode | undefined,
+): Promise<ScanResult> {
+  return scanFreeTexts(
+    db,
+    // DELIBERATELY NOT `accountRef`. See COST_IMPORT_PII_POSTURE.
+    lines.map((line) => [line.service, line.description, line.costCenter, line.unit].filter(Boolean).join("\n")),
+    requested,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -668,6 +705,18 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
         detail: `batch ${importId} is '${batch.status}' — only an applied batch holds lines to withdraw`,
       });
     }
+    // ADR-0076: if any of this batch's lines had SUPERSEDED older duplicates,
+    // those older lines come back to life BEFORE the deletion — a withdrawn
+    // restatement must not silently erase the fact it restated.
+    const doomedIds = (
+      await db.select({ id: importedCostLines.id }).from(importedCostLines).where(eq(importedCostLines.batchId, importId))
+    ).map((r) => r.id);
+    const reinstated = await reinstateLinesSupersededBy(db, {
+      batchId: importId,
+      lineIds: doomedIds,
+      actorUserId: req.authCtx.userId ?? null,
+      reason: body.reason,
+    });
     const removed = await db.delete(importedCostLines).where(eq(importedCostLines.batchId, importId)).returning({ id: importedCostLines.id });
     const [updated] = await db
       .update(costImportBatches)
@@ -675,9 +724,10 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
       .where(eq(costImportBatches.id, importId))
       .returning();
     await audit(req.authCtx.userId, "cost_import_batch", importId, COST_IMPORT_RULE_IDS.importRevoked, "allow",
-      `withdrew ${removed.length} imported cost line(s) from batch ${importId}: ${body.reason}`,
-      { linesRemoved: removed.length, vendor: batch.vendor, adapter: batch.adapter, payloadSha256: batch.payloadSha256 });
-    return { revoked: true, import: updated, linesRemoved: removed.length };
+      `withdrew ${removed.length} imported cost line(s) from batch ${importId}: ${body.reason}` +
+        (reinstated > 0 ? ` — ${reinstated} older line(s) this batch had superseded were reinstated` : ""),
+      { linesRemoved: removed.length, linesReinstated: reinstated, vendor: batch.vendor, adapter: batch.adapter, payloadSha256: batch.payloadSha256 });
+    return { revoked: true, import: updated, linesRemoved: removed.length, linesReinstated: reinstated };
   });
 
   // =======================================================================
@@ -730,28 +780,59 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
     };
   });
 
-  app.post("/v1/cost-imports/mappings", async (req, reply) => {
-    const body = vendorAliasRequestSchema.parse(req.body);
-    const [user] = await db.select({ id: users.id, email: users.email }).from(users).where(eq(users.id, body.userId));
-    if (!user) return reply.status(400).send({ error: "invalid_reference", detail: "userId names no user" });
-    const accountKey = normalizeAccountKey(body.accountRef);
+  /**
+   * THE ONE ALIAS WRITE PATH (ADR-0076). The single-alias admin route below
+   * and the roster ingest both end HERE — a roster is two hundred of the same
+   * assertion, not a second mechanism, and having exactly one writer is what
+   * keeps that true by construction rather than by review.
+   */
+  const upsertAliasCore = async (
+    actor: string | null,
+    input: { vendor: string; accountRef: string; userId: string; reason: string },
+  ) => {
+    const [user] = await db.select({ id: users.id, email: users.email }).from(users).where(eq(users.id, input.userId));
+    if (!user) return null;
+    const accountKey = normalizeAccountKey(input.accountRef);
     const values = {
-      vendor: body.vendor,
+      vendor: input.vendor,
       accountKey,
-      userId: body.userId,
-      reason: body.reason,
-      createdByUserId: req.authCtx.userId ?? null,
+      userId: input.userId,
+      reason: input.reason,
+      createdByUserId: actor,
     };
     const [existing] = await db
       .select()
       .from(vendorAccountAliases)
-      .where(and(eq(vendorAccountAliases.vendor, body.vendor), eq(vendorAccountAliases.accountKey, accountKey)));
+      .where(and(eq(vendorAccountAliases.vendor, input.vendor), eq(vendorAccountAliases.accountKey, accountKey)));
     const [row] = existing
       ? await db.update(vendorAccountAliases).set(values).where(eq(vendorAccountAliases.id, existing.id)).returning()
       : await db.insert(vendorAccountAliases).values(values).returning();
+    return { row: row!, existing: existing ?? null, user, accountKey };
+  };
+
+  /** THE ONE PERSON-LEVEL COST-CENTRE WRITE PATH (ADR-0076) — same argument. */
+  const setCostCenterCore = async (userId: string, costCenter: string | null) => {
+    const [user] = await db
+      .select({ id: users.id, email: users.email, costCenter: users.costCenter })
+      .from(users)
+      .where(eq(users.id, userId));
+    if (!user) return null;
+    const [updated] = await db.update(users).set({ costCenter }).where(eq(users.id, userId)).returning({
+      id: users.id,
+      email: users.email,
+      costCenter: users.costCenter,
+    });
+    return { before: user, after: updated! };
+  };
+
+  app.post("/v1/cost-imports/mappings", async (req, reply) => {
+    const body = vendorAliasRequestSchema.parse(req.body);
+    const upserted = await upsertAliasCore(req.authCtx.userId ?? null, body);
+    if (!upserted) return reply.status(400).send({ error: "invalid_reference", detail: "userId names no user" });
+    const { row, existing, user, accountKey } = upserted;
 
     const impact = await reresolveAll();
-    await audit(req.authCtx.userId, "vendor_account_alias", row!.id, COST_IMPORT_RULE_IDS.aliasCreated, "allow",
+    await audit(req.authCtx.userId, "vendor_account_alias", row.id, COST_IMPORT_RULE_IDS.aliasCreated, "allow",
       `${existing ? "changed" : "asserted"} that vendor account '${body.accountRef}' (vendor '${body.vendor}') is ${user.email}: ${body.reason}` +
         ` — ${impact.changed} stored line(s) re-attributed`,
       { accountKey, vendor: body.vendor, userId: body.userId, userEmail: user.email, ...impact, previousUserId: existing?.userId ?? null });
@@ -816,17 +897,336 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
   app.put("/v1/users/:userId/cost-center", async (req, reply) => {
     const { userId } = z.object({ userId: z.string().uuid() }).parse(req.params);
     const body = z.object({ costCenter: z.string().min(1).max(120).nullable() }).strict().parse(req.body);
-    const [user] = await db.select({ id: users.id, email: users.email, costCenter: users.costCenter }).from(users).where(eq(users.id, userId));
-    if (!user) return reply.status(404).send({ error: "unknown_user" });
-    const [updated] = await db.update(users).set({ costCenter: body.costCenter }).where(eq(users.id, userId)).returning({
-      id: users.id,
-      email: users.email,
-      costCenter: users.costCenter,
-    });
+    const result = await setCostCenterCore(userId, body.costCenter);
+    if (!result) return reply.status(404).send({ error: "unknown_user" });
     await audit(req.authCtx.userId, "user", userId, COST_IMPORT_RULE_IDS.costCenterSet, "allow",
-      `cost centre for ${user.email} changed from '${user.costCenter ?? "(none)"}' to '${body.costCenter ?? "(none)"}'`,
-      { from: user.costCenter, to: body.costCenter });
-    return updated;
+      `cost centre for ${result.before.email} changed from '${result.before.costCenter ?? "(none)"}' to '${body.costCenter ?? "(none)"}'`,
+      { from: result.before.costCenter, to: body.costCenter });
+    return result.after;
+  });
+
+  // =======================================================================
+  // ADR-0076 — THE ROSTER INGEST. Bulk-assert the mappings the wedge needs,
+  // through the SAME write paths the single-row routes use.
+  // =======================================================================
+
+  /**
+   * POST /v1/cost-imports/roster — consume a SCIM-style user export (JSON) or
+   * a CSV roster and turn it into vendor-account aliases + person-level cost
+   * centres, via `upsertAliasCore` / `setCostCenterCore` — the exact functions
+   * the single-row admin routes call. Never a parallel path.
+   *
+   * THE REFUSAL RULE: a vendor account that two roster rows map to two
+   * DIFFERENT people is refused LOUDLY — every involved row, both emails, no
+   * alias written — rather than resolved by order, recency or plausibility.
+   * Same for one person given two different cost centres. An email that names
+   * no RegulAIt user is refused per-row; a roster never invents a person.
+   */
+  app.post("/v1/cost-imports/roster", async (req, reply) => {
+    const raw = req.body;
+    const rawJson = JSON.stringify(raw ?? null);
+    if (rawJson.length > COST_IMPORT_MAX_BYTES) {
+      await audit(req.authCtx.userId, "user", null, COST_IMPORT_RULE_IDS.rosterRefused, "deny",
+        `roster of ${rawJson.length} bytes exceeds the ${COST_IMPORT_MAX_BYTES}-byte bound — chunk the export`,
+        { bytes: rawJson.length, limit: COST_IMPORT_MAX_BYTES });
+      return reply.status(413).send({
+        error: "roster_too_large",
+        detail: `rosters are bounded at ${COST_IMPORT_MAX_BYTES} bytes; split the file into chunks`,
+      });
+    }
+    const parsedReq = rosterIngestRequestSchema.safeParse(raw);
+    if (!parsedReq.success) {
+      return reply.status(400).send({
+        error: "invalid_request",
+        issues: parsedReq.error.issues.slice(0, 10).map((i) => ({ path: i.path.join("."), message: i.message })),
+      });
+    }
+    const body = parsedReq.data;
+
+    let parsed;
+    try {
+      parsed = parseRosterExport({ content: body.content, format: body.format, mapping: body.mapping });
+    } catch (e) {
+      if (e instanceof CostImportFormatError) {
+        await audit(req.authCtx.userId, "user", null, COST_IMPORT_RULE_IDS.rosterRefused, "deny",
+          `roster refused whole-file: ${e.message}`, { source: body.source ?? null });
+        return reply.status(422).send({ error: e.code, detail: e.message });
+      }
+      throw e;
+    }
+
+    // THE ADR-0042 SCAN, over the ONLY non-identity text a roster retains.
+    // Account and email columns are join keys — see ROSTER_PII_POSTURE.
+    const scan = await scanFreeTexts(
+      db,
+      parsed.entries.map((e) => e.costCenter).filter((c): c is string => Boolean(c)),
+      body.piiMode,
+    );
+    if (scan.verdict === "blocked") {
+      const reason =
+        `roster refused: the cost-centre column carries content the ingest gate blocks at mode '${scan.mode}' ` +
+        `(${scan.summary}). Counts only are recorded — no matched text is stored.`;
+      await audit(req.authCtx.userId, "user", null, COST_IMPORT_RULE_IDS.rosterRefused, "deny", reason, {
+        mode: scan.mode,
+        findings: scan.findings,
+        source: body.source ?? null,
+      });
+      return reply.status(422).send({
+        error: "ingest_blocked",
+        detail: reason,
+        piiMode: scan.mode,
+        findings: scan.findings,
+        piiPosture: ROSTER_PII_POSTURE,
+      });
+    }
+
+    // ---- resolution + the ambiguity walls ---------------------------------
+    const ctx = await loadResolutionContext(db);
+    const refusals: RosterRowRefusal[] = [...parsed.refusals];
+    const resolvedRows: Array<{ entry: RosterEntry; vendor: string; accountKey: string; userId: string; userEmail: string }> = [];
+    for (const entry of parsed.entries) {
+      const vendor = entry.vendor ?? body.vendor;
+      const accountKey = normalizeAccountKey(entry.accountRef);
+      const targetEmail = (entry.userEmail ?? entry.accountRef).trim().toLowerCase();
+      const userId = ctx.userIdByEmail.get(targetEmail);
+      if (!userId) {
+        refusals.push({
+          row: entry.sourceRow,
+          field: entry.userEmail ? "user" : "account",
+          reason:
+            `'${targetEmail}' names no RegulAIt user — a roster never invents a person. Create the user first, ` +
+            `or correct the row.`,
+        });
+        continue;
+      }
+      resolvedRows.push({ entry, vendor, accountKey, userId, userEmail: targetEmail });
+    }
+
+    // WALL: one vendor account mapped to TWO different people. Refused loudly,
+    // every involved row, nothing written for that account.
+    const byAccount = new Map<string, typeof resolvedRows>();
+    for (const r of resolvedRows) {
+      const k = `${r.vendor}\u0000${r.accountKey}`;
+      const arr = byAccount.get(k) ?? [];
+      arr.push(r);
+      byAccount.set(k, arr);
+    }
+    const survivors: typeof resolvedRows = [];
+    for (const rows of byAccount.values()) {
+      const distinctUsers = [...new Set(rows.map((r) => r.userId))];
+      if (distinctUsers.length > 1) {
+        const named = rows.map((r) => `row ${r.entry.sourceRow} -> ${r.userEmail}`).join("; ");
+        for (const r of rows) {
+          refusals.push({
+            row: r.entry.sourceRow,
+            field: "account",
+            reason:
+              `AMBIGUOUS: vendor account '${r.entry.accountRef}' (vendor '${r.vendor}') is mapped to ` +
+              `${distinctUsers.length} different people in this roster (${named}). Nothing was written for this ` +
+              `account — ambiguity is refused, never resolved by guessing. Fix the roster or assert a single ` +
+              `alias explicitly.`,
+          });
+        }
+        continue;
+      }
+      survivors.push(...rows);
+    }
+
+    // WALL: one person given two DIFFERENT cost centres. Same refusal posture.
+    const ccByUser = new Map<string, Map<string, number[]>>();
+    for (const r of survivors) {
+      if (!r.entry.costCenter) continue;
+      const m = ccByUser.get(r.userId) ?? new Map<string, number[]>();
+      const arr = m.get(r.entry.costCenter) ?? [];
+      arr.push(r.entry.sourceRow);
+      m.set(r.entry.costCenter, arr);
+      ccByUser.set(r.userId, m);
+    }
+    const ccConflictUsers = new Set<string>();
+    for (const [userId, m] of ccByUser.entries()) {
+      if (m.size > 1) {
+        ccConflictUsers.add(userId);
+        const named = [...m.entries()].map(([cc, rowsN]) => `'${cc}' (row ${rowsN.join(", ")})`).join(" vs ");
+        for (const rowsN of m.values()) {
+          for (const rowN of rowsN) {
+            refusals.push({
+              row: rowN,
+              field: "costCenter",
+              reason:
+                `AMBIGUOUS: this roster assigns the same person ${named}. No cost centre was written for them — ` +
+                `ambiguity is refused, never resolved by guessing.`,
+            });
+          }
+        }
+      }
+    }
+    const accepted = survivors.filter((r) => !(r.entry.costCenter && ccConflictUsers.has(r.userId)));
+
+    // ---- the plan, per unique assertion -----------------------------------
+    const aliasByKey = new Map(ctx.aliases.map((a) => [`${a.vendor}\u0000${a.accountKey}`, a]));
+    const userById = new Map<string, { email: string }>();
+    for (const [email, id] of ctx.userIdByEmail.entries()) userById.set(id, { email });
+
+    interface PlannedAction {
+      row: number;
+      accountRef: string;
+      vendor: string;
+      userEmail: string;
+      aliasAction: "create" | "update" | "unchanged" | "unnecessary";
+      costCenter: string | null;
+      costCenterAction: "set" | "unchanged" | "none";
+    }
+    const seenAccount = new Set<string>();
+    const seenCcUser = new Set<string>();
+    let duplicateRows = 0;
+    const actions: PlannedAction[] = [];
+    const currentCcByUserId = new Map(
+      (await db.select({ id: users.id, costCenter: users.costCenter }).from(users)).map((u) => [u.id, u.costCenter]),
+    );
+    for (const r of accepted) {
+      const key = `${r.vendor}\u0000${r.accountKey}`;
+      const isDupAccount = seenAccount.has(key);
+      if (isDupAccount && (!r.entry.costCenter || seenCcUser.has(r.userId))) {
+        duplicateRows += 1;
+        continue;
+      }
+      seenAccount.add(key);
+      let aliasAction: PlannedAction["aliasAction"];
+      const targetUserEmail = userById.get(r.userId)!.email.trim().toLowerCase();
+      if (r.accountKey === targetUserEmail) {
+        // the account IS the directory address — exact-email resolution
+        // already attributes it, and minting an alias would only add noise
+        aliasAction = "unnecessary";
+      } else {
+        const existing = aliasByKey.get(key);
+        aliasAction = !existing ? "create" : existing.userId === r.userId ? "unchanged" : "update";
+      }
+      let costCenterAction: PlannedAction["costCenterAction"] = "none";
+      if (r.entry.costCenter && !seenCcUser.has(r.userId)) {
+        seenCcUser.add(r.userId);
+        costCenterAction = (currentCcByUserId.get(r.userId) ?? null) === r.entry.costCenter ? "unchanged" : "set";
+      }
+      actions.push({
+        row: r.entry.sourceRow,
+        accountRef: r.entry.accountRef,
+        vendor: r.vendor,
+        userEmail: r.userEmail,
+        aliasAction,
+        costCenter: r.entry.costCenter,
+        costCenterAction,
+      });
+    }
+
+    const counts = {
+      aliasesToCreate: actions.filter((a) => a.aliasAction === "create").length,
+      aliasesToUpdate: actions.filter((a) => a.aliasAction === "update").length,
+      aliasesUnchanged: actions.filter((a) => a.aliasAction === "unchanged").length,
+      aliasesUnnecessary: actions.filter((a) => a.aliasAction === "unnecessary").length,
+      costCentersToSet: actions.filter((a) => a.costCenterAction === "set").length,
+      costCentersUnchanged: actions.filter((a) => a.costCenterAction === "unchanged").length,
+    };
+    const rowsRefused = refusals.length;
+    const rowsAccepted = parsed.rowsParsed - rowsRefused;
+
+    const base = {
+      mode: body.mode,
+      dialect: parsed.dialect,
+      columnsUsed: parsed.columnsUsed,
+      rowsParsed: parsed.rowsParsed,
+      rowsAccepted,
+      rowsRefused,
+      duplicateRows,
+      refusals: refusals.slice(0, 200),
+      refusalsTruncated: refusals.length > 200,
+      counts,
+      actions: actions.slice(0, 200),
+      actionsTruncated: actions.length > 200,
+      ingestScan: { mode: scan.mode, verdict: scan.verdict, findings: scan.findings },
+      piiPosture: ROSTER_PII_POSTURE,
+      posture:
+        "A roster row is the same assertion the single-alias route makes, made in bulk through the same write " +
+        "path. An account mapped to two people, or a person given two cost centres, is refused LOUDLY with every " +
+        "involved row named — never resolved by order, recency or plausibility. An 'unnecessary' alias means the " +
+        "account already IS the person's directory address and exact-email resolution covers it.",
+    };
+
+    if (body.mode === "dry_run") {
+      await audit(req.authCtx.userId, "user", null, COST_IMPORT_RULE_IDS.rosterPlanned, "allow",
+        `roster dry run (${parsed.dialect}): ${parsed.rowsParsed} row(s), ${rowsAccepted} accepted, ` +
+          `${rowsRefused} refused; would create ${counts.aliasesToCreate} and update ${counts.aliasesToUpdate} ` +
+          `alias(es), set ${counts.costCentersToSet} cost centre(s). Nothing was written.`,
+        { source: body.source ?? null, vendor: body.vendor, ...counts, rowsParsed: parsed.rowsParsed, rowsRefused });
+      return reply.status(200).send({ ...base, applied: false });
+    }
+
+    // ---- APPLY, through the existing write paths --------------------------
+    let aliasesCreated = 0;
+    let aliasesUpdated = 0;
+    let costCentersSet = 0;
+    for (const a of actions) {
+      if (a.aliasAction === "create" || a.aliasAction === "update") {
+        const userId = ctx.userIdByEmail.get(a.userEmail)!;
+        const upserted = await upsertAliasCore(req.authCtx.userId ?? null, {
+          vendor: a.vendor,
+          accountRef: a.accountRef,
+          userId,
+          reason: `roster (${body.source ?? "unnamed"}): ${body.reason}`,
+        });
+        if (upserted) {
+          if (upserted.existing) aliasesUpdated += 1;
+          else aliasesCreated += 1;
+          await audit(req.authCtx.userId, "vendor_account_alias", upserted.row.id, COST_IMPORT_RULE_IDS.aliasCreated, "allow",
+            `${upserted.existing ? "changed" : "asserted"} via roster that vendor account '${a.accountRef}' ` +
+              `(vendor '${a.vendor}') is ${upserted.user.email}: ${body.reason} — stored lines re-resolved at the ` +
+              `end of the roster pass`,
+            {
+              accountKey: upserted.accountKey,
+              vendor: a.vendor,
+              userId,
+              userEmail: upserted.user.email,
+              origin: "roster",
+              source: body.source ?? null,
+              previousUserId: upserted.existing?.userId ?? null,
+            });
+        }
+      }
+      if (a.costCenterAction === "set") {
+        const userId = ctx.userIdByEmail.get(a.userEmail)!;
+        const result = await setCostCenterCore(userId, a.costCenter);
+        if (result) {
+          costCentersSet += 1;
+          await audit(req.authCtx.userId, "user", userId, COST_IMPORT_RULE_IDS.costCenterSet, "allow",
+            `cost centre for ${result.before.email} changed from '${result.before.costCenter ?? "(none)"}' to ` +
+              `'${a.costCenter ?? "(none)"}' via roster`,
+            { from: result.before.costCenter, to: a.costCenter, origin: "roster", source: body.source ?? null });
+        }
+      }
+    }
+    // ONE re-resolution pass for the whole roster, so the blast radius is
+    // reported once rather than N times
+    const impact = await reresolveAll();
+    await audit(req.authCtx.userId, "user", null, COST_IMPORT_RULE_IDS.rosterApplied, "allow",
+      `roster applied (${parsed.dialect}): ${parsed.rowsParsed} row(s), ${rowsAccepted} accepted, ${rowsRefused} ` +
+        `refused; ${aliasesCreated} alias(es) created, ${aliasesUpdated} updated, ${costCentersSet} cost ` +
+        `centre(s) set — ${impact.changed} stored line(s) re-attributed`,
+      {
+        source: body.source ?? null,
+        vendor: body.vendor,
+        aliasesCreated,
+        aliasesUpdated,
+        costCentersSet,
+        rowsParsed: parsed.rowsParsed,
+        rowsRefused,
+        ...impact,
+      });
+    return reply.status(201).send({
+      ...base,
+      applied: true,
+      aliasesCreated,
+      aliasesUpdated,
+      costCentersSet,
+      reresolved: impact,
+    });
   });
 
   // =======================================================================
@@ -868,6 +1268,10 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
       : [];
     const projectCostCenter = new Map(projectRows.map((p) => [p.id, p.costCenter ?? p.initiativeCostCenter ?? null]));
 
+    // LIVE lines only (ADR-0076): a line a reconciliation pass marked as a
+    // cross-batch duplicate is EXCLUDED here — and the exclusion is counted
+    // and disclosed below, because a number that quietly got smaller is the
+    // same disease as a number that quietly doubled.
     const importedRows = await db
       .select()
       .from(importedCostLines)
@@ -877,9 +1281,38 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
               gte(importedCostLines.periodStart, window.start),
               lt(importedCostLines.periodStart, window.end),
               eq(importedCostLines.resolvedUserId, onlyUserId),
+              isNull(importedCostLines.supersededAt),
             )
-          : and(gte(importedCostLines.periodStart, window.start), lt(importedCostLines.periodStart, window.end)),
+          : and(
+              gte(importedCostLines.periodStart, window.start),
+              lt(importedCostLines.periodStart, window.end),
+              isNull(importedCostLines.supersededAt),
+            ),
       );
+
+    const [supersededInWindow] = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(importedCostLines)
+      .where(
+        onlyUserId
+          ? and(
+              gte(importedCostLines.periodStart, window.start),
+              lt(importedCostLines.periodStart, window.end),
+              eq(importedCostLines.resolvedUserId, onlyUserId),
+              isNotNull(importedCostLines.supersededAt),
+            )
+          : and(
+              gte(importedCostLines.periodStart, window.start),
+              lt(importedCostLines.periodStart, window.end),
+              isNotNull(importedCostLines.supersededAt),
+            ),
+      );
+    const [lastReconciled] = await db
+      .select({ finishedAt: costReconciliationRuns.finishedAt })
+      .from(costReconciliationRuns)
+      .where(eq(costReconciliationRuns.outcome, "ok"))
+      .orderBy(desc(costReconciliationRuns.startedAt))
+      .limit(1);
 
     const userIds = [
       ...new Set([
@@ -933,6 +1366,17 @@ export function registerCostImportRoutes(app: FastifyInstance, db: Db): void {
       groupedBy: by,
       subjects,
       basisStatement,
+      // ADR-0076: what the reconciliation excluded from this very response.
+      // Disclosed, never silent — the superseded rows still exist and are
+      // listed by GET /v1/cost-imports/reconciliation.
+      reconciliation: {
+        supersededLinesExcluded: supersededInWindow?.n ?? 0,
+        lastReconciledAt: lastReconciled?.finishedAt?.toISOString() ?? null,
+        note:
+          "Cross-batch duplicate lines marked by a reconciliation pass are excluded from the imported side above. " +
+          "They are marked, never deleted: each carries the line that replaced it, the run that decided it and a " +
+          "stated reason, and the full list is readable at /v1/cost-imports/reconciliation.",
+      },
       staleness: {
         vendors: vendorFreshness.map((v) => ({
           vendor: v.vendor,

@@ -225,6 +225,7 @@ import { registerOpenApiRoutes, type RouteInventoryEntry } from "./openapi.js";
 import { registerOnboardingRoutes } from "./onboarding.js";
 import { registerShadowAiRoutes } from "./shadow-ai.js";
 import { registerCostImportRoutes } from "./cost-import.js";
+import { registerCostReconciliationRoutes } from "./cost-reconcile.js";
 import { registerTracingRoutes } from "./tracing.js";
 import { registerCompliancePackRoutes } from "./compliance-packs.js";
 import { registerCopilotRoutes } from "./copilot.js";
@@ -2868,6 +2869,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // under a CHECK that pins `basis = 'imported'`, so nothing it writes can ever
   // be read back as metered.
   registerCostImportRoutes(app, db);
+  // ADR-0076 — COST RECONCILIATION. Admin-only through the default gate: the
+  // "run now" endpoint and the health/report read. Marks (never deletes)
+  // cross-batch duplicate imported lines so a consolidated read cannot count
+  // the same vendor fact twice; the scheduled pass (scheduler-jobs.ts) runs
+  // the identical function.
+  registerCostReconciliationRoutes(app, db);
   // ADR-0070 — TRACE / SPAN OBSERVABILITY. The read surface for the trees the
   // dispatch core, the MCP tool path and the orchestration path record, plus
   // the opt-in OTLP exporter. Listing and reading traces is default-deny with a

@@ -1,5 +1,6 @@
 /**
- * ADR-0064 — THE SCHEDULED JOBS (six at ADR-0064; a seventh at ADR-0065).
+ * ADR-0064 — THE SCHEDULED JOBS (six at ADR-0064; a seventh at ADR-0065; an
+ * eighth at ADR-0076).
  *
  * This file is deliberately thin, and that is the whole point of it. Every
  * entry here CALLS the function the corresponding endpoint already calls.
@@ -38,6 +39,7 @@ import { runSpendAnomalyEvaluation } from "./spend-monitor.js";
 import { runEvalDriftSweep } from "./evals.js";
 import { runScheduledRedTeamSweep } from "./redteam.js";
 import { runTrainingJobPollSweep } from "./regulait-llm.js";
+import { runCostReconciliation } from "./cost-reconcile.js";
 import { toRegistry, type SchedulerJobDefinition, type SchedulerJobRegistry } from "./scheduler.js";
 
 const HOUR = 3600;
@@ -59,6 +61,7 @@ export const SCHEDULER_JOB_NAMES = {
   evalDrift: "eval-drift-sweep",
   redteam: "redteam-sweep",
   trainingPoll: "training-job-poll-sweep",
+  costReconciliation: "cost-reconciliation-sweep",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -212,6 +215,40 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
         return {
           itemsProcessed: out.polled.length,
           detail: { polled: out.polled.length, skipped: out.skipped.length },
+        };
+      },
+    },
+    {
+      // ADR-0076 — the eighth, closing ADR-0069's disclosed cross-chunk
+      // double-count gap. Marks (never deletes) cross-batch duplicate imported
+      // cost lines so consolidated reads stop counting the same vendor fact
+      // twice; ambiguity is reported and left alone. NOT a control: the
+      // consolidated read discloses its own exclusions whether or not this has
+      // ever run, and the manual endpoint runs the same function. Makes no
+      // dispatch, mints no identity, and — per ADR-0069 — polls no vendor:
+      // it re-examines rows we already hold.
+      name: SCHEDULER_JOB_NAMES.costReconciliation,
+      description:
+        "Mark cross-batch duplicate imported cost lines as superseded (never deleted) so a consolidated " +
+        "read cannot count the same vendor fact twice. Ambiguous duplicates are reported, never guessed at.",
+      adr: "ADR-0076",
+      defaultIntervalSeconds: DAY,
+      run: async (ctx) => {
+        const out = await runCostReconciliation(ctx.db, {
+          actorUserId: ctx.actorUserId,
+          now: ctx.now,
+          trigger: "schedule",
+        });
+        return {
+          itemsProcessed: out.supersededLines,
+          detail: {
+            runId: out.runId,
+            scannedLines: out.scannedLines,
+            duplicateGroups: out.duplicateGroups,
+            supersededLines: out.supersededLines,
+            ambiguousGroups: out.ambiguousGroups,
+            overlapWarnings: out.overlapWarnings,
+          },
         };
       },
     },

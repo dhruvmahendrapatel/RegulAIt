@@ -657,6 +657,10 @@ describe("every sweep is registered", () => {
     expect([...registry.keys()].sort()).toEqual(
       [
         SCHEDULER_JOB_NAMES.approvalSla,
+        // ADR-0076: reconciles cross-batch duplicate imported cost lines —
+        // marked, never deleted. Driven end-to-end in cost-reconcile.test.ts;
+        // this list pins its registration.
+        SCHEDULER_JOB_NAMES.costReconciliation,
         SCHEDULER_JOB_NAMES.evalDrift,
         SCHEDULER_JOB_NAMES.mrmExpiry,
         SCHEDULER_JOB_NAMES.redteam,
