@@ -2124,6 +2124,11 @@ to personal `dhruvmahendrapatel`.
   initiator's self-attestation loud (recorded reason + `workflow:deploy-override-attested`), but
   routing the override to a genuine approver is the stronger control and needs a routing policy
   to say *who*.
+- **Slice-9/10 findings (2026-08-15), reported not fixed:** (a) `sessionLifetimeHours`
+  narrowing is issuance-scoped — an already-issued session keeps its stamped expiry, so a 2h-old
+  session survives a 1h narrowing (ADR-0039's revocation levers are the pinned mitigation);
+  (b) a failed PM approval-mirror is surfaced in the decide response (`pmMirror.ok=false`) but
+  not persisted as a retryable marker — reconciliation currently rides drift detection.
 - **Two pillar-6 savings-semantics questions (slice-5 probe, 2026-08-15), deliberately not decided in code:**
   (a) a semantic-cache HIT on a budget-blocked project is served (the cache sits before the
   budget gate) — $0 spend, but the `semantic_caching` savings row claims an avoided dispatch
