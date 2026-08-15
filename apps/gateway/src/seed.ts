@@ -892,6 +892,22 @@ if (!averyRuns.some((r: Json) => r.name === "phi-access-review")) {
 }
 
 // --- workflow instances (one per persona) --------------------------------
+// ADR-0079: a `planning` stage now RESTS (plan-only: mutating agent work
+// attributed to the instance is refused there). Every seeded instance that must
+// reach a later stage therefore leaves plan-only by the same explicit advance a
+// user makes — nothing here bypasses the gate. No-op for a template without a
+// planning stage, so the deploy-tail seeds below need no special-casing.
+async function leavePlanOnly(
+  instanceId: string,
+  auth: { authorization: string },
+): Promise<void> {
+  const view = await call("GET", `/v1/workflows/instances/${instanceId}`, undefined, auth);
+  if (view.instance?.status !== "blocked_on_plan") return;
+  const stage = view.instance.definition?.stages?.[view.instance.state?.currentStageIndex ?? -1];
+  if (!stage) return;
+  await call("POST", `/v1/workflows/instances/${instanceId}/advance`, { stageId: stage.id }, auth);
+}
+
 const DANA_CHANGE = "Add saved-payment-methods to checkout";
 const danaInstances = (await call("GET", "/v1/workflows/instances", undefined, danaAuth)).instances ?? [];
 if (!danaInstances.some((i: Json) => i.change?.description === DANA_CHANGE)) {
@@ -909,6 +925,7 @@ if (!danaInstances.some((i: Json) => i.change?.description === DANA_CHANGE)) {
     },
     danaAuth,
   );
+  await leavePlanOnly(inst.id, danaAuth);
   // submit the requirements artifact so Avery's inbox has a real sign-off waiting
   await call(
     "POST",
@@ -945,6 +962,7 @@ if (!danaInstances2.some((i: Json) => i.change?.description === PIPELINE_CHANGE)
     },
     danaAuth,
   );
+  await leavePlanOnly(inst.id, danaAuth);
   await call(
     "POST",
     `/v1/workflows/instances/${inst.id}/artifacts`,
@@ -966,7 +984,7 @@ if (!averyInstances.some((i: Json) => i.change?.description === AVERY_CHANGE)) {
   // top of the rule-matched one, so this instance carries an extra compliance
   // sign-off nobody configured by hand. Left at the artifact stage: Avery's
   // Workflows page opens on something he can fill in.
-  await call(
+  const inst = await call(
     "POST",
     "/v1/workflows/instances",
     {
@@ -980,6 +998,7 @@ if (!averyInstances.some((i: Json) => i.change?.description === AVERY_CHANGE)) {
     },
     averyAuth,
   );
+  await leavePlanOnly(inst.id, averyAuth);
 }
 
 // --- THE CASCADE HEADLINE (§8.3, MARKET_ANALYSIS 2026-08 §3 → item 4) ------
@@ -1011,6 +1030,7 @@ const CASCADE_CHANGE = "Redact and export the oncology cohort (PHI)";
       },
       danaAuth,
     );
+    await leavePlanOnly(inst.id, danaAuth);
     await call(
       "POST",
       `/v1/workflows/instances/${inst.id}/artifacts`,
@@ -1086,6 +1106,7 @@ const CASCADE_CHANGE = "Redact and export the oncology cohort (PHI)";
       { change: { description, paths: ["src/checkout/deploy.ts"], changeType: "deploy-demo", environment } },
       danaAuth,
     );
+    await leavePlanOnly(inst.id, danaAuth);
     await prep(inst.id);
     await approveInstanceGate(inst.id);
   }

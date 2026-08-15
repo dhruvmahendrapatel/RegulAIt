@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  currentPlanningStage,
   initialState,
   matchTemplates,
   mergeDefinitions,
@@ -21,6 +22,17 @@ const standard: WorkflowDefinition = validateDefinition({
     { id: "checks", type: "automated_check", checks: ["ci_tests"] },
   ],
 });
+
+/**
+ * ADR-0079: `standard` opens with a planning stage, and a planning stage now
+ * RESTS instead of auto-completing. Every walk that used to run straight from
+ * `start` into the artifact stage therefore leaves plan-only explicitly first —
+ * this helper is that one extra, deliberate act.
+ */
+function startedPastPlan(def: WorkflowDefinition = standard) {
+  const started = transition(def, initialState(def), { kind: "start" });
+  return transition(def, started.state, { kind: "human_trigger", stageId: "plan" });
+}
 
 describe("template validation", () => {
   it("accepts the standard template", () => {
@@ -194,9 +206,23 @@ describe("assignment matching + merge (§4)", () => {
 });
 
 describe("instance state machine", () => {
-  it("start runs to the artifact stage and blocks", () => {
+  // §2 stage 2 (ADR-0079): start no longer runs THROUGH the planning stage —
+  // it comes to rest ON it. That resting point is the whole enforcement hook.
+  it("start comes to rest AT the planning stage, not through it", () => {
     const { state, effects } = transition(standard, initialState(standard), { kind: "start" });
+    expect(state.status).toBe("blocked_on_plan");
+    expect(effects).toContainEqual({ kind: "await_plan", stageId: "plan" });
+    // the trigger before it still auto-completes; planning is ACTIVE, not done
+    expect(state.stageStatuses[0]).toBe("completed");
+    expect(state.stageStatuses[1]).toBe("active");
+    expect(currentPlanningStage(standard, state)?.id).toBe("plan");
+  });
+
+  it("leaving plan-only is an explicit act, and only then does the artifact stage block", () => {
+    const { state, effects } = startedPastPlan();
     expect(state.status).toBe("blocked_on_artifact");
+    expect(state.stageStatuses[1]).toBe("completed");
+    expect(currentPlanningStage(standard, state)).toBeNull();
     expect(effects).toContainEqual({
       kind: "await_artifact",
       stageId: "requirements",
@@ -204,8 +230,16 @@ describe("instance state machine", () => {
     });
   });
 
+  it("currentPlanningStage is null on a terminal instance even at a planning index", () => {
+    const started = transition(standard, initialState(standard), { kind: "start" });
+    expect(currentPlanningStage(standard, started.state)?.id).toBe("plan");
+    const aborted = transition(standard, started.state, { kind: "abort" });
+    expect(aborted.state.currentStageIndex).toBe(1); // still sitting on 'plan'
+    expect(currentPlanningStage(standard, aborted.state)).toBeNull();
+  });
+
   it("artifact submission advances to sign-off; approval unblocks to build trigger", () => {
-    let r = transition(standard, initialState(standard), { kind: "start" });
+    let r = startedPastPlan();
     r = transition(standard, r.state, { kind: "artifact_submitted", stageId: "requirements" });
     expect(r.state.status).toBe("blocked_on_approval");
     expect(r.effects).toContainEqual({
@@ -221,7 +255,7 @@ describe("instance state machine", () => {
   });
 
   it("editing the artifact after sign-off re-opens the sign-off (versioned re-approval, §2)", () => {
-    let r = transition(standard, initialState(standard), { kind: "start" });
+    let r = startedPastPlan();
     r = transition(standard, r.state, { kind: "artifact_submitted", stageId: "requirements" });
     r = transition(standard, r.state, { kind: "approval_granted", stageId: "requirements_signoff" });
     expect(r.state.status).toBe("awaiting_trigger");
@@ -237,7 +271,7 @@ describe("instance state machine", () => {
   });
 
   it("denied approval terminates the instance", () => {
-    let r = transition(standard, initialState(standard), { kind: "start" });
+    let r = startedPastPlan();
     r = transition(standard, r.state, { kind: "artifact_submitted", stageId: "requirements" });
     r = transition(standard, r.state, { kind: "approval_denied", stageId: "requirements_signoff" });
     expect(r.state.status).toBe("denied");
@@ -245,7 +279,7 @@ describe("instance state machine", () => {
   });
 
   it("a human trigger walks build to the check executor; check success completes", () => {
-    let r = transition(standard, initialState(standard), { kind: "start" });
+    let r = startedPastPlan();
     r = transition(standard, r.state, { kind: "artifact_submitted", stageId: "requirements" });
     r = transition(standard, r.state, { kind: "approval_granted", stageId: "requirements_signoff" });
     r = transition(standard, r.state, { kind: "human_trigger", stageId: "build" });
@@ -449,7 +483,7 @@ describe("instance state machine", () => {
 
 describe("review-fix regressions", () => {
   it("an approval event for the wrong stage is rejected (cross-stage forgery)", () => {
-    let r = transition(standard, initialState(standard), { kind: "start" });
+    let r = startedPastPlan();
     r = transition(standard, r.state, { kind: "artifact_submitted", stageId: "requirements" });
     expect(() =>
       transition(standard, r.state, { kind: "approval_granted", stageId: "some_other_stage" }),

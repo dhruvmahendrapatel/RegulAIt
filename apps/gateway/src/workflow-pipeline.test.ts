@@ -190,8 +190,19 @@ describe("complete pipeline: intake to merged through public endpoints only", ()
     });
     expect(started.statusCode).toBe(201);
     const instanceId = started.json().id;
-    // trigger + planning auto-complete; the instance parks at the artifact
-    expect(started.json().status).toBe("blocked_on_artifact");
+    // ADR-0079: the trigger auto-completes, and the instance comes to REST at
+    // the plan-only stage — mutating agent work attributed to it is refused
+    // until a human says planning is done (plan-only.test.ts proves the
+    // refusal; here we just walk the pipeline through it).
+    expect(started.json().status).toBe("blocked_on_plan");
+    const leftPlan = await app.inject({
+      method: "POST",
+      headers: piaAuth,
+      url: `/v1/workflows/instances/${instanceId}/advance`,
+      payload: { stageId: "plan" },
+    });
+    expect(leftPlan.statusCode).toBe(200);
+    expect(leftPlan.json().status).toBe("blocked_on_artifact");
 
     // plan-mode output: the requirements artifact
     const art = await app.inject({

@@ -1370,7 +1370,16 @@ describe("workflow engine (EPIC-03 slice)", () => {
     });
     expect(started.statusCode).toBe(201);
     const instanceId = started.json().id;
-    expect(started.json().status).toBe("blocked_on_artifact");
+    // ADR-0079: standardDef opens with a planning stage, which now RESTS
+    // (plan-only) instead of auto-completing — leaving it is an explicit act.
+    expect(started.json().status).toBe("blocked_on_plan");
+    const left = await app.inject({
+      method: "POST",
+      headers: leoAuth,
+      url: `/v1/workflows/instances/${instanceId}/advance`,
+      payload: { stageId: "plan" },
+    });
+    expect(left.json().status).toBe("blocked_on_artifact");
 
     const v1 = await app.inject({
       method: "POST",
@@ -1481,6 +1490,13 @@ describe("workflow engine (EPIC-03 slice)", () => {
     expect(stageIds).toContain("requirements_signoff");
     expect(stageIds).toContain("compliance_signoff");
 
+    // ADR-0079: leave the merged template's plan-only stage first
+    await app.inject({
+      method: "POST",
+      headers: leoAuth,
+      url: `/v1/workflows/instances/${instanceId}/advance`,
+      payload: { stageId: "plan" },
+    });
     // walk to the compliance gate: artifact → own sign-off → build/checks
     await app.inject({
       method: "POST",

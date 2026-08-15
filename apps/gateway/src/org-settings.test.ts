@@ -541,6 +541,13 @@ describe("approvals — org quorum", () => {
     });
     expect(started.statusCode).toBe(201);
     const instanceId = started.json().id as string;
+    // ADR-0079: the planning stage rests — leave plan-only before the artifact
+    await app.inject({
+      method: "POST",
+      headers: umaAuth,
+      url: `/v1/workflows/instances/${instanceId}/advance`,
+      payload: { stageId: "plan" },
+    });
     await app.inject({
       method: "POST",
       headers: umaAuth,
