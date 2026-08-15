@@ -105,3 +105,13 @@ would have read as "still running". (Corrected before it bit — logged because
 the pattern was written.)
 **Rule: any wait-for-completion filter must match every terminal state,
 failure included; silence must never be interpretable as progress.**
+
+### M-014 — Two subagents parked on background watchers that cannot wake them
+Both review agents stopped mid-task ("watchers armed", "waiting on the suite")
+because they armed Monitor-style watchers on their own background runs — and a
+subagent's monitors do not re-invoke it, so each sat idle until I nudged it.
+The defect was in MY briefs: they never said so.
+**Rule: every subagent brief that involves long-running commands must state:
+never stop to wait on a monitor/watcher — poll the run's output file in a
+bounded foreground loop, and do not end the turn before committing and
+summarizing.**
