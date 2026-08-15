@@ -885,6 +885,15 @@ export const invokeAgentSchema = z.object({
   stream: z.boolean().optional(),
   /** pillar 5: attribute this call's cost to a project */
   projectId: z.string().uuid().optional(),
+  /** PILLAR 2 §2 stage 2 (ADR-0079): attribute this call to a workflow
+   * INSTANCE — the join point that lets the instance's current stage constrain
+   * the call. Validated exactly like `projectId`: an unknown instance, or one
+   * the caller may not drive, REFUSES (never silently ignored). While the named
+   * instance rests at a `planning` stage, a mutating `mode` is refused
+   * (`plan_only_stage`) and a plan/read mode is allowed. Attribution is
+   * OPT-IN — an invoke that names no instance is unconstrained, exactly as
+   * before. */
+  instanceId: z.string().uuid().optional(),
   /** multi-turn: dispatch inside this conversation — the stored history rides
    * the request as the model's messages array, and the user+assistant turns
    * are persisted on completion. Only meaningful with dispatch=true; a

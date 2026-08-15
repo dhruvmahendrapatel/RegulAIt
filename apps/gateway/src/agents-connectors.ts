@@ -84,6 +84,9 @@ import {
   type GuardrailPolicy,
 } from "./guardrails.js";
 import { mrmDispatchGate } from "./mrm.js";
+// ADR-0079: pillar 2 §2 stage 2 — the invoke→instance join point and the
+// plan-only refusal it makes possible.
+import { guardInstanceAttributedCall } from "./plan-only.js";
 import { newVersion, resolveAgentPromptVersion } from "./config-versions.js";
 import { z } from "zod";
 import { decryptSecret, encryptSecret } from "./secrets.js";
@@ -2763,6 +2766,24 @@ export function registerAgentConnectorRoutes(
     if (projectId) {
       const attribution = await assertProjectAttribution(db, projectId, userId, req.authCtx.isAdmin);
       if (!attribution.ok) return reply.status(attribution.status).send({ error: attribution.error });
+    }
+
+    // PILLAR 2 §2 stage 2 (ADR-0079) — WORKFLOW-INSTANCE ATTRIBUTION AND THE
+    // PLAN-ONLY GATE. Validated exactly like `projectId` above: an unknown or
+    // unauthorized instance REFUSES rather than being ignored. When the named
+    // instance rests at a `planning` stage, a mutating mode is refused here —
+    // before any dispatch, cache lookup or billing — and a plan/read mode is
+    // allowed through untouched. Naming no instance is unconstrained, exactly
+    // as before: this is opt-in attribution, and the ADR says so plainly.
+    if (body.instanceId) {
+      const gate = await guardInstanceAttributedCall(db, {
+        instanceId: body.instanceId,
+        userId,
+        isAdmin: req.authCtx.isAdmin,
+        mode: body.mode,
+        detail: { phase: "invoke", agentId: agent.id, agentName: agent.name },
+      });
+      if (!gate.ok) return reply.status(gate.status).send({ error: gate.error, detail: gate.detail });
     }
 
     // §8.4 STREAMING SUPPRESSION (ADR-0019, closing the recorded known limit).

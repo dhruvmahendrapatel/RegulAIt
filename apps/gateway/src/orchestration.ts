@@ -76,6 +76,8 @@ import {
 import { executeGovernedToolCall, resolveNodeToolContext } from "./mcp-proxy.js";
 import { loadAgentRevocations, loadRoleAgentGrants } from "./entitlements.js";
 import { assertProjectAttribution, projectPiiMode } from "./projects.js";
+// ADR-0079: the plan-only gate, shared verbatim with the invoke path.
+import { guardInstanceAttributedCall, isPlanSafeMode } from "./plan-only.js";
 import { loadInterceptionSettings } from "./compat-core.js";
 import { mirrorNodeStatus } from "./pm.js";
 import { handleNestedRunCompletion } from "./workflows.js";
@@ -1578,7 +1580,8 @@ export async function applyRunApprovalDecision(
 }
 
 export type PlanRunResult =
-  | { ok: false; status: 400 | 422; body: Record<string, unknown> }
+  // 409 (ADR-0079): the named workflow instance is at a plan-only stage
+  | { ok: false; status: 400 | 403 | 409 | 422; body: Record<string, unknown> }
   | {
       ok: true;
       run: RunRow;
@@ -1623,6 +1626,33 @@ export async function planRun(
     const attribution = await assertProjectAttribution(db, projectId, userId, false);
     if (!attribution.ok) {
       return { ok: false, status: attribution.status as 400 | 422, body: { error: attribution.error } };
+    }
+  }
+  // PILLAR 2 §2 stage 2 (ADR-0079): a run NAMING a workflow instance is
+  // attributed to it, and a run is execution. The same gate as the invoke path,
+  // applied per node because a graph declares one mode per node: while the
+  // instance rests at a planning stage, any node with a mutating mode refuses
+  // the whole plan (planning half a graph would be worse than refusing it).
+  // The nested build-stage call passes the instance's OWN id and initiator, and
+  // a build stage is never a planning stage, so that path is untouched — and
+  // the instance link, previously unvalidated on POST /v1/runs, is now checked
+  // like `projectId` is instead of failing later on a foreign key.
+  if (workflowInstanceId) {
+    const mutating = graph.nodes.filter((n) => !isPlanSafeMode(n.mode));
+    const gate = await guardInstanceAttributedCall(db, {
+      instanceId: workflowInstanceId,
+      userId,
+      isAdmin: false,
+      mode: mutating[0]?.mode ?? "plan",
+      detail: { phase: "run-plan", run: graph.run, nodes: graph.nodes.map((n) => n.id) },
+      what:
+        mutating.length > 0
+          ? `run '${graph.run}' node${mutating.length > 1 ? "s" : ""} ` +
+            mutating.map((n) => `'${n.id}' (mode '${n.mode}')`).join(", ")
+          : undefined,
+    });
+    if (!gate.ok) {
+      return { ok: false, status: gate.status, body: { error: gate.error, detail: gate.detail } };
     }
   }
 

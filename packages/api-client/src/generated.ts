@@ -37,6 +37,7 @@ export type PostV1AgentsByAgentIdInvokeBody = {
     maxTokens?: number;
     stream?: boolean;
     projectId?: string;
+    instanceId?: string;
     conversationId?: string;
   };
 
