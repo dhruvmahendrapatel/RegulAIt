@@ -6,7 +6,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
-import type { AssignmentRule, GitConnection, WorkflowTemplate } from "../../../api/adminTypes";
+import type {
+  AssignmentRule,
+  GitConnection,
+  TemplateGalleryEntry,
+  TemplateGalleryProfile,
+  WorkflowTemplate,
+} from "../../../api/adminTypes";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import {
@@ -21,7 +27,7 @@ import {
   Table,
   Textarea,
 } from "../../../ui/kit";
-import { ReasonModal, optionEls, useAction, useComplianceProfiles } from "../adminKit";
+import { ReasonModal, optionEls, useAction, useComplianceProfiles, useUsers, userOpts } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -118,6 +124,8 @@ export default function WorkflowTemplatesPage() {
           })}
         </Card>
 
+        <GalleryCard />
+
         <AuthorCard connections={git.data?.connections ?? []} />
 
         <Card title="Assignment rules — which template governs which change">
@@ -206,6 +214,136 @@ function DeleteRuleButton(props: { rule: AssignmentRule }) {
         }}
       />
     </>
+  );
+}
+
+// ---- the template gallery (ADR-0077) --------------------------------------
+
+/**
+ * Cascade-aware starting shapes. The stage annotations and the
+ * compliance-heavy shapes come DERIVED from the live compliance profiles'
+ * required templates (never a stored list) — editing a profile moves this
+ * gallery on the next load. "Create" instantiates through the one
+ * template-creation path, so full validation applies.
+ */
+function GalleryCard() {
+  const act = useAction();
+  const users = useUsers();
+  const gallery = useQuery({
+    queryKey: ["admin", "wf-template-gallery"],
+    queryFn: () =>
+      api.get<{ entries: TemplateGalleryEntry[]; profiles: TemplateGalleryProfile[] }>(
+        "/v1/workflows/template-gallery",
+      ),
+  });
+  const [approverUserId, setApproverUserId] = useState("");
+  const [names, setNames] = useState<Record<string, string>>({});
+
+  const profiles = gallery.data?.profiles ?? [];
+  return (
+    <Card title="Template gallery — cascade-aware starting shapes">
+      {gallery.isLoading && <span className={v.dim}>Loading…</span>}
+      {!gallery.isLoading && (
+        <>
+          <div className={a.formRow} style={{ marginBottom: "var(--s2)" }}>
+            <Field label="Approver for sign-off stages (optional)">
+              <Select value={approverUserId} onChange={(e) => setApproverUserId(e.target.value)}>
+                {optionEls(userOpts(users.data?.users), "— the requesting user —")}
+              </Select>
+            </Field>
+          </div>
+          {(gallery.data?.entries ?? []).map((entry) => {
+            const demanded = entry.stageAnnotations.filter((x) => x.demandedByTags.length > 0);
+            return (
+              <div key={entry.galleryId} className={v.listRow}>
+                <div className={v.grow}>
+                  <div className={v.row}>
+                    <strong>{entry.title}</strong>
+                    {entry.source === "compliance_profile" && (
+                      <Badge tone="info" title="shape derived from a compliance profile's required templates">
+                        {entry.profileTag}
+                      </Badge>
+                    )}
+                  </div>
+                  <div className={a.stageRail}>
+                    {(entry.definition.stages ?? []).map((s, i) => {
+                      const tags =
+                        entry.stageAnnotations.find((x) => x.stageId === s.id)?.demandedByTags ?? [];
+                      return (
+                        <span
+                          key={`${s.id}-${i}`}
+                          className={a.stage}
+                          title={tags.length ? `demanded by compliance profile(s): ${tags.join(", ")}` : undefined}
+                        >
+                          {s.id}
+                          <span className={a.stageType}>{s.type}</span>
+                          {tags.map((t) => (
+                            <Badge key={t} tone="warn" title={`the '${t}' cascade forces this stage`}>
+                              {t}
+                            </Badge>
+                          ))}
+                        </span>
+                      );
+                    })}
+                  </div>
+                  <div className={v.faint} style={{ marginTop: "var(--s0)" }}>
+                    {entry.description}
+                    {demanded.length > 0 &&
+                      ` Cascade: ${demanded
+                        .map((x) => `${x.stageId} ← ${x.demandedByTags.join("+")}`)
+                        .join(" · ")}.`}
+                  </div>
+                </div>
+                <div className={v.row}>
+                  <Input
+                    aria-label={`Template name for ${entry.title}`}
+                    placeholder="new template name"
+                    value={names[entry.galleryId] ?? ""}
+                    onChange={(e) => setNames((s) => ({ ...s, [entry.galleryId]: e.target.value }))}
+                  />
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={act.busy || !(names[entry.galleryId] ?? "").trim()}
+                    onClick={() =>
+                      void act.run(
+                        () =>
+                          api.post(`/v1/workflows/template-gallery/${entry.galleryId}/create`, {
+                            name: (names[entry.galleryId] ?? "").trim(),
+                            ...(approverUserId ? { approverUserId } : {}),
+                          }),
+                        "Template created from the gallery — validated like any authored template",
+                      )
+                    }
+                  >
+                    Create
+                  </Button>
+                </div>
+              </div>
+            );
+          })}
+          <p className={v.faint}>
+            Stage badges and the compliance-heavy shapes are derived live from the compliance
+            profiles’ required templates — the same §8.3 rules the workflow engine enforces —
+            so this gallery can never drift from the cascade.
+            {profiles.length > 0 &&
+              ` Profiles: ${profiles
+                .map(
+                  (p) =>
+                    `${p.tag} (pii ${p.piiMode}, mcp ${p.mcpDefaultMode}${
+                      p.auditRetentionDays ? `, audit ${p.auditRetentionDays}d` : ""
+                    })`,
+                )
+                .join(" · ")}.`}
+          </p>
+          {act.error && (
+            <span className={v.errLine} role="alert">
+              {act.error}
+            </span>
+          )}
+        </>
+      )}
+    </Card>
   );
 }
 

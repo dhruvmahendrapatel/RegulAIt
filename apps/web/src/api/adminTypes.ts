@@ -636,6 +636,26 @@ export interface WorkflowTemplate {
   };
 }
 
+/** ADR-0077 — the cascade-annotated template gallery */
+export interface TemplateGalleryEntry {
+  galleryId: string;
+  title: string;
+  description: string;
+  source: "built_in" | "compliance_profile";
+  profileTag?: string | null;
+  definition: { workflow?: string; stages?: Array<{ id: string; type: string }> };
+  stageAnnotations: Array<{ stageId: string; demandedByTags: string[] }>;
+}
+
+export interface TemplateGalleryProfile {
+  tag: string;
+  piiMode: string;
+  auditRetentionDays: number | null;
+  mcpDefaultMode: string;
+  requiredTemplates: Array<{ id: string; name: string; retired: boolean; stageIds: string[] }>;
+  forcedStageIds: string[];
+}
+
 export interface AssignmentRule {
   id: string;
   templateId: string;
