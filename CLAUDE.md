@@ -84,9 +84,12 @@ individual task seems to imply — always ask before crossing that line.
 
 1. Read this file (you just did).
 2. Read [project-state/STATE.md](project-state/STATE.md) in full.
-3. Skim [docs/decisions/README.md](docs/decisions/README.md) for any ADR not yet reflected in
+3. Read [mistakes.md](mistakes.md) — the append-only ledger of this agent's own past
+   process errors, each with an extractable rule. Owner-mandated (2026-08-13): the point of
+   the file is that no logged mistake is ever made twice.
+4. Skim [docs/decisions/README.md](docs/decisions/README.md) for any ADR not yet reflected in
    `STATE.md`'s decisions table — if you find drift, reconcile it before doing anything else.
-4. Give the user a one-paragraph recap of current phase/status and **confirm direction before
+5. Give the user a one-paragraph recap of current phase/status and **confirm direction before
    acting** — do not assume and start building. This mirrors the product's own forced
    Plan-mode-before-build pattern at the meta level.
 
