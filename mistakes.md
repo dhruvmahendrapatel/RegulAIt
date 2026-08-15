@@ -125,3 +125,12 @@ several hundred lines and burned another agent's budget.
 **Rule: when a subagent dies from an API/limit/timeout error, inspect the
 working tree for completed-but-uncommitted artefacts BEFORE re-dispatching —
 a killed agent's last message describes its intent, never its file state.**
+
+### M-016 — `git checkout <file>` to undo a bypass, in a dirty tree
+Reverting a deliberate test-bypass edit with `git checkout apps/gateway/src/agents-connectors.ts`
+threw away ~450 lines of uncommitted work in the same file, because checkout restores the
+whole file from HEAD, not the one edit. Rebuilt and re-verified, but the work was gone
+for a while and could have been lost entirely. (Self-reported by the agent that did it.)
+**Rule: never `git checkout`/`git restore` a FILE to undo a temporary edit while that file
+holds uncommitted work — reverse the exact edit with Edit, or commit first so the revert
+has a floor to land on.**
