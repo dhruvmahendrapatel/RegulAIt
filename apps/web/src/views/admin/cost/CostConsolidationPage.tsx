@@ -181,6 +181,12 @@ interface ConsolidatedResponse {
   groupedBy: "user" | "cost_center";
   subjects: Subject[];
   basisStatement: string;
+  /** ADR-0076: what the reconciliation excluded from this very response */
+  reconciliation: {
+    supersededLinesExcluded: number;
+    lastReconciledAt: string | null;
+    note: string;
+  };
   staleness: {
     vendors: Array<{
       vendor: string;
@@ -191,6 +197,77 @@ interface ConsolidatedResponse {
     note: string;
   };
   note: string;
+}
+
+// ---- ADR-0076: reconciliation + roster projections -------------------------
+
+interface ReconciliationRun {
+  id: string;
+  trigger: "manual" | "schedule";
+  startedAt: string;
+  finishedAt: string | null;
+  outcome: "running" | "ok" | "failed";
+  scannedLines: number;
+  duplicateGroups: number;
+  supersededLines: number;
+  ambiguousGroups: number;
+  overlapWarnings: number;
+  warnings: Array<{ kind: string; detail: string }>;
+  error: string | null;
+}
+
+interface ReconciliationReport {
+  liveLines: number;
+  supersededLines: number;
+  lastRun: ReconciliationRun | null;
+  recentRuns: ReconciliationRun[];
+  supersededSample: Array<{
+    id: string;
+    vendor: string;
+    accountKey: string;
+    amount: number;
+    currency: string;
+    supersededAt: string;
+    supersededReason: string;
+  }>;
+  scheduler: { jobName: string; note: string };
+  posture: string;
+}
+
+interface RosterResult {
+  mode: "dry_run" | "apply";
+  dialect: "scim" | "rows";
+  rowsParsed: number;
+  rowsAccepted: number;
+  rowsRefused: number;
+  duplicateRows: number;
+  refusals: RowRefusal[];
+  refusalsTruncated: boolean;
+  counts: {
+    aliasesToCreate: number;
+    aliasesToUpdate: number;
+    aliasesUnchanged: number;
+    aliasesUnnecessary: number;
+    costCentersToSet: number;
+    costCentersUnchanged: number;
+  };
+  actions: Array<{
+    row: number;
+    accountRef: string;
+    vendor: string;
+    userEmail: string;
+    aliasAction: "create" | "update" | "unchanged" | "unnecessary";
+    costCenter: string | null;
+    costCenterAction: "set" | "unchanged" | "none";
+  }>;
+  applied: boolean;
+  aliasesCreated?: number;
+  aliasesUpdated?: number;
+  costCentersSet?: number;
+  reresolved?: { changed: number; scanned: number };
+  ingestScan: { mode: string; verdict: string };
+  piiPosture: string;
+  posture: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -268,6 +345,10 @@ export default function CostConsolidationPage() {
     queryKey: ["admin", "cost-import-mappings"],
     queryFn: () => api.get<MappingsResponse>("/v1/cost-imports/mappings"),
   });
+  const reconciliation = useQuery({
+    queryKey: ["admin", "cost-reconciliation"],
+    queryFn: () => api.get<ReconciliationReport>("/v1/cost-imports/reconciliation"),
+  });
 
   // ---- import form ----
   const [adapterId, setAdapterId] = useState("generic_mapped");
@@ -307,6 +388,15 @@ export default function CostConsolidationPage() {
   const [ccUser, setCcUser] = useState("");
   const [ccValue, setCcValue] = useState("");
 
+  // ---- ADR-0076: roster upload form ----
+  const [rosterContent, setRosterContent] = useState("");
+  const [rosterFormat, setRosterFormat] = useState<"csv" | "json">("json");
+  const [rosterSource, setRosterSource] = useState("");
+  const [rosterVendor, setRosterVendor] = useState("*");
+  const [rosterReason, setRosterReason] = useState("");
+  const [rosterResult, setRosterResult] = useState<RosterResult | null>(null);
+  const [rosterFileError, setRosterFileError] = useState<string | null>(null);
+
   const [revoking, setRevoking] = useState<ImportBatch | null>(null);
 
   const adapter = (adapters.data?.adapters ?? []).find((x) => x.id === adapterId) ?? null;
@@ -315,6 +405,49 @@ export default function CostConsolidationPage() {
     void history.refetch();
     void mappings.refetch();
     void consolidated.refetch();
+    void reconciliation.refetch();
+  };
+
+  const readRosterFile = async (file: File | undefined) => {
+    setRosterFileError(null);
+    if (!file) return;
+    try {
+      const text = await file.text();
+      setRosterContent(text);
+      setRosterSource(file.name);
+      if (file.name.toLowerCase().endsWith(".json")) setRosterFormat("json");
+      else if (file.name.toLowerCase().endsWith(".csv")) setRosterFormat("csv");
+    } catch (e) {
+      setRosterFileError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const submitRoster = async (mode: "dry_run" | "apply") => {
+    setRosterResult(null);
+    const body: Record<string, unknown> = {
+      format: rosterFormat,
+      mode,
+      content: rosterContent,
+      vendor: rosterVendor.trim() || "*",
+      reason: rosterReason.trim(),
+    };
+    if (rosterSource.trim()) body.source = rosterSource.trim();
+    const res = await act.run<RosterResult>(
+      () => api.post<RosterResult>("/v1/cost-imports/roster", body),
+      mode === "dry_run"
+        ? "Roster dry run complete — nothing was written."
+        : "Roster applied through the existing alias and cost-centre write paths.",
+    );
+    if (res) setRosterResult(res);
+    refreshAll();
+  };
+
+  const runReconciliation = async () => {
+    await act.run(
+      () => api.post("/v1/cost-imports/reconcile", {}),
+      "Reconciliation pass complete — duplicates marked, never deleted.",
+    );
+    refreshAll();
   };
 
   const readFile = async (file: File | undefined) => {
@@ -753,7 +886,119 @@ export default function CostConsolidationPage() {
               />
             )}
             <p className={v.faint}>{consolidated.data?.staleness.note}</p>
+            {consolidated.data && consolidated.data.reconciliation.supersededLinesExcluded > 0 && (
+              <p className={v.dim} data-testid="cc-reconciliation-note">
+                {consolidated.data.reconciliation.supersededLinesExcluded} superseded duplicate line(s) are
+                excluded from the imported side above — marked by a reconciliation pass, never deleted. The
+                full list is in the reconciliation card below.
+              </p>
+            )}
           </div>
+        </Card>
+
+        {/* --- ADR-0076: scheduled reconciliation --------------------------- */}
+        <Card
+          title="Reconciliation — the same vendor line, never counted twice"
+          actions={
+            <Button
+              size="sm"
+              variant="primary"
+              disabled={act.busy}
+              onClick={() => void runReconciliation()}
+              data-testid="rc-run-now"
+            >
+              Run now
+            </Button>
+          }
+        >
+          <QueryGate
+            loading={reconciliation.isLoading}
+            error={reconciliation.error}
+            onRetry={() => void reconciliation.refetch()}
+          >
+            <div className={v.stack} data-testid="rc-card">
+              <p className={v.dim}>{reconciliation.data?.posture}</p>
+              <div className={v.grid}>
+                <Stat value={reconciliation.data?.liveLines ?? 0} label="Live imported lines" />
+                <Stat
+                  value={reconciliation.data?.supersededLines ?? 0}
+                  label="Superseded (marked, kept)"
+                />
+                <Stat
+                  value={
+                    reconciliation.data?.lastRun
+                      ? ago(reconciliation.data.lastRun.startedAt)
+                      : "never"
+                  }
+                  label="Last pass"
+                />
+                <Stat
+                  value={reconciliation.data?.lastRun?.ambiguousGroups ?? 0}
+                  label="Ambiguous groups (left alone)"
+                />
+              </div>
+              {reconciliation.data?.lastRun && (
+                <KV
+                  rows={[
+                    [
+                      "Last pass outcome",
+                      <Badge
+                        tone={reconciliation.data.lastRun.outcome === "ok" ? "ok" : "danger"}
+                      >
+                        {reconciliation.data.lastRun.outcome}
+                      </Badge>,
+                    ],
+                    ["Trigger", reconciliation.data.lastRun.trigger],
+                    ["Lines scanned", String(reconciliation.data.lastRun.scannedLines)],
+                    ["Duplicate groups marked", String(reconciliation.data.lastRun.duplicateGroups)],
+                    [
+                      "Overlapping windows reported (not touched)",
+                      String(reconciliation.data.lastRun.overlapWarnings),
+                    ],
+                  ]}
+                />
+              )}
+              {(reconciliation.data?.lastRun?.warnings ?? []).length > 0 && (
+                <div className={v.stack} data-testid="rc-warnings">
+                  <div className={v.sectionTitle}>What the last pass refused to decide</div>
+                  {reconciliation.data!.lastRun!.warnings.slice(0, 10).map((w, i) => (
+                    <p key={i} className={v.errLine} role="alert">
+                      {w.detail}
+                    </p>
+                  ))}
+                </div>
+              )}
+              {(reconciliation.data?.supersededSample ?? []).length > 0 && (
+                <>
+                  <div className={v.sectionTitle}>Superseded lines (marked, never deleted)</div>
+                  <Table<ReconciliationReport["supersededSample"][number]>
+                    rows={reconciliation.data?.supersededSample ?? []}
+                    rowKey={(r) => r.id}
+                    columns={[
+                      { key: "vendor", header: "Vendor", render: (r) => r.vendor },
+                      {
+                        key: "account",
+                        header: "Account",
+                        render: (r) => <span className={v.mono}>{r.accountKey}</span>,
+                      },
+                      {
+                        key: "amount",
+                        header: "Amount",
+                        render: (r) => `${r.amount.toFixed(2)} ${r.currency}`,
+                      },
+                      { key: "when", header: "Marked", render: (r) => ago(r.supersededAt) },
+                      {
+                        key: "why",
+                        header: "Why",
+                        render: (r) => <span className={v.dim}>{r.supersededReason}</span>,
+                      },
+                    ]}
+                  />
+                </>
+              )}
+              <p className={v.faint}>{reconciliation.data?.scheduler.note}</p>
+            </div>
+          </QueryGate>
         </Card>
 
         {/* --- identity mapping --------------------------------------------- */}
@@ -971,6 +1216,135 @@ export default function CostConsolidationPage() {
               </div>
             </div>
           </QueryGate>
+        </Card>
+
+        {/* --- ADR-0076: roster upload --------------------------------------- */}
+        <Card title="Roster upload — bulk identity mapping from your directory">
+          <div className={v.stack}>
+            <p className={v.dim}>
+              Consume a SCIM-style user export (JSON) or a CSV roster to assert vendor-account aliases and
+              person-level cost centres <strong>in bulk, through the same write paths</strong> as the forms
+              above. An account mapped to two people — or one person given two cost centres — is refused
+              loudly, never resolved by guessing.
+            </p>
+            <div className={a.formRow}>
+              <Field label="Format">
+                <Select
+                  value={rosterFormat}
+                  onChange={(e) => setRosterFormat(e.target.value as "csv" | "json")}
+                  data-testid="ro-format"
+                >
+                  <option value="json">JSON (SCIM or rows)</option>
+                  <option value="csv">CSV</option>
+                </Select>
+              </Field>
+              <Field label="Vendor for asserted aliases (* = any)">
+                <Input value={rosterVendor} onChange={(e) => setRosterVendor(e.target.value)} data-testid="ro-vendor" />
+              </Field>
+              <Field label="Where this came from (provenance)" grow>
+                <Input
+                  value={rosterSource}
+                  onChange={(e) => setRosterSource(e.target.value)}
+                  placeholder="e.g. okta-export-2026-08.json"
+                  data-testid="ro-source"
+                />
+              </Field>
+            </div>
+            <div className={a.formRow}>
+              <Field label="Upload a file">
+                <input
+                  type="file"
+                  accept=".csv,.json,text/csv,application/json,text/plain"
+                  onChange={(e) => void readRosterFile(e.target.files?.[0])}
+                  data-testid="ro-file"
+                />
+              </Field>
+            </div>
+            {rosterFileError && (
+              <div className={v.errLine} role="alert">
+                {rosterFileError}
+              </div>
+            )}
+            <Field label="…or paste the export here" grow>
+              <Textarea
+                rows={8}
+                value={rosterContent}
+                onChange={(e) => setRosterContent(e.target.value)}
+                spellCheck={false}
+                placeholder='{"Resources":[{"userName":"a.smith@vendorbill.example","emails":[{"value":"alice@acme.com","primary":true}]}]}'
+                data-testid="ro-content"
+              />
+            </Field>
+            <Field label="Reason for this bulk assertion (audited, stamped on every alias)" grow>
+              <Input value={rosterReason} onChange={(e) => setRosterReason(e.target.value)} data-testid="ro-reason" />
+            </Field>
+            <div className={v.row}>
+              <Button
+                disabled={act.busy || !rosterContent.trim() || !rosterReason.trim()}
+                onClick={() => void submitRoster("dry_run")}
+                data-testid="ro-dry-run"
+              >
+                Dry run (writes nothing)
+              </Button>
+              <Button
+                variant="primary"
+                disabled={act.busy || !rosterContent.trim() || !rosterReason.trim()}
+                onClick={() => void submitRoster("apply")}
+                data-testid="ro-apply"
+              >
+                Apply
+              </Button>
+              <span className={v.faint}>
+                Identity columns are join keys (PII-exempt by disclosed construction); the cost-centre column
+                is scanned. Unmapped columns are discarded at parse.
+              </span>
+            </div>
+            <OutcomePanel outcome={act.outcome} testId="ro-outcome" />
+            {rosterResult && (
+              <div className={v.stack} data-testid="ro-result">
+                <div className={v.grid}>
+                  <Stat value={rosterResult.rowsParsed} label="Rows parsed" />
+                  <Stat value={rosterResult.rowsAccepted} label="Rows accepted" />
+                  <Stat value={rosterResult.rowsRefused} label="Rows refused" />
+                  <Stat
+                    value={
+                      rosterResult.applied
+                        ? `${rosterResult.aliasesCreated ?? 0} / ${rosterResult.aliasesUpdated ?? 0}`
+                        : `${rosterResult.counts.aliasesToCreate} / ${rosterResult.counts.aliasesToUpdate}`
+                    }
+                    label={rosterResult.applied ? "Aliases created / updated" : "Aliases to create / update"}
+                  />
+                </div>
+                <KV
+                  rows={[
+                    ["Dialect", rosterResult.dialect === "scim" ? "SCIM user export" : "column-mapped rows"],
+                    [
+                      "Unnecessary aliases (account already the directory address)",
+                      String(rosterResult.counts.aliasesUnnecessary),
+                    ],
+                    [
+                      "Cost centres",
+                      rosterResult.applied
+                        ? `${rosterResult.costCentersSet ?? 0} set, ${rosterResult.counts.costCentersUnchanged} unchanged`
+                        : `${rosterResult.counts.costCentersToSet} to set, ${rosterResult.counts.costCentersUnchanged} unchanged`,
+                    ],
+                    [
+                      "Stored lines re-attributed",
+                      rosterResult.reresolved ? String(rosterResult.reresolved.changed) : "— (dry run)",
+                    ],
+                    ["Ingest scan", `${rosterResult.ingestScan.verdict} at mode '${rosterResult.ingestScan.mode}'`],
+                  ]}
+                />
+                <RefusalList
+                  refusals={rosterResult.refusals}
+                  truncated={rosterResult.refusalsTruncated}
+                  testId="ro-refusals"
+                />
+                <p className={v.faint}>{rosterResult.posture}</p>
+                <p className={v.faint}>{rosterResult.piiPosture}</p>
+              </div>
+            )}
+          </div>
         </Card>
 
         {/* --- import history ------------------------------------------------ */}
