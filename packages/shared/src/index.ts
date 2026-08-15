@@ -1145,6 +1145,16 @@ export const advanceStageSchema = z.object({
   stageId: z.string().min(1),
 });
 
+/** ADR-0077 — instantiate a workflow-template-gallery shape as a REAL template.
+ * The gallery entry id names the shape; `name` names the created template;
+ * `approverUserId` (optional) replaces every `requesting_user` approver
+ * placeholder in the shape with a concrete user, resolved and validated by the
+ * SAME template-creation path an admin-authored definition goes through. */
+export const createFromGallerySchema = z.object({
+  name: z.string().min(1).max(200),
+  approverUserId: z.string().uuid().optional(),
+});
+
 /** §2 report per-check outcomes into an automated_check stage. A real CI posts
  * pass/fail (+ optional severity/detail) here; the demo/seed does too. A failing
  * required check parks the instance at blocked_on_check. Only names declared on

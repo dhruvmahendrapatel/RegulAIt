@@ -207,6 +207,7 @@ import { registerDecomposeRoutes } from "./decompose.js";
 import { mirrorApprovalDecision, registerPmRoutes } from "./pm.js";
 import { RunStateError } from "@regulait/orchestration-kernel";
 import { applyWorkflowApprovalDecision, registerWorkflowRoutes } from "./workflows.js";
+import { registerTemplateGalleryRoutes } from "./template-gallery.js";
 import {
   loadOrgSettings,
   registerOrgSettingsRoutes,
@@ -2821,6 +2822,8 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerPmRoutes(app, db, { dataKey: opts.dataKey });
 
   registerWorkflowRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0077 — the cascade-annotated template gallery (admin-gated by default)
+  registerTemplateGalleryRoutes(app, db);
 
   registerMcpProxy(app, db);
 

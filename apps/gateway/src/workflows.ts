@@ -1001,6 +1001,73 @@ ${latestArtifact.content}`
   return lastEffects;
 }
 
+/**
+ * ADR-0077 — THE ONE TEMPLATE-CREATION PATH.
+ *
+ * Extracted verbatim from `POST /v1/workflows/templates` so the gallery's
+ * "create from gallery" route (template-gallery.ts) instantiates through the
+ * exact same validation an admin-authored definition gets: kernel definition
+ * validation, approver resolution (a bad approver id must fail template
+ * creation, not brick an instance mid-flight), and nested-run-graph validation
+ * (a template must never promise a graph the orchestration engine can't run).
+ * A zod definition failure THROWS (ZodError → the global 400 mapping), exactly
+ * as the route always behaved.
+ */
+export async function createWorkflowTemplateValidated(
+  db: Db,
+  body: { name: string; definition?: unknown },
+): Promise<
+  | { ok: true; row: typeof workflowTemplates.$inferSelect }
+  | { ok: false; status: number; body: Record<string, unknown> }
+> {
+  const definition = validateDefinition(body.definition);
+  const named = definition.stages
+    .flatMap((st) => st.approvers ?? [])
+    .filter((a) => a !== "requesting_user");
+  if (named.length > 0) {
+    const uuidCheck = z.string().uuid();
+    if (named.some((a) => !uuidCheck.safeParse(a).success)) {
+      return { ok: false, status: 422, body: { error: "invalid_approver" } };
+    }
+    const found = await db.select({ id: users.id }).from(users).where(inArray(users.id, named));
+    if (found.length !== new Set(named).size) {
+      return { ok: false, status: 422, body: { error: "invalid_approver" } };
+    }
+  }
+  // §8: nested run graphs must be valid NOW. Their escalation approvers
+  // resolve at template time too (same fail-fast rule as stage approvers).
+  const nestedApprovers: string[] = [];
+  for (const st of definition.stages) {
+    if (st.type !== "automated_build" || st.run === undefined) continue;
+    try {
+      nestedApprovers.push(validateGraph(st.run).escalationApproverUserId);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        return {
+          ok: false,
+          status: 422,
+          body: { error: "invalid_run_graph", stageId: st.id, issues: err.issues },
+        };
+      }
+      throw err;
+    }
+  }
+  if (nestedApprovers.length > 0) {
+    const found = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(inArray(users.id, nestedApprovers));
+    if (found.length !== new Set(nestedApprovers).size) {
+      return { ok: false, status: 422, body: { error: "invalid_approver" } };
+    }
+  }
+  const [row] = await db
+    .insert(workflowTemplates)
+    .values({ name: body.name, definition })
+    .returning();
+  return { ok: true, row: row! };
+}
+
 export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: WorkflowRouteOptions = {}) {
   // Git connections: admin-only; tokens encrypted at rest, never returned.
   app.post("/v1/git/connections", async (req, reply) => {
@@ -1122,53 +1189,9 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
 
   app.post("/v1/workflows/templates", async (req, reply) => {
     const body = createWorkflowTemplateSchema.parse(req.body);
-    const definition = validateDefinition(body.definition);
-    // Approvers must be resolvable NOW — a bad approver id must fail template
-    // creation, not brick an instance mid-flight.
-    const named = definition.stages
-      .flatMap((st) => st.approvers ?? [])
-      .filter((a) => a !== "requesting_user");
-    if (named.length > 0) {
-      const uuidCheck = z.string().uuid();
-      if (named.some((a) => !uuidCheck.safeParse(a).success)) {
-        return reply.status(422).send({ error: "invalid_approver" });
-      }
-      const found = await db.select({ id: users.id }).from(users).where(inArray(users.id, named));
-      if (found.length !== new Set(named).size) {
-        return reply.status(422).send({ error: "invalid_approver" });
-      }
-    }
-    // §8: nested run graphs must be valid NOW — a template must never promise
-    // a graph the orchestration engine can't run. Their escalation approvers
-    // resolve at template time too (same fail-fast rule as stage approvers).
-    const nestedApprovers: string[] = [];
-    for (const st of definition.stages) {
-      if (st.type !== "automated_build" || st.run === undefined) continue;
-      try {
-        nestedApprovers.push(validateGraph(st.run).escalationApproverUserId);
-      } catch (err) {
-        if (err instanceof z.ZodError) {
-          return reply
-            .status(422)
-            .send({ error: "invalid_run_graph", stageId: st.id, issues: err.issues });
-        }
-        throw err;
-      }
-    }
-    if (nestedApprovers.length > 0) {
-      const found = await db
-        .select({ id: users.id })
-        .from(users)
-        .where(inArray(users.id, nestedApprovers));
-      if (found.length !== new Set(nestedApprovers).size) {
-        return reply.status(422).send({ error: "invalid_approver" });
-      }
-    }
-    const [row] = await db
-      .insert(workflowTemplates)
-      .values({ name: body.name, definition })
-      .returning();
-    return reply.status(201).send(row);
+    const result = await createWorkflowTemplateValidated(db, body);
+    if (!result.ok) return reply.status(result.status).send(result.body);
+    return reply.status(201).send(result.row);
   });
 
   app.get("/v1/workflows/templates", async () => ({
