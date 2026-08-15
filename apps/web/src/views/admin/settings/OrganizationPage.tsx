@@ -354,9 +354,9 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               "Compliance defaults saved (audited)",
             )
           }
-          help="Default PII mode applies wherever a project-attributed call resolves to NO compliance-cascade PII policy (an unclassified project, or tags with no profile). A classified project's own cascade always wins — this fills the gap, it never overrides a framework. The env-var fallback lets a dispatch use ANTHROPIC_API_KEY-style server env vars when no credential is stored; regulated orgs can turn it off to force every key through the encrypted store, or narrow which providers may use it."
+          help="Default PII mode is the DEPLOYMENT-WIDE FLOOR: it applies wherever no compliance framework governs — an unclassified project, tags matching no profile, and calls attributed to NO project at all (model, connector, MCP, cached replays, streams and training ingest alike), so omitting the project is not an exit from enforcement. A classified project's own cascade always wins — the floor fills gaps under the frameworks, it never overrides one. The env-var fallback lets a dispatch use ANTHROPIC_API_KEY-style server env vars when no credential is stored; regulated orgs can turn it off to force every key through the encrypted store, or narrow which providers may use it."
         >
-          <Field label="Default PII mode (unclassified projects)">
+          <Field label="Default PII mode (the floor: unclassified projects + unattributed calls)">
             <Select value={comp.f.defaultPiiMode} onChange={(e) => comp.set("defaultPiiMode", e.target.value)}>
               <option value="none">none — no enforcement (default)</option>
               <option value="log">log — record category counts</option>

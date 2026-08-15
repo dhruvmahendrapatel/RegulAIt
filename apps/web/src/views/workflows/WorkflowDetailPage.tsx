@@ -22,6 +22,7 @@ import {
   StatusBadge,
 } from "../../ui/kit";
 import { useToast } from "../../ui/toast";
+import { useSession } from "../../session/SessionContext";
 import { DecisionLedgerCard, PmLinksCard } from "../pm/PmAndDecisions";
 import v from "../views.module.css";
 import s from "./workflows.module.css";
@@ -29,8 +30,10 @@ import s from "./workflows.module.css";
 export default function WorkflowDetailPage() {
   const { instanceId } = useParams<{ instanceId: string }>();
   const { toast } = useToast();
+  const { me } = useSession();
   const queryClient = useQueryClient();
   const [artifactText, setArtifactText] = useState("");
+  const [deployReason, setDeployReason] = useState("");
   const [actionError, setActionError] = useState<string | null>(null);
 
   const q = useQuery({
@@ -283,35 +286,65 @@ export default function WorkflowDetailPage() {
           </Card>
         )}
 
-        {inst.status === "blocked_on_deploy" && current && (
-          <Card>
-            <span className={v.rowTight}>
-              <Badge tone="warn">deploy on hold</Badge>
-              <span className={v.dim}>
-                {typeof ctx.lastError === "string" && ctx.lastError
-                  ? ctx.lastError
-                  : "this deploy needs a manual handoff before it can proceed."}
-              </span>
-            </span>
-            <div className={v.row} style={{ marginTop: "var(--s2)" }}>
-              <Button
-                variant="primary"
-                title="Confirm the deploy was handled out-of-band (or the condition is acceptable) and advance"
-                onClick={() =>
-                  void act(
-                    () =>
-                      api.post(`/v1/workflows/instances/${inst.id}/deploy-override`, {
-                        stageId: current.id,
-                      }),
-                    "Deploy handed off — continuing",
-                  )
-                }
-              >
-                Mark deployed &amp; continue
-              </Button>
-            </div>
-          </Card>
-        )}
+        {inst.status === "blocked_on_deploy" &&
+          current &&
+          (() => {
+            // Separation of duties (ADR-0022 amendment): clearing a parked
+            // deploy is an ATTESTATION that it happened some other way. When
+            // the person attesting also initiated the change, the gateway
+            // refuses without a recorded reason — so the field is required
+            // here for exactly that case, optional for an arm's-length
+            // operator, and always recorded when given.
+            const selfAttested = Boolean(me?.userId && me.userId === inst.initiatorUserId);
+            const reasonMissing = selfAttested && !deployReason.trim();
+            return (
+              <Card>
+                <span className={v.rowTight}>
+                  <Badge tone="warn">deploy on hold</Badge>
+                  <span className={v.dim}>
+                    {typeof ctx.lastError === "string" && ctx.lastError
+                      ? ctx.lastError
+                      : "this deploy needs a manual handoff before it can proceed."}
+                  </span>
+                </span>
+                <label className={v.dim} style={{ display: "block", marginTop: "var(--s2)" }}>
+                  {selfAttested
+                    ? "You initiated this change, so clearing its own deploy gate is a self-attestation — record how it was actually deployed (required):"
+                    : "How was it deployed? (optional — recorded in the audit trail)"}
+                  <textarea
+                    value={deployReason}
+                    onChange={(e) => setDeployReason(e.target.value)}
+                    rows={2}
+                    style={{ display: "block", width: "100%", marginTop: "var(--s1)" }}
+                    placeholder="e.g. shipped by hand from the ops runbook; ticket OPS-411"
+                  />
+                </label>
+                <div className={v.row} style={{ marginTop: "var(--s2)" }}>
+                  <Button
+                    variant="primary"
+                    disabled={reasonMissing}
+                    title={
+                      reasonMissing
+                        ? "A recorded reason is required when the initiator clears their own deploy gate"
+                        : "Confirm the deploy was handled out-of-band (or the condition is acceptable) and advance"
+                    }
+                    onClick={() =>
+                      void act(
+                        () =>
+                          api.post(`/v1/workflows/instances/${inst.id}/deploy-override`, {
+                            stageId: current.id,
+                            ...(deployReason.trim() ? { reason: deployReason.trim() } : {}),
+                          }),
+                        "Deploy handed off — continuing",
+                      )
+                    }
+                  >
+                    Mark deployed &amp; continue
+                  </Button>
+                </div>
+              </Card>
+            );
+          })()}
 
         {inst.status === "rolled_back" && (
           <Card>
