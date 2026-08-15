@@ -2440,6 +2440,39 @@ export {
   type VendorDomainRuleRow,
 } from "./cost-import.js";
 
+// ADR-0076 — COST RECONCILIATION, the pure half: the planner that decides
+// which imported lines are cross-batch restatements of the same vendor fact
+// (marked, never deleted), refuses ambiguous multiplicities, and reports
+// overlapping-but-not-identical windows instead of guessing at them.
+export {
+  RECONCILIATION_MAX_WARNINGS,
+  planCostReconciliation,
+  type DuplicateGroupPlan,
+  type ReconciliationLineInput,
+  type ReconciliationPlan,
+  type ReconciliationWarning,
+  type SupersessionPlanItem,
+} from "./cost-reconciliation.js";
+
+// ADR-0076 — ROSTER INGEST, the pure half: parse a SCIM-style user export or
+// a CSV roster into normalised entries the gateway feeds through the EXISTING
+// alias/cost-centre write paths. Identity columns are join keys (PII-exempt by
+// the same construction ADR-0069 discloses); every unmapped column is
+// discarded at parse.
+export {
+  ROSTER_MAX_ROWS,
+  ROSTER_TEXT_MAX,
+  inferRosterMapping,
+  parseRosterExport,
+  rosterColumnMappingSchema,
+  rosterIngestRequestSchema,
+  type RosterColumnMapping,
+  type RosterEntry,
+  type RosterIngestRequest,
+  type RosterParseResult,
+  type RosterRowRefusal,
+} from "./roster-import.js";
+
 // ADR-0061 — CHATOPS APPROVALS, the pure half: signature verification and the
 // replay window (the FIRST wall — a forged callback must be cheap to reject,
 // before mapping, entitlement or any DB work), strict interaction parsing (the

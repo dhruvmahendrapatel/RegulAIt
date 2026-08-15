@@ -697,6 +697,12 @@ export const auditLog = pgTable(
         "cost_import_batch",
         "vendor_account_alias",
         "vendor_domain_rule",
+        // ADR-0076: a reconciliation pass over the imported cost lines. Every
+        // supersession GROUP audits here with the line ids it marked and the
+        // batch it kept, plus one summary row per pass — because excluding a
+        // number from a chargeback view, even a duplicate one, is a governed
+        // act somebody may have to defend. Plain text column — no DDL needed.
+        "cost_reconciliation_run",
         // ADR-0061: ChatOps approvals. Admin CRUD of a chat WORKSPACE and of a
         // chat→RegulAIt IDENTITY LINK (the trust artifact that decides which
         // human a Slack click binds to), the outbound mirror of an approval,
@@ -6333,6 +6339,16 @@ export const importedCostLines = pgTable(
      * "derivedFrom: operator-asserted seat price"). Never a dump of the row. */
     detail: jsonb("detail").$type<Record<string, unknown>>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // --- ADR-0076 (migration 0085): the supersession mark -------------------
+    // NULL everywhere = the line is live and counts. A reconciliation pass that
+    // finds a NEWER batch restating the same vendor fact MARKS the older copy
+    // here — never deletes it: the row is the evidence of what the older file
+    // said and of what every pre-reconciliation read reported. The CHECK below
+    // makes a mark without a reason impossible.
+    supersededAt: timestamp("superseded_at", { withTimezone: true }),
+    supersededByLineId: uuid("superseded_by_line_id"),
+    supersededRunId: uuid("superseded_run_id"),
+    supersededReason: text("superseded_reason"),
   },
   (t) => [
     index("imported_cost_lines_batch_idx").on(t.batchId),
@@ -6350,6 +6366,48 @@ export const importedCostLines = pgTable(
       "imported_cost_lines_resolution_check",
       sql`(${t.resolutionMethod} = 'unresolved') = (${t.resolvedUserId} IS NULL)`,
     ),
+    // ADR-0076: a supersession mark without a reason is an exclusion nobody can
+    // audit; a pointer or run id without a mark is a half-written state; and a
+    // line can never supersede itself
+    check(
+      "imported_cost_lines_supersession_check",
+      sql`((${t.supersededAt} IS NULL) = (${t.supersededReason} IS NULL)) AND (${t.supersededAt} IS NOT NULL OR ${t.supersededByLineId} IS NULL) AND (${t.supersededAt} IS NOT NULL OR ${t.supersededRunId} IS NULL) AND (${t.supersededByLineId} IS NULL OR ${t.supersededByLineId} <> ${t.id})`,
+    ),
+  ],
+);
+
+/**
+ * ADR-0076 (migration 0085) — THE RECONCILIATION RUN LEDGER.
+ *
+ * One row per reconciliation pass over `imported_cost_lines`, whether an
+ * operator pressed "run now" or the ADR-0064 scheduler ticked. Open-first like
+ * `scheduler_runs`: a row stuck at 'running' with a stale `started_at` IS the
+ * diagnosis of a process that died mid-pass. `warnings` carries the bounded,
+ * structured report of what was deliberately NOT touched — ambiguous
+ * multiplicities and overlapping-but-not-identical windows — because a
+ * reconciliation that refuses to guess must say what it refused.
+ */
+export const costReconciliationRuns = pgTable(
+  "cost_reconciliation_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    trigger: text("trigger", { enum: ["manual", "schedule"] }).notNull().default("manual"),
+    initiatedByUserId: uuid("initiated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    outcome: text("outcome", { enum: ["running", "ok", "failed"] }).notNull().default("running"),
+    scannedLines: integer("scanned_lines").notNull().default(0),
+    duplicateGroups: integer("duplicate_groups").notNull().default(0),
+    supersededLines: integer("superseded_lines").notNull().default(0),
+    ambiguousGroups: integer("ambiguous_groups").notNull().default(0),
+    overlapWarnings: integer("overlap_warnings").notNull().default(0),
+    warnings: jsonb("warnings").$type<Array<Record<string, unknown>>>().notNull().default([]),
+    error: text("error"),
+  },
+  (t) => [
+    index("cost_reconciliation_runs_started_idx").on(t.startedAt),
+    check("cost_reconciliation_runs_trigger_check", sql`${t.trigger} IN ('manual', 'schedule')`),
+    check("cost_reconciliation_runs_outcome_check", sql`${t.outcome} IN ('running', 'ok', 'failed')`),
   ],
 );
 
@@ -6417,6 +6475,7 @@ export type CostImportBatchRow = typeof costImportBatches.$inferSelect;
 export type ImportedCostLineRow = typeof importedCostLines.$inferSelect;
 export type VendorAccountAliasRow = typeof vendorAccountAliases.$inferSelect;
 export type VendorDomainRuleRow = typeof vendorDomainRules.$inferSelect;
+export type CostReconciliationRunRow = typeof costReconciliationRuns.$inferSelect;
 
 // ===========================================================================
 // ADR-0070 (migration 0082) — TRACE / SPAN OBSERVABILITY
