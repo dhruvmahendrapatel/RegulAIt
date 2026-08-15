@@ -115,3 +115,13 @@ The defect was in MY briefs: they never said so.
 never stop to wait on a monitor/watcher — poll the run's output file in a
 bounded foreground loop, and do not end the turn before committing and
 summarizing.**
+
+### M-015 — Nearly redid work a dead agent had already finished
+The delegation-conformance agent was killed mid-turn by a model-limit API error.
+Its last words were "Now the ADR and README row", which read as "unfinished" —
+but it had in fact written all four artefacts (test, ADR, spec doc, README row)
+and died only before `git commit`. Re-running the brief would have duplicated
+several hundred lines and burned another agent's budget.
+**Rule: when a subagent dies from an API/limit/timeout error, inspect the
+working tree for completed-but-uncommitted artefacts BEFORE re-dispatching —
+a killed agent's last message describes its intent, never its file state.**
