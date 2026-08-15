@@ -2068,6 +2068,9 @@ export function registerRegulAItLlmRoutes(app: FastifyInstance, db: Db, opts: Re
     const policy = await resolveGuardrailPolicy(database, { projectId });
     // §8.3's PII floor for the project, expressed in the guardrail vocabulary.
     // `projectPiiMode` returns log|warn|block or null; null means "no floor".
+    // Since the ADR-0021 amendment an UNATTRIBUTED ingest also resolves here —
+    // to the org defaultPiiMode — so training data cannot dodge the floor by
+    // omitting the project any more than a dispatch can.
     const piiFloor = (await projectPiiMode(database, projectId)) as GuardrailMode | null;
     const mode = effectiveIngestMode(requested, piiFloor);
     // The detectors run at their configured strength for content classes, and

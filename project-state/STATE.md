@@ -2124,9 +2124,10 @@ to personal `dhruvmahendrapatel`.
   initiator's self-attestation loud (recorded reason + `workflow:deploy-override-attested`), but
   routing the override to a genuine approver is the stronger control and needs a routing policy
   to say *who*.
-- **Deployment-wide PII floor for unattributed dispatches.** Raised with the owner, unanswered:
-  today the §8.4 PII gate is project-scoped by design, so a dispatch attributed to no project is
-  ungated. Worth an explicit decision either way.
+- ~~Deployment-wide PII floor for unattributed dispatches~~ **RESOLVED 2026-08-13** — owner said
+  build it. ADR-0021 amendment: `defaultPiiMode` now governs wherever no compliance framework
+  does, including unattributed model/connector/MCP/cache/streaming/training-ingest calls.
+  Default stays `none` (behaviour-preserving); one `PUT /v1/org/settings` turns the floor on.
 - Security Hub's default standards enabled **both** AWS Foundational Security Best Practices and
   CIS AWS Foundations Benchmark v1.2.0 (the latter wasn't explicitly requested — AWS enables it
   by default alongside FSBP). Harmless; disable the CIS subscription later if its findings become

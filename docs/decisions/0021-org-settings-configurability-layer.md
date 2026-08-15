@@ -155,3 +155,67 @@ ceilings so the /app composer clamps against the org's numbers instead of consta
 - The gateway suite grew from 432 to 452 tests; the new file
   (`apps/gateway/src/org-settings.test.ts`) pins the defaults, the ceiling model, and one
   behavioural test per admin choice.
+
+## Amendment — 2026-08-13: `defaultPiiMode` becomes the deployment-wide floor (owner decision)
+
+As shipped, `defaultPiiMode` answered one question: what PII mode does an
+UNCLASSIFIED (or profile-less) **project** fall back to? An UNATTRIBUTED
+dispatch — no `projectId` on the body at all — resolved to null by design, and
+`projectPiiMode`'s own comment said so: "there is no project policy to
+enforce."
+
+That design left a one-keystroke exit standing. The §8.4 gate ran at every
+project-attributed model, connector and MCP call, and the caller chose whether
+to attribute. The same prompt a block-classified project refused sailed through
+when the `projectId` was simply left off — the identical attribution dodge the
+semantic-cache fix (ADR-0042 amendment, 2026-08-13) closed for *replays*, still
+open for the original call. Raised with the owner twice as an open question;
+the decision came back: **add the deployment-wide PII floor for unattributed
+dispatches.**
+
+**The mechanism is the knob that already existed, with its meaning completed
+rather than a second knob added.** `defaultPiiMode` now reads as one sentence:
+*the PII mode wherever no compliance framework governs* — an unclassified
+project, a project whose tags match no profile, an unattributed call, and a
+dangling `projectId` that names no project (a made-up project must never be
+WEAKER than no project; on the dispatch paths `assertProjectAttribution`
+already 400s the dangling id first, so the resolver's fallback there is
+defense-in-depth). Two knobs meaning almost the same thing is how one half gets
+rotated and the other forgotten — the exact drift this ADR's singleton design
+exists to prevent.
+
+Unchanged, deliberately:
+
+- **The shipped default is still `none`.** A deployment that never set the org
+  default keeps pre-amendment behaviour byte-identical, including the demo.
+  The floor is one `PUT /v1/org/settings {"defaultPiiMode": "block"}` away.
+- **A matched compliance framework still wins.** The org default fills gaps
+  under the frameworks; it never overrides one. A block floor does not harden
+  a warn-classified project — pinned by test.
+- **The Approvals-Queue bulk-sensitivity fence stays project-scoped.** The
+  floor governs what may be SENT OUT of the gateway; an approval decision
+  sends nothing anywhere, and routing it through the floor would turn a PII
+  posture into an approvals-ergonomics policy (a block floor would silently
+  strip bulk-decide from every unattributed approval). The one remaining
+  `projectId ? … : null` ternary, in `workbench.ts`, carries a comment saying
+  it is intentional.
+
+Where the floor now reaches, because every one of these resolves through the
+single `projectPiiMode`: the agent invoke input gate, the dispatch core's
+input+output gate (orchestration and worker-node dispatch included), the
+semantic-cache cached-output gate — closing the cache's remaining leg, fill
+ungated → replay ungated, where no project ever enters the picture — streaming
+suppression (a block FLOOR now buffers an unattributed stream exactly as a
+block project does), the connector path and the MCP proxy path (both
+previously short-circuited on a null `projectId` before reaching the resolver;
+those ternaries are gone), chat fencing, and the RegulAIt-LLM training-ingest
+floor (unattributed training data cannot dodge it either).
+
+`pii.test.ts` pins all of it: default-none regression, unattributed block
+(audited with NO projectId on the deny row — the absence is the point), the
+ungated-fill/ungated-replay cache leg, warn-floor pass-through, the connector
+path, framework-over-floor precedence, and the dangling-id refusal.
+`org-settings.test.ts` now resets `defaultPiiMode` after its block test —
+under the old semantics a leaked `block` was invisible to later files; under
+the floor it would 403 them, which is task #119's order-dependency disease
+returning by a new door.

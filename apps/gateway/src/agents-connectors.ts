@@ -4030,10 +4030,13 @@ export function registerAgentConnectorRoutes(
     }
 
     // §8.4 PII ENFORCEMENT (pillar 3), connector path. The effective piiMode
-    // comes from the attributed project's cascade; an unattributed/unclassified
-    // call yields null and every check is a no-op. The INPUT check runs BEFORE
+    // comes from the attributed project's cascade; an unattributed or
+    // unclassified call falls to the ORG FLOOR (ADR-0021 defaultPiiMode, null
+    // when unset). The resolver is called unconditionally — the old
+    // `projectId ? … : null` ternary here was exactly the one-keystroke
+    // attribution dodge the floor exists to close. The INPUT check runs BEFORE
     // provider.invoke, so a block executes nothing and bills nothing.
-    const piiMode: PiiMode | null = projectId ? await projectPiiMode(db, projectId) : null;
+    const piiMode: PiiMode | null = await projectPiiMode(db, projectId ?? null);
     let inputHits: PiiHit[] = [];
     if (piiMode) {
       const chk = enforcePII(piiMode, {

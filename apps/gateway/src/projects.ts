@@ -430,21 +430,30 @@ async function profilesForTags(db: Db, tags: string[]): Promise<ComplianceProfil
 
 export type PiiMode = "block" | "warn" | "log";
 
-/** The effective piiMode a project's classifications force. When the project
- * is unclassified / has no matching compliance profile, the ORG DEFAULT
- * (ADR-0021 defaultPiiMode) applies — 'none' (the default) maps to null and
- * keeps today's no-enforcement behaviour byte-identical. A classified,
- * matched project keeps its cascade's mode: the org default fills the gap,
- * it never overrides a compliance framework. Unattributed calls (no
- * projectId) stay unenforced — there is no project policy to enforce. */
+/** The effective piiMode for a dispatch, resolved through ONE rule: an
+ * explicit compliance framework governs where one matches; EVERYWHERE ELSE
+ * the ORG DEFAULT (ADR-0021 defaultPiiMode) is the deployment-wide floor.
+ * "Everywhere else" now genuinely means everywhere — an unclassified project,
+ * a project whose tags match no profile, an UNATTRIBUTED call (no projectId at
+ * all), and even a dangling projectId that names no project. The last two are
+ * the 2026-08-13 amendment (owner decision): before it, omitting the
+ * projectId was a one-keystroke exit from PII enforcement — the same
+ * attribution dodge the semantic-cache fix closed for replays, still open for
+ * the original call. A dangling id falls to the floor too, because a made-up
+ * project must never be WEAKER than no project.
+ *
+ * 'none' (the shipped default) maps to null, so a deployment that never set
+ * the org default keeps the old no-enforcement behaviour byte-identical. And
+ * the org default still never overrides a matched compliance framework — it
+ * is the floor under the frameworks, not a ceiling over them. */
 export async function projectPiiMode(
   db: Db,
   projectId: string | null | undefined,
 ): Promise<PiiMode | null> {
-  if (!projectId) return null;
-  const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
-  if (!project) return null;
   const fallback = async () => orgDefaultPiiMode(await loadOrgSettings(db));
+  if (!projectId) return fallback();
+  const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
+  if (!project) return fallback();
   const tags = (project.classifications ?? []) as string[];
   if (tags.length === 0) return fallback();
   const profiles = await profilesForTags(db, tags);

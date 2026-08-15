@@ -381,11 +381,14 @@ async function executeGovernedToolCallInner(
     // §8.4 PII ENFORCEMENT (pillar 3), MCP path — the third governed entry
     // point, now held to the same contract as the model and connector paths.
     // The effective piiMode comes from the ATTRIBUTED project's compliance
-    // cascade; an unattributed or unclassified call yields null and every check
-    // below is a no-op. The INPUT check runs on the tool ARGUMENTS, before the
-    // approval is consumed and before the upstream is contacted, so a block
-    // executes nothing, consumes no approval and bills nothing.
-    const piiMode: PiiMode | null = projectId ? await projectPiiMode(db, projectId) : null;
+    // cascade; an unattributed or unclassified call falls to the ORG FLOOR
+    // (ADR-0021 defaultPiiMode, null when unset — then every check below is a
+    // no-op, byte-identical to the pre-floor contract). The resolver is called
+    // unconditionally so all three entry points share one rule. The INPUT
+    // check runs on the tool ARGUMENTS, before the approval is consumed and
+    // before the upstream is contacted, so a block executes nothing, consumes
+    // no approval and bills nothing.
+    const piiMode: PiiMode | null = await projectPiiMode(db, projectId ?? null);
     let inputHits: PiiHit[] = [];
     if (piiMode) {
       const chk = enforcePII(piiMode, { input: JSON.stringify(args.arguments ?? null) });

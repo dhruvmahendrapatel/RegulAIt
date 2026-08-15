@@ -862,6 +862,14 @@ export function registerWorkbenchRoutes(app: FastifyInstance, db: Db, opts: Work
       // §4's sensitivity fence — evaluated PER ITEM, before the decision. A
       // batch containing one high-sensitivity item does not lose the fence
       // because the other items are ordinary.
+      //
+      // DELIBERATELY project-scoped, unlike the dispatch surfaces: the
+      // ADR-0021 floor governs what may be SENT OUT of the gateway, and an
+      // approval decision sends nothing anywhere. Routing unattributed rows
+      // through the floor here would turn a PII posture into an approvals-
+      // ergonomics policy — an org that sets a block floor would silently
+      // lose bulk decide on every unattributed approval in the queue. The
+      // ternary below is therefore intentional, not a missed call site.
       const piiMode = row.projectId ? await projectPiiMode(db, row.projectId) : null;
       if (bulkSensitivityFenced({ enabled: org.approvalBulkSensitiveBlocked, projectPiiMode: piiMode })) {
         const detail =
