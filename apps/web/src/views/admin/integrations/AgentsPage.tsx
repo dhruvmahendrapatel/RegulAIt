@@ -129,6 +129,7 @@ export default function AgentsPage() {
 
         <RegisterAgentCard />
         <SystemPromptCard agents={agents.data?.agents ?? []} />
+        <FallbackChainCard agents={agents.data?.agents ?? []} />
 
         <Card title="Grant an agent">
           <GrantForm uOpts={uOpts} aOpts={aOpts} />
@@ -328,6 +329,184 @@ function SystemPromptCard(props: { agents: AdminAgent[] }) {
           appended after it and can never replace it. Saving with an empty box clears the prompt.
         </p>
       </form>
+    </Card>
+  );
+}
+
+/** One rung of a chain, as the gateway reports it. */
+interface FallbackRow {
+  position: number;
+  agentId: string;
+  name: string;
+  provider: string;
+  model: string | null;
+  enabled: boolean;
+}
+
+/**
+ * ADR-0066 fallback chains — shipped API-only until now, which meant the
+ * ordering that decides what runs when a provider is down lived nowhere an
+ * admin could read it.
+ *
+ * The chain is edited as a WHOLE (the endpoint is a PUT, and order is the
+ * semantics), so this card loads the current chain on agent select and saves
+ * the full ordered list. The gateway owns the refusals — self-fallback,
+ * duplicates, unknown targets — and this form deliberately does not
+ * re-implement them: a rejected save surfaces the gateway's own reason
+ * verbatim, so the UI can never disagree with the rule that actually binds.
+ */
+function FallbackChainCard(props: { agents: AdminAgent[] }) {
+  const act = useAction();
+  const [agentId, setAgentId] = useState("");
+  const [chain, setChain] = useState<FallbackRow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [addId, setAddId] = useState("");
+
+  const load = async (id: string) => {
+    setChain([]);
+    if (!id) return;
+    setLoading(true);
+    try {
+      const r = await api.get<{ fallbacks: FallbackRow[] }>(`/v1/agents/${id}/fallbacks`);
+      setChain(r.fallbacks ?? []);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const save = (next: FallbackRow[], msg: string) =>
+    void act.run(async () => {
+      await api.put(`/v1/agents/${agentId}/fallbacks`, {
+        fallbackAgentIds: next.map((r) => r.agentId),
+      });
+      await load(agentId);
+    }, msg);
+
+  const move = (i: number, delta: number) => {
+    const next = [...chain];
+    const j = i + delta;
+    if (j < 0 || j >= next.length) return;
+    [next[i], next[j]] = [next[j]!, next[i]!];
+    save(next, "Fallback order saved");
+  };
+
+  // candidates exclude the primary itself and anything already in the chain —
+  // the two conditions the gateway refuses with self_fallback / duplicate_fallback
+  const inChain = new Set(chain.map((r) => r.agentId));
+  const candidates = props.agents.filter((x) => x.id !== agentId && !inChain.has(x.id));
+
+  return (
+    <Card title="Fallback chain (ADR-0066) — what runs when the primary cannot">
+      <div className={a.formRow}>
+        <Field label="Primary agent" grow>
+          <Select
+            value={agentId}
+            onChange={(e) => {
+              setAgentId(e.target.value);
+              setAddId("");
+              void load(e.target.value);
+            }}
+          >
+            {optionEls(agentOpts(props.agents), "— select an agent —")}
+          </Select>
+        </Field>
+      </div>
+
+      {agentId && (
+        <>
+          {loading ? (
+            <span className={v.dim}>Loading chain…</span>
+          ) : chain.length === 0 ? (
+            <p className={v.dim}>
+              No fallbacks. A dispatch that cannot reach this agent fails honestly rather than
+              silently routing somewhere the admin never named.
+            </p>
+          ) : (
+            <ol className={v.stack} style={{ margin: 0, paddingLeft: "1.25rem" }}>
+              {chain.map((r, i) => (
+                <li key={r.agentId}>
+                  <span className={v.rowTight}>
+                    <strong>{r.name}</strong>
+                    <span className={v.dim}>
+                      {r.provider}
+                      {r.model ? ` · ${r.model}` : ""}
+                    </span>
+                    {!r.enabled && (
+                      <Badge tone="warn" title="This agent is disabled — the chain will skip past it">
+                        disabled
+                      </Badge>
+                    )}
+                    <span className={v.grow} />
+                    <Button size="sm" disabled={act.busy || i === 0} onClick={() => move(i, -1)}>
+                      ↑
+                    </Button>
+                    <Button
+                      size="sm"
+                      disabled={act.busy || i === chain.length - 1}
+                      onClick={() => move(i, 1)}
+                    >
+                      ↓
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="danger"
+                      disabled={act.busy}
+                      onClick={() => save(chain.filter((x) => x.agentId !== r.agentId), "Fallback removed")}
+                    >
+                      Remove
+                    </Button>
+                  </span>
+                </li>
+              ))}
+            </ol>
+          )}
+
+          <div className={a.formRow}>
+            <Field label="Add a fallback (tried in order, after the ones above)" grow>
+              <Select value={addId} onChange={(e) => setAddId(e.target.value)}>
+                {optionEls(agentOpts(candidates), "— select an agent —")}
+              </Select>
+            </Field>
+            <Button
+              disabled={act.busy || !addId}
+              onClick={() => {
+                const picked = props.agents.find((x) => x.id === addId);
+                if (!picked) return;
+                save(
+                  [
+                    ...chain,
+                    {
+                      position: chain.length,
+                      agentId: picked.id,
+                      name: picked.name,
+                      provider: picked.provider,
+                      model: picked.model ?? null,
+                      enabled: picked.enabled ?? true,
+                    },
+                  ],
+                  "Fallback added",
+                );
+                setAddId("");
+              }}
+            >
+              Add
+            </Button>
+          </div>
+        </>
+      )}
+
+      {act.error && (
+        <div className={v.errLine} role="alert">
+          {act.error}
+        </div>
+      )}
+      <p className={v.faint}>
+        Order is the policy: on a provider failure the gateway walks this list top-down and
+        dispatches the first agent it can reach. Every rung is still governed — a fallback the
+        CALLER is not entitled to is refused exactly like a direct invoke of it, so a chain can
+        never widen what someone may run. Cost and audit are attributed to the agent that actually
+        served. An agent cannot be its own fallback, and each target may appear once.
+      </p>
     </Card>
   );
 }
