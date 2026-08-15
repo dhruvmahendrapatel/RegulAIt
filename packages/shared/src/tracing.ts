@@ -277,21 +277,68 @@ export const OTEL_STATUS_OK = 1;
 export const OTEL_STATUS_ERROR = 2;
 
 /**
- * A DENIED span maps to OTel ERROR, carrying the governance reason as the
- * status message, AND keeps `regulait.decision = "denied"` beside it.
+ * THE STATUS MAPPING — corrected by ADR-0070's 2026-08-15 amendment.
  *
- * The mapping is a compromise and is stated as one in the ADR: OTel's status
- * enum has exactly three members and none of them means "deliberately
- * refused". UNSET would make a governance refusal invisible in every
- * off-the-shelf trace UI's error filter, which is the opposite of this
- * feature's purpose. So it goes out as ERROR — with the RegulAIt attribute
- * present for anyone who needs to tell the two apart.
+ * ADR-0070 shipped `denied -> ERROR`, disclosing in its own words that "in
+ * someone else's Grafana a governance refusal will look like a failure". That
+ * is the ADR-0057/0072 inversion a third time: **defences working must never
+ * be indistinguishable from defences failing.** It is now:
+ *
+ *   | RegulAIt status | OTel StatusCode | why                                |
+ *   |---|---|---|
+ *   | `ok`      | `Ok` (1)    | explicitly validated as successful       |
+ *   | `denied`  | `Unset` (0) | the operation completed as designed and  |
+ *   |           |             | contains NO error — the gateway refused  |
+ *   | `error`   | `Error` (2) | the operation contains an error          |
+ *   | `running` | `Unset` (0) | not finished; nothing to claim           |
+ *
+ * THE SPEC BASIS, checked 2026-08-15 rather than remembered:
+ *
+ *  - **OTel trace API spec** (`specification/trace/api.md`, open-telemetry/
+ *    opentelemetry-specification @ main): the three codes are `Unset` — "The
+ *    default status"; `Ok` — "validated by an Application developer or
+ *    Operator to have completed successfully"; `Error` — "The operation
+ *    contains an error". A governance DENY contains no error: it is the
+ *    product doing exactly its job. The same spec: `Description` "MUST only be
+ *    used with the `Error` `StatusCode` value" and "MUST be IGNORED for
+ *    `StatusCode` `Ok` & `Unset`" — which is why a denied span carries NO
+ *    status message and its reason rides `regulait.reason` instead. Emitting
+ *    the reason in a field the spec says receivers must ignore would have been
+ *    a reason that silently disappears.
+ *  - **OTel HTTP semantic conventions** (`docs/http/http-spans.md`,
+ *    open-telemetry/semantic-conventions @ main) supply the precedent for the
+ *    exact shape of this decision: "For HTTP status codes in the 4xx range
+ *    span status MUST be left unset in case of `SpanKind.SERVER` and SHOULD be
+ *    set to `Error` in case of `SpanKind.CLIENT`." A deliberate 4xx issued BY
+ *    the instrumented server is not that server's error. A pillar-1 refusal is
+ *    that case precisely: the gateway, acting as the server, refused its
+ *    caller. (The CLIENT half of that rule does not reach us — a denied span
+ *    never made an upstream request, so there is no upstream status to
+ *    reflect.)
+ *
+ * THE ADR-0070 OBJECTION, ANSWERED RATHER THAN IGNORED. The original argument
+ * for ERROR was that UNSET makes a refusal invisible in an off-the-shelf error
+ * filter. That is true, and it is the wrong cure: it makes a refusal *visible
+ * as an outage*, which is worse than invisible — it manufactures incidents out
+ * of the product working. The distinction is instead made QUERYABLE by
+ * attribute, which is what a trace backend actually filters on:
+ * `regulait.outcome` is emitted on EVERY span (`ok` | `denied` | `error` |
+ * `running`), so `regulait.outcome = "denied"` is one filter clause, and
+ * `regulait.decision`, `regulait.reason` and `regulait.rule.id` say who
+ * refused and why. A genuine execution failure still lands on `Error` AND on
+ * the standard `error.type` attribute, so an error dashboard built by someone
+ * who has never heard of RegulAIt still shows the failures and no longer shows
+ * the refusals.
  */
 export function otelStatus(status: string, reason: string | null): { code: number; message?: string } {
   if (status === "ok") return { code: OTEL_STATUS_OK };
-  if (status === "error" || status === "denied") {
+  // Only a genuine execution failure is an OTel error, and only it may carry a
+  // Description (the spec forbids one on Unset/Ok).
+  if (status === "error") {
     return reason ? { code: OTEL_STATUS_ERROR, message: reason } : { code: OTEL_STATUS_ERROR };
   }
+  // `denied` and `running` alike: no error occurred. The refusal's reason and
+  // rule travel as attributes — see `otelAttributesForSpan`.
   return { code: OTEL_STATUS_UNSET };
 }
 
@@ -341,8 +388,44 @@ export function otelAttributesForSpan(
 
   // --- RegulAIt-specific. Namespaced, never squatting inside gen_ai.* -----
   a["regulait.span.kind"] = span.kind;
+  /**
+   * THE DISCRIMINATOR, on EVERY span rather than only on the refusals.
+   *
+   * Since a DENY now exports as OTel `Unset` (see `otelStatus`), "was this
+   * refused?" must be answerable by a FILTER and not by reading prose. It is
+   * emitted unconditionally and for every status so that
+   * `regulait.outcome = "denied"` and `regulait.outcome = "error"` are each
+   * one clause in any backend's query language — and so that a span with no
+   * `regulait.outcome` at all is recognisably an OLD export rather than an
+   * ambiguous one.
+   */
+  a["regulait.outcome"] = span.status;
   if (span.status === "denied") a["regulait.decision"] = "denied";
   if (span.statusReason) a["regulait.reason"] = span.statusReason;
+  /**
+   * WHICH RULE REFUSED. A deny that names no rule is a deny nobody can act on.
+   * `ruleId` is the governance kernel's own rule id where the recorder had one
+   * (the `policy` spans carry it); otherwise the dispatch core's error CODE is
+   * the rule that fired (`pii_blocked`, `budget_exceeded`, `egress_blocked`…),
+   * which is what an operator greps for.
+   */
+  if (span.status === "denied") {
+    const ruleId = span.attributes?.["ruleId"] ?? span.attributes?.["error"];
+    if (typeof ruleId === "string") a["regulait.rule.id"] = ruleId;
+  }
+  /**
+   * `error.type` — the PUBLISHED general attribute ("Describes a class of
+   * error the operation ended with"; instrumentations "SHOULD NOT set
+   * `error.type`" when the operation completed successfully; open-telemetry/
+   * semantic-conventions `docs/registry/attributes/error.md`, checked
+   * 2026-08-15). It is set on genuine failures ONLY, never on a refusal, so a
+   * standard error dashboard built by somebody who has never heard of RegulAIt
+   * keeps showing outages and stops showing the governance layer working.
+   */
+  if (span.status === "error") {
+    const code = span.attributes?.["error"];
+    a["error.type"] = typeof code === "string" ? code : "execution_error";
+  }
   // NO STANDARD GENAI COST KEY EXISTS. Emitting one under gen_ai.* would be
   // inventing a convention; this is ours and is labelled as ours.
   if (span.costUsd != null) a["regulait.cost.usd"] = span.costUsd;
@@ -508,7 +591,13 @@ export const OTLP_EXPORT_LIMITS =
   "Export is a PULL over a bounded window, not a live streaming pipeline: nothing is spooled, " +
   "nothing is retried in the background, and a failed export changes no stored row (re-run it). " +
   "Span ids are the first 8 bytes of RegulAIt's 16-byte span uuid, as OTLP requires 8; the full " +
-  "uuid rides along as `regulait.span.id`. A governance DENY is exported as OTel status ERROR " +
-  "with `regulait.decision=denied`, because OTel's status enum has no member meaning " +
-  "'deliberately refused'. No exporter is configured by default and none is ever contacted " +
+  "uuid rides along as `regulait.span.id`. A governance DENY exports as OTel status UNSET — NOT " +
+  "Error — because the OTel trace spec defines Error as 'the operation contains an error' and a " +
+  "refusal is the product working; the same reasoning the HTTP conventions use when they require " +
+  "a 4xx to leave a SERVER span's status unset. Only a genuine execution failure exports as " +
+  "Error, and only it carries the standard `error.type`. Filter on `regulait.outcome` " +
+  "(`ok`/`denied`/`error`/`running`, present on every span) to separate the two; a denied span " +
+  "also carries `regulait.decision`, `regulait.reason` and `regulait.rule.id`. The reason is NOT " +
+  "in the OTel status message because the spec requires receivers to ignore a description on a " +
+  "non-Error status. No exporter is configured by default and none is ever contacted " +
   "unless an admin types an endpoint, which is then adjudicated by the egress guard on every export.";

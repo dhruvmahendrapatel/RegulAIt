@@ -61,17 +61,23 @@ import {
   agents,
   and,
   auditLog,
+  connectors,
   createDb,
+  desc,
   eq,
+  evalDatasets,
+  evalRuns,
   inArray,
   mcpServers,
   orgSettings,
   ORG_SETTINGS_ID,
   runMigrations,
+  TRACE_SPAN_KINDS,
   traceSpans,
   traces,
   usageEvents,
   users,
+  workflowTemplates,
   type Db,
   type TraceSpanRow,
 } from "@regulait/db";
@@ -151,6 +157,11 @@ let secretAgentId: string; // tr-secret    model tr-secret-model    (BORIS only)
 
 const createdUserIds: string[] = [];
 const createdAgentIds: string[] = [];
+/** ADR-0070 amendment (2026-08-15) — fixtures for the three seams that had a
+ * declared span kind and no writer: connector, workflow_stage, eval_case. */
+let trConnectorId: string;
+let trTemplateId: string;
+let trDatasetId: string;
 let priorOrg: Record<string, unknown> | null = null;
 let upstream: Awaited<ReturnType<typeof startUpstream>>;
 let toolServerId: string;
@@ -265,6 +276,67 @@ beforeAll(async () => {
   expect(g.statusCode, JSON.stringify(g.json())).toBe(201);
   await grant(borisId, secretAgentId);
   await grant(adminId, mainAgentId);
+
+  // --- the three seams ADR-0070 declared and did not write --------------
+  const conn = await app.inject({
+    method: "POST",
+    url: "/v1/connectors",
+    headers: AUTH,
+    payload: { name: "tr-conn", kind: "data", providerKind: "mock", pricePerCallUsd: 0.002 },
+  });
+  expect(conn.statusCode, JSON.stringify(conn.json())).toBe(201);
+  trConnectorId = conn.json().id as string;
+  const cg = await app.inject({
+    method: "POST",
+    url: "/v1/grants/connectors",
+    headers: AUTH,
+    payload: { userId: anaId, connectorId: trConnectorId, mode: "readwrite" },
+  });
+  expect(cg.statusCode, JSON.stringify(cg.json())).toBe(201);
+  // BORIS deliberately gets no grant — his invoke is the refusal case.
+
+  const tpl = await app.inject({
+    method: "POST",
+    url: "/v1/workflows/templates",
+    headers: AUTH,
+    payload: {
+      name: "tr-wf",
+      definition: {
+        workflow: "tr-wf",
+        stages: [
+          { id: "intake", type: "trigger" },
+          { id: "gate", type: "human_approval", approvers: [anaId] },
+        ],
+      },
+    },
+  });
+  expect(tpl.statusCode, JSON.stringify(tpl.json())).toBe(201);
+  trTemplateId = tpl.json().id as string;
+  const rule = await app.inject({
+    method: "POST",
+    url: "/v1/workflows/assignment-rules",
+    headers: AUTH,
+    payload: { templateId: trTemplateId, changeType: "tr-change" },
+  });
+  expect(rule.statusCode, JSON.stringify(rule.json())).toBe(201);
+
+  const ds = await app.inject({
+    method: "POST",
+    url: "/v1/evals/datasets",
+    headers: AUTH,
+    payload: { name: "tr-dataset", scorerKind: "contains", scorerConfig: { needles: ["tr"] } },
+  });
+  expect(ds.statusCode, JSON.stringify(ds.json())).toBe(201);
+  trDatasetId = ds.json().id as string;
+  for (const input of ["tr: case one", "tr: case two"]) {
+    const c = await app.inject({
+      method: "POST",
+      url: `/v1/evals/datasets/${trDatasetId}/cases`,
+      headers: AUTH,
+      payload: { input, scorerKind: "contains", scorerConfig: { needles: ["tr"] } },
+    });
+    expect(c.statusCode, JSON.stringify(c.json())).toBe(201);
+  }
 }, 180_000);
 
 afterAll(async () => {
@@ -286,6 +358,16 @@ afterAll(async () => {
   if (createdAgentIds.length) await db.delete(agents).where(inArray(agents.id, createdAgentIds));
   if (createdUserIds.length) await db.delete(users).where(inArray(users.id, createdUserIds));
   if (toolServerId) await db.delete(mcpServers).where(eq(mcpServers.id, toolServerId));
+  // the 2026-08-15 fixtures. Users cascade their grants, instances and runs;
+  // these three own no user FK and would otherwise linger for other suites.
+  if (trDatasetId) {
+    // eval_runs holds a RESTRICT fk on (dataset_id, version); the run this
+    // file made must go first or the dataset delete is refused.
+    await db.delete(evalRuns).where(eq(evalRuns.datasetId, trDatasetId));
+    await db.delete(evalDatasets).where(eq(evalDatasets.id, trDatasetId));
+  }
+  if (trTemplateId) await db.delete(workflowTemplates).where(eq(workflowTemplates.id, trTemplateId));
+  if (trConnectorId) await db.delete(connectors).where(eq(connectors.id, trConnectorId));
   app.server.closeAllConnections();
   await app.close();
   if (upstream) await upstream.close();
@@ -754,7 +836,16 @@ describe("the OTLP encoding is a real one", () => {
     expect(attrs["gen_ai.cost.usd"]).toBeUndefined();
   });
 
-  it("exports a DENY as OTel ERROR carrying its reason and regulait.decision", async () => {
+  /**
+   * REWRITTEN, NOT DELETED, by ADR-0070's 2026-08-15 amendment. This test was
+   * "exports a DENY as OTel ERROR carrying its reason and regulait.decision"
+   * and it pinned the behaviour ADR-0070 itself disclosed as a fidelity loss:
+   * "in someone else's Grafana a governance refusal will look like a failure."
+   * That is the ADR-0057/0072 inversion — defences working scored the same as
+   * defences failing — and the amendment corrects it. Asserted here on a REAL
+   * refusal produced by the real kernel, not on a hand-built span.
+   */
+  it("does NOT export a real governance DENY as an OTel error, and keeps it queryable", async () => {
     const rows = await db
       .select()
       .from(traces)
@@ -777,17 +868,70 @@ describe("the OTLP encoding is a real one", () => {
       Record<string, unknown>
     >;
     const denied = emitted[0]!;
-    expect((denied["status"] as Record<string, unknown>)["code"]).toBe(2);
-    expect((denied["status"] as Record<string, unknown>)["message"]).toBeTruthy();
+    // OTel StatusCode 0 = Unset. The spec defines Error as "the operation
+    // contains an error"; a refusal contains none — it IS the product working.
+    expect((denied["status"] as Record<string, unknown>)["code"]).toBe(0);
+    // and the spec says a Description is ignored on a non-Error status, so the
+    // reason must NOT be hidden there.
+    expect((denied["status"] as Record<string, unknown>)["message"]).toBeUndefined();
     const attrs = Object.fromEntries(
       (denied["attributes"] as Array<{ key: string; value: Record<string, unknown> }>).map((a) => [
         a.key,
         Object.values(a.value)[0],
       ]),
     );
+    // THE TRACE IS STILL DIAGNOSTIC. The reason and the rule that refused ride
+    // attributes, and the deny/failure split is ONE filter clause.
+    expect(attrs["regulait.outcome"]).toBe("denied");
     expect(attrs["regulait.decision"]).toBe("denied");
+    expect(attrs["regulait.reason"]).toBe(spans[0]!.statusReason);
+    expect(attrs["regulait.rule.id"], "a refusal that names no rule is unactionable").toBeTruthy();
+    // and it is invisible to a standard error dashboard, which is the point
+    expect(attrs["error.type"]).toBeUndefined();
     // includeContent:false means no prompt leaves the deployment
     expect(attrs["gen_ai.input.messages"]).toBeUndefined();
+  });
+
+  it("CONTROL: a genuine transport FAILURE still exports as OTel ERROR with error.type", async () => {
+    // The other half of the boundary, on a real span the dispatch core wrote.
+    // Without this, the fix above could have been "map everything to Unset",
+    // which would buy honesty about refusals by hiding real outages.
+    const errored = await db
+      .select()
+      .from(traceSpans)
+      .where(eq(traceSpans.status, "error"))
+      .limit(1);
+    expect(errored.length, "no error span exists to control against").toBeGreaterThan(0);
+    const [tr] = await db.select().from(traces).where(eq(traces.id, errored[0]!.traceId));
+    const payload = buildOtlpPayload({
+      serviceName: "tr-service",
+      includeContent: false,
+      traces: [
+        {
+          trace: {
+            ...tr!,
+            startedAt: tr!.startedAt.toISOString(),
+            endedAt: tr!.endedAt?.toISOString() ?? null,
+          },
+          spans: [toRecord(errored[0]!)],
+        },
+      ],
+    });
+    const rs = payload.body["resourceSpans"] as Array<Record<string, unknown>>;
+    const emitted = ((rs[0]!["scopeSpans"] as Array<Record<string, unknown>>)[0]!["spans"]) as Array<
+      Record<string, unknown>
+    >;
+    const failed = emitted[0]!;
+    expect((failed["status"] as Record<string, unknown>)["code"]).toBe(2);
+    const attrs = Object.fromEntries(
+      (failed["attributes"] as Array<{ key: string; value: Record<string, unknown> }>).map((a) => [
+        a.key,
+        Object.values(a.value)[0],
+      ]),
+    );
+    expect(attrs["regulait.outcome"]).toBe("error");
+    expect(attrs["error.type"]).toBeTruthy();
+    expect(attrs["regulait.decision"]).toBeUndefined();
   });
 });
 
@@ -847,3 +991,192 @@ function toRecord(s: TraceSpanRow) {
     attributes: (s.attributes ?? null) as Record<string, unknown> | null,
   };
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0070 amendment (2026-08-15) — GAP A: A DECLARED SPAN KIND WITH NO WRITER.
+//
+// ADR-0070 shipped `connector`, `workflow_stage` and `eval_case` as declared
+// kinds that nothing ever wrote, and — unnoticed by the ADR's own disclosure —
+// `guardrail` as a fourth. A vocabulary that promises coverage the product does
+// not have is the same class of dishonesty as a score that inverts.
+//
+// The three real seams now emit; `guardrail` was REMOVED rather than faked
+// (see the comment on TRACE_SPAN_KINDS: an ADR-0042 verdict is a property of a
+// call, not a call, and it already rides the span it acted on).
+//
+// The LAST test here is the one that keeps it true: it enumerates the declared
+// vocabulary and requires every member to have been written by a path this file
+// actually drove. Adding a kind to the list without a writer turns it red.
+// ---------------------------------------------------------------------------
+
+describe("every DECLARED span kind is written by a real path", () => {
+  it("a governed CONNECTOR call writes a connector span that references its ledger row", async () => {
+    const inv = await app.inject({
+      method: "POST",
+      url: `/v1/connectors/${trConnectorId}/invoke`,
+      headers: anaAuth,
+      payload: { operation: "read", object: "records", payload: { q: "tr-connector-ok" } },
+    });
+    expect(inv.statusCode, JSON.stringify(inv.json())).toBe(200);
+
+    const [t] = await db
+      .select()
+      .from(traces)
+      .where(and(eq(traces.userId, anaId), eq(traces.sessionId, `connector:${trConnectorId}`)))
+      .orderBy(desc(traces.startedAt));
+    expect(t, "a governed connector call produced no trace at all").toBeTruthy();
+    const spans = await spansOf(t!.id);
+    const conn = spans.find((s) => s.kind === "connector");
+    expect(conn, "`connector` is declared and nothing wrote it").toBeTruthy();
+    expect(conn!.status).toBe("ok");
+    expect(conn!.connectorId).toBe(trConnectorId);
+    // RULE 1 — it REFERENCES the ledger row and its figure agrees with it.
+    expect(conn!.usageEventId, "the connector span invented its cost").toBeTruthy();
+    const [ledger] = await db
+      .select()
+      .from(usageEvents)
+      .where(eq(usageEvents.id, conn!.usageEventId!));
+    expect(ledger).toBeTruthy();
+    expect(conn!.costUsd).toBe(ledger!.costUsd);
+  });
+
+  it("a connector call the kernel REFUSES is a denied span with the kernel's reason — not an absent one", async () => {
+    // BORIS holds no grant on this connector. Nothing executes and nothing is
+    // billed, which is exactly the case a trace of only the successes loses.
+    const inv = await app.inject({
+      method: "POST",
+      url: `/v1/connectors/${trConnectorId}/invoke`,
+      headers: borisAuth,
+      payload: { operation: "read", object: "records", payload: { q: "tr-connector-denied" } },
+    });
+    expect(inv.statusCode).toBe(403);
+
+    const [t] = await db
+      .select()
+      .from(traces)
+      .where(and(eq(traces.userId, borisId), eq(traces.sessionId, `connector:${trConnectorId}`)))
+      .orderBy(desc(traces.startedAt));
+    expect(t, "a refused connector call produced NO trace — the absence IS the bug").toBeTruthy();
+    const spans = await spansOf(t!.id);
+    const conn = spans.find((s) => s.kind === "connector")!;
+    expect(conn.status).toBe("denied");
+    expect(conn.statusReason, "a deny span with no reason explains nothing").toBeTruthy();
+    expect(conn.statusReason).toBe(inv.json().decision.reason);
+    // the rule that refused, so the export can carry `regulait.rule.id`
+    expect((conn.attributes as Record<string, unknown>)["ruleId"]).toBe(inv.json().decision.ruleId);
+    // NOTHING WAS BILLED, so the span names no ledger row rather than a zero.
+    expect(conn.usageEventId).toBeNull();
+    expect(t!.deniedSpanCount).toBeGreaterThan(0);
+  });
+
+  it("a workflow transition writes a workflow_stage span, and an ABORT is DENIED rather than error", async () => {
+    const started = await app.inject({
+      method: "POST",
+      url: "/v1/workflows/instances",
+      headers: anaAuth,
+      payload: {
+        change: { description: "tr wf", paths: ["src/"], changeType: "tr-change", environment: "dev" },
+      },
+    });
+    expect(started.statusCode, JSON.stringify(started.json())).toBe(201);
+    const instanceId = started.json().id as string;
+
+    const aborted = await app.inject({
+      method: "POST",
+      url: `/v1/workflows/instances/${instanceId}/abort`,
+      headers: anaAuth,
+      payload: {},
+    });
+    expect(aborted.statusCode, JSON.stringify(aborted.json())).toBe(200);
+
+    const [t] = await db
+      .select()
+      .from(traces)
+      .where(and(eq(traces.kind, "workflow"), eq(traces.rootRefId, instanceId)));
+    expect(t, "`workflow_stage` is declared and no transition wrote one").toBeTruthy();
+    const spans = await spansOf(t!.id);
+    const stages = spans.filter((s) => s.kind === "workflow_stage");
+    // ONE TREE PER INSTANCE, not one trace per event: the start and the abort
+    // are siblings of the same tree, in seq order.
+    expect(stages.length, "each transition should be a span of ONE instance tree").toBeGreaterThan(1);
+    expect(stages.map((s) => (s.attributes as Record<string, unknown>)["event"])).toContain("abort");
+    const abortSpan = stages.find(
+      (s) => (s.attributes as Record<string, unknown>)["event"] === "abort",
+    )!;
+    // THE POLARITY. An abort is a DECISION — the workflow engine doing its job.
+    // Recording it as `error` is the ADR-0057/0072 inversion a third time.
+    expect(abortSpan.status).toBe("denied");
+    expect(abortSpan.status).not.toBe("error");
+    expect(abortSpan.statusReason).toBeTruthy();
+    // and the start transition, which refused nothing, is not denied
+    const startSpan = stages.find(
+      (s) => (s.attributes as Record<string, unknown>)["event"] === "start",
+    );
+    expect(startSpan, "the instance's own start transition was not traced").toBeTruthy();
+    expect(startSpan!.status).toBe("ok");
+  });
+
+  it("an eval run is ONE tree whose eval_case spans PARENT the dispatches they made", async () => {
+    const run = await app.inject({
+      method: "POST",
+      url: "/v1/evals/runs",
+      headers: anaAuth,
+      payload: { datasetId: trDatasetId, agentId: mainAgentId },
+    });
+    expect(run.statusCode, JSON.stringify(run.json())).toBe(201);
+    const runId = run.json().run.id as string;
+
+    const [t] = await db
+      .select()
+      .from(traces)
+      .where(and(eq(traces.kind, "eval"), eq(traces.rootRefId, runId)));
+    expect(t, "`eval_case` is declared and an eval run wrote no tree").toBeTruthy();
+    const spans = await spansOf(t!.id);
+    const cases = spans.filter((s) => s.kind === "eval_case");
+    expect(cases.length).toBe(2);
+    expect(cases.every((c) => c.status === "ok")).toBe(true);
+
+    // THE GROUPING IS THE POINT. Before this, an eval's dispatches produced
+    // `llm` spans scattered across N unrelated one-span traces. Each dispatch
+    // must now name its CASE as its parent — asserted by parent id, never by
+    // "they are in the same trace".
+    const llms = spans.filter((s) => s.kind === "llm");
+    expect(llms.length).toBe(2);
+    for (const llm of llms) {
+      expect(cases.map((c) => c.id)).toContain(llm.parentSpanId);
+    }
+    // and the case span is a real container, not a zero-duration marker
+    expect(cases.some((c) => (c.durationMs ?? 0) >= 0)).toBe(true);
+    expect(t!.spanCount).toBe(spans.length);
+  });
+
+  it("THE ENUMERATION: no DECLARED span kind is left with nothing writing it", async () => {
+    // Restricted to the traces THIS FILE produced, so a sibling suite running
+    // against the same database can never lend this test a kind it did not
+    // itself drive.
+    const mine = await db
+      .select({ kind: traceSpans.kind })
+      .from(traceSpans)
+      .innerJoin(traces, eq(traces.id, traceSpans.traceId))
+      .where(inArray(traces.userId, createdUserIds));
+    const written = new Set<string>(mine.map((r) => r.kind as string));
+
+    for (const kind of TRACE_SPAN_KINDS) {
+      expect(
+        written.has(kind),
+        `span kind '${kind}' is DECLARED in TRACE_SPAN_KINDS and no real path writes it — ` +
+          "either give it a writer or remove it from the vocabulary",
+      ).toBe(true);
+    }
+    // and the converse, so a writer can never emit a kind the vocabulary and
+    // the UI's label map have never heard of
+    for (const kind of written) {
+      expect(TRACE_SPAN_KINDS as readonly string[]).toContain(kind);
+    }
+    // `guardrail` was REMOVED, not given a writer. If somebody re-adds it to
+    // the list, the loop above turns red until something emits it.
+    const declared = TRACE_SPAN_KINDS.map((k) => k as string);
+    expect(declared).not.toContain("guardrail");
+    expect(written.has("guardrail")).toBe(false);
+  });
+});

@@ -165,7 +165,6 @@ const KIND_LABEL: Record<string, string> = {
   fallback_hop: "fallback hop",
   tool: "tool call",
   connector: "connector",
-  guardrail: "guardrail",
   policy: "governance",
   workflow_stage: "stage",
   eval_case: "eval case",
@@ -308,6 +307,36 @@ export default function TracesPage() {
                     </div>
                   </>
                 )}
+                {/* A REFUSAL AND AN OUTAGE ARE DIFFERENT THINGS, AND THE
+                    EXPORT SAYS SO. Before 2026-08-15 a governance DENY left
+                    here as OTel status ERROR, so in somebody else's Grafana the
+                    product working looked exactly like the product failing.
+                    The mapping is on the page because an operator who has to
+                    read an ADR to know how their dashboard will read is not
+                    actually told. */}
+                <div className={v.sectionTitle}>How a status leaves as OpenTelemetry</div>
+                <KV
+                  rows={[
+                    [
+                      <Badge tone="ok">OK</Badge>,
+                      "OTel Ok — the call completed.",
+                    ],
+                    [
+                      <Badge tone="danger">DENIED</Badge>,
+                      "OTel Unset — NOT an error. A governance refusal is this product " +
+                        "working, and the OTel spec reserves Error for an operation that " +
+                        "contains one. The reason and the rule ride regulait.reason and " +
+                        "regulait.rule.id, and every span carries regulait.outcome so a " +
+                        "refusal is one filter clause in any backend.",
+                    ],
+                    [
+                      <Badge tone="warn">ERROR</Badge>,
+                      "OTel Error, plus the standard error.type attribute — a real failure " +
+                        "still shows up on an error dashboard built by somebody who has " +
+                        "never heard of RegulAIt.",
+                    ],
+                  ]}
+                />
                 <p className={v.faint}>{config.data.limits}</p>
                 <p className={v.faint}>{config.data.retention}</p>
               </div>
@@ -525,6 +554,13 @@ export default function TracesPage() {
                             >
                               {s.status === "denied" ? "Refused: " : "Failed: "}
                               {s.statusReason}
+                              {s.status === "denied" && (
+                                <span className={v.faint}>
+                                  {" "}
+                                  — a refusal, not a failure. This exports as OTel Unset with
+                                  regulait.outcome=denied.
+                                </span>
+                              )}
                             </div>
                           )}
                           {s.orphaned && (

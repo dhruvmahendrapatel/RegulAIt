@@ -168,16 +168,138 @@ describe("previews", () => {
 });
 
 describe("OTel mapping", () => {
-  it("maps a DENY to ERROR with its reason, and keeps regulait.decision beside it", () => {
-    expect(otelStatus("denied", "not entitled")).toEqual({ code: 2, message: "not entitled" });
+  /**
+   * REWRITTEN, NOT DELETED, by ADR-0070's 2026-08-15 amendment. The previous
+   * version of this test pinned `denied -> ERROR` and was named
+   * "maps a DENY to ERROR with its reason". That was the shipped behaviour and
+   * ADR-0070 disclosed it as a fidelity loss in its own words ("in someone
+   * else's Grafana a governance refusal will look like a failure"); the
+   * amendment corrects it, on the ADR-0057/0072 principle that a defence
+   * working must never look identical to a defence failing. What is asserted
+   * here now is the corrected contract IN BOTH DIRECTIONS: a refusal is not an
+   * OTel error, a genuine failure still is, and the two are separable by
+   * attribute rather than by prose.
+   */
+  it("does NOT export a governance DENY as an OTel error, and carries its reason and rule as attributes", () => {
+    // Spec basis (checked 2026-08-15): OTel trace API defines Error as "the
+    // operation contains an error". A refusal contains none — it IS the
+    // product working. Same shape as the HTTP conventions' rule that a 4xx
+    // leaves a SERVER span's status unset.
+    expect(otelStatus("denied", "not entitled")).toEqual({ code: 0 });
+    // and the spec forbids a Description on a non-Error status, so the reason
+    // must NOT be smuggled into the status message where receivers ignore it.
+    expect(otelStatus("denied", "not entitled").message).toBeUndefined();
     expect(otelStatus("ok", null)).toEqual({ code: 1 });
     expect(otelStatus("running", null)).toEqual({ code: 0 });
-    const a = otelAttributesForSpan(
-      span({ id: U(1), status: "denied", statusReason: "not entitled" }),
+
+    const denied = otelAttributesForSpan(
+      span({
+        id: U(1),
+        status: "denied",
+        statusReason: "not entitled",
+        attributes: { ruleId: "agent-grant-missing" },
+      }),
       { includeContent: false },
     );
-    expect(a["regulait.decision"]).toBe("denied");
-    expect(a["regulait.reason"]).toBe("not entitled");
+    expect(denied["regulait.decision"]).toBe("denied");
+    expect(denied["regulait.reason"]).toBe("not entitled");
+    expect(denied["regulait.rule.id"]).toBe("agent-grant-missing");
+    // THE QUERYABLE DISCRIMINATOR — one filter clause, not a paragraph.
+    expect(denied["regulait.outcome"]).toBe("denied");
+    // A refusal must never be picked up by a standard error dashboard.
+    expect(denied["error.type"]).toBeUndefined();
+  });
+
+  it("CONTROL: a genuine execution failure is still an OTel error, with error.type", () => {
+    // The other half of the boundary. If this ever goes UNSET too, the fix
+    // above would have bought honesty about refusals by hiding real outages.
+    expect(otelStatus("error", "upstream timed out")).toEqual({
+      code: 2,
+      message: "upstream timed out",
+    });
+    const failed = otelAttributesForSpan(
+      span({
+        id: U(1),
+        status: "error",
+        statusReason: "upstream timed out",
+        attributes: { error: "model_dispatch_failed" },
+      }),
+      { includeContent: false },
+    );
+    expect(failed["regulait.outcome"]).toBe("error");
+    // the PUBLISHED attribute, so a backend that never heard of RegulAIt still
+    // sees the failure
+    expect(failed["error.type"]).toBe("model_dispatch_failed");
+    expect(failed["regulait.decision"]).toBeUndefined();
+    // a failure names no governance rule, because none refused it
+    expect(failed["regulait.rule.id"]).toBeUndefined();
+  });
+
+  it("an OK span is neither: no error.type, no decision, and an outcome that says so", () => {
+    const ok = otelAttributesForSpan(span({ id: U(1), status: "ok" }), { includeContent: false });
+    expect(ok["regulait.outcome"]).toBe("ok");
+    expect(ok["error.type"]).toBeUndefined();
+    expect(ok["regulait.decision"]).toBeUndefined();
+  });
+
+  it("a DENY and a FAILURE are distinguishable in the ENCODED OTLP body, not only in the helpers", () => {
+    // The end-to-end shape, because everything above could be right while the
+    // encoder still flattened both onto the same status.
+    const t: TraceRecord = {
+      id: U(500),
+      sessionId: null,
+      kind: "dispatch",
+      rootRefId: null,
+      name: "t",
+      userId: U(9),
+      projectId: null,
+      status: "denied",
+      startedAt: "2026-08-15T00:00:00.000Z",
+      endedAt: "2026-08-15T00:00:01.000Z",
+      durationMs: 1000,
+      spanCount: 2,
+      deniedSpanCount: 1,
+      inputTokens: 0,
+      outputTokens: 0,
+      costUsd: null,
+    };
+    const { body } = buildOtlpPayload({
+      serviceName: "svc",
+      includeContent: false,
+      traces: [
+        {
+          trace: t,
+          spans: [
+            span({ id: U(1), seq: 0, kind: "policy", status: "denied", statusReason: "no grant" }),
+            span({
+              id: U(2),
+              seq: 1,
+              kind: "llm",
+              status: "error",
+              statusReason: "upstream 500",
+              attributes: { error: "model_dispatch_failed" },
+            }),
+          ],
+        },
+      ],
+    });
+    const encoded = (
+      (body["resourceSpans"] as Array<Record<string, unknown>>)[0]!["scopeSpans"] as Array<
+        Record<string, unknown>
+      >
+    )[0]!["spans"] as Array<Record<string, unknown>>;
+    const statusOf = (i: number) => encoded[i]!["status"] as { code: number; message?: string };
+    const attrOf = (i: number, key: string) =>
+      (encoded[i]!["attributes"] as Array<{ key: string; value: Record<string, unknown> }>).find(
+        (x) => x.key === key,
+      )?.value;
+    expect(statusOf(0).code).toBe(0); // the refusal — NOT an error
+    expect(statusOf(1).code).toBe(2); // the outage — still an error
+    expect(statusOf(0).code).not.toBe(statusOf(1).code);
+    expect(attrOf(0, "regulait.outcome")).toEqual({ stringValue: "denied" });
+    expect(attrOf(1, "regulait.outcome")).toEqual({ stringValue: "error" });
+    expect(attrOf(0, "error.type")).toBeUndefined();
+    expect(attrOf(1, "error.type")).toEqual({ stringValue: "model_dispatch_failed" });
   });
 
   it("emits published gen_ai.* keys and namespaces everything else under regulait.*", () => {
