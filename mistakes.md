@@ -152,3 +152,17 @@ used `getByLabel("Name")`, turning a unique locator into six matches.
 existing spec drives, run the WHOLE browser suite before claiming it verified
 — and for shared-fixture suites, copy the order-independent sign-in helper the
 later specs use, never the bootstrap flow the first spec asserts.**
+
+### M-018 — A new spec file's NAME is part of its blast radius
+After fixing the sign-in collision, two specs still failed in the suite
+(phase4's rule test, phase5's "allow-list starts empty") though both passed
+alone and paired with mine. Cause: the suite shares one seeded database and
+several specs assert GLOBAL state ("starts empty", "this row is the one I
+made"). My files sorted alphabetically ahead of the established suite, so they
+mutated that state before those assertions ran. Renaming mine to sort last
+took the suite from 2 failures to 107/107 — the specs' CONTENT was never the
+problem, their POSITION was.
+**Rule: in a shared-fixture e2e suite, name a new spec so it runs AFTER the
+established ones (a `zz-` prefix here), and treat file order as part of the
+fixture contract — a spec that asserts global emptiness can only be protected
+by nothing running before it that writes.**
