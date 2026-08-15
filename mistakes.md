@@ -134,3 +134,21 @@ for a while and could have been lost entirely. (Self-reported by the agent that 
 **Rule: never `git checkout`/`git restore` a FILE to undo a temporary edit while that file
 holds uncommitted work — reverse the exact edit with Edit, or commit first so the revert
 has a floor to land on.**
+
+### M-017 — Verified new browser specs individually, never as a suite
+I added three Playwright specs and validated each on its own fresh database.
+They passed. Run as a SUITE they broke five others, because the e2e suite
+shares ONE seeded database and the seeded one-time password is single-use: my
+specs consumed it and then set a PRIVATE new password, so every later admin
+spec was locked out. The existing specs had already solved this with an
+order-independent `signIn(page, email, candidates[], settleOn)` that tries the
+one-time AND the shared password and settles on the shared one — I never read
+one of those, only the first test of phase2, which is the one spec that
+legitimately asserts the raw one-time flow.
+A separate instance of the same blindness: shipping the ADR-0077 template
+gallery added five "Template name for X" inputs to a page whose existing test
+used `getByLabel("Name")`, turning a unique locator into six matches.
+**Rule: after adding a browser spec OR adding form controls to a page an
+existing spec drives, run the WHOLE browser suite before claiming it verified
+— and for shared-fixture suites, copy the order-independent sign-in helper the
+later specs use, never the bootstrap flow the first spec asserts.**

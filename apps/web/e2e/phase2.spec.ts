@@ -338,7 +338,10 @@ test("audit log: A4 deploy-mode filter, including the honest unknown / pre-0044 
 
 test("workflow templates: author a template from a starter", async () => {
   await nav("Workflow templates", "Workflow templates");
-  await page.getByLabel("Name").fill(`e2e-template-${Date.now()}`);
+  // exact: ADR-0077's gallery put a "Template name for <shape>" input on every
+  // gallery card, so a loose "Name" match now resolves to six controls. The
+  // authoring form's field is the one labelled exactly "Name".
+  await page.getByLabel("Name", { exact: true }).fill(`e2e-template-${Date.now()}`);
   await page.getByRole("button", { name: "Create template" }).click();
   await expect(page.getByText("Template created").first()).toBeVisible();
   await shot(page, "phase2-15-workflow-templates");

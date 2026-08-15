@@ -6,7 +6,7 @@
  * default and the card must say NOT tamper-resistant — the honest answer is
  * the assertion, not a compromise in it.
  */
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,18 +16,45 @@ const state = JSON.parse(readFileSync(path.join(here, ".e2e-state.json"), "utf8"
   passwords: { admin: string };
 };
 
+/** the password every admin spec in this suite settles on */
+const ADMIN_PASSWORD = "E2e-Admin-Phase2!";
+
+
+/**
+ * Order-independent sign-in, copied from the phase4-7 / brand-contract specs.
+ * The suite shares ONE seeded database, so the seeded one-time password is
+ * consumed by whichever spec runs first — a spec that only knows the one-time
+ * password passes alone and fails in the suite. Trying the candidates in turn
+ * and settling on the SHARED password keeps every spec runnable in any order.
+ */
+async function signIn(page: Page, email: string, candidates: string[], settleOn: string) {
+  for (const [i, password] of candidates.entries()) {
+    await page.goto("/ui");
+    await page.getByLabel("Email").fill(email);
+    await page.getByLabel("Password", { exact: true }).fill(password);
+    await page.getByRole("button", { name: "Sign in" }).click();
+
+    const welcome = page.getByRole("heading", { name: /Welcome back/ });
+    const forcedChange = page.getByText("Your password is one-time");
+    const rejected = page.getByText(/password is incorrect/);
+    await expect(welcome.or(forcedChange).or(rejected).first()).toBeVisible();
+
+    if (await welcome.isVisible()) return password;
+    if (await forcedChange.isVisible()) {
+      await page.getByLabel("Current (one-time) password").fill(password);
+      await page.getByLabel("New password", { exact: true }).fill(settleOn);
+      await page.getByLabel("Confirm new password").fill(settleOn);
+      await page.getByRole("button", { name: "Set password & continue" }).click();
+      await expect(welcome).toBeVisible();
+      return settleOn;
+    }
+    expect(i, `no candidate password worked for ${email}`).toBeLessThan(candidates.length - 1);
+  }
+  throw new Error(`could not sign in as ${email}`);
+}
+
 test("admin verifies the audit chain from the UI and reads an honest anchor report", async ({ page }) => {
-  // sign in as the seeded admin (one-time password → forced change)
-  await page.goto("/ui");
-  await page.getByLabel("Email").fill("admin@regulait.local");
-  await page.getByLabel("Password", { exact: true }).fill(state.passwords.admin);
-  await page.getByRole("button", { name: "Sign in" }).click();
-  await expect(page.getByText("Your password is one-time")).toBeVisible();
-  await page.getByLabel("Current (one-time) password").fill(state.passwords.admin);
-  await page.getByLabel("New password", { exact: true }).fill("E2e-Audit-Admin-1!");
-  await page.getByLabel("Confirm new password").fill("E2e-Audit-Admin-1!");
-  await page.getByRole("button", { name: "Set password & continue" }).click();
-  await expect(page.getByRole("heading", { name: /Welcome back/ })).toBeVisible();
+  await signIn(page, "admin@regulait.local", [ADMIN_PASSWORD, state.passwords.admin], ADMIN_PASSWORD);
 
   await page.goto("/ui/admin/audit");
   await expect(page.getByText("Chain integrity", { exact: false })).toBeVisible();
