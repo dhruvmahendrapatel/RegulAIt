@@ -82,13 +82,33 @@ async function nav(label: string, heading: string) {
 }
 
 test("admin login: one-time password → forced change → dashboard shows admin nav", async () => {
+  // MINT A FRESH one-time password rather than spending the seeded one.
+  // The seeded password is single-use and this suite shares ONE database, so
+  // whichever spec signs in first consumes it — this test used to depend on
+  // being that spec, which alphabetical file order stopped guaranteeing. The
+  // CONTRACT under test (a one-time password forces a change on first use) is
+  // unchanged; only its fixture is now owned by the test instead of borrowed.
+  const boot = { authorization: "Bearer e2e-bootstrap-token", "content-type": "application/json" };
+  const users = (await (await fetch(`${state.baseUrl}/v1/users`, { headers: boot })).json()) as {
+    users: Array<{ id: string; email: string }>;
+  };
+  const adminId = users.users.find((u) => u.email === "admin@regulait.local")!.id;
+  const minted = (await (
+    await fetch(`${state.baseUrl}/v1/users/${adminId}/set-initial-password`, {
+      method: "POST",
+      headers: boot,
+      body: JSON.stringify({ force: true }),
+    })
+  ).json()) as { password: string; mustChangePassword: boolean };
+  expect(minted.mustChangePassword).toBe(true);
+
   await page.goto("/ui");
   await page.getByLabel("Email").fill("admin@regulait.local");
-  await page.getByLabel("Password", { exact: true }).fill(state.passwords.admin);
+  await page.getByLabel("Password", { exact: true }).fill(minted.password);
   await page.getByRole("button", { name: "Sign in" }).click();
 
   await expect(page.getByText("Your password is one-time")).toBeVisible();
-  await page.getByLabel("Current (one-time) password").fill(state.passwords.admin);
+  await page.getByLabel("Current (one-time) password").fill(minted.password);
   await page.getByLabel("New password", { exact: true }).fill(ADMIN_PASSWORD);
   await page.getByLabel("Confirm new password").fill(ADMIN_PASSWORD);
   await page.getByRole("button", { name: "Set password & continue" }).click();
