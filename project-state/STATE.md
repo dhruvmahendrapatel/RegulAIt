@@ -118,10 +118,18 @@ across a container restart: the killed agent's artifacts survived in pushed WIP 
 and were validated whole rather than rebuilt (M-015) — full revalidation from cold: `pnpm -r
 build` clean, shared **719**, gateway **2246 passing + 9 MinIO skips / 137 files**, Playwright
 **114/114**, all on fresh scratch databases. Owner promoted **L22–L24** into the queue
-(2026-08-20). Remaining: **L20+L21**, then L22 certification campaigns → L23 tool-combination
-SoD → L24 access recommendations (deterministic half); L13 assessment AI pre-fill (owner
-decision — collides with ADR-0080's "the answers are yours"); L6 the moment the model
-credential is unparked. Process note: M-019 logged —
+(2026-08-20). Then **L20+L21**
+([ADR-0089](../docs/decisions/0089-agent-ownership-alignment.md), migration 0091): identity
+lifecycle at the call plane — agents gain an owner and a lifecycle where **retired refuses
+dispatch** (409 in the one dispatch core, after entitlement, before any provider work; terminal)
+and **deprecated only warns**; ownership renders as owned/unowned/orphaned computed at read
+time (orphaned = owner's SCIM-written `disabled_at`), and the inventory gains a third
+never-blend block: **intended-vs-granted alignment** (aligned/undershoot/overreach against
+`ai_use_cases.intendedAgentIds`, holder sets imported from ADR-0082's index, never about
+traffic). Gateway **2263 passing + 9 MinIO skips / 138 files**, Playwright **116/116**.
+Remaining: L22 certification campaigns → L23 tool-combination SoD → L24 access
+recommendations (deterministic half); L13 assessment AI pre-fill (owner decision — collides
+with ADR-0080's "the answers are yours"); L6 the moment the model credential is unparked. Process note: M-019 logged —
 a REPEAT of M-014 (agent parked on a watcher despite the rule in its brief); the rule is
 rewritten to make parking impossible (foreground suite runs with explicit timeouts, stated
 inside the verification step).
