@@ -71,10 +71,20 @@ byte-identical with CC9.2's graduation path recorded, and the risk register gain
 ([GAP_ANALYSIS_FOUR_VENDORS_2026-08.md](../docs/product/GAP_ANALYSIS_FOUR_VENDORS_2026-08.md),
 owner-directed: Holistic AI, watsonx.governance, Fiddler, OneTrust — all four sites
 egress-blocked, per-source honesty grades recorded) ranked lacks L9–L19 and struck ten
-near-miss claims after in-repo verification. Next: **L10** EU-AI-Act risk-tier classifier in
-the ADR-0080 intake, then **L12** factsheet auto-fill of model cards from the ledgers; L13
-(assessment AI pre-fill) needs an owner decision — it collides with ADR-0080's "the answers
-are yours" stance; L6 dispatches the moment the model credential is unparked. Process note: M-019 logged —
+near-miss claims after in-repo verification. Then **L10**
+([ADR-0085](../docs/decisions/0085-eu-ai-act-tier-screening.md)): EU-AI-Act risk-tier
+*screening* on the intake — a frozen, hash-pinned 17-rule data-only ruleset
+(`EU_AI_ACT_RULESET_V1`: 4 prohibited/11 high/2 limited, dominance ordered) computed
+server-side only from a fenced answers block in the questionnaire artifact (a smuggled tier is
+refused; unscreened is null, never guessed), the tier **informing** the human sign-off rather
+than blocking (blocking would overclaim enforcement and legal judgement — proven by a
+prohibited use case both denied and approved by its human with the tier as the recorded why);
+`high` derives its cascade recommendation live from the org's actual eu-ai-act packs/profiles.
+Gateway **2208 passing + 9 MinIO skips / 134 files**, Playwright **112/112** (e2e fixture fix:
+the auth rate-limit bucket raised in global-setup — the 112th sign-in tipped the production
+default's rolling window). Next: **L12** factsheet auto-fill of model cards from the ledgers;
+L13 (assessment AI pre-fill) needs an owner decision — it collides with ADR-0080's "the
+answers are yours" stance; L6 dispatches the moment the model credential is unparked. Process note: M-019 logged —
 a REPEAT of M-014 (agent parked on a watcher despite the rule in its brief); the rule is
 rewritten to make parking impossible (foreground suite runs with explicit timeouts, stated
 inside the verification step).
