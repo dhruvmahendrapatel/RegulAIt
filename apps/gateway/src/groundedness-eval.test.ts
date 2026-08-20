@@ -445,6 +445,13 @@ describe("a judge-backed metric REFUSES rather than degrading to a lexical proxy
     const ds = await judgedDataset("gr-judge-required");
     const before = await db.select().from(evalRuns).where(eq(evalRuns.datasetId, ds));
     expect(before).toHaveLength(0);
+    // ADR-0088 made `groundedness_judge` rows WITHOUT a judge legitimate when
+    // an EXTERNAL scorer produced them (method "external:<name>"), so the
+    // no-rows sweep below is a DELTA around this refused run (M-008), not an
+    // absolute count — another suite's externally-scored rows are not orphans.
+    const resultsBefore = (
+      await db.select().from(evalResults).where(eq(evalResults.scorerKind, "groundedness_judge"))
+    ).length;
 
     resetProviderCalls();
     const res = await app.inject({
@@ -466,7 +473,7 @@ describe("a judge-backed metric REFUSES rather than degrading to a lexical proxy
       .select()
       .from(evalResults)
       .where(eq(evalResults.scorerKind, "groundedness_judge"));
-    expect(orphanResults).toHaveLength(0);
+    expect(orphanResults).toHaveLength(resultsBefore);
     // and nothing was dispatched, so it did not even cost a token
     expect(providerCalls()).toHaveLength(0);
   });

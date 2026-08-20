@@ -624,6 +624,13 @@
       "when": 1785024000000,
       "tag": "0089_use_case_eu_tier",
       "breakpoints": true
+    },
+    {
+      "idx": 90,
+      "version": "7",
+      "when": 1785025000000,
+      "tag": "0090_external_scorers",
+      "breakpoints": true
     }
   ]
 }

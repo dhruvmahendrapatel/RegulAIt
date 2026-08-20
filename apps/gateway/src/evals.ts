@@ -52,6 +52,7 @@ import {
   evalDatasets,
   evalResults,
   evalRuns,
+  externalScorers,
   isNull,
   ne,
   sql,
@@ -76,6 +77,9 @@ import {
   evalScorerConfigSchema,
   evalScorerRegistry,
   evaluateEvalGate,
+  externalScorerAvailabilityFor,
+  externalScorerMethod,
+  EXTERNAL_SCORER_DISCLOSURE,
   isDeterministicScorer,
   isJudgeBackedScorer,
   judgeAvailabilityFor,
@@ -105,6 +109,11 @@ import {
 import { loadAgentRevocations, loadRoleAgentGrants } from "./entitlements.js";
 import { beginTrace, childContext, closeSpan, finishTrace, openSpan } from "./tracing.js";
 import { assertProjectAttribution } from "./projects.js";
+import {
+  callExternalScorer,
+  resolveExternalScorersByName,
+  type ResolvedExternalScorer,
+} from "./external-scorers.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -573,7 +582,20 @@ export async function runEvalSuite(
   // eval_results row, and not one dispatched token. `judgeAvailabilityFor` is a
   // pure function in @regulait/shared, tested exhaustively without a database.
   // ------------------------------------------------------------------
-  const scorerKinds = cases.map((c) => resolveScorer(dataset, c).kind);
+  // ADR-0088 — WHICH INSTRUMENT EACH CASE ASKED FOR, decided once. A
+  // judge-backed case whose config names a registered external scorer is
+  // scored by THAT instrument and does not require the judge; every other
+  // judge-backed case still does. The deterministic kinds never appear in
+  // either set — `externalScorer` on one of them was refused at authoring
+  // time, and the runner's deterministic branch never consults it, so a
+  // lexical metric structurally cannot route externally.
+  const resolvedScorers = cases.map((c) => resolveScorer(dataset, c));
+  const externalUses = resolvedScorers
+    .filter((r) => isJudgeBackedScorer(r.kind) && r.config.externalScorer)
+    .map((r) => ({ kind: r.kind, scorer: r.config.externalScorer! }));
+  const scorerKinds = resolvedScorers
+    .filter((r) => !(isJudgeBackedScorer(r.kind) && r.config.externalScorer))
+    .map((r) => r.kind);
   let judgeDispatchable = false;
   let judgeUndispatchableDetail: string | null = null;
   if (opts.judge) {
@@ -624,6 +646,55 @@ export async function runEvalSuite(
       detail: availability.reason,
       metrics: availability.metrics,
     };
+  }
+
+  // ------------------------------------------------------------------
+  // ADR-0088 — THE SAME HONESTY LINE FOR A NAMED EXTERNAL INSTRUMENT.
+  //
+  // A case that named a registered external scorer must be scored by THAT
+  // instrument or not at all. Unknown / disabled / not claiming the kind /
+  // egress-refused all refuse the WHOLE RUN here — after the cases are known,
+  // BEFORE the `eval_runs` row is inserted — exactly the ADR-0067 judge-
+  // unreachable path: no run row, no result rows, not one dispatched token,
+  // and NEVER a fallback to the lexical estimate or the model judge under the
+  // external scorer's name. The egress verdict is the ADR-0034 guard against
+  // the same default-deny allow-list every outbound surface rides, which is
+  // what makes the air-gapped posture (ADR-0062) hold here by inheritance.
+  // ------------------------------------------------------------------
+  let externalByName = new Map<string, ResolvedExternalScorer>();
+  if (externalUses.length > 0) {
+    const names = [...new Set(externalUses.map((u) => u.scorer))];
+    const { facts, resolved } = await resolveExternalScorersByName(db, dataKey, names);
+    const ext = externalScorerAvailabilityFor(externalUses, facts);
+    if (!ext.available) {
+      await db.insert(auditLog).values({
+        userId: opts.userId,
+        objectType: "eval_run",
+        objectId: dataset.id,
+        detail: {
+          phase: "external-scorer-availability",
+          purpose,
+          ...originDetail,
+          agentId: agent.id,
+          datasetName: dataset.name,
+          datasetVersion: dataset.version,
+          externalScorer: ext.scorer,
+          metrics: ext.metrics,
+        },
+        effect: "deny",
+        ruleId: ext.error,
+        ruleChain: [],
+        reason: ext.reason,
+      });
+      return {
+        ok: false,
+        status: 422,
+        error: ext.error,
+        detail: ext.reason,
+        metrics: ext.metrics as JudgeBackedScorerKind[],
+      };
+    }
+    externalByName = resolved;
   }
 
   // ------------------------------------------------------------------
@@ -850,6 +921,50 @@ export async function runEvalSuite(
         caseInput: c.input,
         context,
       });
+    } else if (config.externalScorer) {
+      // ADR-0088 — THE EXTERNAL INSTRUMENT. Pre-flight above guaranteed the
+      // scorer exists, is enabled, claims this kind and passed the egress
+      // guard; the guarded fetch re-validates per request anyway. The RAW
+      // case input and the context chunks ride the contract separately —
+      // never the composed dispatch prompt, which would blur the chunk
+      // boundaries the groundedness metrics treat as load-bearing.
+      const ext = externalByName.get(config.externalScorer);
+      if (!ext) {
+        // unreachable by construction — see the judge counterpart below
+        throw new Error(
+          `internal: externally-scored case reached the runner with no resolved scorer '${config.externalScorer}' — ` +
+            "externalScorerAvailabilityFor and the resolution have diverged (ADR-0088)",
+        );
+      }
+      try {
+        const verdict = await callExternalScorer(ext, {
+          input: c.input,
+          output,
+          context: [...context],
+          scorerKind: kind,
+        });
+        const threshold = config.threshold ?? 1;
+        scored = {
+          score: verdict.score,
+          passed: verdict.score >= threshold,
+          detail: {
+            // THE PROVENANCE STAMP. Never 'lexical-idf-overlap', never
+            // 'model-judged': a vendor's opinion is its own method family,
+            // named after the instrument that produced it.
+            method: externalScorerMethod(ext.row.name),
+            metric: kind,
+            externalScorer: ext.row.name,
+            ...(verdict.reasons.length ? { reasons: verdict.reasons } : {}),
+          },
+        };
+      } catch (e) {
+        // the judge_failed idiom, verbatim (ADR-0068's errored-trial lesson):
+        // a non-conforming or failed call is a RECORDED ERROR on the row —
+        // score 0 with the error named, no method stamp, never a fabricated
+        // measurement presented as the instrument's verdict.
+        scored = { score: 0, passed: false, detail: { externalScorer: config.externalScorer, failed: true } };
+        caseError = `external_scorer_failed: ${(e as Error).message}`;
+      }
     } else if (!judge) {
       // ADR-0072 — UNREACHABLE BY CONSTRUCTION, AND A THROW RATHER THAN A ZERO.
       //
@@ -1050,9 +1165,12 @@ const GROUNDEDNESS_KINDS = [
 
 export interface GroundednessMetricSummary {
   metric: string;
-  /** 'local-lexical' or 'model-judged' — the ONE field that stops a lexical
-   * estimate being read as an entailment measurement */
-  method: "local-lexical" | "model-judged";
+  /** 'local-lexical', 'model-judged' or 'external:<name>' (ADR-0088) — the
+   * ONE field that stops a lexical estimate being read as an entailment
+   * measurement, or a vendor's opinion as either. When one metric was scored
+   * by different instruments across cases, each instrument gets ITS OWN
+   * summary row — the three method families are never averaged together. */
+  method: string;
   cases: number;
   meanScore: number;
   minScore: number;
@@ -1088,34 +1206,52 @@ export function summarizeGroundedness(
   const metrics: GroundednessMetricSummary[] = [];
   const claims: GroundednessSummary["unsupportedClaims"] = [];
   for (const kind of GROUNDEDNESS_KINDS) {
-    const rows = relevant.filter((r) => r.scorerKind === kind);
-    if (rows.length === 0) continue;
-    let unsupported = 0;
-    for (const r of rows) {
-      const list = r.detail.unsupportedClaims;
-      if (!Array.isArray(list)) continue;
-      unsupported += list.length;
-      for (const c of list) {
-        if (claims.length >= UNSUPPORTED_CLAIM_REPORT_MAX) break;
-        const rec = c as Record<string, unknown>;
-        claims.push({
-          caseId: r.caseId,
-          metric: kind,
-          claim: String(rec.claim ?? ""),
-          ...(typeof rec.score === "number" ? { score: rec.score } : {}),
-          ...(typeof rec.reason === "string" ? { reason: rec.reason } : {}),
-        });
+    const allRows = relevant.filter((r) => r.scorerKind === kind);
+    if (allRows.length === 0) continue;
+    // ADR-0088: one summary row PER (metric, method). A metric scored by the
+    // model judge on some cases and an external instrument on others reports
+    // two figures under two labels — averaging a vendor's opinion into a
+    // model's entailment judgement would blend exactly what `method` exists
+    // to keep apart. Deterministic kinds stay 'local-lexical' (their row-
+    // level method string is the finer-grained algorithm name and cannot be
+    // external — the runner's deterministic branch never consults
+    // `externalScorer`); judge-backed rows report the instrument stamped on
+    // the row.
+    const methodOf = (r: (typeof allRows)[number]) => {
+      if (!isJudgeBackedScorer(kind)) return "local-lexical";
+      const m = r.detail.method;
+      return typeof m === "string" && m.startsWith("external:") ? m : "model-judged";
+    };
+    const methods = [...new Set(allRows.map(methodOf))];
+    for (const method of methods) {
+      const rows = allRows.filter((r) => methodOf(r) === method);
+      let unsupported = 0;
+      for (const r of rows) {
+        const list = r.detail.unsupportedClaims;
+        if (!Array.isArray(list)) continue;
+        unsupported += list.length;
+        for (const c of list) {
+          if (claims.length >= UNSUPPORTED_CLAIM_REPORT_MAX) break;
+          const rec = c as Record<string, unknown>;
+          claims.push({
+            caseId: r.caseId,
+            metric: kind,
+            claim: String(rec.claim ?? ""),
+            ...(typeof rec.score === "number" ? { score: rec.score } : {}),
+            ...(typeof rec.reason === "string" ? { reason: rec.reason } : {}),
+          });
+        }
       }
+      metrics.push({
+        metric: kind,
+        method,
+        cases: rows.length,
+        meanScore: Number((rows.reduce((a, r) => a + r.score, 0) / rows.length).toFixed(4)),
+        minScore: Math.min(...rows.map((r) => r.score)),
+        passedCases: rows.filter((r) => r.passed).length,
+        unsupportedClaims: unsupported,
+      });
     }
-    metrics.push({
-      metric: kind,
-      method: isJudgeBackedScorer(kind) ? "model-judged" : "local-lexical",
-      cases: rows.length,
-      meanScore: Number((rows.reduce((a, r) => a + r.score, 0) / rows.length).toFixed(4)),
-      minScore: Math.min(...rows.map((r) => r.score)),
-      passedCases: rows.filter((r) => r.passed).length,
-      unsupportedClaims: unsupported,
-    });
   }
   return {
     metrics,
@@ -1123,7 +1259,10 @@ export function summarizeGroundedness(
     note:
       "`method` is load-bearing. 'local-lexical' means IDF-weighted overlap against the case's context — " +
       "real, free, offline, and blind to negation flips, swapped attribution and invalid reasoning. " +
-      "'model-judged' means a governed judge dispatch decided entailment. A run can never carry a " +
+      "'model-judged' means a governed judge dispatch decided entailment. 'external:<name>' (ADR-0088) " +
+      "means the registered external instrument of that name scored the case — the vendor's opinion, " +
+      "governed and recorded but not validated by this platform, and summarised under its own label, " +
+      "never averaged into either other method. A run can never carry a " +
       "model-judged figure that no model produced: ADR-0067 refuses the run outright rather than " +
       "substituting the lexical estimate.",
   };
@@ -1278,6 +1417,26 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
    * string rendered next to it in the admin screen */
   app.get("/v1/evals/scorers", async () => ({
     scorers: evalScorerRegistry(),
+    // ADR-0088 — the registered external instruments an admin may name from a
+    // judge-backed scorer config (`scorerConfig: {"externalScorer": "<name>"}`),
+    // listed WITH the disclosure, where the choice is made. Registration and
+    // lifecycle live at /v1/external-scorers.
+    externalScorers: {
+      scorers: (await db.select().from(externalScorers)).map((s) => ({
+        name: s.name,
+        scorerKinds: s.scorerKinds,
+        enabled: s.enabled,
+        lastTestedAt: s.lastTestedAt,
+      })),
+      disclosure: EXTERNAL_SCORER_DISCLOSURE,
+      note:
+        "Name one from a JUDGE-BACKED scorer's config: `{\"externalScorer\": \"<name>\"}`. The named " +
+        "instrument then scores those cases instead of the model judge, and every row it scores is " +
+        "stamped `method: \"external:<name>\"`. A named scorer that is unknown, disabled, not claiming " +
+        "the metric, or refused by the egress guard REFUSES the whole run with 422 before any row is " +
+        "written — the deterministic (lexical) metrics never route externally, and nothing ever " +
+        "silently substitutes one method for another.",
+    },
     note:
       "Ten of the thirteen scorers are pure functions — same output, same score, no cost, no variance. " +
       "Three (llm_as_judge, groundedness_judge, answer_relevance_judge) are governed model calls: they " +

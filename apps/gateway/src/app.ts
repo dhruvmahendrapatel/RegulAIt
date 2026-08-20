@@ -179,6 +179,7 @@ import { z } from "zod";
 import { registerMcpProxy } from "./mcp-proxy.js";
 import { registerAgentConnectorRoutes } from "./agents-connectors.js";
 import { registerCustomProviderRoutes } from "./custom-providers.js";
+import { registerExternalScorerRoutes } from "./external-scorers.js";
 import {
   applyTrainingJobApprovalDecision,
   registerRegulAItLlmRoutes,
@@ -2837,6 +2838,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // that makes their admin-suppliable baseUrl safe to have. Every route is
   // admin-only via the global gate (none appear in NON_ADMIN_ROUTES).
   registerCustomProviderRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0088 — registered EXTERNAL EVAL SCORERS (the L14 adapter). Registered
+  // beside custom providers because it is the same shape of decision — an
+  // admin-typed outbound endpoint under the same egress guard and the same
+  // register → test → enable lifecycle — applied to a measuring instrument
+  // instead of a model. Admin-only via the global gate.
+  registerExternalScorerRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0065 — REGULAIT-LLM. Registered next to the custom-provider surface
   // because it answers the adjacent question: that one is "which model that we
   // do not own may our people reach?", this one is "which model may our people

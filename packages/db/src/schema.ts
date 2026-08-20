@@ -550,6 +550,10 @@ export const auditLog = pgTable(
         // "which third-party endpoint did our models talk to" is answerable).
         // Plain text column — no DDL needed.
         "custom_model_provider",
+        // ADR-0088: admin registration/update/test/enable/removal of a
+        // registered EXTERNAL EVAL SCORER, and every egress refusal on its
+        // admin-typed endpoint. Plain text column — no DDL needed.
+        "external_scorer",
         // ADR-0034 amendment: a `model_credentials` / `user_model_credentials`
         // baseUrl OVERRIDE refused by the egress guard — at write time (the
         // 400) or at dispatch time (the 403 a pre-guard row now gets). Plain
@@ -1359,6 +1363,54 @@ export const egressAllowHosts = pgTable("egress_allow_hosts", {
 
 export type CustomModelProviderRow = typeof customModelProviders.$inferSelect;
 export type EgressAllowHostRow = typeof egressAllowHosts.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0088 (migration 0090) — REGISTERED EXTERNAL EVAL SCORERS.
+//
+// The operator brings the instrument (a Fiddler-class scoring endpoint they
+// run or buy); the gateway brings the governance. A row here is a DISCLOSED
+// measuring instrument an eval scorer config may name for a judge-backed
+// metric — never a model we ship, never a fallback anything degrades to, and
+// never reachable until its host is in `egress_allow_hosts` AND its own
+// connection test has passed. Every score it produces is stamped
+// `method: "external:<name>"` on the result row, so a vendor's opinion can
+// never be read as our lexical metric or as a model-judged entailment.
+// ---------------------------------------------------------------------------
+
+export const externalScorers = pgTable("external_scorers", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  /** admin-chosen label; the SAME string an eval scorer config names via
+   * `externalScorer`, and the string stamped into `method: "external:<name>"`
+   * on every result row this instrument scores */
+  name: text("name").notNull().unique(),
+  /** the scoring endpoint. Admin-typed, therefore an SSRF primitive: validated
+   * by the ADR-0034 egress guard at registration, at run pre-flight, and again
+   * per HTTP request (DNS-pinned) — identical posture to a custom provider */
+  baseUrl: text("base_url").notNull(),
+  /** AES-256-GCM under REGULAIT_DATA_KEY, write-only, never returned — the
+   * same discipline as custom_model_providers.key_ciphertext. NULLABLE: an
+   * on-prem scorer that authenticates by network position has no secret. */
+  keyCiphertext: text("key_ciphertext"),
+  /** which judge-backed scorer kinds this instrument CLAIMS to serve
+   * (llm_as_judge / groundedness_judge / answer_relevance_judge). A claim,
+   * not a verification — the gateway governs the call, it does not validate
+   * the instrument. A run naming this scorer for a kind outside this list is
+   * refused at pre-flight. */
+  scorerKinds: jsonb("scorer_kinds").$type<string[]>().notNull().default([]),
+  /** the scorer HALF of the plaintext-http opt-in; the matching
+   * egress_allow_hosts row must set it too */
+  allowPlaintextHttp: boolean("allow_plaintext_http").notNull().default(false),
+  /** default FALSE: a freshly registered scorer is inert until an admin runs
+   * the connection test and enables it — register → test → enable, exactly
+   * like a custom provider */
+  enabled: boolean("enabled").notNull().default(false),
+  lastTestedAt: timestamp("last_tested_at", { withTimezone: true }),
+  lastTestError: text("last_test_error"),
+  createdBy: uuid("created_by"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type ExternalScorerRow = typeof externalScorers.$inferSelect;
 
 export const agentGrants = pgTable(
   "agent_grants",

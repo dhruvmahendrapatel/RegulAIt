@@ -237,6 +237,9 @@ export const CIPHERTEXT_COLUMNS: ReadonlyArray<{ table: string; column: string; 
   { table: "model_credentials", column: "key_ciphertext", what: "platform model API keys" },
   { table: "user_model_credentials", column: "key_ciphertext", what: "per-user model API keys" },
   { table: "custom_model_providers", column: "key_ciphertext", what: "custom provider API keys" },
+  // ADR-0088: the auth secret an external eval scorer sends as a bearer —
+  // same custody rules as every other admin-registered endpoint credential.
+  { table: "external_scorers", column: "key_ciphertext", what: "external eval scorer auth secrets" },
   { table: "connector_credentials", column: "token_ciphertext", what: "connector tokens" },
   { table: "git_connections", column: "token_ciphertext", what: "git provider tokens" },
   { table: "pm_connections", column: "token_ciphertext", what: "PM tool tokens" },

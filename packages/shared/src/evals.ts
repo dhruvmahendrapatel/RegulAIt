@@ -408,6 +408,13 @@ export const evalScorerConfigSchema = z
     // supported. Per-metric, per-case, and it is the dial an admin turns when
     // their corpus is unusually terse or unusually boilerplate-heavy.
     claimThreshold: z.number().min(0).max(1).optional(),
+    // ADR-0088: the NAME of a registered external scorer that should score
+    // this case INSTEAD of the model judge. Legal on judge-backed kinds only
+    // (`validateScorerConfig` refuses it elsewhere — a lexical metric never
+    // routes externally). Rows it scores are stamped `method:
+    // "external:<name>"`, and a named-but-unusable scorer refuses the run
+    // with 422 before any row is written, exactly like a missing judge.
+    externalScorer: z.string().min(1).max(120).optional(),
   })
   .strict();
 export type EvalScorerConfig = z.infer<typeof evalScorerConfigSchema>;
@@ -430,6 +437,17 @@ export function validateScorerConfig(
 ): string | null {
   if (requiresContext(kind) && context.length === 0) {
     return `${kind} scorer needs the case to carry \`context\` — groundedness is undefined without the material an answer was supposed to be grounded in`;
+  }
+  // ADR-0088: an external instrument may stand in for the MODEL JUDGE, and
+  // for nothing else. A lexical metric routed to a network endpoint would be a
+  // different measurement wearing a deterministic metric's name — the exact
+  // dishonesty ADR-0067 exists to prevent — so it is refused at authoring
+  // time, where the author can still fix it.
+  if (config.externalScorer && !isJudgeBackedScorer(kind)) {
+    return (
+      `\`externalScorer\` is only legal on a judge-backed scorer kind (${JUDGE_BACKED_SCORER_KINDS.join(", ")}) — ` +
+      `'${kind}' is computed locally and NEVER routes to an external endpoint`
+    );
   }
   switch (kind) {
     case "exact":

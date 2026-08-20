@@ -85,6 +85,31 @@ export {
   type JudgedClaimVerdict,
 } from "./groundedness.js";
 
+// ADR-0088 — REGISTERED EXTERNAL SCORERS. The operator brings the instrument
+// (a Fiddler-class scoring endpoint), the gateway brings the governance, and
+// every score is stamped `method: "external:<name>"`. The pure contract
+// parser, the pre-flight refusal (the ADR-0067/0072 honesty line extended to
+// a third method family), and the admin write shapes.
+export {
+  externalScorerMethod,
+  parseExternalScorerResponse,
+  externalScorerAvailabilityFor,
+  externalScorerKindSchema,
+  createExternalScorerSchema,
+  updateExternalScorerSchema,
+  setExternalScorerEnabledSchema,
+  EXTERNAL_SCORER_DISCLOSURE,
+  EXTERNAL_SCORER_MAX_REASONS,
+  EXTERNAL_SCORER_MAX_REASON_CHARS,
+  type ExternalScorerRequest,
+  type ExternalScorerVerdict,
+  type ExternalScorerUse,
+  type ExternalScorerFacts,
+  type ExternalScorerAvailability,
+  type CreateExternalScorer,
+  type UpdateExternalScorer,
+} from "./external-scorer.js";
+
 // THE ONE TOKENIZER (hoisted here from training-provider by ADR-0067 so the
 // retrieval index, the classifier and the groundedness metrics cannot disagree
 // about what a word is).
