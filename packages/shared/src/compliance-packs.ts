@@ -68,6 +68,7 @@ export const COMPLIANCE_PACK_FRAMEWORKS = [
   "hipaa",
   "pci-dss",
   "finra",
+  "soc-2",
   "custom",
 ] as const;
 export type CompliancePackFramework = (typeof COMPLIANCE_PACK_FRAMEWORKS)[number];
@@ -888,6 +889,151 @@ export const DEFAULT_COMPLIANCE_PACKS: CreateCompliancePackInput[] = [
         minEvidenceCount: 1,
         attestationRequired: true,
         ownerNote: "Organisational document.",
+      },
+    ],
+  },
+  {
+    framework: "soc-2",
+    version: 1,
+    title: "SOC 2 — Security (Common Criteria) control mapping",
+    description:
+      "Maps a Security-category (CC-series) subset of the 2017 Trust Services Criteria onto " +
+      "RegulAIt ledgers and configuration. SECURITY CATEGORY ONLY — Availability, Processing " +
+      "Integrity, Confidentiality and Privacy are out of this pack's scope and are not silently " +
+      "implied. A SOC 2 REPORT is an auditor's opinion on YOUR organisation; this pack collects " +
+      "the control-plane evidence an auditor would sample, it does not constitute the report.",
+    provenance: {
+      source: "AICPA Trust Services Criteria (2017, incl. 2022 points of focus) — Security/CC series",
+      catalogueRevision: "TSC 2017 (rev. 2022)",
+      reviewedBy: null,
+      reviewedOn: null,
+      note: "Authored from the public criteria. NOT reviewed by a CPA firm — treat as a starting point.",
+    },
+    cascadeTag: null,
+    controls: [
+      {
+        controlRef: "soc-2:CC6.1-logical-access",
+        title: "Logical access security is implemented over protected assets",
+        description:
+          "Default-deny operates on every governed call: evidenced by DENY decisions the gateway " +
+          "actually issued in the period — access control that refused nothing is asserted, not shown.",
+        coverage: "enforced",
+        collector: "audit_decisions",
+        collectorParams: { effect: "deny" },
+        minEvidenceCount: 1,
+        attestationRequired: false,
+        ownerNote: null,
+      },
+      {
+        controlRef: "soc-2:CC6.2-user-registration",
+        title: "Users are registered and authorized before access is provisioned",
+        description:
+          "User lifecycle actions (creation, initial credentials, deactivation — incl. SCIM " +
+          "deprovisioning per ADR-0037) land audit rows with objectType 'user'.",
+        coverage: "evidenced",
+        collector: "audit_decisions",
+        collectorParams: { objectType: "user" },
+        minEvidenceCount: 1,
+        attestationRequired: false,
+        ownerNote: null,
+      },
+      {
+        controlRef: "soc-2:CC6.3-access-modification",
+        title: "Access is modified or removed on role change and termination",
+        description:
+          "The mechanism is evidenced (user-lifecycle audit rows; deactivation is disabled_at, never " +
+          "a delete). The CADENCE — access reviews, termination SLAs — is organisational.",
+        coverage: "partial",
+        collector: "audit_decisions",
+        collectorParams: { objectType: "user" },
+        minEvidenceCount: 1,
+        attestationRequired: false,
+        ownerNote:
+          "Attach your access-review cadence and termination SLA; the control plane cannot observe HR events it is not told about.",
+      },
+      {
+        controlRef: "soc-2:CC6.6-boundary-protection",
+        title: "Threats from outside system boundaries are mitigated (egress control)",
+        description:
+          "ADR-0043/0034's default-deny egress guard: admin-typed outbound destinations are " +
+          "allow-listed and every list change is audited (ruleId 'egress-*').",
+        coverage: "enforced",
+        collector: "audit_decisions",
+        collectorParams: { ruleIdPrefix: "egress" },
+        minEvidenceCount: 1,
+        attestationRequired: false,
+        ownerNote: null,
+      },
+      {
+        controlRef: "soc-2:CC6.7-data-movement",
+        title: "Movement of information is restricted to authorized users and processes",
+        description:
+          "The semantic-DLP detector (ADR-0042) at warn-or-stronger inspects governed output paths; " +
+          "the §8.4 PII controls ride the same plane.",
+        coverage: "evidenced",
+        collector: "guardrail_configs",
+        collectorParams: { detector: "semantic_dlp", minMode: "warn" },
+        minEvidenceCount: 1,
+        attestationRequired: false,
+        ownerNote: null,
+      },
+      {
+        controlRef: "soc-2:CC7.2-monitoring",
+        title: "System components are monitored for anomalies indicative of malicious acts",
+        description:
+          "Every governed decision is recorded continuously in the hash-chained audit log " +
+          "(ADR-0060); the prompt-injection detector at block is the runtime tripwire.",
+        coverage: "evidenced",
+        collector: "guardrail_configs",
+        collectorParams: { detector: "prompt_injection", minMode: "block" },
+        minEvidenceCount: 1,
+        attestationRequired: false,
+        ownerNote: null,
+      },
+      {
+        controlRef: "soc-2:CC7.4-incident-response",
+        title: "Security incidents are responded to per a defined incident-response program",
+        coverage: "unaddressed",
+        collector: "none",
+        collectorParams: {},
+        minEvidenceCount: 1,
+        attestationRequired: true,
+        ownerNote:
+          "An incident-response PROGRAM (roles, runbooks, exercises) is organisational; attest with a reference to it. Audit rows can support a post-incident timeline but do not constitute the program.",
+      },
+      {
+        controlRef: "soc-2:CC8.1-change-management",
+        title: "Changes to infrastructure, data and software are authorized before deployment",
+        description:
+          "Pillar-2 workflow sign-offs: human approvals recorded against workflow instances " +
+          "(plan gate per ADR-0079, merge/deploy gates per §2), decided in the period.",
+        coverage: "enforced",
+        collector: "approvals",
+        collectorParams: { status: "approved", approvalObjectType: "workflow" },
+        minEvidenceCount: 1,
+        attestationRequired: false,
+        ownerNote: null,
+      },
+      {
+        controlRef: "soc-2:CC9.2-vendor-risk",
+        title: "Vendor and business-partner risks are assessed and managed",
+        coverage: "unaddressed",
+        collector: "none",
+        collectorParams: {},
+        minEvidenceCount: 1,
+        attestationRequired: true,
+        ownerNote:
+          "RegulAIt has no vendor-risk module (a known gap, L5 in the Credo analysis — deliberately deferred). Attest from your procurement/GRC process.",
+      },
+      {
+        controlRef: "soc-2:CC1.4-competence",
+        title: "The entity attracts, develops and retains competent individuals (control environment)",
+        coverage: "unaddressed",
+        collector: "none",
+        collectorParams: {},
+        minEvidenceCount: 1,
+        attestationRequired: true,
+        ownerNote: "Control-environment criteria live in HR and governance documents, not in a control plane.",
       },
     ],
   },

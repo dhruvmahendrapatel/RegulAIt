@@ -294,3 +294,40 @@ artifact, stamped with pack version and effective project ids). Plus
 `report_definitions.pack_id`, which retires ADR-0047's placeholder catalogue.
 `audit_log.object_type` gains `compliance_pack` as a TS-only widening — the
 column has no DB CHECK, so there is no DDL for it.
+
+---
+
+## Amendment (2026-08-20) — seventh seed pack: SOC 2 (Security / Common Criteria)
+
+The Credo AI gap analysis (`docs/product/GAP_ANALYSIS_CREDO_AI_2026-08.md`, item
+L3) named pack-curation breadth as a real gap even though the *mechanism* above
+already existed. First curation increment: a **SOC 2 — Security (Common
+Criteria)** pack is appended to `DEFAULT_COMPLIANCE_PACKS`, taking the seed set
+from six frameworks to seven (`soc-2` added to `COMPLIANCE_PACK_FRAMEWORKS`).
+
+Scope and honesty posture, consistent with everything above:
+
+- **Security (common criteria) only.** No Availability, Processing Integrity,
+  Confidentiality, or Privacy category controls are mapped; the pack title says
+  so. Provenance records that the mapping was authored from the public AICPA
+  Trust Services Criteria (2017, rev. 2022) and has **not been reviewed by a CPA
+  firm** — `reviewedBy` stays null, which the shared test suite pins for every
+  pack.
+- **Ten controls, honestly graded.** Three are `enforced` and evidenced by
+  queries over real ledgers (CC6.1 logical-access denials via `audit_decisions`
+  with `effect: "deny"`; CC6.6 boundary/egress denials via the `egress` rule-id
+  prefix; CC8.1 change authorization via approved workflow `approvals`). Three
+  are `evidenced` (CC6.2 user provisioning/deprovisioning audit rows; CC6.7
+  semantic-DLP guardrail configuration; CC7.2 prompt-injection detection at
+  `block`). CC6.3 is `partial` — the rows exist but the review cadence is an
+  organisational process. CC7.4 (incident response), CC9.2 (vendor risk — the
+  owner note names the deliberately deferred L5 vendor portal), and CC1.4
+  (competence/HR) are attestation-required: they are organisational controls the
+  platform cannot query, and pretending otherwise would be exactly the tick-box
+  this ADR exists to refuse.
+- **`cascadeTag` is null.** SOC 2 is an attestation framework about the service
+  organisation, not a data-sensitivity regime like HIPAA/PCI; it forces no
+  cascade profile.
+- The shared enumeration test now pins seven frameworks, and every generic pack
+  invariant (parses under the API schema, at least one attestation-required
+  control, no claimed counsel review) applies to it unchanged.

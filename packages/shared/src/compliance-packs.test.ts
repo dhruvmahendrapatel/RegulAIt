@@ -176,7 +176,7 @@ describe("the pack schema refuses the shapes that would manufacture assurance", 
   });
 });
 
-describe("the six launch packs are honest data", () => {
+describe("the seven launch packs are honest data", () => {
   it("every one parses under the schema the API accepts", () => {
     for (const pack of DEFAULT_COMPLIANCE_PACKS) {
       const res = createCompliancePackSchema.safeParse(pack);
@@ -199,8 +199,8 @@ describe("the six launch packs are honest data", () => {
     }
   });
 
-  it("covers the six frameworks ADR-0058 names", () => {
+  it("covers the six frameworks ADR-0058 names plus the SOC 2 amendment", () => {
     const frameworks = DEFAULT_COMPLIANCE_PACKS.map((p) => p.framework).sort();
-    expect(frameworks).toEqual(["eu-ai-act", "finra", "hipaa", "iso-42001", "nist-ai-rmf", "pci-dss"]);
+    expect(frameworks).toEqual(["eu-ai-act", "finra", "hipaa", "iso-42001", "nist-ai-rmf", "pci-dss", "soc-2"]);
   });
 });
