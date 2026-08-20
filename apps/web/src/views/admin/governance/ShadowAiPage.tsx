@@ -135,6 +135,73 @@ interface AdaptersResponse {
   pipeline: string;
 }
 
+// ---- ADR-0083: first-party discovery -------------------------------------
+
+interface DiscoveryCatalogEntry {
+  id: string;
+  kind: string;
+  pattern: string;
+  provider: string;
+  notes: string;
+}
+interface DiscoveryCatalogResponse {
+  catalogVersion: number;
+  total: number;
+  endpoints: number;
+  sdks: number;
+  entries: DiscoveryCatalogEntry[];
+  governedHosts: Array<{ host: string; reason: string }>;
+  posture: string;
+  limits: string;
+}
+interface DiscoveryHit {
+  value: string;
+  kind: string;
+  entryId: string | null;
+  provider: string | null;
+  occurrences: number;
+  origins?: string[];
+  governedReason?: string | null;
+}
+interface DiscoveryResult {
+  mode: string;
+  classification: {
+    catalogVersion: number;
+    sourceKind: string;
+    linesScanned: number;
+    candidateCount: number;
+    shadowCount: number;
+    governedCount: number;
+    unmatchedCount: number;
+    unmatchedOccurrences: number;
+    unmatchedSample: string[];
+  };
+  matches: DiscoveryHit[];
+  governed: DiscoveryHit[];
+  deploymentCatalogueGaps: Array<{ value: string; kind: string; provider: string | null; entryId: string | null }>;
+  gapNote?: string | null;
+  ingest: {
+    importId: string;
+    mode: string;
+    observed: number;
+    matched: number;
+    unmatched: number;
+    created?: number;
+    updated?: number;
+  } | null;
+  rawContentStored: boolean;
+  retention: string;
+  posture: string;
+}
+
+const DISCOVERY_KINDS: Array<{ v: string; l: string }> = [
+  { v: "dns_log", l: "DNS query log (generic lines)" },
+  { v: "proxy_log", l: "Proxy / egress log (generic lines)" },
+  { v: "package_json", l: "package.json manifest" },
+  { v: "requirements_txt", l: "requirements.txt manifest" },
+  { v: "go_mod", l: "go.mod manifest" },
+];
+
 interface RawImportResult {
   importId?: string;
   adapter: string;
@@ -197,9 +264,15 @@ export default function ShadowAiPage() {
     queryKey: ["shadow-ai", "adapters"],
     queryFn: () => api.get<AdaptersResponse>("/v1/shadow-ai/adapters"),
   });
+  const discovery = useQuery({
+    queryKey: ["shadow-ai", "discovery-catalog"],
+    queryFn: () => api.get<DiscoveryCatalogResponse>("/v1/shadow-ai/discovery/catalog"),
+  });
   const act = useAction();
   /** the raw importer keeps the STRUCTURED refusal — line numbers are the point */
   const rawAct = useApiAction();
+  /** first-party discovery keeps the structured classification the same way */
+  const discAct = useApiAction();
 
   const [evidence, setEvidence] = useState(EXAMPLE);
   const [preview, setPreview] = useState<unknown>(null);
@@ -216,6 +289,12 @@ export default function ShadowAiPage() {
   const [onMalformed, setOnMalformed] = useState<"refuse_file" | "report_and_continue">("refuse_file");
   const [rawResult, setRawResult] = useState<RawImportResult | null>(null);
   const [rawFileError, setRawFileError] = useState<string | null>(null);
+
+  // ---- ADR-0083 first-party discovery ----
+  const [discKind, setDiscKind] = useState("dns_log");
+  const [discSubject, setDiscSubject] = useState("");
+  const [discContent, setDiscContent] = useState("");
+  const [discResult, setDiscResult] = useState<DiscoveryResult | null>(null);
 
   const refresh = () => {
     void catalogue.refetch();
@@ -275,6 +354,21 @@ export default function ShadowAiPage() {
     );
     if (res) setRawResult(res);
     refresh();
+  };
+
+  const discIsManifest = discKind !== "dns_log" && discKind !== "proxy_log";
+
+  const submitDiscovery = async (mode: "dry_run" | "apply") => {
+    const body: Record<string, unknown> = { sourceKind: discKind, content: discContent, mode };
+    if (discSubject.trim()) body.subject = discSubject.trim();
+    const res = await discAct.run<DiscoveryResult>(
+      () => api.post<DiscoveryResult>("/v1/shadow-ai/discovery", body),
+      mode === "dry_run"
+        ? "Classified — nothing was written. Review the split below, then confirm the ingest."
+        : "Shadow-classified rows were ingested through the evidence pipeline.",
+    );
+    if (res) setDiscResult(res);
+    if (mode === "apply") refresh();
   };
 
   const bySeverity = useMemo(() => {
@@ -561,6 +655,156 @@ export default function ShadowAiPage() {
                   <code>zscaler</code> adapter nobody has tested against Zscaler.
                 </p>
               </>
+            )}
+          </div>
+        </QueryGate>
+      </Card>
+
+      {/* ================= ADR-0083 — first-party discovery ================= */}
+      <Card title="First-party discovery (classify what you already hold)">
+        <QueryGate loading={discovery.isLoading} error={discovery.error} onRetry={() => void discovery.refetch()}>
+          <div className={v.stack}>
+            <p className={v.dim}>{discovery.data?.posture}</p>
+            <p className={v.faint}>{discovery.data?.limits}</p>
+            <p className={v.faint}>
+              Compiled catalogue v{discovery.data?.catalogVersion}: {discovery.data?.endpoints} endpoint and{" "}
+              {discovery.data?.sdks} SDK signatures, frozen. This deployment currently fronts{" "}
+              {discovery.data?.governedHosts.length ?? 0} governed host(s) — hits on those are labelled{" "}
+              <code>governed_via_gateway</code>, not shadow.
+            </p>
+
+            <div className={a.formRow}>
+              <Field label="Input kind">
+                <Select value={discKind} onChange={(e) => setDiscKind(e.target.value)} data-testid="disc-kind">
+                  {optionEls(DISCOVERY_KINDS)}
+                </Select>
+              </Field>
+              <Field label={discIsManifest ? "Belongs to (repo/service) — required" : "Belongs to (label, optional)"}>
+                <Input
+                  value={discSubject}
+                  onChange={(e) => setDiscSubject(e.target.value)}
+                  placeholder={discIsManifest ? "e.g. acme/checkout-service" : "e.g. office-dns-resolver"}
+                  data-testid="disc-subject"
+                />
+              </Field>
+            </div>
+
+            <Field label="Paste the log excerpt or manifest here" grow>
+              <Textarea
+                rows={8}
+                value={discContent}
+                onChange={(e) => setDiscContent(e.target.value)}
+                spellCheck={false}
+                placeholder={
+                  discIsManifest
+                    ? '{"dependencies": {"openai": "^4.0.0"}}'
+                    : "Aug 20 10:00:01 dnsmasq[812]: query[A] api.openai.com from 10.1.2.3"
+                }
+                data-testid="disc-content"
+              />
+            </Field>
+
+            <div className={v.row}>
+              <Button
+                disabled={discAct.busy || !discContent.trim() || (discIsManifest && !discSubject.trim())}
+                onClick={() => void submitDiscovery("dry_run")}
+                data-testid="disc-classify"
+              >
+                Classify (writes nothing)
+              </Button>
+              <Button
+                variant="primary"
+                disabled={
+                  discAct.busy ||
+                  !discContent.trim() ||
+                  (discIsManifest && !discSubject.trim()) ||
+                  !discResult ||
+                  discResult.classification.shadowCount === 0
+                }
+                onClick={() => void submitDiscovery("apply")}
+                data-testid="disc-ingest"
+              >
+                Confirm ingest of shadow rows
+              </Button>
+            </div>
+
+            <OutcomePanel outcome={discAct.outcome} testId="disc-outcome" />
+
+            {discResult && (
+              <div className={v.stack} data-testid="disc-result">
+                <div className={a.statRow}>
+                  <Stat value={discResult.classification.shadowCount} label="Shadow candidates" />
+                  <Stat value={discResult.classification.governedCount} label="Governed via gateway" />
+                  <Stat value={discResult.classification.unmatchedCount} label="Unmatched" />
+                  <Stat value={discResult.classification.linesScanned} label="Lines scanned" />
+                </div>
+                <p className={v.faint}>{discResult.retention}</p>
+
+                {discResult.matches.length > 0 && (
+                  <>
+                    <div className={v.sectionTitle}>Shadow candidates (compiled catalogue hits the gateway does not front)</div>
+                    <Table<DiscoveryHit>
+                      rows={discResult.matches}
+                      rowKey={(r) => r.value}
+                      columns={[
+                        { key: "value", header: "Host / package", render: (r) => <code>{r.value}</code> },
+                        { key: "kind", header: "Kind", render: (r) => r.kind },
+                        { key: "provider", header: "Provider", render: (r) => r.provider ?? "—" },
+                        { key: "sig", header: "Signature", render: (r) => <code>{r.entryId ?? "—"}</code> },
+                        { key: "n", header: "Occurrences", render: (r) => r.occurrences },
+                        { key: "class", header: "Class", render: () => <Badge tone="warn">shadow</Badge> },
+                      ]}
+                    />
+                  </>
+                )}
+
+                {discResult.governed.length > 0 && (
+                  <>
+                    <div className={v.sectionTitle}>Governed via gateway (this deployment's own configuration fronts these)</div>
+                    <Table<DiscoveryHit>
+                      rows={discResult.governed}
+                      rowKey={(r) => r.value}
+                      columns={[
+                        { key: "value", header: "Host", render: (r) => <code>{r.value}</code> },
+                        { key: "reason", header: "Why not shadow", render: (r) => <span className={v.dim}>{r.governedReason}</span> },
+                        { key: "n", header: "Occurrences", render: (r) => r.occurrences },
+                        { key: "class", header: "Class", render: () => <Badge tone="ok">governed_via_gateway</Badge> },
+                      ]}
+                    />
+                  </>
+                )}
+
+                {discResult.classification.unmatchedCount > 0 && (
+                  <p className={v.faint} data-testid="disc-unmatched">
+                    {discResult.classification.unmatchedCount} distinct name(s) matched nothing (sample:{" "}
+                    {discResult.classification.unmatchedSample.slice(0, 8).join(", ")}). Unmatched names are
+                    counted, never ingested and never listed in full.
+                  </p>
+                )}
+
+                {discResult.gapNote && (
+                  <div className={v.errLine} role="alert" data-testid="disc-gap">
+                    {discResult.gapNote}{" "}
+                    {discResult.deploymentCatalogueGaps.map((g) => (
+                      <code key={g.value}>{g.value} </code>
+                    ))}
+                  </div>
+                )}
+
+                {discResult.ingest ? (
+                  <p className={v.dim} data-testid="disc-ingest-summary">
+                    {discResult.ingest.mode === "apply"
+                      ? `Ingested: ${discResult.ingest.observed} shadow row(s) through the evidence pipeline — ${
+                          (discResult.ingest.created ?? 0) + (discResult.ingest.updated ?? 0)
+                        } finding(s) written by the admin catalogue.`
+                      : `Preview: ${discResult.ingest.observed} shadow row(s) would be ingested; the admin catalogue matched ${discResult.ingest.matched} of them.`}
+                  </p>
+                ) : (
+                  <p className={v.dim} data-testid="disc-ingest-summary">
+                    Nothing shadow-classified — there is nothing to ingest, and that result was audited.
+                  </p>
+                )}
+              </div>
             )}
           </div>
         </QueryGate>
