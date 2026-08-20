@@ -385,6 +385,13 @@ export async function applyWorkflowApprovalDecision(
 export interface WorkflowRouteOptions {
   /** hex AES-256 key for git-connection tokens; absent = git features refused */
   dataKey?: string;
+  /** ADR-0080: called (post-transition, best-effort ordering with the response)
+   * after a human-driven route moves an instance — artifact submit, advance,
+   * abort — so a dependent object (the AI use-case registry) can mirror the
+   * instance's status. The DECIDE path is covered separately inside the one
+   * approvals transaction in app.ts; this hook exists because those three
+   * routes live here and app.ts composes the modules (no import cycle). */
+  onInstanceTransition?: (db: Db, instanceId: string, actorUserId: string | null) => Promise<void>;
 }
 
 /** §8 nesting: called from the orchestration run-event funnel when a run
@@ -1175,6 +1182,90 @@ export async function createWorkflowTemplateValidated(
   return { ok: true, row: row! };
 }
 
+/**
+ * THE ONE INSTANCE-CREATION PATH, extracted (ADR-0080) so the AI use-case
+ * front-door starts its intake instance through EXACTLY the code
+ * `POST /v1/workflows/instances` runs — retired-template refusal, ordered
+ * merge, ADR-0011 attribution, kernel `start` and stage execution included.
+ * The caller is responsible for HOW `templateIds` was chosen (assignment
+ * rules + the §8.3 cascade union for the route; the intake template for the
+ * use-case registry) — everything after that choice lives here, once.
+ */
+export async function startWorkflowInstanceWithTemplates(
+  db: Db,
+  dataKey: string | undefined,
+  input: {
+    templateIds: string[];
+    initiatorUserId: string;
+    change: Record<string, unknown>;
+    projectId?: string | null;
+    isAdmin?: boolean;
+  },
+): Promise<
+  | { ok: true; instance: { id: string; status: string; state: unknown } }
+  | { ok: false; status: number; body: Record<string, unknown> }
+> {
+  const { templateIds, initiatorUserId, change } = input;
+  const templates = await db
+    .select()
+    .from(workflowTemplates)
+    .where(inArray(workflowTemplates.id, templateIds));
+  if (templates.length !== templateIds.length) {
+    return { ok: false, status: 400, body: { error: "invalid_reference" } };
+  }
+  // ADR-0022 retire: a RETIRED template starting a new instance is refused
+  // LOUDLY, never silently skipped — silently dropping a routed (possibly
+  // compliance-required) template would let the change through ungoverned.
+  const retired = templates.filter((t) => t.retiredAt !== null);
+  if (retired.length > 0) {
+    return {
+      ok: false,
+      status: 422,
+      body: {
+        error: "template_retired",
+        templates: retired.map((t) => t.name),
+        detail: `workflow template(s) ${retired.map((t) => `'${t.name}'`).join(", ")} are retired and start no new instances — an admin must route this change to an active template`,
+      },
+    };
+  }
+  // merge in matched order (deterministic: matchTemplates preserves rule order)
+  const ordered = templateIds.map((id) => templates.find((t) => t.id === id)!);
+  const merged = mergeDefinitions(ordered.map((t) => t.definition as WorkflowDefinition));
+
+  if (input.projectId) {
+    // ADR-0011: the initiator must be allowed to bill this project
+    const attribution = await assertProjectAttribution(
+      db,
+      input.projectId,
+      initiatorUserId,
+      input.isAdmin ?? false,
+    );
+    if (!attribution.ok) {
+      return { ok: false, status: attribution.status, body: { error: attribution.error } };
+    }
+  }
+  const [instance] = await db
+    .insert(workflowInstances)
+    .values({
+      templateIds,
+      definition: merged,
+      initiatorUserId,
+      change,
+      projectId: input.projectId ?? null,
+      state: initialState(merged),
+      status: "running",
+    })
+    .returning();
+
+  const first = await applyEvent(db, instance!.id, { kind: "start" }, initiatorUserId);
+  await runGitExecutions(db, instance!.id, first.effects, initiatorUserId, dataKey);
+  const [fresh] = await db
+    .select()
+    .from(workflowInstances)
+    .where(eq(workflowInstances.id, instance!.id));
+  return { ok: true, instance: { id: instance!.id, status: fresh!.status, state: fresh!.state } };
+}
+
 export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: WorkflowRouteOptions = {}) {
   // Git connections: admin-only; tokens encrypted at rest, never returned.
   app.post("/v1/git/connections", async (req, reply) => {
@@ -1430,53 +1521,15 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       return reply.status(422).send({ error: "no_workflow_matches_change" });
     }
 
-    const templates = await db
-      .select()
-      .from(workflowTemplates)
-      .where(inArray(workflowTemplates.id, templateIds));
-    if (templates.length !== templateIds.length) {
-      return reply.status(400).send({ error: "invalid_reference" });
-    }
-    // ADR-0022 retire: a RETIRED template starting a new instance is refused
-    // LOUDLY, never silently skipped — silently dropping a routed (possibly
-    // compliance-required) template would let the change through ungoverned.
-    const retired = templates.filter((t) => t.retiredAt !== null);
-    if (retired.length > 0) {
-      return reply.status(422).send({
-        error: "template_retired",
-        templates: retired.map((t) => t.name),
-        detail: `workflow template(s) ${retired.map((t) => `'${t.name}'`).join(", ")} are retired and start no new instances — an admin must route this change to an active template`,
-      });
-    }
-    // merge in matched order (deterministic: matchTemplates preserves rule order)
-    const ordered = templateIds.map((id) => templates.find((t) => t.id === id)!);
-    const merged = mergeDefinitions(ordered.map((t) => t.definition as WorkflowDefinition));
-
-    if (body.projectId) {
-      // ADR-0011: the initiator must be allowed to bill this project
-      const attribution = await assertProjectAttribution(db, body.projectId, userId, req.authCtx.isAdmin);
-      if (!attribution.ok) return reply.status(attribution.status).send({ error: attribution.error });
-    }
-    const [instance] = await db
-      .insert(workflowInstances)
-      .values({
-        templateIds,
-        definition: merged,
-        initiatorUserId: userId,
-        change,
-        projectId: body.projectId ?? null,
-        state: initialState(merged),
-        status: "running",
-      })
-      .returning();
-
-    const first = await applyEvent(db, instance!.id, { kind: "start" }, userId);
-    await runGitExecutions(db, instance!.id, first.effects, userId, opts.dataKey);
-    const [fresh] = await db
-      .select()
-      .from(workflowInstances)
-      .where(eq(workflowInstances.id, instance!.id));
-    return reply.status(201).send({ id: instance!.id, status: fresh!.status, state: fresh!.state });
+    const started = await startWorkflowInstanceWithTemplates(db, opts.dataKey, {
+      templateIds,
+      initiatorUserId: userId,
+      change,
+      projectId: body.projectId ?? null,
+      isAdmin: req.authCtx.isAdmin,
+    });
+    if (!started.ok) return reply.status(started.status).send(started.body);
+    return reply.status(201).send(started.instance);
   });
 
   type LoadResult =
@@ -1577,6 +1630,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       createdBy: req.authCtx.userId!,
     });
     await runGitExecutions(db, instance.id, effects, req.authCtx.userId, opts.dataKey);
+    await opts.onInstanceTransition?.(db, instance.id, req.authCtx.userId);
     const [fresh] = await db
       .select({ status: workflowInstances.status })
       .from(workflowInstances)
@@ -1619,6 +1673,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
       );
       await runGitExecutions(db, loaded.instance.id, r.effects, req.authCtx.userId, opts.dataKey);
     }
+    await opts.onInstanceTransition?.(db, loaded.instance.id, req.authCtx.userId);
     const [fresh] = await db
       .select()
       .from(workflowInstances)
@@ -1788,6 +1843,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
     if (loaded.error) return sendLoadError(reply, loaded.error);
     if (!req.authCtx.userId) return reply.status(403).send({ error: "bootstrap_cannot_drive" });
     const { state } = await applyEvent(db, loaded.instance.id, { kind: "abort" }, req.authCtx.userId);
+    await opts.onInstanceTransition?.(db, loaded.instance.id, req.authCtx.userId);
     return { status: state.status };
   });
 

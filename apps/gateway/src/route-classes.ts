@@ -114,6 +114,18 @@ export const NON_ADMIN_ROUTES = new Set([
   "DELETE /v1/conversations/:conversationId",
   "GET /v1/users/:userId/agents",
   "GET /v1/users/:userId/connectors",
+  // ADR-0080 — the AI use-case FRONT-door. Non-admin for the same reason
+  // starting a workflow instance is: the person proposing an AI use case is
+  // the requester, not an admin. List/detail/edit are self-scoped INSIDE the
+  // handler (owner-or-admin, exactly like the traces routes above refuse a
+  // cross-user read). Conspicuously NOT here: the RETIRE endpoint — taking a
+  // registered use case out of service is an org-wide act and stays admin —
+  // and there is no status-writing route at all, because approved/rejected
+  // exist only as decisions of the linked intake instance on the one queue.
+  "POST /v1/use-cases",
+  "GET /v1/use-cases",
+  "GET /v1/use-cases/:useCaseId",
+  "PATCH /v1/use-cases/:useCaseId",
   "POST /v1/workflows/instances",
   "POST /v1/workflows/instances/:instanceId/artifacts",
   "POST /v1/workflows/instances/:instanceId/advance",

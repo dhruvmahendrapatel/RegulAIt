@@ -208,6 +208,8 @@ import { mirrorApprovalDecision, registerPmRoutes } from "./pm.js";
 import { RunStateError } from "@regulait/orchestration-kernel";
 import { applyWorkflowApprovalDecision, registerWorkflowRoutes } from "./workflows.js";
 import { registerTemplateGalleryRoutes } from "./template-gallery.js";
+// ADR-0080 — the AI use-case registry (L1 front-door) and its lifecycle join.
+import { registerUseCaseRoutes, syncUseCaseForInstance } from "./use-cases.js";
 import {
   loadOrgSettings,
   registerOrgSettingsRoutes,
@@ -2472,6 +2474,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // Workflow sign-offs advance their instance through the same one inbox (§5).
       if (updated.objectType === "workflow") {
         postCommit = await applyWorkflowApprovalDecision(tx, updated, body.decision, deciderUserId, opts.dataKey);
+        // ADR-0080: if this instance governs an AI use case, its terminal
+        // decision flips the use case (completed -> approved, denied ->
+        // rejected) HERE, inside the decision's own transaction — so
+        // "approval registers the use case" commits or rolls back with the
+        // decision, and inherits every separation-of-duties guard above.
+        await syncUseCaseForInstance(tx as unknown as Db, updated.instanceId, deciderUserId);
       }
       // Orchestration escalations (§3): approve = another attempt, deny = abort.
       if (updated.objectType === "run") {
@@ -2821,9 +2829,18 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerDecomposeRoutes(app, db, { dataKey: opts.dataKey });
   registerPmRoutes(app, db, { dataKey: opts.dataKey });
 
-  registerWorkflowRoutes(app, db, { dataKey: opts.dataKey });
+  registerWorkflowRoutes(app, db, {
+    dataKey: opts.dataKey,
+    // ADR-0080: artifact submit / advance / abort can move an instance that
+    // governs an AI use case (e.g. questionnaire submitted -> under_review,
+    // aborted -> rejected); mirror it. The decide path is handled inside the
+    // one approvals transaction above.
+    onInstanceTransition: (d, instanceId, actorUserId) =>
+      syncUseCaseForInstance(d, instanceId, actorUserId),
+  });
   // ADR-0077 — the cascade-annotated template gallery (admin-gated by default)
   registerTemplateGalleryRoutes(app, db);
+  registerUseCaseRoutes(app, db, { dataKey: opts.dataKey });
 
   registerMcpProxy(app, db);
 

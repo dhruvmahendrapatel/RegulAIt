@@ -76,6 +76,35 @@ export interface GalleryProfileSummary {
   forcedStageIds: string[];
 }
 
+/** ADR-0080 — the well-known name the use-case front-door resolves. An admin
+ * who wants a concrete approver (instead of the requesting_user placeholder,
+ * i.e. self-review-with-reason) creates a template UNDER THIS NAME from the
+ * gallery entry below with `approverUserId` set; `POST /v1/use-cases` uses the
+ * newest active template of this name and only mints the built-in shape when
+ * none exists. */
+export const AI_USE_CASE_INTAKE_TEMPLATE_NAME = "ai-use-case-intake";
+
+/** The §2 core loop applied to the L1 front-door: intake → the ADR-0079
+ * resting plan stage (where the use case is described and refined) → the
+ * intake QUESTIONNAIRE as the artifact_generation output → human sign-off.
+ * The questionnaire is a FORM the proposer fills — deliberately no AI
+ * pre-fill (see ADR-0080: no model credential, no GAIA-equivalent). */
+export function aiUseCaseIntakeDefinition(): WorkflowDefinition {
+  return {
+    workflow: AI_USE_CASE_INTAKE_TEMPLATE_NAME,
+    stages: [
+      { id: "intake", type: "trigger" },
+      { id: "plan", type: "planning" },
+      {
+        id: "questionnaire",
+        type: "artifact_generation",
+        output: "use_case_questionnaire",
+      },
+      { id: "signoff", type: "human_approval", approvers: [APPROVER_PLACEHOLDER] },
+    ],
+  };
+}
+
 function builtInShapes(): Array<
   Pick<GalleryEntry, "galleryId" | "title" | "description"> & { definition: WorkflowDefinition }
 > {
@@ -120,6 +149,17 @@ function builtInShapes(): Array<
           { id: "checks", type: "automated_check", checks: ["unit_tests", "lint"] },
         ],
       },
+    },
+    {
+      galleryId: "ai-use-case-intake",
+      title: "AI use-case intake",
+      description:
+        "The ADR-0080 pre-build front-door: propose an AI use case, refine it at the resting " +
+        "plan stage, submit the intake questionnaire as the governed artifact, and a human " +
+        "sign-off registers it as an approved use case. POST /v1/use-cases starts instances of " +
+        "the newest active template named 'ai-use-case-intake' — create one from this shape with " +
+        "a named approver to route use-case approvals to a governance owner.",
+      definition: aiUseCaseIntakeDefinition(),
     },
     {
       galleryId: "hotfix",

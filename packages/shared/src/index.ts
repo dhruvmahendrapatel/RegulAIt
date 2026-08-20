@@ -2739,3 +2739,43 @@ export {
   type TraceRecord,
   type TreeTotals,
 } from "./tracing.js";
+
+// ---------------------------------------------------------------------------
+// ADR-0080 — the AI use-case registry's request shapes. `status` is
+// conspicuously absent from every one of them: approved/rejected are reached
+// only through the linked intake instance's decision on the one approvals
+// queue, and retirement has its own audited endpoint.
+// ---------------------------------------------------------------------------
+
+export const AI_USE_CASE_DATA_SENSITIVITIES = [
+  "public",
+  "internal",
+  "confidential",
+  "regulated",
+] as const;
+
+export const createUseCaseSchema = z.object({
+  name: z.string().min(1).max(200),
+  description: z.string().min(1).max(4000),
+  businessContext: z.string().min(1).max(4000),
+  dataSensitivity: z.enum(AI_USE_CASE_DATA_SENSITIVITIES),
+  /** the SAME tags the §8.3 cascade enforces (compliance_profiles.tag) */
+  complianceTags: z.array(z.string().min(1).max(200)).max(20).default([]),
+  /** agent REFERENCES the proposer intends to use — validated server-side */
+  intendedAgentIds: z.array(z.string().uuid()).max(20).default([]),
+  projectId: z.string().uuid().optional(),
+});
+
+/** editable while the intake is in flight; `status` is NOT here on purpose —
+ * the gateway refuses a body naming it with a 422 that points at the decide
+ * path, rather than silently dropping the key */
+export const updateUseCaseSchema = z.object({
+  description: z.string().min(1).max(4000).optional(),
+  businessContext: z.string().min(1).max(4000).optional(),
+  intendedAgentIds: z.array(z.string().uuid()).max(20).optional(),
+  projectId: z.string().uuid().nullable().optional(),
+});
+
+export const retireUseCaseSchema = z.object({
+  reason: z.string().min(1).max(2000),
+});

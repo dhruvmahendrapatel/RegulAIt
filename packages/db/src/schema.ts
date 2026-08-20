@@ -782,6 +782,14 @@ export const auditLog = pgTable(
         // the kind of event that belongs in the trail.
         // Plain text column — no DDL needed.
         "trace",
+        // ADR-0080: the AI use-case registry. A PROPOSAL (the front-door act),
+        // every LIFECYCLE FLIP driven by the linked intake instance's decision
+        // (approved/rejected — the rows that make "approval registers the use
+        // case" a recorded property), every refused DIRECT status write, and
+        // an admin RETIREMENT with its reason. The intake instance's own
+        // events keep auditing as objectType "workflow", so "what happened to
+        // this change" stays one query. Plain text column — no DDL needed.
+        "ai_use_case",
       ],
     })
       .notNull()
@@ -6652,3 +6660,73 @@ export const traceSpans = pgTable(
 
 export type TraceRow = typeof traces.$inferSelect;
 export type TraceSpanRow = typeof traceSpans.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0080 — THE AI USE-CASE REGISTRY (the L1 pre-build front-door).
+// A proposed AI use case is a governed OBJECT, not paperwork: `complianceTags`
+// carries the SAME vocabulary the §8.3 cascade enforces (compliance_profiles
+// .tag / projects.classifications), and `status` reaches approved/rejected
+// ONLY through the linked pillar-2 intake instance's decision on the ONE
+// approvals queue — the gateway refuses any direct status write.
+// ---------------------------------------------------------------------------
+
+export const AI_USE_CASE_STATUSES = [
+  "proposed",
+  "under_review",
+  "approved",
+  "rejected",
+  "retired",
+] as const;
+export type AiUseCaseStatus = (typeof AI_USE_CASE_STATUSES)[number];
+
+export const AI_USE_CASE_SENSITIVITIES = [
+  "public",
+  "internal",
+  "confidential",
+  "regulated",
+] as const;
+
+export const aiUseCases = pgTable(
+  "ai_use_cases",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    description: text("description").notNull(),
+    ownerUserId: uuid("owner_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    /** why the business wants this — the intake's anchor sentence(s) */
+    businessContext: text("business_context").notNull(),
+    /** REFERENCES, not copies: agent ids validated at propose time; jsonb so
+     * the registry row survives a later agent deletion */
+    intendedAgentIds: jsonb("intended_agent_ids").$type<string[]>().notNull().default([]),
+    dataSensitivity: text("data_sensitivity", { enum: AI_USE_CASE_SENSITIVITIES }).notNull(),
+    /** THE DIFFERENTIATOR: the same tags the cascade enforces — what
+     * `complianceProfilesForTags`/`effectiveCompliancePolicy` resolve */
+    complianceTags: jsonb("compliance_tags").$type<string[]>().notNull().default([]),
+    /** nullable: a use case may be proposed before any project exists for it */
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
+    status: text("status", { enum: AI_USE_CASE_STATUSES }).notNull().default("proposed"),
+    /** the pillar-2 intake instance that governs this use case's approval */
+    workflowInstanceId: uuid("workflow_instance_id").references(() => workflowInstances.id, {
+      onDelete: "set null",
+    }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    retiredReason: text("retired_reason"),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("ai_use_cases_name_check", sql`length(btrim(${t.name})) > 0`),
+    check(
+      "ai_use_cases_retirement_check",
+      sql`(${t.status} = 'retired') = (${t.retiredAt} IS NOT NULL AND ${t.retiredReason} IS NOT NULL)`,
+    ),
+    index("ai_use_cases_owner_idx").on(t.ownerUserId),
+    index("ai_use_cases_status_idx").on(t.status),
+    index("ai_use_cases_instance_idx").on(t.workflowInstanceId),
+  ],
+);
+
+export type AiUseCaseRow = typeof aiUseCases.$inferSelect;
