@@ -126,6 +126,18 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/use-cases",
   "GET /v1/use-cases/:useCaseId",
   "PATCH /v1/use-cases/:useCaseId",
+  // ADR-0081 — the AI risk register, the same shape as the use-case routes
+  // above: naming a risk is a front-door act, and list/detail/edit/transition
+  // are owner-or-admin INSIDE the handler. Conspicuously NOT here: the ACCEPT
+  // endpoint — recording that the org accepts a residual risk is an org-wide
+  // act and stays admin — and there is no status-writing PATCH at all
+  // (transitions are their own audited endpoint, acceptance its own record).
+  "POST /v1/risks",
+  "GET /v1/risks",
+  "GET /v1/risks/library",
+  "GET /v1/risks/:riskId",
+  "PATCH /v1/risks/:riskId",
+  "POST /v1/risks/:riskId/transition",
   "POST /v1/workflows/instances",
   "POST /v1/workflows/instances/:instanceId/artifacts",
   "POST /v1/workflows/instances/:instanceId/advance",

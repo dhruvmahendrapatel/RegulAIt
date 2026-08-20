@@ -790,6 +790,15 @@ export const auditLog = pgTable(
         // events keep auditing as objectType "workflow", so "what happened to
         // this change" stays one query. Plain text column — no DDL needed.
         "ai_use_case",
+        // ADR-0081: the AI risk register. Registration, every audited status
+        // transition, and above all the RESIDUAL-RISK ACCEPTANCE — who
+        // accepted a named risk, when, why, and what the evidence resolvers
+        // measured at that moment (the counts ride in `detail`, so the
+        // acceptance row is readable even after the ledgers move on). The
+        // evidence itself is never stored — it is computed at read time from
+        // the real ledgers (ADR-0058 discipline). Plain text column — no DDL
+        // needed.
+        "ai_risk",
       ],
     })
       .notNull()
@@ -6730,3 +6739,82 @@ export const aiUseCases = pgTable(
 );
 
 export type AiUseCaseRow = typeof aiUseCases.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0081 (migration 0087) — the AI risk register.
+//
+// The one table of gap L2: a named risk scenario linked to an owner, a
+// mitigating control (prose), a DECLARED likelihood/impact judgment, and a
+// residual-risk acceptance record. What is conspicuously NOT here: evidence.
+// A risk's evidence is computed at read time by SELECTs over the real ledgers
+// (red-team runs, eval runs, guardrail configs, audit denials, grants, shadow
+// AI findings), keyed off `category` — the ADR-0058 "evidence is a query,
+// never a tick-box" discipline applied to risk.
+// ---------------------------------------------------------------------------
+
+export const AI_RISK_STATUSES = ["open", "mitigating", "accepted", "closed"] as const;
+export type AiRiskStatus = (typeof AI_RISK_STATUSES)[number];
+
+/** kept in lockstep with @regulait/shared's AI_RISK_CATEGORIES — the curated
+ * vocabulary of scenarios this deployment's ledgers can (or, for
+ * `scope_drift`, honestly cannot) evidence */
+export const AI_RISK_CATEGORIES = [
+  "tool_misuse",
+  "scope_drift",
+  "prompt_injection",
+  "data_leakage_pii",
+  "over_permissioning",
+  "budget_overrun",
+  "hallucination",
+  "shadow_ai",
+] as const;
+export type AiRiskCategory = (typeof AI_RISK_CATEGORIES)[number];
+
+export const AI_RISK_LEVELS = ["low", "medium", "high"] as const;
+export type AiRiskLevel = (typeof AI_RISK_LEVELS)[number];
+
+export const aiRisks = pgTable(
+  "ai_risks",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    title: text("title").notNull(),
+    description: text("description").notNull(),
+    /** THE EVIDENCE KEY: what the gateway resolves to ledger queries */
+    category: text("category", { enum: AI_RISK_CATEGORIES }).notNull(),
+    ownerUserId: uuid("owner_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    /** optional scope — narrows the evidence queries to this slice */
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    useCaseId: uuid("use_case_id").references(() => aiUseCases.id, { onDelete: "set null" }),
+    status: text("status", { enum: AI_RISK_STATUSES }).notNull().default("open"),
+    /** DECLARED human judgments — never blended into any computed number */
+    likelihood: text("likelihood", { enum: AI_RISK_LEVELS }).notNull(),
+    impact: text("impact", { enum: AI_RISK_LEVELS }).notNull(),
+    /** the mitigating control, in prose (the seed library cites the ADRs) */
+    mitigation: text("mitigation"),
+    /** the residual-risk acceptance record — written ONLY by the audited
+     * acceptance endpoint; a record of a decision, not a control */
+    acceptedByUserId: uuid("accepted_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    acceptedAt: timestamp("accepted_at", { withTimezone: true }),
+    acceptanceNote: text("acceptance_note"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("ai_risks_title_check", sql`length(btrim(${t.title})) > 0`),
+    check(
+      "ai_risks_acceptance_check",
+      sql`(${t.status} = 'accepted') = (${t.acceptedAt} IS NOT NULL AND ${t.acceptanceNote} IS NOT NULL)`,
+    ),
+    index("ai_risks_owner_idx").on(t.ownerUserId),
+    index("ai_risks_status_idx").on(t.status),
+    index("ai_risks_category_idx").on(t.category),
+    index("ai_risks_use_case_idx").on(t.useCaseId),
+  ],
+);
+
+export type AiRiskRow = typeof aiRisks.$inferSelect;

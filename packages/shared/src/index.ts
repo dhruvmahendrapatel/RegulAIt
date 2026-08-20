@@ -2779,3 +2779,32 @@ export const updateUseCaseSchema = z.object({
 export const retireUseCaseSchema = z.object({
   reason: z.string().min(1).max(2000),
 });
+
+// ---------------------------------------------------------------------------
+// ADR-0081 — the AI risk register: the category/resolver vocabulary, the
+// fixed category → evidence mapping, the request shapes, the seed library,
+// and the disclaimer. Evidence itself lives in the gateway as real SELECTs.
+// ---------------------------------------------------------------------------
+export {
+  AI_RISK_CATEGORIES,
+  AI_RISK_LEVELS,
+  AI_RISK_REGISTER_DISCLAIMER,
+  AI_RISK_STATUSES,
+  DEFAULT_RISK_LIBRARY,
+  RISK_CATEGORY_EVIDENCE,
+  RISK_EVIDENCE_RESOLVERS,
+  acceptRiskSchema,
+  createRiskSchema,
+  riskLibraryEntrySchema,
+  transitionRiskSchema,
+  updateRiskSchema,
+  type AcceptRiskInput,
+  type AiRiskCategory,
+  type AiRiskLevel,
+  type AiRiskStatus,
+  type CreateRiskInput,
+  type RiskEvidenceResolverId,
+  type RiskLibraryEntry,
+  type TransitionRiskInput,
+  type UpdateRiskInput,
+} from "./risks.js";

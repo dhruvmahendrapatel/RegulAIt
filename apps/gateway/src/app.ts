@@ -210,6 +210,9 @@ import { applyWorkflowApprovalDecision, registerWorkflowRoutes } from "./workflo
 import { registerTemplateGalleryRoutes } from "./template-gallery.js";
 // ADR-0080 — the AI use-case registry (L1 front-door) and its lifecycle join.
 import { registerUseCaseRoutes, syncUseCaseForInstance } from "./use-cases.js";
+// ADR-0081 — the AI risk register (gap L2): evidence computed from the real
+// ledgers at read time; acceptance is an audited record.
+import { registerRiskRoutes } from "./risks.js";
 import {
   loadOrgSettings,
   registerOrgSettingsRoutes,
@@ -2841,6 +2844,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0077 — the cascade-annotated template gallery (admin-gated by default)
   registerTemplateGalleryRoutes(app, db);
   registerUseCaseRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0081 — the AI risk register beside the use-case registry it can
+  // reference. Register/list/detail/edit/transition are non-admin
+  // (owner-or-admin in-handler, exactly the use-case scoping); ACCEPTANCE is
+  // admin-only through the default gate, because signing off residual risk on
+  // the org's behalf is precisely the act a non-admin must not reach.
+  registerRiskRoutes(app, db);
 
   registerMcpProxy(app, db);
 
