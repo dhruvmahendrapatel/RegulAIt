@@ -32,10 +32,17 @@ honestly graded, no CPA review claimed, `cascadeTag` null — as a dated ADR-005
 a pre-build intake front-door on pillar-2 rails (gallery template → ADR-0079 resting plan →
 questionnaire artifact → sign-off), whose `complianceTags` are the same tags §8.3 enforces and
 whose status can only change through the one decide path (both lifecycle joins proven non-vacuous
-the M-002 way), plus an admin Use-cases page. Gateway suite **2136 passing + 9 MinIO skips**,
-Playwright **107/107**, on fresh scratch databases — still the only gate (Actions exhausted).
-Next in queue: **L2 risk register**, then L7 dependency inventory + L8 exec posture, then L4/L5;
-L6 (governance copilot) stays blocked on the parked model credential.
+the M-002 way), plus an admin Use-cases page. Then **L2**
+([ADR-0081](../docs/decisions/0081-ai-risk-register.md)): an AI risk register that makes the
+measurements legible as *risk* — a `DEFAULT_RISK_LIBRARY` of eight agentic risks whose evidence
+is computed at read time through a fixed category→resolver mapping over the real ledgers
+(red-team ASR verbatim with its Wilson interval, groundedness runs, PII/budget denials,
+guardrail configs, grants inventory), measured and declared kept in two labelled blocks that
+are never blended, acceptance an admin-only audited terminal action that freezes the evidence
+it was taken on, and `scope_drift` honestly attestation-only. Gateway suite **2152 passing +
+9 MinIO skips / 129 files**, Playwright **107/107**, on fresh scratch databases — still the
+only gate (Actions exhausted). Next in queue: **L7 dependency inventory + L8 exec posture**,
+then L4/L5; L6 (governance copilot) stays blocked on the parked model credential.
 
 **2026-08-15 — the ten-slice feature review is CLOSED and the market-analysis build queue is
 under way.** Every pillar was driven end-to-end and attacked with probes written to fail if
