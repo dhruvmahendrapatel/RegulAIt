@@ -49,11 +49,22 @@ at request time (pack coverage via `evaluatePack`, risk counts with the attestat
 named, ASR verbatim with its Wilson interval, spend vs budget, observed anchor grading), and
 an empty section renders *unmeasured, not resisted* — never zero-implies-good. Gateway suite
 **2172 passing + 9 MinIO skips / 131 files**, Playwright **109/109**, on fresh scratch
-databases — still the only gate (Actions exhausted). Next: **L4 shadow-AI discovery** (a
-first-party, compiled-in signature catalogue over operator-supplied inputs — no scrapers,
-ADR-0071's posture kept) then **L5 vendor-risk portal** (owner-directed 2026-08-20, overriding
-the gap doc's defer note); L6 (governance copilot) stays blocked on the parked model
-credential.
+databases — still the only gate (Actions exhausted). Then **L4**
+([ADR-0083](../docs/decisions/0083-shadow-ai-first-party-discovery.md)): first-party shadow-AI
+discovery as an **extension of ADR-0071, not a reversal** — a frozen, hash-pinned
+`SHADOW_AI_CATALOG_V1` (81 entries: 37 endpoint, 44 SDK signatures; no regex over input, no
+scrapers, no network calls) classifying operator-supplied DNS/proxy logs and dependency
+manifests through ADR-0071's existing ingest path, with the honest core being the
+**governed-via-gateway vs shadow** line computed per request from live model-credential/custom-
+provider config (deliberately NOT the egress allow-list, which would launder egress permissions
+into "governed AI"); a hit proves an artifact mentioned a provider, never that traffic flowed,
+and compiled-only signature hits surface as named catalogue gaps rather than findings. Gateway
+suite **2183 passing + 9 MinIO skips / 132 files**, Playwright **110/110**. Next: **L5
+vendor-risk portal** (owner-directed 2026-08-20, overriding the gap doc's defer note); L6
+(governance copilot) stays blocked on the parked model credential. Process note: M-019 logged —
+a REPEAT of M-014 (agent parked on a watcher despite the rule in its brief); the rule is
+rewritten to make parking impossible (foreground suite runs with explicit timeouts, stated
+inside the verification step).
 
 **2026-08-15 — the ten-slice feature review is CLOSED and the market-analysis build queue is
 under way.** Every pillar was driven end-to-end and attacked with probes written to fail if
