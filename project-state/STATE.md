@@ -93,9 +93,23 @@ artifact, not card state), and a **staleness note** counts what moved since the 
 decision ("2 eval runs and 1 guardrail change since certification") without judging it —
 ADR-0045's expiry gate untouched, no fairness number ever synthesized (pinned; L9 stays
 open). Gateway **2218 passing + 9 MinIO skips / 135 files**, Playwright **113/113**. The
-four-vendor build-next queue is done; remaining: L13 assessment AI pre-fill (owner decision —
-collides with ADR-0080's "the answers are yours"), the later/refuse ledger in the gap doc
-(L9/L11/L14–L19), and L6 the moment the model credential is unparked. Process note: M-019 logged —
+four-vendor build-next queue is done. Then **L15**
+([ADR-0087](../docs/decisions/0087-compliance-pack-version-diff.md)): the regulatory-
+intelligence feed REFUSED (a publisher's product; a feed would launder legal advice into a
+gateway that disclaims exactly that authority) and the pack-version diff BUILT — a
+deterministic zod-typed differ (cascadeTag changes flagged HIGH-consequence), a read-only
+diff endpoint whose **impact preview** evaluates both stored versions through the existing
+`evaluatePack` machinery against the current ledgers and names every computed-status move,
+and an activation audit that records whether a diff was computed without ever gating on it.
+Gateway **2228 passing + 9 MinIO skips / 136 files**. A fifth competitive pass
+([GAP_ANALYSIS_SAVIYNT_2026-08.md](../docs/product/GAP_ANALYSIS_SAVIYNT_2026-08.md),
+owner-directed): Saviynt's Agent Access Gateway is the first genuine call-plane claim in the
+series, but **their gateway authorizes an identity; ours governs the call** — nine near-miss
+claims struck; new lacks L20 (agent ownership/lifecycle/orphan signal) and L21
+(intended-vs-granted flags) queued build-next, L22–L24 later, L25/L26 refused (we integrate
+with IGA, we do not compete for it). Remaining: **L14** external-scorer adapter, then
+L20+L21; L13 assessment AI pre-fill (owner decision — collides with ADR-0080's "the answers
+are yours"); L6 the moment the model credential is unparked. Process note: M-019 logged —
 a REPEAT of M-014 (agent parked on a watcher despite the rule in its brief); the rule is
 rewritten to make parking impossible (foreground suite runs with explicit timeouts, stated
 inside the verification step).
