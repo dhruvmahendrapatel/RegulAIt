@@ -39,10 +39,21 @@ is computed at read time through a fixed category→resolver mapping over the re
 (red-team ASR verbatim with its Wilson interval, groundedness runs, PII/budget denials,
 guardrail configs, grants inventory), measured and declared kept in two labelled blocks that
 are never blended, acceptance an admin-only audited terminal action that freezes the evidence
-it was taken on, and `scope_drift` honestly attestation-only. Gateway suite **2152 passing +
-9 MinIO skips / 129 files**, Playwright **107/107**, on fresh scratch databases — still the
-only gate (Actions exhausted). Next in queue: **L7 dependency inventory + L8 exec posture**,
-then L4/L5; L6 (governance copilot) stays blocked on the parked model credential.
+it was taken on, and `scope_drift` honestly attestation-only. Then **L7+L8**
+([ADR-0082](../docs/decisions/0082-inventory-and-posture.md)): a standing agent dependency
+inventory — pure aggregation, no migration — where **granted (may) and observed (did) are
+never blended** (grants ∪ role-derived − revocations vs. usage-event dispatches, trace-attributed
+tool/connector calls, and agent→agent feed edges from orchestration run history), plus a
+board-shaped, print-friendly **Posture one-pager** on ADR-0047's rails: every number a SELECT
+at request time (pack coverage via `evaluatePack`, risk counts with the attestation-only count
+named, ASR verbatim with its Wilson interval, spend vs budget, observed anchor grading), and
+an empty section renders *unmeasured, not resisted* — never zero-implies-good. Gateway suite
+**2172 passing + 9 MinIO skips / 131 files**, Playwright **109/109**, on fresh scratch
+databases — still the only gate (Actions exhausted). Next: **L4 shadow-AI discovery** (a
+first-party, compiled-in signature catalogue over operator-supplied inputs — no scrapers,
+ADR-0071's posture kept) then **L5 vendor-risk portal** (owner-directed 2026-08-20, overriding
+the gap doc's defer note); L6 (governance copilot) stays blocked on the parked model
+credential.
 
 **2026-08-15 — the ten-slice feature review is CLOSED and the market-analysis build queue is
 under way.** Every pillar was driven end-to-end and attacked with probes written to fail if
