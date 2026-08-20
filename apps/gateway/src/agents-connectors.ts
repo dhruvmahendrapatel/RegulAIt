@@ -22,6 +22,7 @@ import {
   usageEvents,
   userModelCredentials,
   userAgentPolicies,
+  users,
   type Db,
 } from "@regulait/db";
 import { createHash } from "node:crypto";
@@ -69,6 +70,8 @@ import {
   invokeConnectorSchema,
   setAgentEnabledSchema,
   setAgentFallbacksSchema,
+  setAgentLifecycleSchema,
+  setAgentOwnerSchema,
   setAgentPolicySchema,
   setAgentSystemPromptSchema,
 } from "@regulait/shared";
@@ -929,6 +932,48 @@ async function dispatchAttempt(
   // EVERY span below including the refusals that never reach the provider.
   sink.provider = served.provider;
   sink.model = served.model;
+
+  // ADR-0089 — THE AGENT LIFECYCLE GATE (gap L20). Retired is TERMINAL for
+  // governance purposes: a retired agent refuses dispatch with a named 409,
+  // the ADR-0045 gate idiom — refusal before ANY provider work, cost, or
+  // content processing, audited with the lifecycle reason. Placed in this ONE
+  // shared core so direct invokes, orchestration workers, fallback hops and
+  // both compat shims inherit it. The agent's grants still EVALUATE (nothing
+  // here deletes or bypasses entitlement rows — every caller already ran
+  // evaluateAgent); the refusal is a lifecycle decision layered after them,
+  // which keeps the entitlement history readable and the retirement
+  // reversible as a record, never as a dispatch. `deprecated` deliberately
+  // does NOT appear here: deprecation only WARNS in the ADR-0082 inventory.
+  if (served.lifecycleStatus === "retired") {
+    const [lcRow] = await db
+      .insert(auditLog)
+      .values({
+        userId,
+        objectType: "agent",
+        objectId: served.id,
+        detail: {
+          phase: "dispatch",
+          agentId: served.id,
+          agentName: served.name,
+          model: served.model,
+          lifecycleStatus: "retired",
+          lifecycleReason: served.lifecycleReason,
+          ...(args.projectId ? { projectId: args.projectId } : {}),
+        },
+        effect: "deny",
+        ruleId: "agent-retired-dispatch-refused",
+        ruleChain: [],
+        reason: `agent '${served.name}' is retired${served.lifecycleReason ? ` (${served.lifecycleReason})` : ""} — a retired agent refuses dispatch; its grants and history remain readable`,
+      })
+      .returning({ id: auditLog.id });
+    sink.auditLogId = lcRow?.id ?? null;
+    return {
+      ok: false,
+      status: 409,
+      error: "agent_retired",
+      detail: `agent '${served.name}' is retired${served.lifecycleReason ? `: ${served.lifecycleReason}` : ""} — retirement is terminal; re-registering is a new agent`,
+    };
+  }
 
   // ADR-0066 §2/§3 — THE VIRTUAL-KEY CEILING. Placed FIRST, before the MRM
   // gate and before any provider work, for the same reason every gate below is
@@ -2541,6 +2586,120 @@ export function registerAgentConnectorRoutes(
       .where(eq(agents.id, agentId))
       .returning();
     if (!row) return reply.status(404).send({ error: "unknown_agent" });
+    return row;
+  });
+
+  // -------------------------------------------------------------------------
+  // ADR-0089 (gap L20) — agent ownership and lifecycle. Admin-only via the
+  // default gate, audited acts — never silent PATCH writes.
+  // -------------------------------------------------------------------------
+
+  // Set/clear the accountable human owner. A GOVERNANCE RECORD, not
+  // authentication: it changes what the ADR-0082 inventory and the posture
+  // page say about accountability, and nothing about who may invoke.
+  app.post("/v1/agents/:agentId/owner", async (req, reply) => {
+    const { agentId } = agentIdParam.parse(req.params);
+    const body = setAgentOwnerSchema.parse(req.body);
+    const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
+    if (!agent) return reply.status(404).send({ error: "unknown_agent" });
+    let ownerEmail: string | null = null;
+    if (body.ownerUserId) {
+      const [owner] = await db
+        .select({ id: users.id, email: users.email, disabledAt: users.disabledAt })
+        .from(users)
+        .where(eq(users.id, body.ownerUserId));
+      if (!owner) return reply.status(400).send({ error: "invalid_reference", field: "ownerUserId" });
+      // assigning ownership to a deactivated account would MINT an orphan —
+      // the exact state the inventory's orphan flag exists to surface
+      if (owner.disabledAt) {
+        return reply.status(409).send({
+          error: "owner_deactivated",
+          detail: "this account is deactivated — an agent owner must be an active user (reactivate them first)",
+        });
+      }
+      ownerEmail = owner.email;
+    }
+    const [row] = await db
+      .update(agents)
+      .set({ ownerUserId: body.ownerUserId })
+      .where(eq(agents.id, agentId))
+      .returning();
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "agent",
+      objectId: agentId,
+      detail: {
+        phase: "ownership",
+        from: agent.ownerUserId,
+        to: body.ownerUserId,
+        ...(ownerEmail ? { ownerEmail } : {}),
+      },
+      effect: "allow",
+      ruleId: body.ownerUserId ? "agent-owner-set" : "agent-owner-cleared",
+      ruleChain: [],
+      reason: body.ownerUserId
+        ? `agent '${agent.name}' owner set to '${ownerEmail}' — an accountability record, not an entitlement`
+        : `agent '${agent.name}' owner cleared — the inventory now reads this agent as unowned`,
+    });
+    return row;
+  });
+
+  // Lifecycle transition, with reason, audited. Retired is TERMINAL for
+  // governance purposes: transitions out of it are refused by name — the
+  // record of why an agent was decommissioned must not be erasable by a
+  // status flip (re-registering is a new agent). The dispatch-side half of
+  // this decision (the 409 gate) lives in dispatchAttempt.
+  app.post("/v1/agents/:agentId/lifecycle", async (req, reply) => {
+    const { agentId } = agentIdParam.parse(req.params);
+    const body = setAgentLifecycleSchema.parse(req.body);
+    const [agent] = await db.select().from(agents).where(eq(agents.id, agentId));
+    if (!agent) return reply.status(404).send({ error: "unknown_agent" });
+    if (agent.lifecycleStatus === "retired") {
+      return reply.status(409).send({
+        error: "agent_retired_terminal",
+        detail:
+          "retirement is terminal for governance purposes — the decommissioning record cannot be " +
+          "flipped back; register a new agent instead",
+      });
+    }
+    if (agent.lifecycleStatus === body.status) {
+      return reply.status(409).send({ error: "lifecycle_unchanged", detail: `agent is already ${body.status}` });
+    }
+    if (body.status !== "active" && !body.reason) {
+      return reply.status(422).send({
+        error: "lifecycle_reason_required",
+        detail: `moving an agent to '${body.status}' requires a reason — it becomes part of the governance record`,
+      });
+    }
+    const [row] = await db
+      .update(agents)
+      .set({
+        lifecycleStatus: body.status,
+        lifecycleReason: body.status === "active" ? null : (body.reason ?? null),
+        lifecycleChangedAt: new Date(),
+      })
+      .where(eq(agents.id, agentId))
+      .returning();
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "agent",
+      objectId: agentId,
+      detail: {
+        phase: "lifecycle",
+        from: agent.lifecycleStatus,
+        to: body.status,
+        ...(body.status !== "active" ? { reason: body.reason } : {}),
+      },
+      effect: "allow",
+      ruleId: `agent-lifecycle-${body.status}`,
+      ruleChain: [],
+      reason:
+        body.status === "retired"
+          ? `agent '${agent.name}' retired: ${body.reason} — dispatch now refuses with 409 agent_retired; grants and history remain readable`
+          : body.status === "deprecated"
+            ? `agent '${agent.name}' deprecated: ${body.reason} — a WARNING in the inventory; dispatch is not blocked`
+            : `agent '${agent.name}' returned to active (was ${agent.lifecycleStatus})`,
+    });
     return row;
   });
 

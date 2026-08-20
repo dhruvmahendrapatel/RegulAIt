@@ -63,6 +63,7 @@ import {
   desc,
   eq,
   inArray,
+  projectMembers,
   projects,
   users,
   workflowArtifacts,
@@ -85,6 +86,9 @@ import {
 } from "@regulait/shared";
 import { z } from "zod";
 import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects.js";
+// ADR-0089 (gap L21): the ONE granted computation and its never-blend note —
+// imported from the inventory, never reimplemented.
+import { buildAgentHolderIndex, INVENTORY_NOTES } from "./inventory.js";
 import {
   createWorkflowTemplateValidated,
   startWorkflowInstanceWithTemplates,
@@ -519,6 +523,68 @@ async function euAiActScreeningFor(db: Db, useCase: AiUseCaseRow, questionnaireC
   };
 }
 
+/**
+ * ADR-0089 (gap L21) — the use-case-shaped half of intended-vs-granted: for
+ * an APPROVED use case, does each intended agent have a live grant path among
+ * the use case's participants (the proposing owner plus the linked project's
+ * members)? Computed at read time from the SAME holder sets the ADR-0082
+ * inventory computes (imported, never reimplemented). Claims about GRANT ROWS
+ * vs APPROVED intent only — never about observed traffic. A non-approved use
+ * case gets no alignment (its intent is not yet, or no longer, something the
+ * register stands behind), and an approved one naming no agents reads "no
+ * intent recorded" — never a guessed alignment.
+ */
+async function intendedVsGrantedFor(db: Db, useCase: AiUseCaseRow) {
+  if (useCase.status !== "approved") {
+    return {
+      status: "not_approved" as const,
+      note:
+        "alignment is computed against APPROVED intent only — this use case is " +
+        `${useCase.status}, so its intended agents are not yet (or no longer) intent the register stands behind`,
+    };
+  }
+  if ((useCase.intendedAgentIds ?? []).length === 0) {
+    return {
+      status: "no_intent_recorded" as const,
+      note:
+        "this approved use case names no intended agents, so there is nothing to compare grants " +
+        "against — no intent recorded, never a guessed alignment",
+    };
+  }
+  const holderIndex = await buildAgentHolderIndex(db);
+  const participants = new Set<string>([useCase.ownerUserId]);
+  if (useCase.projectId) {
+    const members = await db
+      .select({ userId: projectMembers.userId })
+      .from(projectMembers)
+      .where(eq(projectMembers.projectId, useCase.projectId));
+    for (const m of members) participants.add(m.userId);
+  }
+  const agentRows = await db
+    .select({ id: agents.id, name: agents.name })
+    .from(agents)
+    .where(inArray(agents.id, useCase.intendedAgentIds));
+  const nameOf = new Map(agentRows.map((a) => [a.id, a.name]));
+  const perAgent = useCase.intendedAgentIds.map((agentId) => {
+    const holderSet = holderIndex.holders.get(agentId) ?? new Set<string>();
+    const participantHolders = [...participants].filter((p) => holderSet.has(p)).length;
+    return {
+      agentId,
+      agentName: nameOf.get(agentId) ?? null,
+      /** intendedAgentIds survive agent deletion by design — say so honestly */
+      registered: nameOf.has(agentId),
+      grantedToParticipants: participantHolders > 0,
+      participantHolders,
+    };
+  });
+  return {
+    status: perAgent.every((a) => a.grantedToParticipants) ? ("aligned" as const) : ("undershoot" as const),
+    participants: participants.size,
+    agents: perAgent,
+    note: INVENTORY_NOTES.alignment,
+  };
+}
+
 async function projectSummaryFor(db: Db, useCase: AiUseCaseRow) {
   if (!useCase.projectId) return null;
   const [project] = await db
@@ -729,6 +795,7 @@ export function registerUseCaseRoutes(
       questionnaireTemplate: questionnaire ? null : USE_CASE_QUESTIONNAIRE_TEMPLATE,
       cascadeConsequences: await cascadeConsequencesFor(db, row),
       euAiActScreening: await euAiActScreeningFor(db, row, questionnaire?.content ?? null),
+      intendedVsGranted: await intendedVsGrantedFor(db, row),
     };
   });
 

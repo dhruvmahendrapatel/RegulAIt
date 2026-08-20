@@ -1266,6 +1266,18 @@ export const revocations = pgTable(
 
 // §4 global agent/model registry: platform-wide catalog, decoupled from
 // per-user entitlement. tier ranks capability/cost (basis of the ceiling).
+/** ADR-0089 (migration 0091) — the agent lifecycle vocabulary, closed:
+ *  - `active`      the ordinary state; nothing changes on its account.
+ *  - `deprecated`  a governance WARNING (inventory/posture flag it); dispatch
+ *                  is deliberately NOT blocked — deprecation is a migration
+ *                  signal, not a control.
+ *  - `retired`     TERMINAL for governance purposes: the dispatch core
+ *                  refuses with a named 409 (`agent_retired`, the ADR-0045
+ *                  gate idiom). Grants and history stay readable — rows are
+ *                  never deleted; re-registering is a NEW agent. */
+export const AGENT_LIFECYCLE_STATUSES = ["active", "deprecated", "retired"] as const;
+export type AgentLifecycleStatus = (typeof AGENT_LIFECYCLE_STATUSES)[number];
+
 export const agents = pgTable("agents", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: text("name").notNull().unique(),
@@ -1273,6 +1285,21 @@ export const agents = pgTable("agents", {
   tier: integer("tier").notNull(),
   modes: jsonb("modes").$type<string[]>(),
   enabled: boolean("enabled").notNull().default(true),
+  // ADR-0089 (migration 0091): the accountable HUMAN for this agent — a
+  // governance record, not authentication. NULLABLE ON PURPOSE: existing
+  // agents have no owner and inventing one would forge an accountability
+  // record; NULL renders in the ADR-0082 inventory as an explicit "unowned"
+  // flag, never a default. An owner whose user row is deactivated
+  // (users.disabled_at — the state SCIM deprovisioning writes) makes the
+  // agent "orphaned", computed at read time. FK ON DELETE SET NULL in SQL.
+  ownerUserId: uuid("owner_user_id"),
+  // ADR-0089: see AGENT_LIFECYCLE_STATUSES above. DB CHECK pins the
+  // vocabulary; a second CHECK pins (status='active') = (reason IS NULL).
+  lifecycleStatus: text("lifecycle_status", { enum: AGENT_LIFECYCLE_STATUSES })
+    .notNull()
+    .default("active"),
+  lifecycleReason: text("lifecycle_reason"),
+  lifecycleChangedAt: timestamp("lifecycle_changed_at", { withTimezone: true }),
   // OPTIMIZATION §7/§8: list price per million tokens; null = unpriced, the
   // optimizer will never route toward (or estimate savings against) it.
   costPerMTokIn: doublePrecision("cost_per_mtok_in"),

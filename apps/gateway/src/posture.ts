@@ -30,6 +30,7 @@
  */
 import type { FastifyInstance } from "fastify";
 import {
+  agents,
   aiRisks,
   aiUseCases,
   and,
@@ -52,6 +53,7 @@ import {
   redteamRuns,
   sql,
   usageEvents,
+  users,
   type Db,
 } from "@regulait/db";
 import {
@@ -62,6 +64,9 @@ import {
 } from "@regulait/shared";
 import { resolveAnchorSink, type AnchorSink } from "./audit-chain.js";
 import { evaluatePack } from "./compliance-packs.js";
+// ADR-0089 (gap L20): the ONE ownership-flag computation, shared with the
+// inventory so the two surfaces can never disagree about what "orphaned" is.
+import { ownershipFlagFor } from "./inventory.js";
 import { GROUNDEDNESS_SCORER_KINDS } from "./risks.js";
 
 /** the rolling activity window the posture view reads (denials, PII blocks,
@@ -369,6 +374,39 @@ export async function computePostureReport(
       : "No anchor sink is configured: anchors exist only in this database and are NOT tamper-resistant.",
   };
 
+  // --- ADR-0089 (gap L20): agent ownership coverage ------------------------
+  // Computed at read time from the agent rows joined to the users table —
+  // every count is a fact about recorded governance state, and "unowned" is
+  // an explicit figure, never an implied gap. Ownership is a governance
+  // record, not authentication.
+  const agentRows = await db
+    .select({ id: agents.id, ownerUserId: agents.ownerUserId, lifecycleStatus: agents.lifecycleStatus })
+    .from(agents);
+  const agentOwnerIds = [...new Set(agentRows.map((a) => a.ownerUserId).filter((o): o is string => o !== null))];
+  const agentOwnerRows = agentOwnerIds.length
+    ? await db
+        .select({ id: users.id, disabledAt: users.disabledAt })
+        .from(users)
+        .where(inArray(users.id, agentOwnerIds))
+    : [];
+  const disabledOwners = new Set(agentOwnerRows.filter((u) => u.disabledAt !== null).map((u) => u.id));
+  const ownershipCounts = { owned: 0, unowned: 0, orphaned: 0 };
+  const lifecycleCounts = { active: 0, deprecated: 0, retired: 0 };
+  for (const a of agentRows) {
+    ownershipCounts[ownershipFlagFor(a.ownerUserId, a.ownerUserId !== null && disabledOwners.has(a.ownerUserId))] += 1;
+    lifecycleCounts[a.lifecycleStatus] += 1;
+  }
+  const agentOwnership = {
+    total: agentRows.length,
+    ...ownershipCounts,
+    lifecycle: lifecycleCounts,
+    note:
+      "ownership is a governance record, not authentication: 'unowned' agents have no recorded " +
+      "owner (a flag, never a default); 'orphaned' agents have an owner whose account is " +
+      "deactivated. Retired agents refuse dispatch; deprecated agents only warn. Orphan " +
+      "detection sees only this deployment's own user rows.",
+  };
+
   // --- AI use-case pipeline ------------------------------------------------
   const useCaseCounts = await db
     .select({ status: aiUseCases.status, n: count() })
@@ -400,6 +438,7 @@ export async function computePostureReport(
     spend,
     governance,
     auditChain,
+    agentOwnership,
     useCases,
     note:
       "computed live from this deployment's own ledgers at request time — no rollup table, no " +

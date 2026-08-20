@@ -822,6 +822,21 @@ export const createAgentSchemaChecked = createAgentSchema.refine(agentCustomProv
 
 export const setAgentEnabledSchema = z.object({ enabled: z.boolean() });
 
+/** ADR-0089 (gap L20): set/clear an agent's accountable human owner — a
+ * governance record, not authentication. null CLEARS (an explicit act, the
+ * agent-policy/system-prompt clear idiom); the gateway validates the user
+ * exists and is not deactivated. */
+export const setAgentOwnerSchema = z.object({ ownerUserId: z.string().uuid().nullable() });
+
+/** ADR-0089: an agent lifecycle transition. `reason` is required for any
+ * non-active target (enforced with a named 422 in the gateway so the refusal
+ * is self-explaining); retired is terminal — the gateway refuses transitions
+ * OUT of it by name. */
+export const setAgentLifecycleSchema = z.object({
+  status: z.enum(["active", "deprecated", "retired"]),
+  reason: z.string().min(1).max(2000).optional(),
+});
+
 /** ADR-0023: set/clear an existing agent's admin base system prompt (null
  * clears — an explicit choice, mirroring the agent-policy clear semantics) */
 export const setAgentSystemPromptSchema = z.object({

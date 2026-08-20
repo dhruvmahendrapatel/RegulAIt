@@ -41,6 +41,21 @@
  * NOT replayed here — the per-call kernel remains the only authority on any
  * individual call, and the payload's note says so (the Simulation page exists
  * for what-if questions).
+ *
+ * ADR-0089 ADDS TWO MORE READ-TIME BLOCKS, same discipline (gaps L20/L21,
+ * docs/product/GAP_ANALYSIS_SAVIYNT_2026-08.md):
+ *  - OWNERSHIP: `owned` / `unowned` (no owner recorded — a flag, never a
+ *    default) / `orphaned` (the recorded owner's account is deactivated, the
+ *    ADR-0022 state SCIM deprovisioning writes). Computed at read time from
+ *    the agent row joined to the users table — no stored denormalization.
+ *  - ALIGNMENT: grants vs APPROVED use-case intent. `aligned` = every
+ *    approved use case naming this agent has a participant (its owner or a
+ *    linked-project member) with a live grant path; `undershoot` = some
+ *    approved intent has no granted path (a provisioning gap); `overreach` =
+ *    granted yet named by NO approved use case (the over-privilege question
+ *    told with our own objects). These are claims about GRANT ROWS and the
+ *    use-case register ONLY — never about observed traffic, which stays in
+ *    the observed block. Three blocks, never blended.
  */
 import type { FastifyInstance } from "fastify";
 import {
@@ -67,6 +82,7 @@ import {
   modelCards,
   modelCredentials,
   orchestrationRuns,
+  projectMembers,
   redteamRuns,
   roleAgentGrants,
   roleAssignments,
@@ -105,7 +121,119 @@ export const INVENTORY_NOTES = {
     "feeds aggregated from orchestration run history. Only governed activity is visible — a call " +
     "that never crossed the gateway, predates tracing, or ran with tracing off is UNOBSERVED " +
     "here, never counted as absent.",
+  ownership:
+    "a governance record, not authentication: 'unowned' means no owner is recorded (a flag, " +
+    "never a default), 'orphaned' means the recorded owner's account is deactivated (the state " +
+    "SCIM deprovisioning writes). Computed at read time; orphan detection sees only this " +
+    "deployment's own user rows.",
+  alignment:
+    "grants vs APPROVED intent: 'aligned' = every approved use case naming this agent has a " +
+    "participant (the use case's owner or a linked-project member) holding a live grant path " +
+    "(direct or role-derived, minus revocations); 'undershoot' = some approved intent has no " +
+    "granted path among its participants (a provisioning gap); 'overreach' = the agent is " +
+    "granted yet named by NO approved use case. Claims about GRANT ROWS and the use-case " +
+    "register only — never about observed traffic (run history lives only in the observed " +
+    "block). Grant rows count regardless of a holder's active state; a deactivated owner " +
+    "surfaces through the ownership flag, not here.",
 } as const;
+
+// ---------------------------------------------------------------------------
+// ADR-0089 — ownership flag (L20) and intended-vs-granted alignment (L21)
+// ---------------------------------------------------------------------------
+
+export type OwnershipFlag = "owned" | "unowned" | "orphaned";
+
+export function ownershipFlagFor(
+  ownerUserId: string | null,
+  ownerDisabled: boolean,
+): OwnershipFlag {
+  if (!ownerUserId) return "unowned";
+  return ownerDisabled ? "orphaned" : "owned";
+}
+
+export interface AgentAlignment {
+  /** approved use cases naming this agent among their intended agents */
+  approvedUseCases: number;
+  /** every naming approved use case has ≥1 participant with a grant path */
+  aligned: boolean;
+  /** granted (≥1 effective holder) yet named by NO approved use case */
+  overreach: boolean;
+  /** some naming approved use case's participants hold no grant path */
+  undershoot: boolean;
+  /** the undershooting use cases, named — the provisioning worklist */
+  gaps: Array<{ useCaseId: string; name: string; detail: string }>;
+}
+
+/**
+ * The L21 comparison, computed at read time (no new table, no rollup): for
+ * every APPROVED use case, its participants are the proposing owner plus the
+ * linked project's members; an intended agent is "provisioned" when at least
+ * one participant is among the agent's effective grant-holders (the SAME
+ * holder sets `buildAgentHolderIndex` computes — imported, never
+ * reimplemented). Proposed/under-review/rejected/retired use cases
+ * deliberately contribute NOTHING: the flags compare grants against APPROVED
+ * intent, and an unapproved proposal is not yet intent the register stands
+ * behind.
+ */
+export async function computeAlignmentIndex(
+  db: Db,
+  agentIds: string[],
+  holders: Map<string, Set<string>>,
+): Promise<Map<string, AgentAlignment>> {
+  const approved = await db
+    .select({
+      id: aiUseCases.id,
+      name: aiUseCases.name,
+      ownerUserId: aiUseCases.ownerUserId,
+      projectId: aiUseCases.projectId,
+      intendedAgentIds: aiUseCases.intendedAgentIds,
+    })
+    .from(aiUseCases)
+    .where(eq(aiUseCases.status, "approved"));
+  const projectIds = [...new Set(approved.map((u) => u.projectId).filter((p): p is string => p !== null))];
+  const memberRows = projectIds.length
+    ? await db
+        .select({ projectId: projectMembers.projectId, userId: projectMembers.userId })
+        .from(projectMembers)
+        .where(inArray(projectMembers.projectId, projectIds))
+    : [];
+  const membersByProject = new Map<string, string[]>();
+  for (const m of memberRows) {
+    if (!membersByProject.has(m.projectId)) membersByProject.set(m.projectId, []);
+    membersByProject.get(m.projectId)!.push(m.userId);
+  }
+  const participantsOf = (u: (typeof approved)[number]): Set<string> => {
+    const set = new Set<string>([u.ownerUserId]);
+    if (u.projectId) for (const uid of membersByProject.get(u.projectId) ?? []) set.add(uid);
+    return set;
+  };
+
+  const index = new Map<string, AgentAlignment>();
+  for (const agentId of agentIds) {
+    const naming = approved.filter((u) => (u.intendedAgentIds ?? []).includes(agentId));
+    const holderSet = holders.get(agentId) ?? new Set<string>();
+    const gaps: AgentAlignment["gaps"] = [];
+    for (const u of naming) {
+      const participants = participantsOf(u);
+      const provisioned = [...participants].some((p) => holderSet.has(p));
+      if (!provisioned) {
+        gaps.push({
+          useCaseId: u.id,
+          name: u.name,
+          detail: `approved intent, but none of its ${participants.size} participant(s) holds a grant path to this agent`,
+        });
+      }
+    }
+    index.set(agentId, {
+      approvedUseCases: naming.length,
+      aligned: naming.length > 0 && gaps.length === 0,
+      overreach: naming.length === 0 && holderSet.size > 0,
+      undershoot: gaps.length > 0,
+      gaps,
+    });
+  }
+  return index;
+}
 
 // ---------------------------------------------------------------------------
 // Observed agent→agent feeds — an aggregation over orchestration run history
@@ -195,7 +323,7 @@ export async function computeFeedEdges(db: Db): Promise<FeedEdge[]> {
 // Grant-holder resolution — direct ∪ role-derived, minus per-user revocations
 // ---------------------------------------------------------------------------
 
-interface AgentHolderIndex {
+export interface AgentHolderIndex {
   /** per agent id: the users who may currently invoke it */
   holders: Map<string, Set<string>>;
   directUsers: Map<string, Set<string>>;
@@ -206,7 +334,10 @@ interface AgentHolderIndex {
   roleUsers: Map<string, Set<string>>;
 }
 
-async function buildAgentHolderIndex(db: Db): Promise<AgentHolderIndex> {
+/** Exported for ADR-0089's L21 comparison in use-cases.ts — the ONE granted
+ * computation (direct ∪ role-derived − revocations), imported there rather
+ * than reimplemented. */
+export async function buildAgentHolderIndex(db: Db): Promise<AgentHolderIndex> {
   const [direct, roleGrants, assignments, revoked, roleRows] = await Promise.all([
     db.select({ userId: agentGrants.userId, agentId: agentGrants.agentId }).from(agentGrants),
     db.select({ roleId: roleAgentGrants.roleId, agentId: roleAgentGrants.agentId }).from(roleAgentGrants),
@@ -359,6 +490,25 @@ export function registerInventoryRoutes(app: FastifyInstance, db: Db): void {
       computeFeedEdges(db),
     ]);
 
+    // ADR-0089 — ownership (L20) and alignment (L21), both computed at read
+    // time over rows already loaded plus one users read and one approved-use-
+    // case pass. No stored flag anywhere.
+    const ownerIds = [...new Set(agentRows.map((a) => a.ownerUserId).filter((o): o is string => o !== null))];
+    const [ownerRows, alignmentIndex] = await Promise.all([
+      ownerIds.length
+        ? db
+            .select({ id: users.id, displayName: users.displayName, email: users.email, disabledAt: users.disabledAt })
+            .from(users)
+            .where(inArray(users.id, ownerIds))
+        : Promise.resolve([]),
+      computeAlignmentIndex(
+        db,
+        agentRows.map((a) => a.id),
+        holderIndex.holders,
+      ),
+    ]);
+    const ownerById = new Map(ownerRows.map((u) => [u.id, u]));
+
     const customName = new Map(customProviders.map((p) => [p.id, p.name]));
     const platformProviders = new Set(platformCreds.map((c) => c.provider));
     const byoByProvider = new Map(byoCreds.map((c) => [c.provider, c.n]));
@@ -412,6 +562,30 @@ export function registerInventoryRoutes(app: FastifyInstance, db: Db): void {
           model: a.model,
           tier: a.tier,
           enabled: a.enabled,
+          // -- ADR-0089 L20: ownership + lifecycle, read-time ---------------
+          owner: a.ownerUserId
+            ? {
+                userId: a.ownerUserId,
+                name: ownerById.get(a.ownerUserId)
+                  ? ownerById.get(a.ownerUserId)!.displayName || ownerById.get(a.ownerUserId)!.email
+                  : null,
+                deactivated: Boolean(ownerById.get(a.ownerUserId)?.disabledAt),
+              }
+            : null,
+          ownership: ownershipFlagFor(a.ownerUserId, Boolean(ownerById.get(a.ownerUserId ?? "")?.disabledAt)),
+          lifecycle: {
+            status: a.lifecycleStatus,
+            reason: a.lifecycleReason,
+            changedAt: a.lifecycleChangedAt ? a.lifecycleChangedAt.toISOString() : null,
+            ...(a.lifecycleStatus === "deprecated"
+              ? { warning: "deprecated — dispatch still allowed; a migration signal, not a control" }
+              : {}),
+            ...(a.lifecycleStatus === "retired"
+              ? { note: "retired — dispatch refuses with 409 agent_retired; grants and history remain readable" }
+              : {}),
+          },
+          // -- ADR-0089 L21: grants vs approved intent, never traffic -------
+          alignment: alignmentIndex.get(a.id) ?? null,
           credential: {
             source:
               a.provider === "custom"
@@ -481,6 +655,17 @@ export function registerInventoryRoutes(app: FastifyInstance, db: Db): void {
     const windowStart = new Date(now.getTime() - INVENTORY_WINDOW_DAYS * 24 * 60 * 60 * 1000);
 
     const holderIndex = await buildAgentHolderIndex(db);
+
+    // ADR-0089 — ownership (L20) + intended-vs-granted alignment (L21) for
+    // this agent, computed here like everything else on this surface.
+    const [ownerRow] = agent.ownerUserId
+      ? await db
+          .select({ id: users.id, displayName: users.displayName, email: users.email, disabledAt: users.disabledAt })
+          .from(users)
+          .where(eq(users.id, agent.ownerUserId))
+      : [];
+    const alignment = (await computeAlignmentIndex(db, [agentId], holderIndex.holders)).get(agentId)!;
+
     const holderIds = [...(holderIndex.holders.get(agentId) ?? [])];
     const directIds = holderIndex.directUsers.get(agentId) ?? new Set<string>();
     const grantingRoleIds = [...(holderIndex.grantingRoles.get(agentId) ?? [])];
@@ -684,6 +869,31 @@ export function registerInventoryRoutes(app: FastifyInstance, db: Db): void {
       agent: { id: agent.id, name: agent.name, provider: agent.provider, model: agent.model, tier: agent.tier, enabled: agent.enabled },
       window: { start: windowStart.toISOString(), end: now.toISOString(), days: INVENTORY_WINDOW_DAYS },
       computedAt: now.toISOString(),
+      // -- ADR-0089 L20 — ownership + lifecycle, read-time ------------------
+      ownership: {
+        note: INVENTORY_NOTES.ownership,
+        flag: ownershipFlagFor(agent.ownerUserId, Boolean(ownerRow?.disabledAt)),
+        owner: agent.ownerUserId
+          ? {
+              userId: agent.ownerUserId,
+              name: ownerRow ? ownerRow.displayName || ownerRow.email : null,
+              deactivated: Boolean(ownerRow?.disabledAt),
+            }
+          : null,
+        lifecycle: {
+          status: agent.lifecycleStatus,
+          reason: agent.lifecycleReason,
+          changedAt: agent.lifecycleChangedAt ? agent.lifecycleChangedAt.toISOString() : null,
+          ...(agent.lifecycleStatus === "deprecated"
+            ? { warning: "deprecated — dispatch still allowed; a migration signal, not a control" }
+            : {}),
+          ...(agent.lifecycleStatus === "retired"
+            ? { note: "retired — dispatch refuses with 409 agent_retired; grants and history remain readable" }
+            : {}),
+        },
+      },
+      // -- ADR-0089 L21 — grants vs approved intent, never traffic ----------
+      alignment: { note: INVENTORY_NOTES.alignment, ...alignment },
       granted: {
         note: INVENTORY_NOTES.granted,
         users: holderIds.map((id) => ({
