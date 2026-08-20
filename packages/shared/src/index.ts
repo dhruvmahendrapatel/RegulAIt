@@ -2397,6 +2397,42 @@ export {
   type RawEvidenceMalformedPolicy,
 } from "./evidence-adapters.js";
 
+// ADR-0083 — FIRST-PARTY SHADOW-AI DISCOVERY, the pure half: a versioned,
+// FROZEN, compiled-in signature catalogue (the ADR-0068 corpus pattern) and a
+// classifier that triages operator-supplied text — generic DNS/proxy log lines
+// and dependency manifests — into shadow / governed_via_gateway / unmatched.
+// No collector, no scraper, no network call, no regex over input; a compiled
+// hit triages and suggests, it can never mint a finding — findings still come
+// from ADR-0055's pipeline and the deployment's own admin catalogue.
+export {
+  DISCOVERY_MAX_BYTES,
+  DiscoveryParseError,
+  SHADOW_AI_CATALOG_V1,
+  SHADOW_AI_CATALOG_VERSION,
+  SHADOW_CATALOG_KINDS,
+  SHADOW_DISCOVERY_CLASSES,
+  SHADOW_DISCOVERY_POSTURE,
+  SHADOW_DISCOVERY_SOURCE_KINDS,
+  classifyDiscoveryContent,
+  endpointEntryMatches,
+  extractHostCandidatesFromLine,
+  matchCatalogEndpoint,
+  matchCatalogPackage,
+  normalizePackageName,
+  parseGoModManifest,
+  parsePackageJsonManifest,
+  parseRequirementsManifest,
+  sdkEntryMatches,
+  shadowCatalogEntrySchema,
+  type DiscoveryCandidate,
+  type DiscoveryClassification,
+  type ManifestEntry,
+  type ShadowCatalogEntry,
+  type ShadowCatalogKind,
+  type ShadowDiscoveryClass,
+  type ShadowDiscoverySourceKind,
+} from "./shadow-discovery.js";
+
 // ADR-0069 — CROSS-VENDOR COST CONSOLIDATION, the pure half: the adapter
 // registry (a new vendor is a new adapter, not a new code path), the
 // character-scanned amount/date parsers that refuse rather than guess, the

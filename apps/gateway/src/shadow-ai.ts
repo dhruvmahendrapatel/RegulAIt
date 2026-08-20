@@ -71,28 +71,40 @@ import {
   aiEndpointSignatures,
   and,
   auditLog,
+  customModelProviders,
   desc,
   eq,
   inArray,
+  modelCredentials,
   shadowAiFindings,
   shadowAiImports,
   sql,
+  userModelCredentials,
   workflowInstances,
   type Db,
 } from "@regulait/db";
 import {
   DEFAULT_AI_SIGNATURES,
+  DiscoveryParseError,
   EVIDENCE_ADAPTER_POSTURE,
   EVIDENCE_MAX_BYTES,
+  EVIDENCE_MAX_ROWS,
   EvidenceFormatError,
+  SHADOW_AI_CATALOG_V1,
+  SHADOW_AI_CATALOG_VERSION,
   SHADOW_AI_DISPOSITIONS,
+  SHADOW_DISCOVERY_POSTURE,
+  SHADOW_DISCOVERY_SOURCE_KINDS,
   analyzeImport,
   catalogueSignatureSchema,
+  classifyDiscoveryContent,
+  classifyObservation,
   confidenceFor,
   coverageScorecard,
   describeEvidenceAdapters,
   evidenceImportSchema,
   getEvidenceAdapter,
+  normalizeEvidenceHost,
   rawEvidenceImportRequestSchema,
   screenEvidencePayload,
   type AiSignature,
@@ -100,8 +112,12 @@ import {
   type EvidenceImport,
   type EvidenceKind,
   type EvidenceRowRefusal,
+  type Observation,
   type ShadowAiSeverity,
 } from "@regulait/shared";
+import { defaultBaseUrlFor } from "@regulait/model-provider";
+import { ENV_FALLBACK_PROVIDERS, platformEnvKey } from "./agents-connectors.js";
+import { envFallbackAllowed, loadOrgSettings } from "./org-settings.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -124,6 +140,13 @@ export const SHADOW_AI_RULE_IDS = {
   rawMalformedRows: "shadow-ai-raw-import-malformed-rows",
   findingDisposition: "shadow-ai-finding-disposition",
   findingRemediationLinked: "shadow-ai-finding-remediation-linked",
+  /** ADR-0083: a first-party discovery classification that produced nothing to
+   * ingest — audited anyway, because "we looked and found no shadow candidate"
+   * is itself a governance event an operator will want to point at */
+  discoveryClassified: "shadow-ai-discovery-classified",
+  /** ADR-0083: the operator's pasted input was unreadable as a whole (a
+   * package.json that is not JSON) — refused loudly, nothing written */
+  discoveryUnreadable: "shadow-ai-discovery-unreadable",
 } as const;
 
 const SEVERITY_RANK: Record<ShadowAiSeverity, number> = { low: 0, medium: 1, high: 2, critical: 3 };
@@ -141,6 +164,35 @@ const dispositionSchema = z
   });
 
 const remediateSchema = z.object({ instanceId: z.string().uuid() }).strict();
+
+// --- ADR-0083: first-party discovery -----------------------------------------
+
+const discoveryRequestSchema = z
+  .object({
+    sourceKind: z.enum(SHADOW_DISCOVERY_SOURCE_KINDS),
+    /** the operator's pasted text — a log excerpt or a dependency manifest */
+    content: z.string().min(1),
+    /** what the input BELONGS to. Required for manifests (it becomes the
+     * code_scan `repo` — a finding without one points at nothing); optional
+     * for logs, where it becomes the egress rows' sourceIdentity (a coarse,
+     * operator-asserted label like "office-dns", never an inference). */
+    subject: z.string().min(1).max(200).optional(),
+    mode: z.enum(["dry_run", "apply"]).default("dry_run"),
+  })
+  .strict();
+
+/** the honest-limits sentence the catalogue route and the SPA print verbatim */
+export const SHADOW_DISCOVERY_LIMITS =
+  "The compiled catalogue is FROZEN at version " +
+  SHADOW_AI_CATALOG_VERSION +
+  " and is inherently incomplete and dated: it names the providers its authors knew of on its freeze date, and a " +
+  "provider it does not name is invisible to this classifier (the admin catalogue, which is data, needs no release " +
+  "to grow). Only generic input shapes are read — DNS/proxy log LINES and package.json / requirements.txt / go.mod " +
+  "manifests; for real log grammars with per-row attribution and timestamps use the format adapters. The line " +
+  "scanner attributes traffic to nobody and reads no timestamps. A hit proves an artifact MENTIONED a provider, " +
+  "never that traffic flowed; encrypted or DNS-over-HTTPS traffic that bypasses the exported log is invisible. " +
+  "governed_via_gateway means this deployment is CONFIGURED to reach the host — a log line cannot tell gateway " +
+  "traffic from a rogue client's. Nothing runs continuously: every classification is operator-initiated.";
 
 /** the catalogue row shape the matcher wants, read out of the DB row */
 function toSignature(r: typeof aiEndpointSignatures.$inferSelect): AiSignature {
@@ -699,6 +751,287 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
       limits: adapter.limits,
       verification: adapter.verification,
       posture: EVIDENCE_ADAPTER_POSTURE,
+    });
+  });
+
+  // =======================================================================
+  // ADR-0083 — FIRST-PARTY DISCOVERY: a classifier, not a collector
+  // =======================================================================
+
+  /**
+   * THE HOSTS THIS GATEWAY LEGITIMATELY FRONTS, from live configuration and
+   * nothing else: stored platform/user model credentials (their baseUrl
+   * override, or the provider's compiled default endpoint), the env-var
+   * credential fallback where org settings allow it, and enabled custom
+   * providers. Computed at request time — a credential added five minutes ago
+   * moves the governed/shadow line five minutes ago.
+   *
+   * Deliberately NOT included: `egress_allow_hosts`. That table answers "may
+   * this deployment reach X" for connectors, git, Slack — an allow-listed
+   * host is not a host the gateway FRONTS AI TRAFFIC to, and using it here
+   * would launder ordinary egress permissions into "governed AI".
+   */
+  const loadGovernedHosts = async (): Promise<Map<string, string>> => {
+    const governed = new Map<string, string>();
+    const put = (rawUrl: string | null | undefined, reason: string) => {
+      if (!rawUrl) return;
+      const host = normalizeEvidenceHost(rawUrl);
+      if (host && !governed.has(host)) governed.set(host, reason);
+    };
+    for (const row of await db.select().from(modelCredentials)) {
+      put(
+        row.baseUrl ?? defaultBaseUrlFor(row.provider),
+        `this deployment holds a platform model credential for provider '${row.provider}' and dispatches to this host`,
+      );
+    }
+    for (const row of await db
+      .select({ provider: userModelCredentials.provider, baseUrl: userModelCredentials.baseUrl })
+      .from(userModelCredentials)) {
+      put(
+        row.baseUrl ?? defaultBaseUrlFor(row.provider),
+        `a user's own (BYO) model credential for provider '${row.provider}' dispatches to this host through the gateway`,
+      );
+    }
+    const org = await loadOrgSettings(db);
+    for (const provider of ENV_FALLBACK_PROVIDERS) {
+      if (!envFallbackAllowed(org, provider)) continue;
+      const envKey = platformEnvKey(provider);
+      if (!envKey) continue;
+      put(
+        envKey.baseUrl ?? defaultBaseUrlFor(provider),
+        `the '${provider}' platform env-var credential fallback is active on this deployment`,
+      );
+    }
+    for (const row of await db.select().from(customModelProviders)) {
+      if (!row.enabled) continue;
+      put(row.baseUrl, `enabled custom model provider '${row.name}' — this deployment's own governed endpoint`);
+    }
+    return governed;
+  };
+
+  app.get("/v1/shadow-ai/discovery/catalog", async () => {
+    const governed = await loadGovernedHosts();
+    return {
+      catalogVersion: SHADOW_AI_CATALOG_VERSION,
+      total: SHADOW_AI_CATALOG_V1.length,
+      endpoints: SHADOW_AI_CATALOG_V1.filter((e) => e.kind === "endpoint").length,
+      sdks: SHADOW_AI_CATALOG_V1.filter((e) => e.kind === "sdk").length,
+      entries: SHADOW_AI_CATALOG_V1,
+      /** what THIS deployment fronts right now — the shadow/governed line */
+      governedHosts: [...governed.entries()]
+        .map(([host, reason]) => ({ host, reason }))
+        .sort((a, b) => a.host.localeCompare(b.host)),
+      posture: SHADOW_DISCOVERY_POSTURE,
+      limits: SHADOW_DISCOVERY_LIMITS,
+    };
+  });
+
+  /**
+   * CLASSIFY OPERATOR-SUPPLIED TEXT, then (on apply) ingest the SHADOW hits
+   * through THE ONE PIPELINE — the same `processEvidenceImport` both existing
+   * front doors end in. The walls, in ADR-0071's order:
+   *   0. SIZE, on the raw text.
+   *   1. THE CLASSIFIER (pure; a whole-file parse failure refuses loudly).
+   *   2. THE GOVERNED SCREEN — hits on hosts this gateway fronts are labelled
+   *      governed_via_gateway and NEVER forwarded: filing the deployment's own
+   *      sanctioned traffic as shadow findings would manufacture findings.
+   *   3. THE ONE PIPELINE, over shadow hits only. Findings are still computed
+   *      by the ADMIN catalogue there; a compiled hit the admin catalogue does
+   *      not know is returned as a GAP with the row that would close it,
+   *      never silently promoted into a finding.
+   * The pasted content itself is NEVER persisted — only its SHA-256, the
+   * bounded classification summary and any evidence rows survive the request.
+   */
+  app.post("/v1/shadow-ai/discovery", async (req, reply) => {
+    const parsedReq = discoveryRequestSchema.safeParse(req.body);
+    if (!parsedReq.success) {
+      return reply.status(400).send({
+        error: "invalid_request",
+        issues: parsedReq.error.issues.slice(0, 10).map((i) => ({ path: i.path.join("."), message: i.message })),
+      });
+    }
+    const body = parsedReq.data;
+    const fingerprint = sha256(body.content);
+    const isManifest = body.sourceKind !== "dns_log" && body.sourceKind !== "proxy_log";
+    const fallbackKind: EvidenceKind = isManifest ? "code_scan" : "egress_log";
+
+    const recordRefusal = async (ruleId: string, reason: string, summary: Record<string, unknown>) => {
+      const [row] = await db
+        .insert(shadowAiImports)
+        .values({
+          kind: fallbackKind,
+          mode: body.mode,
+          status: "refused",
+          source: `first_party_discovery:v${SHADOW_AI_CATALOG_VERSION}:${body.sourceKind}`,
+          payloadSha256: fingerprint,
+          rowCount: 0,
+          summary: { firstPartyDiscovery: true, sourceKind: body.sourceKind, catalogVersion: SHADOW_AI_CATALOG_VERSION, ...summary },
+          ruleId,
+          reason,
+          requestedByUserId: req.authCtx.userId ?? null,
+        })
+        .returning();
+      await audit(req.authCtx.userId, "shadow_ai_import", row!.id, ruleId, "deny", reason, {
+        sourceKind: body.sourceKind,
+        catalogVersion: SHADOW_AI_CATALOG_VERSION,
+        payloadSha256: fingerprint,
+        ...summary,
+      });
+      return row!;
+    };
+
+    // WALL 0 — SIZE, on the raw text.
+    if (body.content.length > EVIDENCE_MAX_BYTES) {
+      const reason = `discovery input of ${body.content.length} bytes exceeds the ${EVIDENCE_MAX_BYTES}-byte bound — chunk the export`;
+      const row = await recordRefusal(SHADOW_AI_RULE_IDS.importTooLarge, reason, { bytes: body.content.length });
+      return reply.status(413).send({ error: "evidence_too_large", importId: row.id, detail: reason });
+    }
+    if (isManifest && !body.subject) {
+      return reply.status(400).send({
+        error: "subject_required",
+        detail:
+          "a manifest classification needs `subject` — the repo or service the manifest belongs to. It becomes the code_scan finding's repo; a finding without one points at nothing.",
+      });
+    }
+
+    // WALL 1+2 — THE CLASSIFIER, with the deployment's own governed hosts.
+    const governedHosts = await loadGovernedHosts();
+    let classification;
+    try {
+      classification = classifyDiscoveryContent({ sourceKind: body.sourceKind, content: body.content, governedHosts });
+    } catch (e) {
+      if (e instanceof DiscoveryParseError) {
+        const reason = `first-party discovery refused: ${e.message}`;
+        const row = await recordRefusal(SHADOW_AI_RULE_IDS.discoveryUnreadable, reason, {});
+        return reply.status(422).send({ error: e.code, importId: row.id, detail: e.message });
+      }
+      throw e;
+    }
+
+    const boundedMatches = classification.shadow.slice(0, 50).map((c) => ({
+      value: c.value,
+      kind: c.kind,
+      entryId: c.entryId,
+      provider: c.provider,
+      occurrences: c.occurrences,
+      origins: c.origins,
+    }));
+    const boundedGoverned = classification.governed.slice(0, 50).map((c) => ({
+      value: c.value,
+      kind: c.kind,
+      entryId: c.entryId,
+      provider: c.provider,
+      occurrences: c.occurrences,
+      governedReason: c.governedReason,
+    }));
+    const summaryBase = {
+      catalogVersion: classification.catalogVersion,
+      sourceKind: body.sourceKind,
+      ...(body.subject ? { subject: body.subject } : {}),
+      linesScanned: classification.linesScanned,
+      candidateCount: classification.candidateCount,
+      shadowCount: classification.shadow.length,
+      governedCount: classification.governed.length,
+      unmatchedCount: classification.unmatchedCount,
+    };
+    const classificationView = {
+      ...summaryBase,
+      unmatchedOccurrences: classification.unmatchedOccurrences,
+      unmatchedSample: classification.unmatchedSample,
+    };
+    /** what every response says about the upload itself */
+    const retention =
+      "The pasted content was not stored. Only its SHA-256 fingerprint, this bounded classification summary and any ingested evidence rows persist.";
+
+    if (classification.shadow.length === 0) {
+      // NOTHING TO INGEST — a legitimate, auditable outcome, not an error.
+      await audit(
+        req.authCtx.userId,
+        "shadow_ai_import",
+        null,
+        SHADOW_AI_RULE_IDS.discoveryClassified,
+        "allow",
+        `first-party discovery classified ${classification.candidateCount} candidate(s): 0 shadow, ` +
+          `${classification.governed.length} governed via gateway, ${classification.unmatchedCount} unmatched — nothing to ingest`,
+        { payloadSha256: fingerprint, ...summaryBase },
+      );
+      return reply.status(200).send({
+        mode: body.mode,
+        classification: classificationView,
+        matches: [],
+        governed: boundedGoverned,
+        deploymentCatalogueGaps: [],
+        ingest: null,
+        rawContentStored: false,
+        retention,
+        posture: SHADOW_DISCOVERY_POSTURE,
+      });
+    }
+
+    // THE GAP REPORT — which compiled hits would the ADMIN catalogue (the only
+    // thing that can mint a finding) NOT match. Computed with ADR-0055's own
+    // pure classifier so this cannot drift from what the pipeline will do.
+    const adminCatalogue = await loadCatalogue();
+    const nowIso = new Date().toISOString();
+    const deploymentCatalogueGaps = classification.shadow
+      .filter((c) => {
+        const obs: Observation =
+          c.kind === "endpoint"
+            ? { subjectKind: "host", subject: "gap-probe", signalSource: "egress_log", observedAt: nowIso, count: 1, host: c.value }
+            : { subjectKind: "repo", subject: "gap-probe", signalSource: "code_scan", observedAt: nowIso, count: 1, packageName: c.value };
+        return !classifyObservation(obs, adminCatalogue).matched;
+      })
+      .slice(0, 50)
+      .map((c) => ({ value: c.value, kind: c.kind, provider: c.provider, entryId: c.entryId }));
+
+    // WALL 3 — THE ONE PIPELINE, shadow hits only. Rows are aggregated per
+    // distinct host/package so the count is bounded in practice by the
+    // catalogue; the slice is the hard bound a hostile input cannot exceed.
+    const truncated = classification.shadow.length > EVIDENCE_MAX_ROWS;
+    const shadowRows = classification.shadow.slice(0, EVIDENCE_MAX_ROWS);
+    const source = `first_party_discovery:v${SHADOW_AI_CATALOG_VERSION}:${body.sourceKind}`;
+    const imp: EvidenceImport = isManifest
+      ? {
+          kind: "code_scan",
+          mode: body.mode,
+          source,
+          rows: shadowRows.map((c) => ({ repo: body.subject!, packageName: c.value })),
+        }
+      : {
+          kind: "egress_log",
+          mode: body.mode,
+          source,
+          rows: shadowRows.map((c) => ({
+            destinationHost: c.value,
+            requestCount: c.occurrences,
+            ...(body.subject ? { sourceIdentity: body.subject } : {}),
+          })),
+        };
+
+    const result = await processEvidenceImport(req, imp, fingerprint, {
+      firstPartyDiscovery: {
+        ...summaryBase,
+        ...(truncated ? { ingestTruncatedTo: EVIDENCE_MAX_ROWS } : {}),
+        matches: boundedMatches,
+        governed: boundedGoverned,
+      },
+    });
+
+    return reply.status(200).send({
+      mode: body.mode,
+      classification: classificationView,
+      matches: boundedMatches,
+      governed: boundedGoverned,
+      deploymentCatalogueGaps,
+      gapNote:
+        deploymentCatalogueGaps.length > 0
+          ? `${deploymentCatalogueGaps.length} compiled-catalogue hit(s) will produce NO finding on this deployment, because its admin signature catalogue has no row for them. Detection is data: add the row via POST /v1/shadow-ai/catalogue to close the gap — the compiled catalogue only suggests, it never mints a finding.`
+          : null,
+      ...(truncated ? { ingestTruncatedTo: EVIDENCE_MAX_ROWS } : {}),
+      ingest: result,
+      rawContentStored: false,
+      retention,
+      posture: SHADOW_DISCOVERY_POSTURE,
     });
   });
 
