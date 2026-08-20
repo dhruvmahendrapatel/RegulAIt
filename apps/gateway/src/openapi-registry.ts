@@ -362,6 +362,10 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/projects/:projectId/members": "internal",
   "DELETE /v1/projects/:projectId/members/:userId": "internal",
   "PATCH /v1/projects/:projectId/members/:userId": "internal",
+  // ADR-0082 — the standing agent dependency inventory. Internal: an admin
+  // governance read whose aggregation shape is expected to grow.
+  "GET /v1/inventory/agents": "internal",
+  "GET /v1/inventory/agents/:agentId": "internal",
   "GET /v1/reports/definitions": "internal",
   "POST /v1/reports/definitions": "internal",
   "DELETE /v1/reports/definitions/:id": "internal",
@@ -369,6 +373,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/reports/definitions/:id/generate": "internal",
   "POST /v1/reports/definitions/:id/schedules": "internal",
   "GET /v1/reports/overview": "internal",
+  // ADR-0082 — the boardroom posture one-pager; internal like the overview.
+  "GET /v1/reports/posture": "internal",
   "GET /v1/reports/runs": "public-beta",
   "GET /v1/reports/runs/:id": "public-beta",
   "GET /v1/reports/runs/:id/export": "internal",
@@ -925,6 +931,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/projects/:projectId/members": "projects",
   "DELETE /v1/projects/:projectId/members/:userId": "projects",
   "PATCH /v1/projects/:projectId/members/:userId": "projects",
+  "GET /v1/inventory/agents": "inventory",
+  "GET /v1/inventory/agents/:agentId": "inventory",
   "GET /v1/reports/definitions": "reports",
   "POST /v1/reports/definitions": "reports",
   "DELETE /v1/reports/definitions/:id": "reports",
@@ -932,6 +940,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/reports/definitions/:id/generate": "reports",
   "POST /v1/reports/definitions/:id/schedules": "reports",
   "GET /v1/reports/overview": "reports",
+  "GET /v1/reports/posture": "reports",
   "GET /v1/reports/runs": "reports",
   "GET /v1/reports/runs/:id": "reports",
   "GET /v1/reports/runs/:id/export": "reports",

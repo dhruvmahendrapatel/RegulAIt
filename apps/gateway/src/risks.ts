@@ -96,8 +96,10 @@ export const RISK_RULE_IDS = {
 } as const;
 
 /** kept in lockstep with @regulait/shared's ADR-0067 scorer kinds — the
- * subset of EVAL_SCORER_KINDS that measures groundedness */
-const GROUNDEDNESS_SCORER_KINDS = [
+ * subset of EVAL_SCORER_KINDS that measures groundedness. Exported for the
+ * ADR-0082 inventory/posture aggregations so "a groundedness eval" means the
+ * same thing everywhere. */
+export const GROUNDEDNESS_SCORER_KINDS = [
   "claim_support",
   "context_precision",
   "context_recall",

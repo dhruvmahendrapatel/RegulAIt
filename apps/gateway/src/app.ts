@@ -122,6 +122,8 @@ import { registerEvalRoutes } from "./evals.js";
 import { applyModelCardApprovalDecision, registerMrmRoutes } from "./mrm.js";
 import { registerRedTeamRoutes } from "./redteam.js";
 import { registerReportingRoutes } from "./reporting.js";
+import { registerPostureRoutes } from "./posture.js";
+import { registerInventoryRoutes } from "./inventory.js";
 import { registerConfigVersionRoutes } from "./config-versions.js";
 import { ConfigVersionUnresolvableError } from "./rule-versions.js";
 import { registerSpendMonitorRoutes } from "./spend-monitor.js";
@@ -2736,6 +2738,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // that set, so a report can never show spend or audit data the caller could
   // not see directly.
   registerReportingRoutes(app, db);
+  // ADR-0082 — the boardroom posture one-pager beside the reports it rides on:
+  // one org-wide JSON document (packs %, risks, ASR, spend vs budget,
+  // governance activity, anchoring, use-case pipeline), every number a SELECT
+  // over the real ledgers at request time — no rollup, no snapshot. Admin-only
+  // through the default gate, the ADR-0047 position for an org-scoped report.
+  // The anchor sink rides in so tamper resistance is OBSERVED, never config.
+  registerPostureRoutes(app, db, ...(opts.auditAnchorSink !== undefined ? [{ sink: opts.auditAnchorSink }] : []));
+  // ADR-0082 — the standing agent dependency inventory: per registered agent,
+  // GRANTED (what the entitlement rows allow) vs OBSERVED (what run/usage/
+  // trace history recorded), never blended — an aggregation over existing
+  // ledgers, no new collection. Admin-only via the default gate: it names
+  // users, grants, and org-wide run history, the audit log's record class.
+  registerInventoryRoutes(app, db);
   // ADR-0048 — immutable versioning, canary rollout and one-click rollback for
   // the governance artifacts the gateway reads. Following ADR-0040's precedent:
   // immutable version rows plus an active pointer, activation is a pointer
