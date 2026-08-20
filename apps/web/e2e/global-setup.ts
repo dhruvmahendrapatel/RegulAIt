@@ -49,6 +49,15 @@ export default async function globalSetup() {
     REGULAIT_BOOTSTRAP_TOKEN: BOOT,
     REGULAIT_DATA_KEY: DATA_KEY,
     PORT: String(PORT),
+    // Every spec performs a REAL UI sign-in against the same gateway from the
+    // same IP. The production default for the credential bucket (10 per 300s)
+    // was already at the suite tail's edge — the 112th spec tipped zz-vendors
+    // into `rate_limited` purely by adding one more login to the rolling
+    // window. The limiter's own behaviour is covered by the gateway unit
+    // suite (rate-limit.test.ts); this suite tests the app THROUGH sign-in,
+    // so give the bucket suite-sized headroom instead of testing the limiter
+    // by accident.
+    REGULAIT_AUTH_RATE_LIMIT_MAX: "1000",
   };
 
   // 2. seed via the real API (prints one-time passwords exactly once)

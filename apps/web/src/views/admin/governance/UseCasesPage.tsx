@@ -43,9 +43,37 @@ interface UseCaseRow {
   projectId: string | null;
   status: UseCaseStatus;
   workflowInstanceId: string | null;
+  euAiActTier: EuTier | null;
+  euAiActReasons: Array<{ ruleId: string; tier: string; ref: string; reason: string }> | null;
+  euAiActRulesetVersion: number | null;
   decidedAt: string | null;
   retiredReason: string | null;
   createdAt: string;
+}
+type EuTier = "prohibited" | "high" | "limited" | "minimal";
+interface EuScreening {
+  tier: EuTier | null;
+  reasons: Array<{ ruleId: string; tier: string; ref: string; reason: string }> | null;
+  rulesetVersion: number | null;
+  disclaimer: string;
+  enforcement: string;
+  answersStatus: "no_questionnaire" | "missing" | "invalid" | "ok";
+  answersError: string | null;
+  refusal: string | null;
+  cascade: {
+    recommendedTags: Array<{ tag: string; fromPack: string; profileExists: boolean; carriedByUseCase: boolean }>;
+    packs: Array<{
+      id: string;
+      framework: string;
+      version: number;
+      title: string;
+      cascadeTag: string | null;
+      profileExists: boolean;
+      carriedByUseCase: boolean;
+      controls: Array<{ controlRef: string; title: string }>;
+    }>;
+    note: string;
+  } | null;
 }
 interface RequiredTemplate {
   id: string;
@@ -89,10 +117,55 @@ interface UseCaseDetail {
   questionnaire: { version: number; content: string; createdAt: string } | null;
   questionnaireTemplate: string | null;
   cascadeConsequences: CascadeCard;
+  euAiActScreening: EuScreening;
 }
 
 const statusTone = (s: UseCaseStatus): Tone =>
   s === "approved" ? "ok" : s === "under_review" ? "info" : s === "rejected" ? "danger" : s === "retired" ? "warn" : "neutral";
+
+const tierTone = (t: EuTier): Tone =>
+  t === "prohibited" ? "danger" : t === "high" ? "warn" : t === "limited" ? "info" : "ok";
+
+// the screening questionnaire vocabulary — mirrors euAiActAnswersSchema in
+// @regulait/shared (the server refuses anything else, so drift fails loudly)
+const EU_DOMAINS = [
+  ["general-business", "General business use"],
+  ["internal-productivity", "Internal productivity / tooling"],
+  ["employment-hr", "Employment / HR (recruitment, evaluation)"],
+  ["education", "Education / vocational training"],
+  ["essential-services", "Essential services (credit, benefits, insurance)"],
+  ["law-enforcement", "Law enforcement"],
+  ["migration-border", "Migration / asylum / border control"],
+  ["justice-democracy", "Justice / democratic processes"],
+  ["critical-infrastructure", "Critical infrastructure"],
+] as const;
+const EU_AUTONOMY = [
+  ["narrow-procedural", "Narrow procedural task — a human fully decides"],
+  ["informs-human", "Informs a human decision"],
+  ["human-reviews", "Decides, a human reviews"],
+  ["fully-automated", "Fully automated decisions"],
+] as const;
+const EU_BIOMETRIC = [
+  ["none", "No biometric use"],
+  ["verification", "1:1 verification only (unlock/login)"],
+  ["remote-identification", "Remote biometric identification"],
+] as const;
+const EU_AFFECTED = [
+  ["employees", "Employees"],
+  ["customers", "Customers"],
+  ["general-public", "General public"],
+  ["vulnerable-groups", "Vulnerable groups"],
+] as const;
+const EU_FLAGS = [
+  ["emotionRecognition", "Emotion recognition"],
+  ["socialScoring", "Social scoring"],
+  ["manipulativeTechniques", "Manipulative or deceptive techniques"],
+  ["profilesNaturalPersons", "Profiles natural persons"],
+  ["safetyComponent", "Safety component of a regulated product"],
+  ["interactsWithHumans", "People interact with it directly"],
+  ["generatesSyntheticContent", "Generates synthetic content"],
+] as const;
+const EU_ANSWERS_FENCE_RE = /```eu-ai-act-answers[\s\S]*?```/g;
 
 export default function UseCasesPage() {
   const agents = useAgents();
@@ -123,6 +196,36 @@ export default function UseCasesPage() {
   // questionnaire + retire
   const [answers, setAnswers] = useState("");
   const [retireReason, setRetireReason] = useState("");
+
+  // EU AI Act screening answers (ADR-0085) — serialized into the questionnaire
+  // as the fenced eu-ai-act-answers block; the TIER is computed server-side
+  const [euDomain, setEuDomain] = useState("general-business");
+  const [euAutonomy, setEuAutonomy] = useState("informs-human");
+  const [euBiometric, setEuBiometric] = useState("none");
+  const [euAffected, setEuAffected] = useState<string[]>([]);
+  const [euFlags, setEuFlags] = useState<Record<string, boolean>>(
+    Object.fromEntries(EU_FLAGS.map(([k]) => [k, false])),
+  );
+
+  /** the questionnaire the server stores: the prose, with exactly one
+   * canonical answers block appended (any hand-pasted block is replaced) */
+  const questionnaireWithAnswersBlock = (prose: string) => {
+    const block =
+      "```eu-ai-act-answers\n" +
+      JSON.stringify(
+        {
+          purposeDomain: euDomain,
+          affectedPersons: euAffected,
+          decisionAutonomy: euAutonomy,
+          biometricUse: euBiometric,
+          ...euFlags,
+        },
+        null,
+        2,
+      ) +
+      "\n```";
+    return prose.replace(EU_ANSWERS_FENCE_RE, "").trimEnd() + "\n\n" + block + "\n";
+  };
 
   const refreshAll = async () => {
     await Promise.all([list.refetch(), openId ? detail.refetch() : Promise.resolve(null)]);
@@ -322,6 +425,69 @@ export default function UseCasesPage() {
                           value={answers || d.questionnaireTemplate || ""}
                           onChange={(e) => setAnswers(e.target.value)}
                         />
+                        <Card title="EU AI Act risk screening (ADR-0085)">
+                          <div className={v.stack}>
+                            <div className={v.faint}>
+                              The platform computes the risk tier (prohibited / high / limited / minimal)
+                              server-side from these structured answers when you submit — a submitted tier is
+                              refused; only the answers count. Screening, not legal advice.
+                            </div>
+                            <div className={a.formRow}>
+                              <Field label="Purpose domain" grow>
+                                <Select value={euDomain} onChange={(e) => setEuDomain(e.target.value)}>
+                                  {EU_DOMAINS.map(([val, label]) => (
+                                    <option key={val} value={val}>{label}</option>
+                                  ))}
+                                </Select>
+                              </Field>
+                              <Field label="Decision autonomy" grow>
+                                <Select value={euAutonomy} onChange={(e) => setEuAutonomy(e.target.value)}>
+                                  {EU_AUTONOMY.map(([val, label]) => (
+                                    <option key={val} value={val}>{label}</option>
+                                  ))}
+                                </Select>
+                              </Field>
+                              <Field label="Biometric use" grow>
+                                <Select value={euBiometric} onChange={(e) => setEuBiometric(e.target.value)}>
+                                  {EU_BIOMETRIC.map(([val, label]) => (
+                                    <option key={val} value={val}>{label}</option>
+                                  ))}
+                                </Select>
+                              </Field>
+                            </div>
+                            <div>
+                              <span className={v.faint}>Affected persons: </span>
+                              {EU_AFFECTED.map(([val, label]) => (
+                                <label key={val} style={{ marginRight: "1rem" }}>
+                                  <input
+                                    type="checkbox"
+                                    checked={euAffected.includes(val)}
+                                    onChange={(e) =>
+                                      setEuAffected(
+                                        e.target.checked
+                                          ? [...euAffected, val]
+                                          : euAffected.filter((x) => x !== val),
+                                      )
+                                    }
+                                  />{" "}
+                                  {label}
+                                </label>
+                              ))}
+                            </div>
+                            <div>
+                              {EU_FLAGS.map(([key, label]) => (
+                                <label key={key} style={{ marginRight: "1rem", display: "inline-block" }}>
+                                  <input
+                                    type="checkbox"
+                                    checked={euFlags[key] ?? false}
+                                    onChange={(e) => setEuFlags({ ...euFlags, [key]: e.target.checked })}
+                                  />{" "}
+                                  {label}
+                                </label>
+                              ))}
+                            </div>
+                          </div>
+                        </Card>
                         <div>
                           <Button
                             disabled={act.busy}
@@ -329,7 +495,9 @@ export default function UseCasesPage() {
                               void act.run(async () => {
                                 await api.post(`/v1/workflows/instances/${d.instance!.id}/artifacts`, {
                                   stageId: "questionnaire",
-                                  content: answers || d.questionnaireTemplate || "",
+                                  content: questionnaireWithAnswersBlock(
+                                    answers || d.questionnaireTemplate || "",
+                                  ),
                                 });
                                 setAnswers("");
                                 await refreshAll();
@@ -342,6 +510,80 @@ export default function UseCasesPage() {
                       </div>
                     </Card>
                   ) : null}
+
+                  {/* EU AI Act screening (ADR-0085) — computed server-side, informs the sign-off */}
+                  {d.euAiActScreening.refusal && (
+                    <div
+                      role="alert"
+                      style={{
+                        border: "2px solid var(--danger, #c0392b)",
+                        borderRadius: 8,
+                        padding: "0.75rem 1rem",
+                        fontWeight: 600,
+                      }}
+                    >
+                      <Badge tone="danger">prohibited</Badge> {d.euAiActScreening.refusal}
+                    </div>
+                  )}
+                  <Card title="EU AI Act risk screening">
+                    <div className={v.stack}>
+                      {d.euAiActScreening.tier ? (
+                        <div>
+                          <Badge tone={tierTone(d.euAiActScreening.tier)}>
+                            {d.euAiActScreening.tier}
+                          </Badge>{" "}
+                          <span className={v.faint}>
+                            computed server-side from the questionnaire&apos;s answers by rule set v
+                            {d.euAiActScreening.rulesetVersion} — {d.euAiActScreening.enforcement}
+                          </span>
+                        </div>
+                      ) : (
+                        <div className={v.faint}>
+                          Not screened
+                          {d.euAiActScreening.answersStatus === "invalid"
+                            ? ` — the submitted answers block is invalid: ${d.euAiActScreening.answersError}`
+                            : " — the questionnaire has no structured answers block yet. The tier is computed server-side when one is submitted; it is never guessed from prose."}
+                        </div>
+                      )}
+                      {(d.euAiActScreening.reasons ?? []).map((r) => (
+                        <div key={r.ruleId}>
+                          <Badge tone={tierTone(r.tier as EuTier)}>{r.ref}</Badge>{" "}
+                          <span className={v.faint}>{r.reason}</span>
+                        </div>
+                      ))}
+                      {d.euAiActScreening.tier === "minimal" && (
+                        <div className={v.faint}>
+                          No rule in the compiled rule set matched — which is exactly as much as a
+                          screening can honestly say.
+                        </div>
+                      )}
+                      {d.euAiActScreening.cascade && (
+                        <div className={v.stack}>
+                          <div className={v.faint}>{d.euAiActScreening.cascade.note}</div>
+                          {d.euAiActScreening.cascade.recommendedTags.map((t) => (
+                            <div key={t.tag}>
+                              <Badge tone={t.profileExists ? "info" : "warn"}>{t.tag}</Badge>{" "}
+                              <span className={v.faint}>
+                                from {t.fromPack} —{" "}
+                                {t.profileExists
+                                  ? t.carriedByUseCase
+                                    ? "profile exists and this use case carries the tag"
+                                    : "a §8.3 profile exists; add the tag to this use case (and the governed project) to bind its consequences"
+                                  : "no §8.3 compliance profile exists for this tag yet — creating one is what makes the recommendation enforceable"}
+                              </span>
+                            </div>
+                          ))}
+                          {d.euAiActScreening.cascade.packs.map((p) => (
+                            <div key={p.id} className={v.faint}>
+                              Pack citation (read-only): {p.title} (v{p.version}) —{" "}
+                              {p.controls.map((c) => c.controlRef).join(", ")}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      <div className={v.faint}>{d.euAiActScreening.disclaimer}</div>
+                    </div>
+                  </Card>
 
                   {/* cascade consequences — derived from the real cascade rules */}
                   <Card title="Cascade consequences of the compliance tags">
