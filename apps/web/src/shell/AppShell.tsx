@@ -160,6 +160,11 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // question ("what can our models talk to?") asked about an endpoint we
       // do not own, rather than a vendor we do.
       { label: "Custom LLM providers", to: "/admin/custom-providers" },
+      // ADR-0088 — sits under Custom LLM providers because it is the same
+      // decision shape (an admin-typed outbound endpoint under the egress
+      // guard, register → test → enable) applied to a measuring instrument
+      // the operator brings, rather than a model.
+      { label: "External scorers", to: "/admin/external-scorers" },
       // ADR-0065 — sits directly under Custom LLM providers because it answers
       // the adjacent question. That one is "which model that we do not own may
       // our people reach?"; this one is "which model may our people BUILD, out

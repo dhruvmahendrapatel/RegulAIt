@@ -251,6 +251,25 @@ export interface CustomModelProvider {
   createdAt: string;
 }
 
+/** ADR-0088 — a registered external eval scorer: the operator's own
+ * Fiddler-class scoring endpoint, governed by the same egress guard and the
+ * same register → test → enable lifecycle as a custom provider. The secret is
+ * write-only; only `hasApiKey` comes back. */
+export interface ExternalScorer {
+  id: string;
+  name: string;
+  baseUrl: string;
+  /** the judge-backed scorer kinds this instrument CLAIMS to serve */
+  scorerKinds: string[];
+  allowPlaintextHttp: boolean;
+  enabled: boolean;
+  lastTestedAt: string | null;
+  lastTestError: string | null;
+  hasApiKey?: boolean;
+  createdBy: string | null;
+  createdAt: string;
+}
+
 /** One granted egress destination. A bare host — no scheme, port, path or
  * wildcard: the guard matches it exactly against the normalized destination. */
 export interface EgressAllowHost {

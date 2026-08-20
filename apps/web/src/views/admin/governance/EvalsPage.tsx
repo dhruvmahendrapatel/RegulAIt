@@ -55,6 +55,12 @@ interface ScorerInfo {
   summary: string;
   limits: string;
 }
+/** ADR-0088 — the registered external instruments, listed WITH the disclosure */
+interface ExternalScorerListing {
+  scorers: Array<{ name: string; scorerKinds: string[]; enabled: boolean; lastTestedAt: string | null }>;
+  disclosure: string;
+  note: string;
+}
 interface DatasetRow {
   id: string;
   name: string;
@@ -121,6 +127,9 @@ interface ResultRow {
   judgeRationale: string | null;
   error: string | null;
   input: string | null;
+  /** the row's stored evidence — `detail.method` is the provenance stamp
+   * (lexical algorithm name / 'model-judged' / 'external:<name>', ADR-0088) */
+  detail?: Record<string, unknown>;
 }
 
 /** ADR-0072's `GET /v1/evals/scoring-semantics` */
@@ -154,7 +163,10 @@ export default function EvalsPage() {
 
   const scorers = useQuery({
     queryKey: ["admin", "eval-scorers"],
-    queryFn: () => api.get<{ scorers: ScorerInfo[]; note: string }>("/v1/evals/scorers"),
+    queryFn: () =>
+      api.get<{ scorers: ScorerInfo[]; note: string; externalScorers?: ExternalScorerListing }>(
+        "/v1/evals/scorers",
+      ),
   });
   const datasets = useQuery({
     queryKey: ["admin", "eval-datasets"],
@@ -344,6 +356,36 @@ export default function EvalsPage() {
                 },
               ]}
             />
+            {/* ADR-0088 — the external option, with its disclosure ON the page
+                where the choice is made. Registration lives under
+                Integrations → External scorers. */}
+            {(scorers.data?.externalScorers?.scorers ?? []).length > 0 && (
+              <div style={{ marginTop: "var(--s3)" }}>
+                <h3 style={{ marginBottom: "var(--s2)" }}>External scorers (registered instruments)</h3>
+                <div className={v.faint} style={{ marginBottom: "var(--s2)" }}>
+                  {scorers.data?.externalScorers?.disclosure} {scorers.data?.externalScorers?.note}
+                </div>
+                <Table
+                  rows={scorers.data?.externalScorers?.scorers ?? []}
+                  rowKey={(r) => r.name}
+                  columns={[
+                    { key: "name", header: "Name", render: (r) => <code>external:{r.name}</code> },
+                    {
+                      key: "kinds",
+                      header: "Claims to serve",
+                      render: (r) => <span className={v.faint}>{r.scorerKinds.join(", ")}</span>,
+                    },
+                    {
+                      key: "state",
+                      header: "State",
+                      render: (r) => (
+                        <Badge tone={r.enabled ? "ok" : "warn"}>{r.enabled ? "enabled" : "disabled"}</Badge>
+                      ),
+                    },
+                  ]}
+                />
+              </div>
+            )}
           </Card>
 
           {/* ---------------- datasets ---------------- */}
@@ -719,6 +761,23 @@ export default function EvalsPage() {
                   columns={[
                     { key: "input", header: "Case", render: (r) => (r.input ?? "").slice(0, 80) },
                     { key: "scorer", header: "Scorer", render: (r) => <code>{r.scorerKind}</code> },
+                    {
+                      key: "method",
+                      // ADR-0088: WHO produced this number — a local
+                      // algorithm, a governed model judge, or a registered
+                      // external instrument (external:<name>). Rendered on
+                      // every row so a vendor's opinion can never read as a
+                      // model's entailment judgement, or either as ours.
+                      header: "Method",
+                      render: (r) => {
+                        const m = typeof r.detail?.method === "string" ? r.detail.method : null;
+                        return m ? (
+                          <Badge tone={m.startsWith("external:") ? "info" : "neutral"}>{m}</Badge>
+                        ) : (
+                          <span className={v.faint}>—</span>
+                        );
+                      },
+                    },
                     { key: "score", header: "Score", render: (r) => r.score.toFixed(3) },
                     {
                       key: "passed",
