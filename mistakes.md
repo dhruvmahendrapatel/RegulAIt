@@ -166,3 +166,18 @@ problem, their POSITION was.
 established ones (a `zz-` prefix here), and treat file order as part of the
 fixture contract — a spec that asserts global emptiness can only be protected
 by nothing running before it that writes.**
+
+### M-019 — REPEAT of M-014: the no-parking rule was in the brief, and the agent parked anyway
+The L4 discovery agent's brief contained M-014's rule word-for-word ("never park
+on a watcher/monitor — poll in bounded foreground loops; do not stop until
+done") — and the agent still ended its turn with "the monitors will notify me",
+which they never can. A rule stated once in a long brief's process section does
+not survive contact with the moment a long suite is launched: the agent reaches
+for the harness's ergonomic default (background + watcher) because that is what
+the tooling suggests in the moment. The fix is mechanical, not exhortative.
+**Rule: a subagent brief must make parking impossible rather than forbidden —
+instruct that long commands be run as a SINGLE FOREGROUND Bash call with an
+explicit timeout (10 min is allowed) that tails the log itself, state that the
+Monitor/background path is OFF-LIMITS for suite runs, and place that
+instruction INSIDE the verification step it applies to, not in a separate
+process-rules section.**
