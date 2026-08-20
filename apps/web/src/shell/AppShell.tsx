@@ -87,6 +87,11 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // and an audited residual-risk acceptance. Evidence is computed live
       // from the same ledgers those pages render — never hand-ticked.
       { label: "Risks", to: "/admin/risks" },
+      // ADR-0082 — the STANDING dependency view over the per-run records: per
+      // agent, who MAY use it (the grant rows) beside what its runs actually
+      // DID (usage, traces, orchestration history) — never blended, because an
+      // unused permission is exactly the over-permissioning fact to surface.
+      { label: "Agent inventory", to: "/admin/inventory" },
       // ADR-0057 — the SECURITY gate, beside the quality and risk gates. Evals
       // ask "is this agent good on our cases?"; this asks "does it hold when
       // someone attacks it?", measured through the live guardrails and blocking
@@ -114,6 +119,11 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // entitlement, and it says on its face that spend is a list-price
       // estimate and that no scheduler drives its schedules.
       { label: "Reports", to: "/admin/reports" },
+      // ADR-0082 — the one-page BOARD read beside the report machinery it
+      // rides: pack coverage, open risks, ASR, spend vs budget, anchoring —
+      // every figure computed from the ledgers at load, print-friendly with
+      // CSS only, and an empty ledger says "unmeasured", never zero.
+      { label: "Posture", to: "/admin/posture" },
       // ADR-0055 — the land-and-expand wedge: what AI are we NOT governing?
       // It sits in Governance rather than Integrations because a discovered row
       // is a governance gap, not a connection to configure.
