@@ -85,6 +85,14 @@ interface PostureDoc {
     sink: { destination: string; tamperResistant: boolean; mode: string | null } | null;
     disclosure: string;
   };
+  agentOwnership: {
+    total: number;
+    owned: number;
+    unowned: number;
+    orphaned: number;
+    lifecycle: { active: number; deprecated: number; retired: number };
+    note: string;
+  };
   useCases: { proposed: number; underReview: number; approved: number; rejected: number; retired: number; total: number };
   note: string;
 }
@@ -319,6 +327,29 @@ export default function PosturePage() {
                     </>
                   )}
                   {d.evals.groundedness.note && <> {d.evals.groundedness.note}.</>}
+                </div>
+              </Card>
+              <Card title="Agent ownership" actions={<SectionLink to="/admin/inventory" label="agent inventory →" />}>
+                <div className={v.stack}>
+                  <div className={p.oneLiner}>
+                    {d.agentOwnership.total === 0 ? (
+                      <>No agent is registered yet.</>
+                    ) : (
+                      <>
+                        Of {d.agentOwnership.total} registered agent(s), {d.agentOwnership.owned} have a recorded owner,{" "}
+                        {d.agentOwnership.unowned} are unowned (no owner recorded), and {d.agentOwnership.orphaned} are
+                        orphaned (owner deactivated). Lifecycle: {d.agentOwnership.lifecycle.active} active,{" "}
+                        {d.agentOwnership.lifecycle.deprecated} deprecated, {d.agentOwnership.lifecycle.retired} retired.
+                      </>
+                    )}
+                  </div>
+                  {(d.agentOwnership.unowned > 0 || d.agentOwnership.orphaned > 0) && (
+                    <div>
+                      {d.agentOwnership.unowned > 0 && <Badge tone="warn">{d.agentOwnership.unowned} unowned</Badge>}{" "}
+                      {d.agentOwnership.orphaned > 0 && <Badge tone="danger">{d.agentOwnership.orphaned} orphaned</Badge>}
+                    </div>
+                  )}
+                  <div className={v.faint}>{d.agentOwnership.note}</div>
                 </div>
               </Card>
               <Card title="AI use-case pipeline" actions={<SectionLink to="/admin/use-cases" label="use cases →" />}>

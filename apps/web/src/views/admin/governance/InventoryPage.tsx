@@ -10,6 +10,13 @@
  *
  * Observed agent→agent feeds render as a plain list with run counts and
  * last-seen (no graph library — the repo's standing rule).
+ *
+ * ADR-0089 adds two more read-time blocks (gaps L20/L21): OWNERSHIP (owned /
+ * "no owner recorded" / orphaned — a flag, never a default; orphaned = the
+ * recorded owner's account is deactivated) with the lifecycle state
+ * (deprecated warns, retired refuses dispatch), and ALIGNMENT (grants vs
+ * APPROVED use-case intent: aligned / overreach / undershoot — claims about
+ * grant rows and the register, never about observed traffic).
  */
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -20,6 +27,28 @@ import { Badge, Button, Card, EmptyState, Table, type Tone } from "../../../ui/k
 import { QueryGate } from "../adminKit";
 import v from "../../views.module.css";
 
+interface OwnerView {
+  userId: string;
+  name: string | null;
+  deactivated: boolean;
+}
+
+interface LifecycleView {
+  status: "active" | "deprecated" | "retired";
+  reason: string | null;
+  changedAt: string | null;
+  warning?: string;
+  note?: string;
+}
+
+interface AlignmentView {
+  approvedUseCases: number;
+  aligned: boolean;
+  overreach: boolean;
+  undershoot: boolean;
+  gaps: Array<{ useCaseId: string; name: string; detail: string }>;
+}
+
 interface InventoryAgent {
   id: string;
   name: string;
@@ -27,6 +56,10 @@ interface InventoryAgent {
   model: string | null;
   tier: number;
   enabled: boolean;
+  owner: OwnerView | null;
+  ownership: "owned" | "unowned" | "orphaned";
+  lifecycle: LifecycleView;
+  alignment: AlignmentView | null;
   credential: { source: string; platformCredential: boolean; byoUserCredentials: number };
   modelCard: { cards: number; liveApproved: boolean };
   granted: { directUsers: number; grantingRoles: string[]; revokedUsers: number; effectiveHolders: number };
@@ -51,6 +84,13 @@ interface FeedEdgeView {
 interface InventoryDetail {
   agent: { id: string; name: string; provider: string; model: string | null };
   window: { days: number };
+  ownership: {
+    note: string;
+    flag: "owned" | "unowned" | "orphaned";
+    owner: OwnerView | null;
+    lifecycle: LifecycleView;
+  };
+  alignment: AlignmentView & { note: string };
   granted: {
     note: string;
     users: Array<{ id: string; name: string | null; via: string[] }>;
@@ -75,6 +115,29 @@ interface InventoryDetail {
 }
 
 const asrTone = (quality: string | null): Tone => (quality === "measured" ? "info" : "warn");
+
+/** ADR-0089 L20 — the ownership flag as a badge; "no owner recorded" is a
+ * WARNING to render, never a blank to skip */
+function OwnershipBadge(props: { ownership: "owned" | "unowned" | "orphaned"; owner: OwnerView | null }) {
+  if (props.ownership === "unowned") return <Badge tone="warn">no owner recorded</Badge>;
+  if (props.ownership === "orphaned") return <Badge tone="danger">orphaned</Badge>;
+  return <span>{props.owner?.name ?? props.owner?.userId}</span>;
+}
+
+function LifecycleBadge(props: { lifecycle: LifecycleView }) {
+  if (props.lifecycle.status === "active") return null;
+  return <Badge tone={props.lifecycle.status === "retired" ? "danger" : "warn"}>{props.lifecycle.status}</Badge>;
+}
+
+/** ADR-0089 L21 — the three alignment flags; the empty case is said in words */
+function AlignmentBadge(props: { alignment: AlignmentView | null }) {
+  const a = props.alignment;
+  if (!a) return <span className={v.faint}>—</span>;
+  if (a.overreach) return <Badge tone="danger">overreach</Badge>;
+  if (a.undershoot) return <Badge tone="warn">undershoot</Badge>;
+  if (a.aligned) return <Badge tone="ok">aligned</Badge>;
+  return <span className={v.faint}>no approved intent, no grants</span>;
+}
 
 function FeedList(props: { title: string; edges: FeedEdgeView[]; direction: "out" | "in" }) {
   return (
@@ -153,6 +216,20 @@ export default function InventoryPage() {
                         {r.model ? ` · ${r.model}` : ""} · {r.credential.source}
                       </span>
                     ),
+                  },
+                  {
+                    key: "owner",
+                    header: "Owner / lifecycle",
+                    render: (r) => (
+                      <span>
+                        <OwnershipBadge ownership={r.ownership} owner={r.owner} /> <LifecycleBadge lifecycle={r.lifecycle} />
+                      </span>
+                    ),
+                  },
+                  {
+                    key: "alignment",
+                    header: "Intent alignment",
+                    render: (r) => <AlignmentBadge alignment={r.alignment} />,
                   },
                   {
                     key: "card",
@@ -350,6 +427,57 @@ export default function InventoryPage() {
                       <FeedList title="Feeds (this agent's output consumed by)" edges={d.observed.feeds.out} direction="out" />
                       <FeedList title="Fed by (consumes output of)" edges={d.observed.feeds.in} direction="in" />
                       <div className={v.faint}>{d.observed.feeds.note}</div>
+                    </div>
+                  </Card>
+                </div>
+
+                {/* -------- ADR-0089: ownership (L20) + alignment (L21) -------- */}
+                <div className={v.grid2}>
+                  <Card title="Ownership & lifecycle — the accountability record">
+                    <div className={v.stack}>
+                      <div className={v.faint}>{d.ownership.note}</div>
+                      <div>
+                        <OwnershipBadge ownership={d.ownership.flag} owner={d.ownership.owner} />{" "}
+                        {d.ownership.flag === "orphaned" && d.ownership.owner && (
+                          <span className={v.faint}>
+                            owner {d.ownership.owner.name ?? d.ownership.owner.userId} is deactivated
+                          </span>
+                        )}
+                      </div>
+                      <div>
+                        <span className={v.grow}>
+                          lifecycle: <strong>{d.ownership.lifecycle.status}</strong>
+                          {d.ownership.lifecycle.reason ? ` — ${d.ownership.lifecycle.reason}` : ""}
+                        </span>
+                        {d.ownership.lifecycle.changedAt && (
+                          <span className={v.faint}> · changed {ago(d.ownership.lifecycle.changedAt)}</span>
+                        )}
+                      </div>
+                      {(d.ownership.lifecycle.warning ?? d.ownership.lifecycle.note) && (
+                        <div className={v.faint}>{d.ownership.lifecycle.warning ?? d.ownership.lifecycle.note}</div>
+                      )}
+                    </div>
+                  </Card>
+                  <Card title="Intended vs granted — approved intent only">
+                    <div className={v.stack}>
+                      <div className={v.faint}>{d.alignment.note}</div>
+                      <div>
+                        <AlignmentBadge alignment={d.alignment} />{" "}
+                        <span className={v.faint}>
+                          named by {d.alignment.approvedUseCases} approved use case(s)
+                        </span>
+                      </div>
+                      {d.alignment.gaps.length > 0 && (
+                        <div>
+                          <div className={v.sectionTitle}>Provisioning gaps</div>
+                          {d.alignment.gaps.map((g) => (
+                            <div key={g.useCaseId} className={v.listRow}>
+                              <span className={v.grow}>{g.name}</span>
+                              <span className={v.faint}>{g.detail}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </Card>
                 </div>
