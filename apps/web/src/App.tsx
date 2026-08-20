@@ -37,6 +37,7 @@ import GuardrailsPage from "./views/admin/governance/GuardrailsPage";
 import EvalsPage from "./views/admin/governance/EvalsPage";
 import ModelRiskPage from "./views/admin/governance/ModelRiskPage";
 import UseCasesPage from "./views/admin/governance/UseCasesPage";
+import RisksPage from "./views/admin/governance/RisksPage";
 import RedTeamPage from "./views/admin/governance/RedTeamPage";
 import ReportsPage from "./views/admin/cost/ReportsPage";
 import PromptVersionsPage from "./views/admin/governance/PromptVersionsPage";
@@ -157,6 +158,8 @@ export default function App() {
                         <Route path="model-risk" element={<ModelRiskPage />} />
                         {/* ADR-0080 */}
                         <Route path="use-cases" element={<UseCasesPage />} />
+                        {/* ADR-0081 */}
+                        <Route path="risks" element={<RisksPage />} />
                         <Route path="redteam" element={<RedTeamPage />} />
                         <Route path="reports" element={<ReportsPage />} />
                         <Route path="prompt-versions" element={<PromptVersionsPage />} />

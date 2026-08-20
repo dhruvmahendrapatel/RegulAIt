@@ -81,6 +81,12 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // questionnaired, and signed off before anything ran?" — and an approved
       // use case carries the same compliance tags the cascade enforces.
       { label: "Use cases", to: "/admin/use-cases" },
+      // ADR-0081 — the RISK layer over the measurements above. Evals, red-team
+      // and guardrails MEASURE; the register links each measurement to a named
+      // risk scenario, an owner, the mitigating control we actually enforce,
+      // and an audited residual-risk acceptance. Evidence is computed live
+      // from the same ledgers those pages render — never hand-ticked.
+      { label: "Risks", to: "/admin/risks" },
       // ADR-0057 — the SECURITY gate, beside the quality and risk gates. Evals
       // ask "is this agent good on our cases?"; this asks "does it hold when
       // someone attacks it?", measured through the live guardrails and blocking
