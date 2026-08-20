@@ -21,6 +21,22 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-08-20 — the Credo-gap queue is landing: L1 and L3 shipped, positioning refreshed.** A
+gap analysis against Credo AI ([GAP_ANALYSIS_CREDO_AI_2026-08.md](../docs/product/GAP_ANALYSIS_CREDO_AI_2026-08.md))
+ranked eight lacks, and the owner directed both building the gaps and out-placing their
+presentation — so [POSITIONING.md](../docs/product/POSITIONING.md) (category claim: *AI governance
+that enforces itself*), two ADR-cited comparison pages, and a README hero rewrite shipped first.
+Then **L3**: a seventh seed compliance pack — SOC 2 Security (Common Criteria), 10 controls
+honestly graded, no CPA review claimed, `cascadeTag` null — as a dated ADR-0058 amendment. Then
+**L1** ([ADR-0080](../docs/decisions/0080-ai-use-case-registry.md)): an AI use-case registry with
+a pre-build intake front-door on pillar-2 rails (gallery template → ADR-0079 resting plan →
+questionnaire artifact → sign-off), whose `complianceTags` are the same tags §8.3 enforces and
+whose status can only change through the one decide path (both lifecycle joins proven non-vacuous
+the M-002 way), plus an admin Use-cases page. Gateway suite **2136 passing + 9 MinIO skips**,
+Playwright **107/107**, on fresh scratch databases — still the only gate (Actions exhausted).
+Next in queue: **L2 risk register**, then L7 dependency inventory + L8 exec posture, then L4/L5;
+L6 (governance copilot) stays blocked on the parked model credential.
+
 **2026-08-15 — the ten-slice feature review is CLOSED and the market-analysis build queue is
 under way.** Every pillar was driven end-to-end and attacked with probes written to fail if
 enforcement regressed. Four governance holes were found live and closed (inert server grant;
