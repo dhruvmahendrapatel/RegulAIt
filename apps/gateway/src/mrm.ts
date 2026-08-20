@@ -81,6 +81,11 @@ import {
 } from "@regulait/shared";
 import { loadOrgSettings } from "./org-settings.js";
 import { summarizeGroundedness } from "./evals.js";
+import {
+  computeCardAutofill,
+  computeCardStaleness,
+  summarizeAutofillForSnapshot,
+} from "./mrm-autofill.js";
 
 const ORG_SETTINGS_ID = "singleton";
 /** the audit row's actor when the caller is the identity-less bootstrap token —
@@ -240,6 +245,18 @@ export async function applyModelCardApprovalDecision(
     .returning();
   if (!updated) return;
 
+  // ADR-0086 — THE ONE HONEST WRITE OF THE AUTOFILL LAYER. The card's
+  // ledger-computed block is recomputed HERE, inside the decision's own
+  // transaction, and its compact form is frozen into this decision's audit
+  // detail — the ADR-0081 acceptance-freeze pattern: the record shows what
+  // the decider saw, and later ledger movement never rewrites it. It lives in
+  // `audit_log.detail` jsonb, deliberately NOT in a card column — no
+  // migration, and nothing an author or admin could edit afterwards.
+  const [cardRow] = await tx.select().from(modelCards).where(eq(modelCards.id, updated.cardId));
+  const autofillSnapshot = cardRow
+    ? summarizeAutofillForSnapshot(await computeCardAutofill(tx, cardRow, new Date()))
+    : null;
+
   if (decision === "approved" && updated.supersedesId) {
     await tx
       .update(modelCardApprovals)
@@ -263,6 +280,7 @@ export async function applyModelCardApprovalDecision(
       decision,
       validUntil: updated.validUntil?.toISOString() ?? null,
       supersedesId: updated.supersedesId,
+      autofillSnapshot,
     },
     effect: decision === "approved" ? "allow" : "deny",
     ruleId: decision === "approved" ? "mrm-sign-off-approved" : "mrm-sign-off-denied",
@@ -487,12 +505,27 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
     return { cards, enforced: org.mrmEnforced };
   });
 
+  /**
+   * THE DETAIL READ — and, since ADR-0086, the WINDOW. The card's
+   * evidence-shaped sections arrive filled from the ledgers at request time
+   * (`autofill`), visibly apart from the manually attached `evidence`, plus a
+   * `staleness` block saying what has moved since the last certification.
+   * Read-time only, deliberately: nothing here writes a card row, an audit
+   * row, or a cache — the one write is the decide-path snapshot (see
+   * `applyModelCardApprovalDecision`).
+   */
   app.get("/v1/mrm/cards/:id", async (req, reply) => {
     const { id } = idParam.parse(req.params);
     const org = await loadOrgSettings(db);
     const [row] = await db.select().from(modelCards).where(eq(modelCards.id, id));
     if (!row) return reply.status(404).send({ error: "unknown_model_card" });
-    return { card: await cardView(db, row, new Date(), org.mrmExpiryWarnDays) };
+    const now = new Date();
+    const view = await cardView(db, row, now, org.mrmExpiryWarnDays);
+    const [autofill, staleness] = await Promise.all([
+      computeCardAutofill(db, row, now),
+      computeCardStaleness(db, row, view.approvals, now),
+    ]);
+    return { card: { ...view, autofill, staleness } };
   });
 
   app.post("/v1/mrm/cards", async (req, reply) => {
