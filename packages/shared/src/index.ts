@@ -2712,6 +2712,27 @@ export {
   type PackStatus,
 } from "./compliance-packs.js";
 
+// ADR-0087 — the compliance-pack VERSION DIFF, the pure half: a
+// deterministic, order-independent structured diff of two pack versions
+// (controls added/removed/changed with per-field before/after, pack-level
+// changes, the HIGH-consequence cascadeTag flag), so a framework revision is
+// reviewable before it activates. Claims-vs-claims only — the measured half
+// is the gateway's impact preview over the live ledgers.
+export {
+  PACK_CONTROL_DIFF_FIELDS,
+  PACK_LEVEL_DIFF_FIELDS,
+  compliancePackDiffSchema,
+  diffCompliancePacks,
+  type ChangedControl,
+  type CompliancePackDiff,
+  type ControlDiffSummary,
+  type ControlFieldChange,
+  type PackControlDiffField,
+  type PackLevelChange,
+  type PackLevelDiffField,
+  type PackVersionSnapshot,
+} from "./compliance-pack-diff.js";
+
 // ADR-0056 — THE AI GOVERNANCE COPILOT, the pure half: the read-only tool
 // vocabulary (four tools, no mutating one), the deterministic NL -> structured
 // query step (testable without a provider, and unsteerable by the data it

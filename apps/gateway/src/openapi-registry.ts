@@ -506,6 +506,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/compliance/packs/:id/evaluate": "internal",
   "GET /v1/compliance/pack-reports": "internal",
   "GET /v1/compliance/pack-reports/:id": "internal",
+  // ADR-0087 — the pack-version diff + impact preview, same reasoning
+  "GET /v1/compliance-packs/:framework/diff": "internal",
   // ADR-0055 — shadow-AI discovery. Internal: the evidence-import shape and the
   // finding schema will move as the catalogue and the collectors evolve, and an
   // admin console surface is not a contract we want to freeze.
@@ -1060,6 +1062,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/compliance/packs/:id/evaluate": "compliance-packs",
   "GET /v1/compliance/pack-reports": "compliance-packs",
   "GET /v1/compliance/pack-reports/:id": "compliance-packs",
+  "GET /v1/compliance-packs/:framework/diff": "compliance-packs",
   "GET /v1/shadow-ai/catalogue": "shadow-ai",
   "POST /v1/shadow-ai/catalogue": "shadow-ai",
   "POST /v1/shadow-ai/catalogue/seed": "shadow-ai",

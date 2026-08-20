@@ -85,6 +85,7 @@ import {
   buildPackScorecard,
   createCompliancePackSchema,
   evaluatePackSchema,
+  diffCompliancePacks,
   evaluateReportAccess,
   packAttestationSchema,
   resolveReportPeriod,
@@ -92,6 +93,7 @@ import {
   type EvidenceCollectorId,
   type PackControlAssessment,
   type PackScorecard,
+  type PackVersionSnapshot,
 } from "@regulait/shared";
 import { callerProjectIds, callerTeamIds, resolveScopeProjectIds } from "./reporting.js";
 
@@ -111,6 +113,7 @@ export const COMPLIANCE_PACK_RULE_IDS = {
   packDeleted: "compliance-pack-deleted",
   attestationRecorded: "compliance-pack-attestation-recorded",
   evaluated: "compliance-pack-evaluated",
+  diffComputed: "compliance-pack-diff-computed",
   evaluationDenied: "compliance-pack-evaluation-denied",
   reportReadDenied: "compliance-pack-report-read-denied",
 } as const;
@@ -648,6 +651,199 @@ export function registerCompliancePackRoutes(app: FastifyInstance, db: Db): void
     return { pack, controls, attestations, disclaimer: COMPLIANCE_PACK_DISCLAIMER };
   });
 
+  // --- ADR-0087: the version diff + impact preview -------------------------
+
+  /**
+   * WHAT A FRAMEWORK REVISION CHANGES, REVIEWABLE BEFORE IT ACTIVATES.
+   *
+   * Two halves, deliberately distinct in kind:
+   *  - `diff` — the STRUCTURED DIFF of the two versions as authored
+   *    (shared `diffCompliancePacks`). Declared coverage classes are the
+   *    mapping author's CLAIMS, so this half diffs claims against claims.
+   *  - `impact` — the MEASURED half: both versions run through the SAME
+   *    evaluation machinery (`evaluatePack`, which is `runCollector` over the
+   *    real ledgers) against THIS deployment's CURRENT ledgers, and every
+   *    control whose computed status would move is reported ("CC6.6
+   *    satisfied→unsatisfied under v2's higher threshold"). If the two
+   *    versions evaluate identically, the response SAYS so rather than
+   *    implying change.
+   *
+   * READ-ONLY BY DESIGN: nothing activates, no report row is stored, no pack
+   * state moves. The ONE write is an append-only audit row
+   * (`compliance-pack-diff-computed`) — that row is what lets the activation
+   * audit later record honestly whether a diff was computed for its from→to
+   * pair, and an unrecorded read could not do that. Viewing the diff is NOT
+   * a precondition for activation — that would be ceremony, not control.
+   *
+   * Admin-only via the default gate. The impact preview is therefore always
+   * the org-wide (admin) view of the ledgers; it reflects the ledgers AT
+   * REQUEST TIME and predicts nothing about future evidence.
+   */
+  app.get("/v1/compliance-packs/:framework/diff", async (req, reply) => {
+    const { framework } = z.object({ framework: z.string().min(1).max(64) }).parse(req.params);
+    const q = z
+      .object({
+        from: z.coerce.number().int().min(1).max(10_000),
+        to: z.coerce.number().int().min(1).max(10_000),
+        period: z
+          .enum(["current_month", "last_month", "current_quarter", "last_quarter", "last_30_days"])
+          .default("current_quarter"),
+      })
+      .parse(req.query ?? {});
+
+    const loadVersion = async (version: number) => {
+      const [pack] = await db
+        .select()
+        .from(compliancePacks)
+        .where(and(eq(compliancePacks.framework, framework), eq(compliancePacks.version, version)));
+      if (!pack) return null;
+      const controls = await db
+        .select()
+        .from(compliancePackControls)
+        .where(eq(compliancePackControls.packId, pack.id))
+        .orderBy(compliancePackControls.controlRef);
+      return { pack, controls };
+    };
+
+    const fromV = await loadVersion(q.from);
+    if (!fromV) {
+      return reply
+        .status(404)
+        .send({ error: "invalid_reference", detail: `no '${framework}' pack at version ${q.from}` });
+    }
+    const toV = await loadVersion(q.to);
+    if (!toV) {
+      return reply
+        .status(404)
+        .send({ error: "invalid_reference", detail: `no '${framework}' pack at version ${q.to}` });
+    }
+
+    const snapshot = (v: NonNullable<typeof fromV>): PackVersionSnapshot => ({
+      title: v.pack.title,
+      description: v.pack.description,
+      provenance: v.pack.provenance,
+      cascadeTag: v.pack.cascadeTag,
+      controls: v.controls.map((c) => ({
+        controlRef: c.controlRef,
+        title: c.title,
+        description: c.description,
+        coverage: c.coverage,
+        collector: c.collector,
+        collectorParams: c.collectorParams,
+        minEvidenceCount: c.minEvidenceCount,
+        attestationRequired: c.attestationRequired,
+        ownerNote: c.ownerNote,
+      })),
+    });
+
+    const diff = diffCompliancePacks(snapshot(fromV), snapshot(toV));
+
+    // THE IMPACT PREVIEW — both versions through the SAME machinery, against
+    // the CURRENT ledgers. Reused, never reimplemented: two `evaluatePack`
+    // calls are the whole computation.
+    const now = new Date();
+    const resolved = resolveReportPeriod(q.period, now);
+    const evaluate = (v: NonNullable<typeof fromV>) =>
+      evaluatePack(db, {
+        pack: v.pack,
+        controls: v.controls,
+        projectIds: null, // admin-only route: the org-wide view
+        periodStart: resolved.start,
+        periodEnd: resolved.end,
+        period: q.period,
+        periodLabel: resolved.label,
+        scopeKind: "org",
+        scopeId: null,
+        now,
+      });
+    const fromCard = await evaluate(fromV);
+    const toCard = await evaluate(toV);
+
+    const fromByRef = new Map(fromCard.controls.map((c) => [c.controlRef, c]));
+    const toByRef = new Map(toCard.controls.map((c) => [c.controlRef, c]));
+    const changedRefs = new Set(diff.controlsChanged.map((c) => c.controlRef));
+    const addedRefs = new Set(diff.controlsAdded.map((c) => c.controlRef));
+    const removedRefs = new Set(diff.controlsRemoved.map((c) => c.controlRef));
+    const refs = [...new Set([...fromByRef.keys(), ...toByRef.keys()])].sort();
+
+    const controls = refs.map((ref) => {
+      const f = fromByRef.get(ref) ?? null;
+      const t = toByRef.get(ref) ?? null;
+      const definitionChange = addedRefs.has(ref)
+        ? ("added" as const)
+        : removedRefs.has(ref)
+          ? ("removed" as const)
+          : changedRefs.has(ref)
+            ? ("changed" as const)
+            : ("unchanged" as const);
+      const moved = (f?.status ?? null) !== (t?.status ?? null);
+      return {
+        controlRef: ref,
+        title: t?.title ?? f?.title ?? ref,
+        definitionChange,
+        fromStatus: f?.status ?? null,
+        toStatus: t?.status ?? null,
+        fromEvidenceCount: f?.evidenceCount ?? null,
+        toEvidenceCount: t?.evidenceCount ?? null,
+        moved,
+        detail: moved
+          ? t === null
+            ? `'${ref}' (${f!.status} under v${q.from}) is REMOVED in v${q.to} — its coverage claim disappears from the scorecard`
+            : f === null
+              ? `'${ref}' is NEW in v${q.to} and computes ${t.status} against the current ledgers`
+              : `'${ref}' ${f.status} under v${q.from} → ${t.status} under v${q.to} against the same current ledgers`
+          : null,
+      };
+    });
+    const moved = controls.filter((c) => c.moved);
+    const evaluationIdentical = moved.length === 0;
+
+    // The one write: an append-only audit row. It records that THIS from→to
+    // diff was computed, which is what the activation audit later consults.
+    await audit(
+      req.authCtx.userId ?? null,
+      toV.pack.id,
+      COMPLIANCE_PACK_RULE_IDS.diffComputed,
+      `pack diff computed for '${framework}' v${q.from} → v${q.to}: ${diff.summary.controlsAdded} ` +
+        `control(s) added, ${diff.summary.controlsRemoved} removed, ${diff.summary.controlsChanged} ` +
+        `changed${diff.summary.cascadeTagChanged ? ", CASCADE TAG CHANGED (high consequence)" : ""}; ` +
+        `impact preview against the current ledgers: ${moved.length} computed status(es) would move. ` +
+        `Read-only — nothing was activated`,
+      {
+        framework,
+        fromVersion: q.from,
+        toVersion: q.to,
+        summary: diff.summary,
+        statusesMoved: moved.length,
+      },
+    );
+
+    return {
+      framework,
+      from: { id: fromV.pack.id, version: fromV.pack.version, title: fromV.pack.title, status: fromV.pack.status },
+      to: { id: toV.pack.id, version: toV.pack.version, title: toV.pack.title, status: toV.pack.status },
+      diff,
+      impact: {
+        period: { period: q.period, label: resolved.label, start: resolved.start.toISOString(), end: resolved.end.toISOString() },
+        scope: "org",
+        fromTotals: fromCard.totals,
+        toTotals: toCard.totals,
+        controls,
+        statusesMoved: moved.length,
+        evaluationIdentical,
+        note: evaluationIdentical
+          ? `Both versions evaluate IDENTICALLY against this deployment's current ledgers for ` +
+            `${resolved.label} — the revision changes no computed status today. That is a statement ` +
+            `about the ledgers at request time, not a guarantee about any future period.`
+          : `${moved.length} control status(es) would move under v${q.to}, computed by running both ` +
+            `versions through the same evaluator against this deployment's CURRENT ledgers for ` +
+            `${resolved.label}. This reflects the ledgers at request time, not the future. ` +
+            `Attestations are recorded per pack version and do not carry over to a new version.`,
+      },
+      disclaimer: COMPLIANCE_PACK_DISCLAIMER,
+    };
+  });
+
   /** ACTIVATION IS THE VERSION SWITCH. Retiring the previous active version of
    * the same framework happens HERE, in the same request, because the partial
    * unique index would otherwise refuse the second active row — the database
@@ -682,6 +878,27 @@ export function registerCompliancePackRoutes(app: FastifyInstance, db: Db): void
       .set({ status: "active", activatedAt: now })
       .where(eq(compliancePacks.id, id))
       .returning();
+    // ADR-0087, honest and NULLABLE: did anyone compute the v(previous)→v(new)
+    // diff before this activation? Recorded as a fact on the audit row — never
+    // as a gate. Requiring the diff to be VIEWED would be ceremony, not
+    // control; recording whether it was computed keeps the review story
+    // auditable without pretending a page-load is diligence. Null when there
+    // was no previous active version, because then there was nothing to diff.
+    let diffComputed: boolean | null = null;
+    if (previous) {
+      const [d] = await db
+        .select({ n: count() })
+        .from(auditLog)
+        .where(
+          and(
+            eq(auditLog.ruleId, COMPLIANCE_PACK_RULE_IDS.diffComputed),
+            sql`${auditLog.detail} ->> 'framework' = ${pack.framework}`,
+            sql`(${auditLog.detail} ->> 'fromVersion')::int = ${previous.version}`,
+            sql`(${auditLog.detail} ->> 'toVersion')::int = ${pack.version}`,
+          ),
+        );
+      diffComputed = (d?.n ?? 0) > 0;
+    }
     await audit(
       req.authCtx.userId ?? null,
       id,
@@ -689,7 +906,12 @@ export function registerCompliancePackRoutes(app: FastifyInstance, db: Db): void
       `compliance pack '${pack.framework}' v${pack.version} activated${previous ? `, superseding v${previous.version}` : ""} ` +
         `— activation makes it the mapping REPORTS use. It changes no enforcement by itself: the ` +
         `cascade tag '${pack.cascadeTag ?? "(none)"}' is what an Initiative must carry for §8.3 to act`,
-      { framework: pack.framework, version: pack.version, supersededVersion: previous?.version ?? null },
+      {
+        framework: pack.framework,
+        version: pack.version,
+        supersededVersion: previous?.version ?? null,
+        diffComputed,
+      },
     );
     return { pack: activated, retired: previous ? { id: previous.id, version: previous.version } : null };
   });
