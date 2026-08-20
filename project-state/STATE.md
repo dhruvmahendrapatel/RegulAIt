@@ -58,10 +58,23 @@ manifests through ADR-0071's existing ingest path, with the honest core being th
 **governed-via-gateway vs shadow** line computed per request from live model-credential/custom-
 provider config (deliberately NOT the egress allow-list, which would launder egress permissions
 into "governed AI"); a hit proves an artifact mentioned a provider, never that traffic flowed,
-and compiled-only signature hits surface as named catalogue gaps rather than findings. Gateway
-suite **2183 passing + 9 MinIO skips / 132 files**, Playwright **110/110**. Next: **L5
-vendor-risk portal** (owner-directed 2026-08-20, overriding the gap doc's defer note); L6
-(governance copilot) stays blocked on the parked model credential. Process note: M-019 logged —
+and compiled-only signature hits surface as named catalogue gaps rather than findings. Then **L5**
+([ADR-0084](../docs/decisions/0084-vendor-ai-risk-portal.md), owner-directed over the gap
+doc's defer note): vendors as governed objects on the pillar-2 assessment rails — vendor
+answers live on the vendor's own row as **attributed attestations that are never evidence**
+(pinned both ways: zero delta on `compliance_pack_attestations`, and an org pack evaluation
+after a vendor claim still reports `attestation_required`); the seeded SOC 2 v1 stays
+byte-identical with CC9.2's graduation path recorded, and the risk register gains a
+`third_party_ai` category with a real resolver from day one. Gateway suite **2200 passing +
+9 MinIO skips / 133 files**, Playwright **111/111**. The Credo L-queue is now **fully built**
+(L1–L5, L7, L8; L6 waits on the parked credential). A second competitive pass
+([GAP_ANALYSIS_FOUR_VENDORS_2026-08.md](../docs/product/GAP_ANALYSIS_FOUR_VENDORS_2026-08.md),
+owner-directed: Holistic AI, watsonx.governance, Fiddler, OneTrust — all four sites
+egress-blocked, per-source honesty grades recorded) ranked lacks L9–L19 and struck ten
+near-miss claims after in-repo verification. Next: **L10** EU-AI-Act risk-tier classifier in
+the ADR-0080 intake, then **L12** factsheet auto-fill of model cards from the ledgers; L13
+(assessment AI pre-fill) needs an owner decision — it collides with ADR-0080's "the answers
+are yours" stance; L6 dispatches the moment the model credential is unparked. Process note: M-019 logged —
 a REPEAT of M-014 (agent parked on a watcher despite the rule in its brief); the rule is
 rewritten to make parking impossible (foreground suite runs with explicit timeouts, stated
 inside the verification step).
