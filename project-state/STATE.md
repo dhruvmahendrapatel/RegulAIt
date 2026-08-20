@@ -107,9 +107,21 @@ owner-directed): Saviynt's Agent Access Gateway is the first genuine call-plane 
 series, but **their gateway authorizes an identity; ours governs the call** — nine near-miss
 claims struck; new lacks L20 (agent ownership/lifecycle/orphan signal) and L21
 (intended-vs-granted flags) queued build-next, L22–L24 later, L25/L26 refused (we integrate
-with IGA, we do not compete for it). Remaining: **L14** external-scorer adapter, then
-L20+L21; L13 assessment AI pre-fill (owner decision — collides with ADR-0080's "the answers
-are yours"); L6 the moment the model credential is unparked. Process note: M-019 logged —
+with IGA, we do not compete for it). Then **L14**
+([ADR-0088](../docs/decisions/0088-external-scorer-adapter.md)): the external-scorer adapter —
+the operator brings a Fiddler-style scoring endpoint as a registered, governed instrument
+(custom-provider egress/SSRF validation and credential custody, refused in air-gapped mode,
+migration 0090); every stored score is stamped `method: external:<name>` and never blended
+with lexical or model-judged, an unreachable scorer follows ADR-0067's refuse-don't-degrade
+path, and the inline guardrail path deliberately stays local-only as a named boundary. Built
+across a container restart: the killed agent's artifacts survived in pushed WIP checkpoints
+and were validated whole rather than rebuilt (M-015) — full revalidation from cold: `pnpm -r
+build` clean, shared **719**, gateway **2246 passing + 9 MinIO skips / 137 files**, Playwright
+**114/114**, all on fresh scratch databases. Owner promoted **L22–L24** into the queue
+(2026-08-20). Remaining: **L20+L21**, then L22 certification campaigns → L23 tool-combination
+SoD → L24 access recommendations (deterministic half); L13 assessment AI pre-fill (owner
+decision — collides with ADR-0080's "the answers are yours"); L6 the moment the model
+credential is unparked. Process note: M-019 logged —
 a REPEAT of M-014 (agent parked on a watcher despite the rule in its brief); the rule is
 rewritten to make parking impossible (foreground suite runs with explicit timeouts, stated
 inside the verification step).
