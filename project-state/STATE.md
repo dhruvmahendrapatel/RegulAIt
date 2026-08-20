@@ -1,5 +1,5 @@
 ---
-phase: feature-review-wave-closed-and-market-queue-building
+phase: competitive-queue-built-l1-through-l12
 last_updated: 2026-08-13
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
