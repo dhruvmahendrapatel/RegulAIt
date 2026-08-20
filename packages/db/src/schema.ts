@@ -6704,6 +6704,10 @@ export const AI_USE_CASE_SENSITIVITIES = [
   "regulated",
 ] as const;
 
+/** ADR-0085 — mirrors `EU_AI_ACT_TIERS` in @regulait/shared (kept literal
+ * here so the schema package stays dependency-free of shared) */
+export const EU_AI_ACT_TIER_VALUES = ["prohibited", "high", "limited", "minimal"] as const;
+
 export const aiUseCases = pgTable(
   "ai_use_cases",
   {
@@ -6729,6 +6733,16 @@ export const aiUseCases = pgTable(
     workflowInstanceId: uuid("workflow_instance_id").references(() => workflowInstances.id, {
       onDelete: "set null",
     }),
+    /** ADR-0085 (migration 0089) — the EU AI Act SCREENING result, computed
+     * SERVER-SIDE by the shared frozen rule set from the structured answers
+     * inside the questionnaire artifact. All three columns are set together
+     * (or all null = not screened); the tier INFORMS the sign-off — nothing
+     * anywhere auto-blocks on it. */
+    euAiActTier: text("eu_ai_act_tier", { enum: EU_AI_ACT_TIER_VALUES }),
+    euAiActReasons: jsonb("eu_ai_act_reasons").$type<
+      Array<{ ruleId: string; tier: string; ref: string; reason: string }>
+    >(),
+    euAiActRulesetVersion: integer("eu_ai_act_ruleset_version"),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
     retiredReason: text("retired_reason"),
     retiredAt: timestamp("retired_at", { withTimezone: true }),
@@ -6737,6 +6751,10 @@ export const aiUseCases = pgTable(
   },
   (t) => [
     check("ai_use_cases_name_check", sql`length(btrim(${t.name})) > 0`),
+    check(
+      "ai_use_cases_eu_tier_consistency_check",
+      sql`(${t.euAiActTier} IS NULL) = (${t.euAiActRulesetVersion} IS NULL) AND (${t.euAiActTier} IS NULL) = (${t.euAiActReasons} IS NULL)`,
+    ),
     check(
       "ai_use_cases_retirement_check",
       sql`(${t.status} = 'retired') = (${t.retiredAt} IS NOT NULL AND ${t.retiredReason} IS NOT NULL)`,

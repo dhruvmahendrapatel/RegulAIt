@@ -2866,3 +2866,34 @@ export {
   type RecordVendorAttestationInput,
   type UpdateVendorInput,
 } from "./vendors.js";
+
+// ---------------------------------------------------------------------------
+// ADR-0085 — EU AI Act risk-tier screening (gap L10): the questionnaire
+// vocabulary, the frozen v1 rule set, the deterministic classifier, the
+// answers-block parser, and the screening-not-legal-advice disclaimer. The
+// tier is computed SERVER-SIDE from the answers — never accepted from any
+// payload — and it informs the human sign-off; nothing is auto-blocked.
+// ---------------------------------------------------------------------------
+export {
+  classifyEuAiActTier,
+  euAiActAnswersSchema,
+  extractEuAiActAnswers,
+  renderEuAiActAnswersBlock,
+  EU_AI_ACT_ANNEX_III_DOMAINS,
+  EU_AI_ACT_ANSWERS_FENCE,
+  EU_AI_ACT_AFFECTED_PERSONS,
+  EU_AI_ACT_BIOMETRIC_USES,
+  EU_AI_ACT_DECISION_AUTONOMY,
+  EU_AI_ACT_PURPOSE_DOMAINS,
+  EU_AI_ACT_RULESET_V1,
+  EU_AI_ACT_RULESET_VERSION,
+  EU_AI_ACT_SCREENING_DISCLAIMER,
+  EU_AI_ACT_TIER_RANK,
+  EU_AI_ACT_TIERS,
+  type EuAiActAnswers,
+  type EuAiActClassification,
+  type EuAiActExtraction,
+  type EuAiActReason,
+  type EuAiActRule,
+  type EuAiActTier,
+} from "./eu-ai-act.js";

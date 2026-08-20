@@ -37,6 +37,14 @@
  *     use case's tags through the SAME funnel `requiredTemplateIdsFor`
  *     enforces. There is no stored copy of any consequence anywhere here.
  *
+ *  5. THE EU AI ACT TIER IS COMPUTED, NEVER ACCEPTED (ADR-0085, gap L10).
+ *     The questionnaire's structured answers block is the ONLY input; the
+ *     shared frozen rule set (`EU_AI_ACT_RULESET_V1`, hash-pinned) computes
+ *     prohibited/high/limited/minimal server-side on every submission, the
+ *     result is stored with its firing reasons and rule-set version, and it
+ *     INFORMS the sign-off — a tier auto-blocks nothing, and every read of
+ *     it carries the screening-not-legal-advice disclaimer as a field.
+ *
  * WHAT THIS FILE DOES NOT DO — stated because a governance product that
  * overstates itself is worse than one that ships less: approval REGISTERS
  * intent; it does not yet GATE dispatch (nothing refuses an agent call for
@@ -50,6 +58,8 @@ import {
   aiUseCases,
   and,
   auditLog,
+  compliancePackControls,
+  compliancePacks,
   desc,
   eq,
   inArray,
@@ -62,7 +72,17 @@ import {
   type Db,
 } from "@regulait/db";
 import type { InstanceState, WorkflowDefinition } from "@regulait/workflow-kernel";
-import { createUseCaseSchema, retireUseCaseSchema, updateUseCaseSchema } from "@regulait/shared";
+import {
+  classifyEuAiActTier,
+  createUseCaseSchema,
+  extractEuAiActAnswers,
+  retireUseCaseSchema,
+  updateUseCaseSchema,
+  EU_AI_ACT_ANSWERS_FENCE,
+  EU_AI_ACT_RULESET_VERSION,
+  EU_AI_ACT_SCREENING_DISCLAIMER,
+  type EuAiActReason,
+} from "@regulait/shared";
 import { z } from "zod";
 import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects.js";
 import {
@@ -120,7 +140,101 @@ the loop.
 
 ## 8. Decommission criteria
 Under what conditions is this use case retired or re-reviewed?
+
+## 9. EU AI Act risk screening (structured, ADR-0085)
+The platform computes an EU AI Act risk tier (prohibited / high / limited /
+minimal) SERVER-SIDE from structured answers — a submitted tier is refused;
+only the answers count, and the result is a SCREENING aid derived from the
+public Act text, not legal advice. To be screened, include exactly one fenced
+block tagged \`${EU_AI_ACT_ANSWERS_FENCE}\` containing JSON answers (the web
+form builds it for you): purposeDomain, affectedPersons, decisionAutonomy,
+biometricUse, and the boolean flags emotionRecognition, socialScoring,
+manipulativeTechniques, profilesNaturalPersons, safetyComponent,
+interactsWithHumans, generatesSyntheticContent. No block means "not
+screened" — the platform never guesses a tier from prose.
 `;
+
+// ---------------------------------------------------------------------------
+// ADR-0085 — the EU AI Act screening: computed server-side, from the answers,
+// on every questionnaire submission. A calculator, not a lawyer.
+// ---------------------------------------------------------------------------
+
+/**
+ * Recompute the screening from the LATEST questionnaire artifact and store it
+ * on the use case — tier, the firing Annex/Article-shaped reasons, and the
+ * frozen rule-set version that produced them. Called from the same sync the
+ * driving routes and the decide path already run, so re-submitting the
+ * questionnaire (versioned re-approval) recomputes automatically and the
+ * decide path itself is untouched.
+ *
+ * The ONLY input is the answers block inside the artifact: no valid block →
+ * all three columns null ("not screened" — never a guessed tier), and a
+ * block smuggling a `tier` key is refused by the shared parser. Idempotent;
+ * writes (and audits) only when the stored screening actually changes.
+ */
+async function recomputeEuTierForUseCase(
+  db: Db,
+  useCase: AiUseCaseRow,
+  actorUserId: string | null,
+): Promise<void> {
+  if (!useCase.workflowInstanceId) return;
+  const [artifact] = await db
+    .select()
+    .from(workflowArtifacts)
+    .where(
+      and(
+        eq(workflowArtifacts.instanceId, useCase.workflowInstanceId),
+        eq(workflowArtifacts.output, USE_CASE_QUESTIONNAIRE_OUTPUT),
+      ),
+    )
+    .orderBy(desc(workflowArtifacts.version))
+    .limit(1);
+  if (!artifact) return; // nothing submitted yet — nothing to screen
+
+  const extracted = extractEuAiActAnswers(artifact.content);
+  let tier: AiUseCaseRow["euAiActTier"] = null;
+  let reasons: EuAiActReason[] | null = null;
+  let rulesetVersion: number | null = null;
+  if (extracted.status === "ok") {
+    const c = classifyEuAiActTier(extracted.answers);
+    tier = c.tier;
+    reasons = c.reasons;
+    rulesetVersion = c.rulesetVersion;
+  }
+
+  const unchanged =
+    tier === useCase.euAiActTier &&
+    rulesetVersion === useCase.euAiActRulesetVersion &&
+    JSON.stringify(reasons) === JSON.stringify(useCase.euAiActReasons);
+  if (unchanged) return;
+
+  await db
+    .update(aiUseCases)
+    .set({ euAiActTier: tier, euAiActReasons: reasons, euAiActRulesetVersion: rulesetVersion, updatedAt: new Date() })
+    .where(eq(aiUseCases.id, useCase.id));
+  await db.insert(auditLog).values({
+    userId: actorUserId ?? useCase.ownerUserId,
+    objectType: "ai_use_case",
+    objectId: useCase.id,
+    detail: {
+      phase: "eu-ai-act-screening",
+      tier,
+      rulesetVersion,
+      firedRuleIds: reasons?.map((r) => r.ruleId) ?? null,
+      artifactVersion: artifact.version,
+      answersStatus: extracted.status,
+      ...(extracted.status === "invalid" ? { answersError: extracted.error } : {}),
+    },
+    // "allow" even for prohibited: the screening BLOCKS NOTHING — it informs
+    // the sign-off decision, which is where a deny would honestly appear
+    effect: "allow",
+    ruleId: "use-case-eu-tier",
+    ruleChain: [],
+    reason: tier
+      ? `EU AI Act screening for '${useCase.name}': ${tier} (rule set v${rulesetVersion}, from questionnaire v${artifact.version}) — a screening result that informs the sign-off, not legal advice and not a block`
+      : `EU AI Act screening for '${useCase.name}' cleared — questionnaire v${artifact.version} carries no valid answers block (${extracted.status})`,
+  });
+}
 
 // ---------------------------------------------------------------------------
 // The lifecycle join: instance status -> use-case status
@@ -170,6 +284,10 @@ export async function syncUseCaseForInstance(
   if (useCase.status === "approved" || useCase.status === "rejected" || useCase.status === "retired") {
     return;
   }
+  // ADR-0085: the screening rides the same sync — BEFORE the no-status-change
+  // early return below, because a questionnaire re-submission (versioned
+  // re-approval) changes the answers without changing the mapped status.
+  await recomputeEuTierForUseCase(db, useCase, actorUserId);
   const [instance] = await db
     .select({ status: workflowInstances.status })
     .from(workflowInstances)
@@ -299,6 +417,105 @@ async function cascadeConsequencesFor(db: Db, useCase: AiUseCaseRow) {
       "derived live from the compliance profiles — the same rules the cascade enforces on a " +
       "classified project. Enforcement reads a PROJECT's classifications: these consequences " +
       "bind when the named project carries these tags.",
+  };
+}
+
+/** the no-auto-block posture, stated as data so every read carries it */
+const EU_AI_ACT_ENFORCEMENT_NOTE =
+  "the tier INFORMS the human sign-off on the one approvals queue — nothing is auto-blocked by " +
+  "a tier (approval itself gates nothing yet, per ADR-0080's honest limit), and the decide path " +
+  "is unchanged";
+
+/**
+ * ADR-0085 — the screening as the detail view reads it: the STORED result
+ * (tier + firing reasons + rule-set version, written only by
+ * `recomputeEuTierForUseCase`), the disclaimer as a field, and — for a
+ * `high`/`prohibited` tier — the CASCADE ENDING, derived live the ADR-0080
+ * way (never a stored copy): which active eu-ai-act compliance packs exist,
+ * which §8.3 cascade tag each drives, whether the org actually has a
+ * compliance profile for that tag, and the pack's control references cited
+ * read-only. A `prohibited` tier additionally carries the refusal text the
+ * UI renders as an unmissable banner.
+ */
+async function euAiActScreeningFor(db: Db, useCase: AiUseCaseRow, questionnaireContent: string | null) {
+  let answersStatus: "no_questionnaire" | "missing" | "invalid" | "ok" = "no_questionnaire";
+  let answersError: string | null = null;
+  if (questionnaireContent !== null) {
+    const extracted = extractEuAiActAnswers(questionnaireContent);
+    answersStatus = extracted.status;
+    if (extracted.status === "invalid") answersError = extracted.error;
+  }
+  const tier = useCase.euAiActTier;
+  const base = {
+    tier,
+    reasons: useCase.euAiActReasons,
+    rulesetVersion: useCase.euAiActRulesetVersion,
+    currentRulesetVersion: EU_AI_ACT_RULESET_VERSION,
+    disclaimer: EU_AI_ACT_SCREENING_DISCLAIMER,
+    enforcement: EU_AI_ACT_ENFORCEMENT_NOTE,
+    answersStatus,
+    answersError,
+    refusal:
+      tier === "prohibited"
+        ? "Screening result: PROHIBITED under Art. 5 of the EU AI Act. As described by its own " +
+          "answers, this use case falls within the Act's prohibited practices. The platform does " +
+          "not auto-block it — the sign-off decision on the Approvals queue is where a human " +
+          "refuses it, with this screening as the recorded reason."
+        : null,
+  };
+  if (tier !== "high" && tier !== "prohibited") return { ...base, cascade: null };
+
+  // derive live: active eu-ai-act packs -> their cascade tags -> whether a
+  // §8.3 profile actually exists for each tag in THIS org, right now
+  const activePacks = await db
+    .select()
+    .from(compliancePacks)
+    .where(and(eq(compliancePacks.framework, "eu-ai-act"), eq(compliancePacks.status, "active")));
+  const packs = [];
+  for (const pack of activePacks) {
+    const controls = await db
+      .select({ controlRef: compliancePackControls.controlRef, title: compliancePackControls.title })
+      .from(compliancePackControls)
+      .where(eq(compliancePackControls.packId, pack.id))
+      .orderBy(compliancePackControls.controlRef);
+    const profiles = pack.cascadeTag ? await complianceProfilesForTags(db, [pack.cascadeTag]) : [];
+    packs.push({
+      id: pack.id,
+      framework: pack.framework,
+      version: pack.version,
+      title: pack.title,
+      cascadeTag: pack.cascadeTag,
+      /** does the §8.3 cascade actually know this tag here, today? */
+      profileExists: profiles.length > 0,
+      carriedByUseCase: pack.cascadeTag !== null && useCase.complianceTags.includes(pack.cascadeTag),
+      /** read-only citation of the pack's own control vocabulary */
+      controls,
+    });
+  }
+  const recommendedTags = packs
+    .filter((p) => p.cascadeTag !== null)
+    .map((p) => ({
+      tag: p.cascadeTag!,
+      fromPack: p.title,
+      profileExists: p.profileExists,
+      carriedByUseCase: p.carriedByUseCase,
+    }));
+  return {
+    ...base,
+    cascade: {
+      recommendedTags,
+      packs,
+      note:
+        tier === "high"
+          ? "a high screening tier recommends carrying the tags above — where a §8.3 compliance " +
+            "profile exists for a tag, adding it to this use case (and classifying the governed " +
+            "project with it) is what turns the recommendation into enforced cascade consequences; " +
+            "where none exists, creating the profile is the missing step. Derived live from the " +
+            "active eu-ai-act compliance packs — never a stored copy."
+          : "a prohibited screening tier is a reason to refuse at the sign-off, not to tag — the " +
+            "pack citation shows the high-risk obligations that would apply even to a narrowed " +
+            "variant of this proposal. Derived live from the active eu-ai-act compliance packs.",
+    },
   };
 }
 
@@ -511,6 +728,7 @@ export function registerUseCaseRoutes(
       questionnaire,
       questionnaireTemplate: questionnaire ? null : USE_CASE_QUESTIONNAIRE_TEMPLATE,
       cascadeConsequences: await cascadeConsequencesFor(db, row),
+      euAiActScreening: await euAiActScreeningFor(db, row, questionnaire?.content ?? null),
     };
   });
 
@@ -524,6 +742,23 @@ export function registerUseCaseRoutes(
         detail:
           "a use case's status is set only by the linked intake instance's decision on " +
           "POST /v1/approvals/:approvalId/decide (or by the audited retire endpoint) — never by PATCH",
+      });
+    }
+    // ADR-0085: the tier is COMPUTED, never accepted — same by-name refusal
+    // discipline as `status`, pointing at the real input (the answers block)
+    if (
+      req.body &&
+      typeof req.body === "object" &&
+      ("euAiActTier" in (req.body as Record<string, unknown>) ||
+        "euAiActReasons" in (req.body as Record<string, unknown>) ||
+        "euAiActRulesetVersion" in (req.body as Record<string, unknown>))
+    ) {
+      return reply.status(422).send({
+        error: "eu_tier_is_computed_not_patched",
+        detail:
+          "the EU AI Act tier is computed server-side by the frozen rule set from the " +
+          `'${EU_AI_ACT_ANSWERS_FENCE}' answers block inside the questionnaire artifact — ` +
+          "submit answers, never a tier",
       });
     }
     const body = updateUseCaseSchema.parse(req.body);
