@@ -56,6 +56,65 @@ interface ControlAssessment {
   attestationRequired: boolean;
   note: string;
 }
+interface DiffFieldChange {
+  field: string;
+  from: unknown;
+  to: unknown;
+}
+interface DiffControlSummary {
+  controlRef: string;
+  title: string;
+  coverage: string;
+  collector: string;
+  minEvidenceCount: number;
+  attestationRequired: boolean;
+}
+interface ImpactControl {
+  controlRef: string;
+  title: string;
+  definitionChange: "added" | "removed" | "changed" | "unchanged";
+  fromStatus: string | null;
+  toStatus: string | null;
+  fromEvidenceCount: number | null;
+  toEvidenceCount: number | null;
+  moved: boolean;
+  detail: string | null;
+}
+interface DiffResponse {
+  framework: string;
+  from: { version: number; title: string; status: string };
+  to: { version: number; title: string; status: string };
+  diff: {
+    packChanges: DiffFieldChange[];
+    cascadeTagChange: {
+      from: string | null;
+      to: string | null;
+      consequence: string;
+      note: string;
+    } | null;
+    controlsAdded: DiffControlSummary[];
+    controlsRemoved: DiffControlSummary[];
+    controlsChanged: Array<{ controlRef: string; title: string; fields: DiffFieldChange[] }>;
+    summary: {
+      controlsAdded: number;
+      controlsRemoved: number;
+      controlsChanged: number;
+      controlsUnchanged: number;
+      packFieldsChanged: number;
+      cascadeTagChanged: boolean;
+    };
+    identical: boolean;
+  };
+  impact: {
+    period: { label: string };
+    controls: ImpactControl[];
+    statusesMoved: number;
+    evaluationIdentical: boolean;
+    note: string;
+  };
+  disclaimer: string;
+}
+
 interface Scorecard {
   framework: string;
   packVersion: number;
@@ -84,6 +143,13 @@ const STATUS_TONE: Record<string, "ok" | "warn" | "danger" | "info" | "neutral">
   attestation_required: "warn",
   unaddressed: "neutral",
 };
+
+/** render a diffed before/after value: scalars as text, objects as JSON, nullish as a dash */
+function showValue(x: unknown): string {
+  if (x === null || x === undefined) return "—";
+  if (typeof x === "object") return JSON.stringify(x);
+  return String(x);
+}
 
 const EXAMPLE = JSON.stringify(
   {
@@ -126,7 +192,14 @@ export default function CompliancePacksPage() {
 
   const [draft, setDraft] = useState(EXAMPLE);
   const [scorecard, setScorecard] = useState<Scorecard | null>(null);
+  const [diffView, setDiffView] = useState<DiffResponse | null>(null);
   const [period, setPeriod] = useState("current_quarter");
+
+  /** the active version per framework — what a draft/retired version is
+   * reviewed AGAINST */
+  const activeVersionOf = (framework: string) =>
+    (packs.data?.packs ?? []).find((p) => p.framework === framework && p.status === "active")
+      ?.version ?? null;
 
   const refresh = () => void packs.refetch();
 
@@ -170,6 +243,17 @@ export default function CompliancePacksPage() {
       });
       setScorecard(res.scorecard);
     }, "Scorecard computed from the ledgers");
+  };
+
+  const diffAgainstActive = async (p: Pack) => {
+    const activeVersion = activeVersionOf(p.framework);
+    if (activeVersion === null) return;
+    await act.run(async () => {
+      const res = await api.get<DiffResponse>(
+        `/v1/compliance-packs/${encodeURIComponent(p.framework)}/diff?from=${activeVersion}&to=${p.version}&period=${period}`,
+      );
+      setDiffView(res);
+    }, "Diff computed — read-only, nothing activated");
   };
 
   return (
@@ -239,24 +323,175 @@ export default function CompliancePacksPage() {
                 {
                   key: "actions",
                   header: "",
-                  render: (p) => (
-                    <div className={v.row}>
-                      {p.status !== "active" ? (
-                        <Button disabled={act.busy} onClick={() => void activate(p)}>
-                          Activate
+                  render: (p) => {
+                    const activeVersion = activeVersionOf(p.framework);
+                    return (
+                      <div className={v.row}>
+                        {p.status !== "active" ? (
+                          <Button disabled={act.busy} onClick={() => void activate(p)}>
+                            Activate
+                          </Button>
+                        ) : null}
+                        {activeVersion !== null && activeVersion !== p.version ? (
+                          <Button disabled={act.busy} onClick={() => void diffAgainstActive(p)}>
+                            Diff vs active
+                          </Button>
+                        ) : null}
+                        <Button variant="primary" disabled={act.busy} onClick={() => void evaluate(p)}>
+                          Evaluate
                         </Button>
-                      ) : null}
-                      <Button variant="primary" disabled={act.busy} onClick={() => void evaluate(p)}>
-                        Evaluate
-                      </Button>
-                    </div>
-                  ),
+                      </div>
+                    );
+                  },
                 },
               ]}
             />
           )}
         </QueryGate>
       </Card>
+
+      {diffView ? (
+        <Card
+          title={`What v${diffView.to.version} changes — ${diffView.framework} v${diffView.from.version} → v${diffView.to.version}`}
+        >
+          <p className={v.faint}>
+            Read-only review: nothing has been activated. Activation is not gated on this view — it
+            exists so the decision is informed, not so a page-load can stand in for diligence. The
+            activation audit records whether this from→to diff was computed.
+          </p>
+
+          {/* THE UNMISSABLE FLAG: a cascadeTag change is §8.3 enforcement reach, not prose. */}
+          {diffView.diff.cascadeTagChange ? (
+            <div className={`${a.effectBanner} ${a.effectBannerDeny}`}>
+              <span className={a.effectWord}>Cascade tag change</span>
+              <div>
+                <p>
+                  <code>{diffView.diff.cascadeTagChange.from ?? "(none)"}</code>
+                  {" → "}
+                  <code>{diffView.diff.cascadeTagChange.to ?? "(none)"}</code>{" "}
+                  <Badge tone="danger">HIGH consequence</Badge>
+                </p>
+                <p className={v.dim}>{diffView.diff.cascadeTagChange.note}</p>
+              </div>
+            </div>
+          ) : null}
+
+          {diffView.diff.identical ? (
+            <p className={v.dim}>
+              The two versions are <strong>identical</strong> — this revision changes no mapping.
+            </p>
+          ) : (
+            <>
+              <div className={a.statRow}>
+                <Stat value={diffView.diff.summary.controlsAdded} label="Controls added" />
+                <Stat value={diffView.diff.summary.controlsRemoved} label="Controls removed" />
+                <Stat value={diffView.diff.summary.controlsChanged} label="Controls changed" />
+                <Stat value={diffView.diff.summary.controlsUnchanged} label="Unchanged" />
+              </div>
+
+              {diffView.diff.packChanges.length ? (
+                <Table<DiffFieldChange>
+                  rows={diffView.diff.packChanges}
+                  rowKey={(c) => `pack-${c.field}`}
+                  columns={[
+                    { key: "field", header: "Pack field", render: (c) => <code>{c.field}</code> },
+                    { key: "from", header: "Was", render: (c) => <span className={v.dim}>{showValue(c.from)}</span> },
+                    { key: "to", header: "Becomes", render: (c) => showValue(c.to) },
+                  ]}
+                />
+              ) : null}
+
+              {diffView.diff.controlsAdded.length || diffView.diff.controlsRemoved.length ? (
+                <Table<DiffControlSummary & { kind: string }>
+                  rows={[
+                    ...diffView.diff.controlsAdded.map((c) => ({ ...c, kind: "added" })),
+                    ...diffView.diff.controlsRemoved.map((c) => ({ ...c, kind: "removed" })),
+                  ]}
+                  rowKey={(c) => `${c.kind}-${c.controlRef}`}
+                  columns={[
+                    {
+                      key: "kind",
+                      header: "",
+                      render: (c) => <Badge tone={c.kind === "added" ? "info" : "warn"}>{c.kind}</Badge>,
+                    },
+                    { key: "ref", header: "Control", render: (c) => <code>{c.controlRef}</code> },
+                    { key: "title", header: "Title", render: (c) => <span className={v.dim}>{c.title}</span> },
+                    { key: "coverage", header: "Declared coverage", render: (c) => c.coverage },
+                    { key: "collector", header: "Collector", render: (c) => <code>{c.collector}</code> },
+                    { key: "min", header: "Threshold", render: (c) => c.minEvidenceCount },
+                  ]}
+                />
+              ) : null}
+
+              {diffView.diff.controlsChanged.map((c) => (
+                <div key={c.controlRef}>
+                  <p>
+                    <Badge tone="info">changed</Badge> <code>{c.controlRef}</code>{" "}
+                    <span className={v.dim}>{c.title}</span>
+                  </p>
+                  <Table<DiffFieldChange>
+                    rows={c.fields}
+                    rowKey={(f) => `${c.controlRef}-${f.field}`}
+                    columns={[
+                      { key: "field", header: "Field", render: (f) => <code>{f.field}</code> },
+                      { key: "from", header: "Was", render: (f) => <span className={v.dim}>{showValue(f.from)}</span> },
+                      { key: "to", header: "Becomes", render: (f) => showValue(f.to) },
+                    ]}
+                  />
+                </div>
+              ))}
+            </>
+          )}
+
+          <h3 className={v.dim}>Impact preview — computed statuses under each version, current ledgers</h3>
+          <p className={v.faint}>{diffView.impact.note}</p>
+          {diffView.impact.evaluationIdentical ? null : (
+            <Table<ImpactControl>
+              rows={diffView.impact.controls.filter((c) => c.moved || c.definitionChange !== "unchanged")}
+              rowKey={(c) => c.controlRef}
+              columns={[
+                { key: "ref", header: "Control", render: (c) => <code>{c.controlRef}</code> },
+                {
+                  key: "def",
+                  header: "Definition",
+                  render: (c) => (
+                    <Badge tone={c.definitionChange === "removed" ? "warn" : c.definitionChange === "unchanged" ? "neutral" : "info"}>
+                      {c.definitionChange}
+                    </Badge>
+                  ),
+                },
+                {
+                  key: "from",
+                  header: `Under v${diffView.from.version}`,
+                  render: (c) =>
+                    c.fromStatus ? (
+                      <Badge tone={STATUS_TONE[c.fromStatus] ?? "neutral"}>{c.fromStatus}</Badge>
+                    ) : (
+                      <span className={v.faint}>not in pack</span>
+                    ),
+                },
+                {
+                  key: "to",
+                  header: `Under v${diffView.to.version}`,
+                  render: (c) =>
+                    c.toStatus ? (
+                      <Badge tone={STATUS_TONE[c.toStatus] ?? "neutral"}>{c.toStatus}</Badge>
+                    ) : (
+                      <span className={v.faint}>not in pack</span>
+                    ),
+                },
+                {
+                  key: "moved",
+                  header: "Would move",
+                  render: (c) => (c.moved ? <Badge tone="warn">yes</Badge> : <span className={v.faint}>no</span>),
+                },
+                { key: "detail", header: "Detail", render: (c) => <span className={v.dim}>{c.detail ?? ""}</span> },
+              ]}
+            />
+          )}
+          <p className={v.faint}>{diffView.disclaimer}</p>
+        </Card>
+      ) : null}
 
       {scorecard ? (
         <Card title={`Scorecard — ${scorecard.framework} v${scorecard.packVersion} (${scorecard.period.label})`}>
