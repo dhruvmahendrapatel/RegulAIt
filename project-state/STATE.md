@@ -82,9 +82,20 @@ prohibited use case both denied and approved by its human with the tier as the r
 `high` derives its cascade recommendation live from the org's actual eu-ai-act packs/profiles.
 Gateway **2208 passing + 9 MinIO skips / 134 files**, Playwright **112/112** (e2e fixture fix:
 the auth rate-limit bucket raised in global-setup — the 112th sign-in tipped the production
-default's rolling window). Next: **L12** factsheet auto-fill of model cards from the ledgers;
-L13 (assessment AI pre-fill) needs an owner decision — it collides with ADR-0080's "the
-answers are yours" stance; L6 dispatches the moment the model credential is unparked. Process note: M-019 logged —
+default's rolling window). Then **L12**
+([ADR-0086](../docs/decisions/0086-model-card-autofill.md)): the model card becomes **a window
+you sign** — evidence-shaped sections computed by SELECT at read time from the real ledgers
+(evals/groundedness, red-team ASR verbatim or *unmeasured not resisted*, guardrail modes,
+spend, effective grant holders, drift standing, linked use-cases/risks/vendors), kept in a
+labelled block that never blends with manual evidence; at the one decide path the on-screen
+window is frozen into the decision's audit detail (no migration — the snapshot is an audit
+artifact, not card state), and a **staleness note** counts what moved since the last granting
+decision ("2 eval runs and 1 guardrail change since certification") without judging it —
+ADR-0045's expiry gate untouched, no fairness number ever synthesized (pinned; L9 stays
+open). Gateway **2218 passing + 9 MinIO skips / 135 files**, Playwright **113/113**. The
+four-vendor build-next queue is done; remaining: L13 assessment AI pre-fill (owner decision —
+collides with ADR-0080's "the answers are yours"), the later/refuse ledger in the gap doc
+(L9/L11/L14–L19), and L6 the moment the model credential is unparked. Process note: M-019 logged —
 a REPEAT of M-014 (agent parked on a watcher despite the rule in its brief); the rule is
 rewritten to make parking impossible (foreground suite runs with explicit timeouts, stated
 inside the verification step).
