@@ -2,9 +2,20 @@
 
 ![CI](https://github.com/dhruvmahendrapatel/RegulAIt/workflows/CI/badge.svg)
 
-RegulAIt is an AI-native agent/development platform, currently in its infrastructure bootstrap
-phase. Long-term vision, architecture decisions, and live project status are tracked in this
-repo rather than in any one conversation, so work can be picked up by anyone (or any AI session)
+**RegulAIt is AI governance that enforces itself.** The policy pack, the approval, and the
+budget are not documents *about* your AI — they are the control plane your AI actually runs
+through. One compliance tag cascades into required sign-off stages, PII blocking, and audit
+retention; every pack control is evidenced by a **query over real ledgers, never a tick-box**
+(ADR-0058); the audit chain anchors to write-once storage whose tamper resistance is
+**observed at runtime, never assumed from config** (ADR-0060). Governance platforms review
+traces after the fact; gateways proxy calls without a compliance vocabulary; RegulAIt is the
+one plane where the control and its enforcement are the same object — vendor-neutral across
+models, clouds, git hosts, and PM tools by construction.
+
+Every claim above links to an ADR and the adversarial test that pins it — see
+[docs/product/POSITIONING.md](docs/product/POSITIONING.md) and the market/gap analyses beside
+it. Long-term vision, architecture decisions, and live project status are tracked in this repo
+rather than in any one conversation, so work can be picked up by anyone (or any AI session)
 cold.
 
 - **Start here if you're a human:** [project-state/STATE.md](project-state/STATE.md) for current
