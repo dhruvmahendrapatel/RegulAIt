@@ -205,6 +205,7 @@ export default function RisksPage() {
                   <option value="budget_overrun">budget overrun</option>
                   <option value="hallucination">hallucination</option>
                   <option value="shadow_ai">shadow AI</option>
+                  <option value="third_party_ai">third-party AI (vendors)</option>
                 </Select>
               </Field>
             </div>

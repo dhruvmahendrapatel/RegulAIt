@@ -37,6 +37,7 @@ import GuardrailsPage from "./views/admin/governance/GuardrailsPage";
 import EvalsPage from "./views/admin/governance/EvalsPage";
 import ModelRiskPage from "./views/admin/governance/ModelRiskPage";
 import UseCasesPage from "./views/admin/governance/UseCasesPage";
+import VendorsPage from "./views/admin/governance/VendorsPage";
 import RisksPage from "./views/admin/governance/RisksPage";
 import InventoryPage from "./views/admin/governance/InventoryPage";
 import PosturePage from "./views/admin/governance/PosturePage";
@@ -160,6 +161,8 @@ export default function App() {
                         <Route path="model-risk" element={<ModelRiskPage />} />
                         {/* ADR-0080 */}
                         <Route path="use-cases" element={<UseCasesPage />} />
+                        {/* ADR-0084 */}
+                        <Route path="vendors" element={<VendorsPage />} />
                         {/* ADR-0081 */}
                         <Route path="risks" element={<RisksPage />} />
                         {/* ADR-0082 */}

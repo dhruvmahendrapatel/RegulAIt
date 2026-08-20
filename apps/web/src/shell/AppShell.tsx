@@ -81,6 +81,12 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // questionnaired, and signed off before anything ran?" — and an approved
       // use case carries the same compliance tags the cascade enforces.
       { label: "Use cases", to: "/admin/use-cases" },
+      // ADR-0084 — the THIRD-PARTY front door beside the first-party one:
+      // use cases govern OUR use of AI; this governs a vendor's AI reaching
+      // our data. The assessment rides the same rails, and everything the
+      // vendor supplies is an attestation — labelled, attributed, never
+      // blended into computed evidence.
+      { label: "Vendors", to: "/admin/vendors" },
       // ADR-0081 — the RISK layer over the measurements above. Evals, red-team
       // and guardrails MEASURE; the register links each measurement to a named
       // risk scenario, an owner, the mitigating control we actually enforce,
