@@ -63,6 +63,12 @@ export const AI_RISK_CATEGORIES = [
   /** AI usage outside the gateway entirely — evidenced by the shadow-AI
    * findings ledger (ADR-0071) */
   "shadow_ai",
+  /** a third party's AI reaches our data or our stack without an assessed
+   * vendor behind it — evidenced by the AI vendor registry's ASSESSMENT
+   * LIFECYCLE (ADR-0084): counts of vendors by assessment state, decided on
+   * the one approvals queue. The lifecycle is a platform record; the
+   * assessment CONTENT is vendor-attested, and the resolver says so. */
+  "third_party_ai",
 ] as const;
 export type AiRiskCategory = (typeof AI_RISK_CATEGORIES)[number];
 
@@ -114,6 +120,12 @@ export const RISK_EVIDENCE_RESOLVERS = [
   "groundedness_evals",
   /** `shadow_ai_findings` — open vs total, the ADR-0071 discovery ledger */
   "shadow_findings",
+  /** `ai_vendors` (ADR-0084) — vendors by assessment state (proposed /
+   * under_assessment / approved / rejected / retired) plus assessments
+   * decided in the window, scoped to the risk's vendor when it names one.
+   * Counts the assessment LIFECYCLE our approvals queue actually decided —
+   * never the truth of the vendor's own attested answers. */
+  "vendor_assessments",
   /** NOT MEASURED BY ANY LEDGER. The register says so outright. */
   "none",
 ] as const;
@@ -136,6 +148,7 @@ export const RISK_CATEGORY_EVIDENCE: Readonly<
   budget_overrun: ["budget_refusals"],
   hallucination: ["groundedness_evals"],
   shadow_ai: ["shadow_findings"],
+  third_party_ai: ["vendor_assessments"],
 };
 
 /**
@@ -169,6 +182,9 @@ export const createRiskSchema = z.object({
   projectId: z.string().uuid().optional(),
   agentId: z.string().uuid().optional(),
   useCaseId: z.string().uuid().optional(),
+  /** ADR-0084: the vendor whose assessment lifecycle evidences a
+   * third-party risk — narrows the `vendor_assessments` resolver */
+  vendorId: z.string().uuid().optional(),
 });
 export type CreateRiskInput = z.infer<typeof createRiskSchema>;
 
@@ -185,6 +201,7 @@ export const updateRiskSchema = z.object({
   projectId: z.string().uuid().nullable().optional(),
   agentId: z.string().uuid().nullable().optional(),
   useCaseId: z.string().uuid().nullable().optional(),
+  vendorId: z.string().uuid().nullable().optional(),
 });
 export type UpdateRiskInput = z.infer<typeof updateRiskSchema>;
 
@@ -386,5 +403,23 @@ export const DEFAULT_RISK_LIBRARY: RiskLibraryEntry[] = [
       "severity, disposition, and an audited remediation path onto the platform (ADR-0071). " +
       "The open-vs-total findings below are that ledger, live.",
     evidenceResolvers: ["shadow_findings"],
+  },
+  {
+    key: "third-party-ai-unassessed-vendor",
+    title: "A third party's AI reaches our data without an assessed vendor behind it",
+    description:
+      "A model provider, an AI-featured product, or a data processor runs AI over our data " +
+      "with no recorded assessment of what it runs, what it sees, and who its subprocessors " +
+      "are — third-party exposure nobody signed off on.",
+    category: "third_party_ai",
+    likelihood: "medium",
+    impact: "high",
+    mitigatingControl:
+      "The AI vendor registry (ADR-0084): a vendor is a governed object whose assessment " +
+      "rides the pillar-2 rails — questionnaire artifact, human sign-off on the one approvals " +
+      "queue — and the assessment-state counts below are that lifecycle, live. Honest limit, " +
+      "said outright: the platform verifies that assessments HAPPENED and were decided; the " +
+      "answers inside them are vendor attestations, never platform-verified facts.",
+    evidenceResolvers: ["vendor_assessments"],
   },
 ];

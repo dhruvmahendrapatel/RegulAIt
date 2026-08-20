@@ -48,6 +48,7 @@ import {
   agents,
   aiRisks,
   aiUseCases,
+  aiVendors,
   and,
   auditLog,
   connectorGrants,
@@ -131,7 +132,7 @@ export interface RiskEvidenceEntry {
 export interface RiskEvidenceBlock {
   window: { start: string; end: string; days: number };
   /** the slice the queries were scoped to — references, never copies */
-  scope: { projectId: string | null; agentId: string | null };
+  scope: { projectId: string | null; agentId: string | null; vendorId: string | null };
   entries: RiskEvidenceEntry[];
   computedAt: string;
   note: string;
@@ -147,7 +148,7 @@ export interface RiskEvidenceBlock {
  */
 export async function resolveRiskEvidence(
   db: Db,
-  risk: Pick<AiRiskRow, "category" | "projectId" | "agentId">,
+  risk: Pick<AiRiskRow, "category" | "projectId" | "agentId" | "vendorId">,
   now: Date = new Date(),
 ): Promise<RiskEvidenceBlock> {
   const periodEnd = now;
@@ -462,6 +463,67 @@ export async function resolveRiskEvidence(
         break;
       }
 
+      case "vendor_assessments": {
+        // ADR-0084: the vendor registry's ASSESSMENT LIFECYCLE — counts of
+        // vendors by assessment state, plus assessments decided in the
+        // window, scoped to the risk's vendor when it names one. The counts
+        // are platform records (the sign-offs happened on the one approvals
+        // queue); the assessment CONTENT stays vendor-attested — said here,
+        // in the payload, not in a doc.
+        const scoped = (extra?: ReturnType<typeof eq>) =>
+          and(
+            ...(risk.vendorId ? [eq(aiVendors.id, risk.vendorId)] : []),
+            ...(extra ? [extra] : []),
+          );
+        const countWhere = async (extra?: ReturnType<typeof eq>) => {
+          const [row] = await db.select({ n: count() }).from(aiVendors).where(scoped(extra));
+          return row?.n ?? 0;
+        };
+        const [total, proposed, underAssessment, approved, rejected, retired] = await Promise.all([
+          countWhere(),
+          countWhere(eq(aiVendors.status, "proposed")),
+          countWhere(eq(aiVendors.status, "under_assessment")),
+          countWhere(eq(aiVendors.status, "approved")),
+          countWhere(eq(aiVendors.status, "rejected")),
+          countWhere(eq(aiVendors.status, "retired")),
+        ]);
+        const [decidedInWindow] = await db
+          .select({ n: count() })
+          .from(aiVendors)
+          .where(
+            and(
+              ...(risk.vendorId ? [eq(aiVendors.id, risk.vendorId)] : []),
+              gte(aiVendors.decidedAt, periodStart),
+              lt(aiVendors.decidedAt, periodEnd),
+            ),
+          );
+        entries.push({
+          resolver,
+          kind: "measured",
+          source: "ai_vendors",
+          queried:
+            "AI vendors (ADR-0084) by assessment state" +
+            (risk.vendorId ? ", scoped to this risk's vendor" : ", org-wide") +
+            ", plus assessments decided in the window — the lifecycle is a platform record " +
+            "(sign-offs on the one approvals queue); the answers inside an assessment are " +
+            "vendor attestations, not platform-verified facts",
+          measured: {
+            total,
+            proposed,
+            underAssessment,
+            approved,
+            rejected,
+            retired,
+            decidedInWindow: decidedInWindow?.n ?? 0,
+          },
+          note:
+            total === 0
+              ? "no vendor registered — third-party AI is unassessed here, not absent"
+              : undefined,
+        });
+        break;
+      }
+
       default: {
         // an unknown resolver is NOT silently skipped — same posture as
         // runCollector's unknown-collector branch
@@ -476,7 +538,11 @@ export async function resolveRiskEvidence(
       end: periodEnd.toISOString(),
       days: RISK_EVIDENCE_WINDOW_DAYS,
     },
-    scope: { projectId: risk.projectId ?? null, agentId: risk.agentId ?? null },
+    scope: {
+      projectId: risk.projectId ?? null,
+      agentId: risk.agentId ?? null,
+      vendorId: risk.vendorId ?? null,
+    },
     entries,
     computedAt: now.toISOString(),
     note:
@@ -504,7 +570,15 @@ export function registerRiskRoutes(app: FastifyInstance, db: Db): void {
     projectId?: string | null;
     agentId?: string | null;
     useCaseId?: string | null;
+    vendorId?: string | null;
   }): Promise<{ ok: true } | { ok: false; field: string }> {
+    if (body.vendorId) {
+      const [v] = await db
+        .select({ id: aiVendors.id })
+        .from(aiVendors)
+        .where(eq(aiVendors.id, body.vendorId));
+      if (!v) return { ok: false, field: "vendorId" };
+    }
     if (body.projectId) {
       const [p] = await db.select({ id: projects.id }).from(projects).where(eq(projects.id, body.projectId));
       if (!p) return { ok: false, field: "projectId" };
@@ -568,6 +642,7 @@ export function registerRiskRoutes(app: FastifyInstance, db: Db): void {
         projectId: body.projectId ?? null,
         agentId: body.agentId ?? null,
         useCaseId: body.useCaseId ?? null,
+        vendorId: body.vendorId ?? null,
         status: "open",
       })
       .returning();
@@ -585,6 +660,7 @@ export function registerRiskRoutes(app: FastifyInstance, db: Db): void {
         projectId: body.projectId ?? null,
         agentId: body.agentId ?? null,
         useCaseId: body.useCaseId ?? null,
+        vendorId: body.vendorId ?? null,
       },
       effect: "allow",
       ruleId: RISK_RULE_IDS.registered,
@@ -612,6 +688,7 @@ export function registerRiskRoutes(app: FastifyInstance, db: Db): void {
             "budget_overrun",
             "hallucination",
             "shadow_ai",
+            "third_party_ai",
           ])
           .optional(),
       })
@@ -735,6 +812,7 @@ export function registerRiskRoutes(app: FastifyInstance, db: Db): void {
         ...(body.projectId !== undefined ? { projectId: body.projectId } : {}),
         ...(body.agentId !== undefined ? { agentId: body.agentId } : {}),
         ...(body.useCaseId !== undefined ? { useCaseId: body.useCaseId } : {}),
+        ...(body.vendorId !== undefined ? { vendorId: body.vendorId } : {}),
         updatedAt: new Date(),
       })
       .where(eq(aiRisks.id, riskId))

@@ -212,6 +212,7 @@ import { applyWorkflowApprovalDecision, registerWorkflowRoutes } from "./workflo
 import { registerTemplateGalleryRoutes } from "./template-gallery.js";
 // ADR-0080 — the AI use-case registry (L1 front-door) and its lifecycle join.
 import { registerUseCaseRoutes, syncUseCaseForInstance } from "./use-cases.js";
+import { registerVendorRoutes, syncVendorForInstance } from "./vendors.js";
 // ADR-0081 — the AI risk register (gap L2): evidence computed from the real
 // ledgers at read time; acceptance is an audited record.
 import { registerRiskRoutes } from "./risks.js";
@@ -2485,6 +2486,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         // "approval registers the use case" commits or rolls back with the
         // decision, and inherits every separation-of-duties guard above.
         await syncUseCaseForInstance(tx as unknown as Db, updated.instanceId, deciderUserId);
+        // ADR-0084: same discipline for a vendor whose ASSESSMENT this
+        // instance governs — the terminal decision flips the vendor inside
+        // the decision's own transaction. Approving records a sign-off on
+        // the vendor's attested answers, never a verification of them.
+        await syncVendorForInstance(tx as unknown as Db, updated.instanceId, deciderUserId);
       }
       // Orchestration escalations (§3): approve = another attempt, deny = abort.
       if (updated.objectType === "run") {
@@ -2849,16 +2855,23 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   registerWorkflowRoutes(app, db, {
     dataKey: opts.dataKey,
-    // ADR-0080: artifact submit / advance / abort can move an instance that
-    // governs an AI use case (e.g. questionnaire submitted -> under_review,
-    // aborted -> rejected); mirror it. The decide path is handled inside the
-    // one approvals transaction above.
-    onInstanceTransition: (d, instanceId, actorUserId) =>
-      syncUseCaseForInstance(d, instanceId, actorUserId),
+    // ADR-0080/0084: artifact submit / advance / abort can move an instance
+    // that governs an AI use case or an AI vendor assessment (e.g.
+    // questionnaire submitted -> under review/assessment, aborted ->
+    // rejected); mirror both. The decide path is handled inside the one
+    // approvals transaction above.
+    onInstanceTransition: async (d, instanceId, actorUserId) => {
+      await syncUseCaseForInstance(d, instanceId, actorUserId);
+      await syncVendorForInstance(d, instanceId, actorUserId);
+    },
   });
   // ADR-0077 — the cascade-annotated template gallery (admin-gated by default)
   registerTemplateGalleryRoutes(app, db);
   registerUseCaseRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0084 — the AI vendor registry beside the use-case registry whose
+  // rails it copies. Propose/list/detail/edit/attest are non-admin
+  // (owner-or-admin in-handler); RETIRE stays admin through the default gate.
+  registerVendorRoutes(app, db, { dataKey: opts.dataKey });
   // ADR-0081 — the AI risk register beside the use-case registry it can
   // reference. Register/list/detail/edit/transition are non-admin
   // (owner-or-admin in-handler, exactly the use-case scoping); ACCEPTANCE is

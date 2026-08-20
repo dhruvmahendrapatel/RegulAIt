@@ -105,6 +105,34 @@ export function aiUseCaseIntakeDefinition(): WorkflowDefinition {
   };
 }
 
+/** ADR-0084 — the well-known name the vendor front-door resolves, exactly the
+ * ADR-0080 pattern above: the newest active template under this name wins
+ * (so an admin can route vendor assessments to a named assessor), and only
+ * when none exists is the built-in shape minted. */
+export const VENDOR_AI_ASSESSMENT_TEMPLATE_NAME = "vendor-ai-assessment";
+
+/** The §2 core loop applied to the L5 vendor portal: intake → the ADR-0079
+ * resting plan stage (where the assessment is scoped) → the vendor
+ * ASSESSMENT QUESTIONNAIRE as the artifact_generation output → human
+ * sign-off. The questionnaire is an honest blank form the assessor fills
+ * with VENDOR-SUPPLIED answers — labelled as attestations end to end
+ * (ADR-0084), never pre-filled by any model. */
+export function vendorAiAssessmentDefinition(): WorkflowDefinition {
+  return {
+    workflow: VENDOR_AI_ASSESSMENT_TEMPLATE_NAME,
+    stages: [
+      { id: "intake", type: "trigger" },
+      { id: "plan", type: "planning" },
+      {
+        id: "questionnaire",
+        type: "artifact_generation",
+        output: "vendor_assessment_questionnaire",
+      },
+      { id: "signoff", type: "human_approval", approvers: [APPROVER_PLACEHOLDER] },
+    ],
+  };
+}
+
 function builtInShapes(): Array<
   Pick<GalleryEntry, "galleryId" | "title" | "description"> & { definition: WorkflowDefinition }
 > {
@@ -160,6 +188,19 @@ function builtInShapes(): Array<
         "the newest active template named 'ai-use-case-intake' — create one from this shape with " +
         "a named approver to route use-case approvals to a governance owner.",
       definition: aiUseCaseIntakeDefinition(),
+    },
+    {
+      galleryId: "vendor-ai-assessment",
+      title: "Vendor AI assessment",
+      description:
+        "The ADR-0084 third-party front-door: propose an AI vendor, scope the assessment at " +
+        "the resting plan stage, record the vendor's answers in the assessment questionnaire " +
+        "as the governed artifact, and a human sign-off registers the vendor as assessed. " +
+        "The answers are vendor attestations — recorded claims, never platform-verified " +
+        "evidence. POST /v1/vendors starts instances of the newest active template named " +
+        "'vendor-ai-assessment' — create one from this shape with a named approver to route " +
+        "vendor assessments to a risk owner.",
+      definition: vendorAiAssessmentDefinition(),
     },
     {
       galleryId: "hotfix",

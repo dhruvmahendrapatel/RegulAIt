@@ -2844,3 +2844,25 @@ export {
   type TransitionRiskInput,
   type UpdateRiskInput,
 } from "./risks.js";
+
+// ---------------------------------------------------------------------------
+// ADR-0084 — the AI vendor registry (third-party AI risk): the vocabulary,
+// the request shapes, and the attested-never-measured disclaimer. `status` is
+// conspicuously absent from every schema: approved/rejected are reached only
+// through the linked assessment instance's decision on the one approvals
+// queue, and retirement has its own audited endpoint.
+// ---------------------------------------------------------------------------
+export {
+  AI_VENDOR_ATTESTATION_DISCLAIMER,
+  AI_VENDOR_CATEGORIES,
+  AI_VENDOR_STATUSES,
+  createVendorSchema,
+  recordVendorAttestationSchema,
+  retireVendorSchema,
+  updateVendorSchema,
+  type AiVendorCategory,
+  type AiVendorStatus,
+  type CreateVendorInput,
+  type RecordVendorAttestationInput,
+  type UpdateVendorInput,
+} from "./vendors.js";

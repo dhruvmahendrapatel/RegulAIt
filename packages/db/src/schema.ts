@@ -799,6 +799,15 @@ export const auditLog = pgTable(
         // the real ledgers (ADR-0058 discipline). Plain text column — no DDL
         // needed.
         "ai_risk",
+        // ADR-0084: the AI vendor registry (third-party AI risk). A PROPOSAL
+        // (the front-door act), every LIFECYCLE FLIP driven by the linked
+        // assessment instance's decision (approved/rejected — the ADR-0080
+        // discipline), every VENDOR ATTESTATION recorded against a pack
+        // control (who recorded the vendor's claim, when, from which
+        // questionnaire version — a claim, never platform evidence), every
+        // refused DIRECT status write, and an admin RETIREMENT with its
+        // reason. Plain text column — no DDL needed.
+        "ai_vendor",
       ],
     })
       .notNull()
@@ -6741,6 +6750,113 @@ export const aiUseCases = pgTable(
 export type AiUseCaseRow = typeof aiUseCases.$inferSelect;
 
 // ---------------------------------------------------------------------------
+// ADR-0084 (migration 0088) — the AI vendor registry (third-party AI risk).
+//
+// Gap L5: our vendor story was COST (ADR-0069/0076), not risk. A third-party
+// AI vendor becomes a governed object whose assessment rides the pillar-2
+// rails exactly like a use case (ADR-0080): propose → questionnaire artifact
+// → sign-off on the one approvals queue. `status` reaches approved/rejected
+// ONLY through that instance's terminal decision.
+//
+// THE HONESTY SPLIT THIS TABLE CARRIES: `pack_attestations` holds
+// VENDOR-SUPPLIED answers to compliance-pack controls, each stamped with who
+// recorded it, when, and from which questionnaire artifact version. They are
+// CLAIMS — deliberately NOT compliance_pack_attestations rows (those are the
+// org's own statements and feed the pack evaluator), and nothing in the pack
+// scorecard/report/collector machinery ever reads this column.
+// ---------------------------------------------------------------------------
+
+export const AI_VENDOR_STATUSES = [
+  "proposed",
+  "under_assessment",
+  "approved",
+  "rejected",
+  "retired",
+] as const;
+export type AiVendorStatus = (typeof AI_VENDOR_STATUSES)[number];
+
+export const AI_VENDOR_CATEGORIES = [
+  /** a model provider our agents call (directly or via a custom endpoint) */
+  "model_provider",
+  /** a product we use whose features run AI on our data */
+  "ai_feature_vendor",
+  /** a processor our data reaches (sub-processing, enrichment, hosting) */
+  "data_processor",
+  /** an integration that moves data between systems with AI in the path */
+  "integration",
+] as const;
+export type AiVendorCategory = (typeof AI_VENDOR_CATEGORIES)[number];
+
+/** one VENDOR-SUPPLIED answer to a pack control, with full attribution — the
+ * shape the audited attestation endpoint appends and the detail view renders
+ * under its "vendor-attested — not verified by this platform" label */
+export interface AiVendorPackAttestation {
+  framework: string;
+  packId: string;
+  packVersion: number;
+  controlRef: string;
+  /** the vendor's claim, verbatim as recorded */
+  statement: string;
+  evidenceRef: string | null;
+  /** WHO recorded the vendor's answer (a platform user, never the vendor —
+   * there is no vendor-facing auth surface) */
+  recordedByUserId: string;
+  recordedAt: string;
+  /** which version of the assessment questionnaire the answer came from */
+  questionnaireVersion: number;
+}
+
+export const aiVendors = pgTable(
+  "ai_vendors",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    description: text("description").notNull(),
+    category: text("category", { enum: AI_VENDOR_CATEGORIES }).notNull(),
+    ownerUserId: uuid("owner_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    /** REFERENCES, not copies: admin-registered custom model providers
+     * (ADR-0034) this vendor corresponds to — validated at write time */
+    linkedCustomProviderIds: jsonb("linked_custom_provider_ids")
+      .$type<string[]>()
+      .notNull()
+      .default([]),
+    /** provider keys as they appear on agents.provider — a linkage hint,
+     * never an enforcement key (that column is free text) */
+    linkedAgentProviders: jsonb("linked_agent_providers").$type<string[]>().notNull().default([]),
+    /** vendor-supplied pack-control answers WITH ATTRIBUTION — written only
+     * by the audited attestation endpoint (see the section header) */
+    packAttestations: jsonb("pack_attestations")
+      .$type<AiVendorPackAttestation[]>()
+      .notNull()
+      .default([]),
+    status: text("status", { enum: AI_VENDOR_STATUSES }).notNull().default("proposed"),
+    /** the pillar-2 assessment instance that governs this vendor's approval */
+    workflowInstanceId: uuid("workflow_instance_id").references(() => workflowInstances.id, {
+      onDelete: "set null",
+    }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    retiredReason: text("retired_reason"),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("ai_vendors_name_check", sql`length(btrim(${t.name})) > 0`),
+    check(
+      "ai_vendors_retirement_check",
+      sql`(${t.status} = 'retired') = (${t.retiredAt} IS NOT NULL AND ${t.retiredReason} IS NOT NULL)`,
+    ),
+    index("ai_vendors_owner_idx").on(t.ownerUserId),
+    index("ai_vendors_status_idx").on(t.status),
+    index("ai_vendors_instance_idx").on(t.workflowInstanceId),
+  ],
+);
+
+export type AiVendorRow = typeof aiVendors.$inferSelect;
+
+// ---------------------------------------------------------------------------
 // ADR-0081 (migration 0087) — the AI risk register.
 //
 // The one table of gap L2: a named risk scenario linked to an owner, a
@@ -6767,6 +6883,11 @@ export const AI_RISK_CATEGORIES = [
   "budget_overrun",
   "hallucination",
   "shadow_ai",
+  /** ADR-0084 (migration 0088): third-party/vendor AI — evidenced by the
+   * vendor registry's assessment lifecycle. The resolver counts assessment
+   * STATES (platform records); the assessment CONTENT is vendor-attested and
+   * the evidence payload says so. */
+  "third_party_ai",
 ] as const;
 export type AiRiskCategory = (typeof AI_RISK_CATEGORIES)[number];
 
@@ -6788,6 +6909,11 @@ export const aiRisks = pgTable(
     projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
     agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
     useCaseId: uuid("use_case_id").references(() => aiUseCases.id, { onDelete: "set null" }),
+    /** ADR-0084 (migration 0088): the vendor whose assessment lifecycle
+     * evidences a third-party risk — the `vendor_assessments` resolver
+     * narrows its queries to this row when set, exactly how agentId narrows
+     * the red-team and eval resolvers */
+    vendorId: uuid("vendor_id").references(() => aiVendors.id, { onDelete: "set null" }),
     status: text("status", { enum: AI_RISK_STATUSES }).notNull().default("open"),
     /** DECLARED human judgments — never blended into any computed number */
     likelihood: text("likelihood", { enum: AI_RISK_LEVELS }).notNull(),
@@ -6814,6 +6940,7 @@ export const aiRisks = pgTable(
     index("ai_risks_status_idx").on(t.status),
     index("ai_risks_category_idx").on(t.category),
     index("ai_risks_use_case_idx").on(t.useCaseId),
+    index("ai_risks_vendor_idx").on(t.vendorId),
   ],
 );
 

@@ -138,6 +138,19 @@ export const NON_ADMIN_ROUTES = new Set([
   "GET /v1/risks/:riskId",
   "PATCH /v1/risks/:riskId",
   "POST /v1/risks/:riskId/transition",
+  // ADR-0084 — the AI vendor registry, the same shape again: proposing a
+  // vendor is a front-door act, and list/detail/edit are owner-or-admin
+  // INSIDE the handler. Recording a vendor ATTESTATION is owner-or-admin too
+  // (it records a claim, it enforces nothing and satisfies nothing).
+  // Conspicuously NOT here: the RETIRE endpoint — taking a vendor out of the
+  // registry is an org-wide act and stays admin — and there is no
+  // status-writing route at all, because approved/rejected exist only as
+  // decisions of the linked assessment instance on the one queue.
+  "POST /v1/vendors",
+  "GET /v1/vendors",
+  "GET /v1/vendors/:vendorId",
+  "PATCH /v1/vendors/:vendorId",
+  "POST /v1/vendors/:vendorId/attestations",
   "POST /v1/workflows/instances",
   "POST /v1/workflows/instances/:instanceId/artifacts",
   "POST /v1/workflows/instances/:instanceId/advance",
