@@ -76,6 +76,11 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // risk of using it for this purpose, and is that acceptance still valid?"
       // A high score is an input to that decision, never a substitute for it.
       { label: "Model risk", to: "/admin/model-risk" },
+      // ADR-0080 — the PRE-BUILD gate, before all of the above: the gates ask
+      // "may this call proceed?"; this asks "was this USE of AI proposed,
+      // questionnaired, and signed off before anything ran?" — and an approved
+      // use case carries the same compliance tags the cascade enforces.
+      { label: "Use cases", to: "/admin/use-cases" },
       // ADR-0057 — the SECURITY gate, beside the quality and risk gates. Evals
       // ask "is this agent good on our cases?"; this asks "does it hold when
       // someone attacks it?", measured through the live guardrails and blocking
