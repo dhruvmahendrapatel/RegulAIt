@@ -71,6 +71,9 @@ import { ownershipFlagFor } from "./inventory.js";
 // computation discipline, so posture and the campaigns page agree on what
 // "expired-incomplete" is.
 import { certificationPostureSection } from "./grant-certification.js";
+// ADR-0091 (gap L23): the SoD line — rules active / current violators,
+// computed at read time against effective holdings, never auto-revoked.
+import { sodPostureSection } from "./sod.js";
 import { GROUNDEDNESS_SCORER_KINDS } from "./risks.js";
 
 /** the rolling activity window the posture view reads (denials, PII blocks,
@@ -418,6 +421,12 @@ export async function computePostureReport(
   // implied by a zero.
   const certificationCampaigns = await certificationPostureSection(db, now);
 
+  // --- ADR-0091 (gap L23): toxic-combination SoD ---------------------------
+  // Rules active / current violations, computed at read time against
+  // effective holdings (direct ∪ role-derived − revocations). "None defined"
+  // is stated outright; existing violators are surfaced, never auto-revoked.
+  const sod = await sodPostureSection(db);
+
   // --- AI use-case pipeline ------------------------------------------------
   const useCaseCounts = await db
     .select({ status: aiUseCases.status, n: count() })
@@ -451,6 +460,7 @@ export async function computePostureReport(
     auditChain,
     agentOwnership,
     certificationCampaigns,
+    sod,
     useCases,
     note:
       "computed live from this deployment's own ledgers at request time — no rollup table, no " +

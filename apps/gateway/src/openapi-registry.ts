@@ -388,6 +388,15 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // agent/connector twins' write surfaces.
   "DELETE /v1/grants/tools/:grantId": "internal",
   "DELETE /v1/grants/servers/:grantId": "internal",
+  // ADR-0091 — toxic-combination SoD: rule CRUD + override escalations.
+  // Internal: admin governance over the org's own grant policy (override
+  // DECISIONS ride the existing POST /v1/approvals/:approvalId/decide).
+  "POST /v1/sod/rules": "internal",
+  "GET /v1/sod/rules": "internal",
+  "PATCH /v1/sod/rules/:ruleId": "internal",
+  "DELETE /v1/sod/rules/:ruleId": "internal",
+  "POST /v1/sod/overrides": "internal",
+  "GET /v1/sod/overrides": "internal",
   "GET /v1/reports/definitions": "internal",
   "POST /v1/reports/definitions": "internal",
   "DELETE /v1/reports/definitions/:id": "internal",
@@ -859,6 +868,13 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/certification-campaigns/preview": "certification",
   "GET /v1/certification-campaigns": "certification",
   "GET /v1/certification-campaigns/:campaignId": "certification",
+  // ADR-0091 — toxic-combination SoD rules + override escalations
+  "POST /v1/sod/rules": "sod",
+  "GET /v1/sod/rules": "sod",
+  "PATCH /v1/sod/rules/:ruleId": "sod",
+  "DELETE /v1/sod/rules/:ruleId": "sod",
+  "POST /v1/sod/overrides": "sod",
+  "GET /v1/sod/overrides": "sod",
   "GET /v1/group-role-mappings": "group-role-mappings",
   "POST /v1/group-role-mappings": "group-role-mappings",
   "DELETE /v1/group-role-mappings/:mappingId": "group-role-mappings",

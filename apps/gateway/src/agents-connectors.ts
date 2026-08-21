@@ -27,6 +27,9 @@ import {
 } from "@regulait/db";
 import { createHash } from "node:crypto";
 import { deleteAgentGrantById, deleteConnectorGrantById } from "./grant-revocation.js";
+// ADR-0091 — toxic-combination SoD: the mint-time gate on the two direct
+// agent/connector grant endpoints (the other seven mint paths live in app.ts).
+import { refuseSodMint } from "./sod.js";
 import { evaluateAgent, evaluateConnector } from "@regulait/policy-kernel";
 import {
   ConnectorProviderError,
@@ -2725,6 +2728,13 @@ export function registerAgentConnectorRoutes(
 
   app.post("/v1/grants/agents", async (req, reply) => {
     const body = createAgentGrantSchema.parse(req.body);
+    // ADR-0091: the SoD mint gate — refused 409 by name, audited, no row
+    const sod = await refuseSodMint(
+      db,
+      { kind: "agent", userId: body.userId, agentId: body.agentId },
+      req.authCtx.userId,
+    );
+    if (sod) return reply.status(409).send(sod);
     const [row] = await db
       .insert(agentGrants)
       .values({
@@ -4094,6 +4104,13 @@ export function registerAgentConnectorRoutes(
 
   app.post("/v1/grants/connectors", async (req, reply) => {
     const body = createConnectorGrantSchema.parse(req.body);
+    // ADR-0091: the SoD mint gate — refused 409 by name, audited, no row
+    const sod = await refuseSodMint(
+      db,
+      { kind: "connector", userId: body.userId, connectorId: body.connectorId, mode: body.mode },
+      req.authCtx.userId,
+    );
+    if (sod) return reply.status(409).send(sod);
     const [row] = await db
       .insert(connectorGrants)
       .values({

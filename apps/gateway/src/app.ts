@@ -41,6 +41,7 @@ import {
   roleToolGrants,
   roles,
   serverGrants,
+  sodOverrideRequests,
   sql,
   teamMembers,
   teams,
@@ -133,6 +134,16 @@ import {
   precheckGrantCertificationDecision,
   registerGrantCertificationRoutes,
 } from "./grant-certification.js";
+// ADR-0091 — toxic-combination SoD (gap L23): the mint-time gate every
+// grant-creating endpoint calls, the decide-path hooks for an escalated
+// override (the ONE queue carries the decision), and the rules/override CRUD.
+import {
+  SOD_OVERRIDE_PREFIX,
+  applySodOverrideDecision,
+  precheckSodOverrideDecision,
+  refuseSodMint,
+  registerSodRoutes,
+} from "./sod.js";
 import {
   deleteRoleAgentGrantById,
   deleteRoleConnectorGrantById,
@@ -1234,6 +1245,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   app.post("/v1/grants/tools", async (req, reply) => {
     const body = createToolGrantSchema.parse(req.body);
+    // ADR-0091: the SoD mint gate — refused 409 by name, audited, no row
+    const sod = await refuseSodMint(
+      db,
+      { kind: "tool", userId: body.userId, serverId: body.serverId, toolName: body.toolName },
+      req.authCtx.userId,
+    );
+    if (sod) return reply.status(409).send(sod);
     const [row] = await db.insert(toolGrants).values(body).returning();
     return reply.status(201).send(row);
   });
@@ -1241,6 +1259,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   app.post("/v1/grants/servers", async (req, reply) => {
     const body = createServerGrantSchema.parse(req.body);
     if (!body.readOnlyAll) return reply.status(400).send(INERT_SERVER_GRANT);
+    // ADR-0091: the SoD mint gate
+    const sod = await refuseSodMint(
+      db,
+      { kind: "server", userId: body.userId, serverId: body.serverId },
+      req.authCtx.userId,
+    );
+    if (sod) return reply.status(409).send(sod);
     const [row] = await db.insert(serverGrants).values(body).returning();
     return reply.status(201).send(row);
   });
@@ -1276,6 +1301,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   app.post("/v1/roles/:roleId/grants/tools", async (req, reply) => {
     const { roleId } = z.object({ roleId: z.string().uuid() }).parse(req.params);
     const body = createRoleToolGrantSchema.parse(req.body);
+    // ADR-0091: granting to a role confers on EVERY current assignee — the
+    // SoD gate checks each of them (a role with no assignees confers
+    // nothing yet; the assignment gate below catches it then)
+    const sod = await refuseSodMint(
+      db,
+      { kind: "role_tool", roleId, serverId: body.serverId, toolName: body.toolName },
+      req.authCtx.userId,
+    );
+    if (sod) return reply.status(409).send(sod);
     const [row] = await db
       .insert(roleToolGrants)
       .values({ roleId, serverId: body.serverId, toolName: body.toolName })
@@ -1287,6 +1321,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const { roleId } = z.object({ roleId: z.string().uuid() }).parse(req.params);
     const body = createRoleServerGrantSchema.parse(req.body);
     if (!body.readOnlyAll) return reply.status(400).send(INERT_SERVER_GRANT);
+    // ADR-0091: the SoD mint gate, per current assignee
+    const sod = await refuseSodMint(
+      db,
+      { kind: "role_server", roleId, serverId: body.serverId },
+      req.authCtx.userId,
+    );
+    if (sod) return reply.status(409).send(sod);
     const [row] = await db
       .insert(roleServerGrants)
       .values({ roleId, serverId: body.serverId, readOnlyAll: body.readOnlyAll })
@@ -1299,6 +1340,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   app.post("/v1/roles/:roleId/grants/agents", async (req, reply) => {
     const { roleId } = z.object({ roleId: z.string().uuid() }).parse(req.params);
     const body = createRoleAgentGrantSchema.parse(req.body);
+    // ADR-0091: the SoD mint gate, per current assignee
+    const sod = await refuseSodMint(
+      db,
+      { kind: "role_agent", roleId, agentId: body.agentId },
+      req.authCtx.userId,
+    );
+    if (sod) return reply.status(409).send(sod);
     const [row] = await db
       .insert(roleAgentGrants)
       .values({ roleId, agentId: body.agentId, allowedModes: body.allowedModes ?? null })
@@ -1309,6 +1357,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   app.post("/v1/roles/:roleId/grants/connectors", async (req, reply) => {
     const { roleId } = z.object({ roleId: z.string().uuid() }).parse(req.params);
     const body = createRoleConnectorGrantSchema.parse(req.body);
+    // ADR-0091: the SoD mint gate, per current assignee
+    const sod = await refuseSodMint(
+      db,
+      { kind: "role_connector", roleId, connectorId: body.connectorId, mode: body.mode },
+      req.authCtx.userId,
+    );
+    if (sod) return reply.status(409).send(sod);
     const [row] = await db
       .insert(roleConnectorGrants)
       .values({
@@ -1401,6 +1456,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   app.post("/v1/users/:userId/roles", async (req, reply) => {
     const { userId } = z.object({ userId: z.string().uuid() }).parse(req.params);
     const body = assignRoleSchema.parse(req.body);
+    // ADR-0091: assigning a role confers its WHOLE bundle — the SoD gate
+    // checks the bundle against the assignee's effective holdings AND for
+    // bundle-internal toxic pairs. (IdP-driven group assignments do NOT pass
+    // through here — a stated ADR-0091 limit: they surface as violations,
+    // never as a broken directory sync.)
+    const sod = await refuseSodMint(
+      db,
+      { kind: "role_assignment", userId, roleId: body.roleId },
+      req.authCtx.userId,
+    );
+    if (sod) return reply.status(409).send(sod);
     const [row] = await db
       .insert(roleAssignments)
       .values({ userId, roleId: body.roleId, origin: "direct" })
@@ -2277,6 +2343,26 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       const item = certItemById.get(stageId.slice(GRANT_CERT_PREFIX.length));
       return item ? `grant certification · ${item.holderLabel} · ${item.objectLabel}` : null;
     };
+    // ADR-0091: an SoD override's queue row says whose mint despite which
+    // rule — the request row precomputed the label at escalation time.
+    const sodOverrideIds = ids(
+      rows.map((r) =>
+        r.stageId?.startsWith(SOD_OVERRIDE_PREFIX) && uuidOk(r.stageId.slice(SOD_OVERRIDE_PREFIX.length))
+          ? r.stageId.slice(SOD_OVERRIDE_PREFIX.length)
+          : null,
+      ),
+    );
+    const sodOverrideRows = sodOverrideIds.length
+      ? await db
+          .select({ id: sodOverrideRequests.id, label: sodOverrideRequests.label })
+          .from(sodOverrideRequests)
+          .where(inArray(sodOverrideRequests.id, sodOverrideIds))
+      : [];
+    const sodOverrideById = new Map(sodOverrideRows.map((r) => [r.id, r.label]));
+    const sodOverrideLabelFor = (stageId: string | null): string | null => {
+      if (!stageId?.startsWith(SOD_OVERRIDE_PREFIX)) return null;
+      return sodOverrideById.get(stageId.slice(SOD_OVERRIDE_PREFIX.length)) ?? null;
+    };
     const delegatedFor = new Set(delegators);
     const contextConflictFor = (r: (typeof rows)[number]) => {
       if (!r.stageId?.startsWith(CONFLICT_PREFIX)) return {};
@@ -2327,6 +2413,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           (r.objectType === "infra_operation" ? infraLabelFor(r.stageId) : null) ??
           (r.objectType === "model_card" ? modelCardLabelFor(r.stageId) : null) ??
           (r.objectType === "grant_certification" ? grantCertLabelFor(r.stageId) : null) ??
+          (r.objectType === "sod_override" ? sodOverrideLabelFor(r.stageId) : null) ??
           r.toolName ??
           null,
         // ADR-0022: this row reached the caller via an active delegation —
@@ -2447,6 +2534,18 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // Sitting in the one decide path means bulk and ChatOps inherit both.
     if (row.objectType === "grant_certification") {
       const refusal = await precheckGrantCertificationDecision(db, row, deciderUserId);
+      if (refusal) return fail(refusal.status, refusal.body);
+    }
+    // ADR-0091 — SoD override guards, refused BY NAME before anything is
+    // written: `cannot_approve_own_sod_override` (keyed on the DECIDER, so
+    // the requester cannot reach their own escalation through delegation or
+    // the admin override above — signing one's own override is not an
+    // arm's-length review) and, on approve, a re-check that no OTHER enabled
+    // rule now conflicts with the stored mint (this override names ONE rule;
+    // a second conflict needs its own escalation). Sitting in the one decide
+    // path means bulk and ChatOps inherit both.
+    if (row.objectType === "sod_override") {
+      const refusal = await precheckSodOverrideDecision(db, row, deciderUserId, body.decision);
       if (refusal) return fail(refusal.status, refusal.body);
     }
     // Separation-of-duties guard: the person deciding IS the person who
@@ -2620,6 +2719,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           body.decision,
           deciderUserId,
         );
+      }
+      // ADR-0091 SoD override: approved = the STORED refused mint executes
+      // HERE, inside the decision's own transaction, with the overridden
+      // rule recorded in the grant's audit detail (`sodOverride: {ruleId,
+      // approvalId}`); denied = nothing minted, the request records the
+      // denial. Never a second mint endpoint.
+      if (updated.objectType === "sod_override") {
+        await applySodOverrideDecision(tx as unknown as Db, updated, body.decision, deciderUserId);
       }
       return { updated, postCommit };
     });
@@ -2846,6 +2953,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0090 — grant certification campaigns (campaign CRUD only; the
   // keep/revoke decisions ride the one approvals decide path above).
   registerGrantCertificationRoutes(app, db);
+  // ADR-0091 — toxic-combination SoD rules + override escalations. Admin-only
+  // through the DEFAULT gate: declaring two capabilities toxic (and lifting
+  // that with an override) is org-wide entitlement policy, the same class of
+  // record as the rules engine. Enforcement itself is not a route — it is the
+  // `refuseSodMint` gate inside every grant-creating endpoint above, and
+  // override DECISIONS ride the one approvals decide path.
+  registerSodRoutes(app, db);
   // ADR-0048 — immutable versioning, canary rollout and one-click rollback for
   // the governance artifacts the gateway reads. Following ADR-0040's precedent:
   // immutable version rows plus an active pointer, activation is a pointer

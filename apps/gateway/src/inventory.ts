@@ -101,6 +101,11 @@ import {
 } from "@regulait/db";
 import { z } from "zod";
 import { GROUNDEDNESS_SCORER_KINDS } from "./risks.js";
+// ADR-0091 (gap L23): the SoD violations block on the standing inventory —
+// computed live from the same holder sets this file's holder index feeds
+// (sod.ts imports buildAgentHolderIndex from HERE; the cycle is
+// function-level only and both sides resolve at call time).
+import { sodInventorySection } from "./sod.js";
 
 const agentIdParam = z.object({ agentId: z.string().uuid() });
 
@@ -548,10 +553,16 @@ export function registerInventoryRoutes(app: FastifyInstance, db: Db): void {
       feedsIn.set(e.toAgentId, (feedsIn.get(e.toAgentId) ?? 0) + 1);
     }
 
+    // ADR-0091: SoD rules + current violators, computed live at read time —
+    // a rule created after the fact REPORTS here (and in posture); it never
+    // auto-revokes anybody.
+    const sod = await sodInventorySection(db);
+
     return {
       window: { start: windowStart.toISOString(), end: now.toISOString(), days: INVENTORY_WINDOW_DAYS },
       computedAt: now.toISOString(),
       notes: INVENTORY_NOTES,
+      sod,
       agents: agentRows.map((a) => {
         const latestRt = latestRedteamByAgent.get(a.id) ?? null;
         const agentCards = cardsByAgent.get(a.id) ?? [];

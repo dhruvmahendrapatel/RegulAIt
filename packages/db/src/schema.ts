@@ -823,6 +823,18 @@ export const auditLog = pgTable(
         // own objectType — for a certification item's approval that is
         // 'grant_certification'. Plain text column — no DDL needed.
         "grant_certification",
+        // ADR-0091: toxic-combination SoD (gap L23). Admin CRUD of an SoD
+        // rule (create with its reason, enable/disable, delete), every mint
+        // REFUSED by one (`sod-conflict-refused`, naming the rule and the
+        // conflicting holding), every escalation of a refusal into the one
+        // approvals queue, and the overridden mint an approval executes
+        // (with `sodOverride: {ruleId, approvalId}` in the detail). Plain
+        // text column — no DDL needed.
+        "sod_rule",
+        // ADR-0091: the generic decide-path audit rows for an escalated SoD
+        // override ride the approval's own objectType. Plain text column —
+        // no DDL needed.
+        "sod_override",
       ],
     })
       .notNull()
@@ -1020,6 +1032,11 @@ export const approvals = pgTable(
       // certification campaign does NOT get a second inbox or a second decide
       // path — approved = keep (attested), denied = revoke (executed against
       // the real grant row inside the decision's own transaction).
+      // ADR-0091: 'sod_override' — a mint refused by a toxic-combination SoD
+      // rule, escalated. Same reasoning as 'model_card' above: the override
+      // does NOT get a second inbox — an arm's-length approver approving the
+      // one queue row mints the refused grant inside the decision's own
+      // transaction with the overridden rule recorded; denied mints nothing.
       enum: [
         "mcp_tool",
         "workflow",
@@ -1030,6 +1047,7 @@ export const approvals = pgTable(
         "copilot_proposal",
         "training_job",
         "grant_certification",
+        "sod_override",
       ],
     })
       .notNull()
@@ -7170,3 +7188,117 @@ export const grantCertificationItems = pgTable(
 
 export type GrantCertificationCampaignRow = typeof grantCertificationCampaigns.$inferSelect;
 export type GrantCertificationItemRow = typeof grantCertificationItems.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0091 (migration 0093) — toxic-combination segregation of duties (L23)
+// ---------------------------------------------------------------------------
+
+/** the capability kinds an SoD rule side may name — the four grantable
+ * gateway object families. CONCRETE selectors only in this slice: a side is
+ * one id (plus tool name for mcp_tool; plus an optional mode qualifier for
+ * connector). Pattern/category selectors are named follow-up in ADR-0091. */
+export const SOD_CAPABILITY_KINDS = ["agent", "connector", "mcp_tool", "mcp_server"] as const;
+export type SodCapabilityKind = (typeof SOD_CAPABILITY_KINDS)[number];
+
+/** every mint path the SoD gate covers — the eight grant kinds ADR-0090
+ * enumerated, plus role ASSIGNMENT (assigning a role confers its bundle, so
+ * an SoD check that ignored it would be vacuous). */
+export const SOD_MINT_KINDS = [
+  "agent",
+  "connector",
+  "tool",
+  "server",
+  "role_agent",
+  "role_connector",
+  "role_tool",
+  "role_server",
+  "role_assignment",
+] as const;
+export type SodMintKind = (typeof SOD_MINT_KINDS)[number];
+
+export const sodRules = pgTable(
+  "sod_rules",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull().unique(),
+    aKind: text("a_kind", { enum: SOD_CAPABILITY_KINDS }).notNull(),
+    aObjectId: uuid("a_object_id").notNull(),
+    aToolName: text("a_tool_name"),
+    aMode: text("a_mode", { enum: ["read", "readwrite"] }),
+    bKind: text("b_kind", { enum: SOD_CAPABILITY_KINDS }).notNull(),
+    bObjectId: uuid("b_object_id").notNull(),
+    bToolName: text("b_tool_name"),
+    bMode: text("b_mode", { enum: ["read", "readwrite"] }),
+    /** REQUIRED — the refusal must be able to say WHY the pair is toxic */
+    reason: text("reason").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    /** SET NULL on user deletion — the rule outlives its author */
+    createdByUserId: uuid("created_by_user_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("sod_rules_name_check", sql`length(btrim(${t.name})) > 0`),
+    check("sod_rules_reason_check", sql`length(btrim(${t.reason})) > 0`),
+    check("sod_rules_a_tool_check", sql`(${t.aKind} = 'mcp_tool') = (${t.aToolName} IS NOT NULL)`),
+    check("sod_rules_b_tool_check", sql`(${t.bKind} = 'mcp_tool') = (${t.bToolName} IS NOT NULL)`),
+    check(
+      "sod_rules_a_mode_check",
+      sql`${t.aMode} IS NULL OR (${t.aKind} = 'connector' AND ${t.aMode} IN ('read', 'readwrite'))`,
+    ),
+    check(
+      "sod_rules_b_mode_check",
+      sql`${t.bMode} IS NULL OR (${t.bKind} = 'connector' AND ${t.bMode} IN ('read', 'readwrite'))`,
+    ),
+    check(
+      "sod_rules_sides_differ_check",
+      sql`NOT (${t.aKind} = ${t.bKind} AND ${t.aObjectId} = ${t.bObjectId} AND ${t.aToolName} IS NOT DISTINCT FROM ${t.bToolName} AND ${t.aMode} IS NOT DISTINCT FROM ${t.bMode})`,
+    ),
+    index("sod_rules_enabled_idx").on(t.enabled),
+  ],
+);
+
+export const sodOverrideRequests = pgTable(
+  "sod_override_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** CASCADE with the rule — an override of an un-declared toxicity is moot */
+    ruleId: uuid("rule_id")
+      .notNull()
+      .references(() => sodRules.id, { onDelete: "cascade" }),
+    mintKind: text("mint_kind", { enum: SOD_MINT_KINDS }).notNull(),
+    /** the EXACT validated payload of the refused mint — an approval executes
+     * this, never a client-restated one */
+    mintPayload: jsonb("mint_payload").notNull(),
+    /** the conflict as computed at request time (display evidence; the
+     * enforcement re-checks live at decision time) */
+    conflictDetail: jsonb("conflict_detail").notNull(),
+    /** one line for the queue row: who wants what, despite which rule */
+    label: text("label").notNull(),
+    requestedByUserId: uuid("requested_by_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    /** the row in the ONE approvals queue carrying this request's decision */
+    approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    status: text("status", { enum: ["pending", "approved", "denied"] })
+      .notNull()
+      .default("pending"),
+    decidedByUserId: uuid("decided_by_user_id"),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    /** what an approval actually minted (grant kind + row id), null until then */
+    mintDetail: jsonb("mint_detail"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("sod_override_decided_check", sql`(${t.status} = 'pending') = (${t.decidedAt} IS NULL)`),
+    check(
+      "sod_override_decided_by_check",
+      sql`(${t.status} = 'pending') = (${t.decidedByUserId} IS NULL)`,
+    ),
+    index("sod_override_rule_idx").on(t.ruleId),
+    index("sod_override_approval_idx").on(t.approvalId),
+    index("sod_override_status_idx").on(t.status),
+  ],
+);
+
+export type SodRuleRow = typeof sodRules.$inferSelect;
+export type SodOverrideRequestRow = typeof sodOverrideRequests.$inferSelect;

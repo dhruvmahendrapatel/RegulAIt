@@ -645,6 +645,13 @@
       "when": 1785027000000,
       "tag": "0092_grant_certification",
       "breakpoints": true
+    },
+    {
+      "idx": 93,
+      "version": "7",
+      "when": 1785028000000,
+      "tag": "0093_sod_rules",
+      "breakpoints": true
     }
   ]
 }
