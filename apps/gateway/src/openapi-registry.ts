@@ -376,6 +376,18 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // governance read whose aggregation shape is expected to grow.
   "GET /v1/inventory/agents": "internal",
   "GET /v1/inventory/agents/:agentId": "internal",
+  // ADR-0090 — grant certification campaigns. Internal: admin governance
+  // surfaces over the org's own grant rows (the decisions themselves ride
+  // the existing POST /v1/approvals/:approvalId/decide).
+  "POST /v1/certification-campaigns": "internal",
+  "POST /v1/certification-campaigns/preview": "internal",
+  "GET /v1/certification-campaigns": "internal",
+  "GET /v1/certification-campaigns/:campaignId": "internal",
+  // ADR-0090 — the two direct MCP grant deletes that never existed (every
+  // other grant kind already had a removal endpoint); internal like their
+  // agent/connector twins' write surfaces.
+  "DELETE /v1/grants/tools/:grantId": "internal",
+  "DELETE /v1/grants/servers/:grantId": "internal",
   "GET /v1/reports/definitions": "internal",
   "POST /v1/reports/definitions": "internal",
   "DELETE /v1/reports/definitions/:id": "internal",
@@ -840,6 +852,13 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "DELETE /v1/grants/connectors/:grantId": "grants",
   "POST /v1/grants/servers": "grants",
   "POST /v1/grants/tools": "grants",
+  // ADR-0090 — the direct MCP grant deletes + certification campaigns
+  "DELETE /v1/grants/tools/:grantId": "grants",
+  "DELETE /v1/grants/servers/:grantId": "grants",
+  "POST /v1/certification-campaigns": "certification",
+  "POST /v1/certification-campaigns/preview": "certification",
+  "GET /v1/certification-campaigns": "certification",
+  "GET /v1/certification-campaigns/:campaignId": "certification",
   "GET /v1/group-role-mappings": "group-role-mappings",
   "POST /v1/group-role-mappings": "group-role-mappings",
   "DELETE /v1/group-role-mappings/:mappingId": "group-role-mappings",

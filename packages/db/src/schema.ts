@@ -812,6 +812,17 @@ export const auditLog = pgTable(
         // refused DIRECT status write, and an admin RETIREMENT with its
         // reason. Plain text column — no DDL needed.
         "ai_vendor",
+        // ADR-0090: a grant certification campaign (gap L22). Opening a
+        // campaign (with its scope and item count), every keep attestation,
+        // every EXECUTED revocation (with the mechanism and the campaign as
+        // context), and the completion flip — so "what did this campaign
+        // decide" stays one query. Plain text column — no DDL needed.
+        "certification_campaign",
+        // ADR-0090: the generic decide-path audit rows (self-review, admin
+        // override, delegation, workbench routing/SLA) write the approval's
+        // own objectType — for a certification item's approval that is
+        // 'grant_certification'. Plain text column — no DDL needed.
+        "grant_certification",
       ],
     })
       .notNull()
@@ -1004,6 +1015,11 @@ export const approvals = pgTable(
       // `pending_approval` to `queued` is an ordinary row in this one queue
       // decided through the one decide path, with its separation-of-duties
       // guards, delegation window and admin override intact.
+      // ADR-0090: 'grant_certification' — one certification-campaign item's
+      // keep/revoke decision. Same reasoning as 'model_card' above: a
+      // certification campaign does NOT get a second inbox or a second decide
+      // path — approved = keep (attested), denied = revoke (executed against
+      // the real grant row inside the decision's own transaction).
       enum: [
         "mcp_tool",
         "workflow",
@@ -1013,6 +1029,7 @@ export const approvals = pgTable(
         "model_card",
         "copilot_proposal",
         "training_job",
+        "grant_certification",
       ],
     })
       .notNull()
@@ -7042,3 +7059,114 @@ export const aiRisks = pgTable(
 );
 
 export type AiRiskRow = typeof aiRisks.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0090 (migration 0092) — grant certification campaigns (gap L22).
+//
+// Saviynt's core loop — periodic owner-driven review of entitlements with
+// attest/revoke decisions — scoped DELIBERATELY to the grants THIS gateway
+// enforces (agent/connector/MCP tool/server, direct and role-bundled). Items
+// are snapshots taken at open; decisions ride the ONE approvals queue
+// (`approvals.objectType = 'grant_certification'`); a revoke decision
+// EXECUTES the same revocation path the admin endpoints use, inside the
+// decision's own transaction. `expired-incomplete` is a read-time projection
+// (open + past due + undecided) — no scheduler writes it, no timeout ever
+// auto-decides an item.
+// ---------------------------------------------------------------------------
+
+export const GRANT_CERT_SCOPE_KINDS = ["all", "agent_lifecycle", "agent_owner", "user"] as const;
+export type GrantCertScopeKind = (typeof GRANT_CERT_SCOPE_KINDS)[number];
+
+export const GRANT_CERT_GRANT_KINDS = [
+  "agent",
+  "connector",
+  "tool",
+  "server",
+  "role_agent",
+  "role_connector",
+  "role_tool",
+  "role_server",
+] as const;
+export type GrantCertGrantKind = (typeof GRANT_CERT_GRANT_KINDS)[number];
+
+export const grantCertificationCampaigns = pgTable(
+  "grant_certification_campaigns",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    scopeKind: text("scope_kind", { enum: GRANT_CERT_SCOPE_KINDS }).notNull(),
+    /** lifecycle status / owner user id / holder user id, per scopeKind; null for 'all' */
+    scopeValue: text("scope_value"),
+    openedByUserId: uuid("opened_by_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    dueAt: timestamp("due_at", { withTimezone: true }).notNull(),
+    /** stored status is only ever open|completed; 'expired-incomplete' is computed on read */
+    status: text("status", { enum: ["open", "completed"] })
+      .notNull()
+      .default("open"),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("grant_cert_campaigns_name_check", sql`length(btrim(${t.name})) > 0`),
+    check(
+      "grant_cert_campaigns_scope_value_check",
+      sql`(${t.scopeKind} = 'all') = (${t.scopeValue} IS NULL)`,
+    ),
+    check(
+      "grant_cert_campaigns_completed_check",
+      sql`(${t.status} = 'completed') = (${t.completedAt} IS NOT NULL)`,
+    ),
+    index("grant_cert_campaigns_status_idx").on(t.status),
+  ],
+);
+
+export const grantCertificationItems = pgTable(
+  "grant_certification_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    campaignId: uuid("campaign_id")
+      .notNull()
+      .references(() => grantCertificationCampaigns.id, { onDelete: "cascade" }),
+    grantKind: text("grant_kind", { enum: GRANT_CERT_GRANT_KINDS }).notNull(),
+    /** the grant ROW id snapshotted at open — deliberately NOT an FK (the row
+     * may legitimately disappear; the item is the durable review record) */
+    grantId: uuid("grant_id").notNull(),
+    /** exactly one of the two (DB CHECK): who enjoys the grant */
+    holderUserId: uuid("holder_user_id"),
+    holderRoleId: uuid("holder_role_id"),
+    holderLabel: text("holder_label").notNull(),
+    objectId: uuid("object_id"),
+    objectLabel: text("object_label").notNull(),
+    toolName: text("tool_name"),
+    reviewerUserId: uuid("reviewer_user_id").notNull(),
+    /** the row in the ONE approvals queue carrying this item's decision */
+    approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
+    /** keep|revoke, written only by the one decide path; NULL forever if
+     * nobody decides — no auto-decision on expiry, ever */
+    decision: text("decision", { enum: ["keep", "revoke"] }),
+    decidedByUserId: uuid("decided_by_user_id"),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    /** what executing a revoke actually did (mechanism + row-still-there) */
+    revocationDetail: jsonb("revocation_detail"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "grant_cert_items_holder_check",
+      sql`(${t.holderUserId} IS NULL) <> (${t.holderRoleId} IS NULL)`,
+    ),
+    check("grant_cert_items_decided_check", sql`(${t.decision} IS NULL) = (${t.decidedAt} IS NULL)`),
+    check(
+      "grant_cert_items_decided_by_check",
+      sql`(${t.decision} IS NULL) = (${t.decidedByUserId} IS NULL)`,
+    ),
+    index("grant_cert_items_campaign_idx").on(t.campaignId),
+    index("grant_cert_items_approval_idx").on(t.approvalId),
+    index("grant_cert_items_reviewer_idx").on(t.reviewerUserId),
+  ],
+);
+
+export type GrantCertificationCampaignRow = typeof grantCertificationCampaigns.$inferSelect;
+export type GrantCertificationItemRow = typeof grantCertificationItems.$inferSelect;

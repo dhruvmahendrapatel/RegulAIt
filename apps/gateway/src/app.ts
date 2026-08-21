@@ -22,6 +22,7 @@ import {
   connectorRevocations,
   connectors,
   dataScopeRules,
+  grantCertificationItems,
   inArray,
   isNull,
   mcpServers,
@@ -124,6 +125,22 @@ import { registerRedTeamRoutes } from "./redteam.js";
 import { registerReportingRoutes } from "./reporting.js";
 import { registerPostureRoutes } from "./posture.js";
 import { registerInventoryRoutes } from "./inventory.js";
+// ADR-0090 — grant certification campaigns: the decide-path hooks (the ONE
+// queue carries the keep/revoke decisions) and the campaign CRUD routes.
+import {
+  GRANT_CERT_PREFIX,
+  applyGrantCertificationDecision,
+  precheckGrantCertificationDecision,
+  registerGrantCertificationRoutes,
+} from "./grant-certification.js";
+import {
+  deleteRoleAgentGrantById,
+  deleteRoleConnectorGrantById,
+  deleteRoleServerGrantById,
+  deleteRoleToolGrantById,
+  deleteServerGrantById,
+  deleteToolGrantById,
+} from "./grant-revocation.js";
 import { registerConfigVersionRoutes } from "./config-versions.js";
 import { ConfigVersionUnresolvableError } from "./rule-versions.js";
 import { registerSpendMonitorRoutes } from "./spend-monitor.js";
@@ -1354,15 +1371,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     return { tools, servers, agents: roleAgents, connectors: roleConnectors };
   });
 
+  // ADR-0090: the removal itself lives in grant-revocation.ts — ONE
+  // implementation per grant kind, shared with a certification campaign's
+  // revoke decision so the campaign can never grow a parallel delete.
   app.delete("/v1/roles/:roleId/grants/agents/:grantId", async (req, reply) => {
     const { roleId, grantId } = z
       .object({ roleId: z.string().uuid(), grantId: z.string().uuid() })
       .parse(req.params);
-    const deleted = await db
-      .delete(roleAgentGrants)
-      .where(and(eq(roleAgentGrants.id, grantId), eq(roleAgentGrants.roleId, roleId)))
-      .returning({ id: roleAgentGrants.id });
-    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_grant" });
+    if (!(await deleteRoleAgentGrantById(db, grantId, roleId))) {
+      return reply.status(404).send({ error: "unknown_grant" });
+    }
     return { removed: true };
   });
 
@@ -1370,11 +1388,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const { roleId, grantId } = z
       .object({ roleId: z.string().uuid(), grantId: z.string().uuid() })
       .parse(req.params);
-    const deleted = await db
-      .delete(roleConnectorGrants)
-      .where(and(eq(roleConnectorGrants.id, grantId), eq(roleConnectorGrants.roleId, roleId)))
-      .returning({ id: roleConnectorGrants.id });
-    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_grant" });
+    if (!(await deleteRoleConnectorGrantById(db, grantId, roleId))) {
+      return reply.status(404).send({ error: "unknown_grant" });
+    }
     return { removed: true };
   });
 
@@ -1515,11 +1531,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const { roleId, grantId } = z
       .object({ roleId: z.string().uuid(), grantId: z.string().uuid() })
       .parse(req.params);
-    const deleted = await db
-      .delete(roleToolGrants)
-      .where(and(eq(roleToolGrants.id, grantId), eq(roleToolGrants.roleId, roleId)))
-      .returning({ id: roleToolGrants.id });
-    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_grant" });
+    if (!(await deleteRoleToolGrantById(db, grantId, roleId))) {
+      return reply.status(404).send({ error: "unknown_grant" });
+    }
     return { removed: true };
   });
 
@@ -1527,11 +1541,32 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     const { roleId, grantId } = z
       .object({ roleId: z.string().uuid(), grantId: z.string().uuid() })
       .parse(req.params);
-    const deleted = await db
-      .delete(roleServerGrants)
-      .where(and(eq(roleServerGrants.id, grantId), eq(roleServerGrants.roleId, roleId)))
-      .returning({ id: roleServerGrants.id });
-    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_grant" });
+    if (!(await deleteRoleServerGrantById(db, grantId, roleId))) {
+      return reply.status(404).send({ error: "unknown_grant" });
+    }
+    return { removed: true };
+  });
+
+  // ADR-0090: the direct MCP tool/server grant deletes that never existed —
+  // every other grant kind was removable through an admin endpoint, these two
+  // were not (and an ADR-0019 revocation row deliberately does NOT beat a
+  // direct grant in the kernel, so there was genuinely no removal path). A
+  // certification campaign's revoke decision needs one, and it must be THE
+  // path rather than a campaign-private delete — so the endpoints exist too,
+  // sharing the one implementation in grant-revocation.ts.
+  app.delete("/v1/grants/tools/:grantId", async (req, reply) => {
+    const { grantId } = z.object({ grantId: z.string().uuid() }).parse(req.params);
+    if (!(await deleteToolGrantById(db, grantId))) {
+      return reply.status(404).send({ error: "unknown_grant" });
+    }
+    return { removed: true };
+  });
+
+  app.delete("/v1/grants/servers/:grantId", async (req, reply) => {
+    const { grantId } = z.object({ grantId: z.string().uuid() }).parse(req.params);
+    if (!(await deleteServerGrantById(db, grantId))) {
+      return reply.status(404).send({ error: "unknown_grant" });
+    }
     return { removed: true };
   });
 
@@ -2217,6 +2252,31 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         : "custom provider";
       return `model risk sign-off · ${subject} · ${card.intendedUse}`;
     };
+    // ADR-0090: a certification item's queue row says WHOSE grant on WHAT it
+    // reviews — same stageId-sentinel enrichment as the model-card rows.
+    const certItemIds = ids(
+      rows.map((r) =>
+        r.stageId?.startsWith(GRANT_CERT_PREFIX) && uuidOk(r.stageId.slice(GRANT_CERT_PREFIX.length))
+          ? r.stageId.slice(GRANT_CERT_PREFIX.length)
+          : null,
+      ),
+    );
+    const certItems = certItemIds.length
+      ? await db
+          .select({
+            id: grantCertificationItems.id,
+            holderLabel: grantCertificationItems.holderLabel,
+            objectLabel: grantCertificationItems.objectLabel,
+          })
+          .from(grantCertificationItems)
+          .where(inArray(grantCertificationItems.id, certItemIds))
+      : [];
+    const certItemById = new Map(certItems.map((i) => [i.id, i]));
+    const grantCertLabelFor = (stageId: string | null): string | null => {
+      if (!stageId?.startsWith(GRANT_CERT_PREFIX)) return null;
+      const item = certItemById.get(stageId.slice(GRANT_CERT_PREFIX.length));
+      return item ? `grant certification · ${item.holderLabel} · ${item.objectLabel}` : null;
+    };
     const delegatedFor = new Set(delegators);
     const contextConflictFor = (r: (typeof rows)[number]) => {
       if (!r.stageId?.startsWith(CONFLICT_PREFIX)) return {};
@@ -2266,6 +2326,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           (r.projectId ? projectLabel.get(r.projectId) : null) ??
           (r.objectType === "infra_operation" ? infraLabelFor(r.stageId) : null) ??
           (r.objectType === "model_card" ? modelCardLabelFor(r.stageId) : null) ??
+          (r.objectType === "grant_certification" ? grantCertLabelFor(r.stageId) : null) ??
           r.toolName ??
           null,
         // ADR-0022: this row reached the caller via an active delegation —
@@ -2376,6 +2437,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           detail: "an admin deciding in place of the named approver must record a reason",
         });
       }
+    }
+    // ADR-0090 — grant certification guards, refused BY NAME before anything
+    // is written: `campaign_expired` (a past-due campaign's undecided items
+    // stay undecided forever — expiry is a visible posture fact, never a
+    // late decision) and `cannot_certify_own_grant` (keyed on the DECIDER,
+    // so a holder cannot reach their own item through delegation or the
+    // admin override above — attesting one's own access is not a review).
+    // Sitting in the one decide path means bulk and ChatOps inherit both.
+    if (row.objectType === "grant_certification") {
+      const refusal = await precheckGrantCertificationDecision(db, row, deciderUserId);
+      if (refusal) return fail(refusal.status, refusal.body);
     }
     // Separation-of-duties guard: the person deciding IS the person who
     // triggered the governed action. Still decidable (alternate-approver
@@ -2530,6 +2602,19 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // governed action shares.
       if (updated.objectType === "training_job") {
         postCommit = await applyTrainingJobApprovalDecision(
+          tx as unknown as Db,
+          updated,
+          body.decision,
+          deciderUserId,
+        );
+      }
+      // ADR-0090 grant certification: approved = keep (attested), denied =
+      // revoke — and the revoke EXECUTES the same per-kind grant removal the
+      // admin delete endpoints use, HERE inside the decision's transaction,
+      // so a decision can never commit as attested-but-unenforced. The last
+      // decided item flips its campaign to completed in the same tx.
+      if (updated.objectType === "grant_certification") {
+        await applyGrantCertificationDecision(
           tx as unknown as Db,
           updated,
           body.decision,
@@ -2758,6 +2843,9 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ledgers, no new collection. Admin-only via the default gate: it names
   // users, grants, and org-wide run history, the audit log's record class.
   registerInventoryRoutes(app, db);
+  // ADR-0090 — grant certification campaigns (campaign CRUD only; the
+  // keep/revoke decisions ride the one approvals decide path above).
+  registerGrantCertificationRoutes(app, db);
   // ADR-0048 — immutable versioning, canary rollout and one-click rollback for
   // the governance artifacts the gateway reads. Following ADR-0040's precedent:
   // immutable version rows plus an active pointer, activation is a pointer

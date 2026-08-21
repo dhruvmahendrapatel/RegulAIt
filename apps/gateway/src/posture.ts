@@ -67,6 +67,10 @@ import { evaluatePack } from "./compliance-packs.js";
 // ADR-0089 (gap L20): the ONE ownership-flag computation, shared with the
 // inventory so the two surfaces can never disagree about what "orphaned" is.
 import { ownershipFlagFor } from "./inventory.js";
+// ADR-0090 (gap L22): the certification-campaign line — same shared-
+// computation discipline, so posture and the campaigns page agree on what
+// "expired-incomplete" is.
+import { certificationPostureSection } from "./grant-certification.js";
 import { GROUNDEDNESS_SCORER_KINDS } from "./risks.js";
 
 /** the rolling activity window the posture view reads (denials, PII blocks,
@@ -407,6 +411,13 @@ export async function computePostureReport(
       "detection sees only this deployment's own user rows.",
   };
 
+  // --- ADR-0090 (gap L22): grant certification campaigns -------------------
+  // Computed at read time via the ONE effective-status projection the
+  // campaigns API uses: 'expired-incomplete' (past due with undecided items)
+  // is a visible posture fact, and "none run" is stated outright rather than
+  // implied by a zero.
+  const certificationCampaigns = await certificationPostureSection(db, now);
+
   // --- AI use-case pipeline ------------------------------------------------
   const useCaseCounts = await db
     .select({ status: aiUseCases.status, n: count() })
@@ -439,6 +450,7 @@ export async function computePostureReport(
     governance,
     auditChain,
     agentOwnership,
+    certificationCampaigns,
     useCases,
     note:
       "computed live from this deployment's own ledgers at request time — no rollup table, no " +

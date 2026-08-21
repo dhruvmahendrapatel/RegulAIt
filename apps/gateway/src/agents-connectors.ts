@@ -26,6 +26,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { createHash } from "node:crypto";
+import { deleteAgentGrantById, deleteConnectorGrantById } from "./grant-revocation.js";
 import { evaluateAgent, evaluateConnector } from "@regulait/policy-kernel";
 import {
   ConnectorProviderError,
@@ -2703,23 +2704,22 @@ export function registerAgentConnectorRoutes(
     return row;
   });
 
+  // ADR-0090: the removal itself lives in grant-revocation.ts — ONE
+  // implementation per grant kind, shared with a certification campaign's
+  // revoke decision so the campaign can never grow a parallel delete.
   app.delete("/v1/grants/agents/:grantId", async (req, reply) => {
     const { grantId } = z.object({ grantId: z.string().uuid() }).parse(req.params);
-    const deleted = await db
-      .delete(agentGrants)
-      .where(eq(agentGrants.id, grantId))
-      .returning({ id: agentGrants.id });
-    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_grant" });
+    if (!(await deleteAgentGrantById(db, grantId))) {
+      return reply.status(404).send({ error: "unknown_grant" });
+    }
     return { removed: true };
   });
 
   app.delete("/v1/grants/connectors/:grantId", async (req, reply) => {
     const { grantId } = z.object({ grantId: z.string().uuid() }).parse(req.params);
-    const deleted = await db
-      .delete(connectorGrants)
-      .where(eq(connectorGrants.id, grantId))
-      .returning({ id: connectorGrants.id });
-    if (deleted.length === 0) return reply.status(404).send({ error: "unknown_grant" });
+    if (!(await deleteConnectorGrantById(db, grantId))) {
+      return reply.status(404).send({ error: "unknown_grant" });
+    }
     return { removed: true };
   });
 
