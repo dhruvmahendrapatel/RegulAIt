@@ -134,6 +134,10 @@ import {
   precheckGrantCertificationDecision,
   registerGrantCertificationRoutes,
 } from "./grant-certification.js";
+// ADR-0092 — access recommendations (gap L24): deterministic rules over the
+// ledgers, computed at read time, read-only — the campaign feed above is the
+// only action path.
+import { registerAccessRecommendationRoutes } from "./access-recommendations.js";
 // ADR-0091 — toxic-combination SoD (gap L23): the mint-time gate every
 // grant-creating endpoint calls, the decide-path hooks for an escalated
 // override (the ONE queue carries the decision), and the rules/override CRUD.
@@ -2953,6 +2957,15 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // ADR-0090 — grant certification campaigns (campaign CRUD only; the
   // keep/revoke decisions ride the one approvals decide path above).
   registerGrantCertificationRoutes(app, db);
+  // ADR-0092 — access recommendations, the deterministic half: every
+  // recommendation a stated, versioned rule over the ledgers, computed at
+  // read time with evidence attached. READ-ONLY — nothing executes; the
+  // action path is a from_recommendations certification campaign (above) or
+  // the ordinary revocation endpoints. Admin-only via the default gate: the
+  // payload names users, grants and org-wide usage, the inventory's record
+  // class. The model-judged half stays credential-blocked (L6), not
+  // approximated.
+  registerAccessRecommendationRoutes(app, db);
   // ADR-0091 — toxic-combination SoD rules + override escalations. Admin-only
   // through the DEFAULT gate: declaring two capabilities toxic (and lifting
   // that with an override) is org-wide entitlement policy, the same class of

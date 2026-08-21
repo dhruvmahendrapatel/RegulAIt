@@ -2958,3 +2958,24 @@ export {
   type EuAiActRule,
   type EuAiActTier,
 } from "./eu-ai-act.js";
+
+// ---------------------------------------------------------------------------
+// ADR-0092 — access recommendations, the deterministic half (gap L24): the
+// frozen v1 rule set (queries with reasons — id, plain-language rationale
+// template, severity CLASS), the strict rationale renderer, and the
+// `from_recommendations` campaign-scope parser. No scores, no ranking, no
+// auto-execution; the model-judged half stays credential-blocked (L6).
+// ---------------------------------------------------------------------------
+export {
+  ACCESS_RECOMMENDATION_RULES_V1,
+  ACCESS_RECOMMENDATION_RULES_VERSION,
+  ACCESS_RECOMMENDATION_RULE_IDS,
+  ACCESS_RECOMMENDATION_SEVERITIES,
+  UNUSED_GRANT_DEFAULT_WINDOW_DAYS,
+  accessRecommendationRuleById,
+  parseRecommendationRuleIds,
+  renderRecommendationRationale,
+  type AccessRecommendationRule,
+  type AccessRecommendationRuleId,
+  type AccessRecommendationSeverity,
+} from "./access-recommendations.js";

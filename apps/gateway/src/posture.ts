@@ -74,6 +74,10 @@ import { certificationPostureSection } from "./grant-certification.js";
 // ADR-0091 (gap L23): the SoD line — rules active / current violators,
 // computed at read time against effective holdings, never auto-revoked.
 import { sodPostureSection } from "./sod.js";
+// ADR-0092 (gap L24): the access-recommendations line — findings by rule,
+// computed at read time by the SAME computation the endpoint serves, with
+// "none" and "not assessable" stated outright rather than implied by zeros.
+import { recommendationsPostureSection } from "./access-recommendations.js";
 import { GROUNDEDNESS_SCORER_KINDS } from "./risks.js";
 
 /** the rolling activity window the posture view reads (denials, PII blocks,
@@ -427,6 +431,12 @@ export async function computePostureReport(
   // is stated outright; existing violators are surfaced, never auto-revoked.
   const sod = await sodPostureSection(db);
 
+  // --- ADR-0092 (gap L24): access recommendations --------------------------
+  // Findings by deterministic rule (queries with reasons), computed at read
+  // time; "none" is a computed fact, "not assessable" is stated, and nothing
+  // in the recommendation layer ever executes on its own.
+  const accessRecommendations = await recommendationsPostureSection(db, now);
+
   // --- AI use-case pipeline ------------------------------------------------
   const useCaseCounts = await db
     .select({ status: aiUseCases.status, n: count() })
@@ -461,6 +471,7 @@ export async function computePostureReport(
     agentOwnership,
     certificationCampaigns,
     sod,
+    accessRecommendations,
     useCases,
     note:
       "computed live from this deployment's own ledgers at request time — no rollup table, no " +

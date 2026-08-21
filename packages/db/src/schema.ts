@@ -7092,7 +7092,17 @@ export type AiRiskRow = typeof aiRisks.$inferSelect;
 // auto-decides an item.
 // ---------------------------------------------------------------------------
 
-export const GRANT_CERT_SCOPE_KINDS = ["all", "agent_lifecycle", "agent_owner", "user"] as const;
+/** widened by migration 0094 (ADR-0092): `from_recommendations` scopes a
+ * campaign to the grants the named access-recommendation rules flag AT OPEN
+ * — scope_value carries the comma-separated rule ids, and the snapshot is
+ * computed at open, never stored (recommendations have no table). */
+export const GRANT_CERT_SCOPE_KINDS = [
+  "all",
+  "agent_lifecycle",
+  "agent_owner",
+  "user",
+  "from_recommendations",
+] as const;
 export type GrantCertScopeKind = (typeof GRANT_CERT_SCOPE_KINDS)[number];
 
 export const GRANT_CERT_GRANT_KINDS = [

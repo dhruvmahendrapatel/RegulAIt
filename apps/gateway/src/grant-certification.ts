@@ -78,7 +78,13 @@ import {
   type GrantCertGrantKind,
   type GrantCertificationCampaignRow,
 } from "@regulait/db";
+import { parseRecommendationRuleIds } from "@regulait/shared";
 import { z } from "zod";
+// ADR-0092 (gap L24): the recommendation-scoped campaign snapshot — the one
+// action path a recommendation has (recommend → review → human decides →
+// revoke-is-real). Imported here as one more scope filter, never a parallel
+// snapshot mechanism.
+import { computeRecommendedGrantRefs } from "./access-recommendations.js";
 import {
   deleteAgentGrantById,
   deleteConnectorGrantById,
@@ -199,6 +205,28 @@ async function snapshotGrantsForScope(
     throw new ScopeError(400, { error: "invalid_reference", field: "scope.value" });
   }
 
+  // ADR-0092 (gap L24) — the recommendation feed: the scope value names
+  // recommendation rule ids, and the snapshot is EXACTLY the grant rows those
+  // rules flag at this moment (computed now, never stored). One more filter
+  // over the same enumeration below — not a parallel snapshot path.
+  let recommendedRefs: Set<string> | null = null;
+  if (scope.kind === "from_recommendations") {
+    const parsed = parseRecommendationRuleIds(scope.value!);
+    if (!parsed.ok) {
+      throw new ScopeError(422, {
+        error: "invalid_recommendation_rules",
+        detail:
+          parsed.invalid.length > 0
+            ? `unknown recommendation rule id(s): ${parsed.invalid.join(", ")}`
+            : "scope 'from_recommendations' requires at least one recommendation rule id",
+        ...(parsed.invalid.length > 0 ? { invalid: parsed.invalid } : {}),
+      });
+    }
+    recommendedRefs = new Set(
+      (await computeRecommendedGrantRefs(db, parsed.ids)).map((r) => `${r.grantKind}:${r.grantId}`),
+    );
+  }
+
   const [
     agentRows,
     connectorRows,
@@ -243,7 +271,12 @@ async function snapshotGrantsForScope(
 
   type Raw = Omit<SnapshotItem, "holderLabel" | "objectLabel" | "reviewerUserId">;
   const raw: Raw[] = [];
-  const push = (r: Raw) => raw.push(r);
+  // from_recommendations admits exactly the rows the named rules flag; every
+  // other scope admits everything its own filters pass
+  const push = (r: Raw) => {
+    if (recommendedRefs && !recommendedRefs.has(`${r.grantKind}:${r.grantId}`)) return;
+    raw.push(r);
+  };
 
   const userScoped = scope.kind === "user";
   const agentScoped = scope.kind === "agent_lifecycle" || scope.kind === "agent_owner";

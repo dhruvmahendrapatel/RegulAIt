@@ -388,6 +388,10 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // agent/connector twins' write surfaces.
   "DELETE /v1/grants/tools/:grantId": "internal",
   "DELETE /v1/grants/servers/:grantId": "internal",
+  // ADR-0092 — access recommendations, the deterministic half: read-only
+  // queries-with-reasons over the ledgers. Internal: an admin governance
+  // read whose rule set is versioned and expected to grow by version.
+  "GET /v1/recommendations/access": "internal",
   // ADR-0091 — toxic-combination SoD: rule CRUD + override escalations.
   // Internal: admin governance over the org's own grant policy (override
   // DECISIONS ride the existing POST /v1/approvals/:approvalId/decide).
@@ -998,6 +1002,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "PATCH /v1/projects/:projectId/members/:userId": "projects",
   "GET /v1/inventory/agents": "inventory",
   "GET /v1/inventory/agents/:agentId": "inventory",
+  // ADR-0092 — access recommendations (the deterministic half)
+  "GET /v1/recommendations/access": "recommendations",
   "GET /v1/reports/definitions": "reports",
   "POST /v1/reports/definitions": "reports",
   "DELETE /v1/reports/definitions/:id": "reports",
