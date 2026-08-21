@@ -32,8 +32,164 @@ const WORKSPACE: NavEntry[] = [
   { label: "Spend & savings", to: "/spend" },
 ];
 
-/** the native admin surface (phase 2): grouped real routes inside this shell */
+/**
+ * The native admin surface: grouped real routes inside this shell.
+ *
+ * ADR-0093 — the console information architecture. The single "Governance"
+ * group had absorbed ~26 entries and stopped reading as an organized console,
+ * so it is split by the QUESTION a section answers, ordered most-used-first.
+ * Grouping and labels only: every route path is unchanged (bookmarks and the
+ * Playwright specs depend on them), and each entry keeps the ADR note that
+ * justifies its adjacency. Sections are headings, not disclosure menus — the
+ * "/" filter is the fast path across all of them.
+ */
 const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
+  {
+    // "where do we stand?" — the read-first, change-nothing surfaces
+    group: "Overview",
+    items: [
+      // ADR-0082 — the one-page BOARD read beside the report machinery it
+      // rides: pack coverage, open risks, ASR, spend vs budget, anchoring —
+      // every figure computed from the ledgers at load, print-friendly with
+      // CSS only, and an empty ledger says "unmeasured", never zero.
+      { label: "Posture", to: "/admin/posture" },
+      // ADR-0047 — the BOARD-facing read of the same two ledgers the Cost
+      // dashboard and the Audit log render operationally. Nothing new is
+      // stored: a report is a read-only projection, scoped to the caller's own
+      // entitlement, and it says on its face that spend is a list-price
+      // estimate and that no scheduler drives its schedules.
+      { label: "Reports", to: "/admin/reports" },
+      // ADR-0056 — the natural-language front door onto the governance
+      // ledgers: a governed tenant reading the governance record with the
+      // caller's own entitlements and unable to change anything.
+      { label: "Governance copilot", to: "/admin/copilot" },
+    ],
+  },
+  {
+    // "what is waiting on a human, and what happened?" — the daily loop
+    group: "Approvals & Audit",
+    items: [
+      { label: "Approvals queue", to: "/admin/approvals" },
+      // ADR-0046 — the SAME approvals, scaled: routing, SLA timers, escalation,
+      // workload and bulk triage. A layer on the one queue, never a second one.
+      { label: "Review workbench", to: "/admin/review-workbench" },
+      // ADR-0061 — the Approvals Queue's chat courier. It sits beside the queue
+      // it mirrors, because the identity link is a governance trust artifact and
+      // not an integration setting.
+      { label: "ChatOps approvals", to: "/admin/chatops" },
+      { label: "Audit log", to: "/admin/audit" },
+      // ADR-0050 — the audit log answers "who did what"; this answers "what
+      // flowed into what". Adjacent on purpose: an e-discovery or DPIA question
+      // starts in one and finishes in the other, and keeping them apart is what
+      // makes both readable.
+      { label: "Data lineage", to: "/admin/lineage" },
+      // ADR-0070 — the audit log says a decision was taken; the trace says
+      // where in the call it landed and what it stopped ("why did nothing
+      // happen?" is a governance question, so traces stay beside the log).
+      { label: "Traces", to: "/admin/traces" },
+    ],
+  },
+  {
+    // "is each USE of AI proposed, owned, risk-accepted?" — the registers
+    group: "AI Governance",
+    items: [
+      // ADR-0080 — the PRE-BUILD gate before every runtime gate: "was this USE
+      // of AI proposed, questionnaired, and signed off before anything ran?" —
+      // an approved use case carries the same compliance tags the cascade
+      // enforces.
+      { label: "Use cases", to: "/admin/use-cases" },
+      // ADR-0045 — the RISK-ACCEPTANCE gate beside the quality gate: "has a
+      // human accepted the risk of using this model for this purpose, and is
+      // that acceptance still valid?" A high eval score is an input to that
+      // decision, never a substitute for it.
+      { label: "Model risk", to: "/admin/model-risk" },
+      // ADR-0084 — the THIRD-PARTY front door beside the first-party one:
+      // use cases govern OUR use of AI; this governs a vendor's AI reaching
+      // our data. Everything the vendor supplies is an attestation —
+      // labelled, attributed, never blended into computed evidence.
+      { label: "Vendors", to: "/admin/vendors" },
+      // ADR-0081 — the RISK layer over the measurements: evals, red-team and
+      // guardrails MEASURE; the register links each measurement to a named
+      // risk scenario, an owner, the mitigating control we actually enforce,
+      // and an audited residual-risk acceptance. Evidence is computed live
+      // from the same ledgers those pages render — never hand-ticked.
+      { label: "Risks", to: "/admin/risks" },
+      // ADR-0055 — the land-and-expand wedge: what AI are we NOT governing?
+      // A discovered row is a governance gap, not a connection to configure.
+      { label: "Shadow-AI discovery", to: "/admin/shadow-ai" },
+    ],
+  },
+  {
+    // "who holds what, and should they still?" — the access-review loop
+    group: "Access Reviews",
+    items: [
+      // ADR-0082 — the STANDING dependency view over the per-run records: per
+      // agent, who MAY use it (the grant rows) beside what its runs actually
+      // DID (usage, traces, orchestration history) — never blended, because an
+      // unused permission is exactly the over-permissioning fact to surface.
+      { label: "Agent inventory", to: "/admin/inventory" },
+      // ADR-0092 — the WORKLIST over the same ledgers the inventory renders:
+      // deterministic, versioned rules ("queries with reasons") flag grants
+      // worth reviewing, each with hand-checkable evidence, feeding the
+      // certification loop below. No scores, nothing auto-executes; the
+      // model-judged half stays credential-blocked, not approximated.
+      { label: "Access recommendations", to: "/admin/recommendations" },
+      // ADR-0090 — the periodic RE-ATTESTATION loop over the grant rows the
+      // inventory renders: named reviewers keep/revoke each gateway grant
+      // through the one Approvals queue, revoke executes the real removal,
+      // and a past-due campaign reads expired-incomplete rather than
+      // silently vanishing. Gateway grants only — never a fabric campaign.
+      { label: "Certification campaigns", to: "/admin/certification" },
+      // ADR-0091 — the PREVENTIVE twin of the certification loop: toxic
+      // capability combinations refused at mint time, existing violators
+      // surfaced (never auto-revoked), and refused mints escalatable to the
+      // one approvals queue for an arm's-length override.
+      { label: "SoD rules", to: "/admin/sod" },
+    ],
+  },
+  {
+    // "may this call proceed, and under which version of the policy?"
+    group: "Policies & Gates",
+    items: [
+      { label: "Rules engine", to: "/admin/rules" },
+      // ADR-0040 — beside the rules engine because it is the same question
+      // ("what may this call do?") asked with attributes instead of static
+      // grants. It can only ever subtract from what Rules allows.
+      { label: "ABAC policies", to: "/admin/abac-policies" },
+      // ADR-0042 — the CONTENT gate, beside the destination and attribute
+      // gates. Independent controls that happen to share one interception
+      // point: what is in the payload vs. where the call may go vs. who may
+      // make it under which attributes.
+      { label: "Guardrails", to: "/admin/guardrails" },
+      // ADR-0048 — the CHANGE-CONTROL layer under the gates. The gates decide
+      // whether a call may proceed; this decides which VERSION of the
+      // governing artifact it proceeds under, with a canary and a one-click
+      // undo.
+      { label: "Prompt versions", to: "/admin/prompt-versions" },
+      { label: "Simulation", to: "/admin/simulation" },
+      { label: "Workflow templates", to: "/admin/workflow-templates" },
+    ],
+  },
+  {
+    // "is the agent good, and does it hold under attack?" — measurement
+    group: "Quality & Security",
+    items: [
+      // ADR-0044 — the QUALITY gate: "may this proceed?" asked of the agent's
+      // OUTPUT against a fixed dataset, blocking promotion the same way the
+      // runtime gates block a call.
+      { label: "Evaluations", to: "/admin/evals" },
+      // ADR-0057 — the SECURITY gate beside the quality gate: evals ask "is
+      // this agent good on our cases?"; this asks "does it hold when someone
+      // attacks it?", measured through the live guardrails and blocking
+      // promotion through the same automated-check stage.
+      { label: "Red-teaming", to: "/admin/redteam" },
+      // ADR-0088 — the measuring instrument the operator brings: an
+      // admin-typed outbound endpoint under the egress guard (register → test
+      // → enable), scoring evals. Beside the evals it scores (ADR-0093);
+      // registration rides the same rails as Custom LLM providers.
+      { label: "External scorers", to: "/admin/external-scorers" },
+    ],
+  },
   {
     group: "Identity & Access",
     items: [
@@ -55,121 +211,6 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
     ],
   },
   {
-    group: "Governance",
-    items: [
-      { label: "Rules engine", to: "/admin/rules" },
-      // ADR-0040 — sits beside the rules engine because it is the same
-      // question ("what may this call do?") asked with attributes instead of
-      // static grants. It can only ever subtract from what Rules allows.
-      { label: "ABAC policies", to: "/admin/abac-policies" },
-      // ADR-0042 — the CONTENT gate, beside the destination and attribute
-      // gates. Independent controls that happen to share one interception
-      // point: what is in the payload vs. where the call may go vs. who may
-      // make it under which attributes.
-      { label: "Guardrails", to: "/admin/guardrails" },
-      // ADR-0044 — the QUALITY gate, beside the content/destination/attribute
-      // gates. Same question shape ("may this proceed?") asked of the agent's
-      // OUTPUT against a fixed dataset, and it blocks promotion the same way.
-      { label: "Evaluations", to: "/admin/evals" },
-      // ADR-0045 — the RISK-ACCEPTANCE gate, beside the quality gate. Evals ask
-      // "is this agent good on our cases?"; this asks "has a human accepted the
-      // risk of using it for this purpose, and is that acceptance still valid?"
-      // A high score is an input to that decision, never a substitute for it.
-      { label: "Model risk", to: "/admin/model-risk" },
-      // ADR-0080 — the PRE-BUILD gate, before all of the above: the gates ask
-      // "may this call proceed?"; this asks "was this USE of AI proposed,
-      // questionnaired, and signed off before anything ran?" — and an approved
-      // use case carries the same compliance tags the cascade enforces.
-      { label: "Use cases", to: "/admin/use-cases" },
-      // ADR-0084 — the THIRD-PARTY front door beside the first-party one:
-      // use cases govern OUR use of AI; this governs a vendor's AI reaching
-      // our data. The assessment rides the same rails, and everything the
-      // vendor supplies is an attestation — labelled, attributed, never
-      // blended into computed evidence.
-      { label: "Vendors", to: "/admin/vendors" },
-      // ADR-0081 — the RISK layer over the measurements above. Evals, red-team
-      // and guardrails MEASURE; the register links each measurement to a named
-      // risk scenario, an owner, the mitigating control we actually enforce,
-      // and an audited residual-risk acceptance. Evidence is computed live
-      // from the same ledgers those pages render — never hand-ticked.
-      { label: "Risks", to: "/admin/risks" },
-      // ADR-0082 — the STANDING dependency view over the per-run records: per
-      // agent, who MAY use it (the grant rows) beside what its runs actually
-      // DID (usage, traces, orchestration history) — never blended, because an
-      // unused permission is exactly the over-permissioning fact to surface.
-      { label: "Agent inventory", to: "/admin/inventory" },
-      // ADR-0092 — the WORKLIST over the same ledgers the inventory renders:
-      // deterministic, versioned rules ("queries with reasons") flag grants
-      // worth reviewing — unused, orphaned, retired, overreaching, SoD-
-      // violating, holderless — each with hand-checkable evidence, feeding
-      // the certification loop below. No scores, nothing auto-executes; the
-      // model-judged half stays credential-blocked, not approximated.
-      { label: "Access recommendations", to: "/admin/recommendations" },
-      // ADR-0090 — the periodic RE-ATTESTATION loop over the grant rows the
-      // inventory renders: named reviewers keep/revoke each gateway grant
-      // through the one Approvals queue, revoke executes the real removal,
-      // and a past-due campaign reads expired-incomplete rather than
-      // silently vanishing. Gateway grants only — never a fabric campaign.
-      { label: "Certification campaigns", to: "/admin/certification" },
-      // ADR-0091 — the PREVENTIVE twin of the certification loop: toxic
-      // capability combinations refused at mint time, existing violators
-      // surfaced (never auto-revoked), and refused mints escalatable to the
-      // one approvals queue for an arm's-length override.
-      { label: "SoD rules", to: "/admin/sod" },
-      // ADR-0057 — the SECURITY gate, beside the quality and risk gates. Evals
-      // ask "is this agent good on our cases?"; this asks "does it hold when
-      // someone attacks it?", measured through the live guardrails and blocking
-      // promotion through the same automated-check stage.
-      { label: "Red-teaming", to: "/admin/redteam" },
-      // ADR-0048 — the CHANGE-CONTROL layer under all of the above. The gates
-      // decide whether a call may proceed; this decides which VERSION of the
-      // governing artifact it proceeds under, and gives that change a canary
-      // and a one-click undo.
-      { label: "Prompt versions", to: "/admin/prompt-versions" },
-      { label: "Simulation", to: "/admin/simulation" },
-      { label: "Approvals queue", to: "/admin/approvals" },
-      // ADR-0046 — the SAME approvals, scaled: routing, SLA timers, escalation,
-      // workload and bulk triage. A layer on the one queue, never a second one.
-      { label: "Review workbench", to: "/admin/review-workbench" },
-      { label: "Audit log", to: "/admin/audit" },
-      // ADR-0050 — the audit log answers "who did what"; this answers "what
-      // flowed into what". Adjacent on purpose: an e-discovery or DPIA question
-      // starts in one and finishes in the other, and keeping them apart is what
-      // makes both readable.
-      { label: "Data lineage", to: "/admin/lineage" },
-      // ADR-0047 — the BOARD-facing read of the same two ledgers the Cost
-      // dashboard and the Audit log render operationally. Nothing new is
-      // stored: a report is a read-only projection, scoped to the caller's own
-      // entitlement, and it says on its face that spend is a list-price
-      // estimate and that no scheduler drives its schedules.
-      { label: "Reports", to: "/admin/reports" },
-      // ADR-0082 — the one-page BOARD read beside the report machinery it
-      // rides: pack coverage, open risks, ASR, spend vs budget, anchoring —
-      // every figure computed from the ledgers at load, print-friendly with
-      // CSS only, and an empty ledger says "unmeasured", never zero.
-      { label: "Posture", to: "/admin/posture" },
-      // ADR-0055 — the land-and-expand wedge: what AI are we NOT governing?
-      // It sits in Governance rather than Integrations because a discovered row
-      // is a governance gap, not a connection to configure.
-      { label: "Shadow-AI discovery", to: "/admin/shadow-ai" },
-      // ADR-0056 — the natural-language front door onto the very ledgers this
-      // group renders. It sits here, not under Settings, because it IS a
-      // governance surface: a governed tenant reading the governance record
-      // with the caller's own entitlements and unable to change anything.
-      { label: "Governance copilot", to: "/admin/copilot" },
-      // ADR-0070 — sits in Governance, not in a new "Observability" group,
-      // because the question it answers is a governance question: "why did
-      // nothing happen?". The audit log says a decision was taken; the trace
-      // says where in the call it landed and what it stopped.
-      { label: "Traces", to: "/admin/traces" },
-      // ADR-0061 — the Approvals Queue's chat courier. It sits beside the queue
-      // it mirrors, because the identity link is a governance trust artifact and
-      // not an integration setting.
-      { label: "ChatOps approvals", to: "/admin/chatops" },
-      { label: "Workflow templates", to: "/admin/workflow-templates" },
-    ],
-  },
-  {
     group: "Integrations",
     items: [
       { label: "Agents", to: "/admin/agents" },
@@ -178,11 +219,6 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // question ("what can our models talk to?") asked about an endpoint we
       // do not own, rather than a vendor we do.
       { label: "Custom LLM providers", to: "/admin/custom-providers" },
-      // ADR-0088 — sits under Custom LLM providers because it is the same
-      // decision shape (an admin-typed outbound endpoint under the egress
-      // guard, register → test → enable) applied to a measuring instrument
-      // the operator brings, rather than a model.
-      { label: "External scorers", to: "/admin/external-scorers" },
       // ADR-0065 — sits directly under Custom LLM providers because it answers
       // the adjacent question. That one is "which model that we do not own may
       // our people reach?"; this one is "which model may our people BUILD, out

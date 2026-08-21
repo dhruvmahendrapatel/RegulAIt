@@ -114,10 +114,16 @@ test("admin login: one-time password → forced change → dashboard shows admin
   await page.getByRole("button", { name: "Set password & continue" }).click();
 
   await expect(page.getByRole("heading", { name: /Welcome back/ })).toBeVisible();
-  // the six admin groups render as real nav sections, no "classic ↗" bridges
+  // the admin nav sections (ADR-0093 IA) render as real headings, no
+  // "classic ↗" bridges
   for (const group of [
+    "Overview",
+    "Approvals & Audit",
+    "AI Governance",
+    "Access Reviews",
+    "Policies & Gates",
+    "Quality & Security",
     "Identity & Access",
-    "Governance",
     "Integrations",
     "Cost & Optimization",
     "Compliance & Infra",
