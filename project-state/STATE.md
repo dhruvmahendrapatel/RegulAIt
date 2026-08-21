@@ -127,9 +127,19 @@ time (orphaned = owner's SCIM-written `disabled_at`), and the inventory gains a 
 never-blend block: **intended-vs-granted alignment** (aligned/undershoot/overreach against
 `ai_use_cases.intendedAgentIds`, holder sets imported from ADR-0082's index, never about
 traffic). Gateway **2263 passing + 9 MinIO skips / 138 files**, Playwright **116/116**.
-Remaining: L22 certification campaigns → L23 tool-combination SoD → L24 access
-recommendations (deterministic half); L13 assessment AI pre-fill (owner decision — collides
-with ADR-0080's "the answers are yours"); L6 the moment the model credential is unparked. Process note: M-019 logged —
+Then **L22**
+([ADR-0090](../docs/decisions/0090-grant-certification-campaigns.md), migration 0092): grant
+certification campaigns over **gateway grants only** — a campaign snapshots the grants that
+existed at open, each item is one row on the ONE approvals queue decided via
+`decideOneApproval`, the own-grant bar is decider-keyed (an admin holder with an override
+reason is still refused), **revoke executes the real removal inside the decision's
+transaction** (which surfaced and closed a real gap: direct MCP tool/server grants had no
+removal path at all — two DELETE endpoints added on the shared impl), and a past-due campaign
+reads `expired-incomplete` on the breach-on-read idiom — undecided items stay undecided
+forever. Gateway **2279 passing + 9 MinIO skips / 139 files**, Playwright **118/118**.
+Remaining: L23 tool-combination SoD → L24 access recommendations (deterministic half); L13
+assessment AI pre-fill (owner decision — collides with ADR-0080's "the answers are yours");
+L6 the moment the model credential is unparked. Process note: M-019 logged —
 a REPEAT of M-014 (agent parked on a watcher despite the rule in its brief); the rule is
 rewritten to make parking impossible (foreground suite runs with explicit timeouts, stated
 inside the verification step).
