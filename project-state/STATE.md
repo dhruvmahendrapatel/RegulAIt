@@ -21,6 +21,21 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-08-21 (later) — pending ledger made durable; enterprise console IA shipped.**
+[PENDING.md](../docs/product/PENDING.md) now carries the complete post-queue pending set,
+each item with its exact unblock condition (credential / owner decision / live instrument /
+deliberate refusal / anytime follow-up) — written after the harness task list was lost to a
+workspace rollback, proving in-repo docs are the only durable ledger. Then an owner-directed
+enterprise UX pass ([ADR-0093](../docs/decisions/0093-console-information-architecture.md),
+subordinate to ADR-0075): the 26-entry Governance nav split into **11 question-shaped
+sections** (routes and labels byte-identical — grouping, not renaming), one `SeverityBadge`
+vocabulary on the brand's measured severity pairs (two disagreeing local maps deleted), a
+dismissible first-run orientation on the admin home (three live numbers, start-here links,
+zero extra fetches), and raw JSON dumps replaced with bounded code blocks. Survey finding
+recorded honestly: the page-pattern discipline had held — every new page already used the
+shared header/label/skeleton/empty-state idioms. Playwright **121/121** incl. the brand
+contract; one legitimate spec update (nav-section list 6 → 11, assertion unweakened).
+
 **2026-08-20 — the Credo-gap queue is landing: L1 and L3 shipped, positioning refreshed.** A
 gap analysis against Credo AI ([GAP_ANALYSIS_CREDO_AI_2026-08.md](../docs/product/GAP_ANALYSIS_CREDO_AI_2026-08.md))
 ranked eight lacks, and the owner directed both building the gaps and out-placing their
