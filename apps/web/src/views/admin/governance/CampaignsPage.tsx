@@ -27,7 +27,7 @@ import { QueryGate, useAction } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
-type ScopeKind = "all" | "agent_lifecycle" | "agent_owner" | "user";
+type ScopeKind = "all" | "agent_lifecycle" | "agent_owner" | "user" | "from_recommendations";
 type CampaignStatus = "open" | "completed" | "expired-incomplete";
 
 interface CampaignListRow {
@@ -72,7 +72,14 @@ const SCOPE_LABELS: Record<ScopeKind, string> = {
   agent_lifecycle: "grants on agents by lifecycle",
   agent_owner: "grants on one owner's agents",
   user: "one user's direct grants",
+  // ADR-0092: opened from the Access recommendations page (which knows the
+  // rule ids); listed here for display, not offered in the manual form below
+  from_recommendations: "grants flagged by recommendation rules",
 };
+/** the scopes the manual open-form offers — from_recommendations campaigns
+ * are opened from the Access recommendations page, where the flagged set is
+ * visible before committing */
+const FORM_SCOPES: ScopeKind[] = ["all", "agent_lifecycle", "agent_owner", "user"];
 
 export default function CampaignsPage() {
   const act = useAction();
@@ -151,7 +158,7 @@ export default function CampaignsPage() {
                     setPreviewCount(null);
                   }}
                 >
-                  {(Object.keys(SCOPE_LABELS) as ScopeKind[]).map((k) => (
+                  {FORM_SCOPES.map((k) => (
                     <option key={k} value={k}>
                       {SCOPE_LABELS[k]}
                     </option>

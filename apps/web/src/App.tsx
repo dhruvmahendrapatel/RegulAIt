@@ -41,6 +41,7 @@ import VendorsPage from "./views/admin/governance/VendorsPage";
 import RisksPage from "./views/admin/governance/RisksPage";
 import InventoryPage from "./views/admin/governance/InventoryPage";
 import CampaignsPage from "./views/admin/governance/CampaignsPage";
+import RecommendationsPage from "./views/admin/governance/RecommendationsPage";
 import SodRulesPage from "./views/admin/governance/SodRulesPage";
 import PosturePage from "./views/admin/governance/PosturePage";
 import RedTeamPage from "./views/admin/governance/RedTeamPage";
@@ -171,6 +172,7 @@ export default function App() {
                         {/* ADR-0082 */}
                         <Route path="inventory" element={<InventoryPage />} />
                         <Route path="certification" element={<CampaignsPage />} />
+                        <Route path="recommendations" element={<RecommendationsPage />} />
                         {/* ADR-0091 */}
                         <Route path="sod" element={<SodRulesPage />} />
                         <Route path="posture" element={<PosturePage />} />

@@ -98,6 +98,13 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // DID (usage, traces, orchestration history) — never blended, because an
       // unused permission is exactly the over-permissioning fact to surface.
       { label: "Agent inventory", to: "/admin/inventory" },
+      // ADR-0092 — the WORKLIST over the same ledgers the inventory renders:
+      // deterministic, versioned rules ("queries with reasons") flag grants
+      // worth reviewing — unused, orphaned, retired, overreaching, SoD-
+      // violating, holderless — each with hand-checkable evidence, feeding
+      // the certification loop below. No scores, nothing auto-executes; the
+      // model-judged half stays credential-blocked, not approximated.
+      { label: "Access recommendations", to: "/admin/recommendations" },
       // ADR-0090 — the periodic RE-ATTESTATION loop over the grant rows the
       // inventory renders: named reviewers keep/revoke each gateway grant
       // through the one Approvals queue, revoke executes the real removal,

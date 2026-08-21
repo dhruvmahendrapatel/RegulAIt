@@ -106,6 +106,14 @@ interface PostureDoc {
     currentViolations: number;
     note: string;
   };
+  accessRecommendations: {
+    rulesVersion: number;
+    windowDays: number;
+    byRule: Array<{ id: string; severity: string; findings: number; notAssessable: number }>;
+    totalFindings: number;
+    totalNotAssessable: number;
+    note: string;
+  };
   useCases: { proposed: number; underReview: number; approved: number; rejected: number; retired: number; total: number };
   note: string;
 }
@@ -404,6 +412,32 @@ export default function PosturePage() {
                     </div>
                   )}
                   <div className={v.faint}>{d.sod.note}</div>
+                </div>
+              </Card>
+              <Card
+                title="Access recommendations"
+                actions={<SectionLink to="/admin/recommendations" label="recommendations →" />}
+              >
+                <div className={v.stack}>
+                  <div className={p.oneLiner}>
+                    {d.accessRecommendations.totalFindings === 0 ? (
+                      <>None — no deterministic rule currently flags any grant.</>
+                    ) : (
+                      <>
+                        {d.accessRecommendations.totalFindings} finding(s) across the v
+                        {d.accessRecommendations.rulesVersion} rules:{" "}
+                        {d.accessRecommendations.byRule
+                          .filter((r) => r.findings > 0)
+                          .map((r) => `${r.id} ${r.findings}`)
+                          .join(", ")}
+                        .
+                      </>
+                    )}{" "}
+                    {d.accessRecommendations.totalNotAssessable > 0 && (
+                      <>{d.accessRecommendations.totalNotAssessable} grant(s) not assessable.</>
+                    )}
+                  </div>
+                  <div className={v.faint}>{d.accessRecommendations.note}</div>
                 </div>
               </Card>
               <Card title="AI use-case pipeline" actions={<SectionLink to="/admin/use-cases" label="use cases →" />}>
