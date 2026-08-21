@@ -38,7 +38,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea } from "../../../ui/kit";
+import { Badge, Button, Card, CodeBlock, EmptyState, Field, Input, Select, SeverityBadge, Table, Textarea } from "../../../ui/kit";
 import {
   OutcomePanel,
   QueryGate,
@@ -236,13 +236,6 @@ const ADAPTER_CONFIG_HINT: Record<string, string> = {
     'REQUIRED: {"layout":"squid"} — or "common" / "combined". These formats carry no header, so the layout is an operator assertion and is never sniffed: a mis-declared layout would read the client-IP column as the destination.',
   generic_mapped:
     'REQUIRED: {"kind":"egress_log"} (or code_scan / saas_export / self_reported). Add "mapping" to name the columns yourself; omit it and header inference proposes them and REFUSES on ambiguity.',
-};
-
-const SEVERITY_TONE: Record<string, "danger" | "warn" | "info" | "neutral"> = {
-  critical: "danger",
-  high: "warn",
-  medium: "info",
-  low: "neutral",
 };
 
 const EXAMPLE = JSON.stringify(
@@ -619,7 +612,7 @@ export default function ShadowAiPage() {
                   Fields actually read: {rawResult.fieldsUsed.join(", ") || "none"} — everything else in the
                   file was DISCARDED and is stored nowhere.
                 </p>
-                <pre className={a.snippet}>{JSON.stringify(rawResult, null, 2)}</pre>
+                <CodeBlock maxHeight="280px">{JSON.stringify(rawResult, null, 2)}</CodeBlock>
               </div>
             )}
 
@@ -828,7 +821,7 @@ export default function ShadowAiPage() {
           </Button>
         </div>
         {preview ? (
-          <pre className={v.mono}>{JSON.stringify(preview, null, 2)}</pre>
+          <CodeBlock maxHeight="280px">{JSON.stringify(preview, null, 2)}</CodeBlock>
         ) : null}
       </Card>
 
@@ -842,7 +835,7 @@ export default function ShadowAiPage() {
               rows={findings.data?.findings ?? []}
               rowKey={(r) => r.id}
               columns={[
-                { key: "severity", header: "Severity", render: (r) => <Badge tone={SEVERITY_TONE[r.severity] ?? "neutral"}>{r.severity}</Badge> },
+                { key: "severity", header: "Severity", render: (r) => <SeverityBadge severity={r.severity} /> },
                 { key: "subject", header: "Subject", render: (r) => <span title={r.subjectKind}>{r.subject}</span> },
                 { key: "provider", header: "Provider", render: (r) => r.provider },
                 { key: "sources", header: "Sources", render: (r) => r.signalSources.join(", ") },

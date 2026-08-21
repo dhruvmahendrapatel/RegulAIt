@@ -24,7 +24,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, Input, Select, SeverityBadge, Table, Textarea } from "../../../ui/kit";
 import { QueryGate, agentOpts, optionEls, projectOpts, useAction, useAgents, useProjects } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
@@ -89,8 +89,6 @@ interface FindingRow {
 }
 
 const pct = (n: number | null | undefined) => (n == null ? "—" : `${Math.round(n * 100)}%`);
-const sevTone = (s: string): Tone =>
-  s === "critical" || s === "high" ? "danger" : s === "medium" ? "warn" : "info";
 
 export default function RedTeamPage() {
   const agents = useAgents();
@@ -295,7 +293,7 @@ export default function RedTeamPage() {
                   {
                     key: "sev",
                     header: "Severity",
-                    render: (r) => <Badge tone={sevTone(r.severity)}>{r.severity}</Badge>,
+                    render: (r) => <SeverityBadge severity={r.severity} />,
                   },
                   { key: "oracle", header: "Oracle", render: (r) => <code>{r.scorerKind}</code> },
                   { key: "note", header: "Why", render: (r) => <span className={v.faint}>{r.note}</span> },
@@ -388,7 +386,7 @@ export default function RedTeamPage() {
                     header: "Worst defeat",
                     render: (r) =>
                       r.worstDefeatedSeverity ? (
-                        <Badge tone={sevTone(r.worstDefeatedSeverity)}>{r.worstDefeatedSeverity}</Badge>
+                        <SeverityBadge severity={r.worstDefeatedSeverity} />
                       ) : (
                         <span className={v.faint}>none</span>
                       ),
@@ -405,7 +403,7 @@ export default function RedTeamPage() {
                     {
                       key: "sev",
                       header: "Severity",
-                      render: (r) => <Badge tone={sevTone(r.severity)}>{r.severity}</Badge>,
+                      render: (r) => <SeverityBadge severity={r.severity} />,
                     },
                     {
                       key: "out",

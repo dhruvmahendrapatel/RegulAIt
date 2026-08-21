@@ -219,6 +219,25 @@
   background: var(--primary-soft);
   color: var(--primary-soft-text);
 }
+/* The brand's four-step severity scale — 16% tint fill, deep-step text (the
+   deep steps are the measured-AA pairs, see ADR-0075 §5.2b). Rendered only by
+   kit.tsx's SeverityBadge so the vocabulary cannot fork per page. */
+.sevCritical {
+  background: var(--rg-critical-tint);
+  color: var(--rg-critical-deep);
+}
+.sevHigh {
+  background: var(--rg-high-tint);
+  color: var(--rg-high-deep);
+}
+.sevMedium {
+  background: var(--rg-medium-tint);
+  color: var(--rg-medium-deep);
+}
+.sevLow {
+  background: var(--rg-low-tint);
+  color: var(--rg-low-deep);
+}
 .dot {
   display: inline-block;
   width: 8px;
