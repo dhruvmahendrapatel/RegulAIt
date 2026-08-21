@@ -100,6 +100,12 @@ interface PostureDoc {
     expiredIncomplete: number;
     note: string;
   };
+  sod: {
+    rules: number;
+    enabled: number;
+    currentViolations: number;
+    note: string;
+  };
   useCases: { proposed: number; underReview: number; approved: number; rejected: number; retired: number; total: number };
   note: string;
 }
@@ -378,6 +384,26 @@ export default function PosturePage() {
                     </div>
                   )}
                   <div className={v.faint}>{d.certificationCampaigns.note}</div>
+                </div>
+              </Card>
+              <Card title="Separation of duties" actions={<SectionLink to="/admin/sod" label="SoD rules →" />}>
+                <div className={v.stack}>
+                  <div className={p.oneLiner}>
+                    {d.sod.rules === 0 ? (
+                      <>No SoD rule is defined — no capability combination is declared toxic.</>
+                    ) : (
+                      <>
+                        {d.sod.rules} SoD rule(s), {d.sod.enabled} enabled — {d.sod.currentViolations} current
+                        violation(s).
+                      </>
+                    )}
+                  </div>
+                  {d.sod.currentViolations > 0 && (
+                    <div>
+                      <Badge tone="danger">{d.sod.currentViolations} violation(s)</Badge>
+                    </div>
+                  )}
+                  <div className={v.faint}>{d.sod.note}</div>
                 </div>
               </Card>
               <Card title="AI use-case pipeline" actions={<SectionLink to="/admin/use-cases" label="use cases →" />}>

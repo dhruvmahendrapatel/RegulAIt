@@ -104,6 +104,11 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // and a past-due campaign reads expired-incomplete rather than
       // silently vanishing. Gateway grants only — never a fabric campaign.
       { label: "Certification campaigns", to: "/admin/certification" },
+      // ADR-0091 — the PREVENTIVE twin of the certification loop: toxic
+      // capability combinations refused at mint time, existing violators
+      // surfaced (never auto-revoked), and refused mints escalatable to the
+      // one approvals queue for an arm's-length override.
+      { label: "SoD rules", to: "/admin/sod" },
       // ADR-0057 — the SECURITY gate, beside the quality and risk gates. Evals
       // ask "is this agent good on our cases?"; this asks "does it hold when
       // someone attacks it?", measured through the live guardrails and blocking
