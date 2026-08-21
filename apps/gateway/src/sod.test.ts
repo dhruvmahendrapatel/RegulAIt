@@ -49,11 +49,13 @@ import {
   roleAgentGrants,
   roleAssignments,
   runMigrations,
+  sodRules,
   and,
   sodOverrideRequests,
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { sodPostureSection } from "./sod.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -235,16 +237,31 @@ afterAll(async () => {
 });
 
 describe("rule authoring — reasons required, selectors concrete, surfaces stated", () => {
-  it("posture and inventory state outright that no rule is defined (before any exists)", async () => {
-    // sod_rules rows are created ONLY by this file, and the scratch DB is
-    // fresh per run (M-009), so the none-defined statement is assertable
+  it("posture and inventory state outright that no rule is defined — pinned in a rolled-back transaction, order-proof", async () => {
+    // Shared DB + size-ordered files (M-008/M-018): another file can create
+    // SoD rows first, so global rules===0 is an ordering accident. The
+    // none-defined statement is pinned against a transaction that empties
+    // sod_rules and rolls back, touching nothing durable.
+    const rollback = new Error("rollback");
+    await db
+      .transaction(async (tx) => {
+        await tx.delete(sodRules);
+        const s = await sodPostureSection(tx as unknown as Db);
+        expect(s.rules).toBe(0);
+        expect(s.note).toMatch(/no SoD rule is defined/);
+        throw rollback;
+      })
+      .catch((e) => {
+        if (e !== rollback) throw e;
+      });
+    // live endpoints stay consistent whichever way the shared DB leans
     const p = await posture();
-    expect(p.sod.rules).toBe(0);
-    expect(p.sod.note).toMatch(/no SoD rule is defined/);
     const inv = await app.inject({ method: "GET", headers: AUTH, url: "/v1/inventory/agents" });
     expect(inv.statusCode).toBe(200);
-    expect(inv.json().sod.rules).toBe(0);
-    expect(inv.json().sod.note).toMatch(/no SoD rule is defined/);
+    for (const section of [p.sod, inv.json().sod]) {
+      if (section.rules === 0) expect(section.note).toMatch(/no SoD rule is defined/);
+      else expect(section.note).not.toMatch(/no SoD rule is defined/);
+    }
   });
 
   it("refuses by name: unknown object, identical sides, misplaced tool name / mode, missing reason", async () => {

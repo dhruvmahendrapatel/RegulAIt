@@ -181,3 +181,24 @@ explicit timeout (10 min is allowed) that tails the log itself, state that the
 Monitor/background path is OFF-LIMITS for suite runs, and place that
 instruction INSIDE the verification step it applies to, not in a separate
 process-rules section.**
+
+### M-020 — "run it last" was a Playwright rule; vitest orders files by SIZE
+L24's gateway test created campaign/SoD rows; two earlier files asserted the
+global "none has ever existed" posture statements. The agent applied M-018's
+rule — rename to sort last — and its suite went green. But M-018 is about
+Playwright, which runs files alphabetically; the gateway vitest suite runs
+sequentially in SIZE order (fileParallelism: false, default sequencer), so the
+rename changed nothing and the green run was luck: my independent re-run of
+the identical commit had the "polluting" file run first and failed the
+emptiness assertion. Two lessons. First, a nondeterministically-ordered green
+suite does not prove order-independence — only a run forcing the hostile
+order does. Second, the emptiness assertions themselves were M-008 debt from
+the day they were written ("only this file creates rows" is a claim about
+every FUTURE file, which no present file can make). Fixed by pinning the
+zero-state statements inside a rolled-back transaction that empties the
+tables (order-proof, touches nothing durable) plus a two-way consistency
+check on the live endpoint.
+**Rule: a shared-DB test may assert global emptiness ONLY inside a
+rolled-back transaction that creates that emptiness; file naming is an
+ordering tool in Playwright alone, and any "only this file writes X" comment
+must be treated as already false.**

@@ -44,12 +44,14 @@ import {
   createDb,
   eq,
   grantCertificationCampaigns,
+  grantCertificationItems,
   roleAgentGrants,
   runMigrations,
   toolGrants,
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { certificationPostureSection } from "./grant-certification.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -287,12 +289,33 @@ afterAll(async () => {
 });
 
 describe("scope preview + open-time refusals", () => {
-  it("posture says outright that no campaign has ever been run (before any exists)", async () => {
-    // campaign rows are created ONLY by this file, and the scratch DB is
-    // fresh per run (M-009), so the never-run statement is assertable here
+  it("posture says outright that no campaign has ever been run — pinned in a rolled-back transaction, order-proof", async () => {
+    // The suite shares one database and vitest orders files by SIZE, not name,
+    // so another file (zz-access-recommendations opens campaigns through the
+    // feed) can legitimately run first — a global total===0 here is an
+    // ordering accident (M-008/M-018). The never-run statement is pinned
+    // against a transaction that empties the campaign tables and rolls back,
+    // touching nothing durable.
+    const rollback = new Error("rollback");
+    await db
+      .transaction(async (tx) => {
+        await tx.delete(grantCertificationItems);
+        await tx.delete(grantCertificationCampaigns);
+        const s = await certificationPostureSection(tx as unknown as Db, new Date());
+        expect(s.total).toBe(0);
+        expect(s.note).toMatch(/no certification campaign has ever been run/);
+        throw rollback;
+      })
+      .catch((e) => {
+        if (e !== rollback) throw e;
+      });
+    // and the live endpoint is consistent whichever way the shared DB leans
     const p = await posture();
-    expect(p.certificationCampaigns.total).toBe(0);
-    expect(p.certificationCampaigns.note).toMatch(/no certification campaign has ever been run/);
+    if (p.certificationCampaigns.total === 0) {
+      expect(p.certificationCampaigns.note).toMatch(/no certification campaign has ever been run/);
+    } else {
+      expect(p.certificationCampaigns.note).not.toMatch(/never been run/);
+    }
   });
 
   it("preview counts the snapshot a scope would take, by kind", async () => {
