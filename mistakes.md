@@ -202,3 +202,15 @@ check on the live endpoint.
 rolled-back transaction that creates that emptiness; file naming is an
 ordering tool in Playwright alone, and any "only this file writes X" comment
 must be treated as already false.**
+
+### M-021 — REPEAT of M-006: pkill -f matched the invoking shell again (exit 144)
+Restarting dockerd, I wrote `pkill -f 'dockerd$|dockerd '` — the second
+alternative is a substring of my own command line, so the shell killed itself,
+eleven entries after M-006 recorded this exact failure with a working rule I
+did not apply. The rule was fine; I reached for pkill without consulting the
+ledger because the command felt too small to check. That is the failure mode:
+rules are consulted for big operations and skipped for reflex ones, but M-006
+class bugs live ENTIRELY in reflex commands.
+**Rule: before ANY pkill/pgrep -f, mechanically bracket one character of the
+pattern (`docker[d]`) or use pkill -x with the exact process name — no
+exceptions for "quick" commands, which are where this always happens.**
