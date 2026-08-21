@@ -137,9 +137,19 @@ transaction** (which surfaced and closed a real gap: direct MCP tool/server gran
 removal path at all — two DELETE endpoints added on the shared impl), and a past-due campaign
 reads `expired-incomplete` on the breach-on-read idiom — undecided items stay undecided
 forever. Gateway **2279 passing + 9 MinIO skips / 139 files**, Playwright **118/118**.
-Remaining: L23 tool-combination SoD → L24 access recommendations (deterministic half); L13
-assessment AI pre-fill (owner decision — collides with ADR-0080's "the answers are yours");
-L6 the moment the model credential is unparked. Process note: M-019 logged —
+Then **L23**
+([ADR-0091](../docs/decisions/0091-sod-toxic-combinations.md), migration 0093):
+toxic-combination SoD at the grant choke point — admin-declared capability pairs (concrete,
+two-sided, reason required) refused `409 sod_conflict` at **all nine mint paths** (4 direct,
+4 role grants checked against every current assignee, role assignment against the whole
+bundle including bundle-internal pairs), a dedicated mint-time check so the kernel stays the
+one call-time path (byte-identical with zero rules), existing violators **surfaced at read
+time and never auto-revoked**, and overrides only through the one approvals queue with a
+decider-keyed bar and the mint executing inside the decision's transaction. IdP-group-derived
+assignments bypass the gate by design and surface as violations (recorded). Gateway **2302
+passing + 9 MinIO skips / 140 files**, Playwright **120/120**. Remaining: L24 access
+recommendations (deterministic half); L13 assessment AI pre-fill (owner decision — collides
+with ADR-0080's "the answers are yours"); L6 the moment the model credential is unparked. Process note: M-019 logged —
 a REPEAT of M-014 (agent parked on a watcher despite the rule in its brief); the rule is
 rewritten to make parking impossible (foreground suite runs with explicit timeouts, stated
 inside the verification step).
