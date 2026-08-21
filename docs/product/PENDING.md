@@ -124,3 +124,59 @@ caught on read. **The sweeps buy timeliness, never correctness.**
 3. **The scheduler decision** (§4) — one ADR unblocks six features' last mile.
 4. **0048's rules half** — the largest single structural gap in a shipped ADR.
 5. **P2** — HA, when there is a customer to serve. Not before.
+
+---
+
+# Addendum — pending as of 2026-08-21 (after the competitive queue, ADRs 0062–0092)
+
+Everything above this line is the 2026-08-03 inventory; several of its items have since
+CLOSED (S1/S2 by ADR-0062/0063, §4 by ADR-0064, 0048's rules half by ADR-0073, 0057's
+trials/gating by ADR-0068, 0058's cascade preset by ADR-0077-era work, 0060's sink wired +
+observed by the review wave). This addendum is the complete pending set NOW — each item
+states **what information or decision unblocks it**, so any future session can proceed the
+moment that arrives. Recorded here because in-repo docs are the only ledger that survives
+harness resets (proven twice on 2026-08-21).
+
+## Blocked on the owner's model credential (unpark = build immediately)
+| Item | What gets built when a credential arrives |
+|---|---|
+| **L6 governance copilot** (Credo gap; GAIA-equivalent) | Governed copilot over the governance objects — task was #143. Also converts every "mechanism-proven, instrument-unverified" claim (P1 above): judge grading (0044/0067), probe grading (0057/0068), model guardrail tiers (0042), remote training adapters (0065). |
+| **L24 model-judged half** (ADR-0092) | Recommendation intelligence beyond the six deterministic rules — explicitly unapproximated today. |
+| **L9 LLM-half bias/fairness** (four-vendor doc) | Measured bias/fairness for LLM outputs; classical-ML audit business stays refused. |
+| **L13 AI pre-fill of assessments** | ALSO needs the owner decision below — credential alone is not consent. |
+
+## Blocked on an explicit owner decision (a sentence from the owner unblocks)
+| Item | The decision needed |
+|---|---|
+| **L13 assessment AI pre-fill** (four-vendor L13) | Whether pre-filling questionnaires is acceptable at all — it collides with ADR-0080's deliberate "the answers are yours" stance. |
+| **L19 certification spend** | Whether to pursue SOC 2 / ISO 27001/42001 for RegulAIt itself (P3 above; money + auditor, not code). |
+| **PII floor default** | `defaultPiiMode` ships `none` (behaviour-preserving); one PUT flips deployment-wide. Recommend `block` for any shared install. |
+| **Pillar-6 savings semantics** (two questions, STATE.md Open Questions) | How optimizer savings are counted/attributed in edge cases. |
+| **Session-narrowing issuance scope; mirror-failure persistence** | Recorded in STATE.md open decisions since the review wave. |
+
+## Blocked on a live instrument/integration (credentials or a real endpoint)
+| Item | What unblocks |
+|---|---|
+| **L11 live-traffic/embedding drift** (four-vendor) | A live provider plus real traffic; ADR-0044/0064 sweeps stay dataset-anchored until then. |
+| **Live Jira/PM verification** (market queue #5) | Customer/PM-tool credentials — adapters are fake-server-proven. |
+| **External-scorer live verification** (ADR-0088) | A real scoring endpoint; contract + governance proven against a local fake. |
+| **S3 (real release keypair)** | Offline key ceremony per `infra/release-keys/` runbook; dev key still pinned. |
+
+## Deliberate refusals — re-open only on explicit owner pull (all recorded with reasons)
+Fabric-wide identity/service-account discovery and the identity fabric itself (Saviynt
+L25/L26 — "we integrate with your IGA, we do not compete for it", ADR-0089ff); vendor-named
+shadow-AI scrapers (ADR-0071/0083); the regulatory-intelligence feed business (ADR-0087);
+non-gateway ML monitoring and SHAP-style explainability (four-vendor L17/L18); classical-ML
+bias-audit business (L9 note).
+
+## Named follow-ups riding shipped ADRs (buildable anytime, none blocking)
+Use-case approval does not yet GATE dispatch (0080); SoD pattern/N-way selectors (0091);
+campaign scheduler/notifications + review delegation (0090); drift-forces-recertification
+(0086); guardrail-path external scoring (0088 boundary); pack v2 auto-profile creation
+residuals (0058); `agent_config` canary still inert + rule-CRUD does not mint versions
+(0073 residuals); key re-encryption walk (0063); `hosted`/`byoc` egress strict-by-default
+(0062 residual); intent-capture flow for alignment where no use case records intent (0089).
+
+## Enterprise-deal gates unchanged from §1
+**P1** (credential — see above) · **P2** (HA/SLA — build when there is a customer to serve)
+· **P3** (certification — L19 decision).
