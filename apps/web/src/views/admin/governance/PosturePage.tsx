@@ -93,6 +93,13 @@ interface PostureDoc {
     lifecycle: { active: number; deprecated: number; retired: number };
     note: string;
   };
+  certificationCampaigns: {
+    total: number;
+    open: number;
+    completed: number;
+    expiredIncomplete: number;
+    note: string;
+  };
   useCases: { proposed: number; underReview: number; approved: number; rejected: number; retired: number; total: number };
   note: string;
 }
@@ -350,6 +357,27 @@ export default function PosturePage() {
                     </div>
                   )}
                   <div className={v.faint}>{d.agentOwnership.note}</div>
+                </div>
+              </Card>
+              <Card title="Grant certification" actions={<SectionLink to="/admin/certification" label="campaigns →" />}>
+                <div className={v.stack}>
+                  <div className={p.oneLiner}>
+                    {d.certificationCampaigns.total === 0 ? (
+                      <>No certification campaign has ever been run — gateway grants have never been re-attested.</>
+                    ) : (
+                      <>
+                        {d.certificationCampaigns.total} campaign(s): {d.certificationCampaigns.open} open,{" "}
+                        {d.certificationCampaigns.completed} completed, {d.certificationCampaigns.expiredIncomplete}{" "}
+                        expired-incomplete.
+                      </>
+                    )}
+                  </div>
+                  {d.certificationCampaigns.expiredIncomplete > 0 && (
+                    <div>
+                      <Badge tone="danger">{d.certificationCampaigns.expiredIncomplete} expired-incomplete</Badge>
+                    </div>
+                  )}
+                  <div className={v.faint}>{d.certificationCampaigns.note}</div>
                 </div>
               </Card>
               <Card title="AI use-case pipeline" actions={<SectionLink to="/admin/use-cases" label="use cases →" />}>

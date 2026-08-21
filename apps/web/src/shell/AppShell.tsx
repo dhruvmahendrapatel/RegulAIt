@@ -98,6 +98,12 @@ const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // DID (usage, traces, orchestration history) — never blended, because an
       // unused permission is exactly the over-permissioning fact to surface.
       { label: "Agent inventory", to: "/admin/inventory" },
+      // ADR-0090 — the periodic RE-ATTESTATION loop over the grant rows the
+      // inventory renders: named reviewers keep/revoke each gateway grant
+      // through the one Approvals queue, revoke executes the real removal,
+      // and a past-due campaign reads expired-incomplete rather than
+      // silently vanishing. Gateway grants only — never a fabric campaign.
+      { label: "Certification campaigns", to: "/admin/certification" },
       // ADR-0057 — the SECURITY gate, beside the quality and risk gates. Evals
       // ask "is this agent good on our cases?"; this asks "does it hold when
       // someone attacks it?", measured through the live guardrails and blocking
