@@ -77,3 +77,31 @@ gate. All pushed to `claude/status-check-2gbrwf` (draft PR #108).
 - Prior open owner decisions stand (model credential, pillar-6 savings
   semantics, PII floor default, session-narrowing scope, mirror-failure
   persistence).
+
+## Addendum (2026-08-21) — the queue completed
+
+Post-restart continuation in the same session context. L14 recovered from pushed
+WIP checkpoints after a container restart killed its agent (validated whole per
+M-015, not rebuilt; full cold revalidation green). Then, sequentially, each
+agent-built, independently re-verified, and pushed:
+
+- **L20+L21** (ADR-0089, migration 0091): agent ownership + lifecycle (retired
+  refuses dispatch, deprecated warns) + intended-vs-granted alignment flags.
+- **L22** (ADR-0090, migration 0092): grant certification campaigns on the one
+  approvals queue; revoke executes the real removal; found and closed the
+  missing MCP tool/server grant deletion paths.
+- **L23** (ADR-0091, migration 0093): toxic-combination SoD at all nine
+  grant-mint paths; violators surfaced, never auto-revoked; queue-only override.
+- **L24** (ADR-0092, migration 0094): deterministic access recommendations —
+  queries with reasons, campaign feed as the only action path; brief premise
+  about tracing falsified by verification and the honest version shipped.
+
+Also this stretch: Saviynt gap analysis (nine near-misses struck; their gateway
+authorizes an identity, ours governs the call), owner promotions of L22–L24,
+M-019 logged (REPEAT of M-014, rule rewritten to make parking impossible) with
+no recurrence across five subsequent agents.
+
+Final suite state: gateway **141 files / 2321 passed + 9 MinIO skips**, shared
+**728**, Playwright **121/121**, migrations 0001–0094 from zero. The
+competitive build queue (L1–L24, minus owner-gated L6/L9/L11/L13/L19) is
+complete.

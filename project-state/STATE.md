@@ -1,5 +1,5 @@
 ---
-phase: competitive-queue-built-l1-through-l12
+phase: competitive-queue-complete-l1-through-l24
 last_updated: 2026-08-13
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
@@ -147,9 +147,22 @@ one call-time path (byte-identical with zero rules), existing violators **surfac
 time and never auto-revoked**, and overrides only through the one approvals queue with a
 decider-keyed bar and the mint executing inside the decision's transaction. IdP-group-derived
 assignments bypass the gate by design and surface as violations (recorded). Gateway **2302
-passing + 9 MinIO skips / 140 files**, Playwright **120/120**. Remaining: L24 access
-recommendations (deterministic half); L13 assessment AI pre-fill (owner decision — collides
-with ADR-0080's "the answers are yours"); L6 the moment the model credential is unparked. Process note: M-019 logged —
+passing + 9 MinIO skips / 140 files**, Playwright **120/120**. Then **L24**
+([ADR-0092](../docs/decisions/0092-access-recommendations.md), migration 0094 — one CHECK
+widening; recommendations themselves store nothing): access recommendations as **queries with
+reasons** — six frozen v1 rules (unused-grant, never-signed-in-holder, orphaned/retired-agent
+grants, overreach, sod-violation), every result carrying hand-checkable evidence and a
+concrete action ref, nothing auto-executing; the only action path is a `from_recommendations`
+certification-campaign scope whose snapshot is exactly the currently-flagged grants (recommend
+→ human review → revoke-is-real, proven end-to-end). Verification falsified a brief premise
+(M-010): `usage_events` meters every governed call unconditionally, so unused-grant reads
+metering — tracing gates only agent-attribution; `not_assessable` fires where genuinely true.
+The model-judged half stays L6-blocked and unapproximated. Gateway **2321 passing + 9 MinIO
+skips / 141 files**, shared **728**, Playwright **121/121**. **The competitive build queue is
+COMPLETE** — Credo L1–L8, four-vendor L10/L12/L14/L15, Saviynt L20–L24, five gap-analysis
+docs, ADRs 0076–0092, migrations through 0094. Open owner decisions: L13 assessment AI
+pre-fill (collides with ADR-0080's "the answers are yours"); L6 + L24's copilot half (model
+credential); L9/L11 (instrument-gated); L19 certification spend. Process note: M-019 logged —
 a REPEAT of M-014 (agent parked on a watcher despite the rule in its brief); the rule is
 rewritten to make parking impossible (foreground suite runs with explicit timeouts, stated
 inside the verification step).
