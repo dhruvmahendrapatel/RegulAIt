@@ -4,6 +4,7 @@
  * own pending approvals, recent runs and spend. Every card links somewhere
  * real — nothing decorative.
  */
+import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../api/client";
@@ -40,6 +41,7 @@ export default function HomePage() {
         sub="Your governed AI delivery workspace — everything below is live."
       />
       <div className={v.stack}>
+        {auth?.isAdmin && <OrientationCard />}
         {auth?.isAdmin && <SetupCard />}
         <div className={v.grid2}>
           <ApprovalsCard />
@@ -51,6 +53,97 @@ export default function HomePage() {
         </div>
       </div>
     </>
+  );
+}
+
+/**
+ * First-run orientation (ADR-0093). An admin landing on the console for the
+ * first time should understand the product in one screen: what the gateway is
+ * enforcing right now, the headline numbers, and where to start. Dismissal is
+ * a per-browser convenience stored in localStorage — it must never gate
+ * anything, and a cleared browser simply shows the card again.
+ */
+const ORIENTATION_KEY = "rg.homeOrientationDismissed";
+const readDismissed = () => {
+  try {
+    return localStorage.getItem(ORIENTATION_KEY) === "1";
+  } catch {
+    return false;
+  }
+};
+
+function OrientationCard() {
+  const [dismissed, setDismissed] = useState(readDismissed);
+  // deduped against the cards below — same query keys, no extra fetches
+  const approvals = useQuery({
+    queryKey: ["approvals"],
+    queryFn: () => api.get<{ approvals: Approval[] }>("/v1/approvals"),
+  });
+  const usage = useQuery({
+    queryKey: ["usage-events"],
+    queryFn: () => api.get<UsageEventsResponse>("/v1/usage-events?limit=100"),
+  });
+  const setup = useQuery({
+    queryKey: ["setup-status"],
+    queryFn: () => api.get<SetupStatusResponse>("/v1/setup/status"),
+  });
+  if (dismissed) return null;
+  const pending = (approvals.data?.approvals ?? []).filter((a) => a.status === "pending").length;
+  const totals = usage.data?.totals ?? {};
+  const dismiss = () => {
+    try {
+      localStorage.setItem(ORIENTATION_KEY, "1");
+    } catch {
+      /* storage unavailable — dismiss still works for this view */
+    }
+    setDismissed(true);
+  };
+  return (
+    <Card
+      title="Start here — what this console governs"
+      actions={
+        <Button size="sm" variant="ghost" aria-label="Dismiss orientation" onClick={dismiss}>
+          Dismiss
+        </Button>
+      }
+    >
+      <div className={v.stack}>
+        <p className={v.dim} style={{ maxWidth: "70ch" }}>
+          Every agent, connector and MCP call in this workspace passes through one gateway:
+          default-deny entitlements, human approvals, content guardrails, per-project cost
+          attribution and a full audit trail — enforced at the call, not reported after it.
+        </p>
+        <div className={v.grid3}>
+          <div className={v.stat}>
+            <span className={v.statValue}>{pending}</span>
+            <span className={v.statLabel}>decisions waiting on a human</span>
+          </div>
+          <div className={v.stat}>
+            <span className={v.statValue}>{totals.events ?? 0}</span>
+            <span className={v.statLabel}>governed calls metered</span>
+          </div>
+          <div className={v.stat}>
+            <span className={v.statValue}>{fmtUsd(totals.costUsd)}</span>
+            <span className={v.statLabel}>attributed spend</span>
+          </div>
+        </div>
+        <div className={v.row} style={{ flexWrap: "wrap" }}>
+          <Link to="/admin/posture">See your governance posture</Link>
+          <span className={v.faint} aria-hidden>
+            ·
+          </span>
+          <Link to="/admin/use-cases">Propose an AI use case</Link>
+          <span className={v.faint} aria-hidden>
+            ·
+          </span>
+          <Link to="/admin/inventory">Open the agent inventory</Link>
+          <span className={v.faint} aria-hidden>
+            ·
+          </span>
+          <Link to="/admin/cost">Open the cost dashboard</Link>
+        </div>
+      </div>
+    </Card>
   );
 }
 
