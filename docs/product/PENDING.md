@@ -156,8 +156,14 @@ and routing treating the live provider as a credentialed candidate. P1's
 "mechanism-proven, instrument-unverified" disclosures for the GOOGLE adapter and
 judge/probe grading are now VERIFIED (other providers' adapters remain fake-server-proven).
 Environmental finding: the seeded `gemini-2.5-pro` model id is retired for new Google
-accounts — seed refresh + an admin agent-model edit route queued (batch B1.5). **L6 and
-L24's model-judged half are now buildable** and queued behind the B-batches.
+accounts — seed refresh + an admin agent-model edit route queued (batch B1.5). ~~**L6 and
+L24's model-judged half are now buildable** and queued behind the B-batches.~~ — **both BUILT
+and live-verified 2026-08-22** (see the two closed rows below). Second environmental finding
+from that run, recorded here because it will recur: `gemini-3.6-flash` is a REASONING model,
+so an output ceiling sized for the answer alone is a ceiling the reply never reaches — the
+copilot's 1024-token narration budget produced `finishReason: MAX_TOKENS` after 981 thought
+tokens and 39 tokens of JSON, and the gateway (correctly) discarded the truncated reply. Any
+future internal-dispatch budget must be sized for thoughts + answer, not answer alone.
 
 **B1.5 follow-ups CLOSED 2026-08-22** ([ADR-0095](../decisions/0095-mock-routing-honesty-and-agent-model-edit.md)):
 
@@ -177,8 +183,8 @@ L24's model-judged half are now buildable** and queued behind the B-batches.
 ### The table below is retained for history (written while the credential was parked)
 | Item | What gets built when a credential arrives |
 |---|---|
-| **L6 governance copilot** (Credo gap; GAIA-equivalent) | Governed copilot over the governance objects — task was #143. Also converts every "mechanism-proven, instrument-unverified" claim (P1 above): judge grading (0044/0067), probe grading (0057/0068), model guardrail tiers (0042), remote training adapters (0065). |
-| **L24 model-judged half** (ADR-0092) | Recommendation intelligence beyond the six deterministic rules — explicitly unapproximated today. |
+| ~~**L6 governance copilot**~~ (Credo gap; GAIA-equivalent) | **CLOSED 2026-08-22** ([ADR-0056 amendment](../decisions/0056-ai-governance-copilot.md#amendment--2026-08-22-the-copilot-goes-live-l6al6b-migration-0100), migration 0100). L6a: answers are grounded in RETRIEVED OBJECT IDS with a named grounded-refusal shape when the retrieval finds nothing, narration rides the governed dispatch (live Gemini, metered, cross-checked), and `modelNarrationVerified` became an honest per-answer flag. L6b: an APPROVED proposal is applied by an admin through the same public choke points an admin would use (`applyRuleEdit`; the one-per-kind grant removal) — `rule_to_approval` and `budget_adjustment` stay **unapplied and named**, each with the endpoint that must exist first. Still open from this line: enrolment in ADR-0057 red-teaming with a promotion-blocking gate. |
+| ~~**L24 model-judged half**~~ (ADR-0092) | **CLOSED 2026-08-22** ([ADR-0092 amendment](../decisions/0092-access-recommendations.md#amendment--2026-08-22-the-model-judged-half-as-an-annotation-and-nothing-else-l6c-migration-0100), migration 0100). Opt-in, default-off org knob; when on AND a judge is dispatchable (ADR-0067's own `judgeAvailabilityFor`) each DETERMINISTIC finding may carry a `method: "model-judged"` annotation that can neither create a finding nor touch its evidence/severity — asserted byte-identical against the knob-off report. Judge unreachable → report unchanged + `judged: unavailable`. The campaign feed (the only action path) never consults the judge. |
 | **L9 LLM-half bias/fairness** (four-vendor doc) | Measured bias/fairness for LLM outputs; classical-ML audit business stays refused. |
 | **L13 AI pre-fill of assessments** | ALSO needs the owner decision below — credential alone is not consent. |
 

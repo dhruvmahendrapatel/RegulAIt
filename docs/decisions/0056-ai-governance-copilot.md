@@ -260,3 +260,151 @@ touch, which is what makes containment auditable forever) and `copilot_proposals
 row). `audit_log.object_type` gains `copilot_query` and `copilot_proposal`, and
 `approvals.object_type` gains `copilot_proposal`, both as TS-only widenings —
 neither column has a DB CHECK, so there is no DDL for them.
+
+## Amendment — 2026-08-22: THE COPILOT GOES LIVE (L6a/L6b, migration 0100)
+
+The 2026-08-02 amendment named two structural gaps in its own words. Both are
+now closed, and this amendment is a **delta** — everything the first amendment
+recorded still stands except where contradicted below.
+
+### The correction this amendment makes, before anything else
+
+**"No model provider is connected in this build" is no longer true, and the
+release no longer says it is.** A live Google/Gemini credential exists (the
+2026-08-21 unparking, `docs/product/LIVE_VERIFICATION_2026-08.md`), and the
+copilot's narration path has now run against a real model through
+`executeGovernedDispatch` — platform env credential, the caller's entitlements
+deciding, tokens metered into `usage_events` and billed to a named project.
+
+Two consequences the honesty discipline forces:
+
+- **`modelNarrationVerified` is no longer a build-wide constant `false`.** It
+  is a per-answer boolean and it means exactly one thing: *this* narration was
+  cross-checked against *this* retrieval's counts and object ids and passed.
+  It is never a claim that the model is generally reliable. A discarded
+  narration leaves it `false`, and a grounded-only answer leaves it `false`
+  because no model was called.
+- **`POST /v1/copilot/ask`'s `note` is now three different sentences** — model
+  narration cross-checked / narration attempted and discarded / no narrator
+  named. The old single note asserted a fact about the build; these assert
+  facts about the answer in hand.
+
+### L6a — grounding is now BY RETRIEVED OBJECT ID, and an empty retrieval REFUSES
+
+The first amendment grounded answers in **counts**. Counts cannot be
+hallucinated, but they also cannot be walked back to rows, and they say nothing
+about the case that matters most: a question whose retrieval found *nothing*.
+
+- **`CopilotEvidence.citableObjects`** — every retrieval now returns the
+  concrete governance objects it selected, by primary key
+  (`audit_log` / `approval` / `usage_event`), from the SAME scoped `WHERE` the
+  counts came from. The label is gateway-written fact (`effect · ruleId`),
+  never the attacker-influenceable `reason` string, which stays in the
+  guardrailed sample channel.
+- **`narrationIsGrounded` gained the object-level check.** A narration citing
+  an id the retrieval never returned is discarded exactly like an invented
+  figure. A count key is a shape the renderer owns; an object id is a claim
+  that a row exists, so an unretrieved id is either a hallucinated record or an
+  id the model was fed by crafted ledger text — the same failure either way.
+- **The grounded refusal.** `retrievalFoundNothing` (no citable object AND no
+  matched row) makes the answer a REFUSAL with a fixed shape
+  (`COPILOT_GROUNDED_REFUSAL`, `groundedRefusal: true`). The narration prompt
+  carries the matching hard rule, and a narration that answered anyway over an
+  empty retrieval is DISCARDED with the grounded refusal standing. A zero
+  COUNT is still an answer ("0 denials in your scope"); an EMPTY RETRIEVAL is
+  not, and the two are distinguished in code, in the payload and on the page.
+  The refusal is deliberately phrased as scope ("no matching record in your
+  scope"), never as "no such thing exists" — a scoped read cannot support that.
+
+### L6b — an approved proposal CAN now be applied, and only an approved one
+
+`POST /v1/copilot/proposals/:proposalId/apply` (admin, internal, tagged
+`copilot` in the ADR-0053 registry). The first amendment's "an approved
+proposal is not applied by anything" is closed for the kinds whose change has a
+**public choke point an admin would use by hand**, and deliberately NOT closed
+for the others.
+
+- **Consent is the gate, and it is the ONE queue.** The status of the LINKED
+  `approvals` row decides. `pending` and `denied` refuse `proposal_not_approved`
+  naming the status; a proposal with no approval refuses
+  `proposal_has_no_approval`; a deleted queue row refuses
+  `proposal_approval_missing`. Every refusal is audited as a deny and the
+  target is asserted unchanged.
+- **Through the public door, never past it.** `grant_revocation` rides the
+  one-per-kind removal in `grant-revocation.ts` — the exact function
+  `DELETE /v1/grants/…` and an ADR-0090 campaign's revoke decision call.
+  `policy_tightening` rides `applyRuleEdit`, ADR-0074's single door, so a
+  versioned rule mints and activates a version instead of silently drifting;
+  the choke point's own refusal (e.g. `unresolvable`) is surfaced verbatim
+  rather than worked around. There is no raw table write in the handler.
+- **Attributed to the human.** The audit row is written under the applying
+  admin's identity with the proposal as context — proposal id, query id,
+  proposer, the diff, and what the choke point reported back.
+- **Once.** `copilot_proposals.applied_at` is the idempotency gate; a second
+  apply refuses `proposal_already_applied` rather than re-executing a mutation.
+- **A malformed diff refuses** (`proposal_diff_invalid`) before anything is
+  attempted, so a proposal can never be half-applied.
+
+**Named unapplied, with the endpoint that must exist first** (in
+`COPILOT_UNAPPLICABLE_PROPOSAL_KINDS`, returned verbatim in the 422):
+`rule_to_approval` needs a cross-artifact CREATE (a new `approval_rules` row
+derived from a rate-limit/data-scope rule) that no endpoint performs —
+`applyRuleEdit` edits an artifact that exists, it does not mint one of another
+type; `budget_adjustment` has no single choke point comparable to
+`applyRuleEdit` (project budget, compliance-profile ceiling and virtual-key cap
+are three surfaces with three governance stories). Reaching past a missing
+endpoint to write the row would be exactly the ungoverned control-plane
+mutation this ADR exists to prevent, so both refuse by name.
+
+### Non-vacuity (M-002 — every count MEASURED by running the probe, then reverted by exact Edit reversal)
+
+- **Empty the grounding retrieval** (`base.citableObjects = []` in
+  `retrieveEvidence`): **2 gateway tests redden** — "cites the REAL ids of the
+  rows its own scoped retrieval returned" and "ACCEPTS a grounded narration,
+  marks it verified". Recorded honestly: the *refusal* test stays green under
+  this probe, because emptying the retrieval makes MORE things refuse. The
+  refusal assertion is therefore guarded by its CONTROL (the positive citation
+  test), which is what this probe reddens.
+- **Make the refusal condition never fire** (`retrievalFoundNothing` returns
+  `false`): **3 shared tests redden** — the refusal renderer, the prompt's
+  refusal instruction, and the narration refusal cross-check. This is the probe
+  that proves the refusal assertions themselves bite.
+- **Drop the approval-status check in apply** (`if (false && …)`): **2 gateway
+  tests redden** — refuses-PENDING and refuses-DENIED, both of which then apply
+  the mutation they exist to prevent.
+
+### Honest limits after this amendment
+
+1. **One live model, one run.** The narration path is verified against
+   Google/Gemini (`gemini-3.6-flash`). Other providers' adapters remain
+   fake-server-proven; "the model obeys the grounding contract" is a measured
+   fact about this model on these prompts, not a general property.
+2. **Output ceilings are a real failure mode, and were measured as one.** The
+   narrator's original 1024-token ceiling made narration IMPOSSIBLE on a
+   reasoning model: the reply came back `finishReason: MAX_TOKENS` after 981
+   thought tokens and 39 tokens of JSON, and was correctly discarded as
+   unparseable. Re-running the identical prompt at 4096 finished cleanly
+   (`STOP`, 1688 thought tokens, complete JSON citing the real object ids) —
+   which is what proves the ceiling was the cause. The ceiling is now 4096.
+   A future model with a larger thinking budget can reintroduce this, and the
+   symptom will again be a discarded narration, not a wrong one.
+3. **The grounded refusal is verified on ONE nonsense question.** The live
+   model refused an invented object cleanly; that is evidence, not a guarantee
+   that no phrasing can coax an answer out of an empty retrieval. The
+   structural protection is the cross-check, which discards such an answer
+   whether or not the model behaves.
+4. **Two of four proposal kinds are unapplied**, as above.
+5. **The applier is not transactional across the audit row.** The choke point
+   executes, then the proposal row is stamped, then the audit row is written.
+   A crash between them leaves an applied change with `applied_at` unset — the
+   choke point's OWN audit row (e.g. `copilot-proposal-rule-edit`) still
+   records the change, so nothing is invisible, but the proposal would read as
+   unapplied and a retry would re-execute.
+6. **Still not enrolled in red-teaming** (§5's promotion-blocking regression
+   gate). Unchanged from the first amendment.
+
+### Migration
+
+`0100_copilot_apply_and_judged_recommendations.sql` — `copilot_proposals` gains
+`applied_at` / `applied_by_user_id` / `applied_result`, all NULL for every
+existing row (which is exactly their pre-L6 state). No backfill, no new table.
