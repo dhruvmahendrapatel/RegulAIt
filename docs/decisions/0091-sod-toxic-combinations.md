@@ -173,3 +173,54 @@ All three probes reverted by exact Edit reversal (M-016).
   arm's-length property is structural (decider-keyed), not procedural.
 - The comparison page can now say: toxic-combination SoD over gateway capabilities — ours,
   preventive and detective; ERP cross-application SoD — theirs, refused.
+
+## Amendment (2026-08-22, batch B2c) — selector depth: N-way toxic sets and pattern selectors (migration 0097)
+
+Honest limits 1 and 2 were the named follow-up; this amendment builds them without touching
+the choke point's position or adding a second evaluator.
+
+**N-way sets (2..N sides, N capped at 8).** A rule may name more than two sides, and the
+conflict semantics are strict and stated: an identity conflicts only when its effective
+holdings (after the mint) would contain **ALL** sides — **any N-1 subset is allowed**, and the
+suite pins exactly that boundary (a holder of 2-of-3 mints the second side freely and is
+refused only on the completing mint, with a one-side holder as control; the role-grant and
+role-assignment paths reach the same check). The refusal names every already-held side
+(`conflict.existingSides`) and says the boundary out loud ("any N-1 of them may be co-held").
+
+**Pattern selectors — enumerable dimensions only, resolved at CHECK time.** Alongside concrete
+ids, a side may select by one of exactly three dimensions the schema actually has:
+`lifecycle_status` (agent; the closed ADR-0089 vocabulary), `provider` (agent; the closed
+`MODEL_PROVIDER_KINDS` vocabulary), or `mode` (connector; read|readwrite — "any connector held
+at readwrite", riding the existing containment rule). **No free-form regex or name matching
+anywhere** — the ADR-0085 data-only-rules discipline: a pattern is a (dimension, value) pair,
+the dimension enum is the whole vocabulary (a `name_regex` has no door to arrive through), and
+an out-of-vocabulary value is refused by name (`invalid_pattern_value`). Patterns resolve
+**live at check/read time, never at rule-creation time**: an agent deprecated after the rule
+exists — or created after the rule exists — is covered the moment it matches (pinned in the
+suite), and a pattern matching zero objects today is a valid rule, not an error.
+
+**Storage (migration 0097), byte-honest about old rows.** Pre-amendment rules keep their
+`a_*/b_*` columns untouched — nothing rewrites them, and every constraint still admits them.
+The legacy columns are relaxed to nullable with a shape CHECK (fully legacy-sided or fully
+child-sided, never half); new-shape rules (N-way and/or pattern) store every side in
+`sod_rule_sides` (position-ordered; per-selector CHECKs pin concrete-vs-pattern shape and the
+pattern vocabularies). **One loader (`loadRuleSelectors`) reads both shapes**, so the check,
+the violator computation, the rules list, the inventory, posture, the recommendation feed and
+the override path cannot tell them apart — no surface forked. The two-concrete-sided create
+payload still lands in the legacy columns, byte-identical to pre-0097 behavior.
+
+**Everything downstream is the same one path.** Violators are still holders-of-every-side
+intersected (surfaced, never auto-revoked — the disable-window test now proves it with all
+three holdings named per violator); the override still escalates and executes a pattern-rule
+refusal through the ONE approvals queue with the decider-keyed bar unchanged; with no rule
+using the new shapes, every mint path's behavior is byte-identical to pre-amendment (the
+existing 23-test suite passes unmodified).
+
+Non-vacuity (M-002, probes reverted by exact Edit reversal — M-016): tolerating ONE missing
+side (i.e. firing on an N-1 subset) reddens the boundary test and the entire two-sided
+control set — 12 tests in the original suite plus 8 in the selector-depth suite.
+
+**Limits that stand:** dimensions are exactly the three named — adding one is a schema-backed
+decision, not a config knob; MCP sides remain concrete (no pattern dimension exists for them);
+SoD still sees gateway grants only; enforcement is still at mint; IdP-driven role assignments
+still bypass by design.

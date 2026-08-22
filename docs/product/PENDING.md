@@ -198,8 +198,19 @@ non-gateway ML monitoring and SHAP-style explainability (four-vendor L17/L18); c
 bias-audit business (L9 note).
 
 ## Named follow-ups riding shipped ADRs (buildable anytime, none blocking)
-Use-case approval does not yet GATE dispatch (0080); SoD pattern/N-way selectors (0091);
-campaign scheduler/notifications + review delegation (0090); drift-forces-recertification
+Use-case approval does not yet GATE dispatch (0080); ~~SoD pattern/N-way selectors (0091)~~
+— **closed 2026-08-22 (batch B2c, ADR-0091 amendment, migration 0097)**: N-way sets (2..8,
+refused only on the FULL set — any N-1 subset allowed) plus pattern selectors over exactly
+three enumerable dimensions (agent lifecycle status, agent provider kind, connector mode;
+no free-regex, resolved at check time against current objects); ~~campaign
+scheduler/notifications + review delegation (0090)~~ — **the scheduler and reassignment
+halves closed 2026-08-22 (batch B2a/B2b, ADR-0090 amendment)**: an off-by-default ADR-0064
+job records one audited `campaign-expired-incomplete` fact per past-due campaign (it decides
+NOTHING — expiry stays breach-on-read), and admin item reassignment exists (audited,
+reason-required, riding ADR-0046's one approver-moving write, never to the grant's holder);
+**still open from that line**: notifications (nobody is emailed at a deadline) and periodic
+auto-campaigns (deliberately refused in the ADR), while review DELEGATION was always ADR-0022's
+existing mechanism, unchanged; drift-forces-recertification
 (0086); guardrail-path external scoring (0088 boundary); ~~pack v2 auto-profile creation
 residuals (0058); `agent_config` canary still inert + rule-CRUD does not mint versions
 (0073 residuals)~~ — **all three closed 2026-08-22 (batch B1: ADR-0058 + ADR-0073
