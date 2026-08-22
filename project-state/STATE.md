@@ -21,6 +21,33 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-08-22 (night) — B6 closed: the last three buildable residuals are live-retested; the
+copilot's hallucination class is shut twice over; a parallel-sessions protocol now governs this
+repo.** Since the paragraph below: the L6d two-layer narration fix landed and live-retested,
+then [ADR-0096](../docs/decisions/0096-copilot-entity-aware-planning.md) replaced disclosure
+with structural refusal — deterministic entity extraction (the model may never assert
+existence), entitlement-scoped exact-match resolution, and four honest outcomes
+(resolved+filtered with a proven row delta, 422 unresolved, 422 ambiguous-with-candidates,
+422 tool-cannot-filter), scope honesty byte-identical between invisible and nonexistent.
+**B6** (dated amendments to ADR-0095/0080/0096, migration 0101): one exported
+`mockShadowedByLive` predicate now covers routing + compaction-summarizer + decompose-worker
+(skips disclosed on the audit rows), an org knob `dispatchAttributionRequired` refuses
+projectless governed dispatch with 409 `attribution_required` **before any provider call**,
+and the copilot resolves MCP servers/tools as first-class entities (row-delta proven
+108→1→4 on real deny rows). Live retest passed on all three; mid-retest the owner's Google
+key **exhausted its quota** — every gate/refusal/disclosure was proven anyway (the 409-vs-
+provider-502 asymmetry itself proves gate ordering), further narration-content live work is
+parked in PENDING.md until quota refresh. My independent full-suite verification caught one
+non-B6 failure: a latent **7.13%-measured flake** in `agent-config-versioning`'s canary
+subject selection, diagnosed with the failed run's real draw order and fixed at the root
+(min/max-over-batch, `445a77d`). Gateway now **2475 passing + 9 MinIO skips / 157 files**,
+fresh-DB green. Multi-session work is now governed by
+[docs/CONTRIBUTING_PARALLEL_SESSIONS.md](../docs/CONTRIBUTING_PARALLEL_SESSIONS.md)
+(CLAUDE.md bootstrap step 5): declared surface ownership, push-immediately, the migration-
+watermark and same-number-file hazards written down. Remaining work is owner-gated only:
+L13, L19, PII floor default, pillar-6 savings semantics, P2 HA, other provider keys, live PM
+creds, L11 drift, L9 bias, S3 release keypair — and quota refresh for live narration.
+
 **2026-08-22 (evening) — local hands-on testing of the live copilot found a real
 hallucination hole; fix in flight.** Pulled HEAD, built, seeded a fresh database and drove the
 copilot against the live Gemini credential. **What works:** deterministic grounding cites real

@@ -188,5 +188,8 @@ agent-green-twice, me-red-once). Not B6's code — a latent flake in the earlier
 config-versioning suite. Fix `445a77d`: select the inside/outside pair as the
 **min/max buckets over the whole batch** — same pure sampling function, but
 failure now requires all 12 hash draws ≥ 98 or all equal, i.e. a broken hash,
-not bad luck. Targeted rerun 11/11; the full-suite rerun result is appended
-below once it completes.
+not bad luck. Targeted rerun 11/11. **Full-suite rerun on a fresh
+`regulait_test`: 157 files / 2475 passed + 9 MinIO skips — green**, matching the
+B6 agent's own runs. B6 is closed: built, independently verified, live-retested,
+and the one discrepancy between my run and the agent's runs is explained and
+fixed at its root (`445a77d`).
