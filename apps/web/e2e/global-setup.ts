@@ -58,6 +58,17 @@ export default async function globalSetup() {
     // so give the bucket suite-sized headroom instead of testing the limiter
     // by accident.
     REGULAIT_AUTH_RATE_LIMIT_MAX: "1000",
+    // The SAME argument, one bucket up. The GLOBAL per-IP bucket (1200 per
+    // 60s) is a rolling window and the whole suite drives one gateway from one
+    // IP: at 132 specs the tail was already inside it, and the four L6 specs
+    // tipped the last few into `rate_limited` — a page that renders the
+    // limiter's JSON instead of the SPA, which then fails an unrelated
+    // assertion and reads as an app defect (it is not; the b3 spec's snapshot
+    // was the limiter's own body). The limiter is covered on its own terms by
+    // the gateway suite (rate-limit.test.ts, trusted-proxy.test.ts); this
+    // suite tests the app THROUGH HTTP, so give the bucket suite-sized
+    // headroom rather than testing the limiter by accident.
+    REGULAIT_RATE_LIMIT_MAX: "20000",
   };
 
   // 2. seed via the real API (prints one-time passwords exactly once)
