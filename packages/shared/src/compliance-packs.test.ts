@@ -203,4 +203,38 @@ describe("the seven launch packs are honest data", () => {
     const frameworks = DEFAULT_COMPLIANCE_PACKS.map((p) => p.framework).sort();
     expect(frameworks).toEqual(["eu-ai-act", "finra", "hipaa", "iso-42001", "nist-ai-rmf", "pci-dss", "soc-2"]);
   });
+
+  // batch B1 — ADR-0058 §2's preset half: a pack with a cascade tag now
+  // carries the profile its activation seeds, and the pairing rules are pinned
+  // at the schema so an admin pack cannot ship a preset with nothing to hang
+  // it on.
+  it("every pack with a cascadeTag carries a preset, every tagless pack carries none", () => {
+    for (const pack of DEFAULT_COMPLIANCE_PACKS) {
+      if (pack.cascadeTag) {
+        expect(pack.cascadePreset, `${pack.framework} names '${pack.cascadeTag}' but seeds nothing`).toBeTruthy();
+      } else {
+        // SOC 2 / NIST AI RMF / ISO 42001 force no data-sensitivity cascade
+        expect(pack.cascadePreset ?? null, `${pack.framework} has no tag to hang a preset on`).toBeNull();
+      }
+    }
+  });
+
+  it("refuses a cascadePreset without a cascadeTag, and an ill-typed preset", () => {
+    const base = DEFAULT_COMPLIANCE_PACKS.find((p) => p.framework === "soc-2")!;
+    const orphanPreset = createCompliancePackSchema.safeParse({
+      ...base,
+      cascadePreset: { piiMode: "block" },
+    });
+    expect(orphanPreset.success).toBe(false);
+    // the preset passes the SAME validator as a compliance_profile version
+    // body: a selection column (`tag`) and a wrong type are both refused
+    const hipaa = DEFAULT_COMPLIANCE_PACKS.find((p) => p.framework === "hipaa")!;
+    expect(
+      createCompliancePackSchema.safeParse({ ...hipaa, cascadePreset: { tag: "smuggled" } }).success,
+    ).toBe(false);
+    expect(
+      createCompliancePackSchema.safeParse({ ...hipaa, cascadePreset: { auditRetentionDays: "six years" } })
+        .success,
+    ).toBe(false);
+  });
 });
