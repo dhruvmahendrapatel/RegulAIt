@@ -576,3 +576,18 @@ exists and why the committed tests assert layer 2 rather than the prose.
    last week?") also carries the caveat. That is true, mildly noisy, and the
    right side to err on.
 4. Limits 1–6 of the L6a/L6b amendment stand unchanged.
+
+---
+
+**2026-08-22 — the L6d residual above is CLOSED by
+[ADR-0096](0096-entity-aware-copilot-planning.md).** Honest limit 1 ("the planner is still
+keyword-based, and an unknown entity is IGNORED rather than narrowing the query") and limit 2
+("`subjectFiltered: true` does not mean 'narrowed to your subject'") are superseded there.
+Entity-aware planning now extracts candidate subjects deterministically, resolves them against
+the governed object graph under the caller's own entitlements, and takes one of three named
+refusals — unresolved, ambiguous, or resolved-but-this-tool-cannot-filter-that-kind — rather than
+running broad and caveating. The Zorblatt question in this amendment REFUSES as of ADR-0096; it
+is no longer answered at all. **The caveat machinery this amendment introduced is kept, not
+deleted**: `subjectFiltered` and `unfilteredSubjectCaveat` now cover the narrower case ADR-0096
+does not touch — a question that names no subject the extractor could see, whose broad answer
+must still say it is about nothing in particular. Limits 3 and 4 above stand unchanged.

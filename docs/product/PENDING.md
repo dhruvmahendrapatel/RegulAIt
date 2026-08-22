@@ -257,17 +257,28 @@ end-to-end propose → capture → approve → aligned/undershoot on the invento
 mock-shadowing for the compaction-summarizer and decompose-worker rosters (0095 narrowed
 ROUTING selection only — a mock summarizer/worker can still be picked when live agents
 exist, same disease class, deliberately its own call);
-**ENTITY-AWARE COPILOT PLANNING (0056 L6d residual, added 2026-08-22)** — the copilot's
+~~**ENTITY-AWARE COPILOT PLANNING (0056 L6d residual, added 2026-08-22)** — the copilot's
 NL-to-query step is keyword-based, so an entity named in a question that matches no keyword
-rule is silently IGNORED rather than narrowing the query. L6d makes the answer *say* it did
-not filter on the subject (deterministic `subjectFiltered`/`unfilteredSubjectCaveat` plus a
-prompt hard rule, after a live run attributed eight real org-wide approvals to a fictional
-"Zorblatt Quantum Compliance Widget" and stamped it `modelNarrationVerified: true`); it does
-NOT make the copilot filter on the subject, and no param in the current vocabulary
-(`effect`/`objectType`/`status`) is an entity filter at all. Closing this means resolving
-named entities in a question against the governed object graph and either filtering on them
-or refusing the question — a materially larger slice than the caveat, and deliberately not
-smuggled in behind it.
+rule is silently IGNORED rather than narrowing the query.~~ **CLOSED 2026-08-22
+([ADR-0096](../decisions/0096-entity-aware-copilot-planning.md), no migration)**: candidate
+subjects are extracted DETERMINISTICALLY (quoted spans, uuids, conservative capitalised runs —
+never a model call, because a model must never assert that an entity exists) and resolved by a
+real, exact-match, entitlement-scoped lookup over six kinds whose visibility rules are all
+re-uses of predicates the product already enforces. A named subject is now either **filtered
+on** (the plan carries the object, the SQL genuinely narrows — proved by row-count difference,
+not by a reported filter) or **refused by name** in one of three distinguishable shapes:
+unresolved, ambiguous (candidates listed, never a tiebreak), or resolved-but-this-tool-cannot
+-filter-that-kind. The scope-honesty rule — an invisible object refuses byte-identically to a
+nonexistent one — is proved with two users. `subjectFiltered`'s meaning narrows to "narrowed to
+your subject" whenever a subject was named; the L6d caveat is KEPT for questions that name none.
+**What is still open**: extraction is conservative, so a subject with no capitals, quotes or id
+is still missed and falls through to L6d's caveated broad answer; resolution is exact-match, so
+a near-miss refuses rather than suggests; and **MCP servers/tools, compliance packs, AI use
+cases, AI risks, workflow templates, initiatives and roles remain UNRESOLVABLE** — MCP is the
+most valuable next slice and is blocked on the per-(user, server) tool-level visibility
+predicate plus the non-global uniqueness of `mcp_tools.name`. Vendors resolve but no ledger can
+filter by them, so a vendor question can only end in the tool/kind refusal; there is no
+attribution column or join to add one today.
 
 ## Enterprise-deal gates unchanged from §1
 **P1** (credential — see above) · **P2** (HA/SLA — build when there is a customer to serve)
