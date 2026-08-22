@@ -218,9 +218,18 @@ ADR-0080 amendment, migration 0098)**: org opt-in `use_case_gate_mode` (off|warn
 default off = byte-identical); enforce refuses a governed dispatch attributed to a
 use-case-LINKED project (the honest optional `project_id` join — unlinked/unattributed
 dispatch untouched in every mode) with a named 409 before any provider work; warn records the
-refusal-shaped fact without blocking; **still open from that line**: nothing mandates that a
+refusal-shaped fact without blocking; ~~**still open from that line**: nothing mandates that a
 dispatch be attributed to a linked project at all — attribution stays the pillar-5 opt-in, so
-the gate cannot see a call naming no project; ~~SoD pattern/N-way selectors (0091)~~
+the gate cannot see a call naming no project~~ — **closed 2026-08-22 (batch B6b, ADR-0080
+amendment, migration 0101)**: org opt-in `dispatch_attribution_required` (default off =
+byte-identical) refuses a governed dispatch naming NO `projectId` with a named 409
+`attribution_required`, audited, before any provider work; the two knobs are INDEPENDENT by
+construction (this acts only where projectId IS NULL, the use-case gate only where it is NOT,
+so there is no precedence rule) and all four combinations are a committed test; the compat
+shims' `require_project_attribution` (ADR-0020) and the MCP proxy's `require_mcp_attribution`
+(ADR-0024 O11) are neither replaced nor duplicated — three distinct error names for three
+distinct edges; **remaining**: it refuses a MISSING project, never a WRONG one, and a project
+no use case links is still untouched in every mode (ADR-0080's honest join, unchanged); ~~SoD pattern/N-way selectors (0091)~~
 — **closed 2026-08-22 (batch B2c, ADR-0091 amendment, migration 0097)**: N-way sets (2..8,
 refused only on the FULL set — any N-1 subset allowed) plus pattern selectors over exactly
 three enumerable dimensions (agent lifecycle status, agent provider kind, connector mode;

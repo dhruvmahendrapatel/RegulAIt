@@ -167,6 +167,11 @@ function Loaded(props: { settings: Record<string, unknown> }) {
     useCaseGateMode: str(s, "useCaseGateMode") || "off",
   });
 
+  // --- 5b2. Attribution mandate (ADR-0080 B6b amendment) -------------------
+  const attribution = useSection({
+    dispatchAttributionRequired: str(s, "dispatchAttributionRequired") || "false",
+  });
+
   // --- 5c. Model-judged access recommendations (ADR-0092 amendment, L6c) ---
   const recJudge = useSection({
     recommendationJudgeEnabled: str(s, "recommendationJudgeEnabled") || "false",
@@ -579,6 +584,41 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               <option value="off">off — approval registers intent, nothing is refused (default)</option>
               <option value="warn">warn — record + annotate what enforce would refuse</option>
               <option value="enforce">enforce — 409 for use-case-linked projects with no approved use case</option>
+            </Select>
+          </Field>
+        </SectionShell>
+      </Card>
+
+      <Card title="5b2 · Project attribution mandate (ADR-0080)">
+        <SectionShell
+          title="Must every governed dispatch name a project?"
+          busy={attribution.act.busy}
+          error={attribution.act.error}
+          submitLabel="Save attribution mandate"
+          onSubmit={() =>
+            void attribution.act.run(
+              () =>
+                put({
+                  dispatchAttributionRequired: asBool(
+                    attribution.f.dispatchAttributionRequired!,
+                  ),
+                }),
+              "Attribution mandate saved (audited)",
+            )
+          }
+          help="Attribution is normally optional: a call that names no project still runs, and its cost lands in the explicit 'Unattributed' bucket on the cost dashboard rather than disappearing. Turn this on and a governed model dispatch that names no project is refused instead — a named 409 (attribution_required), audited, before anything reaches a provider and before anything is billed. Turn it on when you need chargeback to be complete, or when you are arming the use-case gate above: that gate can only see a dispatch that NAMES a project, so without this a caller can walk past it by omitting the project. The two settings are independent — either can be on without the other — and this one only ever looks at calls naming NO project, so it never changes what happens to an attributed one. Two related settings live elsewhere and are not replaced by this: 'Require project attribution (compat)' on Client Access refuses a header-less IDE/compat call at that edge, and its MCP twin does the same for tool calls. Fully reversible."
+        >
+          <Field label="Require project attribution (governed dispatch)">
+            <Select
+              value={attribution.f.dispatchAttributionRequired}
+              onChange={(e) => attribution.set("dispatchAttributionRequired", e.target.value)}
+            >
+              <option value="false">
+                optional (default) — an unattributed dispatch runs, cost lands in Unattributed
+              </option>
+              <option value="true">
+                required — refuse a dispatch that names no project (409 attribution_required)
+              </option>
             </Select>
           </Field>
         </SectionShell>

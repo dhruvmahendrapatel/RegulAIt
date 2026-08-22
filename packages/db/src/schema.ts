@@ -3047,6 +3047,29 @@ export const orgSettings = pgTable(
       .notNull()
       .default("off"),
 
+    // --- B6b / ADR-0080 amendment (migration 0101): the attribution mandate --
+    /** FALSE (default) = today, byte-identical: a governed dispatch that names
+     * no `projectId` runs and lands in the explicit "Unattributed" cost bucket
+     * (GET /v1/costs/unattributed), which is pillar 5's deliberate opt-in
+     * posture. TRUE = such a dispatch is refused 409 `attribution_required`,
+     * audited, before any provider work.
+     *
+     * This is the hole B3a recorded and could not close from inside itself:
+     * `use_case_gate_mode` binds only dispatches that NAME a project, so a
+     * call naming none was invisible to it. The two knobs are INDEPENDENT by
+     * construction — this gate acts only where projectId IS NULL, that one
+     * only where it is NOT — so they never see the same dispatch and there is
+     * no precedence rule.
+     *
+     * Distinct from `interception_settings.require_project_attribution`
+     * (ADR-0020: the compat shims' own 400 at their own edge) and
+     * `require_mcp_attribution` (ADR-0024 O11: the MCP proxy's). Those guard
+     * surfaces this one cannot reach; this guards the NATIVE governed dispatch
+     * neither of them touches. */
+    dispatchAttributionRequired: boolean("dispatch_attribution_required")
+      .notNull()
+      .default(false),
+
     // --- L6c / ADR-0092 amendment (migration 0100): the model-judged half ---
     /** FALSE (default) = the ADR-0092 access-recommendation report is exactly
      * the six deterministic rules and nothing else, byte-identical to what

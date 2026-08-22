@@ -1897,6 +1897,14 @@ export const updateOrgSettingsSchema = z
      * one the schema holds) unless at least one linked use case is approved.
      * A project no use case links is untouched in every mode. */
     useCaseGateMode: z.enum(["off", "warn", "enforce"]).optional(),
+    /** ADR-0080 amendment (migration 0101, batch B6b): must a governed
+     * dispatch NAME a project? false (default) = today, byte-identical — an
+     * unattributed dispatch runs and lands in the explicit "Unattributed" cost
+     * bucket. true = a governed dispatch with no `projectId` is refused 409
+     * `attribution_required`, audited, before any provider work. Independent
+     * of `useCaseGateMode` by construction: this acts only where projectId is
+     * null, that one only where it is not. */
+    dispatchAttributionRequired: z.boolean().optional(),
     /** ADR-0092 amendment (migration 0100, L6c): may the deterministic
      * access-recommendation findings carry a MODEL-JUDGED annotation? false
      * (default) = the report is the six deterministic rules and nothing else.

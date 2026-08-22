@@ -170,3 +170,106 @@ by reversing the exact edit.
 — attribution remains the pillar-5 opt-in it always was, so the gate cannot see a call that
 names no project. Closing that would be an attribution-mandate decision (its own ADR), not a
 wider join.
+
+## Amendment (2026-08-22, batch B6b) — the attribution mandate closes B3a's own hole (migration 0101)
+
+B3a's last paragraph names exactly one thing it did not build: *"nothing requires a dispatch to
+BE attributed to a use-case-linked project — attribution remains the pillar-5 opt-in it always
+was, so the gate cannot see a call that names no project."* It also named the shape of the fix —
+"an attribution-mandate decision" — and this is it. It lands here rather than in a new ADR
+because it is the same knob family on the same rung of the same gate, and splitting it would put
+the composition rule in a document that neither knob's reader is holding.
+
+**The knob**: `org_settings.dispatch_attribution_required` (boolean, migration 0101), default
+**false** — byte-identical to everything shipped. When **true**, a governed dispatch that names
+**no `projectId`** is refused **409 `attribution_required`**, audited (`attribution-required`,
+effect deny), before any provider work, cost or content processing — the same placement
+discipline as the MRM rung and the use-case gate it sits above.
+
+### The composition, stated because two knobs on one rung invite a precedence question
+
+**There is no precedence rule, by construction.** The attribution gate acts only where
+`projectId IS NULL`; the use-case gate's first line returns for exactly that case and it acts
+only where `projectId IS NOT NULL`. The two can never see the same dispatch, so all four
+combinations are simply the union of two independent behaviours:
+
+| `dispatchAttributionRequired` | `useCaseGateMode` | a dispatch naming NO project | a dispatch attributed to a use-case-linked project with no approved use case |
+|---|---|---|---|
+| off | off | runs | runs |
+| off | enforce | runs — **this is the B3a hole** | 409 `use_case_approval_required` |
+| on | off | 409 `attribution_required` | runs |
+| on | enforce | 409 `attribution_required` | 409 `use_case_approval_required` |
+
+All four cells are a committed test, each asserting both kinds of dispatch and the provider
+spy's call count. Mandating attribution **without** the use-case gate is a legitimate posture on
+its own — chargeback completeness — which is why this is a separate knob and not a fourth mode
+of the other one.
+
+### Blast radius, named honestly rather than described as "dispatch"
+
+The gate sits inside `dispatchAttempt`, the one governed model-dispatch core, so it binds every
+caller of that core. Which of those actually become refusable depends on whether the path
+carries a `projectId` at all:
+
+| Path | Carries a projectId? | What an ON knob does to it |
+|---|---|---|
+| `POST /v1/agents/:id/invoke` | optional (`body.projectId`) | a call omitting it is refused 409 — the headline case |
+| conversations (the same invoke, `conversationId`) | the conversation's own project | refusable only for a conversation created without one |
+| compat shims (`compat-core.ts`) | `x-regulait-project-id` header | refusable — **but see below**: these already have their own edge guard |
+| orchestration worker nodes | the run's project | refusable for a run planned without one |
+| `POST /v1/runs/decompose` (the lead turn) | `body.projectId` | refused, surfaced as the route's own error passthrough |
+| the compaction summarizer | the conversation's project | refused → compaction **fails open** (audited, the turn proceeds on the full history), or 502 under `fail_closed` |
+| the copilot narrator | `body.projectId` | refused → the narration is **discarded and the grounded, count-derived answer stands** (the existing `narrationFailed` path); the copilot does not break |
+| evals / judges, red-team runner, recommendation judge | their run's project | refusable where the run named none |
+| **the MCP proxy's tool calls** | yes, but **not a model dispatch** | **untouched** — MCP has its own `interception_settings.require_mcp_attribution` (ADR-0024 O11, 400 `mcp_attribution_required`) |
+
+Two pre-existing attribution mandates already covered *their own edges* and are neither replaced
+nor duplicated: **`interception_settings.require_project_attribution`** (ADR-0020) refuses a
+header-less compat call **400 `project_attribution_required`** at the compat edge, upstream of
+this gate; and **`require_mcp_attribution`** does the same for MCP tool calls. Neither reaches
+the native governed dispatch, which is precisely the surface this knob covers. A deployment that
+wants attribution everywhere sets all three; they are independent switches with three distinct
+error names, and that is deliberate — an operator reading a refusal should be able to tell which
+control fired.
+
+### Surfaced
+
+Settings → Organization, card **5b2 · Project attribution mandate**, beside the 5b use-case gate,
+with plain-language help that states the default, what the refusal looks like, why it pairs with
+the use-case gate, that the two are independent, and that the compat/MCP knobs live elsewhere and
+are not replaced. No new route (`PUT /v1/org/settings` is a partial update), so the OpenAPI
+registry is unchanged.
+
+### Verified (`attribution-gate.test.ts`, 8 cases; non-vacuous per M-002, probes reverted by exact Edit reversal per M-016)
+
+- Ships off (the settings read reports `false`).
+- Default-off byte-identical: the **exact** projectless dispatch that refuses when on returns
+  200, reaches the provider (spy = 1 call), and writes **zero** rows under the gate's ruleId — a
+  delta, M-008.
+- On → **409 `attribution_required`** with the provider spy at **zero** calls for that attempt,
+  one new audited deny whose detail records `projectId: null`.
+- On + attributed → 200, provider called, and **zero** gate rows: the mandate never looks at an
+  attributed call.
+- The four-combination matrix above, in full.
+
+| Probe (the fix removed) | Reddens |
+|---|---|
+| the refusal no-oped (`return null` after the knob read, so the knob is read and ignored) | **3** — the 409 case and the two `on/*` matrix cells. The default-off tests and both `off/*` cells stay green: they are the controls |
+| the knob ignored the other way (the gate refuses regardless of the setting) | **3** — the default-off byte-identical test and both `off/*` cells, which is what proves the default-off claim is not vacuous |
+| — in both probes `use-case-gate.test.ts` stays **fully green**, which is the independence claim measured rather than asserted |  |
+
+### Honest limits (this amendment)
+
+- **B3a's "still not built" paragraph is superseded** for the attribution half. What the pair
+  now enforces is "no unattributed governed dispatch, and no dispatch on unapproved registered
+  intent" — still **not** "every dispatch runs under an approved use case", because a project
+  that no use case links remains untouched in every mode. That limit is ADR-0080's honest join
+  and this knob does not change it.
+- The gate refuses a **missing** project, not a **wrong** one. Choosing a project you belong to
+  in order to charge someone else's budget is an attribution-quality problem, not one a boolean
+  can see; `assertProjectAttribution` already bounds it to projects the caller may use.
+- **Turning it on can break in-flight automation** that has never sent a project — deliberately,
+  since that is the point — and the paths above degrade differently (a refusal, a fail-open, a
+  discarded narration). Read the table before flipping it on a live deployment.
+- No backfill: historical unattributed usage rows stay unattributed. The knob is a gate, not a
+  repair.

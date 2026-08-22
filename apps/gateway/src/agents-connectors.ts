@@ -97,7 +97,11 @@ import {
 import { mrmDispatchGate } from "./mrm.js";
 // ADR-0080 amendment (batch B3): the use-case dispatch gate — org opt-in,
 // default off (byte-identical), the ADR-0045 gate shape beside the MRM rung.
-import { useCaseDispatchGate, type DispatchUseCaseGate } from "./use-case-gate.js";
+import {
+  attributionDispatchGate,
+  useCaseDispatchGate,
+  type DispatchUseCaseGate,
+} from "./use-case-gate.js";
 // ADR-0079: pillar 2 §2 stage 2 — the invoke→instance join point and the
 // plan-only refusal it makes possible.
 import { guardInstanceAttributedCall } from "./plan-only.js";
@@ -1269,6 +1273,35 @@ async function dispatchAttempt(
       status: mrmRefusal.status,
       error: mrmRefusal.error,
       detail: mrmRefusal.detail,
+    };
+  }
+
+  // ADR-0080 amendment (batch B6b) — THE ATTRIBUTION MANDATE, one rung above
+  // the use-case gate and with the same placement discipline. Default-OFF
+  // (`org_settings.dispatch_attribution_required`), so an ATTRIBUTED dispatch
+  // never even reads the settings row here and an unattributed one is
+  // byte-identical until an admin flips the knob. When ON, a dispatch naming
+  // no project is refused 409 `attribution_required`, audited, before any
+  // provider work — which is what closes B3a's own recorded hole: the
+  // use-case gate below can only bind dispatches that NAME a project, so
+  // without this knob a caller could walk past it by omitting `projectId`.
+  //
+  // The two knobs are INDEPENDENT by construction and there is no precedence
+  // rule to remember: this gate acts only where projectId IS NULL, the
+  // use-case gate only where it is NOT, so they never see the same dispatch.
+  const attributionRefusal = await attributionDispatchGate(db, {
+    userId,
+    agentId: served.id,
+    agentName: served.name,
+    projectId: args.projectId ?? null,
+  });
+  if (attributionRefusal) {
+    sink.auditLogId = attributionRefusal.auditLogId;
+    return {
+      ok: false,
+      status: attributionRefusal.status,
+      error: attributionRefusal.error,
+      detail: attributionRefusal.detail,
     };
   }
 
