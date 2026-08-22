@@ -265,6 +265,7 @@ import { registerSetupStatusRoutes } from "./setup-status.js";
 import { registerSchedulerRoutes } from "./scheduler-api.js";
 import { schedulerJobRegistry } from "./scheduler-jobs.js";
 import { registerDataKeyRoutes } from "./data-key.js";
+import { registerDataKeyReencryptionRoutes } from "./data-key-reencrypt.js";
 import { WEB_UI_ROUTES, defaultWebDistDir, registerWebServing } from "./web-serving.js";
 // ADR-0053 — the auth-class sets the two gates below branch on. They live in
 // their own module so the published OpenAPI document derives each route's
@@ -3215,6 +3216,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // service, and a control that fired on construction is one every fixture
   // would have to work around.
   registerDataKeyRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0063 §4 follow-up (batch B4): STATUS ONLY. The walk itself runs as a
+  // CLI (`pnpm --filter @regulait/gateway reencrypt`) — a full-table
+  // re-encryption inside an HTTP request invites a proxy timeout mid-walk and
+  // an operator retry racing the first attempt, so HTTP gets the read, never
+  // the drive.
+  registerDataKeyReencryptionRoutes(app, db);
   // ADR-0054 — the IN-PRODUCT first-run experience (the installer, ADR-0041,
   // owns deployment bring-up; nothing here duplicates it) plus the
   // migration/import tooling. Admin-only through the DEFAULT gate: every route

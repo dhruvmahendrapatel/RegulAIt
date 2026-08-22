@@ -505,6 +505,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/security/data-key": "internal",
   "GET /v1/security/data-key/attestations": "internal",
   "POST /v1/security/data-key/attestations": "internal",
+  "GET /v1/security/data-key/reencryption": "internal",
   // ADR-0064 — the in-process scheduler. Internal: an operator console surface
   // about THIS deployment's own background loop. Nothing integrates against it,
   // and "run now" on a job that spends model tokens is not a contract we want
@@ -1107,6 +1108,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/security/data-key": "security",
   "GET /v1/security/data-key/attestations": "security",
   "POST /v1/security/data-key/attestations": "security",
+  "GET /v1/security/data-key/reencryption": "security",
   "GET /v1/scheduler": "scheduler",
   "GET /v1/scheduler/jobs/:name/runs": "scheduler",
   "PATCH /v1/scheduler/jobs/:name": "scheduler",
