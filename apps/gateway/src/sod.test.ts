@@ -760,13 +760,20 @@ describe("override — through the one approvals queue, arm's-length only", () =
     expect(request!.status).toBe("approved");
     expect((request!.mintDetail as { table: string }).table).toBe("connector_grants");
     expect(await auditCount("sod-override-minted")).toBe(mintedBefore + 1);
-    const [auditRow] = await db
+    // Find THIS override's row by its own approval id. Taking the oldest
+    // sod-override-minted row assumed nothing else had ever minted one — a
+    // claim about every other test in a shared-database suite (M-008/M-020).
+    const mintRows = await db
       .select()
       .from(auditLog)
       .where(eq(auditLog.ruleId, "sod-override-minted"))
-      .orderBy(auditLog.at)
-      .limit(100);
-    expect(auditRow).toBeTruthy();
+      .orderBy(auditLog.at);
+    const auditRow = mintRows.find(
+      (r) =>
+        (r.detail as { sodOverride?: { approvalId?: string } } | null)?.sodOverride?.approvalId ===
+        overrideApprovalId,
+    );
+    expect(auditRow, "no sod-override-minted row names this approval").toBeTruthy();
     const detail = auditRow!.detail as { sodOverride?: { ruleId: string; approvalId: string } };
     expect(detail.sodOverride).toEqual({ ruleId: rule2, approvalId: overrideApprovalId });
   });
