@@ -1,9 +1,10 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { auditLog, createDb, eq, runMigrations, usageEvents, type Db } from "@regulait/db";
 import { resolveModelProvider, type MockModelProvider } from "@regulait/model-provider";
 import { buildApp } from "./app.js";
+import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
 
 /**
  * PILLAR 7 agent-driven task decomposition end to end: POST /v1/runs/decompose
@@ -66,6 +67,13 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  // ADR-0052 §4: POST /v1/runs/decompose is tier-gated on
+  // `advanced_orchestration` (the flag the ADR names "advanced orchestration
+  // fan-out") and now ENFORCED at the route, so this suite runs under a real
+  // signed license granting it. This suite's 200s ARE the licensed-succeeds
+  // proof for the whole decompose surface. Removed in afterAll — the
+  // deployment ends UNLICENSED exactly as it started.
+  await installLicenseFixture(app, { features: ["advanced_orchestration"], auth: AUTH });
   mock = resolveModelProvider({ provider: "mock" }) as MockModelProvider;
 
   const dee = await makeUser("dcmp-dee@example.com", "Dcmp Dee");
@@ -115,6 +123,11 @@ beforeAll(async () => {
   });
   expect(project.statusCode).toBe(201);
   projectId = project.json().id;
+});
+
+afterAll(async () => {
+  // `licenses` is an org singleton — leave the deployment UNLICENSED
+  await removeLicenseFixture(db);
 });
 
 describe("POST /v1/runs/decompose — happy path", () => {

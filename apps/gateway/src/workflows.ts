@@ -50,6 +50,7 @@ import {
   projectClassifications,
   requiredTemplateIdsFor,
 } from "./projects.js";
+import { refuseIfFeatureNotLicensed } from "./licensing.js";
 import { decryptSecret, encryptSecret as encryptTokenOnce } from "./secrets.js";
 import { guardConnectionCall, refuseConnectionEgressWrite } from "./connection-egress.js";
 // ADR-0062 — the compiled git endpoint, adjudicated under a strict posture.
@@ -1349,6 +1350,22 @@ export function registerWorkflowRoutes(app: FastifyInstance, db: Db, opts: Workf
   };
   app.post("/v1/deploy/targets", async (req, reply) => {
     const body = createDeployTargetSchema.parse(req.body);
+    // ADR-0052 §4: air-gapped mode is a TIER FEATURE, enforced at the one
+    // in-product act that SELECTS it — creating a deploy target whose mode is
+    // air_gapped. hosted/byoc targets are untouched, and every air-gapped
+    // target that already exists keeps deploying (committed footprint, §5).
+    // The RUNNING process mode is REGULAIT_DEPLOY_MODE (ADR-0062) — an
+    // operator env var, deliberately not an API act, so there is nothing to
+    // gate there; recorded-vs-actual `deploymentMode` cross-checking is its
+    // own decision (ADR-0052 amendment) and is deliberately not smuggled in.
+    if (body.mode === "air_gapped") {
+      const flagRefusal = await refuseIfFeatureNotLicensed(db, {
+        actorUserId: req.authCtx.userId,
+        feature: "airgapped_mode",
+        what: "creating an air-gapped deploy target",
+      });
+      if (flagRefusal) return reply.status(flagRefusal.status).send(flagRefusal.body);
+    }
     if (body.credential && !opts.dataKey) {
       return reply.status(503).send({ error: "no_data_key", detail: "set REGULAIT_DATA_KEY to store a deploy credential" });
     }

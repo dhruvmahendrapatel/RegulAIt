@@ -4382,6 +4382,18 @@ export function registerAgentConnectorRoutes(
 
   app.post("/v1/connectors", async (req, reply) => {
     const body = createConnectorSchema.parse(req.body);
+    // ADR-0052 — THE EXPANSION GATE (inventory: `connector.create`, "a new
+    // connected system is a wider footprint"). Refused once the license has
+    // lapsed past its grace window; permitted in every other state including
+    // absent (no tier flag in the §4 matrix covers connectors — recorded in
+    // the ADR amendment rather than invented). Invoking a connector that
+    // already exists is governance-class and stays open.
+    const licenseRefusal = await refuseIfExpansionBlocked(db, {
+      actorUserId: req.authCtx.userId ?? null,
+      objectType: "connector",
+      what: `creating connector '${body.name}'`,
+    });
+    if (licenseRefusal) return reply.status(licenseRefusal.status).send(licenseRefusal.body);
     // ADR-0034 amendment #2 — the earliest honest failure for a connector
     // endpoint. NOT a substitute for the invoke-time check (see the note
     // there): this is so a typo, or a deliberate IMDS/collector URL, is a 400

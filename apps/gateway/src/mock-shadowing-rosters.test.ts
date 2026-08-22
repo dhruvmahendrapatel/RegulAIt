@@ -102,6 +102,7 @@ vi.mock("@regulait/model-provider", async (importOriginal) => {
 });
 
 const { buildApp } = await import("./app.js");
+import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -238,6 +239,10 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  // ADR-0052 §4: decompose is tier-gated on `advanced_orchestration`, now
+  // enforced at the route — run under a real signed license granting it
+  // (removed in afterAll; the deployment ends UNLICENSED as it started).
+  await installLicenseFixture(app, { features: ["advanced_orchestration"], auth: AUTH });
 
   const liv = await makeUser("cdm-liv@example.com");
   livId = liv.id;
@@ -307,6 +312,7 @@ afterAll(async () => {
   if (agentIds.length > 0) await db.delete(usageEvents).where(inArray(usageEvents.agentId, agentIds));
   await db.delete(costEvents).where(inArray(costEvents.userId, [livId, keyId].filter(Boolean)));
   await db.delete(modelCredentials).where(eq(modelCredentials.provider, "anthropic"));
+  await removeLicenseFixture(db);
   for (const name of PROVIDER_ENV_VARS) {
     if (ORIG_ENV[name] !== undefined) process.env[name] = ORIG_ENV[name];
     else delete process.env[name];

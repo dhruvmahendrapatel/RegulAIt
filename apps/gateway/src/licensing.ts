@@ -54,9 +54,10 @@
  *   - It does not defend against a tampered host clock. Validity is evaluated
  *     against `new Date()` on the control-plane host, which is the customer's
  *     own machine. Disclosed, not mitigated.
- *   - It does not gate every enforcement point in the codebase. Two are wired
- *     (user provisioning, agent creation); the rest of the ADR-0052 §4 flag
- *     surface is modelled and unwired. The overview says which.
+ *   - It does not decide which routes are gated — each call site declares its
+ *     own action class or tier flag (see the helpers at the bottom).
+ *     `GET /v1/licenses/status`'s `enforcementPointsWired` is the honest list
+ *     of what is actually wired; ADR-0052's amendments record the history.
  */
 import { createHash, createPublicKey, verify as cryptoVerify } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
@@ -607,8 +608,15 @@ export function registerLicensingRoutes(app: FastifyInstance, db: Db): void {
       enforcementPointsWired: [
         "user.provision",
         "agent.create",
+        "connector.create",
+        "mcp_server.create",
+        "pm_connection.create",
         "feature.sso_saml (saml_provider.create)",
         "feature.scim_provisioning (scim_token.create)",
+        "feature.compliance_packs (compliance_pack.activate)",
+        "feature.advanced_orchestration (run.decompose)",
+        "feature.airgapped_mode (deploy_target.create[mode=air_gapped])",
+        "feature.custom_model_providers (model_provider.connect)",
       ],
       posture: LICENSE_POSTURE_NOTE,
       note:
@@ -770,7 +778,11 @@ export function registerLicensingRoutes(app: FastifyInstance, db: Db): void {
  */
 export async function refuseIfExpansionBlocked(
   db: Db,
-  args: { actorUserId: string | null; objectType: "user" | "agent"; what: string },
+  args: {
+    actorUserId: string | null;
+    objectType: "user" | "agent" | "connector" | "mcp_server" | "pm_connection";
+    what: string;
+  },
 ): Promise<{ status: number; body: Record<string, unknown> } | null> {
   const gate = await licenseGate(db, "expansion");
   if (gate.allowed) return null;

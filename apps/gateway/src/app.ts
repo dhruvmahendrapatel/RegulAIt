@@ -168,7 +168,11 @@ import { ConfigVersionUnresolvableError } from "./rule-versions.js";
 import { registerSpendMonitorRoutes } from "./spend-monitor.js";
 import { registerLineageRoutes } from "./lineage.js";
 import { registerBillingRoutes } from "./billing.js";
-import { refuseIfSeatCapReached, registerLicensingRoutes } from "./licensing.js";
+import {
+  refuseIfExpansionBlocked,
+  refuseIfSeatCapReached,
+  registerLicensingRoutes,
+} from "./licensing.js";
 import { registerAuditChainRoutes, type AnchorSink } from "./audit-chain.js";
 import {
   assignedApprovalIdsFor,
@@ -1194,6 +1198,18 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   app.post("/v1/servers", async (req, reply) => {
     const body = createServerSchema.parse(req.body);
+    // ADR-0052 — THE EXPANSION GATE (inventory: `mcp_server.create`, "a new
+    // tool surface is a wider footprint"). Refused once the license has
+    // lapsed past its grace window; permitted in every other state including
+    // absent (no tier flag in the §4 matrix covers MCP servers — recorded in
+    // the ADR amendment rather than invented). Calling tools on a server that
+    // already exists is governance-class and stays open.
+    const licenseRefusal = await refuseIfExpansionBlocked(db, {
+      actorUserId: req.authCtx.userId ?? null,
+      objectType: "mcp_server",
+      what: `registering MCP server '${body.name}'`,
+    });
+    if (licenseRefusal) return reply.status(licenseRefusal.status).send(licenseRefusal.body);
     // ADR-0043: WRITE-TIME egress check — a bad destination is an honest 400
     // at the moment somebody types it, audited, not a surprise at first tool
     // call. (Write-time is not sufficient — connectUpstream re-checks every

@@ -96,6 +96,7 @@ import {
   type PackScorecard,
   type PackVersionSnapshot,
 } from "@regulait/shared";
+import { refuseIfFeatureNotLicensed } from "./licensing.js";
 import { callerProjectIds, callerTeamIds, resolveScopeProjectIds } from "./reporting.js";
 
 const NO_IDENTITY = "00000000-0000-0000-0000-000000000000";
@@ -1015,6 +1016,19 @@ export function registerCompliancePackRoutes(app: FastifyInstance, db: Db): void
    * unique index would otherwise refuse the second active row — the database
    * enforces "one answer to which mapping evidenced this report". */
   app.post("/v1/compliance/packs/:id/activate", async (req, reply) => {
+    // ADR-0052 §4: compliance packs are a TIER FEATURE, enforced where the
+    // capability is ENABLED. ACTIVATION is the enabling act — it makes the
+    // pack the mapping reports use AND seeds the §8.3 cascade profile.
+    // Authoring stays open on purpose: POST /v1/compliance/packs and /seed
+    // produce DRAFT rows that "evaluate nothing until activated" (their own
+    // audit rows say so), and a pack already active keeps working (committed
+    // footprint, §5) — as do retire/delete, which only ever narrow.
+    const flagRefusal = await refuseIfFeatureNotLicensed(db, {
+      actorUserId: req.authCtx.userId,
+      feature: "compliance_packs",
+      what: "activating a compliance pack",
+    });
+    if (flagRefusal) return reply.status(flagRefusal.status).send(flagRefusal.body);
     const { id } = idParam.parse(req.params);
     const [pack] = await db.select().from(compliancePacks).where(eq(compliancePacks.id, id));
     if (!pack) return reply.status(404).send({ error: "unknown_compliance_pack" });

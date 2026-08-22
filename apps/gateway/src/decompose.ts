@@ -38,6 +38,7 @@ import {
   mockShadowedByLive,
   type AgentRow,
 } from "./agents-connectors.js";
+import { refuseIfFeatureNotLicensed } from "./licensing.js";
 import { loadAgentRevocations, loadEntitlements, loadRoleAgentGrants } from "./entitlements.js";
 import { assertProjectAttribution } from "./projects.js";
 import { z } from "zod";
@@ -282,6 +283,19 @@ export function registerDecomposeRoutes(
   opts: { dataKey?: string } = {},
 ) {
   app.post("/v1/runs/decompose", async (req, reply) => {
+    // ADR-0052 §4: this is the flag the ADR names "advanced orchestration
+    // fan-out", enforced at its enabling act. Agent-driven decomposition IS
+    // the pillar-7 fan-out entry point — a LEAD agent drafting a parallel
+    // task graph of worker agents. Hand-authored runs through POST /v1/runs,
+    // and every run that already exists (events/dispatch/auto), stay open:
+    // basic orchestration is not tier-gated, and an existing run is committed
+    // footprint (§5).
+    const flagRefusal = await refuseIfFeatureNotLicensed(db, {
+      actorUserId: req.authCtx.userId,
+      feature: "advanced_orchestration",
+      what: "agent-driven task decomposition (orchestration fan-out)",
+    });
+    if (flagRefusal) return reply.status(flagRefusal.status).send(flagRefusal.body);
     const body = decomposeGoalSchema.parse(req.body);
     const userId = req.authCtx.userId;
     if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_decompose" });

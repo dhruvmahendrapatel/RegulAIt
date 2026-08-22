@@ -19,6 +19,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
 import { PROJECT_HEADER } from "./mcp-proxy.js";
 
 /**
@@ -188,6 +189,10 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  // ADR-0052 §4: this suite exercises a route now tier-gated on
+  // `advanced_orchestration` — run under a real signed license granting it
+  // (removed in afterAll; the deployment ends UNLICENSED as it started).
+  await installLicenseFixture(app, { features: ["advanced_orchestration"], auth: AUTH });
   gatewayUrl = await app.listen({ port: 0, host: "127.0.0.1" });
   upstream = await startUpstream();
 
@@ -282,6 +287,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await removeLicenseFixture(db);
   app.server.closeAllConnections();
   await app.close();
   await upstream.close();

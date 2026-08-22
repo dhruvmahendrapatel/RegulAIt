@@ -39,6 +39,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
 import { POSTURE_UNMEASURED_REDTEAM } from "./posture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -98,6 +99,10 @@ beforeAll(async () => {
   // sink: null ON PURPOSE — the anchoring section must then say, in words,
   // that nothing here is tamper-resistant (observed posture, not config)
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "b".repeat(64), auditAnchorSink: null });
+  // ADR-0052 §4: pack ACTIVATION is now tier-gated on `compliance_packs` —
+  // run under a real signed license granting it (removed in afterAll; the
+  // deployment ends UNLICENSED as it started).
+  await installLicenseFixture(app, { features: ["compliance_packs"], auth: AUTH });
 
   const user = await app.inject({
     method: "POST",
@@ -132,6 +137,7 @@ afterAll(async () => {
   if (createdUsageIds.length) {
     await db.delete(usageEvents).where(inArray(usageEvents.id, createdUsageIds));
   }
+  await removeLicenseFixture(db);
   await app.close();
   await db.$client.end();
 });

@@ -41,6 +41,7 @@ import {
 import { resolveModelProvider, type ModelProvider } from "@regulait/model-provider";
 import { z } from "zod";
 import { encryptSecret, decryptSecret } from "./secrets.js";
+import { refuseIfFeatureNotLicensed } from "./licensing.js";
 import { loadOrgSettings } from "./org-settings.js";
 import {
   checkEgress,
@@ -331,6 +332,19 @@ export function registerCustomProviderRoutes(
   }));
 
   app.post("/v1/custom-model-providers", async (req, reply) => {
+    // ADR-0052 §4: custom model providers are a TIER FEATURE, enforced where
+    // the capability is ENABLED — registering a provider is the enabling act
+    // and the ADR-0052 inventory's `model_provider.connect` expansion point
+    // (`featureEnabled` composes the expansion posture, so an expired-past-
+    // grace license refuses here too). Everything an existing provider does —
+    // dispatch through it, PATCH, test, enable/disable, delete — stays open:
+    // committed footprint, and delete/disable only ever narrow.
+    const flagRefusal = await refuseIfFeatureNotLicensed(db, {
+      actorUserId: req.authCtx.userId,
+      feature: "custom_model_providers",
+      what: "registering a custom model provider",
+    });
+    if (flagRefusal) return reply.status(flagRefusal.status).send(flagRefusal.body);
     const body = createCustomModelProviderSchema.parse(req.body);
     if (!(await capabilityOn())) {
       return reply.status(409).send({

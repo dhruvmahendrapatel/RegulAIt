@@ -1,9 +1,10 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb, runMigrations, type Db } from "@regulait/db";
 import { resolveDeployProvider, DeployProviderError, type AwsLiveDeployClient } from "./deploy.js";
 import { buildApp } from "./app.js";
+import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
 
 /**
  * PILLAR 3 BYOC — AWS deploy adapter (assume-role SHAPE, dry-run execution),
@@ -74,9 +75,18 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "b".repeat(64) });
+  // ADR-0052 §4: creating an air_gapped deploy target is now tier-gated on
+  // `airgapped_mode` — run under a real signed license granting it (removed
+  // in afterAll; the deployment ends UNLICENSED as it started).
+  await installLicenseFixture(app, { features: ["airgapped_mode"], auth: AUTH });
   piaAuth = (await makeUser("by-pia@example.com")).auth;
   const ana = await makeUser("by-ana@example.com");
   anaId = ana.id; anaAuth = ana.auth;
+});
+
+afterAll(async () => {
+  // `licenses` is an org singleton — leave the deployment UNLICENSED
+  await removeLicenseFixture(db);
 });
 
 describe("AWS deploy adapter (assume-role shape, dry-run)", () => {

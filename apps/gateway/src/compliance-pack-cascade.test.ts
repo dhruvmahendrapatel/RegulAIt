@@ -13,6 +13,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
 
 /**
  * Batch B1 — ADR-0058's §8.3 PRESET HALF: activating a pack seeds the
@@ -111,6 +112,10 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT });
+  // ADR-0052 §4: pack ACTIVATION is now tier-gated on `compliance_packs` —
+  // run under a real signed license granting it (removed in afterAll; the
+  // deployment ends UNLICENSED as it started).
+  await installLicenseFixture(app, { features: ["compliance_packs"], auth: AUTH });
 });
 
 afterAll(async () => {
@@ -120,6 +125,7 @@ afterAll(async () => {
     await db.delete(auditLog).where(inArray(auditLog.objectId, packIds));
     await db.delete(compliancePacks).where(inArray(compliancePacks.id, packIds));
   }
+  await removeLicenseFixture(db);
 });
 
 // ---------------------------------------------------------------------------

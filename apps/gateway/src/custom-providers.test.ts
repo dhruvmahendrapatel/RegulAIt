@@ -19,6 +19,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb, egressAllowHosts, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -47,6 +48,11 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  // ADR-0052 §4: registering a custom model provider is tier-gated on
+  // `custom_model_providers` and the flag is now ENFORCED at the route, so
+  // this suite runs under a real signed license granting it. Removed in
+  // afterAll — the deployment ends UNLICENSED exactly as it started.
+  await installLicenseFixture(app, { features: ["custom_model_providers"], auth: AUTH });
   // HERMETIC DEFAULT-DENY (ADR-0034 amendment): sibling suites now allow-list
   // 127.0.0.1 for their own fake endpoints, and this file's first assertion is
   // that nothing is reachable before an admin says so. Start from the empty
@@ -106,6 +112,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await removeLicenseFixture(db);
   srv.closeAllConnections();
   await new Promise<void>((r) => srv.close(() => r()));
 });

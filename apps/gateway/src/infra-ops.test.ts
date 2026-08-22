@@ -1,9 +1,10 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDb, runMigrations, infraResources, eq, type Db } from "@regulait/db";
 import { resolveInfraProvider } from "@regulait/infra-provider";
 import { buildApp } from "./app.js";
+import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
 
 /**
  * ADR-0017 — the infra-ops AUTOMATION ledgers (pillar 3 §8.2 depth on top of the
@@ -68,6 +69,10 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  // ADR-0052 §4: creating an air_gapped deploy target is now tier-gated on
+  // `airgapped_mode` — run under a real signed license granting it (removed
+  // in afterAll; the deployment ends UNLICENSED as it started).
+  await installLicenseFixture(app, { features: ["airgapped_mode"], auth: AUTH });
 
   const admin = await makeUser("infops-admin@example.com", "Infops Admin", true);
   adminAuth = admin.auth;
@@ -90,6 +95,11 @@ beforeAll(async () => {
   await db.update(infraResources).set({ deployTargetId: targetId }).where(eq(infraResources.id, airCertResId));
 
   await post("/v1/infra/scan", {});
+});
+
+afterAll(async () => {
+  // `licenses` is an org singleton — leave the deployment UNLICENSED
+  await removeLicenseFixture(db);
 });
 
 async function certRowFor(resourceName: string) {

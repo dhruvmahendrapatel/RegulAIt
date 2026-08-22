@@ -46,6 +46,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -175,6 +176,10 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: "a".repeat(64) });
+  // ADR-0052 §4: pack ACTIVATION is now tier-gated on `compliance_packs` —
+  // run under a real signed license granting it (removed in afterAll; the
+  // deployment ends UNLICENSED as it started).
+  await installLicenseFixture(app, { features: ["compliance_packs"], auth: AUTH });
   const priya = await makeUser("vnd-priya@example.com");
   priyaId = priya.id;
   priyaAuth = priya.auth;
@@ -246,6 +251,7 @@ afterAll(async () => {
     await db.delete(compliancePackControls).where(inArray(compliancePackControls.packId, packIds));
     await db.delete(compliancePacks).where(inArray(compliancePacks.id, packIds));
   }
+  await removeLicenseFixture(db);
   await app.close();
   await db.$client.end();
 });

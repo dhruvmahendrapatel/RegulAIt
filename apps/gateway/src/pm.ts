@@ -35,6 +35,7 @@ import {
   createPmConnectionSchema,
   pmSyncSchema,
 } from "@regulait/shared";
+import { refuseIfExpansionBlocked } from "./licensing.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import {
   ConnectionEgressBlockedError,
@@ -348,6 +349,18 @@ export function registerPmRoutes(app: FastifyInstance, db: Db, opts: { dataKey?:
 
   app.post("/v1/pm/connections", async (req, reply) => {
     const body = createPmConnectionSchema.parse(req.body);
+    // ADR-0052 — THE EXPANSION GATE (inventory: `pm_connection.create`, "a new
+    // integrated system is a wider footprint"). Refused once the license has
+    // lapsed past its grace window; permitted in every other state including
+    // absent (no tier flag in the §4 matrix covers PM connections — recorded
+    // in the ADR amendment rather than invented). Syncing through a
+    // connection that already exists is committed footprint and stays open.
+    const licenseRefusal = await refuseIfExpansionBlocked(db, {
+      actorUserId: req.authCtx.userId ?? null,
+      objectType: "pm_connection",
+      what: `creating PM connection '${body.name}'`,
+    });
+    if (licenseRefusal) return reply.status(licenseRefusal.status).send(licenseRefusal.body);
     if (!opts.dataKey) {
       return reply.status(503).send({ error: "pm_connections_require_data_key" });
     }
