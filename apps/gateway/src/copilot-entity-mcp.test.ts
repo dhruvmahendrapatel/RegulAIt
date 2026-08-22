@@ -183,7 +183,7 @@ beforeAll(async () => {
     .returning();
   await db.insert(projectMembers).values([
     { projectId: realmId, userId: memberId, role: "owner" },
-    { projectId: realmId, userId: partialId, role: "member" },
+    { projectId: realmId, userId: partialId, role: "contributor" },
     { projectId: outsiderProject!.id, userId: outsiderId, role: "owner" },
   ]);
 
