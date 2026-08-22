@@ -334,3 +334,85 @@ particular `agent_config` is still vocabulary only, a rule canary still never se
 no pruning, the compliance-profile shadow is still computed at read time over the first 50 projects
 and never stored historically, and the divergence signal is still not fed to ADR-0059's
 blast-radius preview.
+
+---
+
+## Amendment — 2026-08-22 (batch B1): disclosure 1 is closed, and the CRUD surface now exists and is honest
+
+*Appended; nothing above is edited. Migration 0095. Verified by
+`agent-config-versioning.test.ts` (11 cases), `rule-crud-versioning.test.ts` (11 cases), the
+extended `rule-write-guard.test.ts`, and new pure cases in the shared suite — with each fix
+reverted to show which tests redden (M-002): disabling the CRUD mint reddens 6 of the 11 CRUD
+cases plus 12 of ADR-0074's 15; disabling the shadow's observation write reddens exactly the two
+measurement cases while every zero-influence case stays green.*
+
+### 1. `agent_config` resolves at dispatch, in SHADOW — disclosure 1 closed
+
+The last inert artifact type is wired exactly the way this ADR wired the rules: the ONE dispatch
+core (`dispatchAttempt`) resolves the ACTIVE `agent_config` version and overlays it onto the
+served agents row **before** the dispatchability gate, the provider call, and the pillar-5 cost
+attribution — so activating and **rolling back** an agent_config version genuinely changes which
+model executes and at what attributed list price, proved at the provider spy and on the measured
+usage row, never by reading a column.
+
+- **The scope line, applied to agents** (§2's reasoning): only `model`, `costPerMTokIn`,
+  `costPerMTokOut` are versionable — the columns the dispatch core actually consumes.
+  `provider`/`customProviderId` select the credential + egress machinery (rebinding is a NEW
+  agent), `tier` feeds the entitlement ceiling, `enabled`/lifecycle are governance gates with
+  their own audited routes, `systemPrompt` is its own artifact type. All refused with a 422.
+- **The canary SHADOWS and never serves.** One observation per sampled dispatch lands in
+  `config_canary_observations` carrying both sides' effective config
+  (`model=… pricePerMTok=…/…`), the sampling rate and the bucket; the served dispatch is
+  asserted to carry the ACTIVE model while the divergence is recorded. Zero served-path
+  influence is this ADR's invariant, unchanged.
+- **`canaryIsLive('agent_config')` flipped true → false — a deliberate change to ADR-0048's
+  declared intent, recorded here.** The declaration described nothing for three waves; when the
+  resolver was finally built, live-serving a candidate MODEL would be the
+  outage-with-a-percentage-sign this ADR's §2 forbids for rules, arriving through the generative
+  path (a candidate model id the provider rejects fails a share of real requests). The intent
+  statement moved to match the safe fact rather than the fact being bent to an unexercised
+  declaration. A live agent_config ramp remains buildable as its own slice.
+- **Versions-but-no-active FAILS CLOSED at dispatch** (409 `config_version_unresolvable`,
+  audited): dispatching — and billing — a config with no authoritative statement is refused, §4's
+  discipline. Deliberate asymmetry, disclosed: `agent_system_prompt` keeps its ADR-0048
+  fall-back-to-the-column semantics for the same state; changing that here would be a second,
+  unrequested behaviour change on a shipped path.
+- The `agents` table joined the RULE read-model machinery (`RULE_TABLES`,
+  `writeRuleReadModel`, the lazy v1 baseline, the ADR-0074 row lock and write guard — the guard
+  now watches `agents` with its six existing writers audited).
+- **Residuals of this closure**: `usage_events` still stamps only the PROMPT version (one stamp
+  column, two artifact types — the agent_config version that served a dispatch is not on the
+  ledger row); resolution costs one extra indexed query per dispatch (not folded into the prompt
+  query); an agent_config canary has no eval-gated promotion any more than rules do (§ 11).
+
+### 2. The ordinary CRUD surface — disclosure 10's successor, closed the ADR-0074 way
+
+The amendment above corrected disclosure 10: no body-edit CRUD route ever existed. Batch B1
+**builds** the surface (`PATCH /v1/rules/:kind/:ruleId`, `DELETE /v1/rules/:kind/:ruleId`), honest
+from its first day. **The recorded choice is MINT-AND-ACTIVATE, not refusal**: a 409 "use the
+versioning API" would make versioning a one-way trap that permanently breaks the ordinary admin
+surface (ADR-0074 §6(B)'s reasoning, adopted verbatim), and the end state is byte-identical to
+what the versioning API would mint. So a PATCH goes through `applyRuleEdit` — versioned rule +
+enforcing change → mint + activate in one transaction; unversioned rule → plain row write,
+byte-identical (invariant 4); no-op → nothing minted; unresolvable → 409 naming the remedy;
+selection field → 422 naming "create a new rule" (§2's scope line at the route edge).
+
+**DELETE pins the tombstone ADR-0074 §5 scoped** (the "active version pointing at nothing"
+decision): the row is deleted, every version row is KEPT (immutable history), and the
+active/canary pointers are demoted to a new status **`retired`** (canaryPct nulled) with an
+**`artifact_deleted`** activation-ledger entry each — not `superseded` (means "replaced by a
+newer active") and not `rolled_back` (means "an older version re-activated"), either of which
+would misstate history. After a delete, nothing claims to enforce for an artifact that no longer
+exists, the canaries index stops listing a dead comparison, and §4's fail-closed branch stays
+reserved for corruption. **Scope, disclosed**: only the explicit route demotes — a rule that
+vanishes through an FK cascade (deleting its user/server/role/team/approver) still leaves its
+pointers intact and disclosed via `artifactDeleted`, and the per-table AFTER DELETE trigger
+remains its own slice.
+
+### Still open after this amendment
+
+Disclosures 2–9, 11 and 12 stand: a rule canary never serves, `canary_pct` stays capped at 99,
+the shadow pass is inline, there is no pruning, the compliance-profile shadow is computed at read
+time over the first 50 tagged projects and never stored historically, the divergence signal is
+still not fed to ADR-0059's blast-radius preview, selection fields stay un-versionable, and
+nothing here is proven against a real model provider.
