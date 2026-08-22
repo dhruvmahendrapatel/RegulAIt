@@ -231,3 +231,34 @@ dispatched agent must PUSH each scoped commit to the shared branch immediately
 after making it (verification then happens on pushed commits, and a bad commit
 is reverted forward, never left unpushed) — and the coordinator must re-verify
 its own HEAD against `origin` before every action, not only before commits.**
+
+### M-023 — Claimed a reproduction before running the negative control
+Diagnosing an order-dependent test failure, I ran the two suspect files in what
+I called "the hostile order", saw green with my fix, and wrote "the pair passes
+in the hostile order" — presenting it as proof the fix addressed the observed
+red. Then I ran the bypass (fix reverted, same order) out of habit and it ALSO
+passed: the pairing reproduced nothing, so my "proof" had been a green run with
+no failing counterpart, which is exactly the vacuous evidence M-002 exists to
+forbid. I corrected it in the same turn, but only because I ran the control at
+all; had I skipped it, a false causal claim would have gone into the record.
+**Rule: never describe a run as a reproduction until the negative control has
+been run and FAILED — "it passes with the fix" is evidence of nothing without
+"it fails without the fix" in the same configuration, and the two runs must be
+reported together or not at all.**
+
+### M-024 — A guard was proven only in the case where it was easy to fire
+L6's live verification proved the copilot's grounded refusal by asking a
+no-project user about a nonexistent object: retrieval returned zero rows, the
+refusal fired, and the guard was recorded as working. Manual testing later
+found the real hole: an ADMIN asking about a nonexistent entity gets a
+keyword-planned query that ignores the entity, returns eight real unrelated
+approvals, and the model narrates "for the Zorblatt Quantum Compliance Widget,
+8 approvals were requested" — a fabricated subject attached to true numbers,
+stamped `modelNarrationVerified: true`. Both the brief and the test chose the
+EMPTY-retrieval case, where refusal is nearly automatic, and never the case
+where plausible data exists but does not answer the question — which is the
+only case that distinguishes a grounded system from a fluent one.
+**Rule: to prove a guard, construct the case where the guard must fire DESPITE
+plausible, real, well-formed data being available — a guard exercised only
+against absent or malformed input has been shown to handle absence, not to
+handle the failure mode it was built for.**
