@@ -343,3 +343,135 @@ of key material.
 and the audit detail is a `jsonb` column. Every pre-0096 row keeps its exact meaning — a stored
 plan with no `entity`/`entityCandidates` key renders byte-identically to one whose `entity` is
 `null`, which the shared suite pins.
+
+---
+
+## Amendment — 2026-08-22: MCP servers and tools become resolvable (batch B6c, no migration)
+
+Honest limit 3 above named MCP server/tool resolution "the most valuable of these and the most
+likely next slice", and named its two blockers exactly: **the per-`(user, server)` tool-level
+visibility predicate**, and **the non-global uniqueness of `mcp_tools.name`**. Both are solved
+here. Neither is approximated, and the second is solved by *refusing* rather than by resolving,
+which is the honest answer.
+
+### Blocker 1 — visibility: the kernel's own predicate, called, not re-derived
+
+§2's rule was that no kind gets a visibility rule invented for this feature. MCP's rule is
+`loadEntitlements(db, userId, serverId)` + `visibleTools(userId, serverId, refs, entitlements)` —
+the pair `mcp-proxy.ts` runs on `tools/list` and on every governed call, and the pair
+`decompose.ts`'s `callerToolServers` runs to build a planning roster. `resolveCopilotEntities`
+calls **that pair, unchanged**, memoised per server for the duration of one candidate lookup:
+
+| Kind | Table | Matched on | "In your scope" means — and the existing rule it re-uses |
+|---|---|---|---|
+| `mcp_tool` | `mcp_tools` | `server/tool`, bare `tool`, id | the tool survives `visibleTools(...)` for its own server — the exact filter the proxy applies before a caller may even *list* it |
+| `mcp_server` | `mcp_servers` | name (globally unique), id | the caller can see **at least one** tool on it — `callerToolServers`' own rule, which drops a server whose every tool is denied because the caller could not use it for anything |
+
+An admin is org-wide for both, exactly as for the other six.
+
+That this is genuinely **tool-level** and not a server-level shortcut is measured, not asserted:
+a user holding one `tool_grants` row for `Zorbit Docs/lookup` resolves that tool and gets the
+ordinary `copilot_entity_unresolved` for `Zorbit Docs/digest` **on the same server**, while a
+fully-granted member resolves `digest` as the control. Weakening the predicate to "the server is
+visible" reddens exactly that test (probe 3 below).
+
+### Blocker 2 — non-global uniqueness: solved by refusing, because that is what is true
+
+`mcp_tools.name` is unique only per server (`mcp_tools_server_name_uq`), so a bare tool name may
+name several real objects. That is not a resolution problem needing a tiebreak — **it is already
+this ADR's `ambiguous` outcome**, and §3's rule ("ambiguity is never resolved by a tiebreak")
+applies unchanged. A bare `"lookup"` living on two servers returns 422 `copilot_entity_ambiguous`
+listing both, and every `mcp_tool` match renders its `name` **server-qualified** (`Docs/lookup`,
+`Wiki/lookup`) so the listed candidates are strings the caller can actually re-ask with. A
+server-qualified name resolves uniquely, because `mcp_servers.name` **is** globally unique.
+
+One consequence worth stating because it is easy to misread as a bug: **ambiguity is a property
+of the caller's scope, not of the database.** The one-tool grantee above can see exactly one
+`lookup`, so for them the bare name resolves and narrows. That is correct — resolution has always
+run inside the caller's entitlements — and it is a committed test.
+
+### The extended tool × kind table
+
+Determined by reading the schema, the way §4 was. Both MCP kinds turn out to be filterable by all
+four tools, and that is not luck: `audit_log` and `approvals` each carry **first-class
+`server_id` + `tool_name` columns** (the proxy writes them on every governed tool call; the queue
+writes them on every tool approval), so `listAnomalies`' intersection rule is satisfied by both
+halves rather than waived — and `usage_events`, which has no server column, still narrows
+honestly through the pair the MCP proxy documents in its own comment (`object_type='mcp_tool'`,
+the tool name in `operation`, the server id in `detail->>'serverId'`).
+
+| Kind | `queryAuditDecisions` | `listAnomalies` | `listApprovals` | `summarizeUsage` |
+|---|---|---|---|---|
+| `project` | ✅ | ✅ | ✅ | ✅ |
+| `team` | ✅ | ✅ | ✅ | ✅ |
+| `user` | ✅ | ✅ | ✅ | ✅ |
+| `agent` | ✅ | ❌ | ❌ | ✅ |
+| `connector` | ✅ | ❌ | ❌ | ✅ |
+| **`mcp_server`** | ✅ `server_id` | ✅ both halves | ✅ `server_id` | ✅ `detail->>'serverId'` |
+| **`mcp_tool`** | ✅ `server_id` + `tool_name` | ✅ both halves | ✅ `server_id` + `tool_name` | ✅ `object_type` + `operation` + `detail->>'serverId'` |
+| `vendor` | ❌ | ❌ | ❌ | ❌ |
+
+Two notes the table cannot carry:
+
+- **`listApprovals` gains a kind for the first time.** §4's most conspicuous absence was that an
+  approvals question naming an *agent* cannot be narrowed at all. MCP is the opposite case: the
+  approvals queue's own identity for a tool-call approval **is** `(server_id, tool_name)`.
+- **An MCP entity REPLACES any keyword-derived `objectType`**, extending §4's agent/connector rule
+  — and here the reason is sharper than convenience. The planner maps the words "mcp" and "tool
+  call" to `objectType: 'mcp_tool'`, while the proxy's own `audit_log` rows leave `object_type`
+  **NULL** and identify themselves through the dedicated columns. ANDing the keyword would have
+  returned **zero rows for every MCP question**. The `usage_events` filter does pin
+  `object_type='mcp_tool'`, because on *that* ledger the proxy sets it, and pinning it stops a
+  tool name colliding with a connector `operation`.
+
+### The fourth outcome was not added, and for MCP it is unreachable
+
+A kind that resolves but cannot be filtered by the planned tool still ends in the existing
+`copilot_tool_cannot_filter_entity` — no new outcome exists. For the two MCP kinds that refusal
+is **unreachable**, because every cell above is ✅. That is a fact about the schema, not a
+loosening: the `agent`-in-an-approvals-question case is asserted still to produce
+`copilot_tool_cannot_filter_entity` with `toolsThatCanFilter: ["queryAuditDecisions",
+"summarizeUsage"]`, so the matrix was extended rather than relaxed.
+
+### Verified (`copilot-entity-mcp.test.ts`, 11 cases; M-024's rule — every refusal fires with 12 real denials and 6 real approvals in the ledger that a broad query would have returned)
+
+Row counts are seeded deliberately unequal per `(server, tool)` — Docs/lookup 3, Docs/digest 2,
+Wiki/lookup 7 — so a filter that does nothing produces the wrong number rather than a
+coincidentally right one.
+
+| Probe (the fix removed) | Reddens |
+|---|---|
+| **1. THE MANDATORY NO-OP-FILTER PROBE** — the MCP `audit_log` predicates replaced with `[]` while `plan.entity`, the rendered filter string and the audit detail stay exactly as they were | **5**, each with the diagnostic that matters: `expected 12 to be 3`, `expected 12 to be 7`, `expected 12 to be 5`, `expected 12 to be 2`, `expected 12 to be 3`. The broad count came back where the narrowed one was asserted, with the filter still announced in the answer, the note and the ledger |
+| 2. the MCP `approvals` predicates replaced with `[]` | **1** — `expected 6 to be 2` on the approvals ledger |
+| 3. the tool-level predicate weakened to server-level (`visibleOn(server).size > 0` instead of `.has(toolName)`) | **1** — `expected 201 to be 422`: the one-tool grantee resolved a tool they hold no grant for. This is blocker 1's solution measured rather than claimed |
+
+`copilot-entity.test.ts` (all six original kinds) and `copilot.test.ts` stay **green under every
+probe** — they are the regression control for "the six existing kinds behave identically".
+
+Also pinned: the ambiguity listing (both candidates, server-qualified, real ids, `evidence`
+absent because the refusal precedes retrieval); the scope-honesty pair (an invisible
+`Zorbit Docs/lookup` and a nonexistent `Zorbit Nomore/lookup` produce **byte-identical** bodies
+after substituting only the caller's own words, with no server or tool id anywhere), plus the
+server-level twin of it; and the member resolving each of those very objects as the control.
+
+### Honest limits (this amendment)
+
+1. **Honest limit 3 above is narrowed, not removed.** Compliance packs, AI use cases, AI risks,
+   workflow templates, initiatives, roles and virtual keys remain unresolvable, each still for
+   want of a visibility predicate proved with a two-user test. Limits 1, 2, 4, 5, 6 and 7 stand
+   verbatim.
+2. **Extraction still bounds reach, and bounds it harder here.** MCP tool names are typically
+   lowercase and often snake_case (`read_file`), so the capitalised-run signal cannot see them: a
+   tool name must be **quoted** or given as an id, and a `server/tool` qualifier realistically
+   always needs quoting. That is limit 1 applied to a naming convention that makes it bite more
+   often, and the workaround is the same one the refusal text already prints.
+3. **The server-qualified form assumes `/`.** A server whose *name* contains a slash would be
+   split at the first one; nothing enforces that it cannot. No such name exists in this build and
+   the qualifier only ever binds an already-matched tool to an already-named server, so a bad
+   split yields `unresolved`, never a wrong object — but it is a real edge and it is not guarded.
+4. **`usage_events` narrowing rides a convention, not a column.** The server id lives in a `jsonb`
+   detail key the MCP proxy writes. It is the same key the proxy's own comment documents and the
+   same one the cost surfaces read, but a future writer that omitted it would silently under-count
+   rather than error. A real `server_id` column on `usage_events` would remove the caveat.
+5. **Offline only.** Everything here is proved against a real Postgres with seeded ledger rows;
+   nothing in this amendment was re-verified against a live model or a live MCP upstream.

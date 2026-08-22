@@ -73,6 +73,8 @@ import {
   gte,
   inArray,
   lt,
+  mcpServers,
+  mcpTools,
   or,
   projectMembers,
   projects,
@@ -120,11 +122,18 @@ import {
   type CopilotTimeframe,
   type CopilotTool,
 } from "@regulait/shared";
-import { evaluateAgent, evaluateConnector, type AgentDecision } from "@regulait/policy-kernel";
+import {
+  evaluateAgent,
+  evaluateConnector,
+  visibleTools,
+  type AgentDecision,
+  type ToolRef,
+} from "@regulait/policy-kernel";
 import { executeGovernedDispatch, type AgentRow } from "./agents-connectors.js";
 import {
   loadAgentRevocations,
   loadConnectorRevocations,
+  loadEntitlements,
   loadRoleAgentGrants,
   loadRoleConnectorGrants,
 } from "./entitlements.js";
@@ -256,11 +265,36 @@ function auditScopePredicate(projectIds: string[]) {
  *              the exact call an ordinary invoke makes. Not a hand-rolled join
  *              over grant tables, which could drift from the enforcing path.
  *   connector  the kernel's `evaluateConnector` at mode `read`, same reasoning.
+ *   mcp_server the kernel's `visibleTools(...)` over the server's inventory
+ *              (B6c). "Visible" means the caller can see AT LEAST ONE tool on
+ *              it — the exact rule `decompose.ts`'s `callerToolServers` already
+ *              applies when building a planning roster, which is itself the
+ *              rule the MCP proxy enforces on every call.
+ *   mcp_tool   the SAME `visibleTools(...)` call, asked about one tool: the
+ *              tool must survive the filter for its own server (B6c).
  *   vendor     `ai_vendors.owner_user_id = caller` — byte-identical to the
  *              existing `GET /v1/vendors` rule for a non-admin.
  *
- * An admin is org-wide for all six, exactly as `resolveCopilotScope` already
+ * An admin is org-wide for all eight, exactly as `resolveCopilotScope` already
  * makes them org-wide for every ledger.
+ *
+ * B6c — THE TWO BLOCKERS ADR-0096 NAMED, AND HOW EACH IS SOLVED.
+ *
+ *  1. "MCP visibility is a per-(user, server) TOOL-LEVEL computation
+ *     (`loadEntitlements` + `visibleTools`)." Solved by CALLING that pair,
+ *     unchanged, in exactly the shape the MCP proxy calls it — one
+ *     `loadEntitlements(db, userId, serverId)` and one `visibleTools(userId,
+ *     serverId, refs, entitlements)` per candidate server. No new predicate was
+ *     written and none was approximated: the copilot resolves an MCP tool if
+ *     and only if the proxy would let that same user list it.
+ *  2. "`mcp_tools.name` is unique only per server, so a bare tool name cannot
+ *     be resolved without a server qualifier the extractor cannot reliably
+ *     supply." Solved by NOT resolving it. A bare name matching tools on two
+ *     servers produces two matches, which is already this feature's AMBIGUOUS
+ *     outcome: the refusal lists both, each qualified by its server, and never
+ *     tie-breaks. A caller who means one writes `server/tool`, which resolves
+ *     uniquely because `mcp_servers.name` IS globally unique. Ambiguity here is
+ *     not a gap in the design; it is the design.
  *
  * AND THE RULE THAT MATTERS MOST: a candidate the caller may not see comes back
  * as NOT FOUND. Not "found but hidden", not a different error — the same empty
@@ -393,6 +427,92 @@ async function lookupEntityCandidate(
     }
   }
 
+  // --- MCP server / MCP tool (B6c): the kernel's own per-(user, server)
+  //     TOOL-LEVEL predicate, called exactly as the MCP proxy calls it -------
+  {
+    // A `server/tool` qualifier is the only way a NON-GLOBALLY-UNIQUE tool name
+    // can be asked about unambiguously. `mcp_servers.name` IS globally unique,
+    // so the qualified form is exact; the bare form deliberately stays capable
+    // of matching several tools, which is the ambiguity outcome, not a bug.
+    const slash = candidate.indexOf("/");
+    const qualifierName = slash > 0 ? candidate.slice(0, slash).trim() : null;
+    const qualifiedToolName = slash > 0 ? candidate.slice(slash + 1).trim() : null;
+
+    const serverRows = await db
+      .select({ id: mcpServers.id, name: mcpServers.name })
+      .from(mcpServers)
+      .where(byId ? eq(mcpServers.id, candidate) : nameEq(mcpServers.name, candidate))
+      .limit(5);
+
+    const toolNameToMatch = qualifiedToolName || candidate;
+    const toolRows = byId
+      ? await db
+          .select({ id: mcpTools.id, serverId: mcpTools.serverId, name: mcpTools.name })
+          .from(mcpTools)
+          .where(eq(mcpTools.id, candidate))
+          .limit(10)
+      : toolNameToMatch.length >= 2
+        ? await db
+            .select({ id: mcpTools.id, serverId: mcpTools.serverId, name: mcpTools.name })
+            .from(mcpTools)
+            .where(nameEq(mcpTools.name, toolNameToMatch))
+            .limit(10)
+        : [];
+
+    if (serverRows.length || toolRows.length) {
+      const needed = [...new Set([...serverRows.map((r) => r.id), ...toolRows.map((t) => t.serverId)])];
+      const nameRows = await db
+        .select({ id: mcpServers.id, name: mcpServers.name })
+        .from(mcpServers)
+        .where(inArray(mcpServers.id, safeIds(needed)));
+      const serverName = new Map(nameRows.map((r) => [r.id, r.name]));
+
+      // THE RE-USED PREDICATE, memoised per server for this candidate only.
+      // `loadEntitlements` + `visibleTools` is the pair `mcp-proxy.ts` runs on
+      // tools/list and on every call, and `decompose.ts` runs to build a
+      // planning roster. Nothing here re-derives it.
+      const visibleCache = new Map<string, Set<string>>();
+      const visibleOn = async (serverId: string): Promise<Set<string>> => {
+        const hit = visibleCache.get(serverId);
+        if (hit) return hit;
+        const [tools, entitlements] = await Promise.all([
+          db.select().from(mcpTools).where(eq(mcpTools.serverId, serverId)),
+          loadEntitlements(db, actor.userId, serverId),
+        ]);
+        const refs: ToolRef[] = tools.map((t) => ({
+          serverId: t.serverId,
+          name: t.name,
+          kind: t.kind,
+        }));
+        const set = new Set(
+          visibleTools(actor.userId, serverId, refs, entitlements).map((t) => t.name),
+        );
+        visibleCache.set(serverId, set);
+        return set;
+      };
+
+      for (const srv of serverRows) {
+        // a server is "in your scope" when you can see at least one tool on it
+        // — `callerToolServers`' own rule, which drops a server whose tools are
+        // all denied because the caller could not use it for anything
+        if (!actor.isAdmin && (await visibleOn(srv.id)).size === 0) continue;
+        out.push({ kind: "mcp_server", id: srv.id, name: srv.name });
+      }
+
+      for (const t of toolRows) {
+        const owner = serverName.get(t.serverId);
+        if (!owner) continue;
+        // a qualified candidate binds to ONE server; an unqualified one is
+        // allowed to match several, and that is the ambiguity outcome
+        if (qualifierName && owner.toLowerCase() !== qualifierName.toLowerCase()) continue;
+        if (!actor.isAdmin && !(await visibleOn(t.serverId)).has(t.name)) continue;
+        // the NAME is rendered server-qualified, so the ambiguity refusal lists
+        // candidates a caller can actually tell apart and re-ask with
+        out.push({ kind: "mcp_tool", id: t.id, name: `${owner}/${t.name}` });
+      }
+    }
+  }
+
   // --- vendor: the SAME rule GET /v1/vendors already enforces ---------------
   const vendorRows = await db
     .select({ id: aiVendors.id, name: aiVendors.name })
@@ -460,6 +580,22 @@ async function memberIdsOf(db: Db, kind: CopilotEntityKind, id: string): Promise
   return rows.map((r) => r.userId);
 }
 
+/** B6c — the (server_id, tool_name) pair an `mcp_tool` entity filters on.
+ * `mcp_tools.id` is the resolved identity, but no ledger stores it: all three
+ * store the SERVER ID and the TOOL NAME (`audit_log`/`approvals` as first-class
+ * columns; `usage_events` as `operation` + `detail->>'serverId'`). So the pair
+ * is looked up once per retrieval, exactly as `memberIdsOf` expands a team. */
+async function mcpToolRefOf(
+  db: Db,
+  id: string,
+): Promise<{ serverId: string; toolName: string } | null> {
+  const [row] = await db
+    .select({ serverId: mcpTools.serverId, name: mcpTools.name })
+    .from(mcpTools)
+    .where(eq(mcpTools.id, id));
+  return row ? { serverId: row.serverId, toolName: row.name } : null;
+}
+
 // ---------------------------------------------------------------------------
 // Timeframes
 // ---------------------------------------------------------------------------
@@ -524,6 +660,7 @@ const SAMPLE_LIMIT = 5;
 function approvalEntityPredicates(
   entity: CopilotEntityRef | null,
   members: readonly string[],
+  mcpTool: { serverId: string; toolName: string } | null,
 ): ReturnType<typeof eq>[] {
   if (!entity) return [];
   if (entity.kind === "user") return [eq(approvals.userId, entity.id)];
@@ -532,6 +669,15 @@ function approvalEntityPredicates(
     return [
       or(eq(approvals.projectId, entity.id), inArray(approvals.userId, safeIds([...members])))!,
     ];
+  }
+  // B6c: `approvals` carries FIRST-CLASS server_id + tool_name columns (the
+  // queue's own identity for a tool-call approval), which is why MCP is the
+  // only kind `listApprovals` and `listAnomalies` gained — the intersection
+  // rule is satisfied by both halves rather than waived.
+  if (entity.kind === "mcp_server") return [eq(approvals.serverId, entity.id)];
+  if (entity.kind === "mcp_tool") {
+    if (!mcpTool) return [eq(approvals.serverId, ZERO_UUID)];
+    return [eq(approvals.serverId, mcpTool.serverId), eq(approvals.toolName, mcpTool.toolName)];
   }
   // agent / connector / vendor never reach here: `COPILOT_ENTITY_FILTER_MATRIX`
   // excludes them for every tool that reads this ledger, and the route refuses
@@ -581,6 +727,8 @@ export async function retrieveEvidence(
     entity && (entity.kind === "team" || entity.kind === "project")
       ? await memberIdsOf(db, entity.kind, entity.id)
       : [];
+  // B6c: the (server_id, tool_name) pair every ledger actually stores
+  const entityMcpTool = entity?.kind === "mcp_tool" ? await mcpToolRefOf(db, entity.id) : null;
 
   if (plan.tool === "queryAuditDecisions" || plan.tool === "listAnomalies") {
     // `audit_log` carries no project column; attribution rides
@@ -593,16 +741,42 @@ export async function retrieveEvidence(
           ? [inArray(auditLog.userId, safeIds(entityMembers))]
           : entity.kind === "user"
             ? [eq(auditLog.userId, entity.id)]
-            : [
-                // agent / connector: the object THIS row was about. The entity's
-                // own class REPLACES any keyword-derived `objectType` — a
-                // question naming an agent is about that agent whatever other
-                // class word it happens to contain, and ANDing the two would
-                // silently return zero rows instead of an answer.
-                eq(auditLog.objectType, entity.kind as (typeof auditLog.objectType)["_"]["data"]),
-                eq(auditLog.objectId, entity.id),
-              ];
-    const entityOwnsObjectType = entity?.kind === "agent" || entity?.kind === "connector";
+            : // B6c: an MCP row identifies itself with the DEDICATED
+              // `server_id` / `tool_name` columns the proxy writes — it leaves
+              // `object_type` NULL — so these two kinds filter on those
+              // columns, not on the object_type/object_id pair.
+              entity.kind === "mcp_server"
+              ? [eq(auditLog.serverId, entity.id)]
+              : entity.kind === "mcp_tool"
+                ? entityMcpTool
+                  ? [
+                      eq(auditLog.serverId, entityMcpTool.serverId),
+                      eq(auditLog.toolName, entityMcpTool.toolName),
+                    ]
+                  : [eq(auditLog.serverId, ZERO_UUID)]
+                : [
+                    // agent / connector: the object THIS row was about. The
+                    // entity's own class REPLACES any keyword-derived
+                    // `objectType` — a question naming an agent is about that
+                    // agent whatever other class word it happens to contain,
+                    // and ANDing the two would silently return zero rows
+                    // instead of an answer.
+                    eq(
+                      auditLog.objectType,
+                      entity.kind as (typeof auditLog.objectType)["_"]["data"],
+                    ),
+                    eq(auditLog.objectId, entity.id),
+                  ];
+    // B6c extends the same replacement rule to the MCP kinds, and for a
+    // sharper reason than convenience: the planner maps the words "mcp" and
+    // "tool call" to `objectType: 'mcp_tool'`, while the proxy's own audit rows
+    // carry `object_type NULL`. ANDing the keyword would return ZERO rows for
+    // every MCP question — the resolved subject wins, as it does for agents.
+    const entityOwnsObjectType =
+      entity?.kind === "agent" ||
+      entity?.kind === "connector" ||
+      entity?.kind === "mcp_server" ||
+      entity?.kind === "mcp_tool";
     const where = and(
       gte(auditLog.at, start),
       lt(auditLog.at, end),
@@ -674,7 +848,7 @@ export async function retrieveEvidence(
             // halves can narrow (the matrix says so), so a half-narrowed
             // anomaly report — one lead about your subject, one about
             // everything — is unreachable rather than merely discouraged.
-            ...approvalEntityPredicates(entity, entityMembers),
+            ...approvalEntityPredicates(entity, entityMembers, entityMcpTool),
           ),
         );
       const rubber = fast.filter(
@@ -699,7 +873,7 @@ export async function retrieveEvidence(
       lt(approvals.requestedAt, end),
       ...(plan.params.status ? [eq(approvals.status, plan.params.status)] : []),
       ...memberScope,
-      ...approvalEntityPredicates(entity, entityMembers),
+      ...approvalEntityPredicates(entity, entityMembers, entityMcpTool),
     );
     const [total, byStatus, rows] = await Promise.all([
       db.select({ n: count() }).from(approvals).where(where),
@@ -744,7 +918,24 @@ export async function retrieveEvidence(
                   eq(usageEvents.requestedAgentId, entity.id),
                 )!,
               ]
-            : [eq(usageEvents.connectorId, entity.id)];
+            : entity.kind === "connector"
+              ? [eq(usageEvents.connectorId, entity.id)]
+              : // B6c — `usage_events` has NO server column: the MCP proxy
+                // documents its own convention ("`operation` carries the tool
+                // name and the server id rides the detail jsonb"), and this
+                // filter reads exactly that pair. `object_type` is pinned to
+                // 'mcp_tool' here because on THIS ledger the proxy does set it,
+                // and it keeps a tool name that collides with a connector
+                // operation from matching.
+                entity.kind === "mcp_server"
+                ? [sql`${usageEvents.detail} ->> 'serverId' = ${assertUuid(entity.id)}`]
+                : entityMcpTool
+                  ? [
+                      eq(usageEvents.objectType, "mcp_tool"),
+                      eq(usageEvents.operation, entityMcpTool.toolName),
+                      sql`${usageEvents.detail} ->> 'serverId' = ${assertUuid(entityMcpTool.serverId)}`,
+                    ]
+                  : [eq(usageEvents.id, ZERO_UUID)];
   const where = and(
     gte(usageEvents.at, start),
     lt(usageEvents.at, end),

@@ -292,12 +292,26 @@ nonexistent one — is proved with two users. `subjectFiltered`'s meaning narrow
 your subject" whenever a subject was named; the L6d caveat is KEPT for questions that name none.
 **What is still open**: extraction is conservative, so a subject with no capitals, quotes or id
 is still missed and falls through to L6d's caveated broad answer; resolution is exact-match, so
-a near-miss refuses rather than suggests; and **MCP servers/tools, compliance packs, AI use
-cases, AI risks, workflow templates, initiatives and roles remain UNRESOLVABLE** — MCP is the
+a near-miss refuses rather than suggests; ~~and **MCP servers/tools**, compliance packs, AI use
+cases, AI risks, workflow templates, initiatives and roles remain UNRESOLVABLE — MCP is the
 most valuable next slice and is blocked on the per-(user, server) tool-level visibility
-predicate plus the non-global uniqueness of `mcp_tools.name`. Vendors resolve but no ledger can
-filter by them, so a vendor question can only end in the tool/kind refusal; there is no
-attribution column or join to add one today.
+predicate plus the non-global uniqueness of `mcp_tools.name`~~ — **MCP closed 2026-08-22 (batch
+B6c, ADR-0096 amendment, no migration)**: both named blockers solved — visibility RE-USES the
+kernel's own `loadEntitlements` + `visibleTools` pair (the one the MCP proxy enforces per call),
+proved tool-level by a one-tool grantee who resolves `Docs/lookup` and gets the ordinary
+unresolved refusal for `Docs/digest` on the SAME server; and non-global uniqueness is solved by
+REFUSING — a bare tool name on two servers is the existing ambiguous outcome, listing both
+candidates server-qualified and never tie-breaking, while `server/tool` resolves uniquely
+because `mcp_servers.name` is globally unique. Both MCP kinds filter on all FOUR read tools
+(`audit_log`/`approvals` carry first-class `server_id`+`tool_name`; `usage_events` narrows via
+`object_type`+`operation`+`detail->>'serverId'`), so `listApprovals` gains a kind for the first
+time and no fourth outcome was added — the tool/kind refusal is simply unreachable for MCP. The
+mandatory no-op-filter probe reddens 5 tests (`expected 12 to be 3` …). **Still unresolvable**:
+compliance packs, AI use cases, AI risks, workflow templates, initiatives, roles, virtual keys —
+each still wants a visibility predicate proved with a two-user test; and MCP tool names are
+usually lowercase/snake_case, so in practice they must be QUOTED to be extracted at all.
+Vendors resolve but no ledger can filter by them, so a vendor question can only end in the
+tool/kind refusal; there is no attribution column or join to add one today.
 
 ## Enterprise-deal gates unchanged from §1
 **P1** (credential — see above) · **P2** (HA/SLA — build when there is a customer to serve)

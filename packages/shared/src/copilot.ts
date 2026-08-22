@@ -207,6 +207,16 @@ export const COPILOT_ENTITY_KINDS = [
   "user",
   "agent",
   "connector",
+  // B6c: MCP servers and tools. ADR-0096 excluded them and named the two
+  // blockers precisely — the per-(user, server) TOOL-LEVEL visibility
+  // predicate, and the fact that `mcp_tools.name` is unique only per server.
+  // Both are solved rather than approximated: visibility RE-USES the kernel's
+  // own `loadEntitlements` + `visibleTools` (the pair the MCP proxy itself
+  // enforces on every call), and non-global uniqueness is not tie-broken — a
+  // bare tool name matching two servers is exactly this ADR's AMBIGUOUS
+  // outcome, and a server-qualified `server/tool` name is the resolved one.
+  "mcp_server",
+  "mcp_tool",
   "vendor",
 ] as const;
 export type CopilotEntityKind = (typeof COPILOT_ENTITY_KINDS)[number];
@@ -218,6 +228,8 @@ export const COPILOT_ENTITY_KIND_LABELS: Record<CopilotEntityKind, string> = {
   user: "user",
   agent: "agent",
   connector: "connector",
+  mcp_server: "MCP server",
+  mcp_tool: "MCP tool",
   vendor: "AI vendor",
 };
 
@@ -254,12 +266,22 @@ export interface CopilotEntityRef extends CopilotEntityMatch {
  *
  *   `vendor` appears nowhere. `ai_vendors` has no id on any of the three
  *   ledgers and no join table to one.
+ *
+ *   B6c — `mcp_server` and `mcp_tool` are the ONLY kinds present for all four
+ *   tools, and that is read off the schema rather than wished for: BOTH
+ *   `audit_log` and `approvals` carry first-class `server_id` + `tool_name`
+ *   columns (the MCP proxy writes them on every governed tool call and every
+ *   queued approval), so `listAnomalies`' intersection rule is satisfied by
+ *   both halves rather than bypassed; and `usage_events`, which has no server
+ *   column, still narrows honestly through the pair the MCP proxy documents
+ *   itself — `object_type='mcp_tool'` with the tool name in `operation` and
+ *   the server id in `detail->>'serverId'`.
  */
 export const COPILOT_ENTITY_FILTER_MATRIX: Record<CopilotTool, readonly CopilotEntityKind[]> = {
-  queryAuditDecisions: ["project", "team", "user", "agent", "connector"],
-  listAnomalies: ["project", "team", "user"],
-  listApprovals: ["project", "team", "user"],
-  summarizeUsage: ["project", "team", "user", "agent", "connector"],
+  queryAuditDecisions: ["project", "team", "user", "agent", "connector", "mcp_server", "mcp_tool"],
+  listAnomalies: ["project", "team", "user", "mcp_server", "mcp_tool"],
+  listApprovals: ["project", "team", "user", "mcp_server", "mcp_tool"],
+  summarizeUsage: ["project", "team", "user", "agent", "connector", "mcp_server", "mcp_tool"],
 };
 
 export function copilotToolSupportsEntityKind(tool: CopilotTool, kind: CopilotEntityKind): boolean {
