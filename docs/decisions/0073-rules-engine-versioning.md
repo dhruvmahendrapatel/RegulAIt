@@ -416,3 +416,94 @@ the shadow pass is inline, there is no pruning, the compliance-profile shadow is
 time over the first 50 tagged projects and never stored historically, the divergence signal is
 still not fed to ADR-0059's blast-radius preview, selection fields stay un-versionable, and
 nothing here is proven against a real model provider.
+
+---
+
+## Amendment — 2026-08-22 (batch B7c): the last three residuals are closed
+
+*Appended; nothing above is edited. Migration 0102. Verified by
+`canary-observation-prune.test.ts` (5 cases), `orphan-pointer-trigger.test.ts` (3 cases) and
+`usage-config-stamp.test.ts` (5 cases), plus the pinned scheduler-registry list in
+`scheduler.test.ts`. This closes disclosure 5 ("no pruning") and both residuals the B1 amendment
+named: the FK-cascade orphan path ("the per-table AFTER DELETE trigger remains its own slice")
+and the one-stamp-column gap ("`usage_events` still stamps only the PROMPT version").*
+
+### 1. Disclosure 5 closed — observations prune; versions NEVER do
+
+`config_canary_observations` — one row per sampled governed decision while a canary runs — now
+has a retention sweep: `runCanaryObservationPrune`, driven three ways through ONE implementation
+(ADR-0064 §7's extract-don't-duplicate): the `canary-observation-prune-sweep` scheduler job, the
+manual `POST /v1/config-versions/observations/prune` door, and the exported function both call.
+
+- **THE BOUNDARY, stated as hard as it can be: only `config_canary_observations` rows are ever
+  pruned. `config_versions` are NEVER pruned by anything** — version history is the audit
+  substrate: rollback re-points at version rows, the activation ledger references them, and the
+  usage stamp (§3 below) names them. Pruning a version would break rollback and the ledger. The
+  test asserts the version rows — including the superseded one whose evidence was just pruned —
+  survive every pass.
+- **A live canary's evidence is live evidence.** An observation whose candidate version is
+  currently in CANARY status is kept regardless of age, checked inside the DELETE's own WHERE
+  (no window for a canary started mid-pass). Pruning it would empty the divergence report an
+  operator is about to promote or abandon on. Proved: a 100-day-old observation of a live canary
+  survives both the default and a narrowed 30-day window.
+- **The window is an org-settings knob**, `canaryObservationRetentionDays` (default 90, zod
+  1–3650), on the ordinary settings surface. The JOB inherits ADR-0064's posture unchanged: the
+  per-job row defaults enabled but the SCHEDULER is off by default, so a fresh install prunes
+  nothing until an operator opts in — exactly like the other nine sweeps.
+- **Every pass writes one audited fact** (`ruleId: canary-observations-pruned`): count, cutoff,
+  retention days, and how many over-age rows were protected by a live canary.
+
+### 2. The B1 amendment's FK-cascade residual closed — the AFTER DELETE trigger exists
+
+Migration 0102 installs `config_versions_retire_on_subject_delete()` as an AFTER DELETE trigger
+on every table whose rows are config-version subjects: the four rule tables (`approval_rules`,
+`rate_limits`, `data_scope_rules`, `compliance_profiles`) and `agents` — which is the subject of
+BOTH `agent_config` and `agent_system_prompt`, so its one trigger covers both artifact types. A
+subject row that vanishes through an FK cascade (deleting its user/server/role/team/approver) or
+any raw SQL delete now gets exactly the explicit DELETE route's semantics, at the SQL level:
+active/canary pointers demoted to `retired` (canaryPct nulled), one `artifact_deleted`
+activation-ledger entry per pointer naming the trigger path, every version row KEPT.
+
+- **The route path is byte-identical by construction, not by luck**: `deleteRuleArtifact`
+  demotes pointers BEFORE deleting the row in one transaction, so the trigger fires on the
+  route's own delete and finds nothing in the active/canary space — proved by exact
+  ledger-entry counts (2 pointers, 2 entries, none trigger-authored) on the route path, next to
+  the raw-cascade path where the 2 entries ARE trigger-authored.
+- **Boundary, stated: the trigger writes the ACTIVATION LEDGER and deliberately NOT
+  `audit_log`.** ADR-0060's hash chain is computed at the application layer (`createDb`), so a
+  trigger-inserted audit row would be un-chained and reported by verification as possible
+  tampering. The activation ledger is the record every versioning surface reads, and it is what
+  the route writes per pointer too.
+- `artifactDeleted: true` remains on the read surfaces; what changed is that it can no longer
+  coexist with a version still claiming to be `active` — §4's fail-closed branch is now
+  genuinely reserved for corruption on every deletion path, not just the explicit one.
+
+### 3. The B1 amendment's stamp residual closed — `usage_events` names the agent_config that served
+
+`usage_events.agent_config_version_id` + `agent_config_version` (migration 0102) are stamped in
+the ONE dispatch core, from the same resolution that overlays the active `agent_config` onto the
+served agents row — so the ledger row and the executed config cannot disagree by construction.
+
+- **Mirrors the ADR-0048 prompt stamp exactly, including FK-freeness.** The brief suggested an
+  FK ON DELETE SET NULL and said to check what the prompt column does and mirror it; the prompt
+  stamp — like every attribution column of this ledger — is deliberately FK-free (a deleted row
+  must not take spend history's attribution with it), with the integer stored alongside the id
+  so the answer survives a pruned version row. The mirror wins over the literal FK suggestion,
+  and §1's no-version-pruning boundary makes the dangling-id case unreachable anyway.
+- **NULL when the agent's config is unversioned** — every pre-B7c row and the pre-existing
+  behaviour, byte-identical, pinned by test.
+- **The column means "what SERVED". The shadow/canary CANDIDATE id is never stamped** — a
+  candidate never serves (this ADR's invariant), so it has no business on the ledger of what
+  did. Proved with a 99% shadow canary running: the row still names the active version. Proved
+  the other way too: activating a new version moves the stamp on the very next row, and the
+  prompt stamp and config stamp coexist on one row naming different versions.
+
+### Still open after this amendment
+
+Disclosures 2–4, 6–9, 11 and 12 stand: a rule canary never serves, `canary_pct` stays capped at
+99, the shadow pass is inline, the compliance-profile shadow is computed at read time over the
+first 50 tagged projects and never stored historically, the divergence signal is still not fed
+to ADR-0059's blast-radius preview, selection fields stay un-versionable, and nothing here is
+proven against a real model provider. New, minor, disclosed: observation pruning is bounded by
+retention age and live-canary protection only — there is no per-artifact cap, so a 90-day window
+on a busy fleet still holds 90 days of rows.
