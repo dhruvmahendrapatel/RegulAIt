@@ -878,7 +878,14 @@ export class ModelBackedRecommendationJudge implements RecommendationJudge {
       // no routing counterfactual: the judge is pinned by org configuration
       baseline: null,
       input: buildRecommendationJudgePrompt(reqs),
-      maxTokens: 2048,
+      // L6c — headroom for a REASONING model, for the reason measured on the
+      // copilot's narration path (see `ModelBackedNarrator`): a thinking model
+      // spends its budget on thoughts first, and a truncated reply is
+      // (correctly) discarded, so a ceiling that is merely "big enough for the
+      // answer" makes the whole judged layer permanently unavailable. This
+      // budget also covers a BATCH — up to
+      // RECOMMENDATION_JUDGE_MAX_FINDINGS verdicts in one array.
+      maxTokens: 8192,
       projectId: this.ctx.projectId,
       detail: { purpose: "recommendation-judge", findings: reqs.length },
     });
@@ -893,9 +900,20 @@ export class ModelBackedRecommendationJudge implements RecommendationJudge {
   }
 }
 
-/** cap on how many findings ride one judge call — a bounded prompt, and a
- * bounded bill, on a report that can legitimately hold hundreds of rows */
-export const RECOMMENDATION_JUDGE_MAX_FINDINGS = 40;
+/**
+ * Cap on how many findings ride one judge call — a bounded prompt, and a
+ * bounded bill, on a report that can legitimately hold hundreds of rows.
+ *
+ * 20 rather than 40, and the number is measured. A 40-finding batch against a
+ * live reasoning model produced 3431 output tokens on top of 2615 thought
+ * tokens; a second identical run truncated instead, and the report came back
+ * `judged: unavailable` (correct behaviour — a truncated array is refused, not
+ * half-read — but a judged layer that intermittently disappears is not much of
+ * a feature). Halving the batch halves the output side of that budget. The
+ * report still states how many of its findings were sent, so a report larger
+ * than one batch is disclosed rather than silently partial.
+ */
+export const RECOMMENDATION_JUDGE_MAX_FINDINGS = 20;
 
 /**
  * ATTACH ANNOTATIONS TO A COMPUTED REPORT — the only function that may.

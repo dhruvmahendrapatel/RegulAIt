@@ -468,7 +468,17 @@ export class ModelBackedNarrator implements CopilotNarrator {
       // no routing counterfactual: the narrator is pinned by the caller
       baseline: null,
       input: buildNarrationPrompt(req),
-      maxTokens: 1024,
+      // L6a — 1024 WAS TOO SMALL, and the failure was measured, not guessed.
+      // Against a live reasoning model the narration came back truncated
+      // (`finishReason: MAX_TOKENS`, 981 thought tokens against a 1024 ceiling,
+      // 39 tokens of actual JSON) and was correctly discarded as unparseable —
+      // so the copilot could never narrate at all on such a model. Re-running
+      // the IDENTICAL prompt with a 4096 ceiling finished cleanly (`STOP`,
+      // 1688 thought tokens, complete JSON citing the real object ids), which
+      // is what proves the ceiling was the cause rather than the prompt. This
+      // is an output CEILING, not a spend: a non-reasoning model still emits
+      // its ~200-token reply and bills for that.
+      maxTokens: 4096,
       projectId: this.ctx.projectId,
       detail: { purpose: "copilot-narration", tool: req.plan.tool },
     });
