@@ -21,6 +21,29 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-08-22 (evening) — local hands-on testing of the live copilot found a real
+hallucination hole; fix in flight.** Pulled HEAD, built, seeded a fresh database and drove the
+copilot against the live Gemini credential. **What works:** deterministic grounding cites real
+`audit_log` ids; live narration returns `generation: model` with `modelNarrationVerified: true`
+through the governed path, **metered** (2 rows, 1,804 in / 603 out tokens, ~$0.008, attributed)
+and audited (`copilot-question-answered`); the decision-support notice and scope caveat render
+on every answer. **What broke:** a question naming a NONEXISTENT entity ("Summarise the
+Zorblatt Quantum Compliance Widget approvals from last week") did **not** refuse — the
+keyword planner ignored the unknown entity, ran an unfiltered `listApprovals`, retrieved 8
+real org-wide approvals, and the model narrated *"for the Zorblatt Quantum Compliance Widget,
+8 approvals were requested, 4 approved, 4 pending"* — a fabricated subject bound to true
+numbers, stamped verified. The three existing guards all passed legitimately (no invented
+figure, no invented id, retrieval non-empty); **none checks that the question's SUBJECT was
+ever a filter**. Fix dispatched (two layers: filters disclosed to the narrator with a hard
+rule against attributing findings to unfiltered entities, plus a deterministic caveat that
+holds even when the model misbehaves; ADR-0056 amendment states precisely what
+`modelNarrationVerified` does and does not mean). Two process lessons logged: **M-023** (I
+called a run a reproduction before the negative control — which then also passed, proving
+nothing) and **M-024** (L6's own live test proved the refusal only in the EMPTY-retrieval
+case, the easy one, so this whole class survived "verified"). Also fixed and pushed: an
+order-fragile SoD audit assertion my independent full-suite run caught (`6059271`). Suite at
+**153 files / 2437 passed + 9 skips**.
+
 **2026-08-22 (later) — the autonomous queue is EMPTY: B1–B5 and L6 all landed.** Everything
 buildable without further owner input is built, each slice agent-built then independently
 re-verified on a second fresh database. **B2** (ADR-0090/0091): campaign expiry sweep on the
