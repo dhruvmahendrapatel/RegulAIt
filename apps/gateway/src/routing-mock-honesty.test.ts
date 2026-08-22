@@ -50,8 +50,12 @@ import {
  * SHARED-DB DISCIPLINE: `rmh-` prefixed users/agents owned by this file; row
  * assertions are DELTAS (M-008); the stored anthropic credential and this
  * file's usage/cost rows are removed in afterAll; provider env vars cleared
- * per-file and restored verbatim (an ambient XAI key would flip the keyless
- * case).
+ * per-file and restored verbatim (an ambient GOOGLE key would flip the keyless
+ * case). The keyless live agent sits on the GOOGLE provider slot deliberately:
+ * no other suite file ever stores a google platform credential (mcp-proxy
+ * leaves an xai one behind, which is exactly how the first draft of this file
+ * learned the M-020 lesson about asserting global emptiness), and beforeAll
+ * clears the slot anyway so the claim is created by this file, not assumed.
  */
 
 declare global {
@@ -131,7 +135,7 @@ let reqLiveId: string;
 let cheapLiveId: string;
 let mockLivId: string;
 /** key's roster: an uncredentialed live agent + a mock — the keyless demo */
-let liveXaiId: string;
+let liveKeylessId: string;
 let mockKeyId: string;
 
 async function makeUser(email: string) {
@@ -193,10 +197,14 @@ beforeAll(async () => {
     [livId],
   );
 
-  liveXaiId = await makeAgent(
-    { name: "rmh-xai-live", provider: "xai", tier: 2, modes: ["execute"], model: "rmh-grok-model", costPerMTokIn: 15, costPerMTokOut: 75 },
+  liveKeylessId = await makeAgent(
+    { name: "rmh-google-live", provider: "google", tier: 2, modes: ["execute"], model: "rmh-gem-model", costPerMTokIn: 15, costPerMTokOut: 75 },
     [keyId],
   );
+  // own the keyless story for the google slot while this file runs (the
+  // env-fallback suite's discipline for anthropic): no stored platform
+  // credential may make the "keyless" roster silently credentialed
+  await db.delete(modelCredentials).where(eq(modelCredentials.provider, "google"));
   mockKeyId = await makeAgent(
     { name: "rmh-mock-keyless", provider: "mock", tier: 0, modes: ["execute"], model: "mock-fast", costPerMTokIn: 1, costPerMTokOut: 5 },
     [keyId],
@@ -214,7 +222,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  const agentIds = [reqLiveId, cheapLiveId, mockLivId, liveXaiId, mockKeyId].filter(Boolean);
+  const agentIds = [reqLiveId, cheapLiveId, mockLivId, liveKeylessId, mockKeyId].filter(Boolean);
   if (agentIds.length > 0) await db.delete(usageEvents).where(inArray(usageEvents.agentId, agentIds));
   await db.delete(costEvents).where(inArray(costEvents.userId, [livId, keyId].filter(Boolean)));
   await db.delete(modelCredentials).where(eq(modelCredentials.provider, "anthropic"));
@@ -291,7 +299,7 @@ describe("F1 — the keyless demo is preserved, and its savings are honest", () 
     const res = await app.inject({
       method: "POST",
       headers: keyAuth,
-      url: `/v1/agents/${liveXaiId}/invoke`,
+      url: `/v1/agents/${liveKeylessId}/invoke`,
       payload: { mode: "execute", input: "rmh keyless ask, short", dispatch: true },
     });
     expect(res.statusCode).toBe(200);
@@ -310,7 +318,7 @@ describe("F1 — the keyless demo is preserved, and its savings are honest", () 
     const [row] = await usageRows(keyId);
     expect(row!.provider).toBe("mock");
     expect(row!.agentId).toBe(mockKeyId);
-    expect(row!.baselineAgentId).toBe(liveXaiId);
+    expect(row!.baselineAgentId).toBe(liveKeylessId);
     // billed honestly…
     expect(row!.costUsd).toBeGreaterThan(0);
     // …but the "saved vs the live model's list price" claim is refused: the
