@@ -101,7 +101,14 @@ individual task seems to imply — always ask before crossing that line.
    the file is that no logged mistake is ever made twice.
 4. Skim [docs/decisions/README.md](docs/decisions/README.md) for any ADR not yet reflected in
    `STATE.md`'s decisions table — if you find drift, reconcile it before doing anything else.
-5. Give the user a one-paragraph recap of current phase/status and **confirm direction before
+5. **If any other session may be working this repo** (a second Claude Code session, cloud or
+   local, or a human at a checkout), read
+   [docs/CONTRIBUTING_PARALLEL_SESSIONS.md](docs/CONTRIBUTING_PARALLEL_SESSIONS.md) and
+   **establish which surface you own before editing anything**. Its §4 lists collisions git
+   merges without a conflict — a same-numbered migration, a lost ADR index row, and a
+   `drizzle-kit generate` timestamp that silently stops every later migration from ever
+   applying. When in doubt about whether you are alone, assume you are not.
+6. Give the user a one-paragraph recap of current phase/status and **confirm direction before
    acting** — do not assume and start building. This mirrors the product's own forced
    Plan-mode-before-build pattern at the meta level.
 
