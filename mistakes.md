@@ -262,3 +262,22 @@ only case that distinguishes a grounded system from a fluent one.
 plausible, real, well-formed data being available — a guard exercised only
 against absent or malformed input has been shown to handle absence, not to
 handle the failure mode it was built for.**
+
+### M-025 — Diagnosed data loss from a stale filesystem, having skipped my own rule
+Asked what work remained, I read `docs/product/PENDING.md`, found 126 lines with
+no addendum and a last-commit date predating the day's work, and began forming
+the conclusion that the concurrent local session had clobbered six agents'
+updates in a bad merge. All of it was wrong: the container had silently rolled
+back again, `origin` held every commit intact, and one `git fetch` would have
+shown it. The galling part is that M-022's rule has two halves — agents push
+every commit, AND *"the coordinator must re-verify its own HEAD against `origin`
+before every action, not only before commits"* — and I had written that
+sentence myself hours earlier. I followed the half that protects the work and
+skipped the half that protects the diagnosis, and came within one message of
+publicly accusing a collaborator's session of destroying data it had not
+touched.
+**Rule: treat any observation of missing or reverted content as a claim about
+the FILESYSTEM until `git fetch && git rev-parse HEAD origin/<branch>` proves
+otherwise — never as a claim about another author, and never report it as one;
+a rolled-back workspace and a hostile merge look identical from inside the
+tree.**
