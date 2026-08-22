@@ -161,6 +161,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // ADR-0073 — the shadow-canary divergence surfaces
   "GET /v1/config-versions/canaries": "internal",
   "GET /v1/config-versions/:artifactType/:artifactId/divergence": "internal",
+  "POST /v1/config-versions/observations/prune": "internal",
   "GET /v1/connectors": "public-stable",
   "POST /v1/connectors": "internal",
   "DELETE /v1/connectors/:connectorId/credential": "internal",
@@ -802,6 +803,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/config-versions/:artifactType/:artifactId/traffic": "config-versions",
   "GET /v1/config-versions/canaries": "config-versions",
   "GET /v1/config-versions/:artifactType/:artifactId/divergence": "config-versions",
+  "POST /v1/config-versions/observations/prune": "config-versions",
   "GET /v1/connectors": "connectors",
   "POST /v1/connectors": "connectors",
   "DELETE /v1/connectors/:connectorId/credential": "connectors",

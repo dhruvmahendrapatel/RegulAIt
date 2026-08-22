@@ -1932,6 +1932,12 @@ export const updateOrgSettingsSchema = z
     modeAuditRetention: z
       .record(z.enum(["hosted", "byoc", "air_gapped"]), z.number().int().positive())
       .optional(),
+    /** Batch B7c (ADR-0073 amendment, migration 0102): retention window for
+     * `config_canary_observations` — shadow-canary evidence only, acted on by
+     * the ADR-0064 prune job (off with the scheduler) and the manual prune
+     * endpoint. `config_versions` themselves are NEVER pruned by anything;
+     * this knob cannot reach them. */
+    canaryObservationRetentionDays: z.number().int().min(1).max(3650).optional(),
     // O5 (migration 0045): scheduled backup verification — OFF by default
     backupVerifyEnabled: z.boolean().optional(),
     backupVerifyIntervalHours: z.number().int().min(1).max(24 * 30).optional(),

@@ -73,6 +73,8 @@ import {
   evalRuns,
   inArray,
   isNotNull,
+  lt,
+  orgSettings,
   projects,
   rateLimits,
   sql,
@@ -778,10 +780,121 @@ export async function deleteRuleArtifact(
 }
 
 // ---------------------------------------------------------------------------
+// Batch B7c (ADR-0073 disclosure 5 — "no pruning") — the retention sweep over
+// `config_canary_observations`, and NOTHING else.
+// ---------------------------------------------------------------------------
+
+export interface CanaryObservationPruneResult {
+  pruned: number;
+  retainedDays: number;
+  /** ISO timestamp: rows recorded before this were eligible */
+  cutoff: string;
+  /** rows OLDER than the cutoff that were kept anyway, because their candidate
+   * version is currently in CANARY status — an active canary's evidence is
+   * live evidence, and pruning it would empty the divergence report an
+   * operator is about to promote on */
+  keptLiveCanary: number;
+}
+
+/**
+ * One retention pass over the shadow canary's output.
+ *
+ * THE BOUNDARY, stated as hard as it can be: this prunes
+ * `config_canary_observations` rows ONLY. It NEVER touches `config_versions` —
+ * version history is the audit substrate (rollback re-points at version rows,
+ * the activation ledger references them, the usage stamp names them), and
+ * pruning a version would break rollback and the ledger. There is no code path
+ * from this function to that table except the read that PROTECTS observations
+ * of a live canary.
+ *
+ * Two callers, one implementation (ADR-0064 §7's extract-don't-duplicate):
+ * the `canary-observation-prune-sweep` scheduler job — which inherits the
+ * scheduler's own off-by-default posture, so a fresh install prunes nothing
+ * until an operator opts in — and `POST /v1/config-versions/observations/prune`,
+ * the manual/cron door every other sweep also keeps.
+ *
+ * Every pass writes ONE audited fact of what it pruned (count + cutoff +
+ * what was protected), in the `runAuditPruneOnce` style.
+ */
+export async function runCanaryObservationPrune(
+  db: Db,
+  opts: { actorUserId: string | null; now?: Date } = { actorUserId: null },
+): Promise<CanaryObservationPruneResult> {
+  const now = opts.now ?? new Date();
+  // read the knob straight off the singleton row rather than through
+  // org-settings.ts — that module reaches this one via rule-writes, and a
+  // require cycle is not worth one helper call. Missing row = the column
+  // default, so a pre-seed database still gets the generous 90 days.
+  const [org] = await db
+    .select({ days: orgSettings.canaryObservationRetentionDays })
+    .from(orgSettings);
+  const retainedDays = Math.max(1, org?.days ?? 90);
+  const cutoff = new Date(now.getTime() - retainedDays * 24 * 3600 * 1000);
+
+  // "belongs to a version currently in CANARY status" — checked at delete
+  // time, inside the DELETE's own WHERE, so there is no window in which a
+  // canary started mid-pass loses its old evidence.
+  const liveCanaryGuard = sql`exists (select 1 from ${configVersions} where ${configVersions.id} = ${configCanaryObservations.candidateVersionId} and ${configVersions.status} = 'canary')`;
+
+  const [protectedRow] = await db
+    .select({ n: count() })
+    .from(configCanaryObservations)
+    .where(and(lt(configCanaryObservations.at, cutoff), liveCanaryGuard));
+  const keptLiveCanary = Number(protectedRow?.n ?? 0);
+
+  const deleted = await db
+    .delete(configCanaryObservations)
+    .where(and(lt(configCanaryObservations.at, cutoff), sql`not (${liveCanaryGuard})`))
+    .returning({ id: configCanaryObservations.id });
+
+  await db.insert(auditLog).values({
+    userId: opts.actorUserId ?? NO_IDENTITY,
+    objectType: "config_version",
+    objectId: null,
+    detail: {
+      phase: "canary-observation-prune",
+      pruned: deleted.length,
+      retainedDays,
+      cutoff: cutoff.toISOString(),
+      keptLiveCanary,
+    },
+    effect: "allow",
+    ruleId: "canary-observations-pruned",
+    ruleChain: [],
+    reason:
+      `pruned ${deleted.length} shadow-canary observation row(s) older than ${retainedDays}d ` +
+      `(cutoff ${cutoff.toISOString()}); ${keptLiveCanary} older row(s) kept because their candidate ` +
+      `is a LIVE canary. config_versions themselves are never pruned — version history is the ` +
+      `audit substrate.`,
+  });
+
+  return { pruned: deleted.length, retainedDays, cutoff: cutoff.toISOString(), keptLiveCanary };
+}
+
+// ---------------------------------------------------------------------------
 // Routes (admin-only via app.ts's DEFAULT gate)
 // ---------------------------------------------------------------------------
 
 export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void {
+  /** Batch B7c — the manual door for the observation-retention sweep, exactly
+   * as every ADR-0064 sweep keeps one (POST /v1/mrm/expiry-sweep etc.). Calls
+   * the SAME function the scheduler job calls. Static segment, so it can never
+   * be captured by the :artifactType routes below (and "observations" is not a
+   * legal artifactType anyway). */
+  app.post("/v1/config-versions/observations/prune", async (req) => {
+    const result = await runCanaryObservationPrune(db, {
+      actorUserId: req.authCtx.userId ?? null,
+    });
+    return {
+      ...result,
+      note:
+        "Prunes config_canary_observations ONLY, and never an observation whose candidate is a live " +
+        "canary. config_versions are NEVER pruned — version history is the audit substrate. The " +
+        "ADR-0064 scheduler job runs this same function when REGULAIT_SCHEDULER=on (off by default); " +
+        "this endpoint stays the manual/cron door.",
+    };
+  });
+
   /** the lineage: every version, the active/canary pointers, and the
    * append-only activation history that answers "what was active when" */
   app.get("/v1/config-versions/:artifactType/:artifactId", async (req) => {

@@ -41,6 +41,7 @@ import { runScheduledRedTeamSweep } from "./redteam.js";
 import { runTrainingJobPollSweep } from "./regulait-llm.js";
 import { runCostReconciliation } from "./cost-reconcile.js";
 import { runCampaignExpirySweep } from "./grant-certification.js";
+import { runCanaryObservationPrune } from "./config-versions.js";
 import { toRegistry, type SchedulerJobDefinition, type SchedulerJobRegistry } from "./scheduler.js";
 
 const HOUR = 3600;
@@ -64,6 +65,7 @@ export const SCHEDULER_JOB_NAMES = {
   trainingPoll: "training-job-poll-sweep",
   costReconciliation: "cost-reconciliation-sweep",
   certificationExpiry: "certification-expiry-sweep",
+  canaryObservationPrune: "canary-observation-prune-sweep",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -272,6 +274,40 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
       run: async (ctx) => {
         const out = await runCampaignExpirySweep(ctx.db, { actorUserId: ctx.actorUserId, now: ctx.now });
         return { itemsProcessed: out.observed, detail: { observed: out.observed, campaignIds: out.campaignIds } };
+      },
+    },
+    {
+      // ADR-0073 amendment (batch B7c) — the tenth, closing disclosure 5's
+      // "no pruning" for `config_canary_observations`. Prunes shadow-canary
+      // OBSERVATIONS older than the org-settings retention window
+      // (`canaryObservationRetentionDays`, default 90d) and NOTHING else:
+      // `config_versions` are the audit substrate and are never pruned by
+      // anything, and an observation whose candidate is a LIVE canary is kept
+      // regardless of age — an active canary's evidence is live evidence.
+      // NOT a control: nothing enforces from observations; they are the
+      // operator's promote-or-abandon evidence, and the manual endpoint
+      // (POST /v1/config-versions/observations/prune) runs the same function.
+      // Reconciles stored state only — no dispatch, no identity minted.
+      name: SCHEDULER_JOB_NAMES.canaryObservationPrune,
+      description:
+        "Prune shadow-canary observation rows older than the org retention window. Never touches " +
+        "config_versions (version history is the audit substrate) and never an observation of a LIVE canary.",
+      adr: "ADR-0073",
+      defaultIntervalSeconds: DAY,
+      run: async (ctx) => {
+        const out = await runCanaryObservationPrune(ctx.db, {
+          actorUserId: ctx.actorUserId,
+          now: ctx.now,
+        });
+        return {
+          itemsProcessed: out.pruned,
+          detail: {
+            pruned: out.pruned,
+            retainedDays: out.retainedDays,
+            cutoff: out.cutoff,
+            keptLiveCanary: out.keptLiveCanary,
+          },
+        };
       },
     },
   ];

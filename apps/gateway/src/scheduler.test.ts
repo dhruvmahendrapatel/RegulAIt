@@ -660,6 +660,11 @@ describe("every sweep is registered", () => {
     expect([...registry.keys()].sort()).toEqual(
       [
         SCHEDULER_JOB_NAMES.approvalSla,
+        // ADR-0073 amendment (B7c): prunes shadow-canary OBSERVATIONS older
+        // than the org retention window — never config_versions (the audit
+        // substrate), never a live canary's evidence. Driven end-to-end in
+        // canary-observation-prune.test.ts; this list pins its registration.
+        SCHEDULER_JOB_NAMES.canaryObservationPrune,
         // ADR-0090 amendment (B2a): records campaign expiry into the audit
         // log, once per campaign — decides NOTHING (expiry stays computed on
         // read). Driven end-to-end in grant-certification-ops.test.ts; this

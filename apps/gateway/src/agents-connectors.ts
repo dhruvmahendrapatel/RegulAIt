@@ -1039,6 +1039,13 @@ async function dispatchAttempt(
   // -------------------------------------------------------------------------
   let served = args.served;
   let agentConfigShadow: { note: CandidateNote; candidateBody: Record<string, unknown> } | null = null;
+  /** Batch B7c (ADR-0073 amendment) — the ACTIVE agent_config version that
+   * SERVED this dispatch, captured here (the only place it is known) and
+   * stamped onto the usage row below alongside the prompt stamp. Stays null
+   * for an unversioned agent — pre-existing rows and behaviour byte-identical
+   * — and is NEVER the shadow/canary candidate: the column means "what
+   * served", and an agent_config candidate never serves. */
+  let servedAgentConfigVersion: { versionId: string; version: number } | null = null;
   if (served) {
     const cfgVersions = await loadVersions(db, "agent_config", served.id);
     if (cfgVersions.length > 0) {
@@ -1081,6 +1088,7 @@ async function dispatchAttempt(
           served as unknown as Record<string, unknown>,
           res.served.body,
         ) as typeof served;
+        servedAgentConfigVersion = { versionId: res.served.id, version: res.served.version };
       }
       if (res.candidate) {
         agentConfigShadow = {
@@ -2001,6 +2009,13 @@ async function dispatchAttempt(
     configVersionId: promptVersion?.versionId ?? null,
     configVersion: promptVersion?.version ?? null,
     configCanary: promptVersion?.canary ?? false,
+    // Batch B7c (ADR-0073 amendment) — THE SECOND STAMP. Which agent_config
+    // version actually served (model + list price resolved at the top of this
+    // function). NULL = the agent's config is unversioned, byte-identical to
+    // every pre-B7c row. Never the shadow candidate — a candidate never
+    // serves, so it has no business on the ledger of what did.
+    agentConfigVersionId: servedAgentConfigVersion?.versionId ?? null,
+    agentConfigVersion: servedAgentConfigVersion?.version ?? null,
     // ADR-0066 §2 — WHICH VIRTUAL KEY PAID. Attribution rides the ONE existing
     // ledger rather than a parallel per-key table, so per-key spend, per-project
     // spend and the pillar-5 rollups are the same numbers by construction.
