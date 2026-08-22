@@ -5912,6 +5912,86 @@ export type DataKeyStateRow = typeof dataKeyState.$inferSelect;
 export type DataKeyAttestationRow = typeof dataKeyAttestations.$inferSelect;
 
 // ---------------------------------------------------------------------------
+// ADR-0063 amendment (migration 0099) — THE KEY RE-ENCRYPTION WALK
+// ---------------------------------------------------------------------------
+
+/** `running` is the ONLY status a killed run can be left in — the next
+ * invocation with the same from/to keys resumes it. A row that decrypted under
+ * NEITHER key forces `completed_with_failures`, never `completed`. */
+export const DATA_KEY_REENCRYPTION_STATUSES = [
+  "running",
+  "completed",
+  "completed_with_failures",
+] as const;
+export type DataKeyReencryptionStatus = (typeof DATA_KEY_REENCRYPTION_STATUSES)[number];
+
+/**
+ * One row per re-encryption walk (ADR-0063 §4's named follow-up). Progress is
+ * committed in the SAME transaction as each batch's rewritten rows, so "these
+ * rows are under the new key" and "the watermark has moved past them" are one
+ * atomic fact — the resumability guarantee.
+ */
+export const dataKeyReencryptionRuns = pgTable(
+  "data_key_reencryption_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    fromFingerprint: text("from_fingerprint").notNull(),
+    toFingerprint: text("to_fingerprint").notNull(),
+    status: text("status", { enum: DATA_KEY_REENCRYPTION_STATUSES }).notNull().default("running"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (t) => [index("data_key_reencryption_runs_status_idx").on(t.status, t.startedAt)],
+);
+
+/** per-(run, table, column) watermark + the counters the completion record
+ * reports. All thirteen ciphertext-bearing tables key on a uuid `id`. */
+export const dataKeyReencryptionProgress = pgTable(
+  "data_key_reencryption_progress",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => dataKeyReencryptionRuns.id, { onDelete: "cascade" }),
+    tableName: text("table_name").notNull(),
+    columnName: text("column_name").notNull(),
+    /** PK of the last settled row, in uuid order. NULL = not started. */
+    watermark: uuid("watermark"),
+    done: boolean("done").notNull().default(false),
+    rowsReencrypted: integer("rows_reencrypted").notNull().default(0),
+    rowsAlreadyCurrent: integer("rows_already_current").notNull().default(0),
+    rowsFailed: integer("rows_failed").notNull().default(0),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [unique("data_key_reencryption_progress_unique").on(t.runId, t.tableName, t.columnName)],
+);
+
+/** the id + table of every row that decrypted under neither key — recorded,
+ * then walked past. One corrupt row must not brick a rotation, and must never
+ * be counted as success. */
+export const dataKeyReencryptionFailures = pgTable(
+  "data_key_reencryption_failures",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => dataKeyReencryptionRuns.id, { onDelete: "cascade" }),
+    tableName: text("table_name").notNull(),
+    columnName: text("column_name").notNull(),
+    rowId: uuid("row_id").notNull(),
+    detail: text("detail"),
+    recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("data_key_reencryption_failures_unique").on(t.runId, t.tableName, t.columnName, t.rowId),
+  ],
+);
+
+export type DataKeyReencryptionRunRow = typeof dataKeyReencryptionRuns.$inferSelect;
+export type DataKeyReencryptionProgressRow = typeof dataKeyReencryptionProgress.$inferSelect;
+export type DataKeyReencryptionFailureRow = typeof dataKeyReencryptionFailures.$inferSelect;
+
+// ---------------------------------------------------------------------------
 // ADR-0064 (migration 0076) — THE IN-PROCESS SCHEDULER
 // ---------------------------------------------------------------------------
 
