@@ -191,23 +191,26 @@ beforeAll(async () => {
   // function the resolver samples with (the cfg suite's discipline: if
   // sampling ever stops being a pure function of the stable key, these
   // expectations become unsatisfiable rather than flaky). The invoke path has
-  // no run/conversation, so the stable key is the user id.
-  const found: Array<{ id: string; auth: { authorization: string }; bucket: number }> = [];
-  for (let i = 0; i < 12 && found.length < 2; i++) {
+  // no run/conversation, so the stable key is the user id. Take the MIN and
+  // MAX buckets over the whole batch — first-acceptable-then-beat-it was a
+  // measured ~7% flake (12 draws can all fail to beat an early high bucket);
+  // min/max fails only if every one of 12 hash draws lands >= 98 or all are
+  // equal, which is not a flake, it is the hash being broken.
+  const drawn: Array<{ id: string; auth: { authorization: string }; bucket: number }> = [];
+  for (let i = 0; i < 12; i++) {
     const u = await makeUser(`acfg-canary-${i}@example.com`);
-    const bucket = canaryBucket(shadowAgentId, u.id);
-    if (found.length === 0) {
-      if (bucket <= 97) found.push({ ...u, bucket });
-      continue;
-    }
-    if (bucket > found[0]!.bucket) found.push({ ...u, bucket });
+    drawn.push({ ...u, bucket: canaryBucket(shadowAgentId, u.id) });
   }
-  expect(found.length).toBe(2);
-  insideId = found[0]!.id;
-  insideAuth = found[0]!.auth;
-  outsideAuth = found[1]!.auth;
-  canaryPct = found[0]!.bucket + 1; // samples inside, not outside
-  for (const g of [insideId, found[1]!.id]) {
+  drawn.sort((a, b) => a.bucket - b.bucket);
+  const inside = drawn[0]!;
+  const outside = drawn[drawn.length - 1]!;
+  expect(inside.bucket).toBeLessThanOrEqual(97); // pct = bucket+1 must stay a valid canaryPct
+  expect(outside.bucket).toBeGreaterThan(inside.bucket);
+  insideId = inside.id;
+  insideAuth = inside.auth;
+  outsideAuth = outside.auth;
+  canaryPct = inside.bucket + 1; // samples inside, not outside
+  for (const g of [insideId, outside.id]) {
     await app.inject({
       method: "POST",
       url: "/v1/grants/agents",
