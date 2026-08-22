@@ -214,3 +214,20 @@ class bugs live ENTIRELY in reflex commands.
 **Rule: before ANY pkill/pgrep -f, mechanically bracket one character of the
 pattern (`docker[d]`) or use pkill -x with the exact process name — no
 exceptions for "quick" commands, which are where this always happens.**
+
+### M-022 — "commit small, don't push" is not durable in a workspace that rolls back
+This container silently reverted the working tree to an old snapshot at least
+three times in one session. I adapted by telling every agent to commit in small
+scoped chunks — but I ALSO told them "do NOT push" (to keep the shared branch
+tidy and let me verify first). A local commit does not survive a snapshot
+rollback: when the L6 agent was killed by a model limit near the end of its
+task, the rollback that followed erased every commit it had made, and `git
+fsck` found nothing recoverable. Hours of work vanished for a reason that had
+nothing to do with the work. The verify-before-push instinct is right in a
+stable workspace and wrong in an unstable one; durability beats tidiness when
+the floor is moving.
+**Rule: when a workspace has rolled back even once in a session, every
+dispatched agent must PUSH each scoped commit to the shared branch immediately
+after making it (verification then happens on pushed commits, and a bad commit
+is reverted forward, never left unpushed) — and the coordinator must re-verify
+its own HEAD against `origin` before every action, not only before commits.**
