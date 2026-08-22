@@ -401,7 +401,9 @@ ABSENT state refuses with `license-absent-feature-closed` exactly as `features.*
 always been reported; a tier WITH the flags creates both objects unchanged. Non-vacuity: removing
 the one SAML flag read reddened exactly the two gating tests (21/23) and nothing else.
 
-**Still unwired, named rather than implied:**
+**Still unwired, named rather than implied** *(superseded by the 2026-08-22 B7b amendment below
+for the four flags and the connector/MCP/model-provider/PM expansion points; the `deploymentMode`
+line still stands)*:
 
 - **Flags with no reader yet**: `compliance_packs`, `advanced_orchestration`, `airgapped_mode`,
   `custom_model_providers` — reported-only today, exactly as all six were before this amendment.
@@ -411,3 +413,82 @@ the one SAML flag read reddened exactly the two gating tests (21/23) and nothing
   against ADR-0027's A4 running-mode dimension decides what a mode-mismatched install DOES
   (refuse to boot? degrade? warn?) — that is its own decision with its own failure-posture
   argument, not a flag read, and it is deliberately not smuggled in here.
+
+---
+
+## Amendment (2026-08-22, batch B7b) — every §4 tier flag now has an enforcement point, and the four remaining expansion points are wired
+
+The batch-B5 amendment above closed two of the six flags and named the rest honestly. This
+amendment closes the remaining four the same way — same helper (`refuseIfFeatureNotLicensed`),
+same 403 naming feature + tier + state + the flag reader's own ruleId, same audited deny, same
+posture rule for the ABSENT state ("every tier feature is **closed**", exactly as the status API
+has reported since this ADR shipped) — and wires the four expansion points the status API's
+`enforcementPointsWired` has listed as missing since 2026-08-02.
+
+**Where each flag bites — the ENABLING act, never the operation of what exists:**
+
+| flag | enforcement point | why this act, and what stays open on purpose |
+|---|---|---|
+| `compliance_packs` | `POST /v1/compliance/packs/:id/activate` | Activation is the act that turns the capability ON: it makes the pack the mapping reports use and seeds the §8.3 cascade profile. Authoring stays open — `POST /v1/compliance/packs` and `/seed` produce DRAFT rows whose own audit trail says they "evaluate nothing until activated", so gating them would gate inert data. An already-active pack keeps evaluating (committed footprint, §5); retire/delete only narrow. |
+| `advanced_orchestration` | `POST /v1/runs/decompose` | §4 names this flag "advanced orchestration fan-out" and defines no other concrete act, so the reading is stated here rather than smuggled: agent-driven decomposition IS the pillar-7 fan-out entry point — a LEAD agent drafting a parallel task graph of worker agents. Hand-authored runs through `POST /v1/runs` are basic orchestration and stay open (deliberately: the keyless demo's seeded runs are hand-authored); existing runs (events/dispatch/auto) are committed footprint. |
+| `airgapped_mode` | `POST /v1/deploy/targets` **when `mode: "air_gapped"`** | The one in-product act that SELECTS air-gapped. hosted/byoc targets are untouched; existing air-gapped targets keep deploying (§5). The RUNNING process mode is `REGULAIT_DEPLOY_MODE` (ADR-0062) — an operator env var, deliberately not an API act, so there is no portal write to gate there; recorded-vs-actual `deploymentMode` cross-checking remains **its own decision** (unchanged from the note above) and was not touched. |
+| `custom_model_providers` | `POST /v1/custom-model-providers` | Registering a custom LLM provider (ADR-0034/0065 surface) is the enabling act — and it is simultaneously the inventory's `model_provider.connect` expansion point, closed through the same read (`featureEnabled` composes the expansion posture internally, so an expired-past-grace license refuses here with `license-expired-no-expansion` even when the tier grants the flag — tested). PATCH/test/enable/disable/delete of an existing provider, and dispatch through one, stay open. The gate runs BEFORE the `customModelProvidersEnabled` org switch: the license is the outer ceiling (§2), the org setting narrows within it. |
+
+**The four expansion points, wired — and which feature the matrix maps them to:**
+
+- **`model_provider.connect`** → gated by the `custom_model_providers` tier flag (above). This is
+  the one point the §4 feature set genuinely covers. "Model-provider creation" here means the
+  custom-provider registry — built-in providers are compiled-in enum members with no creation
+  act; storing a credential for one is credential management of an existing provider, not
+  connecting a new one, and is not gated.
+- **`connector.create`** (`POST /v1/connectors`), **`mcp_server.create`** (`POST /v1/servers`),
+  **`pm_connection.create`** (`POST /v1/pm/connections`) → wired through
+  `refuseIfExpansionBlocked` — the same expansion gate `user.provision` and `agent.create` have
+  carried since 2026-08-02, with the inventory's own classifications. **Stated honestly rather
+  than invented: the §4 feature set contains no flag for connectors, MCP servers, or PM
+  connections**, so these three are expansion-class only — refused once the license lapses past
+  grace (or is not yet valid), permitted in every other state **including ABSENT** (unlicensed =
+  uncapped growth, the same deliberate posture as seats; only tier flags close on absence).
+  Inventing `connectors`/`mcp_servers`/`pm_tools` flags to make these refuse harder would have
+  been a licensing-schema decision this batch was not asked to make; if a future tier matrix adds
+  them, the wiring point already exists.
+
+`enforcementPointsWired` on `GET /v1/licenses/status` now lists all eleven wired points
+(user.provision, agent.create, connector.create, mcp_server.create, pm_connection.create, and the
+six `feature.*` points) — the list is asserted verbatim in the suite, so it cannot drift from the
+code again.
+
+**Proven, not asserted** (`licensing.test.ts`, +6 tests): a valid `team`-tier license WITHOUT the
+four flags is refused BY NAME at all four points (403, feature + tier + ruleId
+`license-feature-not-granted`, audited deny, nothing enabled — the pack stays `draft`, no target/
+provider row appears); the ABSENT state refuses all four with `license-absent-feature-closed`;
+a tier WITH the flags activates a pack end-to-end (200, status `active`) and creates an
+air-gapped target end-to-end (201), while decompose and provider registration are proven past
+the license gate to their routes' own next checks (`bootstrap_cannot_decompose` /
+`egress_blocked`) — the full licensed happy paths are decompose.test.ts and
+custom-providers.test.ts, which now run under a license fixture granting exactly their flag. The
+three flag-less expansion points are proven open when ABSENT (201s) and refused when expired past
+grace (403 `license-expired-no-expansion`, audited, nothing created). Non-vacuity was checked the
+B5 way: neutering the decompose flag read (`flagRefusal && false`) reddened exactly the B7b
+gating tests and nothing else; the refusal tests are inherently non-vacuous (their ruleIds exist
+only in the gate).
+
+**Suites that legitimately exercise the gated acts now run under the B5 license fixture**
+(`testing/license-fixture.ts`, unchanged — ephemeral in-memory keypair, real install route, the
+deployment left UNLICENSED after each suite): decompose / decompose-node-cap / governance-gaps /
+mock-shadowing-rosters (`advanced_orchestration`), compliance-packs / -cascade / -diff / posture
+/ use-cases-eu-tier / vendors (`compliance_packs`), deploy-byoc / enterprise-ux / infra-ops
+(`airgapped_mode`), custom-providers (`custom_model_providers`).
+
+**The keyless seed/demo is untouched, checked rather than assumed:** the seed installs no license
+(it cannot — no committed private key can sign one this repo's keyring accepts, by design) and
+touches none of the four feature-gated acts: it creates connectors, MCP servers and PM
+connections (expansion-class, open when ABSENT), a `hosted` deploy target, hand-authored runs
+(never decompose), compliance *profiles* (never pack activation), and no custom provider. Had a
+feature gate landed on a seeded path, the only in-posture fix would have been seeding a license —
+which the no-committed-key rule forbids — so the enabling-act choices above were also constrained
+by "the unlicensed demo must stay byte-identical", and they satisfy it without exception.
+
+**Honest non-closes, restated:** no flag was invented for connector/MCP/PM creation (see above);
+`deploymentMode` recorded-vs-actual enforcement remains open as its own decision; the
+`grace`-ladder, hosted refresh, and real signing-key follow-ups from 2026-08-02 are unchanged.
