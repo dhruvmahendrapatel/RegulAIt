@@ -256,7 +256,18 @@ intent edits refused by name — changing intent after approval is a NEW use cas
 end-to-end propose → capture → approve → aligned/undershoot on the inventory;
 mock-shadowing for the compaction-summarizer and decompose-worker rosters (0095 narrowed
 ROUTING selection only — a mock summarizer/worker can still be picked when live agents
-exist, same disease class, deliberately its own call).
+exist, same disease class, deliberately its own call);
+**ENTITY-AWARE COPILOT PLANNING (0056 L6d residual, added 2026-08-22)** — the copilot's
+NL-to-query step is keyword-based, so an entity named in a question that matches no keyword
+rule is silently IGNORED rather than narrowing the query. L6d makes the answer *say* it did
+not filter on the subject (deterministic `subjectFiltered`/`unfilteredSubjectCaveat` plus a
+prompt hard rule, after a live run attributed eight real org-wide approvals to a fictional
+"Zorblatt Quantum Compliance Widget" and stamped it `modelNarrationVerified: true`); it does
+NOT make the copilot filter on the subject, and no param in the current vocabulary
+(`effect`/`objectType`/`status`) is an entity filter at all. Closing this means resolving
+named entities in a question against the governed object graph and either filtering on them
+or refusing the question — a materially larger slice than the caveat, and deliberately not
+smuggled in behind it.
 
 ## Enterprise-deal gates unchanged from §1
 **P1** (credential — see above) · **P2** (HA/SLA — build when there is a customer to serve)
