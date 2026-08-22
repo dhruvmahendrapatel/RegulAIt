@@ -70,3 +70,44 @@ Gateway **153 files / 2437 passed + 9 MinIO skips**, shared **742**, Playwright
 remains is owner-gated: L13 (AI pre-fill vs "the answers are yours"), L19
 (certification spend), the PII floor default, other providers' keys, live PM
 credentials, and P2 (HA, when there is a customer to serve).
+
+## Addendum — hands-on testing of the live copilot (same day, later)
+
+The owner asked for a local pull-and-test of the copilot plus a refresh of every
+tracking file. A fresh database was seeded from HEAD and the copilot driven
+against the live Gemini credential on a local gateway.
+
+**Confirmed working:** deterministic grounding cites real `audit_log` ids; live
+narration returns `generation: model` / `modelNarrationVerified: true` through
+the governed dispatch path; the calls are metered (2 usage rows, 1,804 in / 603
+out, ~$0.008, attributed) and audited as `copilot-question-answered`; the
+decision-support notice and scope caveat appear on every answer.
+
+**Defect found — the reason hands-on testing exists.** Asked to *"Summarise the
+Zorblatt Quantum Compliance Widget approvals from last week"* — an entity that
+does not exist — the copilot did not refuse. The keyword planner matched only
+"approval"/"last week", ran an unfiltered `listApprovals`, retrieved 8 real
+org-wide approvals, and the model narrated *"for the Zorblatt Quantum Compliance
+Widget, 8 approvals were requested, 4 approved, 4 pending"*. Every existing
+guard passed honestly: no figure was invented, no id was invented, retrieval was
+not empty. The missing check is whether the question's SUBJECT was ever used as
+a filter. `modelNarrationVerified: true` made it worse by stamping the sentence
+as checked.
+
+Fix dispatched the same turn: filters disclosed to the narrator with a hard rule
+against attributing findings to entities that were never filtered on, plus a
+deterministic caveat that survives a misbehaving model, plus an ADR-0056
+amendment stating exactly what the verified flag means.
+
+**Process lessons logged.** M-023: I described a two-file run as "the hostile
+order" reproduction before running the negative control — which then also
+passed, so the pairing had proven nothing. M-024: L6's own live verification
+exercised the grounded refusal only where retrieval returned zero rows, the case
+where refusal is nearly automatic; the case where plausible real data exists but
+does not answer the question was never tried, and that is precisely where the
+hole was.
+
+Also this stretch: an order-fragile SoD audit assertion (taking the oldest
+`sod-override-minted` row in a shared database) was caught by an independent
+full-suite run and scoped to its own approval; `docs/product/TESTING_CHECKLIST.md`
+gained rows 31–41 for everything shipped in this wave.
