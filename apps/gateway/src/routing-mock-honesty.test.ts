@@ -135,7 +135,10 @@ let liveXaiId: string;
 let mockKeyId: string;
 
 async function makeUser(email: string) {
-  const u = await app.inject({ method: "POST", headers: AUTH, url: "/v1/users", payload: { email, displayName: email } });
+  // display name must never be email-shaped: the shared-context directory
+  // suite asserts the names-only surface leaks no "@example.com" from ANY row
+  const displayName = email.split("@")[0]!.replace(/-/g, " ");
+  const u = await app.inject({ method: "POST", headers: AUTH, url: "/v1/users", payload: { email, displayName } });
   expect(u.statusCode).toBe(201);
   const k = await app.inject({
     method: "POST",
