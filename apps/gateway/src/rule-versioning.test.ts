@@ -631,14 +631,23 @@ describe("ADR-0073 — the disclosure now matches reality", () => {
     expect(body.note).not.toMatch(/NOT yet wired/);
   });
 
-  it("agent_config still declares itself INERT — the part ADR-0073 does not close", async () => {
+  it("agent_config reports SHADOW — the residual ADR-0073 left open, closed by batch B1", async () => {
+    // REWRITTEN (2026-08-22, batch B1), not deleted — this test used to pin
+    // `inert` while agent_config was vocabulary-only, the same way ADR-0048's
+    // "NOT yet wired" test pinned the pre-0073 disclosure. The dispatch core
+    // now resolves the active agent_config version and shadow-evaluates a
+    // sampled candidate (agent-config-versioning.test.ts proves it through
+    // real dispatches), so the honest disclosure moved and this assertion
+    // moved with it. canaryIsLive stays false: an agent_config canary must
+    // never SERVE a candidate model.
     const res = await app.inject({
       method: "GET",
       headers: AUTH,
       url: `/v1/config-versions/agent_config/${ruleId}`,
     });
-    expect(res.json().canaryMode).toBe("inert");
-    expect(res.json().canaryIsEvaluated).toBe(false);
-    expect(res.json().note).toMatch(/VOCABULARY ONLY/);
+    expect(res.json().canaryMode).toBe("shadow");
+    expect(res.json().canaryIsLive).toBe(false);
+    expect(res.json().canaryIsEvaluated).toBe(true);
+    expect(res.json().note).not.toMatch(/VOCABULARY ONLY/);
   });
 });

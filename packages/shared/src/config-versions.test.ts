@@ -244,15 +244,24 @@ describe("ADR-0073 canary mode vocabulary", () => {
     expect(canaryModeOf("agent_system_prompt")).toBe("live");
   });
 
-  it("still says OUT LOUD that agent_config is INERT — the part ADR-0073 does NOT close", () => {
-    // ADR-0048 DECLARED agent_config a live-canary type and never wired a
-    // resolver, so `canaryIsLive` answered 'yes' about something nothing reads.
-    // Intent and fact are now separate, and the fact is what the API reports.
-    expect(canaryIsLive("agent_config")).toBe(true); // declared intent, unchanged
-    expect(canaryIsEvaluated("agent_config")).toBe(false); // the fact
-    expect(canaryModeOf("agent_config")).toBe("inert");
-    expect(canaryModeNote("agent_config")).toMatch(/VOCABULARY ONLY/);
-    expect(canaryModeNote("agent_config")).toMatch(/changes nothing and measures nothing/);
+  it("agent_config is SHADOW — the last inert type, closed by batch B1", () => {
+    // REWRITTEN (2026-08-22, batch B1), not deleted — the previous test pinned
+    // "agent_config is inert" while ADR-0073's residual stood, exactly as
+    // ADR-0048's "NOT yet wired" test was rewritten when ADR-0073 landed. The
+    // dispatch core now resolves the ACTIVE agent_config version and
+    // shadow-evaluates a sampled candidate, so `inert` here would be the
+    // stale claim. `canaryIsLive` FLIPPED from true to false with the wiring:
+    // ADR-0048's live-canary declaration was intent nothing had ever
+    // exercised, and serving a candidate MODEL to a share of traffic would be
+    // the rule-canary outage mode wearing a generative face (a candidate
+    // model id the provider rejects = a per-request failure at N%). The
+    // shadow measures the same divergence with zero served-path risk.
+    expect(canaryIsLive("agent_config")).toBe(false);
+    expect(canaryIsShadowEvaluated("agent_config")).toBe(true);
+    expect(canaryIsEvaluated("agent_config")).toBe(true);
+    expect(canaryModeOf("agent_config")).toBe("shadow");
+    expect(canaryModeNote("agent_config")).toMatch(/SHADOW/);
+    expect(canaryModeNote("agent_config")).not.toMatch(/VOCABULARY ONLY/);
   });
 
   it("the shadow note stops claiming rules are unwired and states the sampling meaning", () => {
@@ -297,6 +306,34 @@ describe("ADR-0073 what a rule version body may contain", () => {
     // an artifact type with no rule table is not a rule artifact at all
     expect(isRuleArtifact("agent_system_prompt")).toBe(false);
     expect(validateRuleVersionBody("agent_system_prompt", { anything: 1 })).toBeNull();
+  });
+
+  it("batch B1 — agent_config versions the DISPATCH config and refuses everything else on the agents row", () => {
+    // the scope line: model + list price are what the one dispatch core reads
+    expect(isRuleArtifact("agent_config")).toBe(true);
+    expect(
+      validateRuleVersionBody("agent_config", { model: "mock-premium", costPerMTokIn: 3, costPerMTokOut: 15 }),
+    ).toBeNull();
+    // provider selects the credential/egress machinery — rebinding it is a NEW
+    // agent, exactly as rebinding a rule's subject is a new rule
+    expect(validateRuleVersionBody("agent_config", { provider: "openai" })?.error).toBe(
+      "unknown_versioned_field",
+    );
+    // tier feeds the entitlement ceiling; enabled/lifecycle are governance
+    // gates; systemPrompt is its own artifact type — all refused
+    for (const key of ["tier", "enabled", "lifecycleStatus", "systemPrompt", "name"]) {
+      expect(validateRuleVersionBody("agent_config", { [key]: 1 })?.error).toBe("unknown_versioned_field");
+    }
+    // ...and the body is TYPE-checked like every rule body
+    expect(validateRuleVersionBody("agent_config", { costPerMTokIn: "three" })?.error).toBe(
+      "invalid_versioned_field",
+    );
+    // overlay semantics are the rule semantics: partial body inherits the row
+    const row = { id: "a", model: "mock-balanced", costPerMTokIn: 3, costPerMTokOut: 15, tier: 2 };
+    const out = applyRuleBody("agent_config", row, { model: "mock-premium" });
+    expect(out.model).toBe("mock-premium");
+    expect(out.costPerMTokIn).toBe(3);
+    expect(out.tier).toBe(2); // never touched — not a versionable field
   });
 
   it("overlays field-wise: an omitted field keeps the row's value, it is not nulled", () => {

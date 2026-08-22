@@ -125,6 +125,18 @@ const AUDITED_WRITERS: AuditedWriter[] = [
       "nothing and the request falls through to the edit path instead of clobbering it.",
   },
   {
+    file: "compliance-packs.ts",
+    method: "insert",
+    expr: "complianceProfiles",
+    why:
+      "batch B1 `ensureCascadeProfile` — the CREATE half only, `onConflictDoNothing` on the unique tag: a " +
+      "pack activation FIND-OR-CREATES its cascade profile and NEVER writes an existing one (there is no " +
+      "edit fall-through here at all — an existing profile is reported 'exists_preserved' and left " +
+      "untouched, because a pack activation silently replacing an admin's tuned floors would be this guard's " +
+      "own defect class arriving through a wizard). A brand-new row cannot have config_versions rows, so " +
+      "nothing needs minting.",
+  },
+  {
     file: "onboarding.ts",
     method: "insert",
     expr: "complianceProfiles",
