@@ -396,6 +396,16 @@ describe("ADR-0056 — an ungrounded narration is discarded, never merged", () =
  * The pair below is the whole point: the unmatched-entity question must carry
  * the caveat, and the question that really does filter must NOT, or the caveat
  * is decoration that fires on everything.
+ *
+ * WHAT ADR-0096 CHANGED HERE, and what it deliberately did not. The Zorblatt
+ * question itself now REFUSES before any retrieval runs — entity-aware planning
+ * resolves its subject against the object graph, finds nothing in scope, and
+ * says so by name (that case moved to `copilot-entity.test.ts`, which is where
+ * the refusal is proved). The caveat machinery below is UNCHANGED and still
+ * load-bearing: it covers the case ADR-0096 leaves untouched, a question that
+ * names no subject at all, whose broad answer must still say it is about
+ * nothing in particular. The question was swapped for one with no capitalised
+ * subject in it; every assertion is the same.
  */
 describe("L6d — an answer whose query never filtered on the question's subject says so", () => {
   it("a question naming an entity nobody filtered on carries the unfiltered-subject caveat", async () => {
@@ -408,7 +418,7 @@ describe("L6d — an answer whose query never filtered on the question's subject
 
     const res = await post(
       "/v1/copilot/ask",
-      { question: "Summarise the Zorblatt Quantum Compliance Widget approvals from last week" },
+      { question: "summarise the approvals from last week" },
       leadAAuth,
     );
     expect(res.statusCode).toBe(201);
@@ -417,6 +427,10 @@ describe("L6d — an answer whose query never filtered on the question's subject
     // the precondition — the planner really did run an UNFILTERED listApprovals
     expect(body.plan.tool).toBe("listApprovals");
     expect(body.plan.params).toEqual({});
+    // ADR-0096: and this question genuinely names no subject, so the refusal
+    // path was never in play — the caveat is what is being proved, not it
+    expect(body.plan.entityCandidates).toEqual([]);
+    expect(body.plan.entity).toBeNull();
     // the retrieval really did return rows, so this is not the refusal path
     expect(body.evidence.rowsExamined).toBeGreaterThan(0);
     expect(body.answer.groundedRefusal).toBe(false);

@@ -59,9 +59,12 @@ import type { FastifyInstance } from "fastify";
 import {
   agentGrants,
   agents,
+  aiVendors,
   and,
   approvals,
   auditLog,
+  connectorGrants,
+  connectors,
   copilotProposals,
   copilotQueries,
   count,
@@ -70,8 +73,12 @@ import {
   gte,
   inArray,
   lt,
+  or,
   projectMembers,
+  projects,
   sql,
+  teamMembers,
+  teams,
   usageEvents,
   userAgentPolicies,
   users,
@@ -80,21 +87,30 @@ import {
 import {
   COPILOT_APPLICABLE_PROPOSAL_KINDS,
   COPILOT_DECISION_SUPPORT_NOTICE,
+  COPILOT_ENTITY_KIND_LABELS,
   COPILOT_SCOPE_CAVEAT,
   COPILOT_TOOL_SPECS,
   COPILOT_UNAPPLICABLE_PROPOSAL_KINDS,
   buildNarrationPrompt,
   buildProposalRecord,
   copilotAskSchema,
+  copilotEntityAmbiguousRefusal,
+  copilotEntityNotFilterableRefusal,
+  copilotEntityUnresolvedRefusal,
   copilotGrantRevocationDiffSchema,
   copilotPolicyTighteningDiffSchema,
   copilotProposalKindIsApplicable,
   copilotProposalSchema,
+  copilotToolSupportsEntityKind,
+  copilotToolsFilteringEntityKind,
   describeCopilotFilters,
   narrationIsGrounded,
   parseNarration,
   planCopilotQuery,
   renderGroundedAnswer,
+  type CopilotEntityKind,
+  type CopilotEntityMatch,
+  type CopilotEntityRef,
   type CopilotEvidence,
   type CopilotNarration,
   type CopilotNarrationRequest,
@@ -102,10 +118,16 @@ import {
   type CopilotProposalKind,
   type CopilotQueryPlan,
   type CopilotTimeframe,
+  type CopilotTool,
 } from "@regulait/shared";
-import { evaluateAgent, type AgentDecision } from "@regulait/policy-kernel";
+import { evaluateAgent, evaluateConnector, type AgentDecision } from "@regulait/policy-kernel";
 import { executeGovernedDispatch, type AgentRow } from "./agents-connectors.js";
-import { loadAgentRevocations, loadRoleAgentGrants } from "./entitlements.js";
+import {
+  loadAgentRevocations,
+  loadConnectorRevocations,
+  loadRoleAgentGrants,
+  loadRoleConnectorGrants,
+} from "./entitlements.js";
 import {
   deleteAgentGrantById,
   deleteConnectorGrantById,
@@ -144,6 +166,12 @@ export const COPILOT_RULE_IDS = {
   /** L6b — the consent-gated applier */
   proposalApplied: "copilot-proposal-applied",
   proposalApplyRefused: "copilot-proposal-apply-refused",
+  /** ADR-0096 — entity-aware planning's three refusals, each its own row so an
+   * operator can tell "you named something I cannot see" from "your query
+   * matched nothing" from "this tool has no such filter" by grepping alone */
+  entityUnresolved: "copilot-refused-unresolved-entity",
+  entityAmbiguous: "copilot-refused-ambiguous-entity",
+  entityNotFilterable: "copilot-refused-entity-not-filterable",
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -207,6 +235,232 @@ function auditScopePredicate(projectIds: string[]) {
 }
 
 // ---------------------------------------------------------------------------
+// ADR-0096 — ENTITY RESOLUTION: the database decides, never the extractor
+// ---------------------------------------------------------------------------
+
+/**
+ * WHAT "IN YOUR SCOPE" MEANS PER KIND, and why each rule is a RE-USE.
+ *
+ * Entity resolution is a new read surface, and a new read surface is a new
+ * place for existence to leak. So no kind here gets a visibility rule invented
+ * for this feature; each one re-uses a predicate the product already enforces
+ * somewhere an auditor could check:
+ *
+ *   project    `scope.projectIds` — the very list every copilot retrieval is
+ *              already narrowed to (ADR-0047 `callerProjectIds`).
+ *   user       `scope.memberIds` — the members of those projects, the same list
+ *              the approvals retrieval already scopes on.
+ *   team       the teams the caller is a member of (`team_members`), the
+ *              tightest reading of "your team" and the one the SPA uses.
+ *   agent      the KERNEL's own answer: `evaluateAgent(...).effect === "allow"`,
+ *              the exact call an ordinary invoke makes. Not a hand-rolled join
+ *              over grant tables, which could drift from the enforcing path.
+ *   connector  the kernel's `evaluateConnector` at mode `read`, same reasoning.
+ *   vendor     `ai_vendors.owner_user_id = caller` — byte-identical to the
+ *              existing `GET /v1/vendors` rule for a non-admin.
+ *
+ * An admin is org-wide for all six, exactly as `resolveCopilotScope` already
+ * makes them org-wide for every ledger.
+ *
+ * AND THE RULE THAT MATTERS MOST: a candidate the caller may not see comes back
+ * as NOT FOUND. Not "found but hidden", not a different error — the same empty
+ * result a nonexistent name produces, so the refusal wording is byte-identical
+ * either way and the copilot cannot be used as an existence oracle.
+ */
+export type CopilotEntityResolution =
+  | { status: "none" }
+  | { status: "resolved"; entity: CopilotEntityRef }
+  | { status: "ambiguous"; matches: CopilotEntityMatch[] }
+  | { status: "unresolved"; candidates: string[] };
+
+const isUuid = (v: string) =>
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(v);
+
+/** case-insensitive exact match on a name column. `lower(col) = lower($1)` —
+ * never a LIKE: a prefix match would silently resolve "Payments" to "Payments
+ * Platform", which is the guessing this feature refuses to do. */
+const nameEq = (col: unknown, candidate: string) =>
+  sql`lower(${col}) = lower(${candidate})`;
+
+/**
+ * Resolve ONE candidate string against the governed object graph, entitlement
+ * -scoped. Returns every match across every kind — the caller decides what to
+ * do with zero, one, or many.
+ */
+async function lookupEntityCandidate(
+  db: Db,
+  candidate: string,
+  scope: CopilotScope,
+  actor: { userId: string; isAdmin: boolean },
+): Promise<CopilotEntityMatch[]> {
+  const byId = isUuid(candidate);
+  const out: CopilotEntityMatch[] = [];
+
+  // --- project: the caller's own project list, already resolved -------------
+  const projectRows = await db
+    .select({ id: projects.id, name: projects.name })
+    .from(projects)
+    .where(
+      and(
+        byId ? eq(projects.id, candidate) : nameEq(projects.name, candidate),
+        ...(scope.projectIds === null ? [] : [inArray(projects.id, safeIds(scope.projectIds))]),
+      ),
+    )
+    .limit(5);
+  for (const r of projectRows) out.push({ kind: "project", id: r.id, name: r.name });
+
+  // --- team: the teams this caller belongs to -------------------------------
+  const teamRows = actor.isAdmin
+    ? await db
+        .select({ id: teams.id, name: teams.name })
+        .from(teams)
+        .where(byId ? eq(teams.id, candidate) : nameEq(teams.name, candidate))
+        .limit(5)
+    : await db
+        .selectDistinct({ id: teams.id, name: teams.name })
+        .from(teams)
+        .innerJoin(teamMembers, eq(teamMembers.teamId, teams.id))
+        .where(
+          and(
+            byId ? eq(teams.id, candidate) : nameEq(teams.name, candidate),
+            eq(teamMembers.userId, actor.userId),
+          ),
+        )
+        .limit(5);
+  for (const r of teamRows) out.push({ kind: "team", id: r.id, name: r.name });
+
+  // --- user: email, username or display name, within the shared-project set -
+  const userRows = await db
+    .select({ id: users.id, displayName: users.displayName, email: users.email })
+    .from(users)
+    .where(
+      and(
+        byId
+          ? eq(users.id, candidate)
+          : or(
+              nameEq(users.email, candidate),
+              nameEq(users.username, candidate),
+              nameEq(users.displayName, candidate),
+            ),
+        ...(scope.memberIds === null ? [] : [inArray(users.id, safeIds(scope.memberIds))]),
+      ),
+    )
+    .limit(5);
+  for (const r of userRows) out.push({ kind: "user", id: r.id, name: r.displayName || r.email });
+
+  // --- agent: the KERNEL's own allow, one call per candidate row ------------
+  const agentRows = await db
+    .select()
+    .from(agents)
+    .where(byId ? eq(agents.id, candidate) : nameEq(agents.name, candidate))
+    .limit(5);
+  for (const a of agentRows) {
+    if (!actor.isAdmin) {
+      const decision = await agentDecision(db, actor.userId, a as AgentRow);
+      if (decision.effect !== "allow") continue;
+    }
+    out.push({ kind: "agent", id: a.id, name: a.name });
+  }
+
+  // --- connector: the kernel's own allow at mode `read` ---------------------
+  const connectorRows = await db
+    .select({ id: connectors.id, name: connectors.name })
+    .from(connectors)
+    .where(byId ? eq(connectors.id, candidate) : nameEq(connectors.name, candidate))
+    .limit(5);
+  if (connectorRows.length) {
+    const [grants, roleGrants, revocations] = actor.isAdmin
+      ? [[], [], []]
+      : await Promise.all([
+          db.select().from(connectorGrants).where(eq(connectorGrants.userId, actor.userId)),
+          loadRoleConnectorGrants(db, actor.userId),
+          loadConnectorRevocations(db, actor.userId),
+        ]);
+    for (const c of connectorRows) {
+      if (!actor.isAdmin) {
+        const decision = evaluateConnector({
+          userId: actor.userId,
+          connectorId: c.id,
+          connectorName: c.name,
+          operation: "read",
+          connectorGrants: grants,
+          roleConnectorGrants: roleGrants,
+          connectorRevocations: revocations,
+        });
+        if (decision.effect !== "allow") continue;
+      }
+      out.push({ kind: "connector", id: c.id, name: c.name });
+    }
+  }
+
+  // --- vendor: the SAME rule GET /v1/vendors already enforces ---------------
+  const vendorRows = await db
+    .select({ id: aiVendors.id, name: aiVendors.name })
+    .from(aiVendors)
+    .where(
+      and(
+        byId ? eq(aiVendors.id, candidate) : nameEq(aiVendors.name, candidate),
+        ...(actor.isAdmin ? [] : [eq(aiVendors.ownerUserId, actor.userId)]),
+      ),
+    )
+    .limit(5);
+  for (const r of vendorRows) out.push({ kind: "vendor", id: r.id, name: r.name });
+
+  return out;
+}
+
+/**
+ * Resolve every candidate a question produced.
+ *
+ * MULTIPLE RESOLVED ENTITIES IS AMBIGUITY, not an opportunity to pick one. A
+ * question naming two real objects cannot be answered by filtering on one of
+ * them and quietly dropping the other — that is the same lie as filtering on
+ * none and labelling the result with both.
+ */
+export async function resolveCopilotEntities(
+  db: Db,
+  candidates: readonly string[],
+  scope: CopilotScope,
+  actor: { userId: string; isAdmin: boolean },
+): Promise<CopilotEntityResolution> {
+  if (candidates.length === 0) return { status: "none" };
+
+  const resolved: CopilotEntityRef[] = [];
+  for (const candidate of candidates) {
+    const matches = await lookupEntityCandidate(db, candidate, scope, actor);
+    for (const m of matches) resolved.push({ ...m, matchedOn: candidate });
+  }
+  const distinct = resolved.filter(
+    (r, i) => resolved.findIndex((o) => o.kind === r.kind && o.id === r.id) === i,
+  );
+  if (distinct.length === 0) return { status: "unresolved", candidates: [...candidates] };
+  if (distinct.length > 1) return { status: "ambiguous", matches: distinct };
+  return { status: "resolved", entity: distinct[0]! };
+}
+
+/** the ledger each read tool reads, for the mismatch refusal's own words */
+const TOOL_LEDGER: Record<CopilotTool, string> = Object.fromEntries(
+  COPILOT_TOOL_SPECS.map((s) => [s.id, s.ledger]),
+) as Record<CopilotTool, string>;
+
+/** the members of a team or a project — the expansion a `team`/`project` filter
+ * uses on ledgers that carry a `user_id` and no object column of their own */
+async function memberIdsOf(db: Db, kind: CopilotEntityKind, id: string): Promise<string[]> {
+  if (kind === "team") {
+    const rows = await db
+      .selectDistinct({ userId: teamMembers.userId })
+      .from(teamMembers)
+      .where(eq(teamMembers.teamId, id));
+    return rows.map((r) => r.userId);
+  }
+  const rows = await db
+    .selectDistinct({ userId: projectMembers.userId })
+    .from(projectMembers)
+    .where(eq(projectMembers.projectId, id));
+  return rows.map((r) => r.userId);
+}
+
+// ---------------------------------------------------------------------------
 // Timeframes
 // ---------------------------------------------------------------------------
 
@@ -255,6 +509,36 @@ export function resolveCopilotTimeframe(
  * bounded surface. */
 const SAMPLE_LIMIT = 5;
 
+/**
+ * ADR-0096 — the subject filter for the `approvals` ledger, in ONE place
+ * because TWO tools read it (`listApprovals`, and `listAnomalies`' instant
+ * decision half). Two copies could disagree, and a disagreement here would
+ * mean an anomaly report narrowed differently from the approvals report over
+ * the same subject.
+ *
+ * A `project` filter is the OR of the two ways an approval belongs to one:
+ * `project_id` (set on pillar-5 budget escalations) and "raised by a member of
+ * that project", which is how the tool's own entitlement scope already reads
+ * this ledger. Narrower than either alone would drop real rows.
+ */
+function approvalEntityPredicates(
+  entity: CopilotEntityRef | null,
+  members: readonly string[],
+): ReturnType<typeof eq>[] {
+  if (!entity) return [];
+  if (entity.kind === "user") return [eq(approvals.userId, entity.id)];
+  if (entity.kind === "team") return [inArray(approvals.userId, safeIds([...members]))];
+  if (entity.kind === "project") {
+    return [
+      or(eq(approvals.projectId, entity.id), inArray(approvals.userId, safeIds([...members])))!,
+    ];
+  }
+  // agent / connector / vendor never reach here: `COPILOT_ENTITY_FILTER_MATRIX`
+  // excludes them for every tool that reads this ledger, and the route refuses
+  // the pair before retrieval runs.
+  return [];
+}
+
 export async function retrieveEvidence(
   db: Db,
   plan: CopilotQueryPlan,
@@ -284,15 +568,50 @@ export async function retrieveEvidence(
   const usageScope =
     scope.projectIds === null ? [] : [inArray(usageEvents.projectId, safeIds(scope.projectIds))];
 
+  // ADR-0096 — THE ENTITY FILTER, built into the SAME `where` as the scope, at
+  // construction time. A subject filter applied to a result set afterwards
+  // would have already read every row it then discards, which is the exact
+  // mistake `resolveCopilotScope`'s own comment warns about for entitlement.
+  //
+  // The route guarantees this branch is only reached for a (tool, kind) pair
+  // `COPILOT_ENTITY_FILTER_MATRIX` admits, so there is no silent fall-through:
+  // an unsupported pair was refused before retrieval ran.
+  const entity = plan.entity;
+  const entityMembers =
+    entity && (entity.kind === "team" || entity.kind === "project")
+      ? await memberIdsOf(db, entity.kind, entity.id)
+      : [];
+
   if (plan.tool === "queryAuditDecisions" || plan.tool === "listAnomalies") {
+    // `audit_log` carries no project column; attribution rides
+    // `detail->>'projectId'`, the same key the scope predicate reads.
+    const entityAudit = !entity
+      ? []
+      : entity.kind === "project"
+        ? [sql`${auditLog.detail} ->> 'projectId' = ${assertUuid(entity.id)}`]
+        : entity.kind === "team"
+          ? [inArray(auditLog.userId, safeIds(entityMembers))]
+          : entity.kind === "user"
+            ? [eq(auditLog.userId, entity.id)]
+            : [
+                // agent / connector: the object THIS row was about. The entity's
+                // own class REPLACES any keyword-derived `objectType` — a
+                // question naming an agent is about that agent whatever other
+                // class word it happens to contain, and ANDing the two would
+                // silently return zero rows instead of an answer.
+                eq(auditLog.objectType, entity.kind as (typeof auditLog.objectType)["_"]["data"]),
+                eq(auditLog.objectId, entity.id),
+              ];
+    const entityOwnsObjectType = entity?.kind === "agent" || entity?.kind === "connector";
     const where = and(
       gte(auditLog.at, start),
       lt(auditLog.at, end),
       ...(plan.params.effect ? [eq(auditLog.effect, plan.params.effect)] : []),
-      ...(plan.params.objectType
+      ...(plan.params.objectType && !entityOwnsObjectType
         ? [eq(auditLog.objectType, plan.params.objectType as (typeof auditLog.objectType)["_"]["data"])]
         : []),
       ...auditScope,
+      ...entityAudit,
     );
     const [total, byEffect, topRules, samples] = await Promise.all([
       db.select({ n: count() }).from(auditLog).where(where),
@@ -350,6 +669,12 @@ export async function retrieveEvidence(
             lt(approvals.requestedAt, end),
             inArray(approvals.status, ["approved", "denied"]),
             ...memberScope,
+            // ADR-0096: the SECOND ledger this tool reads gets the same subject
+            // filter as the first. `listAnomalies` supports only the kinds BOTH
+            // halves can narrow (the matrix says so), so a half-narrowed
+            // anomaly report — one lead about your subject, one about
+            // everything — is unreachable rather than merely discouraged.
+            ...approvalEntityPredicates(entity, entityMembers),
           ),
         );
       const rubber = fast.filter(
@@ -374,6 +699,7 @@ export async function retrieveEvidence(
       lt(approvals.requestedAt, end),
       ...(plan.params.status ? [eq(approvals.status, plan.params.status)] : []),
       ...memberScope,
+      ...approvalEntityPredicates(entity, entityMembers),
     );
     const [total, byStatus, rows] = await Promise.all([
       db.select({ n: count() }).from(approvals).where(where),
@@ -399,7 +725,32 @@ export async function retrieveEvidence(
   }
 
   // summarizeUsage
-  const where = and(gte(usageEvents.at, start), lt(usageEvents.at, end), ...usageScope);
+  const entityUsage = !entity
+    ? []
+    : entity.kind === "project"
+      ? [eq(usageEvents.projectId, entity.id)]
+      : entity.kind === "team"
+        ? [inArray(usageEvents.userId, safeIds(entityMembers))]
+        : entity.kind === "user"
+          ? [eq(usageEvents.userId, entity.id)]
+          : entity.kind === "agent"
+            ? // BOTH agent columns: a right-sized routing decision (ADR-0095)
+              // makes `agent_id` the SERVED agent and `requested_agent_id` the
+              // one the caller asked for. "Spend on agent X" honestly covers
+              // both, and covering only one would under-report the answer.
+              [
+                or(
+                  eq(usageEvents.agentId, entity.id),
+                  eq(usageEvents.requestedAgentId, entity.id),
+                )!,
+              ]
+            : [eq(usageEvents.connectorId, entity.id)];
+  const where = and(
+    gte(usageEvents.at, start),
+    lt(usageEvents.at, end),
+    ...usageScope,
+    ...entityUsage,
+  );
   const [total, grouped, rows] = await Promise.all([
     db.select({ n: count() }).from(usageEvents).where(where),
     db
@@ -609,6 +960,112 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
     const now = new Date();
     const plan = planCopilotQuery(body.question);
     const scope = await resolveCopilotScope(db, { userId, isAdmin: req.authCtx.isAdmin });
+
+    // -----------------------------------------------------------------------
+    // ADR-0096 — ENTITY-AWARE PLANNING, BEFORE ANY RETRIEVAL RUNS.
+    //
+    // The question's proposed subjects are resolved against the real object
+    // graph under this caller's own entitlements. Three of the four outcomes
+    // end the request here, with nothing retrieved and nothing narrated:
+    // running a broad query and labelling its findings with the caller's words
+    // is the fabrication ADR-0056's L6d amendment could only caveat, and this
+    // is where it stops being possible.
+    // -----------------------------------------------------------------------
+    const resolution = await resolveCopilotEntities(db, plan.entityCandidates, scope, {
+      userId,
+      isAdmin: req.authCtx.isAdmin,
+    });
+
+    if (resolution.status === "unresolved") {
+      // WORDED IDENTICALLY whether the object does not exist or exists
+      // somewhere this caller may not read — the copilot is not an existence
+      // oracle. The candidates are echoed because they are the caller's OWN
+      // words; nothing about any object is disclosed.
+      const detail = copilotEntityUnresolvedRefusal(resolution.candidates);
+      await audit(
+        userId,
+        "copilot_query",
+        null,
+        COPILOT_RULE_IDS.entityUnresolved,
+        `refused a copilot question naming a subject that resolved to no governed object in this ` +
+          `caller's scope (${resolution.candidates.join(", ")}). Answering it would have meant ` +
+          `running '${plan.tool}' unfiltered and presenting org-wide findings as that subject's — ` +
+          `real numbers under a name nobody searched for`,
+        { candidates: resolution.candidates, tool: plan.tool },
+        "deny",
+      );
+      return reply.status(422).send({
+        error: "copilot_entity_unresolved",
+        detail,
+        candidates: resolution.candidates,
+        plan,
+        scopeCaveat: COPILOT_SCOPE_CAVEAT,
+      });
+    }
+
+    if (resolution.status === "ambiguous") {
+      const detail = copilotEntityAmbiguousRefusal(resolution.matches);
+      await audit(
+        userId,
+        "copilot_query",
+        null,
+        COPILOT_RULE_IDS.entityAmbiguous,
+        `refused a copilot question whose subject matched ${resolution.matches.length} governed ` +
+          `objects in this caller's scope — narrowing to one of them by a tiebreak would attach ` +
+          `real records to a subject the caller never chose`,
+        { matches: resolution.matches, tool: plan.tool },
+        "deny",
+      );
+      return reply.status(422).send({
+        error: "copilot_entity_ambiguous",
+        detail,
+        candidates: resolution.matches,
+        plan,
+        scopeCaveat: COPILOT_SCOPE_CAVEAT,
+      });
+    }
+
+    if (resolution.status === "resolved") {
+      const { entity } = resolution;
+      if (!copilotToolSupportsEntityKind(plan.tool, entity.kind)) {
+        // RESOLVED, AND STILL REFUSED. The subject is real and visible; the
+        // ledger this tool reads simply has no column for it. Running anyway
+        // and captioning the result with the subject's name is the same lie as
+        // the unresolved case, so it gets the same treatment — plus the names
+        // of the tools that CAN answer.
+        const detail = copilotEntityNotFilterableRefusal(plan.tool, TOOL_LEDGER[plan.tool], entity);
+        await audit(
+          userId,
+          "copilot_query",
+          null,
+          COPILOT_RULE_IDS.entityNotFilterable,
+          `refused a copilot question whose subject resolved to the ` +
+            `${COPILOT_ENTITY_KIND_LABELS[entity.kind]} '${entity.name}' (${entity.id}) but whose ` +
+            `planned tool '${plan.tool}' reads a ledger with no ${entity.kind} column — the query ` +
+            `could not be narrowed to the subject, and running it unfiltered would have produced ` +
+            `real findings labelled with a subject nobody filtered on`,
+          {
+            entity: { kind: entity.kind, id: entity.id },
+            tool: plan.tool,
+            toolsThatCanFilter: copilotToolsFilteringEntityKind(entity.kind),
+          },
+          "deny",
+        );
+        return reply.status(422).send({
+          error: "copilot_tool_cannot_filter_entity",
+          detail,
+          entity,
+          tool: plan.tool,
+          toolsThatCanFilter: copilotToolsFilteringEntityKind(entity.kind),
+          plan,
+          scopeCaveat: COPILOT_SCOPE_CAVEAT,
+        });
+      }
+      // THE CASE THAT MAKES THE FEATURE TRUE: the plan now carries a real
+      // filter, and every SELECT below is built with it.
+      plan.entity = entity;
+    }
+
     const evidence = await retrieveEvidence(db, plan, scope, now);
 
     // ADR-0042 — THE INJECTION SURFACE. Retrieved `reason` strings are text an
@@ -743,8 +1200,15 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
         // L6d — and the honest record of what it NARROWED ON. "Were those
         // figures actually about the thing that question named?" has to stay
         // answerable from the ledger alone, long after the answer text is gone.
-        filters: describeCopilotFilters(plan.params),
+        filters: describeCopilotFilters(plan.params, plan.entity),
         subjectFiltered: grounded.subjectFiltered,
+        // ADR-0096 — the RESOLVED SUBJECT, by id and kind, on the row an
+        // auditor reads. "Was that answer actually about the thing I asked?"
+        // is now answerable with a primary key rather than an inference.
+        entity: plan.entity
+          ? { kind: plan.entity.kind, id: plan.entity.id, matchedOn: plan.entity.matchedOn }
+          : null,
+        entityCandidates: plan.entityCandidates,
       },
     );
 
@@ -771,6 +1235,15 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
         (grounded.subjectFiltered
           ? ""
           : `${grounded.unfilteredSubjectCaveat} `) +
+        // ADR-0096 — when a subject WAS resolved, the note leads with what the
+        // query was narrowed to, by id. The caveat's absence is not evidence
+        // of narrowing; this sentence is.
+        (plan.entity
+          ? `SUBJECT RESOLVED AND FILTERED. "${plan.entity.matchedOn}" in your question resolved to ` +
+            `the ${COPILOT_ENTITY_KIND_LABELS[plan.entity.kind]} '${plan.entity.name}' ` +
+            `(${plan.entity.id}) in your own scope, and every figure above was retrieved with that ` +
+            `as a SQL filter. `
+          : "") +
         (narrationGroundingChecked
           ? "The retrieval, scoping and grounding above are real and tested. A model narration was " +
             "added on top and CROSS-CHECKED against this retrieval — every count key and every " +

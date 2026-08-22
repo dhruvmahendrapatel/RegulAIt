@@ -421,7 +421,8 @@ export function extractEntityCandidates(question: string): string[] {
  */
 export function copilotEntityUnresolvedRefusal(candidates: readonly string[]): string {
   const named = candidates.map((c) => `'${c}'`).join(", ");
-  const kinds = COPILOT_ENTITY_KINDS.map((k) => COPILOT_ENTITY_KIND_LABELS[k]).join(", ");
+  const labels = COPILOT_ENTITY_KINDS.map((k) => COPILOT_ENTITY_KIND_LABELS[k]);
+  const kinds = `${labels.slice(0, -1).join(", ")} or ${labels[labels.length - 1]}`;
   return (
     `UNRESOLVED SUBJECT — REFUSING TO ANSWER. This question names ${named}, and no ${kinds} by ` +
     "that name is visible in your scope. The copilot will NOT fall back to a broad query and label " +
