@@ -59,10 +59,13 @@ import type { FastifyInstance } from "fastify";
 import {
   agentGrants,
   agents,
+  aiRisks,
+  aiUseCases,
   aiVendors,
   and,
   approvals,
   auditLog,
+  compliancePacks,
   connectorGrants,
   connectors,
   copilotProposals,
@@ -72,18 +75,22 @@ import {
   eq,
   gte,
   inArray,
+  initiatives,
   lt,
   mcpServers,
   mcpTools,
   or,
   projectMembers,
   projects,
+  roles,
   sql,
   teamMembers,
   teams,
   usageEvents,
   userAgentPolicies,
   users,
+  virtualKeys,
+  workflowTemplates,
   type Db,
 } from "@regulait/db";
 import {
@@ -275,8 +282,28 @@ function auditScopePredicate(projectIds: string[]) {
  *   vendor     `ai_vendors.owner_user_id = caller` — byte-identical to the
  *              existing `GET /v1/vendors` rule for a non-admin.
  *
- * An admin is org-wide for all eight, exactly as `resolveCopilotScope` already
- * makes them org-wide for every ledger.
+ * B7a — the seven registry kinds, same discipline (re-used, never invented):
+ *
+ *   initiative        ADMIN-ONLY. `GET /v1/initiatives` is not in
+ *   compliance_pack   `NON_ADMIN_ROUTES`, so the gateway's default admin gate
+ *   workflow_template refuses every non-admin read of it — likewise
+ *   role              `GET /v1/compliance/packs`, `GET /v1/workflows/templates`
+ *                     and `GET /v1/roles`. The resolver mirrors that reality
+ *                     exactly: for a non-admin these four kinds are NEVER
+ *                     LOOKED UP, so a real one refuses byte-identically to a
+ *                     nonexistent one. (A non-admin CAN evaluate a pack by id
+ *                     via POST /v1/compliance/packs/:id/evaluate, but the READ
+ *                     surface this resolver is a read against is the list, and
+ *                     the list is admin-only.)
+ *   ai_use_case       `owner_user_id = caller` — the exact non-admin predicate
+ *   ai_risk           `GET /v1/use-cases` and `GET /v1/risks` apply ("fleet
+ *                     for admins, own rows for everyone else").
+ *   virtual_key       `user_id = caller` — the exact non-admin predicate
+ *                     `GET /v1/virtual-keys` applies (ADR-0022 visibility: a
+ *                     non-admin sees their OWN keys and no one else's).
+ *
+ * An admin is org-wide for all fifteen, exactly as `resolveCopilotScope`
+ * already makes them org-wide for every ledger.
  *
  * B6c — THE TWO BLOCKERS ADR-0096 NAMED, AND HOW EACH IS SOLVED.
  *
@@ -513,6 +540,88 @@ async function lookupEntityCandidate(
     }
   }
 
+  // --- B7a: the four ADMIN-ONLY registries. Their list endpoints sit behind
+  //     the gateway's default admin gate (absent from NON_ADMIN_ROUTES), so
+  //     for a non-admin they are NOT QUERIED AT ALL — a real initiative and a
+  //     nonexistent one are the same absence, which is the scope-honesty rule
+  //     with nothing left to get wrong -------------------------------------
+  if (actor.isAdmin) {
+    const initiativeRows = await db
+      .select({ id: initiatives.id, name: initiatives.name })
+      .from(initiatives)
+      .where(byId ? eq(initiatives.id, candidate) : nameEq(initiatives.name, candidate))
+      .limit(5);
+    for (const r of initiativeRows) out.push({ kind: "initiative", id: r.id, name: r.name });
+
+    // matched on TITLE (the display name an operator knows a pack by), never
+    // on the bare framework slug: (framework, version) is the unique pair, so
+    // two versions sharing a title are the ordinary ambiguity outcome
+    const packRows = await db
+      .select({ id: compliancePacks.id, title: compliancePacks.title })
+      .from(compliancePacks)
+      .where(byId ? eq(compliancePacks.id, candidate) : nameEq(compliancePacks.title, candidate))
+      .limit(5);
+    for (const r of packRows) out.push({ kind: "compliance_pack", id: r.id, name: r.title });
+
+    const templateRows = await db
+      .select({ id: workflowTemplates.id, name: workflowTemplates.name })
+      .from(workflowTemplates)
+      .where(byId ? eq(workflowTemplates.id, candidate) : nameEq(workflowTemplates.name, candidate))
+      .limit(5);
+    for (const r of templateRows) out.push({ kind: "workflow_template", id: r.id, name: r.name });
+
+    const roleRows = await db
+      .select({ id: roles.id, name: roles.name })
+      .from(roles)
+      .where(byId ? eq(roles.id, candidate) : nameEq(roles.name, candidate))
+      .limit(5);
+    for (const r of roleRows) out.push({ kind: "role", id: r.id, name: r.name });
+  }
+
+  // --- B7a: AI use case / AI risk — the exact owner-or-admin predicate their
+  //     own list endpoints apply ("fleet for admins, own rows for everyone
+  //     else"). A retired/closed row still resolves, because the list still
+  //     returns it ---------------------------------------------------------
+  const useCaseRows = await db
+    .select({ id: aiUseCases.id, name: aiUseCases.name })
+    .from(aiUseCases)
+    .where(
+      and(
+        byId ? eq(aiUseCases.id, candidate) : nameEq(aiUseCases.name, candidate),
+        ...(actor.isAdmin ? [] : [eq(aiUseCases.ownerUserId, actor.userId)]),
+      ),
+    )
+    .limit(5);
+  for (const r of useCaseRows) out.push({ kind: "ai_use_case", id: r.id, name: r.name });
+
+  const riskRows = await db
+    .select({ id: aiRisks.id, title: aiRisks.title })
+    .from(aiRisks)
+    .where(
+      and(
+        byId ? eq(aiRisks.id, candidate) : nameEq(aiRisks.title, candidate),
+        ...(actor.isAdmin ? [] : [eq(aiRisks.ownerUserId, actor.userId)]),
+      ),
+    )
+    .limit(5);
+  for (const r of riskRows) out.push({ kind: "ai_risk", id: r.id, name: r.title });
+
+  // --- B7a: virtual key — ADR-0022's own visibility rule, byte-identical to
+  //     GET /v1/virtual-keys: a non-admin sees their OWN keys only. `name` is
+  //     not unique even per user, so two keys sharing one label are the
+  //     ambiguity outcome, listed by id ------------------------------------
+  const keyRows = await db
+    .select({ id: virtualKeys.id, name: virtualKeys.name })
+    .from(virtualKeys)
+    .where(
+      and(
+        byId ? eq(virtualKeys.id, candidate) : nameEq(virtualKeys.name, candidate),
+        ...(actor.isAdmin ? [] : [eq(virtualKeys.userId, actor.userId)]),
+      ),
+    )
+    .limit(5);
+  for (const r of keyRows) out.push({ kind: "virtual_key", id: r.id, name: r.name });
+
   // --- vendor: the SAME rule GET /v1/vendors already enforces ---------------
   const vendorRows = await db
     .select({ id: aiVendors.id, name: aiVendors.name })
@@ -596,6 +705,30 @@ async function mcpToolRefOf(
   return row ? { serverId: row.serverId, toolName: row.name } : null;
 }
 
+/** B7a — an `initiative` entity's expansion: the projects grouped under it
+ * (`projects.initiative_id`, the EXACT join GET /v1/initiatives runs to roll
+ * up initiative spend) and the members of those projects (so the `approvals`
+ * filter can apply the same project-OR-member rule a `project` filter does).
+ * An initiative with no projects expands to nothing and the filters below
+ * fail CLOSED via `safeIds` — zero rows, never all rows. */
+async function initiativeExpansionOf(
+  db: Db,
+  id: string,
+): Promise<{ projectIds: string[]; memberIds: string[] }> {
+  const projectRows = await db
+    .select({ id: projects.id })
+    .from(projects)
+    .where(eq(projects.initiativeId, id));
+  const projectIds = projectRows.map((r) => r.id);
+  const memberRows = projectIds.length
+    ? await db
+        .selectDistinct({ userId: projectMembers.userId })
+        .from(projectMembers)
+        .where(inArray(projectMembers.projectId, projectIds))
+    : [];
+  return { projectIds, memberIds: memberRows.map((r) => r.userId) };
+}
+
 // ---------------------------------------------------------------------------
 // Timeframes
 // ---------------------------------------------------------------------------
@@ -661,6 +794,7 @@ function approvalEntityPredicates(
   entity: CopilotEntityRef | null,
   members: readonly string[],
   mcpTool: { serverId: string; toolName: string } | null,
+  initiative: { projectIds: string[]; memberIds: string[] } | null,
 ): ReturnType<typeof eq>[] {
   if (!entity) return [];
   if (entity.kind === "user") return [eq(approvals.userId, entity.id)];
@@ -668,6 +802,17 @@ function approvalEntityPredicates(
   if (entity.kind === "project") {
     return [
       or(eq(approvals.projectId, entity.id), inArray(approvals.userId, safeIds([...members])))!,
+    ];
+  }
+  // B7a: an initiative is its project set, so its approvals filter is the
+  // project rule applied ACROSS that set — `project_id` in the set (pillar-5
+  // budget escalations) OR raised by a member of one of its projects. Either
+  // alone would drop real rows, exactly as for a single project above.
+  if (entity.kind === "initiative") {
+    const projectIds = safeIds(initiative?.projectIds ?? []);
+    const memberIds = safeIds(initiative?.memberIds ?? []);
+    return [
+      or(inArray(approvals.projectId, projectIds), inArray(approvals.userId, memberIds))!,
     ];
   }
   // B6c: `approvals` carries FIRST-CLASS server_id + tool_name columns (the
@@ -729,6 +874,10 @@ export async function retrieveEvidence(
       : [];
   // B6c: the (server_id, tool_name) pair every ledger actually stores
   const entityMcpTool = entity?.kind === "mcp_tool" ? await mcpToolRefOf(db, entity.id) : null;
+  // B7a: an initiative's project set + those projects' members, the expansion
+  // every ledger's initiative filter is built from
+  const entityInitiative =
+    entity?.kind === "initiative" ? await initiativeExpansionOf(db, entity.id) : null;
 
   if (plan.tool === "queryAuditDecisions" || plan.tool === "listAnomalies") {
     // `audit_log` carries no project column; attribution rides
@@ -754,19 +903,30 @@ export async function retrieveEvidence(
                       eq(auditLog.toolName, entityMcpTool.toolName),
                     ]
                   : [eq(auditLog.serverId, ZERO_UUID)]
-                : [
-                    // agent / connector: the object THIS row was about. The
-                    // entity's own class REPLACES any keyword-derived
-                    // `objectType` — a question naming an agent is about that
-                    // agent whatever other class word it happens to contain,
-                    // and ANDing the two would silently return zero rows
-                    // instead of an answer.
-                    eq(
-                      auditLog.objectType,
-                      entity.kind as (typeof auditLog.objectType)["_"]["data"],
-                    ),
-                    eq(auditLog.objectId, entity.id),
-                  ];
+                : // B7a: an initiative filters the way a project does —
+                  // through `detail->>'projectId'`, the attribution key every
+                  // governed path writes — over its whole project set. The
+                  // same predicate builder the SCOPE uses, so the two cannot
+                  // diverge; an initiative with no projects matches nothing
+                  // (fail closed), never everything.
+                  entity.kind === "initiative"
+                  ? [auditScopePredicate(entityInitiative?.projectIds ?? [])]
+                  : [
+                      // agent / connector — and B7a's compliance_pack,
+                      // ai_use_case, ai_risk, workflow_template, role and
+                      // virtual_key: the object THIS row was about, via the
+                      // `object_type` enum value the gateway already writes
+                      // for each of them. The entity's own class REPLACES any
+                      // keyword-derived `objectType` — a question naming an
+                      // agent is about that agent whatever other class word it
+                      // happens to contain, and ANDing the two would silently
+                      // return zero rows instead of an answer.
+                      eq(
+                        auditLog.objectType,
+                        entity.kind as (typeof auditLog.objectType)["_"]["data"],
+                      ),
+                      eq(auditLog.objectId, entity.id),
+                    ];
     // B6c extends the same replacement rule to the MCP kinds, and for a
     // sharper reason than convenience: the planner maps the words "mcp" and
     // "tool call" to `objectType: 'mcp_tool'`, while the proxy's own audit rows
@@ -776,7 +936,17 @@ export async function retrieveEvidence(
       entity?.kind === "agent" ||
       entity?.kind === "connector" ||
       entity?.kind === "mcp_server" ||
-      entity?.kind === "mcp_tool";
+      entity?.kind === "mcp_tool" ||
+      // B7a: the six object_type-filtered registry kinds own the column for
+      // the same reason — their filter IS `object_type = <kind>`, and ANDing a
+      // keyword-derived class (e.g. "tool call" → 'mcp_tool' in a question
+      // about a virtual key's denials) would return zero rows, not an answer.
+      entity?.kind === "compliance_pack" ||
+      entity?.kind === "ai_use_case" ||
+      entity?.kind === "ai_risk" ||
+      entity?.kind === "workflow_template" ||
+      entity?.kind === "role" ||
+      entity?.kind === "virtual_key";
     const where = and(
       gte(auditLog.at, start),
       lt(auditLog.at, end),
@@ -848,7 +1018,7 @@ export async function retrieveEvidence(
             // halves can narrow (the matrix says so), so a half-narrowed
             // anomaly report — one lead about your subject, one about
             // everything — is unreachable rather than merely discouraged.
-            ...approvalEntityPredicates(entity, entityMembers, entityMcpTool),
+            ...approvalEntityPredicates(entity, entityMembers, entityMcpTool, entityInitiative),
           ),
         );
       const rubber = fast.filter(
@@ -873,7 +1043,7 @@ export async function retrieveEvidence(
       lt(approvals.requestedAt, end),
       ...(plan.params.status ? [eq(approvals.status, plan.params.status)] : []),
       ...memberScope,
-      ...approvalEntityPredicates(entity, entityMembers, entityMcpTool),
+      ...approvalEntityPredicates(entity, entityMembers, entityMcpTool, entityInitiative),
     );
     const [total, byStatus, rows] = await Promise.all([
       db.select({ n: count() }).from(approvals).where(where),
@@ -920,7 +1090,16 @@ export async function retrieveEvidence(
               ]
             : entity.kind === "connector"
               ? [eq(usageEvents.connectorId, entity.id)]
-              : // B6c — `usage_events` has NO server column: the MCP proxy
+              : // B7a — an initiative is its project set: `project_id IN`, the
+                // EXACT join GET /v1/initiatives itself runs to roll up
+                // initiative spend. No projects = no rows (fail closed).
+                entity.kind === "initiative"
+                ? [inArray(usageEvents.projectId, safeIds(entityInitiative?.projectIds ?? []))]
+                : // B7a — a virtual key has a FIRST-CLASS ledger column:
+                  // `virtual_key_id`, "which key paid for this row" (ADR-0066)
+                  entity.kind === "virtual_key"
+                  ? [eq(usageEvents.virtualKeyId, entity.id)]
+                  : // B6c — `usage_events` has NO server column: the MCP proxy
                 // documents its own convention ("`operation` carries the tool
                 // name and the server id rides the detail jsonb"), and this
                 // filter reads exactly that pair. `object_type` is pinned to

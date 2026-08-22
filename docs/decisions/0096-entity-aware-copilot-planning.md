@@ -475,3 +475,139 @@ server-level twin of it; and the member resolving each of those very objects as 
    rather than error. A real `server_id` column on `usage_events` would remove the caveat.
 5. **Offline only.** Everything here is proved against a real Postgres with seeded ledger rows;
    nothing in this amendment was re-verified against a live model or a live MCP upstream.
+
+---
+
+## Amendment — 2026-08-22: the seven registry kinds become resolvable (batch B7a, no migration)
+
+Honest limit 3, as B6c narrowed it, still named seven kinds unresolvable — compliance packs, AI
+use cases, AI risks, workflow templates, initiatives, roles, virtual keys — "each still for want
+of a visibility predicate proved with a two-user test". All seven close here. Every predicate is
+a RE-USE of the scoping the kind's own list endpoint already enforces, every new filter is proved
+as a row-count delta with real rows on both sides, and nothing is approximated: a pair the schema
+cannot narrow refuses by name, exactly as before.
+
+### Visibility: the kind's own list endpoint, mirrored — including where that means admin-only
+
+§2's rule ("no kind gets a visibility rule invented for this feature") has a corollary this batch
+makes explicit: **the resolver must be exactly as broad as the kind's own read/list surface, in
+both directions** — no invented restriction, and no invented generosity either.
+
+| Kind | Table | Matched on | "In your scope" means — and the existing rule it re-uses |
+|---|---|---|---|
+| `initiative` | `initiatives` | name (globally unique), id | **admin-only** — `GET /v1/initiatives` is absent from `NON_ADMIN_ROUTES`, so the gateway's default admin gate refuses every non-admin read of the registry |
+| `compliance_pack` | `compliance_packs` | **title**, id | **admin-only** — same default gate over `GET /v1/compliance/packs` |
+| `workflow_template` | `workflow_templates` | name (globally unique), id | **admin-only** — same gate over `GET /v1/workflows/templates` |
+| `role` | `roles` | name (globally unique), id | **admin-only** — same gate over `GET /v1/roles` |
+| `ai_use_case` | `ai_use_cases` | name, id | `owner_user_id = caller` — byte-identical to `GET /v1/use-cases`' own non-admin rule ("fleet for admins, own rows for everyone else") |
+| `ai_risk` | `ai_risks` | title, id | `owner_user_id = caller` — `GET /v1/risks`' own rule, same shape |
+| `virtual_key` | `virtual_keys` | name, id | `user_id = caller` — ADR-0022's visibility rule, byte-identical to `GET /v1/virtual-keys` ("a non-admin sees their OWN keys and no one else's") |
+
+For the four admin-only kinds the implementation is the strongest form of scope honesty
+available: a non-admin's candidate is **never looked up at all**, so a real initiative and a
+nonexistent one are literally the same absence. The committed suite proves it byte-for-byte —
+the non-admin's whole 422 body for a real, admin-visible initiative equals (after substituting
+only the caller's own words) the body a name that exists nowhere produces, with the admin
+resolving the very same object as the control; packs, templates and roles are pinned against the
+same pure refusal function that equality rests on. The owner-scoped kinds get the ordinary
+two-user pair: the owner resolves their use case / risk / key, the non-owner gets the unresolved
+refusal byte-identical to nonexistent, ids asserted absent.
+
+Two deliberate wording-level choices: a compliance pack is matched on its **title** (the display
+name an operator knows it by), never the bare framework slug — `(framework, version)` is the
+unique pair, so two versions sharing a title are the ordinary AMBIGUOUS outcome, listed by id and
+never tie-broken by `status='active'`. And `virtual_keys.name` is not unique even per user, so
+two keys sharing one label are likewise ambiguity — the committed suite pins both twins listed
+with their real ids and nothing retrieved.
+
+### The extended tool × kind table
+
+Read off the schema, the way §4 and B6c were:
+
+| Kind | `queryAuditDecisions` | `listAnomalies` | `listApprovals` | `summarizeUsage` |
+|---|---|---|---|---|
+| **`initiative`** | ✅ `detail->>'projectId'` over the project set | ✅ both halves | ✅ `project_id IN` set **OR** member expansion | ✅ `project_id IN` set |
+| **`virtual_key`** | ✅ `object_type='virtual_key' AND object_id` | ❌ | ❌ | ✅ `virtual_key_id` (first-class column, ADR-0066) |
+| **`compliance_pack`** | ✅ `object_type + object_id` | ❌ | ❌ | ❌ |
+| **`ai_use_case`** | ✅ `object_type + object_id` | ❌ | ❌ | ❌ |
+| **`ai_risk`** | ✅ `object_type + object_id` | ❌ | ❌ | ❌ |
+| **`workflow_template`** | ✅ `object_type + object_id` | ❌ | ❌ | ❌ |
+| **`role`** | ✅ `object_type + object_id` | ❌ | ❌ | ❌ |
+
+So the closure splits two ways, and no kind lands in vendor's resolve-but-nothing-filters bucket:
+
+- **Multi-ledger**: `initiative` (all four tools) and `virtual_key` (audit + usage).
+- **Audit-only**: the other five — they resolve, `queryAuditDecisions` narrows for real, and any
+  other tool ends in the existing `copilot_tool_cannot_filter_entity` naming
+  `queryAuditDecisions` as the tool that can.
+
+Why each ✅ is real: every one of the seven kinds has its own `audit_log.object_type` enum value
+**that the gateway already writes** (role/template lifecycle since ADR-0022, packs since
+ADR-0058, use cases/risks since ADR-0080/0082, virtual keys since ADR-0066), so the audit filter
+is the same `object_type + object_id` pair agents and connectors have used since §4 — and it
+REPLACES a keyword-derived `objectType` for the same reason (a "tool call" question about a named
+virtual key would otherwise AND to zero rows; a committed test pins the replacement). An
+initiative is a flat grouping of projects (`projects.initiative_id`), so it narrows through the
+`team`-style expansion idiom everywhere `project` narrows: `audit_log` on `detail->>'projectId'`
+over the set (built by the same predicate builder the caller scope uses, so the two cannot
+diverge), `approvals` on the project-OR-member rule the `project` filter already applies (either
+alone would drop real rows), and `usage_events` on `project_id IN` — the **exact join
+`GET /v1/initiatives` itself runs** to roll up initiative spend. `listAnomalies`' intersection
+rule is satisfied for initiatives by both halves and waived for nothing else.
+
+Why each ❌ is real: `approvals` and `usage_events` carry no column for the five audit-only kinds
+and no principled single-hop join. The one candidate worth naming so it is visibly not smuggled
+in: `approvals.instance_id` does reach an AI use case's intake instance
+(`ai_use_cases.workflow_instance_id`), but those approval rows identify the INSTANCE (an
+instance may be composed from several templates, and a use case may predate any instance), so
+wiring it as "approvals about this use case" is a design decision for a future slice, not a fact
+of the schema — the committed suite pins the honest refusal instead. A `workflow_template`
+approvals filter is weaker still (`workflow_instances.template_ids` is a jsonb array snapshot).
+
+### Verified (`copilot-entity-registry.test.ts`, 16 cases; M-024's rule throughout)
+
+Seed counts are deliberately unequal per kind — role 2, virtual key 3, use case 4, pack 5,
+template 6, risk 7 audit denials; initiative = the 14 attributed to its two projects with 13 more
+outside it; approvals 3-in / 3-out; usage 7-in / 4-out with 2 of the 7 on the key — so a filter
+that does nothing produces the wrong number rather than a coincidentally right one. Exact-count
+assertions ride only suite-scoped reads (the owner's project scope, or a filter over this suite's
+own ids); org-wide admin counts are floors, never equalities (M-008).
+
+The no-op-filter probes (each a scratch edit reverted by exact reversal, M-016; `plan.entity`,
+the rendered filter string and the audit detail left exactly as they were):
+
+| Probe (the fix removed) | Reddens |
+|---|---|
+| **1. THE MANDATORY NO-OP-FILTER PROBE** — the seven kinds' `audit_log` predicates replaced with `[]` | **6**, each with the diagnostic that matters: `expected 14 to be 3` (virtual key), `expected 14 to be 4` (use case/risk), `expected 40 to be 2` (role/pack/template), `expected 35 to be 14` (initiative), `expected 14 to be 3` (objectType-replacement), `expected 49 to be 14` (anomalies) — the broad count came back where the narrowed one was asserted, with the filter still announced everywhere |
+| 2. the `usage_events` initiative + virtual-key predicates replaced with `[]` | **2** — `expected 7 to be 2` (the key's first-class column), `expected 11 to be 7` (the initiative join) |
+| 3. the `approvals` initiative predicate replaced with `[]` | **1** — `expected 6 to be 3` |
+
+`copilot-entity.test.ts`, `copilot-entity-mcp.test.ts` and `copilot.test.ts` stay **green under
+every probe** — the regression control that the eight existing kinds behave identically. The 422
+unresolved refusal now enumerates all fifteen resolvable kinds, unchanged in shape, via the same
+`copilotEntityUnresolvedRefusal` every suite pins.
+
+### Honest limits (this amendment)
+
+1. **Honest limit 3 is now CLOSED**: no named object kind in the governed graph is left
+   unresolvable. Limits 1, 2, 4, 5, 6 and 7 stand verbatim; limit 2 (exact-match only) bites the
+   registry kinds exactly as it bites the rest.
+2. **The resolver mirrors the LIST surface, and the list surface is what it is.** A non-admin can
+   `POST /v1/compliance/packs/:id/evaluate` (that route is deliberately non-admin), yet cannot
+   resolve a pack by name — because the pack *list* is admin-only and the resolver mirrors the
+   read surface, not the act surface. If the list endpoints' posture ever loosens, the resolver
+   must loosen with it or it becomes an invented restriction.
+3. **Non-admin audit narrowing still intersects the caller's project scope.** An owner filtering
+   on their own virtual key sees only rows attributed (`detail->>'projectId'`) to their projects
+   — lifecycle rows written with no project attribution are visible to admins only, exactly as
+   they always were. The filter narrows within the caller's scope; it never widens it.
+4. **The two named approvals joins are deferred, not denied**: `instance_id` → use case and
+   `template_ids` → template (above). Wiring either is a future slice with its own row-delta
+   proof.
+5. **Stale in §4, observed while reading the schema for this batch**: `audit_log.object_type`
+   now has an `'ai_vendor'` value that ADR-0084's vendor lifecycle writes, so §4's "no join
+   exists anywhere" for `vendor` is no longer true of `queryAuditDecisions`. Making vendor
+   audit-filterable is a candidate slice; it is NOT done here, because vendor is outside this
+   batch's mandate and its row-delta proof does not exist yet.
+6. **Offline only.** Everything here is proved against a real Postgres with seeded ledger rows;
+   nothing in this amendment was re-verified against a live model.

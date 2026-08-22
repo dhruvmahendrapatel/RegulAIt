@@ -217,6 +217,23 @@ export const COPILOT_ENTITY_KINDS = [
   // outcome, and a server-qualified `server/tool` name is the resolved one.
   "mcp_server",
   "mcp_tool",
+  // B7a: the seven kinds ADR-0096's honest limit 3 left unresolvable, each now
+  // carrying the visibility rule its OWN list endpoint already enforces —
+  // admin-only for the four admin-console registries (initiative, compliance
+  // pack, workflow template, role: their list endpoints sit behind the
+  // gateway's default admin gate), owner-or-admin for the three self-scoped
+  // ones (AI use case, AI risk, virtual key: `owner_user_id`/`user_id` =
+  // caller, byte-identical to GET /v1/use-cases, /v1/risks, /v1/virtual-keys).
+  // None of their name columns is guaranteed unique except initiative,
+  // workflow template and role — a repeated pack title or virtual-key name is
+  // the ordinary AMBIGUOUS outcome, never a tiebreak.
+  "initiative",
+  "compliance_pack",
+  "ai_use_case",
+  "ai_risk",
+  "workflow_template",
+  "role",
+  "virtual_key",
   "vendor",
 ] as const;
 export type CopilotEntityKind = (typeof COPILOT_ENTITY_KINDS)[number];
@@ -230,6 +247,13 @@ export const COPILOT_ENTITY_KIND_LABELS: Record<CopilotEntityKind, string> = {
   connector: "connector",
   mcp_server: "MCP server",
   mcp_tool: "MCP tool",
+  initiative: "initiative",
+  compliance_pack: "compliance pack",
+  ai_use_case: "AI use case",
+  ai_risk: "AI risk",
+  workflow_template: "workflow template",
+  role: "role",
+  virtual_key: "virtual key",
   vendor: "AI vendor",
 };
 
@@ -276,12 +300,64 @@ export interface CopilotEntityRef extends CopilotEntityMatch {
  *   column, still narrows honestly through the pair the MCP proxy documents
  *   itself — `object_type='mcp_tool'` with the tool name in `operation` and
  *   the server id in `detail->>'serverId'`.
+ *
+ *   B7a — the seven registry kinds, read off the schema the same way:
+ *
+ *   `initiative` is a FLAT GROUPING OF PROJECTS (`projects.initiative_id`), so
+ *   it filters everywhere `project` does, through the same expansion idiom
+ *   `team` uses for members: `audit_log` on `detail->>'projectId'` over the
+ *   initiative's project set (the attribution key every governed path writes),
+ *   `approvals` on the same project-OR-member rule the `project` filter
+ *   applies (either alone would drop real rows), and `usage_events` on
+ *   `project_id` — the EXACT join GET /v1/initiatives itself runs to roll up
+ *   initiative spend.
+ *
+ *   `virtual_key` has a FIRST-CLASS `usage_events.virtual_key_id` column
+ *   (ADR-0066: which key paid for this row), so spend narrows for real; and
+ *   its lifecycle/enforcement audit rows carry `object_type='virtual_key'` +
+ *   `object_id`, the same pair `agent` filters on.
+ *
+ *   `compliance_pack`, `ai_use_case`, `ai_risk`, `workflow_template` and
+ *   `role` filter `audit_log` ONLY, via their own `object_type` enum values +
+ *   `object_id` — every one of which the gateway already writes. None of the
+ *   five has a column on `approvals` or `usage_events`, and no principled
+ *   single-hop join exists (`approvals.instance_id` does reach an AI use
+ *   case's intake instance, but those rows identify the INSTANCE, may span
+ *   several composed templates, and the use case may predate any instance —
+ *   recorded in the ADR amendment as a candidate, not smuggled in as a fact).
+ *   `listAnomalies`' intersection rule therefore excludes all five, exactly
+ *   as it excludes `agent`.
  */
 export const COPILOT_ENTITY_FILTER_MATRIX: Record<CopilotTool, readonly CopilotEntityKind[]> = {
-  queryAuditDecisions: ["project", "team", "user", "agent", "connector", "mcp_server", "mcp_tool"],
-  listAnomalies: ["project", "team", "user", "mcp_server", "mcp_tool"],
-  listApprovals: ["project", "team", "user", "mcp_server", "mcp_tool"],
-  summarizeUsage: ["project", "team", "user", "agent", "connector", "mcp_server", "mcp_tool"],
+  queryAuditDecisions: [
+    "project",
+    "team",
+    "user",
+    "agent",
+    "connector",
+    "mcp_server",
+    "mcp_tool",
+    "initiative",
+    "compliance_pack",
+    "ai_use_case",
+    "ai_risk",
+    "workflow_template",
+    "role",
+    "virtual_key",
+  ],
+  listAnomalies: ["project", "team", "user", "mcp_server", "mcp_tool", "initiative"],
+  listApprovals: ["project", "team", "user", "mcp_server", "mcp_tool", "initiative"],
+  summarizeUsage: [
+    "project",
+    "team",
+    "user",
+    "agent",
+    "connector",
+    "mcp_server",
+    "mcp_tool",
+    "initiative",
+    "virtual_key",
+  ],
 };
 
 export function copilotToolSupportsEntityKind(tool: CopilotTool, kind: CopilotEntityKind): boolean {
