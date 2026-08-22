@@ -4039,6 +4039,13 @@ export const CONFIG_VERSION_STATUSES = [
   "active",
   "rolled_back",
   "superseded",
+  // batch B1 (migration 0095) — demoted because the ARTIFACT was deleted
+  // through the explicit rule DELETE route. Not 'superseded' (replaced by a
+  // newer active) and not 'rolled_back' (an older version re-activated over
+  // it): both would misstate the version's history. A 'retired' version can
+  // never serve — its artifact no longer exists — and its row is kept as the
+  // record of what governed the calls made while it did.
+  "retired",
 ] as const;
 export type ConfigVersionStatus = (typeof CONFIG_VERSION_STATUSES)[number];
 
@@ -4050,6 +4057,9 @@ export const CONFIG_ACTIVATION_ACTIONS = [
   "promoted",
   "rolled_back",
   "abandoned",
+  // batch B1 (migration 0095) — the ledger entry that records a pointer being
+  // demoted to 'retired' because the artifact was deleted
+  "artifact_deleted",
 ] as const;
 export type ConfigActivationAction = (typeof CONFIG_ACTIVATION_ACTIONS)[number];
 
@@ -5441,6 +5451,15 @@ export const compliancePacks = pgTable(
     /** the §8.3 cascade tag this pack drives. A pack ENFORCES NOTHING itself:
      * tagging an Initiative with this drives the EXISTING cascade. */
     cascadeTag: text("cascade_tag"),
+    /** batch B1 (migration 0096) — the compliance-profile STARTING POINT this
+     * pack's cascade tag seeds on activation: a partial map of enforcing
+     * `compliance_profiles` columns, validated at the edge with the same
+     * check every profile version body passes. Null = the pack names no
+     * starting profile and the admin authors one, exactly as before. Only
+     * meaningful when cascadeTag is set; the API refuses a preset without a
+     * tag. Activation FIND-OR-CREATES from this and NEVER overwrites an
+     * existing profile. */
+    cascadePreset: jsonb("cascade_preset").$type<Record<string, unknown>>(),
     status: text("status", { enum: ["draft", "active", "retired"] }).notNull().default("draft"),
     createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

@@ -659,6 +659,20 @@
       "when": 1785029000000,
       "tag": "0094_recommendation_campaign_scope",
       "breakpoints": true
+    },
+    {
+      "idx": 95,
+      "version": "7",
+      "when": 1785030000000,
+      "tag": "0095_rule_delete_tombstone",
+      "breakpoints": true
+    },
+    {
+      "idx": 96,
+      "version": "7",
+      "when": 1785031000000,
+      "tag": "0096_pack_cascade_preset",
+      "breakpoints": true
     }
   ]
 }

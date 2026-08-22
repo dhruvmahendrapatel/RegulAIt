@@ -728,6 +728,49 @@ export const createDataScopeRuleSchema = z
   })
   .superRefine(refineRuleScope);
 
+// ---------------------------------------------------------------------------
+// Batch B1 (ADR-0073 residual) — the ordinary CRUD EDIT surface for the three
+// restriction-rule kinds. Deliberately ENFORCING FIELDS ONLY, `.strict()`:
+// the selection columns (scope/serverScope/userId/roleId/teamId/serverId)
+// decide WHICH callers a rule is loaded for, and ADR-0073 §2 pins that
+// rebinding a rule to a different subject is a NEW rule, never an edit — the
+// route pre-checks those keys and refuses with the reason named, and strict
+// parsing catches everything else. Every field optional: a PATCH names only
+// what it means to move, and `applyRuleEdit` decides whether that is a policy
+// change to version (mint + activate), a plain row write (unversioned rule —
+// invariant 4), or a no-op. Value types mirror the version-body schemas in
+// config-versions.ts, which re-validate the COMPOSED body before anything is
+// stored.
+// ---------------------------------------------------------------------------
+const ruleDeployModeField = z.enum(["hosted", "byoc", "air_gapped"]).nullable().optional();
+
+export const updateApprovalRuleSchema = z
+  .object({
+    toolName: z.string().min(1).nullable().optional(),
+    writeOnly: z.boolean().optional(),
+    approverUserId: z.string().uuid().optional(),
+    deployMode: ruleDeployModeField,
+  })
+  .strict();
+
+export const updateRateLimitSchema = z
+  .object({
+    toolName: z.string().min(1).nullable().optional(),
+    maxCalls: z.number().int().min(0).optional(),
+    windowSeconds: z.number().int().positive().optional(),
+    deployMode: ruleDeployModeField,
+  })
+  .strict();
+
+export const updateDataScopeRuleSchema = z
+  .object({
+    toolName: z.string().min(1).nullable().optional(),
+    argPath: z.string().min(1).optional(),
+    allowedValues: z.array(z.string()).min(1).optional(),
+    deployMode: ruleDeployModeField,
+  })
+  .strict();
+
 export const createRoleSchema = z.object({
   name: z.string().min(1),
   description: z.string().optional(),

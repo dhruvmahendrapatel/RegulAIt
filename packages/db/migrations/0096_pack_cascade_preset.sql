@@ -1,0 +1,30 @@
+-- ADR-0058 §8.3-preset residual (batch B1) — A PACK CARRIES ITS OWN CASCADE
+-- PRESET, AS DATA.
+--
+-- ADR-0058 disclosed: "this release wires no automatic creation of a
+-- compliance_profiles row from a pack — the preset half of §2 does not ship".
+-- Closing that requires the pack to SAY what profile its cascade tag should
+-- start from. Per the ADR's own principle ("a new framework ... is rows, no
+-- deploy"), the preset is a COLUMN on the pack row rather than a code table
+-- keyed by tag — a customer's own pack can carry a preset the same way the
+-- launch packs do.
+--
+-- NULLABLE on purpose, in two distinct senses the API keeps separate:
+--   cascade_tag IS NULL                  -> the framework forces no cascade at
+--                                           all (SOC 2), so a preset would be
+--                                           meaningless and is refused.
+--   cascade_tag set, cascade_preset NULL -> the pack names a tag but ships no
+--                                           starting profile; activation says
+--                                           so and the admin authors the
+--                                           profile, exactly as before this
+--                                           migration. Every pack row that
+--                                           predates this column is in this
+--                                           state.
+--
+-- The preset's SHAPE is validated at the API edge with the same
+-- `validateRuleVersionBody('compliance_profile', ...)` check every profile
+-- version body passes — only enforcing profile columns, correctly typed. No DB
+-- CHECK duplicates that: jsonb shape checks live at the edge throughout this
+-- schema (the migration-0027 convention).
+
+ALTER TABLE "compliance_packs" ADD COLUMN "cascade_preset" jsonb;

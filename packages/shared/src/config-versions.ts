@@ -50,6 +50,9 @@ export const CONFIG_VERSION_STATUSES = [
   "active",
   "rolled_back",
   "superseded",
+  // batch B1 (migration 0095) — demoted because the artifact was deleted
+  // through the explicit rule DELETE route; see packages/db schema comment
+  "retired",
 ] as const;
 export type ConfigVersionStatus = (typeof CONFIG_VERSION_STATUSES)[number];
 
@@ -62,10 +65,22 @@ export type ConfigVersionStatus = (typeof CONFIG_VERSION_STATUSES)[number];
  * non-deterministically block real work, which is an outage with a percentage
  * sign on it. So restriction rules canary in shadow — evaluated and logged,
  * never enforcing — and the set is closed here rather than decided per call.
+ *
+ * BATCH B1 (2026-08-22, ADR-0073 amendment): `agent_config` LEFT this set.
+ * ADR-0048 declared it live-canary and never wired a resolver, so for three
+ * waves the declaration described nothing. When the resolver was finally
+ * wired, it was wired in SHADOW, not live, and the intent statement moved to
+ * match the fact rather than the fact being bent to match a declaration
+ * nothing had ever exercised: a live agent_config canary would serve a
+ * DIFFERENT MODEL to a percentage of real traffic — a candidate carrying a
+ * model id the provider rejects would be a per-request outage at N%, the
+ * rule-canary failure mode with a generative face on it. The shadow measures
+ * exactly what the live split would have shown ("which model/price would this
+ * dispatch have used") with zero served-path risk; a live ramp for
+ * agent_config remains buildable as its own slice if a measured need appears.
  */
 export const LIVE_CANARY_ARTIFACT_TYPES: readonly ConfigArtifactType[] = [
   "agent_system_prompt",
-  "agent_config",
 ];
 
 export function canaryIsLive(t: ConfigArtifactType): boolean {
@@ -96,15 +111,19 @@ export function canaryIsLive(t: ConfigArtifactType): boolean {
  * something genuinely computes what the candidate WOULD have decided, whether
  * by serving it (prompts) or by shadowing it (rules and compliance profiles).
  *
- * `agent_config` is in NEITHER set: nothing resolves it at dispatch and nothing
- * shadows it. It is still vocabulary-only, and that is the one part of
- * ADR-0048's deviation 1/2 this slice does not close.
+ * BATCH B1 (2026-08-22): `agent_config` joined THIS set — the last inert type.
+ * The dispatch core now resolves the ACTIVE agent_config version (model +
+ * list price overlaid onto the agents row) and evaluates a sampled CANDIDATE
+ * in parallel, recording each comparison in `config_canary_observations`
+ * exactly like the rule kinds. The candidate can never reach the served
+ * dispatch; see the LIVE set's comment for why it shadows rather than serves.
  */
 export const SHADOW_CANARY_ARTIFACT_TYPES: readonly ConfigArtifactType[] = [
   "approval_rule",
   "rate_limit",
   "data_scope_rule",
   "compliance_profile",
+  "agent_config",
 ];
 
 export function canaryIsShadowEvaluated(t: ConfigArtifactType): boolean {
@@ -121,6 +140,12 @@ export function canaryIsShadowEvaluated(t: ConfigArtifactType): boolean {
  * Keeping the two separate is what lets ADR-0073 close the rule half honestly
  * without either rewriting ADR-0048's declared intent or letting the API keep
  * claiming a measurement that does not exist.
+ *
+ * BATCH B1 (2026-08-22): with `agent_config` wired (in shadow) at the dispatch
+ * core, intent and fact finally agree — every one of the six artifact types is
+ * resolved by something, and `canaryModeOf` no longer has an `inert` type to
+ * report. The `inert` vocabulary is kept: it is what an honest API says the
+ * day a seventh type is declared before it is wired.
  */
 export const RESOLVED_ARTIFACT_TYPES: readonly ConfigArtifactType[] = [
   "agent_system_prompt",
@@ -367,6 +392,22 @@ export const VERSIONED_RULE_FIELDS: Partial<Record<ConfigArtifactType, readonly 
   approval_rule: ["toolName", "writeOnly", "approverUserId", "deployMode"],
   rate_limit: ["toolName", "maxCalls", "windowSeconds", "deployMode"],
   data_scope_rule: ["toolName", "argPath", "allowedValues", "deployMode"],
+  /**
+   * BATCH B1 — `agent_config` versions the DISPATCH-EXECUTION config of an
+   * agent registry row, and deliberately nothing else. The scope line here is
+   * the same one §2 draws for rules: `model` and the two list-price columns
+   * are what the ONE dispatch core reads when it executes and attributes a
+   * call, so they are enforcing. Everything else on `agents` is refused:
+   * `provider`/`customProviderId` select the credential + egress machinery (a
+   * closed vocabulary four subsystems switch over — rebinding it is a NEW
+   * agent, exactly as rebinding a rule's subject is a new rule); `tier` feeds
+   * the ADR-0016 entitlement ceiling (a governance input, not a config);
+   * `enabled`/`lifecycleStatus` are governance gates with their own audited
+   * routes; `systemPrompt` is versioned as its own artifact type
+   * (`agent_system_prompt`); `name`/`modes`/`ownerUserId` are identity and
+   * accountability records.
+   */
+  agent_config: ["model", "costPerMTokIn", "costPerMTokOut"],
   compliance_profile: [
     "requiredTemplateIds",
     "mcpDefaultMode",
@@ -417,6 +458,15 @@ export interface RuleBodyRejection {
  */
 const deployModeField = z.enum(["hosted", "byoc", "air_gapped"]).nullish();
 const RULE_BODY_SCHEMAS: Partial<Record<ConfigArtifactType, z.ZodTypeAny>> = {
+  /** BATCH B1 — a null/absent `model` is legal (a routing-only agent) but the
+   * dispatch gate then refuses with `agent_not_dispatchable`, same as a row
+   * with no model; the prices are list prices and may legitimately be null
+   * (unpriced — pillar 5 then attributes no invented dollar figure). */
+  agent_config: z.object({
+    model: z.string().min(1).nullish(),
+    costPerMTokIn: z.number().nonnegative().nullish(),
+    costPerMTokOut: z.number().nonnegative().nullish(),
+  }),
   approval_rule: z.object({
     toolName: z.string().min(1).nullish(),
     writeOnly: z.boolean().optional(),
