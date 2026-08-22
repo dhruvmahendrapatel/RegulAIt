@@ -58,8 +58,12 @@ const migrationsFolder = path.resolve(
 // second developer, CI beside a local run) terminate each other's connections
 // and surface as an unhandled 57P01 plus a spuriously failed suite. Scoping the
 // scratch database to the caller's own database name makes the isolation this
-// file already intended actually hold.
-const DB_NAME = `${new URL(DATABASE_URL).pathname.replace(/^\//, "") || "regulait"}_stream`.slice(
+// file already intended actually hold — and the pid + timestamp suffix closes
+// the remaining case that scoping alone cannot: two concurrent runs pointed at
+// the SAME DATABASE_URL (a CI retry racing its predecessor, a re-run beside a
+// hung one) would still share the derived name and destroy each other
+// (PENDING §5). afterAll drops the database, so nothing accumulates.
+const DB_NAME = `${(new URL(DATABASE_URL).pathname.replace(/^\//, "") || "regulait").slice(0, 30)}_stream_${process.pid}_${Date.now()}`.slice(
   0,
   63,
 );

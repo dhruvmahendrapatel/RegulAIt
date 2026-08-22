@@ -81,7 +81,10 @@ import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
 
-const SCRATCH_DB = "regulait_scheduler_adr0064_test";
+// Per-RUN unique (pid + timestamp): a fixed name plus beforeAll's
+// DROP ... WITH (FORCE) lets two concurrent runs on one host destroy each
+// other's database (PENDING §5); afterAll drops this one, so nothing persists.
+const SCRATCH_DB = `regulait_sched_adr0064_${process.pid}_${Date.now()}`;
 const scratchUrl = (() => {
   const u = new URL(DATABASE_URL);
   u.pathname = "/" + SCRATCH_DB;

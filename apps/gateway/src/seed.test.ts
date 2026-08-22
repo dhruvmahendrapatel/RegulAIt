@@ -33,7 +33,13 @@ import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
 
-const SCRATCH_DB = "regulait_seed_test";
+// Per-RUN unique name (pid + timestamp), not a fixed one: a fixed name is
+// shared by every concurrent run on the host, and beforeAll's
+// DROP ... WITH (FORCE) then terminates the other run's backends mid-suite —
+// two concurrent runs destroy each other (PENDING §5). afterAll drops the
+// database, so nothing accumulates on a normal exit; a run killed hard enough
+// to skip afterAll leaves a uniquely-named orphan an operator can drop cold.
+const SCRATCH_DB = `regulait_seed_test_${process.pid}_${Date.now()}`;
 const scratchUrl = (() => {
   const u = new URL(DATABASE_URL);
   u.pathname = "/" + SCRATCH_DB;
