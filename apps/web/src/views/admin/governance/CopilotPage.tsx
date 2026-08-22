@@ -23,6 +23,13 @@
  *    badge is about FIGURES AND IDS only — so an answer whose query narrowed on
  *    NOTHING is badged and captioned separately (L6d), because real numbers can
  *    still be narrated as belonging to a subject nobody ever filtered on.
+ *  - **A named subject is either FILTERED ON or REFUSED (ADR-0096).** When the
+ *    question's subject resolved against the governed object graph, the page
+ *    prints what it resolved to — kind, name and id — beside the answer. When
+ *    it did not resolve, is ambiguous, or the planned tool has no filter for
+ *    its kind, there is NO ANSWER to render: the page shows the gateway's own
+ *    refusal verbatim, with its error code, rather than an answer about
+ *    everything wearing the subject's name.
  *  - **An approved proposal can be applied, and only an approved one.** The
  *    proposals table renders each proposal's approval state, an Apply button
  *    that exists only where applying is possible, and the refusal reason
@@ -34,7 +41,7 @@ import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
 import { Badge, Button, Card, EmptyState, Field, Input, Table } from "../../../ui/kit";
-import { QueryGate, Stat, useAction } from "../adminKit";
+import { QueryGate, Stat, useAction, useApiAction } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
 
@@ -52,7 +59,16 @@ interface ToolsResponse {
   decisionSupport: string;
 }
 interface AskResponse {
-  plan: { tool: string; timeframe: string; matched: string[]; fallback: boolean };
+  plan: {
+    tool: string;
+    timeframe: string;
+    matched: string[];
+    fallback: boolean;
+    // ADR-0096: the candidate subjects the question proposed, and the ONE
+    // governed object they resolved to (null when the question named none)
+    entityCandidates: string[];
+    entity: { kind: string; id: string; name: string; matchedOn: string } | null;
+  };
   answer: {
     text: string;
     scopeCaveat: string;
@@ -102,6 +118,11 @@ export default function CopilotPage() {
     queryFn: () => api.get<{ queries: QueryRow[] }>("/v1/copilot/queries"),
   });
   const act = useAction();
+  // ADR-0096: the ask path's whole product can be a REFUSAL carrying structure
+  // (the candidates it could not resolve, the objects a name was ambiguous
+  // between, the tools that CAN narrow by that kind). `useAction` flattens an
+  // error to one string, which would throw exactly that away.
+  const askAct = useApiAction();
 
   const proposals = useQuery({
     queryKey: ["copilot", "proposals"],
@@ -134,11 +155,17 @@ export default function CopilotPage() {
     }, "Applied through the same public endpoint an admin would use, under your own identity");
 
   const ask = async () => {
-    const ok = await act.run(async () => {
-      const res = await api.post<AskResponse>("/v1/copilot/ask", { question });
+    // the previous answer is cleared FIRST: an answer left on screen beside a
+    // refusal reads as though the refusal were a warning about it
+    setAnswer(null);
+    const res = await askAct.run(
+      () => api.post<AskResponse>("/v1/copilot/ask", { question }),
+      "Answered from the ledgers, within your own scope",
+    );
+    if (res) {
       setAnswer(res);
-    }, "Answered from the ledgers, within your own scope");
-    if (ok) void history.refetch();
+      void history.refetch();
+    }
   };
 
   return (
@@ -162,13 +189,55 @@ export default function CopilotPage() {
         <Field label="Question" grow>
           <Input value={question} onChange={(e) => setQuestion(e.target.value)} />
         </Field>
-        {act.error ? <p className={v.errLine}>{act.error}</p> : null}
         <div className={v.row}>
-          <Button variant="primary" disabled={act.busy} onClick={() => void ask()}>
+          <Button variant="primary" disabled={askAct.busy} onClick={() => void ask()}>
             Ask
           </Button>
         </div>
       </Card>
+
+      {/* ADR-0096 — THE REFUSAL, RENDERED AS THE PRODUCT IT IS. A question whose
+          subject could not be resolved, was ambiguous, or cannot be filtered by
+          the planned tool has no answer at all — so the page shows the
+          gateway's own sentence verbatim rather than an answer about
+          everything wearing that subject's name. */}
+      {askAct.outcome && !askAct.outcome.ok ? (
+        <Card title="Refused">
+          <div className={v.row}>
+            <Badge tone="danger">{askAct.outcome.code ?? "refused"}</Badge>
+          </div>
+          <p className={v.errLine}>{askAct.outcome.reason}</p>
+          {Array.isArray(askAct.outcome.payload?.candidates) &&
+          askAct.outcome.payload.candidates.length ? (
+            <>
+              <p className={v.faint}>
+                {askAct.outcome.code === "copilot_entity_ambiguous"
+                  ? "Every governed object in your scope that answers to the name — name one of them and ask again:"
+                  : "The subject(s) taken from your question, which resolved to nothing you may see:"}
+              </p>
+              <ul className={v.dim}>
+                {(askAct.outcome.payload.candidates as Array<string | Record<string, string>>).map(
+                  (c, i) => (
+                    <li key={i}>
+                      <code>
+                        {typeof c === "string" ? c : `${c.kind} · ${c.name} · ${c.id}`}
+                      </code>
+                    </li>
+                  ),
+                )}
+              </ul>
+            </>
+          ) : null}
+          {Array.isArray(askAct.outcome.payload?.toolsThatCanFilter) ? (
+            <p className={v.faint}>
+              Read tools that CAN narrow by this kind:{" "}
+              {(askAct.outcome.payload.toolsThatCanFilter as string[]).length
+                ? (askAct.outcome.payload.toolsThatCanFilter as string[]).join(", ")
+                : "none in this build."}
+            </p>
+          ) : null}
+        </Card>
+      ) : null}
 
       {answer ? (
         <>
@@ -186,6 +255,11 @@ export default function CopilotPage() {
               {answer.answer.groundedRefusal ? (
                 <Badge tone="danger">REFUSED — nothing retrieved</Badge>
               ) : null}
+              {answer.plan.entity ? (
+                <Badge tone="ok">
+                  narrowed to {answer.plan.entity.kind} · {answer.plan.entity.name}
+                </Badge>
+              ) : null}
               {answer.answer.subjectFiltered ? null : (
                 <Badge tone="warn">no filter — every record in scope</Badge>
               )}
@@ -201,6 +275,16 @@ export default function CopilotPage() {
                 own qualification, not as a footnote elsewhere on the page */}
             {answer.answer.unfilteredSubjectCaveat ? (
               <p className={v.errLine}>{answer.answer.unfilteredSubjectCaveat}</p>
+            ) : null}
+            {/* ADR-0096 — and its opposite: the subject that WAS resolved, by
+                id, so the narrowing is checkable rather than merely claimed */}
+            {answer.plan.entity ? (
+              <p className={v.dim}>
+                Subject resolved: &ldquo;{answer.plan.entity.matchedOn}&rdquo; in your question
+                resolved, within your own scope, to the {answer.plan.entity.kind}{" "}
+                <strong>{answer.plan.entity.name}</strong> (<code>{answer.plan.entity.id}</code>),
+                and every figure above was retrieved with that as a SQL filter.
+              </p>
             ) : null}
             <p className={v.faint}>{answer.answer.scopeCaveat}</p>
             <p className={v.faint}>{answer.note}</p>
