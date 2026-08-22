@@ -301,9 +301,16 @@ describe("L6a — the copilot answers from retrieved governance objects, or refu
     // a scope with no rows at all: a brand-new non-admin user is a member of no
     // project, so the fail-closed scope selects NOTHING (not everything)
     const stranger = await makeUser("l6-stranger@example.com");
+    // ADR-0096 NOTE. This question is deliberately all-lowercase so it names no
+    // extractable subject and reaches the EMPTY-RETRIEVAL gate, which is what
+    // this test is about. The question it replaced ("what does the
+    // Sarbanes-Oxley Act require of a nonexistent widget?") now refuses one
+    // gate EARLIER, as an unresolved subject — also correct, also a refusal,
+    // and pinned below so the interaction between the two gates is a recorded
+    // fact rather than something a future reader has to rediscover.
     const res = await post(
       "/v1/copilot/ask",
-      { question: "what does the Sarbanes-Oxley Act require of a nonexistent widget?" },
+      { question: "which denied decisions happened this week?" },
       stranger.auth,
     );
     expect(res.statusCode).toBe(201);
@@ -315,6 +322,21 @@ describe("L6a — the copilot answers from retrieved governance objects, or refu
     expect(body.answer.citedObjectIds).toEqual([]);
     // the refusal is a refusal, not a claim about the world
     expect(body.answer.text).toMatch(/never 'no such thing exists'/);
+
+    // ADR-0096 — THE TWO GATES, PINNED SIDE BY SIDE. The same stranger asking
+    // the ORIGINAL phrasing refuses at the SUBJECT gate instead, before any
+    // retrieval runs, with its own status and its own reason. Both are
+    // refusals; a caller can tell them apart, which is the whole point of
+    // giving the subject failure a name of its own.
+    const named = await post(
+      "/v1/copilot/ask",
+      { question: "what does the Sarbanes-Oxley Act require of a nonexistent widget?" },
+      stranger.auth,
+    );
+    expect(named.statusCode).toBe(422);
+    expect(named.json().error).toBe("copilot_entity_unresolved");
+    expect(named.json().detail).toMatch(/^UNRESOLVED SUBJECT/);
+    expect(named.json().detail).not.toContain("NOTHING RETRIEVED");
   });
 
   it("DISCARDS a narration that answered over an empty retrieval, and audits it", async () => {
@@ -340,7 +362,9 @@ describe("L6a — the copilot answers from retrieved governance objects, or refu
         method: "POST",
         url: "/v1/copilot/ask",
         headers: stranger.auth,
-        payload: { question: "what does SOX require?", narratorAgentId: agentA },
+        // ADR-0096: all-lowercase and subject-free on purpose, so this reaches
+        // the empty retrieval this test is about rather than the subject gate
+        payload: { question: "which denied decisions happened this week?", narratorAgentId: agentA },
       });
       expect(res.statusCode).toBe(201);
       const body = res.json();
