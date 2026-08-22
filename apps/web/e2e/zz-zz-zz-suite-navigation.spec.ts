@@ -274,8 +274,10 @@ test("home keeps orientation + at-a-glance stats ABOVE the launcher tiles", asyn
   await page.goto("/ui/");
   // the three live numbers of the at-a-glance card (they survive dismissal —
   // the just-shipped rework this must not regress)
+  // ("attributed spend" also captions the Cost & Optimization tile below, so
+  // take the first match — DOM order puts the at-a-glance card first)
   for (const label of ["decisions waiting on a human", "governed calls metered", "attributed spend"]) {
-    await expect(page.getByText(label, { exact: true })).toBeVisible();
+    await expect(page.getByText(label, { exact: true }).first()).toBeVisible();
   }
   const statsBox = await page.getByText("governed calls metered", { exact: true }).boundingBox();
   const tilesBox = await page.getByTestId("suite-tile-ai-governance").boundingBox();
