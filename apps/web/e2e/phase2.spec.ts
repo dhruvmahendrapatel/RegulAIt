@@ -76,7 +76,15 @@ test.afterAll(async () => {
   await page.close();
 });
 
+/**
+ * Navigate via the sidebar's "/" filter. Under ADR-0094 the sidebar shows one
+ * suite at a time, so a bare click-by-label only works inside the current
+ * suite; the filter is the designed cross-suite path (it searches EVERY
+ * destination), so every journey below exercises it. Selecting an entry
+ * clears the filter again.
+ */
 async function nav(label: string, heading: string) {
+  await page.getByLabel("Filter navigation").fill(label);
   await page.getByRole("link", { name: label, exact: true }).click();
   await expect(page.getByRole("heading", { name: heading, exact: true })).toBeVisible();
 }
@@ -114,26 +122,48 @@ test("admin login: one-time password → forced change → dashboard shows admin
   await page.getByRole("button", { name: "Set password & continue" }).click();
 
   await expect(page.getByRole("heading", { name: /Welcome back/ })).toBeVisible();
-  // the admin nav sections (ADR-0093 IA) render as real headings, no
-  // "classic ↗" bridges
-  for (const group of [
-    "Overview",
-    "Approvals & Audit",
-    "AI Governance",
-    "Access Reviews",
-    "Policies & Gates",
-    "Quality & Security",
-    "Identity & Access",
-    "Integrations",
-    "Cost & Optimization",
-    "Compliance & Infra",
-    "Settings",
-  ]) {
-    await expect(page.getByText(group, { exact: true })).toBeVisible();
+  // ADR-0094 replaced the always-visible 11-section rail with a home launcher
+  // plus a suite-scoped sidebar. The old assertion (every ADR-0093 section
+  // heading visible at once) is restated at equivalent strength for the new
+  // IA: every suite must be offered by BOTH the launcher's tile grid and the
+  // sidebar's switcher — the two affordances that replaced "everything is
+  // always on screen" — so nothing is stranded. No "classic ↗" bridges.
+  const suites = [
+    ["workspace", "Workspace"],
+    ["ai-governance", "AI Governance"],
+    ["access-reviews", "Access Reviews"],
+    ["approvals-audit", "Approvals & Audit"],
+    ["policies-gates", "Policies & Gates"],
+    ["quality-security", "Quality & Security"],
+    ["compliance-infra", "Compliance & Infra"],
+    ["cost-optimization", "Cost & Optimization"],
+    ["identity-access", "Identity & Access"],
+    ["integrations", "Integrations"],
+    ["settings", "Settings"],
+  ] as const;
+  const switcher = page.getByLabel("Switch suite");
+  await expect(switcher).toBeVisible();
+  for (const [id, name] of suites) {
+    await expect(page.getByTestId(`suite-tile-${id}`)).toBeVisible();
+    await expect(switcher.locator("option", { hasText: name })).toHaveCount(1);
   }
+  // and there are no surprise extra suites in either affordance
+  await expect(page.locator('[data-testid^="suite-tile-"]')).toHaveCount(suites.length);
+  await expect(switcher.locator("option")).toHaveCount(suites.length);
   await expect(page.locator("text=classic ↗")).toHaveCount(0);
   await shot(page, "phase2-01-admin-dashboard");
-  track.assertClean("admin login + dashboard");
+
+  // the sidebar scopes to ONE suite: launching AI Governance shows its own
+  // entries (including the coalesced Overview section) and no other suite's
+  await page.getByTestId("suite-tile-ai-governance").click();
+  await expect(page.getByRole("heading", { name: "Posture", exact: true })).toBeVisible();
+  const aside = page.locator("aside");
+  await expect(aside.getByRole("link", { name: "Use cases", exact: true })).toBeVisible();
+  await expect(aside.getByRole("link", { name: "Reports", exact: true })).toBeVisible();
+  await expect(aside.getByRole("link", { name: "Users", exact: true })).toHaveCount(0);
+  await expect(aside.getByRole("link", { name: "Chat", exact: true })).toHaveCount(0);
+  await shot(page, "phase2-01b-ai-governance-suite");
+  track.assertClean("admin login + launcher + scoped sidebar");
 });
 
 test("users: create a user, issue a one-time password and an API key (one-time reveals)", async () => {

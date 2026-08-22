@@ -162,6 +162,8 @@ test.describe("ADR-0066 virtual keys — the surface the ADR said did not exist"
   });
 
   const gotoPage = async () => {
+    // ADR-0094: the sidebar is suite-scoped; the "/" filter reaches any suite
+    await page.getByLabel("Filter navigation").fill("Virtual keys");
     await page.getByRole("link", { name: "Virtual keys", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Virtual keys", exact: true })).toBeVisible();
   };
@@ -294,6 +296,7 @@ test.describe("ADR-0069 cross-vendor cost consolidation — metered and imported
   });
 
   const gotoPage = async () => {
+    await page.getByLabel("Filter navigation").fill("Cross-vendor consolidation");
     await page.getByRole("link", { name: "Cross-vendor consolidation", exact: true }).click();
     await expect(
       page.getByRole("heading", { name: "Cross-vendor cost consolidation", exact: true }),
@@ -488,6 +491,7 @@ test.describe("ADR-0071 raw evidence import — the verification claim reaches t
   });
 
   const gotoPage = async () => {
+    await page.getByLabel("Filter navigation").fill("Shadow-AI discovery");
     await page.getByRole("link", { name: "Shadow-AI discovery", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Shadow-AI discovery", exact: true })).toBeVisible();
   };
@@ -598,6 +602,7 @@ test.describe("ADR-0072 — an operator can SEE which baselines are stranded", (
   });
 
   test("the scoring-semantics card states what a score MEANT, per version", async () => {
+    await page.getByLabel("Filter navigation").fill("Evaluations");
     await page.getByRole("link", { name: "Evaluations", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Evaluations", exact: true })).toBeVisible();
 
