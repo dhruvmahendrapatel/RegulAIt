@@ -21,6 +21,34 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-08-22 (later) — the autonomous queue is EMPTY: B1–B5 and L6 all landed.** Everything
+buildable without further owner input is built, each slice agent-built then independently
+re-verified on a second fresh database. **B2** (ADR-0090/0091): campaign expiry sweep on the
+real scheduler that decides nothing, review reassignment reusing ADR-0046's escalation with
+the holder-bar covering both holder shapes, SoD **N-way** sets (refusing only the completing
+mint) and pattern selectors on three enumerable dimensions (no free regex). **B3**
+(ADR-0080/0086/0089, migration 0098): three enforcement opt-ins, all default-off and proven
+byte-identical until flipped — use-case dispatch gate (`off|warn|enforce`), staleness-forces-
+recertification deepening ADR-0045's gate, intent capture with post-approval edits refused by
+name. **B4** (ADR-0063, migration 0099): the resumable transactional **key re-encryption
+walk** — watermark advanced inside the rewrite transaction, fail-closed registry drift check,
+corrupt rows recorded with `completed_with_failures` never `completed`, kill/resume proven.
+**B5** (ADR-0049/0052): six test files cured of shared-scratch-DB collisions (proven both
+directions), the framework cost floor genuinely sourced from the cascade, first two tier flags
+enforced at their enabling acts. **L6 + L24's model-judged half** (ADR-0056/0092 amendments,
+migration 0100): the **governance copilot is live through governed dispatch** — grounding
+moved from counts to retrieved object ids, an empty retrieval is a refusal (the live model
+itself refused a nonsense object), proposals gained a consent-gated applier riding the real
+choke points (`applyRuleEdit`, the one grant-revocation function — never a raw write) with
+two kinds honestly named unapplied, and recommendations gained an opt-in `model-judged`
+annotation layer that never touches deterministic evidence. Two live-driven fixes: narration
+was structurally impossible at a 1024-token ceiling on a reasoning model (981 thought tokens,
+39 of JSON, correctly discarded) — ceilings raised and measured. Gateway **2437 passing + 9
+MinIO skips / 153 files**, shared **742**, Playwright **136/136**. Process: **M-022** logged —
+the first L6 attempt was lost when a workspace rollback erased its unpushed commits, so agents
+in this container now push every scoped commit immediately. Remaining work is owner-gated only
+(L13, L19, PII floor default, other providers' keys, live PM creds).
+
 **2026-08-22 — the credential is UNPARKED, live-proven; owner testing is live; the follow-up
 queue is landing.** The owner supplied a Google/Gemini key and live-instrument verification
 passed **V1–V7** ([LIVE_VERIFICATION_2026-08.md](../docs/product/LIVE_VERIFICATION_2026-08.md),
