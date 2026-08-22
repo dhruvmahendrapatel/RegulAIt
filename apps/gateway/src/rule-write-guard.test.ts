@@ -35,9 +35,14 @@ import { fileURLToPath } from "node:url";
 
 const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)));
 
-/** the four tables ADR-0073 turned into read-models, by the drizzle symbol they
- * are reachable through — `packages/db/src/schema.ts` exports no other handle */
-const RULE_TABLE_SYMBOLS = ["approvalRules", "rateLimits", "dataScopeRules", "complianceProfiles"];
+/** the tables the versioning layer turned into read-models, by the drizzle
+ * symbol they are reachable through — `packages/db/src/schema.ts` exports no
+ * other handle. The four rule tables are ADR-0073's; `agents` joined in batch
+ * B1 when `agent_config` gained a dispatch-time resolver, because its
+ * `model`/`costPerMTokIn`/`costPerMTokOut` columns are now versioned and a
+ * bare write to them on a versioned agent would be the same silently-discarded
+ * edit ADR-0074 closed for rules. */
+const RULE_TABLE_SYMBOLS = ["approvalRules", "rateLimits", "dataScopeRules", "complianceProfiles", "agents"];
 
 /**
  * THE AUDITED WRITER SET. Every entry states, in the `why`, what makes that
@@ -127,6 +132,48 @@ const AUDITED_WRITERS: AuditedWriter[] = [
       "POST /v1/onboarding/compliance-pack — the CREATE half only, split the same way as the profiles route. " +
       "A pack RE-APPLY over an existing profile goes through applyRuleEdit, which is what makes the wizard's " +
       "documented idempotence honest rather than a silent overwrite of a versioned profile.",
+  },
+  // --- batch B1: the `agents` writer set (agent_config's read-model) --------
+  {
+    file: "config-versions.ts",
+    method: "update",
+    expr: "agents",
+    why:
+      "`activateVersion`'s agent_system_prompt read-model write — refreshes `agents.systemPrompt` from the " +
+      "newly-active PROMPT version, inside the activation transaction (ADR-0074). `systemPrompt` is versioned " +
+      "as its own artifact type and is deliberately NOT an agent_config field, so this writer cannot touch " +
+      "the batch-B1 versioned columns (model/costPerMTokIn/costPerMTokOut); those are written only by " +
+      "`writeRuleReadModel` through the VERSIONED_RULE_FIELDS filter.",
+  },
+  {
+    file: "agents-connectors.ts",
+    method: "update",
+    expr: "agents",
+    count: 3,
+    why:
+      "POST /v1/agents/:id/enabled, /owner and /lifecycle — three audited governance routes that write ONLY " +
+      "`enabled`, `ownerUserId` and the three lifecycle columns. None of those is an agent_config versioned " +
+      "field (the batch-B1 scope line refuses them from version bodies for exactly this reason: they are " +
+      "governance gates and accountability records with their own routes, not dispatch config), so no " +
+      "read-model divergence is possible. A fourth `.update(agents)` writing model or a price column must go " +
+      "through `applyRuleEdit` and raises this count.",
+  },
+  {
+    file: "agents-connectors.ts",
+    method: "insert",
+    expr: "agents",
+    why:
+      "POST /v1/agents — CREATE ONLY, `defaultRandom()` id, no ON CONFLICT: a brand-new agent cannot have an " +
+      "agent_config version at the instant it is written, so the raw row is served (the same reasoning as the " +
+      "three rule create routes).",
+  },
+  {
+    file: "regulait-llm.ts",
+    method: "insert",
+    expr: "agents",
+    why:
+      "the RegulAIt-LLM bootstrap registration — CREATE ONLY, same shape as POST /v1/agents: a fresh row with " +
+      "a random id and no ON CONFLICT, which cannot yet have versions.",
   },
   {
     file: "org-settings.ts",
@@ -326,11 +373,16 @@ describe("ADR-0074 — the rule tables have an ENUMERATED writer set", () => {
     expect(aliased).toEqual([]);
   });
 
-  it("no raw SQL statement writes the four tables behind the ORM's back", () => {
+  it("no raw SQL statement writes the watched tables behind the ORM's back", () => {
     const offenders: string[] = [];
-    const tables = ["approval_rules", "rate_limits", "data_scope_rules", "compliance_profiles"];
+    const tables = ["approval_rules", "rate_limits", "data_scope_rules", "compliance_profiles", "agents"];
     for (const file of FILES) {
-      const src = readFileSync(file, "utf8");
+      // batch B1: comments stripped, exactly as `writesIn` already does — two
+      // files carry the historical sentence "used to be a straight `UPDATE
+      // agents SET system_prompt`" in a doc block, and prose about a write is
+      // not a write. Raw SQL lives in sql`` template strings, which survive
+      // the strip.
+      const src = stripComments(readFileSync(file, "utf8"));
       for (const t of tables) {
         const re = new RegExp(`(insert\\s+into|update)\\s+${t}\\b`, "i");
         if (re.test(src)) offenders.push(`${path.basename(file)}:${t}`);

@@ -94,7 +94,13 @@ import {
   decideApprovalSchema,
   deleteRoleSchema,
   evaluateRequestSchema,
+  ruleKindParamSchema,
+  RULE_IDENTITY_FIELDS,
+  RULE_SELECTION_FIELDS,
   setUserAdminSchema,
+  updateApprovalRuleSchema,
+  updateDataScopeRuleSchema,
+  updateRateLimitSchema,
   updateServerSchema,
   updateUserSchema,
 } from "@regulait/shared";
@@ -156,7 +162,8 @@ import {
   deleteServerGrantById,
   deleteToolGrantById,
 } from "./grant-revocation.js";
-import { registerConfigVersionRoutes } from "./config-versions.js";
+import { deleteRuleArtifact, registerConfigVersionRoutes } from "./config-versions.js";
+import { applyRuleEdit, isRuleEditRefusal } from "./rule-writes.js";
 import { ConfigVersionUnresolvableError } from "./rule-versions.js";
 import { registerSpendMonitorRoutes } from "./spend-monitor.js";
 import { registerLineageRoutes } from "./lineage.js";
@@ -1966,6 +1973,89 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       })
       .returning();
     return reply.status(201).send(row);
+  });
+
+  // -------------------------------------------------------------------------
+  // Batch B1 (ADR-0073 residual, ADR-0074's pattern) — the ordinary CRUD
+  // UPDATE/DELETE surface for the three restriction-rule kinds. Until now the
+  // surface was create + list only, plus the field-specific deploy-mode PATCH;
+  // an admin could not edit a rule body or remove a rule through the API at
+  // all (a rule only vanished when its subject cascaded away). Both routes are
+  // honest about versioning from their first day:
+  //
+  //   PATCH  goes through `applyRuleEdit`, ADR-0074's one choke point — a
+  //          versioned rule's enforcing edit MINTS + ACTIVATES a version in
+  //          one transaction (so the 200 tells the truth about enforcement),
+  //          an unversioned rule keeps the plain row write byte-identical to
+  //          pre-ADR-0073 behaviour, an unresolvable artifact refuses with the
+  //          remedy named, and a no-op mints nothing.
+  //   DELETE goes through `deleteRuleArtifact` — the row is deleted, the
+  //          version HISTORY is kept, and the active/canary pointers are
+  //          demoted to 'retired' with an 'artifact_deleted' ledger entry, so
+  //          no version is left claiming to enforce for an artifact that no
+  //          longer exists (the tombstone ADR-0074 §5 scoped).
+  // -------------------------------------------------------------------------
+  const RULE_CRUD = {
+    approvals: { artifactType: "approval_rule", schema: updateApprovalRuleSchema },
+    "rate-limits": { artifactType: "rate_limit", schema: updateRateLimitSchema },
+    "data-scopes": { artifactType: "data_scope_rule", schema: updateDataScopeRuleSchema },
+  } as const;
+
+  app.patch("/v1/rules/:kind/:ruleId", async (req, reply) => {
+    const { kind, ruleId } = z
+      .object({ kind: ruleKindParamSchema, ruleId: z.string().uuid() })
+      .parse(req.params);
+    const crud = RULE_CRUD[kind];
+    // ADR-0073 §2's scope line, refused with the reason NAMED rather than as a
+    // generic strict-parse error: the selection columns decide WHICH callers a
+    // rule is loaded for, and rebinding a rule to a different subject is a NEW
+    // rule, never an edit of an old one.
+    const offending = Object.keys((req.body ?? {}) as Record<string, unknown>).filter(
+      (k) => RULE_SELECTION_FIELDS.includes(k) || RULE_IDENTITY_FIELDS.includes(k),
+    );
+    if (offending.length > 0) {
+      return reply.status(422).send({
+        error: "selection_field_not_editable",
+        detail:
+          `'${offending.join("', '")}' selects WHICH callers this rule is loaded for (or is its identity); ` +
+          `it is not part of what the rule does and cannot be edited. Create a new rule bound to the new ` +
+          `subject (POST /v1/rules/${kind}) and delete this one instead.`,
+      });
+    }
+    const patch = crud.schema.parse(req.body ?? {});
+    const res = await applyRuleEdit(db, {
+      artifactType: crud.artifactType,
+      artifactId: ruleId,
+      patch,
+      actorUserId: req.authCtx.userId ?? null,
+      label: `edited via PATCH /v1/rules/${kind}/:ruleId`,
+      auditObjectType: "restriction_rule",
+      auditRuleId: "rule-crud-edited",
+      auditDetail: { phase: "rule-crud-edit", ruleKind: kind, patch },
+    });
+    if (isRuleEditRefusal(res)) {
+      return reply.status(res.status).send({ error: res.error, detail: res.detail });
+    }
+    return reply.send({ ...res.row, versionMinted: res.mintedVersion, note: res.note });
+  });
+
+  app.delete("/v1/rules/:kind/:ruleId", async (req, reply) => {
+    const { kind, ruleId } = z
+      .object({ kind: ruleKindParamSchema, ruleId: z.string().uuid() })
+      .parse(req.params);
+    const res = await deleteRuleArtifact(db, {
+      artifactType: RULE_CRUD[kind].artifactType,
+      artifactId: ruleId,
+      actorUserId: req.authCtx.userId ?? null,
+      routeLabel: `DELETE /v1/rules/${kind}/:ruleId`,
+    });
+    if (!res.ok) return reply.status(res.status).send({ error: res.error, detail: res.detail });
+    return reply.send({
+      deleted: true,
+      versionsRetired: res.versionsRetired,
+      versionCount: res.versionCount,
+      note: res.note,
+    });
   });
 
   // --- ADR-0022 approver delegation (admin-managed) -------------------------

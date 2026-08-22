@@ -81,6 +81,9 @@ import {
 } from "@regulait/shared";
 import type { PiiHit } from "@regulait/shared";
 import { guardrailWithheldMarker, guardrailCategoryList } from "@regulait/shared";
+// batch B1 — agent_config resolution at the ONE dispatch core: the active
+// version's model/list-price overlay, and the shadow canary's sampling
+import { applyRuleBody, resolveForShadow, stableKeyFor } from "@regulait/shared";
 import {
   guardrailOutcome,
   recordGuardrailDecision,
@@ -94,7 +97,12 @@ import { mrmDispatchGate } from "./mrm.js";
 // ADR-0079: pillar 2 §2 stage 2 — the invoke→instance join point and the
 // plan-only refusal it makes possible.
 import { guardInstanceAttributedCall } from "./plan-only.js";
-import { newVersion, resolveAgentPromptVersion } from "./config-versions.js";
+import { loadVersions, newVersion, resolveAgentPromptVersion } from "./config-versions.js";
+import {
+  recordCanaryFailure,
+  recordCanaryObservations,
+  type CandidateNote,
+} from "./rule-versions.js";
 import { z } from "zod";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import {
@@ -915,13 +923,184 @@ async function dispatchOnce(
  * this body decides anything about tracing beyond populating `sink` with the
  * ids of rows it was already writing.
  */
+/** batch B1 — the one-line description of an agent's dispatch-execution
+ * config, used as the shadow observation's effect string on BOTH sides so a
+ * divergence is a model or list-price difference and nothing else. Kept a
+ * human-readable sentence fragment rather than JSON because operators read it
+ * verbatim off the divergence endpoint. */
+function agentConfigEffect(a: {
+  model: string | null;
+  costPerMTokIn: number | null;
+  costPerMTokOut: number | null;
+}): string {
+  return (
+    `model=${a.model ?? "(none)"} ` +
+    `pricePerMTok=${a.costPerMTokIn ?? "unpriced"}/${a.costPerMTokOut ?? "unpriced"}`
+  );
+}
+
 async function dispatchAttempt(
   db: Db,
   dataKey: string | undefined,
   args: GovernedDispatchArgs,
   sink: DispatchTraceSink = {},
 ): Promise<DispatchOutcome> {
-  const { userId, served, requestedAgentId, baseline } = args;
+  const { userId, requestedAgentId, baseline } = args;
+
+  // -------------------------------------------------------------------------
+  // Batch B1 (ADR-0073 residual / ADR-0048 deviation 2) — `agent_config`
+  // RESOLVES AT DISPATCH, in the one shared core, the same shape as the
+  // prompt path two hundred lines below and the rule path in
+  // `governedEvaluate`:
+  //
+  //   - no version rows           -> the agents row governs (byte-identical
+  //                                  pre-B1 behaviour for every existing
+  //                                  install — this branch costs one indexed
+  //                                  query that returns zero rows);
+  //   - an ACTIVE version         -> its body (model + list price) is overlaid
+  //                                  onto the served row BEFORE the
+  //                                  dispatchability gate, the provider call,
+  //                                  and the pillar-5 cost attribution, so all
+  //                                  three see one consistent config. This is
+  //                                  the clause that makes activating and
+  //                                  ROLLING BACK an agent_config version
+  //                                  genuinely change dispatch.
+  //   - versions but NO active    -> REFUSED, 409, the ADR-0073 §4 discipline:
+  //                                  the state is unreachable through the API
+  //                                  (the lazy baseline + activateVersion keep
+  //                                  exactly one active) and reachable only by
+  //                                  corruption, and dispatching on a config
+  //                                  with no authoritative statement would
+  //                                  execute (and bill) a model nobody
+  //                                  authorized. Note the deliberate
+  //                                  asymmetry: `agent_system_prompt` keeps
+  //                                  its ADR-0048 fall-back-to-the-column
+  //                                  semantics unchanged — that path shipped
+  //                                  before the fail-closed rule and altering
+  //                                  it here would be a second, unrequested
+  //                                  behaviour change.
+  //   - a CANARY version          -> SHADOW-evaluated only. The candidate's
+  //                                  effective config is computed and one
+  //                                  observation row is recorded per sampled
+  //                                  dispatch; nothing about it can reach the
+  //                                  served config, which is fixed before the
+  //                                  comparison runs.
+  // -------------------------------------------------------------------------
+  let served = args.served;
+  let agentConfigShadow: { note: CandidateNote; candidateBody: Record<string, unknown> } | null = null;
+  if (served) {
+    const cfgVersions = await loadVersions(db, "agent_config", served.id);
+    if (cfgVersions.length > 0) {
+      const detail = args.detail ?? {};
+      const res = resolveForShadow({
+        artifactType: "agent_config",
+        artifactId: served.id,
+        versions: cfgVersions.map((v) => ({
+          id: v.id,
+          version: v.version,
+          status: v.status,
+          canaryPct: v.canaryPct,
+          body: v.body,
+        })),
+        // the same stable key the prompt resolver uses below, so one dispatch
+        // buckets consistently across both artifact types
+        stableKey: stableKeyFor({
+          runId: typeof detail["runId"] === "string" ? (detail["runId"] as string) : null,
+          conversationId:
+            typeof detail["conversationId"] === "string" ? (detail["conversationId"] as string) : null,
+          userId,
+        }),
+      });
+      if (res.unresolvable) {
+        await db.insert(auditLog).values({
+          userId,
+          objectType: "agent",
+          objectId: served.id,
+          detail: { phase: "dispatch", artifactType: "agent_config", ...(args.projectId ? { projectId: args.projectId } : {}) },
+          effect: "deny",
+          ruleId: "config-version-unresolvable",
+          ruleChain: [],
+          reason: res.unresolvable,
+        });
+        return { ok: false, status: 409, error: "config_version_unresolvable", detail: res.unresolvable };
+      }
+      if (res.served) {
+        served = applyRuleBody(
+          "agent_config",
+          served as unknown as Record<string, unknown>,
+          res.served.body,
+        ) as typeof served;
+      }
+      if (res.candidate) {
+        agentConfigShadow = {
+          candidateBody: res.candidate.body,
+          note: {
+            artifactType: "agent_config",
+            artifactId: served.id,
+            candidateVersionId: res.candidate.id,
+            candidateVersion: res.candidate.version,
+            activeVersionId: res.served?.id ?? null,
+            activeVersion: res.served?.version ?? null,
+            canaryPct: res.candidate.canaryPct,
+            bucket: res.bucket,
+          },
+        };
+      }
+    }
+  }
+  // THE SHADOW OBSERVATION. Written before the dispatchability gate on
+  // purpose: the comparison is a statement about CONFIG, valid whether or not
+  // this particular attempt goes on to reach a provider — and writing it here
+  // keeps "one observation per sampled dispatch attempt" a rule with no
+  // exceptions to remember. Both sides carry the SAME ruleId string so
+  // `diverged` is judged purely on the effect (model/price) difference.
+  // Inline and awaited (ADR-0073 disclosure 4: a fire-and-forget measurement
+  // is one whose failures nobody sees) — but a measurement failure must never
+  // fail the dispatch, so every write is caught.
+  if (served && agentConfigShadow) {
+    const servedDesc = agentConfigEffect(served);
+    try {
+      const candidateAgent = applyRuleBody(
+        "agent_config",
+        args.served as unknown as Record<string, unknown>,
+        agentConfigShadow.candidateBody,
+      ) as NonNullable<typeof args.served>;
+      const candidateDesc = agentConfigEffect(candidateAgent);
+      await recordCanaryObservations(
+        db,
+        [agentConfigShadow.note],
+        {
+          servedEffect: servedDesc,
+          servedRuleId: "agent-config",
+          servedReason: `active agent_config — this dispatch executes ${servedDesc}`,
+          candidateEffect: candidateDesc,
+          candidateRuleId: "agent-config",
+          candidateReason:
+            candidateDesc === servedDesc
+              ? `the candidate agent_config resolves to the same dispatch config (${candidateDesc})`
+              : `the candidate agent_config would have executed ${candidateDesc} instead`,
+        },
+        {
+          userId,
+          projectId: args.projectId ?? null,
+          detail: { phase: "agent-config-shadow" },
+        },
+      );
+    } catch (err) {
+      try {
+        await recordCanaryFailure(
+          db,
+          [agentConfigShadow.note],
+          (err as Error)?.message ?? "agent_config shadow evaluation failed",
+          { userId, projectId: args.projectId ?? null, detail: { phase: "agent-config-shadow" } },
+          { effect: servedDesc, ruleId: "agent-config", reason: "active agent_config (served)" },
+        );
+      } catch {
+        // the served dispatch may never be failed by its own measurement
+      }
+    }
+  }
+
   if (!served || !served.model || !isModelProviderKind(served.provider)) {
     return {
       ok: false,

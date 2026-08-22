@@ -50,6 +50,10 @@
  *     compliant with the EU AI Act and is not a certification of anything.
  */
 import { z } from "zod";
+// batch B1 — a pack's cascade PRESET is validated with the SAME check every
+// compliance-profile version body passes: only enforcing profile columns,
+// correctly typed, selection (`tag`) refused. One validator, not two.
+import { validateRuleVersionBody } from "./config-versions.js";
 
 // ---------------------------------------------------------------------------
 // Vocabularies
@@ -257,6 +261,14 @@ export const createCompliancePackSchema = z
      * itself: tagging with this drives the EXISTING cascade. Null = the pack is
      * evidence-only. */
     cascadeTag: z.string().min(1).max(120).nullish(),
+    /** batch B1 (ADR-0058 §2's preset half) — the compliance-profile STARTING
+     * POINT the pack's cascade tag seeds on activation: a partial map of
+     * enforcing `compliance_profiles` columns. Activation FIND-OR-CREATES the
+     * profile from this and never overwrites an existing one. Null/omitted =
+     * the pack ships no starting profile and the admin authors it, exactly as
+     * before this batch. Refused without a cascadeTag: a profile preset with
+     * no tag to hang it on is a claim about nothing. */
+    cascadePreset: z.record(z.unknown()).nullish(),
     controls: z.array(packControlSchema).min(1).max(500),
   })
   .strict()
@@ -270,6 +282,25 @@ export const createCompliancePackSchema = z
         });
       }
       seen.add(c.controlRef);
+    }
+    if (p.cascadePreset != null) {
+      if (p.cascadeTag == null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["cascadePreset"],
+          message:
+            "a cascadePreset requires a cascadeTag — the preset is the profile the tag seeds, and " +
+            "without a tag there is nothing for the §8.3 cascade to key on",
+        });
+      }
+      const rejection = validateRuleVersionBody("compliance_profile", p.cascadePreset);
+      if (rejection) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["cascadePreset"],
+          message: `${rejection.error}: ${rejection.reason}`,
+        });
+      }
     }
   });
 export type CreateCompliancePackInput = z.infer<typeof createCompliancePackSchema>;
@@ -508,6 +539,19 @@ export const DEFAULT_COMPLIANCE_PACKS: CreateCompliancePackInput[] = [
       note: "Authored from the public text. NOT reviewed by counsel — treat as a starting point.",
     },
     cascadeTag: "eu-ai-act-high-risk",
+    // batch B1 — the §8.3 starting point this tag seeds on activation. Each
+    // value cites the obligation that makes it defensible; like every mapping
+    // in this pack it is a STARTING POINT an admin tightens, not legal advice.
+    cascadePreset: {
+      // Art. 19: automatically generated logs kept at least six months
+      auditRetentionDays: 183,
+      // Art. 14 human oversight: connector writes default to read-only so a
+      // human approval sits in front of state-changing acts
+      mcpDefaultMode: "read_only",
+      // Art. 15 robustness/cybersecurity names resilience against attempts to
+      // alter the system's behaviour — prompt injection is that attack here
+      guardrailModes: { prompt_injection: "block" },
+    },
     controls: [
       {
         controlRef: "eu-ai-act:art-12-record-keeping",
@@ -725,6 +769,17 @@ export const DEFAULT_COMPLIANCE_PACKS: CreateCompliancePackInput[] = [
       note: "Administrative and physical safeguards are out of scope for a control plane.",
     },
     cascadeTag: "hipaa",
+    // batch B1 — mirrors the onboarding wizard's HIPAA cascade seed (shared
+    // onboarding.ts COMPLIANCE_PACKS): PHI must not leave the boundary in a
+    // prompt, and 45 CFR 164.316(b)(2) holds documentation six years.
+    cascadePreset: {
+      mcpDefaultMode: "read_only",
+      auditRetentionDays: 2192,
+      piiMode: "block",
+      backupRetentionDays: 2192,
+      patchCadenceDays: 30,
+      guardrailModes: { prompt_injection: "block", semantic_dlp: "block" },
+    },
     controls: [
       {
         controlRef: "hipaa:164.312(b)-audit-controls",
@@ -796,6 +851,16 @@ export const DEFAULT_COMPLIANCE_PACKS: CreateCompliancePackInput[] = [
       note: "A QSA determines CDE scope; this pack does not.",
     },
     cascadeTag: "pci-dss",
+    // batch B1 — cardholder data never reaches a model: PII blocked, one year
+    // of audit retention (v4 req. 10.5.1), 30-day patch cadence (req. 6.3.3).
+    cascadePreset: {
+      mcpDefaultMode: "read_only",
+      auditRetentionDays: 365,
+      piiMode: "block",
+      backupRetentionDays: 365,
+      patchCadenceDays: 30,
+      guardrailModes: { prompt_injection: "block", semantic_dlp: "block" },
+    },
     controls: [
       {
         controlRef: "pci-dss:7.2.1-least-privilege",
@@ -854,6 +919,18 @@ export const DEFAULT_COMPLIANCE_PACKS: CreateCompliancePackInput[] = [
       note: "Broker-dealer scope determination is the firm's own.",
     },
     cascadeTag: "finra",
+    // batch B1 — deliberately MINIMAL: SEA 17a-4(b) makes a six-year record
+    // floor defensible; FINRA is a books-and-records regime, not a PII one, so
+    // no piiMode is claimed. Note the loop this closes: this pack's own
+    // 17a-4-record-retention control is evidenced by
+    // `compliance_profile_cascade` with the retention aspect — activation now
+    // seeds the very profile that control looks for, instead of reporting a
+    // gap the pack itself could have configured away.
+    cascadePreset: {
+      mcpDefaultMode: "read_only",
+      auditRetentionDays: 2192,
+      backupRetentionDays: 2192,
+    },
     controls: [
       {
         controlRef: "finra:3110-supervisory-review",

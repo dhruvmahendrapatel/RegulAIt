@@ -43,15 +43,16 @@
  *     canary would be a rollout mechanism with no way to attribute the
  *     regression it exists to catch.
  *
- * WHAT THIS FILE DOES NOT DO — stated here rather than only in the ADR:
- *   Restriction-rule (`approval_rule` / `rate_limit` / `data_scope_rule` /
- *   `compliance_profile`) versions are STORED, versioned, activatable and
- *   rollback-able through this same surface, but the rules engine does NOT yet
- *   read them: those kernels still read their own tables. §2's SHADOW canary
- *   for restriction rules is therefore not evaluated by anything. The
- *   substrate is real; the wiring for rule types is a follow-up, and
- *   `canaryIsLive` names the boundary in code so nobody mistakes a stored rule
- *   canary for an enforcing one.
+ * WHAT THE PARAGRAPH THAT USED TO END THIS HEADER SAID, AND WHY IT IS GONE:
+ *   as shipped, rule/compliance versions were stored here and read by nothing
+ *   — the kernels read their own tables and the shadow canary evaluated
+ *   nothing. ADR-0073 (migration 0084) closed that: `governedEvaluate` and
+ *   `profilesForTags` resolve the ACTIVE version of every loaded rule/profile
+ *   through `rule-versions.ts`, and the candidate is genuinely evaluated in
+ *   shadow. Batch B1 (2026-08-22) closed the last inert type the same way:
+ *   `agent_config` resolves at the dispatch core (model + list price overlaid
+ *   onto the agents row) with a shadow canary of its own. A stale disclaimer
+ *   claiming none of this is wired would now be the opposite failure.
  */
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
@@ -164,6 +165,13 @@ const RULE_TABLES = {
   rate_limit: rateLimits,
   data_scope_rule: dataScopeRules,
   compliance_profile: complianceProfiles,
+  /** batch B1 — `agent_config` versions overlay the `agents` row (its
+   * versionable fields: model + the two list-price columns), so the agents
+   * table is its baseline source and read-model exactly as a rule's own table
+   * is for a rule. `writeRuleReadModel` filters through
+   * VERSIONED_RULE_FIELDS, so activation can never touch provider, tier,
+   * lifecycle or any other governance/identity column. */
+  agent_config: agents,
 } as const;
 
 type RuleArtifactType = keyof typeof RULE_TABLES;
@@ -630,6 +638,143 @@ export async function activateVersion(
     rollback ? "deny" : "allow",
   );
   return { target: updated, previous, rollback };
+}
+
+// ---------------------------------------------------------------------------
+// Batch B1 (ADR-0073 residual) — DELETING a rule artifact through the ordinary
+// CRUD surface, with the tombstone ADR-0074 §5 scoped.
+// ---------------------------------------------------------------------------
+
+export interface RuleDeleteRefusal {
+  ok: false;
+  status: 404;
+  error: string;
+  detail: string;
+}
+
+export interface RuleDeleteSuccess {
+  ok: true;
+  /** version pointers demoted out of the active/canary space */
+  versionsRetired: number;
+  /** total stored versions this artifact leaves behind (all kept) */
+  versionCount: number;
+  note: string;
+}
+
+/**
+ * Delete ONE rule artifact, and leave its version history TRUE.
+ *
+ * THE SEMANTICS, decided here and pinned by tests (the brief's "an active
+ * version pointing at nothing" question):
+ *
+ *  - The rule ROW is deleted. The next evaluation simply never loads it — the
+ *    scoped SQL pre-filter is what makes a deleted rule unenforceable, with or
+ *    without versions.
+ *  - Every `config_versions` row is KEPT. They are the record of what governed
+ *    the calls made while the rule existed (ADR-0048 property 1: immutable
+ *    history), and deleting them to tidy a dashboard is ADR-0072 §4's rejected
+ *    alternative.
+ *  - The `active`/`canary` POINTERS are demoted to `retired` (canaryPct
+ *    nulled), each demotion appended to the activation ledger as
+ *    `artifact_deleted`. This is the tombstone ADR-0074 §5 named as the
+ *    correct end state: after an explicit delete, no version claims to be
+ *    active or canarying for an artifact that no longer exists, the canaries
+ *    index stops listing a comparison that can never accumulate another
+ *    observation, and `resolveForShadow`'s fail-closed branch stays reserved
+ *    for corruption instead of firing on ordinary housekeeping.
+ *  - NOT `superseded` (means "replaced by a newer active") and NOT
+ *    `rolled_back` (means "an older version was re-activated") — either would
+ *    misstate history, the same reasoning that keeps a displaced canary at
+ *    `draft`.
+ *
+ * One transaction, behind the artifact's own row lock, exactly like
+ * `applyRuleEdit`: a delete racing a mint must serialize, not interleave.
+ *
+ * SCOPE, disclosed: this covers the EXPLICIT route only. A rule that vanishes
+ * through an FK cascade (deleting its user/server/role/team/approver) still
+ * leaves its pointers intact — that path needs the per-table AFTER DELETE
+ * trigger ADR-0074 §5 scoped as its own slice, and the read surfaces disclose
+ * those orphans with `artifactDeleted: true` exactly as before.
+ */
+export async function deleteRuleArtifact(
+  db: Db,
+  args: {
+    artifactType: ConfigArtifactType;
+    artifactId: string;
+    actorUserId: string | null;
+    /** names the route in the ledger and the audit row */
+    routeLabel: string;
+  },
+): Promise<RuleDeleteSuccess | RuleDeleteRefusal> {
+  const table = ruleTableFor(args.artifactType);
+  if (!table) {
+    return {
+      ok: false,
+      status: 404,
+      error: "not_a_rule_artifact",
+      detail: `${args.artifactType} has no rule table, so there is nothing to delete here`,
+    };
+  }
+  return db.transaction(async (tx) => {
+    await lockRuleArtifact(tx, args.artifactType, args.artifactId);
+    const row = await loadRuleRow(tx, args.artifactType, args.artifactId);
+    if (!row) {
+      return {
+        ok: false as const,
+        status: 404 as const,
+        error: "unknown_rule",
+        detail: `no ${args.artifactType} with id ${args.artifactId} exists`,
+      };
+    }
+    const versions = await loadVersions(tx, args.artifactType, args.artifactId);
+    const pointers = versions.filter((v) => v.status === "active" || v.status === "canary");
+    for (const v of pointers) {
+      await tx
+        .update(configVersions)
+        .set({ status: "retired", canaryPct: null })
+        .where(eq(configVersions.id, v.id));
+      await tx.insert(configActivationEvents).values({
+        artifactType: args.artifactType,
+        artifactId: args.artifactId,
+        versionId: v.id,
+        version: v.version,
+        action: "artifact_deleted",
+        actorUserId: args.actorUserId,
+        reason:
+          `${args.routeLabel}: the ${args.artifactType} this ` +
+          `${v.status === "canary" ? `canary (at ${v.canaryPct}%)` : "active version"} belonged to was ` +
+          `deleted — the version row is kept (status 'retired') as the record of what governed calls ` +
+          `while the rule existed, and it can never enforce again`,
+      });
+    }
+    await tx.delete(table).where(eq(table.id, args.artifactId));
+
+    const note =
+      versions.length === 0
+        ? `${args.artifactType} deleted. It had no stored versions, so there is no history to keep.`
+        : `${args.artifactType} deleted. Its ${versions.length} stored version(s) are KEPT — ` +
+          `${pointers.length} pointer(s) demoted to 'retired' and ledgered as 'artifact_deleted' — because ` +
+          `they are the record of what governed the calls made while the rule existed. Nothing about them ` +
+          `can ever enforce again: a deleted rule is never loaded by any evaluation.`;
+
+    await tx.insert(auditLog).values({
+      userId: args.actorUserId ?? NO_IDENTITY,
+      objectType: "restriction_rule",
+      objectId: args.artifactId,
+      detail: {
+        phase: "rule-delete",
+        artifactType: args.artifactType,
+        versionCount: versions.length,
+        versionsRetired: pointers.map((p) => ({ version: p.version, was: p.status })),
+      },
+      effect: "allow",
+      ruleId: "rule-deleted",
+      ruleChain: [],
+      reason: `${args.routeLabel}: ${note}`,
+    });
+
+    return { ok: true as const, versionsRetired: pointers.length, versionCount: versions.length, note };
+  });
 }
 
 // ---------------------------------------------------------------------------

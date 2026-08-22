@@ -112,6 +112,8 @@ export const COMPLIANCE_PACK_RULE_IDS = {
   packRetired: "compliance-pack-retired",
   packDeleted: "compliance-pack-deleted",
   attestationRecorded: "compliance-pack-attestation-recorded",
+  cascadeProfileCreated: "compliance-pack-cascade-profile-created",
+  cascadeProfilePreserved: "compliance-pack-cascade-profile-preserved",
   evaluated: "compliance-pack-evaluated",
   diffComputed: "compliance-pack-diff-computed",
   evaluationDenied: "compliance-pack-evaluation-denied",
@@ -489,6 +491,7 @@ async function insertPack(
       description: input.description ?? null,
       provenance: input.provenance as Record<string, unknown>,
       cascadeTag: input.cascadeTag ?? null,
+      cascadePreset: input.cascadePreset ?? null,
       status: "draft",
       createdByUserId,
     })
