@@ -5,6 +5,7 @@ import {
   and,
   approvals,
   auditLog,
+  complianceProfiles,
   createDb,
   eq,
   gte,
@@ -94,6 +95,10 @@ let alphaId: string; // team A's project — carries the spike
 let betaId: string; // team B's project — the leak target
 let forecastPid: string; // the deterministic ten-day forecast project
 let calmId: string; // same baseline as alpha, ordinary observed day
+// §4 framework-floor fixture (see the "§4 framework cost floor" describe):
+let flooredId: string; // tagged 'spm-floor-block' — profile mandates block
+let alertOnlyId: string; // untagged — the byte-identical control
+let bareTagId: string; // tagged with a tag that has NO profile — null cascade
 const createdUsageIds: string[] = [];
 
 async function makeUser(email: string) {
@@ -269,7 +274,12 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  const pids = [alphaId, betaId, forecastPid, calmId].filter(Boolean);
+  const pids = [alphaId, betaId, forecastPid, calmId, flooredId, alertOnlyId, bareTagId].filter(
+    Boolean,
+  );
+  // the §4 fixture's compliance profile is ORG-WIDE state: only projects
+  // tagged 'spm-floor-block' feel it, but it goes anyway so nothing survives
+  await db.delete(complianceProfiles).where(eq(complianceProfiles.tag, "spm-floor-block"));
   // approvals carry a plain projectId column (no FK), so they do NOT cascade
   // with the project and must go explicitly or every other suite's queue moves
   if (pids.length) {
@@ -607,6 +617,139 @@ describe("ADR-0049 — enforcement lands on the EXISTING approvals queue", () =>
       payload: { status: "dismissed", reason: "spm — second decision must be refused" },
     });
     expect(again.statusCode).toBe(409);
+  });
+});
+
+describe("ADR-0049 §4 — the framework cost floor is SOURCED from the compliance cascade", () => {
+  // Three projects with the SAME baseline and the SAME runaway spike, differing
+  // only in classification — so the ONLY thing that can explain a different
+  // enforcement outcome is the sourced floor:
+  //   floored   tagged 'spm-floor-block' (profile: budgetEnforcement 'block')
+  //   alertOnly untagged                 (the byte-identical control)
+  //   bareTag   tagged 'spm-floor-no-profile-tag' (no profile row -> null cascade)
+  // All three run an 'alert' policy: without the floor every outcome is
+  // alert-only; the floor — and nothing else — raises floored's to
+  // require_approval. Reverting the wiring to `frameworkFloor: null` reddens
+  // the first test and leaves the two controls green (proven during the build).
+  beforeAll(async () => {
+    const prof = await app.inject({
+      method: "POST",
+      url: "/v1/compliance/profiles",
+      headers: AUTH,
+      payload: { tag: "spm-floor-block", budgetEnforcement: "block", piiMode: "log" },
+    });
+    expect(prof.statusCode, prof.body).toBe(201);
+
+    const mk = async (name: string, classifications?: string[]) => {
+      const p = await app.inject({
+        method: "POST",
+        url: "/v1/projects",
+        headers: AUTH,
+        payload: {
+          name,
+          budgetUsd: 5000,
+          budgetApproverUserId: leadAId,
+          ...(classifications ? { classifications } : {}),
+        },
+      });
+      expect(p.statusCode, name).toBe(201);
+      return p.json().id as string;
+    };
+    flooredId = await mk("spm-floored", ["spm-floor-block"]);
+    alertOnlyId = await mk("spm-alert-only");
+    bareTagId = await mk("spm-bare-tag", ["spm-floor-no-profile-tag"]);
+
+    // identical baseline + identical spike, straight from the alpha fixture
+    const midnight = todayUtcMidnight();
+    const baselinePattern = [10, 11, 9, 10, 12, 8, 10, 11, 9, 10];
+    const observedAt = new Date(midnight.getTime() - DAY_MS + 10 * 3600 * 1000);
+    for (const pid of [flooredId, alertOnlyId, bareTagId]) {
+      await seedUsage(
+        Array.from({ length: 30 }, (_, i) => ({
+          userId: leadAId,
+          projectId: pid,
+          at: new Date(midnight.getTime() - (31 - i) * DAY_MS + 10 * 3600 * 1000),
+          costUsd: baselinePattern[i % baselinePattern.length]!,
+          inputTokens: baselinePattern[i % baselinePattern.length]! * 100,
+          outputTokens: 0,
+        })),
+      );
+      await seedUsage([
+        { userId: leadAId, projectId: pid, at: observedAt, costUsd: 400, inputTokens: 400_000, outputTokens: 0 },
+      ]);
+      const pol = await app.inject({
+        method: "PUT",
+        url: "/v1/spend/monitor-policies",
+        headers: AUTH,
+        payload: { projectId: pid, enabled: true, sensitivity: "medium", baselineDays: 30, action: "alert" },
+      });
+      expect(pol.statusCode).toBe(200);
+      const ev = await app.inject({
+        method: "POST",
+        url: "/v1/spend/anomalies/evaluate",
+        headers: AUTH,
+        payload: { projectId: pid },
+      });
+      expect(ev.statusCode).toBe(200);
+    }
+  }, 120_000);
+
+  it("a block-mandating profile RAISES an 'alert' policy to require_approval, disclosed by name", async () => {
+    const [row] = await db
+      .select()
+      .from(spendAnomalies)
+      .where(and(eq(spendAnomalies.projectId, flooredId), eq(spendAnomalies.signal, "spend_spike")));
+    expect(row).toBeTruthy();
+    expect(row!.action).toBe("require_approval");
+    const detail = row!.detail as {
+      enforcement: string;
+      enforcementReason: string;
+      frameworkFloor: string | null;
+    };
+    // the FLOOR ruleId, not the plain policy one — the tightening names its cause
+    expect(detail.enforcement).toBe("spend-anomaly-enforced-framework-floor");
+    expect(detail.frameworkFloor).toBe("block");
+    expect(detail.enforcementReason).toMatch(/compliance framework mandates blocking/i);
+    expect(detail.enforcementReason).toMatch(/floor tightens, never relaxes/i);
+    // and the response is REAL: an item on the one approvals queue, pointed at
+    const [item] = await db
+      .select()
+      .from(approvals)
+      .where(and(eq(approvals.projectId, flooredId), eq(approvals.stageId, SPEND_ANOMALY_STAGE)));
+    expect(item).toBeTruthy();
+    expect(item!.approverUserId).toBe(leadAId);
+    expect(row!.approvalId).toBe(item!.id);
+  });
+
+  it("an UNTAGGED project's 'alert' stays an alert — no queue item, floor null", async () => {
+    const [row] = await db
+      .select()
+      .from(spendAnomalies)
+      .where(and(eq(spendAnomalies.projectId, alertOnlyId), eq(spendAnomalies.signal, "spend_spike")));
+    expect(row).toBeTruthy();
+    expect(row!.action).toBe("alert");
+    expect(row!.approvalId).toBeNull();
+    const detail = row!.detail as { enforcement: string; frameworkFloor: string | null };
+    expect(detail.enforcement).toBe("spend-anomaly-alert-only");
+    expect(detail.frameworkFloor).toBeNull();
+    const queueRows = await db
+      .select()
+      .from(approvals)
+      .where(and(eq(approvals.projectId, alertOnlyId), eq(approvals.stageId, SPEND_ANOMALY_STAGE)));
+    expect(queueRows).toHaveLength(0);
+  });
+
+  it("a tag with NO profile resolves a null cascade — byte-identical to untagged", async () => {
+    const [row] = await db
+      .select()
+      .from(spendAnomalies)
+      .where(and(eq(spendAnomalies.projectId, bareTagId), eq(spendAnomalies.signal, "spend_spike")));
+    expect(row).toBeTruthy();
+    expect(row!.action).toBe("alert");
+    expect(row!.approvalId).toBeNull();
+    const detail = row!.detail as { enforcement: string; frameworkFloor: string | null };
+    expect(detail.enforcement).toBe("spend-anomaly-alert-only");
+    expect(detail.frameworkFloor).toBeNull();
   });
 });
 
