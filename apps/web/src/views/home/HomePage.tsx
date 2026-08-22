@@ -18,6 +18,7 @@ import type {
 import { ago, approvalStageLabel, fmtUsd } from "../../api/format";
 import { useSession } from "../../session/SessionContext";
 import { PageHeader } from "../../shell/AppShell";
+import { SUITES, SuiteGlyph, suiteHome } from "../../shell/suites";
 import {
   Badge,
   Button,
@@ -42,6 +43,7 @@ export default function HomePage() {
       />
       <div className={v.stack}>
         {auth?.isAdmin && <OrientationCard />}
+        {auth?.isAdmin && <SuiteLauncher />}
         {auth?.isAdmin && <SetupCard />}
         <div className={v.grid2}>
           <ApprovalsCard />
@@ -156,6 +158,81 @@ function OrientationCard() {
         )}
       </div>
     </Card>
+  );
+}
+
+/**
+ * ADR-0094 — the product launcher. One tile per suite, rendered from the SAME
+ * array that scopes the sidebar (suites.tsx), so the launcher can never drift
+ * from the navigation. A tile shows a live number only where a query this page
+ * ALREADY runs can supply one (deduped by query key — no per-tile fetches); a
+ * suite without a cheap number shows none rather than inventing one.
+ */
+function SuiteLauncher() {
+  const approvals = useQuery({
+    queryKey: ["approvals"],
+    queryFn: () => api.get<{ approvals: Approval[] }>("/v1/approvals"),
+  });
+  const usage = useQuery({
+    queryKey: ["usage-events"],
+    queryFn: () => api.get<UsageEventsResponse>("/v1/usage-events?limit=100"),
+  });
+  const setup = useQuery({
+    queryKey: ["setup-status"],
+    queryFn: () => api.get<SetupStatusResponse>("/v1/setup/status"),
+  });
+  const runs = useQuery({
+    queryKey: ["runs"],
+    queryFn: () => api.get<{ runs: RunSummary[] }>("/v1/runs"),
+  });
+
+  const pending = (approvals.data?.approvals ?? []).filter((a) => a.status === "pending").length;
+  const stat = (suiteId: string): { value: string; label: string } | null => {
+    switch (suiteId) {
+      case "workspace":
+        return runs.data ? { value: String(runs.data.runs.length), label: "runs" } : null;
+      case "approvals-audit":
+        return approvals.data ? { value: String(pending), label: "waiting on a human" } : null;
+      case "cost-optimization":
+        return usage.data ? { value: fmtUsd(usage.data.totals?.costUsd), label: "attributed spend" } : null;
+      case "settings":
+        return setup.data
+          ? { value: `${setup.data.doneCount}/${setup.data.totalCount}`, label: "setup steps done" }
+          : null;
+      default:
+        return null;
+    }
+  };
+
+  return (
+    <div>
+      <h2 className={v.sectionTitle}>Products</h2>
+      <div className={v.tileGrid}>
+        {SUITES.map((su) => {
+          const n = stat(su.id);
+          return (
+            <Link
+              key={su.id}
+              to={su.id === "workspace" ? "/chat" : suiteHome(su)}
+              className={v.tile}
+              data-testid={`suite-tile-${su.id}`}
+            >
+              <span className={v.tileGlyph}>
+                <SuiteGlyph suiteId={su.id} />
+              </span>
+              <span className={v.tileName}>{su.name}</span>
+              <span className={v.tileDesc}>{su.purpose}</span>
+              {n && (
+                <span className={v.tileStat}>
+                  <span className={v.tileStatValue}>{n.value}</span>
+                  <span className={v.tileStatLabel}>{n.label}</span>
+                </span>
+              )}
+            </Link>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
