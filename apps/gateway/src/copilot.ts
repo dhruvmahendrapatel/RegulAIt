@@ -75,12 +75,17 @@ import {
   type Db,
 } from "@regulait/db";
 import {
+  COPILOT_APPLICABLE_PROPOSAL_KINDS,
   COPILOT_DECISION_SUPPORT_NOTICE,
   COPILOT_SCOPE_CAVEAT,
   COPILOT_TOOL_SPECS,
+  COPILOT_UNAPPLICABLE_PROPOSAL_KINDS,
   buildNarrationPrompt,
   buildProposalRecord,
   copilotAskSchema,
+  copilotGrantRevocationDiffSchema,
+  copilotPolicyTighteningDiffSchema,
+  copilotProposalKindIsApplicable,
   copilotProposalSchema,
   narrationIsGrounded,
   parseNarration,
@@ -97,10 +102,31 @@ import {
 import { evaluateAgent, type AgentDecision } from "@regulait/policy-kernel";
 import { executeGovernedDispatch, type AgentRow } from "./agents-connectors.js";
 import { loadAgentRevocations, loadRoleAgentGrants } from "./entitlements.js";
+import {
+  deleteAgentGrantById,
+  deleteConnectorGrantById,
+  deleteRoleAgentGrantById,
+  deleteRoleConnectorGrantById,
+  deleteRoleServerGrantById,
+  deleteRoleToolGrantById,
+  deleteServerGrantById,
+  deleteToolGrantById,
+} from "./grant-revocation.js";
 import { resolveGuardrailPolicy, runGuardrails } from "./guardrails.js";
 import { callerProjectIds } from "./reporting.js";
+import { applyRuleEdit, isRuleEditRefusal } from "./rule-writes.js";
 
 const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
+
+/** L6b — the rule kind a proposal names, mapped to the `config_versions`
+ * ARTIFACT TYPE `applyRuleEdit` speaks. Same map the admin deploy-mode route
+ * uses; a rule kind outside it cannot be named, because the diff schema's enum
+ * and this map are the same three strings. */
+const APPLY_RULE_ARTIFACT_TYPES = {
+  approvals: "approval_rule",
+  "rate-limits": "rate_limit",
+  "data-scopes": "data_scope_rule",
+} as const;
 
 /** stable rule ids — the strings an operator greps the audit log for */
 export const COPILOT_RULE_IDS = {
@@ -111,6 +137,9 @@ export const COPILOT_RULE_IDS = {
   guardrailActed: "copilot-guardrail-acted",
   proposalOpened: "copilot-proposal-opened",
   proposalRefused: "copilot-proposal-refused",
+  /** L6b — the consent-gated applier */
+  proposalApplied: "copilot-proposal-applied",
+  proposalApplyRefused: "copilot-proposal-apply-refused",
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -237,6 +266,10 @@ export async function retrieveEvidence(
     counts: [],
     samples: [],
     leads: [],
+    // L6a: filled from the SAME scoped selects below. A citable object is a
+    // primary key the caller's own retrieval actually returned — never an id
+    // assembled from a count, and never one from an unscoped query.
+    citableObjects: [],
   };
 
   // THE SCOPE PREDICATES. Built once, applied to every query below. Note they
@@ -268,13 +301,22 @@ export async function retrieveEvidence(
         .orderBy(desc(count()))
         .limit(5),
       db
-        .select({ ruleId: auditLog.ruleId, reason: auditLog.reason })
+        .select({ id: auditLog.id, ruleId: auditLog.ruleId, reason: auditLog.reason, effect: auditLog.effect })
         .from(auditLog)
         .where(where)
         .orderBy(desc(auditLog.at))
         .limit(SAMPLE_LIMIT),
     ]);
     base.rowsExamined = total[0]?.n ?? 0;
+    // L6a — THE CITABLE SET. Ids from the SAME `where` the counts came from,
+    // so an answer can be walked back to concrete rows. The LABEL is the
+    // effect + rule id (facts this gateway wrote), never the `reason` string,
+    // which is the attacker-influenceable half and is handled as a sample.
+    base.citableObjects = samples.map((s) => ({
+      kind: "audit_log" as const,
+      id: s.id,
+      label: `${s.effect} · ${s.ruleId}`,
+    }));
     base.counts.push({ key: "decisions", label: "governance decisions", value: base.rowsExamined });
     for (const e of byEffect) {
       base.counts.push({ key: `effect.${e.effect}`, label: `decisions with effect '${e.effect}'`, value: e.n });
@@ -329,21 +371,32 @@ export async function retrieveEvidence(
       ...(plan.params.status ? [eq(approvals.status, plan.params.status)] : []),
       ...memberScope,
     );
-    const [total, byStatus] = await Promise.all([
+    const [total, byStatus, rows] = await Promise.all([
       db.select({ n: count() }).from(approvals).where(where),
       db.select({ status: approvals.status, n: count() }).from(approvals).where(where).groupBy(approvals.status),
+      db
+        .select({ id: approvals.id, status: approvals.status, objectType: approvals.objectType })
+        .from(approvals)
+        .where(where)
+        .orderBy(desc(approvals.requestedAt))
+        .limit(SAMPLE_LIMIT),
     ]);
     base.rowsExamined = total[0]?.n ?? 0;
     base.counts.push({ key: "approvals", label: "approvals requested", value: base.rowsExamined });
     for (const s of byStatus) {
       base.counts.push({ key: `status.${s.status}`, label: `approvals in state '${s.status}'`, value: s.n });
     }
+    base.citableObjects = rows.map((r) => ({
+      kind: "approval" as const,
+      id: r.id,
+      label: `${r.objectType} · ${r.status}`,
+    }));
     return base;
   }
 
   // summarizeUsage
   const where = and(gte(usageEvents.at, start), lt(usageEvents.at, end), ...usageScope);
-  const [total, grouped] = await Promise.all([
+  const [total, grouped, rows] = await Promise.all([
     db.select({ n: count() }).from(usageEvents).where(where),
     db
       .select({
@@ -356,8 +409,19 @@ export async function retrieveEvidence(
       .groupBy(usageEvents.projectId)
       .orderBy(desc(count()))
       .limit(10),
+    db
+      .select({ id: usageEvents.id, provider: usageEvents.provider, model: usageEvents.model })
+      .from(usageEvents)
+      .where(where)
+      .orderBy(desc(usageEvents.at))
+      .limit(SAMPLE_LIMIT),
   ]);
   base.rowsExamined = total[0]?.n ?? 0;
+  base.citableObjects = rows.map((r) => ({
+    kind: "usage_event" as const,
+    id: r.id,
+    label: `${r.provider} · ${r.model}`,
+  }));
   base.counts.push({ key: "calls", label: "measured model/tool calls", value: base.rowsExamined });
   for (const g of grouped) {
     base.counts.push({
@@ -564,6 +628,9 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
     let generation: "grounded" | "model" = "grounded";
     let narratorAgentId: string | null = null;
     let narrationError: string | null = null;
+    /** L6a: true only once a narration has PASSED `narrationIsGrounded` */
+    let narrationGroundingChecked = false;
+    let narrationRefused = false;
 
     if (body.narratorAgentId) {
       const [agent] = await db.select().from(agents).where(eq(agents.id, body.narratorAgentId));
@@ -603,6 +670,8 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
         answerText = `${grounded.text}\n\n--- narration ---\n${narration.text}`;
         generation = "model";
         narratorAgentId = agent.id;
+        narrationGroundingChecked = true;
+        narrationRefused = narration.refused;
       } catch (err) {
         // THE GROUNDED ANSWER STANDS. A narration that failed, or that cited a
         // figure the retrieval never produced, is DISCARDED — never merged in
@@ -663,14 +732,33 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
     return reply.status(201).send({
       query: { ...row, evidence: undefined },
       plan,
-      answer: { ...grounded, text: answerText, generation },
+      answer: {
+        ...grounded,
+        text: answerText,
+        generation,
+        // L6a — an HONEST per-answer flag, not a build-wide constant. True means
+        // exactly one thing: THIS narration was cross-checked against THIS
+        // retrieval's counts and object ids and passed. It is never a claim
+        // that the model is generally reliable.
+        modelNarrationVerified: narrationGroundingChecked,
+        // the refusal is the grounded layer's, or the model's own agreement
+        // with it — either way the caller sees "nothing to answer from"
+        groundedRefusal: grounded.groundedRefusal || narrationRefused,
+      },
       evidence,
       scope: { projectIds: scope.projectIds, statement: scope.statement },
       ...(narrationError ? { narrationDiscarded: narrationError } : {}),
-      note:
-        "The retrieval, scoping and grounding above are real and tested. NO MODEL PROVIDER IS " +
-        "CONNECTED IN THIS BUILD, so any narration path is unverified — `modelNarrationVerified` is " +
-        "false on every answer.",
+      note: narrationGroundingChecked
+        ? "The retrieval, scoping and grounding above are real and tested. A model narration was " +
+          "added on top and CROSS-CHECKED against this retrieval — every count key and every " +
+          "governance-object id it cited was one this caller's own scoped query returned. The " +
+          "counts remain the authoritative answer; the narration is prose over them."
+        : narrationError
+          ? "The retrieval, scoping and grounding above are real and tested. A model narration was " +
+            "attempted and DISCARDED (see `narrationDiscarded`); the grounded, count-derived answer " +
+            "stands alone."
+          : "The retrieval, scoping and grounding above are real and tested. No narrator agent was " +
+            "named, so this answer is the grounded, count-derived one and no model was called.",
     });
   });
 
@@ -775,6 +863,233 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
       proposal,
       approvalId: approval!.id,
       note: record.note,
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // L6b — THE CONSENT-GATED APPLIER.
+  //
+  // ADR-0056's amendment named this gap outright: "an approved proposal is not
+  // applied by anything… the worked example loop stops at 'approved', not at
+  // 'revoked'." This closes it, and the shape of the closure is the whole
+  // point:
+  //
+  //  * CONSENT FIRST. The gate is the LINKED APPROVAL's status in the ONE
+  //    existing approvals queue — reused, never forked. Pending, denied, and
+  //    "no approval row at all" each refuse by their own name, audited, with
+  //    the mutation not attempted.
+  //  * THROUGH THE PUBLIC DOOR, NEVER PAST IT. A rule edit rides `applyRuleEdit`
+  //    (ADR-0074's one choke point, so a versioned rule mints and activates a
+  //    version instead of silently drifting); a grant removal rides the
+  //    one-per-kind function in `grant-revocation.ts` that `DELETE /v1/grants/…`
+  //    and an ADR-0090 campaign's revoke decision both call. There is no raw
+  //    table write in this handler, and a kind whose change has no such door
+  //    is REFUSED BY NAME rather than approximated.
+  //  * ATTRIBUTED TO THE HUMAN. The audit row is written under the applying
+  //    admin's identity with the proposal as context. The copilot proposed;
+  //    a named person consented; a named person applied.
+  //  * ONCE. `applied_at` is the idempotency gate — a second apply is refused,
+  //    never re-executed.
+  // -------------------------------------------------------------------------
+  app.post("/v1/copilot/proposals/:proposalId/apply", async (req, reply) => {
+    const { proposalId } = z.object({ proposalId: z.string().uuid() }).parse(req.params);
+    const userId = req.authCtx.userId ?? null;
+
+    const [proposal] = await db.select().from(copilotProposals).where(eq(copilotProposals.id, proposalId));
+    if (!proposal) return reply.status(404).send({ error: "unknown_copilot_proposal" });
+
+    /** every refusal takes this path: audited as a deny, naming the proposal */
+    const refuse = async (status: number, error: string, detail: string, extra: Record<string, unknown> = {}) => {
+      await audit(
+        userId,
+        "copilot_proposal",
+        proposal.id,
+        COPILOT_RULE_IDS.proposalApplyRefused,
+        `refused to apply copilot proposal '${proposal.title}' (${proposal.kind}): ${detail}`,
+        { kind: proposal.kind, error, ...extra },
+        "deny",
+      );
+      return reply.status(status).send({ error, detail });
+    };
+
+    // ALREADY APPLIED. Checked before consent so a replay cannot re-execute a
+    // mutation just because the approval is still 'approved'.
+    if (proposal.appliedAt) {
+      return refuse(
+        409,
+        "proposal_already_applied",
+        `this proposal was already applied at ${proposal.appliedAt.toISOString()}. Applying is a ` +
+          `mutation, so it happens once; propose a new change rather than re-applying this one.`,
+        { appliedAt: proposal.appliedAt.toISOString() },
+      );
+    }
+
+    // ---- THE CONSENT GATE ---------------------------------------------------
+    if (!proposal.approvalId) {
+      return refuse(
+        409,
+        "proposal_has_no_approval",
+        "this proposal carries no Approvals-Queue item, so no human has consented to it. The " +
+          "copilot's only route to a change is a proposal a named human approves.",
+      );
+    }
+    const [approval] = await db.select().from(approvals).where(eq(approvals.id, proposal.approvalId));
+    if (!approval) {
+      return refuse(
+        409,
+        "proposal_approval_missing",
+        "the Approvals-Queue item this proposal was opened against no longer exists, so there is " +
+          "no recorded consent to apply.",
+        { approvalId: proposal.approvalId },
+      );
+    }
+    if (approval.status !== "approved") {
+      return refuse(
+        409,
+        "proposal_not_approved",
+        `the linked approval is '${approval.status}', not 'approved'. A copilot proposal is applied ` +
+          `only on a named human's recorded consent through the one approvals queue — the copilot ` +
+          `cannot consent on anyone's behalf and neither can this endpoint.`,
+        { approvalId: approval.id, approvalStatus: approval.status },
+      );
+    }
+
+    // ---- THE KIND GATE ------------------------------------------------------
+    if (!copilotProposalKindIsApplicable(proposal.kind)) {
+      return refuse(
+        422,
+        "proposal_kind_not_applicable",
+        COPILOT_UNAPPLICABLE_PROPOSAL_KINDS[proposal.kind] ??
+          `there is no public endpoint that applies a '${proposal.kind}' proposal, and this endpoint ` +
+            `will not write the change directly.`,
+        { applicableKinds: COPILOT_APPLICABLE_PROPOSAL_KINDS },
+      );
+    }
+
+    // ---- THE MUTATION, THROUGH THE PUBLIC DOOR ------------------------------
+    let applied: Record<string, unknown>;
+    let reason: string;
+
+    if (proposal.kind === "grant_revocation") {
+      const parsedDiff = copilotGrantRevocationDiffSchema.safeParse(proposal.diff);
+      if (!parsedDiff.success) {
+        return refuse(
+          422,
+          "proposal_diff_invalid",
+          `a grant_revocation diff must name {grantKind, grantId}; this one does not (${parsedDiff.error.issues
+            .map((i) => i.path.join(".") || "(root)")
+            .join(", ")}).`,
+        );
+      }
+      const { grantKind, grantId } = parsedDiff.data;
+      // ADR-0090's ONE removal implementation per kind — the exact function the
+      // DELETE endpoints and a campaign's revoke decision call. Not a copy.
+      const removers = {
+        agent: deleteAgentGrantById,
+        connector: deleteConnectorGrantById,
+        tool: deleteToolGrantById,
+        server: deleteServerGrantById,
+        role_agent: deleteRoleAgentGrantById,
+        role_connector: deleteRoleConnectorGrantById,
+        role_tool: deleteRoleToolGrantById,
+        role_server: deleteRoleServerGrantById,
+      } as const;
+      const removed = await removers[grantKind](db, grantId);
+      if (!removed) {
+        return refuse(
+          404,
+          "proposal_target_gone",
+          `the ${grantKind} grant this proposal names (${grantId}) no longer exists — nothing was ` +
+            `removed, and the proposal stays unapplied so the record does not claim a change that ` +
+            `did not happen.`,
+          { grantKind, grantId },
+        );
+      }
+      applied = { via: "grant-revocation", grantKind, grantId, removed: true };
+      reason =
+        `applied copilot proposal '${proposal.title}': removed ${grantKind} grant ${grantId} through the ` +
+        `same one-per-kind removal the DELETE /v1/grants endpoints and an ADR-0090 campaign's revoke ` +
+        `decision use. Consent came from approval ${approval.id}; this act is attributed to the ` +
+        `applying admin, not to the copilot`;
+    } else {
+      const parsedDiff = copilotPolicyTighteningDiffSchema.safeParse(proposal.diff);
+      if (!parsedDiff.success) {
+        return refuse(
+          422,
+          "proposal_diff_invalid",
+          `a policy_tightening diff must name {ruleKind, ruleId, patch}; this one does not (${parsedDiff.error.issues
+            .map((i) => i.path.join(".") || "(root)")
+            .join(", ")}).`,
+        );
+      }
+      const { ruleKind, ruleId, patch } = parsedDiff.data;
+      const artifactType = APPLY_RULE_ARTIFACT_TYPES[ruleKind];
+      // ADR-0074's ONE DOOR. Never a `.update()` on the rule table: a versioned
+      // rule must mint and activate, or the admin sees an edit that enforces
+      // nothing — which in a governance product is worse than a refusal.
+      const res = await applyRuleEdit(db, {
+        artifactType,
+        artifactId: ruleId,
+        patch,
+        actorUserId: userId,
+        label: `applied copilot proposal ${proposal.id}`,
+        reason:
+          `${ruleKind} rule tightened by applying copilot proposal '${proposal.title}' ` +
+          `(approval ${approval.id})`,
+        auditObjectType: "restriction_rule",
+        auditRuleId: "copilot-proposal-rule-edit",
+        auditDetail: {
+          phase: "copilot-proposal-apply",
+          ruleKind,
+          copilotProposalId: proposal.id,
+          approvalId: approval.id,
+        },
+      });
+      if (isRuleEditRefusal(res)) {
+        // THE CHOKE POINT'S OWN REFUSAL, SURFACED VERBATIM. The applier does not
+        // get a way around a refusal an admin editing by hand would hit.
+        return refuse(res.status, res.error, res.detail, { ruleKind, ruleId });
+      }
+      applied = {
+        via: "applyRuleEdit",
+        ruleKind,
+        ruleId,
+        versionMinted: res.mintedVersion,
+        note: res.note,
+      };
+      reason =
+        `applied copilot proposal '${proposal.title}': edited ${ruleKind} rule ${ruleId} through ` +
+        `applyRuleEdit, ADR-0074's single door for every rule-table write` +
+        (res.mintedVersion ? ` (config version minted and activated)` : ` (unversioned rule: plain row write)`) +
+        `. Consent came from approval ${approval.id}; this act is attributed to the applying admin, ` +
+        `not to the copilot`;
+    }
+
+    const [updated] = await db
+      .update(copilotProposals)
+      .set({ appliedAt: new Date(), appliedByUserId: userId, appliedResult: applied })
+      .where(eq(copilotProposals.id, proposal.id))
+      .returning();
+
+    await audit(userId, "copilot_proposal", proposal.id, COPILOT_RULE_IDS.proposalApplied, reason, {
+      kind: proposal.kind,
+      approvalId: approval.id,
+      // THE PROPOSAL AS CONTEXT: what was proposed, on what evidence, and what
+      // the choke point actually did — all on the one row an auditor reads.
+      copilotProposalId: proposal.id,
+      copilotQueryId: proposal.queryId,
+      proposedByUserId: proposal.proposedByUserId,
+      diff: proposal.diff,
+      applied,
+    });
+
+    return reply.send({
+      proposal: updated,
+      applied,
+      note:
+        "APPLIED UNDER THE ADMIN'S OWN IDENTITY, through the same public endpoint an admin would " +
+        "use by hand. The copilot proposed the change and a named human approved it; neither the " +
+        "copilot nor this endpoint may apply anything that is not approved.",
     });
   });
 

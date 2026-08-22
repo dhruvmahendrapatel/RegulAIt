@@ -1897,6 +1897,13 @@ export const updateOrgSettingsSchema = z
      * one the schema holds) unless at least one linked use case is approved.
      * A project no use case links is untouched in every mode. */
     useCaseGateMode: z.enum(["off", "warn", "enforce"]).optional(),
+    /** ADR-0092 amendment (migration 0100, L6c): may the deterministic
+     * access-recommendation findings carry a MODEL-JUDGED annotation? false
+     * (default) = the report is the six deterministic rules and nothing else.
+     * The agent id names the judge; null clears it. An enabled knob with no
+     * dispatchable judge reports `judged: unavailable` and changes nothing. */
+    recommendationJudgeEnabled: z.boolean().optional(),
+    recommendationJudgeAgentId: z.string().uuid().nullable().optional(),
     // budgets
     budgetEnforcement: budgetEnforcementSchema.optional(),
     budgetHardBlockPct: z.number().int().min(1).max(100).optional(),

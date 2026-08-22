@@ -356,6 +356,8 @@ describe("ADR-0056 — an ungrounded narration is discarded, never merged", () =
       narrate: async (): Promise<CopilotNarration> => ({
         text: "There were 4,000 PII accesses across every team.",
         citedKeys: ["a_count_that_does_not_exist"],
+        citedObjectIds: [],
+        refused: false,
       }),
     };
     const seamApp = buildApp(db, { bootstrapToken: BOOT });
@@ -371,6 +373,7 @@ describe("ADR-0056 — an ungrounded narration is discarded, never merged", () =
         counts: [{ key: "decisions", label: "d", value: 0 }],
         samples: [],
         leads: [],
+        citableObjects: [],
       });
       expect(check.ok).toBe(false);
     } finally {

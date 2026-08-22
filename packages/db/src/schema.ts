@@ -3047,6 +3047,21 @@ export const orgSettings = pgTable(
       .notNull()
       .default("off"),
 
+    // --- L6c / ADR-0092 amendment (migration 0100): the model-judged half ---
+    /** FALSE (default) = the ADR-0092 access-recommendation report is exactly
+     * the six deterministic rules and nothing else, byte-identical to what
+     * that ADR shipped. TRUE = each finding the rules ALREADY produced MAY
+     * carry a `judged` annotation labelled `method: "model-judged"`. The
+     * annotation can never create a finding, never alter a finding's
+     * severity/evidence/rationale, and never reorder anything: it is a
+     * sibling field on a finding the deterministic layer computed. */
+    recommendationJudgeEnabled: boolean("recommendation_judge_enabled").notNull().default(false),
+    /** the registry agent the judged layer dispatches through. Must be in the
+     * caller's own entitled, dispatchable roster — naming one here can pin a
+     * choice, never widen entitlement. NULL while enabled = `judged:
+     * unavailable` with `judge_required`, never a silent no-annotation run. */
+    recommendationJudgeAgentId: uuid("recommendation_judge_agent_id"),
+
     // --- ADR-0046 (migration 0058): review-workbench bulk fences ------------
     /** hard cap on items per bulk approve/deny/reassign. Not a UI convenience:
      * a bulk of 5,000 is indistinguishable from "approve everything". */
@@ -5689,6 +5704,19 @@ export const copilotProposals = pgTable(
     approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
     proposedByUserId: uuid("proposed_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    /**
+     * L6b (migration 0100) — THE APPLY LEDGER. NULL (every pre-L6 row) = not
+     * applied, which was the only possible state before the applier existed.
+     * Set only by `POST /v1/copilot/proposals/:id/apply`, only when the linked
+     * approval is APPROVED, and only after the change went through the same
+     * public choke point an admin would use by hand. Non-null is also the
+     * idempotency gate: a second apply is refused by name, never re-executed.
+     */
+    appliedAt: timestamp("applied_at", { withTimezone: true }),
+    appliedByUserId: uuid("applied_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** exactly what the choke point reported back — the honest record of what
+     * the apply DID, as distinct from what the diff proposed */
+    appliedResult: jsonb("applied_result").$type<Record<string, unknown>>(),
   },
   (t) => [index("copilot_proposals_query_idx").on(t.queryId)],
 );
