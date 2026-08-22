@@ -1,5 +1,25 @@
 # RegulAIt — Operating Instructions for Claude Code
 
+<!-- suite-rules:start -->
+> **Suite rules apply — read them before acting.**
+> `C:\Users\dhruv\Documents\regulAIt - Product Suite\SUITE_RULES.md` binds every regulAIt
+> repository and takes precedence over this file. Where the two conflict, **stop and escalate
+> to the suite agent** — do not pick a side, and do not edit either document.
+> Check `MODULE_REGISTRY.md` (status, ports, brand) and `CAPABILITY_MAP.md` (who owns which
+> capability) in that same folder before building anything that may already exist elsewhere.
+>
+> This block is generated from the suite repo. If a `git pull` removes it, restore it with
+> `node scripts/suite-header.mjs --install` from the suite root rather than retyping it.
+<!-- suite-rules:end -->
+
+
+> **Suite rules apply — read them before acting.**
+> `C:\Users\dhruv\Documents\regulAIt - Product Suite\SUITE_RULES.md` binds every regulAIt
+> repository and takes precedence over this file. Where the two conflict, **stop and escalate
+> to the suite agent** — do not pick a side, and do not edit either document.
+> Check `MODULE_REGISTRY.md` (status, ports, brand) and `CAPABILITY_MAP.md` (who owns which
+> capability) in that same folder before building anything that may already exist elsewhere.
+
 ## What this project is
 
 RegulAIt is a from-scratch build of an AI-native agent/development platform in the spirit of
