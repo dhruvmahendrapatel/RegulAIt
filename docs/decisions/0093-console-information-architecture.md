@@ -128,3 +128,17 @@ readable. Restyling honesty is allowed; rewording it is not.
 - **Eleven sections is more headings, not less nav.** The sidebar is longer than before; the
   bet is that labeled short runs scan better than one unlabeled long run, and the `/` filter
   remains the escape hatch. If a section shrinks to one entry in future work, merge it.
+
+---
+
+## Amendment (2026-08-22): ADR-0094 replaces the always-visible-all-sections presentation
+
+[ADR-0094](0094-suite-scoped-navigation.md) supersedes §2.1's *presentation* — the rail no longer
+renders all eleven sections at once. Everything else here stands: the section groupings, entry
+labels, orderings, ADR adjacency comments and the `GROUP_OF_PATH` breadcrumb derivation are
+untouched (the sections now live in `apps/web/src/shell/suites.tsx`, moved verbatim), and the
+sections render inside their suite's scoped sidebar and as headings under the cross-suite `/`
+filter's results. §2.4's orientation card and at-a-glance stats stay at the top of Home, above
+0094's launcher tiles. The honest limit "eleven sections is more headings, not less nav" is
+resolved by 0094 rather than by merging sections: the nav a user sees at any moment is one
+suite's, and the launcher/switcher/filter carry the rest.
