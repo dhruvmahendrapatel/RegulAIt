@@ -111,3 +111,27 @@ Also this stretch: an order-fragile SoD audit assertion (taking the oldest
 `sod-override-minted` row in a shared database) was caught by an independent
 full-suite run and scoped to its own approval; `docs/product/TESTING_CHECKLIST.md`
 gained rows 31–41 for everything shipped in this wave.
+
+## Retest of the copilot fix (ADR-0056 L6d) — 2026-08-22, live
+
+Pulled `ae17aec`, rebuilt, restarted the local gateway against the same seeded
+database and the live Gemini narrator. Four cases, chosen so that a fix which
+merely made the copilot evasive would fail two of them:
+
+| Case | Result |
+|---|---|
+| **A. The defect** — "Summarise the Zorblatt Quantum Compliance Widget approvals from last week" | **FIXED.** Narration now reads *"…with no filters applied (across all records in scope, **not only Zorblatt Quantum Compliance Widget**), 8 approvals were requested…"*; `subjectFiltered: false` plus the deterministic UNFILTERED SUBJECT caveat. The fabricated attribution is gone. |
+| **B. Must still answer** — "What governance denials happened recently and why?" | Normal, useful answer; `subjectFiltered: true`, filter `effect=deny` disclosed, no caveat. The guard has not over-fired. |
+| **C/D. Must still refuse** — empty retrieval (an entitlement-empty user) | `rows=0`, `cited=0`, `groundedRefusal: true`. The original L6a guard is intact alongside the new one. |
+| **Bonus governance check** | An entitlement-empty user naming the seeded Google agent as narrator gets `403 narrator_not_entitled` — you cannot narrate with an agent you may not invoke (ADR-0056 tenancy rule, holding live). |
+
+A nicety worth noting: when a filter IS applied but is not the question's
+subject (e.g. "approvals in state rejected" planned as `effect=deny`), the model
+still says *"with the filter 'effect=deny' (across all records in scope, not
+only approvals in state rejected)"* — accurate on both counts.
+
+**Two probe errors of my own during the retest, both mine and not the app's**
+(M-004 discipline): my "empty retrieval" control initially returned 103 rows
+because I assumed a question would produce a state I never verified, and my
+user-creation probe used the wrong field name and read the wrong key field.
+Fixed each and re-ran rather than reporting around them.
