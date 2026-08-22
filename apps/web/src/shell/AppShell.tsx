@@ -13,286 +13,9 @@ import type { Approval } from "../api/types";
 import { useSession } from "../session/SessionContext";
 import { useTheme } from "../ui/useTheme";
 import { Lockup, WORDMARK } from "../ui/Brand";
+import { ADMIN_GROUPS, SUITES, WORKSPACE, suiteHome, suiteOfPath, type NavEntry } from "./suites";
 import s from "./shell.module.css";
 
-interface NavEntry {
-  label: string;
-  to: string;
-}
-const WORKSPACE: NavEntry[] = [
-  { label: "Home", to: "/" },
-  { label: "Chat", to: "/chat" },
-  { label: "Runs", to: "/runs" },
-  { label: "Workflows", to: "/workflows" },
-  { label: "Inbox", to: "/inbox" },
-  { label: "Projects", to: "/projects" },
-  { label: "Shared context", to: "/context" },
-  // pillars 5 + 6 for the person who generates the spend — self-scoped, and
-  // the only place a non-admin can see their own cost and savings ledgers
-  { label: "Spend & savings", to: "/spend" },
-];
-
-/**
- * The native admin surface: grouped real routes inside this shell.
- *
- * ADR-0093 — the console information architecture. The single "Governance"
- * group had absorbed ~26 entries and stopped reading as an organized console,
- * so it is split by the QUESTION a section answers, ordered most-used-first.
- * Grouping and labels only: every route path is unchanged (bookmarks and the
- * Playwright specs depend on them), and each entry keeps the ADR note that
- * justifies its adjacency. Sections are headings, not disclosure menus — the
- * "/" filter is the fast path across all of them.
- */
-const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
-  {
-    // "where do we stand?" — the read-first, change-nothing surfaces
-    group: "Overview",
-    items: [
-      // ADR-0082 — the one-page BOARD read beside the report machinery it
-      // rides: pack coverage, open risks, ASR, spend vs budget, anchoring —
-      // every figure computed from the ledgers at load, print-friendly with
-      // CSS only, and an empty ledger says "unmeasured", never zero.
-      { label: "Posture", to: "/admin/posture" },
-      // ADR-0047 — the BOARD-facing read of the same two ledgers the Cost
-      // dashboard and the Audit log render operationally. Nothing new is
-      // stored: a report is a read-only projection, scoped to the caller's own
-      // entitlement, and it says on its face that spend is a list-price
-      // estimate and that no scheduler drives its schedules.
-      { label: "Reports", to: "/admin/reports" },
-      // ADR-0056 — the natural-language front door onto the governance
-      // ledgers: a governed tenant reading the governance record with the
-      // caller's own entitlements and unable to change anything.
-      { label: "Governance copilot", to: "/admin/copilot" },
-    ],
-  },
-  {
-    // "what is waiting on a human, and what happened?" — the daily loop
-    group: "Approvals & Audit",
-    items: [
-      { label: "Approvals queue", to: "/admin/approvals" },
-      // ADR-0046 — the SAME approvals, scaled: routing, SLA timers, escalation,
-      // workload and bulk triage. A layer on the one queue, never a second one.
-      { label: "Review workbench", to: "/admin/review-workbench" },
-      // ADR-0061 — the Approvals Queue's chat courier. It sits beside the queue
-      // it mirrors, because the identity link is a governance trust artifact and
-      // not an integration setting.
-      { label: "ChatOps approvals", to: "/admin/chatops" },
-      { label: "Audit log", to: "/admin/audit" },
-      // ADR-0050 — the audit log answers "who did what"; this answers "what
-      // flowed into what". Adjacent on purpose: an e-discovery or DPIA question
-      // starts in one and finishes in the other, and keeping them apart is what
-      // makes both readable.
-      { label: "Data lineage", to: "/admin/lineage" },
-      // ADR-0070 — the audit log says a decision was taken; the trace says
-      // where in the call it landed and what it stopped ("why did nothing
-      // happen?" is a governance question, so traces stay beside the log).
-      { label: "Traces", to: "/admin/traces" },
-    ],
-  },
-  {
-    // "is each USE of AI proposed, owned, risk-accepted?" — the registers
-    group: "AI Governance",
-    items: [
-      // ADR-0080 — the PRE-BUILD gate before every runtime gate: "was this USE
-      // of AI proposed, questionnaired, and signed off before anything ran?" —
-      // an approved use case carries the same compliance tags the cascade
-      // enforces.
-      { label: "Use cases", to: "/admin/use-cases" },
-      // ADR-0045 — the RISK-ACCEPTANCE gate beside the quality gate: "has a
-      // human accepted the risk of using this model for this purpose, and is
-      // that acceptance still valid?" A high eval score is an input to that
-      // decision, never a substitute for it.
-      { label: "Model risk", to: "/admin/model-risk" },
-      // ADR-0084 — the THIRD-PARTY front door beside the first-party one:
-      // use cases govern OUR use of AI; this governs a vendor's AI reaching
-      // our data. Everything the vendor supplies is an attestation —
-      // labelled, attributed, never blended into computed evidence.
-      { label: "Vendors", to: "/admin/vendors" },
-      // ADR-0081 — the RISK layer over the measurements: evals, red-team and
-      // guardrails MEASURE; the register links each measurement to a named
-      // risk scenario, an owner, the mitigating control we actually enforce,
-      // and an audited residual-risk acceptance. Evidence is computed live
-      // from the same ledgers those pages render — never hand-ticked.
-      { label: "Risks", to: "/admin/risks" },
-      // ADR-0055 — the land-and-expand wedge: what AI are we NOT governing?
-      // A discovered row is a governance gap, not a connection to configure.
-      { label: "Shadow-AI discovery", to: "/admin/shadow-ai" },
-    ],
-  },
-  {
-    // "who holds what, and should they still?" — the access-review loop
-    group: "Access Reviews",
-    items: [
-      // ADR-0082 — the STANDING dependency view over the per-run records: per
-      // agent, who MAY use it (the grant rows) beside what its runs actually
-      // DID (usage, traces, orchestration history) — never blended, because an
-      // unused permission is exactly the over-permissioning fact to surface.
-      { label: "Agent inventory", to: "/admin/inventory" },
-      // ADR-0092 — the WORKLIST over the same ledgers the inventory renders:
-      // deterministic, versioned rules ("queries with reasons") flag grants
-      // worth reviewing, each with hand-checkable evidence, feeding the
-      // certification loop below. No scores, nothing auto-executes; the
-      // model-judged half stays credential-blocked, not approximated.
-      { label: "Access recommendations", to: "/admin/recommendations" },
-      // ADR-0090 — the periodic RE-ATTESTATION loop over the grant rows the
-      // inventory renders: named reviewers keep/revoke each gateway grant
-      // through the one Approvals queue, revoke executes the real removal,
-      // and a past-due campaign reads expired-incomplete rather than
-      // silently vanishing. Gateway grants only — never a fabric campaign.
-      { label: "Certification campaigns", to: "/admin/certification" },
-      // ADR-0091 — the PREVENTIVE twin of the certification loop: toxic
-      // capability combinations refused at mint time, existing violators
-      // surfaced (never auto-revoked), and refused mints escalatable to the
-      // one approvals queue for an arm's-length override.
-      { label: "SoD rules", to: "/admin/sod" },
-    ],
-  },
-  {
-    // "may this call proceed, and under which version of the policy?"
-    group: "Policies & Gates",
-    items: [
-      { label: "Rules engine", to: "/admin/rules" },
-      // ADR-0040 — beside the rules engine because it is the same question
-      // ("what may this call do?") asked with attributes instead of static
-      // grants. It can only ever subtract from what Rules allows.
-      { label: "ABAC policies", to: "/admin/abac-policies" },
-      // ADR-0042 — the CONTENT gate, beside the destination and attribute
-      // gates. Independent controls that happen to share one interception
-      // point: what is in the payload vs. where the call may go vs. who may
-      // make it under which attributes.
-      { label: "Guardrails", to: "/admin/guardrails" },
-      // ADR-0048 — the CHANGE-CONTROL layer under the gates. The gates decide
-      // whether a call may proceed; this decides which VERSION of the
-      // governing artifact it proceeds under, with a canary and a one-click
-      // undo.
-      { label: "Prompt versions", to: "/admin/prompt-versions" },
-      { label: "Simulation", to: "/admin/simulation" },
-      { label: "Workflow templates", to: "/admin/workflow-templates" },
-    ],
-  },
-  {
-    // "is the agent good, and does it hold under attack?" — measurement
-    group: "Quality & Security",
-    items: [
-      // ADR-0044 — the QUALITY gate: "may this proceed?" asked of the agent's
-      // OUTPUT against a fixed dataset, blocking promotion the same way the
-      // runtime gates block a call.
-      { label: "Evaluations", to: "/admin/evals" },
-      // ADR-0057 — the SECURITY gate beside the quality gate: evals ask "is
-      // this agent good on our cases?"; this asks "does it hold when someone
-      // attacks it?", measured through the live guardrails and blocking
-      // promotion through the same automated-check stage.
-      { label: "Red-teaming", to: "/admin/redteam" },
-      // ADR-0088 — the measuring instrument the operator brings: an
-      // admin-typed outbound endpoint under the egress guard (register → test
-      // → enable), scoring evals. Beside the evals it scores (ADR-0093);
-      // registration rides the same rails as Custom LLM providers.
-      { label: "External scorers", to: "/admin/external-scorers" },
-    ],
-  },
-  {
-    group: "Identity & Access",
-    items: [
-      { label: "Users", to: "/admin/users" },
-      { label: "Roles", to: "/admin/roles" },
-      { label: "Teams", to: "/admin/teams" },
-      { label: "Client access", to: "/admin/client-access" },
-      // ADR-0066 — sits beside Client access because it answers the adjacent
-      // question. That one is "which programmatic client may reach us at all?";
-      // this one is "which narrowed credential did we hand a developer INSTEAD
-      // of the vendor key?". A virtual key is an entitlement ceiling, not an
-      // integration setting, which is why it is here and not under Cost.
-      { label: "Virtual keys", to: "/admin/virtual-keys" },
-      { label: "SSO & sessions", to: "/admin/sso" },
-      { label: "Provisioning (SCIM)", to: "/admin/provisioning" },
-      // ADR-0038: where an IdP group becomes a role — and where the ones that
-      // grant nothing are visible rather than silently inert.
-      { label: "Group → role mapping", to: "/admin/group-mappings" },
-    ],
-  },
-  {
-    group: "Integrations",
-    items: [
-      { label: "Agents", to: "/admin/agents" },
-      { label: "Model credentials", to: "/admin/model-credentials" },
-      // ADR-0034 — sits next to Model credentials because it is the same
-      // question ("what can our models talk to?") asked about an endpoint we
-      // do not own, rather than a vendor we do.
-      { label: "Custom LLM providers", to: "/admin/custom-providers" },
-      // ADR-0065 — sits directly under Custom LLM providers because it answers
-      // the adjacent question. That one is "which model that we do not own may
-      // our people reach?"; this one is "which model may our people BUILD, out
-      // of what data, and under whose sign-off?".
-      { label: "regulAIt-LLM", to: "/admin/regulait-llm" },
-      { label: "Connectors", to: "/admin/connectors" },
-      { label: "MCP servers", to: "/admin/mcp-servers" },
-      { label: "Git connections", to: "/admin/git-connections" },
-      { label: "PM connections", to: "/admin/pm-connections" },
-      { label: "Deploy targets", to: "/admin/deploy-targets" },
-    ],
-  },
-  {
-    group: "Cost & Optimization",
-    items: [
-      { label: "Cost dashboard", to: "/admin/cost" },
-      // ADR-0069 — directly under the Cost dashboard, because it is the same
-      // question asked of money RegulAIt never metered: a Copilot seat, a raw
-      // vendor key, a cloud AI bill. The two are deliberately adjacent AND
-      // deliberately separate: the dashboard reports what we observed, this
-      // reports what we were told, and nothing adds them together.
-      { label: "Cross-vendor consolidation", to: "/admin/cost-consolidation" },
-      // ADR-0049 — budget-vs-FORECAST and spend-anomaly signals over the same
-      // measured ledger the Cost dashboard renders as actuals. Next to it
-      // because it is the same question asked forward in time rather than
-      // backward, and because a forecast that lived somewhere else would
-      // inevitably drift from the actuals it extrapolates.
-      { label: "Spend forecast & anomalies", to: "/admin/spend-monitor" },
-      // ADR-0051 — the same measured ledger again, turned into money. It sits
-      // here rather than under Settings because the honest framing is that
-      // billing is a READ of the cost data next to it: rate cards and invoices
-      // never touch the meter, and a statement that disagreed with the Cost
-      // dashboard would be the bug this placement makes obvious.
-      { label: "Metering & billing", to: "/admin/billing" },
-      { label: "Optimization", to: "/admin/optimization" },
-    ],
-  },
-  {
-    group: "Compliance & Infra",
-    items: [
-      { label: "Compliance profiles", to: "/admin/compliance" },
-      // ADR-0058 — framework control mappings evidenced from the same ledgers
-      // everything else here reads. It sits directly under Compliance profiles
-      // because a pack DRIVES that cascade rather than forking it: one tag, one
-      // cascade, one audit trail.
-      { label: "Compliance packs", to: "/admin/compliance-packs" },
-      { label: "Infrastructure", to: "/admin/infrastructure" },
-    ],
-  },
-  {
-    group: "Settings",
-    items: [
-      { label: "Organization", to: "/admin/organization" },
-      // ADR-0052 — the COMMERCIAL ceiling, deliberately beside the org-wide
-      // functional ceiling rather than under Cost: a license caps how many
-      // entitled users and which tier features exist, which is the same kind of
-      // org-level setting as the ones next to it. It is never a cost report.
-      { label: "Licensing & seats", to: "/admin/licensing" },
-      // ADR-0063 — the deployment's own envelope key: which one this box runs,
-      // whether it agrees with the ciphertext in the database, and whether any
-      // human has ever said they hold a copy. It sits in Settings rather than
-      // under Compliance because it is a property of THIS installation, and it
-      // is the one page whose absence of a record is itself the finding.
-      { label: "Data key custody", to: "/admin/data-key" },
-      // ADR-0064 — the six governance sweeps and whether anything is actually
-      // driving them. In Settings for the same reason the data key is: it is a
-      // property of THIS installation, and the page whose row of null
-      // timestamps is itself the finding.
-      { label: "Scheduled jobs", to: "/admin/scheduler" },
-      { label: "First-run setup", to: "/admin/first-run" },
-      { label: "Getting started", to: "/admin/setup" },
-    ],
-  },
-];
 
 /**
  * route path → the nav section it lives under, so a page header can state where
@@ -347,20 +70,62 @@ export default function AppShell(props: { children: ReactNode }) {
     return () => document.removeEventListener("mousedown", onDown);
   }, [menuOpen]);
 
+  const { pathname } = useLocation();
   const q = filter.trim().toLowerCase();
-  const workspaceItems = useMemo(
-    () => WORKSPACE.filter((n) => !q || n.label.toLowerCase().includes(q)),
-    [q],
+
+  /**
+   * ADR-0094 — suite-scoped navigation. The suites a user can see (non-admins
+   * see only Workspace), the suite the current route belongs to, and the two
+   * render modes:
+   *  - filter EMPTY: only the active suite's sections render, under a compact
+   *    suite identity header with the switcher. Someone working in one suite
+   *    is not confronted with every other product's nav.
+   *  - filter NON-EMPTY: the "/" filter searches ACROSS ALL destinations in
+   *    every visible suite — it is the escape hatch, and scoping it to the
+   *    current suite would strand users (the ADR states this as an invariant).
+   */
+  const suites = useMemo(
+    () => SUITES.filter((su) => !su.admin || auth?.isAdmin),
+    [auth?.isAdmin],
   );
-  const adminGroups = useMemo(() => {
-    if (!auth?.isAdmin) return [];
-    return ADMIN_GROUPS.map((g) => ({
-      group: g.group,
-      items: g.items.filter(
-        (n) => !q || n.label.toLowerCase().includes(q) || g.group.toLowerCase().includes(q),
-      ),
-    })).filter((g) => g.items.length > 0);
-  }, [auth?.isAdmin, q]);
+  const activeSuite = useMemo(() => suiteOfPath(pathname), [pathname]);
+  const filterResults = useMemo(() => {
+    if (!q) return [];
+    return suites
+      .flatMap((su) => su.sections)
+      .map((g) =>
+        // Home is a constant affordance, not a suite entry — but the filter
+        // must still be able to find it
+        g.group === "Workspace" ? { group: g.group, items: [{ label: "Home", to: "/" }, ...g.items] } : g,
+      )
+      .map((g) => ({
+        group: g.group,
+        items: g.items.filter(
+          (n) => n.label.toLowerCase().includes(q) || g.group.toLowerCase().includes(q),
+        ),
+      }))
+      .filter((g) => g.items.length > 0);
+  }, [suites, q]);
+
+  const navEntry = (n: NavEntry) => (
+    <NavLink
+      key={n.to}
+      to={n.to}
+      end={n.to === "/"}
+      className={({ isActive }) => (isActive ? s.navItemActive! : s.navItem!)}
+      onClick={() => {
+        setSideOpen(false);
+        setFilter("");
+      }}
+    >
+      {n.label}
+      {n.to === "/inbox" && pendingCount > 0 && (
+        <span className={s.navCount} aria-label={`${pendingCount} pending approvals`}>
+          {pendingCount}
+        </span>
+      )}
+    </NavLink>
+  );
 
   const displayName = auth?.user?.displayName ?? "Operator";
   const initials = displayName
@@ -399,38 +164,60 @@ export default function AppShell(props: { children: ReactNode }) {
             }
           }}
         />
-        <div className={s.section}>Workspace</div>
-        {workspaceItems.map((n) => (
-          <NavLink
-            key={n.to}
-            to={n.to}
-            end={n.to === "/"}
-            className={({ isActive }) => (isActive ? s.navItemActive! : s.navItem!)}
-            onClick={() => setSideOpen(false)}
-          >
-            {n.label}
-            {n.to === "/inbox" && pendingCount > 0 && (
-              <span className={s.navCount} aria-label={`${pendingCount} pending approvals`}>
-                {pendingCount}
-              </span>
+        {q ? (
+          /* the escape hatch: matches from EVERY suite, grouped by section */
+          filterResults.length > 0 ? (
+            filterResults.map((g) => (
+              <div key={g.group}>
+                <div className={s.section}>{g.group}</div>
+                {g.items.map(navEntry)}
+              </div>
+            ))
+          ) : (
+            <div className={s.filterEmpty}>No destination matches</div>
+          )
+        ) : (
+          <>
+            {/* the two constant affordances: back to the launcher, and the
+                suite switcher (a native select — keyboard accessible for
+                free, and compact at every width) */}
+            {navEntry({ label: "Home", to: "/" })}
+            {suites.length > 1 && (
+              <div className={s.suiteHead}>
+                <div className={s.suiteName}>{activeSuite.name}</div>
+                <select
+                  className={s.suiteSwitch}
+                  aria-label="Switch suite"
+                  value={activeSuite.id}
+                  onChange={(e) => {
+                    const target = suites.find((su) => su.id === e.target.value);
+                    if (target && target.id !== activeSuite.id) {
+                      setSideOpen(false);
+                      navigate(target.id === "workspace" ? "/" : suiteHome(target));
+                    }
+                  }}
+                >
+                  {suites.map((su) => (
+                    <option key={su.id} value={su.id}>
+                      {su.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
             )}
-          </NavLink>
-        ))}
-        {adminGroups.map((g) => (
-          <div key={g.group}>
-            <div className={s.section}>{g.group}</div>
-            {g.items.map((n) => (
-              <NavLink
-                key={n.to}
-                to={n.to}
-                className={({ isActive }) => (isActive ? s.navItemActive! : s.navItem!)}
-                onClick={() => setSideOpen(false)}
-              >
-                {n.label}
-              </NavLink>
+            {activeSuite.sections.map((g) => (
+              <div key={g.group}>
+                {/* a section heading only where it adds information: inside a
+                    suite that presents more than one ADR-0093 section, or the
+                    plain Workspace list a non-admin sees */}
+                {(activeSuite.sections.length > 1 || suites.length === 1) && (
+                  <div className={s.section}>{g.group}</div>
+                )}
+                {g.items.map(navEntry)}
+              </div>
             ))}
-          </div>
-        ))}
+          </>
+        )}
         {/* The two "legacy ↗" bridges are gone: ADR-0033 deleted the
             single-file shells they pointed at, so a link here would be a dead
             end — the exact failure phase 1 refused to ship. */}

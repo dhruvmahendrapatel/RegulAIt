@@ -55,6 +55,45 @@
   padding: var(--s2) var(--s1) 7px;
 }
 
+/* ---- ADR-0094: suite scoping ----
+   The rail shows ONE suite at a time. The identity header is the scope
+   indicator; the switcher is a native select restyled onto the dark stack —
+   compact, keyboard-accessible, and it works at every width. */
+.suiteHead {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s0);
+  padding: var(--s2) var(--s1) var(--s1);
+  border-bottom: 1px solid var(--rg-dark-line);
+  margin-bottom: var(--s0);
+}
+.suiteName {
+  font-family: var(--rg-font-display);
+  font-size: var(--text-md);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--rg-dark-ink);
+  line-height: 1.2;
+}
+.suiteSwitch {
+  width: 100%;
+  padding: 4px 8px;
+  font-size: var(--text-xs);
+  font-family: var(--rg-font);
+  border-radius: var(--rg-r-sm);
+  border: 1px solid var(--rg-dark-line);
+  /* same pair as .navFilter — dark ink on the raised step, a measured
+     combination (brand-contract asserts the dark stack's floors) */
+  background: var(--rg-dark-raised);
+  color: var(--rg-dark-ink);
+  cursor: pointer;
+}
+.filterEmpty {
+  padding: var(--s2) var(--s1);
+  font-size: var(--text-sm);
+  color: var(--rg-dark-muted);
+}
+
 /* The rail's active/hover indicator is a Signal left edge, not a filled pill —
    Signal Cyan means interactive, and nothing else in the rail is coloured. */
 .navItem {
