@@ -65,6 +65,9 @@ number + what you saw for anything off.
 | 39 | Campaign expiry + reassignment | Access Reviews → Campaigns | Let one pass its due date; reassign an item | `expired-incomplete` on read; reassignment audited; never to the grant's holder |
 | 40 | Key re-encryption walk | CLI (ops) | `REGULAIT_DATA_KEY=<new> REGULAIT_DATA_KEY_OLD=<old> pnpm --filter @regulait/gateway reencrypt` | Resumable; rows readable under the new key only; corrupt rows → `completed_with_failures` |
 | 41 | Tier flags enforced | Identity & Access → SAML/SCIM | Try enabling SAML/SCIM without a license | 403 naming feature and tier (unlicensed installs now refuse enablement) |
+| 42 | Mock-shadowing everywhere | Runs → decompose; long-context invoke | With a live credential present, decompose a goal / trigger compaction while mock agents exist | Live agent serves; skipped mocks disclosed as `mock_shadowed_by_live` on the `run-decomposed`/`context-compaction` audit rows — one predicate, all three surfaces (retested live 2026-08-22: decompose lead served by the live model) |
+| 43 | Attribution-required dispatch | Settings (org) → `dispatchAttributionRequired` | Flip on; dispatch WITHOUT a projectId; then with one | Projectless dispatch → 409 `attribution_required` **before any provider call**; with projectId unchanged; knob off = byte-identical (retested live: the 409 fired pre-provider while project-attributed calls reached the provider) |
+| 44 | Copilot: MCP server/tool entities | Overview → Governance copilot | Ask about `"repo-tools/search_code"` denials; then the bare server name | Tool entity narrows retrieval (row-delta proven 108→1 unfiltered→filtered), server name narrows to its tools (→4); a tool you cannot see refuses byte-identically to one that does not exist; unresolved-kind list now names mcp servers/tools |
 
 ## D. Needs external setup (test when available)
 Live model dispatch (add a credential) · SSO/SCIM/group-mapping (IdP) · PM sync

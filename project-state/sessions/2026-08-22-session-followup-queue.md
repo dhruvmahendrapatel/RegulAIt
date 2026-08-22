@@ -157,3 +157,36 @@ fabricated subject and stamped it verified (found by hand, 2026-08-22). L6d made
 it disclose that it had not filtered. ADR-0096 makes it refuse instead — and the
 non-vacuity probe that mattered was "report the filter but make it a no-op in
 SQL", which reddened three tests with `expected 8 to be 3`.
+
+## Retest of B6 (ADR-0095/0080/0096 dated amendments) — 2026-08-22, live
+
+Pass criteria written before results, per the standing retest discipline. Gateway
+built from origin head `4163983` on a fresh `regulait_b6live` DB, live Google
+credential in process env only (never in any file).
+
+| Case | Criterion (pre-written) | Result |
+|---|---|---|
+| A — mock-shadowing unified (B6a) | With the live credential seeded, decompose picks a live-served lead; skipped mocks disclosed as `mock_shadowed_by_live` on the `run-decomposed` audit row; a google usage row exists | **PASS** — lead served by the live model, disclosure present, usage metered |
+| B — attribution knob (B6b) | 2×2: knob on/off × projectId present/absent. 409 `attribution_required` ONLY in on+projectless, and **before any provider call**; other three cells reach the provider | **PASS on the gate.** The on+projectless cell 409'd pre-provider; the other three cells reached the provider, which returned 502 `model_dispatch_failed` — extracted detail: Google quota exhausted ("You exceeded your current quota"). Provider-side, not app-side; the asymmetry (409 pre-provider vs 502 AT the provider) itself proves the gate ordering |
+| C — MCP entities (B6c) | `"repo-tools/search_code"` narrows retrieval with a real row delta; bare server name narrows to the server's tools; dana (revoked on search_code) gets a refusal byte-identical to a nonexistent tool; C2 unresolved-refusal enumerates the new kinds | **PASS** — after generating real MCP deny rows (dana proxy calls → 403), unfiltered 108 → tool-filtered 1 → server-filtered 4; scope honesty byte-identical after word substitution; refusal names mcp servers/tools |
+
+**Quota note:** the owner's Google key hit its quota ceiling mid-retest. Every
+gate/refusal/disclosure above is proven; further *narration-content* live work is
+parked until the owner refreshes quota (PENDING.md credential section updated).
+
+### Independent full-suite verification — one failure, diagnosed as a latent flake
+
+My fresh-DB rerun of the whole gateway suite returned **156/157 files,
+`agent-config-versioning.test.ts` failed in `beforeAll`** (11 tests skipped) — the
+B6 agent's two runs had been green. Diagnosis with the failed run's REAL data
+(the canary users persist in the DB): the setup drew 12 random users and wanted
+an inside subject (first bucket ≤ 97) plus a later draw with a strictly greater
+bucket; the actual draw order was `94,48,83,72,19,52,45,4,8,18,27,35` — nothing
+beat 94. Negative control per M-023: the same loop over fresh random UUIDs fails
+**7.13% of 100k simulated batches** (and passes ~93% — exactly matching
+agent-green-twice, me-red-once). Not B6's code — a latent flake in the earlier
+config-versioning suite. Fix `445a77d`: select the inside/outside pair as the
+**min/max buckets over the whole batch** — same pure sampling function, but
+failure now requires all 12 hash draws ≥ 98 or all equal, i.e. a broken hash,
+not bad luck. Targeted rerun 11/11; the full-suite rerun result is appended
+below once it completes.

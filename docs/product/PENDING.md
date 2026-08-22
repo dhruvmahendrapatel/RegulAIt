@@ -165,6 +165,13 @@ copilot's 1024-token narration budget produced `finishReason: MAX_TOKENS` after 
 tokens and 39 tokens of JSON, and the gateway (correctly) discarded the truncated reply. Any
 future internal-dispatch budget must be sized for thoughts + answer, not answer alone.
 
+**Quota status 2026-08-22 (evening):** the key hit its Google quota ceiling during the B6
+live retest ("You exceeded your current quota" — provider-side 502s on otherwise-passing
+calls). Every gate, refusal, disclosure, and row-delta in that retest was proven before or
+despite the ceiling; what is parked until the owner refreshes quota (or supplies another
+key) is further *narration-content* live work — new live copilot answers, live judge
+annotations, live-graded red-team runs. Everything committed still passes keyless.
+
 **B1.5 follow-ups CLOSED 2026-08-22** ([ADR-0095](../decisions/0095-mock-routing-honesty-and-agent-model-edit.md)):
 
 - **F1 (owner-experienced mock-routing defect)** — a mock-provider agent is no longer a
