@@ -193,3 +193,49 @@ not bad luck. Targeted rerun 11/11. **Full-suite rerun on a fresh
 B6 agent's own runs. B6 is closed: built, independently verified, live-retested,
 and the one discrepancy between my run and the agent's runs is explained and
 fixed at its root (`445a77d`).
+
+## Batch B7 + retest — 2026-08-22 (night)
+
+The owner's "continue with the remaining pending items" after B6 close-out. The ledger's
+owner-gated set is unchanged; the three genuinely buildable residual groups became B7,
+agent-built sequentially (each on its own scratch DB, push-every-commit), then independently
+verified and hands-on retested. A fifth silent workspace rollback preceded the batch
+(restored from origin, M-022/M-025 protocol — zero loss).
+
+- **B7a** (`91e7c9d`, ADR-0096 amendment): the seven remaining entity kinds resolve —
+  initiative + virtual_key multi-ledger filterable with row-delta proofs; packs/use
+  cases/risks/templates/roles audit-filterable; visibility per kind = its own list endpoint's
+  scoping; no-op-filter probes redden 9 tests.
+- **B7b** (`2608bb2`+`b794837`, ADR-0052 amendment): all four remaining tier flags enforce at
+  their enabling acts; four expansion points wired expansion-class; 11 wired points reported;
+  honest non-close: no §4 flag exists for connector/MCP/PM creation.
+- **B7c** (`96193aa`..`77f2f38`, ADR-0073 amendment, migration 0102): canary-observation
+  retention sweep (job + door + knob; versions NEVER pruned; live-canary evidence kept),
+  subject-delete AFTER DELETE trigger (activation ledger, not the hash-chained audit_log),
+  and the `usage_events` agent_config served-version stamp (FK-free, mirrors the prompt stamp).
+
+**Independent verification**: fresh `regulait_test` at head `77f2f38` — **161 files, 2509
+passed + 9 MinIO skips, green**; journal idx/when unique+ascending.
+
+**Hands-on retest** (criteria pre-written in scratchpad b7-retest-criteria.md; keyless
+gateway :3221 on seeded `regulait_b7live`): **ALL PASS.**
+- A: initiative narrowed usage 19→15 (real rows both sides; the audit-side 94→0 is correct
+  exclusion — invoke audit rows carry no projectId, only project-attributed ledgers match);
+  role two-user proof — admin resolves, non-admin's refusal byte-identical to a nonexistent
+  name after substitution, with the admin-nonexistent negative control also refusing; pack ×
+  spend → 422 `copilot_tool_cannot_filter_entity` naming kind+tool+id; the unresolved body
+  enumerates all new kinds.
+- B: four 403s (`license-absent-feature-closed`, feature named, 4 audited deny rows); pack
+  seeding 201 and basic `POST /v1/runs` 201 on the same ABSENT license; 11 wired points.
+- C: stamp = v3 then moves to v4 on activation (seed-era rows all NULL = unversioned
+  control); prune door → pruned=1 / keptLiveCanary=1 / all versions intact / audited fact;
+  raw SQL delete of a versioned agent → pointer retired + trigger-authored
+  `artifact_deleted` ledger entry; scheduler off with 10 registered jobs incl. the sweep.
+- D: keyless demo unchanged (mock serves, copilot grounded answers + caveat).
+
+**Process**: M-026 logged — I read decision-only invoke 200s as executions twice (the
+false-FAIL on the stamp column cost four diagnostic steps before M-004 discipline caught
+it); rule: verify state-generating probes by the state they claim to write, and
+`/v1/agents/:id/invoke` executes nothing without `dispatch: true`. The B7c agent's flagged
+"ADR index drift" did not reproduce (96 files = 96 rows). Google quota still exhausted —
+all retest instruments keyless by design.

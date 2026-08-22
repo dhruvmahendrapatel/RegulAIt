@@ -21,6 +21,34 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-08-22 (late night) — B7 closed and retested: the buildable-anytime tail is now EMPTY;
+every remaining pending item is owner-gated.** The three residual groups the ledger still
+carried became batch B7, each agent-built on its own scratch DB and then independently
+verified and hands-on retested keyless (criteria pre-written; Google quota still exhausted).
+**B7a** (ADR-0096 amendment): the seven remaining entity kinds — compliance packs, AI use
+cases, AI risks, workflow templates, initiatives, roles, virtual keys — now resolve in the
+copilot, each reusing its own list endpoint's visibility; initiative and virtual_key filter
+across multiple ledgers with row-delta proofs, the other five are audit-filterable, and the
+retest proved usage 19→15 on a named initiative plus the two-user byte-identical refusal with
+its negative control. **B7b** (ADR-0052 amendment): all four remaining tier flags enforce at
+their enabling acts (pack activation, decompose, air-gapped deploy target, custom provider —
+authoring and basic runs stay open) and the four expansion points are wired;
+`enforcementPointsWired` reports 11; retested on an ABSENT license (four named audited 403s,
+open paths still 201). **B7c** (ADR-0073 amendment, migration 0102): canary-observation
+retention sweep (10th scheduler job + manual door + org knob; versions NEVER pruned,
+live-canary evidence kept — retested pruned=1/keptLiveCanary=1), the subject-delete AFTER
+DELETE trigger (activation-ledger-authored, proven on a raw SQL delete), and
+`usage_events` now stamps the agent_config version that SERVED (moved 3→4 live across an
+activation flip; seed rows NULL). Suite: **161 files / 2509 passed + 9 MinIO skips**,
+independently verified on a fresh DB at head `77f2f38`. Process: a fifth silent workspace
+rollback was absorbed with zero loss (origin restore), and **M-026** logged — decision-only
+invoke 200s are previews, not executions; verify probes by the state they write. What
+remains is owner-gated only: L13, L19, PII floor default, pillar-6 savings semantics,
+session-narrowing/mirror-persistence decisions, P2 HA, L11/L9, live PM creds, S3 release
+keypair, certification — and a Google quota refresh for live-narration work. Named-next
+buildables recorded in PENDING: vendor audit-filter (now unblocked by ADR-0084's
+object_type) and two approvals joins for the copilot.
+
 **2026-08-22 (night) — B6 closed: the last three buildable residuals are live-retested; the
 copilot's hallucination class is shut twice over; a parallel-sessions protocol now governs this
 repo.** Since the paragraph below: the L6d two-layer narration fix landed and live-retested,

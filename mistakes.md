@@ -281,3 +281,23 @@ the FILESYSTEM until `git fetch && git rev-parse HEAD origin/<branch>` proves
 otherwise — never as a claim about another author, and never report it as one;
 a rolled-back workspace and a hostile merge look identical from inside the
 tree.**
+
+## M-026 (2026-08-22) — I read a 200 from a decision-only invoke as an execution, twice
+
+During the B7 retest I "generated three project-attributed dispatches" and later
+"dispatched under an active config version" by POSTing `/v1/agents/:id/invoke`
+without `dispatch: true` — and took the three 200s as proof the calls executed.
+They were governance PREVIEWS: the endpoint returns the decision object and
+executes nothing (the ledger even says so — "a decision-only invoke still
+previews mocks (it executes nothing)"). The vacuous probes then produced a
+false FAIL on the brand-new usage-stamp column (all stamps NULL — because no
+usage rows were ever written), and I spent four diagnostic steps auditing dist
+freshness, write sites, and resolution code before checking what the 200 had
+actually returned. The M-004 discipline (check the harness before the code)
+eventually caught it, but the probes should never have been trusted: a probe
+that generates state must be verified by the STATE it claims to generate (the
+usage row, the audit row with the right shape), not by its status code.
+**Rule: an HTTP 200 proves the request was accepted, not that the effect
+happened — before building any conclusion on a state-generating probe, read
+back the state it claims to have written; for RegulAIt specifically,
+`/v1/agents/:id/invoke` executes nothing without `dispatch: true`.**
