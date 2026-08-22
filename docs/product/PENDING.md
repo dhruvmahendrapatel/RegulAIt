@@ -137,7 +137,20 @@ states **what information or decision unblocks it**, so any future session can p
 moment that arrives. Recorded here because in-repo docs are the only ledger that survives
 harness resets (proven twice on 2026-08-21).
 
-## Blocked on the owner's model credential (unpark = build immediately)
+## ~~Blocked on the owner's model credential~~ — UNPARKED 2026-08-21 (Google/Gemini key)
+Live-instrument verification ran the same day: **V1–V7 all PASS**
+([LIVE_VERIFICATION_2026-08.md](LIVE_VERIFICATION_2026-08.md), ~$0.007 total spend) — live
+governed dispatch with real metering, streaming, PII-cascade-precedes-dispatch proven against
+a live backend, groundedness judges (`method: model-judged`) with the keyless 422 still
+holding, llm_as_judge, live-graded red-team trials with a real-denominator Wilson interval,
+and routing treating the live provider as a credentialed candidate. P1's
+"mechanism-proven, instrument-unverified" disclosures for the GOOGLE adapter and
+judge/probe grading are now VERIFIED (other providers' adapters remain fake-server-proven).
+Environmental finding: the seeded `gemini-2.5-pro` model id is retired for new Google
+accounts — seed refresh + an admin agent-model edit route queued (batch B1.5). **L6 and
+L24's model-judged half are now buildable** and queued behind the B-batches.
+
+### The table below is retained for history (written while the credential was parked)
 | Item | What gets built when a credential arrives |
 |---|---|
 | **L6 governance copilot** (Credo gap; GAIA-equivalent) | Governed copilot over the governance objects — task was #143. Also converts every "mechanism-proven, instrument-unverified" claim (P1 above): judge grading (0044/0067), probe grading (0057/0068), model guardrail tiers (0042), remote training adapters (0065). |
