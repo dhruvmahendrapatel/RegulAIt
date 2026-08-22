@@ -87,32 +87,42 @@ function OrientationCard() {
     queryKey: ["setup-status"],
     queryFn: () => api.get<SetupStatusResponse>("/v1/setup/status"),
   });
-  if (dismissed) return null;
   const pending = (approvals.data?.approvals ?? []).filter((a) => a.status === "pending").length;
   const totals = usage.data?.totals ?? {};
-  const dismiss = () => {
+  // Dismissal hides the ORIENTATION (prose + start-here links), never the live
+  // numbers — those are a dashboard, not onboarding (owner feedback, 2026-08-21).
+  // "Show orientation" restores it; the choice stays a per-browser convenience.
+  const setStored = (on: boolean) => {
     try {
-      localStorage.setItem(ORIENTATION_KEY, "1");
+      if (on) localStorage.setItem(ORIENTATION_KEY, "1");
+      else localStorage.removeItem(ORIENTATION_KEY);
     } catch {
-      /* storage unavailable — dismiss still works for this view */
+      /* storage unavailable — the toggle still works for this view */
     }
-    setDismissed(true);
+    setDismissed(on);
   };
   return (
     <Card
-      title="Start here — what this console governs"
+      title={dismissed ? "Governance at a glance" : "Start here — what this console governs"}
       actions={
-        <Button size="sm" variant="ghost" aria-label="Dismiss orientation" onClick={dismiss}>
-          Dismiss
+        <Button
+          size="sm"
+          variant="ghost"
+          aria-label={dismissed ? "Show orientation" : "Dismiss orientation"}
+          onClick={() => setStored(!dismissed)}
+        >
+          {dismissed ? "Show orientation" : "Dismiss"}
         </Button>
       }
     >
       <div className={v.stack}>
-        <p className={v.dim} style={{ maxWidth: "70ch" }}>
-          Every agent, connector and MCP call in this workspace passes through one gateway:
-          default-deny entitlements, human approvals, content guardrails, per-project cost
-          attribution and a full audit trail — enforced at the call, not reported after it.
-        </p>
+        {!dismissed && (
+          <p className={v.dim} style={{ maxWidth: "70ch" }}>
+            Every agent, connector and MCP call in this workspace passes through one gateway:
+            default-deny entitlements, human approvals, content guardrails, per-project cost
+            attribution and a full audit trail — enforced at the call, not reported after it.
+          </p>
+        )}
         <div className={v.grid3}>
           <div className={v.stat}>
             <span className={v.statValue}>{pending}</span>
@@ -127,6 +137,7 @@ function OrientationCard() {
             <span className={v.statLabel}>attributed spend</span>
           </div>
         </div>
+        {!dismissed && (
         <div className={v.row} style={{ flexWrap: "wrap" }}>
           <Link to="/admin/posture">See your governance posture</Link>
           <span className={v.faint} aria-hidden>
@@ -142,6 +153,7 @@ function OrientationCard() {
           </span>
           <Link to="/admin/cost">Open the cost dashboard</Link>
         </div>
+        )}
       </div>
     </Card>
   );
