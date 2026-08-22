@@ -2811,6 +2811,12 @@ export const APPROVAL_QUORUMS = ["all", "any"] as const;
  * posture. 'inherit' defers to the env-derived deploy mode; 'strict' raises
  * the floor. There is deliberately no value that lowers it. */
 export const EGRESS_COMPILED_DEFAULT_POLICIES = ["inherit", "strict"] as const;
+/** ADR-0080 amendment (migration 0098, batch B3): does an approved AI use
+ * case gate dispatch? 'off' = the shipped honest limit ("approval registers
+ * intent"), byte-identical. 'warn' records the refusal-shaped fact without
+ * blocking. 'enforce' refuses a governed dispatch attributed to a
+ * use-case-LINKED project with no approved linked use case. */
+export const USE_CASE_GATE_MODES = ["off", "warn", "enforce"] as const;
 
 export const orgSettings = pgTable(
   "org_settings",
@@ -3013,6 +3019,33 @@ export const orgSettings = pgTable(
      * "expiring soon" — the window the registry surfaces lapses in as WORK
      * ahead of time rather than as an outage on the day. */
     mrmExpiryWarnDays: integer("mrm_expiry_warn_days").notNull().default(30),
+    /** ADR-0086 §3's named follow-up (migration 0098, batch B3):
+     * staleness-forces-recertification. false (default) = ADR-0086's shipped
+     * posture, byte-identical — staleness informs and gates nothing. true =
+     * the ADR-0045 dispatch gate (and ONLY while `mrmEnforced` is on — this
+     * knob deepens the one gate, it creates no gate of its own) additionally
+     * refuses a card whose ledger drift since the last granting decision has
+     * reached the threshold below, on the SAME 409 path expiry uses. Fully
+     * reversible; recertifying (a new superseding sign-off) resets the clock. */
+    mrmStalenessRecertEnabled: boolean("mrm_staleness_recert_enabled").notNull().default(false),
+    /** how many ledger changes since certification (the `computeCardStaleness`
+     * counts, summed) it takes before an armed staleness gate refuses. 1 =
+     * any drift at all forces recertification. */
+    mrmStalenessRecertThreshold: integer("mrm_staleness_recert_threshold").notNull().default(1),
+
+    // --- ADR-0080 amendment (migration 0098): use-case dispatch gate --------
+    /** 'off' (default) = the ADR-0080 honest limit exactly as shipped:
+     * approval registers intent and gates nothing — byte-identical behaviour.
+     * 'warn' = a governed dispatch attributed to a use-case-LINKED project
+     * with no approved linked use case proceeds, but the refusal-shaped fact
+     * is audited and annotated on the response. 'enforce' = the same dispatch
+     * is refused 409 `use_case_approval_required` before any provider work —
+     * the ADR-0045 gate shape. The join is `ai_use_cases.project_id`, the
+     * only join the schema holds: a project no use case links stays untouched
+     * in every mode. */
+    useCaseGateMode: text("use_case_gate_mode", { enum: USE_CASE_GATE_MODES })
+      .notNull()
+      .default("off"),
 
     // --- ADR-0046 (migration 0058): review-workbench bulk fences ------------
     /** hard cap on items per bulk approve/deny/reassign. Not a UI convenience:
@@ -3098,6 +3131,14 @@ export const orgSettings = pgTable(
     check(
       "org_settings_approval_bulk_max_items_check",
       sql`${t.approvalBulkMaxItems} >= 1 AND ${t.approvalBulkMaxItems} <= 500`,
+    ),
+    check(
+      "org_settings_use_case_gate_mode_check",
+      sql`${t.useCaseGateMode} IN ('off', 'warn', 'enforce')`,
+    ),
+    check(
+      "org_settings_mrm_staleness_recert_threshold_check",
+      sql`${t.mrmStalenessRecertThreshold} >= 1 AND ${t.mrmStalenessRecertThreshold} <= 100000`,
     ),
   ],
 );

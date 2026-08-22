@@ -95,6 +95,9 @@ import {
   type GuardrailPolicy,
 } from "./guardrails.js";
 import { mrmDispatchGate } from "./mrm.js";
+// ADR-0080 amendment (batch B3): the use-case dispatch gate — org opt-in,
+// default off (byte-identical), the ADR-0045 gate shape beside the MRM rung.
+import { useCaseDispatchGate, type DispatchUseCaseGate } from "./use-case-gate.js";
 // ADR-0079: pillar 2 §2 stage 2 — the invoke→instance join point and the
 // plan-only refusal it makes possible.
 import { guardInstanceAttributedCall } from "./plan-only.js";
@@ -343,6 +346,10 @@ export type DispatchOutcome =
          * transport layer and a configured fallback hop served instead. Its
          * presence is the disclosure — a fallback is never silent. */
         fallback?: DispatchFallback;
+        /** ADR-0080 amendment (batch B3): present ONLY under
+         * useCaseGateMode=warn when this dispatch would have been refused
+         * under enforce — the refusal-shaped fact, annotated, not enforced. */
+        useCaseGate?: DispatchUseCaseGate;
       };
       /** ADR-0070: where this call landed in the trace tree. Present whenever
        * tracing is enabled; absent when the org switched it off. */
@@ -1229,6 +1236,37 @@ async function dispatchAttempt(
     };
   }
 
+  // ADR-0080 amendment (batch B3) — THE USE-CASE DISPATCH GATE, beside the
+  // MRM rung and with the same placement discipline: after the caller's
+  // entitlement decision, before ANY provider work, so a refusal costs
+  // nothing. Default-off (`org_settings.use_case_gate_mode = 'off'`) is
+  // byte-identical — an unattributed dispatch does not even read settings
+  // here. The join is honest and narrow: the gate fires only for a dispatch
+  // attributed to a project that at least one AI use case LINKS
+  // (`ai_use_cases.project_id`, the only join the schema holds); under
+  // 'enforce' such a dispatch refuses 409 `use_case_approval_required`
+  // unless a linked use case is approved, under 'warn' it proceeds with the
+  // refusal-shaped fact audited and annotated on the result.
+  let useCaseGateWarning: DispatchUseCaseGate | null = null;
+  const useCaseGate = await useCaseDispatchGate(db, {
+    userId,
+    agentId: served.id,
+    agentName: served.name,
+    projectId: args.projectId ?? null,
+  });
+  if (useCaseGate) {
+    if (useCaseGate.kind === "refuse") {
+      sink.auditLogId = useCaseGate.auditLogId;
+      return {
+        ok: false,
+        status: useCaseGate.status,
+        error: useCaseGate.error,
+        detail: useCaseGate.detail,
+      };
+    }
+    useCaseGateWarning = useCaseGate.annotation;
+  }
+
   // PILLAR 5 enforcement: an attributed dispatch is gated on the project's
   // measured budget BEFORE any provider work happens.
   const projectGate = await preDispatchProjectGate(db, args.projectId ?? null, userId);
@@ -2042,6 +2080,9 @@ async function dispatchAttempt(
         : {}),
       ...(pii ? { pii } : {}),
       ...(dispatchGuardrails ? { guardrails: dispatchGuardrails } : {}),
+      // ADR-0080 amendment (batch B3): the warn-mode fact rides the result —
+      // absent everywhere else, so default-off responses are byte-identical
+      ...(useCaseGateWarning ? { useCaseGate: useCaseGateWarning } : {}),
     },
   };
 }

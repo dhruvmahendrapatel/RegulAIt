@@ -172,7 +172,77 @@ export async function mrmDispatchGate(
     cards: [...cards, ...providerCards],
     now,
   });
-  if (decision.allowed) return null;
+  if (decision.allowed) {
+    // ADR-0086 §3's named follow-up (batch B3) — STALENESS FORCES
+    // RECERTIFICATION, as an org opt-in DEEPENING this same gate rather than
+    // forking a second one. Default off = ADR-0086 exactly as shipped
+    // (staleness informs, gates nothing), and the knob is meaningful only
+    // here, inside the mrmEnforced gate — with enforcement off there is no
+    // gate to deepen. When armed: the live card's ledger drift since its
+    // last granting decision (computeCardStaleness — the ONE staleness
+    // computation, never re-derived) reaching the threshold refuses on the
+    // SAME 409 path expiry uses, with the staleness evidence named, and a
+    // recertification (new superseding sign-off) resets the clock.
+    if (!org.mrmStalenessRecertEnabled || decision.reason !== "approved" || !decision.cardId) {
+      return null;
+    }
+    const [liveCard] = await db.select().from(modelCards).where(eq(modelCards.id, decision.cardId));
+    if (!liveCard) return null;
+    const chain = await db
+      .select()
+      .from(modelCardApprovals)
+      .where(eq(modelCardApprovals.cardId, liveCard.id));
+    const staleness = await computeCardStaleness(db, liveCard, chain, now);
+    if (!staleness.certified || !staleness.drifted || !staleness.changesSinceCertification) {
+      return null;
+    }
+    const totalChanges = Object.values(staleness.changesSinceCertification).reduce(
+      (a, b) => a + b,
+      0,
+    );
+    if (totalChanges < org.mrmStalenessRecertThreshold) return null;
+    const detail =
+      `the risk sign-off on model card '${liveCard.intendedUse}' is live but STALE: ` +
+      `${staleness.summary} (${totalChanges} ledger change(s) since certification on ` +
+      `${staleness.lastCertifiedAt}, threshold ${org.mrmStalenessRecertThreshold}). ` +
+      `Staleness-forces-recertification is enabled — recertify (a new sign-off superseding ` +
+      `the current one) to restore dispatch`;
+    await db.insert(auditLog).values({
+      userId: ctx.userId,
+      objectType: "model_card",
+      objectId: liveCard.id,
+      detail: {
+        phase: "dispatch",
+        agentId: ctx.agentId,
+        agentName: ctx.agentName,
+        model: ctx.model,
+        customProviderId: ctx.customProviderId,
+        mrmReason: "staleness_recert_required",
+        modelCardId: liveCard.id,
+        modelCardApprovalId: decision.approvalId,
+        stalenessThreshold: org.mrmStalenessRecertThreshold,
+        staleness: {
+          lastCertifiedAt: staleness.lastCertifiedAt,
+          changesSinceCertification: staleness.changesSinceCertification,
+          totalChanges,
+          summary: staleness.summary,
+        },
+        ...(ctx.projectId ? { projectId: ctx.projectId } : {}),
+      },
+      effect: "deny",
+      ruleId: "mrm-staleness-recert-required",
+      ruleChain: [],
+      reason: detail,
+    });
+    return {
+      status: 409,
+      // the SAME stable caller-facing code every MRM refusal carries — the
+      // remediation is the same family ("recertify"); the audit ruleId is
+      // where this case is distinguishable (the ADR-0045 deviation-1 rule)
+      error: "mrm_approval_required",
+      detail,
+    };
+  }
 
   await db.insert(auditLog).values({
     userId: ctx.userId,
@@ -462,6 +532,10 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
     return {
       enforced: org.mrmEnforced,
       warnDays: org.mrmExpiryWarnDays,
+      /** ADR-0086 §3's follow-up (batch B3): off by default; deepens the
+       * dispatch gate (mrmEnforced) — with enforcement off it gates nothing */
+      stalenessRecertEnabled: org.mrmStalenessRecertEnabled,
+      stalenessRecertThreshold: org.mrmStalenessRecertThreshold,
       ...mrmPosture({ enforced: org.mrmEnforced, cardCount: cards.length, approvedCount }),
       cards: cards.length,
       approved: count("approved"),
@@ -904,13 +978,29 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
    * PUT, because turning it on can hard-stop production and the act deserves
    * its own audit row. */
   app.post("/v1/mrm/enforcement", async (req, reply) => {
-    const body = z.object({ enforced: z.boolean(), warnDays: z.number().int().min(0).max(3650).optional() }).parse(req.body);
+    const body = z
+      .object({
+        enforced: z.boolean(),
+        warnDays: z.number().int().min(0).max(3650).optional(),
+        /** ADR-0086 §3's follow-up (batch B3): staleness-forces-
+         * recertification. Per-org, default off, meaningful only while
+         * `enforced` is on (it deepens this gate; it creates none). */
+        stalenessRecertEnabled: z.boolean().optional(),
+        stalenessRecertThreshold: z.number().int().min(1).max(100000).optional(),
+      })
+      .parse(req.body);
     const org = await loadOrgSettings(db);
     const [updated] = await db
       .update(orgSettings)
       .set({
         mrmEnforced: body.enforced,
         ...(body.warnDays !== undefined ? { mrmExpiryWarnDays: body.warnDays } : {}),
+        ...(body.stalenessRecertEnabled !== undefined
+          ? { mrmStalenessRecertEnabled: body.stalenessRecertEnabled }
+          : {}),
+        ...(body.stalenessRecertThreshold !== undefined
+          ? { mrmStalenessRecertThreshold: body.stalenessRecertThreshold }
+          : {}),
         updatedBy: req.authCtx.userId ?? null,
         updatedAt: new Date(),
       })
@@ -920,16 +1010,43 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
       userId: req.authCtx.userId ?? NO_IDENTITY,
       objectType: "org_settings",
       objectId: null,
-      detail: { phase: "mrm", from: org.mrmEnforced, to: body.enforced, warnDays: updated!.mrmExpiryWarnDays },
+      detail: {
+        phase: "mrm",
+        from: org.mrmEnforced,
+        to: body.enforced,
+        warnDays: updated!.mrmExpiryWarnDays,
+        ...(body.stalenessRecertEnabled !== undefined || body.stalenessRecertThreshold !== undefined
+          ? {
+              stalenessRecert: {
+                from: {
+                  enabled: org.mrmStalenessRecertEnabled,
+                  threshold: org.mrmStalenessRecertThreshold,
+                },
+                to: {
+                  enabled: updated!.mrmStalenessRecertEnabled,
+                  threshold: updated!.mrmStalenessRecertThreshold,
+                },
+              },
+            }
+          : {}),
+      },
       effect: body.enforced ? "deny" : "allow",
       ruleId: body.enforced ? "mrm-enforcement-enabled" : "mrm-enforcement-disabled",
       ruleChain: [],
       reason: body.enforced
-        ? "mrmEnforced ON — dispatch of a model with no unexpired approved card is now REFUSED"
+        ? "mrmEnforced ON — dispatch of a model with no unexpired approved card is now REFUSED" +
+          (updated!.mrmStalenessRecertEnabled
+            ? `; staleness-forces-recertification armed (threshold ${updated!.mrmStalenessRecertThreshold} ledger change(s) since certification)`
+            : "")
         : "mrmEnforced OFF — model cards are recorded but no dispatch is refused",
     });
     if (!updated) return reply.status(500).send({ error: "org_settings_missing" });
-    return { enforced: updated.mrmEnforced, warnDays: updated.mrmExpiryWarnDays };
+    return {
+      enforced: updated.mrmEnforced,
+      warnDays: updated.mrmExpiryWarnDays,
+      stalenessRecertEnabled: updated.mrmStalenessRecertEnabled,
+      stalenessRecertThreshold: updated.mrmStalenessRecertThreshold,
+    };
   });
 }
 

@@ -1888,6 +1888,15 @@ export const updateOrgSettingsSchema = z
      * allow-list regardless of mode. There is deliberately NO value that
      * loosens an air_gapped deployment — the enum has no such member. */
     egressCompiledDefaultPolicy: egressCompiledDefaultPolicySchema.optional(),
+    /** ADR-0080 amendment (migration 0098, batch B3): does an approved AI use
+     * case gate dispatch? 'off' (default) = approval registers intent and
+     * gates nothing — the shipped honest limit, byte-identical. 'warn'
+     * records the refusal-shaped fact (audit row + response annotation)
+     * without blocking. 'enforce' refuses a governed dispatch attributed to a
+     * use-case-LINKED project (the `ai_use_cases.projectId` join — the only
+     * one the schema holds) unless at least one linked use case is approved.
+     * A project no use case links is untouched in every mode. */
+    useCaseGateMode: z.enum(["off", "warn", "enforce"]).optional(),
     // budgets
     budgetEnforcement: budgetEnforcementSchema.optional(),
     budgetHardBlockPct: z.number().int().min(1).max(100).optional(),

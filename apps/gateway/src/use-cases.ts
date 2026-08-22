@@ -47,8 +47,10 @@
  *
  * WHAT THIS FILE DOES NOT DO — stated because a governance product that
  * overstates itself is worse than one that ships less: approval REGISTERS
- * intent; it does not yet GATE dispatch (nothing refuses an agent call for
- * lacking an approved use case — named in ADR-0080 as the obvious next step).
+ * intent, and — since the batch-B3 amendment closed ADR-0080's named
+ * follow-up — GATES dispatch only where an admin arms the org opt-in
+ * (`org_settings.use_case_gate_mode`, default off = byte-identical; see
+ * use-case-gate.ts for the gate and its honest projectId-join limit).
  * And nothing auto-discovers use cases: every row here was proposed by a
  * person.
  */
@@ -427,8 +429,8 @@ async function cascadeConsequencesFor(db: Db, useCase: AiUseCaseRow) {
 /** the no-auto-block posture, stated as data so every read carries it */
 const EU_AI_ACT_ENFORCEMENT_NOTE =
   "the tier INFORMS the human sign-off on the one approvals queue — nothing is auto-blocked by " +
-  "a tier (approval itself gates nothing yet, per ADR-0080's honest limit), and the decide path " +
-  "is unchanged";
+  "a tier (approval gates dispatch only where the org's use_case_gate_mode opt-in is armed — " +
+  "off by default, per the ADR-0080 B3 amendment), and the decide path is unchanged";
 
 /**
  * ADR-0085 — the screening as the detail view reads it: the STORED result
@@ -838,6 +840,21 @@ export function registerUseCaseRoutes(
       });
     }
     if (row.status !== "proposed" && row.status !== "under_review") {
+      // ADR-0089 amendment (batch B3) — INTENT IS DECIDED WITH THE USE CASE.
+      // The intended-agents list is part of what the sign-off approved (the
+      // ADR-0089 alignment comparison stands on it), so a post-decision
+      // intent edit is refused BY NAME, ahead of the generic refusal:
+      // changing intent after approval is a NEW use case, never an edit.
+      if (body.intendedAgentIds !== undefined) {
+        return reply.status(409).send({
+          error: "intent_is_decided_not_patched",
+          detail:
+            `a ${row.status} use case's intended agents are part of what was decided — editing ` +
+            "them would rewrite what the sign-off approved. Changing intent after a decision is " +
+            "a NEW use case: propose one naming the new agents and take it through the same " +
+            "intake sign-off",
+        });
+      }
       return reply.status(409).send({
         error: "use_case_not_editable",
         detail: `a ${row.status} use case is a decided record — editing it would change what was decided`,
