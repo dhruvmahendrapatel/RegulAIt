@@ -44,12 +44,15 @@
  *     The grounded answer is composed from COUNTS, so a blocked sample costs
  *     the answer nothing but the sample.
  *
- *  5. GENERATION QUALITY IS UNVERIFIED, AND SAYS SO. No model provider is
- *     connected in this build. The retrieval, the planning, the grounding, the
- *     scoping and the proposal path are all real and tested. `ModelBackedNarrator`
- *     follows ADR-0044's judge pattern exactly — interface, model-backed
- *     implementation, test seam — and has never narrated real output. Every
- *     answer carries `modelNarrationVerified: false`.
+ *  5. `modelNarrationVerified` MEANS ONE NARROW THING, AND SAYS SO. It is TRUE
+ *     when THIS narration's cited count keys and cited governance-object ids
+ *     were all cross-checked against THIS retrieval and passed
+ *     (`narrationIsGrounded`). It is NOT a claim that the model is generally
+ *     reliable, and — the L6d lesson — NOT a claim that the answer is ABOUT
+ *     what the question asked: real figures over an unfiltered query can still
+ *     be narrated as belonging to a subject nobody ever filtered on. That
+ *     separate fact rides its own field, `subjectFiltered`, and its own
+ *     deterministic caveat in the grounded text.
  */
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
@@ -87,6 +90,7 @@ import {
   copilotPolicyTighteningDiffSchema,
   copilotProposalKindIsApplicable,
   copilotProposalSchema,
+  describeCopilotFilters,
   narrationIsGrounded,
   parseNarration,
   planCopilotQuery,
@@ -736,6 +740,11 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
         rowsExamined: evidence.rowsExamined,
         generation,
         guardrailAction,
+        // L6d — and the honest record of what it NARROWED ON. "Were those
+        // figures actually about the thing that question named?" has to stay
+        // answerable from the ledger alone, long after the answer text is gone.
+        filters: describeCopilotFilters(plan.params),
+        subjectFiltered: grounded.subjectFiltered,
       },
     );
 
@@ -758,17 +767,23 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
       evidence,
       scope: { projectIds: scope.projectIds, statement: scope.statement },
       ...(narrationError ? { narrationDiscarded: narrationError } : {}),
-      note: narrationGroundingChecked
-        ? "The retrieval, scoping and grounding above are real and tested. A model narration was " +
-          "added on top and CROSS-CHECKED against this retrieval — every count key and every " +
-          "governance-object id it cited was one this caller's own scoped query returned. The " +
-          "counts remain the authoritative answer; the narration is prose over them."
-        : narrationError
+      note:
+        (grounded.subjectFiltered
+          ? ""
+          : `${grounded.unfilteredSubjectCaveat} `) +
+        (narrationGroundingChecked
           ? "The retrieval, scoping and grounding above are real and tested. A model narration was " +
-            "attempted and DISCARDED (see `narrationDiscarded`); the grounded, count-derived answer " +
-            "stands alone."
-          : "The retrieval, scoping and grounding above are real and tested. No narrator agent was " +
-            "named, so this answer is the grounded, count-derived one and no model was called.",
+            "added on top and CROSS-CHECKED against this retrieval — every count key and every " +
+            "governance-object id it cited was one this caller's own scoped query returned. That " +
+            "cross-check covers the FIGURES AND IDS ONLY: it does not, and cannot, verify that the " +
+            "narration attributed them to the right subject. The counts remain the authoritative " +
+            "answer; the narration is prose over them."
+          : narrationError
+            ? "The retrieval, scoping and grounding above are real and tested. A model narration was " +
+              "attempted and DISCARDED (see `narrationDiscarded`); the grounded, count-derived answer " +
+              "stands alone."
+            : "The retrieval, scoping and grounding above are real and tested. No narrator agent was " +
+              "named, so this answer is the grounded, count-derived one and no model was called."),
     });
   });
 

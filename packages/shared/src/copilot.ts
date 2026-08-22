@@ -144,6 +144,44 @@ export const COPILOT_GROUNDED_REFUSAL =
   "or from the phrasing of the question. This is a refusal, not a finding: it means 'no matching " +
   "record in your scope', never 'no such thing exists'.";
 
+/**
+ * ADR-0056 amendment (2026-08-22, L6d) — THE UNFILTERED-SUBJECT CAVEAT.
+ *
+ * THE DEFECT THIS EXISTS FOR, found live. Asked to "summarise the Zorblatt
+ * Quantum Compliance Widget approvals from last week", the keyword planner
+ * matched only "approval" and "last week". It ran `listApprovals` WITH NO
+ * ENTITY FILTER, retrieved eight real, org-wide approvals, and the narration
+ * described them as being "for the Zorblatt Quantum Compliance Widget". Every
+ * existing guard passed: the retrieval was not empty (so
+ * `retrievalFoundNothing` did not fire), the figures were real (so the count
+ * cross-check passed) and the ids were real (so the object cross-check
+ * passed). Nothing anywhere checked that THE SUBJECT OF THE QUESTION HAD EVER
+ * BEEN USED AS A FILTER.
+ *
+ * WHY THIS IS A DETERMINISTIC FIELD AND NOT A PROMPT INSTRUCTION. The prompt
+ * gained a hard rule too (`buildNarrationPrompt` rule 6), but a hard rule is
+ * only as good as the model's obedience, and the whole point of
+ * `COPILOT_SCOPE_CAVEAT` is that the honest qualification on an answer is
+ * emitted by CODE THAT CANNOT DECLINE TO EMIT IT. Same reasoning, same shape:
+ * the sentence is composed here, lands in the grounded text (which is itself
+ * handed to the narrator as authoritative), and is carried as its own field on
+ * the answer.
+ *
+ * WHAT IT DOES NOT CLAIM. It does not claim to know WHICH words in the question
+ * were a subject — that would be a second keyword heuristic of exactly the kind
+ * that produced the defect. It states a fact about the EXECUTED QUERY: no
+ * filter was applied, therefore the findings are not about anything in
+ * particular.
+ */
+export function copilotUnfilteredSubjectCaveat(tool: CopilotTool): string {
+  return (
+    "UNFILTERED SUBJECT. This query ran with NO filter at all, so the findings are ALL " +
+    `'${tool}' records in your scope for the period. They are NOT narrowed to any person, team, ` +
+    "system, vendor, product or other subject your question may have named, and must not be read " +
+    "as being about one."
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Natural language -> a structured, bounded tool call
 // ---------------------------------------------------------------------------
@@ -268,6 +306,38 @@ export function planCopilotQuery(question: string): CopilotQueryPlan {
   };
 }
 
+/**
+ * L6d — THE NARROWING THIS QUERY ACTUALLY APPLIED, rendered as `key=value`
+ * pairs in a stable (alphabetical) order so the same plan always produces the
+ * same string. This is the one place the plan's params are turned into prose,
+ * so the prompt, the grounded answer and the caveat cannot disagree about what
+ * was filtered on.
+ */
+export function describeCopilotFilters(params: CopilotQueryPlan["params"]): string[] {
+  return Object.entries(params)
+    .filter(([, v]) => v !== undefined && v !== null && v !== "")
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([k, v]) => `${k}=${String(v)}`);
+}
+
+/**
+ * L6d — DID THE EXECUTED QUERY NARROW AT ALL?
+ *
+ * Deliberately a fact about the PLAN and not a guess about the question. False
+ * means the retrieval was "every record of this kind in the caller's scope for
+ * the period", which is precisely the state in which attributing the findings
+ * to a subject named in the question is a fabrication.
+ *
+ * HONEST LIMIT, stated in the ADR amendment: the current param vocabulary
+ * (`effect`, `objectType`, `status`) contains NO true entity filter — nothing
+ * in it can narrow to a named product or vendor. So `true` here means "the
+ * query narrowed by something", not "the query narrowed to your subject". The
+ * fix for that is entity-aware planning, which is a separate slice.
+ */
+export function copilotPlanFiltered(plan: CopilotQueryPlan): boolean {
+  return describeCopilotFilters(plan.params).length > 0;
+}
+
 // ---------------------------------------------------------------------------
 // The grounded answer
 // ---------------------------------------------------------------------------
@@ -325,6 +395,26 @@ export interface GroundedAnswer {
   text: string;
   scopeCaveat: string;
   notice: string;
+  /**
+   * L6d: TRUE when the executed plan applied at least one filter. FALSE means
+   * the retrieval was "every record of this kind in the caller's scope for the
+   * period" — so nothing the answer says is about any subject in particular.
+   *
+   * This is a SEPARATE flag from `modelNarrationVerified` on purpose. That flag
+   * means "this narration's figures and object ids were cross-checked against
+   * this retrieval and passed", which stays true here — the numbers WERE real.
+   * Folding subject-attribution into it would silently change what a `true`
+   * means for every other answer, and would make it depend on a keyword guess
+   * about which words in the question were a subject.
+   */
+  subjectFiltered: boolean;
+  /**
+   * L6d: the deterministic caveat, present exactly when `subjectFiltered` is
+   * false and null otherwise. A sibling of `scopeCaveat`/`notice` because it is
+   * the same kind of thing: a qualification the answer carries as a FIELD, not
+   * as a footnote a caller may or may not have read.
+   */
+  unfilteredSubjectCaveat: string | null;
   /** every figure in `text`, itemised — an answer traceable to its records */
   citedCounts: CopilotEvidence["counts"];
   /** L6a: the governance objects this answer is allowed to rest on, by id */
@@ -371,6 +461,17 @@ export function renderGroundedAnswer(
       ? "Scope: organization-wide (admin caller)."
       : `Scope: ${evidence.scopeProjectIds.length} project(s) you are a member of.`,
   );
+  // L6d — THE FILTERS, ALWAYS STATED. A reader can only judge whether an answer
+  // is about what they asked if they can see what the query narrowed on, so the
+  // narrowing is rendered on every answer, filtered or not.
+  const filters = describeCopilotFilters(plan.params);
+  const subjectFiltered = filters.length > 0;
+  lines.push(`Filters applied: ${subjectFiltered ? filters.join(", ") : "none"}.`);
+  // and when it narrowed on NOTHING, the caveat that the figures below are not
+  // about any subject the question named — emitted here, by code, so it holds
+  // whatever a narrator layered on top decides to say
+  const unfilteredSubjectCaveat = subjectFiltered ? null : copilotUnfilteredSubjectCaveat(plan.tool);
+  if (unfilteredSubjectCaveat) lines.push(unfilteredSubjectCaveat);
   lines.push(`${evidence.rowsExamined} record(s) matched.`);
   for (const c of evidence.counts) lines.push(`- ${c.label}: ${c.value}`);
   if (evidence.leads.length) {
@@ -397,6 +498,8 @@ export function renderGroundedAnswer(
     text: lines.join("\n"),
     scopeCaveat: COPILOT_SCOPE_CAVEAT,
     notice: COPILOT_DECISION_SUPPORT_NOTICE,
+    subjectFiltered,
+    unfilteredSubjectCaveat,
     citedCounts: evidence.counts,
     citedObjectIds: evidence.citableObjects.map((o) => o.id),
     generation: "grounded",
@@ -444,6 +547,12 @@ export interface CopilotNarrator {
  * it is not something this build can verify. */
 export function buildNarrationPrompt(req: CopilotNarrationRequest): string {
   const nothing = retrievalFoundNothing(req.evidence);
+  // L6d — THE FILTERS THE QUERY ACTUALLY RAN WITH. Their ABSENCE from this
+  // prompt is what let a model describe eight org-wide approvals as being "for
+  // the Zorblatt Quantum Compliance Widget": it was shown the question and the
+  // rows, and nothing that said the rows had not been narrowed to the thing the
+  // question named.
+  const filters = describeCopilotFilters(req.plan.params);
   return [
     "You are a governance analyst. Summarise the FINDINGS BELOW for a compliance officer.",
     "",
@@ -461,11 +570,23 @@ export function buildNarrationPrompt(req: CopilotNarrationRequest): string {
     "   matching governance record was retrieved in this caller's scope, and stop. Do NOT",
     "   answer from general knowledge, do NOT speculate about what the answer might be, and",
     "   do NOT explain the concept the question mentions.",
-    "6. Reply as JSON and nothing else:",
+    "6. Describe the findings IN TERMS OF THE TOOL AND FILTERS ACTUALLY EXECUTED, listed under",
+    "   FILTERS below. NEVER attribute the findings to a person, team, system, vendor, product or",
+    "   any other entity named in the QUESTION unless that entity appears in FILTERS or in the",
+    "   RETRIEVED GOVERNANCE OBJECTS. The question is a REQUEST, not evidence that its subject was",
+    "   searched for. If the QUESTION names a subject that was not filtered on, say so in one",
+    "   clause — e.g. \"across all records in scope, not only <subject>\" — rather than silently",
+    "   relabelling unfiltered findings as that subject's.",
+    "7. Reply as JSON and nothing else:",
     "   {\"text\": string, \"citedKeys\": string[], \"citedObjectIds\": string[], \"refused\": boolean}.",
     "",
     `QUESTION: ${req.question}`,
     `TOOL: ${req.plan.tool}  TIMEFRAME: ${req.evidence.timeframe.label}`,
+    filters.length
+      ? `FILTERS: ${filters.join(", ")} — the ONLY narrowing applied beyond the caller's own scope ` +
+        "and the timeframe"
+      : `FILTERS: none — these are ALL ${req.plan.tool} records in the caller's scope for the ` +
+        "period, narrowed by nothing else. They are NOT about any subject named in the QUESTION.",
     "COUNTS:",
     ...req.evidence.counts.map((c) => `  ${c.key} = ${c.value}  (${c.label})`),
     `RETRIEVED GOVERNANCE OBJECTS (${req.evidence.citableObjects.length}):`,

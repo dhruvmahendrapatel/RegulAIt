@@ -19,7 +19,10 @@
  *    lists the concrete object ids it is grounded in.
  *  - **Verification is per-answer, not a build-wide claim.** A narration that
  *    passed the grounding cross-check is badged "grounded + narrated
- *    (cross-checked)"; one that was discarded says so with the reason.
+ *    (cross-checked)"; one that was discarded says so with the reason. That
+ *    badge is about FIGURES AND IDS only — so an answer whose query narrowed on
+ *    NOTHING is badged and captioned separately (L6d), because real numbers can
+ *    still be narrated as belonging to a subject nobody ever filtered on.
  *  - **An approved proposal can be applied, and only an approved one.** The
  *    proposals table renders each proposal's approval state, an Apply button
  *    that exists only where applying is possible, and the refusal reason
@@ -58,6 +61,8 @@ interface AskResponse {
     groundedRefusal: boolean;
     citedObjectIds: string[];
     modelNarrationVerified: boolean;
+    subjectFiltered: boolean;
+    unfilteredSubjectCaveat: string | null;
   };
   evidence: {
     rowsExamined: number;
@@ -181,6 +186,9 @@ export default function CopilotPage() {
               {answer.answer.groundedRefusal ? (
                 <Badge tone="danger">REFUSED — nothing retrieved</Badge>
               ) : null}
+              {answer.answer.subjectFiltered ? null : (
+                <Badge tone="warn">no filter — every record in scope</Badge>
+              )}
               {answer.plan.fallback ? <Badge tone="warn">question not matched</Badge> : null}
               {answer.narrationDiscarded ? <Badge tone="danger">narration discarded</Badge> : null}
             </div>
@@ -188,6 +196,11 @@ export default function CopilotPage() {
               <p className={v.errLine}>
                 The model narration was DISCARDED and the grounded answer stands: {answer.narrationDiscarded}
               </p>
+            ) : null}
+            {/* the L6d caveat, rendered the way `scopeCaveat` is: as the answer's
+                own qualification, not as a footnote elsewhere on the page */}
+            {answer.answer.unfilteredSubjectCaveat ? (
+              <p className={v.errLine}>{answer.answer.unfilteredSubjectCaveat}</p>
             ) : null}
             <p className={v.faint}>{answer.answer.scopeCaveat}</p>
             <p className={v.faint}>{answer.note}</p>
