@@ -137,3 +137,36 @@ approved intent, and a PROPOSED use case must not clear overreach.
 - **No certification campaigns yet.** Periodic owner-driven review of grants with
   attest/revoke/auto-revoke is L22, next in the queue — this ADR ships the ownership spine those
   campaigns need, not the campaigns.
+
+---
+
+## Amendment (2026-08-22, batch B3c) — the intent-capture half is closed
+
+§3's honest boundary said it plainly: *"no intent-capture flow was added in this slice"*, so an
+approved use case naming no agents read `no_intent_recorded`. The capture half now exists, and
+it deliberately adds **no new storage and no new route**:
+
+- **Capture feeds the ONE column.** The intended-agents list is edited through the existing
+  `PATCH /v1/use-cases/:id` (agent ids validated against the registry, `invalid_reference` on
+  an unknown id) and captured in the SPA — the propose form's intended-agent pick and a new
+  "Intended agents" card on the use-case detail with the read-time `intendedVsGranted`
+  comparison rendered beside it. Everything writes `ai_use_cases.intendedAgentIds`, the exact
+  column this ADR's alignment comparison reads; there is no second intent store.
+- **Editable ONLY pre-decision.** While a use case is `proposed`/`under_review` the intent is
+  the proposer's to refine (the same window every other in-flight edit has). After the
+  decision, an intent PATCH is refused **by name** — 409 `intent_is_decided_not_patched`,
+  ahead of the generic `use_case_not_editable` — because the intended agents are part of what
+  the sign-off approved, and rewriting them would rewrite the approval the alignment flags
+  stand on. **Changing intent after approval is a NEW use case** (propose one naming the new
+  agents and take it through the same intake sign-off) — the recorded choice, consistent with
+  ADR-0080's decided-statuses-are-terminal discipline; a re-approval path on the same row was
+  rejected because it would need a status regression that ADR-0080 refuses by design.
+- **Proven end to end from a captured intent, not a seeded row**: propose with no intent →
+  capture two agents via PATCH → approve through the one decide path → the inventory reads
+  `aligned` for the agent a participant holds and `undershoot` (gap naming the use case) for
+  the one nobody holds, and the use-case detail tells the same story. Non-vacuity: bypassing
+  the by-name refusal reddens exactly the boundary test (probe reverted by exact reversal).
+
+The `no_intent_recorded` reading itself is unchanged and still honest: it now describes a use
+case whose proposer recorded nothing before the decision, not a platform with nowhere to
+record it.

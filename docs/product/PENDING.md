@@ -198,7 +198,14 @@ non-gateway ML monitoring and SHAP-style explainability (four-vendor L17/L18); c
 bias-audit business (L9 note).
 
 ## Named follow-ups riding shipped ADRs (buildable anytime, none blocking)
-Use-case approval does not yet GATE dispatch (0080); ~~SoD pattern/N-way selectors (0091)~~
+~~Use-case approval does not yet GATE dispatch (0080)~~ — **closed 2026-08-22 (batch B3a,
+ADR-0080 amendment, migration 0098)**: org opt-in `use_case_gate_mode` (off|warn|enforce,
+default off = byte-identical); enforce refuses a governed dispatch attributed to a
+use-case-LINKED project (the honest optional `project_id` join — unlinked/unattributed
+dispatch untouched in every mode) with a named 409 before any provider work; warn records the
+refusal-shaped fact without blocking; **still open from that line**: nothing mandates that a
+dispatch be attributed to a linked project at all — attribution stays the pillar-5 opt-in, so
+the gate cannot see a call naming no project; ~~SoD pattern/N-way selectors (0091)~~
 — **closed 2026-08-22 (batch B2c, ADR-0091 amendment, migration 0097)**: N-way sets (2..8,
 refused only on the FULL set — any N-1 subset allowed) plus pattern selectors over exactly
 three enumerable dimensions (agent lifecycle status, agent provider kind, connector mode;
@@ -210,15 +217,25 @@ NOTHING — expiry stays breach-on-read), and admin item reassignment exists (au
 reason-required, riding ADR-0046's one approver-moving write, never to the grant's holder);
 **still open from that line**: notifications (nobody is emailed at a deadline) and periodic
 auto-campaigns (deliberately refused in the ADR), while review DELEGATION was always ADR-0022's
-existing mechanism, unchanged; drift-forces-recertification
-(0086); guardrail-path external scoring (0088 boundary); ~~pack v2 auto-profile creation
+existing mechanism, unchanged; ~~drift-forces-recertification
+(0086)~~ — **closed 2026-08-22 (batch B3b, ADR-0086 amendment, migration 0098)**: org opt-in
+`mrm_staleness_recert_enabled`/`_threshold` (default off/1) deepening the ADR-0045 dispatch
+gate — a live-certified card whose `computeCardStaleness` drift count reaches the threshold
+refuses on the expiry gate's own 409 path with the evidence named, recertification resets the
+clock, and with `mrm_enforced` off the knob gates nothing (it creates no gate of its own);
+guardrail-path external scoring (0088 boundary); ~~pack v2 auto-profile creation
 residuals (0058); `agent_config` canary still inert + rule-CRUD does not mint versions
 (0073 residuals)~~ — **all three closed 2026-08-22 (batch B1: ADR-0058 + ADR-0073
 amendments, migrations 0095/0096)**; what remains of those two ADRs' residual lists:
 read-time-only compliance-profile shadow, no ADR-0059 blast-radius feed, no observation
 pruning, the FK-cascade delete-orphan trigger, pack red-team gating presets;
 key re-encryption walk (0063); `hosted`/`byoc` egress strict-by-default
-(0062 residual); intent-capture flow for alignment where no use case records intent (0089);
+(0062 residual); ~~intent-capture flow for alignment where no use case records intent
+(0089)~~ — **closed 2026-08-22 (batch B3c, ADR-0089 amendment)**: intended agents are captured
+through the existing PATCH + the use-case detail's new field, feeding the ONE
+`intendedAgentIds` column the alignment reads, editable only pre-decision (post-decision
+intent edits refused by name — changing intent after approval is a NEW use case), proven
+end-to-end propose → capture → approve → aligned/undershoot on the inventory;
 mock-shadowing for the compaction-summarizer and decompose-worker rosters (0095 narrowed
 ROUTING selection only — a mock summarizer/worker can still be picked when live agents
 exist, same disease class, deliberately its own call).
