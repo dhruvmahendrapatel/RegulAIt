@@ -7223,11 +7223,22 @@ export type GrantCertificationItemRow = typeof grantCertificationItems.$inferSel
 // ---------------------------------------------------------------------------
 
 /** the capability kinds an SoD rule side may name — the four grantable
- * gateway object families. CONCRETE selectors only in this slice: a side is
- * one id (plus tool name for mcp_tool; plus an optional mode qualifier for
- * connector). Pattern/category selectors are named follow-up in ADR-0091. */
+ * gateway object families. A side is either CONCRETE (one id, plus tool name
+ * for mcp_tool; plus an optional mode qualifier for connector) or — since the
+ * ADR-0091 amendment (migration 0097) — a PATTERN over one of the enumerable
+ * dimensions in SOD_PATTERN_DIMENSIONS below. */
 export const SOD_CAPABILITY_KINDS = ["agent", "connector", "mcp_tool", "mcp_server"] as const;
 export type SodCapabilityKind = (typeof SOD_CAPABILITY_KINDS)[number];
+
+/** ADR-0091 amendment (migration 0097) — the CLOSED pattern vocabulary. A
+ * pattern side selects by an enumerable dimension the schema actually has:
+ * an agent's lifecycle status, an agent's provider kind, or a connector
+ * holding's mode ("any connector held at readwrite"). NO free-form regex or
+ * name matching anywhere — the ADR-0085 data-only-rules discipline. Patterns
+ * resolve at CHECK time against current objects, so a new agent matching the
+ * pattern is covered the moment it exists. */
+export const SOD_PATTERN_DIMENSIONS = ["lifecycle_status", "provider", "mode"] as const;
+export type SodPatternDimension = (typeof SOD_PATTERN_DIMENSIONS)[number];
 
 /** every mint path the SoD gate covers — the eight grant kinds ADR-0090
  * enumerated, plus role ASSIGNMENT (assigning a role confers its bundle, so
@@ -7250,12 +7261,15 @@ export const sodRules = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     name: text("name").notNull().unique(),
-    aKind: text("a_kind", { enum: SOD_CAPABILITY_KINDS }).notNull(),
-    aObjectId: uuid("a_object_id").notNull(),
+    /** legacy two-sided shape (pre-0097 rows keep it byte-identically); a
+     * rule whose sides live in `sod_rule_sides` leaves all four NULL — the
+     * `sod_rules_side_storage_check` pins that it is one shape or the other */
+    aKind: text("a_kind", { enum: SOD_CAPABILITY_KINDS }),
+    aObjectId: uuid("a_object_id"),
     aToolName: text("a_tool_name"),
     aMode: text("a_mode", { enum: ["read", "readwrite"] }),
-    bKind: text("b_kind", { enum: SOD_CAPABILITY_KINDS }).notNull(),
-    bObjectId: uuid("b_object_id").notNull(),
+    bKind: text("b_kind", { enum: SOD_CAPABILITY_KINDS }),
+    bObjectId: uuid("b_object_id"),
     bToolName: text("b_tool_name"),
     bMode: text("b_mode", { enum: ["read", "readwrite"] }),
     /** REQUIRED — the refusal must be able to say WHY the pair is toxic */
@@ -7282,9 +7296,56 @@ export const sodRules = pgTable(
       "sod_rules_sides_differ_check",
       sql`NOT (${t.aKind} = ${t.bKind} AND ${t.aObjectId} = ${t.bObjectId} AND ${t.aToolName} IS NOT DISTINCT FROM ${t.bToolName} AND ${t.aMode} IS NOT DISTINCT FROM ${t.bMode})`,
     ),
+    // migration 0097: fully legacy-sided or fully child-sided, never half
+    check(
+      "sod_rules_side_storage_check",
+      sql`((${t.aKind} IS NOT NULL) = (${t.aObjectId} IS NOT NULL)) AND ((${t.bKind} IS NOT NULL) = (${t.bObjectId} IS NOT NULL)) AND ((${t.aKind} IS NULL) = (${t.bKind} IS NULL)) AND (${t.aKind} IS NOT NULL OR (${t.aToolName} IS NULL AND ${t.aMode} IS NULL AND ${t.bToolName} IS NULL AND ${t.bMode} IS NULL))`,
+    ),
     index("sod_rules_enabled_idx").on(t.enabled),
   ],
 );
+
+/** ADR-0091 amendment (migration 0097) — one row per side of a NEW-shape SoD
+ * rule (N-way and/or pattern selectors). A pre-0097 two-sided rule has no
+ * rows here and keeps its legacy a-/b-side columns; the gateway reads both shapes
+ * through one loader. Each side is either CONCRETE (object_id [+ tool_name /
+ * mode]) or a PATTERN — an enumerable (dimension, value) pair over the
+ * closed SOD_PATTERN_DIMENSIONS vocabulary, resolved at check time. */
+export const sodRuleSides = pgTable(
+  "sod_rule_sides",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ruleId: uuid("rule_id")
+      .notNull()
+      .references(() => sodRules.id, { onDelete: "cascade" }),
+    position: integer("position").notNull(),
+    selector: text("selector", { enum: ["concrete", "pattern"] }).notNull(),
+    kind: text("kind", { enum: SOD_CAPABILITY_KINDS }).notNull(),
+    objectId: uuid("object_id"),
+    toolName: text("tool_name"),
+    mode: text("mode", { enum: ["read", "readwrite"] }),
+    patternDimension: text("pattern_dimension", { enum: SOD_PATTERN_DIMENSIONS }),
+    patternValue: text("pattern_value"),
+  },
+  (t) => [
+    unique("sod_rule_sides_position_uq").on(t.ruleId, t.position),
+    check(
+      "sod_rule_sides_concrete_check",
+      sql`${t.selector} <> 'concrete' OR (${t.objectId} IS NOT NULL AND ${t.patternDimension} IS NULL AND ${t.patternValue} IS NULL AND ((${t.kind} = 'mcp_tool') = (${t.toolName} IS NOT NULL)) AND (${t.mode} IS NULL OR (${t.kind} = 'connector' AND ${t.mode} IN ('read', 'readwrite'))))`,
+    ),
+    check(
+      "sod_rule_sides_pattern_check",
+      sql`${t.selector} <> 'pattern' OR (${t.objectId} IS NULL AND ${t.toolName} IS NULL AND ${t.mode} IS NULL AND ${t.patternDimension} IS NOT NULL AND ${t.patternValue} IS NOT NULL AND ((${t.kind} = 'agent' AND ${t.patternDimension} IN ('lifecycle_status', 'provider')) OR (${t.kind} = 'connector' AND ${t.patternDimension} = 'mode' AND ${t.patternValue} IN ('read', 'readwrite'))))`,
+    ),
+    check(
+      "sod_rule_sides_lifecycle_value_check",
+      sql`${t.patternDimension} <> 'lifecycle_status' OR ${t.patternValue} IN ('active', 'deprecated', 'retired')`,
+    ),
+    index("sod_rule_sides_rule_idx").on(t.ruleId),
+  ],
+);
+
+export type SodRuleSideRow = typeof sodRuleSides.$inferSelect;
 
 export const sodOverrideRequests = pgTable(
   "sod_override_requests",

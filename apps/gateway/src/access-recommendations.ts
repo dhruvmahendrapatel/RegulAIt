@@ -83,7 +83,7 @@ import {
 } from "@regulait/shared";
 import { z } from "zod";
 import { buildAgentHolderIndex, computeAlignmentIndex, ownershipFlagFor } from "./inventory.js";
-import { computeRuleViolators } from "./sod.js";
+import { computeRuleViolators, loadRuleSelectors, resolveSelectorObjects } from "./sod.js";
 
 export const ACCESS_RECOMMENDATION_NOTES = {
   what:
@@ -143,7 +143,8 @@ export interface RecommendationFinding {
   rationale: string;
   evidence: Record<string, unknown>;
   /** sod-violation only: the concrete grant rows conferring each side */
-  grants?: Array<GrantRef & { side: "A" | "B"; object: ObjectView; holder: HolderView; revoke: RevokeAction }>;
+  /** B2c: sides beyond the pair are tagged "side 3", "side 4", … */
+  grants?: Array<GrantRef & { side: string; object: ObjectView; holder: HolderView; revoke: RevokeAction }>;
   action: {
     campaignScope: { kind: "from_recommendations"; value: string };
     revoke: RevokeAction | null;
@@ -646,12 +647,28 @@ export async function computeAccessRecommendations(
       }
       return out;
     };
+    // B2c: a rule's sides come from the ONE loader (legacy a/b columns or the
+    // sod_rule_sides rows), and a pattern side resolves to its CURRENT
+    // matching objects — the 'mode' pattern (any connector) enumerates every
+    // known connector, since any of them may carry the conferring row.
+    const sideSelectors = await loadRuleSelectors(db, enabledSodRules as SodRuleRow[]);
     for (const sodRule of enabledSodRules) {
+      const ruleSides = sideSelectors.get(sodRule.id) ?? [];
+      const resolvedSides = await Promise.all(
+        ruleSides.map(async (side) => ({
+          side,
+          objectIds: (await resolveSelectorObjects(db, side)).objectIds ?? new Set(connectorRows.map((c) => c.id)),
+        })),
+      );
       for (const v of violators.get(sodRule.id) ?? []) {
-        const grants = [
-          ...conferring({ kind: sodRule.aKind, objectId: sodRule.aObjectId, toolName: sodRule.aToolName, mode: sodRule.aMode }, v.userId).map((g) => ({ ...g, side: "A" as const })),
-          ...conferring({ kind: sodRule.bKind, objectId: sodRule.bObjectId, toolName: sodRule.bToolName, mode: sodRule.bMode }, v.userId).map((g) => ({ ...g, side: "B" as const })),
-        ];
+        const sideTag = (i: number) => (i === 0 ? "A" : i === 1 ? "B" : `side ${i + 1}`);
+        const grants = resolvedSides.flatMap(({ side, objectIds }, i) =>
+          [...objectIds].flatMap((objectId) =>
+            conferring({ kind: side.kind, objectId, toolName: side.toolName, mode: side.mode }, v.userId).map(
+              (g) => ({ ...g, side: sideTag(i) }),
+            ),
+          ),
+        );
         addFinding("sod-violation", {
           grantKind: null,
           grantId: null,
