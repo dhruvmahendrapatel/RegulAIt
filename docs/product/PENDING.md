@@ -150,6 +150,21 @@ Environmental finding: the seeded `gemini-2.5-pro` model id is retired for new G
 accounts — seed refresh + an admin agent-model edit route queued (batch B1.5). **L6 and
 L24's model-judged half are now buildable** and queued behind the B-batches.
 
+**B1.5 follow-ups CLOSED 2026-08-22** ([ADR-0095](../decisions/0095-mock-routing-honesty-and-agent-model-edit.md)):
+
+- **F1 (owner-experienced mock-routing defect)** — a mock-provider agent is no longer a
+  routing candidate while a credentialed live agent in the caller's entitled roster can
+  serve (disclosed as `mock_shadowed_by_live` in `skippedCandidates`); direct mock
+  invocation and the keyless demo are untouched, and `measured_cost_saved_usd` is never
+  recorded where a mock served against a non-mock baseline. One residue stays open, named
+  in the follow-ups section below: the compaction-summarizer and decompose-worker rosters
+  are not mock-narrowed.
+- **F2 (retired seed id + missing edit affordance)** — seed's google agent now pins
+  `gemini-3.6-flash` (fresh installs only: the seed never mutates existing rows, stated in
+  the seed), and `PATCH /v1/agents/:agentId` edits model + list prices through the
+  ADR-0073/0074 versioned `agent_config` path (mint + activate for versioned agents, plain
+  row write for unversioned), with a Model & pricing card on the Agents admin page.
+
 ### The table below is retained for history (written while the credential was parked)
 | Item | What gets built when a credential arrives |
 |---|---|
@@ -192,7 +207,10 @@ amendments, migrations 0095/0096)**; what remains of those two ADRs' residual li
 read-time-only compliance-profile shadow, no ADR-0059 blast-radius feed, no observation
 pruning, the FK-cascade delete-orphan trigger, pack red-team gating presets;
 key re-encryption walk (0063); `hosted`/`byoc` egress strict-by-default
-(0062 residual); intent-capture flow for alignment where no use case records intent (0089).
+(0062 residual); intent-capture flow for alignment where no use case records intent (0089);
+mock-shadowing for the compaction-summarizer and decompose-worker rosters (0095 narrowed
+ROUTING selection only — a mock summarizer/worker can still be picked when live agents
+exist, same disease class, deliberately its own call).
 
 ## Enterprise-deal gates unchanged from §1
 **P1** (credential — see above) · **P2** (HA/SLA — build when there is a customer to serve)
