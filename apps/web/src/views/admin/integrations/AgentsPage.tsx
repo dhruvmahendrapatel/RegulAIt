@@ -128,6 +128,7 @@ export default function AgentsPage() {
         </Card>
 
         <RegisterAgentCard />
+        <ModelPricingCard agents={agents.data?.agents ?? []} />
         <SystemPromptCard agents={agents.data?.agents ?? []} />
         <FallbackChainCard agents={agents.data?.agents ?? []} />
 
@@ -278,6 +279,81 @@ function RegisterAgentCard() {
           )}
         </div>
       </form>
+    </Card>
+  );
+}
+
+/**
+ * B1.5 — edit an agent's model id + list prices, the affordance the live
+ * verification run found missing (a retired provider model id was only
+ * fixable via psql). `PATCH /v1/agents/:agentId` rides the versioned
+ * agent_config edit path on the gateway: a versioned agent's save mints and
+ * activates a config version, an unversioned agent keeps the plain row write.
+ */
+function ModelPricingCard(props: { agents: AdminAgent[] }) {
+  const act = useAction();
+  const [agentId, setAgentId] = useState("");
+  const [model, setModel] = useState("");
+  const [inC, setInC] = useState("");
+  const [outC, setOutC] = useState("");
+  return (
+    <Card title="Model & pricing — dispatch-execution config">
+      <form
+        className={a.formRow}
+        onSubmit={(e) => {
+          e.preventDefault();
+          void act.run(
+            () =>
+              api.patch(`/v1/agents/${agentId}`, {
+                model: model || null,
+                costPerMTokIn: inC === "" ? null : Number(inC),
+                costPerMTokOut: outC === "" ? null : Number(outC),
+              }),
+            "Model & pricing saved",
+          );
+        }}
+      >
+        <Field label="Agent" grow>
+          <Select
+            required
+            value={agentId}
+            onChange={(e) => {
+              setAgentId(e.target.value);
+              const picked = props.agents.find((x) => x.id === e.target.value);
+              setModel(picked?.model ?? "");
+              setInC(picked?.costPerMTokIn == null ? "" : String(picked.costPerMTokIn));
+              setOutC(picked?.costPerMTokOut == null ? "" : String(picked.costPerMTokOut));
+            }}
+            data-testid="model-pricing-agent"
+          >
+            {optionEls(agentOpts(props.agents), "— select an agent —")}
+          </Select>
+        </Field>
+        <Field label="Model id (empty = not dispatchable)">
+          <Input value={model} onChange={(e) => setModel(e.target.value)} data-testid="model-pricing-model" />
+        </Field>
+        <Field label="$/MTok in (empty = unpriced)">
+          <Input type="number" step="any" value={inC} onChange={(e) => setInC(e.target.value)} />
+        </Field>
+        <Field label="$/MTok out (empty = unpriced)">
+          <Input type="number" step="any" value={outC} onChange={(e) => setOutC(e.target.value)} />
+        </Field>
+        <Button type="submit" disabled={act.busy || !agentId}>
+          Save model & pricing
+        </Button>
+        {act.error && (
+          <span className={v.errLine} role="alert">
+            {act.error}
+          </span>
+        )}
+      </form>
+      <p className={v.faint}>
+        Provider model ids age out (the seeded Google id already did once) — this is where a stale id is
+        refreshed. The save is versioned where versions exist: an agent with agent_config versions gets a
+        new version minted and activated (one click rolls back under Config versions); an unversioned
+        agent is updated in place. Provider, tier, enablement and lifecycle are deliberately not editable
+        here — each has its own governed control.
+      </p>
     </Card>
   );
 }

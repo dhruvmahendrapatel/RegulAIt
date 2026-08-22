@@ -78,6 +78,7 @@ import {
   setAgentOwnerSchema,
   setAgentPolicySchema,
   setAgentSystemPromptSchema,
+  updateAgentConfigSchema,
 } from "@regulait/shared";
 import type { PiiHit } from "@regulait/shared";
 import { guardrailWithheldMarker, guardrailCategoryList } from "@regulait/shared";
@@ -98,6 +99,9 @@ import { mrmDispatchGate } from "./mrm.js";
 // plan-only refusal it makes possible.
 import { guardInstanceAttributedCall } from "./plan-only.js";
 import { loadVersions, newVersion, resolveAgentPromptVersion } from "./config-versions.js";
+// B1.5 — the agent model/pricing edit goes through ADR-0074's ONE choke point,
+// so a versioned agent's edit mints + activates an agent_config version.
+import { applyRuleEdit, isRuleEditRefusal } from "./rule-writes.js";
 import {
   recordCanaryFailure,
   recordCanaryObservations,
@@ -190,7 +194,7 @@ export type AgentRow = typeof agents.$inferSelect;
 export interface SkippedCandidate {
   agentId: string;
   name: string;
-  reason: "no_model_credential" | "no_model_id" | "unknown_provider";
+  reason: "no_model_credential" | "no_model_id" | "unknown_provider" | "mock_shadowed_by_live";
 }
 
 /** §8.4 PII enforcement outcome threaded onto a dispatch. COUNTS ONLY —
@@ -1769,11 +1773,17 @@ async function dispatchAttempt(
       : null;
   // The measured version of routing's savings claim: what the baseline agent
   // would have cost at the SAME measured token volumes, minus what we paid.
+  // B1.5 F1: never priced when a MOCK served against a NON-mock baseline — a
+  // canned mock answer "saving" a live model's list price is money nobody
+  // saved on work nobody did (the request was not actually served by a model).
+  // Mock-vs-mock stays measured: both sides are the same demo economy, so the
+  // counterfactual is honest there.
   const measuredCostSavedUsd =
     costUsd != null &&
     baseline &&
     baseline.costPerMTokIn != null &&
-    baseline.costPerMTokOut != null
+    baseline.costPerMTokOut != null &&
+    !(served.provider === "mock" && baseline.provider !== "mock")
       ? (result.usage.inputTokens / 1e6) * baseline.costPerMTokIn +
         (result.usage.outputTokens / 1e6) * baseline.costPerMTokOut -
         costUsd
@@ -2366,6 +2376,55 @@ export function registerAgentConnectorRoutes(
       })
       .returning();
     return reply.status(201).send(row);
+  });
+
+  // B1.5 F2 (LIVE_VERIFICATION_2026-08) — edit an agent's DISPATCH-EXECUTION
+  // config: model id + the two list prices, the exact fields batch B1 made
+  // versionable as `agent_config`. Until now no API route edited an agent's
+  // model at all — the live run had to psql the column when Google retired the
+  // seeded model id. The edit rides `applyRuleEdit` (ADR-0074's one choke
+  // point): a VERSIONED agent's change mints + activates an agent_config
+  // version in one transaction (a raw column write would be silently ignored
+  // by the dispatch-time resolver — the exact divergence ADR-0074 exists to
+  // remove), an UNVERSIONED agent keeps the plain row write, byte-identical to
+  // pre-versioning semantics. Admin-only via the global gate.
+  app.patch("/v1/agents/:agentId", async (req, reply) => {
+    const { agentId } = agentIdParam.parse(req.params);
+    const [existing] = await db.select({ id: agents.id }).from(agents).where(eq(agents.id, agentId));
+    if (!existing) return reply.status(404).send({ error: "unknown_agent" });
+    // The ADR-0073 scope line at the route edge, refused with the remedy NAMED
+    // rather than as a generic strict-parse error: everything else on the
+    // agents row has its own audited route or is a new agent, not an edit.
+    const editable = new Set(Object.keys(updateAgentConfigSchema.shape));
+    const offending = Object.keys((req.body ?? {}) as Record<string, unknown>).filter(
+      (k) => !editable.has(k),
+    );
+    if (offending.length > 0) {
+      return reply.status(422).send({
+        error: "field_not_editable",
+        detail:
+          `'${offending.join("', '")}' is not part of an agent's dispatch-execution config. Editable here: ` +
+          `model, costPerMTokIn, costPerMTokOut. provider/customProviderId select the credential + egress ` +
+          `machinery (rebinding is a NEW agent — POST /v1/agents); tier feeds the entitlement ceiling; ` +
+          `enabled/lifecycle have their own audited routes; systemPrompt is its own versioned artifact ` +
+          `(POST /v1/agents/:agentId/system-prompt).`,
+      });
+    }
+    const patch = updateAgentConfigSchema.parse(req.body ?? {});
+    const res = await applyRuleEdit(db, {
+      artifactType: "agent_config",
+      artifactId: agentId,
+      patch,
+      actorUserId: req.authCtx.userId ?? null,
+      label: "edited via PATCH /v1/agents/:agentId",
+      auditObjectType: "agent",
+      auditRuleId: "agent-config-edited",
+      auditDetail: { phase: "agent-config-edit", patch },
+    });
+    if (isRuleEditRefusal(res)) {
+      return reply.status(res.status).send({ error: res.error, detail: res.detail });
+    }
+    return reply.send({ ...(res.row as Record<string, unknown>), versionMinted: res.mintedVersion, note: res.note });
   });
 
   // ADR-0023: set/clear an agent's admin-authored BASE system prompt — a
@@ -3472,11 +3531,24 @@ export function registerAgentConnectorRoutes(
       let compactionCandidates: AgentRow[] = [];
       if (body.dispatch) {
         const configured = await configuredProviders(db, opts.dataKey, userId);
+        const strictlyDispatchable = (a: AgentRow) =>
+          Boolean(a.model) && isModelProviderKind(a.provider) && configured.has(agentProviderToken(a));
+        // B1.5 F1 (owner-experienced, LIVE_VERIFICATION_2026-08): mock agents
+        // exist for the KEYLESS demo — the out-of-box roster must route and
+        // answer with no credential configured anywhere. The moment a live
+        // agent in this caller's entitled roster can genuinely serve, a mock
+        // stops being a routing candidate: right-sizing a real request onto a
+        // canned-prose responder is not an optimization, it is a non-answer
+        // billed as savings. Only ROUTING eligibility is narrowed — a mock the
+        // caller explicitly requested still serves (the requested-agent
+        // exemption below), because an explicit choice is not routing.
+        const liveCanServe = entitled.some((a) => a.provider !== "mock" && strictlyDispatchable(a));
         const skipReason = (a: AgentRow): SkippedCandidate["reason"] | null => {
           if (a.id === agent.id) return null;
           if (!a.model) return "no_model_id";
           if (!isModelProviderKind(a.provider)) return "unknown_provider";
           if (!configured.has(agentProviderToken(a))) return "no_model_credential";
+          if (a.provider === "mock" && liveCanServe) return "mock_shadowed_by_live";
           return null;
         };
         skippedCandidates = entitled.flatMap((a) => {
@@ -3485,9 +3557,11 @@ export function registerAgentConnectorRoutes(
         });
         const skippedIds = new Set(skippedCandidates.map((s) => s.agentId));
         candidateRows = entitled.filter((a) => !skippedIds.has(a.id));
-        compactionCandidates = entitled.filter(
-          (a) => a.model && isModelProviderKind(a.provider) && configured.has(agentProviderToken(a)),
-        );
+        // (deliberately NOT mock-narrowed like the routing roster above: the
+        // summarizer picking a mock in a keyless install is the demo working,
+        // and narrowing it when live agents exist is a separate call — noted
+        // as a follow-up in PENDING.md, not smuggled in here.)
+        compactionCandidates = entitled.filter(strictlyDispatchable);
       }
 
       // PILLAR 6 §5 CONTEXT COMPACTION — strictly after governance (the

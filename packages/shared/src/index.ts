@@ -865,6 +865,19 @@ export const createAgentSchemaChecked = createAgentSchema.refine(agentCustomProv
 
 export const setAgentEnabledSchema = z.object({ enabled: z.boolean() });
 
+/** B1.5 — `PATCH /v1/agents/:agentId`: the ordinary admin edit surface for an
+ * agent's DISPATCH-EXECUTION config, deliberately the same three fields
+ * `VERSIONED_RULE_FIELDS.agent_config` names and nothing else (the ADR-0073
+ * scope line at the route edge). The gateway routes the edit through
+ * `applyRuleEdit`, so a versioned agent's edit mints + activates an
+ * agent_config version and an unversioned agent keeps the plain row write —
+ * never a raw column write that the dispatch-time resolver would ignore. */
+export const updateAgentConfigSchema = z.object({
+  model: z.string().min(1).nullish(),
+  costPerMTokIn: z.number().nonnegative().nullish(),
+  costPerMTokOut: z.number().nonnegative().nullish(),
+});
+
 /** ADR-0089 (gap L20): set/clear an agent's accountable human owner — a
  * governance record, not authentication. null CLEARS (an explicit act, the
  * agent-policy/system-prompt clear idiom); the gateway validates the user

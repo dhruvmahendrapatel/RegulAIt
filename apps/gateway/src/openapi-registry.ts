@@ -90,6 +90,8 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/agents/:agentId/fallbacks": "internal",
   "PUT /v1/agents/:agentId/fallbacks": "internal",
   "POST /v1/agents": "internal",
+  // B1.5 — the versioned agent_config edit surface (model + list prices).
+  "PATCH /v1/agents/:agentId": "internal",
   "POST /v1/agents/:agentId/enabled": "internal",
   "POST /v1/agents/:agentId/invoke": "public-stable",
   // ADR-0089 — ownership + lifecycle, admin governance writes on the registry.
@@ -727,6 +729,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/agents/:agentId/fallbacks": "agents",
   "PUT /v1/agents/:agentId/fallbacks": "agents",
   "POST /v1/agents": "agents",
+  "PATCH /v1/agents/:agentId": "agents",
   "POST /v1/agents/:agentId/enabled": "agents",
   "POST /v1/agents/:agentId/invoke": "agents",
   "POST /v1/agents/:agentId/lifecycle": "agents",

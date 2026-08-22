@@ -115,13 +115,21 @@ const passwords: Record<string, string> = {};
 }
 
 // --- agent catalog -------------------------------------------------------
+// Model-id freshness (B1.5, LIVE_VERIFICATION_2026-08): pinned provider model
+// ids AGE OUT — Google retired `gemini-2.5-pro` for new accounts and the
+// out-of-box "google goes live via env fallback" demo 502'd until the id was
+// refreshed to `gemini-3.6-flash` (proven working in the live run). Re-seed
+// semantics are unchanged and deliberate: an EXISTING agent row is matched by
+// name and never mutated (below), so refreshing an already-seeded database is
+// an admin act — `PATCH /v1/agents/:agentId` (the versioned agent_config edit
+// path), never a silent seed-side rewrite of rows an operator may have tuned.
 const AGENTS = [
   { name: "fast-mock", provider: "mock", tier: 0, costPerMTokIn: 1, costPerMTokOut: 5, model: "mock-fast" },
   { name: "balanced-mock", provider: "mock", tier: 1, costPerMTokIn: 3, costPerMTokOut: 15, model: "mock-balanced" },
   { name: "premium-mock", provider: "mock", tier: 2, costPerMTokIn: 15, costPerMTokOut: 75, model: "mock-premium" },
   { name: "claude-opus", provider: "anthropic", tier: 2, costPerMTokIn: 5, costPerMTokOut: 25, model: "claude-opus-5" },
   { name: "gpt-5", provider: "openai", tier: 2, costPerMTokIn: 2, costPerMTokOut: 8, model: "gpt-5" },
-  { name: "gemini-pro", provider: "google", tier: 1, costPerMTokIn: 1.25, costPerMTokOut: 10, model: "gemini-2.5-pro" },
+  { name: "gemini-pro", provider: "google", tier: 1, costPerMTokIn: 1.25, costPerMTokOut: 10, model: "gemini-3.6-flash" },
   { name: "grok", provider: "xai", tier: 1, costPerMTokIn: 3, costPerMTokOut: 15, model: "grok-4" },
 ];
 const catalog = (await call("GET", "/v1/agents")).agents ?? [];
