@@ -23,7 +23,10 @@ import {
   parseNarration,
   planCopilotQuery,
   renderGroundedAnswer,
+  retrievalFoundNothing,
+  COPILOT_GROUNDED_REFUSAL,
   type CopilotEvidence,
+  type CopilotNarration,
 } from "./copilot.js";
 
 const evidence: CopilotEvidence = {
@@ -37,7 +40,28 @@ const evidence: CopilotEvidence = {
   ],
   samples: [{ key: "rule-x", text: "denied by rule x" }],
   leads: [],
+  citableObjects: [
+    { kind: "audit_log", id: "aaaaaaaa-0000-4000-8000-000000000001", label: "deny · rule-x" },
+    { kind: "audit_log", id: "aaaaaaaa-0000-4000-8000-000000000002", label: "allow · rule-y" },
+  ],
 };
+
+/** the empty-retrieval case: no citable object AND no matched row */
+const nothingRetrieved: CopilotEvidence = {
+  ...evidence,
+  rowsExamined: 0,
+  counts: [],
+  samples: [],
+  citableObjects: [],
+};
+
+const narration = (over: Partial<CopilotNarration> = {}): CopilotNarration => ({
+  text: "ok",
+  citedKeys: [],
+  citedObjectIds: [],
+  refused: false,
+  ...over,
+});
 
 describe("planCopilotQuery — deterministic, bounded, unsteerable", () => {
   it("maps the ADR's own worked questions onto the right read tool", () => {
@@ -109,20 +133,108 @@ describe("renderGroundedAnswer — composed from counts, never from recall", () 
   });
 });
 
+describe("L6a — the grounding unit is a RETRIEVED OBJECT ID, and an empty retrieval REFUSES", () => {
+  const plan = planCopilotQuery("which denials happened?");
+
+  it("names the retrieved objects on the answer, so a claim is traceable to rows", () => {
+    const answer = renderGroundedAnswer(plan, evidence, "which denials happened?");
+    expect(answer.citedObjectIds).toEqual(evidence.citableObjects.map((o) => o.id));
+    for (const o of evidence.citableObjects) expect(answer.text).toContain(o.id);
+    // THE CONTROL: a grounded answer over a non-empty retrieval is NOT a refusal
+    expect(answer.groundedRefusal).toBe(false);
+    expect(answer.text).not.toContain(COPILOT_GROUNDED_REFUSAL);
+  });
+
+  it("REFUSES, in a named shape, when the retrieval returned nothing at all", () => {
+    expect(retrievalFoundNothing(nothingRetrieved)).toBe(true);
+    const answer = renderGroundedAnswer(plan, nothingRetrieved, "who is the president of France?");
+    expect(answer.groundedRefusal).toBe(true);
+    expect(answer.text).toContain(COPILOT_GROUNDED_REFUSAL);
+    expect(answer.citedObjectIds).toEqual([]);
+  });
+
+  it("a zero COUNT is an answer; an EMPTY RETRIEVAL is not — the two are distinguished", () => {
+    // rows were matched (so objects could be cited) but every count is zero:
+    // that is a finding of zero, not a refusal
+    const zeroButRetrieved: CopilotEvidence = {
+      ...evidence,
+      rowsExamined: 3,
+      counts: [{ key: "effect.deny", label: "denials", value: 0 }],
+    };
+    expect(retrievalFoundNothing(zeroButRetrieved)).toBe(false);
+    expect(renderGroundedAnswer(plan, zeroButRetrieved, "q").groundedRefusal).toBe(false);
+  });
+
+  it("the prompt hands the model the citable ids, and orders a refusal when there are none", () => {
+    const full = buildNarrationPrompt({
+      question: "q",
+      plan,
+      evidence,
+      groundedText: "grounded",
+    });
+    for (const o of evidence.citableObjects) expect(full).toContain(o.id);
+    expect(full).toMatch(/citedObjectIds/);
+
+    const empty = buildNarrationPrompt({
+      question: "q",
+      plan,
+      evidence: nothingRetrieved,
+      groundedText: "grounded",
+    });
+    expect(empty).toMatch(/rule 5 applies/);
+    expect(empty).toMatch(/nothing to ground an answer in/i);
+    expect(empty).toMatch(/answer from general knowledge/i);
+    expect(empty).toMatch(/do NOT speculate/i);
+  });
+});
+
 describe("narration is cross-checked, and an ungrounded one is rejected", () => {
-  it("accepts a narration that cites only known counts", () => {
-    expect(narrationIsGrounded({ text: "ok", citedKeys: ["decisions"] }, evidence).ok).toBe(true);
+  it("accepts a narration that cites only known counts and only retrieved objects", () => {
+    const ok = narrationIsGrounded(
+      narration({ citedKeys: ["decisions"], citedObjectIds: [evidence.citableObjects[0]!.id] }),
+      evidence,
+    );
+    expect(ok.ok).toBe(true);
   });
 
   it("REJECTS a narration that cites a figure the retrieval never produced", () => {
-    const res = narrationIsGrounded({ text: "4000 accesses", citedKeys: ["invented"] }, evidence);
+    const res = narrationIsGrounded(narration({ text: "4000 accesses", citedKeys: ["invented"] }), evidence);
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.reason).toMatch(/never produced/);
   });
 
+  it("REJECTS a narration that cites an OBJECT ID the retrieval never returned", () => {
+    const res = narrationIsGrounded(
+      narration({ text: "see audit row", citedObjectIds: ["deadbeef-0000-4000-8000-000000000009"] }),
+      evidence,
+    );
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.reason).toMatch(/never returned/);
+  });
+
+  it("REJECTS a narration that answered anyway over an EMPTY retrieval", () => {
+    const res = narrationIsGrounded(
+      narration({ text: "PII access is generally logged under HIPAA controls." }),
+      nothingRetrieved,
+    );
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.reason).toMatch(/answered anyway instead of refusing/);
+    // ACCEPTS the same empty retrieval when the model actually refused
+    expect(
+      narrationIsGrounded(narration({ text: "nothing was retrieved", refused: true }), nothingRetrieved).ok,
+    ).toBe(true);
+  });
+
   it("parses a fenced JSON reply and refuses prose", () => {
-    const ok = parseNarration('```json\n{"text":"hi","citedKeys":["decisions"]}\n```');
+    const ok = parseNarration('```json\n{"text":"hi","citedKeys":["decisions"],"citedObjectIds":["x"]}\n```');
     expect(ok.ok).toBe(true);
+    if (ok.ok) {
+      expect(ok.narration.citedObjectIds).toEqual(["x"]);
+      expect(ok.narration.refused).toBe(false);
+    }
+    const refusal = parseNarration('{"text":"nothing retrieved","refused":true}');
+    expect(refusal.ok).toBe(true);
+    if (refusal.ok) expect(refusal.narration.refused).toBe(true);
     expect(parseNarration("I think there were quite a few denials.").ok).toBe(false);
     expect(parseNarration('{"citedKeys":[]}').ok).toBe(false);
   });

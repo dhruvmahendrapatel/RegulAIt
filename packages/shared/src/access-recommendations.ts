@@ -231,3 +231,181 @@ export function parseRecommendationRuleIds(
     ids: ACCESS_RECOMMENDATION_RULE_IDS.filter((id) => wanted.has(id)),
   };
 }
+
+// ---------------------------------------------------------------------------
+// L6c (ADR-0092 amendment) — THE MODEL-JUDGED ANNOTATION, the pure half.
+//
+// ADR-0092 shipped six deterministic rules and stated plainly that "the
+// model-judged half remains L6-blocked and unapproximated". A credential now
+// exists, so the judged half can be built — but the thing that made ADR-0092
+// honest was that severity is a CLASS, not a score, and that every finding is
+// re-derivable by hand from the ledgers. A model that could change a finding,
+// add one, or reorder them would destroy exactly that property.
+//
+// So the judged layer is an ANNOTATION and structurally nothing else:
+//
+//   * it is OPT-IN and default-off (the batch-B3 idiom: an untouched
+//     deployment's report is byte-identical);
+//   * it attaches to a finding the deterministic rules ALREADY produced —
+//     `judged` is a sibling field, never a mutation of `evidence`, `severity`,
+//     `rationale` or the finding set;
+//   * it can never CREATE a finding: the annotator is handed the findings and
+//     returns annotations keyed by them, and an annotation for an unknown key
+//     is dropped;
+//   * every annotation is labelled `method: "model-judged"` so no reader can
+//     mistake it for the deterministic evidence beside it;
+//   * a judge that cannot be reached leaves the report UNCHANGED and says
+//     `judged: unavailable` with the reason — the ADR-0067 typed refusal,
+//     never a silent downgrade to "no annotations, all fine".
+// ---------------------------------------------------------------------------
+
+/** The label that must ride every model-produced annotation. There is exactly
+ * one legal value: a reader scanning a report must be able to separate what a
+ * rule computed from what a model said, by field, without reading prose. */
+export const RECOMMENDATION_JUDGE_METHOD = "model-judged" as const;
+
+/** what the judged layer is allowed to say about ONE deterministic finding */
+export const RECOMMENDATION_JUDGE_VERDICTS = ["agree", "disagree", "unclear"] as const;
+export type RecommendationJudgeVerdict = (typeof RECOMMENDATION_JUDGE_VERDICTS)[number];
+
+export interface RecommendationJudgeAnnotation {
+  /** always `model-judged`. Not derived, not defaulted — stamped. */
+  method: typeof RECOMMENDATION_JUDGE_METHOD;
+  /** the instrument, so an annotation is attributable to a named agent */
+  judge: string;
+  verdict: RecommendationJudgeVerdict;
+  /** one or two sentences. Advisory prose, never evidence. */
+  note: string;
+  /** stated on every annotation, so the caveat travels with the claim */
+  limits: string;
+}
+
+export const RECOMMENDATION_JUDGE_LIMITS =
+  "MODEL-JUDGED ADVISORY. This annotation is a model's opinion about a finding the deterministic " +
+  "rule already made; it is not evidence, it did not create the finding, it cannot change the " +
+  "finding's severity or evidence, and it is not re-derivable by hand the way the finding is. " +
+  "Disagreement by the judge does not clear a grant — only a named human's decision does.";
+
+export interface RecommendationJudgeRequest {
+  /** the finding key, so the annotation can only ever attach to a real one */
+  key: string;
+  ruleId: AccessRecommendationRuleId;
+  rationale: string;
+  evidence: Record<string, unknown>;
+}
+
+export interface RecommendationJudgeReply {
+  key: string;
+  verdict: RecommendationJudgeVerdict;
+  note: string;
+}
+
+/** the judge behind an interface, exactly as ADR-0044/0067 do it, so the
+ * deterministic path never depends on a model existing */
+export interface RecommendationJudge {
+  readonly id: string;
+  judge(reqs: RecommendationJudgeRequest[]): Promise<RecommendationJudgeReply[]>;
+}
+
+/** the disclosure that rides the report whenever the knob is on */
+export type RecommendationJudgedState =
+  | { enabled: false; note: string }
+  | { enabled: true; status: "judged"; judge: string; annotated: number; note: string }
+  | { enabled: true; status: "unavailable"; error: string; reason: string; note: string };
+
+export const RECOMMENDATION_JUDGE_OFF_NOTE =
+  "model-judged annotations are OFF for this organization (the default). Every finding below is " +
+  "the deterministic rule set and nothing else.";
+
+export const RECOMMENDATION_JUDGE_UNAVAILABLE_NOTE =
+  "model-judged annotations are ENABLED but no judge could be dispatched, so NOTHING was judged " +
+  "and the deterministic report below is unchanged. This is stated rather than silently degraded: " +
+  "an unannotated report from a reachable judge and an unannotated report from a missing one are " +
+  "different facts.";
+
+/** the grading prompt. Pure and therefore testable; whether a model OBEYS it is
+ * not something this function can promise. */
+export function buildRecommendationJudgePrompt(reqs: RecommendationJudgeRequest[]): string {
+  return [
+    "You are reviewing access-governance findings produced by deterministic rules over an audit",
+    "ledger. For EACH finding, say whether the stated evidence supports the stated conclusion.",
+    "",
+    "HARD RULES:",
+    "1. You may NOT add findings, remove findings, or change any evidence value. You annotate only.",
+    "2. Judge each finding on the evidence given. Do not assume facts that are not listed.",
+    "3. 'disagree' means the evidence does not support the conclusion — it does NOT clear the grant.",
+    "4. Reply with ONLY a JSON array, one object per finding, keys unchanged:",
+    '   [{"key": string, "verdict": "agree"|"disagree"|"unclear", "note": string}]',
+    "",
+    "FINDINGS:",
+    ...reqs.map((r) =>
+      [
+        `- key: ${r.key}`,
+        `  rule: ${r.ruleId}`,
+        `  conclusion: ${r.rationale}`,
+        `  evidence: ${JSON.stringify(r.evidence)}`,
+      ].join("\n"),
+    ),
+  ].join("\n");
+}
+
+/** tolerant of a fenced block, strict about the shape. An unparseable reply is
+ * an ERROR — never silently zero annotations. */
+export function parseRecommendationJudgeReplies(
+  raw: string,
+): { ok: true; replies: RecommendationJudgeReply[] } | { ok: false; error: string } {
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const body = (fenced?.[1] ?? raw).trim();
+  const start = body.indexOf("[");
+  const end = body.lastIndexOf("]");
+  if (start < 0 || end <= start) return { ok: false, error: "judge reply contains no JSON array" };
+  let arr: unknown;
+  try {
+    arr = JSON.parse(body.slice(start, end + 1));
+  } catch {
+    return { ok: false, error: "judge reply is not parseable JSON" };
+  }
+  if (!Array.isArray(arr)) return { ok: false, error: "judge reply is not a JSON array" };
+  const verdicts = new Set<string>(RECOMMENDATION_JUDGE_VERDICTS);
+  const replies: RecommendationJudgeReply[] = [];
+  for (const item of arr) {
+    if (!item || typeof item !== "object") continue;
+    const o = item as Record<string, unknown>;
+    if (typeof o.key !== "string" || typeof o.verdict !== "string" || !verdicts.has(o.verdict)) continue;
+    replies.push({
+      key: o.key,
+      verdict: o.verdict as RecommendationJudgeVerdict,
+      note: typeof o.note === "string" ? o.note.slice(0, 600) : "",
+    });
+  }
+  if (replies.length === 0) return { ok: false, error: "judge reply contained no usable verdict" };
+  return { ok: true, replies };
+}
+
+/**
+ * THE CONTAINMENT FUNCTION. Turns judge replies into annotations keyed by
+ * finding key, dropping anything that does not name a finding the
+ * DETERMINISTIC rules already produced. This is what makes "the judged layer
+ * can never create a recommendation" a property of the code rather than a
+ * promise in a doc — the caller passes the deterministic keys in, and no
+ * annotation can escape that set.
+ */
+export function annotationsForFindings(
+  deterministicKeys: readonly string[],
+  replies: readonly RecommendationJudgeReply[],
+  judgeId: string,
+): Map<string, RecommendationJudgeAnnotation> {
+  const allowed = new Set(deterministicKeys);
+  const out = new Map<string, RecommendationJudgeAnnotation>();
+  for (const r of replies) {
+    if (!allowed.has(r.key) || out.has(r.key)) continue;
+    out.set(r.key, {
+      method: RECOMMENDATION_JUDGE_METHOD,
+      judge: judgeId,
+      verdict: r.verdict,
+      note: r.note,
+      limits: RECOMMENDATION_JUDGE_LIMITS,
+    });
+  }
+  return out;
+}
