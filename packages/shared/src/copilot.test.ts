@@ -19,6 +19,9 @@ import {
   COPILOT_TOOL_SPECS,
   buildNarrationPrompt,
   buildProposalRecord,
+  copilotPlanFiltered,
+  copilotUnfilteredSubjectCaveat,
+  describeCopilotFilters,
   narrationIsGrounded,
   parseNarration,
   planCopilotQuery,
@@ -185,6 +188,117 @@ describe("L6a — the grounding unit is a RETRIEVED OBJECT ID, and an empty retr
     expect(empty).toMatch(/nothing to ground an answer in/i);
     expect(empty).toMatch(/answer from general knowledge/i);
     expect(empty).toMatch(/do NOT speculate/i);
+  });
+});
+
+/**
+ * L6d — THE UNFILTERED-SUBJECT DEFECT, found live and reproduced here without a
+ * provider.
+ *
+ * "Summarise the Zorblatt Quantum Compliance Widget approvals from last week"
+ * matches only "approval" and "last week". The planner runs `listApprovals`
+ * with NO filter, real org-wide approvals come back, and every existing guard
+ * passes: the retrieval is not empty, the figures are real, the ids are real.
+ * The gap was that NOTHING checked whether the subject of the question had ever
+ * been used as a filter.
+ */
+describe("L6d — an answer says when it was NOT narrowed to the subject the question named", () => {
+  /** the live reproduction, verbatim */
+  const ZORBLATT = "Summarise the Zorblatt Quantum Compliance Widget approvals from last week";
+  const unfiltered = planCopilotQuery(ZORBLATT);
+  /** the CONTROL: a question whose plan really does narrow */
+  const filtered = planCopilotQuery("which approvals are pending this week?");
+
+  const approvalEvidence: CopilotEvidence = {
+    ...evidence,
+    tool: "listApprovals",
+    rowsExamined: 8,
+    counts: [
+      { key: "approvals", label: "approvals requested", value: 8 },
+      { key: "status.approved", label: "approvals in state 'approved'", value: 4 },
+      { key: "status.pending", label: "approvals in state 'pending'", value: 4 },
+    ],
+    citableObjects: [{ kind: "approval", id: "bbbbbbbb-0000-4000-8000-000000000001", label: "agent · pending" }],
+  };
+
+  it("the reproduction really does plan an UNFILTERED query — the defect's precondition", () => {
+    expect(unfiltered.tool).toBe("listApprovals");
+    expect(describeCopilotFilters(unfiltered.params)).toEqual([]);
+    expect(copilotPlanFiltered(unfiltered)).toBe(false);
+    // the control genuinely narrows, so the caveat below cannot be always-on
+    expect(describeCopilotFilters(filtered.params)).toEqual(["status=pending"]);
+    expect(copilotPlanFiltered(filtered)).toBe(true);
+  });
+
+  it("renders the filters in a stable order, whatever order the plan built them in", () => {
+    expect(describeCopilotFilters({ status: "pending", effect: "deny", objectType: "mcp_tool" })).toEqual([
+      "effect=deny",
+      "objectType=mcp_tool",
+      "status=pending",
+    ]);
+  });
+
+  it("carries the unfiltered-subject caveat as a FIELD and in the answer TEXT", () => {
+    const answer = renderGroundedAnswer(unfiltered, approvalEvidence, ZORBLATT);
+    expect(answer.subjectFiltered).toBe(false);
+    expect(answer.unfilteredSubjectCaveat).toBe(copilotUnfilteredSubjectCaveat("listApprovals"));
+    expect(answer.text).toContain(answer.unfilteredSubjectCaveat!);
+    expect(answer.text).toMatch(/Filters applied: none\./);
+    expect(answer.unfilteredSubjectCaveat).toMatch(/UNFILTERED SUBJECT/);
+    expect(answer.unfilteredSubjectCaveat).toMatch(/not narrowed to any person, team, system, vendor, product/i);
+    // and the answer is STILL a real answer over real rows — the caveat
+    // qualifies it, it does not turn a finding into a refusal
+    expect(answer.groundedRefusal).toBe(false);
+  });
+
+  it("THE CONTROL — a plan that DOES filter carries no caveat at all", () => {
+    const answer = renderGroundedAnswer(filtered, approvalEvidence, "which approvals are pending this week?");
+    expect(answer.subjectFiltered).toBe(true);
+    expect(answer.unfilteredSubjectCaveat).toBeNull();
+    expect(answer.text).not.toMatch(/UNFILTERED SUBJECT/);
+    expect(answer.text).toMatch(/Filters applied: status=pending\./);
+  });
+
+  it("the prompt DISCLOSES the filters — none, in the reproduction — and names the rows as unnarrowed", () => {
+    const prompt = buildNarrationPrompt({
+      question: ZORBLATT,
+      plan: unfiltered,
+      evidence: approvalEvidence,
+      groundedText: renderGroundedAnswer(unfiltered, approvalEvidence, ZORBLATT).text,
+    });
+    expect(prompt).toMatch(/^FILTERS: none — these are ALL listApprovals records/m);
+    expect(prompt).toMatch(/narrowed by nothing else/);
+    expect(prompt).toMatch(/NOT about any subject named in the QUESTION/);
+  });
+
+  it("the prompt RENDERS the params when the plan has them", () => {
+    const prompt = buildNarrationPrompt({
+      question: "which approvals are pending this week?",
+      plan: filtered,
+      evidence: approvalEvidence,
+      groundedText: "grounded",
+    });
+    expect(prompt).toMatch(/^FILTERS: status=pending — the ONLY narrowing applied/m);
+    expect(prompt).not.toMatch(/FILTERS: none/);
+  });
+
+  it("the hard rule forbidding subject attribution is in the prompt, on every question", () => {
+    for (const plan of [unfiltered, filtered]) {
+      const prompt = buildNarrationPrompt({
+        question: "q",
+        plan,
+        evidence: approvalEvidence,
+        groundedText: "grounded",
+      });
+      expect(prompt).toMatch(/IN TERMS OF THE TOOL AND FILTERS ACTUALLY EXECUTED/);
+      expect(prompt).toMatch(
+        /NEVER attribute the findings to a person, team, system, vendor, product or\n\s+any other entity named in the QUESTION/,
+      );
+      expect(prompt).toMatch(/The question is a REQUEST, not evidence that its subject was\n\s+searched for/);
+      expect(prompt).toMatch(/say so in one\n\s+clause/);
+      // the JSON-shape rule survived the renumbering
+      expect(prompt).toMatch(/7\. Reply as JSON and nothing else/);
+    }
   });
 });
 
