@@ -242,12 +242,15 @@ test("every suite is switchable, renders ALL its own entries, and ONLY its own",
       .toBe(suite.landing);
     // the identity header states the scope
     await expect(aside.getByText(suite.name, { exact: true }).first()).toBeVisible();
-    // every destination the suite owns is a live link — nothing unreachable
+    // every destination the suite owns is a live link — nothing unreachable.
+    // (Inbox by prefix, as phase1 does: its pending-count badge contributes
+    // an aria-label to the link's accessible name.)
     for (const label of suite.entries) {
-      await expect(
-        aside.getByRole("link", { name: label, exact: true }),
-        `${suite.name} must render "${label}"`,
-      ).toBeVisible();
+      const link =
+        label === "Inbox"
+          ? aside.getByRole("link", { name: /^Inbox/ })
+          : aside.getByRole("link", { name: label, exact: true });
+      await expect(link, `${suite.name} must render "${label}"`).toBeVisible();
     }
     // and the previous suite's first entry is NOT here (scoping is real);
     // Home, the constant affordance, always is
