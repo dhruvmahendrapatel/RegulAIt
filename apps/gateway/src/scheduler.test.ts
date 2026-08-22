@@ -657,6 +657,11 @@ describe("every sweep is registered", () => {
     expect([...registry.keys()].sort()).toEqual(
       [
         SCHEDULER_JOB_NAMES.approvalSla,
+        // ADR-0090 amendment (B2a): records campaign expiry into the audit
+        // log, once per campaign — decides NOTHING (expiry stays computed on
+        // read). Driven end-to-end in grant-certification-ops.test.ts; this
+        // list pins its registration.
+        SCHEDULER_JOB_NAMES.certificationExpiry,
         // ADR-0076: reconciles cross-batch duplicate imported cost lines —
         // marked, never deleted. Driven end-to-end in cost-reconcile.test.ts;
         // this list pins its registration.

@@ -385,6 +385,11 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/certification-campaigns/preview": "internal",
   "GET /v1/certification-campaigns": "internal",
   "GET /v1/certification-campaigns/:campaignId": "internal",
+  // ADR-0090 amendment (B2) — the expiry sweep's manual door (records
+  // visibility facts only; decides nothing) and audited item reassignment
+  // (never to the grant's holder).
+  "POST /v1/certification-campaigns/expiry-sweep": "internal",
+  "POST /v1/certification-campaigns/:campaignId/items/:itemId/reassign": "internal",
   // ADR-0090 — the two direct MCP grant deletes that never existed (every
   // other grant kind already had a removal endpoint); internal like their
   // agent/connector twins' write surfaces.
@@ -877,6 +882,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/certification-campaigns/preview": "certification",
   "GET /v1/certification-campaigns": "certification",
   "GET /v1/certification-campaigns/:campaignId": "certification",
+  "POST /v1/certification-campaigns/expiry-sweep": "certification",
+  "POST /v1/certification-campaigns/:campaignId/items/:itemId/reassign": "certification",
   // ADR-0091 — toxic-combination SoD rules + override escalations
   "POST /v1/sod/rules": "sod",
   "GET /v1/sod/rules": "sod",

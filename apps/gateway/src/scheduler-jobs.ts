@@ -40,6 +40,7 @@ import { runEvalDriftSweep } from "./evals.js";
 import { runScheduledRedTeamSweep } from "./redteam.js";
 import { runTrainingJobPollSweep } from "./regulait-llm.js";
 import { runCostReconciliation } from "./cost-reconcile.js";
+import { runCampaignExpirySweep } from "./grant-certification.js";
 import { toRegistry, type SchedulerJobDefinition, type SchedulerJobRegistry } from "./scheduler.js";
 
 const HOUR = 3600;
@@ -62,6 +63,7 @@ export const SCHEDULER_JOB_NAMES = {
   redteam: "redteam-sweep",
   trainingPoll: "training-job-poll-sweep",
   costReconciliation: "cost-reconciliation-sweep",
+  certificationExpiry: "certification-expiry-sweep",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -250,6 +252,26 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
             overlapWarnings: out.overlapWarnings,
           },
         };
+      },
+    },
+    {
+      // ADR-0090 amendment (batch B2a) — the ninth, and the most deliberately
+      // inert: it CHANGES NO DECISION AND NO STATUS. Campaign expiry stays a
+      // read-time fact (ADR-0090's breach-on-read posture, unchanged) and
+      // undecided items stay undecided forever; this job only writes ONE
+      // audited campaign-expired-incomplete row per campaign the first time
+      // it is observed past due, so the audit trail carries the expiry even
+      // if nobody ever opens the campaigns page. Idempotent by data (the
+      // audit row is the marker); re-runs add nothing. NOT a control.
+      name: SCHEDULER_JOB_NAMES.certificationExpiry,
+      description:
+        "Record — once, into the audit log — each certification campaign that passed its due date with " +
+        "items undecided. Decides nothing: expiry stays computed on read, and undecided stays undecided.",
+      adr: "ADR-0090",
+      defaultIntervalSeconds: HOUR,
+      run: async (ctx) => {
+        const out = await runCampaignExpirySweep(ctx.db, { actorUserId: ctx.actorUserId, now: ctx.now });
+        return { itemsProcessed: out.observed, detail: { observed: out.observed, campaignIds: out.campaignIds } };
       },
     },
   ];
