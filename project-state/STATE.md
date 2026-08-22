@@ -21,6 +21,28 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-08-22 — the credential is UNPARKED, live-proven; owner testing is live; the follow-up
+queue is landing.** The owner supplied a Google/Gemini key and live-instrument verification
+passed **V1–V7** ([LIVE_VERIFICATION_2026-08.md](../docs/product/LIVE_VERIFICATION_2026-08.md),
+~$0.007): governed live dispatch with real metering, streaming, PII-cascade-precedes-dispatch
+proven against a live backend, judges (`model-judged` + the keyless 422 both ways), live-graded
+red-team trials, routing treating the live provider as a credentialed candidate. Owner testing
+against the checklist began and drives fixes directly: home stats now survive orientation
+dismissal (Show-orientation toggle), and **ADR-0094** rebuilt the console as a **tile launcher
++ suite-scoped sidebar** (one product suite at a time, cross-suite `/` filter as the
+anti-stranding escape hatch, routes byte-identical, Playwright 121→127). Batch **B1**
+(ADR-0073/0058 residuals): rule CRUD edit/delete built honest-first over versioning (migration
+0095: `retired` version status), `agent_config` became real versioned dispatch config with a
+zero-influence shadow canary, pack activation now seeds its §8.3 profile (migration 0096,
+presets as pack data). Batch **B1.5** (ADR-0095): owner-found mock-routing defect fixed —
+mocks route only when no credentialed live agent can serve (`mock_shadowed_by_live`
+disclosed, keyless demo byte-identical), savings never priced mock-vs-live; seed google agent
+→ `gemini-3.6-flash` (the 2.5 id is retired for new accounts) and `PATCH /v1/agents/:id`
+rides the versioned edit path. Gateway **2361 passing + 9 MinIO skips / 146 files**,
+Playwright **127/127**. In queue: B2 certification ops → B3 enforcement opt-ins → B4 key
+re-encryption → B5 long tail → **L6 governance copilot + L24 model-judged half** (now
+buildable). PENDING.md's credential section reads UNPARKED.
+
 **2026-08-21 (later) — pending ledger made durable; enterprise console IA shipped.**
 [PENDING.md](../docs/product/PENDING.md) now carries the complete post-queue pending set,
 each item with its exact unblock condition (credential / owner decision / live instrument /
