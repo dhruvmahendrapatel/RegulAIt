@@ -76,13 +76,32 @@ import {
 import {
   ACCESS_RECOMMENDATION_RULES_V1,
   ACCESS_RECOMMENDATION_RULES_VERSION,
+  RECOMMENDATION_JUDGE_OFF_NOTE,
+  RECOMMENDATION_JUDGE_UNAVAILABLE_NOTE,
   UNUSED_GRANT_DEFAULT_WINDOW_DAYS,
+  annotationsForFindings,
+  buildRecommendationJudgePrompt,
+  judgeAvailabilityFor,
+  parseRecommendationJudgeReplies,
   renderRecommendationRationale,
   type AccessRecommendationRule,
   type AccessRecommendationRuleId,
+  type RecommendationJudge,
+  type RecommendationJudgeAnnotation,
+  type RecommendationJudgeReply,
+  type RecommendationJudgeRequest,
+  type RecommendationJudgedState,
 } from "@regulait/shared";
 import { z } from "zod";
+import {
+  agentProviderToken,
+  configuredProviders,
+  executeGovernedDispatch,
+  type AgentRow,
+} from "./agents-connectors.js";
+import { isModelProviderKind } from "@regulait/model-provider";
 import { buildAgentHolderIndex, computeAlignmentIndex, ownershipFlagFor } from "./inventory.js";
+import { loadOrgSettings } from "./org-settings.js";
 import { computeRuleViolators, loadRuleSelectors, resolveSelectorObjects } from "./sod.js";
 
 export const ACCESS_RECOMMENDATION_NOTES = {
@@ -149,6 +168,18 @@ export interface RecommendationFinding {
     campaignScope: { kind: "from_recommendations"; value: string };
     revoke: RevokeAction | null;
   };
+  /**
+   * L6c — the OPT-IN model-judged annotation. Absent unless the org knob is on
+   * AND a judge was dispatchable AND the judge returned a verdict for THIS
+   * finding's key. A SIBLING field: nothing in `evidence`, `rationale`,
+   * `severity` or `action` is derived from it, and no finding exists because
+   * of it (`annotationsForFindings` drops any verdict keyed to something the
+   * deterministic rules did not produce).
+   */
+  judged?: RecommendationJudgeAnnotation;
+  /** the stable key the judged layer addresses this finding by. Deterministic
+   * (rule + grant/holder), so the same finding gets the same key across runs. */
+  key: string;
 }
 
 export interface NotAssessableEntry {
@@ -183,6 +214,16 @@ export interface AccessRecommendationsReport {
       note: string;
     };
   };
+  /**
+   * L6c — the judged layer's own disclosure, ALWAYS present. Three states and
+   * no fourth: off (the default), judged (with the instrument named and how
+   * many findings it annotated), or unavailable (enabled, but no judge could
+   * be dispatched — the deterministic report above is unchanged and says so).
+   * An unannotated report from a reachable judge and an unannotated report
+   * from a missing one are different facts, and this field is what keeps them
+   * distinguishable.
+   */
+  judged: RecommendationJudgedState;
 }
 
 // ---------------------------------------------------------------------------
@@ -376,7 +417,31 @@ export async function computeAccessRecommendations(
     });
   }
   const ruleOf = (id: AccessRecommendationRuleId) => ACCESS_RECOMMENDATION_RULES_V1.find((r) => r.id === id)!;
-  const addFinding = (id: AccessRecommendationRuleId, f: RecommendationFinding) => ruleResults.get(id)!.findings.push(f);
+  /**
+   * L6c — every finding gets a STABLE KEY as it is created, derived only from
+   * deterministic identity (rule + grant row, or rule + holder for the
+   * identity-shaped sod findings). The key is the ONLY handle the judged layer
+   * has: it is given the deterministic key set and can annotate nothing else,
+   * which is what makes "the judged layer cannot create a recommendation" a
+   * structural property rather than a promise. A collision (two findings of
+   * one rule on one identity) is disambiguated with an index rather than
+   * silently merged.
+   */
+  const usedKeys = new Set<string>();
+  const findingKey = (id: AccessRecommendationRuleId, f: Omit<RecommendationFinding, "key">) => {
+    const base = `${id}:${f.grantKind ?? "identity"}:${f.grantId ?? f.holder.userId ?? f.holder.roleId ?? "-"}`;
+    if (!usedKeys.has(base)) {
+      usedKeys.add(base);
+      return base;
+    }
+    let n = 2;
+    while (usedKeys.has(`${base}#${n}`)) n += 1;
+    const key = `${base}#${n}`;
+    usedKeys.add(key);
+    return key;
+  };
+  const addFinding = (id: AccessRecommendationRuleId, f: Omit<RecommendationFinding, "key">) =>
+    ruleResults.get(id)!.findings.push({ ...f, key: findingKey(id, f) });
 
   // -- every grant row, one uniform view ------------------------------------
   interface GrantRow {
@@ -755,6 +820,10 @@ export async function computeAccessRecommendations(
     computedAt: now.toISOString(),
     notes: ACCESS_RECOMMENDATION_NOTES,
     rules: rulesOut,
+    // the DEFAULT state of the world: the deterministic report and nothing
+    // else. `annotateWithJudge` below replaces this, and only this, when the
+    // org opts in — the computation above never consults a model.
+    judged: { enabled: false, note: RECOMMENDATION_JUDGE_OFF_NOTE },
     action: {
       openCampaign: {
         endpoint: "POST /v1/certification-campaigns",
@@ -766,6 +835,216 @@ export async function computeAccessRecommendations(
           "on its own.",
       },
     },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// L6c (ADR-0092 amendment) — THE MODEL-JUDGED HALF.
+//
+// ADR-0092 said this half "remains L6-blocked and unapproximated". It is now
+// buildable, and the shape it takes is the one that keeps ADR-0092 honest:
+//
+//   * OPT-IN, DEFAULT OFF (the batch-B3 idiom). An untouched deployment's
+//     report is byte-identical to what ADR-0092 shipped.
+//   * A JUDGE IS AN INSTRUMENT, AND A MISSING ONE IS SAID. Availability rides
+//     ADR-0067's own `judgeAvailabilityFor` — the same typed refusal the eval
+//     runner uses — so "we had no instrument" can never be recorded as "we
+//     looked and found nothing to flag".
+//   * THE ANNOTATION CANNOT REACH THE DETERMINISTIC FIELDS. `annotateReport`
+//     writes exactly one key (`judged`) on findings the rules already made,
+//     addressed by the deterministic key set. The judge never sees the report
+//     object and never returns one.
+//   * IT RIDES THE GOVERNED DISPATCH. `ModelBackedRecommendationJudge` calls
+//     `executeGovernedDispatch` — same entitlements, same PII cascade, same
+//     guardrails, same metering as any tenant call. Its tokens bill a project
+//     and appear in pillar 5, exactly like the copilot's narration.
+// ---------------------------------------------------------------------------
+
+export class ModelBackedRecommendationJudge implements RecommendationJudge {
+  readonly id: string;
+  constructor(
+    private readonly db: Db,
+    private readonly dataKey: string | undefined,
+    private readonly ctx: { agent: AgentRow; userId: string; projectId: string | null },
+  ) {
+    this.id = `model:${ctx.agent.name}`;
+  }
+
+  async judge(reqs: RecommendationJudgeRequest[]): Promise<RecommendationJudgeReply[]> {
+    const outcome = await executeGovernedDispatch(this.db, this.dataKey, {
+      userId: this.ctx.userId,
+      served: this.ctx.agent,
+      requestedAgentId: this.ctx.agent.id,
+      // no routing counterfactual: the judge is pinned by org configuration
+      baseline: null,
+      input: buildRecommendationJudgePrompt(reqs),
+      maxTokens: 2048,
+      projectId: this.ctx.projectId,
+      detail: { purpose: "recommendation-judge", findings: reqs.length },
+    });
+    if (!outcome.ok) {
+      throw new Error(
+        `recommendation judge dispatch failed: ${outcome.error}${outcome.detail ? ` — ${outcome.detail}` : ""}`,
+      );
+    }
+    const parsed = parseRecommendationJudgeReplies(outcome.result.outputText);
+    if (!parsed.ok) throw new Error(`recommendation judge reply unusable: ${parsed.error}`);
+    return parsed.replies;
+  }
+}
+
+/** cap on how many findings ride one judge call — a bounded prompt, and a
+ * bounded bill, on a report that can legitimately hold hundreds of rows */
+export const RECOMMENDATION_JUDGE_MAX_FINDINGS = 40;
+
+/**
+ * ATTACH ANNOTATIONS TO A COMPUTED REPORT — the only function that may.
+ *
+ * The report goes in already finished. This writes `judged` on the report and
+ * `judged` on individual findings, and touches nothing else: it cannot add a
+ * finding (it iterates the ones present), cannot remove one, and cannot reach
+ * `evidence`, `rationale`, `severity`, `counts` or `action`, none of which it
+ * assigns to. A judge that throws leaves the report EXACTLY as it arrived,
+ * with `judged: unavailable` stating why.
+ */
+export async function annotateReportWithJudge(
+  report: AccessRecommendationsReport,
+  judge: RecommendationJudge,
+): Promise<AccessRecommendationsReport> {
+  const findings = report.rules.flatMap((r) =>
+    r.findings.map((f) => ({ ruleId: r.id, f })),
+  );
+  if (findings.length === 0) {
+    report.judged = {
+      enabled: true,
+      status: "judged",
+      judge: judge.id,
+      annotated: 0,
+      note:
+        "model-judged annotations are enabled and the judge was reachable, but the deterministic " +
+        "rules flagged nothing — there was nothing to annotate. The judged layer never creates a " +
+        "finding of its own.",
+    };
+    return report;
+  }
+  const batch = findings.slice(0, RECOMMENDATION_JUDGE_MAX_FINDINGS);
+  let replies: RecommendationJudgeReply[];
+  try {
+    replies = await judge.judge(
+      batch.map(({ ruleId, f }) => ({
+        key: f.key,
+        ruleId,
+        rationale: f.rationale,
+        evidence: f.evidence,
+      })),
+    );
+  } catch (err) {
+    report.judged = {
+      enabled: true,
+      status: "unavailable",
+      error: "judge_not_dispatchable",
+      reason: err instanceof Error ? err.message : String(err),
+      note: RECOMMENDATION_JUDGE_UNAVAILABLE_NOTE,
+    };
+    return report;
+  }
+  // THE CONTAINMENT STEP. Only the deterministic key set is annotatable.
+  const annotations: Map<string, RecommendationJudgeAnnotation> = annotationsForFindings(
+    batch.map(({ f }) => f.key),
+    replies,
+    judge.id,
+  );
+  let annotated = 0;
+  for (const rule of report.rules) {
+    for (const f of rule.findings) {
+      const a = annotations.get(f.key);
+      if (!a) continue;
+      f.judged = a;
+      annotated += 1;
+    }
+  }
+  report.judged = {
+    enabled: true,
+    status: "judged",
+    judge: judge.id,
+    annotated,
+    note:
+      `${annotated} of ${findings.length} finding(s) carry a model-judged annotation` +
+      (findings.length > batch.length
+        ? ` (only the first ${batch.length} were sent to the judge — a bounded prompt and a bounded bill)`
+        : "") +
+      ". Every annotation is labelled `method: \"model-judged\"` and is advisory: it did not create " +
+      "the finding, it cannot change the finding's evidence or severity, and it does not clear a grant.",
+  };
+  return report;
+}
+
+/**
+ * The org-configured judge, or the typed reason there is none. Deliberately
+ * mirrors the eval runner's pre-flight (`evals.ts`): named? dispatchable?
+ * `judgeAvailabilityFor` makes the call, so the two surfaces cannot drift into
+ * disagreeing about what "we have an instrument" means.
+ */
+export async function resolveRecommendationJudge(
+  db: Db,
+  dataKey: string | undefined,
+  opts: { userId: string | null; projectId?: string | null; judge?: RecommendationJudge | null },
+): Promise<
+  { enabled: false } | { enabled: true; judge: RecommendationJudge } | { enabled: true; unavailable: RecommendationJudgedState }
+> {
+  const settings = await loadOrgSettings(db);
+  if (!settings.recommendationJudgeEnabled) return { enabled: false };
+  // an injected judge IS the judge (the test seam) — it needs no credential
+  if (opts.judge) return { enabled: true, judge: opts.judge };
+
+  const unavailable = (error: "judge_required" | "judge_not_dispatchable", reason: string) => ({
+    enabled: true as const,
+    unavailable: {
+      enabled: true as const,
+      status: "unavailable" as const,
+      error,
+      reason,
+      note: RECOMMENDATION_JUDGE_UNAVAILABLE_NOTE,
+    },
+  });
+
+  if (!opts.userId) {
+    return unavailable(
+      "judge_not_dispatchable",
+      "the judged layer dispatches with the CALLING USER's entitlements, and this caller has no " +
+        "user identity to inherit them from (a bootstrap/API token). The deterministic report is " +
+        "returned unchanged.",
+    );
+  }
+  const judgeAgentId = settings.recommendationJudgeAgentId;
+  let detail: string | null = null;
+  let agent: AgentRow | null = null;
+  if (judgeAgentId) {
+    const [row] = await db.select().from(agents).where(eq(agents.id, judgeAgentId));
+    if (!row) detail = "the configured judge agent no longer exists";
+    else if (!row.model) detail = `judge agent '${row.name}' has no model id`;
+    else if (!isModelProviderKind(row.provider)) {
+      detail = `judge agent '${row.name}' has unknown provider '${row.provider}'`;
+    } else {
+      const configured = await configuredProviders(db, dataKey, opts.userId);
+      if (configured.has(agentProviderToken(row))) agent = row as AgentRow;
+      else detail = `no model credential (user or platform) is configured for provider '${row.provider}'`;
+    }
+  }
+  // ADR-0067's OWN pre-flight, reused rather than reimplemented.
+  const availability = judgeAvailabilityFor(["llm_as_judge"], {
+    named: Boolean(judgeAgentId),
+    dispatchable: Boolean(agent),
+    detail,
+  });
+  if (!availability.available) return unavailable(availability.error, availability.reason);
+  return {
+    enabled: true,
+    judge: new ModelBackedRecommendationJudge(db, dataKey, {
+      agent: agent!,
+      userId: opts.userId,
+      projectId: opts.projectId ?? null,
+    }),
   };
 }
 
@@ -846,11 +1125,44 @@ export async function recommendationsPostureSection(db: Db, now: Date) {
 
 const querySchema = z.object({
   windowDays: z.coerce.number().int().min(1).max(3650).optional(),
+  /** L6c: which project the judged layer's tokens bill, when it runs at all.
+   * Ignored entirely while the knob is off — the deterministic report costs
+   * nothing and attributes nothing. */
+  projectId: z.string().uuid().optional(),
 });
 
-export function registerAccessRecommendationRoutes(app: FastifyInstance, db: Db): void {
+export interface AccessRecommendationRouteOptions {
+  dataKey?: string | undefined;
+  /** TEST SEAM. Absent = the org-configured, credential-checked, governed
+   * `ModelBackedRecommendationJudge` — i.e. the real path. */
+  judge?: RecommendationJudge | null | undefined;
+}
+
+export function registerAccessRecommendationRoutes(
+  app: FastifyInstance,
+  db: Db,
+  opts: AccessRecommendationRouteOptions = {},
+): void {
   app.get("/v1/recommendations/access", async (req) => {
-    const { windowDays } = querySchema.parse(req.query);
-    return computeAccessRecommendations(db, windowDays !== undefined ? { windowDays } : {});
+    const { windowDays, projectId } = querySchema.parse(req.query);
+    // THE DETERMINISTIC REPORT, COMPUTED FIRST AND UNCONDITIONALLY. Whatever
+    // the judged layer does or fails to do below, this is what it does it to.
+    const report = await computeAccessRecommendations(
+      db,
+      windowDays !== undefined ? { windowDays } : {},
+    );
+    const resolved = await resolveRecommendationJudge(db, opts.dataKey, {
+      userId: req.authCtx.userId ?? null,
+      projectId: projectId ?? null,
+      judge: opts.judge ?? null,
+    });
+    if (!resolved.enabled) return report;
+    if ("unavailable" in resolved) {
+      // ENABLED BUT NO INSTRUMENT. The report is returned UNCHANGED and says
+      // so — never a silent downgrade to an unannotated "all clear".
+      report.judged = resolved.unavailable;
+      return report;
+    }
+    return annotateReportWithJudge(report, resolved.judge);
   });
 }

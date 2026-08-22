@@ -213,6 +213,14 @@ export interface BuildAppOptions {
    * Exposed so a test can drive a real WORM buffer without touching the
    * environment. */
   auditAnchorSink?: AnchorSink | null;
+  /** L6a TEST SEAM (ADR-0056 amendment): inject a deterministic copilot
+   * narrator instead of the real, governed `ModelBackedNarrator`. Absent =
+   * the real path. */
+  copilotNarrator?: CopilotNarrator | null;
+  /** L6c TEST SEAM (ADR-0092 amendment): inject a deterministic
+   * recommendation judge instead of the real, governed, org-configured one.
+   * Absent = the real path, which still requires the org knob to be ON. */
+  recommendationJudge?: RecommendationJudge | null;
 }
 import { z } from "zod";
 import { registerMcpProxy } from "./mcp-proxy.js";
@@ -279,6 +287,7 @@ import { registerCostReconciliationRoutes } from "./cost-reconcile.js";
 import { registerTracingRoutes } from "./tracing.js";
 import { registerCompliancePackRoutes } from "./compliance-packs.js";
 import { registerCopilotRoutes } from "./copilot.js";
+import type { CopilotNarrator, RecommendationJudge } from "@regulait/shared";
 import { registerChatOpsRoutes } from "./chatops.js";
 import path from "node:path";
 import { registerSpaInlineScripts, securityHeaders } from "./security-headers.js";
@@ -3056,7 +3065,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // payload names users, grants and org-wide usage, the inventory's record
   // class. The model-judged half stays credential-blocked (L6), not
   // approximated.
-  registerAccessRecommendationRoutes(app, db);
+  registerAccessRecommendationRoutes(app, db, {
+    dataKey: opts.dataKey,
+    // L6c: absent = the org-configured, credential-checked governed judge
+    judge: opts.recommendationJudge ?? null,
+  });
   // ADR-0091 — toxic-combination SoD rules + override escalations. Admin-only
   // through the DEFAULT gate: declaring two capabilities toxic (and lifting
   // that with an override) is org-wide entitlement policy, the same class of
@@ -3277,7 +3290,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // treated as UNTRUSTED INPUT through ADR-0042's guardrails; and it has no
   // mutating tools at all — its only route to a change is a proposal that opens
   // an ordinary Approvals-Queue item for a named human.
-  registerCopilotRoutes(app, db, { dataKey: opts.dataKey });
+  registerCopilotRoutes(app, db, {
+    dataKey: opts.dataKey,
+    narrator: opts.copilotNarrator ?? null,
+  });
   // ADR-0053 — the published contract: the OpenAPI document, the versioning /
   // deprecation policy, and the RFC-8594 Deprecation/Sunset headers. Registered
   // here (rather than first) only for readability; the inventory hook at the top

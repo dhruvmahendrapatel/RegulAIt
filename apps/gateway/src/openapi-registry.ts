@@ -537,6 +537,9 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/copilot/queries": "internal",
   "POST /v1/copilot/proposals": "internal",
   "GET /v1/copilot/proposals": "internal",
+  // L6b — the consent-gated applier. Internal for the same reason the rest of
+  // the copilot is: it names governance objects and is an admin surface.
+  "POST /v1/copilot/proposals/:proposalId/apply": "internal",
   // ADR-0058 — compliance packs. Internal: the pack schema and the collector
   // vocabulary will move as frameworks are revised and new ledgers become
   // evidenceable, and freezing a control-mapping shape as a public contract
@@ -1128,6 +1131,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/copilot/queries": "copilot",
   "POST /v1/copilot/proposals": "copilot",
   "GET /v1/copilot/proposals": "copilot",
+  "POST /v1/copilot/proposals/:proposalId/apply": "copilot",
   "GET /v1/compliance/packs": "compliance-packs",
   "POST /v1/compliance/packs": "compliance-packs",
   "POST /v1/compliance/packs/seed": "compliance-packs",
