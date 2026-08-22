@@ -2105,11 +2105,23 @@ export const usageEvents = pgTable(
      * key, a session, or an internal (scheduler/orchestration) path, which is
      * every pre-0066 row. */
     virtualKeyId: uuid("virtual_key_id"),
+    /** Batch B7c (ADR-0073 amendment, migration 0102) — WHICH `agent_config`
+     * VERSION SERVED. The B1 amendment disclosed "usage_events still stamps
+     * only the PROMPT version (one stamp column, two artifact types)"; this
+     * closes it. Mirrors the prompt stamp above exactly: FK-FREE like every
+     * other attribution column of this ledger, integer stored alongside the id
+     * so the answer survives a pruned version row. NULL = the agent's config
+     * was unversioned (every pre-B7c row, byte-identical). NEVER the shadow/
+     * canary CANDIDATE id — the column means "what served", and an
+     * agent_config candidate never serves (ADR-0073's invariant). */
+    agentConfigVersionId: uuid("agent_config_version_id"),
+    agentConfigVersion: integer("agent_config_version"),
     detail: jsonb("detail"),
   },
   (t) => [
     index("usage_events_user_idx").on(t.userId, t.at),
     index("usage_events_config_version_idx").on(t.configVersionId),
+    index("usage_events_agent_config_version_idx").on(t.agentConfigVersionId),
   ],
 );
 
@@ -2925,6 +2937,16 @@ export const orgSettings = pgTable(
       .$type<Partial<Record<"hosted" | "byoc" | "air_gapped", number>>>()
       .notNull()
       .default({}),
+    /** Batch B7c (ADR-0073 amendment, migration 0102) — retention window for
+     * `config_canary_observations`, the shadow canary's output, which ADR-0073
+     * disclosure 5 left growing monotonically. Acted on by the ADR-0064
+     * `canary-observation-prune-sweep` job (off with the scheduler, like every
+     * job) and the manual prune endpoint. ONLY observations are pruned, and
+     * never those of a version currently in CANARY status — `config_versions`
+     * themselves are the audit substrate and are NEVER pruned by anything. */
+    canaryObservationRetentionDays: integer("canary_observation_retention_days")
+      .notNull()
+      .default(90),
 
     // --- O5 (migration 0045): scheduled backup verification --------------
     /** OFF (default) = today's behaviour: success ledger rows only ever come

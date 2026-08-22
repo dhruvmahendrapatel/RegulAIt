@@ -708,6 +708,13 @@
       "when": 1785036000000,
       "tag": "0101_dispatch_attribution_required",
       "breakpoints": true
+    },
+    {
+      "idx": 102,
+      "version": "7",
+      "when": 1785037000000,
+      "tag": "0102_config_version_residuals",
+      "breakpoints": true
     }
   ]
 }
