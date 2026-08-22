@@ -135,3 +135,25 @@ only approvals in state rejected)"* — accurate on both counts.
 because I assumed a question would produce a state I never verified, and my
 user-creation probe used the wrong field name and read the wrong key field.
 Fixed each and re-ran rather than reporting around them.
+
+## Retest of entity-aware planning (ADR-0096) — 2026-08-22, live
+
+Pulled, rebuilt, fresh seeded database, live Gemini narrator. Five cases, criteria
+written before the run:
+
+| Case | Result |
+|---|---|
+| **A. The original defect** — "Summarise the Zorblatt Quantum Compliance Widget approvals from last week" | **422 `copilot_entity_unresolved`.** No answer, no model call. The message names the six resolvable kinds and states outright that it will not fall back to a broad query and label the findings with the caller's words. |
+| **B. Real entity narrows** — `spent this month on "demo-project"` | **15 rows filtered vs 20 unfiltered.** The filter genuinely narrows; the plan carries `{kind: project, id, name, matchedOn}` and the narration names the filter. |
+| **C. Control, no entity** | Unchanged useful answer. |
+| **D. Empty retrieval** (user with no projects) | `groundedRefusal: true`, rows 0 — a **201 with a grounded refusal**, structurally distinct from A's **422**. The two "I can't answer" cases are now separable by a caller. |
+| **E. Scope honesty** | A real-but-invisible project and a genuinely nonexistent name produce refusals that are **byte-identical after substituting only the caller's own word**, with no id leak. Invisible is indistinguishable from nonexistent. |
+
+Independent full gateway suite on a fresh database: **154 files / 2450 passed + 9
+skipped**, matching the build agent's numbers.
+
+The arc this closes: the copilot originally attached 8 real approvals to a
+fabricated subject and stamped it verified (found by hand, 2026-08-22). L6d made
+it disclose that it had not filtered. ADR-0096 makes it refuse instead — and the
+non-vacuity probe that mattered was "report the filter but make it a no-op in
+SQL", which reddened three tests with `expected 8 to be 3`.
