@@ -2811,6 +2811,12 @@ export const APPROVAL_QUORUMS = ["all", "any"] as const;
  * posture. 'inherit' defers to the env-derived deploy mode; 'strict' raises
  * the floor. There is deliberately no value that lowers it. */
 export const EGRESS_COMPILED_DEFAULT_POLICIES = ["inherit", "strict"] as const;
+/** ADR-0080 amendment (migration 0098, batch B3): does an approved AI use
+ * case gate dispatch? 'off' = the shipped honest limit ("approval registers
+ * intent"), byte-identical. 'warn' records the refusal-shaped fact without
+ * blocking. 'enforce' refuses a governed dispatch attributed to a
+ * use-case-LINKED project with no approved linked use case. */
+export const USE_CASE_GATE_MODES = ["off", "warn", "enforce"] as const;
 
 export const orgSettings = pgTable(
   "org_settings",
@@ -3013,6 +3019,48 @@ export const orgSettings = pgTable(
      * "expiring soon" — the window the registry surfaces lapses in as WORK
      * ahead of time rather than as an outage on the day. */
     mrmExpiryWarnDays: integer("mrm_expiry_warn_days").notNull().default(30),
+    /** ADR-0086 §3's named follow-up (migration 0098, batch B3):
+     * staleness-forces-recertification. false (default) = ADR-0086's shipped
+     * posture, byte-identical — staleness informs and gates nothing. true =
+     * the ADR-0045 dispatch gate (and ONLY while `mrmEnforced` is on — this
+     * knob deepens the one gate, it creates no gate of its own) additionally
+     * refuses a card whose ledger drift since the last granting decision has
+     * reached the threshold below, on the SAME 409 path expiry uses. Fully
+     * reversible; recertifying (a new superseding sign-off) resets the clock. */
+    mrmStalenessRecertEnabled: boolean("mrm_staleness_recert_enabled").notNull().default(false),
+    /** how many ledger changes since certification (the `computeCardStaleness`
+     * counts, summed) it takes before an armed staleness gate refuses. 1 =
+     * any drift at all forces recertification. */
+    mrmStalenessRecertThreshold: integer("mrm_staleness_recert_threshold").notNull().default(1),
+
+    // --- ADR-0080 amendment (migration 0098): use-case dispatch gate --------
+    /** 'off' (default) = the ADR-0080 honest limit exactly as shipped:
+     * approval registers intent and gates nothing — byte-identical behaviour.
+     * 'warn' = a governed dispatch attributed to a use-case-LINKED project
+     * with no approved linked use case proceeds, but the refusal-shaped fact
+     * is audited and annotated on the response. 'enforce' = the same dispatch
+     * is refused 409 `use_case_approval_required` before any provider work —
+     * the ADR-0045 gate shape. The join is `ai_use_cases.project_id`, the
+     * only join the schema holds: a project no use case links stays untouched
+     * in every mode. */
+    useCaseGateMode: text("use_case_gate_mode", { enum: USE_CASE_GATE_MODES })
+      .notNull()
+      .default("off"),
+
+    // --- L6c / ADR-0092 amendment (migration 0100): the model-judged half ---
+    /** FALSE (default) = the ADR-0092 access-recommendation report is exactly
+     * the six deterministic rules and nothing else, byte-identical to what
+     * that ADR shipped. TRUE = each finding the rules ALREADY produced MAY
+     * carry a `judged` annotation labelled `method: "model-judged"`. The
+     * annotation can never create a finding, never alter a finding's
+     * severity/evidence/rationale, and never reorder anything: it is a
+     * sibling field on a finding the deterministic layer computed. */
+    recommendationJudgeEnabled: boolean("recommendation_judge_enabled").notNull().default(false),
+    /** the registry agent the judged layer dispatches through. Must be in the
+     * caller's own entitled, dispatchable roster — naming one here can pin a
+     * choice, never widen entitlement. NULL while enabled = `judged:
+     * unavailable` with `judge_required`, never a silent no-annotation run. */
+    recommendationJudgeAgentId: uuid("recommendation_judge_agent_id"),
 
     // --- ADR-0046 (migration 0058): review-workbench bulk fences ------------
     /** hard cap on items per bulk approve/deny/reassign. Not a UI convenience:
@@ -3098,6 +3146,14 @@ export const orgSettings = pgTable(
     check(
       "org_settings_approval_bulk_max_items_check",
       sql`${t.approvalBulkMaxItems} >= 1 AND ${t.approvalBulkMaxItems} <= 500`,
+    ),
+    check(
+      "org_settings_use_case_gate_mode_check",
+      sql`${t.useCaseGateMode} IN ('off', 'warn', 'enforce')`,
+    ),
+    check(
+      "org_settings_mrm_staleness_recert_threshold_check",
+      sql`${t.mrmStalenessRecertThreshold} >= 1 AND ${t.mrmStalenessRecertThreshold} <= 100000`,
     ),
   ],
 );
@@ -5648,6 +5704,19 @@ export const copilotProposals = pgTable(
     approvalId: uuid("approval_id").references(() => approvals.id, { onDelete: "set null" }),
     proposedByUserId: uuid("proposed_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    /**
+     * L6b (migration 0100) — THE APPLY LEDGER. NULL (every pre-L6 row) = not
+     * applied, which was the only possible state before the applier existed.
+     * Set only by `POST /v1/copilot/proposals/:id/apply`, only when the linked
+     * approval is APPROVED, and only after the change went through the same
+     * public choke point an admin would use by hand. Non-null is also the
+     * idempotency gate: a second apply is refused by name, never re-executed.
+     */
+    appliedAt: timestamp("applied_at", { withTimezone: true }),
+    appliedByUserId: uuid("applied_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** exactly what the choke point reported back — the honest record of what
+     * the apply DID, as distinct from what the diff proposed */
+    appliedResult: jsonb("applied_result").$type<Record<string, unknown>>(),
   },
   (t) => [index("copilot_proposals_query_idx").on(t.queryId)],
 );
@@ -5869,6 +5938,86 @@ export const dataKeyAttestations = pgTable(
 
 export type DataKeyStateRow = typeof dataKeyState.$inferSelect;
 export type DataKeyAttestationRow = typeof dataKeyAttestations.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// ADR-0063 amendment (migration 0099) — THE KEY RE-ENCRYPTION WALK
+// ---------------------------------------------------------------------------
+
+/** `running` is the ONLY status a killed run can be left in — the next
+ * invocation with the same from/to keys resumes it. A row that decrypted under
+ * NEITHER key forces `completed_with_failures`, never `completed`. */
+export const DATA_KEY_REENCRYPTION_STATUSES = [
+  "running",
+  "completed",
+  "completed_with_failures",
+] as const;
+export type DataKeyReencryptionStatus = (typeof DATA_KEY_REENCRYPTION_STATUSES)[number];
+
+/**
+ * One row per re-encryption walk (ADR-0063 §4's named follow-up). Progress is
+ * committed in the SAME transaction as each batch's rewritten rows, so "these
+ * rows are under the new key" and "the watermark has moved past them" are one
+ * atomic fact — the resumability guarantee.
+ */
+export const dataKeyReencryptionRuns = pgTable(
+  "data_key_reencryption_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    fromFingerprint: text("from_fingerprint").notNull(),
+    toFingerprint: text("to_fingerprint").notNull(),
+    status: text("status", { enum: DATA_KEY_REENCRYPTION_STATUSES }).notNull().default("running"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (t) => [index("data_key_reencryption_runs_status_idx").on(t.status, t.startedAt)],
+);
+
+/** per-(run, table, column) watermark + the counters the completion record
+ * reports. All thirteen ciphertext-bearing tables key on a uuid `id`. */
+export const dataKeyReencryptionProgress = pgTable(
+  "data_key_reencryption_progress",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => dataKeyReencryptionRuns.id, { onDelete: "cascade" }),
+    tableName: text("table_name").notNull(),
+    columnName: text("column_name").notNull(),
+    /** PK of the last settled row, in uuid order. NULL = not started. */
+    watermark: uuid("watermark"),
+    done: boolean("done").notNull().default(false),
+    rowsReencrypted: integer("rows_reencrypted").notNull().default(0),
+    rowsAlreadyCurrent: integer("rows_already_current").notNull().default(0),
+    rowsFailed: integer("rows_failed").notNull().default(0),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [unique("data_key_reencryption_progress_unique").on(t.runId, t.tableName, t.columnName)],
+);
+
+/** the id + table of every row that decrypted under neither key — recorded,
+ * then walked past. One corrupt row must not brick a rotation, and must never
+ * be counted as success. */
+export const dataKeyReencryptionFailures = pgTable(
+  "data_key_reencryption_failures",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => dataKeyReencryptionRuns.id, { onDelete: "cascade" }),
+    tableName: text("table_name").notNull(),
+    columnName: text("column_name").notNull(),
+    rowId: uuid("row_id").notNull(),
+    detail: text("detail"),
+    recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("data_key_reencryption_failures_unique").on(t.runId, t.tableName, t.columnName, t.rowId),
+  ],
+);
+
+export type DataKeyReencryptionRunRow = typeof dataKeyReencryptionRuns.$inferSelect;
+export type DataKeyReencryptionProgressRow = typeof dataKeyReencryptionProgress.$inferSelect;
+export type DataKeyReencryptionFailureRow = typeof dataKeyReencryptionFailures.$inferSelect;
 
 // ---------------------------------------------------------------------------
 // ADR-0064 (migration 0076) — THE IN-PROCESS SCHEDULER
@@ -7223,11 +7372,22 @@ export type GrantCertificationItemRow = typeof grantCertificationItems.$inferSel
 // ---------------------------------------------------------------------------
 
 /** the capability kinds an SoD rule side may name — the four grantable
- * gateway object families. CONCRETE selectors only in this slice: a side is
- * one id (plus tool name for mcp_tool; plus an optional mode qualifier for
- * connector). Pattern/category selectors are named follow-up in ADR-0091. */
+ * gateway object families. A side is either CONCRETE (one id, plus tool name
+ * for mcp_tool; plus an optional mode qualifier for connector) or — since the
+ * ADR-0091 amendment (migration 0097) — a PATTERN over one of the enumerable
+ * dimensions in SOD_PATTERN_DIMENSIONS below. */
 export const SOD_CAPABILITY_KINDS = ["agent", "connector", "mcp_tool", "mcp_server"] as const;
 export type SodCapabilityKind = (typeof SOD_CAPABILITY_KINDS)[number];
+
+/** ADR-0091 amendment (migration 0097) — the CLOSED pattern vocabulary. A
+ * pattern side selects by an enumerable dimension the schema actually has:
+ * an agent's lifecycle status, an agent's provider kind, or a connector
+ * holding's mode ("any connector held at readwrite"). NO free-form regex or
+ * name matching anywhere — the ADR-0085 data-only-rules discipline. Patterns
+ * resolve at CHECK time against current objects, so a new agent matching the
+ * pattern is covered the moment it exists. */
+export const SOD_PATTERN_DIMENSIONS = ["lifecycle_status", "provider", "mode"] as const;
+export type SodPatternDimension = (typeof SOD_PATTERN_DIMENSIONS)[number];
 
 /** every mint path the SoD gate covers — the eight grant kinds ADR-0090
  * enumerated, plus role ASSIGNMENT (assigning a role confers its bundle, so
@@ -7250,12 +7410,15 @@ export const sodRules = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     name: text("name").notNull().unique(),
-    aKind: text("a_kind", { enum: SOD_CAPABILITY_KINDS }).notNull(),
-    aObjectId: uuid("a_object_id").notNull(),
+    /** legacy two-sided shape (pre-0097 rows keep it byte-identically); a
+     * rule whose sides live in `sod_rule_sides` leaves all four NULL — the
+     * `sod_rules_side_storage_check` pins that it is one shape or the other */
+    aKind: text("a_kind", { enum: SOD_CAPABILITY_KINDS }),
+    aObjectId: uuid("a_object_id"),
     aToolName: text("a_tool_name"),
     aMode: text("a_mode", { enum: ["read", "readwrite"] }),
-    bKind: text("b_kind", { enum: SOD_CAPABILITY_KINDS }).notNull(),
-    bObjectId: uuid("b_object_id").notNull(),
+    bKind: text("b_kind", { enum: SOD_CAPABILITY_KINDS }),
+    bObjectId: uuid("b_object_id"),
     bToolName: text("b_tool_name"),
     bMode: text("b_mode", { enum: ["read", "readwrite"] }),
     /** REQUIRED — the refusal must be able to say WHY the pair is toxic */
@@ -7282,9 +7445,56 @@ export const sodRules = pgTable(
       "sod_rules_sides_differ_check",
       sql`NOT (${t.aKind} = ${t.bKind} AND ${t.aObjectId} = ${t.bObjectId} AND ${t.aToolName} IS NOT DISTINCT FROM ${t.bToolName} AND ${t.aMode} IS NOT DISTINCT FROM ${t.bMode})`,
     ),
+    // migration 0097: fully legacy-sided or fully child-sided, never half
+    check(
+      "sod_rules_side_storage_check",
+      sql`((${t.aKind} IS NOT NULL) = (${t.aObjectId} IS NOT NULL)) AND ((${t.bKind} IS NOT NULL) = (${t.bObjectId} IS NOT NULL)) AND ((${t.aKind} IS NULL) = (${t.bKind} IS NULL)) AND (${t.aKind} IS NOT NULL OR (${t.aToolName} IS NULL AND ${t.aMode} IS NULL AND ${t.bToolName} IS NULL AND ${t.bMode} IS NULL))`,
+    ),
     index("sod_rules_enabled_idx").on(t.enabled),
   ],
 );
+
+/** ADR-0091 amendment (migration 0097) — one row per side of a NEW-shape SoD
+ * rule (N-way and/or pattern selectors). A pre-0097 two-sided rule has no
+ * rows here and keeps its legacy a-/b-side columns; the gateway reads both shapes
+ * through one loader. Each side is either CONCRETE (object_id [+ tool_name /
+ * mode]) or a PATTERN — an enumerable (dimension, value) pair over the
+ * closed SOD_PATTERN_DIMENSIONS vocabulary, resolved at check time. */
+export const sodRuleSides = pgTable(
+  "sod_rule_sides",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ruleId: uuid("rule_id")
+      .notNull()
+      .references(() => sodRules.id, { onDelete: "cascade" }),
+    position: integer("position").notNull(),
+    selector: text("selector", { enum: ["concrete", "pattern"] }).notNull(),
+    kind: text("kind", { enum: SOD_CAPABILITY_KINDS }).notNull(),
+    objectId: uuid("object_id"),
+    toolName: text("tool_name"),
+    mode: text("mode", { enum: ["read", "readwrite"] }),
+    patternDimension: text("pattern_dimension", { enum: SOD_PATTERN_DIMENSIONS }),
+    patternValue: text("pattern_value"),
+  },
+  (t) => [
+    unique("sod_rule_sides_position_uq").on(t.ruleId, t.position),
+    check(
+      "sod_rule_sides_concrete_check",
+      sql`${t.selector} <> 'concrete' OR (${t.objectId} IS NOT NULL AND ${t.patternDimension} IS NULL AND ${t.patternValue} IS NULL AND ((${t.kind} = 'mcp_tool') = (${t.toolName} IS NOT NULL)) AND (${t.mode} IS NULL OR (${t.kind} = 'connector' AND ${t.mode} IN ('read', 'readwrite'))))`,
+    ),
+    check(
+      "sod_rule_sides_pattern_check",
+      sql`${t.selector} <> 'pattern' OR (${t.objectId} IS NULL AND ${t.toolName} IS NULL AND ${t.mode} IS NULL AND ${t.patternDimension} IS NOT NULL AND ${t.patternValue} IS NOT NULL AND ((${t.kind} = 'agent' AND ${t.patternDimension} IN ('lifecycle_status', 'provider')) OR (${t.kind} = 'connector' AND ${t.patternDimension} = 'mode' AND ${t.patternValue} IN ('read', 'readwrite'))))`,
+    ),
+    check(
+      "sod_rule_sides_lifecycle_value_check",
+      sql`${t.patternDimension} <> 'lifecycle_status' OR ${t.patternValue} IN ('active', 'deprecated', 'retired')`,
+    ),
+    index("sod_rule_sides_rule_idx").on(t.ruleId),
+  ],
+);
+
+export type SodRuleSideRow = typeof sodRuleSides.$inferSelect;
 
 export const sodOverrideRequests = pgTable(
   "sod_override_requests",

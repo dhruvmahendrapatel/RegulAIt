@@ -1888,6 +1888,22 @@ export const updateOrgSettingsSchema = z
      * allow-list regardless of mode. There is deliberately NO value that
      * loosens an air_gapped deployment — the enum has no such member. */
     egressCompiledDefaultPolicy: egressCompiledDefaultPolicySchema.optional(),
+    /** ADR-0080 amendment (migration 0098, batch B3): does an approved AI use
+     * case gate dispatch? 'off' (default) = approval registers intent and
+     * gates nothing — the shipped honest limit, byte-identical. 'warn'
+     * records the refusal-shaped fact (audit row + response annotation)
+     * without blocking. 'enforce' refuses a governed dispatch attributed to a
+     * use-case-LINKED project (the `ai_use_cases.projectId` join — the only
+     * one the schema holds) unless at least one linked use case is approved.
+     * A project no use case links is untouched in every mode. */
+    useCaseGateMode: z.enum(["off", "warn", "enforce"]).optional(),
+    /** ADR-0092 amendment (migration 0100, L6c): may the deterministic
+     * access-recommendation findings carry a MODEL-JUDGED annotation? false
+     * (default) = the report is the six deterministic rules and nothing else.
+     * The agent id names the judge; null clears it. An enabled knob with no
+     * dispatchable judge reports `judged: unavailable` and changes nothing. */
+    recommendationJudgeEnabled: z.boolean().optional(),
+    recommendationJudgeAgentId: z.string().uuid().nullable().optional(),
     // budgets
     budgetEnforcement: budgetEnforcementSchema.optional(),
     budgetHardBlockPct: z.number().int().min(1).max(100).optional(),
@@ -2836,25 +2852,53 @@ export {
 // hallucinate a figure), the narrator INTERFACE + prompt/parse/cross-check
 // following ADR-0044's judge pattern, and the proposal record builder.
 export {
+  COPILOT_APPLICABLE_PROPOSAL_KINDS,
   COPILOT_DECISION_SUPPORT_NOTICE,
+  COPILOT_ENTITY_FILTER_MATRIX,
+  COPILOT_ENTITY_KINDS,
+  COPILOT_ENTITY_KIND_LABELS,
+  COPILOT_GRANT_KINDS,
+  COPILOT_GROUNDED_REFUSAL,
+  COPILOT_MAX_ENTITY_CANDIDATES,
+  COPILOT_OBJECT_KINDS,
   COPILOT_PROPOSAL_KINDS,
   COPILOT_SCOPE_CAVEAT,
   COPILOT_TIMEFRAMES,
   COPILOT_TOOLS,
   COPILOT_TOOL_SPECS,
+  COPILOT_UNAPPLICABLE_PROPOSAL_KINDS,
   buildNarrationPrompt,
   buildProposalRecord,
   copilotAskSchema,
+  copilotEntityAmbiguousRefusal,
+  copilotEntityNotFilterableRefusal,
+  copilotEntityUnresolvedRefusal,
+  copilotGrantRevocationDiffSchema,
+  copilotPolicyTighteningDiffSchema,
+  copilotPlanFiltered,
+  copilotProposalKindIsApplicable,
   copilotProposalSchema,
+  copilotToolSupportsEntityKind,
+  copilotToolsFilteringEntityKind,
+  copilotUnfilteredSubjectCaveat,
+  describeCopilotFilters,
+  extractEntityCandidates,
   narrationIsGrounded,
   parseNarration,
   planCopilotQuery,
   renderGroundedAnswer,
+  retrievalFoundNothing,
+  type CopilotApplicableProposalKind,
   type CopilotAskInput,
+  type CopilotCitableObject,
+  type CopilotEntityKind,
+  type CopilotEntityMatch,
+  type CopilotEntityRef,
   type CopilotEvidence,
   type CopilotNarration,
   type CopilotNarrationRequest,
   type CopilotNarrator,
+  type CopilotObjectKind,
   type CopilotProposalInput,
   type CopilotProposalKind,
   type CopilotQueryPlan,
@@ -3027,11 +3071,25 @@ export {
   ACCESS_RECOMMENDATION_RULES_VERSION,
   ACCESS_RECOMMENDATION_RULE_IDS,
   ACCESS_RECOMMENDATION_SEVERITIES,
+  RECOMMENDATION_JUDGE_LIMITS,
+  RECOMMENDATION_JUDGE_METHOD,
+  RECOMMENDATION_JUDGE_OFF_NOTE,
+  RECOMMENDATION_JUDGE_UNAVAILABLE_NOTE,
+  RECOMMENDATION_JUDGE_VERDICTS,
   UNUSED_GRANT_DEFAULT_WINDOW_DAYS,
   accessRecommendationRuleById,
+  annotationsForFindings,
+  buildRecommendationJudgePrompt,
+  parseRecommendationJudgeReplies,
   parseRecommendationRuleIds,
   renderRecommendationRationale,
   type AccessRecommendationRule,
   type AccessRecommendationRuleId,
   type AccessRecommendationSeverity,
+  type RecommendationJudge,
+  type RecommendationJudgeAnnotation,
+  type RecommendationJudgeReply,
+  type RecommendationJudgeRequest,
+  type RecommendationJudgeVerdict,
+  type RecommendationJudgedState,
 } from "./access-recommendations.js";

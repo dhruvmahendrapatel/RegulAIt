@@ -356,6 +356,8 @@ describe("ADR-0056 — an ungrounded narration is discarded, never merged", () =
       narrate: async (): Promise<CopilotNarration> => ({
         text: "There were 4,000 PII accesses across every team.",
         citedKeys: ["a_count_that_does_not_exist"],
+        citedObjectIds: [],
+        refused: false,
       }),
     };
     const seamApp = buildApp(db, { bootstrapToken: BOOT });
@@ -371,11 +373,112 @@ describe("ADR-0056 — an ungrounded narration is discarded, never merged", () =
         counts: [{ key: "decisions", label: "d", value: 0 }],
         samples: [],
         leads: [],
+        citableObjects: [],
       });
       expect(check.ok).toBe(false);
     } finally {
       await seamApp.close();
     }
+  });
+});
+
+/**
+ * L6d — THE UNFILTERED-SUBJECT DEFECT, over the real route and a real database.
+ *
+ * Found live: a question naming an entity that does not exist ("the Zorblatt
+ * Quantum Compliance Widget") matched only "approval" and "last week", ran
+ * `listApprovals` with NO entity filter, retrieved eight real org-wide
+ * approvals, and was narrated as "for the Zorblatt Quantum Compliance Widget".
+ * Every existing guard passed — the retrieval was not empty, the figures were
+ * real, the ids were real — because none of them asks whether THE SUBJECT OF
+ * THE QUESTION WAS EVER USED AS A FILTER.
+ *
+ * The pair below is the whole point: the unmatched-entity question must carry
+ * the caveat, and the question that really does filter must NOT, or the caveat
+ * is decoration that fires on everything.
+ *
+ * WHAT ADR-0096 CHANGED HERE, and what it deliberately did not. The Zorblatt
+ * question itself now REFUSES before any retrieval runs — entity-aware planning
+ * resolves its subject against the object graph, finds nothing in scope, and
+ * says so by name (that case moved to `copilot-entity.test.ts`, which is where
+ * the refusal is proved). The caveat machinery below is UNCHANGED and still
+ * load-bearing: it covers the case ADR-0096 leaves untouched, a question that
+ * names no subject at all, whose broad answer must still say it is about
+ * nothing in particular. The question was swapped for one with no capitalised
+ * subject in it; every assertion is the same.
+ */
+describe("L6d — an answer whose query never filtered on the question's subject says so", () => {
+  it("a question naming an entity nobody filtered on carries the unfiltered-subject caveat", async () => {
+    // real approvals for this caller, so the retrieval is NOT empty and the
+    // existing empty-retrieval refusal cannot be what catches this
+    await db.insert(approvals).values([
+      { userId: leadA, approverUserId: leadB, objectType: "mcp_tool", toolName: `${PREFIX}-tool-1` },
+      { userId: leadA, approverUserId: leadB, objectType: "mcp_tool", toolName: `${PREFIX}-tool-2` },
+    ]);
+
+    const res = await post(
+      "/v1/copilot/ask",
+      { question: "summarise the approvals from last week" },
+      leadAAuth,
+    );
+    expect(res.statusCode).toBe(201);
+    const body = res.json();
+
+    // the precondition — the planner really did run an UNFILTERED listApprovals
+    expect(body.plan.tool).toBe("listApprovals");
+    expect(body.plan.params).toEqual({});
+    // ADR-0096: and this question genuinely names no subject, so the refusal
+    // path was never in play — the caveat is what is being proved, not it
+    expect(body.plan.entityCandidates).toEqual([]);
+    expect(body.plan.entity).toBeNull();
+    // the retrieval really did return rows, so this is not the refusal path
+    expect(body.evidence.rowsExamined).toBeGreaterThan(0);
+    expect(body.answer.groundedRefusal).toBe(false);
+
+    // THE FIX: the answer carries the fact as a field, in its own text, and in
+    // the response note — none of which depends on a model behaving
+    expect(body.answer.subjectFiltered).toBe(false);
+    expect(body.answer.unfilteredSubjectCaveat).toMatch(/UNFILTERED SUBJECT/);
+    expect(body.answer.text).toMatch(/UNFILTERED SUBJECT/);
+    expect(body.answer.text).toMatch(/Filters applied: none\./);
+    expect(body.note).toMatch(/UNFILTERED SUBJECT/);
+
+    // and the ledger records what it narrowed on, so the question stays
+    // answerable after the prose is gone. Matched by the audit row's OBJECT ID
+    // (this query's own row), never by "the most recent one" — this suite
+    // shares a database with every other copilot test.
+    const [asked] = await db
+      .select()
+      .from(auditLog)
+      .where(
+        and(eq(auditLog.ruleId, COPILOT_RULE_IDS.asked), eq(auditLog.objectId, body.query.id as string)),
+      );
+    expect(asked!.detail).toMatchObject({ subjectFiltered: false, filters: [] });
+  });
+
+  it("THE CONTROL — a question whose plan DOES filter carries no caveat", async () => {
+    const res = await post(
+      "/v1/copilot/ask",
+      { question: "which approvals are pending this week?" },
+      leadAAuth,
+    );
+    expect(res.statusCode).toBe(201);
+    const body = res.json();
+
+    expect(body.plan.params).toEqual({ status: "pending" });
+    expect(body.answer.subjectFiltered).toBe(true);
+    expect(body.answer.unfilteredSubjectCaveat).toBeNull();
+    expect(body.answer.text).not.toMatch(/UNFILTERED SUBJECT/);
+    expect(body.answer.text).toMatch(/Filters applied: status=pending\./);
+    expect(body.note).not.toMatch(/UNFILTERED SUBJECT/);
+
+    const [asked] = await db
+      .select()
+      .from(auditLog)
+      .where(
+        and(eq(auditLog.ruleId, COPILOT_RULE_IDS.asked), eq(auditLog.objectId, body.query.id as string)),
+      );
+    expect(asked!.detail).toMatchObject({ subjectFiltered: true, filters: ["status=pending"] });
   });
 });
 

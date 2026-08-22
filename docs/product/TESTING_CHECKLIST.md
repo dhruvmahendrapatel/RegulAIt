@@ -47,6 +47,22 @@ number + what you saw for anything off.
 | 29 | Evals + red team | Quality & Security | Run seeded suite; red-team run | Method-stamped scores; ASR with Wilson interval |
 | 30 | RegulAIt-LLM | Quality & Security → Training | Train local demo model | Real loss curve; remote adapters refuse w/o creds |
 
+## B2. Shipped since this list was written (2026-08-22 wave)
+| # | Feature | Where | Try this | Expect |
+|---|---|---|---|---|
+| 31 | Suite launcher + scoped nav | Home, then any suite | Click a tile; note the sidebar; use the switcher; press `/` and search a page from ANOTHER suite | One suite at a time; `/` still finds everything (anti-stranding); every URL unchanged |
+| 32 | Governance copilot (LIVE) | Overview → Governance copilot | Ask "What governance denials happened recently and why?" with a live narrator | `generation: model`, citations to real audit ids, decision-support notice + scope caveat |
+| 32b | Copilot narrator entitlement | same, as a user with no agent grant | Ask with a narrator agent you lack | 403 `narrator_not_entitled` — you cannot narrate with an agent you may not invoke |
+| 33 | Copilot grounded refusal | same | Ask about an object that does not exist | Empty retrieval → refusal. If keywords still match a broad tool, the answer now carries `subjectFiltered: false` + an UNFILTERED SUBJECT caveat and the narration says "not only <your subject>" (ADR-0056 L6d, retested live 2026-08-22) |
+| 34 | Copilot proposal applier | same | Approve a proposal, then Apply | Applies through the same endpoints an admin uses; pending/denied refuse by name; second apply refuses |
+| 35 | Judged recommendations (opt-in) | Settings → org knob, then Access Reviews → Recommendations | Enable the judge knob with a live agent | Annotations labelled `model-judged`; deterministic evidence byte-identical; knob off = no annotations |
+| 36 | Use-case dispatch gate | Settings (org) → use-case gate | Set `warn`, then `enforce`, dispatch on a linked project | Off = unchanged; warn = annotated; enforce = 409 before any provider call |
+| 37 | Staleness recertification | Settings → Model risk enforcement | Enable staleness recert, drift a card, dispatch | 409 naming the drift evidence; recertify clears it |
+| 38 | SoD N-way + patterns | Access Reviews → SoD rules | Build a 3-side rule; hold 2 of 3; then take the third | Any 2 of 3 fine; the completing mint refused |
+| 39 | Campaign expiry + reassignment | Access Reviews → Campaigns | Let one pass its due date; reassign an item | `expired-incomplete` on read; reassignment audited; never to the grant's holder |
+| 40 | Key re-encryption walk | CLI (ops) | `REGULAIT_DATA_KEY=<new> REGULAIT_DATA_KEY_OLD=<old> pnpm --filter @regulait/gateway reencrypt` | Resumable; rows readable under the new key only; corrupt rows → `completed_with_failures` |
+| 41 | Tier flags enforced | Identity & Access → SAML/SCIM | Try enabling SAML/SCIM without a license | 403 naming feature and tier (unlicensed installs now refuse enablement) |
+
 ## D. Needs external setup (test when available)
 Live model dispatch (add a credential) · SSO/SCIM/group-mapping (IdP) · PM sync
 (Jira/Linear creds) · BYOC/air-gapped install (separate box) · MinIO-backed

@@ -673,6 +673,34 @@
       "when": 1785031000000,
       "tag": "0096_pack_cascade_preset",
       "breakpoints": true
+    },
+    {
+      "idx": 97,
+      "version": "7",
+      "when": 1785032000000,
+      "tag": "0097_sod_rule_sides",
+      "breakpoints": true
+    },
+    {
+      "idx": 98,
+      "version": "7",
+      "when": 1785033000000,
+      "tag": "0098_enforcement_opt_ins",
+      "breakpoints": true
+    },
+    {
+      "idx": 99,
+      "version": "7",
+      "when": 1785034000000,
+      "tag": "0099_data_key_reencryption",
+      "breakpoints": true
+    },
+    {
+      "idx": 100,
+      "version": "7",
+      "when": 1785035000000,
+      "tag": "0100_copilot_apply_and_judged_recommendations",
+      "breakpoints": true
     }
   ]
 }

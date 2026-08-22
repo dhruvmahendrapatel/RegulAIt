@@ -128,3 +128,46 @@ that would need its own ADR and its own toggle — not smuggled in.
 - **Endpoint-level cards inherit agent-shaped blind spots.** Red-team runs, grants, and usage
   attach to agents; a custom-provider card with no registered backing agent honestly shows
   those sections empty/unmeasured rather than inventing endpoint-level attribution.
+
+---
+
+## Amendment (2026-08-22, batch B3b) — §3's follow-up built: staleness forces recertification, as an org opt-in deepening the ADR-0045 gate (migration 0098)
+
+§3 named the follow-up rather than smuggling it in: *"an org-level opt-in ('drift beyond X
+requires recertification') that would need … its own toggle"*. Built exactly so.
+
+**Where it lives, and why org-level**: the change lands inside `mrmDispatchGate`
+(apps/gateway/src/mrm.ts) — ADR-0045's gate anatomy is an `org_settings` pair
+(`mrm_enforced` + `mrm_expiry_warn_days`) read by the one gate, so the natural home for a
+deepening of that gate is two more columns beside them: `mrm_staleness_recert_enabled`
+(default **false**) and `mrm_staleness_recert_threshold` (default 1). A per-card flag was
+considered and rejected: it would put authorable per-card state next to a block this ADR
+deliberately keeps un-authorable, and it would fork "is this card enforced" across two places.
+Both knobs are set through the existing audited `POST /v1/mrm/enforcement` (no new route;
+`GET /v1/mrm/status` reports them).
+
+**Semantics**:
+
+- The knob **deepens the ONE gate; it creates none of its own**. It is evaluated only after
+  `evaluateMrmGate` allows on a live approval — so with `mrmEnforced` off there is no gate to
+  deepen and the knob gates nothing (pinned by test). Default off = this ADR's shipped posture
+  byte-identically, even enforced, even drifted.
+- When armed: the live card's drift is read from **`computeCardStaleness` — the one staleness
+  computation, never re-derived** — and when the summed `changesSinceCertification` counts
+  reach the threshold, the dispatch refuses on the **same 409 `mrm_approval_required` path the
+  expiry gate uses** (extended, never forked; the caller-facing code stays one, per ADR-0045's
+  deviation-1 rule), audited under its own ruleId **`mrm-staleness-recert-required`** with the
+  staleness evidence (per-section counts, total, threshold, last-certified instant) in the
+  audit detail and the human summary named in the response.
+- **Recertifying clears it**: a new superseding sign-off through the one decide path resets
+  the clock (the reference point is the latest granting decision, exactly as §3 defined it),
+  and fresh drift after the recertification refuses again.
+
+Non-vacuity the M-002 way: no-op the deepening branch → exactly the three armed-refusal tests
+fail (the off-is-identical and threshold-dial controls stay green). Probe reverted by
+reversing the exact edit.
+
+**§3's sentence above stands corrected in one word**: staleness informs — and, where an org
+opts in, forces recertification at dispatch. The unilateral-contract-change concern §3 raised
+is answered by the shape: nothing changes for any deployment until its own admin arms the
+toggle, and disarming restores the shipped meaning of every existing acceptance.

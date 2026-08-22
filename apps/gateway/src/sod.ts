@@ -40,13 +40,22 @@
  *     Approval executes the stored mint inside the decision's own
  *     transaction with `sodOverride: {ruleId, approvalId}` in the audit
  *     detail; denial mints nothing.
- *  5. TWO-SIDED, CONCRETE RULES ONLY. A rule names exactly two id-based
- *     capabilities. Pattern/category selectors and N-way toxic sets are
- *     named follow-up in ADR-0091, not smuggled in.
+ *  5. SIDES ARE DATA, NEVER CODE (the ADR-0091 amendment, batch B2c). A rule
+ *     names 2..N capability sides; the conflict is strict — an identity's
+ *     effective holdings must contain ALL sides (any N-1 subset is fine).
+ *     A side is CONCRETE (one id) or a PATTERN over an ENUMERABLE dimension
+ *     the schema actually has: agent lifecycle status, agent provider kind,
+ *     or connector holding mode. NO free-form regex or name-matching
+ *     anywhere (the ADR-0085 data-only-rules discipline), and patterns
+ *     resolve at CHECK time against current objects — a new agent matching
+ *     the pattern is covered the moment it exists. Pre-amendment two-sided
+ *     rows are read byte-identically through the same loader.
  */
 import type { FastifyInstance } from "fastify";
 import {
+  AGENT_LIFECYCLE_STATUSES,
   SOD_MINT_KINDS,
+  SOD_PATTERN_DIMENSIONS,
   agentGrants,
   agents,
   and,
@@ -67,14 +76,19 @@ import {
   roles,
   serverGrants,
   sodOverrideRequests,
+  sodRuleSides,
   sodRules,
   toolGrants,
   users,
   type Db,
   type SodCapabilityKind,
   type SodMintKind,
+  type SodPatternDimension,
   type SodRuleRow,
 } from "@regulait/db";
+// the CLOSED provider vocabulary agents.provider speaks — the pattern
+// dimension 'provider' validates against it, never against free text
+import { MODEL_PROVIDER_KINDS } from "@regulait/model-provider";
 import { z } from "zod";
 import { buildAgentHolderIndex } from "./inventory.js";
 
@@ -106,13 +120,19 @@ export const SOD_NOTES = {
 
 export interface SodSelector {
   kind: SodCapabilityKind;
-  objectId: string;
+  /** null iff this is a PATTERN side (the pattern below says which objects) */
+  objectId: string | null;
   /** mcp_tool only: the tool's name on that server */
   toolName: string | null;
   /** connector only: null = any mode; 'readwrite' matches only readwrite
    * grants; 'read' matches read AND readwrite (capability containment — a
-   * readwrite holder can read) */
+   * readwrite holder can read). The 'mode' PATTERN sets this to its value,
+   * so the one containment rule serves both shapes. */
   mode: "read" | "readwrite" | null;
+  /** ADR-0091 amendment (B2c): an enumerable (dimension, value) pair over
+   * the CLOSED SOD_PATTERN_DIMENSIONS vocabulary — never free text. null =
+   * concrete side. Patterns resolve at CHECK time against current objects. */
+  pattern: { dimension: SodPatternDimension; value: string } | null;
 }
 
 /** a capability a mint would confer (same vocabulary as a selector side) */
@@ -123,8 +143,38 @@ interface Capability {
   mode: "read" | "readwrite" | null;
 }
 
-function capabilityMatchesSelector(cap: Capability, sel: SodSelector): boolean {
-  if (cap.kind !== sel.kind || cap.objectId !== sel.objectId) return false;
+/** a selector with its pattern resolved to the CURRENT matching object ids
+ * (null = any object of the kind — the connector 'mode' pattern). Resolution
+ * happens at check/read time, never at rule-creation time, which is what
+ * makes a later-created agent covered the moment it exists. */
+interface ResolvedSelector {
+  sel: SodSelector;
+  objectIds: Set<string> | null;
+}
+
+/** resolve one side against the database's CURRENT objects */
+export async function resolveSelectorObjects(db: Db, sel: SodSelector): Promise<ResolvedSelector> {
+  if (!sel.pattern) return { sel, objectIds: new Set([sel.objectId!]) };
+  if (sel.pattern.dimension === "lifecycle_status") {
+    const rows = await db
+      .select({ id: agents.id })
+      .from(agents)
+      .where(eq(agents.lifecycleStatus, sel.pattern.value as (typeof AGENT_LIFECYCLE_STATUSES)[number]));
+    return { sel, objectIds: new Set(rows.map((r) => r.id)) };
+  }
+  if (sel.pattern.dimension === "provider") {
+    const rows = await db.select({ id: agents.id }).from(agents).where(eq(agents.provider, sel.pattern.value));
+    return { sel, objectIds: new Set(rows.map((r) => r.id)) };
+  }
+  // 'mode': any connector held at the pattern's mode — the mode qualifier on
+  // the selector (set at load time) does the containment work; no narrowing
+  return { sel, objectIds: null };
+}
+
+function capabilityMatchesSelector(cap: Capability, resolved: ResolvedSelector): boolean {
+  const sel = resolved.sel;
+  if (cap.kind !== sel.kind) return false;
+  if (resolved.objectIds !== null && !resolved.objectIds.has(cap.objectId)) return false;
   if (sel.kind === "mcp_tool" && cap.toolName !== sel.toolName) return false;
   if (sel.kind === "connector" && sel.mode !== null) {
     // containment: a readwrite grant satisfies a 'read' selector
@@ -135,17 +185,66 @@ function capabilityMatchesSelector(cap: Capability, sel: SodSelector): boolean {
 }
 
 const sideA = (r: SodRuleRow): SodSelector => ({
-  kind: r.aKind,
+  kind: r.aKind!,
   objectId: r.aObjectId,
   toolName: r.aToolName,
   mode: r.aMode,
+  pattern: null,
 });
 const sideB = (r: SodRuleRow): SodSelector => ({
-  kind: r.bKind,
+  kind: r.bKind!,
   objectId: r.bObjectId,
   toolName: r.bToolName,
   mode: r.bMode,
+  pattern: null,
 });
+
+/**
+ * THE ONE SIDE LOADER — both storage shapes come out as the same selector
+ * list. A pre-0097 rule keeps its two legacy columns (read byte-identically);
+ * an amendment-shape rule stores every side (2..N, concrete or pattern) in
+ * `sod_rule_sides`. Nothing downstream knows which shape a rule uses.
+ */
+export async function loadRuleSelectors(db: Db, rules: SodRuleRow[]): Promise<Map<string, SodSelector[]>> {
+  const out = new Map<string, SodSelector[]>();
+  if (rules.length === 0) return out;
+  const childSided = rules.filter((r) => r.aKind === null);
+  const childRows = childSided.length
+    ? await db
+        .select()
+        .from(sodRuleSides)
+        .where(
+          inArray(
+            sodRuleSides.ruleId,
+            childSided.map((r) => r.id),
+          ),
+        )
+        .orderBy(sodRuleSides.ruleId, sodRuleSides.position)
+    : [];
+  for (const rule of rules) {
+    if (rule.aKind !== null) {
+      out.set(rule.id, [sideA(rule), sideB(rule)]);
+      continue;
+    }
+    out.set(
+      rule.id,
+      childRows
+        .filter((s) => s.ruleId === rule.id)
+        .map((s) => ({
+          kind: s.kind,
+          objectId: s.objectId,
+          toolName: s.toolName,
+          // the 'mode' pattern rides the mode qualifier so containment stays one rule
+          mode:
+            s.selector === "pattern" && s.patternDimension === "mode"
+              ? (s.patternValue as "read" | "readwrite")
+              : s.mode,
+          pattern: s.selector === "pattern" ? { dimension: s.patternDimension!, value: s.patternValue! } : null,
+        })),
+    );
+  }
+  return out;
+}
 
 // ---------------------------------------------------------------------------
 // Effective holders of one capability — direct ∪ role-derived − revocations
@@ -175,56 +274,94 @@ async function holdersOfSelector(db: Db, sel: SodSelector): Promise<Map<string, 
   const describe = (via: string) => via;
 
   if (sel.kind === "agent") {
+    // concrete: exactly the one id. Pattern: the CURRENT matching agents,
+    // resolved live — a later-created agent joins the moment it exists.
+    const resolved = await resolveSelectorObjects(db, sel);
+    const agentIds = [...(resolved.objectIds ?? [])];
+    if (agentIds.length === 0) return holders;
     const index = await buildAgentHolderIndex(db);
-    const set = index.holders.get(sel.objectId) ?? new Set<string>();
-    const direct = index.directUsers.get(sel.objectId) ?? new Set<string>();
-    const grantingRoles = index.grantingRoles.get(sel.objectId) ?? new Set<string>();
-    for (const uid of set) {
-      if (direct.has(uid)) {
-        holders.set(uid, describe("a direct agent grant"));
-        continue;
+    const patternNames = sel.pattern
+      ? new Map(
+          (
+            await db.select({ id: agents.id, name: agents.name }).from(agents).where(inArray(agents.id, agentIds))
+          ).map((a) => [a.id, a.name]),
+        )
+      : null;
+    for (const agentId of agentIds) {
+      const suffix = patternNames ? ` on agent '${patternNames.get(agentId) ?? agentId}'` : "";
+      const set = index.holders.get(agentId) ?? new Set<string>();
+      const direct = index.directUsers.get(agentId) ?? new Set<string>();
+      const grantingRoles = index.grantingRoles.get(agentId) ?? new Set<string>();
+      for (const uid of set) {
+        if (holders.has(uid)) continue; // first matching agent's path wins
+        if (direct.has(uid)) {
+          holders.set(uid, describe(`a direct agent grant${suffix}`));
+          continue;
+        }
+        const via = [...grantingRoles].find((rid) => index.roleUsers.get(rid)?.has(uid));
+        holders.set(uid, describe(`role '${via ? (index.roleName.get(via) ?? via) : "?"}' (agent grant)${suffix}`));
       }
-      const via = [...grantingRoles].find((rid) => index.roleUsers.get(rid)?.has(uid));
-      holders.set(uid, describe(`role '${via ? (index.roleName.get(via) ?? via) : "?"}' (agent grant)`));
     }
     return holders;
   }
 
   if (sel.kind === "connector") {
-    const [direct, roleGrants, assignments, revs, roleRows] = await Promise.all([
-      db
-        .select({ userId: connectorGrants.userId, mode: connectorGrants.mode })
-        .from(connectorGrants)
-        .where(eq(connectorGrants.connectorId, sel.objectId)),
-      db
-        .select({ roleId: roleConnectorGrants.roleId, mode: roleConnectorGrants.mode })
-        .from(roleConnectorGrants)
-        .where(eq(roleConnectorGrants.connectorId, sel.objectId)),
+    // concrete: the one connector. 'mode' pattern: ANY connector held at the
+    // qualifying mode — the same per-connector revocation semantics, applied
+    // connector by connector, first qualifying holding wins.
+    const concreteId = sel.objectId;
+    const [direct, roleGrants, assignments, revs, roleRows, connectorRows] = await Promise.all([
+      concreteId
+        ? db
+            .select({ userId: connectorGrants.userId, mode: connectorGrants.mode, connectorId: connectorGrants.connectorId })
+            .from(connectorGrants)
+            .where(eq(connectorGrants.connectorId, concreteId))
+        : db
+            .select({ userId: connectorGrants.userId, mode: connectorGrants.mode, connectorId: connectorGrants.connectorId })
+            .from(connectorGrants),
+      concreteId
+        ? db
+            .select({ roleId: roleConnectorGrants.roleId, mode: roleConnectorGrants.mode, connectorId: roleConnectorGrants.connectorId })
+            .from(roleConnectorGrants)
+            .where(eq(roleConnectorGrants.connectorId, concreteId))
+        : db
+            .select({ roleId: roleConnectorGrants.roleId, mode: roleConnectorGrants.mode, connectorId: roleConnectorGrants.connectorId })
+            .from(roleConnectorGrants),
       db.select({ roleId: roleAssignments.roleId, userId: roleAssignments.userId }).from(roleAssignments),
-      db
-        .select({ userId: connectorRevocations.userId, scope: connectorRevocations.scope })
-        .from(connectorRevocations)
-        .where(eq(connectorRevocations.connectorId, sel.objectId)),
+      concreteId
+        ? db
+            .select({ userId: connectorRevocations.userId, scope: connectorRevocations.scope, connectorId: connectorRevocations.connectorId })
+            .from(connectorRevocations)
+            .where(eq(connectorRevocations.connectorId, concreteId))
+        : db
+            .select({ userId: connectorRevocations.userId, scope: connectorRevocations.scope, connectorId: connectorRevocations.connectorId })
+            .from(connectorRevocations),
       db.select({ id: roles.id, name: roles.name }).from(roles),
+      sel.pattern ? db.select({ id: connectors.id, name: connectors.name }).from(connectors) : Promise.resolve([]),
     ]);
     const roleName = new Map(roleRows.map((r) => [r.id, r.name]));
+    const connectorName = new Map(connectorRows.map((c) => [c.id, c.name]));
     const roleUsers = new Map<string, string[]>();
     for (const a of assignments) roleUsers.set(a.roleId, [...(roleUsers.get(a.roleId) ?? []), a.userId]);
-    const revBy = new Map(revs.map((r) => [r.userId, r.scope]));
-    // per user: every (mode, via) pair, revocation-adjusted, then match
-    const candidates = new Map<string, Array<{ mode: "read" | "readwrite"; via: string }>>();
-    const push = (uid: string, mode: "read" | "readwrite", via: string) =>
-      candidates.set(uid, [...(candidates.get(uid) ?? []), { mode, via }]);
-    for (const g of direct) push(g.userId, g.mode, `a direct connector grant (${g.mode})`);
+    // revocations are per (user, connector) — keyed that way so the 'mode'
+    // pattern applies each connector's revocation to that connector only
+    const revBy = new Map(revs.map((r) => [`${r.userId}:${r.connectorId}`, r.scope]));
+    // per user: every (mode, via, connector) triple, revocation-adjusted
+    const candidates = new Map<string, Array<{ mode: "read" | "readwrite"; via: string; connectorId: string }>>();
+    const push = (uid: string, mode: "read" | "readwrite", via: string, connectorId: string) =>
+      candidates.set(uid, [...(candidates.get(uid) ?? []), { mode, via, connectorId }]);
+    const suffix = (connectorId: string) =>
+      sel.pattern ? ` on connector '${connectorName.get(connectorId) ?? connectorId}'` : "";
+    for (const g of direct) push(g.userId, g.mode, `a direct connector grant (${g.mode})${suffix(g.connectorId)}`, g.connectorId);
     for (const g of roleGrants) {
       for (const uid of roleUsers.get(g.roleId) ?? []) {
-        push(uid, g.mode, `role '${roleName.get(g.roleId) ?? g.roleId}' (connector grant, ${g.mode})`);
+        push(uid, g.mode, `role '${roleName.get(g.roleId) ?? g.roleId}' (connector grant, ${g.mode})${suffix(g.connectorId)}`, g.connectorId);
       }
     }
     for (const [uid, entries] of candidates) {
-      const rev = revBy.get(uid);
-      if (rev === "full") continue; // everything gone
       for (const e of entries) {
+        const rev = revBy.get(`${uid}:${e.connectorId}`);
+        if (rev === "full") continue; // this connector's holding is gone
         const effective = rev === "read_only" && e.mode === "readwrite" ? "read" : e.mode;
         const matches =
           sel.mode === null ||
@@ -239,32 +376,34 @@ async function holdersOfSelector(db: Db, sel: SodSelector): Promise<Map<string, 
   }
 
   // mcp_tool / mcp_server — direct grants survive MCP revocations (role-only
-  // by design); a 'full' revocation suppresses the role-derived path
+  // by design); a 'full' revocation suppresses the role-derived path. No
+  // pattern dimensions exist for MCP kinds, so the side is always concrete.
   const isTool = sel.kind === "mcp_tool";
+  const serverId = sel.objectId!;
   const [direct, roleGrants, assignments, revs, roleRows] = await Promise.all([
     isTool
       ? db
           .select({ userId: toolGrants.userId })
           .from(toolGrants)
-          .where(and(eq(toolGrants.serverId, sel.objectId), eq(toolGrants.toolName, sel.toolName ?? "")))
+          .where(and(eq(toolGrants.serverId, serverId), eq(toolGrants.toolName, sel.toolName ?? "")))
       : db
           .select({ userId: serverGrants.userId })
           .from(serverGrants)
-          .where(eq(serverGrants.serverId, sel.objectId)),
+          .where(eq(serverGrants.serverId, serverId)),
     isTool
       ? db
           .select({ roleId: roleToolGrants.roleId })
           .from(roleToolGrants)
-          .where(and(eq(roleToolGrants.serverId, sel.objectId), eq(roleToolGrants.toolName, sel.toolName ?? "")))
+          .where(and(eq(roleToolGrants.serverId, serverId), eq(roleToolGrants.toolName, sel.toolName ?? "")))
       : db
           .select({ roleId: roleServerGrants.roleId })
           .from(roleServerGrants)
-          .where(eq(roleServerGrants.serverId, sel.objectId)),
+          .where(eq(roleServerGrants.serverId, serverId)),
     db.select({ roleId: roleAssignments.roleId, userId: roleAssignments.userId }).from(roleAssignments),
     db
       .select({ userId: revocations.userId, toolName: revocations.toolName, scope: revocations.scope })
       .from(revocations)
-      .where(eq(revocations.serverId, sel.objectId)),
+      .where(eq(revocations.serverId, serverId)),
     db.select({ id: roles.id, name: roles.name }).from(roles),
   ]);
   const roleName = new Map(roleRows.map((r) => [r.id, r.name]));
@@ -308,12 +447,18 @@ export type SodMint =
 
 export interface SodConflict {
   rule: SodRuleRow;
-  /** the identity that would come to hold both sides */
+  /** the identity that would come to hold every side */
   userId: string;
-  /** how they hold (or would co-acquire) the OTHER side */
+  /** how they hold (or would co-acquire) the first OTHER side (prose lead) */
   via: string;
-  /** the other side, as a selector (for the refusal's prose) */
+  /** that side, as a selector (for the refusal's prose) */
   otherSide: SodSelector;
+  /** ADR-0091 amendment (B2c): EVERY side already held via an existing
+   * holding (the minted side(s) excluded). For a two-sided rule this is one
+   * entry and the refusal reads as before; an N-way refusal names them all. */
+  heldSides: Array<{ side: SodSelector; via: string }>;
+  /** how many sides the rule has (2 for every pre-amendment rule) */
+  sideCount: number;
 }
 
 /** the capability set a mint confers + the identities it confers it on */
@@ -381,8 +526,15 @@ async function mintFootprint(
 
 /**
  * THE CHECK. Null = no enabled rule objects to this mint. A conflict names
- * the first rule (creation order — deterministic) whose two sides would both
- * be held by some affected identity after the mint.
+ * the first rule (creation order — deterministic) ALL of whose sides some
+ * affected identity would hold after the mint.
+ *
+ * N-WAY SEMANTICS (ADR-0091 amendment, B2c), stated so the boundary is a
+ * sentence and not an accident: a side counts as held when the MINT confers
+ * it or an EXISTING effective holding covers it, and the rule refuses only
+ * when EVERY side is held — an identity holding any N-1 subset mints freely.
+ * For a two-sided rule this is byte-identical to the original check. Pattern
+ * sides resolve against CURRENT objects here, at check time.
  */
 export async function checkSodMint(
   db: Db,
@@ -396,28 +548,51 @@ export async function checkSodMint(
   if (rules.length === 0) return null;
   const { capabilities, userIds } = await mintFootprint(db, mint);
   if (capabilities.length === 0 || userIds.length === 0) return null;
+  const selectorsByRule = await loadRuleSelectors(db, rules);
 
   for (const rule of rules) {
-    const orientations: Array<{ minted: SodSelector; other: SodSelector }> = [
-      { minted: sideA(rule), other: sideB(rule) },
-      { minted: sideB(rule), other: sideA(rule) },
-    ];
-    for (const { minted, other } of orientations) {
-      if (!capabilities.some((c) => capabilityMatchesSelector(c, minted))) continue;
-      // bundle-internal pair: the SAME mint would confer both sides
-      if (capabilities.some((c) => capabilityMatchesSelector(c, other))) {
+    const sides = selectorsByRule.get(rule.id) ?? [];
+    if (sides.length < 2) continue; // defensive: a rule without sides enforces nothing
+    const resolved = await Promise.all(sides.map((s) => resolveSelectorObjects(db, s)));
+    const mintedSide = resolved.map((r) => capabilities.some((c) => capabilityMatchesSelector(c, r)));
+    if (!mintedSide.some(Boolean)) continue; // the mint touches no side of this rule
+    // holder maps are computed lazily, once per side, only when needed
+    const holderMaps: Array<Map<string, string> | null> = sides.map(() => null);
+    const holdersOf = async (i: number): Promise<Map<string, string>> =>
+      (holderMaps[i] ??= await holdersOfSelector(db, sides[i]!));
+    for (const uid of userIds) {
+      const heldSides: Array<{ side: SodSelector; via: string }> = [];
+      let allHeld = true;
+      for (let i = 0; i < sides.length; i++) {
+        if (mintedSide[i]) continue; // conferred by this very mint
+        const via = (await holdersOf(i)).get(uid);
+        if (!via) {
+          // an N-1 subset is fine — this identity is missing a side
+          allHeld = false;
+          break;
+        }
+        heldSides.push({ side: sides[i]!, via });
+      }
+      if (!allHeld) continue;
+      if (heldSides.length === 0) {
+        // bundle-internal: the SAME mint would confer every side
         return {
           rule,
-          userId: userIds[0]!,
+          userId: uid,
           via: "the same mint (the role's bundle contains both sides)",
-          otherSide: other,
+          otherSide: sides[1]!,
+          heldSides,
+          sideCount: sides.length,
         };
       }
-      const holders = await holdersOfSelector(db, other);
-      for (const uid of userIds) {
-        const via = holders.get(uid);
-        if (via) return { rule, userId: uid, via, otherSide: other };
-      }
+      return {
+        rule,
+        userId: uid,
+        via: heldSides[0]!.via,
+        otherSide: heldSides[0]!.side,
+        heldSides,
+        sideCount: sides.length,
+      };
     }
   }
   return null;
@@ -425,15 +600,22 @@ export async function checkSodMint(
 
 /** human-readable name for a selector's object (refusal prose only) */
 async function describeSelector(db: Db, sel: SodSelector): Promise<string> {
+  if (sel.pattern) {
+    // patterns are (dimension, value) pairs over closed vocabularies — the
+    // prose states the dimension so a refusal never reads like a named object
+    if (sel.pattern.dimension === "lifecycle_status") return `agents with lifecycle status '${sel.pattern.value}'`;
+    if (sel.pattern.dimension === "provider") return `agents from provider '${sel.pattern.value}'`;
+    return `any connector (${sel.pattern.value})`;
+  }
   if (sel.kind === "agent") {
-    const [a] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, sel.objectId));
+    const [a] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, sel.objectId!));
     return `agent '${a?.name ?? sel.objectId}'`;
   }
   if (sel.kind === "connector") {
-    const [c] = await db.select({ name: connectors.name }).from(connectors).where(eq(connectors.id, sel.objectId));
+    const [c] = await db.select({ name: connectors.name }).from(connectors).where(eq(connectors.id, sel.objectId!));
     return `connector '${c?.name ?? sel.objectId}'${sel.mode ? ` (${sel.mode})` : ""}`;
   }
-  const [s] = await db.select({ name: mcpServers.name }).from(mcpServers).where(eq(mcpServers.id, sel.objectId));
+  const [s] = await db.select({ name: mcpServers.name }).from(mcpServers).where(eq(mcpServers.id, sel.objectId!));
   return sel.kind === "mcp_tool"
     ? `MCP tool '${s?.name ?? sel.objectId} · ${sel.toolName}'`
     : `MCP server '${s?.name ?? sel.objectId}'`;
@@ -445,24 +627,43 @@ export interface SodRefusalBody extends Record<string, unknown> {
   ruleName: string;
   ruleReason: string;
   detail: string;
-  conflict: { userId: string; userLabel: string; existingHolding: string; existingSide: string };
+  conflict: {
+    userId: string;
+    userLabel: string;
+    existingHolding: string;
+    existingSide: string;
+    /** B2c: every already-held side (one entry for a two-sided rule; an
+     * N-way refusal names them all) */
+    existingSides: Array<{ side: string; via: string }>;
+  };
   escalate: string;
 }
 
 async function buildRefusalBody(db: Db, conflict: SodConflict): Promise<SodRefusalBody> {
-  const [[u], existingSide] = await Promise.all([
+  const [[u], existingSide, existingSides] = await Promise.all([
     db.select({ displayName: users.displayName, email: users.email }).from(users).where(eq(users.id, conflict.userId)),
     describeSelector(db, conflict.otherSide),
+    Promise.all(
+      conflict.heldSides.map(async (h) => ({ side: await describeSelector(db, h.side), via: h.via })),
+    ),
   ]);
   const userLabel = u ? u.displayName || u.email : conflict.userId;
+  const holdsProse =
+    existingSides.length > 1
+      ? existingSides.map((h) => `${h.side} via ${h.via}`).join("; and ")
+      : `${existingSide} via ${conflict.via}`;
+  const togetherProse =
+    conflict.sideCount === 2
+      ? "the two capabilities toxic together"
+      : `all ${conflict.sideCount} capabilities toxic together (any ${conflict.sideCount - 1} of them may be co-held; this mint would complete the full set)`;
   return {
     error: "sod_conflict",
     ruleId: conflict.rule.id,
     ruleName: conflict.rule.name,
     ruleReason: conflict.rule.reason,
     detail:
-      `SoD rule '${conflict.rule.name}' refuses this: ${userLabel} already holds ${existingSide} ` +
-      `via ${conflict.via}, and the rule declares the two capabilities toxic together ` +
+      `SoD rule '${conflict.rule.name}' refuses this: ${userLabel} already holds ${holdsProse}` +
+      `, and the rule declares ${togetherProse} ` +
       `(${conflict.rule.reason}). Nothing was granted. Escalate through the approvals queue ` +
       `to mint it anyway with the rule recorded as overridden.`,
     conflict: {
@@ -470,6 +671,7 @@ async function buildRefusalBody(db: Db, conflict: SodConflict): Promise<SodRefus
       userLabel,
       existingHolding: conflict.via,
       existingSide,
+      existingSides,
     },
     escalate: "POST /v1/sod/overrides",
   };
@@ -515,25 +717,44 @@ export interface SodViolator {
   userLabel: string;
   holdsA: string;
   holdsB: string;
+  /** B2c: how the identity holds EVERY side, in side order (two entries for
+   * a pre-amendment rule — the same values as holdsA/holdsB) */
+  holds: string[];
 }
 
-/** current violators per rule: holders(A) ∩ holders(B), computed live */
+/** current violators per rule: the identities holding EVERY side (the
+ * intersection of all sides' holder sets — any N-1 subset is not a
+ * violation), computed live; pattern sides resolve against current objects */
 export async function computeRuleViolators(db: Db, rules: SodRuleRow[]): Promise<Map<string, SodViolator[]>> {
   const out = new Map<string, SodViolator[]>();
   if (rules.length === 0) return out;
   const userIds = new Set<string>();
-  const raw = new Map<string, Array<{ userId: string; holdsA: string; holdsB: string }>>();
+  const raw = new Map<string, Array<{ userId: string; holdsA: string; holdsB: string; holds: string[] }>>();
+  const selectorsByRule = await loadRuleSelectors(db, rules);
   for (const rule of rules) {
-    const [a, b] = await Promise.all([holdersOfSelector(db, sideA(rule)), holdersOfSelector(db, sideB(rule))]);
-    const both: Array<{ userId: string; holdsA: string; holdsB: string }> = [];
-    for (const [uid, viaA] of a) {
-      const viaB = b.get(uid);
-      if (viaB) {
-        both.push({ userId: uid, holdsA: viaA, holdsB: viaB });
-        userIds.add(uid);
-      }
+    const sides = selectorsByRule.get(rule.id) ?? [];
+    if (sides.length < 2) {
+      raw.set(rule.id, []);
+      continue;
     }
-    raw.set(rule.id, both);
+    const maps = await Promise.all(sides.map((s) => holdersOfSelector(db, s)));
+    const all: Array<{ userId: string; holdsA: string; holdsB: string; holds: string[] }> = [];
+    for (const [uid, viaFirst] of maps[0]!) {
+      const holds = [viaFirst];
+      let every = true;
+      for (let i = 1; i < maps.length; i++) {
+        const via = maps[i]!.get(uid);
+        if (!via) {
+          every = false;
+          break;
+        }
+        holds.push(via);
+      }
+      if (!every) continue;
+      all.push({ userId: uid, holdsA: holds[0]!, holdsB: holds[1]!, holds });
+      userIds.add(uid);
+    }
+    raw.set(rule.id, all);
   }
   const userRows = userIds.size
     ? await db
@@ -867,15 +1088,30 @@ export async function applySodOverrideDecision(
 
 const selectorSchema = z.object({
   kind: z.enum(["agent", "connector", "mcp_tool", "mcp_server"]),
-  objectId: z.string().uuid(),
+  // optional since B2c: a PATTERN side names no object. resolveSelector
+  // refuses by name when neither (or both) of objectId/pattern is given.
+  objectId: z.string().uuid().optional().nullable(),
   toolName: z.string().min(1).optional().nullable(),
   mode: z.enum(["read", "readwrite"]).optional().nullable(),
+  /** B2c pattern selector: an enumerable (dimension, value) pair — the
+   * dimension enum IS the whole vocabulary (no free-regex anywhere), and
+   * resolveSelector pins each dimension's closed value set */
+  pattern: z
+    .object({ dimension: z.enum(SOD_PATTERN_DIMENSIONS), value: z.string().min(1) })
+    .optional()
+    .nullable(),
 });
+/** B2c: an N-way rule names 2..8 sides. 8 is a sanity cap, not a semantic —
+ * a toxic set larger than that is a policy document, not a rule. */
+const MAX_RULE_SIDES = 8;
 const createRuleSchema = z.object({
   name: z.string().min(1),
   reason: z.string().min(1),
-  a: selectorSchema,
-  b: selectorSchema,
+  // either the original two-sided shape (a + b) …
+  a: selectorSchema.optional(),
+  b: selectorSchema.optional(),
+  // … or the B2c N-way shape (2..N sides, concrete and/or pattern)
+  sides: z.array(selectorSchema).min(2).max(MAX_RULE_SIDES).optional(),
   enabled: z.boolean().optional(),
 });
 const ruleIdParam = z.object({ ruleId: z.string().uuid() });
@@ -888,14 +1124,80 @@ const escalateSchema = z.object({
 
 type SelectorInput = z.infer<typeof selectorSchema>;
 
-/** normalize + validate one side: tool name iff mcp_tool, mode only on
- * connector, and the referenced object must exist (CONCRETE selectors) */
+/**
+ * normalize + validate one side. A CONCRETE side: tool name iff mcp_tool,
+ * mode only on connector, and the referenced object must exist. A PATTERN
+ * side (B2c): a (dimension, value) pair whose value must sit in that
+ * dimension's CLOSED vocabulary — agent lifecycle statuses, the model
+ * provider kinds, or read|readwrite — never free text, never a regex; a
+ * pattern matching zero objects TODAY is fine (it covers later-created
+ * objects the moment they exist), so no existence check applies.
+ */
 async function resolveSelector(
   db: Db,
-  side: "a" | "b",
+  side: string,
   input: SelectorInput,
 ): Promise<{ sel: SodSelector } | { refusal: { status: number; body: Record<string, unknown> } }> {
   const refuse = (status: number, body: Record<string, unknown>) => ({ refusal: { status, body } });
+  if (input.pattern) {
+    if (input.objectId) {
+      return refuse(422, {
+        error: "pattern_and_object_exclusive",
+        field: side,
+        detail: "a side is either a concrete object or a pattern, never both",
+      });
+    }
+    if (input.toolName || input.mode) {
+      return refuse(422, {
+        error: "pattern_carries_no_qualifiers",
+        field: side,
+        detail: "a pattern side is the (dimension, value) pair alone — the 'mode' dimension's value IS the mode",
+      });
+    }
+    const { dimension, value } = input.pattern;
+    if (dimension === "lifecycle_status" || dimension === "provider") {
+      if (input.kind !== "agent") {
+        return refuse(422, {
+          error: "invalid_pattern_dimension",
+          field: side,
+          detail: `dimension '${dimension}' applies to agent sides only`,
+        });
+      }
+      const vocabulary: readonly string[] = dimension === "lifecycle_status" ? AGENT_LIFECYCLE_STATUSES : MODEL_PROVIDER_KINDS;
+      if (!vocabulary.includes(value)) {
+        return refuse(422, {
+          error: "invalid_pattern_value",
+          field: side,
+          detail: `'${value}' is not in the '${dimension}' vocabulary (${vocabulary.join(", ")}) — pattern values are enumerable, never free text`,
+        });
+      }
+      return { sel: { kind: "agent", objectId: null, toolName: null, mode: null, pattern: { dimension, value } } };
+    }
+    // dimension === "mode"
+    if (input.kind !== "connector") {
+      return refuse(422, {
+        error: "invalid_pattern_dimension",
+        field: side,
+        detail: "dimension 'mode' applies to connector sides only",
+      });
+    }
+    if (value !== "read" && value !== "readwrite") {
+      return refuse(422, {
+        error: "invalid_pattern_value",
+        field: side,
+        detail: `'${value}' is not in the 'mode' vocabulary (read, readwrite)`,
+      });
+    }
+    // the pattern's mode rides the mode qualifier so containment stays one rule
+    return { sel: { kind: "connector", objectId: null, toolName: null, mode: value, pattern: { dimension, value } } };
+  }
+  if (!input.objectId) {
+    return refuse(422, {
+      error: "object_or_pattern_required",
+      field: side,
+      detail: "a side names a concrete object id or a pattern",
+    });
+  }
   if (input.kind === "mcp_tool" && !input.toolName) {
     return refuse(422, { error: "tool_name_required", field: side, detail: "an mcp_tool side names its tool" });
   }
@@ -918,23 +1220,37 @@ async function resolveSelector(
       objectId: input.objectId,
       toolName: input.toolName ?? null,
       mode: input.mode ?? null,
+      pattern: null,
     },
   };
 }
 
 function selectorView(sel: SodSelector) {
-  return { kind: sel.kind, objectId: sel.objectId, toolName: sel.toolName, mode: sel.mode };
+  return { kind: sel.kind, objectId: sel.objectId, toolName: sel.toolName, mode: sel.mode, pattern: sel.pattern };
 }
 
-async function ruleView(db: Db, rule: SodRuleRow, violators: SodViolator[]) {
-  const [aLabel, bLabel] = await Promise.all([describeSelector(db, sideA(rule)), describeSelector(db, sideB(rule))]);
+const sameSelector = (x: SodSelector, y: SodSelector): boolean =>
+  x.kind === y.kind &&
+  x.objectId === y.objectId &&
+  x.toolName === y.toolName &&
+  x.mode === y.mode &&
+  x.pattern?.dimension === y.pattern?.dimension &&
+  x.pattern?.value === y.pattern?.value;
+
+async function ruleView(db: Db, rule: SodRuleRow, sides: SodSelector[], violators: SodViolator[]) {
+  const labeled = await Promise.all(
+    sides.map(async (s) => ({ ...selectorView(s), label: await describeSelector(db, s) })),
+  );
   return {
     id: rule.id,
     name: rule.name,
     reason: rule.reason,
     enabled: rule.enabled,
-    a: { ...selectorView(sideA(rule)), label: aLabel },
-    b: { ...selectorView(sideB(rule)), label: bLabel },
+    /** every side, in order (2 for a pre-amendment rule) — the ONE render
+     * path; a/b below are the legacy aliases for the first two sides */
+    sides: labeled,
+    a: labeled[0] ?? null,
+    b: labeled[1] ?? null,
     createdByUserId: rule.createdByUserId,
     createdAt: rule.createdAt.toISOString(),
     currentViolators: violators,
@@ -944,64 +1260,114 @@ async function ruleView(db: Db, rule: SodRuleRow, violators: SodViolator[]) {
 export function registerSodRoutes(app: FastifyInstance, db: Db): void {
   app.post("/v1/sod/rules", async (req, reply) => {
     const body = createRuleSchema.parse(req.body);
-    const [a, b] = await Promise.all([resolveSelector(db, "a", body.a), resolveSelector(db, "b", body.b)]);
-    if ("refusal" in a) return reply.status(a.refusal.status).send(a.refusal.body);
-    if ("refusal" in b) return reply.status(b.refusal.status).send(b.refusal.body);
-    const same =
-      a.sel.kind === b.sel.kind &&
-      a.sel.objectId === b.sel.objectId &&
-      a.sel.toolName === b.sel.toolName &&
-      a.sel.mode === b.sel.mode;
-    if (same) {
+    // one input shape after normalization: the original a+b pair, or the B2c
+    // sides array (2..N). Never both, never neither.
+    if (body.sides && (body.a || body.b)) {
       return reply.status(422).send({
-        error: "sod_rule_sides_identical",
-        detail: "a capability cannot be declared toxic with itself — the two sides must differ",
+        error: "sides_or_pair",
+        detail: "name the rule's sides either as a+b or as the sides array, not both",
       });
+    }
+    if (!body.sides && (!body.a || !body.b)) {
+      return reply.status(422).send({
+        error: "sides_or_pair",
+        detail: "a rule names its sides as a+b or as a sides array of 2..8",
+      });
+    }
+    const inputs: Array<{ label: string; input: SelectorInput }> = body.sides
+      ? body.sides.map((input, i) => ({ label: `sides[${i}]`, input }))
+      : [
+          { label: "a", input: body.a! },
+          { label: "b", input: body.b! },
+        ];
+    const sides: SodSelector[] = [];
+    for (const { label, input } of inputs) {
+      const resolved = await resolveSelector(db, label, input);
+      if ("refusal" in resolved) return reply.status(resolved.refusal.status).send(resolved.refusal.body);
+      sides.push(resolved.sel);
+    }
+    for (let i = 0; i < sides.length; i++) {
+      for (let j = i + 1; j < sides.length; j++) {
+        if (sameSelector(sides[i]!, sides[j]!)) {
+          return reply.status(422).send({
+            error: "sod_rule_sides_identical",
+            detail: "a capability cannot be declared toxic with itself — every side must differ",
+          });
+        }
+      }
     }
     const duplicate = await db.select({ id: sodRules.id }).from(sodRules).where(eq(sodRules.name, body.name));
     if (duplicate.length > 0) return reply.status(409).send({ error: "duplicate_rule_name" });
-    const [rule] = await db
-      .insert(sodRules)
-      .values({
-        name: body.name,
-        reason: body.reason,
-        aKind: a.sel.kind,
-        aObjectId: a.sel.objectId,
-        aToolName: a.sel.toolName,
-        aMode: a.sel.mode,
-        bKind: b.sel.kind,
-        bObjectId: b.sel.objectId,
-        bToolName: b.sel.toolName,
-        bMode: b.sel.mode,
-        enabled: body.enabled ?? true,
-        createdByUserId: req.authCtx.userId ?? null,
-      })
-      .returning();
+    // storage: the original shape (exactly two concrete sides given as a+b)
+    // keeps the legacy columns byte-identically; anything wider — N-way
+    // and/or pattern — stores every side in sod_rule_sides. One loader
+    // (loadRuleSelectors) reads both, so nothing downstream can tell.
+    const legacyShaped = !body.sides && sides.length === 2 && sides.every((s) => s.pattern === null);
+    const rule = await db.transaction(async (tx) => {
+      const [row] = await tx
+        .insert(sodRules)
+        .values({
+          name: body.name,
+          reason: body.reason,
+          ...(legacyShaped
+            ? {
+                aKind: sides[0]!.kind,
+                aObjectId: sides[0]!.objectId,
+                aToolName: sides[0]!.toolName,
+                aMode: sides[0]!.mode,
+                bKind: sides[1]!.kind,
+                bObjectId: sides[1]!.objectId,
+                bToolName: sides[1]!.toolName,
+                bMode: sides[1]!.mode,
+              }
+            : {}),
+          enabled: body.enabled ?? true,
+          createdByUserId: req.authCtx.userId ?? null,
+        })
+        .returning();
+      if (!legacyShaped) {
+        await tx.insert(sodRuleSides).values(
+          sides.map((s, i) => ({
+            ruleId: row!.id,
+            position: i + 1,
+            selector: (s.pattern ? "pattern" : "concrete") as "pattern" | "concrete",
+            kind: s.kind,
+            objectId: s.pattern ? null : s.objectId,
+            toolName: s.pattern ? null : s.toolName,
+            mode: s.pattern ? null : s.mode,
+            patternDimension: s.pattern?.dimension ?? null,
+            patternValue: s.pattern?.value ?? null,
+          })),
+        );
+      }
+      return row!;
+    });
     // creation NEVER strips existing holders — it REPORTS them, right here
     // in the creation response, so the admin who declared the toxicity sees
     // the existing exposure the moment they create the rule
-    const violators = rule!.enabled ? ((await computeRuleViolators(db, [rule!])).get(rule!.id) ?? []) : [];
+    const violators = rule.enabled ? ((await computeRuleViolators(db, [rule])).get(rule.id) ?? []) : [];
     await db.insert(auditLog).values({
-      userId: req.authCtx.userId ?? rule!.id,
+      userId: req.authCtx.userId ?? rule.id,
       objectType: "sod_rule",
-      objectId: rule!.id,
+      objectId: rule.id,
       detail: {
-        name: rule!.name,
-        reason: rule!.reason,
-        a: selectorView(sideA(rule!)),
-        b: selectorView(sideB(rule!)),
-        enabled: rule!.enabled,
+        name: rule.name,
+        reason: rule.reason,
+        sides: sides.map((s) => selectorView(s)),
+        a: selectorView(sides[0]!),
+        b: selectorView(sides[1]!),
+        enabled: rule.enabled,
         currentViolators: violators.length,
       },
       effect: "allow",
       ruleId: "sod-rule-created",
       ruleChain: [],
       reason:
-        `SoD rule '${rule!.name}' created: ${rule!.reason} — enforced at mint time from now on; ` +
+        `SoD rule '${rule.name}' created: ${rule.reason} — enforced at mint time from now on; ` +
         `${violators.length} existing violator(s) surfaced, none auto-revoked`,
     });
     return reply.status(201).send({
-      ...(await ruleView(db, rule!, violators)),
+      ...(await ruleView(db, rule, sides, violators)),
       notes: SOD_NOTES,
     });
   });
@@ -1012,9 +1378,12 @@ export function registerSodRoutes(app: FastifyInstance, db: Db): void {
       db,
       rules.filter((r) => r.enabled),
     );
+    const selectorsByRule = await loadRuleSelectors(db, rules);
     return {
       notes: SOD_NOTES,
-      rules: await Promise.all(rules.map((r) => ruleView(db, r, violators.get(r.id) ?? []))),
+      rules: await Promise.all(
+        rules.map((r) => ruleView(db, r, selectorsByRule.get(r.id) ?? [], violators.get(r.id) ?? [])),
+      ),
     };
   });
 
@@ -1036,7 +1405,8 @@ export function registerSodRoutes(app: FastifyInstance, db: Db): void {
         : `SoD rule '${rule.name}' disabled — the combination is no longer refused at mint time`,
     });
     const violators = rule.enabled ? ((await computeRuleViolators(db, [rule])).get(rule.id) ?? []) : [];
-    return await ruleView(db, rule, violators);
+    const sides = (await loadRuleSelectors(db, [rule])).get(rule.id) ?? [];
+    return await ruleView(db, rule, sides, violators);
   });
 
   app.delete("/v1/sod/rules/:ruleId", async (req, reply) => {

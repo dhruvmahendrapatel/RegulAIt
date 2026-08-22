@@ -186,3 +186,136 @@ route.
   `agents.model` for the seeded google agent now reads `gemini-3.6-flash`.
 - Worktree byte-identical to commit 80d2d16 (no git commands were run).
 - API key: passed only as process env; never written to any file or log kept here.
+
+---
+
+# L6 run — the governance copilot live, plus L24's model-judged half (2026-08-22 UTC)
+
+Scope: prove ADR-0056's two named structural gaps closed against a REAL Gemini backend, and
+ADR-0092's model-judged half working as an annotation. Gateway run from built `dist/` on port
+3111 with `GOOGLE_API_KEY=<redacted>` in the process env only (env-fallback path — no key
+stored in the DB, in any file, or in any committed fixture). Database: fresh `regulait_live_l6`
+(dropped and recreated before seed). Every COMMITTED test passes without the key.
+
+Pre-flight baselines (M-004 discipline, known-good at each layer before any gateway probe was
+interpreted):
+
+- Direct provider call, `gemini-3.6-flash:generateContent` → HTTP 200, text `OK`,
+  `usageMetadata` returned (`promptTokenCount: 5`, `thoughtsTokenCount: 99`).
+- Gateway `GET /health` → `{"status":"ok","database":"ok"}`.
+- The requesting admin was pinned to `routingMode: "passthrough"` (the ADR-0095 F1 idiom), so
+  pillar-6 right-sizing did not route the copilot's small prompt away from the live agent.
+
+## Environmental finding — a REASONING model needs a ceiling sized for thoughts, not answers
+
+The FIRST live narration came back discarded: `copilot narration unusable: narration reply
+contains no JSON object`. M-004 first — the harness was checked before the app was blamed. The
+identical prompt sent DIRECTLY to the provider at the gateway's own 1024-token ceiling returned
+`finishReason: MAX_TOKENS`, `thoughtsTokenCount: 981`, `candidatesTokenCount: 39` — i.e. the
+model spent the whole budget thinking and emitted 39 tokens of truncated JSON. The gateway was
+RIGHT to discard it (a truncated narration is not a narration).
+
+Cause proven by removing it: the same prompt at a 4096 ceiling returned `finishReason: STOP`,
+`thoughtsTokenCount: 1688`, and complete JSON citing the four real audit-row ids. The copilot's
+narration ceiling is now 4096 and the recommendation judge's is 8192, each with the measurement
+in the comment. This is an app fix driven by live evidence, not a workaround.
+
+## L6a-1 — a real governance question, narrated live and cross-checked: PASS
+
+`POST /v1/copilot/ask` as admin, `{question: "which denied decisions happened this week?",
+narratorAgentId: <google agent>, projectId: <demo-project>}`.
+
+- `generation: "model"`, `modelNarrationVerified: true`, `groundedRefusal: false`, no
+  `narrationDiscarded`.
+- 5 citable objects returned, all `audit_log` primary keys from the same scoped query as the
+  counts (`468a4373…`, `bc82aca4…`, `8f0692ce…`, `04d878bd…`, `a04f515f…`).
+- The live model's own reply cited exactly those ids and exactly the produced count keys
+  (`decisions`, `effect.deny`, `deny_rule.default-deny`, `deny_rule.pii-blocked`) — the
+  cross-check accepted it, which is what `modelNarrationVerified: true` means here.
+- Narration text (verbatim): *"This summary is scoped to the caller's own entitlements. Over the
+  last 7 days, there were 5 governance decisions, all 5 of which resulted in an effect of
+  'deny'. The denials were triggered by the following rules: 3 from 'default-deny', 1 from
+  'copilot-narration-unusable', and 1 from 'pii-blocked'."* (The copilot reading its own earlier
+  discard out of the audit log is the dogfood working, not a defect.)
+- `usage_events`: `provider=google`, `model=gemini-3.6-flash`, `input_tokens=1024`,
+  `output_tokens=357`, `cost_usd=0.00485`, `project_id=<demo-project>`, real
+  `provider_message_id`.
+- `audit_log`: `copilot-question-answered`, `effect=allow`, `generation=model`,
+  `rowsExamined=5`.
+
+## L6a-2 — a nonsense-object question gets the GROUNDED REFUSAL, from the real model: PASS
+
+Same endpoint as a non-admin who is a member of no project (so the fail-closed scope selects
+nothing): *"who accessed the Zorblatt Compliance Widget last quarter?"*, same live narrator.
+
+- `rowsExamined: 0`, `citableObjects: []`, `groundedRefusal: true`.
+- The live model **refused**: its reply was `refused: true` with the text *"No matching
+  governance record was retrieved in this caller's scope."* — no description of what the
+  "Zorblatt Compliance Widget" might be, no speculation, no general-knowledge answer.
+- `modelNarrationVerified: true` because the refusal PASSED the cross-check — the cross-check's
+  rule is that an empty retrieval must be refused, and it was.
+
+This is the property the committed deterministic test asserts (`narrationIsGrounded` discards a
+narration that answered anyway over an empty retrieval); this run shows the real model obeying
+it rather than the guard having to catch it.
+
+## L6b — a proposal applied end-to-end, and refused before consent: PASS
+
+1. A real `agent_grants` row (`03ff3752…`, dana → a mock agent) chosen as the target.
+2. `POST /v1/copilot/ask` → real `copilot_queries` row; `POST /v1/copilot/proposals`
+   (`kind: grant_revocation`, diff naming that grant) → proposal `f18469eb…` + approval
+   `e42eea77…` in the ONE queue.
+3. **Apply BEFORE consent → HTTP 409 `proposal_not_approved`**, detail *"the linked approval is
+   'pending', not 'approved'…"*. Grant row still present.
+4. Approval decided `approved` through the ordinary `POST /v1/approvals/:id/decide`.
+5. **Apply → HTTP 200.** `applied: {via: "grant-revocation", grantKind: "agent", grantId:
+   "03ff3752…", removed: true}`. `agent_grants` rows for that id: **1 before → 0 after**.
+   `applied_at` stamped, `applied_by_user_id` = the applying admin.
+6. `audit_log` row `copilot-proposal-applied`, `effect=allow`, **`user_id` = the applying
+   admin** (not the copilot, not a system id), carrying `copilotProposalId`, `approvalId` and
+   the `applied` result, reason: *"…removed agent grant … through the same one-per-kind removal
+   the DELETE /v1/grants endpoints and an ADR-0090 campaign's revoke decision use… attributed to
+   the applying admin, not to the copilot"*.
+7. **Second apply → HTTP 409 `proposal_already_applied`** — the mutation was not re-executed.
+
+## L6c — the model-judged annotation, live: PASS (all three states)
+
+- **Knob OFF (default)**: `judged: {enabled: false}`, 40 deterministic findings, **0**
+  annotations.
+- **Knob ON, no judge named**: `judged: {enabled: true, status: "unavailable", error:
+  "judge_required"}` with ADR-0067's own reason text; deterministic half **identical** to the
+  knob-off run.
+- **Knob ON with the live agent**: `judged: {status: "judged", judge: "model:gemini-pro",
+  annotated: 40}`. Every annotation `method: "model-judged"`, each carrying the limits
+  paragraph; the finding key set **unchanged**; the deterministic half **byte-identical** to the
+  knob-off run. Example annotation — rule `orphaned-agent-grants`, verdict `agree`, note
+  *"Evidence shows ownership is 'unowned' and owner is null, supporting the conclusion."*
+- Metered: `input_tokens=5086`, `output_tokens=3431`, `cost_usd=0.0407`, attributed to the
+  named project.
+
+**One honest wobble, kept:** the FIRST judged attempt returned `judged: unavailable /
+judge_not_dispatchable` with reason *"judge reply contains no JSON array"* (2847 output tokens —
+a truncated array), and the deterministic report came back unchanged. That is the designed
+behaviour working, but a judged layer that intermittently disappears is poor, so the batch cap
+dropped from 40 findings to 20 (measured, recorded in the code and in the ADR-0092 amendment).
+
+## Defects found
+
+None in the app. Two app CHANGES driven by live measurement (narration ceiling 1024 → 4096,
+judge ceiling → 8192, judge batch 40 → 20) and one environmental finding recorded above and in
+PENDING.md. Every refusal the run provoked was correct, named, and audited.
+
+## Spend accounting
+
+~10 live calls total (5 direct provider probes for the M-004 baselines and the ceiling
+diagnosis, 5 through the gateway). Measured gateway spend on the metered rows: $0.00485
+(narration) + $0.0407 + $0.0348 (two judge runs) ≈ **$0.080**, plus a few cents of direct
+probes. Well inside the ≤40-call budget.
+
+## Housekeeping
+
+Scratch database `regulait_live_l6` left in place for inspection; the key existed only in the
+gateway process environment and in the curl probes, and appears in no file, fixture, log or
+commit. The org knobs this run flipped (`recommendation_judge_enabled` /
+`recommendation_judge_agent_id`) live only in that scratch database — no committed test or
+fixture ships them on.

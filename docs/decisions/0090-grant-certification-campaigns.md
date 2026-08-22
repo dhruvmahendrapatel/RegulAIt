@@ -167,3 +167,49 @@ Suite: gateway 138 → 139 files, 2263 → 2279 passed (+16); Playwright 116 →
 - **Fabric campaigns stay refused.** The scope vocabulary cannot name another system's
   entitlements; cross-SaaS certification is the IGA we integrate with (pillar 8 posture), not a
   roadmap item hiding in an ADR.
+
+## Amendment (2026-08-22, batch B2) — the expiry sweep (decides nothing) and item reassignment (never to the holder)
+
+Two of this ADR's honest limits were built out; the rest stand.
+
+**B2a — a scheduler job that makes expiry VISIBLE, and is structurally barred from deciding.**
+The "no scheduler" limit is closed in the narrowest possible way: an ADR-0064 job
+(`certification-expiry-sweep`, off-by-default like every job on that scheduler, hourly default,
+with `POST /v1/certification-campaigns/expiry-sweep` as the manual/cron door calling the same
+`runCampaignExpirySweep`) whose ONLY write is one audited `campaign-expired-incomplete` row per
+campaign the FIRST time it is observed past due with items undecided. The boundary is the
+decision of this amendment: **the sweep changes no status and decides nothing** —
+`expired-incomplete` stays computed on read, the late-decide refusal stays the same shared
+`campaignPastDue` predicate (so the swept event and the read can never disagree), and undecided
+items stay undecided forever. What read-time computation could not do is put the fact where
+nobody has to open a page to see it; that — and only that — is what the sweep adds. Idempotence
+is by data (the audit row is the marker): a re-run adds nothing, ever. Suite: sweep marks
+exactly once / re-run adds nothing / a within-due campaign untouched / status-and-event
+agreement / the scheduler job runs the identical function through the real claim-lease
+machinery. Non-vacuity (M-002): no-op'ing the event write reddens exactly the three sweep tests.
+
+**B2b — reassignment of an ITEM's review, with the holder bar extended to routing.**
+The "no reassignment" limit is closed:
+`POST /v1/certification-campaigns/:campaignId/items/:itemId/reassign` (admin-only via the
+default gate, bootstrap refused, **reason required**, audited `grant-cert-item-reassigned`)
+moves an UNDECIDED item's reviewer. The approvals-row move rides
+`reassignApprovalApprover` — **extracted from ADR-0046's SLA `reassign` escalation so both
+callers share the one pending-guarded approver-moving write** — never a parallel UPDATE.
+Refused by name: a decided item (`item_already_decided`), a past-due campaign
+(`campaign_expired`, same shared predicate), and — the bar — **the grant's holder**
+(`cannot_reassign_to_holder`, both holder shapes: the direct holder and any current assignee of
+the bundling role). The §4 self-review bar is decider-keyed at signing time; this extends the
+same judgment to routing time, because handing the holder their own item manufactures exactly
+the self-certification the decide path refuses — and **an admin override reason does NOT help**
+(the ADR-0022 idiom: the bar is about who would sign, not how well the move is documented).
+Suite: the reassigned reviewer decides, the original gets `not_the_named_approver`, both holder
+shapes refused with an override-style reason, decided/expired refused. Non-vacuity: dropping
+the bar reddens exactly the two holder tests (the admin's reason goes through).
+
+Routes tagged internal/`certification` (ADR-0053 registry). SPA: the campaign detail gains a
+reassign form (undecided items only, reason required, the gateway refusal rendered verbatim);
+the last-sorting Playwright spec drives a reassignment and the holder refusal end to end.
+
+**Still true, restated:** no notifications (nobody is emailed at the deadline — the sweep
+writes an audit fact, not an outbox); no periodic auto-campaigns; ADR-0022 delegation windows
+are unchanged and remain decider-barred from self-certification.

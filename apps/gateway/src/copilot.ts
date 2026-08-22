@@ -44,21 +44,27 @@
  *     The grounded answer is composed from COUNTS, so a blocked sample costs
  *     the answer nothing but the sample.
  *
- *  5. GENERATION QUALITY IS UNVERIFIED, AND SAYS SO. No model provider is
- *     connected in this build. The retrieval, the planning, the grounding, the
- *     scoping and the proposal path are all real and tested. `ModelBackedNarrator`
- *     follows ADR-0044's judge pattern exactly — interface, model-backed
- *     implementation, test seam — and has never narrated real output. Every
- *     answer carries `modelNarrationVerified: false`.
+ *  5. `modelNarrationVerified` MEANS ONE NARROW THING, AND SAYS SO. It is TRUE
+ *     when THIS narration's cited count keys and cited governance-object ids
+ *     were all cross-checked against THIS retrieval and passed
+ *     (`narrationIsGrounded`). It is NOT a claim that the model is generally
+ *     reliable, and — the L6d lesson — NOT a claim that the answer is ABOUT
+ *     what the question asked: real figures over an unfiltered query can still
+ *     be narrated as belonging to a subject nobody ever filtered on. That
+ *     separate fact rides its own field, `subjectFiltered`, and its own
+ *     deterministic caveat in the grounded text.
  */
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import {
   agentGrants,
   agents,
+  aiVendors,
   and,
   approvals,
   auditLog,
+  connectorGrants,
+  connectors,
   copilotProposals,
   copilotQueries,
   count,
@@ -67,25 +73,44 @@ import {
   gte,
   inArray,
   lt,
+  or,
   projectMembers,
+  projects,
   sql,
+  teamMembers,
+  teams,
   usageEvents,
   userAgentPolicies,
   users,
   type Db,
 } from "@regulait/db";
 import {
+  COPILOT_APPLICABLE_PROPOSAL_KINDS,
   COPILOT_DECISION_SUPPORT_NOTICE,
+  COPILOT_ENTITY_KIND_LABELS,
   COPILOT_SCOPE_CAVEAT,
   COPILOT_TOOL_SPECS,
+  COPILOT_UNAPPLICABLE_PROPOSAL_KINDS,
   buildNarrationPrompt,
   buildProposalRecord,
   copilotAskSchema,
+  copilotEntityAmbiguousRefusal,
+  copilotEntityNotFilterableRefusal,
+  copilotEntityUnresolvedRefusal,
+  copilotGrantRevocationDiffSchema,
+  copilotPolicyTighteningDiffSchema,
+  copilotProposalKindIsApplicable,
   copilotProposalSchema,
+  copilotToolSupportsEntityKind,
+  copilotToolsFilteringEntityKind,
+  describeCopilotFilters,
   narrationIsGrounded,
   parseNarration,
   planCopilotQuery,
   renderGroundedAnswer,
+  type CopilotEntityKind,
+  type CopilotEntityMatch,
+  type CopilotEntityRef,
   type CopilotEvidence,
   type CopilotNarration,
   type CopilotNarrationRequest,
@@ -93,14 +118,41 @@ import {
   type CopilotProposalKind,
   type CopilotQueryPlan,
   type CopilotTimeframe,
+  type CopilotTool,
 } from "@regulait/shared";
-import { evaluateAgent, type AgentDecision } from "@regulait/policy-kernel";
+import { evaluateAgent, evaluateConnector, type AgentDecision } from "@regulait/policy-kernel";
 import { executeGovernedDispatch, type AgentRow } from "./agents-connectors.js";
-import { loadAgentRevocations, loadRoleAgentGrants } from "./entitlements.js";
+import {
+  loadAgentRevocations,
+  loadConnectorRevocations,
+  loadRoleAgentGrants,
+  loadRoleConnectorGrants,
+} from "./entitlements.js";
+import {
+  deleteAgentGrantById,
+  deleteConnectorGrantById,
+  deleteRoleAgentGrantById,
+  deleteRoleConnectorGrantById,
+  deleteRoleServerGrantById,
+  deleteRoleToolGrantById,
+  deleteServerGrantById,
+  deleteToolGrantById,
+} from "./grant-revocation.js";
 import { resolveGuardrailPolicy, runGuardrails } from "./guardrails.js";
 import { callerProjectIds } from "./reporting.js";
+import { applyRuleEdit, isRuleEditRefusal } from "./rule-writes.js";
 
 const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
+
+/** L6b — the rule kind a proposal names, mapped to the `config_versions`
+ * ARTIFACT TYPE `applyRuleEdit` speaks. Same map the admin deploy-mode route
+ * uses; a rule kind outside it cannot be named, because the diff schema's enum
+ * and this map are the same three strings. */
+const APPLY_RULE_ARTIFACT_TYPES = {
+  approvals: "approval_rule",
+  "rate-limits": "rate_limit",
+  "data-scopes": "data_scope_rule",
+} as const;
 
 /** stable rule ids — the strings an operator greps the audit log for */
 export const COPILOT_RULE_IDS = {
@@ -111,6 +163,15 @@ export const COPILOT_RULE_IDS = {
   guardrailActed: "copilot-guardrail-acted",
   proposalOpened: "copilot-proposal-opened",
   proposalRefused: "copilot-proposal-refused",
+  /** L6b — the consent-gated applier */
+  proposalApplied: "copilot-proposal-applied",
+  proposalApplyRefused: "copilot-proposal-apply-refused",
+  /** ADR-0096 — entity-aware planning's three refusals, each its own row so an
+   * operator can tell "you named something I cannot see" from "your query
+   * matched nothing" from "this tool has no such filter" by grepping alone */
+  entityUnresolved: "copilot-refused-unresolved-entity",
+  entityAmbiguous: "copilot-refused-ambiguous-entity",
+  entityNotFilterable: "copilot-refused-entity-not-filterable",
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -174,6 +235,232 @@ function auditScopePredicate(projectIds: string[]) {
 }
 
 // ---------------------------------------------------------------------------
+// ADR-0096 — ENTITY RESOLUTION: the database decides, never the extractor
+// ---------------------------------------------------------------------------
+
+/**
+ * WHAT "IN YOUR SCOPE" MEANS PER KIND, and why each rule is a RE-USE.
+ *
+ * Entity resolution is a new read surface, and a new read surface is a new
+ * place for existence to leak. So no kind here gets a visibility rule invented
+ * for this feature; each one re-uses a predicate the product already enforces
+ * somewhere an auditor could check:
+ *
+ *   project    `scope.projectIds` — the very list every copilot retrieval is
+ *              already narrowed to (ADR-0047 `callerProjectIds`).
+ *   user       `scope.memberIds` — the members of those projects, the same list
+ *              the approvals retrieval already scopes on.
+ *   team       the teams the caller is a member of (`team_members`), the
+ *              tightest reading of "your team" and the one the SPA uses.
+ *   agent      the KERNEL's own answer: `evaluateAgent(...).effect === "allow"`,
+ *              the exact call an ordinary invoke makes. Not a hand-rolled join
+ *              over grant tables, which could drift from the enforcing path.
+ *   connector  the kernel's `evaluateConnector` at mode `read`, same reasoning.
+ *   vendor     `ai_vendors.owner_user_id = caller` — byte-identical to the
+ *              existing `GET /v1/vendors` rule for a non-admin.
+ *
+ * An admin is org-wide for all six, exactly as `resolveCopilotScope` already
+ * makes them org-wide for every ledger.
+ *
+ * AND THE RULE THAT MATTERS MOST: a candidate the caller may not see comes back
+ * as NOT FOUND. Not "found but hidden", not a different error — the same empty
+ * result a nonexistent name produces, so the refusal wording is byte-identical
+ * either way and the copilot cannot be used as an existence oracle.
+ */
+export type CopilotEntityResolution =
+  | { status: "none" }
+  | { status: "resolved"; entity: CopilotEntityRef }
+  | { status: "ambiguous"; matches: CopilotEntityMatch[] }
+  | { status: "unresolved"; candidates: string[] };
+
+const isUuid = (v: string) =>
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(v);
+
+/** case-insensitive exact match on a name column. `lower(col) = lower($1)` —
+ * never a LIKE: a prefix match would silently resolve "Payments" to "Payments
+ * Platform", which is the guessing this feature refuses to do. */
+const nameEq = (col: unknown, candidate: string) =>
+  sql`lower(${col}) = lower(${candidate})`;
+
+/**
+ * Resolve ONE candidate string against the governed object graph, entitlement
+ * -scoped. Returns every match across every kind — the caller decides what to
+ * do with zero, one, or many.
+ */
+async function lookupEntityCandidate(
+  db: Db,
+  candidate: string,
+  scope: CopilotScope,
+  actor: { userId: string; isAdmin: boolean },
+): Promise<CopilotEntityMatch[]> {
+  const byId = isUuid(candidate);
+  const out: CopilotEntityMatch[] = [];
+
+  // --- project: the caller's own project list, already resolved -------------
+  const projectRows = await db
+    .select({ id: projects.id, name: projects.name })
+    .from(projects)
+    .where(
+      and(
+        byId ? eq(projects.id, candidate) : nameEq(projects.name, candidate),
+        ...(scope.projectIds === null ? [] : [inArray(projects.id, safeIds(scope.projectIds))]),
+      ),
+    )
+    .limit(5);
+  for (const r of projectRows) out.push({ kind: "project", id: r.id, name: r.name });
+
+  // --- team: the teams this caller belongs to -------------------------------
+  const teamRows = actor.isAdmin
+    ? await db
+        .select({ id: teams.id, name: teams.name })
+        .from(teams)
+        .where(byId ? eq(teams.id, candidate) : nameEq(teams.name, candidate))
+        .limit(5)
+    : await db
+        .selectDistinct({ id: teams.id, name: teams.name })
+        .from(teams)
+        .innerJoin(teamMembers, eq(teamMembers.teamId, teams.id))
+        .where(
+          and(
+            byId ? eq(teams.id, candidate) : nameEq(teams.name, candidate),
+            eq(teamMembers.userId, actor.userId),
+          ),
+        )
+        .limit(5);
+  for (const r of teamRows) out.push({ kind: "team", id: r.id, name: r.name });
+
+  // --- user: email, username or display name, within the shared-project set -
+  const userRows = await db
+    .select({ id: users.id, displayName: users.displayName, email: users.email })
+    .from(users)
+    .where(
+      and(
+        byId
+          ? eq(users.id, candidate)
+          : or(
+              nameEq(users.email, candidate),
+              nameEq(users.username, candidate),
+              nameEq(users.displayName, candidate),
+            ),
+        ...(scope.memberIds === null ? [] : [inArray(users.id, safeIds(scope.memberIds))]),
+      ),
+    )
+    .limit(5);
+  for (const r of userRows) out.push({ kind: "user", id: r.id, name: r.displayName || r.email });
+
+  // --- agent: the KERNEL's own allow, one call per candidate row ------------
+  const agentRows = await db
+    .select()
+    .from(agents)
+    .where(byId ? eq(agents.id, candidate) : nameEq(agents.name, candidate))
+    .limit(5);
+  for (const a of agentRows) {
+    if (!actor.isAdmin) {
+      const decision = await agentDecision(db, actor.userId, a as AgentRow);
+      if (decision.effect !== "allow") continue;
+    }
+    out.push({ kind: "agent", id: a.id, name: a.name });
+  }
+
+  // --- connector: the kernel's own allow at mode `read` ---------------------
+  const connectorRows = await db
+    .select({ id: connectors.id, name: connectors.name })
+    .from(connectors)
+    .where(byId ? eq(connectors.id, candidate) : nameEq(connectors.name, candidate))
+    .limit(5);
+  if (connectorRows.length) {
+    const [grants, roleGrants, revocations] = actor.isAdmin
+      ? [[], [], []]
+      : await Promise.all([
+          db.select().from(connectorGrants).where(eq(connectorGrants.userId, actor.userId)),
+          loadRoleConnectorGrants(db, actor.userId),
+          loadConnectorRevocations(db, actor.userId),
+        ]);
+    for (const c of connectorRows) {
+      if (!actor.isAdmin) {
+        const decision = evaluateConnector({
+          userId: actor.userId,
+          connectorId: c.id,
+          connectorName: c.name,
+          operation: "read",
+          connectorGrants: grants,
+          roleConnectorGrants: roleGrants,
+          connectorRevocations: revocations,
+        });
+        if (decision.effect !== "allow") continue;
+      }
+      out.push({ kind: "connector", id: c.id, name: c.name });
+    }
+  }
+
+  // --- vendor: the SAME rule GET /v1/vendors already enforces ---------------
+  const vendorRows = await db
+    .select({ id: aiVendors.id, name: aiVendors.name })
+    .from(aiVendors)
+    .where(
+      and(
+        byId ? eq(aiVendors.id, candidate) : nameEq(aiVendors.name, candidate),
+        ...(actor.isAdmin ? [] : [eq(aiVendors.ownerUserId, actor.userId)]),
+      ),
+    )
+    .limit(5);
+  for (const r of vendorRows) out.push({ kind: "vendor", id: r.id, name: r.name });
+
+  return out;
+}
+
+/**
+ * Resolve every candidate a question produced.
+ *
+ * MULTIPLE RESOLVED ENTITIES IS AMBIGUITY, not an opportunity to pick one. A
+ * question naming two real objects cannot be answered by filtering on one of
+ * them and quietly dropping the other — that is the same lie as filtering on
+ * none and labelling the result with both.
+ */
+export async function resolveCopilotEntities(
+  db: Db,
+  candidates: readonly string[],
+  scope: CopilotScope,
+  actor: { userId: string; isAdmin: boolean },
+): Promise<CopilotEntityResolution> {
+  if (candidates.length === 0) return { status: "none" };
+
+  const resolved: CopilotEntityRef[] = [];
+  for (const candidate of candidates) {
+    const matches = await lookupEntityCandidate(db, candidate, scope, actor);
+    for (const m of matches) resolved.push({ ...m, matchedOn: candidate });
+  }
+  const distinct = resolved.filter(
+    (r, i) => resolved.findIndex((o) => o.kind === r.kind && o.id === r.id) === i,
+  );
+  if (distinct.length === 0) return { status: "unresolved", candidates: [...candidates] };
+  if (distinct.length > 1) return { status: "ambiguous", matches: distinct };
+  return { status: "resolved", entity: distinct[0]! };
+}
+
+/** the ledger each read tool reads, for the mismatch refusal's own words */
+const TOOL_LEDGER: Record<CopilotTool, string> = Object.fromEntries(
+  COPILOT_TOOL_SPECS.map((s) => [s.id, s.ledger]),
+) as Record<CopilotTool, string>;
+
+/** the members of a team or a project — the expansion a `team`/`project` filter
+ * uses on ledgers that carry a `user_id` and no object column of their own */
+async function memberIdsOf(db: Db, kind: CopilotEntityKind, id: string): Promise<string[]> {
+  if (kind === "team") {
+    const rows = await db
+      .selectDistinct({ userId: teamMembers.userId })
+      .from(teamMembers)
+      .where(eq(teamMembers.teamId, id));
+    return rows.map((r) => r.userId);
+  }
+  const rows = await db
+    .selectDistinct({ userId: projectMembers.userId })
+    .from(projectMembers)
+    .where(eq(projectMembers.projectId, id));
+  return rows.map((r) => r.userId);
+}
+
+// ---------------------------------------------------------------------------
 // Timeframes
 // ---------------------------------------------------------------------------
 
@@ -222,6 +509,36 @@ export function resolveCopilotTimeframe(
  * bounded surface. */
 const SAMPLE_LIMIT = 5;
 
+/**
+ * ADR-0096 — the subject filter for the `approvals` ledger, in ONE place
+ * because TWO tools read it (`listApprovals`, and `listAnomalies`' instant
+ * decision half). Two copies could disagree, and a disagreement here would
+ * mean an anomaly report narrowed differently from the approvals report over
+ * the same subject.
+ *
+ * A `project` filter is the OR of the two ways an approval belongs to one:
+ * `project_id` (set on pillar-5 budget escalations) and "raised by a member of
+ * that project", which is how the tool's own entitlement scope already reads
+ * this ledger. Narrower than either alone would drop real rows.
+ */
+function approvalEntityPredicates(
+  entity: CopilotEntityRef | null,
+  members: readonly string[],
+): ReturnType<typeof eq>[] {
+  if (!entity) return [];
+  if (entity.kind === "user") return [eq(approvals.userId, entity.id)];
+  if (entity.kind === "team") return [inArray(approvals.userId, safeIds([...members]))];
+  if (entity.kind === "project") {
+    return [
+      or(eq(approvals.projectId, entity.id), inArray(approvals.userId, safeIds([...members])))!,
+    ];
+  }
+  // agent / connector / vendor never reach here: `COPILOT_ENTITY_FILTER_MATRIX`
+  // excludes them for every tool that reads this ledger, and the route refuses
+  // the pair before retrieval runs.
+  return [];
+}
+
 export async function retrieveEvidence(
   db: Db,
   plan: CopilotQueryPlan,
@@ -237,6 +554,10 @@ export async function retrieveEvidence(
     counts: [],
     samples: [],
     leads: [],
+    // L6a: filled from the SAME scoped selects below. A citable object is a
+    // primary key the caller's own retrieval actually returned — never an id
+    // assembled from a count, and never one from an unscoped query.
+    citableObjects: [],
   };
 
   // THE SCOPE PREDICATES. Built once, applied to every query below. Note they
@@ -247,15 +568,50 @@ export async function retrieveEvidence(
   const usageScope =
     scope.projectIds === null ? [] : [inArray(usageEvents.projectId, safeIds(scope.projectIds))];
 
+  // ADR-0096 — THE ENTITY FILTER, built into the SAME `where` as the scope, at
+  // construction time. A subject filter applied to a result set afterwards
+  // would have already read every row it then discards, which is the exact
+  // mistake `resolveCopilotScope`'s own comment warns about for entitlement.
+  //
+  // The route guarantees this branch is only reached for a (tool, kind) pair
+  // `COPILOT_ENTITY_FILTER_MATRIX` admits, so there is no silent fall-through:
+  // an unsupported pair was refused before retrieval ran.
+  const entity = plan.entity;
+  const entityMembers =
+    entity && (entity.kind === "team" || entity.kind === "project")
+      ? await memberIdsOf(db, entity.kind, entity.id)
+      : [];
+
   if (plan.tool === "queryAuditDecisions" || plan.tool === "listAnomalies") {
+    // `audit_log` carries no project column; attribution rides
+    // `detail->>'projectId'`, the same key the scope predicate reads.
+    const entityAudit = !entity
+      ? []
+      : entity.kind === "project"
+        ? [sql`${auditLog.detail} ->> 'projectId' = ${assertUuid(entity.id)}`]
+        : entity.kind === "team"
+          ? [inArray(auditLog.userId, safeIds(entityMembers))]
+          : entity.kind === "user"
+            ? [eq(auditLog.userId, entity.id)]
+            : [
+                // agent / connector: the object THIS row was about. The entity's
+                // own class REPLACES any keyword-derived `objectType` — a
+                // question naming an agent is about that agent whatever other
+                // class word it happens to contain, and ANDing the two would
+                // silently return zero rows instead of an answer.
+                eq(auditLog.objectType, entity.kind as (typeof auditLog.objectType)["_"]["data"]),
+                eq(auditLog.objectId, entity.id),
+              ];
+    const entityOwnsObjectType = entity?.kind === "agent" || entity?.kind === "connector";
     const where = and(
       gte(auditLog.at, start),
       lt(auditLog.at, end),
       ...(plan.params.effect ? [eq(auditLog.effect, plan.params.effect)] : []),
-      ...(plan.params.objectType
+      ...(plan.params.objectType && !entityOwnsObjectType
         ? [eq(auditLog.objectType, plan.params.objectType as (typeof auditLog.objectType)["_"]["data"])]
         : []),
       ...auditScope,
+      ...entityAudit,
     );
     const [total, byEffect, topRules, samples] = await Promise.all([
       db.select({ n: count() }).from(auditLog).where(where),
@@ -268,13 +624,22 @@ export async function retrieveEvidence(
         .orderBy(desc(count()))
         .limit(5),
       db
-        .select({ ruleId: auditLog.ruleId, reason: auditLog.reason })
+        .select({ id: auditLog.id, ruleId: auditLog.ruleId, reason: auditLog.reason, effect: auditLog.effect })
         .from(auditLog)
         .where(where)
         .orderBy(desc(auditLog.at))
         .limit(SAMPLE_LIMIT),
     ]);
     base.rowsExamined = total[0]?.n ?? 0;
+    // L6a — THE CITABLE SET. Ids from the SAME `where` the counts came from,
+    // so an answer can be walked back to concrete rows. The LABEL is the
+    // effect + rule id (facts this gateway wrote), never the `reason` string,
+    // which is the attacker-influenceable half and is handled as a sample.
+    base.citableObjects = samples.map((s) => ({
+      kind: "audit_log" as const,
+      id: s.id,
+      label: `${s.effect} · ${s.ruleId}`,
+    }));
     base.counts.push({ key: "decisions", label: "governance decisions", value: base.rowsExamined });
     for (const e of byEffect) {
       base.counts.push({ key: `effect.${e.effect}`, label: `decisions with effect '${e.effect}'`, value: e.n });
@@ -304,6 +669,12 @@ export async function retrieveEvidence(
             lt(approvals.requestedAt, end),
             inArray(approvals.status, ["approved", "denied"]),
             ...memberScope,
+            // ADR-0096: the SECOND ledger this tool reads gets the same subject
+            // filter as the first. `listAnomalies` supports only the kinds BOTH
+            // halves can narrow (the matrix says so), so a half-narrowed
+            // anomaly report — one lead about your subject, one about
+            // everything — is unreachable rather than merely discouraged.
+            ...approvalEntityPredicates(entity, entityMembers),
           ),
         );
       const rubber = fast.filter(
@@ -328,22 +699,59 @@ export async function retrieveEvidence(
       lt(approvals.requestedAt, end),
       ...(plan.params.status ? [eq(approvals.status, plan.params.status)] : []),
       ...memberScope,
+      ...approvalEntityPredicates(entity, entityMembers),
     );
-    const [total, byStatus] = await Promise.all([
+    const [total, byStatus, rows] = await Promise.all([
       db.select({ n: count() }).from(approvals).where(where),
       db.select({ status: approvals.status, n: count() }).from(approvals).where(where).groupBy(approvals.status),
+      db
+        .select({ id: approvals.id, status: approvals.status, objectType: approvals.objectType })
+        .from(approvals)
+        .where(where)
+        .orderBy(desc(approvals.requestedAt))
+        .limit(SAMPLE_LIMIT),
     ]);
     base.rowsExamined = total[0]?.n ?? 0;
     base.counts.push({ key: "approvals", label: "approvals requested", value: base.rowsExamined });
     for (const s of byStatus) {
       base.counts.push({ key: `status.${s.status}`, label: `approvals in state '${s.status}'`, value: s.n });
     }
+    base.citableObjects = rows.map((r) => ({
+      kind: "approval" as const,
+      id: r.id,
+      label: `${r.objectType} · ${r.status}`,
+    }));
     return base;
   }
 
   // summarizeUsage
-  const where = and(gte(usageEvents.at, start), lt(usageEvents.at, end), ...usageScope);
-  const [total, grouped] = await Promise.all([
+  const entityUsage = !entity
+    ? []
+    : entity.kind === "project"
+      ? [eq(usageEvents.projectId, entity.id)]
+      : entity.kind === "team"
+        ? [inArray(usageEvents.userId, safeIds(entityMembers))]
+        : entity.kind === "user"
+          ? [eq(usageEvents.userId, entity.id)]
+          : entity.kind === "agent"
+            ? // BOTH agent columns: a right-sized routing decision (ADR-0095)
+              // makes `agent_id` the SERVED agent and `requested_agent_id` the
+              // one the caller asked for. "Spend on agent X" honestly covers
+              // both, and covering only one would under-report the answer.
+              [
+                or(
+                  eq(usageEvents.agentId, entity.id),
+                  eq(usageEvents.requestedAgentId, entity.id),
+                )!,
+              ]
+            : [eq(usageEvents.connectorId, entity.id)];
+  const where = and(
+    gte(usageEvents.at, start),
+    lt(usageEvents.at, end),
+    ...usageScope,
+    ...entityUsage,
+  );
+  const [total, grouped, rows] = await Promise.all([
     db.select({ n: count() }).from(usageEvents).where(where),
     db
       .select({
@@ -356,8 +764,19 @@ export async function retrieveEvidence(
       .groupBy(usageEvents.projectId)
       .orderBy(desc(count()))
       .limit(10),
+    db
+      .select({ id: usageEvents.id, provider: usageEvents.provider, model: usageEvents.model })
+      .from(usageEvents)
+      .where(where)
+      .orderBy(desc(usageEvents.at))
+      .limit(SAMPLE_LIMIT),
   ]);
   base.rowsExamined = total[0]?.n ?? 0;
+  base.citableObjects = rows.map((r) => ({
+    kind: "usage_event" as const,
+    id: r.id,
+    label: `${r.provider} · ${r.model}`,
+  }));
   base.counts.push({ key: "calls", label: "measured model/tool calls", value: base.rowsExamined });
   for (const g of grouped) {
     base.counts.push({
@@ -404,7 +823,17 @@ export class ModelBackedNarrator implements CopilotNarrator {
       // no routing counterfactual: the narrator is pinned by the caller
       baseline: null,
       input: buildNarrationPrompt(req),
-      maxTokens: 1024,
+      // L6a — 1024 WAS TOO SMALL, and the failure was measured, not guessed.
+      // Against a live reasoning model the narration came back truncated
+      // (`finishReason: MAX_TOKENS`, 981 thought tokens against a 1024 ceiling,
+      // 39 tokens of actual JSON) and was correctly discarded as unparseable —
+      // so the copilot could never narrate at all on such a model. Re-running
+      // the IDENTICAL prompt with a 4096 ceiling finished cleanly (`STOP`,
+      // 1688 thought tokens, complete JSON citing the real object ids), which
+      // is what proves the ceiling was the cause rather than the prompt. This
+      // is an output CEILING, not a spend: a non-reasoning model still emits
+      // its ~200-token reply and bills for that.
+      maxTokens: 4096,
       projectId: this.ctx.projectId,
       detail: { purpose: "copilot-narration", tool: req.plan.tool },
     });
@@ -531,6 +960,112 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
     const now = new Date();
     const plan = planCopilotQuery(body.question);
     const scope = await resolveCopilotScope(db, { userId, isAdmin: req.authCtx.isAdmin });
+
+    // -----------------------------------------------------------------------
+    // ADR-0096 — ENTITY-AWARE PLANNING, BEFORE ANY RETRIEVAL RUNS.
+    //
+    // The question's proposed subjects are resolved against the real object
+    // graph under this caller's own entitlements. Three of the four outcomes
+    // end the request here, with nothing retrieved and nothing narrated:
+    // running a broad query and labelling its findings with the caller's words
+    // is the fabrication ADR-0056's L6d amendment could only caveat, and this
+    // is where it stops being possible.
+    // -----------------------------------------------------------------------
+    const resolution = await resolveCopilotEntities(db, plan.entityCandidates, scope, {
+      userId,
+      isAdmin: req.authCtx.isAdmin,
+    });
+
+    if (resolution.status === "unresolved") {
+      // WORDED IDENTICALLY whether the object does not exist or exists
+      // somewhere this caller may not read — the copilot is not an existence
+      // oracle. The candidates are echoed because they are the caller's OWN
+      // words; nothing about any object is disclosed.
+      const detail = copilotEntityUnresolvedRefusal(resolution.candidates);
+      await audit(
+        userId,
+        "copilot_query",
+        null,
+        COPILOT_RULE_IDS.entityUnresolved,
+        `refused a copilot question naming a subject that resolved to no governed object in this ` +
+          `caller's scope (${resolution.candidates.join(", ")}). Answering it would have meant ` +
+          `running '${plan.tool}' unfiltered and presenting org-wide findings as that subject's — ` +
+          `real numbers under a name nobody searched for`,
+        { candidates: resolution.candidates, tool: plan.tool },
+        "deny",
+      );
+      return reply.status(422).send({
+        error: "copilot_entity_unresolved",
+        detail,
+        candidates: resolution.candidates,
+        plan,
+        scopeCaveat: COPILOT_SCOPE_CAVEAT,
+      });
+    }
+
+    if (resolution.status === "ambiguous") {
+      const detail = copilotEntityAmbiguousRefusal(resolution.matches);
+      await audit(
+        userId,
+        "copilot_query",
+        null,
+        COPILOT_RULE_IDS.entityAmbiguous,
+        `refused a copilot question whose subject matched ${resolution.matches.length} governed ` +
+          `objects in this caller's scope — narrowing to one of them by a tiebreak would attach ` +
+          `real records to a subject the caller never chose`,
+        { matches: resolution.matches, tool: plan.tool },
+        "deny",
+      );
+      return reply.status(422).send({
+        error: "copilot_entity_ambiguous",
+        detail,
+        candidates: resolution.matches,
+        plan,
+        scopeCaveat: COPILOT_SCOPE_CAVEAT,
+      });
+    }
+
+    if (resolution.status === "resolved") {
+      const { entity } = resolution;
+      if (!copilotToolSupportsEntityKind(plan.tool, entity.kind)) {
+        // RESOLVED, AND STILL REFUSED. The subject is real and visible; the
+        // ledger this tool reads simply has no column for it. Running anyway
+        // and captioning the result with the subject's name is the same lie as
+        // the unresolved case, so it gets the same treatment — plus the names
+        // of the tools that CAN answer.
+        const detail = copilotEntityNotFilterableRefusal(plan.tool, TOOL_LEDGER[plan.tool], entity);
+        await audit(
+          userId,
+          "copilot_query",
+          null,
+          COPILOT_RULE_IDS.entityNotFilterable,
+          `refused a copilot question whose subject resolved to the ` +
+            `${COPILOT_ENTITY_KIND_LABELS[entity.kind]} '${entity.name}' (${entity.id}) but whose ` +
+            `planned tool '${plan.tool}' reads a ledger with no ${entity.kind} column — the query ` +
+            `could not be narrowed to the subject, and running it unfiltered would have produced ` +
+            `real findings labelled with a subject nobody filtered on`,
+          {
+            entity: { kind: entity.kind, id: entity.id },
+            tool: plan.tool,
+            toolsThatCanFilter: copilotToolsFilteringEntityKind(entity.kind),
+          },
+          "deny",
+        );
+        return reply.status(422).send({
+          error: "copilot_tool_cannot_filter_entity",
+          detail,
+          entity,
+          tool: plan.tool,
+          toolsThatCanFilter: copilotToolsFilteringEntityKind(entity.kind),
+          plan,
+          scopeCaveat: COPILOT_SCOPE_CAVEAT,
+        });
+      }
+      // THE CASE THAT MAKES THE FEATURE TRUE: the plan now carries a real
+      // filter, and every SELECT below is built with it.
+      plan.entity = entity;
+    }
+
     const evidence = await retrieveEvidence(db, plan, scope, now);
 
     // ADR-0042 — THE INJECTION SURFACE. Retrieved `reason` strings are text an
@@ -564,6 +1099,9 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
     let generation: "grounded" | "model" = "grounded";
     let narratorAgentId: string | null = null;
     let narrationError: string | null = null;
+    /** L6a: true only once a narration has PASSED `narrationIsGrounded` */
+    let narrationGroundingChecked = false;
+    let narrationRefused = false;
 
     if (body.narratorAgentId) {
       const [agent] = await db.select().from(agents).where(eq(agents.id, body.narratorAgentId));
@@ -603,6 +1141,8 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
         answerText = `${grounded.text}\n\n--- narration ---\n${narration.text}`;
         generation = "model";
         narratorAgentId = agent.id;
+        narrationGroundingChecked = true;
+        narrationRefused = narration.refused;
       } catch (err) {
         // THE GROUNDED ANSWER STANDS. A narration that failed, or that cited a
         // figure the retrieval never produced, is DISCARDED — never merged in
@@ -657,20 +1197,66 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
         rowsExamined: evidence.rowsExamined,
         generation,
         guardrailAction,
+        // L6d — and the honest record of what it NARROWED ON. "Were those
+        // figures actually about the thing that question named?" has to stay
+        // answerable from the ledger alone, long after the answer text is gone.
+        filters: describeCopilotFilters(plan.params, plan.entity),
+        subjectFiltered: grounded.subjectFiltered,
+        // ADR-0096 — the RESOLVED SUBJECT, by id and kind, on the row an
+        // auditor reads. "Was that answer actually about the thing I asked?"
+        // is now answerable with a primary key rather than an inference.
+        entity: plan.entity
+          ? { kind: plan.entity.kind, id: plan.entity.id, matchedOn: plan.entity.matchedOn }
+          : null,
+        entityCandidates: plan.entityCandidates,
       },
     );
 
     return reply.status(201).send({
       query: { ...row, evidence: undefined },
       plan,
-      answer: { ...grounded, text: answerText, generation },
+      answer: {
+        ...grounded,
+        text: answerText,
+        generation,
+        // L6a — an HONEST per-answer flag, not a build-wide constant. True means
+        // exactly one thing: THIS narration was cross-checked against THIS
+        // retrieval's counts and object ids and passed. It is never a claim
+        // that the model is generally reliable.
+        modelNarrationVerified: narrationGroundingChecked,
+        // the refusal is the grounded layer's, or the model's own agreement
+        // with it — either way the caller sees "nothing to answer from"
+        groundedRefusal: grounded.groundedRefusal || narrationRefused,
+      },
       evidence,
       scope: { projectIds: scope.projectIds, statement: scope.statement },
       ...(narrationError ? { narrationDiscarded: narrationError } : {}),
       note:
-        "The retrieval, scoping and grounding above are real and tested. NO MODEL PROVIDER IS " +
-        "CONNECTED IN THIS BUILD, so any narration path is unverified — `modelNarrationVerified` is " +
-        "false on every answer.",
+        (grounded.subjectFiltered
+          ? ""
+          : `${grounded.unfilteredSubjectCaveat} `) +
+        // ADR-0096 — when a subject WAS resolved, the note leads with what the
+        // query was narrowed to, by id. The caveat's absence is not evidence
+        // of narrowing; this sentence is.
+        (plan.entity
+          ? `SUBJECT RESOLVED AND FILTERED. "${plan.entity.matchedOn}" in your question resolved to ` +
+            `the ${COPILOT_ENTITY_KIND_LABELS[plan.entity.kind]} '${plan.entity.name}' ` +
+            `(${plan.entity.id}) in your own scope, and every figure above was retrieved with that ` +
+            `as a SQL filter. `
+          : "") +
+        (narrationGroundingChecked
+          ? "The retrieval, scoping and grounding above are real and tested. A model narration was " +
+            "added on top and CROSS-CHECKED against this retrieval — every count key and every " +
+            "governance-object id it cited was one this caller's own scoped query returned. That " +
+            "cross-check covers the FIGURES AND IDS ONLY: it does not, and cannot, verify that the " +
+            "narration attributed them to the right subject. The counts remain the authoritative " +
+            "answer; the narration is prose over them."
+          : narrationError
+            ? "The retrieval, scoping and grounding above are real and tested. A model narration was " +
+              "attempted and DISCARDED (see `narrationDiscarded`); the grounded, count-derived answer " +
+              "stands alone."
+            : "The retrieval, scoping and grounding above are real and tested. No narrator agent was " +
+              "named, so this answer is the grounded, count-derived one and no model was called."),
     });
   });
 
@@ -775,6 +1361,233 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
       proposal,
       approvalId: approval!.id,
       note: record.note,
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // L6b — THE CONSENT-GATED APPLIER.
+  //
+  // ADR-0056's amendment named this gap outright: "an approved proposal is not
+  // applied by anything… the worked example loop stops at 'approved', not at
+  // 'revoked'." This closes it, and the shape of the closure is the whole
+  // point:
+  //
+  //  * CONSENT FIRST. The gate is the LINKED APPROVAL's status in the ONE
+  //    existing approvals queue — reused, never forked. Pending, denied, and
+  //    "no approval row at all" each refuse by their own name, audited, with
+  //    the mutation not attempted.
+  //  * THROUGH THE PUBLIC DOOR, NEVER PAST IT. A rule edit rides `applyRuleEdit`
+  //    (ADR-0074's one choke point, so a versioned rule mints and activates a
+  //    version instead of silently drifting); a grant removal rides the
+  //    one-per-kind function in `grant-revocation.ts` that `DELETE /v1/grants/…`
+  //    and an ADR-0090 campaign's revoke decision both call. There is no raw
+  //    table write in this handler, and a kind whose change has no such door
+  //    is REFUSED BY NAME rather than approximated.
+  //  * ATTRIBUTED TO THE HUMAN. The audit row is written under the applying
+  //    admin's identity with the proposal as context. The copilot proposed;
+  //    a named person consented; a named person applied.
+  //  * ONCE. `applied_at` is the idempotency gate — a second apply is refused,
+  //    never re-executed.
+  // -------------------------------------------------------------------------
+  app.post("/v1/copilot/proposals/:proposalId/apply", async (req, reply) => {
+    const { proposalId } = z.object({ proposalId: z.string().uuid() }).parse(req.params);
+    const userId = req.authCtx.userId ?? null;
+
+    const [proposal] = await db.select().from(copilotProposals).where(eq(copilotProposals.id, proposalId));
+    if (!proposal) return reply.status(404).send({ error: "unknown_copilot_proposal" });
+
+    /** every refusal takes this path: audited as a deny, naming the proposal */
+    const refuse = async (status: number, error: string, detail: string, extra: Record<string, unknown> = {}) => {
+      await audit(
+        userId,
+        "copilot_proposal",
+        proposal.id,
+        COPILOT_RULE_IDS.proposalApplyRefused,
+        `refused to apply copilot proposal '${proposal.title}' (${proposal.kind}): ${detail}`,
+        { kind: proposal.kind, error, ...extra },
+        "deny",
+      );
+      return reply.status(status).send({ error, detail });
+    };
+
+    // ALREADY APPLIED. Checked before consent so a replay cannot re-execute a
+    // mutation just because the approval is still 'approved'.
+    if (proposal.appliedAt) {
+      return refuse(
+        409,
+        "proposal_already_applied",
+        `this proposal was already applied at ${proposal.appliedAt.toISOString()}. Applying is a ` +
+          `mutation, so it happens once; propose a new change rather than re-applying this one.`,
+        { appliedAt: proposal.appliedAt.toISOString() },
+      );
+    }
+
+    // ---- THE CONSENT GATE ---------------------------------------------------
+    if (!proposal.approvalId) {
+      return refuse(
+        409,
+        "proposal_has_no_approval",
+        "this proposal carries no Approvals-Queue item, so no human has consented to it. The " +
+          "copilot's only route to a change is a proposal a named human approves.",
+      );
+    }
+    const [approval] = await db.select().from(approvals).where(eq(approvals.id, proposal.approvalId));
+    if (!approval) {
+      return refuse(
+        409,
+        "proposal_approval_missing",
+        "the Approvals-Queue item this proposal was opened against no longer exists, so there is " +
+          "no recorded consent to apply.",
+        { approvalId: proposal.approvalId },
+      );
+    }
+    if (approval.status !== "approved") {
+      return refuse(
+        409,
+        "proposal_not_approved",
+        `the linked approval is '${approval.status}', not 'approved'. A copilot proposal is applied ` +
+          `only on a named human's recorded consent through the one approvals queue — the copilot ` +
+          `cannot consent on anyone's behalf and neither can this endpoint.`,
+        { approvalId: approval.id, approvalStatus: approval.status },
+      );
+    }
+
+    // ---- THE KIND GATE ------------------------------------------------------
+    if (!copilotProposalKindIsApplicable(proposal.kind)) {
+      return refuse(
+        422,
+        "proposal_kind_not_applicable",
+        COPILOT_UNAPPLICABLE_PROPOSAL_KINDS[proposal.kind] ??
+          `there is no public endpoint that applies a '${proposal.kind}' proposal, and this endpoint ` +
+            `will not write the change directly.`,
+        { applicableKinds: COPILOT_APPLICABLE_PROPOSAL_KINDS },
+      );
+    }
+
+    // ---- THE MUTATION, THROUGH THE PUBLIC DOOR ------------------------------
+    let applied: Record<string, unknown>;
+    let reason: string;
+
+    if (proposal.kind === "grant_revocation") {
+      const parsedDiff = copilotGrantRevocationDiffSchema.safeParse(proposal.diff);
+      if (!parsedDiff.success) {
+        return refuse(
+          422,
+          "proposal_diff_invalid",
+          `a grant_revocation diff must name {grantKind, grantId}; this one does not (${parsedDiff.error.issues
+            .map((i) => i.path.join(".") || "(root)")
+            .join(", ")}).`,
+        );
+      }
+      const { grantKind, grantId } = parsedDiff.data;
+      // ADR-0090's ONE removal implementation per kind — the exact function the
+      // DELETE endpoints and a campaign's revoke decision call. Not a copy.
+      const removers = {
+        agent: deleteAgentGrantById,
+        connector: deleteConnectorGrantById,
+        tool: deleteToolGrantById,
+        server: deleteServerGrantById,
+        role_agent: deleteRoleAgentGrantById,
+        role_connector: deleteRoleConnectorGrantById,
+        role_tool: deleteRoleToolGrantById,
+        role_server: deleteRoleServerGrantById,
+      } as const;
+      const removed = await removers[grantKind](db, grantId);
+      if (!removed) {
+        return refuse(
+          404,
+          "proposal_target_gone",
+          `the ${grantKind} grant this proposal names (${grantId}) no longer exists — nothing was ` +
+            `removed, and the proposal stays unapplied so the record does not claim a change that ` +
+            `did not happen.`,
+          { grantKind, grantId },
+        );
+      }
+      applied = { via: "grant-revocation", grantKind, grantId, removed: true };
+      reason =
+        `applied copilot proposal '${proposal.title}': removed ${grantKind} grant ${grantId} through the ` +
+        `same one-per-kind removal the DELETE /v1/grants endpoints and an ADR-0090 campaign's revoke ` +
+        `decision use. Consent came from approval ${approval.id}; this act is attributed to the ` +
+        `applying admin, not to the copilot`;
+    } else {
+      const parsedDiff = copilotPolicyTighteningDiffSchema.safeParse(proposal.diff);
+      if (!parsedDiff.success) {
+        return refuse(
+          422,
+          "proposal_diff_invalid",
+          `a policy_tightening diff must name {ruleKind, ruleId, patch}; this one does not (${parsedDiff.error.issues
+            .map((i) => i.path.join(".") || "(root)")
+            .join(", ")}).`,
+        );
+      }
+      const { ruleKind, ruleId, patch } = parsedDiff.data;
+      const artifactType = APPLY_RULE_ARTIFACT_TYPES[ruleKind];
+      // ADR-0074's ONE DOOR. Never a `.update()` on the rule table: a versioned
+      // rule must mint and activate, or the admin sees an edit that enforces
+      // nothing — which in a governance product is worse than a refusal.
+      const res = await applyRuleEdit(db, {
+        artifactType,
+        artifactId: ruleId,
+        patch,
+        actorUserId: userId,
+        label: `applied copilot proposal ${proposal.id}`,
+        reason:
+          `${ruleKind} rule tightened by applying copilot proposal '${proposal.title}' ` +
+          `(approval ${approval.id})`,
+        auditObjectType: "restriction_rule",
+        auditRuleId: "copilot-proposal-rule-edit",
+        auditDetail: {
+          phase: "copilot-proposal-apply",
+          ruleKind,
+          copilotProposalId: proposal.id,
+          approvalId: approval.id,
+        },
+      });
+      if (isRuleEditRefusal(res)) {
+        // THE CHOKE POINT'S OWN REFUSAL, SURFACED VERBATIM. The applier does not
+        // get a way around a refusal an admin editing by hand would hit.
+        return refuse(res.status, res.error, res.detail, { ruleKind, ruleId });
+      }
+      applied = {
+        via: "applyRuleEdit",
+        ruleKind,
+        ruleId,
+        versionMinted: res.mintedVersion,
+        note: res.note,
+      };
+      reason =
+        `applied copilot proposal '${proposal.title}': edited ${ruleKind} rule ${ruleId} through ` +
+        `applyRuleEdit, ADR-0074's single door for every rule-table write` +
+        (res.mintedVersion ? ` (config version minted and activated)` : ` (unversioned rule: plain row write)`) +
+        `. Consent came from approval ${approval.id}; this act is attributed to the applying admin, ` +
+        `not to the copilot`;
+    }
+
+    const [updated] = await db
+      .update(copilotProposals)
+      .set({ appliedAt: new Date(), appliedByUserId: userId, appliedResult: applied })
+      .where(eq(copilotProposals.id, proposal.id))
+      .returning();
+
+    await audit(userId, "copilot_proposal", proposal.id, COPILOT_RULE_IDS.proposalApplied, reason, {
+      kind: proposal.kind,
+      approvalId: approval.id,
+      // THE PROPOSAL AS CONTEXT: what was proposed, on what evidence, and what
+      // the choke point actually did — all on the one row an auditor reads.
+      copilotProposalId: proposal.id,
+      copilotQueryId: proposal.queryId,
+      proposedByUserId: proposal.proposedByUserId,
+      diff: proposal.diff,
+      applied,
+    });
+
+    return reply.send({
+      proposal: updated,
+      applied,
+      note:
+        "APPLIED UNDER THE ADMIN'S OWN IDENTITY, through the same public endpoint an admin would " +
+        "use by hand. The copilot proposed the change and a named human approved it; neither the " +
+        "copilot nor this endpoint may apply anything that is not approved.",
     });
   });
 

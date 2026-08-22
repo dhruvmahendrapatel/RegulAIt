@@ -167,3 +167,107 @@ asserts the campaign items match the flagged set against the gateway's own APIs.
 7. **`never_authenticated` is a floor over recorded state**, not an HR feed: a user who
    authenticated before this deployment recorded sessions reads as never-authenticated only if
    truly nothing (session, key use, usage) names them.
+
+## Amendment — 2026-08-22: the MODEL-JUDGED half, as an annotation and nothing else (L6c, migration 0100)
+
+This ADR's honest limit #1 said "the deterministic/model-judged split is the
+product… the embedded copilot are the L6-blocked half; nothing here imitates
+them". The L6 wall is down (ADR-0056 amendment, same date), so the judged half
+is now buildable. This amendment is a **delta**: every deterministic rule,
+every disclosure and every limit above stands unchanged, and that is the point
+— the judged layer is added BESIDE them and can reach none of them.
+
+### What was built
+
+An **opt-in, default-off ANNOTATION** on findings the deterministic rules
+already produced. Five properties, each structural rather than promised:
+
+1. **Default off (the batch-B3 idiom).** `org_settings.recommendation_judge_enabled`
+   ships `false` and `recommendation_judge_agent_id` ships null, so an
+   untouched deployment's report is byte-identical to what this ADR shipped.
+   The report ALWAYS carries a `judged` field, whose off-state says so outright
+   rather than leaving the absence implied.
+2. **It cannot create a recommendation.** Every finding now carries a stable
+   deterministic `key` (rule + grant row, or rule + holder for the
+   identity-shaped SoD findings), minted as the finding is created.
+   `annotationsForFindings` is handed exactly that key set and DROPS any
+   verdict keyed to anything else — so a judge that invents
+   `peer-analytics:user:u9` produces nothing at all.
+3. **It cannot alter deterministic evidence.** `annotateReportWithJudge`
+   assigns exactly two things: `report.judged`, and `finding.judged` on
+   findings already present. It never assigns `evidence`, `rationale`,
+   `severity`, `counts` or `action`, and it never reorders. The suite asserts
+   the whole deterministic half is **byte-identical** between a knob-off run
+   and a knob-on annotated run.
+4. **Every annotation is LABELLED.** `method: "model-judged"` is stamped, not
+   defaulted, and each annotation carries `RECOMMENDATION_JUDGE_LIMITS`
+   verbatim: advisory, not evidence, did not create the finding, cannot change
+   severity, and **does not clear a grant** — only a named human's decision
+   does. Severity remains a class; the judged layer adds no number, so nothing
+   here can be mistaken for the trust score this ADR refused to ship.
+5. **A missing instrument is SAID, never a silent downgrade.** Availability
+   rides ADR-0067's own `judgeAvailabilityFor` — the same typed refusal the
+   eval runner uses. Enabled with no judge named → `judged: unavailable`,
+   `judge_required`. Enabled with an unreachable/uncredentialed judge, or a
+   judge that throws or returns an unusable reply → `judged: unavailable`,
+   `judge_not_dispatchable`, with the reason verbatim. In every case the
+   deterministic report is returned **unchanged**: an unannotated report from a
+   working judge and one from a missing judge are different facts.
+
+The judge is `ModelBackedRecommendationJudge`, an ordinary governed dispatch
+through `executeGovernedDispatch` — the caller's entitlements, the caller's
+budget, the PII cascade, the guardrails, and a metered `usage_events` row
+billing the named project. It is a tenant, exactly like the copilot's narrator.
+
+**The campaign feed is deliberately untouched.** `computeRecommendedGrantRefs`
+takes no judge and never will: the ONLY action path stays deterministic, so a
+disagreeing model cannot shrink what a certification campaign reviews. The
+suite pins this with a judge that disagrees with everything.
+
+### Non-vacuity (M-002 — MEASURED, then reverted by exact Edit reversal)
+
+- **Let the judged layer mutate a deterministic field** (`f.evidence = { ...f.evidence, judgeVerdict: a.verdict }`
+  beside the annotation): **1 test reddens** — "ANNOTATES findings when enabled
+  and a judge is reachable", on its byte-identical deterministic-shape
+  assertion. The containment assertion is what catches it, which is the point:
+  the shape comparison is the guard, not the annotation's own presence.
+- The shared suite additionally pins the containment function directly: a
+  verdict keyed to an invented finding is dropped, a repeated key cannot
+  double-annotate, and an unparseable or empty reply is an ERROR rather than
+  zero verdicts.
+
+### Live verification (2026-08-22, Google/Gemini)
+
+Knob off → `judged: {enabled:false}`, 40 findings, 0 annotations. Knob on with
+no judge named → `judged: unavailable / judge_required`, deterministic half
+identical. Knob on with the live agent → `judged: judged`, `judge:
+model:gemini-pro`, **40 of 40 annotated**, every annotation
+`method: "model-judged"`, the finding key set unchanged, and the deterministic
+half **byte-identical** to the knob-off run. Metered: 5086 in / 3431 out,
+$0.0407, attributed to the named project.
+
+### Honest limits added by this amendment
+
+1. **The judged layer is advisory and unverified as a judgement.** That a model
+   said "agree" is a fact about the model, not about the grant. On the live run
+   it agreed with all 40 findings — which is as consistent with a well-behaved
+   judge as with an agreeable one, and this build cannot tell those apart.
+   Nothing downstream reads the verdict.
+2. **Batching is disclosed, not unlimited.** `RECOMMENDATION_JUDGE_MAX_FINDINGS`
+   is 20 (measured down from 40: a 40-finding batch cost 3431 output tokens on
+   top of 2615 thought tokens, and a second identical run truncated instead and
+   correctly reported `judged: unavailable`). A report larger than one batch
+   states how many findings were sent, so partial annotation is visible rather
+   than silent.
+3. **One live model, one run**, as in the ADR-0056 amendment.
+4. **The judge sees rendered rationales and evidence maps, not the ledgers.**
+   It cannot re-derive a finding; it can only assess the evidence it is shown.
+   That is deliberate — a judge with ledger access would be a second, unaudited
+   read path — but it bounds what its opinion can be worth.
+
+### Migration
+
+`0100_copilot_apply_and_judged_recommendations.sql` — `org_settings` gains
+`recommendation_judge_enabled` (default false) and `recommendation_judge_agent_id`
+(nullable). No data movement; reversing the knob restores the prior behaviour
+with every row intact.

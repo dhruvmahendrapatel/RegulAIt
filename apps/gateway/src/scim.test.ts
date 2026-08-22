@@ -45,6 +45,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
 import { hashToken } from "./auth.js";
 import { parseScimFilter, scimErrorBody, SCIM_TOKEN_PREFIX } from "./scim.js";
 
@@ -144,6 +145,11 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT });
+  // ADR-0052 §4: issuing a SCIM token is tier-gated on `scim_provisioning` and
+  // the flag is now ENFORCED at the route, so this suite runs under a real
+  // signed license granting it. Removed in afterAll — the deployment ends
+  // UNLICENSED exactly as it started (`licenses` is an org singleton).
+  await installLicenseFixture(app, { features: ["scim_provisioning"], auth: ADMIN });
   const issued = await app.inject({
     method: "POST",
     url: "/v1/scim/tokens",
@@ -156,6 +162,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await removeLicenseFixture(db);
   await app?.close();
 });
 

@@ -13,8 +13,15 @@
  *  - **Revoke is real.** A revoke decision executes the grant removal in the
  *    decision's own transaction; the item then shows what the execution did.
  *  - **Expiry is visible, never silent.** A past-due campaign with undecided
- *    items reads "expired-incomplete" (computed on read — no scheduler), its
- *    items stay undecided forever, and the posture page carries the count.
+ *    items reads "expired-incomplete" (computed on read), its items stay
+ *    undecided forever, and the posture page carries the count. The B2a
+ *    scheduler sweep only RECORDS that fact into the audit log — it decides
+ *    nothing, so this page renders exactly what it always did.
+ *  - **Reassignment moves the queue, never the decision.** (ADR-0090
+ *    amendment, B2b) An admin can move an UNDECIDED item's reviewer with a
+ *    recorded reason — riding ADR-0046's one approver-moving write — and
+ *    NEVER to the grant's holder: the decider-keyed self-review bar extends
+ *    to routing, and the gateway's refusal is rendered verbatim below.
  */
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -83,6 +90,7 @@ const FORM_SCOPES: ScopeKind[] = ["all", "agent_lifecycle", "agent_owner", "user
 
 export default function CampaignsPage() {
   const act = useAction();
+  const reassignAct = useAction();
   const { auth } = useSession();
   const myUserId = auth?.userId ?? null;
 
@@ -109,6 +117,11 @@ export default function CampaignsPage() {
   const [scopeValue, setScopeValue] = useState("");
   const [dueAt, setDueAt] = useState("");
   const [previewCount, setPreviewCount] = useState<number | null>(null);
+
+  // reassign-a-review form (B2b)
+  const [reassignItemId, setReassignItemId] = useState("");
+  const [reassignReviewerId, setReassignReviewerId] = useState("");
+  const [reassignReason, setReassignReason] = useState("");
 
   const scopePayload = () => ({
     kind: scopeKind,
@@ -350,6 +363,70 @@ export default function CampaignsPage() {
                       },
                     ]}
                   />
+                  {d.status === "open" && d.items.some((i) => i.decision === null) && (
+                    <form
+                      className={v.stack}
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        void reassignAct.run(async () => {
+                          await api.post(`/v1/certification-campaigns/${d.id}/items/${reassignItemId}/reassign`, {
+                            reviewerUserId: reassignReviewerId,
+                            reason: reassignReason,
+                          });
+                          setReassignItemId("");
+                          setReassignReviewerId("");
+                          setReassignReason("");
+                          await refreshAll();
+                        }, "Review reassigned — the item moved to the new reviewer's queue; nothing was decided");
+                      }}
+                    >
+                      <div className={a.formRow}>
+                        <Field label="Item to reassign">
+                          <Select required value={reassignItemId} onChange={(e) => setReassignItemId(e.target.value)}>
+                            <option value="">— select —</option>
+                            {d.items
+                              .filter((i) => i.decision === null)
+                              .map((i) => (
+                                <option key={i.id} value={i.id}>
+                                  {i.holder.label} · {i.object.label} (now: {i.reviewer.name ?? i.reviewer.userId})
+                                </option>
+                              ))}
+                          </Select>
+                        </Field>
+                        <Field label="New reviewer">
+                          <Select required value={reassignReviewerId} onChange={(e) => setReassignReviewerId(e.target.value)}>
+                            <option value="">— select —</option>
+                            {(usersQ.data?.users ?? []).map((u) => (
+                              <option key={u.id} value={u.id}>
+                                {u.displayName || u.email}
+                              </option>
+                            ))}
+                          </Select>
+                        </Field>
+                        <Field label="Reassignment reason" grow>
+                          <Input
+                            required
+                            value={reassignReason}
+                            onChange={(e) => setReassignReason(e.target.value)}
+                            placeholder="why the review is moving — recorded in the audit trail"
+                          />
+                        </Field>
+                        <Button type="submit" size="sm" disabled={reassignAct.busy}>
+                          Reassign review
+                        </Button>
+                      </div>
+                      {reassignAct.error && (
+                        <span className={v.errLine} role="alert">
+                          {reassignAct.error}
+                        </span>
+                      )}
+                      <p className={v.faint}>
+                        Reassignment moves whose queue the item shows in, never who may decide — and never to the
+                        grant's holder: routing them their own item would set up the self-certification the decide
+                        path refuses. No reason unlocks that bar.
+                      </p>
+                    </form>
+                  )}
                   <div className={v.faint}>{d.notes.scope}</div>
                   <div className={v.faint}>{d.notes.snapshot} {d.notes.expiry}</div>
                 </div>

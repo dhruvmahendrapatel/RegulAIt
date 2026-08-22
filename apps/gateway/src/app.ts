@@ -213,6 +213,14 @@ export interface BuildAppOptions {
    * Exposed so a test can drive a real WORM buffer without touching the
    * environment. */
   auditAnchorSink?: AnchorSink | null;
+  /** L6a TEST SEAM (ADR-0056 amendment): inject a deterministic copilot
+   * narrator instead of the real, governed `ModelBackedNarrator`. Absent =
+   * the real path. */
+  copilotNarrator?: CopilotNarrator | null;
+  /** L6c TEST SEAM (ADR-0092 amendment): inject a deterministic
+   * recommendation judge instead of the real, governed, org-configured one.
+   * Absent = the real path, which still requires the org knob to be ON. */
+  recommendationJudge?: RecommendationJudge | null;
 }
 import { z } from "zod";
 import { registerMcpProxy } from "./mcp-proxy.js";
@@ -265,6 +273,7 @@ import { registerSetupStatusRoutes } from "./setup-status.js";
 import { registerSchedulerRoutes } from "./scheduler-api.js";
 import { schedulerJobRegistry } from "./scheduler-jobs.js";
 import { registerDataKeyRoutes } from "./data-key.js";
+import { registerDataKeyReencryptionRoutes } from "./data-key-reencrypt.js";
 import { WEB_UI_ROUTES, defaultWebDistDir, registerWebServing } from "./web-serving.js";
 // ADR-0053 — the auth-class sets the two gates below branch on. They live in
 // their own module so the published OpenAPI document derives each route's
@@ -278,6 +287,7 @@ import { registerCostReconciliationRoutes } from "./cost-reconcile.js";
 import { registerTracingRoutes } from "./tracing.js";
 import { registerCompliancePackRoutes } from "./compliance-packs.js";
 import { registerCopilotRoutes } from "./copilot.js";
+import type { CopilotNarrator, RecommendationJudge } from "@regulait/shared";
 import { registerChatOpsRoutes } from "./chatops.js";
 import path from "node:path";
 import { registerSpaInlineScripts, securityHeaders } from "./security-headers.js";
@@ -3055,7 +3065,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // payload names users, grants and org-wide usage, the inventory's record
   // class. The model-judged half stays credential-blocked (L6), not
   // approximated.
-  registerAccessRecommendationRoutes(app, db);
+  registerAccessRecommendationRoutes(app, db, {
+    dataKey: opts.dataKey,
+    // L6c: absent = the org-configured, credential-checked governed judge
+    judge: opts.recommendationJudge ?? null,
+  });
   // ADR-0091 — toxic-combination SoD rules + override escalations. Admin-only
   // through the DEFAULT gate: declaring two capabilities toxic (and lifting
   // that with an override) is org-wide entitlement policy, the same class of
@@ -3215,6 +3229,12 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // service, and a control that fired on construction is one every fixture
   // would have to work around.
   registerDataKeyRoutes(app, db, { dataKey: opts.dataKey });
+  // ADR-0063 §4 follow-up (batch B4): STATUS ONLY. The walk itself runs as a
+  // CLI (`pnpm --filter @regulait/gateway reencrypt`) — a full-table
+  // re-encryption inside an HTTP request invites a proxy timeout mid-walk and
+  // an operator retry racing the first attempt, so HTTP gets the read, never
+  // the drive.
+  registerDataKeyReencryptionRoutes(app, db);
   // ADR-0054 — the IN-PRODUCT first-run experience (the installer, ADR-0041,
   // owns deployment bring-up; nothing here duplicates it) plus the
   // migration/import tooling. Admin-only through the DEFAULT gate: every route
@@ -3270,7 +3290,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // treated as UNTRUSTED INPUT through ADR-0042's guardrails; and it has no
   // mutating tools at all — its only route to a change is a proposal that opens
   // an ordinary Approvals-Queue item for a named human.
-  registerCopilotRoutes(app, db, { dataKey: opts.dataKey });
+  registerCopilotRoutes(app, db, {
+    dataKey: opts.dataKey,
+    narrator: opts.copilotNarrator ?? null,
+  });
   // ADR-0053 — the published contract: the OpenAPI document, the versioning /
   // deprecation policy, and the RFC-8594 Deprecation/Sunset headers. Registered
   // here (rather than first) only for readability; the inventory hook at the top

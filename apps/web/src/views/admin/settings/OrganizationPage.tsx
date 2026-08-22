@@ -162,6 +162,17 @@ function Loaded(props: { settings: Record<string, unknown> }) {
     approvalDelegationEnabled: str(s, "approvalDelegationEnabled"),
   });
 
+  // --- 5b. Use-case dispatch gate (ADR-0080 B3 amendment) ------------------
+  const useCaseGate = useSection({
+    useCaseGateMode: str(s, "useCaseGateMode") || "off",
+  });
+
+  // --- 5c. Model-judged access recommendations (ADR-0092 amendment, L6c) ---
+  const recJudge = useSection({
+    recommendationJudgeEnabled: str(s, "recommendationJudgeEnabled") || "false",
+    recommendationJudgeAgentId: str(s, "recommendationJudgeAgentId"),
+  });
+
   // --- 7. Network access (ADR-0039) ----------------------------------------
   // Not a useSection form: the save needs the confirm-on-lockout retry flow
   // (a 409 ip_policy_lockout opens an explicit confirm modal, and only a
@@ -542,6 +553,72 @@ function Loaded(props: { settings: Record<string, unknown> }) {
               <option value="true">enabled (delegation windows apply)</option>
               <option value="false">disabled (strict separation of duties)</option>
             </Select>
+          </Field>
+        </SectionShell>
+      </Card>
+
+      <Card title="5b · AI use-case dispatch gate (ADR-0080)">
+        <SectionShell
+          title="Approved-use-case requirement for governed dispatch"
+          busy={useCaseGate.act.busy}
+          error={useCaseGate.act.error}
+          submitLabel="Save use-case gate"
+          onSubmit={() =>
+            void useCaseGate.act.run(
+              () => put({ useCaseGateMode: useCaseGate.f.useCaseGateMode as "off" | "warn" | "enforce" }),
+              "Use-case gate saved (audited)",
+            )
+          }
+          help="The AI use-case registry's approval used to register intent and gate nothing — that honest limit is now a choice. This applies to a governed dispatch ATTRIBUTED TO A PROJECT THAT AT LEAST ONE USE CASE NAMES (the use case's optional project link is the only join there is): 'off' (default) keeps today's behaviour exactly; 'warn' lets such a dispatch run when no linked use case is approved, but audits the fact and annotates the response, so you can see what enforce would refuse before arming it; 'enforce' refuses it with a named 409 before any provider work until a linked use case is approved on the Approvals queue. A project no use case links — and a dispatch attributed to no project — is untouched in every mode: this gate holds registered intent to its approval, it does not require every call to have a use case. A retired use case no longer satisfies it. Fully reversible."
+        >
+          <Field label="Use-case dispatch gate">
+            <Select
+              value={useCaseGate.f.useCaseGateMode}
+              onChange={(e) => useCaseGate.set("useCaseGateMode", e.target.value)}
+            >
+              <option value="off">off — approval registers intent, nothing is refused (default)</option>
+              <option value="warn">warn — record + annotate what enforce would refuse</option>
+              <option value="enforce">enforce — 409 for use-case-linked projects with no approved use case</option>
+            </Select>
+          </Field>
+        </SectionShell>
+      </Card>
+
+      <Card title="5c · Model-judged access recommendations (ADR-0092)">
+        <SectionShell
+          title="Advisory model annotations on the deterministic recommendation rules"
+          busy={recJudge.act.busy}
+          error={recJudge.act.error}
+          submitLabel="Save judged-recommendation setting"
+          onSubmit={() =>
+            void recJudge.act.run(
+              () =>
+                put({
+                  recommendationJudgeEnabled: asBool(recJudge.f.recommendationJudgeEnabled!),
+                  recommendationJudgeAgentId: recJudge.f.recommendationJudgeAgentId
+                    ? String(recJudge.f.recommendationJudgeAgentId)
+                    : null,
+                }),
+              "Judged-recommendation setting saved (audited)",
+            )
+          }
+          help="Access recommendations are six DETERMINISTIC rules over this deployment's ledgers, each re-derivable by hand — that is what makes them trustworthy, and this switch does not change them. OFF (default) means the report is those rules and nothing else. ON means each finding the rules ALREADY made may additionally carry an advisory annotation from a model judge, labelled `model-judged` and rendered separately: it cannot create a finding, cannot remove one, cannot change any evidence value or severity, and does not clear a grant — only a named human's decision does. The judge is an ordinary registry agent dispatched with the CALLING USER's entitlements and budget, so its tokens are metered and audited like any other call. If no judge agent is named, or the named one has no reachable model credential, the report is returned UNCHANGED and says `judged: unavailable` — an unannotated report from a working judge and one from a missing judge are different facts, and the page never blurs them."
+        >
+          <Field label="Model-judged annotations">
+            <Select
+              value={recJudge.f.recommendationJudgeEnabled}
+              onChange={(e) => recJudge.set("recommendationJudgeEnabled", e.target.value)}
+            >
+              <option value="false">off — deterministic rules only (default)</option>
+              <option value="true">on — allow advisory model-judged annotations</option>
+            </Select>
+          </Field>
+          <Field label="Judge agent id">
+            <Input
+              value={recJudge.f.recommendationJudgeAgentId}
+              placeholder="registry agent uuid (blank = judged: unavailable)"
+              onChange={(e) => recJudge.set("recommendationJudgeAgentId", e.target.value)}
+            />
           </Field>
         </SectionShell>
       </Card>

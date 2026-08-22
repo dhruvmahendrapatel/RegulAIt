@@ -260,3 +260,319 @@ touch, which is what makes containment auditable forever) and `copilot_proposals
 row). `audit_log.object_type` gains `copilot_query` and `copilot_proposal`, and
 `approvals.object_type` gains `copilot_proposal`, both as TS-only widenings —
 neither column has a DB CHECK, so there is no DDL for them.
+
+## Amendment — 2026-08-22: THE COPILOT GOES LIVE (L6a/L6b, migration 0100)
+
+The 2026-08-02 amendment named two structural gaps in its own words. Both are
+now closed, and this amendment is a **delta** — everything the first amendment
+recorded still stands except where contradicted below.
+
+### The correction this amendment makes, before anything else
+
+**"No model provider is connected in this build" is no longer true, and the
+release no longer says it is.** A live Google/Gemini credential exists (the
+2026-08-21 unparking, `docs/product/LIVE_VERIFICATION_2026-08.md`), and the
+copilot's narration path has now run against a real model through
+`executeGovernedDispatch` — platform env credential, the caller's entitlements
+deciding, tokens metered into `usage_events` and billed to a named project.
+
+Two consequences the honesty discipline forces:
+
+- **`modelNarrationVerified` is no longer a build-wide constant `false`.** It
+  is a per-answer boolean and it means exactly one thing: *this* narration was
+  cross-checked against *this* retrieval's counts and object ids and passed.
+  It is never a claim that the model is generally reliable. A discarded
+  narration leaves it `false`, and a grounded-only answer leaves it `false`
+  because no model was called.
+- **`POST /v1/copilot/ask`'s `note` is now three different sentences** — model
+  narration cross-checked / narration attempted and discarded / no narrator
+  named. The old single note asserted a fact about the build; these assert
+  facts about the answer in hand.
+
+### L6a — grounding is now BY RETRIEVED OBJECT ID, and an empty retrieval REFUSES
+
+The first amendment grounded answers in **counts**. Counts cannot be
+hallucinated, but they also cannot be walked back to rows, and they say nothing
+about the case that matters most: a question whose retrieval found *nothing*.
+
+- **`CopilotEvidence.citableObjects`** — every retrieval now returns the
+  concrete governance objects it selected, by primary key
+  (`audit_log` / `approval` / `usage_event`), from the SAME scoped `WHERE` the
+  counts came from. The label is gateway-written fact (`effect · ruleId`),
+  never the attacker-influenceable `reason` string, which stays in the
+  guardrailed sample channel.
+- **`narrationIsGrounded` gained the object-level check.** A narration citing
+  an id the retrieval never returned is discarded exactly like an invented
+  figure. A count key is a shape the renderer owns; an object id is a claim
+  that a row exists, so an unretrieved id is either a hallucinated record or an
+  id the model was fed by crafted ledger text — the same failure either way.
+- **The grounded refusal.** `retrievalFoundNothing` (no citable object AND no
+  matched row) makes the answer a REFUSAL with a fixed shape
+  (`COPILOT_GROUNDED_REFUSAL`, `groundedRefusal: true`). The narration prompt
+  carries the matching hard rule, and a narration that answered anyway over an
+  empty retrieval is DISCARDED with the grounded refusal standing. A zero
+  COUNT is still an answer ("0 denials in your scope"); an EMPTY RETRIEVAL is
+  not, and the two are distinguished in code, in the payload and on the page.
+  The refusal is deliberately phrased as scope ("no matching record in your
+  scope"), never as "no such thing exists" — a scoped read cannot support that.
+
+### L6b — an approved proposal CAN now be applied, and only an approved one
+
+`POST /v1/copilot/proposals/:proposalId/apply` (admin, internal, tagged
+`copilot` in the ADR-0053 registry). The first amendment's "an approved
+proposal is not applied by anything" is closed for the kinds whose change has a
+**public choke point an admin would use by hand**, and deliberately NOT closed
+for the others.
+
+- **Consent is the gate, and it is the ONE queue.** The status of the LINKED
+  `approvals` row decides. `pending` and `denied` refuse `proposal_not_approved`
+  naming the status; a proposal with no approval refuses
+  `proposal_has_no_approval`; a deleted queue row refuses
+  `proposal_approval_missing`. Every refusal is audited as a deny and the
+  target is asserted unchanged.
+- **Through the public door, never past it.** `grant_revocation` rides the
+  one-per-kind removal in `grant-revocation.ts` — the exact function
+  `DELETE /v1/grants/…` and an ADR-0090 campaign's revoke decision call.
+  `policy_tightening` rides `applyRuleEdit`, ADR-0074's single door, so a
+  versioned rule mints and activates a version instead of silently drifting;
+  the choke point's own refusal (e.g. `unresolvable`) is surfaced verbatim
+  rather than worked around. There is no raw table write in the handler.
+- **Attributed to the human.** The audit row is written under the applying
+  admin's identity with the proposal as context — proposal id, query id,
+  proposer, the diff, and what the choke point reported back.
+- **Once.** `copilot_proposals.applied_at` is the idempotency gate; a second
+  apply refuses `proposal_already_applied` rather than re-executing a mutation.
+- **A malformed diff refuses** (`proposal_diff_invalid`) before anything is
+  attempted, so a proposal can never be half-applied.
+
+**Named unapplied, with the endpoint that must exist first** (in
+`COPILOT_UNAPPLICABLE_PROPOSAL_KINDS`, returned verbatim in the 422):
+`rule_to_approval` needs a cross-artifact CREATE (a new `approval_rules` row
+derived from a rate-limit/data-scope rule) that no endpoint performs —
+`applyRuleEdit` edits an artifact that exists, it does not mint one of another
+type; `budget_adjustment` has no single choke point comparable to
+`applyRuleEdit` (project budget, compliance-profile ceiling and virtual-key cap
+are three surfaces with three governance stories). Reaching past a missing
+endpoint to write the row would be exactly the ungoverned control-plane
+mutation this ADR exists to prevent, so both refuse by name.
+
+### Non-vacuity (M-002 — every count MEASURED by running the probe, then reverted by exact Edit reversal)
+
+- **Empty the grounding retrieval** (`base.citableObjects = []` in
+  `retrieveEvidence`): **2 gateway tests redden** — "cites the REAL ids of the
+  rows its own scoped retrieval returned" and "ACCEPTS a grounded narration,
+  marks it verified". Recorded honestly: the *refusal* test stays green under
+  this probe, because emptying the retrieval makes MORE things refuse. The
+  refusal assertion is therefore guarded by its CONTROL (the positive citation
+  test), which is what this probe reddens.
+- **Make the refusal condition never fire** (`retrievalFoundNothing` returns
+  `false`): **3 shared tests redden** — the refusal renderer, the prompt's
+  refusal instruction, and the narration refusal cross-check. This is the probe
+  that proves the refusal assertions themselves bite.
+- **Drop the approval-status check in apply** (`if (false && …)`): **2 gateway
+  tests redden** — refuses-PENDING and refuses-DENIED, both of which then apply
+  the mutation they exist to prevent.
+
+### Honest limits after this amendment
+
+1. **One live model, one run.** The narration path is verified against
+   Google/Gemini (`gemini-3.6-flash`). Other providers' adapters remain
+   fake-server-proven; "the model obeys the grounding contract" is a measured
+   fact about this model on these prompts, not a general property.
+2. **Output ceilings are a real failure mode, and were measured as one.** The
+   narrator's original 1024-token ceiling made narration IMPOSSIBLE on a
+   reasoning model: the reply came back `finishReason: MAX_TOKENS` after 981
+   thought tokens and 39 tokens of JSON, and was correctly discarded as
+   unparseable. Re-running the identical prompt at 4096 finished cleanly
+   (`STOP`, 1688 thought tokens, complete JSON citing the real object ids) —
+   which is what proves the ceiling was the cause. The ceiling is now 4096.
+   A future model with a larger thinking budget can reintroduce this, and the
+   symptom will again be a discarded narration, not a wrong one.
+3. **The grounded refusal is verified on ONE nonsense question.** The live
+   model refused an invented object cleanly; that is evidence, not a guarantee
+   that no phrasing can coax an answer out of an empty retrieval. The
+   structural protection is the cross-check, which discards such an answer
+   whether or not the model behaves.
+4. **Two of four proposal kinds are unapplied**, as above.
+5. **The applier is not transactional across the audit row.** The choke point
+   executes, then the proposal row is stamped, then the audit row is written.
+   A crash between them leaves an applied change with `applied_at` unset — the
+   choke point's OWN audit row (e.g. `copilot-proposal-rule-edit`) still
+   records the change, so nothing is invisible, but the proposal would read as
+   unapplied and a retry would re-execute.
+6. **Still not enrolled in red-teaming** (§5's promotion-blocking regression
+   gate). Unchanged from the first amendment.
+
+### Migration
+
+`0100_copilot_apply_and_judged_recommendations.sql` — `copilot_proposals` gains
+`applied_at` / `applied_by_user_id` / `applied_result`, all NULL for every
+existing row (which is exactly their pre-L6 state). No backfill, no new table.
+
+## Amendment — 2026-08-22 (L6d): THE UNFILTERED-SUBJECT HALLUCINATION, found live and closed in two layers
+
+This amendment exists because the L6a amendment above was **wrong about how much
+it had closed**, and a hands-on session found the hole the same day. No
+migration; code and contract only.
+
+### The defect, as found
+
+Reproduced against a live narrator on the coordinator's own instance:
+
+```
+POST /v1/copilot/ask   (admin caller, live Google/Gemini narrator)
+{"question":"Summarise the Zorblatt Quantum Compliance Widget approvals from last week",
+ "narratorAgentId":"<google agent>"}
+```
+
+There is no Zorblatt Quantum Compliance Widget. There never was. The keyword
+planner matched only `"approval"` and `"last week"`, ran **`listApprovals` with
+no entity filter at all**, retrieved **eight real, unrelated, org-wide
+approvals**, and the model narrated:
+
+> *"Over the last 7 days **for the Zorblatt Quantum Compliance Widget
+> approvals**, 8 approvals were requested, 4 approvals were in state 'approved',
+> and 4 approvals were in state 'pending'."*
+
+`groundedRefusal: false`. Five real approval ids cited. And
+**`modelNarrationVerified: true`.**
+
+For a governance product this is the exact hallucination class the copilot
+claims to prevent — real records confidently attributed to a subject nobody ever
+searched for — and the verification flag made it worse by stamping a false
+statement as checked.
+
+### Why all three existing guards missed it, precisely
+
+Each of them passed *correctly*. That is the point: they were never asked this
+question.
+
+| Guard | Why it passed |
+| --- | --- |
+| `retrievalFoundNothing` → grounded refusal | The retrieval was **not** empty. Eight real rows, five citable objects. The refusal fires only on an empty read; this read was full. |
+| Figure cross-check (`citedKeys`) | Every figure the model used — 8, 4, 4 — was a count the retrieval actually produced. Nothing was invented. |
+| Object-id cross-check (`citedObjectIds`) | Every id cited was a primary key this caller's own scoped query returned. Nothing was invented. |
+
+All three verify that **what the answer says is drawn from the retrieval**.
+Not one of them asks whether **the retrieval was about what the question
+asked**. Grounding was checked *downstream* of the plan and never *against* it,
+so a plan that quietly dropped the subject was invisible to every check.
+
+### The fix — two layers, because a prompt rule alone is wishful thinking
+
+**Layer 1 — the model can now see what was filtered on.**
+`buildNarrationPrompt` never showed the plan's `params`. It showed the QUESTION
+and it showed the ROWS, and nothing that said the rows had not been narrowed to
+the thing the question named — so "these approvals are the Zorblatt ones" was
+the only reading available. The prompt now carries a `FILTERS:` line rendering
+`plan.params`, and when there are none it says so outright: *"FILTERS: none —
+these are ALL `listApprovals` records in the caller's scope for the period,
+narrowed by nothing else. They are NOT about any subject named in the
+QUESTION."* A new **hard rule 6** requires the findings to be described in terms
+of the tool and filters actually executed, forbids attributing them to any
+entity that appears in neither FILTERS nor the RETRIEVED GOVERNANCE OBJECTS,
+states that *the question is a request, not evidence that its subject was
+searched for*, and requires one clause saying so when the subject was not
+filtered on.
+
+**Layer 2 — a deterministic caveat that does not depend on the model obeying.**
+This is the layer that holds when the narration misbehaves, and it follows
+`COPILOT_SCOPE_CAVEAT`'s reasoning exactly: the honest qualification on an
+answer is emitted by code that cannot decline to emit it.
+
+- `GroundedAnswer` gains two siblings of `scopeCaveat`/`notice`:
+  **`subjectFiltered`** (did the executed plan narrow at all?) and
+  **`unfilteredSubjectCaveat`** (the sentence, non-null exactly when it did
+  not).
+- Every answer's grounded text now renders `Filters applied: …` — *none*
+  included — and, when there are none, the caveat sentence itself. Because the
+  grounded text is handed to the narrator as **authoritative**, layer 2 also
+  strengthens layer 1.
+- The `POST /v1/copilot/ask` `note` leads with the caveat when the query
+  narrowed on nothing, and the `copilot-question-answered` audit row records
+  `filters` and `subjectFiltered` — so *"was that answer actually about the
+  thing I asked?"* stays answerable from the ledger after the prose is gone.
+- The copilot page badges it (`no filter — every record in scope`) and prints
+  the caveat next to the scope caveat.
+
+### What `modelNarrationVerified: true` means, and what it does NOT
+
+Deliberately **unchanged**, and documented instead of widened. It means exactly:
+
+> *This* narration's cited count keys and cited governance-object ids were all
+> checked against *this* retrieval and were all things the retrieval actually
+> produced.
+
+It does **not** mean the narration is correct, does **not** mean the model is
+reliable, and — the L6d lesson — does **not** mean **the answer is about what
+you asked**. Real figures over an unfiltered query can still be narrated as
+belonging to a subject nobody filtered on, and that answer is `verified: true`
+because the figures really were real.
+
+The alternative was to flip the flag to `false` in this situation. Rejected, for
+two reasons. First, it would silently change what `true` means on every *other*
+answer, from a checkable provenance claim into a vague quality claim. Second, it
+would make the flag depend on a keyword guess about which words in a question
+are "the subject" — a second heuristic of exactly the kind that caused this
+defect, and one that would fail closed on some questions and open on others with
+no way to tell which. A verification flag whose meaning cannot be stated in one
+sentence is worse than no flag. So the flag keeps its narrow, true meaning; the
+separate fact rides `subjectFiltered`, the caveat, the badge, the note and the
+audit row.
+
+### Non-vacuity (M-002 — every count MEASURED by running the probe, then reverted by exact Edit reversal)
+
+- **Remove the caveat emission** (`unfilteredSubjectCaveat` forced to `null`,
+  the `lines.push` dropped): **1 shared test + 1 gateway test redden** — "carries
+  the unfiltered-subject caveat as a FIELD and in the answer TEXT" and "a
+  question naming an entity nobody filtered on carries the unfiltered-subject
+  caveat". Recorded honestly: the two CONTROL tests stay green under this probe,
+  because they assert the caveat's *absence* — that is what makes them controls.
+- **Remove the `FILTERS:` block from the prompt**: **2 shared tests redden** —
+  the no-filter disclosure and the rendered-params disclosure. Both layers are
+  therefore separately load-bearing.
+- **Remove hard rule 6** (replaced with placeholder text): **1 shared test
+  reddens** — the rule-text assertion, including its check that the JSON-shape
+  rule survived renumbering to 7.
+
+### Live re-check — the same question, the same shape, a different answer
+
+Same question, same plan (`listApprovals`, `params: {}`), eight real approvals,
+five real cited ids, `modelNarrationVerified: true`, `groundedRefusal: false` —
+every input to the original failure held constant. The narration, verbatim:
+
+> *"This summary is scoped to the caller's own entitlements. Based on the
+> listApprovals tool executed for the last 7 days with no filters applied
+> (across all records in scope, not only Zorblatt Quantum Compliance Widget), 8
+> approvals were requested in total, with 4 in state 'approved' and 4 in state
+> 'pending'."*
+
+The model took hard rule 6's own escape clause. That is evidence the prompt
+layer works on this model; it is **not** a guarantee, which is why layer 2
+exists and why the committed tests assert layer 2 rather than the prose.
+
+### Honest limits after this amendment
+
+1. **The planner is still keyword-based, and an unknown entity is IGNORED
+   rather than narrowing the query.** This amendment makes the copilot *say* it
+   did not filter on the subject. It does not make it filter on the subject, and
+   it does not detect that "Zorblatt Quantum Compliance Widget" is a subject at
+   all. A question about a real vendor that the planner has no filter for gets
+   the same treatment as one about a fictional widget: honest, and unhelpful.
+   **Entity-aware planning — resolving named entities against the governed
+   object graph and either filtering on them or refusing — is a separate, larger
+   slice**, tracked in `docs/product/PENDING.md`.
+2. **`subjectFiltered: true` does not mean "narrowed to your subject".** The
+   current param vocabulary (`effect`, `objectType`, `status`) contains **no
+   true entity filter** — nothing in it can narrow to a named product or vendor.
+   So `true` means "the query narrowed by something", which is the closest
+   available proxy and is stated as such rather than dressed up. The control in
+   the committed suite pins the proxy's behaviour; it does not pretend the proxy
+   is the real thing.
+3. **The caveat is a statement about the plan, not about the question.** It is
+   deliberately not gated on "did the question name something we did not
+   filter on", because answering that needs the entity resolution of limit 1.
+   The consequence is that a genuinely org-wide question ("how many approvals
+   last week?") also carries the caveat. That is true, mildly noisy, and the
+   right side to err on.
+4. Limits 1–6 of the L6a/L6b amendment stand unchanged.

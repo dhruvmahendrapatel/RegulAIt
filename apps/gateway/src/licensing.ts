@@ -89,6 +89,7 @@ import {
   type LicenseActionClass,
   type LicenseDecision,
   type LicenseDocument,
+  type LicenseFeature,
   type LicenseState,
   type SeatDecision,
 } from "@regulait/shared";
@@ -603,7 +604,12 @@ export function registerLicensingRoutes(app: FastifyInstance, db: Db): void {
       lastVerifiedAt: lastCheck?.at ?? null,
       schedulerPresent: false,
       phoneHome: false,
-      enforcementPointsWired: ["user.provision", "agent.create"],
+      enforcementPointsWired: [
+        "user.provision",
+        "agent.create",
+        "feature.sso_saml (saml_provider.create)",
+        "feature.scim_provisioning (scim_token.create)",
+      ],
       posture: LICENSE_POSTURE_NOTE,
       note:
         "Verification is OFFLINE and makes no network call of any kind — there is no license server to " +
@@ -836,6 +842,66 @@ export async function refuseIfSeatCapReached(
       activeSeats: seat.activeSeats,
       seatCap: seat.seatCap,
       detail: seat.reason,
+    },
+  };
+}
+
+/**
+ * Refuse an act behind a TIER FEATURE FLAG the current license does not grant,
+ * audited. Returns null when the flag is granted and the act may proceed.
+ *
+ * This is `featureEnabled` — the §4 flag reader the status API has reported
+ * from since ADR-0052 shipped — finally ENFORCED at a call site, so a wired
+ * point can never disagree with what `GET /v1/licenses/status` reports. That
+ * includes the ABSENT state: no license closes every tier flag (the posture
+ * table's own line — a tier flag is exactly what is being paid for), so an
+ * unlicensed deployment is refused here exactly as its status page has always
+ * said it would be. Contrast the seat cap, which absence deliberately leaves
+ * unenforced: there is no authoritative NUMBER to invent, but "closed" needs
+ * no invention.
+ *
+ * A tier-flag gate is a GROWTH gate in the §5 sense: it guards the act of
+ * ENABLING a capability (creating a SAML provider, minting a SCIM token) —
+ * never the operation of what already exists. Sign-in through an
+ * already-configured provider is authentication (governance, fail-open) and
+ * must never pass through here.
+ */
+export async function refuseIfFeatureNotLicensed(
+  db: Db,
+  args: { actorUserId: string | null; feature: LicenseFeature; what: string },
+): Promise<{ status: number; body: Record<string, unknown> } | null> {
+  const resolved = await resolveLicense(db);
+  const decision = featureEnabled(resolved.document, args.feature, resolved.state);
+  if (decision.enabled) return null;
+  const tier = resolved.row?.tier ?? null;
+  await db.insert(auditLog).values({
+    userId: args.actorUserId ?? NO_IDENTITY,
+    objectType: "license",
+    objectId: resolved.row?.id ?? null,
+    detail: {
+      phase: "tier-flag-gate",
+      what: args.what,
+      feature: args.feature,
+      state: resolved.state,
+      licenseTier: tier,
+    },
+    effect: "deny",
+    ruleId: decision.ruleId,
+    ruleChain: [],
+    reason:
+      `${args.what} refused: ${decision.reason} Governance, approvals, guardrails and audit logging ` +
+      "are unaffected, and everything already configured keeps working — this gates ENABLING the " +
+      "capability, never the operation of what exists.",
+  });
+  return {
+    status: 403,
+    body: {
+      error: "license_feature_not_licensed",
+      ruleId: decision.ruleId,
+      feature: args.feature,
+      tier,
+      state: resolved.state,
+      detail: decision.reason,
     },
   };
 }

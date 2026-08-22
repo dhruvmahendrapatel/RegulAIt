@@ -74,7 +74,10 @@ import { closeAll, dropScratchDatabase } from "./testing/scratch-db.js";
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
 
-const SCRATCH_DB = "regulait_data_key_custody_test";
+// Per-RUN unique (pid + timestamp): a fixed name plus beforeAll's
+// DROP ... WITH (FORCE) lets two concurrent runs on one host destroy each
+// other's database (PENDING §5); afterAll drops this one, so nothing persists.
+const SCRATCH_DB = `regulait_dk_custody_${process.pid}_${Date.now()}`;
 const scratchUrl = (() => {
   const u = new URL(DATABASE_URL);
   u.pathname = "/" + SCRATCH_DB;
@@ -490,7 +493,8 @@ describe("restore onto a new box", () => {
 // ===========================================================================
 
 describe("first boot after upgrade", () => {
-  const UPGRADE_DB = "regulait_data_key_upgrade_test";
+  // per-run unique for the same concurrency reason as SCRATCH_DB above
+  const UPGRADE_DB = `regulait_dk_upgrade_${process.pid}_${Date.now()}`;
   const upgradeUrl = (() => {
     const u = new URL(DATABASE_URL!);
     u.pathname = "/" + UPGRADE_DB;

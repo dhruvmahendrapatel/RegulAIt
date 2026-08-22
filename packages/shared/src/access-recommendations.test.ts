@@ -17,7 +17,12 @@ import {
   ACCESS_RECOMMENDATION_RULES_VERSION,
   ACCESS_RECOMMENDATION_RULE_IDS,
   ACCESS_RECOMMENDATION_SEVERITIES,
+  RECOMMENDATION_JUDGE_LIMITS,
+  RECOMMENDATION_JUDGE_METHOD,
   UNUSED_GRANT_DEFAULT_WINDOW_DAYS,
+  annotationsForFindings,
+  buildRecommendationJudgePrompt,
+  parseRecommendationJudgeReplies,
   accessRecommendationRuleById,
   parseRecommendationRuleIds,
   renderRecommendationRationale,
@@ -109,5 +114,80 @@ describe("the from_recommendations scope parser", () => {
     const bad = parseRecommendationRuleIds("unused-grant,peer-analytics");
     expect(bad).toEqual({ ok: false, invalid: ["peer-analytics"] });
     expect(parseRecommendationRuleIds("  ,")).toEqual({ ok: false, invalid: [] });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// L6c (ADR-0092 amendment) — the model-judged ANNOTATION, pure half.
+//
+// What these pin is containment, not fluency: the judged layer may only ever
+// attach to a finding the deterministic rules already made, it is labelled so
+// nobody can mistake it for evidence, and an unparseable or off-key reply
+// yields NOTHING rather than a quietly-empty annotation set.
+// ---------------------------------------------------------------------------
+describe("L6c — the judged layer annotates; it can never create a recommendation", () => {
+  const keys = ["unused-grant:agent:g1", "overreach:agent:g2"];
+
+  it("labels every annotation `model-judged` and carries its limits paragraph", () => {
+    const anns = annotationsForFindings(
+      keys,
+      [{ key: keys[0]!, verdict: "agree", note: "the grant has genuinely not been used" }],
+      "model:judge-agent",
+    );
+    const a = anns.get(keys[0]!)!;
+    expect(a.method).toBe(RECOMMENDATION_JUDGE_METHOD);
+    expect(a.method).toBe("model-judged");
+    expect(a.judge).toBe("model:judge-agent");
+    expect(a.verdict).toBe("agree");
+    expect(a.limits).toBe(RECOMMENDATION_JUDGE_LIMITS);
+    expect(a.limits).toMatch(/not evidence/i);
+  });
+
+  it("DROPS a verdict keyed to a finding the deterministic rules never produced", () => {
+    const anns = annotationsForFindings(
+      keys,
+      [
+        { key: "peer-analytics:user:u9", verdict: "disagree", note: "this person's peers all have it" },
+        { key: keys[1]!, verdict: "unclear", note: "" },
+      ],
+      "j",
+    );
+    // the invented finding is gone; only the deterministic key survives
+    expect([...anns.keys()]).toEqual([keys[1]!]);
+  });
+
+  it("keeps the FIRST verdict per key, so a repeated key cannot double-annotate", () => {
+    const anns = annotationsForFindings(
+      keys,
+      [
+        { key: keys[0]!, verdict: "agree", note: "first" },
+        { key: keys[0]!, verdict: "disagree", note: "second" },
+      ],
+      "j",
+    );
+    expect(anns.size).toBe(1);
+    expect(anns.get(keys[0]!)!.note).toBe("first");
+  });
+
+  it("parses a fenced array, and treats an unusable reply as an ERROR not as zero verdicts", () => {
+    const ok = parseRecommendationJudgeReplies(
+      '```json\n[{"key":"k1","verdict":"agree","note":"n"}]\n```',
+    );
+    expect(ok.ok).toBe(true);
+    if (ok.ok) expect(ok.replies).toEqual([{ key: "k1", verdict: "agree", note: "n" }]);
+
+    expect(parseRecommendationJudgeReplies("I broadly agree with these findings.").ok).toBe(false);
+    expect(parseRecommendationJudgeReplies("[]").ok).toBe(false);
+    // a verdict outside the closed vocabulary is not a verdict
+    expect(parseRecommendationJudgeReplies('[{"key":"k","verdict":"probably","note":""}]').ok).toBe(false);
+  });
+
+  it("the judge prompt forbids adding, removing or altering findings", () => {
+    const p = buildRecommendationJudgePrompt([
+      { key: keys[0]!, ruleId: "unused-grant", rationale: "r", evidence: { governedCallsInWindow: 0 } },
+    ]);
+    expect(p).toMatch(/may NOT add findings, remove findings, or change any evidence value/);
+    expect(p).toMatch(/does NOT clear the grant/);
+    expect(p).toContain(keys[0]!);
   });
 });

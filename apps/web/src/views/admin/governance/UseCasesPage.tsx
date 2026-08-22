@@ -118,6 +118,18 @@ interface UseCaseDetail {
   questionnaireTemplate: string | null;
   cascadeConsequences: CascadeCard;
   euAiActScreening: EuScreening;
+  /** ADR-0089: the use-case side of intended-vs-granted, computed at read time */
+  intendedVsGranted: {
+    status: "aligned" | "undershoot" | "not_approved" | "no_intent_recorded";
+    note: string;
+    agents?: Array<{
+      agentId: string;
+      agentName: string | null;
+      registered: boolean;
+      grantedToParticipants: boolean;
+      participantHolders: number;
+    }>;
+  };
 }
 
 const statusTone = (s: UseCaseStatus): Tone =>
@@ -197,6 +209,10 @@ export default function UseCasesPage() {
   const [answers, setAnswers] = useState("");
   const [retireReason, setRetireReason] = useState("");
 
+  // ADR-0089 B3 — the intent-capture edit buffer (null = mirror the stored
+  // intent). Editable only pre-decision; the server refuses the rest by name.
+  const [intentDraft, setIntentDraft] = useState<string[] | null>(null);
+
   // EU AI Act screening answers (ADR-0085) — serialized into the questionnaire
   // as the fenced eu-ai-act-answers block; the TIER is computed server-side
   const [euDomain, setEuDomain] = useState("general-business");
@@ -236,7 +252,7 @@ export default function UseCasesPage() {
     <>
       <PageHeader
         title="Use cases"
-        sub="Governance before anything runs: a proposed AI use case starts a real intake workflow — plan, questionnaire, human sign-off on the one Approvals queue — and approval registers it as a governance object whose compliance tags are the same tags the cascade enforces. Approval registers intent; it does not yet gate dispatch."
+        sub="Governance before anything runs: a proposed AI use case starts a real intake workflow — plan, questionnaire, human sign-off on the one Approvals queue — and approval registers it as a governance object whose compliance tags are the same tags the cascade enforces. Approval registers intent — and gates dispatch only where the org's use-case gate (Settings → Organization) is armed; it ships off."
       />
       <div className={v.stack}>
         {/* ---------------- propose ---------------- */}
@@ -319,7 +335,10 @@ export default function UseCasesPage() {
               <Table
                 rows={list.data?.useCases ?? []}
                 rowKey={(r) => r.id}
-                onRowClick={(r) => setOpenId(openId === r.id ? null : r.id)}
+                onRowClick={(r) => {
+                  setIntentDraft(null);
+                  setOpenId(openId === r.id ? null : r.id);
+                }}
                 columns={[
                   { key: "name", header: "Name", render: (r) => r.name },
                   {
@@ -362,6 +381,91 @@ export default function UseCasesPage() {
                   </div>
                   <div className={v.faint}>{d.useCase.description}</div>
                   <div className={v.faint}>Business context: {d.useCase.businessContext}</div>
+
+                  {/* ADR-0089 B3 — intent capture: which registered agents
+                      this use case intends. Editable ONLY pre-decision —
+                      after the sign-off, the intent is part of what was
+                      decided and changing it is a NEW use case. Feeds the
+                      SAME intendedAgentIds column the alignment flags read. */}
+                  <Card title="Intended agents (the intent the alignment flags stand on)">
+                    <div className={v.stack}>
+                      {d.useCase.status === "proposed" || d.useCase.status === "under_review" ? (
+                        <div className={a.formRow}>
+                          <Field label="Intended agents (ctrl/cmd-click to select several)" grow>
+                            <Select
+                              multiple
+                              size={Math.min(6, Math.max(3, (agents.data?.agents ?? []).length))}
+                              value={intentDraft ?? d.useCase.intendedAgentIds}
+                              onChange={(e) =>
+                                setIntentDraft(Array.from(e.target.selectedOptions).map((o) => o.value))
+                              }
+                            >
+                              {(agents.data?.agents ?? []).map((ag) => (
+                                <option key={ag.id} value={ag.id}>
+                                  {ag.name}
+                                </option>
+                              ))}
+                            </Select>
+                          </Field>
+                          {/* deliberately OUTSIDE a Field: a <label>-wrapped
+                              button inherits the label text as its accessible
+                              name, which would erase this button's */}
+                          <div style={{ alignSelf: "flex-end" }}>
+                            <Button
+                              disabled={act.busy || intentDraft === null}
+                              onClick={() =>
+                                void act.run(async () => {
+                                  await api.patch(`/v1/use-cases/${d.useCase.id}`, {
+                                    intendedAgentIds: intentDraft ?? [],
+                                  });
+                                  setIntentDraft(null);
+                                  await refreshAll();
+                                }, "Intended agents captured — the alignment comparison reads exactly this list")
+                              }
+                            >
+                              Save intended agents
+                            </Button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className={v.faint}>
+                          {d.useCase.intendedAgentIds.length === 0
+                            ? "No intent was recorded before the decision — the register says so rather than guessing."
+                            : "Intent is part of what was decided and is no longer editable — changing it means proposing a NEW use case."}
+                        </div>
+                      )}
+                      <div>
+                        <Badge
+                          tone={
+                            d.intendedVsGranted.status === "aligned"
+                              ? "ok"
+                              : d.intendedVsGranted.status === "undershoot"
+                                ? "warn"
+                                : "neutral"
+                          }
+                        >
+                          {d.intendedVsGranted.status.replace(/_/g, " ")}
+                        </Badge>{" "}
+                        <span className={v.faint}>{d.intendedVsGranted.note}</span>
+                      </div>
+                      {(d.intendedVsGranted.agents ?? []).map(
+                        (agRow: NonNullable<UseCaseDetail["intendedVsGranted"]["agents"]>[number]) => (
+                          <div key={agRow.agentId}>
+                            <Badge tone={agRow.grantedToParticipants ? "ok" : "warn"}>
+                              {agRow.agentName ?? agRow.agentId}
+                            </Badge>{" "}
+                            <span className={v.faint}>
+                              {agRow.registered
+                                ? agRow.grantedToParticipants
+                                  ? `granted to ${agRow.participantHolders} participant(s)`
+                                  : "no participant holds a grant — a provisioning gap, not evidence of use"
+                                : "no longer in the registry (intent survives agent deletion by design)"}
+                            </span>
+                          </div>
+                        ),
+                      )}
+                    </div>
+                  </Card>
 
                   {/* the linked workflow's state */}
                   {d.instance && (

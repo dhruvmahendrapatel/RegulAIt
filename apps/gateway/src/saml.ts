@@ -68,6 +68,7 @@ import {
   requestIsSecure,
   sessionCookie,
 } from "./auth.js";
+import { refuseIfFeatureNotLicensed } from "./licensing.js";
 import { loadOrgSettings } from "./org-settings.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { countEnabledSsoProviders, SSO_ONLY_LAST_PROVIDER } from "./sso-providers.js";
@@ -712,6 +713,15 @@ export function registerSamlRoutes(app: FastifyInstance, db: Db, opts: SamlRoute
   });
 
   app.post("/v1/auth/saml-providers", async (req, reply) => {
+    // ADR-0052 §4: SSO/SAML is a TIER FEATURE, enforced where it is ENABLED.
+    // Creating a provider is the enabling act; sign-in through an existing
+    // provider is authentication (governance, fail-open) and is never gated.
+    const flagRefusal = await refuseIfFeatureNotLicensed(db, {
+      actorUserId: req.authCtx.userId,
+      feature: "sso_saml",
+      what: "creating a SAML provider",
+    });
+    if (flagRefusal) return reply.status(flagRefusal.status).send(flagRefusal.body);
     const body = createSamlProviderSchema.parse(req.body);
     if (body.spPrivateKey && !opts.dataKey) {
       return reply.status(409).send({

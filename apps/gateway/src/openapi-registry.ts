@@ -385,6 +385,11 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/certification-campaigns/preview": "internal",
   "GET /v1/certification-campaigns": "internal",
   "GET /v1/certification-campaigns/:campaignId": "internal",
+  // ADR-0090 amendment (B2) — the expiry sweep's manual door (records
+  // visibility facts only; decides nothing) and audited item reassignment
+  // (never to the grant's holder).
+  "POST /v1/certification-campaigns/expiry-sweep": "internal",
+  "POST /v1/certification-campaigns/:campaignId/items/:itemId/reassign": "internal",
   // ADR-0090 — the two direct MCP grant deletes that never existed (every
   // other grant kind already had a removal endpoint); internal like their
   // agent/connector twins' write surfaces.
@@ -500,6 +505,7 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/security/data-key": "internal",
   "GET /v1/security/data-key/attestations": "internal",
   "POST /v1/security/data-key/attestations": "internal",
+  "GET /v1/security/data-key/reencryption": "internal",
   // ADR-0064 — the in-process scheduler. Internal: an operator console surface
   // about THIS deployment's own background loop. Nothing integrates against it,
   // and "run now" on a job that spends model tokens is not a contract we want
@@ -531,6 +537,9 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/copilot/queries": "internal",
   "POST /v1/copilot/proposals": "internal",
   "GET /v1/copilot/proposals": "internal",
+  // L6b — the consent-gated applier. Internal for the same reason the rest of
+  // the copilot is: it names governance objects and is an admin surface.
+  "POST /v1/copilot/proposals/:proposalId/apply": "internal",
   // ADR-0058 — compliance packs. Internal: the pack schema and the collector
   // vocabulary will move as frameworks are revised and new ledgers become
   // evidenceable, and freezing a control-mapping shape as a public contract
@@ -877,6 +886,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/certification-campaigns/preview": "certification",
   "GET /v1/certification-campaigns": "certification",
   "GET /v1/certification-campaigns/:campaignId": "certification",
+  "POST /v1/certification-campaigns/expiry-sweep": "certification",
+  "POST /v1/certification-campaigns/:campaignId/items/:itemId/reassign": "certification",
   // ADR-0091 — toxic-combination SoD rules + override escalations
   "POST /v1/sod/rules": "sod",
   "GET /v1/sod/rules": "sod",
@@ -1100,6 +1111,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/security/data-key": "security",
   "GET /v1/security/data-key/attestations": "security",
   "POST /v1/security/data-key/attestations": "security",
+  "GET /v1/security/data-key/reencryption": "security",
   "GET /v1/scheduler": "scheduler",
   "GET /v1/scheduler/jobs/:name/runs": "scheduler",
   "PATCH /v1/scheduler/jobs/:name": "scheduler",
@@ -1119,6 +1131,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/copilot/queries": "copilot",
   "POST /v1/copilot/proposals": "copilot",
   "GET /v1/copilot/proposals": "copilot",
+  "POST /v1/copilot/proposals/:proposalId/apply": "copilot",
   "GET /v1/compliance/packs": "compliance-packs",
   "POST /v1/compliance/packs": "compliance-packs",
   "POST /v1/compliance/packs/seed": "compliance-packs",

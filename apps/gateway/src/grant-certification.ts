@@ -95,6 +95,10 @@ import {
   deleteServerGrantById,
   deleteToolGrantById,
 } from "./grant-revocation.js";
+// ADR-0046's ONE approver-moving write — the same mechanism the SLA
+// `reassign` escalation uses. Item reassignment below calls it rather than
+// writing `approvals.approverUserId` a second way.
+import { reassignApprovalApprover } from "./workbench.js";
 
 /** the `approvals.stageId` sentinel carrying the ITEM id — the same slot the
  * model-card / infra / conflict rows use, because riding the ONE queue with
@@ -111,9 +115,10 @@ export const CERTIFICATION_NOTES = {
     "opened. A grant created after open is out of its scope, and campaign coverage is never " +
     "continuous.",
   expiry:
-    "computed on read — no scheduler. A past-due campaign with undecided items reads " +
-    "'expired-incomplete'; its undecided items stay undecided forever (deciding them is refused " +
-    "by name), and nothing ever auto-keeps or auto-revokes.",
+    "computed on read. A past-due campaign with undecided items reads 'expired-incomplete'; its " +
+    "undecided items stay undecided forever (deciding them is refused by name), and nothing ever " +
+    "auto-keeps or auto-revokes. The ADR-0064 expiry sweep only RECORDS the fact into the audit " +
+    "log (once per campaign) so it is visible even if nobody opens this page — it decides nothing.",
 } as const;
 
 const scopeSchema = z.object({
@@ -575,6 +580,80 @@ export async function certificationPostureSection(db: Db, now: Date) {
 }
 
 // ---------------------------------------------------------------------------
+// ADR-0090 amendment (batch B2a) — the campaign expiry sweep. VISIBILITY
+// ONLY, and that boundary is the whole design: rule 4 above stands untouched.
+// ---------------------------------------------------------------------------
+
+/**
+ * Record — never decide — that open campaigns have passed their due date with
+ * items undecided.
+ *
+ * READ THIS BEFORE TRUSTING IT: THIS FUNCTION CHANGES NO DECISION AND NO
+ * STATUS. `expired-incomplete` stays a read-time projection of stored state
+ * (`campaignEffectiveStatus`), the late-decide refusal stays `campaignPastDue`
+ * — the SAME predicate this sweep asks, so the sweep and the read can never
+ * disagree — and undecided items stay undecided forever. What read-time
+ * computation cannot do is put the fact somewhere nobody has to open a page
+ * to see: this sweep writes ONE audited `campaign-expired-incomplete` row per
+ * campaign the FIRST time it is observed past due (idempotent — a re-run adds
+ * nothing), so the audit trail carries the expiry even if no one ever reads
+ * the campaign again.
+ *
+ * Two things call this, and they call THIS, not a copy: the ADR-0064
+ * `certification-expiry-sweep` job (when REGULAIT_SCHEDULER=on, which is OFF
+ * by default) and `POST /v1/certification-campaigns/expiry-sweep`, the
+ * manual/cron door.
+ */
+export async function runCampaignExpirySweep(
+  db: Db,
+  opts: { actorUserId: string | null; now?: Date } = { actorUserId: null },
+): Promise<{ observed: number; campaignIds: string[] }> {
+  const now = opts.now ?? new Date();
+  const open = await db
+    .select()
+    .from(grantCertificationCampaigns)
+    .where(eq(grantCertificationCampaigns.status, "open"));
+  const campaignIds: string[] = [];
+  for (const campaign of open) {
+    if (!campaignPastDue(campaign, now)) continue; // within due date: untouched
+    const [undecided] = await db
+      .select({ n: count() })
+      .from(grantCertificationItems)
+      .where(and(eq(grantCertificationItems.campaignId, campaign.id), isNull(grantCertificationItems.decision)));
+    const undecidedCount = undecided?.n ?? 0;
+    if (undecidedCount === 0) continue; // not expired-incomplete (defensive; the last decide completes)
+    // idempotence: the fact is recorded ONCE per campaign, ever — the audit
+    // log itself is the marker, so no schema state and no second row
+    const [already] = await db
+      .select({ n: count() })
+      .from(auditLog)
+      .where(and(eq(auditLog.ruleId, "campaign-expired-incomplete"), eq(auditLog.objectId, campaign.id)));
+    if ((already?.n ?? 0) > 0) continue;
+    await db.insert(auditLog).values({
+      userId: opts.actorUserId ?? campaign.openedByUserId,
+      objectType: "certification_campaign",
+      objectId: campaign.id,
+      detail: {
+        phase: "expiry_sweep",
+        name: campaign.name,
+        dueAt: campaign.dueAt.toISOString(),
+        undecidedItems: undecidedCount,
+        sweptBy: opts.actorUserId,
+      },
+      effect: "deny",
+      ruleId: "campaign-expired-incomplete",
+      ruleChain: [],
+      reason:
+        `certification campaign '${campaign.name}' passed its due date with ${undecidedCount} item(s) ` +
+        "undecided — they stay undecided forever and nothing auto-keeps or auto-revokes; recorded once " +
+        "by the expiry sweep so the fact is visible without anyone reading the campaign",
+    });
+    campaignIds.push(campaign.id);
+  }
+  return { observed: campaignIds.length, campaignIds };
+}
+
+// ---------------------------------------------------------------------------
 // Routes (admin-only via the default gate — opening a review of the org's
 // grant rows and reading who holds what is the same class of record as the
 // inventory). Reviewer DECISIONS deliberately have no route here: they ride
@@ -785,6 +864,154 @@ export function registerGrantCertificationRoutes(app: FastifyInstance, db: Db): 
         decidedAt: i.decidedAt ? i.decidedAt.toISOString() : null,
         revocation: i.revocationDetail ?? null,
       })),
+    };
+  });
+
+  /** the B2a sweep's manual/cron door — the ADR-0064 pattern: this calls
+   * EXACTLY the function the `certification-expiry-sweep` scheduler job
+   * calls, so a manual run and a scheduled run are one code path. It records
+   * visibility facts only; it decides nothing (see runCampaignExpirySweep). */
+  app.post("/v1/certification-campaigns/expiry-sweep", async (req) => {
+    const result = await runCampaignExpirySweep(db, { actorUserId: req.authCtx.userId ?? null });
+    return {
+      ...result,
+      note:
+        "visibility only: one audited campaign-expired-incomplete fact per past-due campaign, the " +
+        "first time it is observed — no status written, no item decided, nothing auto-keeps or " +
+        "auto-revokes. 'expired-incomplete' remains computed on read from the same predicate.",
+    };
+  });
+
+  /**
+   * ADR-0090 amendment (batch B2b) — reassign an ITEM's reviewer. The ADR
+   * shipped with "no reassignment": an item routed to a reviewer who then
+   * becomes unavailable was decidable only via the generic admin override.
+   * This gives the operation a first-class, audited, reason-required act —
+   * admin-only via the default gate — with two hard bars:
+   *
+   *  - NEVER to the grant's holder. The ADR-0022 decider-keyed self-review
+   *    bar extends to routing: handing the holder their own item would set up
+   *    the exact self-certification the decide path refuses, so the routing
+   *    act refuses first, by name (`cannot_reassign_to_holder`) — and a
+   *    recorded reason does NOT help, because the bar is about who would
+   *    sign, not about how well the move is documented.
+   *  - NEVER on a decided item (`item_already_decided`) and never on a
+   *    past-due campaign (`campaign_expired`, the same shared predicate the
+   *    decide path refuses with — an undecided-forever item has no reviewer
+   *    to move).
+   *
+   * The approvals-row move rides `reassignApprovalApprover` — ADR-0046's one
+   * approver-moving write (the SLA `reassign` escalation) — never a parallel
+   * UPDATE, so the queue and the item can never learn different reviewers.
+   */
+  app.post("/v1/certification-campaigns/:campaignId/items/:itemId/reassign", async (req, reply) => {
+    const params = z.object({ campaignId: z.string().uuid(), itemId: z.string().uuid() }).parse(req.params);
+    const body = z.object({ reviewerUserId: z.string().uuid(), reason: z.string().min(1) }).parse(req.body);
+    const actorUserId = req.authCtx.userId;
+    if (!actorUserId) {
+      // moving a named review is an accountability record — an identityless
+      // bootstrap token cannot author one (the campaign-open rule)
+      return reply.status(403).send({ error: "bootstrap_cannot_reassign" });
+    }
+    const [campaign] = await db
+      .select()
+      .from(grantCertificationCampaigns)
+      .where(eq(grantCertificationCampaigns.id, params.campaignId));
+    if (!campaign) return reply.status(404).send({ error: "not_found" });
+    const [item] = await db
+      .select()
+      .from(grantCertificationItems)
+      .where(and(eq(grantCertificationItems.id, params.itemId), eq(grantCertificationItems.campaignId, params.campaignId)));
+    if (!item) return reply.status(404).send({ error: "not_found" });
+    if (item.decision !== null) {
+      return reply.status(409).send({
+        error: "item_already_decided",
+        detail: "this item is decided — a recorded attestation keeps its reviewer; reassignment moves pending reviews only",
+      });
+    }
+    if (campaign.status === "open" && campaignPastDue(campaign, new Date())) {
+      return reply.status(409).send({
+        error: "campaign_expired",
+        detail:
+          "this campaign is past its due date — its undecided items stay undecided forever, so there " +
+          "is no pending review to move; open a new campaign to review these grants",
+      });
+    }
+    const [reviewer] = await db
+      .select({ id: users.id, displayName: users.displayName, email: users.email, disabledAt: users.disabledAt })
+      .from(users)
+      .where(eq(users.id, body.reviewerUserId));
+    if (!reviewer || reviewer.disabledAt) {
+      return reply.status(400).send({ error: "invalid_reference", field: "reviewerUserId" });
+    }
+    // THE BAR: the holder never reviews their own grant — refused at routing
+    // time for the same reason the decide path refuses it at signing time.
+    // Keyed on the would-be reviewer's actual holding (direct, or a current
+    // assignment of the bundling role), and no reason unlocks it.
+    let reviewerHolds = item.holderUserId !== null && item.holderUserId === body.reviewerUserId;
+    if (!reviewerHolds && item.holderRoleId) {
+      const held = await db
+        .select({ id: roleAssignments.id })
+        .from(roleAssignments)
+        .where(and(eq(roleAssignments.roleId, item.holderRoleId), eq(roleAssignments.userId, body.reviewerUserId)));
+      reviewerHolds = held.length > 0;
+    }
+    if (reviewerHolds) {
+      return reply.status(403).send({
+        error: "cannot_reassign_to_holder",
+        detail:
+          "the proposed reviewer holds this grant — routing them their own item would set up a " +
+          "self-certification the decide path refuses (cannot_certify_own_grant); no reason unlocks " +
+          "this, because the bar is about who would sign",
+      });
+    }
+    if (!item.approvalId) return reply.status(409).send({ error: "item_has_no_approval" });
+    const previousReviewerUserId = item.reviewerUserId;
+    const outcome = await db.transaction(async (tx) => {
+      // ADR-0046's one approver-moving write — pending-guarded, never decides
+      const moved = await reassignApprovalApprover(tx as unknown as Db, item.approvalId!, body.reviewerUserId);
+      if (!moved) return { moved: false as const };
+      await tx
+        .update(grantCertificationItems)
+        .set({ reviewerUserId: body.reviewerUserId })
+        .where(eq(grantCertificationItems.id, item.id));
+      await tx.insert(auditLog).values({
+        userId: actorUserId,
+        objectType: "certification_campaign",
+        objectId: campaign.id,
+        detail: {
+          phase: "reassign",
+          itemId: item.id,
+          approvalId: item.approvalId,
+          grantKind: item.grantKind,
+          grantId: item.grantId,
+          holder: item.holderLabel,
+          object: item.objectLabel,
+          previousReviewerUserId,
+          reviewerUserId: body.reviewerUserId,
+          reason: body.reason,
+        },
+        effect: "allow",
+        ruleId: "grant-cert-item-reassigned",
+        ruleChain: [],
+        reason:
+          `certification item '${item.holderLabel} · ${item.objectLabel}' reassigned to ` +
+          `'${reviewer.displayName || reviewer.email}': ${body.reason} — routing moves whose queue ` +
+          "the item shows in, never who is allowed to decide (the one decide path enforces that)",
+      });
+      return { moved: true as const };
+    });
+    if (!outcome.moved) {
+      return reply.status(409).send({
+        error: "approval_not_pending",
+        detail: "the item's queue row is no longer pending — nothing was moved",
+      });
+    }
+    return {
+      reassigned: true,
+      itemId: item.id,
+      previousReviewerUserId,
+      reviewerUserId: body.reviewerUserId,
     };
   });
 }

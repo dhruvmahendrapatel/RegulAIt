@@ -357,3 +357,57 @@ path that quietly defaulted to `governance` would be an unlicensed hole.
   under a `hosted` license is refused rather than merely inconsistent.
 - Feed the seat count into ADR-0051's `syncSeats` once a billing backend exists that can receive it.
 - A grace-window escalation ladder, once a notification transport exists to escalate through.
+
+---
+
+## Amendment (2026-08-22) — the first two §4 tier flags are ENFORCED, not just reported
+
+"Tier flags are correct and reported but no feature reads them yet" is no longer fully true: two
+flags now have real enforcement points, chosen as the two §4 consumers closest to real in this
+codebase (both surfaces fully exist) and first in this ADR's own follow-up order — **SSO/SAML**
+and **SCIM**.
+
+**Where the flag bites — the ENABLING act, never the operation of what exists:**
+
+| flag | enforcement point | stays open on purpose |
+|---|---|---|
+| `sso_saml` | `POST /v1/auth/saml-providers` (creating a provider is enabling SSO) | sign-in through an existing provider (authentication is governance, fail-open); PATCH/DELETE on existing providers (managing/narrowing committed footprint) |
+| `scim_provisioning` | `POST /v1/scim/tokens` (minting a token is enabling provisioning) | already-issued tokens (committed footprint, §5); rotate (narrows exposure) and revoke (offboarding) |
+
+The gate is one helper, `refuseIfFeatureNotLicensed`, the tier-flag twin of
+`refuseIfExpansionBlocked`: it calls `featureEnabled` — the same §4 flag reader
+`GET /v1/licenses/status` has reported from since this ADR shipped — so **a wired point can never
+disagree with what the status API reports**. A refusal is a 403 naming the feature, the tier, the
+state and the flag reader's own ruleId (`license-feature-not-granted` /
+`license-absent-feature-closed`), audited as a deny. `enforcementPointsWired` on the status API
+now lists all four wired points.
+
+**The ABSENT state is enforced per the posture table, which is a behaviour change stated
+plainly.** With no license installed, `featureEnabled` closes every flag ("every tier feature is
+**closed**" — the posture the 2026-08-02 amendment's table has stated from the start, and what
+the status API has reported all along); these two creation routes now refuse on an unlicensed deployment
+where they previously succeeded. Enforcing anything softer would have re-created the exact
+reported-vs-enforced split this closure exists to remove. Contrast seats, which absence
+deliberately leaves uncapped: there is no authoritative NUMBER to invent there, but "closed"
+needs no invention. Grace keeps flags open and past-grace closes them, unchanged — `featureEnabled`
+composes the expiry posture internally and is unit-tested for it. The gateway test suites that
+legitimately exercise SAML/SCIM creation now run under a real ephemerally-signed license granting
+exactly the flags they need (`testing/license-fixture.ts` — same ephemeral-keypair discipline as
+`licensing.test.ts`, deployment left UNLICENSED after each suite).
+
+**Proven, not asserted** (`licensing.test.ts`): a valid `team`-tier license WITHOUT the flags is
+refused BY NAME at both points (403, feature + tier + ruleId, audited deny, nothing created); the
+ABSENT state refuses with `license-absent-feature-closed` exactly as `features.*: false` has
+always been reported; a tier WITH the flags creates both objects unchanged. Non-vacuity: removing
+the one SAML flag read reddened exactly the two gating tests (21/23) and nothing else.
+
+**Still unwired, named rather than implied:**
+
+- **Flags with no reader yet**: `compliance_packs`, `advanced_orchestration`, `airgapped_mode`,
+  `custom_model_providers` — reported-only today, exactly as all six were before this amendment.
+- **Expansion points**: connector, MCP server, model-provider and PM/git connection creation
+  still produce no license refusal (only `user.provision` and `agent.create` do).
+- **`deploymentMode` stays recorded, not enforced.** Cross-checking a signed deployment grant
+  against ADR-0027's A4 running-mode dimension decides what a mode-mismatched install DOES
+  (refuse to boot? degrade? warn?) — that is its own decision with its own failure-posture
+  argument, not a flag read, and it is deliberately not smuggled in here.

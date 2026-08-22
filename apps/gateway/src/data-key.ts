@@ -138,34 +138,50 @@
  * "nobody has ever said they have this key" stops being invisible.
  */
 
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { timingSafeEqual } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
   DATA_KEY_ATTESTATION_METHODS,
   auditLog,
   dataKeyAttestations,
+  dataKeyReencryptionRuns,
   dataKeyState,
+  desc,
   eq,
   sql,
   users,
   type DataKeyAttestationMethod,
   type DataKeyAttestationRow,
+  type DataKeyReencryptionRunRow,
   type DataKeyStateRow,
   type Db,
 } from "@regulait/db";
-import { decryptSecret } from "./secrets.js";
+import {
+  FINGERPRINT_BYTES,
+  FINGERPRINT_DOMAIN,
+  FINGERPRINT_PREFIX,
+  dataKeyFingerprint,
+  decryptSecret,
+} from "./secrets.js";
 
 export const DATA_KEY_ENV = "REGULAIT_DATA_KEY";
 export const DATA_KEY_ROTATION_ENV = "REGULAIT_DATA_KEY_ROTATED_FROM";
+/** the OLD key's FULL 64 hex chars — the re-encryption walk needs a key that
+ * can decrypt, and DATA_KEY_ROTATION_ENV holds only a fingerprint (a PRF
+ * output, which cannot). Defined here (not in data-key-reencrypt.ts) so the
+ * boot path can name it without a circular import. */
+export const DATA_KEY_OLD_ENV = "REGULAIT_DATA_KEY_OLD";
+/** the one command that starts — or resumes — the ADR-0063 §4 re-encryption
+ * walk. Printed by the CLI, the boot warning and the status endpoint from
+ * this single definition, so they can never drift apart. */
+export const REENCRYPT_COMMAND =
+  `${DATA_KEY_ENV}=<new key> ${DATA_KEY_OLD_ENV}=<old key> pnpm --filter @regulait/gateway reencrypt`;
 
-/** the fixed domain-separation string. Changing it invalidates every recorded
- * fingerprint on every deployment — hence the `dk1:` version tag beside it. */
-export const FINGERPRINT_DOMAIN = "regulait/data-key-fingerprint/v1";
-export const FINGERPRINT_PREFIX = "dk1:";
-/** 128 bits. Collision-irrelevant here (we compare one value to one value) and
- * short enough that a human can read it off a screen and compare it. */
-export const FINGERPRINT_BYTES = 16;
+// The derivation itself moved to secrets.ts (batch B4) so the envelope can
+// embed the fingerprint of its encrypting key without a circular import — the
+// public surface here is unchanged.
+export { FINGERPRINT_BYTES, FINGERPRINT_DOMAIN, FINGERPRINT_PREFIX, dataKeyFingerprint };
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 
@@ -183,23 +199,6 @@ export const DATA_KEY_RULE_IDS = {
 // ---------------------------------------------------------------------------
 // 1. THE FINGERPRINT
 // ---------------------------------------------------------------------------
-
-/** Same validation the envelope itself applies, so a key that cannot encrypt
- * can never acquire a fingerprint either. */
-function keyBytes(dataKeyHex: string): Buffer {
-  const key = Buffer.from(dataKeyHex, "hex");
-  if (key.length !== 32) throw new Error("data key must be 32 bytes (64 hex chars)");
-  return key;
-}
-
-/**
- * The non-secret, non-invertible identifier for a data key. See the module
- * header §1 for the derivation and why publishing it is safe.
- */
-export function dataKeyFingerprint(dataKeyHex: string): string {
-  const digest = createHmac("sha256", keyBytes(dataKeyHex)).update(FINGERPRINT_DOMAIN, "utf8").digest();
-  return FINGERPRINT_PREFIX + digest.subarray(0, FINGERPRINT_BYTES).toString("hex");
-}
 
 /** `null` for "this process has no key at all", which is a legitimate state
  * (secret writes are simply refused) and not a misconfiguration on its own. */
@@ -473,6 +472,11 @@ export interface DataKeyBootResult extends DataKeyBootDecision {
   probe: CiphertextProbe | null;
   /** false when nobody has ever attested custody of the CURRENT fingerprint */
   attested: boolean;
+  /** an ADR-0063 §4 re-encryption walk left `running` (killed mid-walk, or
+   * still in progress on another process) — ciphertext exists under two keys
+   * until it is resumed to completion. Null after a completed walk, which is
+   * why a boot under the new key alone then succeeds with no caveat. */
+  pendingReencryption: DataKeyReencryptionRunRow | null;
 }
 
 async function readState(db: Db): Promise<DataKeyStateRow | undefined> {
@@ -525,12 +529,41 @@ export async function verifyDataKeyOnBoot(
   const rotatedRaw = env[DATA_KEY_ROTATION_ENV];
   const rotatedFrom = rotatedRaw && rotatedRaw.trim() !== "" ? rotatedRaw.trim() : null;
 
+  // ADR-0063 §4 follow-up: an interrupted re-encryption walk means ciphertext
+  // exists under TWO keys right now. It never blocks a boot on its own — the
+  // walk is resumable by design — but every outcome below reports it, and the
+  // mismatch refusal names the resume command instead of sending the operator
+  // down the abandon-the-old-ciphertext path.
+  const [pendingReencryption = null] = await db
+    .select()
+    .from(dataKeyReencryptionRuns)
+    .where(eq(dataKeyReencryptionRuns.status, "running"))
+    .orderBy(desc(dataKeyReencryptionRuns.startedAt))
+    .limit(1);
+
   // The probe only matters on the "nothing recorded yet" branch: everywhere
   // else the recorded fingerprint is the stronger, cheaper answer.
   const probe =
     current !== null && recorded === null ? await probeCiphertext(db, (dataKeyHex as string).trim()) : null;
 
   const decision = decideDataKeyBoot({ current, recorded, rotatedFrom, probe });
+
+  if (
+    decision.code === "mismatch" &&
+    pendingReencryption &&
+    fingerprintsMatch(pendingReencryption.toFingerprint, current) &&
+    fingerprintsMatch(pendingReencryption.fromFingerprint, recorded)
+  ) {
+    // The mismatch is not a mystery restore — it is a walk that was killed
+    // mid-flight. Point at the resume command, because the generic remedy
+    // ("declare a rotation, re-enter everything by hand") would abandon
+    // ciphertext the walk can still genuinely re-encrypt.
+    decision.message +=
+      `\n\n  AN UNFINISHED RE-ENCRYPTION WALK (run ${pendingReencryption.id}) from ${recorded} ` +
+      `to ${current} explains this mismatch: it was interrupted before every row was rewritten. ` +
+      `Do NOT declare a rotation — resume the walk instead; it continues from its exact watermark:\n` +
+      `         ${REENCRYPT_COMMAND}`;
+  }
 
   switch (decision.code) {
     case "recorded":
@@ -615,7 +648,7 @@ export async function verifyDataKeyOnBoot(
   }
 
   const attested = current === null ? false : await hasAttestation(db, current);
-  return { ...decision, recorded, current, probe, attested };
+  return { ...decision, recorded, current, probe, attested, pendingReencryption };
 }
 
 /** one line an operator can read in the boot log, beside proxy/HSTS/egress */
@@ -624,7 +657,11 @@ export function describeDataKey(result: DataKeyBootResult): string {
   const custody = result.attested
     ? "custody attested"
     : "NO CUSTODY ATTESTATION ON FILE — nobody has recorded that this key is stored anywhere but this box";
-  return `${result.current} [${result.code}] — ${custody}`;
+  const walk = result.pendingReencryption
+    ? ` — RE-ENCRYPTION WALK INCOMPLETE (${result.pendingReencryption.fromFingerprint} -> ` +
+      `${result.pendingReencryption.toFingerprint}): ciphertext exists under two keys; resume with: ${REENCRYPT_COMMAND}`
+    : "";
+  return `${result.current} [${result.code}] — ${custody}${walk}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -753,6 +790,19 @@ export async function dataKeyPosture(db: Db, dataKeyHex: string | undefined | nu
       `NO CUSTODY ATTESTATION on file for ${target}. Nobody has recorded that this key exists ` +
         `anywhere other than this machine — which means a backup of this deployment may not be ` +
         `restorable. The key is deliberately NOT in the backup (ADR-0035).`,
+    );
+  }
+  const [pendingWalk] = await db
+    .select()
+    .from(dataKeyReencryptionRuns)
+    .where(eq(dataKeyReencryptionRuns.status, "running"))
+    .orderBy(desc(dataKeyReencryptionRuns.startedAt))
+    .limit(1);
+  if (pendingWalk) {
+    warnings.push(
+      `A key re-encryption walk (${pendingWalk.fromFingerprint} -> ${pendingWalk.toFingerprint}, ` +
+        `run ${pendingWalk.id}) is INCOMPLETE — ciphertext currently exists under two keys. ` +
+        `Resume it: ${REENCRYPT_COMMAND}. Keep BOTH keys available until it completes.`,
     );
   }
 

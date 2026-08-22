@@ -124,3 +124,49 @@ The form is the deliverable; the filled form is the versioned artifact the sign-
 - **Retiring does not abort a live intake instance**; the instance runs out and the terminal
   guard simply ignores its outcome.
 - **No risk register.** Linking a use case to named risks/controls is gap L2, not this ADR.
+
+---
+
+## Amendment (2026-08-22, batch B3a) — approval now gates dispatch, as an org opt-in (migration 0098)
+
+The first honest limit above ("approval does not yet gate dispatch — the obvious next step") is
+closed, the only way a gate should arrive in a shipped enforcement plane: **default-off,
+byte-identical until an admin acts**.
+
+**The knob**: `org_settings.use_case_gate_mode ∈ off | warn | enforce`, default `off` (set via
+the audited `PUT /v1/org/settings`; no new route — the ADR-0021 machinery). Off is proven
+byte-identical by test: the exact dispatch that refuses under enforce succeeds with the provider
+called, no response annotation, and zero rows under either gate ruleId.
+
+**The join, stated as honestly as the schema allows**: `ai_use_cases.project_id` is the ONLY
+join between the register and dispatch attribution, and it is **optional** (a use case may be
+proposed before any project exists). So the gate applies exactly **where a link exists**: a
+governed dispatch attributed to a project that at least one use case names. A dispatch
+attributed to a project no use case links — or attributed to no project at all — is untouched
+in every mode. What this enforces is therefore *"a project the register governs does not
+dispatch on unapproved intent"* — NOT *"every dispatch runs under an approved use case"*, which
+this deployment has no data to enforce and does not claim.
+
+**The mechanics** (`apps/gateway/src/use-case-gate.ts`, called from the ONE dispatch core
+beside the ADR-0045 MRM rung — after the caller's entitlement decision, before any provider
+work, cost, or content processing, so a refusal costs nothing):
+
+- **enforce**: refused **409 `use_case_approval_required`** (audited `use-case-gate-refused`,
+  effect deny, the linked use cases and their statuses in the detail) unless at least one
+  linked use case is `approved`. Proven with a recording provider spy at zero calls, and an
+  approval through the one decide path flips the same dispatch live in the same test.
+- **warn**: the dispatch proceeds; the refusal-shaped fact is recorded — an audit row
+  (`use-case-gate-warned`, effect allow) plus a `useCaseGate` annotation on the dispatch
+  result — so an operator can see exactly what enforce would refuse before arming it.
+- A **retired** use case does not satisfy the gate (its status is no longer `approved`):
+  retirement takes the approval out of service for dispatch exactly as for the register.
+- Fully reversible: turning the knob off restores dispatch with every registry row intact.
+
+Non-vacuity the M-002 way: no-op the enforce branch → exactly the two enforce-refusal tests
+fail; drop the warn annotation → exactly the warn-annotation test fails. Both probes reverted
+by reversing the exact edit.
+
+**Still not built**: nothing requires a dispatch to BE attributed to a use-case-linked project
+— attribution remains the pillar-5 opt-in it always was, so the gate cannot see a call that
+names no project. Closing that would be an attribution-mandate decision (its own ADR), not a
+wider join.
