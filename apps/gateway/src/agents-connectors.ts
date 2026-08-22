@@ -200,6 +200,42 @@ export interface SkippedCandidate {
   reason: "no_model_credential" | "no_model_id" | "unknown_provider" | "mock_shadowed_by_live";
 }
 
+/**
+ * ADR-0095 (B1.5 F1), widened by B6a — THE ONE MOCK-SHADOWING PREDICATE.
+ *
+ * A mock-provider agent exists for the KEYLESS demo: with no credential
+ * configured anywhere, the out-of-box roster must still route, summarize and
+ * decompose. The moment a live agent in the SAME governed roster can genuinely
+ * serve, a mock stops being an automatic pick — right-sizing real work onto a
+ * canned-prose responder is not an optimization, it is a non-answer.
+ *
+ * ADR-0095 shipped this for ROUTING selection only and named its own residual:
+ * the compaction-summarizer roster and the decompose-worker roster were not
+ * narrowed, so a mock could still be picked to SUMMARIZE a conversation (a
+ * canned summary silently degrades every later turn's retained context) or to
+ * PLAN a task graph (a canned plan is a nonsense DAG). B6a closes both by
+ * reusing this function rather than restating the rule — three copies of a
+ * predicate are three places for it to drift, and the drift would be silent.
+ *
+ * The contract, identical at all three call sites:
+ *   - `roster` is the caller's OWN entitled set (never widened here).
+ *   - `dispatchable` is that call site's own strict dispatchability test.
+ *   - Nothing is shadowed unless a non-mock member of the same roster is
+ *     dispatchable, so a keyless install shadows nothing and behaves exactly
+ *     as it did before.
+ *   - An EXPLICIT choice is not routing and is exempted by the CALLER (the
+ *     requested agent on invoke, the org's fixed summarizer, an explicitly
+ *     named lead) — this function only ever reports the shadowed set.
+ */
+export function mockShadowedByLive<T extends { id: string; provider: string }>(
+  roster: readonly T[],
+  dispatchable: (a: T) => boolean,
+): Set<string> {
+  const liveCanServe = roster.some((a) => a.provider !== "mock" && dispatchable(a));
+  if (!liveCanServe) return new Set<string>();
+  return new Set(roster.filter((a) => a.provider === "mock" && dispatchable(a)).map((a) => a.id));
+}
+
 /** §8.4 PII enforcement outcome threaded onto a dispatch. COUNTS ONLY —
  * inputHits/outputHits are per-category counts, never the matched text. */
 /**
@@ -3570,6 +3606,9 @@ export function registerAgentConnectorRoutes(
       // compaction dispatch can never fail on config the invoke path already
       // knows about. Same filter decompose.ts applies to its worker roster.
       let compactionCandidates: AgentRow[] = [];
+      /** B6a: the summarizer candidates `mockShadowedByLive` removed, disclosed
+       * on the compaction audit row with the same reason string routing uses */
+      let compactionSkipped: SkippedCandidate[] = [];
       if (body.dispatch) {
         const configured = await configuredProviders(db, opts.dataKey, userId);
         const strictlyDispatchable = (a: AgentRow) =>
@@ -3580,16 +3619,20 @@ export function registerAgentConnectorRoutes(
         // agent in this caller's entitled roster can genuinely serve, a mock
         // stops being a routing candidate: right-sizing a real request onto a
         // canned-prose responder is not an optimization, it is a non-answer
-        // billed as savings. Only ROUTING eligibility is narrowed — a mock the
-        // caller explicitly requested still serves (the requested-agent
-        // exemption below), because an explicit choice is not routing.
-        const liveCanServe = entitled.some((a) => a.provider !== "mock" && strictlyDispatchable(a));
+        // billed as savings. A mock the caller explicitly requested still
+        // serves (the requested-agent exemption below), because an explicit
+        // choice is not routing.
+        //
+        // B6a: the rule itself now lives in `mockShadowedByLive` so the
+        // summarizer and worker rosters can obey the SAME predicate instead of
+        // a second copy of it.
+        const shadowedMocks = mockShadowedByLive(entitled, strictlyDispatchable);
         const skipReason = (a: AgentRow): SkippedCandidate["reason"] | null => {
           if (a.id === agent.id) return null;
           if (!a.model) return "no_model_id";
           if (!isModelProviderKind(a.provider)) return "unknown_provider";
           if (!configured.has(agentProviderToken(a))) return "no_model_credential";
-          if (a.provider === "mock" && liveCanServe) return "mock_shadowed_by_live";
+          if (shadowedMocks.has(a.id)) return "mock_shadowed_by_live";
           return null;
         };
         skippedCandidates = entitled.flatMap((a) => {
@@ -3598,11 +3641,29 @@ export function registerAgentConnectorRoutes(
         });
         const skippedIds = new Set(skippedCandidates.map((s) => s.agentId));
         candidateRows = entitled.filter((a) => !skippedIds.has(a.id));
-        // (deliberately NOT mock-narrowed like the routing roster above: the
-        // summarizer picking a mock in a keyless install is the demo working,
-        // and narrowing it when live agents exist is a separate call — noted
-        // as a follow-up in PENDING.md, not smuggled in here.)
-        compactionCandidates = entitled.filter(strictlyDispatchable);
+        // B6a (ADR-0095's own recorded residual, now closed): the summarizer
+        // roster obeys the SAME `mockShadowedByLive` predicate the routing
+        // roster above obeys. A mock summary is canned prose written over the
+        // conversation's retained context, so every later turn in that thread
+        // silently degrades — quieter than the routing defect the owner hit,
+        // and the same disease.
+        //
+        // THE EXPLICIT-CHOICE EXEMPTION, mirroring routing's requested-agent
+        // exemption: ADR-0021's `summarizerSelection: 'fixed_agent'` is an
+        // admin naming ONE summarizer on purpose. Shadowing that pick would
+        // turn a deliberate configuration into `fixed_summarizer_unavailable`,
+        // so the fixed agent is exempt exactly as the requested agent is.
+        const fixedSummarizerId =
+          org.summarizerSelection === "fixed_agent" ? org.summarizerAgentId : null;
+        compactionSkipped = entitled.flatMap((a) =>
+          shadowedMocks.has(a.id) && a.id !== fixedSummarizerId
+            ? [{ agentId: a.id, name: a.name, reason: "mock_shadowed_by_live" as const }]
+            : [],
+        );
+        const compactionSkippedIds = new Set(compactionSkipped.map((s) => s.agentId));
+        compactionCandidates = entitled
+          .filter(strictlyDispatchable)
+          .filter((a) => !compactionSkippedIds.has(a.id));
       }
 
       // PILLAR 6 §5 CONTEXT COMPACTION — strictly after governance (the
@@ -3623,6 +3684,7 @@ export function registerAgentConnectorRoutes(
           conversation: convo.conversation,
           messages: convo.messages,
           candidates: compactionCandidates,
+          skippedCandidates: compactionSkipped,
           projectId,
           execute: executeGovernedDispatch,
           org,

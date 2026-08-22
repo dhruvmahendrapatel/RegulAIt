@@ -254,9 +254,19 @@ through the existing PATCH + the use-case detail's new field, feeding the ONE
 `intendedAgentIds` column the alignment reads, editable only pre-decision (post-decision
 intent edits refused by name — changing intent after approval is a NEW use case), proven
 end-to-end propose → capture → approve → aligned/undershoot on the inventory;
-mock-shadowing for the compaction-summarizer and decompose-worker rosters (0095 narrowed
+~~mock-shadowing for the compaction-summarizer and decompose-worker rosters (0095 narrowed
 ROUTING selection only — a mock summarizer/worker can still be picked when live agents
-exist, same disease class, deliberately its own call);
+exist, same disease class, deliberately its own call)~~ — **closed 2026-08-22 (batch B6a,
+ADR-0095 amendment, no migration)**: the rule is now ONE reused predicate
+(`mockShadowedByLive`) consumed by all three rosters, so a mock can no longer summarize a
+conversation or plan a task graph while a credentialed live agent in the same roster can
+serve; the keyless demo is byte-identical (nothing is shadowed unless a non-mock member of
+the SAME roster is dispatchable), an explicit choice is still honoured (routing's requested
+agent, ADR-0021's `summarizerSelection: 'fixed_agent'`, decompose's `leadAgentId`), the skip
+is disclosed as `mock_shadowed_by_live` on both new audit rows, and neutralising the one
+predicate reddens ADR-0095's own routing test alongside the three new ones — which is what
+proves the reuse; **remaining**: offline-only proof (stubbed adapter, as F1), and a
+decision-only invoke still previews mocks (it executes nothing);
 ~~**ENTITY-AWARE COPILOT PLANNING (0056 L6d residual, added 2026-08-22)** — the copilot's
 NL-to-query step is keyword-based, so an entity named in a question that matches no keyword
 rule is silently IGNORED rather than narrowing the query.~~ **CLOSED 2026-08-22

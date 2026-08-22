@@ -120,6 +120,12 @@ export async function prepareConversationContext(
     messages: StoredConversationMessage[];
     /** entitled + dispatchable agents the summarizer may be chosen from */
     candidates: readonly AgentRow[];
+    /** B6a (ADR-0095 amendment): entitled+dispatchable agents the caller
+     * REMOVED from `candidates` and why — today only `mock_shadowed_by_live`.
+     * Disclosed on the compaction audit row so a summarizer that was NOT
+     * chosen is as explainable as the one that was, exactly as the routing
+     * decision discloses its own skipped candidates. */
+    skippedCandidates?: readonly { agentId: string; name: string; reason: string }[];
     projectId: string | null;
     execute: typeof executeGovernedDispatch;
     /** ADR-0021 org settings: threshold/window dials, failure mode, summarizer
@@ -238,6 +244,9 @@ export async function prepareConversationContext(
             summaryTokens: newTokens,
             servedAgentId: outcome.result.servedAgentId,
             costUsd: outcome.result.costUsd,
+            ...(args.skippedCandidates?.length
+              ? { skippedCandidates: args.skippedCandidates }
+              : {}),
           },
           effect: "allow",
           ruleId: "context-compaction",

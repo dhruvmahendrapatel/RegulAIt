@@ -125,3 +125,104 @@ the row showed the new one.
 - The seed refresh helps fresh installs only, by design; existing rows need one PATCH.
 - Nothing here is re-proven against a live provider; the live run's evidence stands, and the
   new tests prove the mechanism offline (a stubbed adapter for the live-serve case).
+
+---
+
+## Amendment — 2026-08-22: the other two rosters (batch B6a, no migration)
+
+The section above ("Deliberately NOT narrowed here") named this ADR's own residual: routing
+selection was narrowed, but the **§5 compaction-summarizer roster** and **decompose's worker
+roster** were not, so a mock could still be picked in either while a credentialed live agent
+could serve. This amendment closes both. The owner experienced the ROUTING version of the
+defect directly (a mock answered a chat with canned prose while a live Gemini credential
+existed); the two remaining paths produce the same failure with quieter symptoms:
+
+- **Compaction.** A mock summary is canned prose written over a conversation's *retained
+  context*. Nothing errors; every later turn in that thread silently carries a summary that
+  never read the turns it replaced.
+- **Decomposition.** A mock plan is a nonsense task graph — and worse, the implicit lead was
+  *by construction* "the cheapest granted mock", so the agent that WRITES the plan was the
+  mock whenever the caller set no default agent.
+
+### The rule is now one function, reused — not restated
+
+`mockShadowedByLive(roster, dispatchable)` (`apps/gateway/src/agents-connectors.ts`) is the
+single predicate. It returns the ids of mock-provider agents that are dispatchable **while a
+non-mock member of the same roster is dispatchable**, and an empty set otherwise. All three
+call sites now consume it:
+
+| Call site | Roster | `dispatchable` |
+|---|---|---|
+| `POST /v1/agents/:id/invoke` routing | the caller's `evaluateAgent`-entitled set | model id + known provider kind + stored credential |
+| the compaction-summarizer roster (same handler) | the same entitled set | the same strict test |
+| `POST /v1/runs/decompose` worker roster | the caller's worker-mode-entitled, already-strictly-dispatchable set | `() => true` (the roster is pre-filtered) |
+
+Three copies of this rule would be three places for it to drift, and the drift would be
+silent. That the reuse is real is *measured*, not asserted: neutralising the one predicate
+reddens ADR-0095's own routing test alongside the three new ones (probe 3 below).
+
+### What is preserved, unchanged
+
+1. **The keyless demo is byte-identical.** Nothing is shadowed unless a non-mock agent in the
+   *same* roster can genuinely serve, so with no credential anywhere the summarizer and the
+   worker roster still select mocks and nothing is reported as skipped.
+2. **An explicit choice is not routing.** Routing already exempted the requested agent. The
+   compaction analogue is ADR-0021's `summarizerSelection: 'fixed_agent'`: an admin who names
+   a mock summarizer on purpose still gets it — shadowing it would have turned a deliberate
+   configuration into `fixed_summarizer_unavailable`. The decompose analogue is
+   `body.leadAgentId`, which is resolved from the full registry and was never affected; the
+   worker roster stays narrowed underneath an explicit mock lead, because the exemption is for
+   the agent the caller *named*, not for the plan's workers.
+3. **Savings are never priced mock-vs-live.** Untouched — the measured-savings guard sits on
+   the usage row and this change never reaches it.
+4. **A roster can never be emptied by shadowing.** Shadowing fires only when a dispatchable
+   non-mock member exists, and that member is exactly what survives. So no new
+   `no_compaction_agent` / `no_worker_agents` path is reachable from this change.
+
+### The implicit decompose lead, stated precisely
+
+`cheapestMock` was the third fallback for both the lead and the substitution owner. It becomes
+`implicitLead`: the cheapest agent of the **surviving** roster under the identical sort when
+mocks are shadowed, and the cheapest granted **mock** when they are not. This is surgical
+rather than a policy change, and two facts make it so: the narrowed roster is all-mock or
+all-live and never both (a dispatchable live member is precisely what triggers shadowing), so
+with nothing shadowed the expression *is* the old `cheapestMock`; and a caller who names a
+lead explicitly bypasses it entirely.
+
+### Disclosure
+
+The same reason string, `mock_shadowed_by_live`, in both new places:
+
+- compaction — `skippedCandidates` on the `context-compaction` audit row's detail, beside the
+  `servedAgentId` that did the work;
+- decompose — `skippedCandidates` on the `run-decomposed` audit row's detail **and** on the
+  `POST /v1/runs/decompose` response body (additive; the route's OpenAPI registration is
+  unchanged).
+
+### Verified (`mock-shadowing-rosters.test.ts`, 6 cases; non-vacuous per M-002, each probe reverted by exact Edit reversal per M-016)
+
+Every positive case asserts the **served dispatch**, never merely a reported roster: the
+compaction audit row's `servedAgentId` (cross-checked against the `usage_events` row's
+provider), the decompose response's `dispatch.servedAgentId`, the planning prompt's own
+roster listing, and each proposal node's `ownerAgentId`.
+
+| Probe (the fix removed) | Reddens |
+|---|---|
+| 1. compaction narrowing dropped (`compactionCandidates` back to the plain strict filter) | **1** — `expected 'b7e5a17e…' to be '32f72a6d…'` on `detail.servedAgentId`: the summarization dispatch that really ran was served by the mock |
+| 2. decompose narrowing dropped (`roster = entitledDispatchable`) | **2** — the implicit lead reverts to the mock, and under an explicit mock lead the worker nodes revert to being owned by it |
+| 3. the shared predicate neutralised (`liveCanServe` forced false) | **4** — the three above **plus** ADR-0095's own `routing-mock-honesty.test.ts` roster/dispatch case, which is what proves the three call sites share one predicate rather than three copies |
+
+The two keyless cases stay **green under all three probes** — they are the controls, and a
+probe that reddened them would mean the fix had changed the out-of-box demo.
+
+### Honest limits (this amendment)
+
+- The first honest limit above ("the compaction-summarizer and decompose-worker rosters can
+  still pick a mock") is **superseded**; the other four stand unchanged.
+- Offline only. The live-serve case is a stubbed adapter, exactly as the F1 tests are; nothing
+  here was re-proven against a live provider.
+- `regulait_llm` (ADR-0065) counts as **live**, not as a mock — it is credential-free but
+  serves a real artifact. Unchanged from F1's semantics, restated because the predicate is now
+  shared by three call sites and the question will recur.
+- A decision-only invoke (`dispatch: false`) still previews the whole entitled set, mocks
+  included; it executes nothing, compacts nothing and plans nothing.
