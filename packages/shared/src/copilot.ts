@@ -456,10 +456,11 @@ export function copilotEntityNotFilterableRefusal(
   entity: CopilotEntityMatch,
 ): string {
   const kind = COPILOT_ENTITY_KIND_LABELS[entity.kind];
+  const article = /^[aeiouAEIOU]/.test(kind) ? "an" : "a";
   const can = copilotToolsFilteringEntityKind(entity.kind);
   return (
     `SUBJECT NOT FILTERABLE BY THIS TOOL — REFUSING TO ANSWER BROADLY. '${entity.name}' resolved to ` +
-    `a ${kind} (${entity.id}) in your scope, but the '${tool}' read tool reads the '${ledger}' ` +
+    `${article} ${kind} (${entity.id}) in your scope, but the '${tool}' read tool reads the '${ledger}' ` +
     `ledger, which carries no ${kind} column and no join to one — so this question cannot be ` +
     `narrowed to that ${kind}. Running '${tool}' unfiltered and presenting the result as ` +
     `'${entity.name}' is precisely the fabrication this refusal exists to prevent. ` +
