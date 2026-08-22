@@ -57,6 +57,7 @@ import {
   type Db,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
 import { spEntityId } from "./saml.js";
 import { normalizeAssertedGroups } from "./group-roles.js";
 
@@ -429,6 +430,10 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  // ADR-0052 §4: this suite both creates SAML providers and mints SCIM tokens,
+  // and both flags are now ENFORCED at their creation routes — so it runs
+  // under a real signed license granting them. Removed in afterAll.
+  await installLicenseFixture(app, { features: ["sso_saml", "scim_provisioning"], auth: AUTH });
   samlKey = makeSigningKey("regulait-grm-test-idp");
   await startIdp();
 
@@ -476,6 +481,7 @@ afterAll(async () => {
   await db.delete(assertedGroups);
   await db.execute(sql`delete from oidc_providers where name like 'grm-%'`);
   await db.execute(sql`delete from saml_providers where name like 'grm-%'`);
+  await removeLicenseFixture(db);
   await app?.close();
   await new Promise<void>((resolve) => idp.server?.close(() => resolve()) ?? resolve());
 });

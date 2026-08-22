@@ -72,6 +72,7 @@ import {
 } from "@regulait/db";
 import { z } from "zod";
 import { hashToken } from "./auth.js";
+import { refuseIfFeatureNotLicensed } from "./licensing.js";
 import { reconcileGroupRoles, scimAssertedGroupsFor } from "./group-roles.js";
 
 // ---------------------------------------------------------------------------
@@ -1263,6 +1264,17 @@ export function registerScimAdminRoutes(app: FastifyInstance, db: Db) {
   }));
 
   app.post("/v1/scim/tokens", async (req, reply) => {
+    // ADR-0052 §4: SCIM provisioning is a TIER FEATURE, enforced where it is
+    // ENABLED. Minting a token is the enabling act; an already-issued token
+    // keeps working (committed footprint, §5), and rotate/revoke stay open —
+    // rotating a credential narrows exposure and revoking one is offboarding,
+    // neither of which a commercial state may block.
+    const flagRefusal = await refuseIfFeatureNotLicensed(db, {
+      actorUserId: req.authCtx.userId,
+      feature: "scim_provisioning",
+      what: "issuing a SCIM provisioning token",
+    });
+    if (flagRefusal) return reply.status(flagRefusal.status).send(flagRefusal.body);
     const body = createScimTokenSchema.parse(req.body);
     const { token, tokenHash } = generateScimToken();
     const [row] = await db.insert(scimTokens).values({ name: body.name, tokenHash }).returning();

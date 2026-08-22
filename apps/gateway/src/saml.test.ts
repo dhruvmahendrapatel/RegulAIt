@@ -47,6 +47,7 @@ import {
   type OrgSettingsRow,
 } from "@regulait/db";
 import { buildApp } from "./app.js";
+import { installLicenseFixture, removeLicenseFixture } from "./testing/license-fixture.js";
 import { governingIpPolicy, HUMAN_SESSION_ORIGINS, hashToken } from "./auth.js";
 import {
   assertionIdentity,
@@ -318,6 +319,11 @@ beforeAll(async () => {
   db = createDb(DATABASE_URL);
   await runMigrations(db, migrationsFolder);
   app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+  // ADR-0052 §4: creating a SAML provider is tier-gated on `sso_saml` and the
+  // flag is now ENFORCED at the route, so this suite runs under a real signed
+  // license granting it. Removed in afterAll — the deployment ends UNLICENSED
+  // exactly as it started (`licenses` is an org singleton).
+  await installLicenseFixture(app, { features: ["sso_saml"], auth: AUTH });
   keyA = makeSigningKey("regulait-test-idp-a");
   keyB = makeSigningKey("regulait-test-idp-b");
   const [settings] = await db.select().from(orgSettings).where(eq(orgSettings.id, ORG_SETTINGS_ID));
@@ -340,6 +346,7 @@ afterAll(async () => {
       .set(orgSettingsSnapshot)
       .where(eq(orgSettings.id, ORG_SETTINGS_ID));
   }
+  await removeLicenseFixture(db);
   await app?.close();
 });
 

@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { generateKeyPairSync, sign as cryptoSign, type KeyObject } from "node:crypto";
+import { generateKeyPairSync, randomBytes, sign as cryptoSign, type KeyObject } from "node:crypto";
 import { createRequire } from "node:module";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,6 +14,8 @@ import {
   licenseVerifications,
   licenses,
   runMigrations,
+  samlProviders,
+  scimTokens,
   users,
   type Db,
 } from "@regulait/db";
@@ -519,6 +521,114 @@ describe("ADR-0052 — seats count ACTIVE users and never punish existing ones",
   });
 });
 
+describe("ADR-0052 §4 — tier flags are ENFORCED at their creation routes, not only reported", () => {
+  // PEM-shaped is all creation validates (the crypto bites at sign-in, which
+  // is deliberately not what these tests exercise) — a synthetic cert keeps
+  // this suite free of openssl.
+  const FAKE_CERT =
+    "-----BEGIN CERTIFICATE-----\nMIIBfakefakefakefakefakefakefakefake\n-----END CERTIFICATE-----";
+  const samlPayload = (name: string) => ({
+    name,
+    entityId: `https://lic-flag.example/${name}`,
+    idpSsoUrl: "https://lic-flag.example/sso",
+    idpSigningCerts: [FAKE_CERT],
+  });
+
+  it("a tier WITHOUT the flag is refused BY NAME at both points — and reporting agrees", async () => {
+    // `team` tier: real license, sso_saml and scim_provisioning deliberately absent
+    const r = await install(artifact(makeDoc({ tier: "team", features: ["airgapped_mode"] })));
+    expect(r.statusCode).toBe(201);
+    const s = await status();
+    expect(s.features.sso_saml).toBe(false);
+    expect(s.features.scim_provisioning).toBe(false);
+
+    const saml = await app.inject({
+      method: "POST", url: "/v1/auth/saml-providers", headers: AUTH,
+      payload: samlPayload("lic-flag-refused-idp"),
+    });
+    expect(saml.statusCode, saml.body).toBe(403);
+    expect(saml.json()).toMatchObject({
+      error: "license_feature_not_licensed",
+      ruleId: "license-feature-not-granted",
+      feature: "sso_saml",
+      tier: "team",
+      state: "valid",
+    });
+    expect(saml.json().detail).toMatch(/tier 'team'/);
+    // nothing was created under the refused name
+    expect(
+      await db.select().from(samlProviders).where(eq(samlProviders.name, "lic-flag-refused-idp")),
+    ).toHaveLength(0);
+
+    const scim = await app.inject({
+      method: "POST", url: "/v1/scim/tokens", headers: AUTH,
+      payload: { name: "lic-flag-refused-token" },
+    });
+    expect(scim.statusCode, scim.body).toBe(403);
+    expect(scim.json()).toMatchObject({
+      error: "license_feature_not_licensed",
+      ruleId: "license-feature-not-granted",
+      feature: "scim_provisioning",
+      tier: "team",
+    });
+    expect(
+      await db.select().from(scimTokens).where(eq(scimTokens.name, "lic-flag-refused-token")),
+    ).toHaveLength(0);
+
+    // both refusals are audited as denies with the flag reader's own ruleId
+    const denies = (await audits("license-feature-not-granted")).filter((a) => a.effect === "deny");
+    const gated = denies.map((a) => (a.detail as { feature?: string }).feature);
+    expect(gated).toContain("sso_saml");
+    expect(gated).toContain("scim_provisioning");
+  });
+
+  it("ABSENT closes the flag at the enforcement point exactly as the status API has always reported", async () => {
+    // afterEach cleared the tables — the deployment is UNLICENSED here
+    const s = await status();
+    expect(s.state).toBe("absent");
+    expect(s.features.sso_saml).toBe(false);
+    const saml = await app.inject({
+      method: "POST", url: "/v1/auth/saml-providers", headers: AUTH,
+      payload: samlPayload("lic-flag-absent-idp"),
+    });
+    expect(saml.statusCode, saml.body).toBe(403);
+    expect(saml.json()).toMatchObject({
+      error: "license_feature_not_licensed",
+      ruleId: "license-absent-feature-closed",
+      feature: "sso_saml",
+      state: "absent",
+      tier: null,
+    });
+    const scim = await app.inject({
+      method: "POST", url: "/v1/scim/tokens", headers: AUTH,
+      payload: { name: "lic-flag-absent-token" },
+    });
+    expect(scim.statusCode, scim.body).toBe(403);
+    expect(scim.json().ruleId).toBe("license-absent-feature-closed");
+  });
+
+  it("a tier WITH the flags is unchanged: both creation routes succeed", async () => {
+    const suffix = randomBytes(3).toString("hex");
+    const r = await install(
+      artifact(makeDoc({ features: ["sso_saml", "scim_provisioning"] })),
+    );
+    expect(r.statusCode).toBe(201);
+    const saml = await app.inject({
+      method: "POST", url: "/v1/auth/saml-providers", headers: AUTH,
+      payload: samlPayload(`lic-flag-granted-idp-${suffix}`),
+    });
+    expect(saml.statusCode, saml.body).toBe(201);
+    const scim = await app.inject({
+      method: "POST", url: "/v1/scim/tokens", headers: AUTH,
+      payload: { name: `lic-flag-granted-token-${suffix}` },
+    });
+    expect(scim.statusCode, scim.body).toBe(201);
+    // clean up what this test created on the SHARED database
+    await db.delete(samlProviders).where(eq(samlProviders.id, saml.json().id as string));
+    await db.delete(scimTokens).where(eq(scimTokens.id, scim.json().id as string));
+  });
+});
+
 describe("ADR-0052 — admin gating, disclosure and audit", () => {
   it("refuses a non-admin every licensing route", async () => {
     for (const [method, url, payload] of [
@@ -540,7 +650,12 @@ describe("ADR-0052 — admin gating, disclosure and audit", () => {
     expect(s.phoneHome).toBe(false);
     expect(s.schedulerPresent).toBe(false);
     expect(s.keyring.pinnedKeyIds).toContain(KEY_ID);
-    expect(s.enforcementPointsWired).toEqual(["user.provision", "agent.create"]);
+    expect(s.enforcementPointsWired).toEqual([
+      "user.provision",
+      "agent.create",
+      "feature.sso_saml (saml_provider.create)",
+      "feature.scim_provisioning (scim_token.create)",
+    ]);
     expect(s.note).toMatch(/no network call of any kind/);
     // ADR-0064: a scheduler exists; licence re-verification deliberately has no
     // job on it, and the disclosure names that rather than denying the scheduler
