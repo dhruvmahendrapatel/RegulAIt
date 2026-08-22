@@ -162,6 +162,11 @@ function Loaded(props: { settings: Record<string, unknown> }) {
     approvalDelegationEnabled: str(s, "approvalDelegationEnabled"),
   });
 
+  // --- 5b. Use-case dispatch gate (ADR-0080 B3 amendment) ------------------
+  const useCaseGate = useSection({
+    useCaseGateMode: str(s, "useCaseGateMode") || "off",
+  });
+
   // --- 7. Network access (ADR-0039) ----------------------------------------
   // Not a useSection form: the save needs the confirm-on-lockout retry flow
   // (a 409 ip_policy_lockout opens an explicit confirm modal, and only a
@@ -541,6 +546,33 @@ function Loaded(props: { settings: Record<string, unknown> }) {
             >
               <option value="true">enabled (delegation windows apply)</option>
               <option value="false">disabled (strict separation of duties)</option>
+            </Select>
+          </Field>
+        </SectionShell>
+      </Card>
+
+      <Card title="5b · AI use-case dispatch gate (ADR-0080)">
+        <SectionShell
+          title="Approved-use-case requirement for governed dispatch"
+          busy={useCaseGate.act.busy}
+          error={useCaseGate.act.error}
+          submitLabel="Save use-case gate"
+          onSubmit={() =>
+            void useCaseGate.act.run(
+              () => put({ useCaseGateMode: useCaseGate.f.useCaseGateMode as "off" | "warn" | "enforce" }),
+              "Use-case gate saved (audited)",
+            )
+          }
+          help="The AI use-case registry's approval used to register intent and gate nothing — that honest limit is now a choice. This applies to a governed dispatch ATTRIBUTED TO A PROJECT THAT AT LEAST ONE USE CASE NAMES (the use case's optional project link is the only join there is): 'off' (default) keeps today's behaviour exactly; 'warn' lets such a dispatch run when no linked use case is approved, but audits the fact and annotates the response, so you can see what enforce would refuse before arming it; 'enforce' refuses it with a named 409 before any provider work until a linked use case is approved on the Approvals queue. A project no use case links — and a dispatch attributed to no project — is untouched in every mode: this gate holds registered intent to its approval, it does not require every call to have a use case. A retired use case no longer satisfies it. Fully reversible."
+        >
+          <Field label="Use-case dispatch gate">
+            <Select
+              value={useCaseGate.f.useCaseGateMode}
+              onChange={(e) => useCaseGate.set("useCaseGateMode", e.target.value)}
+            >
+              <option value="off">off — approval registers intent, nothing is refused (default)</option>
+              <option value="warn">warn — record + annotate what enforce would refuse</option>
+              <option value="enforce">enforce — 409 for use-case-linked projects with no approved use case</option>
             </Select>
           </Field>
         </SectionShell>

@@ -87,6 +87,10 @@ interface ModelCard {
 interface StatusView {
   enforced: boolean;
   warnDays: number;
+  /** ADR-0086 §3's follow-up (batch B3): staleness-forces-recertification —
+   * off by default; deepens the dispatch gate and only bites while enforced */
+  stalenessRecertEnabled: boolean;
+  stalenessRecertThreshold: number;
   posture: "enforced" | "declared" | "absent";
   label: string;
   cards: number;
@@ -221,6 +225,8 @@ export default function ModelRiskPage() {
   const [approver, setApprover] = useState("");
   const [validUntil, setValidUntil] = useState("");
   const [evidenceRun, setEvidenceRun] = useState("");
+  // ADR-0086 B3: the staleness-recert threshold edit buffer (null = untouched)
+  const [stalenessThreshold, setStalenessThreshold] = useState<string | null>(null);
 
   const refreshAll = async () => {
     await Promise.all([status.refetch(), cards.refetch(), expiring.refetch(), cardDetail.refetch()]);
@@ -290,6 +296,65 @@ export default function ModelRiskPage() {
                     Run sweep
                   </Button>
                 </Field>
+              </div>
+              {/* ADR-0086 §3's follow-up (batch B3) — staleness forces
+                  recertification: a per-org opt-in DEEPENING the dispatch
+                  gate above. Off (default) = staleness informs and gates
+                  nothing, exactly as ADR-0086 shipped. */}
+              <div className={a.formRow}>
+                <Field label="Staleness forces recertification">
+                  <Select
+                    value={status.data?.stalenessRecertEnabled ? "on" : "off"}
+                    onChange={(e) =>
+                      void act.run(async () => {
+                        await api.post("/v1/mrm/enforcement", {
+                          enforced: status.data?.enforced ?? false,
+                          stalenessRecertEnabled: e.target.value === "on",
+                        });
+                        await refreshAll();
+                      }, "Staleness-recertification setting updated")
+                    }
+                  >
+                    <option value="off">off — drift informs, nothing more (default)</option>
+                    <option value="on">on — a certified card that drifted past the threshold refuses dispatch</option>
+                  </Select>
+                </Field>
+                <Field label="Drift threshold (ledger changes since certification)">
+                  <Input
+                    type="number"
+                    min={1}
+                    value={stalenessThreshold ?? status.data?.stalenessRecertThreshold ?? 1}
+                    onChange={(e) => setStalenessThreshold(e.target.value)}
+                  />
+                </Field>
+                {/* OUTSIDE a Field on purpose: a <label>-wrapped button
+                    inherits the label text as its accessible name */}
+                <div style={{ alignSelf: "flex-end" }}>
+                  <Button
+                    disabled={act.busy || stalenessThreshold === null}
+                    onClick={() =>
+                      void act.run(async () => {
+                        await api.post("/v1/mrm/enforcement", {
+                          enforced: status.data?.enforced ?? false,
+                          stalenessRecertThreshold: Number(stalenessThreshold),
+                        });
+                        setStalenessThreshold(null);
+                        await refreshAll();
+                      }, "Drift threshold saved")
+                    }
+                  >
+                    Save threshold
+                  </Button>
+                </div>
+              </div>
+              <div className={v.faint}>
+                Staleness-forces-recertification only bites while the dispatch gate above is on — it
+                deepens that gate, it creates none of its own. When armed, a card with a LIVE
+                sign-off whose ledgers have moved (eval runs, red-team runs, guardrail/grant/risk
+                changes, drift regressions — the same counts the card&apos;s certification-drift
+                banner shows) at least this many times since the last granting decision refuses
+                dispatch on the same 409 the expiry gate uses, naming the drift; a recertification
+                resets the clock. Off keeps drift purely informational.
               </div>
               <div className={v.faint}>{status.data?.note}</div>
               <div className={a.formRow}>
