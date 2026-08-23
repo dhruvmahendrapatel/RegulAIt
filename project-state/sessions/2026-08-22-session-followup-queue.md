@@ -239,3 +239,54 @@ it); rule: verify state-generating probes by the state they claim to write, and
 `/v1/agents/:id/invoke` executes nothing without `dispatch: true`. The B7c agent's flagged
 "ADR index drift" did not reproduce (96 files = 96 rows). Google quota still exhausted —
 all retest instruments keyless by design.
+
+## Batch B8 + retest — 2026-08-23
+
+The buildable tail after B7 became B8, agent-built sequentially, independently
+verified, and hands-on retested keyless (criteria pre-written before any slice
+reported; probe discipline per M-026 — every state-generating probe verified by
+the row it wrote). One more silent workspace rollback (7th) absorbed with zero
+loss before dispatch.
+
+- **B8a** (`32ae134`+`ec94527`, ADR-0096 amendment): vendor × audit filter
+  (`object_type='ai_vendor'`), ai_use_case × approvals (own instance pointer,
+  fail-closed to ZERO_UUID), workflow_template × approvals (`template_ids @>`);
+  old refusal tests replaced by row-delta tests, still-refusing pairs pinned.
+- **B8b** (`eb2618b`+`cff10be`, ADR-0073 amendment, no migration): profile-shadow
+  divergence persists write-through into `config_canary_observations`
+  (candidate×project×fingerprint dedup; 50-cap disclosed in-row; B7c prune covers
+  it unchanged) and feeds `complianceProfileCanaryDivergence` on the ADR-0059
+  preview, read-only, byte-absent without recorded divergence.
+- **B8c** (`07b1ed6`+`f9b24b1`, ADR-0056 amendment, no migration): the last two
+  proposal kinds apply via PRE-EXISTING routes through extracted shared
+  implementations; the applier runs each route's own zod; five refusal legs
+  pinned; stale "unapplied" disclosures removed.
+
+**Independent verification**: fresh `regulait_test` at `f9b24b1` — **163 files,
+2535 passed + 9 MinIO skips, green**. ADR index 96=96 (the agents' repeated
+"96-vs-95 drift" flags did not reproduce — they misread CONTRIBUTING §4.4's
+example as a live finding).
+
+**Hands-on retest** (gateway :3222, seeded `regulait_b8live`, keyless): **ALL PASS.**
+- A: vendor audit 94→3 on product-written rows (create + 2 patches); use-case
+  approvals 9→1; template approvals 9→1; vendor × spend 422 naming kind+tool.
+- B: divergence read persists + dedups (re-read writes nothing); non-diverged v2
+  and diverged v3 both recorded with history kept; simulation control (real 201,
+  field absent) then positive (field lists hipaa candidate v3, 1 diverged
+  project, changed fields, both effects); totals correct on re-read.
+- C: rule_to_approval applied via `POST /v1/rules/approvals (createApprovalRuleRow)`
+  — approval_rules 3→4, second apply 409; en route the applier surfaced the
+  route's own zod verbatim twice ("Nothing was created") on my malformed probes,
+  proving the no-bypass leg live; budget_adjustment applied via
+  `PATCH /v1/projects/:projectId (applyProjectPatch)` — 0.2→5, smuggled `name`
+  refused with the project untouched; pending-apply refused by name; no stale
+  "unapplied" claims remain.
+- D: keyless demo floor (dispatch:true invoke proven by usage-row delta 19→20;
+  grounded copilot answer with caveat); independent suite green as above.
+
+**Process**: M-027 logged — four consecutive slice agents (B7b→B8b) stalled
+"waiting for a monitor" that was not running (B8b with uncommitted work in the
+tree); the dispatch-brief fix (foreground final suite, state numbers before
+stopping) ran clean on B8c. Instrument-level setup used where the product path
+was already test-pinned (one approval row bound by SQL to the use-case instance;
+retest exercised the join through the API).

@@ -301,3 +301,19 @@ usage row, the audit row with the right shape), not by its status code.
 happened — before building any conclusion on a state-generating probe, read
 back the state it claims to have written; for RegulAIt specifically,
 `/v1/agents/:id/invoke` executes nothing without `dispatch: true`.**
+
+## M-027 (2026-08-23) — four slice agents in a row stalled "waiting for a monitor" that was not running
+
+B7b, B7c, B8a and B8b's build agents all ended their turns mid-verification with
+words like "waiting for the monitor notification" — but the harness notifies the
+coordinator precisely when an agent has NO live background children, so the
+monitor each believed was armed was already gone, and nothing would ever wake
+them. Worse, B8b stopped with its entire slice UNCOMMITTED in a container that
+silently rolls back working trees. Each stall cost a coordinator round-trip
+message to resume; the fix that actually worked (B8c ran clean) was putting it
+in the dispatch brief: run the final suite IN THE FOREGROUND of the turn, do not
+background it, and end the turn only after stating the numbers.
+**Rule: a subagent's definition-of-done must be reachable inside a single turn —
+instruct agents to run terminal verification in the foreground and to state the
+result before stopping; treat any agent report of "waiting for a monitor/
+notification" as a stall to resume immediately, not a state to wait on.**

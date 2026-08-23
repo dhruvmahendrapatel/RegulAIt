@@ -21,6 +21,32 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-08-23 — B8 closed and retested: the copilot's filter matrix, the versioning ADR's
+last structural pair, and the applier's last two kinds are done; the buildable tail is empty
+again.** **B8a** (ADR-0096 amendment): vendor questions filter the audit ledger
+(`object_type='ai_vendor'`, retested 94→3 on rows the product wrote), AI use cases narrow
+approvals through their own workflow-instance pointer (9→1 live), and workflow templates
+narrow through `template_ids` containment (9→1 live, a composed instance counting for every
+composing template); still-refusing pairs stay pinned, and the honest limits are recorded
+(anomalies-tool intersection deliberately unwired; vendor spend unanswerable). **B8b**
+(ADR-0073 amendment, no migration): the compliance-profile shadow is STORED HISTORY —
+write-through into `config_canary_observations` with candidate×project×fingerprint dedup
+(re-reads write nothing, retested), the 50-project cap disclosed in-row, B7c's prune covering
+it unchanged — and recorded divergence feeds the ADR-0059 preview as the read-only
+`complianceProfileCanaryDivergence` field (byte-absent without divergence; both legs retested
+live with a hipaa candidate). **B8c** (ADR-0056 amendment, no migration): `rule_to_approval`
+and `budget_adjustment` proposals now APPLY — through the PRE-EXISTING public routes via
+extracted shared implementations (`createApprovalRuleRow`; `applyProjectPatch`, honestly
+scoped to project budgets), running each route's own zod with issues verbatim; retested
+end-to-end (approval_rules 3→4 with a 409 second apply; budget 0.2→5 with a smuggled field
+refused and the project untouched). Suite: **163 files / 2535 passed + 9 MinIO skips**,
+independently verified on a fresh DB at `f9b24b1`. Process: **M-027** logged — four
+consecutive slice agents stalled on phantom monitors (one with uncommitted work); the
+foreground-verification dispatch rule fixed it. Remaining work is owner-gated only (L13,
+L19, PII floor, savings semantics, P2 HA, L11/L9, live PM creds, S3 keypair, certification,
+quota refresh); the named-next buildables now in PENDING are the anomalies-tool intersection
+for use cases/templates and the rule-canary per-decision preview aggregation.
+
 **2026-08-22 (late night) — B7 closed and retested: the buildable-anytime tail is now EMPTY;
 every remaining pending item is owner-gated.** The three residual groups the ledger still
 carried became batch B7, each agent-built on its own scratch DB and then independently
