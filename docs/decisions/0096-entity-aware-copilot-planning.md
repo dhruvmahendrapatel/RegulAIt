@@ -611,3 +611,144 @@ unresolved refusal now enumerates all fifteen resolvable kinds, unchanged in sha
    batch's mandate and its row-delta proof does not exist yet.
 6. **Offline only.** Everything here is proved against a real Postgres with seeded ledger rows;
    nothing in this amendment was re-verified against a live model.
+
+---
+
+## Amendment — 2026-08-22 (batch B8a): the three follow-ups B7a itself named, closed
+
+B7a's own honest-limits section named exactly three residues with their blockers already solved
+or stated: the stale vendor claim (limit 5), and the two deferred approvals joins (limit 4).
+All three close here. Resolution and visibility are UNTOUCHED — every one of these kinds already
+resolved; this batch only adds filters — and each new filter is proved as a row-count delta with
+real rows on both sides, with the mandatory no-op-filter probe run and reverted for each.
+
+### 1. Vendor becomes audit-filterable — over rows the product itself wrote
+
+B7a limit 5 said §4's "no join exists anywhere" was stale because `audit_log.object_type`
+carries `'ai_vendor'` and ADR-0084's vendor surface writes it. Wired exactly like the B7a
+audit-only kinds, with the one wrinkle stated rather than hidden: **this is the only kind whose
+resolver label (`vendor`) and ledger enum value (`'ai_vendor'`) differ**, so the gateway filter
+maps it explicitly instead of riding the kind string:
+
+    object_type = 'ai_vendor' AND object_id = <vendor id>
+
+and `vendor` joins the `entityOwnsObjectType` set (a keyword-derived `objectType` is REPLACED,
+never ANDed to zero rows — §4's standing rule). Every other vendor pair still refuses:
+`approvals` and `usage_events` gained no vendor column and no principled join
+(ADR-0069's `vendor_account_aliases` is about imported cost lines, not these ledgers).
+
+The proof rows are **generated the way the product generates them** — `POST /v1/vendors`
+(`vendor-proposed`) and `PATCH /v1/vendors/:id` (`vendor-updated`), never a hand-inserted audit
+row: vendor A carries 3 rows, an unrelated vendor B carries 1, and the surrounding
+instance-lifecycle rows sit on the far side of the delta. Measured: admin unfiltered **9** >
+filtered **3** (vendor A) and **1** (vendor B) > 0 — and the filter tracks the subject (A and B
+return different counts for the same question).
+
+**Two-user scope honesty, per the kind's unchanged visibility** (`owner_user_id = caller` for a
+non-admin): a vendor someone else owns refuses byte-identically to one that exists nowhere (full
+JSON bodies equal after substituting only the caller's own words, id asserted absent), the owner
+resolving it as the control — and the owner's own narrowing honestly examines **0 rows**,
+because ADR-0084's vendor rows carry no `detail->>'projectId'` attribution and a non-admin's
+audit read is project-scoped. **B7a honest-limit 3 extends to vendor verbatim**: the filter
+narrows within the caller's scope, it never widens it, so vendor audit history is in practice an
+admin's question.
+
+### 2. ai_use_case × listApprovals — the intake-instance join, verbatim
+
+The deferred join, wired exactly as B7a described it and never a new attribution column:
+
+    approvals.instance_id = ai_use_cases.workflow_instance_id
+
+(the direction verified off the schema: `approvals.instance_id` is a bare uuid the decide path
+stamps with the governing workflow instance; `ai_use_cases.workflow_instance_id` is ADR-0080's
+FK to `workflow_instances.id`, written at proposal). "Approvals about this use case" therefore
+means **the sign-offs of its own intake instance** — the single-hop, product-read pointer. The
+use case's instance id is pre-fetched per retrieval (`useCaseInstanceOf`, the same expansion
+idiom `memberIdsOf` uses); a use case that predates any instance has a NULL pointer and the
+filter fails CLOSED (`instance_id = ZERO_UUID` — zero rows, never a silent broad run).
+
+Measured, owner-scoped both sides: broad **5** > filtered **2** > 0, the 3 same-owner approvals
+on other instances (and on none) dropping out.
+
+### 3. workflow_template × listApprovals — jsonb containment over the snapshot array
+
+`workflow_instances.template_ids` verified as a jsonb **array of template-id strings** (the
+composition snapshot `startWorkflowInstanceWithTemplates` writes). The filter is the containment
+operator, pre-fetched into an id list per the codebase's expansion idiom
+(`templateInstancesOf`, mirroring `initiativeExpansionOf`):
+
+    approvals.instance_id IN (SELECT id FROM workflow_instances
+                              WHERE template_ids @> '["<template id>"]'::jsonb)
+
+An instance COMPOSED from several templates counts for **each** of them — measured with a
+composed `[deploy, intake]` instance whose approval lands in both templates' counts: unfiltered
+**11** > intake **3** (2 + the composed 1) and deploy **4** (3 + the composed 1) > 0, the two
+narrow counts deliberately unequal. A template no instance was ever composed from expands to
+nothing and fails CLOSED via `safeIds`.
+
+### The extended tool × kind table (the three changed cells)
+
+| Kind | `queryAuditDecisions` | `listAnomalies` | `listApprovals` | `summarizeUsage` |
+|---|---|---|---|---|
+| `ai_use_case` | ✅ | ❌ (not wired — see residue 1) | ✅ **`instance_id` = its intake instance** | ❌ |
+| `workflow_template` | ✅ | ❌ (not wired — see residue 1) | ✅ **`instance_id IN` composed instances** | ❌ |
+| `vendor` | ✅ **`object_type='ai_vendor' + object_id`** | ❌ | ❌ | ❌ |
+
+No kind now sits in the resolve-but-nothing-filters bucket, so
+`copilotEntityNotFilterableRefusal`'s "No read tool in this build can narrow by …" branch is
+unreachable for every real kind; it stays in the function as the honest wording should the
+matrix ever lose a kind's last tool.
+
+### Verified (`copilot-entity-b8a.test.ts`, 7 cases; M-024's rule throughout — every refusal and every narrowing fires with the plausible rows above already in the ledger)
+
+The no-op-filter probes (each a scratch edit reverted by exact Edit reversal, M-016;
+`plan.entity`, the rendered filter string and the audit detail left exactly as they were):
+
+| Probe (the fix removed) | Reddens |
+|---|---|
+| **1. THE MANDATORY NO-OP-FILTER PROBE, vendor** — the vendor `audit_log` predicate replaced with `[]` | **1** — `copilot-entity-b8a.test.ts` › "the admin's broad count vs one vendor's own rows — and the filter tracks the subject": `expected 9 to be 3`. The org-wide count came back where vendor A's was asserted, with the filter still announced everywhere. Recorded honestly: the two-user scope-honesty test stays green under this probe (the owner's project-scoped count is 0 filtered or not), so it is a visibility control, not a narrowing guard — the narrowing guard is the reddened test |
+| **2. the `ai_use_case` approvals predicate replaced with `[]`** | **2** — `copilot-entity-b8a.test.ts` › "the owner's broad approvals vs the sign-offs of the use case's OWN instance": `expected 5 to be 2`; and `copilot-entity-registry.test.ts` › "an AI use case with NO intake instance matches NOTHING on approvals — fail closed, never broad": `expected 3 to be +0` — the fail-closed replacement test is itself a live guard |
+| **3. the `workflow_template` approvals predicate replaced with `[]`** | **1** — `copilot-entity-b8a.test.ts` › "each template narrows to the instances COMPOSED from it — the shared instance counts for both": `expected 11 to be 3` |
+
+`copilot-entity.test.ts`, `copilot-entity-mcp.test.ts`, `copilot.test.ts` and the untouched
+registry cases stay green under every probe — the regression control that the fifteen kinds'
+existing behavior is unchanged.
+
+### Refusal tests replaced or updated — intentionally, none silently deleted
+
+- `copilot-entity-registry.test.ts` › *"an AI use case in an approvals question — the instance
+  join is NOT smuggled in"* (pinned the 422) is **REPLACED** by the row-delta above plus a new
+  fail-closed test in its place (that suite's use case has no instance, so its honest answer is
+  now 0-of-N, not a refusal). The replacement is itself reddened by probe 2.
+- `copilot-entity.test.ts` › *"a real AI vendor resolves — and is refused because NO tool can
+  narrow by vendor"* is **UPDATED, not deleted**: the vendor×`summarizeUsage` refusal stands,
+  but `toolsThatCanFilter` is now `["queryAuditDecisions"]` and the detail names the tool that
+  can — the disclosure and the matrix stay the same fact. The audit-side row-delta lives in the
+  B8a suite.
+- `packages/shared/src/copilot.test.ts`'s matrix pins are updated the same way (vendor =
+  audit-only; the two instance-join kinds = `["queryAuditDecisions", "listApprovals"]`; the
+  other audit-only registry kinds pinned unchanged), and new pins assert the pairs that still
+  refuse (vendor spend/approvals/anomalies; use-case and template spend/anomalies) so no
+  refusal was weakened by the closes.
+
+### Honest limits (this amendment)
+
+1. **`listAnomalies` did NOT gain the two instance-join kinds, and now could.** Its
+   intersection rule is technically satisfiable for `ai_use_case` and `workflow_template`
+   (audit half via `object_type`, approvals half via the joins above), but a cell is present
+   only with its own row-delta proof, and that proof does not exist yet — the pair refuses,
+   naming both tools that can. This is B8a's deliberate residue, recorded exactly as B7a
+   recorded the two joins it deferred.
+2. **Vendor is audit-only, and for a non-admin the audit filter honestly yields zero** (B7a
+   limit 3 extended, above). Vendor spend remains unanswerable — the attribution column or join
+   still does not exist; ADR-0069's aliases remain about imported cost lines.
+3. **The approvals joins carry the semantics of their pointers, no more.** An instance may
+   govern things besides the use case that links to it, and `template_ids` is a snapshot at
+   composition time — "approvals for this template" means "sign-offs of instances composed from
+   it", not "instances currently conforming to its latest definition". Both meanings are the
+   product's own (`ai_use_cases.workflow_instance_id` is how the use-case page finds its
+   instance; the snapshot is what the engine executes).
+4. B7a limits 1–3 stand verbatim; its limit 4 (the two deferred joins) and limit 5 (the stale
+   vendor claim) are closed by this amendment.
+5. **Offline only.** Everything here is proved against a real Postgres with product-written and
+   seeded ledger rows; nothing was re-verified against a live model.
