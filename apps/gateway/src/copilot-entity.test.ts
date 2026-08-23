@@ -22,8 +22,11 @@
  *     BYTE-IDENTICAL to the one a name that exists nowhere produces. Existence
  *     must not leak across the entitlement boundary (ADR-0050's idiom).
  *  4. TOOL/KIND MISMATCH. A resolved, visible agent named in an approvals
- *     question, and a resolved, visible AI vendor named anywhere: both refused
- *     by name with the tools that CAN narrow by that kind, never run broadly.
+ *     question, and a resolved, visible AI vendor named in a SPEND question:
+ *     both refused by name with the tools that CAN narrow by that kind, never
+ *     run broadly. (B8a made vendor audit-filterable, so "named anywhere" no
+ *     longer holds — the vendor spend/approvals/anomalies pairs still refuse,
+ *     and the audit row-delta lives in copilot-entity-b8a.test.ts.)
  *  5. AMBIGUITY. One name held by two governed objects: both listed, neither
  *     picked.
  *  6. THE CONTROL. A question naming no subject is untouched — same 201, same
@@ -465,15 +468,21 @@ describe("ADR-0096 — a resolved subject this tool cannot filter by is refused,
     expect(denies.length).toBeGreaterThan(0);
   });
 
-  it("a real AI vendor resolves — and is refused because NO tool can narrow by vendor", async () => {
+  it("a real AI vendor in a SPEND question still refuses — naming the audit tool B8a wired", async () => {
+    // Pre-B8a this pinned `toolsThatCanFilter: []` ("NO tool can narrow by
+    // vendor"). B8a made `queryAuditDecisions` narrow by vendor for real
+    // (`object_type='ai_vendor'`, ADR-0084's rows), so the usage-ledger
+    // refusal STANDS but its disclosure now names the one tool that can — the
+    // vendor audit row-delta itself lives in copilot-entity-b8a.test.ts.
     const res = await ask(`how much did ${VENDOR} spend last month?`, memberAuth);
     expect(res.statusCode).toBe(422);
     const body = res.json();
     expect(body.error).toBe("copilot_tool_cannot_filter_entity");
+    expect(body.tool).toBe("summarizeUsage");
     expect(body.entity).toMatchObject({ kind: "vendor", id: vendorId, name: VENDOR });
-    expect(body.toolsThatCanFilter).toEqual([]);
-    expect(body.detail).toMatch(/No read tool in this build can narrow by AI vendor/);
-    // THE POINT of resolving a kind nothing can filter: a REAL vendor is never
+    expect(body.toolsThatCanFilter).toEqual(["queryAuditDecisions"]);
+    expect(body.detail).toMatch(/Read tools that CAN narrow by AI vendor: queryAuditDecisions/);
+    // THE POINT of resolving the vendor either way: a REAL vendor is never
     // reported as "no such thing in your scope"
     expect(body.detail).not.toMatch(/UNRESOLVED SUBJECT/);
   });

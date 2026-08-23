@@ -90,6 +90,7 @@ import {
   userAgentPolicies,
   users,
   virtualKeys,
+  workflowInstances,
   workflowTemplates,
   type Db,
 } from "@regulait/db";
@@ -729,6 +730,35 @@ async function initiativeExpansionOf(
   return { projectIds, memberIds: memberRows.map((r) => r.userId) };
 }
 
+/** B8a — an `ai_use_case` entity's approvals join: the use case's OWN intake
+ * instance (`ai_use_cases.workflow_instance_id`, the pointer ADR-0080 writes
+ * at proposal), so "approvals about this use case" means the sign-offs of the
+ * instance that governs it — the single-hop, product-read join B7a recorded
+ * as deferred. A use case that predates any instance has a NULL pointer and
+ * the filter fails CLOSED below (zero rows, never a silent broad run). */
+async function useCaseInstanceOf(db: Db, id: string): Promise<string | null> {
+  const [row] = await db
+    .select({ workflowInstanceId: aiUseCases.workflowInstanceId })
+    .from(aiUseCases)
+    .where(eq(aiUseCases.id, id));
+  return row?.workflowInstanceId ?? null;
+}
+
+/** B8a — a `workflow_template` entity's approvals join: the instances whose
+ * `workflow_instances.template_ids` jsonb array CONTAINS the template (`@>`).
+ * An instance may be COMPOSED from several templates and every composition
+ * counts — that is exactly what the snapshot array records. Pre-fetched into
+ * an id list, the same expansion idiom `memberIdsOf` and
+ * `initiativeExpansionOf` use; a template no instance was ever composed from
+ * expands to nothing and fails CLOSED via `safeIds`. */
+async function templateInstancesOf(db: Db, id: string): Promise<string[]> {
+  const rows = await db
+    .select({ id: workflowInstances.id })
+    .from(workflowInstances)
+    .where(sql`${workflowInstances.templateIds} @> ${JSON.stringify([assertUuid(id)])}::jsonb`);
+  return rows.map((r) => r.id);
+}
+
 // ---------------------------------------------------------------------------
 // Timeframes
 // ---------------------------------------------------------------------------
@@ -795,6 +825,8 @@ function approvalEntityPredicates(
   members: readonly string[],
   mcpTool: { serverId: string; toolName: string } | null,
   initiative: { projectIds: string[]; memberIds: string[] } | null,
+  useCaseInstanceId: string | null,
+  templateInstanceIds: string[] | null,
 ): ReturnType<typeof eq>[] {
   if (!entity) return [];
   if (entity.kind === "user") return [eq(approvals.userId, entity.id)];
@@ -824,9 +856,22 @@ function approvalEntityPredicates(
     if (!mcpTool) return [eq(approvals.serverId, ZERO_UUID)];
     return [eq(approvals.serverId, mcpTool.serverId), eq(approvals.toolName, mcpTool.toolName)];
   }
-  // agent / connector / vendor never reach here: `COPILOT_ENTITY_FILTER_MATRIX`
-  // excludes them for every tool that reads this ledger, and the route refuses
-  // the pair before retrieval runs.
+  // B8a: the two deferred instance joins, wired exactly as B7a named them —
+  // never a new attribution column. "Approvals about this use case" means the
+  // sign-offs of ITS OWN intake instance; a use case with no instance matches
+  // NOTHING (fail closed), never everything.
+  if (entity.kind === "ai_use_case") {
+    return [eq(approvals.instanceId, useCaseInstanceId ?? ZERO_UUID)];
+  }
+  // "Approvals about this template" means the sign-offs of every instance
+  // COMPOSED from it (`template_ids @>`, pre-fetched); a template no instance
+  // ever used fails CLOSED via `safeIds`.
+  if (entity.kind === "workflow_template") {
+    return [inArray(approvals.instanceId, safeIds(templateInstanceIds ?? []))];
+  }
+  // agent / connector / vendor / the remaining registry kinds never reach
+  // here: `COPILOT_ENTITY_FILTER_MATRIX` excludes them for every tool that
+  // reads this ledger, and the route refuses the pair before retrieval runs.
   return [];
 }
 
@@ -878,6 +923,12 @@ export async function retrieveEvidence(
   // every ledger's initiative filter is built from
   const entityInitiative =
     entity?.kind === "initiative" ? await initiativeExpansionOf(db, entity.id) : null;
+  // B8a: the two instance joins the approvals filter rides — the use case's
+  // own intake instance, and the instances composed from a template
+  const entityUseCaseInstance =
+    entity?.kind === "ai_use_case" ? await useCaseInstanceOf(db, entity.id) : null;
+  const entityTemplateInstances =
+    entity?.kind === "workflow_template" ? await templateInstancesOf(db, entity.id) : null;
 
   if (plan.tool === "queryAuditDecisions" || plan.tool === "listAnomalies") {
     // `audit_log` carries no project column; attribution rides
@@ -911,7 +962,14 @@ export async function retrieveEvidence(
                   // (fail closed), never everything.
                   entity.kind === "initiative"
                   ? [auditScopePredicate(entityInitiative?.projectIds ?? [])]
-                  : [
+                  : // B8a: the ONE kind whose label and enum value differ —
+                    // the resolver's kind is 'vendor' but ADR-0084's vendor
+                    // surface writes `object_type='ai_vendor'` on every
+                    // propose/update/attestation/lifecycle row, so the map is
+                    // explicit rather than riding the kind string.
+                    entity.kind === "vendor"
+                    ? [eq(auditLog.objectType, "ai_vendor"), eq(auditLog.objectId, entity.id)]
+                    : [
                       // agent / connector — and B7a's compliance_pack,
                       // ai_use_case, ai_risk, workflow_template, role and
                       // virtual_key: the object THIS row was about, via the
@@ -946,7 +1004,9 @@ export async function retrieveEvidence(
       entity?.kind === "ai_risk" ||
       entity?.kind === "workflow_template" ||
       entity?.kind === "role" ||
-      entity?.kind === "virtual_key";
+      entity?.kind === "virtual_key" ||
+      // B8a: vendor's filter IS `object_type = 'ai_vendor'` — same reason
+      entity?.kind === "vendor";
     const where = and(
       gte(auditLog.at, start),
       lt(auditLog.at, end),
@@ -1018,7 +1078,14 @@ export async function retrieveEvidence(
             // halves can narrow (the matrix says so), so a half-narrowed
             // anomaly report — one lead about your subject, one about
             // everything — is unreachable rather than merely discouraged.
-            ...approvalEntityPredicates(entity, entityMembers, entityMcpTool, entityInitiative),
+            ...approvalEntityPredicates(
+        entity,
+        entityMembers,
+        entityMcpTool,
+        entityInitiative,
+        entityUseCaseInstance,
+        entityTemplateInstances,
+      ),
           ),
         );
       const rubber = fast.filter(
@@ -1043,7 +1110,14 @@ export async function retrieveEvidence(
       lt(approvals.requestedAt, end),
       ...(plan.params.status ? [eq(approvals.status, plan.params.status)] : []),
       ...memberScope,
-      ...approvalEntityPredicates(entity, entityMembers, entityMcpTool, entityInitiative),
+      ...approvalEntityPredicates(
+        entity,
+        entityMembers,
+        entityMcpTool,
+        entityInitiative,
+        entityUseCaseInstance,
+        entityTemplateInstances,
+      ),
     );
     const [total, byStatus, rows] = await Promise.all([
       db.select({ n: count() }).from(approvals).where(where),

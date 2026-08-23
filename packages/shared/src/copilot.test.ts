@@ -452,9 +452,15 @@ describe("ADR-0096 — the filterable tool × kind table is read off the schema"
     expect(copilotToolSupportsEntityKind("summarizeUsage", "agent")).toBe(true);
   });
 
-  it("no tool can narrow by vendor, and the matrix says so rather than pretending", () => {
-    for (const t of COPILOT_TOOLS) expect(copilotToolSupportsEntityKind(t, "vendor")).toBe(false);
-    expect(copilotToolsFilteringEntityKind("vendor")).toEqual([]);
+  it("vendor narrows the audit ledger ONLY (B8a) — object_type='ai_vendor' is real, the rest is not", () => {
+    // B8a closed B7a's stale-limit note: ADR-0084 writes `ai_vendor` audit
+    // rows, so `queryAuditDecisions` genuinely narrows. No other ledger
+    // gained a vendor column, so every other pair still refuses.
+    expect(copilotToolsFilteringEntityKind("vendor")).toEqual(["queryAuditDecisions"]);
+    expect(copilotToolSupportsEntityKind("queryAuditDecisions", "vendor")).toBe(true);
+    for (const t of ["listAnomalies", "listApprovals", "summarizeUsage"] as const) {
+      expect(copilotToolSupportsEntityKind(t, "vendor")).toBe(false);
+    }
     expect(copilotToolsFilteringEntityKind("agent")).toEqual([
       "queryAuditDecisions",
       "summarizeUsage",
@@ -513,12 +519,39 @@ describe("ADR-0096 — three refusals, none mistakable for another", () => {
     // it is NOT the unresolved refusal — the object is real and visible, and
     // saying otherwise would be a false statement about it
     expect(text).not.toMatch(/UNRESOLVED SUBJECT/);
-    const nowhere = copilotEntityNotFilterableRefusal("summarizeUsage", "usage_events", {
+    // B8a: vendor is no longer the no-tool case — its refusal now names the
+    // one tool that CAN narrow (the audit ledger), so the disclosure and the
+    // matrix stay the same fact. (The "no read tool in this build" branch is
+    // now unreachable for every real kind: all fifteen filter at least
+    // `queryAuditDecisions`. It stays in the function as the honest wording
+    // should the matrix ever lose a kind's last tool.)
+    const vendorMismatch = copilotEntityNotFilterableRefusal("summarizeUsage", "usage_events", {
       kind: "vendor",
       id: "dddd0000-0000-4000-8000-000000000003",
       name: "Vendorco",
     });
-    expect(nowhere).toMatch(/No read tool in this build can narrow by AI vendor/);
+    expect(vendorMismatch).toMatch(/Read tools that CAN narrow by AI vendor: queryAuditDecisions/);
+    expect(vendorMismatch).not.toMatch(/No read tool in this build can narrow/);
+  });
+
+  it("B8a — the two instance joins are in the approvals column; anomalies did NOT follow", () => {
+    for (const k of ["ai_use_case", "workflow_template"] as const) {
+      expect(copilotToolSupportsEntityKind("listApprovals", k)).toBe(true);
+      // usage_events still has no column and no join
+      expect(copilotToolSupportsEntityKind("summarizeUsage", k)).toBe(false);
+      // the anomalies intersection is now technically satisfiable for these
+      // two, but a cell is present only with its own row-delta proof — the
+      // B8a amendment records this as the honest residue
+      expect(copilotToolSupportsEntityKind("listAnomalies", k)).toBe(false);
+      expect(copilotToolsFilteringEntityKind(k)).toEqual([
+        "queryAuditDecisions",
+        "listApprovals",
+      ]);
+    }
+    // the other audit-only registry kinds are untouched
+    for (const k of ["compliance_pack", "ai_risk", "role"] as const) {
+      expect(copilotToolsFilteringEntityKind(k)).toEqual(["queryAuditDecisions"]);
+    }
   });
 });
 

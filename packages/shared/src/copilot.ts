@@ -288,8 +288,15 @@ export interface CopilotEntityRef extends CopilotEntityMatch {
  *   lead is about your subject and the other is about everything would be
  *   worse than a refusal.
  *
- *   `vendor` appears nowhere. `ai_vendors` has no id on any of the three
- *   ledgers and no join table to one.
+ *   `vendor` filters `audit_log` ONLY (B8a). `audit_log.object_type` carries an
+ *   `'ai_vendor'` value that ADR-0084's vendor surface writes on every
+ *   propose/update/attestation/lifecycle act, so `queryAuditDecisions` narrows
+ *   by the same `object_type + object_id` pair the registry kinds use — the
+ *   ONE place the kind's own label ('vendor') and the ledger's enum value
+ *   ('ai_vendor') differ, which the gateway filter maps explicitly. No other
+ *   ledger gained a vendor column: `approvals` and `usage_events` still carry
+ *   no id and no principled join (`vendor_account_aliases` is about imported
+ *   cost lines, not these ledgers), so every other pair still refuses.
  *
  *   B6c — `mcp_server` and `mcp_tool` are the ONLY kinds present for all four
  *   tools, and that is read off the schema rather than wished for: BOTH
@@ -318,15 +325,33 @@ export interface CopilotEntityRef extends CopilotEntityMatch {
  *   `object_id`, the same pair `agent` filters on.
  *
  *   `compliance_pack`, `ai_use_case`, `ai_risk`, `workflow_template` and
- *   `role` filter `audit_log` ONLY, via their own `object_type` enum values +
- *   `object_id` — every one of which the gateway already writes. None of the
- *   five has a column on `approvals` or `usage_events`, and no principled
- *   single-hop join exists (`approvals.instance_id` does reach an AI use
- *   case's intake instance, but those rows identify the INSTANCE, may span
- *   several composed templates, and the use case may predate any instance —
- *   recorded in the ADR amendment as a candidate, not smuggled in as a fact).
- *   `listAnomalies`' intersection rule therefore excludes all five, exactly
- *   as it excludes `agent`.
+ *   `role` filter `audit_log` via their own `object_type` enum values +
+ *   `object_id` — every one of which the gateway already writes.
+ *
+ *   B8a — `ai_use_case` and `workflow_template` additionally filter
+ *   `listApprovals`, through the ONE real, product-read join each has to that
+ *   ledger (the joins B7a recorded as deferred candidates):
+ *
+ *     `ai_use_case`        `approvals.instance_id` =
+ *                          `ai_use_cases.workflow_instance_id` — the use
+ *                          case's own intake instance, the single-hop pointer
+ *                          ADR-0080 writes at proposal. "Approvals about this
+ *                          use case" means the sign-offs of the instance that
+ *                          governs it; a use case that predates any instance
+ *                          has NO instance and the filter fails CLOSED (zero
+ *                          rows, never a silent broad run).
+ *     `workflow_template`  `approvals.instance_id` IN the instances whose
+ *                          `workflow_instances.template_ids` jsonb array
+ *                          CONTAINS the template (`@>`). An instance may be
+ *                          COMPOSED from several templates; every composition
+ *                          counts, which is what the snapshot array records.
+ *
+ *   Neither kind gained `usage_events` (no column, no join), and NEITHER
+ *   gained `listAnomalies`: its intersection rule is now technically
+ *   satisfiable for these two (both halves could narrow), but the pair is NOT
+ *   wired in this batch — a cell is present only with its own row-delta
+ *   proof, and that proof does not exist yet. Recorded in the B8a amendment
+ *   as the honest residue, exactly as B7a recorded these two joins.
  */
 export const COPILOT_ENTITY_FILTER_MATRIX: Record<CopilotTool, readonly CopilotEntityKind[]> = {
   queryAuditDecisions: [
@@ -344,9 +369,19 @@ export const COPILOT_ENTITY_FILTER_MATRIX: Record<CopilotTool, readonly CopilotE
     "workflow_template",
     "role",
     "virtual_key",
+    "vendor",
   ],
   listAnomalies: ["project", "team", "user", "mcp_server", "mcp_tool", "initiative"],
-  listApprovals: ["project", "team", "user", "mcp_server", "mcp_tool", "initiative"],
+  listApprovals: [
+    "project",
+    "team",
+    "user",
+    "mcp_server",
+    "mcp_tool",
+    "initiative",
+    "ai_use_case",
+    "workflow_template",
+  ],
   summarizeUsage: [
     "project",
     "team",

@@ -518,11 +518,26 @@ describe("B7a — the kinds no other ledger can narrow REFUSE, naming the tool t
     expect(res.json().toolsThatCanFilter).toEqual(["queryAuditDecisions"]);
   });
 
-  it("an AI use case in an approvals question — the instance join is NOT smuggled in", async () => {
+  // B8a REPLACED the refusal test that stood here ("an AI use case in an
+  // approvals question — the instance join is NOT smuggled in"): the join is
+  // now deliberately wired (`approvals.instance_id` =
+  // `ai_use_cases.workflow_instance_id`), so the pair filters instead of
+  // refusing, and its proof is the ROW-DELTA test in
+  // copilot-entity-b8a.test.ts ("AI use case: approvals narrow to its own
+  // intake instance…"). This suite's use case has NO instance, which is now
+  // the fail-closed row-delta below rather than a refusal.
+  it("an AI use case with NO intake instance matches NOTHING on approvals — fail closed, never broad", async () => {
+    const broad = await ask("summarise the approvals from this quarter", ownerAuth);
+    expect(broad.statusCode).toBe(201);
+    expect(approvalCount(broad.json())).toBeGreaterThan(0);
+
     const res = await ask(`summarise the approvals for "${USE_CASE}" from this quarter`, ownerAuth);
-    expect(res.statusCode).toBe(422);
-    expect(res.json().error).toBe("copilot_tool_cannot_filter_entity");
-    expect(res.json().toolsThatCanFilter).toEqual(["queryAuditDecisions"]);
+    expect(res.statusCode).toBe(201);
+    expect(res.json().plan.tool).toBe("listApprovals");
+    expect(res.json().plan.entity).toMatchObject({ kind: "ai_use_case", id: useCaseId });
+    // this suite's use case predates any instance (workflow_instance_id NULL):
+    // the filter must select NOTHING, never fall through to the broad count
+    expect(approvalCount(res.json())).toBe(0);
   });
 });
 
