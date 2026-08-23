@@ -22,12 +22,12 @@
  *     retrieval never returned is discarded exactly like an invented figure,
  *     and the discard is audited.
  *  3. AN APPLIER THAT DOES NOT NEED CONSENT. Applying a proposal is gated on
- *     the LINKED APPROVAL in the one existing queue: pending, denied, missing,
- *     already-applied and not-an-applicable-kind each refuse by their OWN
- *     name, audited, with the target asserted UNCHANGED. Only the approved one
- *     applies — and its mutation is asserted to have really happened (the
- *     grant row is gone; the rule's enforcing body moved) through the same
- *     public choke points an admin would use.
+ *     the LINKED APPROVAL in the one existing queue: pending, denied, missing
+ *     and already-applied each refuse by their OWN name, audited, with the
+ *     target asserted UNCHANGED. Only the approved one applies — and its
+ *     mutation is asserted to have really happened (the grant row is gone; the
+ *     rule's enforcing body moved; B8c: the approval rule exists, the project
+ *     budget moved) through the same public choke points an admin would use.
  *  4. A JUDGED LAYER THAT QUIETLY BECOMES THE ANSWER. With the org knob OFF
  *     (the default) the report carries no annotation at all. With it ON and a
  *     judge injected, annotations appear — labelled `model-judged` — and the
@@ -54,6 +54,7 @@ import {
   desc,
   eq,
   orgSettings,
+  projects,
   runMigrations,
   usageEvents,
   type Db,
@@ -496,21 +497,6 @@ describe("L6b — an approved proposal can be APPLIED, and an unapproved one can
     expect(await grantExists(survivorNoApproval)).toBe(true);
   });
 
-  it("refuses a kind with no public endpoint, NAMING the endpoint that must exist first", async () => {
-    const { proposalId, approvalId } = await proposeThrough("budget_adjustment", "l6 budget", {
-      projectId: "00000000-0000-0000-0000-000000000000",
-      budgetUsd: 1,
-    });
-    await decide(approvalId, "approved");
-    const res = await applyProposal(proposalId);
-    expect(res.statusCode).toBe(422);
-    expect(res.json().error).toBe("proposal_kind_not_applicable");
-    expect(res.json().detail).toMatch(/no single public choke point for a budget write/);
-    // even APPROVED, it stays unapplied — an approval is consent, not a door
-    const [row] = await db.select().from(copilotProposals).where(eq(copilotProposals.id, proposalId));
-    expect(row!.appliedAt).toBeNull();
-  });
-
   it("APPLIES an approved grant_revocation through the one removal path, and audits it", async () => {
     expect(await grantExists(doomedGrantId)).toBe(true);
     const { proposalId, approvalId } = await proposeThrough("grant_revocation", "l6 revoke the unused grant", {
@@ -597,6 +583,336 @@ describe("L6b — an approved proposal can be APPLIED, and an unapproved one can
     expect(res.json().error).toBe("proposal_diff_invalid");
     const [row] = await db.select().from(copilotProposals).where(eq(copilotProposals.id, proposalId));
     expect(row!.appliedAt).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B8c (ADR-0056 amendment 2026-08-22) — the two kinds L6b left honestly
+// unapplied now apply, through the SAME public routes an admin uses by hand:
+//   rule_to_approval  → the create POST /v1/rules/approvals performs
+//                       (`createApprovalRuleRow`), behind the route's OWN
+//                       createApprovalRuleSchema;
+//   budget_adjustment → the merged write PATCH /v1/projects/:projectId performs
+//                       (`applyProjectPatch`), behind the route's OWN
+//                       updateProjectSchema and budget-requires-approver
+//                       invariant.
+// Every assertion is a DELTA or filtered to this block's own ids (M-008).
+// ---------------------------------------------------------------------------
+
+describe("B8c — rule_to_approval applies through POST /v1/rules/approvals' own create", () => {
+  /** a fresh source rate-limit rule per test — the deny-heavy artifact an
+   * approval requirement is derived from */
+  const makeSourceRateLimit = async (toolName: string): Promise<string> => {
+    const r = await post("/v1/rules/rate-limits", {
+      userId: holderId,
+      serverId,
+      toolName,
+      maxCalls: 1,
+      windowSeconds: 60,
+    });
+    expect(r.statusCode).toBe(201);
+    return r.json().id as string;
+  };
+
+  /** the create payload the diff carries — exactly what an admin would POST */
+  const createPayload = (toolName: string) => ({
+    userId: holderId,
+    serverId,
+    toolName,
+    writeOnly: false,
+    approverUserId: approverId,
+  });
+
+  const approvalRuleCountFor = async (toolName: string) =>
+    (await db.select({ id: approvalRules.id }).from(approvalRules).where(eq(approvalRules.toolName, toolName)))
+      .length;
+
+  it("refuses a PENDING proposal by name and creates NOTHING", async () => {
+    const sourceId = await makeSourceRateLimit("b8c_pending_src");
+    const { proposalId } = await proposeThrough("rule_to_approval", "b8c pending", {
+      sourceRuleKind: "rate-limits",
+      sourceRuleId: sourceId,
+      create: createPayload("b8c_pending_tool"),
+    });
+    const res = await applyProposal(proposalId);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("proposal_not_approved");
+    expect(await approvalRuleCountFor("b8c_pending_tool")).toBe(0);
+    const denyRow = await latestAuditFor(COPILOT_RULE_IDS.proposalApplyRefused);
+    expect(denyRow?.effect).toBe("deny");
+  });
+
+  it("APPLIES an approved rule_to_approval: the approval rule EXISTS, via the route's create, audited", async () => {
+    const sourceId = await makeSourceRateLimit("b8c_apply_src");
+    const { proposalId, approvalId } = await proposeThrough("rule_to_approval", "b8c convert the noisy rule", {
+      sourceRuleKind: "rate-limits",
+      sourceRuleId: sourceId,
+      create: createPayload("b8c_apply_tool"),
+    });
+    await decide(approvalId, "approved");
+
+    const res = await applyProposal(proposalId);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().applied).toMatchObject({
+      via: "POST /v1/rules/approvals (createApprovalRuleRow)",
+      derivedFromRuleKind: "rate-limits",
+      derivedFromRuleId: sourceId,
+    });
+
+    // THE EFFECT IS VISIBLE IN THE TARGET OBJECT: the approval rule exists,
+    // with exactly the fields the route would have written
+    const [rule] = await db
+      .select()
+      .from(approvalRules)
+      .where(eq(approvalRules.toolName, "b8c_apply_tool"));
+    expect(rule).toBeTruthy();
+    expect(rule!.id).toBe(res.json().applied.approvalRuleId);
+    expect(rule!.userId).toBe(holderId);
+    expect(rule!.serverId).toBe(serverId);
+    expect(rule!.approverUserId).toBe(approverId);
+    expect(rule!.writeOnly).toBe(false);
+
+    const [row] = await db.select().from(copilotProposals).where(eq(copilotProposals.id, proposalId));
+    expect(row!.appliedAt).not.toBeNull();
+    expect(row!.appliedByUserId).toBe(adminId);
+
+    // audited under the APPLYING HUMAN's identity, with the proposal as context
+    const applied = await latestAuditFor(COPILOT_RULE_IDS.proposalApplied);
+    expect(applied?.userId).toBe(adminId);
+    expect(applied?.effect).toBe("allow");
+    expect((applied?.detail as Record<string, unknown>).copilotProposalId).toBe(proposalId);
+    expect(applied?.reason).toMatch(/same create POST \/v1\/rules\/approvals performs/);
+    expect(applied?.reason).toMatch(/attributed to the applying admin, not to the copilot/);
+  });
+
+  it("refuses a SECOND apply rather than creating a second rule", async () => {
+    const sourceId = await makeSourceRateLimit("b8c_twice_src");
+    const { proposalId, approvalId } = await proposeThrough("rule_to_approval", "b8c idempotency", {
+      sourceRuleKind: "rate-limits",
+      sourceRuleId: sourceId,
+      create: createPayload("b8c_twice_tool"),
+    });
+    await decide(approvalId, "approved");
+    expect((await applyProposal(proposalId)).statusCode).toBe(200);
+    expect(await approvalRuleCountFor("b8c_twice_tool")).toBe(1);
+
+    const second = await applyProposal(proposalId);
+    expect(second.statusCode).toBe(409);
+    expect(second.json().error).toBe("proposal_already_applied");
+    // the mutation did NOT re-execute: still exactly one rule
+    expect(await approvalRuleCountFor("b8c_twice_tool")).toBe(1);
+  });
+
+  it("refuses, by name, a proposal whose SOURCE rule vanished — a conversion of nothing is not applied", async () => {
+    const sourceId = await makeSourceRateLimit("b8c_gone_src");
+    const { proposalId, approvalId } = await proposeThrough("rule_to_approval", "b8c source gone", {
+      sourceRuleKind: "rate-limits",
+      sourceRuleId: sourceId,
+      create: createPayload("b8c_gone_tool"),
+    });
+    await decide(approvalId, "approved");
+    // the source rule is deleted through the ordinary admin DELETE
+    const del = await app.inject({
+      method: "DELETE",
+      url: `/v1/rules/rate-limits/${sourceId}`,
+      headers: adminAuth,
+    });
+    expect(del.statusCode).toBe(200);
+
+    const res = await applyProposal(proposalId);
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error).toBe("proposal_target_gone");
+    expect(res.json().detail).toMatch(/no longer exists/);
+    expect(await approvalRuleCountFor("b8c_gone_tool")).toBe(0);
+    const [row] = await db.select().from(copilotProposals).where(eq(copilotProposals.id, proposalId));
+    expect(row!.appliedAt).toBeNull();
+  });
+
+  it("NEVER bypasses the route's own zod: a create the route would refuse is refused with its error", async () => {
+    const sourceId = await makeSourceRateLimit("b8c_zod_src");
+    const { proposalId, approvalId } = await proposeThrough("rule_to_approval", "b8c zod bypass attempt", {
+      sourceRuleKind: "rate-limits",
+      sourceRuleId: sourceId,
+      // scope 'user' with NO userId — exactly what POST /v1/rules/approvals'
+      // superRefine refuses; a raw insert would have slipped it to the DB CHECK
+      create: {
+        scope: "user",
+        serverScope: "server",
+        serverId,
+        toolName: "b8c_zod_tool",
+        approverUserId: approverId,
+      },
+    });
+    await decide(approvalId, "approved");
+    const res = await applyProposal(proposalId);
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toBe("proposal_diff_invalid");
+    // the ROUTE'S schema, by name, and ITS message verbatim
+    expect(res.json().detail).toMatch(/createApprovalRuleSchema/);
+    expect(res.json().detail).toMatch(/scope 'user' requires a userId/);
+    expect(await approvalRuleCountFor("b8c_zod_tool")).toBe(0);
+    const [row] = await db.select().from(copilotProposals).where(eq(copilotProposals.id, proposalId));
+    expect(row!.appliedAt).toBeNull();
+  });
+});
+
+describe("B8c — budget_adjustment applies through PATCH /v1/projects/:projectId's own write", () => {
+  const makeProject = async (
+    name: string,
+    opts: { budgetUsd?: number; withApprover?: boolean } = {},
+  ): Promise<string> => {
+    const withApprover = opts.withApprover ?? true;
+    const r = await post("/v1/projects", {
+      name,
+      ...(opts.budgetUsd !== undefined ? { budgetUsd: opts.budgetUsd } : {}),
+      ...(withApprover ? { budgetApproverUserId: approverId } : {}),
+    });
+    expect(r.statusCode).toBe(201);
+    return r.json().id as string;
+  };
+
+  const readProject = async (projectId: string) => {
+    const [row] = await db.select().from(projects).where(eq(projects.id, projectId));
+    expect(row).toBeTruthy();
+    return row!;
+  };
+
+  it("APPLIES an approved budget_adjustment: the budget MOVED, via the route's write, audited with its rule id", async () => {
+    const projectId = await makeProject("b8c-budget-apply", { budgetUsd: 100 });
+    const { proposalId, approvalId } = await proposeThrough("budget_adjustment", "b8c raise the budget", {
+      projectId,
+      patch: { budgetUsd: 250 },
+    });
+    await decide(approvalId, "approved");
+
+    const res = await applyProposal(proposalId);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().applied).toMatchObject({
+      via: "PATCH /v1/projects/:projectId (applyProjectPatch)",
+      projectId,
+      changed: { budgetUsd: 250 },
+    });
+
+    // THE EFFECT IS VISIBLE IN THE TARGET OBJECT
+    expect((await readProject(projectId)).budgetUsd).toBe(250);
+
+    const [row] = await db.select().from(copilotProposals).where(eq(copilotProposals.id, proposalId));
+    expect(row!.appliedAt).not.toBeNull();
+    expect(row!.appliedByUserId).toBe(adminId);
+
+    // the ROUTE'S OWN audit rule id (`project-updated`) recorded the change,
+    // stamped with the proposal as context — the same row an admin edit writes
+    const routeRow = await latestAuditFor("project-updated");
+    expect(routeRow?.objectId).toBe(projectId);
+    expect((routeRow?.detail as Record<string, unknown>).copilotProposalId).toBe(proposalId);
+    expect((routeRow?.detail as Record<string, unknown>).changed).toMatchObject({ budgetUsd: 250 });
+
+    // and the applier's own row, under the applying human's identity
+    const applied = await latestAuditFor(COPILOT_RULE_IDS.proposalApplied);
+    expect(applied?.userId).toBe(adminId);
+    expect(applied?.reason).toMatch(/same merged write PATCH \/v1\/projects\/:projectId performs/);
+  });
+
+  it("refuses a DENIED proposal by name and leaves the budget alone", async () => {
+    const projectId = await makeProject("b8c-budget-denied", { budgetUsd: 100 });
+    const { proposalId, approvalId } = await proposeThrough("budget_adjustment", "b8c denied", {
+      projectId,
+      patch: { budgetUsd: 999 },
+    });
+    await decide(approvalId, "denied");
+    const res = await applyProposal(proposalId);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("proposal_not_approved");
+    expect((await readProject(projectId)).budgetUsd).toBe(100);
+  });
+
+  it("refuses a SECOND apply rather than re-executing the write", async () => {
+    const projectId = await makeProject("b8c-budget-twice", { budgetUsd: 100 });
+    const { proposalId, approvalId } = await proposeThrough("budget_adjustment", "b8c idempotency", {
+      projectId,
+      patch: { budgetUsd: 150 },
+    });
+    await decide(approvalId, "approved");
+    expect((await applyProposal(proposalId)).statusCode).toBe(200);
+    expect((await readProject(projectId)).budgetUsd).toBe(150);
+
+    // an admin then moves the budget by hand; a re-executed apply would be
+    // visible as the value snapping back to 150
+    const manual = await app.inject({
+      method: "PATCH",
+      url: `/v1/projects/${projectId}`,
+      headers: adminAuth,
+      payload: { budgetUsd: 175 },
+    });
+    expect(manual.statusCode).toBe(200);
+
+    const second = await applyProposal(proposalId);
+    expect(second.statusCode).toBe(409);
+    expect(second.json().error).toBe("proposal_already_applied");
+    expect((await readProject(projectId)).budgetUsd).toBe(175);
+  });
+
+  it("surfaces the route's own refusal for a project that does not exist — named, not a 500", async () => {
+    const { proposalId, approvalId } = await proposeThrough("budget_adjustment", "b8c project gone", {
+      projectId: "3d1f8a58-0000-4000-8000-b8c000000001",
+      patch: { budgetUsd: 10 },
+    });
+    await decide(approvalId, "approved");
+    const res = await applyProposal(proposalId);
+    expect(res.statusCode).toBe(404);
+    // the route's OWN error, surfaced verbatim
+    expect(res.json().error).toBe("unknown_project");
+    const [row] = await db.select().from(copilotProposals).where(eq(copilotProposals.id, proposalId));
+    expect(row!.appliedAt).toBeNull();
+  });
+
+  it("NEVER bypasses the route's own zod: a patch the route would refuse is refused with its error", async () => {
+    const projectId = await makeProject("b8c-budget-zod", { budgetUsd: 100 });
+    const { proposalId, approvalId } = await proposeThrough("budget_adjustment", "b8c zod bypass attempt", {
+      projectId,
+      // a NEGATIVE budget — updateProjectSchema requires positive; a raw
+      // db.update would have written it without complaint
+      patch: { budgetUsd: -50 },
+    });
+    await decide(approvalId, "approved");
+    const res = await applyProposal(proposalId);
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toBe("proposal_diff_invalid");
+    expect(res.json().detail).toMatch(/updateProjectSchema/);
+    expect((await readProject(projectId)).budgetUsd).toBe(100);
+  });
+
+  it("surfaces the route's budget-requires-approver invariant verbatim rather than working around it", async () => {
+    // a project with NO budget and NO approver: setting a budget alone must
+    // hit the SAME merged-row invariant an admin's own PATCH hits
+    const projectId = await makeProject("b8c-budget-invariant", { withApprover: false });
+    const { proposalId, approvalId } = await proposeThrough("budget_adjustment", "b8c invariant", {
+      projectId,
+      patch: { budgetUsd: 40 },
+    });
+    await decide(approvalId, "approved");
+    const res = await applyProposal(proposalId);
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toBe("budget_requires_approver");
+    expect((await readProject(projectId)).budgetUsd).toBeNull();
+    const [row] = await db.select().from(copilotProposals).where(eq(copilotProposals.id, proposalId));
+    expect(row!.appliedAt).toBeNull();
+  });
+
+  it("refuses a patch that reaches past the budget — a budget_adjustment may not rename a project", async () => {
+    const projectId = await makeProject("b8c-budget-scope", { budgetUsd: 100 });
+    const { proposalId, approvalId } = await proposeThrough("budget_adjustment", "b8c scope smuggle", {
+      projectId,
+      patch: { budgetUsd: 120, name: "smuggled-rename" },
+    });
+    await decide(approvalId, "approved");
+    const res = await applyProposal(proposalId);
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error).toBe("proposal_diff_invalid");
+    expect(res.json().detail).toMatch(/'name' is not a budget field/);
+    const after = await readProject(projectId);
+    expect(after.name).toBe("b8c-budget-scope");
+    expect(after.budgetUsd).toBe(100);
   });
 });
 

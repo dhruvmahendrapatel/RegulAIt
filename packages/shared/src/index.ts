@@ -2867,6 +2867,7 @@ export {
 // following ADR-0044's judge pattern, and the proposal record builder.
 export {
   COPILOT_APPLICABLE_PROPOSAL_KINDS,
+  COPILOT_BUDGET_ADJUSTMENT_FIELDS,
   COPILOT_DECISION_SUPPORT_NOTICE,
   COPILOT_ENTITY_FILTER_MATRIX,
   COPILOT_ENTITY_KINDS,
@@ -2876,6 +2877,7 @@ export {
   COPILOT_MAX_ENTITY_CANDIDATES,
   COPILOT_OBJECT_KINDS,
   COPILOT_PROPOSAL_KINDS,
+  COPILOT_RULE_TO_APPROVAL_SOURCE_KINDS,
   COPILOT_SCOPE_CAVEAT,
   COPILOT_TIMEFRAMES,
   COPILOT_TOOLS,
@@ -2887,9 +2889,11 @@ export {
   copilotEntityAmbiguousRefusal,
   copilotEntityNotFilterableRefusal,
   copilotEntityUnresolvedRefusal,
+  copilotBudgetAdjustmentDiffSchema,
   copilotGrantRevocationDiffSchema,
   copilotPolicyTighteningDiffSchema,
   copilotPlanFiltered,
+  copilotRuleToApprovalDiffSchema,
   copilotProposalKindIsApplicable,
   copilotProposalSchema,
   copilotToolSupportsEntityKind,

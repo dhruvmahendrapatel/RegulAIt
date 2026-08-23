@@ -91,12 +91,14 @@ const AUDITED_WRITERS: AuditedWriter[] = [
       "a property of the code path.",
   },
   {
-    file: "app.ts",
+    file: "rule-creates.ts",
     method: "insert",
     expr: "approvalRules",
     why:
-      "POST /v1/rules/approvals — CREATE ONLY. A pure insert with a defaultRandom id and no ON CONFLICT " +
-      "clause (approval_rules carries no unique constraint one could target), so the row is brand new and " +
+      "`createApprovalRuleRow` — CREATE ONLY, moved out of app.ts in B8c (ADR-0056 amendment) so " +
+      "POST /v1/rules/approvals and the copilot's rule_to_approval applier share ONE implementation on the " +
+      "grant-revocation.ts pattern. A pure insert with a defaultRandom id and no ON CONFLICT clause " +
+      "(approval_rules carries no unique constraint one could target), so the row is brand new and " +
       "cannot have a config_versions row at the instant it is written: resolveForShadow returns served=null " +
       "and the raw row is served. `create-only routes stay create-only` is pinned by " +
       "rule-write-versioning.test.ts; if this ever gains an upsert or an edit sibling it must go through " +

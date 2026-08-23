@@ -970,6 +970,83 @@ export async function applyProjectApprovalDecision(
  * route. */
 const ROLE_RANK: Record<string, number> = { viewer: 0, contributor: 1, owner: 2 };
 
+/**
+ * B8c (ADR-0056 amendment 2026-08-22) — the `PATCH /v1/projects/:projectId`
+ * handler core, extracted so the copilot's consent-gated applier executes a
+ * `budget_adjustment` proposal through EXACTLY the write an admin's own PATCH
+ * performs (the pattern `grant-revocation.ts` set): merge over the current
+ * row, re-check the budget-requires-approver invariant against the MERGED row,
+ * write, audit as `project-updated`. Validation stays the route's own —
+ * `updateProjectSchema` — and EVERY caller parses with it before calling this;
+ * this function never widens what the route would accept.
+ *
+ * `auditDetail` merges route-specific fields into the `project-updated` audit
+ * row's detail (the same courtesy `applyRuleEdit` extends), so the copilot
+ * apply can stamp its proposal id onto the very row an admin edit writes.
+ */
+export type ProjectPatchResult =
+  | { ok: true; row: ProjectRow; changed: Record<string, unknown> }
+  | { ok: false; status: 404 | 422; error: string; detail: string };
+
+export async function applyProjectPatch(
+  db: Db,
+  args: {
+    projectId: string;
+    patch: z.infer<typeof updateProjectSchema>;
+    actorUserId: string | null;
+    auditDetail?: Record<string, unknown>;
+  },
+): Promise<ProjectPatchResult> {
+  const { projectId, patch: body } = args;
+  const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
+  if (!project) {
+    return {
+      ok: false,
+      status: 404,
+      error: "unknown_project",
+      detail: `no project with id ${projectId} exists`,
+    };
+  }
+  const merged = {
+    name: body.name ?? project.name,
+    costCenter: body.costCenter === undefined ? project.costCenter : body.costCenter,
+    budgetUsd: body.budgetUsd === undefined ? project.budgetUsd : body.budgetUsd,
+    budgetApproverUserId:
+      body.budgetApproverUserId === undefined
+        ? project.budgetApproverUserId
+        : body.budgetApproverUserId,
+    budgetPeriod: body.budgetPeriod === undefined ? project.budgetPeriod : body.budgetPeriod,
+    alertThresholdPct:
+      body.alertThresholdPct === undefined ? project.alertThresholdPct : body.alertThresholdPct,
+    arbiterUserId: body.arbiterUserId === undefined ? project.arbiterUserId : body.arbiterUserId,
+    initiativeId: body.initiativeId === undefined ? project.initiativeId : body.initiativeId,
+  };
+  // the create-time invariant, held against the row this patch would leave
+  if (merged.budgetUsd != null && merged.budgetApproverUserId == null) {
+    return {
+      ok: false,
+      status: 422,
+      error: "budget_requires_approver",
+      detail: "a project budget requires a budgetApproverUserId",
+    };
+  }
+  const [row] = await db.update(projects).set(merged).where(eq(projects.id, projectId)).returning();
+  const changed = Object.fromEntries(
+    Object.entries(body).filter(([, v]) => v !== undefined),
+  ) as Record<string, unknown>;
+  await db.insert(auditLog).values({
+    userId: args.actorUserId ?? project.budgetApproverUserId ?? projectId,
+    objectType: "project",
+    objectId: projectId,
+    detail: { phase: "update", changed, ...(args.auditDetail ?? {}) },
+    effect: "allow",
+    ruleId: "project-updated",
+    ruleChain: [],
+    reason: `project '${project.name}' updated: ${Object.keys(changed).join(", ")}`,
+  });
+  return { ok: true, row: row!, changed };
+}
+
 export function registerProjectRoutes(app: FastifyInstance, db: Db) {
   /** §9.3: per-user, per-Shared-Project access — viewer reads, contributor+
    * writes, owner administers membership. Admins bypass. Returns the
@@ -1068,49 +1145,24 @@ export function registerProjectRoutes(app: FastifyInstance, db: Db) {
   // Post-creation edits (admin-only by the default gate): budget, approver,
   // arbiter, cost center, name. Classifications never ride this route — a
   // reclassification is a governed diff-then-approve change (§8.3), and a
-  // PATCH that could slip one through would bypass that review.
+  // PATCH that could slip one through would bypass that review. B8c: the
+  // handler core lives in `applyProjectPatch` so the copilot's
+  // `budget_adjustment` applier rides this exact write.
   app.patch("/v1/projects/:projectId", async (req, reply) => {
     const { projectId } = projectIdParam.parse(req.params);
     const body = updateProjectSchema.parse(req.body);
-    const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
-    if (!project) return reply.status(404).send({ error: "unknown_project" });
-    const merged = {
-      name: body.name ?? project.name,
-      costCenter: body.costCenter === undefined ? project.costCenter : body.costCenter,
-      budgetUsd: body.budgetUsd === undefined ? project.budgetUsd : body.budgetUsd,
-      budgetApproverUserId:
-        body.budgetApproverUserId === undefined
-          ? project.budgetApproverUserId
-          : body.budgetApproverUserId,
-      budgetPeriod: body.budgetPeriod === undefined ? project.budgetPeriod : body.budgetPeriod,
-      alertThresholdPct:
-        body.alertThresholdPct === undefined ? project.alertThresholdPct : body.alertThresholdPct,
-      arbiterUserId: body.arbiterUserId === undefined ? project.arbiterUserId : body.arbiterUserId,
-      initiativeId:
-        body.initiativeId === undefined ? project.initiativeId : body.initiativeId,
-    };
-    // the create-time invariant, held against the row this patch would leave
-    if (merged.budgetUsd != null && merged.budgetApproverUserId == null) {
-      return reply.status(422).send({
-        error: "budget_requires_approver",
-        detail: "a project budget requires a budgetApproverUserId",
-      });
-    }
-    const [row] = await db.update(projects).set(merged).where(eq(projects.id, projectId)).returning();
-    const changed = Object.fromEntries(
-      Object.entries(body).filter(([, v]) => v !== undefined),
-    ) as Record<string, unknown>;
-    await db.insert(auditLog).values({
-      userId: req.authCtx.userId ?? project.budgetApproverUserId ?? projectId,
-      objectType: "project",
-      objectId: projectId,
-      detail: { phase: "update", changed },
-      effect: "allow",
-      ruleId: "project-updated",
-      ruleChain: [],
-      reason: `project '${project.name}' updated: ${Object.keys(changed).join(", ")}`,
+    const res = await applyProjectPatch(db, {
+      projectId,
+      patch: body,
+      actorUserId: req.authCtx.userId ?? null,
     });
-    return row;
+    if (!res.ok) {
+      // byte-identical to the pre-B8c responses: the 404 carried no detail
+      return reply
+        .status(res.status)
+        .send(res.status === 404 ? { error: res.error } : { error: res.error, detail: res.detail });
+    }
+    return res.row;
   });
 
   // ---------------------------------------------------------------------------

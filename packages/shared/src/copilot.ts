@@ -1233,11 +1233,12 @@ export function buildProposalRecord(input: {
 // ---------------------------------------------------------------------------
 
 /**
- * WHICH PROPOSAL KINDS THIS BUILD CAN APPLY, and why the others cannot.
+ * WHICH PROPOSAL KINDS THIS BUILD CAN APPLY.
  *
  * ADR-0056's amendment named "an approved proposal is not applied by anything"
- * as its largest structural gap. L6b closes it for the kinds whose change
- * already has a PUBLIC CHOKE POINT an admin would use by hand:
+ * as its largest structural gap. L6b closed it for two kinds; batch B8c closed
+ * the remaining two. Every kind now rides a PUBLIC CHOKE POINT an admin would
+ * use by hand — never a raw table write in the applier:
  *
  *   grant_revocation   → the one-per-kind removal in `grant-revocation.ts`,
  *                        the exact function `DELETE /v1/grants/...` and an
@@ -1245,33 +1246,36 @@ export function buildProposalRecord(input: {
  *   policy_tightening  → `applyRuleEdit`, ADR-0074's single door for every
  *                        rule-table edit (so a versioned rule mints+activates
  *                        a version instead of silently drifting).
- *
- * The other two are NOT approximated. An applier that reached past a missing
- * endpoint and wrote the row itself would be precisely the ungoverned
- * control-plane mutation ADR-0056 exists to prevent — so they refuse by name
- * and say which endpoint has to exist first.
+ *   rule_to_approval   → the same create `POST /v1/rules/approvals` performs
+ *                        (`createApprovalRuleRow`, extracted in B8c so both
+ *                        callers share one implementation), validated by that
+ *                        route's own `createApprovalRuleSchema` and gated on
+ *                        the SOURCE rule still existing.
+ *   budget_adjustment  → the same merged write `PATCH /v1/projects/:projectId`
+ *                        performs (`applyProjectPatch`, extracted in B8c),
+ *                        validated by that route's own `updateProjectSchema`
+ *                        and subject to its own budget-requires-approver
+ *                        invariant, surfaced verbatim.
  */
 export const COPILOT_APPLICABLE_PROPOSAL_KINDS = [
   "grant_revocation",
   "policy_tightening",
+  "rule_to_approval",
+  "budget_adjustment",
 ] as const;
 export type CopilotApplicableProposalKind = (typeof COPILOT_APPLICABLE_PROPOSAL_KINDS)[number];
 
-/** the named reason each unapplicable kind is unapplicable — surfaced verbatim
- * in the refusal, so "why not" never needs a code read */
-export const COPILOT_UNAPPLICABLE_PROPOSAL_KINDS: Record<string, string> = {
-  rule_to_approval:
-    "converting an existing deny rule into an approval requirement is a CROSS-ARTIFACT CREATE " +
-    "(a new `approval_rules` row derived from a rate-limit or data-scope rule), and no endpoint " +
-    "performs it — `applyRuleEdit` edits an artifact that already exists, it does not mint one of " +
-    "a different type. Applying this kind needs that endpoint built and governed first; the " +
-    "copilot will not write the row directly.",
-  budget_adjustment:
-    "there is no single public choke point for a budget write comparable to `applyRuleEdit` — a " +
-    "project budget, a compliance-profile ceiling and a virtual-key cap are three different " +
-    "surfaces with three different governance stories. Applying this kind needs that decision " +
-    "made and an endpoint named; the copilot will not pick one and write it.",
-};
+/**
+ * The named reason each unapplicable kind is unapplicable — surfaced verbatim
+ * in the refusal, so "why not" never needs a code read.
+ *
+ * EMPTY SINCE B8C (2026-08-22): every kind in `COPILOT_PROPOSAL_KINDS` now has
+ * a public choke point and an applier branch. The mechanism stays for the next
+ * proposal kind that lands proposed-before-appliable; while the map is empty
+ * the kind gate can only fire on a kind outside the enum, which the proposal
+ * schema already refuses at proposal time.
+ */
+export const COPILOT_UNAPPLICABLE_PROPOSAL_KINDS: Record<string, string> = {};
 
 export function copilotProposalKindIsApplicable(kind: string): kind is CopilotApplicableProposalKind {
   return (COPILOT_APPLICABLE_PROPOSAL_KINDS as readonly string[]).includes(kind);
@@ -1308,6 +1312,60 @@ export const copilotPolicyTighteningDiffSchema = z
   .object({
     ruleKind: z.enum(["approvals", "rate-limits", "data-scopes"]),
     ruleId: z.string().uuid(),
+    patch: z.record(z.unknown()),
+  })
+  .strict();
+
+/** the rule kinds an approval requirement can be DERIVED from — the deny-heavy
+ * kinds ADR-0056's worked example names ("this rule fires deny 400×/day;
+ * propose making it an approval instead"). Approval rules are excluded: one
+ * cannot be converted INTO itself. */
+export const COPILOT_RULE_TO_APPROVAL_SOURCE_KINDS = ["rate-limits", "data-scopes"] as const;
+
+/**
+ * `rule_to_approval` (B8c) — a diff naming the SOURCE rule the approval
+ * requirement is derived from, plus the `create` payload for the new
+ * `approval_rules` row. `create` is deliberately a free record here: the
+ * authority on its shape is `createApprovalRuleSchema` — the EXACT zod
+ * `POST /v1/rules/approvals` parses with — which the applier runs verbatim, so
+ * a payload that route would refuse is refused with that schema's own issues
+ * rather than applied. Duplicating its field list here would be a second
+ * source of truth that could disagree with the enforcing one (the same
+ * reasoning as `policy_tightening`'s free patch above).
+ */
+export const copilotRuleToApprovalDiffSchema = z
+  .object({
+    sourceRuleKind: z.enum(COPILOT_RULE_TO_APPROVAL_SOURCE_KINDS),
+    sourceRuleId: z.string().uuid(),
+    create: z.record(z.unknown()),
+  })
+  .strict();
+
+/** the project columns a `budget_adjustment` may touch — the pillar-5 budget
+ * surface of `PATCH /v1/projects/:projectId` and nothing else. A patch naming
+ * any other column (a rename, a re-parenting) is refused as not being a budget
+ * adjustment at all. */
+export const COPILOT_BUDGET_ADJUSTMENT_FIELDS = [
+  "budgetUsd",
+  "budgetApproverUserId",
+  "budgetPeriod",
+  "alertThresholdPct",
+] as const;
+
+/**
+ * `budget_adjustment` (B8c) — a diff naming one PROJECT and the budget patch
+ * to apply to it. The kind is scoped to PROJECT budgets deliberately: that is
+ * the object the copilot's own cost evidence attributes spend to (pillar 5),
+ * and it has exactly one public write — `PATCH /v1/projects/:projectId`. A
+ * compliance-profile ceiling is a rule artifact and rides `policy_tightening`;
+ * a virtual-key cap has its own admin surface and is not a project budget.
+ * `patch` is a free record for the same reason as above: the applier restricts
+ * its KEYS to `COPILOT_BUDGET_ADJUSTMENT_FIELDS` and then validates the VALUES
+ * with `updateProjectSchema` — the exact zod the route parses with.
+ */
+export const copilotBudgetAdjustmentDiffSchema = z
+  .object({
+    projectId: z.string().uuid(),
     patch: z.record(z.unknown()),
   })
   .strict();

@@ -107,10 +107,15 @@ import {
   copilotEntityAmbiguousRefusal,
   copilotEntityNotFilterableRefusal,
   copilotEntityUnresolvedRefusal,
+  copilotBudgetAdjustmentDiffSchema,
   copilotGrantRevocationDiffSchema,
   copilotPolicyTighteningDiffSchema,
   copilotProposalKindIsApplicable,
   copilotProposalSchema,
+  copilotRuleToApprovalDiffSchema,
+  COPILOT_BUDGET_ADJUSTMENT_FIELDS,
+  createApprovalRuleSchema,
+  updateProjectSchema,
   copilotToolSupportsEntityKind,
   copilotToolsFilteringEntityKind,
   describeCopilotFilters,
@@ -158,6 +163,11 @@ import {
 import { resolveGuardrailPolicy, runGuardrails } from "./guardrails.js";
 import { callerProjectIds } from "./reporting.js";
 import { applyRuleEdit, isRuleEditRefusal } from "./rule-writes.js";
+// B8c — the remaining two proposal kinds' public choke points, each the exact
+// implementation its admin route calls (never a parallel write):
+import { createApprovalRuleRow } from "./rule-creates.js";
+import { applyProjectPatch } from "./projects.js";
+import { loadRuleRow } from "./config-versions.js";
 
 const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
 
@@ -1824,9 +1834,13 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
   //    (ADR-0074's one choke point, so a versioned rule mints and activates a
   //    version instead of silently drifting); a grant removal rides the
   //    one-per-kind function in `grant-revocation.ts` that `DELETE /v1/grants/…`
-  //    and an ADR-0090 campaign's revoke decision both call. There is no raw
-  //    table write in this handler, and a kind whose change has no such door
-  //    is REFUSED BY NAME rather than approximated.
+  //    and an ADR-0090 campaign's revoke decision both call; B8c added the last
+  //    two doors — a rule_to_approval rides the create POST /v1/rules/approvals
+  //    performs (`createApprovalRuleRow`), a budget_adjustment rides the merged
+  //    write PATCH /v1/projects/:projectId performs (`applyProjectPatch`), each
+  //    behind that route's OWN zod. There is no raw table write in this
+  //    handler, and a future kind whose change has no such door refuses by
+  //    name rather than being approximated.
   //  * ATTRIBUTED TO THE HUMAN. The audit row is written under the applying
   //    admin's identity with the proposal as context. The copilot proposed;
   //    a named person consented; a named person applied.
@@ -1953,7 +1967,7 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
         `same one-per-kind removal the DELETE /v1/grants endpoints and an ADR-0090 campaign's revoke ` +
         `decision use. Consent came from approval ${approval.id}; this act is attributed to the ` +
         `applying admin, not to the copilot`;
-    } else {
+    } else if (proposal.kind === "policy_tightening") {
       const parsedDiff = copilotPolicyTighteningDiffSchema.safeParse(proposal.diff);
       if (!parsedDiff.success) {
         return refuse(
@@ -2004,6 +2018,130 @@ export function registerCopilotRoutes(app: FastifyInstance, db: Db, opts: Copilo
         `applyRuleEdit, ADR-0074's single door for every rule-table write` +
         (res.mintedVersion ? ` (config version minted and activated)` : ` (unversioned rule: plain row write)`) +
         `. Consent came from approval ${approval.id}; this act is attributed to the applying admin, ` +
+        `not to the copilot`;
+    } else if (proposal.kind === "rule_to_approval") {
+      // B8c — the cross-artifact CREATE the first amendment named unapplied.
+      // The create half IS a public endpoint's work — POST /v1/rules/approvals
+      // — and the derivation half happened at PROPOSAL time (the evidence names
+      // the noisy source rule). So the apply is: re-run the route's own zod,
+      // check the SOURCE rule still exists, then create through the extracted
+      // implementation the route itself calls (`createApprovalRuleRow`).
+      const parsedDiff = copilotRuleToApprovalDiffSchema.safeParse(proposal.diff);
+      if (!parsedDiff.success) {
+        return refuse(
+          422,
+          "proposal_diff_invalid",
+          `a rule_to_approval diff must name {sourceRuleKind, sourceRuleId, create}; this one does not ` +
+            `(${parsedDiff.error.issues.map((i) => i.path.join(".") || "(root)").join(", ")}).`,
+        );
+      }
+      const { sourceRuleKind, sourceRuleId, create } = parsedDiff.data;
+      // THE ROUTE'S OWN VALIDATION, NEVER BYPASSED: the exact schema
+      // POST /v1/rules/approvals parses with, its issues surfaced verbatim. A
+      // payload the route would refuse is refused here, not applied.
+      const parsedCreate = createApprovalRuleSchema.safeParse(create);
+      if (!parsedCreate.success) {
+        return refuse(
+          422,
+          "proposal_diff_invalid",
+          `the 'create' payload was refused by POST /v1/rules/approvals' own schema ` +
+            `(createApprovalRuleSchema): ${parsedCreate.error.issues
+              .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
+              .join("; ")}. Nothing was created.`,
+        );
+      }
+      // the CROSS-ARTIFACT half: an approval requirement "derived from" a rule
+      // that no longer exists would be a requirement justified by nothing
+      const source = await loadRuleRow(db, APPLY_RULE_ARTIFACT_TYPES[sourceRuleKind], sourceRuleId);
+      if (!source) {
+        return refuse(
+          404,
+          "proposal_target_gone",
+          `the ${sourceRuleKind} rule this proposal derives its approval requirement from ` +
+            `(${sourceRuleId}) no longer exists — nothing was created, and the proposal stays ` +
+            `unapplied so the record does not claim a conversion of a rule that is gone.`,
+          { sourceRuleKind, sourceRuleId },
+        );
+      }
+      const row = await createApprovalRuleRow(db, parsedCreate.data);
+      applied = {
+        via: "POST /v1/rules/approvals (createApprovalRuleRow)",
+        approvalRuleId: row.id,
+        derivedFromRuleKind: sourceRuleKind,
+        derivedFromRuleId: sourceRuleId,
+      };
+      reason =
+        `applied copilot proposal '${proposal.title}': created approval rule ${row.id} through the ` +
+        `same create POST /v1/rules/approvals performs, derived from ${sourceRuleKind} rule ` +
+        `${sourceRuleId}. Consent came from approval ${approval.id}; this act is attributed to the ` +
+        `applying admin, not to the copilot`;
+    } else {
+      // B8c — budget_adjustment. The kind is a PROJECT-budget adjustment (the
+      // object pillar 5 attributes spend to), and the project budget's one
+      // public write is PATCH /v1/projects/:projectId — so the apply rides that
+      // route's extracted core (`applyProjectPatch`), behind that route's own
+      // zod and its own budget-requires-approver invariant.
+      const parsedDiff = copilotBudgetAdjustmentDiffSchema.safeParse(proposal.diff);
+      if (!parsedDiff.success) {
+        return refuse(
+          422,
+          "proposal_diff_invalid",
+          `a budget_adjustment diff must name {projectId, patch}; this one does not ` +
+            `(${parsedDiff.error.issues.map((i) => i.path.join(".") || "(root)").join(", ")}).`,
+        );
+      }
+      const { projectId, patch } = parsedDiff.data;
+      const keys = Object.keys(patch);
+      const offBudget = keys.filter(
+        (k) => !(COPILOT_BUDGET_ADJUSTMENT_FIELDS as readonly string[]).includes(k),
+      );
+      if (keys.length === 0 || offBudget.length > 0) {
+        return refuse(
+          422,
+          "proposal_diff_invalid",
+          keys.length === 0
+            ? `a budget_adjustment patch must move at least one budget field ` +
+                `(${COPILOT_BUDGET_ADJUSTMENT_FIELDS.join(", ")}); this one is empty.`
+            : `a budget_adjustment adjusts the project's budget fields ` +
+                `(${COPILOT_BUDGET_ADJUSTMENT_FIELDS.join(", ")}) and nothing else; ` +
+                `'${offBudget.join("', '")}' is not a budget field.`,
+        );
+      }
+      // THE ROUTE'S OWN VALIDATION, NEVER BYPASSED: the exact schema
+      // PATCH /v1/projects/:projectId parses with, its issues surfaced verbatim.
+      const parsedPatch = updateProjectSchema.safeParse(patch);
+      if (!parsedPatch.success) {
+        return refuse(
+          422,
+          "proposal_diff_invalid",
+          `the patch was refused by PATCH /v1/projects/:projectId's own schema ` +
+            `(updateProjectSchema): ${parsedPatch.error.issues
+              .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
+              .join("; ")}. Nothing was changed.`,
+        );
+      }
+      const res = await applyProjectPatch(db, {
+        projectId,
+        patch: parsedPatch.data,
+        actorUserId: userId,
+        auditDetail: { via: "copilot-proposal-apply", copilotProposalId: proposal.id, approvalId: approval.id },
+      });
+      if (!res.ok) {
+        // THE CHOKE POINT'S OWN REFUSAL, SURFACED VERBATIM — `unknown_project`
+        // (the target vanished) and `budget_requires_approver` (the route's
+        // merged-row invariant) are the same answers an admin's own PATCH gets.
+        return refuse(res.status, res.error, res.detail, { projectId });
+      }
+      applied = {
+        via: "PATCH /v1/projects/:projectId (applyProjectPatch)",
+        projectId,
+        changed: res.changed,
+      };
+      reason =
+        `applied copilot proposal '${proposal.title}': adjusted project ${projectId}'s budget ` +
+        `(${Object.keys(res.changed).join(", ")}) through the same merged write ` +
+        `PATCH /v1/projects/:projectId performs, including its budget-requires-approver invariant. ` +
+        `Consent came from approval ${approval.id}; this act is attributed to the applying admin, ` +
         `not to the copilot`;
     }
 

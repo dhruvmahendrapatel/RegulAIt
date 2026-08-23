@@ -164,6 +164,7 @@ import {
 } from "./grant-revocation.js";
 import { deleteRuleArtifact, registerConfigVersionRoutes } from "./config-versions.js";
 import { applyRuleEdit, isRuleEditRefusal } from "./rule-writes.js";
+import { createApprovalRuleRow, scopedRuleColumns } from "./rule-creates.js";
 import { ConfigVersionUnresolvableError } from "./rule-versions.js";
 import { registerSpendMonitorRoutes } from "./spend-monitor.js";
 import { registerLineageRoutes } from "./lineage.js";
@@ -1939,37 +1940,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   }));
 
   // PILLAR 1 rule scoping: the discriminant is already validated by the shared
-  // superRefine (mirrors the DB CHECK). We null out every off-scope subject/
-  // server field so the row is clean and the DB CHECK always passes — a
-  // role-scoped rule stores only roleId, a fleet rule stores none, an
-  // all-servers rule stores no serverId.
-  const scopedRuleColumns = (body: {
-    scope: "user" | "role" | "team" | "fleet";
-    serverScope: "server" | "all";
-    userId?: string | null;
-    roleId?: string | null;
-    teamId?: string | null;
-    serverId?: string | null;
-  }) => ({
-    scope: body.scope,
-    serverScope: body.serverScope,
-    userId: body.scope === "user" ? body.userId! : null,
-    roleId: body.scope === "role" ? body.roleId! : null,
-    teamId: body.scope === "team" ? body.teamId! : null,
-    serverId: body.serverScope === "server" ? body.serverId! : null,
-  });
-
+  // superRefine (mirrors the DB CHECK). `scopedRuleColumns` (rule-creates.ts)
+  // nulls out every off-scope subject/server field so the row is clean and the
+  // DB CHECK always passes. B8c: the approvals create itself moved to
+  // `createApprovalRuleRow` so the copilot's `rule_to_approval` applier rides
+  // the exact create this route performs — never a parallel insert.
   app.post("/v1/rules/approvals", async (req, reply) => {
     const body = createApprovalRuleSchema.parse(req.body);
-    const [row] = await db
-      .insert(approvalRules)
-      .values({
-        ...scopedRuleColumns(body),
-        toolName: body.toolName ?? null,
-        writeOnly: body.writeOnly ?? false,
-        approverUserId: body.approverUserId,
-      })
-      .returning();
+    const row = await createApprovalRuleRow(db, body);
     return reply.status(201).send(row);
   });
 
