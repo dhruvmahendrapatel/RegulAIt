@@ -356,6 +356,11 @@ are three surfaces with three governance stories). Reaching past a missing
 endpoint to write the row would be exactly the ungoverned control-plane
 mutation this ADR exists to prevent, so both refuse by name.
 
+> **Superseded 2026-08-22 (batch B8c).** Both kinds now apply through public
+> choke points and `COPILOT_UNAPPLICABLE_PROPOSAL_KINDS` is empty — see the
+> B8c amendment below, which also records why the "no endpoint performs it"
+> reading above was too pessimistic for both kinds.
+
 ### Non-vacuity (M-002 — every count MEASURED by running the probe, then reverted by exact Edit reversal)
 
 - **Empty the grounding retrieval** (`base.citableObjects = []` in
@@ -393,7 +398,8 @@ mutation this ADR exists to prevent, so both refuse by name.
    that no phrasing can coax an answer out of an empty retrieval. The
    structural protection is the cross-check, which discards such an answer
    whether or not the model behaves.
-4. **Two of four proposal kinds are unapplied**, as above.
+4. **Two of four proposal kinds are unapplied**, as above. — **Closed
+   2026-08-22 (batch B8c), see the B8c amendment below.**
 5. **The applier is not transactional across the audit row.** The choke point
    executes, then the proposal row is stamped, then the audit row is written.
    A crash between them leaves an applied change with `applied_at` unset — the
@@ -591,3 +597,142 @@ is no longer answered at all. **The caveat machinery this amendment introduced i
 deleted**: `subjectFiltered` and `unfilteredSubjectCaveat` now cover the narrower case ADR-0096
 does not touch — a question that names no subject the extractor could see, whose broad answer
 must still say it is about nothing in particular. Limits 3 and 4 above stand unchanged.
+
+## Amendment — 2026-08-22 (batch B8c): the two honestly-unapplied proposal kinds APPLY, through routes that already existed
+
+L6b left `rule_to_approval` and `budget_adjustment` refusing with "the endpoint
+that must exist first is X". This amendment closes both — and the honest
+finding is that **neither needed a new endpoint built**. Both refusal texts
+were too pessimistic, in the same way:
+
+- `rule_to_approval` claimed "no endpoint performs the cross-artifact CREATE".
+  But the cross-artifact work decomposes: the *derivation* (reading the noisy
+  rate-limit/data-scope rule and deciding an approval requirement should exist)
+  happened at PROPOSAL time and lives in the proposal's evidence; the *apply*
+  half is nothing but creating an `approval_rules` row — which
+  `POST /v1/rules/approvals` has performed since pillar 1.
+- `budget_adjustment` claimed "three surfaces with three governance stories" and
+  no single choke point. But the kind's own diff has always named a
+  **`projectId`** — a budget_adjustment proposal is a PROJECT-budget adjustment
+  (the object pillar 5 attributes spend to), and the project budget has exactly
+  one public write: `PATCH /v1/projects/:projectId`. A compliance-profile
+  ceiling is a rule artifact and already rides `policy_tightening`; a
+  virtual-key cap is not a project budget and stays out of this kind's scope —
+  scoping stated here rather than smuggled.
+
+### Per kind: the route, and how the applier rides it
+
+**`rule_to_approval` → `POST /v1/rules/approvals` (pre-existing; its create
+extracted, not rebuilt).** The route's inline insert moved to
+`createApprovalRuleRow` (`apps/gateway/src/rule-creates.ts`, the exact pattern
+`grant-revocation.ts` set): the admin route and the applier now share ONE
+implementation, byte-identical route behaviour. The applier: (1) parses the
+diff shape (`copilotRuleToApprovalDiffSchema`: `{sourceRuleKind ∈
+{rate-limits, data-scopes}, sourceRuleId, create}`); (2) runs the ROUTE'S OWN
+`createApprovalRuleSchema` — including its scope superRefine and its
+scope/serverScope defaults — over `create`, refusing `proposal_diff_invalid`
+with that schema's issues verbatim; (3) refuses `proposal_target_gone` (404)
+when the SOURCE rule no longer exists, because a conversion derived from a
+deleted rule is a requirement justified by nothing; (4) creates through
+`createApprovalRuleRow`. The `rule-write-guard.test.ts` AUDITED_WRITERS entry
+moved with the insert (`app.ts` → `rule-creates.ts`), reason updated — the
+enumerated-writer set still has no new writer, only a relocated one.
+
+**`budget_adjustment` → `PATCH /v1/projects/:projectId` (pre-existing; its
+handler core extracted, not rebuilt).** The handler moved to
+`applyProjectPatch` (exported from `apps/gateway/src/projects.ts`): merge over
+the current row, re-check budget-requires-approver against the MERGED row,
+write, audit `project-updated` — the route now calls it with byte-identical
+responses (the 404 still carries no detail). The applier: (1) parses the diff
+shape (`copilotBudgetAdjustmentDiffSchema`: `{projectId, patch}`); (2)
+restricts the patch's KEYS to `COPILOT_BUDGET_ADJUSTMENT_FIELDS` (`budgetUsd`,
+`budgetApproverUserId`, `budgetPeriod`, `alertThresholdPct`) — a
+budget_adjustment may not rename or re-parent a project; (3) runs the ROUTE'S
+OWN `updateProjectSchema` over the values, refusing with its issues verbatim;
+(4) calls `applyProjectPatch`, surfacing ITS refusals verbatim —
+`unknown_project` (the target vanished) and `budget_requires_approver` (the
+route's own invariant) are the same answers an admin's own PATCH gets. The
+`project-updated` audit row — the route's own rule id — is stamped with
+`copilotProposalId`/`approvalId` via the same `auditDetail` courtesy
+`applyRuleEdit` extends, so the change is visible as an ordinary project edit
+AND traceable to the proposal.
+
+### Parity tests (zz-zz-copilot-live.test.ts, mirroring the existing kinds)
+
+`rule_to_approval`: pending → `proposal_not_approved`, nothing created, audited
+deny; approved apply → 200, the approval rule EXISTS with the route's fields,
+`applied.via` names the route, `applied_at`/`applied_by_user_id` set, audited
+under the applying admin with the proposal as context; second apply → 409
+`proposal_already_applied`, still exactly one rule; source rule deleted (via
+the ordinary `DELETE /v1/rules/rate-limits/:id`) → 404 `proposal_target_gone`,
+nothing created; a `create` the route's zod refuses (scope 'user', no userId)
+→ `proposal_diff_invalid` naming `createApprovalRuleSchema` and carrying its
+message verbatim, nothing created.
+
+`budget_adjustment`: approved apply → 200, the project row's `budgetUsd` MOVED,
+the `project-updated` audit row carries the proposal id and the changed set,
+the applier row is under the admin's identity; denied → `proposal_not_approved`,
+budget unchanged; second apply → 409 and does NOT re-execute (an admin moves
+the budget by hand between the two applies and the manual value survives);
+unknown project → the route's own `unknown_project` 404, unapplied; a negative
+budget → `proposal_diff_invalid` naming `updateProjectSchema`, unchanged; a
+budget on a project with no approver → the route's own
+`budget_requires_approver` 422 verbatim, unchanged; a patch smuggling `name` →
+`proposal_diff_invalid` ("'name' is not a budget field"), name and budget both
+unchanged.
+
+### Non-vacuity (M-002 — every count MEASURED by running the probe, then reverted by exact Edit reversal)
+
+- **Disable the source-rule existence check** (`if (false && !source)`):
+  **1 gateway test reddens** — "refuses … whose SOURCE rule vanished".
+- **Disable the budget-fields restriction**: **1 gateway test reddens** — "a
+  budget_adjustment may not rename a project". Recorded honestly: the
+  `keys.length === 0` half of that condition has no dedicated test — an empty
+  patch would in any case be refused one line later by `updateProjectSchema`'s
+  own "nothing to update" refine, so the early check is a better message, not
+  the only guard.
+- **Bypass `updateProjectSchema`** (feed the raw patch through): **1 gateway
+  test reddens** — the budget zod-bypass test, which then APPLIES a negative
+  budget the route would have refused.
+- **Bypass `createApprovalRuleSchema`**: **3 gateway tests redden** — the
+  zod-bypass test AND both positive rule_to_approval tests, because the
+  route's schema also supplies the scope/serverScope defaults the create
+  depends on. The route's zod is load-bearing for the happy path, not only for
+  refusals — one more reason the applier must never skip it.
+
+### Disclosures removed
+
+- `COPILOT_UNAPPLICABLE_PROPOSAL_KINDS` is now `{}` (the constant and the
+  fallback refusal stay, for the next kind that lands
+  proposed-before-appliable); `COPILOT_APPLICABLE_PROPOSAL_KINDS` lists all
+  four kinds; the doc comments at both sites restated.
+- The stale "Named unapplied" paragraph and honest-limit 4 of the L6a/L6b
+  amendment above carry dated supersession notes pointing here.
+- The applier's route doc-comment and the live-test header no longer claim a
+  kind without a door exists today.
+- The ADR index row (README.md) is updated alongside this amendment.
+- **Not editable by this batch** (shared-ledger ownership, batch rules):
+  `docs/product/PENDING.md` line "rule_to_approval and budget_adjustment stay
+  unapplied and named" and `project-state/STATE.md`'s "two kinds honestly named
+  unapplied" recap sentence are now stale and need a one-line touch-up by the
+  ledger owner.
+
+### Honest limits after this amendment
+
+1. The applier is still not transactional across its audit row (L6a/L6b limit
+   5, unchanged; the two new kinds share the same shape — choke point, then
+   `applied_at`, then audit).
+2. `rule_to_approval` CREATES the approval requirement; it does not retire the
+   source rule. "Convert" as delete-and-replace was deliberately not invented
+   here: the proposal's diff carries only a `create`, and removing a
+   rate-limit/data-scope rule is its own governed act (`DELETE
+   /v1/rules/:kind/:ruleId`) a human can take — or a future proposal kind can
+   propose — separately.
+3. `budget_adjustment` is scoped to PROJECT budgets, as stated above. A
+   proposal wanting to move a compliance-profile ceiling must be a
+   `policy_tightening` on that profile; a virtual-key cap has no proposal kind.
+4. All other limits of the earlier amendments stand unchanged.
+
+No migration: `copilot_proposals` (0100) and both target tables already carry
+every column this needed. Migration 0103 was reserved for this batch and is
+deliberately NOT used.
