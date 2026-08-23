@@ -507,3 +507,101 @@ to ADR-0059's blast-radius preview, selection fields stay un-versionable, and no
 proven against a real model provider. New, minor, disclosed: observation pruning is bounded by
 retention age and live-canary protection only — there is no per-artifact cap, so a 90-day window
 on a busy fleet still holds 90 days of rows.
+
+---
+
+## Amendment — 2026-08-22 (batch B8b): the last structural pair — the profile shadow is STORED HISTORY, and the stored divergence feeds ADR-0059's preview
+
+*Appended; nothing above is edited. NO migration — the profile comparisons fit
+`config_canary_observations` exactly as it stands (`project_id`, both sides' effect/reason, the
+`detail` jsonb), which was checked before inventing columns. Verified by
+`profile-shadow-history.test.ts` (8 cases) and the rewritten stored-history case in
+`rule-versioning.test.ts`. This closes disclosure 7 ("`compliance_profile` divergence is not
+recorded historically at all") and disclosure 8 ("the divergence signal is not fed to ADR-0059's
+blast-radius preview"), and re-scopes disclosure 6.*
+
+### 1. Disclosure 7 closed — the read-time computation now PERSISTS, deduplicated
+
+The compliance-profile shadow stays a read-time computation (its effect is a pure function of
+the profile bodies and a project's tags — disclosure 6's reasoning is untouched), but the
+computation no longer throws its answer away. **The persistence site is the existing computation
+site itself** — `computeAndRecordProfileImpact`, extracted from the divergence route
+(extract-don't-duplicate), called by `GET /v1/config-versions/compliance_profile/:id/divergence`
+— i.e. **write-through on read**, not a sweep: a second implementation on a schedule could
+drift from what the report shows, and a sweep would run for nobody when no operator is looking.
+
+- **THE DEDUP KEY, stated**: one observation per **(candidateVersionId, projectId,
+  fingerprint)**, where the fingerprint is a sha256 over the stable (sorted-key) serialization
+  of `{ activeVersionId, classifications, before, after }` — the identity of the comparison.
+  Refreshing the page recomputes, matches, and writes **nothing**. The baseline moving (a new
+  active version), the project's tag set changing, or the cascade outcome changing each mint a
+  NEW fingerprint and a new row — **with the old rows kept**, which is exactly the history
+  disclosure 7 said did not exist. Proved both ways: a refresh writes zero rows; activating a
+  new version mid-canary writes one new row per project and the old-baseline rows survive.
+- **Non-diverged comparisons are recorded too** (`diverged: false`), as the rule shadow already
+  records non-diverged samples: the rows are the record of WHICH projects were examined.
+- **The 50-project cap STAYS** (disclosure 6's bound, not this amendment's to change) — but it
+  is now **visible in data**: every row's `detail` carries `taggedProjects`,
+  `examinedProjects`, `projectCap: 50` and `capApplied`, so "the first 50" is a fact on the
+  row rather than a sentence in a note. Disclosure 6 is accordingly re-scoped, not closed: the
+  shadow is still computed at read time and still capped at 50; what is no longer true is "and
+  never stored".
+- Row mapping, for the record: `servedEffect`/`candidateEffect` are compact
+  `cascade:{key=value,…}` strings over the CHANGED dimensions (equal exactly when not
+  diverged), full `before`/`after`/`changed` live in `detail`, `bucket` is null and
+  `canaryPct` is recorded as provenance only — the profile shadow is exhaustive over the
+  examined projects, never sampled.
+- **B7c's pruning applies to these rows with ZERO code change**: the sweep's live-canary guard
+  keys on the candidate version's own `status`, which is artifact-type-agnostic by
+  construction. Proved rather than asserted: a 100-day-old profile observation of a live
+  profile canary survives the sweep, prunes once the canary is abandoned, and the
+  `config_versions` rows survive every pass.
+- The write-through is awaited and a persistence failure fails the read loudly (this ADR's
+  §"the shadow pass is INLINE" reasoning: a fire-and-forget measurement is one whose failures
+  nobody sees). The divergence report's note now discloses the storage and the per-read
+  recorded/deduplicated counts; the old "NOT sampled and NOT stored" test assertion was
+  **rewritten, not deleted**, with a comment naming what changed (the ADR-0048 precedent).
+
+### 2. Disclosure 8 closed — the stored divergence SURFACES on ADR-0059's preview
+
+**The reading of ADR-0059, stated as required**: its shipped preview surface is
+`POST /v1/policy-simulations` (+ the stored-run read-outs), and its own amendment says the
+candidate is **an ABAC policy version only** — §1's other deltas "are not simulable yet". There
+is therefore genuinely no artifact-level candidate slot for a compliance profile, so the honest
+close is the one the brief named: a **named field on the preview response**, not a parallel
+preview surface. `complianceProfileCanaryDivergence` appears on the blast-radius run response
+(POST 201) and on `GET /v1/policy-simulations/:id`, listing every compliance-profile candidate
+with RECORDED divergence — count, the diverged projects, both sides' effects — so an operator
+reading a blast radius also sees the concurrent pending §8.3 cascade changes that would move the
+compliance posture of the projects around it.
+
+- **Read from the STORED observations only, never recomputed in the preview path**
+  (`loadComplianceProfileCanaryDivergence` reads `config_canary_observations` + the canary
+  pointer; the profile row is consulted only for its tag). Proved by the sharpest test in the
+  file: a live candidate whose divergence is REAL but not yet recorded leaves the preview
+  byte-identical — an implementation that "helpfully" recomputed would fail it. Per project the
+  LATEST stored comparison reports; superseded fingerprints stay history and never double-count.
+- **No candidate, or no recorded divergence → the response is BYTE-IDENTICAL to pre-B8b**,
+  pinned by exact key-set assertions on both read-outs: the field is absent, not null.
+- **Read-only reporting, three ways**: the preview run writes zero observation rows; the STORED
+  simulation row (buckets, considered, blast radius) is unchanged by the field's presence; and
+  nothing reads the field into any gate — the preview gains information, never enforcement.
+- **Admin-only, disclosed**: profile divergence names projects org-wide, while the preview
+  itself is entitlement-scoped (ADR-0047's discipline). A non-admin's response never gains the
+  field — pinned — rather than gaining a "scoped" variant whose narrowing could be probed.
+- The field rides the CANARY POINTER: abandoning the canary removes it from the preview even
+  though the stored history remains readable through this ADR's own divergence surface.
+
+### Still open after this amendment
+
+Disclosures 2–4, 9, 11 and 12 stand, and disclosure 6 as re-scoped above: a rule canary never
+serves, `canary_pct` stays capped at 99, the shadow pass is inline, the profile shadow is
+computed at read time over the first 50 tagged projects (now stored, still capped, the cap
+visible in data), selection fields stay un-versionable, and nothing here is proven against a
+real model provider. New, minor, disclosed: (a) the RULE canary's per-decision divergence is
+still not surfaced on ADR-0059's preview — the wired feed is the compliance-profile cascade
+signal, which is the artifact class whose divergence is project-shaped like the preview itself;
+a per-decision rule feed would want its own aggregation design and is its own slice; (b) the
+preview field reports org-wide pending profile changes whether or not they intersect the
+simulated policy's own blast radius — it is a concurrent-pending-changes panel, not a join,
+and says so in its note.
