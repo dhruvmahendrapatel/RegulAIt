@@ -551,9 +551,16 @@ describe("ADR-0073 — the compliance cascade reads the active version", () => {
     expect(after[0]!.piiMode).toBe("log");
   });
 
-  it("the divergence report computes the per-project impact LIVE and says it is not sampled", async () => {
+  // B8b (ADR-0073 disclosures 6+7): this test used to assert the note said
+  // "NOT sampled and NOT stored". The computation is still per-project and
+  // still not sampled, but it is now STORED — each comparison is persisted
+  // into config_canary_observations (deduplicated by fingerprint) at the same
+  // read-time site. Rewritten rather than deleted, per the ADR-0048 precedent:
+  // the assertion now pins the new disclosure AND that the storage is real.
+  it("the divergence report computes the per-project impact and PERSISTS it, deduplicated", async () => {
     const c = await canaryOn("compliance_profile", profileId, 2, 50);
     expect(c.statusCode).toBe(200);
+    const obsBefore = (await observationsFor(profileId)).length;
     const res = await app.inject({
       method: "GET",
       headers: AUTH,
@@ -568,7 +575,25 @@ describe("ADR-0073 — the compliance cascade reads the active version", () => {
     expect(mine.changed).toContain("piiMode");
     expect(mine.before.piiMode).toBe("log");
     expect(mine.after.piiMode).toBe("block");
-    expect(res.json().projectImpactNote).toMatch(/NOT sampled and NOT stored/);
+    expect(res.json().projectImpactNote).toMatch(/NOT sampled/);
+    expect(res.json().projectImpactNote).toMatch(/STORED/);
+    // the comparison is now history: one observation row per examined project
+    // (DELTA, not absolute — the rule canaries above wrote their own rows)
+    const obsAfter = await observationsFor(profileId);
+    const stored = obsAfter.filter(
+      (o) => o.projectId === projectId && o.detail?.source === "profile-shadow-read-through",
+    );
+    expect(obsAfter.length).toBeGreaterThan(obsBefore);
+    expect(stored.length).toBe(1);
+    expect(stored[0]!.diverged).toBe(true);
+    // a refresh recomputes but DEDUPLICATES — no second identical row
+    const again = await app.inject({
+      method: "GET",
+      headers: AUTH,
+      url: `/v1/config-versions/compliance_profile/${profileId}/divergence`,
+    });
+    expect(again.statusCode).toBe(200);
+    expect((await observationsFor(profileId)).length).toBe(obsAfter.length);
     await app.inject({
       method: "DELETE",
       headers: AUTH,

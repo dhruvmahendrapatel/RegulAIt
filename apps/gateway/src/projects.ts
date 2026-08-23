@@ -410,7 +410,10 @@ export async function complianceProfilesForTags(
  * function of the profile bodies and the project's tags — it does not vary per
  * request. Evaluating it here would write one identical observation row per
  * call, so it is computed instead where it is read, over the real projects, by
- * `GET /v1/config-versions/:type/:id/divergence`. Stated rather than implied.
+ * `GET /v1/config-versions/:type/:id/divergence` — which since B8b also
+ * PERSISTS each per-project comparison (deduplicated by fingerprint) into
+ * `config_canary_observations`, so the history survives the page refresh.
+ * Stated rather than implied.
  */
 async function profilesForTags(db: Db, tags: string[]): Promise<ComplianceProfileRow[]> {
   if (tags.length === 0) return [];

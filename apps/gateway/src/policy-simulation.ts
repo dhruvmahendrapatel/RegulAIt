@@ -105,6 +105,7 @@ import {
   type ReplayedDecision,
 } from "@regulait/shared";
 import { assembleAbacRequest } from "./abac.js";
+import { loadComplianceProfileCanaryDivergence } from "./config-versions.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 const SINGLETON = "singleton";
@@ -510,6 +511,41 @@ export async function runPolicySimulation(
 
 const idParam = z.object({ id: z.string().uuid() });
 
+/**
+ * B8b — ADR-0073 disclosure 8's consumer, finally wired. ADR-0059's shipped
+ * preview has no artifact-level candidate slot (its amendment: "the candidate
+ * is an ABAC policy version only"), so the honest close is a NAMED FIELD on
+ * the preview response rather than a parallel preview surface: when a
+ * compliance-profile candidate has RECORDED divergence observations, the
+ * preview read-outs carry them — count, the diverged projects, both sides'
+ * effects — read from the STORED observations only, never recomputed here.
+ *
+ * Three boundaries, each pinned by test:
+ *  - no profile candidate, or none with recorded divergence → the field is
+ *    ABSENT and the response is byte-identical to pre-B8b;
+ *  - ADMIN-ONLY: profile divergence names projects org-wide, while the preview
+ *    itself is entitlement-scoped — a non-admin's response never gains the
+ *    field, however much divergence is stored;
+ *  - read-only REPORTING: the preview gains information, never enforcement —
+ *    nothing here feeds the stored simulation row, the buckets, or any gate.
+ */
+const PROFILE_CANARY_PREVIEW_NOTE =
+  "Concurrent pending compliance-profile change(s) with RECORDED divergence (ADR-0073 shadow " +
+  "canary, stored history): the named projects' §8.3 cascade would change if the candidate were " +
+  "promoted. Read from stored config_canary_observations — never recomputed in this path — and " +
+  "reporting only: nothing here enforces, and this field is absent entirely when no " +
+  "compliance-profile candidate has recorded divergence.";
+
+async function complianceProfileCanaryField(
+  db: Db,
+  isAdmin: boolean,
+): Promise<Record<string, unknown>> {
+  if (!isAdmin) return {};
+  const canaries = await loadComplianceProfileCanaryDivergence(db);
+  if (canaries.length === 0) return {};
+  return { complianceProfileCanaryDivergence: { canaries, note: PROFILE_CANARY_PREVIEW_NOTE } };
+}
+
 export function registerPolicySimulationRoutes(app: FastifyInstance, db: Db): void {
   const refuse = (
     actorUserId: string | null,
@@ -580,6 +616,7 @@ export function registerPolicySimulationRoutes(app: FastifyInstance, db: Db): vo
       fidelity: REPLAY_FIDELITY_DISCLOSURE,
       abacCannotGrant: ABAC_CANNOT_GRANT_NOTE,
       dryRun: true,
+      ...(await complianceProfileCanaryField(db, req.authCtx.isAdmin)),
     });
   });
 
@@ -633,6 +670,7 @@ export function registerPolicySimulationRoutes(app: FastifyInstance, db: Db): vo
       fidelity: REPLAY_FIDELITY_DISCLOSURE,
       abacCannotGrant: ABAC_CANNOT_GRANT_NOTE,
       unreplayableAttributes: UNREPLAYABLE_ATTRIBUTES,
+      ...(await complianceProfileCanaryField(db, req.authCtx.isAdmin)),
     };
   });
 

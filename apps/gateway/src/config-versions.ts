@@ -54,6 +54,7 @@
  *   onto the agents row) with a shadow canary of its own. A stale disclaimer
  *   claiming none of this is wired would now be the opposite failure.
  */
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import {
@@ -872,6 +873,304 @@ export async function runCanaryObservationPrune(
 }
 
 // ---------------------------------------------------------------------------
+// Batch B8b (ADR-0073 disclosures 6+7) — the compliance-profile shadow becomes
+// STORED HISTORY, and the stored rows feed ADR-0059's blast-radius preview.
+// ---------------------------------------------------------------------------
+
+/**
+ * ADR-0073 disclosure 6's cap — a DISCLOSED bound, deliberately unchanged by
+ * B8b: the profile shadow examines the first 50 projects carrying the tag and
+ * a 51st is not shown. What B8b changes is that the bound is now VISIBLE IN
+ * DATA: every persisted observation records how many tagged projects existed,
+ * how many were examined, and whether the cap truncated the examination.
+ */
+export const PROFILE_IMPACT_PROJECT_CAP = 50;
+
+/** deterministic serialization (object keys sorted, recursively) so the same
+ * comparison always fingerprints to the same value across page refreshes */
+function stableStringify(v: unknown): string {
+  if (v === null || typeof v !== "object") return JSON.stringify(v);
+  if (Array.isArray(v)) return `[${v.map(stableStringify).join(",")}]`;
+  const o = v as Record<string, unknown>;
+  return `{${Object.keys(o)
+    .sort()
+    .map((k) => `${JSON.stringify(k)}:${stableStringify(o[k])}`)
+    .join(",")}}`;
+}
+
+/** the compact effect string a profile observation stores: the changed cascade
+ * dimensions with that side's values, or a shared marker when nothing moved —
+ * so `servedEffect !== candidateEffect` exactly when `diverged` */
+function cascadeEffect(changed: string[], policy: Record<string, unknown>): string {
+  return changed.length === 0
+    ? "cascade-unchanged"
+    : `cascade:{${changed.map((k) => `${k}=${JSON.stringify(policy[k])}`).join(",")}}`;
+}
+
+export interface ProfileImpactProjectRow {
+  projectId: string;
+  projectName: string;
+  classifications: string[];
+  diverged: boolean;
+  changed: string[];
+  before: Record<string, unknown>;
+  after: Record<string, unknown>;
+}
+
+export interface ProfileImpactResult {
+  tag: string;
+  impact: ProfileImpactProjectRow[];
+  taggedProjects: number;
+  examinedProjects: number;
+  capApplied: boolean;
+  /** observation rows newly persisted by THIS computation */
+  recorded: number;
+  /** comparisons skipped because an identical observation already exists */
+  deduplicated: number;
+}
+
+/**
+ * B8b — CLOSE OF ADR-0073 DISCLOSURE 7. The per-project comparison the
+ * divergence report used to compute at read time and throw away is now
+ * PERSISTED at the same computation site (write-through on read — the
+ * extract-don't-duplicate move: one implementation, called where the
+ * computation already lived, not a second sweep that could drift from it).
+ *
+ * THE DEDUP KEY, stated: one observation per
+ * (candidateVersionId, projectId, fingerprint), where the fingerprint is a
+ * sha256 over the stable serialization of
+ * { activeVersionId, classifications, before, after } — i.e. the IDENTITY OF
+ * THE COMPARISON. Refreshing the page recomputes and matches the stored
+ * fingerprint, so it writes nothing; the baseline moving (a new active
+ * version), the project's tag set changing, or the cascade outcome changing
+ * each produce a NEW fingerprint and a new row, with the old row KEPT — that
+ * is precisely the history disclosure 7 said did not exist.
+ *
+ * NON-diverged comparisons are recorded too (diverged=false), exactly as the
+ * rule shadow records non-diverged samples: the rows are the record of WHICH
+ * projects were examined, which is what makes the 50-project cap visible in
+ * data instead of only in prose.
+ *
+ * The INSERT is awaited and a failure propagates loudly (ADR-0073 §"the
+ * shadow pass is INLINE" reasoning: a fire-and-forget measurement is one
+ * whose failures nobody sees).
+ */
+export async function computeAndRecordProfileImpact(
+  db: Db,
+  args: { artifactId: string; canary: ConfigVersionRow; active: ConfigVersionRow | null },
+): Promise<ProfileImpactResult | null> {
+  const [profile] = await db
+    .select()
+    .from(complianceProfiles)
+    .where(eq(complianceProfiles.id, args.artifactId));
+  if (!profile) return null;
+  const all = await db
+    .select({ id: projects.id, name: projects.name, classifications: projects.classifications })
+    .from(projects);
+  const tagged = all.filter((p) => ((p.classifications ?? []) as string[]).includes(profile.tag));
+  const affected = tagged.slice(0, PROFILE_IMPACT_PROJECT_CAP);
+
+  const computed: Array<ProfileImpactProjectRow & { fingerprint: string }> = [];
+  for (const p of affected) {
+    const tags = (p.classifications ?? []) as string[];
+    const activeSet = await complianceProfilesForTags(db, tags);
+    const candidateSet = activeSet.map((row) =>
+      row.id === args.artifactId ? applyRuleBody("compliance_profile", row, args.canary.body) : row,
+    );
+    const before = effectiveCompliancePolicy(activeSet) as Record<string, unknown>;
+    const after = effectiveCompliancePolicy(candidateSet) as Record<string, unknown>;
+    const changed = Object.keys(after).filter(
+      (k) => JSON.stringify(before[k]) !== JSON.stringify(after[k]),
+    );
+    computed.push({
+      projectId: p.id,
+      projectName: p.name,
+      classifications: tags,
+      diverged: changed.length > 0,
+      changed,
+      before,
+      after,
+      fingerprint: createHash("sha256")
+        .update(
+          stableStringify({
+            activeVersionId: args.active?.id ?? null,
+            classifications: tags,
+            before,
+            after,
+          }),
+        )
+        .digest("hex"),
+    });
+  }
+
+  const existing = computed.length
+    ? await db
+        .select({
+          projectId: configCanaryObservations.projectId,
+          fingerprint: sql<string | null>`${configCanaryObservations.detail} ->> 'fingerprint'`,
+        })
+        .from(configCanaryObservations)
+        .where(eq(configCanaryObservations.candidateVersionId, args.canary.id))
+    : [];
+  const seen = new Set(
+    existing.filter((e) => e.projectId && e.fingerprint).map((e) => `${e.projectId}|${e.fingerprint}`),
+  );
+  const fresh = computed.filter((c) => !seen.has(`${c.projectId}|${c.fingerprint}`));
+  if (fresh.length > 0) {
+    await db.insert(configCanaryObservations).values(
+      fresh.map((c) => ({
+        artifactType: "compliance_profile" as const,
+        artifactId: args.artifactId,
+        candidateVersionId: args.canary.id,
+        candidateVersion: args.canary.version,
+        activeVersionId: args.active?.id ?? null,
+        activeVersion: args.active?.version ?? null,
+        // the pct in force when recorded, for provenance — the profile shadow
+        // is EXHAUSTIVE over the examined projects, never sampled, so this is
+        // not a sampling rate here and `bucket` is null
+        canaryPct: args.canary.canaryPct,
+        bucket: null,
+        userId: null,
+        serverId: null,
+        toolName: null,
+        projectId: c.projectId,
+        servedEffect: cascadeEffect(c.changed, c.before),
+        servedRuleId: "compliance-cascade",
+        servedReason:
+          `effective §8.3 cascade for project '${c.projectName}' under the ACTIVE profile set` +
+          (c.diverged
+            ? ` — differs from the candidate on ${c.changed.join(", ")}`
+            : " — identical under the candidate"),
+        candidateEffect: cascadeEffect(c.changed, c.after),
+        candidateRuleId: "compliance-cascade",
+        candidateReason:
+          `effective §8.3 cascade for project '${c.projectName}' with candidate v${args.canary.version} ` +
+          `of '${profile.tag}' overlaid` +
+          (c.diverged ? ` — moves ${c.changed.join(", ")}` : " — identical to the served cascade"),
+        diverged: c.diverged,
+        failed: false,
+        failureReason: null,
+        detail: {
+          source: "profile-shadow-read-through",
+          fingerprint: c.fingerprint,
+          projectName: c.projectName,
+          classifications: c.classifications,
+          changed: c.changed,
+          before: c.before,
+          after: c.after,
+          taggedProjects: tagged.length,
+          examinedProjects: affected.length,
+          projectCap: PROFILE_IMPACT_PROJECT_CAP,
+          capApplied: tagged.length > PROFILE_IMPACT_PROJECT_CAP,
+        },
+      })),
+    );
+  }
+
+  return {
+    tag: profile.tag,
+    impact: computed.map(({ fingerprint: _fp, ...row }) => row),
+    taggedProjects: tagged.length,
+    examinedProjects: affected.length,
+    capApplied: tagged.length > PROFILE_IMPACT_PROJECT_CAP,
+    recorded: fresh.length,
+    deduplicated: computed.length - fresh.length,
+  };
+}
+
+export interface ProfileCanaryDivergenceReport {
+  artifactId: string;
+  tag: string | null;
+  candidateVersionId: string;
+  candidateVersion: number;
+  /** the baseline the latest stored comparison was made against */
+  activeVersion: number | null;
+  canaryPct: number | null;
+  /** distinct projects with a stored observation for this candidate */
+  observedProjects: number;
+  divergedCount: number;
+  divergedProjects: Array<{
+    projectId: string | null;
+    projectName: string | null;
+    changed: unknown;
+    servedEffect: string | null;
+    candidateEffect: string | null;
+    before: unknown;
+    after: unknown;
+    recordedAt: string;
+  }>;
+}
+
+/**
+ * B8b — THE FEED ADR-0073 DISCLOSURE 8 NAMED AND NEVER WIRED. Read-only
+ * reporting for ADR-0059's blast-radius preview: every compliance-profile
+ * candidate whose STORED observations record at least one diverged project,
+ * with the diverged projects and both sides' effects — read from
+ * `config_canary_observations` ONLY, never recomputed in the preview path
+ * (delete the stored rows and this reports nothing, however divergent a live
+ * recomputation would be). One entry per project — the LATEST stored
+ * comparison; superseded fingerprints stay in the table as history but do not
+ * double-count here. Returns [] when no candidate has recorded divergence,
+ * which is the signal to leave the preview response byte-identical.
+ */
+export async function loadComplianceProfileCanaryDivergence(
+  db: Db,
+): Promise<ProfileCanaryDivergenceReport[]> {
+  const canaries = await db
+    .select()
+    .from(configVersions)
+    .where(
+      and(eq(configVersions.artifactType, "compliance_profile"), eq(configVersions.status, "canary")),
+    )
+    .orderBy(asc(configVersions.artifactId));
+  if (canaries.length === 0) return [];
+  const obs = await db
+    .select()
+    .from(configCanaryObservations)
+    .where(
+      inArray(
+        configCanaryObservations.candidateVersionId,
+        canaries.map((c) => c.id),
+      ),
+    )
+    .orderBy(desc(configCanaryObservations.at));
+
+  const reports: ProfileCanaryDivergenceReport[] = [];
+  for (const c of canaries) {
+    const mine = obs.filter((o) => o.candidateVersionId === c.id && o.projectId != null);
+    const latestPerProject = new Map<string, (typeof mine)[number]>();
+    for (const o of mine) if (!latestPerProject.has(o.projectId!)) latestPerProject.set(o.projectId!, o);
+    const diverged = [...latestPerProject.values()].filter((o) => o.diverged);
+    if (diverged.length === 0) continue;
+    const [profile] = await db
+      .select({ tag: complianceProfiles.tag })
+      .from(complianceProfiles)
+      .where(eq(complianceProfiles.id, c.artifactId));
+    reports.push({
+      artifactId: c.artifactId,
+      tag: profile?.tag ?? null,
+      candidateVersionId: c.id,
+      candidateVersion: c.version,
+      activeVersion: diverged[0]!.activeVersion ?? null,
+      canaryPct: c.canaryPct,
+      observedProjects: latestPerProject.size,
+      divergedCount: diverged.length,
+      divergedProjects: diverged.map((o) => ({
+        projectId: o.projectId,
+        projectName: (o.detail?.projectName as string | undefined) ?? null,
+        changed: o.detail?.changed ?? null,
+        servedEffect: o.servedEffect,
+        candidateEffect: o.candidateEffect,
+        before: o.detail?.before ?? null,
+        after: o.detail?.after ?? null,
+        recordedAt: o.at.toISOString(),
+      })),
+    });
+  }
+  return reports;
+}
+
+// ---------------------------------------------------------------------------
 // Routes (admin-only via app.ts's DEFAULT gate)
 // ---------------------------------------------------------------------------
 
@@ -1449,47 +1748,31 @@ export function registerConfigVersionRoutes(app: FastifyInstance, db: Db): void 
     // The compliance cascade's candidate effect does NOT vary per request — it
     // is a pure function of the profile bodies and a project's tags — so it is
     // computed HERE, over the real projects, rather than written once per call
-    // into an observation table as N identical rows.
-    let projectImpact: Array<Record<string, unknown>> | null = null;
+    // into an observation table as N identical rows. B8b (ADR-0073 disclosure
+    // 7): the computation now PERSISTS each per-project comparison at this same
+    // site, deduplicated by (candidate, project, fingerprint), so the history
+    // survives a page refresh and ADR-0059's preview can read it back.
+    let projectImpact: ProfileImpactProjectRow[] | null = null;
     let projectImpactNote: string | null = null;
     if (artifactType === "compliance_profile" && canary) {
-      const [profile] = await db
-        .select()
-        .from(complianceProfiles)
-        .where(eq(complianceProfiles.id, artifactId));
-      if (profile) {
-        const all = await db
-          .select({ id: projects.id, name: projects.name, classifications: projects.classifications })
-          .from(projects);
-        const affected = all
-          .filter((p) => ((p.classifications ?? []) as string[]).includes(profile.tag))
-          .slice(0, 50);
-        projectImpact = [];
-        for (const p of affected) {
-          const tags = (p.classifications ?? []) as string[];
-          const activeSet = await complianceProfilesForTags(db, tags);
-          const candidateSet = activeSet.map((row) =>
-            row.id === artifactId ? applyRuleBody("compliance_profile", row, canary.body) : row,
-          );
-          const before = effectiveCompliancePolicy(activeSet) as Record<string, unknown>;
-          const after = effectiveCompliancePolicy(candidateSet) as Record<string, unknown>;
-          const changed = Object.keys(after).filter(
-            (k) => JSON.stringify(before[k]) !== JSON.stringify(after[k]),
-          );
-          projectImpact.push({
-            projectId: p.id,
-            projectName: p.name,
-            classifications: tags,
-            diverged: changed.length > 0,
-            changed,
-            before,
-            after,
-          });
-        }
+      const result = await computeAndRecordProfileImpact(db, {
+        artifactId,
+        canary,
+        active: active ?? null,
+      });
+      if (result) {
+        projectImpact = result.impact;
         projectImpactNote =
-          `Computed live from the candidate body against every project carrying '${profile.tag}' ` +
-          `(first 50). This is NOT sampled and NOT stored — a compliance profile's effect does not vary ` +
-          `per request, so recording one observation row per call would store the same answer repeatedly.`;
+          `Computed from the candidate body against every project carrying '${result.tag}' ` +
+          `(${result.examinedProjects} of ${result.taggedProjects} examined — the first ` +
+          `${PROFILE_IMPACT_PROJECT_CAP} is a disclosed cap` +
+          (result.capApplied ? ", and it truncated this list" : "") +
+          `). NOT sampled — a compliance profile's effect does not vary per request — and, since ` +
+          `batch B8b, STORED: each per-project comparison is persisted into ` +
+          `config_canary_observations (${result.recorded} recorded by this read, ` +
+          `${result.deduplicated} identical to an already-stored observation and skipped), so ` +
+          `refreshing this page never duplicates history, and ADR-0059's blast-radius preview ` +
+          `reads the stored rows rather than recomputing.`;
       }
     }
 
