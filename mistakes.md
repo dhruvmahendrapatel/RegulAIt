@@ -317,3 +317,24 @@ background it, and end the turn only after stating the numbers.
 instruct agents to run terminal verification in the foreground and to state the
 result before stopping; treat any agent report of "waiting for a monitor/
 notification" as a stall to resume immediately, not a state to wait on.**
+
+## M-028 (2026-08-23) — a subagent answered a research question from a rolled-back tree, confidently and in detail
+
+Asked to gap-check RegulAIt against an external project's feature set, an Explore
+agent returned a meticulous 12-row verdict table with file:line citations — built
+entirely against a **months-stale snapshot**. The container had rolled the working
+tree back (8th occurrence) to `a11fdc5`, where `docs/decisions/` stops at 0064;
+the agent duly reported "there is no ADR-0066", "virtual keys is not a shipped
+concept", and NONE verdicts for capabilities that ADRs 0065–0096 had long since
+built. Nothing in its output looked wrong: the citations were real, the greps
+were real, the tree was just old. I caught it only because one claim contradicted
+something I had probed myself hours earlier (`usage_events.virtual_key_id`, in
+the B7a retest) — i.e. by luck of overlap, not by process.
+M-022/M-025 made the coordinator verify HEAD before diagnosing missing content;
+this extends that to DELEGATED reads, where the coordinator never sees the tree
+the agent saw.
+**Rule: any subagent that reads the repo must verify `HEAD == origin/<branch>`
+(and one cheap invariant such as the ADR file count) BEFORE reading, and must
+print the HEAD sha in its answer as proof. A research verdict with no stated HEAD
+is unciteable — re-run it. Absence of evidence from an unverified tree is not
+evidence of absence.**
