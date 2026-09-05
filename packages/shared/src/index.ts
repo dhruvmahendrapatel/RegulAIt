@@ -754,6 +754,17 @@ export const decideApprovalSchema = z.object({
 
 export const createApiKeySchema = z.object({
   name: z.string().min(1),
+  /** ADR-0098 — the caller-supplied expiry, ISO-8601. Three distinct inputs:
+   *  - ABSENT: the org's `apiKeyDefaultTtlDays` applies, falling back to
+   *    `apiKeyMaxTtlDays` when only a ceiling is configured, and to NO expiry
+   *    when neither is (the shipped defaults — byte-identical to pre-0098).
+   *  - a TIMESTAMP: honoured, unless it exceeds `apiKeyMaxTtlDays`, in which
+   *    case issuance is REFUSED BY NAME (422) rather than clamped.
+   *  - `null`: an explicit request for a key that never expires. Honoured
+   *    when no ceiling is configured; refused by the SAME 422 when one is,
+   *    because "no expiry" is the longest lifetime there is and a ceiling a
+   *    caller can step over by asking for infinity is not a ceiling. */
+  expiresAt: z.string().datetime().nullable().optional(),
 });
 
 export const createDataScopeRuleSchema = z
@@ -2040,6 +2051,18 @@ export const updateOrgSettingsSchema = z
     sessionIpAllowlist: z.array(z.string().trim().min(1).max(64)).max(256).nullable().optional(),
     sessionIpPolicy: ipPolicySchema.optional(),
     apiKeyIpPolicy: ipPolicySchema.optional(),
+    /** ADR-0098 (migration 0104): API-KEY LIFETIME. Two dials, both null by
+     * default so the shipped posture is exactly pre-0098 — a newly issued key
+     * never expires. `apiKeyDefaultTtlDays` is the lifetime (in days) applied
+     * to a key issued with no caller-supplied expiry; `apiKeyMaxTtlDays` is
+     * the CEILING on what any issuer may request, and a request over it —
+     * including an explicit request for no expiry at all — is refused by name
+     * (422 `api_key_expiry_exceeds_ceiling`), never silently clamped. Null
+     * clears either. A default above the ceiling is refused (422). Neither
+     * knob touches a key that already exists: expiry is set at issuance and
+     * this ADR deliberately offers no way to extend it. */
+    apiKeyDefaultTtlDays: z.number().int().min(1).max(3650).nullable().optional(),
+    apiKeyMaxTtlDays: z.number().int().min(1).max(3650).nullable().optional(),
     /** ADR-0039 self-lockout guard (mirrors the sso_only guard): saving
      * enforce_continuous with an allow-list that excludes the caller's own
      * current IP is refused (409) unless this explicit confirm rides along.

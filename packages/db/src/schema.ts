@@ -807,6 +807,15 @@ export const auditLog = pgTable(
         // credential to a contractor, and it should be one query.
         // Plain text column — no DDL needed.
         "virtual_key",
+        // ADR-0098 (API-key expiry): the credential's own lifecycle events —
+        // an issuance REFUSED for exceeding the org's lifetime ceiling, and
+        // every presentation of a key that is expired or revoked. Its own
+        // object type rather than filed under `user` because "why did this
+        // key stop working" is exactly the question an operator asks, and the
+        // discriminating `ruleId` (api-key-refused-expired vs
+        // api-key-refused-revoked) should be one query away.
+        // Plain text column — no DDL needed.
+        "api_key",
         // ADR-0070 (trace observability): the READ surface, not the recorder.
         // Recording a span emits no audit row — it would double the trail for
         // every governed call and say nothing the existing row does not. What
@@ -1156,8 +1165,21 @@ export const apiKeys = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    /** ADR-0098 (migration 0104) — THE LIFETIME THIS TABLE NEVER HAD.
+     * NULL = never expires, which is what every pre-0104 row is and what a
+     * newly issued key still is under the shipped org defaults. A non-null
+     * value is enforced in `authenticate()` (the one place a bearer token
+     * becomes an identity), where an expired key is refused with its OWN
+     * reason so it is never confused with a revoked one. */
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
   },
-  (t) => [index("api_keys_user_idx").on(t.userId)],
+  (t) => [
+    index("api_keys_user_idx").on(t.userId),
+    /** the lifecycle read (`GET /v1/keys`, and any future expiry sweep) sorts
+     * and filters on this; a partial index keeps the never-expiring majority
+     * out of it entirely. */
+    index("api_keys_expires_at_idx").on(t.expiresAt),
+  ],
 );
 
 // §5 roles: named bundles of default entitlements. Assigning a role sets a
@@ -3066,6 +3088,25 @@ export const orgSettings = pgTable(
      * bootstrap origin is never IP-restricted. */
     apiKeyIpPolicy: text("api_key_ip_policy", { enum: IP_POLICIES }).notNull().default("off"),
 
+    // --- ADR-0098 (migration 0104): API-KEY LIFETIME -----------------------
+    /** THE DEFAULT applied to a key issued with no caller-supplied expiry.
+     * NULL (DEFAULT) = no default lifetime, so a newly issued key still never
+     * expires and behaviour is byte-identical to pre-0104 — ADR-0021's "a
+     * fresh settings row changes nothing" invariant, held here too. A number
+     * is a lifetime in DAYS from the moment of issuance.
+     * Recommended production setting: 90. It is NOT flipped here, because a
+     * control that starts expiring live credentials on upgrade is how a
+     * security feature gets turned back off permanently (ADR-0097's reasoning
+     * for `mcp_admission_mode`, applied verbatim). */
+    apiKeyDefaultTtlDays: integer("api_key_default_ttl_days"),
+    /** THE CEILING on what any issuer may request, in DAYS. NULL (DEFAULT) =
+     * no ceiling, so an issuer may ask for any expiry or none. When set, a
+     * request for a longer lifetime — INCLUDING an explicit request for no
+     * expiry at all — is REFUSED BY NAME (422), never silently clamped: a
+     * clamp hands back a credential with a lifetime nobody asked for and
+     * nobody was told about. Recommended production setting: 365. */
+    apiKeyMaxTtlDays: integer("api_key_max_ttl_days"),
+
     // --- ADR-0045 (migration 0057): model risk management -------------------
     /** THE DISPATCH GATE. false (default) = today's behaviour, byte-identical:
      * cards are documentation. true = `executeGovernedDispatch` refuses any
@@ -3239,6 +3280,22 @@ export const orgSettings = pgTable(
     check(
       "org_settings_mrm_staleness_recert_threshold_check",
       sql`${t.mrmStalenessRecertThreshold} >= 1 AND ${t.mrmStalenessRecertThreshold} <= 100000`,
+    ),
+    // ADR-0098: both API-key TTL dials are optional (NULL = the shipped
+    // never-expires posture) and bounded to a decade when present.
+    check(
+      "org_settings_api_key_default_ttl_days_check",
+      sql`${t.apiKeyDefaultTtlDays} IS NULL OR (${t.apiKeyDefaultTtlDays} >= 1 AND ${t.apiKeyDefaultTtlDays} <= 3650)`,
+    ),
+    check(
+      "org_settings_api_key_max_ttl_days_check",
+      sql`${t.apiKeyMaxTtlDays} IS NULL OR (${t.apiKeyMaxTtlDays} >= 1 AND ${t.apiKeyMaxTtlDays} <= 3650)`,
+    ),
+    // A default longer than the ceiling would make every no-argument issuance
+    // refuse itself. The database refuses the incoherent pair outright.
+    check(
+      "org_settings_api_key_ttl_ordering_check",
+      sql`${t.apiKeyDefaultTtlDays} IS NULL OR ${t.apiKeyMaxTtlDays} IS NULL OR ${t.apiKeyDefaultTtlDays} <= ${t.apiKeyMaxTtlDays}`,
     ),
   ],
 );

@@ -108,10 +108,12 @@ import { governedEvaluate } from "./governed-evaluate.js";
 import { refuseMcpServerWrite } from "./mcp-egress.js";
 import { loadEntitlements } from "./entitlements.js";
 import {
+  AUTH_REFUSAL_DETAIL,
   CSRF_HEADER,
   SESSION_COOKIE,
   authenticate,
   clearSessionCookie,
+  isAuthRefusal,
   generateToken,
   governingIpPolicy,
   readCookie,
@@ -281,6 +283,10 @@ import { registerVendorRoutes, syncVendorForInstance } from "./vendors.js";
 // ADR-0081 — the AI risk register (gap L2): evidence computed from the real
 // ledgers at read time; acceptance is an audited record.
 import { registerRiskRoutes } from "./risks.js";
+// ADR-0098 — API-key lifetime: the pure arithmetic (issuance resolution
+// against the org's default/ceiling, and the lifecycle state a listing shows).
+// Enforcement itself is in auth.ts's `authenticate()`.
+import { apiKeyState, resolveIssuedExpiry } from "./api-key-expiry.js";
 import {
   loadOrgSettings,
   registerOrgSettingsRoutes,
@@ -867,14 +873,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // ADR-0066: a virtual key that really exists but is revoked or expired says
     // so, rather than reading as a bad token. Only someone holding the real
     // token ever sees this, so it leaks nothing.
-    if (ctx === "virtual_key_revoked" || ctx === "virtual_key_expired") {
-      return reply.status(401).send({
-        error: ctx,
-        detail:
-          ctx === "virtual_key_revoked"
-            ? "this virtual key has been revoked and authenticates nothing"
-            : "this virtual key has expired — its issuer can mint a new one",
-      });
+    // ADR-0098: `api_key_expired` and `api_key_revoked` join the set on the
+    // same terms and the same 401 — expiry rides the front door every other
+    // credential state already rides, which is what makes the MCP proxy's
+    // RFC 6750 challenge (ADR-0097, in the onSend hook above) cover it with no
+    // new code at all: it fires on any 401 from that route.
+    if (isAuthRefusal(ctx)) {
+      return reply.status(401).send({ error: ctx, detail: AUTH_REFUSAL_DETAIL[ctx] });
     }
     if (!ctx) return reply.status(401).send({ error: "unauthenticated" });
     // ADR-0039: header API-key auth under api_key_ip_policy. Each request
@@ -1203,13 +1208,55 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         detail: "this account is deactivated — reactivate it before issuing keys",
       });
     }
+    // ADR-0098 — THE LIFETIME. Three inputs with three meanings (absent = "you
+    // decide", a timestamp = an explicit request, explicit null = "never
+    // expires"), adjudicated against the org's default and ceiling in one
+    // place. A request over the ceiling — including the `null` one — is
+    // REFUSED BY NAME rather than clamped: a clamp hands back a credential
+    // with a lifetime nobody asked for and nobody was told about.
+    const org = await loadOrgSettings(db);
+    const resolved = resolveIssuedExpiry(
+      body.expiresAt === undefined ? undefined : body.expiresAt === null ? null : new Date(body.expiresAt),
+      { defaultTtlDays: org.apiKeyDefaultTtlDays, maxTtlDays: org.apiKeyMaxTtlDays },
+    );
+    if (!resolved.ok) {
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+        objectType: "api_key",
+        objectId: null,
+        detail: {
+          phase: "issue-refused",
+          targetUserId: userId,
+          name: body.name,
+          requestedExpiresAt: body.expiresAt ?? null,
+          requestedNeverExpires: body.expiresAt === null,
+          maxTtlDays: org.apiKeyMaxTtlDays,
+          error: resolved.refusal.error,
+        },
+        effect: "deny",
+        ruleId: resolved.refusal.error,
+        ruleChain: [],
+        reason: resolved.refusal.detail,
+      });
+      return reply.status(resolved.refusal.status).send({
+        error: resolved.refusal.error,
+        detail: resolved.refusal.detail,
+      });
+    }
     const { token, tokenHash } = generateToken();
     const [row] = await db
       .insert(apiKeys)
-      .values({ userId, name: body.name, tokenHash })
-      .returning({ id: apiKeys.id, name: apiKeys.name, createdAt: apiKeys.createdAt });
-    // The plaintext token is returned exactly once and never stored.
-    return reply.status(201).send({ ...row, token });
+      .values({ userId, name: body.name, tokenHash, expiresAt: resolved.expiresAt })
+      .returning({
+        id: apiKeys.id,
+        name: apiKeys.name,
+        createdAt: apiKeys.createdAt,
+        expiresAt: apiKeys.expiresAt,
+      });
+    // The plaintext token is returned exactly once and never stored. The
+    // EXPIRY is returned with it, always — including the null that means
+    // "never", so a caller never has to infer what it was given.
+    return reply.status(201).send({ ...row, expirySource: resolved.source, token });
   });
 
   app.get("/v1/keys", async (req) => {
@@ -1222,10 +1269,18 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
         createdAt: apiKeys.createdAt,
         lastUsedAt: apiKeys.lastUsedAt,
         revokedAt: apiKeys.revokedAt,
+        expiresAt: apiKeys.expiresAt,
       })
       .from(apiKeys)
       .where(userId ? eq(apiKeys.userId, userId) : undefined);
-    return { keys: rows };
+    // ADR-0098 — THE LIFECYCLE READ. `state` is derived here rather than left
+    // to every caller to re-implement: active / expiring / expired / revoked,
+    // with REVOKED winning over expired (a key somebody killed is revoked
+    // whatever its clock says). An admin looking at this list can see what is
+    // about to break BEFORE it breaks, which is the whole point of shipping a
+    // lifetime rather than just an enforcement.
+    const now = new Date();
+    return { keys: rows.map((k) => ({ ...k, state: apiKeyState(k, now) })) };
   });
 
   app.post("/v1/keys/:keyId/revoke", async (req, reply) => {

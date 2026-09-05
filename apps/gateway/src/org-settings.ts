@@ -461,6 +461,27 @@ export function registerOrgSettingsRoutes(app: FastifyInstance, db: Db) {
         }
       }
     }
+    // ADR-0098 — the two API-key lifetime dials must stay coherent WITH EACH
+    // OTHER AND WITH THE ROW ALREADY SAVED. A PATCH that lowers the ceiling
+    // below an existing default (or raises the default above an existing
+    // ceiling) would leave every no-argument issuance refusing itself, so the
+    // check runs over the MERGED values, not just the submitted ones. The
+    // database holds the same rule as a CHECK constraint; this is the honest
+    // 422 an admin sees instead of a 500.
+    if (body.apiKeyDefaultTtlDays !== undefined || body.apiKeyMaxTtlDays !== undefined) {
+      const nextDefault =
+        body.apiKeyDefaultTtlDays !== undefined ? body.apiKeyDefaultTtlDays : before.apiKeyDefaultTtlDays;
+      const nextMax =
+        body.apiKeyMaxTtlDays !== undefined ? body.apiKeyMaxTtlDays : before.apiKeyMaxTtlDays;
+      if (nextDefault !== null && nextMax !== null && nextDefault > nextMax) {
+        return reply.status(422).send({
+          error: "api_key_ttl_ordering",
+          detail:
+            `apiKeyDefaultTtlDays (${nextDefault}) cannot exceed apiKeyMaxTtlDays (${nextMax}) — ` +
+            `every key issued with no explicit expiry would be refused by the ceiling it was given. Nothing was saved.`,
+        });
+      }
+    }
     // ADR-0070 — THE OTLP ENDPOINT IS AN ADMIN-TYPED OUTBOUND URL, so it goes
     // behind ADR-0043's guard at WRITE time exactly as `mcp_servers.url` and
     // `oidc_providers.issuerUrl` do. Refusing here means an operator learns the

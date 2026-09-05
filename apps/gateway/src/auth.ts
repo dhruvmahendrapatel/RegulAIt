@@ -81,12 +81,40 @@ export interface AuthContext {
  * definition possesses the real token — learns why, exactly as ADR-0022's
  * "disabled" marker does for a deactivated user's API key.
  */
-export const AUTH_REFUSALS = ["disabled", "virtual_key_revoked", "virtual_key_expired"] as const;
+/**
+ * ADR-0098 adds `api_key_expired` and `api_key_revoked`. Both are 401s that
+ * name what happened, for the same reason ADR-0066 named the virtual-key pair:
+ * only somebody holding the real token ever sees them, so nothing leaks, and
+ * an operator debugging "my key stopped working" MUST be able to tell a
+ * lifetime that ran out from a credential somebody deliberately killed. Those
+ * two facts call for opposite responses — reissue on the same terms, versus
+ * find out who revoked it and why — and `unauthenticated` distinguishes
+ * neither of them from a typo.
+ */
+export const AUTH_REFUSALS = [
+  "disabled",
+  "virtual_key_revoked",
+  "virtual_key_expired",
+  "api_key_expired",
+  "api_key_revoked",
+] as const;
 export type AuthRefusal = (typeof AUTH_REFUSALS)[number];
 
 export function isAuthRefusal(x: AuthContext | null | AuthRefusal): x is AuthRefusal {
   return typeof x === "string";
 }
+
+/** ONE place the holder-facing wording lives, so the route hook and the
+ * key-exchange endpoint cannot drift into saying different things about the
+ * same credential. */
+export const AUTH_REFUSAL_DETAIL: Record<AuthRefusal, string> = {
+  disabled: "this account has been deactivated — an admin can reactivate it",
+  virtual_key_revoked: "this virtual key has been revoked and authenticates nothing",
+  virtual_key_expired: "this virtual key has expired — its issuer can mint a new one",
+  api_key_expired:
+    "this API key has expired and authenticates nothing — an admin must issue a new one (an expiry cannot be extended)",
+  api_key_revoked: "this API key has been revoked and authenticates nothing",
+};
 
 export const TOKEN_PREFIX = "rgl_";
 
@@ -152,24 +180,84 @@ export async function authenticate(
     };
   }
 
+  // ADR-0098: the `revoked_at IS NULL` filter moved OUT of this WHERE clause.
+  // It used to make a revoked key indistinguishable from a token that never
+  // existed; the row is now fetched either way so the two dead states —
+  // revoked and expired — can be told apart, by the holder AND in the audit
+  // trail. The lookup is still one indexed equality on `token_hash`.
   const [row] = await db
     .select({
       keyId: apiKeys.id,
       userId: apiKeys.userId,
       isAdmin: users.isAdmin,
       disabledAt: users.disabledAt,
+      revokedAt: apiKeys.revokedAt,
+      expiresAt: apiKeys.expiresAt,
     })
     .from(apiKeys)
     .innerJoin(users, eq(apiKeys.userId, users.id))
-    .where(and(eq(apiKeys.tokenHash, hashToken(token)), isNull(apiKeys.revokedAt)));
+    .where(eq(apiKeys.tokenHash, hashToken(token)));
   if (!row) return null;
   // ADR-0022: a deactivated user's keys stop authenticating IMMEDIATELY — no
   // lastUsedAt touch, no context. Reactivation restores them unchanged
-  // (deactivate ≠ delete; the keys were never revoked).
+  // (deactivate ≠ delete; the keys were never revoked). Checked BEFORE the two
+  // key-state refusals so a disabled account keeps saying so, unchanged.
   if (row.disabledAt !== null) return "disabled";
+  // ADR-0098 — THE TWO DEAD STATES, in the one place a bearer token becomes an
+  // identity. Revoked is checked FIRST: a key somebody deliberately killed is
+  // revoked whatever its clock says, and telling its holder "expired" would
+  // invite them to ask for the same key again.
+  if (row.revokedAt !== null) {
+    await auditKeyRefusal(db, row.userId, row.keyId, "revoked", row.revokedAt);
+    return "api_key_revoked";
+  }
+  if (row.expiresAt !== null && row.expiresAt.getTime() <= Date.now()) {
+    await auditKeyRefusal(db, row.userId, row.keyId, "expired", row.expiresAt);
+    return "api_key_expired";
+  }
 
   await db.update(apiKeys).set({ lastUsedAt: new Date() }).where(eq(apiKeys.id, row.keyId));
   return { userId: row.userId, isAdmin: row.isAdmin, via: "api-key" };
+}
+
+/**
+ * ADR-0098 — the audit half of "expired ≠ revoked".
+ *
+ * Written HERE rather than at each 401 site, because `authenticate()` is the
+ * only place that knows WHICH key was presented — the refusal that leaves this
+ * function is a bare string. Every caller (the route auth hook, the
+ * interception identity probe, `POST /auth/login-with-key`) therefore audits
+ * identically, with no site left to forget.
+ *
+ * `ruleId` is the discriminator an operator greps: `api-key-refused-expired`
+ * versus `api-key-refused-revoked`. `lastUsedAt` is deliberately NOT touched —
+ * a refused presentation is not a use.
+ */
+async function auditKeyRefusal(
+  db: Db,
+  userId: string,
+  keyId: string,
+  kind: "expired" | "revoked",
+  at: Date,
+): Promise<void> {
+  await db.insert(auditLog).values({
+    userId,
+    objectType: "api_key",
+    objectId: keyId,
+    detail: {
+      phase: "authenticate",
+      keyId,
+      refusal: kind,
+      [kind === "expired" ? "expiresAt" : "revokedAt"]: at.toISOString(),
+    },
+    effect: "deny",
+    ruleId: `api-key-refused-${kind}`,
+    ruleChain: [],
+    reason:
+      kind === "expired"
+        ? `API key ${keyId} expired at ${at.toISOString()} and authenticates nobody; a new key must be issued`
+        : `API key ${keyId} was revoked at ${at.toISOString()} and authenticates nobody`,
+  });
 }
 
 // ===========================================================================
@@ -948,15 +1036,12 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, opts: AuthRoute
       });
     }
     // ADR-0066: a revoked or expired virtual key is refused here for the same
-    // reason it is refused everywhere else, and says which.
+    // reason it is refused everywhere else, and says which. ADR-0098 extends
+    // the same courtesy to the API-key pair — this exchange runs through the
+    // very same `authenticate()`, so an expired key cannot buy a session here
+    // that it could not buy anywhere else.
     if (isAuthRefusal(ctx)) {
-      return reply.status(401).send({
-        error: ctx,
-        detail:
-          ctx === "virtual_key_revoked"
-            ? "this virtual key has been revoked"
-            : "this virtual key has expired",
-      });
+      return reply.status(401).send({ error: ctx, detail: AUTH_REFUSAL_DETAIL[ctx] });
     }
     if (!ctx) return reply.status(401).send({ error: "invalid_key" });
     // ADR-0066 — THE ESCALATION THIS ENDPOINT WOULD OTHERWISE BE. A virtual key
