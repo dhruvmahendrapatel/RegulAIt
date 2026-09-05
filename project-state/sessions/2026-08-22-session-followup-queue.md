@@ -290,3 +290,52 @@ tree); the dispatch-brief fix (foreground final suite, state numbers before
 stopping) ran clean on B8c. Instrument-level setup used where the product path
 was already test-pinned (one approval row bound by SQL to the use-case instance;
 retest exercised the join through the API).
+
+## Batch B9 + retest — 2026-09-05
+
+Owner-directed from the mcp-gateway-registry gap review: build items #1 and #2 as one
+slice (they share the MCP registration path and the proxy front door). ADR-0097,
+migration 0103. An 8th silent workspace rollback preceded this — caught because a
+delegated gap-check answered from the stale tree (M-028), not by luck of process.
+
+**Independent verification**: fresh `regulait_test` at `6b12ab5` — **164 files / 2560
+passed + 9 MinIO skips**, matching the builder's own numbers (+1 file, +25 tests);
+`pnpm -r build` clean; ADR index 97 = 97; journal tail 0103, idx/when unique+ascending;
+migration proven by the fresh-DB run. Pre-change baseline I captured BEFORE the build —
+32 `toBe(403)` in `mcp-proxy.test.ts` — is **unchanged at 32**, confirming no entitlement
+refusal was quietly converted to a 401.
+
+**Hands-on retest** (criteria pre-written in scratchpad `b9-retest-criteria.md`; keyless
+gateway :3223 on seeded `regulait_b9live`; three controllable fake upstreams serving
+clean / poisoned-description / poison-only-in-nested-schema): **ALL PASS.**
+
+| Case | Result |
+|---|---|
+| A1 default byte-identical | knob `off` in DB; poisoned server registers `unscanned`; proxy call 200 |
+| A2 enforce holds + control | poisoned → `held`/`critical`/6 findings, call denied; clean server under the same setting → `clean`, callable |
+| A3 **pre-connect** | upstream KILLED, call still returns `mcp_admission_held` (not a connection error) — nothing attempted outbound |
+| A4 nested-only poison | held at critical; `where` = `inputSchema.properties.q.description` |
+| A5 **drift re-holds** | a clean, approved server whose upstream changed → `held` automatically, no admin action |
+| A6 clear path | no reason → 400; non-admin → 403; admin+reason → 200, reason/actor/timestamp persisted; audit rows `mcp-admission-held` (deny), `mcp-admission-drift-reheld` (deny), `mcp-admission-cleared` (allow); cleared stays cleared on the same manifest |
+| A7 invisibility | held server → `{"tools":[]}` |
+| findings hygiene | grepped stored findings for `id_rsa` / `attacker.example` / the injection string — clean; counts+locations only |
+| B1 **metadata honesty** | both advertised credentials verified genuinely accepted (API key throughout; session cookie proven by login → 403-not-401). `authorization_servers` omitted with a written reason; DCR false; cookie excluded from `bearer_methods_supported` per RFC 6750 |
+| B2/B4 challenge | no credential → 401 + `Bearer realm=…, resource_metadata=…`; bad credential → adds `error="invalid_token"`; scoped metadata URL resolves |
+| B3 no leak | authenticated-but-refused → 403 with **no** challenge (both a gate refusal and an in-protocol entitlement denial) |
+| B5 no overclaim | bogus serverId → 200, never 404: the metadata path cannot enumerate the registry |
+| C1 demo floor | dispatch invoke 200 with usage row 19→20 (M-026: verified by the row, not the status code) |
+
+**One false alarm, resolved by control**: seeded `repo-tools` returned 500. Its URL is
+`http://127.0.0.1:9/...` (discard port, unreachable by design) and the same 500 occurs with
+`mcpAdmissionMode=off` — pre-existing, not a B9 regression.
+
+**Three probe errors, all mine, all caught before reporting** (M-004/M-026 discipline
+working): wrong settings path (`/v1/org-settings` vs `/v1/org/settings`), missing
+`x-regulait-csrf` header, and `username` vs `identifier` in the login body. No new mistake
+class — these are instances of rules already logged.
+
+**Residues for the ledger**: knob ships `off` (inert until an operator opts in; recommended
+path `log` → review → `enforce`); no SPA surface for the review queue; no scheduled re-scan;
+`MCP_ADMISSION_SCANNER_VERSION` bumping is convention nothing enforces; `openapi.json` and
+the api-client were regenerated, so that package needs a rebuild before its own drift test
+passes locally.

@@ -21,6 +21,36 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-05 — B9 closed and retested: MCP servers are now admitted, not merely registered,
+and off-the-shelf MCP clients can discover how to authenticate.** Prompted by an owner-requested
+gap review against [mcp-gateway-registry](https://github.com/agentic-community/mcp-gateway-registry)
+(Apache-2.0; the review's full findings, including the nine gaps NOT built, are recorded in
+PENDING.md), the two highest-value items shipped as one slice —
+[ADR-0097](../docs/decisions/0097-mcp-admission-scanning-and-auth-discovery.md), migration 0103.
+**Admission scanning** closes a real hole: ADR-0043 gated a server's URL, but `syncUpstreamTools`
+then upserted its tool names, descriptions and input schemas unexamined — so a compromised
+upstream could put instructions in a description that our models read and obey. A local,
+deterministic, zero-network scanner (reusing ADR-0042's detectors, adding tool-order,
+sensitive-path, exfiltration and hidden-Unicode rules) now runs over every scanned string
+**including each nested schema property description**, and the gate sits at the first statement
+of `connectUpstream` and inside the sync before the upsert, so a dirty manifest is never stored.
+Retested live: refusal proven **pre-connect by killing the upstream** (still
+`mcp_admission_held`, not a connection error), nested-only poison caught with its exact JSON
+path, and — the property that matters most — an approved server whose upstream later changed was
+**automatically re-held**, so approved-once is not approved-forever. The knob ships `off`
+(byte-identical, verified) with `log` and `enforce` beside it; clear is admin-only,
+reason-required and audited. **Auth discovery** adds RFC 9728 metadata and an RFC 6750
+`WWW-Authenticate` challenge, built to one rule: never advertise a mechanism we do not accept —
+`authorization_servers` is omitted *with a written reason* because no route validates an
+IdP-issued token, and both advertised credentials were verified genuinely accepted. Suite:
+**164 files / 2560 passed + 9 MinIO skips**, independently verified on a fresh DB; the pre-change
+403 baseline I captured beforehand is unchanged, confirming no entitlement refusal became a 401.
+Process: **M-028** logged — a delegated gap-check answered in convincing detail from a
+rolled-back tree (8th rollback), so any subagent reading the repo must now prove `HEAD == origin`
+before reading. Owner-gated work is unchanged; PENDING's new addendum names the next buildables
+(semantic discovery, which would reverse ADR-0044/0067, and quarantine, which collides with
+ADR-0092's no-auto-revoke).
+
 **2026-08-23 — B8 closed and retested: the copilot's filter matrix, the versioning ADR's
 last structural pair, and the applier's last two kinds are done; the buildable tail is empty
 again.** **B8a** (ADR-0096 amendment): vendor questions filter the audit ledger

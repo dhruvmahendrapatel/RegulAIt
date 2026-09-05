@@ -350,13 +350,24 @@ capabilities were checked against our tree at HEAD `d809f9e` (96 ADRs, verified 
 an earlier pass answered from a rolled-back snapshot — see M-028). Recorded here because a
 finding that lives only in a chat session does not survive it.
 
-**Being built now (batch B9, ADR-0097, migration 0103)** — do not re-open without checking that ADR:
-1. **MCP tool-description admission scanning.** ADR-0043 gates a server's URL fail-closed, but
-   `syncUpstreamTools` upserts names/descriptions/input schemas unexamined, and `mcp_servers`
-   had no state column, so nothing could be held. Tool poisoning is the live attack class.
-2. **MCP spec auth discovery** (RFC 9728 protected-resource metadata + `WWW-Authenticate`).
-   We served neither, so an off-the-shelf MCP client cannot discover how to authenticate;
-   an unauthenticated call returned a bare 403 with no challenge.
+**CLOSED 2026-09-05 (batch B9, [ADR-0097](../decisions/0097-mcp-admission-scanning-and-auth-discovery.md), migration 0103)** — both built, independently verified (164 files / 2560 passed + 9 MinIO skips on a fresh DB) and live-retested keyless; see the session log for the A/B/C evidence table:
+1. ~~**MCP tool-description admission scanning.**~~ **DONE** — a local, deterministic,
+   zero-network scanner (reusing ADR-0042's `prompt_injection` + `semantic_dlp` detectors and
+   adding `mcp.tool_order` / `mcp.local_path` / `mcp.exfil` / `mcp.hidden_unicode`) runs over
+   tool names, descriptions and the whole input schema **including each nested property
+   description**. Org knob `mcpAdmissionMode` = `off` (default, byte-identical) | `log` |
+   `enforce`; enforcement sits at the first statement of `connectUpstream` and inside
+   `syncUpstreamTools` before the upsert, so a dirty manifest is never stored. Drift re-holds an
+   approved server. **Still open**: the FIRST sync of a new server necessarily connects (nothing
+   dirty is stored or returned); grandfathered rows stay trusted until re-synced; no scheduled
+   re-scan, so a compromised server nobody calls is never re-examined; no manifest signing or
+   publisher attestation; no SPA surface — the review queue and clear are API-only.
+2. ~~**MCP spec auth discovery.**~~ **DONE** — RFC 9728 metadata at the default and
+   resource-scoped paths plus an RFC 6750 `WWW-Authenticate` challenge on every 401 of the MCP
+   route. `authorization_servers` is omitted unconditionally and on the record, because no code
+   path validates an IdP-issued access token; DCR and an authorization-server surface are
+   documented out of scope. **Still open**: if RegulAIt ever accepts IdP-issued tokens, this
+   document must gain `authorization_servers` in the same change — the omission is load-bearing.
 
 **Verified gaps NOT being built — each with what unblocks it:**
 | Gap | State in our tree | What it would take |
