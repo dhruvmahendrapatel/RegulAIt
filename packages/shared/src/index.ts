@@ -3,6 +3,9 @@ import { z } from "zod";
 // re-exported below) so the compliance-profile schema validates a framework's
 // red-team gating classes against the one authoritative list.
 import { RED_TEAM_ATTACK_CLASSES } from "./redteam.js";
+// ADR-0097: the admission-mode enum is DEFINED in mcp-admission.ts and used by
+// updateOrgSettingsSchema below, so it is imported as well as re-exported.
+import { MCP_ADMISSION_MODES } from "./mcp-admission.js";
 
 export { detectPII, type PiiHit, type PiiCategory } from "./pii.js";
 
@@ -496,6 +499,40 @@ export {
   type GuardrailFinding,
   type GuardrailEvaluation,
 } from "./guardrails.js";
+
+// ADR-0097 — MCP ADMISSION SCANNING: the tool-poisoning gate's pure half. A
+// deterministic, local, zero-network scan over one MCP tool manifest, reusing
+// ADR-0042's prompt-injection and DLP detectors and adding the four
+// manifest-specific classes they lack (tool-ordering directives, sensitive
+// local paths, exfiltration-shaped directives, hidden/bidi Unicode).
+export {
+  MCP_ADMISSION_SEVERITIES,
+  MCP_ADMISSION_MODES,
+  MCP_ADMISSION_STATES,
+  MCP_ADMISSION_HOLD_AT,
+  MCP_ADMISSION_SCANNER_VERSION,
+  scanMcpManifest,
+  scanUnitsForTool,
+  manifestDigest,
+  nextAdmissionState,
+  admissionFindingSummary,
+  mcpAdmissionRuleIds,
+  strictestSeverity,
+  type McpAdmissionSeverity,
+  type McpAdmissionMode,
+  type McpAdmissionState,
+  type McpAdmissionFinding,
+  type McpAdmissionScan,
+  type ScannableTool,
+} from "./mcp-admission.js";
+
+/** ADR-0097 — the admin CLEAR action on a held MCP server. A reason is
+ * REQUIRED and there is no auto-clear: admitting a manifest a scanner flagged
+ * is a decision somebody signs, not a timeout that expires. */
+export const clearMcpAdmissionSchema = z
+  .object({ reason: z.string().min(1).max(2000) })
+  .strict();
+export type ClearMcpAdmission = z.infer<typeof clearMcpAdmissionSchema>;
 
 /** ADR-0042 admin write shapes. A mode is one of the four verbs; a partial map
  * lets an admin change one detector without restating the others.
@@ -1882,6 +1919,14 @@ export const updateOrgSettingsSchema = z
      * false = strict, requiring an explicit per-server flag or an allow entry.
      * IMDS/link-local stays unconditionally blocked either way. */
     mcpPrivateRangesDefault: z.boolean().optional(),
+    /** ADR-0097: the MCP ADMISSION posture. 'off' (default) = no manifest
+     * scan runs at all and behaviour is byte-identical to pre-0097. 'log' =
+     * every manifest sync is scanned and the verdict/findings are recorded on
+     * the server row, but nothing is ever refused. 'enforce' = a server whose
+     * scan verdict is `held` is refused BEFORE any upstream connect and
+     * contributes no tools to discovery, until an admin clears it with a
+     * reason. Recommended production setting: 'enforce'. */
+    mcpAdmissionMode: z.enum(MCP_ADMISSION_MODES).optional(),
     /** ADR-0062: the org's TIGHTENING dial over the deployment-wide egress
      * posture. 'inherit' (default) defers to the env-derived deploy mode;
      * 'strict' adjudicates compiled vendor endpoints against the egress

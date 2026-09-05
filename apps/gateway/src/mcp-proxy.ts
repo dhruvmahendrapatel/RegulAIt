@@ -31,7 +31,9 @@ import {
   guardrailCategoryList,
   guardrailWithheldMarker,
   toolPayloadPreview,
+  admissionFindingSummary,
   type PiiHit,
+  type ScannableTool,
 } from "@regulait/shared";
 // ADR-0070 — the tool span. A governed tool call is the other half of what a
 // trace tree must show: which tool the model asked for, with which arguments,
@@ -48,6 +50,15 @@ import {
 import { governedEvaluate } from "./governed-evaluate.js";
 import { abacPrincipalFromRequest, type AbacPrincipalContext } from "./abac-principal.js";
 import { guardedMcpConnect, McpEgressBlockedError } from "./mcp-egress.js";
+// ADR-0097 — ADMISSION SCANNING. ADR-0043 governs the DESTINATION; this governs
+// what comes back. The gate runs at the top of connectUpstream (before the only
+// thing that opens an outbound socket) and the scan runs inside
+// syncUpstreamTools (before the only thing that persists a tool description).
+import {
+  assertAdmitted,
+  McpAdmissionHeldError,
+  recordManifestScan,
+} from "./mcp-admission.js";
 import { loadEntitlements } from "./entitlements.js";
 import { effectiveTechniqueMode, loadOrgSettings } from "./org-settings.js";
 import {
@@ -103,6 +114,15 @@ export async function connectUpstream(
   db: Db,
   serverRow: { id: string; url: string; allowPrivateRanges: boolean | null },
 ): Promise<Client> {
+  // ADR-0097 — THE ADMISSION GATE, and note the ORDER. It runs BEFORE
+  // `guardedMcpConnect`, which is the only function in this codebase that
+  // opens an outbound MCP socket, so a held server is refused with provably
+  // zero outbound attempt — the same standard ADR-0043 holds itself to, proven
+  // the same way (a recording resolver that must see no lookup at all).
+  // Re-read per connect, never cached: the verdict recorded at the last sync is
+  // not a fact about this request, and a row written straight into Postgres
+  // must be adjudicated too.
+  await assertAdmitted(db, serverRow.id);
   return guardedMcpConnect(db, serverRow);
 }
 
@@ -633,6 +653,23 @@ async function executeGovernedToolCallInner(
 /** Discover the upstream tool manifest and sync it into the registry (§6: auto-discovered tool inventory). */
 async function syncUpstreamTools(db: Db, serverId: string, client: Client): Promise<Tool[]> {
   const { tools } = await client.listTools();
+  // ADR-0097 — SCAN BEFORE UPSERT. This is the one moment the gateway sees a
+  // manifest, and scanning here rather than after the upsert is what keeps a
+  // poisoned description out of `mcp_tools` ENTIRELY: under `enforce` a dirty
+  // manifest is never written, so no discovery surface, cache or later read can
+  // hand it to a model even once. Under `off` (the shipped default) nothing
+  // below runs at all and this function is byte-identical to pre-0097.
+  const admission = await recordManifestScan(db, serverId, tools as ScannableTool[]);
+  if (admission.mode === "enforce" && admission.state === "held") {
+    throw new McpAdmissionHeldError(
+      serverId,
+      "held",
+      admission.scan?.findings ?? [],
+      `MCP server manifest refused by admission scanning: ` +
+        `${admissionFindingSummary(admission.scan?.findings ?? [])}. The manifest was NOT stored ` +
+        `and no tool from it was returned. An admin must review and clear the server.`,
+    );
+  }
   for (const tool of tools) {
     await db
       .insert(mcpTools)
@@ -844,6 +881,17 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
           detail: err.decision.reason,
         });
       }
+      // ADR-0097: an admission HOLD surfaces in exactly the same place and the
+      // same shape as ADR-0043's egress refusal — a plain pre-hijack 403 naming
+      // the real reason, with the refusal already audited and NOTHING having
+      // been attempted upstream. The findings ride along counts-only.
+      if (err instanceof McpAdmissionHeldError) {
+        return reply.status(403).send({
+          error: "mcp_admission_held",
+          detail: err.detail,
+          findings: err.findings,
+        });
+      }
       throw err;
     }
 
@@ -853,7 +901,17 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
     );
 
     proxy.setRequestHandler(ListToolsRequestSchema, async () => {
-      const upstreamTools = await syncUpstreamTools(db, serverId, upstream);
+      // ADR-0097 DRIFT: the connect-time gate passed, but the manifest is
+      // re-scanned on every sync, so a server whose tools changed mid-session
+      // into something dirty is refused HERE — as a real MCP error naming the
+      // reason, never a fabricated empty tool list. The dirty manifest was not
+      // stored either (syncUpstreamTools scans before it upserts).
+      const upstreamTools = await syncUpstreamTools(db, serverId, upstream).catch((err: unknown) => {
+        if (err instanceof McpAdmissionHeldError) {
+          throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${err.detail}`);
+        }
+        throw err;
+      });
       const entitlements = await loadEntitlements(db, userId, serverId);
       const refs: ToolRef[] = upstreamTools.map((t) => ({
         serverId,

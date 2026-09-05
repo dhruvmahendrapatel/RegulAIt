@@ -56,6 +56,11 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /auth/totp/enroll": "internal",
   "POST /auth/username": "internal",
   "GET /health": "public-stable",
+  // ADR-0097 — RFC 9728 protected-resource metadata. `public-stable` because
+  // the RFC pins the path and the shape; the CONTENTS are derived from what
+  // this gateway actually accepts, which is what makes it safe to publish.
+  "GET /.well-known/oauth-protected-resource": "public-stable",
+  "GET /.well-known/oauth-protected-resource/mcp/:serverId": "public-stable",
   "POST /mcp/:serverId": "public-beta",
   "GET /scim/v2/Groups": "internal",
   "POST /scim/v2/Groups": "internal",
@@ -498,6 +503,9 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "PATCH /v1/servers/:serverId": "internal",
   "GET /v1/servers/:serverId/tools": "internal",
   "POST /v1/servers/:serverId/tools": "internal",
+  // ADR-0097 — the MCP admission review surface
+  "GET /v1/mcp/admission": "internal",
+  "POST /v1/servers/:serverId/admission/clear": "internal",
   "PATCH /v1/servers/:serverId/tools/:toolName/price": "internal",
   "GET /v1/setup/status": "internal",
   // ADR-0063 — REGULAIT_DATA_KEY custody. Internal: an operator/admin console
@@ -707,6 +715,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /auth/totp/enroll": "auth",
   "POST /auth/username": "auth",
   "GET /health": "health",
+  "GET /.well-known/oauth-protected-resource": "mcp-proxy",
+  "GET /.well-known/oauth-protected-resource/mcp/:serverId": "mcp-proxy",
   "POST /mcp/:serverId": "mcp-proxy",
   "GET /scim/v2/Groups": "misc",
   "POST /scim/v2/Groups": "misc",
@@ -1108,6 +1118,8 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "PATCH /v1/servers/:serverId": "servers",
   "GET /v1/servers/:serverId/tools": "servers",
   "POST /v1/servers/:serverId/tools": "servers",
+  "GET /v1/mcp/admission": "servers",
+  "POST /v1/servers/:serverId/admission/clear": "servers",
   "PATCH /v1/servers/:serverId/tools/:toolName/price": "servers",
   "GET /v1/setup/status": "setup",
   "GET /v1/security/data-key": "security",

@@ -253,6 +253,18 @@ import { registerAnthropicCompat } from "./compat-anthropic.js";
 import { registerOpenAiCompat } from "./compat-openai.js";
 import { registerModelsDiscovery } from "./compat-models.js";
 import { registerVirtualKeyRoutes, VIRTUAL_KEY_ALLOWED_ROUTES } from "./virtual-keys.js";
+// ADR-0097 — the tool-poisoning admission gate (part A) and the RFC 9728
+// protected-resource metadata + WWW-Authenticate challenge (part B).
+import {
+  admissionHidesTools,
+  registerMcpAdmissionRoutes,
+  REGISTRATION_ADMISSION_STATE,
+} from "./mcp-admission.js";
+import {
+  MCP_PROXY_ROUTE_URL,
+  registerMcpAuthMetadata,
+  wwwAuthenticateFor,
+} from "./mcp-auth-metadata.js";
 import { registerConversationRoutes } from "./conversations.js";
 import { applyProjectApprovalDecision, registerProjectRoutes } from "./projects.js";
 import { applyInfraApprovalDecision, registerInfraRoutes } from "./infra.js";
@@ -593,6 +605,36 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       reply.getHeader("strict-transport-security") === undefined
     ) {
       reply.header("strict-transport-security", hsts);
+    }
+    // ADR-0097 part B — THE RFC 9728 CHALLENGE, and the 401/403 line it draws.
+    //
+    // It rides here, on the response, rather than at each refusal site, because
+    // the MCP path can 401 from five different places (no credential, invalid
+    // credential, deactivated owner, revoked/expired virtual key, IP envelope)
+    // and a challenge that only some of them carried would be worse than none —
+    // a client cannot discover anything from a header that is sometimes absent.
+    //
+    // 401 ONLY. A missing or invalid CREDENTIAL is 401 and carries the
+    // challenge; an authenticated caller who lacks ENTITLEMENT (the bootstrap
+    // token, which has no user identity; a virtual key out of its route
+    // ceiling; a user without a tool grant) stays 403 and carries NOTHING.
+    // RFC 6750 would permit a challenge on a 403 `insufficient_scope`, but it
+    // would be noise here: a challenge says "authenticate differently, here is
+    // where to learn how", and for those callers there IS no different
+    // credential to fetch — the answer is a grant an admin makes, not a token
+    // an authorization server issues. Set-if-absent, like every header above.
+    if (
+      reply.statusCode === 401 &&
+      (req.routeOptions.url ?? "") === MCP_PROXY_ROUTE_URL &&
+      reply.getHeader("www-authenticate") === undefined
+    ) {
+      reply.header(
+        "www-authenticate",
+        wwwAuthenticateFor(req, {
+          credentialPresented:
+            typeof req.headers.authorization === "string" && req.headers.authorization.length > 0,
+        }),
+      );
     }
     return payload;
   });
@@ -1223,7 +1265,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       label: `MCP server '${body.name}' url`,
     });
     if (refusal) return reply.status(400).send(refusal);
-    const [row] = await db.insert(mcpServers).values(body).returning();
+    // ADR-0097: the registration path sets the admission state EXPLICITLY
+    // rather than inheriting migration 0103's DEFAULT. The default exists for
+    // rows that predate the scanner ('grandfathered' — trusted because they
+    // already were, scanned on their next manifest sync); a row this code
+    // creates says what it means, and 'unscanned' is a different fact the
+    // review queue shows separately.
+    const [row] = await db
+      .insert(mcpServers)
+      .values({ ...body, admissionState: REGISTRATION_ADMISSION_STATE })
+      .returning();
     return reply.status(201).send(row);
   });
 
@@ -1268,6 +1319,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   app.get("/v1/servers/:serverId/tools", async (req) => {
     const { serverId } = uuidParam.parse(req.params);
+    // ADR-0097: a HELD server contributes NOTHING to discovery under enforce.
+    // This route reads the stored inventory and never connects, so the
+    // connect-time gate cannot cover it — without this, a manifest synced
+    // before the server was held would still be readable here.
+    if (await admissionHidesTools(db, serverId)) return { tools: [] };
     return { tools: await db.select().from(mcpTools).where(eq(mcpTools.serverId, serverId)) };
   });
 
@@ -1314,6 +1370,10 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     if (!req.authCtx.isAdmin && req.authCtx.userId !== userId) {
       return reply.status(403).send({ error: "forbidden" });
     }
+    // ADR-0097: the same hold, on the visibleTools preview — "must not appear
+    // in tool discovery for ANYONE" includes the admin looking at somebody
+    // else's entitlements.
+    if (await admissionHidesTools(db, serverId)) return { tools: [] };
     const [tools, entitlements] = await Promise.all([
       db.select().from(mcpTools).where(eq(mcpTools.serverId, serverId)),
       loadEntitlements(db, userId, serverId),
@@ -3200,6 +3260,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   registerRiskRoutes(app, db);
 
   registerMcpProxy(app, db);
+  // ADR-0097 part A — the admission review queue and the reason-required,
+  // audited clear. Admin-only through the default gate, like the MCP registry
+  // writes it sits beside.
+  registerMcpAdmissionRoutes(app, db);
+  // ADR-0097 part B — RFC 9728. Both routes are AUTH_EXEMPT by design: a
+  // client with no credential is exactly the one that needs to read them.
+  registerMcpAuthMetadata(app);
 
   // ADR-0020 (Batch H) — IDE / existing-agent interception. The two
   // provider-shaped shims are OFF by default and gated by the onRequest hook

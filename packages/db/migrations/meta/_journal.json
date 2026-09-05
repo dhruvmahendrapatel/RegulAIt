@@ -715,6 +715,13 @@
       "when": 1785037000000,
       "tag": "0102_config_version_residuals",
       "breakpoints": true
+    },
+    {
+      "idx": 103,
+      "version": "7",
+      "when": 1785038000000,
+      "tag": "0103_mcp_admission_scanning",
+      "breakpoints": true
     }
   ]
 }

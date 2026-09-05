@@ -426,6 +426,37 @@ export const mcpServers = pgTable("mcp_servers", {
    * by this flag; a PUBLIC-internet URL still needs an egress_allow_hosts
    * entry regardless of it. */
   allowPrivateRanges: boolean("allow_private_ranges"),
+  /** ADR-0097 (migration 0103) — THE ADMISSION VERDICT on this server's tool
+   * manifest. ADR-0043 governs where the gateway may CONNECT; these columns
+   * govern what it may ACCEPT back.
+   *
+   * `grandfathered` is the migration DEFAULT and the only way a row can carry
+   * it: an install that upgrades keeps every server it already trusted, and
+   * each is scanned on its next manifest sync. The registration path writes
+   * `unscanned` EXPLICITLY rather than inheriting the default, so the review
+   * queue can tell "predates the scanner" from "nobody has synced it yet".
+   * `clean`/`held` are scan verdicts; `cleared` is an audited admin override
+   * PINNED to `admissionManifestDigest` — a changed manifest is adjudicated
+   * from scratch, so "approved once" never means "approved forever". */
+  admissionState: text("admission_state", {
+    enum: ["grandfathered", "unscanned", "clean", "held", "cleared"],
+  })
+    .notNull()
+    .default("grandfathered"),
+  admissionScannedAt: timestamp("admission_scanned_at", { withTimezone: true }),
+  /** counts and LOCATIONS only, never the matched text — the ADR-0042 contract,
+   * because this column is rendered on a review screen and a finding that
+   * quoted the payload would make the review surface a delivery vector */
+  admissionFindings: jsonb("admission_findings"),
+  admissionSeverity: text("admission_severity", {
+    enum: ["low", "medium", "high", "critical"],
+  }),
+  admissionScannerVersion: text("admission_scanner_version"),
+  /** the drift key: the digest of the manifest the verdict was computed over */
+  admissionManifestDigest: text("admission_manifest_digest"),
+  admissionClearedBy: uuid("admission_cleared_by"),
+  admissionClearedAt: timestamp("admission_cleared_at", { withTimezone: true }),
+  admissionClearReason: text("admission_clear_reason"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -3010,6 +3041,15 @@ export const orgSettings = pgTable(
      * the private-range opt-in) before a private-range URL is reachable.
      * Link-local/IMDS stays unconditionally blocked in BOTH postures. */
     mcpPrivateRangesDefault: boolean("mcp_private_ranges_default").notNull().default(true),
+    /** ADR-0097 (migration 0103): the MCP ADMISSION posture. 'off' (DEFAULT)
+     * runs no manifest scan at all and is byte-identical to pre-0103. 'log'
+     * scans every sync and records the verdict/findings on the server row
+     * without ever refusing. 'enforce' refuses a `held` server BEFORE any
+     * upstream connect and keeps it out of tool discovery until an admin
+     * clears it with a reason. Recommended production setting: 'enforce'. */
+    mcpAdmissionMode: text("mcp_admission_mode", { enum: ["off", "log", "enforce"] })
+      .notNull()
+      .default("off"),
     /** ADR-0039 (migration 0050): the org network envelope — CIDR blocks
      * (IPv4 + IPv6) interactive access must come from. NULL/empty = no
      * restriction (today; upgrade locks nobody out). Malformed entries are

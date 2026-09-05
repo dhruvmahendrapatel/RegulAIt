@@ -19,6 +19,10 @@
  * already module-level.
  */
 import { SCIM_ROUTES } from "./scim.js";
+import {
+  PROTECTED_RESOURCE_METADATA_MCP_PATH,
+  PROTECTED_RESOURCE_METADATA_PATH,
+} from "./mcp-auth-metadata.js";
 import { WEB_UI_ROUTES } from "./web-serving.js";
 
 export const AUTH_EXEMPT_ROUTES = new Set([
@@ -56,6 +60,16 @@ export const AUTH_EXEMPT_ROUTES = new Set([
   "/auth/saml/:providerId/start",
   "/auth/saml/:providerId/acs",
   "/auth/saml/:providerId/metadata",
+  // ADR-0097 — RFC 9728 protected-resource metadata. Unauthenticated BY
+  // DEFINITION: the whole point of the document is to tell a client that has
+  // no credential yet how to get one, and RFC 9728 §3 places it at a
+  // well-known path a client fetches before any authenticated call. Same
+  // posture, and the same reasoning, as the SAML metadata document above: it
+  // contains no secret and names no fact an unauthenticated caller could not
+  // already observe. The scoped variant deliberately does not check whether
+  // the server id exists — a 404 there would enumerate the registry.
+  PROTECTED_RESOURCE_METADATA_PATH,
+  PROTECTED_RESOURCE_METADATA_MCP_PATH,
   // ADR-0037 — SCIM is a SEPARATE TRUST PATH, and this exemption is what
   // makes that true rather than aspirational. These routes must never
   // authenticate via a human session cookie or a user's API key: they
