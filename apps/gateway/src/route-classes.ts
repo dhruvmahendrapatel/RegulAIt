@@ -85,6 +85,12 @@ export const AUTH_EXEMPT_ROUTES = new Set([
 ]);
 
 export const NON_ADMIN_ROUTES = new Set([
+  // ADR-0097 — RFC 9728 protected-resource metadata. A route must be BOTH
+  // auth-exempt (above) and non-admin (here) to be reachable with no
+  // credential — either gate refusing is a refusal — and a discovery document
+  // a client can only read once it is already authenticated discovers nothing.
+  `GET ${PROTECTED_RESOURCE_METADATA_PATH}`,
+  `GET ${PROTECTED_RESOURCE_METADATA_MCP_PATH}`,
   "POST /v1/approvals/:approvalId/decide",
   "GET /v1/users/:userId/servers/:serverId/tools",
   "POST /mcp/:serverId",

@@ -10,7 +10,7 @@
 // Regenerate with:  REGULAIT_WRITE_API_ARTIFACTS=1 pnpm --filter @regulait/gateway exec vitest run src/openapi.test.ts
 //
 // Spec version: 1.0.0
-// Operations:   70
+// Operations:   72
 //
 // RESPONSES ARE `unknown` BY DESIGN. The gateway's routes declare request
 // schemas but not response schemas, so there is nothing to derive a response
@@ -95,6 +95,22 @@ export type PostV1UsersByUserIdRolesBody = {
   };
 
 export class GeneratedRegulAItClient extends BaseClient {
+  /**
+ * GET /.well-known/oauth-protected-resource
+ * @stability public-stable — auth: public
+   */
+  getWellKnownOauthProtectedResource<T = unknown>(options?: RequestOptions): Promise<T> {
+    return this.request<T>("GET", `/.well-known/oauth-protected-resource`, undefined, options);
+  }
+
+  /**
+ * GET /.well-known/oauth-protected-resource/mcp/:serverId
+ * @stability public-stable — auth: public
+   */
+  getWellKnownOauthProtectedResourceMcpByServerId<T = unknown>(serverId: string, options?: RequestOptions): Promise<T> {
+    return this.request<T>("GET", `/.well-known/oauth-protected-resource/mcp/${encodeURIComponent(serverId)}`, undefined, options);
+  }
+
   /**
  * Liveness probe. The only route that is never rate limited.
  * @stability public-stable — auth: public
@@ -673,6 +689,16 @@ export class GeneratedRegulAItClient extends BaseClient {
 /** every operation the published spec carries, as data — useful for tooling
  * that wants to enumerate the surface without parsing the document. */
 export const OPERATIONS: ReadonlyArray<{ id: string; method: string; path: string }> = [
+  {
+    "id": "getWellKnownOauthProtectedResource",
+    "method": "GET",
+    "path": "/.well-known/oauth-protected-resource"
+  },
+  {
+    "id": "getWellKnownOauthProtectedResourceMcpByServerId",
+    "method": "GET",
+    "path": "/.well-known/oauth-protected-resource/mcp/{serverId}"
+  },
   {
     "id": "getHealth",
     "method": "GET",

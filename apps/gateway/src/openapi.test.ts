@@ -292,7 +292,22 @@ describe("versioning and deprecation policy", () => {
     const doc = buildOpenApiDocument(app.routeInventory);
     for (const p of Object.keys(doc.paths as object)) {
       expect(
-        p.startsWith("/v1/") || p === "/health" || p.startsWith("/mcp/"),
+        p.startsWith("/v1/") ||
+          p === "/health" ||
+          p.startsWith("/mcp/") ||
+          // ADR-0097 — the ONE deliberate exemption, and it is not ours to
+          // version. RFC 9728 §3 PINS the protected-resource metadata document
+          // at `/.well-known/oauth-protected-resource`; an MCP client fetches
+          // exactly that path, and a `/v1/` prefix would make the document
+          // undiscoverable by every conformant client — i.e. it would defeat
+          // the entire point of publishing it. The alternative considered and
+          // rejected was tagging the two routes `internal` so they never reach
+          // this loop: that hides a PUBLIC, unauthenticated surface from our own
+          // published contract, which is a worse lie than an unversioned path.
+          // Its compatibility guarantee comes from the RFC rather than from
+          // VERSIONING_POLICY, which is why it is named here explicitly rather
+          // than pattern-matched away.
+          p.startsWith("/.well-known/oauth-protected-resource"),
         `published path ${p} carries no major version`,
       ).toBe(true);
     }

@@ -2614,6 +2614,64 @@
         }
       }
     },
+    "/.well-known/oauth-protected-resource": {
+      "get": {
+        "operationId": "getWellKnownOauthProtectedResource",
+        "summary": "GET /.well-known/oauth-protected-resource",
+        "tags": [
+          "mcp-proxy"
+        ],
+        "security": [],
+        "x-regulait-stability": "public-stable",
+        "x-regulait-auth": "public",
+        "x-regulait-guarantee": "breaking changes require a new major path (/v2) served alongside /v1; a deprecated route or field emits RFC-8594 Deprecation and Sunset headers for at least 12 months before removal",
+        "responses": {
+          "400": {
+            "description": "Request body failed schema validation."
+          },
+          "429": {
+            "description": "Rate limited. Retry after the `retry-after` header."
+          },
+          "2XX": {
+            "description": "Success."
+          }
+        }
+      }
+    },
+    "/.well-known/oauth-protected-resource/mcp/{serverId}": {
+      "get": {
+        "operationId": "getWellKnownOauthProtectedResourceMcpByServerId",
+        "summary": "GET /.well-known/oauth-protected-resource/mcp/:serverId",
+        "tags": [
+          "mcp-proxy"
+        ],
+        "security": [],
+        "x-regulait-stability": "public-stable",
+        "x-regulait-auth": "public",
+        "x-regulait-guarantee": "breaking changes require a new major path (/v2) served alongside /v1; a deprecated route or field emits RFC-8594 Deprecation and Sunset headers for at least 12 months before removal",
+        "parameters": [
+          {
+            "name": "serverId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Request body failed schema validation."
+          },
+          "429": {
+            "description": "Rate limited. Retry after the `retry-after` header."
+          },
+          "2XX": {
+            "description": "Success."
+          }
+        }
+      }
+    },
     "/v1/openapi.json": {
       "get": {
         "operationId": "getV1OpenapiJson",
