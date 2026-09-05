@@ -338,3 +338,45 @@ attribution); vendor spend remains unanswerable.
 ## Enterprise-deal gates unchanged from §1
 **P1** (credential — see above) · **P2** (HA/SLA — build when there is a customer to serve)
 · **P3** (certification — L19 decision).
+
+---
+
+# Addendum — gap review against agentic-community/mcp-gateway-registry (2026-09-05)
+
+The owner asked whether anything in [mcp-gateway-registry](https://github.com/agentic-community/mcp-gateway-registry)
+(Apache-2.0, FastAPI + nginx + MongoDB, Compose/ECS/EKS) is worth taking. It converges on the
+same control-plane/data-plane split as pillar 1, so most of it is parallel work — but eleven
+capabilities were checked against our tree at HEAD `d809f9e` (96 ADRs, verified before reading;
+an earlier pass answered from a rolled-back snapshot — see M-028). Recorded here because a
+finding that lives only in a chat session does not survive it.
+
+**Being built now (batch B9, ADR-0097, migration 0103)** — do not re-open without checking that ADR:
+1. **MCP tool-description admission scanning.** ADR-0043 gates a server's URL fail-closed, but
+   `syncUpstreamTools` upserts names/descriptions/input schemas unexamined, and `mcp_servers`
+   had no state column, so nothing could be held. Tool poisoning is the live attack class.
+2. **MCP spec auth discovery** (RFC 9728 protected-resource metadata + `WWW-Authenticate`).
+   We served neither, so an off-the-shelf MCP client cannot discover how to authenticate;
+   an unauthenticated call returned a bare 403 with no challenge.
+
+**Verified gaps NOT being built — each with what unblocks it:**
+| Gap | State in our tree | What it would take |
+|---|---|---|
+| **Semantic/NL tool discovery across the catalog** | PARTIAL — an *entitlement-filtered* intent ranker exists (`mcp-proxy.ts` → `selectTools`), but ranking is stopword-stripped term overlap, single-server, and needs `?intent=`. **No embeddings anywhere**; ADR-0044 and ADR-0067 both declined embedding similarity deliberately | An embedding store + a cross-catalog route. Reversing a stated ADR decision — an **owner call**, not a default. Note our version would beat theirs: their design never specifies entitlement-filtering of discovery results |
+| **External registry federation** (Anthropic MCP Registry, peer instances) | NONE — registration is manual `POST /v1/servers`; no provenance/sync columns | Importer + sync job + provenance columns. **Sequence AFTER admission scanning**: their implementation grants federated entries the same access as local ones with no approval, which violates default-deny. For us federated entries must land as held drafts |
+| **Virtual MCP servers** (one endpoint composing several backends) | NONE — `/mcp/:serverId` is hard-bound to one backend; `mcp_tools` is unique per `(serverId, name)` only | New composition entity + member table + alias/collision policy + a new endpoint shape. Plays directly into role-bundle provisioning. Their own doc notes virtual servers drop streaming |
+| **Per-user egress auth brokering** (OAuth 3LO / OBO / PAT vault) | NONE — connector and model credentials are org-wide singletons; `mcp_servers` carries no auth field at all and the proxy sends no caller credential upstream | Authorization-code flow, per-user token vault, refresh/rotation, upstream auth injection. Large, and high value for real enterprise MCP use (users' own Jira/GitHub tokens) |
+| **A2A interop** | NONE — `DELEGATION_CONFORMANCE.md` §110-132 already says so outright | Inbound agent card + outbound client + task/artifact mapping. An ecosystem bet; **owner decision** |
+| **Skills as a governed asset type** | NONE — no table, route, or ADR; "skills" appears only as a competitor capability in VISION.md | Whole asset type: registration, entitlement, versioning, audit. Timely product bet; **owner decision** |
+| **Runtime quarantine of an abusive identity** | PARTIAL — identity-keyed buckets exist but exceeding one only 429s; auto-suspension exists solely for failed logins (ADR-0025) | **Conflicts with a stated principle**: ADR-0092 says there is no auto-revoke anywhere. Needs an ADR reconciling that before any code |
+| **OpenTelemetry metrics** | Traces are DONE (ADR-0070: OTLP/HTTP, GenAI semconv, egress-guarded). **Metrics signal absent** | A metrics exporter beside the trace one; several declared-but-unwritten span kinds also remain |
+| **Helm chart / k8s install for RegulAIt itself** | NONE — we ship Compose on one EC2 host (ADR-0013); `deploy-k8s-client.ts` deploys *customer* workloads, not us | A chart + manifests + migration Job + the replica story. Natural vehicle for **P2 HA**, still open |
+| **Gateway-issued token TTL** | PARTIAL — virtual keys have optional `expiresAt` (ADR-0066) but **`api_keys` has no expiry column at all**, and API keys are what authenticate the MCP proxy | `expires_at` on `api_keys` + org-settings default and ceiling + enforcement. Small, bounded, and an obvious audit finding today |
+| **Credential scrubbing over audit rows** | PARTIAL — `dlp.secret.*` detectors exist but run on dispatch content; ~10 hand-rolled `audit()` helpers write `detail`/`reason` unscrubbed with no chokepoint | One audit chokepoint + reuse of those detectors + a test asserting a secret cannot land in `audit_log` |
+
+**One discipline worth adopting outright, no code**: their invariant that every configuration
+parameter must be expressible with identical semantics on every deployment surface, and a
+feature is not done until all of them support it. Our BYOC and air-gapped modes are exactly
+where that drifts.
+
+**Two of their choices we deliberately refuse**: federated entries inheriting local access
+without approval, and discovery results that are not entitlement-filtered.
