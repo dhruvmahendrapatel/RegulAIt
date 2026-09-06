@@ -58,6 +58,7 @@ import {
   assertAdmitted,
   McpAdmissionHeldError,
   recordManifestScan,
+  type McpAdmissionTrigger,
 } from "./mcp-admission.js";
 import { loadEntitlements } from "./entitlements.js";
 import { effectiveTechniqueMode, loadOrgSettings } from "./org-settings.js";
@@ -650,8 +651,19 @@ async function executeGovernedToolCallInner(
   }
 }
 
-/** Discover the upstream tool manifest and sync it into the registry (§6: auto-discovered tool inventory). */
-async function syncUpstreamTools(db: Db, serverId: string, client: Client): Promise<Tool[]> {
+/** Discover the upstream tool manifest and sync it into the registry (§6: auto-discovered tool inventory).
+ *
+ * EXPORTED for ADR-0100: the scheduled admission re-scan drives THIS function
+ * rather than one of its own, so there is exactly one implementation of "fetch
+ * a manifest, adjudicate it, store what is admissible". `trigger` only labels
+ * the audit row the adjudication writes — it changes no threshold, no state
+ * rule and no order of operations. */
+export async function syncUpstreamTools(
+  db: Db,
+  serverId: string,
+  client: Client,
+  trigger: McpAdmissionTrigger = "sync",
+): Promise<Tool[]> {
   const { tools } = await client.listTools();
   // ADR-0097 — SCAN BEFORE UPSERT. This is the one moment the gateway sees a
   // manifest, and scanning here rather than after the upsert is what keeps a
@@ -659,7 +671,7 @@ async function syncUpstreamTools(db: Db, serverId: string, client: Client): Prom
   // manifest is never written, so no discovery surface, cache or later read can
   // hand it to a model even once. Under `off` (the shipped default) nothing
   // below runs at all and this function is byte-identical to pre-0097.
-  const admission = await recordManifestScan(db, serverId, tools as ScannableTool[]);
+  const admission = await recordManifestScan(db, serverId, tools as ScannableTool[], trigger);
   if (admission.mode === "enforce" && admission.state === "held") {
     throw new McpAdmissionHeldError(
       serverId,

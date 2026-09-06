@@ -675,6 +675,12 @@ describe("every sweep is registered", () => {
         // this list pins its registration.
         SCHEDULER_JOB_NAMES.costReconciliation,
         SCHEDULER_JOB_NAMES.evalDrift,
+        // ADR-0100: re-fetches and re-adjudicates MCP tool manifests so a
+        // server nobody calls is still caught. Drives the LIVE path
+        // (connectUpstream + syncUpstreamTools + recordManifestScan) — there
+        // is no second adjudication. Driven end-to-end in
+        // mcp-admission-rescan.test.ts; this list pins its registration.
+        SCHEDULER_JOB_NAMES.mcpAdmissionRescan,
         SCHEDULER_JOB_NAMES.mrmExpiry,
         SCHEDULER_JOB_NAMES.redteam,
         SCHEDULER_JOB_NAMES.reportSchedules,

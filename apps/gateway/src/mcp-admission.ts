@@ -145,17 +145,34 @@ export async function assertAdmitted(db: Db, serverId: string): Promise<void> {
   throw new McpAdmissionHeldError(serverId, row.admissionState, findings, detail);
 }
 
+/** ADR-0100: WHAT BROUGHT THE MANIFEST IN. `sync` is a live manifest sync — a
+ * human or an agent called the server and the gateway fetched its tools on the
+ * way. `rescan` is the scheduled admission re-scan sweep, which fetches a
+ * manifest nobody asked for. The value is a LABEL on the audit row and nothing
+ * else: same scanner, same threshold, same state rule, same columns. It exists
+ * so an operator reading `mcp-admission-held` can tell "held by a call" from
+ * "held by the sweep" from the row itself rather than by correlating
+ * timestamps against the scheduler ledger. */
+export type McpAdmissionTrigger = "sync" | "rescan";
+
 /**
  * THE SCAN, at manifest-sync time. Returns the verdict the caller must act on.
  *
  * `off` short-circuits before the scan is even computed — no CPU, no write, no
  * audit row, no column touched. That is what makes the default byte-identical
  * rather than merely "equivalent in effect".
+ *
+ * ADR-0100 drives this SAME function from the scheduled re-scan sweep. There is
+ * deliberately no second "is this manifest admissible" implementation and no
+ * second threshold: a sweep with its own copy of this logic would drift from
+ * the live path, and the drift would be discovered by whoever relied on the one
+ * that was wrong.
  */
 export async function recordManifestScan(
   db: Db,
   serverId: string,
   tools: readonly ScannableTool[],
+  trigger: McpAdmissionTrigger = "sync",
 ): Promise<{ mode: McpAdmissionMode; scan: McpAdmissionScan | null; state: McpAdmissionState | null }> {
   const mode = await loadAdmissionMode(db);
   if (mode === "off") return { mode, scan: null, state: null };
@@ -212,6 +229,8 @@ export async function recordManifestScan(
       detail: {
         phase: "manifest-scan",
         mode,
+        // ADR-0100: a label, not a behaviour — see McpAdmissionTrigger
+        trigger,
         previousState: before.admissionState,
         admissionState: state,
         severity: scan.severity,
@@ -235,6 +254,9 @@ export async function recordManifestScan(
             `(was ${before.admissionState}) and the new manifest scans dirty — `
           : `MCP server '${before.name}' held by admission scanning — `) +
         `${admissionFindingSummary(scan.findings)}` +
+        (trigger === "rescan"
+          ? " (observed by the ADR-0100 scheduled admission re-scan, not by a call)"
+          : "") +
         (mode === "enforce"
           ? ". Refused until an admin clears it."
           : ". mcp_admission_mode='log' — RECORDED ONLY, nothing was refused."),

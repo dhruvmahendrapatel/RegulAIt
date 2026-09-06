@@ -1,6 +1,6 @@
 /**
  * ADR-0064 — THE SCHEDULED JOBS (six at ADR-0064; a seventh at ADR-0065; an
- * eighth at ADR-0076).
+ * eighth at ADR-0076; an eleventh at ADR-0100).
  *
  * This file is deliberately thin, and that is the whole point of it. Every
  * entry here CALLS the function the corresponding endpoint already calls.
@@ -42,6 +42,7 @@ import { runTrainingJobPollSweep } from "./regulait-llm.js";
 import { runCostReconciliation } from "./cost-reconcile.js";
 import { runCampaignExpirySweep } from "./grant-certification.js";
 import { runCanaryObservationPrune } from "./config-versions.js";
+import { runMcpAdmissionRescan } from "./mcp-admission-rescan.js";
 import { toRegistry, type SchedulerJobDefinition, type SchedulerJobRegistry } from "./scheduler.js";
 
 const HOUR = 3600;
@@ -66,6 +67,7 @@ export const SCHEDULER_JOB_NAMES = {
   costReconciliation: "cost-reconciliation-sweep",
   certificationExpiry: "certification-expiry-sweep",
   canaryObservationPrune: "canary-observation-prune-sweep",
+  mcpAdmissionRescan: "mcp-admission-rescan-sweep",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -306,6 +308,56 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
             retainedDays: out.retainedDays,
             cutoff: out.cutoff,
             keptLiveCanary: out.keptLiveCanary,
+          },
+        };
+      },
+    },
+    {
+      // ADR-0100 — the eleventh, closing ADR-0097's own disclosed residue
+      // ("it does not re-scan on a schedule ... a compromised server that is
+      // never called is never caught", plus the indefinitely-trusted
+      // grandfathered row). Re-fetches the manifest of every server in an
+      // eligible admission state and drives THE LIVE PATH over it —
+      // `connectUpstream` then `syncUpstreamTools`, which is
+      // `recordManifestScan`, which owns the scan, the threshold, the digest
+      // and the state rule. There is deliberately no second adjudication here.
+      //
+      // Daily by default and deliberately so: unlike every other reconcile
+      // sweep, each pass of this one makes OUTBOUND calls (one tools/list per
+      // examined server, bounded per pass), all of them through ADR-0043's
+      // egress guard.
+      //
+      // Doubly opt-in: the scheduler is off by default AND the pass adjudicates
+      // nothing while `org_settings.mcp_admission_mode` is `off`.
+      name: SCHEDULER_JOB_NAMES.mcpAdmissionRescan,
+      description:
+        "Re-fetch and re-adjudicate the tool manifest of every MCP server in an eligible admission state " +
+        "(grandfathered/unscanned/clean/cleared), so a server nobody calls is still caught. Never " +
+        "re-examines a held server (nothing auto-clears) and never re-holds a cleared server on the " +
+        "unchanged manifest an admin signed for. Makes outbound calls; adjudicates nothing while " +
+        "mcp_admission_mode is off.",
+      adr: "ADR-0100",
+      defaultIntervalSeconds: DAY,
+      run: async (ctx) => {
+        const out = await runMcpAdmissionRescan(ctx.db, {
+          actorUserId: ctx.actorUserId,
+          now: ctx.now,
+        });
+        return {
+          itemsProcessed: out.examined,
+          detail: {
+            mode: out.mode,
+            skipped: out.skipped,
+            eligible: out.eligible,
+            examined: out.examined,
+            capped: out.capped,
+            adjudicated: out.adjudicated,
+            held: out.held,
+            reheld: out.reheld,
+            clean: out.clean,
+            clearedUnchanged: out.clearedUnchanged,
+            unreachable: out.unreachable,
+            reason: out.reason,
           },
         };
       },
