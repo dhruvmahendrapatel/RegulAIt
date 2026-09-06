@@ -21,6 +21,32 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-06 (later) — B11 closed and retested: MCP registries can now be federated, and an
+imported entry arrives usable by nobody.** ([ADR-0101](../docs/decisions/0101-federated-mcp-registry.md),
+migration 0105.) This was deliberately sequenced last of the MCP wave: the reference
+implementation we reviewed grants federated entries the same access as locally-registered ones
+with no approval step, which is a default-deny violation, so federation was only safe to build
+once ADR-0097's admission gate existed to put imports behind. Built against the **real** v0.1
+registry API (`GET /v0.1/servers`, opaque `metadata.nextCursor`, unauthenticated reads) — and
+notably the dispatch brief I wrote carried an error from a docs summary (it claimed `packages`
+was required); the builder checked the spec, found otherwise, and built to the truth. The
+governing rules: a sync writes only a catalogue, **import is a separate audited operator act**
+creating one `federated`/`unscanned` row with **zero grants**, a federated server is still
+subject to admission with no bypass, and a local row is **never** clobbered — collisions are
+recorded and refused. Only a `remotes[]` entry with an absolute untemplated URL can become a
+server; a package's own loopback `transport.url` is deliberately ignored and **no URL is ever
+invented**, which matters because most registry entries are stdio packages this gateway cannot
+proxy at all. Air-gapped refuses before DNS. Retested live against a local fake registry: grant
+deltas of zero, the ungranted refusal proven non-vacuous, `held|critical` on a poisoned
+federated upstream, cursors round-tripped verbatim, idempotent re-sync, and B9/B10 regressions
+intact. Suite **168 files / 2640 passed + 9 MinIO skips**, independently verified on a fresh DB.
+Also confirmed at the owner's prompt: **everything is on GitHub** (remote head == local, PR #108
+carries it) — but **that PR's description is stale**, ending at ADR-0092 and quoting 141/2321
+against today's ADR-0101 and 168/2640; left for an owner decision rather than rewriting a
+20k-char record. Open findings carried forward: **S5** (audit scrub covers `audit_log` only; 47
+other free-text columns store operator prose verbatim) and the **non-deterministic suite exit
+code**.
+
 **2026-09-06 — B10 closed and retested: the product's most privileged credential now expires,
 the audit ledger scrubs secrets by construction, and the admission gate no longer has a blind
 spot.** Three slices from the gap-review backlog, all previously ranked and none requiring a

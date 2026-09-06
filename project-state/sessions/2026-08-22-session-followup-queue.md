@@ -394,3 +394,51 @@ and overwrote the 492-line suite the agent had committed in its second commit; r
 session limit and survived for the same reason. Surface ownership held: B10c was rescoped to
 backend-only after confirming `apps/web/**` belongs to the local session, and the admission
 review-queue page is an explicit handoff.
+
+## Batch B11 — federated MCP registries + retest — 2026-09-06
+
+Owner-directed "build federation next". Sequenced deliberately AFTER ADR-0097: the condition
+PENDING carried on this row was that the reference implementation (agentic-community's
+mcp-gateway-registry) grants federated entries the same access as local ones with no approval,
+which violates default-deny — so federation could only be built once an admission gate existed
+to put them behind. ADR-0101, migration 0105.
+
+**Built against the real API, not a guess.** I fetched the official v0.1 OpenAPI: `GET
+/v0.1/servers` with opaque `metadata.nextCursor`, unauthenticated reads. My dispatch brief
+carried an error from a docs summary — it said `packages` was required — and the agent
+checked the spec, found neither `packages` nor `remotes` is required, and built to the truth.
+Worth noting as a pattern: briefs are not evidence.
+
+**Independent verification**: fresh `regulait_test` at `8840798` — **168 files / 2640 passed
++ 9 MinIO skips**, matching the builder's numbers (+1 file, +41 tests); `pnpm -r build` clean;
+ADR index 101 = 101; journal tail 0105 unique+ascending; whole commit range reviewed (M-029),
+tests present.
+
+**Hands-on retest** (criteria pre-written in `b11-retest-criteria.md`; keyless gateway :3226
+on seeded `regulait_b11live`; a LOCAL fake registry serving the real v0.1 shape across two
+pages, plus clean and poisoned MCP upstreams): **all criteria PASS.**
+
+| Case | Result |
+|---|---|
+| A1 usable by nobody | import delta `tool_grants` 3→3, `server_grants` 0→0; row `federated`/`unscanned`; ungranted user denied |
+| A1 non-vacuity | with a matching tool grant the IDENTICAL call moves "no grant matches" → "Approval required" |
+| A2 still admitted | federated + poisoned manifest → `held|critical`, refused; no bypass |
+| A3 never clobbers | `name_taken` and `url_taken` both recorded, import 409s, local row byte-identical in SQL |
+| B2 pagination | fake registry received its own opaque cursor back **verbatim** |
+| B4 package-only | no URL stored despite the package advertising `transport.url` on loopback; import refused |
+| B3 idempotent | re-sync created 0 / updated 4; entries 4→4, servers 4→4 |
+| C1 sweep posture | 12th ADR-0064 job, scheduler off by default; audit facts `mcp-registry-{configured,synced,entry-imported,import-conflict}` |
+| D1 B9 holds | federated held server, upstream KILLED → still `mcp_admission_held` |
+| D2 B10 holds | expired key → 401 + RFC 6750 challenge; `GET /v1/audit/verify` → ok |
+
+**Two probe errors, both mine, both caught before they became a claim** (M-023/M-026): I ran a
+"negative control" that changed the grant AND the method at once (`tools/call` → `tools/list`,
+where an empty list is legitimate, not a denial), and then issued a `readOnlyAll` grant for a
+tool the gateway classifies as `write`. Neither was a product defect; the third attempt was the
+real control.
+
+**Also verified this session, at the owner's prompt**: everything is on GitHub — the remote
+branch head matches local exactly and PR #108 carries it. **The PR description is stale**: it
+ends at ADR-0092 and quotes 141 files / 2321 tests, against a reality of ADR-0101 and 168/2640.
+Not updated — reconstructing a ~20k-char body risks losing a valuable record, and STATE.md is
+the canonical current account. Flagged for an owner decision.
