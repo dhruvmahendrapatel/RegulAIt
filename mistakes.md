@@ -338,3 +338,28 @@ the agent saw.
 print the HEAD sha in its answer as proof. A research verdict with no stated HEAD
 is unciteable — re-run it. Absence of evidence from an unverified tree is not
 evidence of absence.**
+
+## M-029 (2026-09-06) — I judged a slice "untested" from ONE commit's stat, and overwrote the tests
+
+The B10a agent was killed mid-slice by a session limit. Reviewing what survived, I
+ran `git show --stat` on the FIRST of its two commits, saw no `.test.ts`, and
+concluded "the implementation shipped but there are no tests — this slice is
+unverified enforcement code." I said so to the owner, wrote a 186-line
+replacement test file, and only discovered the truth when `git status` reported
+the file as **M** rather than untracked: the agent had written a thorough
+492-line suite (16 cases, several stronger than mine — the key-exchange bypass
+path, default-above-ceiling coherence, all four lifecycle states) and committed
+it in the SECOND commit, which I never inspected. My file had clobbered it.
+
+Worse, the evidence was in front of me and I read it backwards. The module comment
+said the invariant was pinned by `api-key-expiry.test.ts` "rather than trusting
+it", and I treated that as an agent citing a test it never wrote — an accusation
+of dishonesty — when it was a plain true statement and my check was the thing that
+was incomplete. Nothing was lost only because the work had been pushed, so
+`git checkout` restored it.
+
+**Rule: to judge what a multi-commit slice contains, diff the whole RANGE
+(`git diff --stat <base>..<head>`, or `git log --stat`), never one commit; and
+before writing any file, establish whether it already exists. When an artifact
+references another by name, that is evidence FOR its existence — go look for it
+before concluding the reference is false.**
