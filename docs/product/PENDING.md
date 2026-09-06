@@ -99,6 +99,21 @@ caught on read. **The sweeps buy timeliness, never correctness.**
 
 ## 5. Test-infrastructure debt
 
+- **The gateway suite's EXIT CODE is not trustworthy (found 2026-09-06).** Two unhandled
+  `TypeError: socket.destroySoon is not a function` exceptions escape while
+  `apps/gateway/src/mcp-admission-auth.test.ts` runs (ADR-0097's own e2e file, which starts real
+  local HTTP upstreams). All tests pass — 166 files / 2583 + 9 skips — but `vitest` exited **0 on
+  one run and 1 on the next with the identical two errors**, so the exit code is a coin flip.
+  Two reasons this is not cosmetic: (a) **local verification is this project's only quality gate**
+  (CI is Actions-cap-blocked), so a non-deterministic exit code trains readers to judge by the
+  summary line and ignore the status — precisely the habit that lets a real failure through; and
+  (b) vitest itself warns *"This might cause false positive tests"*, which means the suite's
+  verdict is not fully sound while these are unresolved. Not attributable to any slice after
+  B9 — present in every post-ADR-0097 run checked. Note the origin was initially misattributed to
+  `@hono/node-server`; that package is not in this repo at all. Fix belongs with whoever owns
+  the upstream teardown in that file: close the servers (and await it) before the transport, or
+  hold the socket open until the SDK transport has finished with it.
+
 - ~~**`seed.test.ts` uses a fixed-name scratch database** (`regulait_seed_test`) and
   `DROP DATABASE … WITH (FORCE)` in `beforeAll`. Two concurrent suite runs on one host destroy each
   other's database. This caused spurious failures repeatedly during the build wave and is a real
