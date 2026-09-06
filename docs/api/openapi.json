@@ -444,6 +444,11 @@
                   "name": {
                     "type": "string",
                     "minLength": 1
+                  },
+                  "expiresAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "nullable": true
                   }
                 },
                 "required": [

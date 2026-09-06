@@ -88,6 +88,7 @@ export type PostV1UsersByUserIdDeactivateBody = {
 
 export type PostV1UsersByUserIdKeysBody = {
     name: string;
+    expiresAt?: string;
   };
 
 export type PostV1UsersByUserIdRolesBody = {
