@@ -545,7 +545,12 @@ describe("6. the covered / NOT-covered inventory", () => {
        where table_schema = 'public'
          and data_type in ('text', 'character varying')
          and (column_name like '%reason%' or column_name like '%note%'
-              or column_name like '%rationale%' or column_name like '%explanation%')
+              or column_name like '%rationale%' or column_name like '%explanation%'
+              -- widened 2026-09-06: the schema sweep that FOUND S5 also matched
+              -- these two. Neither exists today, so this catches nothing now —
+              -- which is the point: a guard that is narrower than the sweep that
+              -- found the bug will not notice the next column of the same kind.
+              or column_name like '%justification%' or column_name like '%comment%')
     `);
     const found = (res as unknown as { rows: Array<{ table_name: string; column_name: string }> }).rows
       .map((r) => `${r.table_name}.${r.column_name}`)
