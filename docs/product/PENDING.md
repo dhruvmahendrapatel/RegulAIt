@@ -375,8 +375,12 @@ finding that lives only in a chat session does not survive it.
    `enforce`; enforcement sits at the first statement of `connectUpstream` and inside
    `syncUpstreamTools` before the upsert, so a dirty manifest is never stored. Drift re-holds an
    approved server. **Still open**: the FIRST sync of a new server necessarily connects (nothing
-   dirty is stored or returned); grandfathered rows stay trusted until re-synced; no scheduled
-   re-scan, so a compromised server nobody calls is never re-examined; no manifest signing or
+   dirty is stored or returned); grandfathered rows stay trusted until re-synced; ~~no scheduled
+   re-scan~~ **CLOSED 2026-09-06 ([ADR-0100](../decisions/0100-scheduled-mcp-admission-rescan.md))** — an
+   off-by-default ADR-0064 sweep re-adjudicates through the SAME live path (`connectUpstream` →
+   `syncUpstreamTools` → `recordManifestScan`), so there is no second threshold; `held` is
+   deliberately ineligible (nothing auto-un-holds) and a `cleared` server on its unchanged digest
+   is left alone. Retested live: a server nobody called went `clean` → `held` on the sweep; no manifest signing or
    publisher attestation; no SPA surface — the review queue and clear are API-only.
 2. ~~**MCP spec auth discovery.**~~ **DONE** — RFC 9728 metadata at the default and
    resource-scoped paths plus an RFC 6750 `WWW-Authenticate` challenge on every 401 of the MCP
@@ -397,8 +401,8 @@ finding that lives only in a chat session does not survive it.
 | **Runtime quarantine of an abusive identity** | PARTIAL — identity-keyed buckets exist but exceeding one only 429s; auto-suspension exists solely for failed logins (ADR-0025) | **Conflicts with a stated principle**: ADR-0092 says there is no auto-revoke anywhere. Needs an ADR reconciling that before any code |
 | **OpenTelemetry metrics** | Traces are DONE (ADR-0070: OTLP/HTTP, GenAI semconv, egress-guarded). **Metrics signal absent** | A metrics exporter beside the trace one; several declared-but-unwritten span kinds also remain |
 | **Helm chart / k8s install for RegulAIt itself** | NONE — we ship Compose on one EC2 host (ADR-0013); `deploy-k8s-client.ts` deploys *customer* workloads, not us | A chart + manifests + migration Job + the replica story. Natural vehicle for **P2 HA**, still open |
-| **Gateway-issued token TTL** | PARTIAL — virtual keys have optional `expiresAt` (ADR-0066) but **`api_keys` has no expiry column at all**, and API keys are what authenticate the MCP proxy | `expires_at` on `api_keys` + org-settings default and ceiling + enforcement. Small, bounded, and an obvious audit finding today |
-| **Credential scrubbing over audit rows** | PARTIAL — `dlp.secret.*` detectors exist but run on dispatch content; ~10 hand-rolled `audit()` helpers write `detail`/`reason` unscrubbed with no chokepoint | One audit chokepoint + reuse of those detectors + a test asserting a secret cannot land in `audit_log` |
+| ~~**Gateway-issued token TTL**~~ | **CLOSED 2026-09-06 ([ADR-0098](../decisions/0098-api-key-expiry.md), migration 0104)** — `api_keys.expires_at` plus org dials `apiKeyDefaultTtlDays` and `apiKeyMaxTtlDays`, enforced in `authenticate()` (the one place a bearer token becomes an identity, so there is no second path). Both dials ship NULL so an upgrade invalidates nothing. Expired and revoked are distinct 401s with distinct audit rule ids; the ceiling **refuses rather than clamps**, including refusing an explicit never-expires request. Retested live: enforced on two surfaces with a control, and an expired key at the MCP proxy gets ADR-0097's RFC 6750 challenge while the ledger still records `api-key-refused-expired`. | Residue: expiry cannot be extended, by design — a key past its date is reissued, not renewed. |
+| ~~**Credential scrubbing over audit rows**~~ | **CLOSED 2026-09-06 ([ADR-0099](../decisions/0099-audit-log-credential-scrub.md), no migration)** — sited at ADR-0060's existing audit-chain chokepoint (`appendChainedAuditRows`), so raw `db.insert(auditLog)` calls and future call sites are covered by construction rather than by convention; proven on a raw insert and one inside a caller's own transaction. Redaction preserves correlation (`[redacted:<rule>:<len>:<fingerprint>]`), and scrubbing precedes hashing so ADR-0060 verification still passes — retested live, `status: ok` with a redacted row in range. | **But see S5**: this covers `audit_log` ONLY; 47 other free-text columns still store operator prose verbatim. |
 
 **One discipline worth adopting outright, no code**: their invariant that every configuration
 parameter must be expressible with identical semantics on every deployment surface, and a

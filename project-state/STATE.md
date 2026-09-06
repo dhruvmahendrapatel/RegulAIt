@@ -21,6 +21,35 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-06 — B10 closed and retested: the product's most privileged credential now expires,
+the audit ledger scrubs secrets by construction, and the admission gate no longer has a blind
+spot.** Three slices from the gap-review backlog, all previously ranked and none requiring a
+prior decision to be reversed. **B10a** ([ADR-0098](../docs/decisions/0098-api-key-expiry.md),
+migration 0104): `api_keys` had no expiry column at all, and API keys are what authenticate the
+MCP proxy — they now carry a lifetime with an org default and ceiling, enforced in
+`authenticate()` (the single place a bearer token becomes an identity, so there is no second
+path to bypass). Both dials ship NULL, so an upgrade invalidates nothing; expired and revoked
+are distinct 401s with distinct audit rule ids; the ceiling **refuses rather than clamps**,
+including refusing an explicit never-expires request. **B10b**
+([ADR-0099](../docs/decisions/0099-audit-log-credential-scrub.md)): the credential scrub is
+sited at ADR-0060's existing audit-chain chokepoint, so raw inserts and future call sites are
+covered by construction rather than by 30-odd authors remembering a helper; redaction preserves
+correlation, and scrubbing precedes hashing so chain verification still passes. **B10c**
+([ADR-0100](../docs/decisions/0100-scheduled-mcp-admission-rescan.md)): an off-by-default sweep
+closes ADR-0097's own residue — a compromised server nobody calls is now re-examined anyway —
+re-adjudicating through the LIVE path so no second threshold exists, with `held` deliberately
+ineligible because nothing may auto-un-hold. Suite **167 files / 2599 passed + 9 MinIO skips**,
+independently verified on a fresh DB. **Two findings came out of the retest, both recorded
+rather than patched**: **S5** — the scrub covers `audit_log` only, and the same operator-typed
+key was persisted verbatim to `mcp_servers.admission_clear_reason`, one of **47** free-text
+columns outside the ledger (the fix is a design choice, and guessing at it would repeat the
+convention ADR-0099 rejected); and the gateway suite's **exit code is non-deterministic**
+(unhandled socket-teardown errors, same two errors giving exit 0 then 1) which matters because
+local verification is this project's only gate. Process: **M-029** — I judged B10a untested from
+one commit's stat and overwrote the tests it had committed in another; recovered because the
+work had been pushed. Surface ownership held: B10c was rescoped to backend-only, and the
+admission review-queue page is an explicit handoff to the local session that owns `apps/web`.
+
 **2026-09-05 — B9 closed and retested: MCP servers are now admitted, not merely registered,
 and off-the-shelf MCP clients can discover how to authenticate.** Prompted by an owner-requested
 gap review against [mcp-gateway-registry](https://github.com/agentic-community/mcp-gateway-registry)

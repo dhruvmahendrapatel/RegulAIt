@@ -339,3 +339,58 @@ path `log` → review → `enforce`); no SPA surface for the review queue; no sc
 `MCP_ADMISSION_SCANNER_VERSION` bumping is convention nothing enforces; `openapi.json` and
 the api-client were regenerated, so that package needs a rebuild before its own drift test
 passes locally.
+
+## Batch B10 + retest — 2026-09-06
+
+Owner-directed "identify the pending items and let's start building". Buildable-now set was
+seven; picked the three that were unambiguously unblocked and did not require reversing a
+prior decision. Sequential, because they collide in schema/shared-zod. ADRs 0098–0100,
+migration 0104.
+
+- **B10a** (`32653b8`+`79f567b`, ADR-0098, migration 0104): `api_keys.expires_at` + two org
+  dials, enforced in `authenticate()`; expired ≠ revoked in error and audit; ceiling refuses
+  rather than clamps.
+- **B10b** (`d137650`..`6d155ae`, ADR-0099, no migration): credential scrub sited at
+  ADR-0060's `appendChainedAuditRows` chokepoint — covers raw inserts by construction;
+  redaction preserves correlation; scrub precedes hashing.
+- **B10c** (`98ea6eb`+`e052982`, ADR-0100, no migration): off-by-default ADR-0064 sweep
+  re-adjudicating through the live path, closing ADR-0097's "a compromised server nobody
+  calls is never caught" residue.
+
+**Independent verification**: fresh `regulait_test` at `e052982` — **167 files / 2599 passed
++ 9 MinIO skips**, matching each builder's numbers; `pnpm -r build` clean; ADR index 100 =
+100; journal tail 0104 unique+ascending.
+
+**Hands-on retest** (criteria pre-written in `b10-retest-criteria.md`, keyless gateway :3225
+on seeded `regulait_b10live`): **all criteria PASS.**
+
+| Case | Result |
+|---|---|
+| A5/A6 expiry, two surfaces | control 200 before → `api_key_expired` after on REST; same key at MCP → 401 + `WWW-Authenticate … error="invalid_token", resource_metadata=…` |
+| expiry diagnosability | caller sees generic `unauthenticated` at MCP (correct — no credential-state leak) while the ledger keeps `api-key-refused-expired`. Posture, not omission |
+| B1 audit scrub | AWS-shaped key typed into a clear reason stored as `[redacted:aws_key:20:1a5d44a2dca1]` |
+| B4 chain ordering | `GET /v1/audit/verify` → `status: ok`, `firstBreak: null`, with a redacted row inside the range |
+| C1 sweep | `clean` → `held|critical` with **nobody calling the server**; audited fact eligible 4 / examined 4 / adjudicated 1 / held 1 / unreachable 3 |
+| D1 B9 regressions | poisoned server held on first sync; with the upstream KILLED the call still returns `mcp_admission_held`, not a connect error |
+| D2 demo floor | dispatch invoke 200, usage rows 19→20 |
+
+**Finding — recorded as S5, not patched.** The scrub covers `audit_log` only. In the SAME
+request, the same operator-typed key was persisted verbatim to
+`mcp_servers.admission_clear_reason`; a schema sweep found **47** free-text columns outside
+`audit_log` holding operator prose. Not a failure of ADR-0099 against its scope, but its
+limits list does not say so. The fix is a design choice (zod refinement on the shared reason
+schemas is the closest analogue to what made ADR-0099 sound), not a patch — so it is written
+down rather than guessed at.
+
+**Second finding — the suite's exit code is unreliable.** Two unhandled `socket.destroySoon`
+errors escape `mcp-admission-auth.test.ts`; the same two errors gave exit 0 on one run and 1
+on the next. Local verification is this project's only gate, so this is recorded in §5 rather
+than tolerated. Origin was initially misattributed (by the B10b agent, and by me when I
+repeated it in B10c's brief) to `@hono/node-server` — **that package is not in this repo**.
+
+**Process**: **M-029** logged — I judged B10a "untested" from ONE commit's `--stat`, said so,
+and overwrote the 492-line suite the agent had committed in its second commit; recovered via
+`git checkout` because the work had been pushed. B10a's agent was itself killed mid-slice by a
+session limit and survived for the same reason. Surface ownership held: B10c was rescoped to
+backend-only after confirming `apps/web/**` belongs to the local session, and the admission
+review-queue page is an explicit handoff.
