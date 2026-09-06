@@ -457,8 +457,109 @@ export const mcpServers = pgTable("mcp_servers", {
   admissionClearedBy: uuid("admission_cleared_by"),
   admissionClearedAt: timestamp("admission_cleared_at", { withTimezone: true }),
   admissionClearReason: text("admission_clear_reason"),
+  /** ADR-0101 (migration 0105) — FEDERATION PROVENANCE, on the server row
+   * itself, because "where did this come from" is asked while looking at the
+   * server. `local` is the migration DEFAULT and the only value a pre-0105 row
+   * can carry: every server that existed before federation is, and stays, the
+   * operator's own decision. A federated row can never take one over — the
+   * import path refuses on a name or url collision and records the conflict on
+   * the catalogue row instead. */
+  origin: text("origin", { enum: ["local", "federated"] })
+    .notNull()
+    .default("local"),
+  /** ON DELETE SET NULL: removing a registry configuration must never cascade
+   * into deleting servers an operator is relying on. */
+  registryId: uuid("registry_id"),
+  /** the upstream reverse-DNS name, verbatim — the string that can be pasted
+   * back into the upstream registry */
+  registryEntryName: text("registry_entry_name"),
+  registryVersion: text("registry_version"),
+  registryFirstSeenAt: timestamp("registry_first_seen_at", { withTimezone: true }),
+  registryLastSyncedAt: timestamp("registry_last_synced_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * ADR-0101 — an upstream MCP registry an operator configured. A fresh install
+ * has ZERO rows here, so federation is off because there is nothing to
+ * federate rather than because a flag says so, and `enabled` defaults false on
+ * top of that.
+ */
+export const mcpRegistries = pgTable("mcp_registries", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull().unique(),
+  /** BASE url; the adapter appends `/v0.1/servers`. Adjudicated by ADR-0043's
+   * guard at write time and on every pull. */
+  url: text("url").notNull(),
+  enabled: boolean("enabled").notNull().default(false),
+  /** NULL inherits org_settings.mcpPrivateRangesDefault, exactly like
+   * mcp_servers.allowPrivateRanges — an internal registry mirror on the LAN is
+   * an ordinary deployment. */
+  allowPrivateRanges: boolean("allow_private_ranges"),
+  lastSyncAt: timestamp("last_sync_at", { withTimezone: true }),
+  lastSyncOutcome: text("last_sync_outcome", {
+    enum: ["ok", "failed", "refused", "skipped"],
+  }),
+  lastSyncDetail: jsonb("last_sync_detail"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * ADR-0101 — THE CATALOGUE. The only table a sync writes.
+ *
+ * A row here is a record of what a registry says exists. It is NOT a server: a
+ * row with `serverId` null is inert by construction — no `mcp_servers` row
+ * means no `/mcp/:serverId` route, no tool inventory and no grant that could
+ * name it. `kind = 'catalogue_only'` rows can NEVER acquire one, because the
+ * entry carries no endpoint and this codebase does not invent URLs.
+ */
+export const mcpRegistryEntries = pgTable(
+  "mcp_registry_entries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    registryId: uuid("registry_id")
+      .notNull()
+      .references(() => mcpRegistries.id, { onDelete: "cascade" }),
+    upstreamName: text("upstream_name").notNull(),
+    upstreamVersion: text("upstream_version").notNull(),
+    title: text("title"),
+    description: text("description"),
+    repositoryUrl: text("repository_url"),
+    websiteUrl: text("website_url"),
+    kind: text("kind", { enum: ["remote", "catalogue_only"] }).notNull(),
+    remoteUrl: text("remote_url"),
+    remoteTransport: text("remote_transport"),
+    /** why a catalogue-only entry is catalogue-only, shown verbatim to an
+     * operator who asks why they cannot import it */
+    catalogueReason: text("catalogue_reason"),
+    upstreamStatus: text("upstream_status", { enum: ["active", "deprecated", "deleted"] }),
+    upstreamPublishedAt: timestamp("upstream_published_at", { withTimezone: true }),
+    upstreamUpdatedAt: timestamp("upstream_updated_at", { withTimezone: true }),
+    serverId: uuid("server_id").references(() => mcpServers.id, { onDelete: "set null" }),
+    importedAt: timestamp("imported_at", { withTimezone: true }),
+    importedBy: uuid("imported_by"),
+    conflictReason: text("conflict_reason", { enum: ["name_taken", "url_taken"] }),
+    conflictServerId: uuid("conflict_server_id").references(() => mcpServers.id, {
+      onDelete: "set null",
+    }),
+    /** the upstream endpoint moved AFTER an import. `mcp_servers.url` is NOT
+     * rewritten: a registry silently redirecting a server an operator already
+     * trusts is the federation attack, not a convenience. */
+    remoteUrlDrift: text("remote_url_drift"),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }).notNull().defaultNow(),
+    /** set only by a COMPLETE (untruncated) listing that no longer contained
+     * this entry — "beyond the page cap" and "gone" are different facts. It
+     * never deletes, disables or un-grants the local server. */
+    missingSince: timestamp("missing_since", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("mcp_registry_entries_registry_name_uq").on(t.registryId, t.upstreamName),
+    index("mcp_registry_entries_kind_idx").on(t.registryId, t.kind),
+    index("mcp_registry_entries_server_idx").on(t.serverId),
+  ],
+);
 
 export const mcpTools = pgTable(
   "mcp_tools",

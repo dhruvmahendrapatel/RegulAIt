@@ -526,6 +526,34 @@ export {
   type ScannableTool,
 } from "./mcp-admission.js";
 
+// ADR-0101 — FEDERATED MCP REGISTRY, the pure half: the v0.1 `ServerListResponse`
+// wire schema, the remote-vs-package classification that decides what can become
+// an `mcp_servers` row at all, and the verbatim name rule.
+export {
+  MCP_REGISTRY_API_VERSION,
+  MCP_REGISTRY_LIST_PATH,
+  MCP_REGISTRY_MAX_PAGE_SIZE,
+  MCP_REMOTE_TRANSPORT_TYPES,
+  MCP_REGISTRY_ENTRY_KINDS,
+  MCP_CATALOGUE_REASONS,
+  MCP_REGISTRY_UPSTREAM_STATUSES,
+  MCP_IMPORT_CONFLICT_REASONS,
+  mcpRegistryPageSchema,
+  normalizeRegistryPage,
+  classifyRegistryEntry,
+  usableRemoteUrl,
+  pickRemote,
+  localServerNameFor,
+  type McpRemoteTransportType,
+  type McpRegistryEntryKind,
+  type McpCatalogueReason,
+  type McpRegistryUpstreamStatus,
+  type McpImportConflictReason,
+  type McpRegistryPagePayload,
+  type NormalizedRegistryEntry,
+  type NormalizedRegistryPage,
+} from "./mcp-registry.js";
+
 /** ADR-0097 — the admin CLEAR action on a held MCP server. A reason is
  * REQUIRED and there is no auto-clear: admitting a manifest a scanner flagged
  * is a decision somebody signs, not a timeout that expires. */
