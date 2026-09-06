@@ -188,7 +188,14 @@ afterAll(async () => {
 
 describe("B7c — the observation retention sweep prunes evidence, never history", () => {
   it("prunes only rows older than the window, keeps a LIVE canary's old evidence, and NEVER touches config_versions", async () => {
-    const auditBefore = (await prunedAuditRows()).length;
+    // DELTA, BY ID, not by physical row order. `prunedAuditRows()` has no
+    // ORDER BY, so `at(-1)` was reading whatever Postgres handed back first —
+    // stable only while `audit_log` happened to be laid out a particular way.
+    // Identifying the new row by id is deterministic regardless of what else
+    // the suite has written, and weakens no assertion below.
+    const auditRowsBefore = await prunedAuditRows();
+    const auditIdsBefore = new Set(auditRowsBefore.map((r) => r.id));
+    const auditBefore = auditRowsBefore.length;
 
     const out = await runCanaryObservationPrune(db, { actorUserId: null });
     expect(out.retainedDays).toBe(90);
@@ -213,11 +220,13 @@ describe("B7c — the observation retention sweep prunes evidence, never history
     // the audited fact: one new row carrying count + cutoff + what was protected
     const audits = await prunedAuditRows();
     expect(audits.length).toBe(auditBefore + 1);
-    const detail = audits.at(-1)!.detail as Record<string, unknown>;
+    const fresh = audits.find((r) => !auditIdsBefore.has(r.id))!;
+    expect(fresh).toBeDefined();
+    const detail = fresh.detail as Record<string, unknown>;
     expect(detail.pruned).toBe(out.pruned);
     expect(detail.retainedDays).toBe(90);
     expect(typeof detail.cutoff).toBe("string");
-    expect(audits.at(-1)!.reason).toMatch(/never pruned/);
+    expect(fresh.reason).toMatch(/never pruned/);
   });
 
   it("a second pass finds nothing new — idempotent by data", async () => {

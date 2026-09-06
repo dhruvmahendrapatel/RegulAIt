@@ -651,7 +651,7 @@ describe("clean shutdown", () => {
 });
 
 // ===========================================================================
-// 6. THE REGISTERED JOBS — six from ADR-0064 plus ADR-0065's training poll
+// 6. THE REGISTERED JOBS — six from ADR-0064, plus the ones later ADRs added
 // ===========================================================================
 
 describe("every sweep is registered", () => {
@@ -681,6 +681,13 @@ describe("every sweep is registered", () => {
         // is no second adjudication. Driven end-to-end in
         // mcp-admission-rescan.test.ts; this list pins its registration.
         SCHEDULER_JOB_NAMES.mcpAdmissionRescan,
+        // ADR-0101: pulls each ENABLED upstream MCP registry and refreshes the
+        // federated CATALOGUE — and nothing else. It creates no server row and
+        // no grant, because turning a directory entry into a governed object is
+        // an explicit operator act, not something a timer does on the estate's
+        // behalf. Driven end-to-end in mcp-registry.test.ts; this list pins its
+        // registration.
+        SCHEDULER_JOB_NAMES.mcpRegistrySync,
         SCHEDULER_JOB_NAMES.mrmExpiry,
         SCHEDULER_JOB_NAMES.redteam,
         SCHEDULER_JOB_NAMES.reportSchedules,

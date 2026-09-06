@@ -1072,12 +1072,17 @@ describe("ADR-0101 §8 — egress: the pull is ADR-0043's surface, and air-gappe
     expect((await db.select({ id: mcpRegistries.id }).from(mcpRegistries)).length).toBe(before);
   });
 
-  it("a registry that opts OUT of private ranges cannot reach a loopback fake", async () => {
+  it("CONNECT TIME is guarded too, not just write time — a row already in the table is refused", async () => {
+    // ADR-0043's rule, verbatim: rows written before a guard existed (or before
+    // a posture changed) are REFUSED, never rewritten. The write-time check
+    // above would have stopped this url; this drives `syncRegistry` with it
+    // anyway, which is the only way to prove the second moment exists.
     const requestsBefore = fake.requests.length;
-    const out = await syncRegistry(db, { ...registryRow, allowPrivateRanges: false });
+    const out = await syncRegistry(db, { ...registryRow, url: "http://169.254.169.254/" });
     expect(out.outcome).toBe("refused");
     expect(out.entriesSeen).toBe(0);
-    // the guard refused before any socket
+    // refused before any socket — and the IMDS carve-out is unconditional, so
+    // no egress_allow_hosts entry any other suite may have added can reach it
     expect(fake.requests.length).toBe(requestsBefore);
   });
 
