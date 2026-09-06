@@ -52,16 +52,16 @@ happens at parse time for every route that uses them. It is the right instinct �
 analogue to what made ADR-0099 sound — and it is **not implementable here, because there are no
 shared reason schemas.**
 
-Measured, not assumed: **~104** reason/note/rationale field declarations across
-`apps/gateway/src` and `packages/shared/src`, and **every one of them is an ad-hoc inline
-`z.string().min(1).max(N)`** written at its own endpoint —
+Measured, not assumed: **63** reason/note/rationale field declarations across
+`apps/gateway/src` and `packages/*/src` (excluding tests and built `dist`), and **every one of
+them is an ad-hoc inline `z.string().min(1).max(N)`** written at its own endpoint —
 `packages/shared/src/mrm.ts:124`, `packages/shared/src/risks.ts:212`,
 `apps/gateway/src/sod.ts:1109`, and a hundred more. There is no `reasonText()` helper, no
 `proseSchema`, nothing for them to have been built on. **The shared-schema layer covers zero of
 the 47 columns**, because it does not exist.
 
-So "make the shared schema scrub" would have meant editing 104 declarations and then depending on
-the 105th to remember — **the per-call-site convention ADR-0099 explicitly rejected**, wearing a
+So "make the shared schema scrub" would have meant editing 63 declarations and then depending on
+the 64th to remember — **the per-call-site convention ADR-0099 explicitly rejected**, wearing a
 zod costume. Executing the brief literally would have produced a worse control and a dishonest
 ADR.
 
