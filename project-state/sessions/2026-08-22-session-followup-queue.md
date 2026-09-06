@@ -442,3 +442,58 @@ branch head matches local exactly and PR #108 carries it. **The PR description i
 ends at ADR-0092 and quotes 141 files / 2321 tests, against a reality of ADR-0101 and 168/2640.
 Not updated — reconstructing a ~20k-char body risks losing a valuable record, and STATE.md is
 the canonical current account. Flagged for an owner decision.
+
+## Batch B12 — operator-prose credential scrub (closing S5) — 2026-09-06
+
+Resumed after a usage-limit pause and two container restarts (tree verified intact against
+origin each time; Postgres restarted twice). Nothing was mid-flight, so I took the highest-value
+open item: S5, the leak my own B10 retest found. ADR-0102, no migration.
+
+**The briefed plan was measured and rejected, correctly.** I had specified a zod refinement on
+the shared reason schemas. The agent measured first: **0 shared reason schemas vs 63 ad-hoc
+inline `z.string()` declarations**. Executing my brief would have been the per-call-site
+convention ADR-0099 explicitly rejected, wearing a zod costume. It sited the scrub instead in
+the `createDb` Proxy ADR-0060 already installed — which is not audit-specific — composing
+outside `withAuditChain` and re-wrapping `transaction()`. That last part is load-bearing:
+`approvals.decision_reason` is written inside the decide route's own transaction, so a wrapper
+that forgot would have missed the most important column while top-level tests passed.
+
+**Coverage**: 51 columns covered (all 47 S5 named, plus 4 machine free-text columns quoting
+`Error.message`), 3 excluded by name with reasons. Structural, not a snapshot — a test asks
+`information_schema`, not the TypeScript.
+
+**Independent verification**: fresh `regulait_test` at `bce5e7a` — **169 files / 2656 passed +
+9 MinIO skips**; `pnpm -r build` clean; ADR index 102 = 102; journal untouched; whole commit
+range reviewed (M-029).
+
+**Hands-on retest** (criteria pre-written in `b12-retest-criteria.md`; keyless gateway :3227 on
+seeded `regulait_b12live`): **all criteria PASS.**
+
+| Case | Result |
+|---|---|
+| A1 the exact S5 case, inverted | AWS key in an admission-clear reason → `[redacted:aws_key:20:1a5d44a2dca1]` in `mcp_servers.admission_clear_reason` (was verbatim) |
+| A2 marker identity | column marker == `audit_log.reason` marker, character-for-character — the two records now agree, which is the defect S5 named |
+| A3 over-scrub guard | uuid + ticket id + "1200 tokensIn" + the word "token" → byte-identical |
+| A4 second surface | `approvals.decision_reason`, written INSIDE the route's transaction, scrubbed |
+| B1 exclusion honesty | `usage_events.stop_reason` = `end_turn`, plain, as documented |
+| C1 ADR-0099 intact | `GET /v1/audit/verify` → ok (scrub still precedes hashing) |
+| C2 B9 intact | poisoned server held on registration under `enforce` |
+| C3 demo floor | dispatch invoke, usage rows 19→20 |
+
+**A guard I hardened myself (`c90a403`).** ADR-0102's inventory test matched
+`%reason%/%note%/%rationale%/%explanation%` — but the sweep that FOUND S5 also matched
+`%justification%` and `%comment%`. Neither column exists today, so the guard caught nothing;
+that is precisely the risk, since a guard narrower than the sweep that found the bug will not
+notice the next column of the same kind. Widened, then **proven non-vacuous** by adding
+`approvals.override_justification` to a fresh schema — the inventory test failed and named it.
+
+**Test-hygiene finding**: `prose-scrub.test.ts` is not re-runnable on a dirty database (fixed
+user emails → 409 in `beforeAll`), and vitest then reports all 16 tests **skipped**, which reads
+like success at a glance. It briefly fooled me during the non-vacuity attempt until I read the
+actual error. Same class the B11 agent flagged for `canary-observation-prune.test.ts`.
+
+**Ledger discipline**: S5 is struck **in proportion**. Its 47 columns are genuinely closed, but
+ADR-0102 disclosed ~34 `name`/`title`/`description` content columns that remain verbatim — those
+were never in S5's scope, so they are recorded as **S6** rather than allowed to disappear inside
+S5's closure. ADR-0099's row carried a "but see S5" cross-reference which is now stale and was
+corrected in the same commit, so the two rows do not contradict each other.

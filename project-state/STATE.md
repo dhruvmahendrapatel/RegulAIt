@@ -21,6 +21,30 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-06 (later) — B12 closed and retested: the credential leak that the B10 retest found
+is shut, and the ledger says exactly how far.** ([ADR-0102](../docs/decisions/0102-operator-prose-credential-scrub.md),
+no migration.) ADR-0099 scrubbed `audit_log`; the retest proved the *same* operator-typed key,
+in the *same* request, was stored verbatim in `mcp_servers.admission_clear_reason` — one of 47
+free-text columns where a human can paste a secret while explaining an action. **The fix I
+briefed was measured and rejected**, which is the outcome I wanted from asking: there are **0
+shared reason schemas against 63 ad-hoc inline declarations**, so a zod refinement would have
+been the per-call-site convention ADR-0099 rejected in a costume. It went instead into the
+`createDb` Proxy ADR-0060 already installed — not audit-specific — composing outside the
+audit-chain wrapper and re-wrapping `transaction()`, which is load-bearing because the approval
+decide route writes its reason inside its own transaction. **51 columns covered, 3 excluded by
+name**, and the coverage is structural rather than a snapshot: a test asks `information_schema`,
+not the TypeScript, so a hand-authored migration cannot slip past. Retested live — the exact S5
+case inverted, with the column's marker **character-identical** to the audit row's (the two
+records now agree, which is the defect S5 actually named), a second surface scrubbed inside its
+transaction, and ordinary prose byte-identical. I also widened that guard myself (`c90a403`) to
+the same patterns as the sweep that found S5, and proved it non-vacuous. Suite **169 files /
+2656 passed + 9 MinIO skips**, independently verified on a fresh DB. **S5 is struck in
+proportion**: its 47 columns are closed, but ~34 `name`/`title`/`description` **content** columns
+remain verbatim and are now recorded as **S6** rather than allowed to vanish inside the closure —
+and ADR-0099's stale "but see S5" cross-reference was corrected in the same commit so the two
+rows cannot contradict each other. Still open: **S6**, the non-deterministic suite exit code, and
+PR #108's description, which is stale at ADR-0092 against today's ADR-0102 and 169/2656.
+
 **2026-09-06 (later) — B11 closed and retested: MCP registries can now be federated, and an
 imported entry arrives usable by nobody.** ([ADR-0101](../docs/decisions/0101-federated-mcp-registry.md),
 migration 0105.) This was deliberately sequenced last of the MCP wave: the reference
