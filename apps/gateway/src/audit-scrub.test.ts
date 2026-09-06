@@ -168,10 +168,18 @@ describe("1. a credential driven through a REAL route is stored redacted", () =>
     const r2 = await rawRow((await transitionWithReason(`virtual ${RGLV_KEY} leaked`, "as-rglv")).id);
     expect(r2.reason).not.toContain(RGLV_KEY);
 
-    const r3 = await rawRow((await transitionWithReason(`pasted:\n${PEM}`, "as-pem")).id);
+    // NB: no literal newline in the reason this writes. The PEM fixture's own
+    // internal newlines are inside the span that gets replaced, so the STORED
+    // reason is single-line — deliberately, because `audit_log` is shared with
+    // every other suite in this run and `GET /v1/audit.csv` emits a quoted,
+    // genuinely multi-line CSV cell that a line-oriented reader downstream
+    // would split in half. Proving the scrub does not require being the first
+    // suite in this repo to put a newline in an audit reason.
+    const r3 = await rawRow((await transitionWithReason(`pasted: ${PEM}`, "as-pem")).id);
     expect(r3.reason).not.toContain("SCRUBBODY");
     expect(r3.reason).not.toContain("BEGIN RSA PRIVATE KEY");
-    expect(r3.reason).toContain("pasted:\n");
+    expect(r3.reason).toContain("pasted: ");
+    expect(r3.reason).not.toContain("\n");
   });
 
   it("CORRELATES across rows: the same key twice yields the same marker, a different key does not", async () => {
