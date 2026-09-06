@@ -43,6 +43,7 @@ import { runCostReconciliation } from "./cost-reconcile.js";
 import { runCampaignExpirySweep } from "./grant-certification.js";
 import { runCanaryObservationPrune } from "./config-versions.js";
 import { runMcpAdmissionRescan } from "./mcp-admission-rescan.js";
+import { runMcpRegistrySync } from "./mcp-registry.js";
 import { toRegistry, type SchedulerJobDefinition, type SchedulerJobRegistry } from "./scheduler.js";
 
 const HOUR = 3600;
@@ -68,6 +69,7 @@ export const SCHEDULER_JOB_NAMES = {
   certificationExpiry: "certification-expiry-sweep",
   canaryObservationPrune: "canary-observation-prune-sweep",
   mcpAdmissionRescan: "mcp-admission-rescan-sweep",
+  mcpRegistrySync: "mcp-registry-sync-sweep",
 } as const;
 
 export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): SchedulerJobDefinition[] {
@@ -357,6 +359,58 @@ export function schedulerJobDefinitions(opts: SchedulerJobsOptions = {}): Schedu
             clean: out.clean,
             clearedUnchanged: out.clearedUnchanged,
             unreachable: out.unreachable,
+            reason: out.reason,
+          },
+        };
+      },
+    },
+    {
+      // ADR-0101 — the twelfth. Pulls each ENABLED upstream MCP registry and
+      // refreshes the CATALOGUE (`mcp_registry_entries`) — and nothing else. It
+      // creates no `mcp_servers` row, no grant and no tool inventory, because
+      // turning a directory entry into a governed object is an explicit,
+      // audited operator act, not something a timer does on the estate's
+      // behalf. That is the whole difference between this and the federation
+      // design ADR-0101 declined to copy.
+      //
+      // Triply opt-in: the scheduler is off by default, a fresh install has no
+      // registry rows at all, and a registry row is `enabled = false` until an
+      // operator flips it. On an air-gapped deployment the pass refuses before
+      // reading a row or opening a socket.
+      name: SCHEDULER_JOB_NAMES.mcpRegistrySync,
+      description:
+        "Pull each enabled upstream MCP registry and refresh the federated CATALOGUE. Creates no " +
+        "server and no grant — importing an entry is a separate explicit operator act. Bounded per " +
+        "pass; refuses outright on an air-gapped deployment; never deletes a local server an upstream " +
+        "stopped listing.",
+      adr: "ADR-0101",
+      defaultIntervalSeconds: 6 * HOUR,
+      run: async (ctx) => {
+        const out = await runMcpRegistrySync(ctx.db, {
+          actorUserId: ctx.actorUserId,
+          now: ctx.now,
+        });
+        return {
+          itemsProcessed: out.entriesSeen,
+          detail: {
+            deployMode: out.deployMode,
+            skipped: out.skipped,
+            eligible: out.eligible,
+            examined: out.examined,
+            capped: out.capped,
+            ok: out.ok,
+            refused: out.refused,
+            failed: out.failed,
+            entriesSeen: out.entriesSeen,
+            created: out.created,
+            updated: out.updated,
+            remote: out.remote,
+            catalogueOnly: out.catalogueOnly,
+            markedMissing: out.markedMissing,
+            driftDetected: out.driftDetected,
+            conflicts: out.conflicts,
+            serversCreated: out.serversCreated,
+            grantsCreated: out.grantsCreated,
             reason: out.reason,
           },
         };

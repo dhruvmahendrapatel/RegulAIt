@@ -262,6 +262,9 @@ import {
   registerMcpAdmissionRoutes,
   REGISTRATION_ADMISSION_STATE,
 } from "./mcp-admission.js";
+// ADR-0101 — federated MCP registries. Admin-only through the default gate;
+// a sync writes only the catalogue and an import is an explicit operator act.
+import { registerMcpRegistryRoutes } from "./mcp-registry.js";
 import {
   MCP_PROXY_ROUTE_URL,
   registerMcpAuthMetadata,
@@ -3319,6 +3322,11 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // audited clear. Admin-only through the default gate, like the MCP registry
   // writes it sits beside.
   registerMcpAdmissionRoutes(app, db);
+  // ADR-0101 — configure an upstream MCP registry, pull its catalogue, and
+  // import ONE entry as a federated `mcp_servers` row that is `unscanned`,
+  // ungranted and subject to the same ADR-0097 admission and ADR-0043 egress
+  // gates as any hand-registered server.
+  registerMcpRegistryRoutes(app, db);
   // ADR-0097 part B — RFC 9728. Both routes are AUTH_EXEMPT by design: a
   // client with no credential is exactly the one that needs to read them.
   registerMcpAuthMetadata(app);

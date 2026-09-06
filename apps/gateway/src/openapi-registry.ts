@@ -505,6 +505,15 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "POST /v1/servers/:serverId/tools": "internal",
   // ADR-0097 — the MCP admission review surface
   "GET /v1/mcp/admission": "internal",
+  // ADR-0101 — federated MCP registries. Internal: an operator console surface
+  // (configure an upstream, pull its catalogue, import one entry), not part of
+  // the published integration contract.
+  "POST /v1/mcp-registries": "internal",
+  "GET /v1/mcp-registries": "internal",
+  "PATCH /v1/mcp-registries/:registryId": "internal",
+  "POST /v1/mcp-registries/:registryId/sync": "internal",
+  "GET /v1/mcp-registries/:registryId/entries": "internal",
+  "POST /v1/mcp-registries/entries/:entryId/import": "internal",
   "POST /v1/servers/:serverId/admission/clear": "internal",
   "PATCH /v1/servers/:serverId/tools/:toolName/price": "internal",
   "GET /v1/setup/status": "internal",
@@ -1119,6 +1128,12 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/servers/:serverId/tools": "servers",
   "POST /v1/servers/:serverId/tools": "servers",
   "GET /v1/mcp/admission": "servers",
+  "POST /v1/mcp-registries": "servers",
+  "GET /v1/mcp-registries": "servers",
+  "PATCH /v1/mcp-registries/:registryId": "servers",
+  "POST /v1/mcp-registries/:registryId/sync": "servers",
+  "GET /v1/mcp-registries/:registryId/entries": "servers",
+  "POST /v1/mcp-registries/entries/:entryId/import": "servers",
   "POST /v1/servers/:serverId/admission/clear": "servers",
   "PATCH /v1/servers/:serverId/tools/:toolName/price": "servers",
   "GET /v1/setup/status": "setup",
