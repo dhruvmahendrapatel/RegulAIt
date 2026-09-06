@@ -69,6 +69,7 @@ import {
   AUDIT_GENESIS_SEQ,
   auditContentHash,
   auditRowHash,
+  scrubAuditRow,
   type AuditChainFields,
 } from "@regulait/shared";
 import { auditLog } from "./schema.js";
@@ -170,7 +171,20 @@ export async function appendChainedAuditRows(
   let nextSeq = (tip[0]?.seq ?? AUDIT_GENESIS_SEQ - 1) + 1;
 
   const rows = values.map((raw) => {
-    const fields = resolveDefaults(raw);
+    // ADR-0099 — SCRUB, THEN HASH. The order is the whole correctness argument
+    // and it is not stylistic: `content_hash` is taken over the row's immutable
+    // facts, so if the scrub ran AFTER the hash the stored row would no longer
+    // hash to its own `content_hash` and ADR-0060's verification would report
+    // every redacted row as `content_mismatch` — tampering, on the one control
+    // that was supposed to make tampering visible. Scrubbing here also means
+    // the row that is hashed and the row that is inserted below are the SAME
+    // object, so they cannot drift.
+    //
+    // And it is sited here, not at the ~30 call sites and ~10 local `audit()`
+    // helpers, for the same reason chaining is (see this file's header): a
+    // raw `db.insert(auditLog)` written next month is scrubbed without its
+    // author knowing this line exists. Convention could not promise that.
+    const fields = scrubAuditRow(resolveDefaults(raw));
     const contentHash = auditContentHash(fields);
     const rowHash = auditRowHash(prevHash, contentHash);
     const row = { ...fields, seq: nextSeq, contentHash, prevHash, rowHash };

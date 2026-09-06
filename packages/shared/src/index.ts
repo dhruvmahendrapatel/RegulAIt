@@ -2480,6 +2480,24 @@ export {
   type ChainedAuditRow,
 } from "./audit-chain.js";
 
+// ADR-0099 — the audit-log CREDENTIAL SCRUB. Pure, and called from
+// `@regulait/db`'s single chained-insert path immediately BEFORE the row is
+// hashed, so every call site — helper, raw insert, and the next one written —
+// is covered without knowing it exists. Exported here so the scrub rule can be
+// tested, and so a reader of a redacted ledger can find the marker's grammar.
+export {
+  AUDIT_SCRUB_FINGERPRINT_HEX,
+  AUDIT_SCRUB_MARKER_PREFIX,
+  scrubAuditDetail,
+  scrubAuditRow,
+  scrubAuditText,
+  type ScrubbableAuditRow,
+} from "./audit-scrub.js";
+
+// ADR-0099 — the credential-material subset of ADR-0042's DLP rules, shared
+// with the scrubber so detection has exactly one definition.
+export { CREDENTIAL_MATERIAL_RULES } from "./guardrails.js";
+
 // ADR-0055 — SHADOW-AI DISCOVERY, the pure half: the untrusted-evidence
 // envelope (bounds + the pre-parse escalation screen), the catalogue shape and
 // its shipped seed, the linear matchers (no regex ever comes from data), the
