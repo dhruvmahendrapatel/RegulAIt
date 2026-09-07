@@ -447,6 +447,20 @@ without approval, and discovery results that are not entitlement-filtered.
 
 # Addendum — external review by Codex (2026-09-07), findings F01–F08
 
+> **Sequenced version lives in the build plan.** This section records the *findings*; the bucketed,
+> sequenced treatment of them — together with the second review document (`PathForward.md`,
+> PF-01…PF-14) and the automated block AER-001…003 — is in
+> [ENTERPRISE_READINESS_PLAN.md](ENTERPRISE_READINESS_PLAN.md) §Addendum (2026-09-07). Two items
+> from that intake are corrections to **our own** records rather than new gaps:
+> **AER-002** — ADR-0103 is described as gating *"paid tool calls"*, but the contract it actually
+> enforces is a **project dispatch freeze on exhaustion**: an attributed tool priced `null` or `0`
+> is blocked too. The narrower wording appears in the ADR title, this file, `TESTING_CHECKLIST.md`
+> row 58 and `STATE.md`, and is tracked as **R1**.
+> **AER-003** — the reviewer's host violated the declared package manager; **this repo pins it
+> correctly** (`packageManager: pnpm@10.33.0`, CI installs `--frozen-lockfile` via an action that
+> reads that field). The real residue is that `README.md:69` documents no pinned clean-checkout
+> command; tracked as **R2**.
+
 The owner had another agent (Codex) review the project and hand over recommendations. Its own
 caveat is accurate and worth preserving: it read source but did **not** start the application, run
 tests, call providers, or inspect a deployment. Every finding below was therefore rechecked against

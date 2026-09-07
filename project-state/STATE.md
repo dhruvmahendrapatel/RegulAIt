@@ -21,6 +21,33 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-07 (later still) — two external review documents taken into the build plan.** The owner
+supplied an updated `codexInputs.md` (F01–F08 plus an automated block **AER-001…003** from two
+review runs) and a second document, `PathForward.md` (**PF-01…PF-14**, Waves 0–4), proposing
+RegulAIt be positioned as an AI security & governance **control plane** rather than a monolith.
+Both were rechecked against the tree rather than taken on trust, and the sequenced result is in
+[ENTERPRISE_READINESS_PLAN.md](../docs/product/ENTERPRISE_READINESS_PLAN.md) §Addendum.
+
+Three things that intake established. **(a) PF-01 — "bind approval to the exact action" — is P0 in
+that document and is already substantially built**: PathForward reviewed `271bdca`, which predates
+ADR-0104, so the plan records what ADR-0104 delivered and names the honest remaining delta (dual
+proposed/enforced digest recomputed pre-execution, envelope breadth, expiry/idempotency, coverage
+beyond the MCP path, the ABAC scope dial) instead of scheduling shipped work. **(b) AER-002 is a
+correction to us**: ADR-0103 is titled and described as gating *"paid tool calls"*, but what it
+enforces is a **project dispatch freeze** — an attributed tool priced `null`/`0` is blocked too, by
+deliberate decision. The narrow wording is in the ADR, PENDING, the checklist and this file; fixing
+it is **R1**. **(c) AER-003 was partly misattributed**: the repo pins `pnpm@10.33.0` and CI installs
+`--frozen-lockfile`; the reviewer's host ignored the pin. The genuine residue is the absence of a
+documented pinned clean-checkout command (**R2**).
+
+The plan also records what none of the three sequencing proposals can settle: whether to adopt the
+control-plane positioning at all, whether F03 needs true reservations, whether automatic quarantine
+may ever act without a human, and the **suite-gated** items (workload identity, artifact admission)
+whose `MODULE_REGISTRY.md` / `CAPABILITY_MAP.md` are not readable from this environment. Also
+noted: the plan's own Buckets 1–3 are stale at ADR-0036–0061-as-Proposed against today's ADR-0104,
+so reconciling them is listed as **R0** — the same "stale row misleads a reader" failure F08 caught
+in PENDING.
+
 **2026-09-07 (later) — B13b closed and retested: an approval is now bound to the arguments it was
 approved for.** ([ADR-0104](../docs/decisions/0104-approval-payload-binding.md), migration 0106.)
 F05's gap: approval lookup keyed on user/server/tool/status only, `approvals` had no arguments

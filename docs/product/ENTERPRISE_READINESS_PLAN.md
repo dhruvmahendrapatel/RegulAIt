@@ -137,3 +137,143 @@ The ADRs are independent decisions, but a sane build order maximizes salability 
 
 Status of each ADR is tracked in [docs/decisions/README.md](../decisions/README.md); this plan
 tracks the *bucketing*. When an ADR moves from Proposed → Accepted (i.e. built), update both.
+
+---
+
+# Addendum — external-review intake (2026-09-07)
+
+**Sources:** two documents from another agent — `codexInputs.md` (findings **F01–F08**, plus an
+automated enterprise-readiness block **AER-001…003** covering two review runs) and
+`PathForward.md` (**PF-01…PF-14**, a strategic recommendation to position RegulAIt as an AI
+security & governance *control plane*, with delivery Waves 0–4).
+
+**Both documents disclaim implementation authority, and this addendum inherits that.** Nothing
+here authorizes production designation, cloud spend, deployment, publishing, key rotation, or
+suite-contract changes. Bucketing below is a *proposal for owner triage*, not a commitment.
+
+> **Read the buckets above with care — they are stale.** §Bucket 1–3 were written 2026-08-01 and
+> describe ADRs 0036–0061 as *Proposed*. The tree is now at **ADR-0104**, and a substantial part of
+> that range has since been built and accepted (ADR-0040 ABAC, 0042 guardrails, 0043 egress guard
+> among them). This plan's own closing rule — update the bucketing when an ADR moves
+> Proposed → Accepted — has not been kept. **Reconciling §Bucket 1–3 against
+> `docs/decisions/README.md` is itself a task, listed as R0 below.** Until it is done, do not read
+> an unticked row above as evidence that something is unbuilt.
+
+## 1. Intake — verified state of every finding, as of HEAD `668f5f5`
+
+Each row was rechecked against the tree rather than accepted from the document.
+
+| Ref | Claim | Verified state |
+|---|---|---|
+| **F01** / PF-04 | Test gate not trustworthy | **PARTLY CLOSED.** One flake fixed (`0ebfabe`, unordered `db.select()` + `.at(-1)`). The intermittent `socket.destroySoon` remains, now correctly attributed to `@hono/node-server`, transitive via `@modelcontextprotocol/sdk@1.29.0`. `.at(-1)` sweep (86 sites) open. |
+| **F02** / AER-001 | Budget not enforced on the MCP path | **CLOSED — and runtime-verified here.** ADR-0103. Codex could not run the integration test (no disposable `DATABASE_URL` on its host) and correctly labelled it *runtime-unverified*; it has since been executed on this box — three full-suite runs plus row-level checks. AER-001's six acceptance items are met. |
+| **AER-002** | "Paid tool calls" wording ≠ implemented predicate | **DECISION RESOLVED, WORDING NOT.** ADR-0103 deliberately chose the broader contract: an exhausted project blocks attributed tools priced `null`/`0` too. But the ADR *title*, its commit subject, and this project's own status prose all say **"paid tool calls"**, which promises something narrower than what is enforced. **This is our wording error, and it is exactly the F08 disease.** → **R1**. |
+| **AER-003** | Verification host violates the pinned package manager | **PARTLY MISATTRIBUTED — corrected.** The repo *does* pin correctly (`packageManager: pnpm@10.33.0`; this container runs 10.33.0), and CI installs with `--frozen-lockfile` via `pnpm/action-setup@v4`, which reads that field — so the lockfile rewrite Codex saw was **its host ignoring the pin**, not a missing declaration. The legitimate residue is real though: `README.md:69` documents only `pnpm install && pnpm -r build` — no frozen lockfile, no corepack step, no single clean-checkout command. → **R2**. |
+| **F03** | Cap semantics under concurrency | **OPEN, by explicit ADR-0103 limitation.** Measured-spend, first-crossing-allowed; not a reservation. Needs a hold ledger, not another call site. |
+| **F04** | Secrets outside `audit_log` | **CLOSED** by ADR-0102 (51 columns, structural `information_schema` guard). Codex correctly flags it as *repository-reported, not independently rerun*. Its **extension is genuinely new and open**: exports, backups, traces, conversations were never assessed. → **R3**. Distinct from **S6** (content columns). |
+| **F05** / **PF-01** | Approval not bound to its payload | **CLOSED for the MCP tool path** (ADR-0104, migration 0106) — **but PF-01 asks for materially more.** See §2. |
+| **F06** | End-to-end journeys unproven | **OPEN.** Largely owner-gated (live provider creds). |
+| **F07** | Install / upgrade / recovery unvalidated | **OPEN.** Largely owner-gated. |
+| **F08** | Documentation contradictions | **MOSTLY CLOSED.** Stale S3-sink and copilot-applier rows struck; `STATE.md` front matter caught up. One item was **overstated by us**: `/app` and `/admin` do not 404 — they 302 to `/ui` and resolve 200. Marketing-claim items (guardrails as heuristics, training-provider as retrieval + classical classification) unassessed. |
+| **PF-02** | Cryptographic agent/workload identity | **OPEN, correctly observed.** `agents` is a governance record, not an authenticating identity; governed invocations act under a human `userId`. |
+| **PF-03** | Agent SRE: SLOs, breakers, kill switches, quarantine | **OPEN.** Note the collision it names itself: automatic runtime quarantine conflicts with the deliberate no-auto-revoke stance, and needs its own ADR. |
+| **PF-05** | Generalize policy intervention points + safe transforms | **OPEN.** Kernel exposes `allow`/`deny`/`require_approval` only. |
+| **PF-06** | Real isolation, task-scoped creds, compensation | **OPEN.** Correctly warns against calling an in-process permission check a sandbox. |
+| **PF-07** | MCP / supply-chain admission hardening | **PARTLY BUILT.** ADR-0097 admission scanning, ADR-0100 scheduled rescan, ADR-0101 federation exist. Delta: Unicode confusables, typosquat/collision analysis, signed publisher provenance, version/digest pinning, exfil-URL scanning of *results*, A2A agent-card scanning. |
+| **PF-08** | Portable enforcement SDKs / framework adapters | **OPEN.** A private TS API client exists; no framework middleware. |
+| **PF-09** | Decision BOM + AI BOM | **OPEN, ingredients present.** Hash-chained audit, WORM anchoring, traces, lineage, cost all exist but are not exportable as one verifiable per-decision bundle. |
+| **PF-10…PF-14** | Red-team orchestration, pluggable classifiers, artifact admission, AISVS control graph, AI SecOps | **OPEN.** All P2 in the source document. |
+
+## 2. PF-01 vs ADR-0104 — what is actually done, and the honest delta
+
+PathForward reviewed `271bdca`, which **predates ADR-0104** (`3add994`). PF-01 is therefore
+partly answered already, and the plan must not schedule it as greenfield.
+
+**Delivered by ADR-0104:** a canonical, key-sorted fingerprint over `{projectId, arguments}`;
+consent action-scoped by default with an explicit `tool` escape hatch; a **scrubbed** approver-facing
+preview; the executed digest on the audit row under either scope; single-use consumption preserved;
+dedup keyed on the digest so two payloads cannot collapse into one approval.
+
+**Still missing, and this is the real PF-01 backlog:**
+
+1. **Dual digest.** ADR-0104 stores one fingerprint. PF-01 wants **proposed** *and* **enforced**
+   digests, with the enforced one **recomputed immediately before execution** and a fail-closed
+   mismatch. Today nothing re-verifies between consumption and forwarding.
+2. **Envelope breadth.** The fingerprint covers `{projectId, arguments}`. PF-01's envelope also
+   binds **authenticated agent identity** (blocked on PF-02), run/stage, **policy and config
+   versions**, target, and any policy transform (blocked on PF-05).
+3. **Expiry and idempotency.** Approvals have no TTL and no defined retry semantics.
+4. **Scope beyond MCP.** Binding covers the MCP tool path only. Connector and model-dispatch
+   approvals are unbound.
+5. **ABAC scope dial.** `abac_policies` has no `approval_scope`; a policy-driven pause defaults to
+   `action` (fail-closed, correct) with no way to elect `tool`.
+
+## 3. Proposed bucketing
+
+### R — Reconciliation (do first; cheap, and everything else reads these files)
+
+| Ref | Item |
+|---|---|
+| **R0** | Reconcile §Bucket 1–3 against `docs/decisions/README.md`; mark built ADRs. Without this the plan actively misleads — the failure F08 already caught once. |
+| **R1** | Fix the **"paid tool calls"** wording (AER-002): ADR-0103 title/prose, commit-message legacy, `PENDING.md`, `TESTING_CHECKLIST.md` row 58, `STATE.md`. The enforced contract is a **project dispatch freeze on exhaustion**, not a paid-call-only gate. |
+| **R2** | One documented, pinned clean-checkout command (corepack + `--frozen-lockfile` + build + typecheck + test) that leaves `git status --short` clean; correct `README.md:69`. Closes AER-003's real residue. |
+| **R3** | Assess F04's untouched surfaces — exports, backups, traces, conversations — with synthetic secrets. Assess before asserting either way. |
+
+### NOW — trustworthy evidence, then trusted actions (PathForward Waves 0–1)
+
+| Ref | Item | Note |
+|---|---|---|
+| **N1** | Close `socket.destroySoon`; make a failing assertion **and** an unhandled error each fail the gate | F01 / PF-04 / Wave 0. The gate is the prerequisite for trusting every claim below it. |
+| **N2** | `.at(-1)` sweep over raw `db.select()` without `ORDER BY` (86 candidate sites) | F01. Two live flakes found this way already. |
+| **N3** | PF-01 delta items 1–3: dual proposed/enforced digest with pre-execution recompute, expiry, idempotency | Builds directly on ADR-0104; the highest-value increment available. |
+| **N4** | F03 — decide and document cap semantics; test at the boundary | Pairs with N3; a reservation ledger is a *decision*, not a given. |
+| **N5** | Product's own security CI: SAST, secret scanning, dependency/container scanning, SBOM | PF-04 / Wave 0. |
+
+### CORE — before a customer pilot
+
+| Ref | Item | Note |
+|---|---|---|
+| **C1** | PF-02 workload identity + constrained delegation | **Suite-gated** — cross-module; needs the suite ADR/capability-map process. Unblocks PF-01 item 2 and PF-08. |
+| **C2** | PF-03 SRE: SLOs, breakers, kill switches, OTel **metrics**, durable notifications | Note: escalations currently notify nobody. Automatic quarantine needs its own ADR (collides with the deliberate no-auto-revoke stance) — ship observe → recommend → auto in that order. |
+| **C3** | PF-09 Decision BOM v1 | Ingredients exist; this is assembly + offline verification. |
+| **C4** | PF-07 supply-chain delta: confusables, typosquat, publisher provenance, digest pinning | Extends ADR-0097/0100/0101. |
+| **C5** | F06 + F07 journeys, install/upgrade/restore proof | Owner-gated on live creds and a separate box. |
+| **C6** | PF-05 policy intervention points + bounded `transform` | Prerequisite for PF-01 item 2's transform binding. |
+
+### DEFERRED — real, sequenced behind the above
+
+PF-06 (isolation, task-scoped credentials, compensation — **do not ship anything called a sandbox
+until there is a real OS/runtime boundary**), PF-08 (SDKs/adapters — gated on C1), PF-10 (red-team
+orchestration), PF-11 (classifier providers), PF-12 (artifact admission — **suite-gated**, model
+runtime ownership may sit in the LLM module), PF-13 (AISVS control graph), PF-14 (AI SecOps,
+sequence analytics). **S6** (content columns) and the marketing-claim review from F08 also sit here.
+
+## 4. Three competing orders, and what to actually do
+
+This project now holds three sequencing proposals that optimize for different things:
+
+- **This plan (2026-08-01)** — *salability*: identity → BYOC → security items → differentiators.
+- **Codex** — *pilot trustworthiness*: test gate → governance enforcement → secrets → journeys →
+  install → docs.
+- **PathForward** — *strategic positioning*: Wave 0 evidence → Wave 1 trusted actions → supply
+  chain → ecosystem → SecOps.
+
+They agree on more than they differ: **all three put making the evidence trustworthy before
+building on top of it**, and Codex's order and PathForward's Wave 0 are nearly the same list.
+The recommendation is **R → NOW → CORE**, which follows Codex/PathForward, with this plan's
+salability ordering used to break ties *within* CORE — because an unreliable gate makes every
+salability claim above it unfalsifiable, and R0/R1 make the planning documents themselves honest
+before anyone sequences from them.
+
+**Owner decisions this addendum cannot make:** whether to adopt the control-plane positioning at
+all (PathForward is a *proposal*); whether F03 needs true reservations or a documented threshold;
+whether automatic quarantine may ever act without a human; and every suite-gated item (C1, PF-12),
+which needs `MODULE_REGISTRY.md` / `CAPABILITY_MAP.md` — **not readable from this environment**.
+
+## 5. Standing constraint, restated
+
+PathForward's own definition-of-done forbids "enterprise-ready", "complete", "certified" or
+"production-ready" claims without fresh executable evidence. That agrees with this repo's standing
+guardrail: **nothing gets a production designation, and nothing deploys to one, without the owner's
+direct explicit sign-off in that session.** Wave 4's language about "enterprise deployment" does not
+alter it.
