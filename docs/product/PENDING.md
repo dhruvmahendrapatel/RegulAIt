@@ -487,7 +487,16 @@ reservation — that is F03, and it needs a hold ledger rather than another call
 Approval lookup keys only on user/server/tool/status (`governed-evaluate.ts:201-212`); `approvals`
 has no arguments column (`schema.ts:1148-1220`); queueing and the audit row both omit the payload.
 An approver signs off on "may call `write_note`" and the caller may execute it with entirely
-different arguments. `mcp-proxy.test.ts` currently *passes* while doing exactly that.
+different arguments.
+
+**One claim in an earlier revision of this entry was wrong and is withdrawn**: I wrote that
+`mcp-proxy.test.ts` "currently passes while doing exactly that". It does not. That test queued its
+approval with `{text:"hi"}` and executed with `{text:"hi"}` — matching arguments — and its retry
+with `{text:"again"}` was refused by **single-use consumption**, not by any payload check. So the
+existing suite never exercised the hole in either direction. The hole is nonetheless real: a
+neutralised-binding control showed an approval signed for `{text:"safe"}` executing
+`{text:"exfiltrate"}`. I asserted a test's behaviour from its shape instead of reading what it
+passed in — the same error as M-030, one file over.
 
 **Two compensating controls the review missed**, which bound the exposure to a one-shot swap per
 approval cycle rather than unlimited reuse: consumption is atomic and single-use, and
