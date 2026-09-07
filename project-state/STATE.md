@@ -1,6 +1,6 @@
 ---
-phase: competitive-queue-complete-l1-through-l24
-last_updated: 2026-08-13
+phase: codex-review-hardening-f02-closed-f05-next
+last_updated: 2026-09-07
 active_epics: []
 completed_epics: [EPIC-01, EPIC-02, EPIC-03, EPIC-04, EPIC-05, EPIC-06]
 open_questions_open: []
@@ -20,6 +20,41 @@ roadmap: ../docs/product/ROADMAP.md
 > handed its successor a file describing a project with "no workload to deploy".
 
 ## Where we are (read this paragraph first)
+
+**2026-09-07 — B13a closed and retested: paid MCP tool calls are now gated on the project
+budget, and my own retest caught a flake the build agent's run did not.**
+([ADR-0103](../docs/decisions/0103-mcp-path-project-budget-gate.md), no migration.) An outside
+review (Codex, findings F01-F08) was assessed against the tree; 7 of 8 checked claims held, F04
+was stale because ADR-0102 closed it the day before. **F02 was the live one**: pillar 5's
+`preDispatchProjectGate` had exactly ONE production call site — the model/connector dispatch path
+— so the MCP tool-call path was **priced and attributed but never gated**. Setting
+`x-regulait-project-id` and looping `tools/call` ran unbounded paid spend against an exhausted
+project, and the overspend then surfaced as a 409 on the *model* path: the symptom appearing
+somewhere other than the cause. The gate went into `executeGovernedToolCallInner` — the ONE shared
+primitive both entry points funnel through — sited exactly as §8.4 PII and ADR-0023's read_only
+enforcement already are, so pillar 7's delegated worker inherits it structurally rather than by
+anyone remembering. The gate is **reused, not reimplemented**, which carries the ADR-0027 ceiling,
+`overageActive`, ADR-0021's `budgetHardBlockPct`, strictest-wins `warn_only`, and the escalation
+into the one approvals queue. Unattributed calls are unchanged and now **defined** rather than
+merely tolerated.
+
+**The retest is the part worth recording.** Three full runs of the identical commit: the agent's
+170/2664/9-skips clean; mine **2663 passed / 1 failed** with an unhandled error, exit 1; mine again
+**2664/0**, zero unhandled errors, exit 0. Two independent lessons. (a) The one failure was NOT
+B13a and NOT the known `destroySoon` issue — `use-cases-eu-tier.test.ts` selected from `audit_log`
+with no `ORDER BY` and then indexed `.at(-1)`; Postgres guarantees no row order without one. Fixed
+(`0ebfabe`); certification run after the fix: **170 files / 2664 passed + 9 MinIO skips, 0 failed,
+0 unhandled errors**. (b) **I withdrew one of my own earlier corrections**: I had edited PENDING to
+say the `socket.destroySoon` attribution to `@hono/node-server` was wrong "because that package is
+not in this repo at all". It IS — transitively, via `@modelcontextprotocol/sdk@1.29.0`
+(`pnpm-lock.yaml:4223`). A direct-dependency check missed a transitive one, and I published the
+negative. See **M-030**. Net: the suite had **two** unrelated flake sources and §5 had been
+blaming one for both. Also corrected: `/app` and `/admin` do **not** 404 as I had said — they 302
+to `/ui` and resolve 200, so that F08 item is cosmetic banner staleness, not a broken link.
+
+Still open: **F05** (approval payload binding — designed and briefed, build not yet started),
+**S6**, F01's exit-code work and the `.at(-1)` sweep (86 sites, most benign), F03 (the gate is
+measured-spend/first-crossing-allowed, not a reservation), and PR #108's description.
 
 **2026-09-06 (later) — B12 closed and retested: the credential leak that the B10 retest found
 is shut, and the ledger says exactly how far.** ([ADR-0102](../docs/decisions/0102-operator-prose-credential-scrub.md),

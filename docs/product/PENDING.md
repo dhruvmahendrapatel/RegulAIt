@@ -442,3 +442,78 @@ where that drifts.
 
 **Two of their choices we deliberately refuse**: federated entries inheriting local access
 without approval, and discovery results that are not entitlement-filtered.
+
+---
+
+# Addendum — external review by Codex (2026-09-07), findings F01–F08
+
+The owner had another agent (Codex) review the project and hand over recommendations. Its own
+caveat is accurate and worth preserving: it read source but did **not** start the application, run
+tests, call providers, or inspect a deployment. Every finding below was therefore rechecked against
+the tree at HEAD `2c90396` (102 ADRs) before being acted on. **7 of the 8 held**; the eighth was
+stale by one day.
+
+| # | Verdict on recheck | State |
+| --- | --- | --- |
+| **F01** — untrustworthy test gate | **TRUE**, already ours (§5 above) | **OPEN**, and now better understood — see §5's correction |
+| **F02** — budget not enforced on MCP path | **TRUE** | **CLOSED** — [ADR-0103](../decisions/0103-mcp-path-project-budget-gate.md) |
+| **F03** — cap semantics under concurrency | **TRUE**, design question not defect | **OPEN** — named honestly in ADR-0103's limits |
+| **F04** — secrets outside `audit_log` | **STALE** — S5 closed 2026-09-06 by ADR-0102 | Its *extension* is new and open: exports, backups, traces, conversations were never assessed |
+| **F05** — approval not bound to payload | **PARTLY TRUE** | **OPEN** — designed and briefed, build not started |
+| **F06** — prove end-to-end journeys | verification programme, not a finding | **OPEN**, largely owner-gated |
+| **F07** — install/upgrade/recovery | verification programme, not a finding | **OPEN**, largely owner-gated |
+| **F08** — documentation contradictions | 4 of 5 **TRUE**, 1 overstated by *me* | Partly closed below |
+
+## F02 — closed 2026-09-07 (ADR-0103, no migration)
+
+`preDispatchProjectGate` had **exactly one production call site** (`agents-connectors.ts`, the
+model/connector dispatch). MCP tool calls were priced (`mcp_tools.price_per_call_usd ??
+mcp_servers.price_per_call_usd`) and attributed (a `usage_events` row carrying `projectId`, which
+`projectSpendUsd` reads) — **metered and attributed, but never gated**. Two properties made it
+worse than a plain missing check: the overspend surfaced later as a 409 on the *model* path, so the
+path that overspent was the one path that never complained; and nothing in the repo asserted it.
+
+Fixed in the one shared primitive both entry points funnel through, so the direct proxy route and
+pillar 7's delegated worker inherit it structurally. Proof is stronger than an error code: the test
+upstream counts **both** HTTP requests and tool-handler invocations and every blocked case asserts a
+zero delta on both. Non-vacuity measured — 5 of 8 tests redden under a neutralised gate, and the 3
+that correctly stay green are the ones asserting *unchanged* behaviour.
+
+**Residue, stated not hidden**: this is a measured-spend, **first-crossing-allowed** gate, not a
+reservation — that is F03, and it needs a hold ledger rather than another call site.
+
+## F05 — open, designed, not built
+
+Approval lookup keys only on user/server/tool/status (`governed-evaluate.ts:201-212`); `approvals`
+has no arguments column (`schema.ts:1148-1220`); queueing and the audit row both omit the payload.
+An approver signs off on "may call `write_note`" and the caller may execute it with entirely
+different arguments. `mcp-proxy.test.ts` currently *passes* while doing exactly that.
+
+**Two compensating controls the review missed**, which bound the exposure to a one-shot swap per
+approval cycle rather than unlimited reuse: consumption is atomic and single-use, and
+`data_scope_rules` (`argPath`/`allowedValues`) constrain permissible values **before** approval
+satisfaction and fail closed. The real defect is that **no ADR states the intended semantics**, and
+neither the queue row nor the audit row records the payload — so the approver decides blind and
+there is no forensic record of the arguments actually executed.
+
+**Decided design** (action-scoped consent by default, explicit `tool` escape hatch, digest over
+canonical `{projectId, arguments}`, scrubbed approver-facing preview reusing ADR-0099's scrubber,
+executed digest on the audit row). Two traps for whoever builds it: the "reuse an existing pending
+entry" dedup must also key on the digest or two payloads collapse into one approval; and legacy
+approved rows with a NULL digest must fail closed under action scope, which is a real upgrade-day
+behaviour change.
+
+## F08 — documentation, partly closed
+
+- **CLOSED**: PENDING's stale rows on the S3 Object-Lock sink ("built but not wired" — contradicted
+  by `audit-chain.ts`) and the copilot diff-applier ("nothing applies proposals" — contradicted by
+  B8c). Both sat inside a dated inventory that *does* carry a supersession disclaimer, and an
+  external reviewer was misled anyway. **That is the finding**: the disclaimer is not working.
+- **CLOSED**: `STATE.md` front matter was `2026-08-13` against a narrative current to `2026-09-06`.
+- **CORRECTED, and the correction is mine to own**: I reported that `boot.ts` prints `/app` and
+  `/admin` which "now 404". **They do not** — both 302 to `/ui` and resolve 200. The item is real
+  but cosmetic: a stale boot banner, not a broken link. I asserted the stronger claim without
+  probing it.
+- **Not assessed**: the marketing-claim items (guardrails as heuristics, training-provider as
+  retrieval + classical classification rather than local transformer training). Both look right on
+  their face and neither is a code defect.

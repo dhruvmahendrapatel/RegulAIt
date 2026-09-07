@@ -363,3 +363,39 @@ was incomplete. Nothing was lost only because the work had been pushed, so
 before writing any file, establish whether it already exists. When an artifact
 references another by name, that is evidence FOR its existence — go look for it
 before concluding the reference is false.**
+
+## M-030 (2026-09-07) — I "corrected" a right attribution into a wrong one by checking only direct dependencies
+
+PENDING §5 recorded that the suite's `TypeError: socket.destroySoon is not a
+function` originated in `@hono/node-server`. In an earlier session I decided that
+was a misattribution, and edited the file to say so with a flat factual claim:
+*"that package is not in this repo at all."* I had checked the workspace
+`package.json` files, found no `hono`, and stopped.
+
+It is in the repo. It is a **transitive** dependency of
+`@modelcontextprotocol/sdk@1.29.0` (`pnpm-lock.yaml:4223`) — which is exactly why
+no workspace manifest mentions it. A single `grep` of the lockfile, or one
+`pnpm why`, would have shown it. Instead the stack frame proved it during the
+B13a retest: `Timeout.forceClose (@hono/node-server/dist/index.mjs:390:14)`.
+
+Two distinct failures, and the second is the worse one. First, I searched the
+wrong surface — direct dependencies are a subset of what is installed, so their
+absence proves nothing about presence. Second, and this is the real error, I
+published a **universal negative** ("not in this repo at all") on the strength of
+one narrow check, and I published it as a *correction*, which carries more
+authority than an ordinary claim: it tells every later reader that the question
+was examined and settled. A wrong correction is worse than the wrong thing it
+replaced, because it forecloses the check.
+
+The same shape appeared twice more in the same review. I told the owner
+`boot.ts`'s `/app` and `/admin` banners "now 404" — they 302 to `/ui` and resolve
+200; I had inferred the consequence from the ADR that removed the routes instead
+of issuing the request. Both claims were about observable runtime behaviour, and
+both would have cost one command.
+
+**Rule: to claim something is ABSENT, search the surface where it would actually
+appear — for a dependency that is the lockfile or `pnpm why`, not the manifests.
+Never assert a universal negative from one narrow check. And hold a CORRECTION to
+a higher standard of evidence than the claim it overturns, because it is read as
+settled: verify it directly, and if the direct check is cheap (one command, one
+request), run it rather than reasoning to the consequence.**
