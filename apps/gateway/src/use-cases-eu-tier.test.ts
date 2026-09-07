@@ -151,11 +151,19 @@ async function pendingSignoff(instanceId: string) {
     );
 }
 
+// ORDER BY is load-bearing, not decoration: the assertions below index this
+// with `.at(-1)` to reach the NEWEST screening. An unordered select returns
+// heap order, which is usually insertion order and occasionally is not — that
+// made the v2-recompute assertion fail intermittently against an otherwise
+// identical tree. The two screenings are written by two separate requests, so
+// `at` strictly increases and ascending order makes `.at(-1)` mean what the
+// assertions already assumed it meant.
 const screeningAudits = (useCaseId: string) =>
   db
     .select()
     .from(auditLog)
-    .where(and(eq(auditLog.objectId, useCaseId), eq(auditLog.ruleId, "use-case-eu-tier")));
+    .where(and(eq(auditLog.objectId, useCaseId), eq(auditLog.ruleId, "use-case-eu-tier")))
+    .orderBy(auditLog.at);
 
 beforeAll(async () => {
   db = createDb(DATABASE_URL);
