@@ -21,6 +21,46 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-07 (later) — B13b closed and retested: an approval is now bound to the arguments it was
+approved for.** ([ADR-0104](../docs/decisions/0104-approval-payload-binding.md), migration 0106.)
+F05's gap: approval lookup keyed on user/server/tool/status only, `approvals` had no arguments
+column, and neither the queue row nor the audit row recorded the payload — so an approver signed
+"may call `write_note`" and the caller could execute it with anything. **Decided semantics
+(action-scoped consent by default, `tool` as an explicit escape hatch)**, because pillar 1 is
+default-deny and strictest-wins is this codebase's idiom; the real defect was that *no ADR said
+which it was*. Consent is now a sha256 over canonical `{projectId, arguments}`, the approver reads
+a **scrubbed** preview of the payload, and the executed digest lands on the audit row under either
+scope — closing the forensic half independently of the consent half.
+
+**Two things the agent did better than my brief.** I told it to write a canonicalizer in
+`packages/shared`; it found ADR-0060's existing `canonicalJson` and reused that plus ADR-0099's
+`scrubAuditDetail`, so there is genuinely ONE of each rather than the second implementation I was
+trying to prevent. And it fixed a pre-existing `.limit(1)` with **no `ORDER BY`** in the approval
+lookup — the same defect class as the flake found earlier the same day, sitting in the code path it
+was already editing.
+
+**Retested: 171 files / 2674 passed + 9 MinIO skips, 0 failed, 0 unhandled errors**, independently
+reproduced on a fresh DB, plus a clean rebuild and a **repo-wide** `tsc --noEmit` — the last of
+which matters because the agent's own near-miss (an interface edit that silently dropped
+`approverUserId`) passed both the gateway suite and a *filtered* typecheck against a stale
+`policy-kernel/dist`, and only a repo-wide check caught it. Verified further **by the rows**, not
+by status codes: a call signed for `{text:"safe"}` attempting `{text:"exfiltrate"}` sits **pending**
+rather than consumed; two identical calls share a digest and the second still re-queues (single-use
+intact); the same arguments in a different project carry a **different** digest; and a payload
+carrying a synthetic secret stored `[redacted:…]` in the preview while the call still **executed** —
+the digest is taken pre-scrub, so redaction cannot move consent identity.
+
+**A correction I own.** My brief asserted that `mcp-proxy.test.ts` "passes while doing exactly
+that". It does not — that test queued and executed with the *same* `{text:"hi"}`, and its retry was
+refused by single-use consumption, not by any payload check. The suite never exercised the hole in
+either direction. The finding stands (the neutralised-binding control shows it plainly), but I
+described a test from its shape instead of reading what it passed in. **M-031**, a repeat of M-030
+inside one session.
+
+New residue recorded: **an ABAC-driven pause has no configurable scope** — with no matching
+`approval_rules` row the default `action` applies (fail-closed, correct), but `abac_policies` has
+no scope column, so the `tool` reading is unavailable to a policy-driven pause.
+
 **2026-09-07 — B13a closed and retested: paid MCP tool calls are now gated on the project
 budget, and my own retest caught a flake the build agent's run did not.**
 ([ADR-0103](../docs/decisions/0103-mcp-path-project-budget-gate.md), no migration.) An outside

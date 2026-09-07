@@ -399,3 +399,36 @@ Never assert a universal negative from one narrow check. And hold a CORRECTION t
 a higher standard of evidence than the claim it overturns, because it is read as
 settled: verify it directly, and if the direct check is cheap (one command, one
 request), run it rather than reasoning to the consequence.**
+
+## M-031 (2026-09-07) — the same error as M-030, three hours later, in the same review
+
+Writing the F05 brief I stated that `mcp-proxy.test.ts` "currently passes while
+doing exactly that" — executing arguments an approver never signed — and put the
+same claim into `PENDING.md`. It is false. That test queues its approval with
+`{text:"hi"}` and executes with `{text:"hi"}`; its retry with `{text:"again"}` is
+refused by **single-use consumption**, not by any payload check. The suite never
+exercised the hole in either direction. The build agent read the file, found the
+claim wrong, and added a genuinely mismatched attempt instead of editing
+assertions to match my description — which is the only reason the new test proves
+anything.
+
+The finding itself was real, and that is what makes this worth its own entry: a
+true conclusion reached through a fabricated intermediate. I inferred what the
+test demonstrated from its *shape* — an approval, then two calls with different
+arguments — without reading the arguments the first call passed. Had the agent
+trusted the brief, it would have written a test that asserted my story rather
+than the behaviour.
+
+This is M-030's rule (published a claim I had not directly checked, in a form
+that reads as settled) recurring **within the same session in which I wrote
+M-030**, against a file I had open. Writing the rule down did not transfer it,
+because I filed M-030 as being about *dependency resolution* rather than about
+the move underneath it: reasoning to what an artifact must contain instead of
+reading it.
+
+**Rule: when a brief or a status file asserts what a specific test, file or route
+DOES, quote the lines that show it — reading them at the moment of writing, not
+recalling them. If the claim is worth stating as fact to another agent, it is
+worth the one command that confirms it. And when logging a mistake, name the
+MOVE, not the domain: "I did not check the lockfile" is a fact; "I asserted
+content from structure" is the rule.**

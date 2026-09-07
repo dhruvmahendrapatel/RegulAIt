@@ -459,7 +459,7 @@ stale by one day.
 | **F02** — budget not enforced on MCP path | **TRUE** | **CLOSED** — [ADR-0103](../decisions/0103-mcp-path-project-budget-gate.md) |
 | **F03** — cap semantics under concurrency | **TRUE**, design question not defect | **OPEN** — named honestly in ADR-0103's limits |
 | **F04** — secrets outside `audit_log` | **STALE** — S5 closed 2026-09-06 by ADR-0102 | Its *extension* is new and open: exports, backups, traces, conversations were never assessed |
-| **F05** — approval not bound to payload | **PARTLY TRUE** | **OPEN** — designed and briefed, build not started |
+| **F05** — approval not bound to payload | **PARTLY TRUE** | **CLOSED** — [ADR-0104](../decisions/0104-approval-payload-binding.md), migration 0106 |
 | **F06** — prove end-to-end journeys | verification programme, not a finding | **OPEN**, largely owner-gated |
 | **F07** — install/upgrade/recovery | verification programme, not a finding | **OPEN**, largely owner-gated |
 | **F08** — documentation contradictions | 4 of 5 **TRUE**, 1 overstated by *me* | Partly closed below |
@@ -482,7 +482,7 @@ that correctly stay green are the ones asserting *unchanged* behaviour.
 **Residue, stated not hidden**: this is a measured-spend, **first-crossing-allowed** gate, not a
 reservation — that is F03, and it needs a hold ledger rather than another call site.
 
-## F05 — open, designed, not built
+## F05 — closed 2026-09-07 (ADR-0104, migration 0106)
 
 Approval lookup keys only on user/server/tool/status (`governed-evaluate.ts:201-212`); `approvals`
 has no arguments column (`schema.ts:1148-1220`); queueing and the audit row both omit the payload.
@@ -505,12 +505,27 @@ satisfaction and fail closed. The real defect is that **no ADR states the intend
 neither the queue row nor the audit row records the payload — so the approver decides blind and
 there is no forensic record of the arguments actually executed.
 
-**Decided design** (action-scoped consent by default, explicit `tool` escape hatch, digest over
-canonical `{projectId, arguments}`, scrubbed approver-facing preview reusing ADR-0099's scrubber,
-executed digest on the audit row). Two traps for whoever builds it: the "reuse an existing pending
-entry" dedup must also key on the digest or two payloads collapse into one approval; and legacy
-approved rows with a NULL digest must fail closed under action scope, which is a real upgrade-day
-behaviour change.
+**Built as decided**: action-scoped consent by default with an explicit `tool` escape hatch; consent
+is a sha256 over canonical `{projectId, arguments}` reusing **ADR-0060's `canonicalJson`** and
+**ADR-0099's `scrubAuditDetail`** rather than adding a second canonicalizer or a second redactor;
+the approver reads a scrubbed preview; the executed digest lands on the audit row under either
+scope, closing the forensic half independently of the consent half. Both traps were handled: the
+pending-entry dedup keys on the digest under action scope (and deliberately not under `tool`), and
+strictest-wins runs over the rules that *actually matched*, using the kernel's own predicate.
+
+Verified by the rows rather than by status codes: a call signed for `{text:"safe"}` attempting
+`{text:"exfiltrate"}` sits **pending**, not consumed; two identical calls share a digest and the
+second still re-queues; the same arguments under a different project carry a **different** digest;
+a payload with a synthetic secret stores `[redacted:…]` in the preview while the call still
+executes — the digest is pre-scrub, so redaction cannot move consent identity.
+
+**Residue, stated not hidden.** (a) Legacy `approved` rows with a NULL digest do not satisfy an
+action-scoped call — they re-queue, self-healing within one cycle. Backfilling was rejected as
+manufacturing a consent no human gave. (b) **NEW — an ABAC-driven pause has no configurable
+scope**: with no matching `approval_rules` row the strictest-wins default `action` applies
+(fail-closed, correct), but `abac_policies` has no scope column, so an operator who legitimately
+wants the `tool` reading for a policy-driven pause must author a parallel approval rule. (c) The
+digest binds the arguments, not the state they act on.
 
 ## F08 — documentation, partly closed
 
