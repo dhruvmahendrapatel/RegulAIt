@@ -1105,6 +1105,23 @@ async function dispatchRunNodeInner(
             };
             traceStatus = "guardrail_blocked";
             break;
+          // ADR-0103: the run's PROJECT budget (pillar 5) is exhausted, so a
+          // paid tool call is refused pre-call — nothing executed, nothing
+          // billed. Surfaced exactly like a governed denial so a delegated
+          // worker cannot spend what a direct caller cannot. Distinct from the
+          // run/node budget gated by `gateNodeStartBudget` above: that is the
+          // run's own ledger, this is the project's.
+          case "budget_blocked":
+            block = {
+              type: "tool_result",
+              toolUseId: tc.id,
+              content:
+                `blocked by governance: ${toolOut.error}` +
+                (toolOut.detail ? ` — ${toolOut.detail}` : ""),
+              isError: true,
+            };
+            traceStatus = "budget_blocked";
+            break;
           case "approval_required":
             block = {
               type: "tool_result",

@@ -67,6 +67,7 @@ import {
   enforcePII,
   piiCategoryList,
   piiWithheldMarker,
+  preDispatchProjectGate,
   projectMcpMode,
   projectPiiMode,
   type PiiMode,
@@ -158,7 +159,13 @@ export type GovernedToolCallOutcome =
    * caller — and the audit trail — can tell the three apart. */
   | { kind: "guardrail_blocked"; reason: string; guardrails: DispatchGuardrails }
   | { kind: "approval_required"; approvalId: string; decision: Decision }
-  | { kind: "approval_consumed_race"; approvalId: string };
+  | { kind: "approval_consumed_race"; approvalId: string }
+  /** ADR-0103: the ATTRIBUTED project's pillar-5 budget is exhausted, so this
+   * paid tool call may not run. Distinct from `denied` (entitlement) and from
+   * the run/node budget the orchestrator enforces separately — this is the
+   * PROJECT ledger, and it carries the same status/error the model path
+   * returns so the two surfaces name the same condition identically. */
+  | { kind: "budget_blocked"; status: number; error: string; detail?: string };
 
 /** §8.4 PII outcome on an MCP tool call. COUNTS ONLY — inputHits/outputHits are
  * per-category counts, never the matched substrings (the same contract the
@@ -217,13 +224,19 @@ export async function executeGovernedToolCall(
       outcome.kind === "denied" ||
       outcome.kind === "pii_blocked" ||
       outcome.kind === "guardrail_blocked" ||
+      // ADR-0103: a project-budget block is a REFUSAL, so it closes a `denied`
+      // span carrying its reason — same treatment as pii_blocked, never an
+      // absent span.
+      outcome.kind === "budget_blocked" ||
       outcome.kind === "approval_required";
     const reason =
       outcome.kind === "denied"
         ? outcome.decision.reason
         : outcome.kind === "pii_blocked" || outcome.kind === "guardrail_blocked"
           ? outcome.reason
-          : outcome.kind === "approval_required"
+          : outcome.kind === "budget_blocked"
+            ? `${outcome.error}${outcome.detail ? `: ${outcome.detail}` : ""}`
+            : outcome.kind === "approval_required"
             ? `tool call requires approval '${outcome.approvalId}' before it may run`
             : outcome.kind === "approval_consumed_race"
               ? `approval '${outcome.approvalId}' was already consumed`
@@ -366,6 +379,63 @@ async function executeGovernedToolCallInner(
           decision: { effect: "deny", ruleId: "mcp-default-mode", ruleChain: [], reason },
         };
       }
+    }
+
+    // ADR-0103 — PILLAR-5 PROJECT BUDGET, MCP path. The tool-call path was
+    // priced and attributed but never gated: an attributed `tools/call` loop
+    // could run unbounded PAID spend against an exhausted project, and the
+    // overspend then surfaced as a 409 on the MODEL path — the symptom showing
+    // up somewhere other than the cause. The gate is sited HERE, in the one
+    // shared primitive, exactly as §8.4 PII and the ADR-0023 mcpDefaultMode
+    // enforcement above are, so BOTH entry points (the direct proxy route and
+    // pillar 7's delegated worker loop) inherit it from one place — a
+    // delegated worker can never bypass what a direct caller cannot.
+    //
+    // ORDERING. Entitlement deny and the compliance read_only posture stay
+    // ahead of it: they are categorical and cheaper, and no budget makes a
+    // forbidden call permissible. Budget beats approval QUEUEING, though —
+    // piling a pending approval onto the queue for a call that cannot run is
+    // noise for the approver. It is strictly before the approval is consumed,
+    // before PII/guardrail work, and before the upstream is ever contacted, so
+    // a budget-blocked call executes nothing, consumes nothing and bills
+    // nothing.
+    //
+    // The gate itself is REUSED, not reimplemented: `preDispatchProjectGate`
+    // already carries the ADR-0027 compliance ceiling (min(project budget,
+    // framework ceiling), capping unbudgeted projects too), the sanctioned
+    // `overageActive` overage, ADR-0021's budgetHardBlockPct, warn_only vs
+    // block with strictest-wins from the cascade, and the escalation into the
+    // one approvals queue with its audit row. All of it carries over here
+    // unchanged — that is the point of reusing it.
+    //
+    // UNATTRIBUTED calls (projectId null) are unchanged and pass straight
+    // through: the gate returns ok for a null project, and the call meters into
+    // the disclosed ADR-0019/0024 Unattributed bucket. That is the DEFINED
+    // treatment, not an oversight — a null-project row can never belong to a
+    // project ledger, so there is no project budget for it to have exceeded.
+    const projectBudget = await preDispatchProjectGate(db, projectId, userId);
+    if (!projectBudget.ok) {
+      await db.insert(auditLog).values({
+        userId,
+        serverId,
+        toolName,
+        detail: {
+          phase: "project-budget",
+          projectId,
+          toolKind: kind,
+          pricePerCallUsd,
+        },
+        effect: "deny",
+        ruleId: "project-budget-cap",
+        ruleChain: [],
+        reason: `tool '${toolName}' blocked: ${projectBudget.error} — ${projectBudget.detail ?? "project budget exhausted"}`,
+      });
+      return {
+        kind: "budget_blocked",
+        status: projectBudget.status,
+        error: projectBudget.error,
+        ...(projectBudget.detail ? { detail: projectBudget.detail } : {}),
+      };
     }
 
     if (decision.effect === "require_approval") {
@@ -1028,6 +1098,16 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
         // never a fabricated empty success, and CATEGORIES only in the message.
         case "guardrail_blocked":
           throw new McpError(ErrorCode.InvalidRequest, `Denied by policy: ${outcome.reason}`);
+        // ADR-0103 pillar-5 block: the attributed project's budget is
+        // exhausted, so nothing ran, nothing was consumed and nothing billed.
+        // The message names the same error the model path returns (409
+        // project_budget_exceeded) so an operator reading either surface sees
+        // one condition, not two.
+        case "budget_blocked":
+          throw new McpError(
+            ErrorCode.InvalidRequest,
+            `Denied by policy: ${outcome.error}` + (outcome.detail ? ` — ${outcome.detail}` : ""),
+          );
         case "approval_required": {
           // name the approver by display name when the kernel carried one — the
           // approval id keeps the full UUID (a caller retries with it)
