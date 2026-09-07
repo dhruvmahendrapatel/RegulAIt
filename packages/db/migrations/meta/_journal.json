@@ -736,6 +736,13 @@
       "when": 1785040000000,
       "tag": "0105_mcp_registry_federation",
       "breakpoints": true
+    },
+    {
+      "idx": 106,
+      "version": "7",
+      "when": 1785041000000,
+      "tag": "0106_approval_payload_binding",
+      "breakpoints": true
     }
   ]
 }

@@ -1097,6 +1097,15 @@ export const approvalRules = pgTable(
     deployMode: text("deploy_mode", { enum: ["hosted", "byoc", "air_gapped"] }),
     toolName: text("tool_name"),
     writeOnly: boolean("write_only").notNull().default(false),
+    // ADR-0104 (migration 0106): what this rule's consent is BOUND TO.
+    // 'action' (the default, and every pre-0106 row) binds an approval to the
+    // exact arguments it was granted for — the approver signs a payload, not a
+    // tool name. 'tool' is the deliberate escape hatch: the approval is
+    // reusable across differing arguments, for a call whose arguments do not
+    // change what it means to approve it. Strictest-wins across matching rules.
+    approvalScope: text("approval_scope", { enum: ["action", "tool"] })
+      .notNull()
+      .default("action"),
     approverUserId: uuid("approver_user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
@@ -1212,10 +1221,29 @@ export const approvals = pgTable(
     decidedBy: uuid("decided_by"),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
     decisionReason: text("decision_reason"),
+    // ADR-0104 (migration 0106) — PAYLOAD BINDING. Both NULLABLE, because rows
+    // queued before 0106 legitimately have neither and inventing one would be
+    // manufacturing a consent nobody gave.
+    /** consent fingerprint: sha256 hex over the canonical `{projectId,
+     * arguments}` of the call this row was queued for, computed on the RAW
+     * arguments (pre-scrub) so redaction cannot move consent identity. NULL =
+     * a legacy row, which satisfies a `tool`-scoped rule only. */
+    argumentsDigest: text("arguments_digest"),
+    /** the SCRUBBED (ADR-0099) rendering of those same arguments — what the
+     * approver actually reads. Never the input to the digest. */
+    argumentsPreview: jsonb("arguments_preview"),
   },
   (t) => [
     index("approvals_status_idx").on(t.status),
     index("approvals_user_server_tool_idx").on(t.userId, t.serverId, t.toolName),
+    // the shape of ADR-0104's matcher lookup
+    index("approvals_payload_binding_idx").on(
+      t.userId,
+      t.serverId,
+      t.toolName,
+      t.status,
+      t.argumentsDigest,
+    ),
   ],
 );
 

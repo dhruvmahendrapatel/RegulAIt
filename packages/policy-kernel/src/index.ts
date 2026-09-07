@@ -99,7 +99,17 @@ export interface ApprovalRule {
   deployMode?: RuleDeployMode | null;
   toolName: string | null;
   writeOnly: boolean;
-  approverUserId: string;
+  /**
+   * ADR-0104: what a consent granted under this rule is BOUND TO. 'action'
+   * binds it to the exact call arguments the approver signed for; 'tool' is the
+   * escape hatch that makes it reusable across differing arguments. Absent
+   * reads as 'action' — the strict default — so an older rule body that carries
+   * no scope can never be the loose one. The kernel itself does not branch on
+   * this: the gateway resolves the strictest scope across the MATCHED rules
+   * (see `matchingApprovalRules` below) and uses it to decide whether an
+   * already-approved queue entry has to fingerprint-match this call.
+   */
+  approvalScope?: "action" | "tool" | null;
   /** optional display name for the approver — used in reason prose only */
   approverName?: string | null;
 }
@@ -393,6 +403,35 @@ function argAtPath(args: Record<string, unknown> | undefined, path: string): unk
  * through rate limits (an exhausted limit denies even if an approval was
  * signed off) and approval rules before the final allow.
  */
+/**
+ * The approval-rule MATCH predicate, extracted so there is exactly one.
+ *
+ * `evaluate` uses it to find the rule that pauses a call; ADR-0104's gateway
+ * matcher uses it to read the strictest `approvalScope` across the rules that
+ * bound THIS call, so "which rules govern this approval" is one answer computed
+ * once, not two answers that can disagree. Order is preserved: the first
+ * element is the rule `evaluate` reports as the pausing rule, exactly as the
+ * previous `.find` did.
+ */
+export function matchingApprovalRules(
+  rules: readonly ApprovalRule[],
+  ctx: {
+    userId: string;
+    serverId: string;
+    tool: ToolRef;
+    deployContext?: readonly string[] | null | undefined;
+  },
+): ApprovalRule[] {
+  return rules.filter(
+    (r) =>
+      ruleAppliesToSubject(r, ctx.userId) &&
+      ruleAppliesToServer(r, ctx.serverId) &&
+      ruleAppliesToDeployMode(r, ctx.deployContext ?? null) &&
+      matchesScope(r.toolName, ctx.tool.name) &&
+      (!r.writeOnly || ctx.tool.kind === "write"),
+  );
+}
+
 export function evaluate(input: EvaluationInput): Decision {
   const { userId, serverId, tool } = input;
   // prose labels only — every id field below still carries the full id
@@ -659,14 +698,16 @@ export function evaluate(input: EvaluationInput): Decision {
 
   // PILLAR 1: first matching approval rule across any scope pauses the call —
   // a broader fleet/role/team rule requires sign-off just as a user rule does.
-  const approvalRule = (input.approvalRules ?? []).find(
-    (r) =>
-      ruleAppliesToSubject(r, userId) &&
-      ruleAppliesToServer(r, serverId) &&
-      ruleAppliesToDeployMode(r, input.deployContext) &&
-      matchesScope(r.toolName, tool.name) &&
-      (!r.writeOnly || tool.kind === "write"),
-  );
+  // The MATCH itself lives in `matchingApprovalRules` (below) because ADR-0104
+  // needs the same predicate outside the kernel, to read the strictest
+  // `approvalScope` off exactly the rules that bound this call. Two copies of
+  // that predicate could drift into governing different rule sets.
+  const approvalRule = matchingApprovalRules(input.approvalRules ?? [], {
+    userId,
+    serverId,
+    tool,
+    deployContext: input.deployContext,
+  })[0];
   if (approvalRule) {
     if (input.approvedApprovalId) {
       chain.push({

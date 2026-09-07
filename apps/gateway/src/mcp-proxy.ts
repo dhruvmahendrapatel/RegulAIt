@@ -12,6 +12,7 @@ import {
 import {
   and,
   approvals,
+  asc,
   auditLog,
   costEvents,
   eq,
@@ -27,6 +28,7 @@ import { visibleTools, type Decision, type ToolRef } from "@regulait/policy-kern
 import { selectTools } from "@regulait/optimizer-kernel";
 import type { ModelToolDef } from "@regulait/model-provider";
 import {
+  approvalArgumentsPreview,
   setToolPriceSchema,
   guardrailCategoryList,
   guardrailWithheldMarker,
@@ -312,7 +314,7 @@ async function executeGovernedToolCallInner(
       kind = toolKind(found);
     }
 
-    const { decision, approvedApprovalId } = await governedEvaluate(
+    const { decision, approvedApprovalId, argumentsDigest, approvalScope } = await governedEvaluate(
       db,
       userId,
       serverId,
@@ -327,10 +329,22 @@ async function executeGovernedToolCallInner(
       args.principal,
     );
 
+    // ADR-0104 — THE FORENSIC HALF, and it is unconditional.
+    //
+    // Before this, the tool-call audit row named the user, the server and the
+    // tool, and said nothing whatsoever about the payload — so "which arguments
+    // actually ran" was not recoverable from the ledger at all. The consent
+    // fingerprint goes on EVERY tool-call audit row regardless of the governing
+    // rules' `approval_scope`, because the record of what ran is not a
+    // consequence of the consent semantics; it is owed either way. It is the
+    // DIGEST, never the arguments: the audit log is not a place to put a
+    // payload that may carry a secret, and the approver-facing rendering lives
+    // scrubbed on the queue row instead.
     await db.insert(auditLog).values({
       userId,
       serverId,
       toolName,
+      detail: { argumentsDigest, approvalScope },
       effect: decision.effect,
       ruleId: decision.ruleId,
       ruleChain: decision.ruleChain,
@@ -440,6 +454,17 @@ async function executeGovernedToolCallInner(
 
     if (decision.effect === "require_approval") {
       // Reuse an existing pending entry rather than piling up duplicates.
+      //
+      // ADR-0104 — THE DEDUP MUST KEY ON THE PAYLOAD TOO, under action scope.
+      // The old dedup keyed on user/server/tool/pending only. Under a consent
+      // that is bound to the arguments, that is the SAME HOLE IN A NEW PLACE: a
+      // second call with a completely different payload would collapse into the
+      // first call's pending row, the approver would read the first payload,
+      // sign it, and the second payload would ride along on that signature.
+      // Under 'tool' scope the digest is deliberately NOT in the key — one
+      // pending entry standing for a tool regardless of arguments is exactly
+      // what that escape hatch means, and the row's preview shows whichever
+      // payload first raised it.
       const [pending] = await db
         .select({ id: approvals.id })
         .from(approvals)
@@ -449,8 +474,12 @@ async function executeGovernedToolCallInner(
             eq(approvals.serverId, serverId),
             eq(approvals.toolName, toolName),
             eq(approvals.status, "pending"),
+            ...(approvalScope === "action"
+              ? [eq(approvals.argumentsDigest, argumentsDigest)]
+              : []),
           ),
         )
+        .orderBy(asc(approvals.requestedAt))
         .limit(1);
       const approvalId =
         pending?.id ??
@@ -463,6 +492,15 @@ async function executeGovernedToolCallInner(
               toolName,
               ruleId: decision.ruleId,
               approverUserId: decision.approverUserId!,
+              // ADR-0104: the fingerprint the consent will be BOUND to, and
+              // beside it the SCRUBBED payload the approver actually reads.
+              // Both are stored under either scope — a tool-scoped approval
+              // still deserves to show a human what raised it. The digest is
+              // taken from the RAW arguments upstream in `governedEvaluate`;
+              // the preview is derived from the same raw value here, so
+              // redaction cannot move the consent identity.
+              argumentsDigest,
+              argumentsPreview: approvalArgumentsPreview(args.arguments),
             })
             .returning({ id: approvals.id })
         )[0]!.id;

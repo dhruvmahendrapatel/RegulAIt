@@ -2522,6 +2522,23 @@ export {
   type ScrubbableAuditRow,
 } from "./audit-scrub.js";
 
+// ADR-0104 — APPROVAL PAYLOAD BINDING. The consent fingerprint an Approvals-
+// Queue row is bound to, and the approver-facing preview beside it. Pure: it
+// reuses ADR-0060's `canonicalJson` for the serialization and ADR-0099's
+// `scrubAuditDetail` for the preview rather than adding a second of either, so
+// the queue writer and the evaluation-time matcher hash the identical bytes.
+export {
+  APPROVAL_DIGEST_VERSION,
+  APPROVAL_SCOPES,
+  DEFAULT_APPROVAL_SCOPE,
+  approvalArgumentsDigest,
+  approvalArgumentsPreview,
+  effectiveApprovalScope,
+  normalizeApprovalArguments,
+  type ApprovalPayloadRef,
+  type ApprovalScope,
+} from "./approval-binding.js";
+
 // ADR-0099 — the credential-material subset of ADR-0042's DLP rules, shared
 // with the scrubber so detection has exactly one definition.
 export { CREDENTIAL_MATERIAL_RULES } from "./guardrails.js";

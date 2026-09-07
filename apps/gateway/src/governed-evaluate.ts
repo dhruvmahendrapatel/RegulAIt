@@ -1,6 +1,7 @@
 import {
   and,
   approvalRules,
+  asc,
   approvals,
   auditLog,
   count,
@@ -18,7 +19,12 @@ import {
   type PgColumn,
   type SQL,
 } from "@regulait/db";
-import { evaluate, type Decision, type ToolRef } from "@regulait/policy-kernel";
+import { evaluate, matchingApprovalRules, type Decision, type ToolRef } from "@regulait/policy-kernel";
+import {
+  approvalArgumentsDigest,
+  effectiveApprovalScope,
+  type ApprovalScope,
+} from "@regulait/shared";
 import { loadEntitlements, loadScopeMemberships } from "./entitlements.js";
 import { evaluateAbacForToolCall, loadActiveAbacPolicies, type AbacPrincipalContext } from "./abac.js";
 import {
@@ -67,6 +73,22 @@ export interface GovernedEvaluation {
   decision: Decision;
   /** the approved Approvals-Queue row this evaluation relied on, if any */
   approvedApprovalId: string | null;
+  /**
+   * ADR-0104: the consent fingerprint of THIS call — sha256 over the canonical
+   * `{projectId, arguments}`. Computed here, once, so the queue writer, the
+   * audit writer and this matcher can never hash different bytes. Returned
+   * unconditionally (it is recorded on the audit row whatever the scope, which
+   * is the forensic half of ADR-0104 and independent of the consent half).
+   */
+  argumentsDigest: string;
+  /**
+   * ADR-0104: the STRICTEST `approval_scope` across the approval rules that
+   * actually matched this call — 'action' when any of them binds consent to the
+   * payload, 'tool' only when every matching rule opts out. With no matching
+   * approval rule it is the default, 'action'. The caller uses it to decide
+   * whether the pending-entry dedup must also key on the digest.
+   */
+  approvalScope: ApprovalScope;
 }
 
 /** the workflow statuses under which attributed work is still "landing on" its
@@ -198,8 +220,20 @@ export async function governedEvaluate(
           teamIds,
         ),
       ),
+    // ADR-0104 — the CANDIDATE approved rows, not "the" approved row.
+    //
+    // This used to be a `.limit(1)` with no ORDER BY, which under Postgres is
+    // an arbitrary row. It now loads the candidates and lets the payload-
+    // binding rules below pick, because which row satisfies depends on the
+    // governing rules' `approval_scope` — and those are loaded in this same
+    // batch, so the choice cannot be made in SQL here without a second round
+    // trip. `requestedAt` ASC makes the pick deterministic (oldest consent
+    // first, FIFO) instead of storage-order-dependent. The cap is a safety
+    // bound on a queue that in practice holds a handful of approved,
+    // unconsumed rows per user/server/tool — consumption is single-use, so
+    // they do not accumulate.
     db
-      .select({ id: approvals.id })
+      .select({ id: approvals.id, argumentsDigest: approvals.argumentsDigest })
       .from(approvals)
       .where(
         and(
@@ -209,7 +243,8 @@ export async function governedEvaluate(
           eq(approvals.status, "approved"),
         ),
       )
-      .limit(1),
+      .orderBy(asc(approvals.requestedAt))
+      .limit(50),
     db.select({ name: mcpServers.name }).from(mcpServers).where(eq(mcpServers.id, serverId)),
   ]);
 
@@ -261,6 +296,14 @@ export async function governedEvaluate(
           (unresolvable.length > 1 ? ` (and ${unresolvable.length - 1} more)` : ""),
       },
       approvedApprovalId: null,
+      // ADR-0104: the fingerprint is a fact about the CALL, not about the
+      // decision, so it is still reported on a refusal — the audit row for an
+      // indeterminate-config deny records which payload was attempted.
+      argumentsDigest: approvalArgumentsDigest({
+        projectId: projectId ?? null,
+        arguments: args,
+      }),
+      approvalScope: "action",
     };
   }
 
@@ -312,7 +355,17 @@ export async function governedEvaluate(
     servedLimits.map(async (l) => ({ ...l, currentCount: await countFor(l) })),
   );
 
-  const approvedApprovalId = approvedRows[0]?.id ?? null;
+  // ---------------------------------------------------------------------
+  // ADR-0104 — APPROVAL PAYLOAD BINDING.
+  //
+  // The fingerprint of the call being evaluated, computed ONCE here from the
+  // RAW arguments (pre-scrub) and the pillar-5 attribution. Everything
+  // downstream — the queue row, the audit row, this match — uses this exact
+  // string, so the writer and the matcher cannot hash different bytes.
+  const argumentsDigest = approvalArgumentsDigest({
+    projectId: projectId ?? null,
+    arguments: args,
+  });
 
   // A4: derive the deploy context ONLY when some loaded rule is mode-scoped —
   // zero extra queries on the default path (no mode-scoped rules = today).
@@ -329,6 +382,34 @@ export async function governedEvaluate(
     modeScopedIn(scopeResolved.candidate ?? []);
   const deployContext =
     anyModeScoped && projectId ? await deriveDeployContext(db, projectId) : null;
+
+  // ADR-0104 — STRICTEST-WINS over the rules that actually MATCHED this call,
+  // using the kernel's own match predicate (not a second copy of it). Any
+  // matching action-scoped rule makes the whole consent action-scoped; no
+  // matching approval rule at all -> the default, 'action'. This is sited AFTER
+  // `deployContext` deliberately: a mode-scoped approval rule must be judged
+  // against the real derived context, exactly as the kernel judges it, or a
+  // rule that does bind this call could be skipped when reading its scope.
+  const approvalScope = effectiveApprovalScope(
+    matchingApprovalRules(servedARules, { userId, serverId, tool, deployContext }),
+  );
+
+  // WHICH approved row satisfies this call.
+  //
+  //   * an exact fingerprint match always satisfies, under either scope;
+  //   * under 'tool' scope any approved row satisfies, including one carrying a
+  //     different payload's digest (that IS the escape hatch) and including a
+  //     legacy row with no digest at all;
+  //   * under 'action' scope nothing else satisfies. A row for different
+  //     arguments is a different consent, and a legacy row (NULL digest,
+  //     queued before migration 0106) is a consent that was never bound to a
+  //     payload — neither can stand in. The call re-queues instead, and the
+  //     re-queued row is born with a digest, so the gap closes itself. This is
+  //     fail-closed, and it is a real upgrade-day behaviour change; ADR-0104
+  //     states it rather than hiding it.
+  const exactMatch = approvedRows.find((r) => r.argumentsDigest === argumentsDigest);
+  const approvedApprovalId =
+    exactMatch?.id ?? (approvalScope === "tool" ? (approvedRows[0]?.id ?? null) : null);
 
   // ADR-0040 ABAC. The policy-set load is ONE indexed query, and an install
   // with no active policies stops there: `abacDecision` stays null, the kernel
@@ -466,5 +547,5 @@ export async function governedEvaluate(
     }
   }
 
-  return { decision, approvedApprovalId };
+  return { decision, approvedApprovalId, argumentsDigest, approvalScope };
 }
