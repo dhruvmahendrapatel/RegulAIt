@@ -111,10 +111,40 @@ caught on read. **The sweeps buy timeliness, never correctness.**
   summary line and ignore the status — precisely the habit that lets a real failure through; and
   (b) vitest itself warns *"This might cause false positive tests"*, which means the suite's
   verdict is not fully sound while these are unresolved. Not attributable to any slice after
-  B9 — present in every post-ADR-0097 run checked. Note the origin was initially misattributed to
-  `@hono/node-server`; that package is not in this repo at all. Fix belongs with whoever owns
-  the upstream teardown in that file: close the servers (and await it) before the transport, or
-  hold the socket open until the SDK transport has finished with it.
+  B9 — present in every post-ADR-0097 run checked.
+
+  **ATTRIBUTION CORRECTED 2026-09-07 (B13a retest).** An earlier revision of this entry said the
+  `@hono/node-server` attribution was a misattribution because "that package is not in this repo
+  at all". **That correction was itself wrong, and is withdrawn.** The package IS present, as a
+  TRANSITIVE dependency of `@modelcontextprotocol/sdk@1.29.0` (`pnpm-lock.yaml:4223`) — which is
+  why it appears in no workspace `package.json` and why a direct-dependency check missed it. The
+  stack frame is unambiguous:
+  `Timeout.forceClose (@hono/node-server@1.19.15/dist/index.mjs:390:14)` ← `listOnTimeout`. So the
+  fix is NOT ours to make inside the test file alone: a timer inside the MCP SDK's bundled HTTP
+  server fires after the socket has already been torn down. Mitigations available to us: await the
+  upstream servers' close before the transport's, or keep the socket alive until the SDK transport
+  is done with it.
+
+  **Intermittency measured 2026-09-07** — three full runs of the IDENTICAL commit (`9aea2ae`):
+  run A 2663 passed / 1 failed with the unhandled error present, exit 1; run B 2664 passed /
+  0 failed with **zero** unhandled errors, exit 0; the agent's own run matched B. So the
+  `destroySoon` error is itself intermittent, not a constant that only sometimes changes the exit
+  code — which is a different and slightly better-behaved bug than this entry previously described.
+
+- **A SECOND, independent non-determinism source — found and fixed 2026-09-07 (B13a retest).**
+  Run A's single failure was `use-cases-eu-tier.test.ts:260`, and it was NOT the `destroySoon`
+  issue and NOT caused by B13a. `screeningAudits` selected from `audit_log` with a WHERE and **no
+  `ORDER BY`**, then the v2-recompute assertion indexed the result with `.at(-1)`. Postgres
+  guarantees no row order without `ORDER BY`, so that read heap order — usually insertion order,
+  occasionally not. Fixed in `0ebfabe` by ordering on `at`. Recorded here because it establishes
+  that the suite had **two** unrelated flake sources, and the exit-code entry above was absorbing
+  the blame for both.
+
+- **OPEN — the same defect class is probably not isolated.** `.at(-1)` appears **86 times** across
+  the gateway tests. Most index API-response arrays, which carry the route's own ordering, so this
+  is NOT 86 bugs — but every one that indexes a raw `db.select()` without an `ORDER BY` is the same
+  latent flake. A sweep belongs with F01's "make the quality gate dependable" work; it was
+  deliberately not widened into B13a.
 
 - ~~**`seed.test.ts` uses a fixed-name scratch database** (`regulait_seed_test`) and
   `DROP DATABASE … WITH (FORCE)` in `beforeAll`. Two concurrent suite runs on one host destroy each
