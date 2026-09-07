@@ -6,6 +6,10 @@ import { RED_TEAM_ATTACK_CLASSES } from "./redteam.js";
 // ADR-0097: the admission-mode enum is DEFINED in mcp-admission.ts and used by
 // updateOrgSettingsSchema below, so it is imported as well as re-exported.
 import { MCP_ADMISSION_MODES } from "./mcp-admission.js";
+// ADR-0104: the approval-scope vocabulary is needed IN SCOPE here (not merely
+// re-exported below) so `createApprovalRuleSchema` validates against the one
+// authoritative list rather than a second copy of the two strings.
+import { APPROVAL_SCOPES } from "./approval-binding.js";
 
 export { detectPII, type PiiHit, type PiiCategory } from "./pii.js";
 
@@ -761,6 +765,12 @@ export const createApprovalRuleSchema = z
     ...ruleScopeFields,
     toolName: z.string().min(1).nullable().optional(),
     writeOnly: z.boolean().optional(),
+    /** ADR-0104 — what a consent granted under this rule is BOUND TO.
+     *  ABSENT is the default and the strict reading, 'action': the approval is
+     *  bound to the exact arguments the approver signed for. 'tool' is the
+     *  deliberate escape hatch, and an operator has to type it — it is the
+     *  looser semantics, so it is never what you get by saying nothing. */
+    approvalScope: z.enum(APPROVAL_SCOPES).optional(),
     approverUserId: z.string().uuid(),
   })
   .superRefine(refineRuleScope);

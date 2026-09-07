@@ -59,6 +59,9 @@ export async function createApprovalRuleRow(
       ...scopedRuleColumns(body),
       toolName: body.toolName ?? null,
       writeOnly: body.writeOnly ?? false,
+      // ADR-0104: omitted -> the column default, 'action'. Written through
+      // rather than defaulted here so the ONE default lives in the DDL.
+      ...(body.approvalScope ? { approvalScope: body.approvalScope } : {}),
       approverUserId: body.approverUserId,
     })
     .returning();
