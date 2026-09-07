@@ -32,11 +32,15 @@ Three things that intake established. **(a) PF-01 — "bind approval to the exac
 that document and is already substantially built**: PathForward reviewed `271bdca`, which predates
 ADR-0104, so the plan records what ADR-0104 delivered and names the honest remaining delta (dual
 proposed/enforced digest recomputed pre-execution, envelope breadth, expiry/idempotency, coverage
-beyond the MCP path, the ABAC scope dial) instead of scheduling shipped work. **(b) AER-002 is a
-correction to us**: ADR-0103 is titled and described as gating *"paid tool calls"*, but what it
-enforces is a **project dispatch freeze** — an attributed tool priced `null`/`0` is blocked too, by
-deliberate decision. The narrow wording is in the ADR, PENDING, the checklist and this file; fixing
-it is **R1**. **(c) AER-003 was partly misattributed**: the repo pins `pnpm@10.33.0` and CI installs
+beyond the MCP path, the ABAC scope dial) instead of scheduling shipped work. **(b) AER-002 is half a
+correction to us, and I over-accepted it**: the enforced contract is a **project dispatch freeze** —
+an attributed tool priced `null`/`0` is blocked too, by deliberate decision. But AER-002 says the
+narrow wording is in "the ADR title", and **that part is false**: ADR-0103 is titled *"Gate the MCP
+tool-call path on the project budget"* and already carries an explicit *"It does not gate on the
+price of this call"* section; checklist row 58 already spells the unpriced case out too. The only
+genuinely narrow artifacts were the **commit subject** and this file's own headline. I repeated
+Codex's overstatement into STATE and the build plan without checking it — M-031's rule, a third
+time. Corrected in place; **R1** is correspondingly smaller than filed. **(c) AER-003 was partly misattributed**: the repo pins `pnpm@10.33.0` and CI installs
 `--frozen-lockfile`; the reviewer's host ignored the pin. The genuine residue is the absence of a
 documented pinned clean-checkout command (**R2**).
 
@@ -88,8 +92,8 @@ New residue recorded: **an ABAC-driven pause has no configurable scope** — wit
 `approval_rules` row the default `action` applies (fail-closed, correct), but `abac_policies` has
 no scope column, so the `tool` reading is unavailable to a policy-driven pause.
 
-**2026-09-07 — B13a closed and retested: paid MCP tool calls are now gated on the project
-budget, and my own retest caught a flake the build agent's run did not.**
+**2026-09-07 — B13a closed and retested: an exhausted project now FREEZES its attributed MCP
+dispatches, and my own retest caught a flake the build agent's run did not.**
 ([ADR-0103](../docs/decisions/0103-mcp-path-project-budget-gate.md), no migration.) An outside
 review (Codex, findings F01-F08) was assessed against the tree; 7 of 8 checked claims held, F04
 was stale because ADR-0102 closed it the day before. **F02 was the live one**: pillar 5's

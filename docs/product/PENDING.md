@@ -452,10 +452,13 @@ without approval, and discovery results that are not entitlement-filtered.
 > PF-01…PF-14) and the automated block AER-001…003 — is in
 > [ENTERPRISE_READINESS_PLAN.md](ENTERPRISE_READINESS_PLAN.md) §Addendum (2026-09-07). Two items
 > from that intake are corrections to **our own** records rather than new gaps:
-> **AER-002** — ADR-0103 is described as gating *"paid tool calls"*, but the contract it actually
-> enforces is a **project dispatch freeze on exhaustion**: an attributed tool priced `null` or `0`
-> is blocked too. The narrower wording appears in the ADR title, this file, `TESTING_CHECKLIST.md`
-> row 58 and `STATE.md`, and is tracked as **R1**.
+> **AER-002** — the enforced contract is a **project dispatch freeze on exhaustion**: an attributed
+> tool priced `null` or `0` is blocked too. **Partly over-accepted on intake and corrected
+> 2026-09-07**: AER-002 places the narrow wording in "the ADR title", which is false — ADR-0103 is
+> titled *"Gate the MCP tool-call path on the project budget"* and already carries an explicit
+> *"It does not gate on the price of this call"* section, and checklist row 58 already spells out
+> the unpriced case. The only genuinely narrow artifacts were the **commit subject** (immutable
+> history) and `STATE.md`'s headline. **R1** was therefore smaller than filed and is now done.
 > **AER-003** — the reviewer's host violated the declared package manager; **this repo pins it
 > correctly** (`packageManager: pnpm@10.33.0`, CI installs `--frozen-lockfile` via an action that
 > reads that field). The real residue is that `README.md:69` documents no pinned clean-checkout

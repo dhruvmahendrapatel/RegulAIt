@@ -190,3 +190,39 @@ before this ADR was written.
 The upstream-contact proof is deliberately stronger than "an error came back": the fake upstream
 counts **both** its HTTP requests and its tool-handler invocations, and every blocked case asserts
 a zero delta on both. An MCP error with the upstream already spoken to would have failed the test.
+
+## Amendment (2026-09-07) — name the contract: a project dispatch FREEZE
+
+An external review (AER-002) observed that the *rationale* prose around this gate — and notably the
+commit subject that carried it, `feat(mcp): gate paid tool calls on the project budget` — describes
+a **paid-spend** control, while the predicate implemented here is broader. Both readings appear in
+this document's own §Context, which speaks of "paid spend running unbounded".
+
+**No behaviour changes with this amendment.** The implemented and tested contract is, and remains:
+
+> **Once a project's measured spend reaches its hard-block threshold, that project's ATTRIBUTED
+> dispatches are frozen — regardless of what the individual call costs.** A tool priced `null` or
+> `0` is refused alongside a priced one, because the gate keys on the project's spend rather than
+> on this call's price.
+
+That was already the decision — §"What this deliberately does NOT do" states it, and a test pins
+it — but it was stated as a *consequence* rather than named as *the contract*, which let the
+narrower "paid calls" phrasing travel into the commit message and the project's status prose.
+It is named here so operator-facing language has one thing to copy.
+
+**Two corrections to the review that prompted this**, recorded because a review's own claims are
+evidence like any other and were checked rather than accepted:
+
+- AER-002 places the narrow wording in "the ADR title". It is not there: this ADR is titled *"Gate
+  the MCP tool-call path on the project budget"*, which is accurate, and `TESTING_CHECKLIST.md`
+  row 58 already spelled out the unpriced-tool case. The genuinely narrow artifacts were the commit
+  subject and `STATE.md`'s headline.
+- The rationale prose in §Context above is left **as written**, dated and in place. It described a
+  real motivating case (unbounded *paid* spend) accurately; it simply was not the whole predicate.
+  Rewriting it to imply the broader framing was always foremost would be exactly the retroactive
+  tidying this project's records discipline refuses.
+
+**Operator-facing consequence worth stating plainly**: an exhausted project loses its free and
+read-only attributed tooling too. That is the intended "stop all project activity" posture and the
+reason a sanctioned overage (`overageActive`) exists — but an operator who expected a
+paid-calls-only gate would be surprised, which is precisely why the contract is named here.
