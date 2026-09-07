@@ -110,6 +110,7 @@ export interface ApprovalRule {
    * already-approved queue entry has to fingerprint-match this call.
    */
   approvalScope?: "action" | "tool" | null;
+  approverUserId: string;
   /** optional display name for the approver — used in reason prose only */
   approverName?: string | null;
 }
@@ -394,16 +395,6 @@ function argAtPath(args: Record<string, unknown> | undefined, path: string): unk
 }
 
 /**
- * Pure, zero-I/O policy evaluation. Rules run in fixed order; the first
- * terminal match wins and everything evaluated is recorded in ruleChain for
- * the audit log.
- *
- * Order: grant check (allow-list, then read-only-all) — an ungranted call is
- * default-denied and nothing can rescue it. A granted call then passes
- * through rate limits (an exhausted limit denies even if an approval was
- * signed off) and approval rules before the final allow.
- */
-/**
  * The approval-rule MATCH predicate, extracted so there is exactly one.
  *
  * `evaluate` uses it to find the rule that pauses a call; ADR-0104's gateway
@@ -432,6 +423,16 @@ export function matchingApprovalRules(
   );
 }
 
+/**
+ * Pure, zero-I/O policy evaluation. Rules run in fixed order; the first
+ * terminal match wins and everything evaluated is recorded in ruleChain for
+ * the audit log.
+ *
+ * Order: grant check (allow-list, then read-only-all) — an ungranted call is
+ * default-denied and nothing can rescue it. A granted call then passes
+ * through rate limits (an exhausted limit denies even if an approval was
+ * signed off) and approval rules before the final allow.
+ */
 export function evaluate(input: EvaluationInput): Decision {
   const { userId, serverId, tool } = input;
   // prose labels only — every id field below still carries the full id
@@ -698,7 +699,7 @@ export function evaluate(input: EvaluationInput): Decision {
 
   // PILLAR 1: first matching approval rule across any scope pauses the call —
   // a broader fleet/role/team rule requires sign-off just as a user rule does.
-  // The MATCH itself lives in `matchingApprovalRules` (below) because ADR-0104
+  // The MATCH itself lives in `matchingApprovalRules` (above) because ADR-0104
   // needs the same predicate outside the kernel, to read the strictest
   // `approvalScope` off exactly the rules that bound this call. Two copies of
   // that predicate could drift into governing different rule sets.

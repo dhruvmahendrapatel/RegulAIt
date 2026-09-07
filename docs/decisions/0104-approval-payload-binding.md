@@ -182,12 +182,13 @@ queue row.
   ask to be re-signed. Backfilling a digest was rejected outright: any value we invented would be
   manufacturing a consent record that no human gave, which is worse than admitting the row predates
   the feature.
-- **An ABAC-driven pause is still tool-scoped.** When ADR-0040's Cedar layer returns
-  `require_approval` and **no** `approval_rules` row also matches, there is no rule to carry an
-  `approval_scope`, so the strictest-wins computation falls to its default of `action` only when a
-  matching rule exists; a pure-ABAC pause with no matching rule takes the default too — but the
-  scope is not configurable per policy, because `abac_policies` has no such column. Giving ABAC
-  policies their own scope dial is out of scope here and is a genuine residue.
+- **An ABAC-driven pause is action-scoped, but not configurably so.** When ADR-0040's Cedar layer
+  returns `require_approval` and **no** `approval_rules` row also matches, there is no rule to carry
+  an `approval_scope`. The strictest-wins computation falls to its default, `action`, so the pause is
+  payload-bound — fail-closed, which is the right answer. What is missing is the other direction:
+  `abac_policies` has no scope column, so an operator who legitimately wants the `tool` reading for a
+  policy-driven pause has no way to say so, and would have to author a parallel approval rule to get
+  it. Giving ABAC policies their own scope dial is out of scope here and is a genuine residue.
 - **The digest binds the arguments, not the world they act on.** Two identical calls a week apart
   have the same fingerprint. If the state the tool reads or writes changed in between, the approval
   is still spendable on the later one. Binding to state would require a reservation, not a hash.
