@@ -16,10 +16,14 @@ import {
   auditLog,
   costEvents,
   eq,
+  gt,
   interceptionSettings,
   INTERCEPTION_SETTINGS_ID,
+  isNull,
   mcpServers,
   mcpTools,
+  or,
+  sql,
   usageEvents,
   userAgentPolicies,
   type Db,
@@ -49,7 +53,7 @@ import {
   runGuardrails,
   type DispatchGuardrails,
 } from "./guardrails.js";
-import { governedEvaluate } from "./governed-evaluate.js";
+import { governedEvaluate, type RetiredApproval } from "./governed-evaluate.js";
 import { abacPrincipalFromRequest, type AbacPrincipalContext } from "./abac-principal.js";
 import { guardedMcpConnect, McpEgressBlockedError } from "./mcp-egress.js";
 // ADR-0097 — ADMISSION SCANNING. ADR-0043 governs the DESTINATION; this governs
@@ -162,12 +166,105 @@ export type GovernedToolCallOutcome =
   | { kind: "guardrail_blocked"; reason: string; guardrails: DispatchGuardrails }
   | { kind: "approval_required"; approvalId: string; decision: Decision }
   | { kind: "approval_consumed_race"; approvalId: string }
+  /**
+   * ADR-0105: a consent this call WOULD have spent had passed its
+   * `expires_at`. The stale row is SUPERSEDED (visibly, with an audit fact
+   * naming why) and, on the queueing path, a fresh approval carrying the
+   * current digests is raised in its place — `requeuedApprovalId`. It is null
+   * only on the narrow consumption race, where the replacement is raised by
+   * the caller's retry rather than guessed at here.
+   *
+   * Distinct from `approval_required` because "your approval lapsed" and "you
+   * never had one" are different things to tell a human, and distinct from
+   * `approval_context_stale` because an expiry is a clock fact and a stale
+   * context is a policy fact.
+   */
+  | {
+      kind: "approval_expired";
+      supersededApprovalIds: string[];
+      requeuedApprovalId: string | null;
+    }
+  /**
+   * ADR-0105: the POLICY that demanded the consent moved after it was signed —
+   * a matched rule's active `config_versions` version changed, the required
+   * approver changed, or the approval scope changed. Same visible disposition
+   * as `approval_expired`: supersede with a reason, re-queue under the current
+   * context.
+   */
+  | {
+      kind: "approval_context_stale";
+      supersededApprovalIds: string[];
+      requeuedApprovalId: string | null;
+    }
   /** ADR-0103: the ATTRIBUTED project's pillar-5 budget is exhausted, so this
    * paid tool call may not run. Distinct from `denied` (entitlement) and from
    * the run/node budget the orchestrator enforces separately — this is the
    * PROJECT ledger, and it carries the same status/error the model path
    * returns so the two surfaces name the same condition identically. */
   | { kind: "budget_blocked"; status: number; error: string; detail?: string };
+
+/**
+ * ADR-0105 — RETIRE A CONSENT THAT NO LONGER SATISFIES THE CALL, VISIBLY.
+ *
+ * A stale or expired approved row must not be silently skipped. Left sitting in
+ * the queue marked `approved` it is a live-looking signature that the next
+ * evaluation has to re-refuse, and that an approver reading the workbench has
+ * no way to tell is dead. So it moves to `superseded` — a status the enum
+ * ALREADY carries, so no DDL was needed — and the move is audited with the
+ * reason named.
+ *
+ * `status = 'approved'` is in the predicate so this can never trample a row
+ * that a concurrent caller consumed in the meantime: retiring is best-effort
+ * about WHICH rows it moves, and exact about never moving one that was spent.
+ *
+ * Returns the ids actually retired.
+ */
+async function supersedeStaleConsent(
+  db: Db,
+  rows: readonly RetiredApproval[],
+  ctx: { userId: string; serverId: string; toolName: string; projectId: string | null },
+): Promise<string[]> {
+  const retired: string[] = [];
+  for (const row of rows) {
+    const moved = await db
+      .update(approvals)
+      .set({
+        status: "superseded",
+        decisionReason:
+          row.reason === "expired"
+            ? "superseded: this approval passed its expiry before it was spent"
+            : "superseded: the policy context this approval was granted under has changed",
+      })
+      .where(and(eq(approvals.id, row.id), eq(approvals.status, "approved")))
+      .returning({ id: approvals.id });
+    if (moved.length === 0) continue;
+    retired.push(row.id);
+    await db.insert(auditLog).values({
+      userId: ctx.userId,
+      serverId: ctx.serverId,
+      toolName: ctx.toolName,
+      // the approval id rides in `detail.approvalId`, exactly as ADR-0046's
+      // `approval-routed` / `approval-sla-breached` rows do, so "what happened
+      // to this approval" stays ONE query on one objectType.
+      detail: {
+        phase: "consent-retired",
+        approvalId: row.id,
+        retirementReason: row.reason,
+        projectId: ctx.projectId,
+      },
+      effect: "deny",
+      ruleId: row.reason === "expired" ? "approval-expired" : "approval-context-stale",
+      ruleChain: [],
+      reason:
+        row.reason === "expired"
+          ? `approval '${row.id}' for tool '${ctx.toolName}' expired before it was spent and was superseded`
+          : `approval '${row.id}' for tool '${ctx.toolName}' was granted under a policy context that has ` +
+            `since changed (matched rules, their active config versions, the required approver or the ` +
+            `approval scope) and was superseded`,
+    });
+  }
+  return retired;
+}
 
 /** §8.4 PII outcome on an MCP tool call. COUNTS ONLY — inputHits/outputHits are
  * per-category counts, never the matched substrings (the same contract the
@@ -230,6 +327,11 @@ export async function executeGovernedToolCall(
       // span carrying its reason — same treatment as pii_blocked, never an
       // absent span.
       outcome.kind === "budget_blocked" ||
+      // ADR-0105: a lapsed or policy-stale consent is a REFUSAL, so it closes a
+      // `denied` span carrying its reason — the same treatment ADR-0103 gives
+      // budget_blocked, never an absent span.
+      outcome.kind === "approval_expired" ||
+      outcome.kind === "approval_context_stale" ||
       outcome.kind === "approval_required";
     const reason =
       outcome.kind === "denied"
@@ -240,11 +342,22 @@ export async function executeGovernedToolCall(
             ? `${outcome.error}${outcome.detail ? `: ${outcome.detail}` : ""}`
             : outcome.kind === "approval_required"
             ? `tool call requires approval '${outcome.approvalId}' before it may run`
-            : outcome.kind === "approval_consumed_race"
-              ? `approval '${outcome.approvalId}' was already consumed`
-              : outcome.kind === "unknown_tool"
-                ? `tool '${args.toolName}' is not in this server's manifest`
-                : null;
+            : outcome.kind === "approval_expired"
+              ? `approval ${outcome.supersededApprovalIds.join(", ")} expired and was superseded` +
+                (outcome.requeuedApprovalId
+                  ? `; approval '${outcome.requeuedApprovalId}' now awaits sign-off`
+                  : "")
+              : outcome.kind === "approval_context_stale"
+                ? `approval ${outcome.supersededApprovalIds.join(", ")} was granted under a policy ` +
+                  `context that has since changed and was superseded` +
+                  (outcome.requeuedApprovalId
+                    ? `; approval '${outcome.requeuedApprovalId}' now awaits sign-off`
+                    : "")
+                : outcome.kind === "approval_consumed_race"
+                  ? `approval '${outcome.approvalId}' was already consumed`
+                  : outcome.kind === "unknown_tool"
+                    ? `tool '${args.toolName}' is not in this server's manifest`
+                    : null;
     const capture = args.trace.policy.captureContent;
     const max = args.trace.policy.previewMaxChars;
     await recordSpan(db, args.trace, {
@@ -314,7 +427,14 @@ async function executeGovernedToolCallInner(
       kind = toolKind(found);
     }
 
-    const { decision, approvedApprovalId, argumentsDigest, approvalScope } = await governedEvaluate(
+    const {
+      decision,
+      approvedApprovalId,
+      argumentsDigest,
+      approvalScope,
+      contextDigest,
+      retiredApprovals,
+    } = await governedEvaluate(
       db,
       userId,
       serverId,
@@ -344,7 +464,10 @@ async function executeGovernedToolCallInner(
       userId,
       serverId,
       toolName,
-      detail: { argumentsDigest, approvalScope },
+      // ADR-0105 adds the CONSENT-CONTEXT identity beside ADR-0104's payload
+      // fingerprint. Still digests only — the ledger records WHICH call ran and
+      // WHICH policy governed it, never the arguments themselves.
+      detail: { argumentsDigest, approvalScope, contextDigest },
       effect: decision.effect,
       ruleId: decision.ruleId,
       ruleChain: decision.ruleChain,
@@ -453,6 +576,36 @@ async function executeGovernedToolCallInner(
     }
 
     if (decision.effect === "require_approval") {
+      // ADR-0105 — THE VISIBLE DISPOSITION, and it happens BEFORE the re-queue.
+      //
+      // If this call is here because a consent it was holding went stale or
+      // lapsed, that row is retired NOW, with an audit fact naming why, and the
+      // fresh entry raised below carries the CURRENT digests. Retire-then-
+      // requeue in that order is what makes the pair legible to an approver:
+      // the dead signature is marked dead, and the row asking to be signed is
+      // the one bound to today's policy.
+      //
+      // Sited in this branch, not above the deny/compliance/budget gates: a
+      // call refused for some OTHER reason has said nothing about whether the
+      // stored consent is still good, and retiring on the way past would be
+      // acting on a question nobody asked. A genuinely stale row is retired the
+      // next time it is actually reached for.
+      const superseded = retiredApprovals.length
+        ? await supersedeStaleConsent(db, retiredApprovals, {
+            userId,
+            serverId,
+            toolName,
+            projectId,
+          })
+        : [];
+
+      // ADR-0105 — THE TTL DIAL, read at QUEUE time. NULL is a real value and
+      // is NOT defaulted away: it is the operator's recorded choice that this
+      // org's approvals never expire, which knowingly reopens the gap. The
+      // shipped column default is 72 hours (see migration 0107), so an org that
+      // has never touched the dial gets expiry.
+      const { approvalTtlHours } = await loadOrgSettings(db);
+
       // Reuse an existing pending entry rather than piling up duplicates.
       //
       // ADR-0104 — THE DEDUP MUST KEY ON THE PAYLOAD TOO, under action scope.
@@ -501,9 +654,40 @@ async function executeGovernedToolCallInner(
               // redaction cannot move the consent identity.
               argumentsDigest,
               argumentsPreview: approvalArgumentsPreview(args.arguments),
+              // ADR-0105: the POLICY identity this consent is being asked for,
+              // and the clock it dies on. Both stamped HERE, at queue time —
+              // the digest so the signature is bound to the policy the
+              // approver is signing under, the expiry so a later dial change
+              // can never extend a consent that already exists (the same
+              // stamp-at-issuance discipline ADR-0098 holds for API keys).
+              contextDigest,
+              ...(approvalTtlHours != null
+                ? { expiresAt: new Date(Date.now() + approvalTtlHours * 3_600_000) }
+                : {}),
             })
             .returning({ id: approvals.id })
         )[0]!.id;
+      // A retirement that actually moved a row is reported as the distinct
+      // outcome it is: "your approval lapsed / the policy moved, here is the
+      // replacement" is a different thing to tell a caller than "you need an
+      // approval". A context change outranks an expiry when both happened —
+      // the policy fact is the more consequential one.
+      if (superseded.length > 0) {
+        const anyContext = retiredApprovals.some(
+          (r) => superseded.includes(r.id) && r.reason === "context_changed",
+        );
+        return anyContext
+          ? {
+              kind: "approval_context_stale",
+              supersededApprovalIds: superseded,
+              requeuedApprovalId: approvalId,
+            }
+          : {
+              kind: "approval_expired",
+              supersededApprovalIds: superseded,
+              requeuedApprovalId: approvalId,
+            };
+      }
       return { kind: "approval_required", approvalId, decision };
     }
 
@@ -593,12 +777,82 @@ async function executeGovernedToolCallInner(
     if (approvedApprovalId) {
       // Atomically consume the approval; losing the race means another call
       // already spent it, so this call must go back through the queue.
+      //
+      // ADR-0105 — THE WHOLE TEST IS IN THE PREDICATE, NOT AROUND IT.
+      //
+      // The matcher in `governedEvaluate` already refused a stale or expired
+      // row. This is the same test again, expressed as part of the SINGLE
+      // atomic statement that changes the row's state — so between the moment
+      // the decision was taken and the moment the consent is actually spent
+      // there is no window in which a row can be checked as good and then
+      // spent as bad. Two calls racing for one consent still resolve to exactly
+      // one winner (the `status = 'approved'` conjunct, unchanged), and a
+      // caller whose evaluation is already behind a policy activation cannot
+      // spend on the strength of it.
+      //
+      //   * `arguments_digest` is asserted ONLY under action scope. Under the
+      //     ADR-0104 `tool` escape hatch a different payload's digest — or a
+      //     legacy NULL — is exactly what the row is allowed to carry, so
+      //     asserting it there would quietly delete the escape hatch.
+      //   * `context_digest` must equal this call's, OR be NULL. A NULL is a
+      //     row queued before migration 0107; it is accepted because it is
+      //     still payload-bound under ADR-0104, and ADR-0105 argues that call
+      //     rather than leaving it implicit.
+      //   * `expires_at` must be absent or in the future, evaluated by the
+      //     DATABASE's clock (`now()`), not this process's — the row is being
+      //     changed there and the freshness question has to be answered there
+      //     too.
       const consumed = await db
         .update(approvals)
         .set({ status: "consumed" })
-        .where(and(eq(approvals.id, approvedApprovalId), eq(approvals.status, "approved")))
+        .where(
+          and(
+            eq(approvals.id, approvedApprovalId),
+            eq(approvals.status, "approved"),
+            ...(approvalScope === "action"
+              ? [eq(approvals.argumentsDigest, argumentsDigest)]
+              : []),
+            or(isNull(approvals.contextDigest), eq(approvals.contextDigest, contextDigest))!,
+            or(isNull(approvals.expiresAt), gt(approvals.expiresAt, sql`now()`))!,
+          ),
+        )
         .returning({ id: approvals.id });
       if (consumed.length === 0) {
+        // ADR-0105 — CLASSIFY, do not return one opaque failure. Re-read the
+        // row and say which of the three actually happened: somebody else spent
+        // it, it lapsed, or the policy moved underneath it. The first is a
+        // benign race; the other two are refusals that owe a visible
+        // disposition, so the row is superseded here too. No replacement is
+        // queued on this path — raising one needs a fresh evaluation under the
+        // policy that has just changed, which is precisely what the caller's
+        // retry does.
+        const [row] = await db
+          .select()
+          .from(approvals)
+          .where(eq(approvals.id, approvedApprovalId));
+        if (row && row.status === "approved") {
+          const reason: RetiredApproval["reason"] =
+            row.expiresAt != null && row.expiresAt.getTime() <= Date.now()
+              ? "expired"
+              : "context_changed";
+          const superseded = await supersedeStaleConsent(db, [{ id: row.id, reason }], {
+            userId,
+            serverId,
+            toolName,
+            projectId,
+          });
+          return reason === "expired"
+            ? {
+                kind: "approval_expired",
+                supersededApprovalIds: superseded,
+                requeuedApprovalId: null,
+              }
+            : {
+                kind: "approval_context_stale",
+                supersededApprovalIds: superseded,
+                requeuedApprovalId: null,
+              };
+        }
         return { kind: "approval_consumed_race", approvalId: approvedApprovalId };
       }
     }
@@ -1163,6 +1417,30 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
           throw new McpError(
             ErrorCode.InvalidRequest,
             `Approval '${outcome.approvalId}' was already consumed — retry to request a new approval.`,
+          );
+        // ADR-0105: the two consent-freshness refusals. Both name the retired
+        // row AND the replacement, so a caller reading the error knows the old
+        // signature is dead and which row now needs signing — never a bare
+        // "denied" that leaves them retrying into the same wall.
+        case "approval_expired":
+          throw new McpError(
+            ErrorCode.InvalidRequest,
+            `Approval ${outcome.supersededApprovalIds.map((id) => `'${id}'`).join(", ")} expired ` +
+              `before it was used and has been superseded.` +
+              (outcome.requeuedApprovalId
+                ? ` Approval '${outcome.requeuedApprovalId}' has been raised in its place and is ` +
+                  `pending sign-off. Retry after approval.`
+                : ` Retry to raise a fresh approval.`),
+          );
+        case "approval_context_stale":
+          throw new McpError(
+            ErrorCode.InvalidRequest,
+            `Approval ${outcome.supersededApprovalIds.map((id) => `'${id}'`).join(", ")} was granted ` +
+              `under a policy context that has since changed and has been superseded.` +
+              (outcome.requeuedApprovalId
+                ? ` Approval '${outcome.requeuedApprovalId}' has been raised under the current policy ` +
+                  `and is pending sign-off. Retry after approval.`
+                : ` Retry to raise a fresh approval.`),
           );
         case "allowed":
           return outcome.content as Record<string, unknown>;

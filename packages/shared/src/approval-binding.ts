@@ -143,3 +143,135 @@ export function effectiveApprovalScope(
     ? "action"
     : "tool";
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0105 — CONSENT CONTEXT BINDING.
+//
+// ADR-0104 bound a consent to its PAYLOAD. It did not bind it to the POLICY
+// that demanded the consent in the first place, and that is a second, distinct
+// hole: an approval queued and signed under rule/config A stayed spendable
+// after a stricter version B activated, or after the required approver
+// changed, as long as user/server/tool/project/arguments were unchanged. That
+// is an authorization time-of-check/time-of-use gap — the check ran against
+// yesterday's policy and the use happens under today's.
+//
+// The fix is a SECOND digest, kept deliberately separate from the payload one:
+//
+//   * two digests fail INDEPENDENTLY, so the reason a consent stopped
+//     satisfying a call is recoverable ("the payload changed" vs "the policy
+//     changed"). One combined hash would collapse both into a single opaque
+//     mismatch, and the audit trail would be poorer for it.
+//   * the payload digest is a fact about the CALL and never changes for a
+//     given call; the context digest is a fact about the GOVERNING POLICY and
+//     changes underneath a stationary call. Hashing them together would make
+//     the payload digest look mutable.
+//
+// WHAT IS IN IT
+// -------------
+//   * the MATCHED approval rules, each paired with the id of the
+//     `config_versions` row that is ACTIVE for it (ADR-0073). Matched, not
+//     loaded: a rule that does not bind this call is not governing it, so
+//     editing it must not invalidate a consent (that is the compatibility rule
+//     ADR-0105 states, made mechanical). `null` for a rule with no version rows
+//     at all — the byte-identical pre-ADR-0073 case, which must hash to a
+//     stable value rather than to "unknown".
+//   * the REQUIRED APPROVER for the call as policy currently reads it. If the
+//     rule now names a different human, the old signature is a signature from
+//     someone who is no longer the person entitled to give it.
+//   * the APPROVAL SCOPE ('action' | 'tool'). Flipping a rule from action to
+//     tool scope changes what a signature MEANS; a consent granted under one
+//     meaning is not consent under the other.
+//
+// WHAT IS DELIBERATELY NOT IN IT: everything else. The compatibility rule is
+// exactly "what is in the digest invalidates, what is not does not", and it is
+// only honest if the field list is short and stated.
+// ---------------------------------------------------------------------------
+
+/**
+ * Version tag for the CONTEXT digest, independent of
+ * `APPROVAL_DIGEST_VERSION` above so the two can move separately. Same
+ * contract: bumping it makes every pre-existing context digest stop matching,
+ * which is a re-queue (fail-closed), never an accidental match.
+ */
+export const APPROVAL_CONTEXT_DIGEST_VERSION = "regulait.approval-context.v1";
+
+/** One governing approval rule and the `config_versions` row currently ACTIVE
+ * for it. `activeVersionId` is null when the rule has no version rows — the
+ * pre-ADR-0073 case, and a stable value, not an absence. */
+export interface ApprovalRuleVersionRef {
+  ruleId: string;
+  activeVersionId: string | null;
+}
+
+/** The identity of the POLICY CONTEXT a consent was granted under. */
+export interface ApprovalContextRef {
+  /** the rules that MATCHED this call, with their resolved active versions */
+  ruleVersions: ReadonlyArray<ApprovalRuleVersionRef>;
+  /** who policy currently requires to sign — `decision.approverUserId` */
+  requiredApproverUserId?: string | null;
+  /** the strictest scope across the matched rules */
+  approvalScope: ApprovalScope;
+}
+
+/**
+ * Rule/version pairs in a DETERMINISTIC order.
+ *
+ * Rules reach the evaluator in whatever order Postgres returned them — there
+ * is no `ORDER BY` on the rule loads and none is owed, because the kernel's
+ * decision does not depend on it. A digest that DID depend on it would be a
+ * consent that spontaneously stops matching when the planner changes its mind,
+ * which reads exactly like a policy change and is not one. Sorted by ruleId,
+ * then by version id so a (theoretically impossible) duplicate rule id still
+ * orders stably. Exported so the pinning test asserts the rule directly.
+ */
+export function sortApprovalRuleVersions(
+  pairs: ReadonlyArray<ApprovalRuleVersionRef>,
+): ApprovalRuleVersionRef[] {
+  return [...pairs].sort(
+    (a, b) =>
+      a.ruleId.localeCompare(b.ruleId) ||
+      (a.activeVersionId ?? "").localeCompare(b.activeVersionId ?? ""),
+  );
+}
+
+/**
+ * The consent-context fingerprint: sha256 hex over the versioned canonical
+ * JSON of the governing policy identity.
+ *
+ * Deterministic and pure — no clock, no database, no I/O — exactly like
+ * `approvalArgumentsDigest`, and using the SAME `canonicalJson` + `sha256Hex`
+ * for the same reason: one canonicalizer that already survives the `jsonb`
+ * round trip, never a second one that could drift from it.
+ */
+export function approvalContextDigest(ref: ApprovalContextRef): string {
+  return sha256Hex(
+    `${APPROVAL_CONTEXT_DIGEST_VERSION}\n${canonicalJson({
+      ruleVersions: sortApprovalRuleVersions(ref.ruleVersions).map((p) => ({
+        ruleId: p.ruleId,
+        activeVersionId: p.activeVersionId ?? null,
+      })),
+      requiredApproverUserId: ref.requiredApproverUserId ?? null,
+      approvalScope: ref.approvalScope,
+    })}`,
+  );
+}
+
+/**
+ * ADR-0105 — the DEFAULT approval time-to-live, in hours, applied when
+ * `org_settings.approval_ttl_hours` has never been set.
+ *
+ * 72 hours is a deliberate, documented upgrade-day behaviour change. An
+ * approval is a human decision about ONE pending action; indefinite validity
+ * is the defect, not a feature, and shipping the dial as NULL ("never
+ * expires") would have left the gap open for exactly the population that
+ * already has it — the same argument ADR-0104 made for `approval_scope`
+ * defaulting to 'action'. An operator who genuinely wants the old posture sets
+ * the dial to NULL, on the record, and reopens the gap knowingly.
+ */
+export const DEFAULT_APPROVAL_TTL_HOURS = 72;
+
+/** Why a stored consent stopped satisfying the call it was granted for. Kept
+ * as a closed vocabulary so the audit trail, the outcome variants and the
+ * approver-facing reason all name the same conditions. */
+export const CONSENT_RETIREMENT_REASONS = ["expired", "context_changed"] as const;
+export type ConsentRetirementReason = (typeof CONSENT_RETIREMENT_REASONS)[number];

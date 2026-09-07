@@ -22,8 +22,10 @@ import {
 import { evaluate, matchingApprovalRules, type Decision, type ToolRef } from "@regulait/policy-kernel";
 import {
   approvalArgumentsDigest,
+  approvalContextDigest,
   effectiveApprovalScope,
   type ApprovalScope,
+  type ConsentRetirementReason,
 } from "@regulait/shared";
 import { loadEntitlements, loadScopeMemberships } from "./entitlements.js";
 import { evaluateAbacForToolCall, loadActiveAbacPolicies, type AbacPrincipalContext } from "./abac.js";
@@ -89,6 +91,32 @@ export interface GovernedEvaluation {
    * whether the pending-entry dedup must also key on the digest.
    */
   approvalScope: ApprovalScope;
+  /**
+   * ADR-0105: the CONSENT-CONTEXT fingerprint of this call — sha256 over the
+   * matched approval rules paired with their active `config_versions` ids, the
+   * required approver, and the approval scope. Computed here, once, for the
+   * same reason `argumentsDigest` is: the queue writer, the audit writer and
+   * the consumption predicate must all be looking at the same bytes. Returned
+   * unconditionally, including on a refusal — it is a fact about the policy
+   * that governed the call, and the audit row is owed it either way.
+   */
+  contextDigest: string;
+  /**
+   * ADR-0105: approved rows that WOULD have satisfied this call on ADR-0104's
+   * payload test but were refused on the new ones — an expired consent, or one
+   * granted under a policy context that has since moved. Returned as DATA, not
+   * acted on: `governedEvaluate` is also the engine behind `/v1/evaluate`,
+   * which must never create, consume or retire a queue entry. The ACTING path
+   * (`mcp-proxy.ts`) is what supersedes them and re-queues, so a preview stays
+   * a preview.
+   */
+  retiredApprovals: RetiredApproval[];
+}
+
+/** one stored consent this call refused to spend, and why */
+export interface RetiredApproval {
+  id: string;
+  reason: ConsentRetirementReason;
 }
 
 /** the workflow statuses under which attributed work is still "landing on" its
@@ -233,7 +261,15 @@ export async function governedEvaluate(
     // unconsumed rows per user/server/tool — consumption is single-use, so
     // they do not accumulate.
     db
-      .select({ id: approvals.id, argumentsDigest: approvals.argumentsDigest })
+      .select({
+        id: approvals.id,
+        argumentsDigest: approvals.argumentsDigest,
+        // ADR-0105 — the two new consent facts, loaded with the candidates so
+        // the freshness test happens in the same pass as the payload test and
+        // cannot be forgotten by one of them.
+        contextDigest: approvals.contextDigest,
+        expiresAt: approvals.expiresAt,
+      })
       .from(approvals)
       .where(
         and(
@@ -304,6 +340,15 @@ export async function governedEvaluate(
         arguments: args,
       }),
       approvalScope: "action",
+      // ADR-0105: governance is indeterminate, so there IS no governing policy
+      // identity to report. The empty context is the honest answer and is
+      // never stored — this branch denies before anything is queued.
+      contextDigest: approvalContextDigest({
+        ruleVersions: [],
+        requiredApproverUserId: null,
+        approvalScope: "action",
+      }),
+      retiredApprovals: [],
     };
   }
 
@@ -390,26 +435,13 @@ export async function governedEvaluate(
   // `deployContext` deliberately: a mode-scoped approval rule must be judged
   // against the real derived context, exactly as the kernel judges it, or a
   // rule that does bind this call could be skipped when reading its scope.
-  const approvalScope = effectiveApprovalScope(
-    matchingApprovalRules(servedARules, { userId, serverId, tool, deployContext }),
-  );
-
-  // WHICH approved row satisfies this call.
-  //
-  //   * an exact fingerprint match always satisfies, under either scope;
-  //   * under 'tool' scope any approved row satisfies, including one carrying a
-  //     different payload's digest (that IS the escape hatch) and including a
-  //     legacy row with no digest at all;
-  //   * under 'action' scope nothing else satisfies. A row for different
-  //     arguments is a different consent, and a legacy row (NULL digest,
-  //     queued before migration 0106) is a consent that was never bound to a
-  //     payload — neither can stand in. The call re-queues instead, and the
-  //     re-queued row is born with a digest, so the gap closes itself. This is
-  //     fail-closed, and it is a real upgrade-day behaviour change; ADR-0104
-  //     states it rather than hiding it.
-  const exactMatch = approvedRows.find((r) => r.argumentsDigest === argumentsDigest);
-  const approvedApprovalId =
-    exactMatch?.id ?? (approvalScope === "tool" ? (approvedRows[0]?.id ?? null) : null);
+  const matchedARules = matchingApprovalRules(servedARules, {
+    userId,
+    serverId,
+    tool,
+    deployContext,
+  });
+  const approvalScope = effectiveApprovalScope(matchedARules);
 
   // ADR-0040 ABAC. The policy-set load is ONE indexed query, and an install
   // with no active policies stops there: `abacDecision` stays null, the kernel
@@ -451,6 +483,11 @@ export async function governedEvaluate(
     rules: typeof servedARules,
     limitRows: typeof limitsWithCounts,
     scopes: typeof servedScopeRules,
+    /** ADR-0105: the consent this pass is holding. Explicit, because the
+     * evaluation is run TWICE on the consent path — once holding nothing, to
+     * learn who policy CURRENTLY requires as approver, and once holding the
+     * row that satisfied. Defaulted so the shadow pass below is unchanged. */
+    heldApprovalId: string | null = null,
   ) =>
     evaluate({
       userId,
@@ -466,15 +503,104 @@ export async function governedEvaluate(
       rateLimits: limitRows,
       dataScopeRules: scopes,
       args,
-      approvedApprovalId,
+      approvedApprovalId: heldApprovalId,
       ceilingTools: ceilingTools ?? null,
       deployContext,
       abacDecision,
     });
 
+  // ---------------------------------------------------------------------
+  // ADR-0105 — WHO POLICY CURRENTLY REQUIRES, and the consent-context digest.
+  //
+  // The evaluation is run FIRST holding NO consent. That pass answers exactly
+  // the question ADR-0105's finding says nobody was asking: "if this call
+  // arrived right now with nothing signed, who would have to sign it?" Asking
+  // the kernel is the only honest way to get that answer — an approval rule is
+  // not the only thing that can demand an approver (ADR-0040's ABAC layer can
+  // too), and re-deriving the kernel's own selection order here would be the
+  // second implementation this codebase keeps refusing to write.
+  //
+  // It is also what breaks the circularity: the digest depends on the required
+  // approver, the row selection depends on the digest, and the final decision
+  // depends on the selected row. Evaluating with no consent first orders those
+  // three without any of them guessing at the others.
+  const pendingDecision = evaluateWith(
+    servedARules,
+    limitsWithCounts,
+    servedScopeRules,
+    null,
+  );
+
+  // The POLICY fingerprint of this call, computed ONCE. Only the rules that
+  // actually MATCHED are in it, each paired with the `config_versions` row that
+  // resolved it (ADR-0073) — that pairing IS the compatibility rule ADR-0105
+  // states: activate a new version of a rule that binds this call and the
+  // consent granted under the old one stops satisfying it; edit a rule that
+  // does not bind this call and nothing moves.
+  const contextDigest = approvalContextDigest({
+    ruleVersions: matchedARules.map((r) => ({
+      ruleId: r.id,
+      activeVersionId: aResolved.activeVersionByArtifact.get(r.id) ?? null,
+    })),
+    requiredApproverUserId: pendingDecision.approverUserId ?? null,
+    approvalScope,
+  });
+
+  // WHICH approved row satisfies this call.
+  //
+  // ADR-0104 — THE PAYLOAD TEST:
+  //   * an exact fingerprint match always satisfies, under either scope;
+  //   * under 'tool' scope any approved row satisfies, including one carrying a
+  //     different payload's digest (that IS the escape hatch) and including a
+  //     legacy row with no digest at all;
+  //   * under 'action' scope nothing else satisfies. A row for different
+  //     arguments is a different consent, and a legacy row (NULL digest,
+  //     queued before migration 0106) is a consent that was never bound to a
+  //     payload — neither can stand in. The call re-queues instead, and the
+  //     re-queued row is born with a digest, so the gap closes itself. This is
+  //     fail-closed, and it is a real upgrade-day behaviour change; ADR-0104
+  //     states it rather than hiding it.
+  //
+  // ADR-0105 — THE FRESHNESS TEST, applied on top of it:
+  //   * a stored `context_digest` that differs from the one just computed means
+  //     the governing policy moved after the signature — the consent does not
+  //     satisfy;
+  //   * a NULL stored `context_digest` is a legacy row and IS accepted: it
+  //     predates the feature and is still payload-bound under ADR-0104. See
+  //     ADR-0105 for why that call was made rather than fail-closed;
+  //   * a stored `expires_at` in the past does not satisfy. NULL never expires
+  //     — a legacy row, or an org that set the dial to NULL on purpose.
+  //
+  // The rows that pass the payload test and FAIL the freshness test are
+  // reported as `retiredApprovals` rather than silently skipped, because
+  // leaving a dead consent sitting in the queue marked `approved` is how it
+  // gets found again.
+  const now = Date.now();
+  const satisfiesPayload = (r: (typeof approvedRows)[number]) =>
+    r.argumentsDigest === argumentsDigest || approvalScope === "tool";
+  const expired = (r: (typeof approvedRows)[number]) =>
+    r.expiresAt != null && r.expiresAt.getTime() <= now;
+  const contextStale = (r: (typeof approvedRows)[number]) =>
+    r.contextDigest != null && r.contextDigest !== contextDigest;
+  const fresh = (r: (typeof approvedRows)[number]) => !expired(r) && !contextStale(r);
+
+  const usable = approvedRows.filter((r) => satisfiesPayload(r) && fresh(r));
+  // an exact payload match still wins over a tool-scoped stand-in, exactly as
+  // it did before — the freshness test narrows the candidate set, it does not
+  // reorder it.
+  const approvedApprovalId =
+    usable.find((r) => r.argumentsDigest === argumentsDigest)?.id ?? usable[0]?.id ?? null;
+  const retiredApprovals: RetiredApproval[] = approvedRows
+    .filter((r) => satisfiesPayload(r) && !fresh(r))
+    .map((r) => ({ id: r.id, reason: expired(r) ? "expired" : "context_changed" }));
+
   // THE SERVED DECISION. Computed to completion, from the ACTIVE bodies alone,
   // BEFORE any shadow work starts. Everything after this point is measurement.
-  const decision = evaluateWith(servedARules, limitsWithCounts, servedScopeRules);
+  // With no consent held it IS `pendingDecision` — the same pure function of
+  // the same inputs — so the second call is made only when a row satisfied.
+  const decision = approvedApprovalId
+    ? evaluateWith(servedARules, limitsWithCounts, servedScopeRules, approvedApprovalId)
+    : pendingDecision;
 
   // ---------------------------------------------------------------------
   // ADR-0073 §2 — THE SHADOW PASS.
@@ -514,6 +640,7 @@ export async function governedEvaluate(
         aResolved.candidate ?? servedARules,
         candidateLimits,
         scopeResolved.candidate ?? servedScopeRules,
+        approvedApprovalId,
       );
       await recordCanaryObservations(
         db,
@@ -547,5 +674,12 @@ export async function governedEvaluate(
     }
   }
 
-  return { decision, approvedApprovalId, argumentsDigest, approvalScope };
+  return {
+    decision,
+    approvedApprovalId,
+    argumentsDigest,
+    approvalScope,
+    contextDigest,
+    retiredApprovals,
+  };
 }

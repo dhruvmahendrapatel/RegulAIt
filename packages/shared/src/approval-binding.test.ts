@@ -7,13 +7,17 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  APPROVAL_CONTEXT_DIGEST_VERSION,
   APPROVAL_DIGEST_VERSION,
   DEFAULT_APPROVAL_SCOPE,
+  DEFAULT_APPROVAL_TTL_HOURS,
   approvalArgumentsDigest,
   approvalArgumentsPreview,
+  approvalContextDigest,
   effectiveApprovalScope,
   normalizeApprovalArguments,
   scrubAuditDetail,
+  sortApprovalRuleVersions,
 } from "./index.js";
 
 describe("ADR-0104 — the consent fingerprint", () => {
@@ -138,5 +142,112 @@ describe("ADR-0104 — strictest-wins across matching rules", () => {
         { approvalScope: "tool" },
       ]),
     ).toBe("action");
+  });
+});
+
+/**
+ * ADR-0105 — the CONSENT-CONTEXT fingerprint, pinned.
+ *
+ * The gateway's consumption predicate compares this string to one stored hours
+ * or days earlier. Every property below is one the predicate relies on: if the
+ * digest moved for a reason that is not a policy change, every consent would
+ * spontaneously stop matching (noise); if it failed to move for one that is,
+ * the ADR-0105 gap is still open.
+ */
+describe("ADR-0105 — the consent-context fingerprint", () => {
+  const RULE_A = "11111111-1111-4111-8111-111111111111";
+  const RULE_B = "22222222-2222-4222-8222-222222222222";
+  const V1 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
+  const V2 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2";
+  const APPROVER = "99999999-9999-4999-8999-999999999999";
+  const base = {
+    ruleVersions: [{ ruleId: RULE_A, activeVersionId: V1 }],
+    requiredApproverUserId: APPROVER,
+    approvalScope: "action" as const,
+  };
+
+  it("is a sha256 hex string, and a DIFFERENT one from the payload digest", () => {
+    expect(approvalContextDigest(base)).toMatch(/^[0-9a-f]{64}$/);
+    // the two digests are separate namespaces — a version tag each — so no
+    // context digest can ever be mistaken for a payload digest
+    expect(APPROVAL_CONTEXT_DIGEST_VERSION).not.toBe(APPROVAL_DIGEST_VERSION);
+    expect(approvalContextDigest(base)).not.toBe(approvalArgumentsDigest({ arguments: {} }));
+  });
+
+  it("RULE-LOAD ORDER IS NOT AN INPUT — the pairs are sorted before hashing", () => {
+    // The rule loads carry no ORDER BY and are owed none: the kernel's decision
+    // does not depend on it. A digest that DID depend on it would be a consent
+    // that stops matching when the planner changes its mind, which reads
+    // exactly like a policy change and is not one.
+    const forwards = approvalContextDigest({
+      ...base,
+      ruleVersions: [
+        { ruleId: RULE_A, activeVersionId: V1 },
+        { ruleId: RULE_B, activeVersionId: V2 },
+      ],
+    });
+    const backwards = approvalContextDigest({
+      ...base,
+      ruleVersions: [
+        { ruleId: RULE_B, activeVersionId: V2 },
+        { ruleId: RULE_A, activeVersionId: V1 },
+      ],
+    });
+    expect(forwards).toBe(backwards);
+    expect(sortApprovalRuleVersions([
+      { ruleId: RULE_B, activeVersionId: V2 },
+      { ruleId: RULE_A, activeVersionId: V1 },
+    ])).toEqual([
+      { ruleId: RULE_A, activeVersionId: V1 },
+      { ruleId: RULE_B, activeVersionId: V2 },
+    ]);
+  });
+
+  it("a rule's ACTIVE VERSION changing changes the digest — this is the finding", () => {
+    expect(approvalContextDigest({ ...base, ruleVersions: [{ ruleId: RULE_A, activeVersionId: V2 }] }))
+      .not.toBe(approvalContextDigest(base));
+  });
+
+  it("an UNVERSIONED rule hashes to a STABLE value, not to 'unknown'", () => {
+    // pre-ADR-0073 rules have no version rows at all. That has to be a fixed
+    // input or every unversioned rule would look like a policy change on every
+    // single call.
+    const none = { ...base, ruleVersions: [{ ruleId: RULE_A, activeVersionId: null }] };
+    expect(approvalContextDigest(none)).toBe(approvalContextDigest(none));
+    expect(approvalContextDigest(none)).not.toBe(approvalContextDigest(base));
+  });
+
+  it("the REQUIRED APPROVER is in the digest", () => {
+    expect(approvalContextDigest({ ...base, requiredApproverUserId: RULE_B }))
+      .not.toBe(approvalContextDigest(base));
+    // absent and explicit-null are one value: an evaluation that names no
+    // approver must not hash differently from one that names none
+    expect(approvalContextDigest({ ...base, requiredApproverUserId: null }))
+      .toBe(approvalContextDigest({ ruleVersions: base.ruleVersions, approvalScope: "action" }));
+  });
+
+  it("the APPROVAL SCOPE is in the digest — it changes what a signature MEANS", () => {
+    expect(approvalContextDigest({ ...base, approvalScope: "tool" }))
+      .not.toBe(approvalContextDigest(base));
+  });
+
+  it("ADDING a matched rule changes the digest; the same set does not", () => {
+    expect(approvalContextDigest(base)).toBe(approvalContextDigest({ ...base }));
+    expect(
+      approvalContextDigest({
+        ...base,
+        ruleVersions: [...base.ruleVersions, { ruleId: RULE_B, activeVersionId: null }],
+      }),
+    ).not.toBe(approvalContextDigest(base));
+  });
+
+  it("is pure — no clock, no I/O: the same input hashes the same twice in a row", () => {
+    expect(approvalContextDigest(base)).toBe(approvalContextDigest(base));
+  });
+
+  it("the shipped TTL default is 72 hours", () => {
+    // stated in TypeScript beside the DDL default it mirrors, so a change to
+    // one without the other is visible here rather than only in production
+    expect(DEFAULT_APPROVAL_TTL_HOURS).toBe(72);
   });
 });

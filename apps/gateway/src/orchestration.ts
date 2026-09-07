@@ -1142,6 +1142,50 @@ async function dispatchRunNodeInner(
             };
             traceStatus = "approval_consumed_race";
             break;
+          // ADR-0105 — the two consent-freshness refusals, surfaced to the
+          // worker as error tool_results exactly like every other governance
+          // outcome. A worker whose consent lapsed or whose governing policy
+          // moved is PAUSED for the replacement approval, the same treatment
+          // `approval_required` gets: the alternative is a worker that keeps
+          // burning turns retrying a call it can no longer make.
+          case "approval_expired":
+            block = {
+              type: "tool_result",
+              toolUseId: tc.id,
+              content:
+                `approval ${toolOut.supersededApprovalIds.join(", ")} expired before it was used and ` +
+                `has been superseded` +
+                (toolOut.requeuedApprovalId
+                  ? ` — approval '${toolOut.requeuedApprovalId}' has been raised in its place and this ` +
+                    `worker is paused until it is decided`
+                  : ` — retry to raise a fresh approval`),
+              isError: true,
+            };
+            traceStatus = "approval_expired";
+            if (toolOut.requeuedApprovalId) {
+              breakForApproval = true;
+              toolApprovalPending = true;
+            }
+            break;
+          case "approval_context_stale":
+            block = {
+              type: "tool_result",
+              toolUseId: tc.id,
+              content:
+                `approval ${toolOut.supersededApprovalIds.join(", ")} was granted under a policy context ` +
+                `that has since changed and has been superseded` +
+                (toolOut.requeuedApprovalId
+                  ? ` — approval '${toolOut.requeuedApprovalId}' has been raised under the current policy ` +
+                    `and this worker is paused until it is decided`
+                  : ` — retry to raise a fresh approval`),
+              isError: true,
+            };
+            traceStatus = "approval_context_stale";
+            if (toolOut.requeuedApprovalId) {
+              breakForApproval = true;
+              toolApprovalPending = true;
+            }
+            break;
           case "unknown_tool":
             block = {
               type: "tool_result",

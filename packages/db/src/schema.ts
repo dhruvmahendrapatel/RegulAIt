@@ -1232,6 +1232,24 @@ export const approvals = pgTable(
     /** the SCRUBBED (ADR-0099) rendering of those same arguments — what the
      * approver actually reads. Never the input to the digest. */
     argumentsPreview: jsonb("arguments_preview"),
+    // ADR-0105 (migration 0107) — CONSENT CONTEXT + EXPIRY. Both NULLABLE for
+    // the same reason ADR-0104's pair is: a row queued before 0107 has
+    // neither, and inventing either would be manufacturing a fact nobody
+    // recorded.
+    /** the POLICY fingerprint this consent was granted under: sha256 hex over
+     * the matched approval rules paired with their ACTIVE `config_versions`
+     * ids (ADR-0073), the required approver and the approval scope. Re-derived
+     * at consumption and compared in the same atomic UPDATE predicate that
+     * spends the row, so a policy activation cannot be raced. NULL = a legacy
+     * row that predates the feature; it is ACCEPTED, because it is still
+     * payload-bound under ADR-0104 — see ADR-0105 for why that call was made
+     * rather than fail-closed. */
+    contextDigest: text("context_digest"),
+    /** when this consent stops being spendable, stamped at QUEUE time from
+     * `org_settings.approval_ttl_hours`. NULL = never expires: either a legacy
+     * row queued before 0107, or an org that has deliberately set the dial to
+     * NULL. Never rewritten by a later dial change. */
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
   },
   (t) => [
     index("approvals_status_idx").on(t.status),
@@ -3236,6 +3254,20 @@ export const orgSettings = pgTable(
      * nobody was told about. Recommended production setting: 365. */
     apiKeyMaxTtlDays: integer("api_key_max_ttl_days"),
 
+    // --- ADR-0105 (migration 0107): APPROVAL LIFETIME ----------------------
+    /** HOW LONG an approved-but-unspent MCP tool-call consent stays spendable,
+     * in HOURS from the moment it was queued. DEFAULT 72, which is NOT the
+     * ADR-0098 posture of "ship the dial off": an approval is a human decision
+     * about ONE pending action, and an approved row that is still spendable
+     * next month is the defect this dial exists to close — shipping it NULL
+     * would leave the gap open for exactly the population that already has it.
+     * That makes it a deliberate upgrade-day behaviour change, stated in
+     * ADR-0105. NULL means "never expires": a legitimate operator choice,
+     * recorded as one, which knowingly reopens the gap. Expiry is stamped at
+     * queue time and never rewritten, so changing the dial cannot extend a
+     * consent that already exists. */
+    approvalTtlHours: integer("approval_ttl_hours").default(72),
+
     // --- ADR-0045 (migration 0057): model risk management -------------------
     /** THE DISPATCH GATE. false (default) = today's behaviour, byte-identical:
      * cards are documentation. true = `executeGovernedDispatch` refuses any
@@ -3422,6 +3454,11 @@ export const orgSettings = pgTable(
     ),
     // A default longer than the ceiling would make every no-argument issuance
     // refuse itself. The database refuses the incoherent pair outright.
+    // ADR-0105: optional (NULL = never expires) and bounded to a year when set.
+    check(
+      "org_settings_approval_ttl_hours_check",
+      sql`${t.approvalTtlHours} IS NULL OR (${t.approvalTtlHours} >= 1 AND ${t.approvalTtlHours} <= 8760)`,
+    ),
     check(
       "org_settings_api_key_ttl_ordering_check",
       sql`${t.apiKeyDefaultTtlDays} IS NULL OR ${t.apiKeyMaxTtlDays} IS NULL OR ${t.apiKeyDefaultTtlDays} <= ${t.apiKeyMaxTtlDays}`,

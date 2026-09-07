@@ -134,6 +134,19 @@ export interface RuleResolution<T> {
   notes: CandidateNote[];
   /** artifacts with version rows but no active version — the fail-closed set */
   unresolvable: Array<{ artifactId: string; reason: string }>;
+  /**
+   * ADR-0105 — the artifact id -> ACTIVE `config_versions` row id it resolved
+   * through, for every row passed in. `null` means the artifact has no version
+   * rows at all, which is the byte-identical pre-ADR-0073 case and a STABLE
+   * value, not an absence: it has to hash to something fixed, or every
+   * unversioned rule would look like a policy change on every call.
+   *
+   * This is surfaced rather than re-derived by the caller because
+   * `resolveForShadow` already knows the answer and a second walk of the
+   * version rows could disagree with the one that actually served — which is
+   * precisely the class of bug the consent-context digest exists to catch.
+   */
+  activeVersionByArtifact: Map<string, string | null>;
 }
 
 /**
@@ -154,6 +167,7 @@ export function applyRuleVersions<T extends { id: string }>(
   const candidate: T[] = [];
   const notes: CandidateNote[] = [];
   const unresolvable: Array<{ artifactId: string; reason: string }> = [];
+  const activeVersionByArtifact = new Map<string, string | null>();
   let anyCandidate = false;
 
   for (const row of rows) {
@@ -179,11 +193,16 @@ export function applyRuleVersions<T extends { id: string }>(
       // reached rather than on the rule.
       served.push(row);
       candidate.push(row);
+      // an artifact whose active version cannot be found has no active version
+      // id to report; the caller turns this into a DENY before any consent is
+      // matched, so the map entry is only ever the honest "none".
+      activeVersionByArtifact.set(row.id, null);
       continue;
     }
 
     const servedRow = res.served ? applyRuleBody(artifactType, row, res.served.body) : row;
     served.push(servedRow);
+    activeVersionByArtifact.set(row.id, res.served?.id ?? null);
 
     if (res.candidate) {
       anyCandidate = true;
@@ -203,7 +222,13 @@ export function applyRuleVersions<T extends { id: string }>(
     }
   }
 
-  return { served, candidate: anyCandidate ? candidate : null, notes, unresolvable };
+  return {
+    served,
+    candidate: anyCandidate ? candidate : null,
+    notes,
+    unresolvable,
+    activeVersionByArtifact,
+  };
 }
 
 /**
@@ -218,7 +243,13 @@ export async function resolveRuleVersions<T extends { id: string }>(
   stableKey: string,
 ): Promise<RuleResolution<T>> {
   if (rows.length === 0) {
-    return { served: [], candidate: null, notes: [], unresolvable: [] };
+    return {
+      served: [],
+      candidate: null,
+      notes: [],
+      unresolvable: [],
+      activeVersionByArtifact: new Map(),
+    };
   }
   const versions = await loadVersionsForArtifacts(
     db,

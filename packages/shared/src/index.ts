@@ -2101,6 +2101,15 @@ export const updateOrgSettingsSchema = z
      * this ADR deliberately offers no way to extend it. */
     apiKeyDefaultTtlDays: z.number().int().min(1).max(3650).nullable().optional(),
     apiKeyMaxTtlDays: z.number().int().min(1).max(3650).nullable().optional(),
+    /** ADR-0105 (migration 0107): HOW LONG AN APPROVED-BUT-UNSPENT MCP TOOL
+     * consent stays spendable, in HOURS from the moment it was queued. Ships
+     * at 72 — a deliberate upgrade-day change, because an approval is a human
+     * decision about one pending action and indefinite validity is the defect.
+     * NULL means "never expires": a legitimate operator choice, recorded as
+     * one, that knowingly reopens the gap ADR-0105 closes. Changing the dial
+     * never rewrites an approval that already exists — expiry is stamped at
+     * queue time, exactly as ADR-0098 stamps a key's at issuance. */
+    approvalTtlHours: z.number().int().min(1).max(8760).nullable().optional(),
     /** ADR-0039 self-lockout guard (mirrors the sso_only guard): saving
      * enforce_continuous with an allow-list that excludes the caller's own
      * current IP is refused (409) unless this explicit confirm rides along.
@@ -2538,15 +2547,23 @@ export {
 // `scrubAuditDetail` for the preview rather than adding a second of either, so
 // the queue writer and the evaluation-time matcher hash the identical bytes.
 export {
+  APPROVAL_CONTEXT_DIGEST_VERSION,
   APPROVAL_DIGEST_VERSION,
   APPROVAL_SCOPES,
+  CONSENT_RETIREMENT_REASONS,
   DEFAULT_APPROVAL_SCOPE,
+  DEFAULT_APPROVAL_TTL_HOURS,
   approvalArgumentsDigest,
   approvalArgumentsPreview,
+  approvalContextDigest,
   effectiveApprovalScope,
   normalizeApprovalArguments,
+  sortApprovalRuleVersions,
+  type ApprovalContextRef,
   type ApprovalPayloadRef,
+  type ApprovalRuleVersionRef,
   type ApprovalScope,
+  type ConsentRetirementReason,
 } from "./approval-binding.js";
 
 // ADR-0099 — the credential-material subset of ADR-0042's DLP rules, shared
