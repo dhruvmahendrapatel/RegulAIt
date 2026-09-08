@@ -82,6 +82,56 @@ pnpm --filter @regulait/gateway start   # migrations run on boot
 
 Tests (`pnpm -r test`) need `DATABASE_URL` pointing at a scratch database.
 
+### Verifying a clean checkout
+
+Run this — verbatim — before trusting a fresh clone, a rebase, or a dependency
+change. It is the same sequence CI runs (`.github/workflows/ci.yml`), plus a
+repo-wide `--noEmit` typecheck and an explicitly disposable database, and it is
+the only sequence whose result is meaningful: anything that skips a step below
+can go green on a tree that does not actually build.
+
+```bash
+# 0. Use the package manager this repo pins. package.json declares
+#    "packageManager": "pnpm@10.33.0"; corepack is what makes your shell honour
+#    it. Skipping this is the single most common cause of a "broken clone"
+#    report that the repo cannot reproduce — a mismatched pnpm resolves a
+#    different tree from the same lockfile.
+corepack enable
+corepack prepare --activate          # activates the pinned pnpm, no version to retype
+
+# 1. Install EXACTLY the locked tree. --frozen-lockfile fails rather than
+#    silently rewriting pnpm-lock.yaml, so a verification run can never be the
+#    thing that changes what it is verifying. (CI installs the same way, via
+#    pnpm/action-setup@v4, which reads the packageManager field above.)
+pnpm install --frozen-lockfile
+
+# 2. Build every workspace. This also typechecks and bundles the React SPA.
+pnpm -r build
+
+# 3. Typecheck every workspace against SOURCE, not dist/. Step 2 can pass on a
+#    stale dist/; this cannot.
+pnpm -r exec tsc --noEmit
+
+# 4. Tests, against a database created for this run and thrown away after.
+#    The suites are NOT re-runnable against a populated database — a run
+#    reporting mass SKIPS is a dirty database, not a pass — so the drop is part
+#    of the procedure, not cleanup.
+export PGDATABASE_VERIFY=regulait_verify
+dropdb --if-exists "$PGDATABASE_VERIFY" && createdb "$PGDATABASE_VERIFY"
+export DATABASE_URL="postgres://regulait:regulait@localhost:5432/$PGDATABASE_VERIFY"
+# 64-hex fixture key, the shape secrets.ts asserts. Not a secret.
+export REGULAIT_DATA_KEY=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+pnpm -r test
+dropdb --if-exists "$PGDATABASE_VERIFY"
+```
+
+**The exit code is the result.** `pnpm -r test` exits non-zero for a failed
+assertion *and* for an unhandled error thrown outside any assertion — the
+second kind is the one that used to make this suite's exit code
+non-deterministic on an all-green run, closed by
+[ADR-0106](docs/decisions/0106-mock-socket-net-contract.md). Do not read the
+"N passed" line and stop; read `echo $?`.
+
 ### Tamper-evident audit anchoring (no cloud account needed)
 
 The compose stack brings up **MinIO with a real S3 Object Lock bucket in
