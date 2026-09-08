@@ -257,5 +257,23 @@ was added inside one test file; the run exited non-zero, reported as an unhandle
 test still passing. Reverted exactly. **This is the control that distinguishes a fix from a
 suppression**: quiet was not achieved by making unhandled errors invisible.
 
-Exit codes and the exact commands for all four, plus the three consecutive full-suite runs on
-freshly created databases, are recorded in the session log for this change.
+### The measured results
+
+Every run below is `pnpm vitest run` in `apps/gateway`, against a database created immediately
+before it and never reused — these suites are not re-runnable against a populated database, and a
+run reporting mass *skips* would be a dirty database, not a pass.
+
+| run | database | result | exit |
+| --- | --- | --- | --- |
+| baseline 1 | `f01_run1`, fresh | 173 files / 2688 passed / 9 skipped / 0 failed / **0 errors** | **0** |
+| baseline 2 | `f01_run2`, fresh | 173 files / 2688 passed / 9 skipped / 0 failed / **0 errors** | **0** |
+| baseline 3 | `f01_run3`, fresh | 173 files / 2688 passed / 9 skipped / 0 failed / **0 errors** | **0** |
+| control 3 — inverted assertion in `egress-guard.test.ts:50` | `f01_ctl2`, fresh | 1 file failed / 1 failed / 2687 passed — `AssertionError: expected false to be true` | **1** |
+| control 4 — `setTimeout(() => { throw new Error("control") }, 0)` in `egress-guard.test.ts` | `f01_ctl3`, fresh | 173 files **passed** / 2688 **passed** / 0 failed / **1 unhandled error** | **1** |
+
+Control 4 is worth reading twice: **every test passed and the run still exited 1**, which is the
+exact shape of the F01 symptom this ADR closes. That is the intended behaviour — an unhandled error
+must fail the gate. What changed is that the suite no longer *manufactures* one.
+
+Both controls were reverted with `git checkout --` of the single touched file and `git status`
+confirmed clean. `pnpm -r build` followed by repo-wide `pnpm -r exec tsc --noEmit` exits 0.
