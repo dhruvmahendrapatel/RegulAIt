@@ -287,8 +287,18 @@ describe("L6a — the copilot answers from retrieved governance objects, or refu
       expect(o.kind).toBe("audit_log");
       expect(o.id).toMatch(/^[0-9a-f]{8}-/);
       // the label is gateway-written fact (effect · ruleId), never the
-      // attacker-influenceable `reason` string
-      expect(o.label).toMatch(/^(allow|deny|approval_required|error)\s·\s/);
+      // attacker-influenceable `reason` string.
+      //
+      // These are the THREE values `audit_log.effect` can hold (schema.ts) and
+      // nothing else: copilot.ts builds this label as `${effect} · ${ruleId}`
+      // straight off the row. The list previously read
+      // `approval_required|error` — a transposition of `require_approval`, plus
+      // a value the enum does not have — so a cited require_approval row could
+      // never satisfy it, and the assertion passed only while this file's
+      // scoped retrieval happened to sample none. It began failing once a
+      // batch that writes many require_approval rows landed earlier in the
+      // shared database, which is luck expiring, not a regression.
+      expect(o.label).toMatch(/^(allow|deny|require_approval)\s·\s/);
       expect(body.answer.text).toContain(o.id);
     }
     // and every cited id is a row that really exists, with the label it claims
