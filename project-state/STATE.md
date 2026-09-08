@@ -21,6 +21,50 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-08 — N1 landed: the `socket.destroySoon` cause is closed and proven, but F01 stays OPEN.**
+([ADR-0106](../docs/decisions/0106-mock-socket-net-contract.md), no migration.) Also closes
+**AER-003**'s residue via a documented pinned clean-checkout sequence in `README.md`.
+
+**The cause, traced end to end and verified rather than reasoned.** `@hono/node-server` — in the
+tree only **transitively, via `@modelcontextprotocol/sdk`, whose server transport imports it** —
+arms a 500 ms `unref`'d drain timer whose `forceClose` reads `socket && !socket.destroyed` and then
+calls `socket.destroySoon()` without establishing it is callable. Under `app.inject()` that socket
+is `light-my-request`'s `MockSocket extends EventEmitter`, carrying **only `remoteAddress`**: a real
+`net.Socket` answers both members, the mock answers neither — so the guard reads `!undefined` →
+`true`, passes, and calls a method that is not there. `unref` stops a timer holding the process
+open; it does not stop it firing. Fixed by **completing the mock against the contract it stands in
+for** — not by suppressing anything: no `dangerouslyIgnoreUnhandledErrors`, no `uncaughtException`
+handler, no `node_modules` patch. Two corrections to the long-standing record:
+`mcp-admission-auth.test.ts` was **never the buggy file** (its own upstream fixture uses a real
+`http.createServer`; it was merely where the transport is driven hardest), and the production
+reach is `mcp-proxy.ts:1458`, so every test file driving the inbound MCP route could hit it.
+
+**Proven, not merely quiet.** An async `throw` injected deliberately still yields *173 files passed,
+2688 passed, 0 failed, **exit 1*** — the F01 symptom shape reproduced on purpose, showing unhandled
+errors are still caught and the suite simply no longer manufactures one. A deliberately broken
+assertion also exits non-zero. `destroySoon`: **0 occurrences across 4 independent full runs.**
+
+**But F01's acceptance criterion is NOT met, and N1 is not being marked closed.** It requires
+repeated runs with no unhandled errors *and* consistent exit status. Across my four post-fix runs
+the exit codes were **1, 0, 0, 0** — the one failure being a *different*, previously unseen
+intermittent: `compat-longtail.test.ts` expecting 409 `no_model_credential` and getting **500**. It
+passes 3/3 in isolation, so it is order/state-dependent in the shared database. I instrumented it
+and re-ran the suite twice more; **it did not reproduce**, so the probe was reverted and no
+diagnosis was reached. Recorded as **S8**, with the untested hypothesis explicitly labelled as a
+guess. **That makes four intermittents found in four batches, every one by the independent retest
+rather than a build agent's run, and all the same disease: an assertion that passes by luck of
+what the shared database holds.**
+
+**A verification failure of my own, worth more than the result it nearly produced.** My first two
+N1 runs reported *159 files failed* — which was **Postgres being down**, not the code. I had
+redirected the database-setup stderr to `/dev/null`, suppressing the one signal that would have
+caught it, and every DB-backed file then "failed" with all its tests skipped. Reporting those
+numbers would have handed the owner a fabricated regression on work that was sound. Re-run with
+setup errors visible, an explicit reachability probe that aborts, and per-run `ECONNREFUSED`
+counts. This is the inverse of the warning I myself wrote into `TESTING_CHECKLIST.md` two batches
+ago — mass skips mean the database, not the code; I had only considered *dirty*, not *absent*.
+See **M-032**.
+
 **2026-09-08 — B14 closed and retested: a consent is now bound to the policy that demanded it, and
 expires.** ([ADR-0105](../docs/decisions/0105-consent-context-binding-and-expiry.md), migration
 0107.) A third external review run raised **AER-004 (HIGH)**, and it was true on all three counts I

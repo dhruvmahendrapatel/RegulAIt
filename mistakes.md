@@ -432,3 +432,44 @@ recalling them. If the claim is worth stating as fact to another agent, it is
 worth the one command that confirms it. And when logging a mistake, name the
 MOVE, not the domain: "I did not check the lockfile" is a fact; "I asserted
 content from structure" is the rule.**
+
+## M-032 (2026-09-08) — I silenced my own instrument, then nearly reported its silence as a result
+
+Verifying N1, I ran the gateway suite twice and got **159 of 173 files "failed"**
+with 2464 tests skipped, on databases I had just created. The tree under test was
+sound. Postgres was simply **down** — every database-backed `beforeAll` threw
+`ECONNREFUSED 127.0.0.1:5432`, and the 233 tests that passed were the pure ones
+needing no database.
+
+I could not see that from the run, because my own harness hid it. I had written
+the setup step as:
+
+```
+psql ... -c "DROP DATABASE ..." -c "CREATE DATABASE ..." >/dev/null 2>&1
+```
+
+`2>&1` to `/dev/null` discarded the connection error from the one command whose
+failure invalidates everything after it. The suite then ran against a database
+that did not exist, and reported that as 159 failing files.
+
+Two things make this worse than an ordinary slip. First, I had **already written
+the rule** — `TESTING_CHECKLIST.md` gained a preamble two batches earlier saying
+*"a run reporting mass skips is a dirty database, not a passing suite"*. I had
+considered only a **dirty** database, not an **absent** one, so my own warning
+did not fire for me. Second, this session's entire value has been catching
+results that look like findings but are artefacts; had I pasted "159 files
+failed" into a report, I would have manufactured exactly the kind of false
+regression I keep catching in others' runs — on somebody else's correct work.
+
+The near-miss was luck of temperament, not process: the number was implausible
+enough that I looked at a failure body instead of reporting the summary. A
+slightly *less* dramatic wrong answer — say 3 files failing — would very likely
+have been reported.
+
+**Rule: never discard stderr from a setup or precondition step. Redirecting a
+command's errors is only ever acceptable for a command whose failure does not
+change the meaning of what follows. Every verification harness must make its
+preconditions ASSERT rather than assume: probe the dependency, fail loudly, and
+abort — a run that cannot distinguish "the code is broken" from "my instrument is
+absent" produces no evidence in either direction. And when a result is dramatic,
+that is the moment to check the instrument first, not the code.**

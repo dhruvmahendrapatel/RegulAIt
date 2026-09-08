@@ -101,6 +101,28 @@ caught on read. **The sweeps buy timeliness, never correctness.**
 
 ## 5. Test-infrastructure debt
 
+- **S8 — a FOURTH intermittent, order-dependent test failure. OPEN, and NOT diagnosed (2026-09-08).**
+  `compat-longtail.test.ts` — *"THE ASYMMETRY, provider side"* — asserts that a dispatch to an
+  `anthropic`-provider agent with no credential configured returns **409 `no_model_credential`**.
+  On one full-suite run it returned **500**. Observed **once in four** post-ADR-0106 runs
+  (`n1w1` exit 1; `n1w2`, `diag1`, `diag2` all exit 0 at 2688 passed). It passes **3/3 in
+  isolation** on a fresh database, so it is order/state-dependent inside the shared database, not a
+  defect of that file in itself. A temporary probe was added to capture the 500 body and the suite
+  re-run twice more; **it did not reproduce**, so the probe was reverted and no diagnosis was
+  reached. Recorded rather than guessed at.
+
+  **Untested hypothesis, written down so it is not mistaken for a finding**: a 500 where the
+  contract is "no credential ⇒ 409" is consistent with some *other* file registering an `anthropic`
+  provider credential into the shared database first, turning a credential-less dispatch into a
+  real provider attempt. That is a guess. It has not been checked, and the next person should
+  check it before acting on it.
+
+  **Consequence for F01**: the `socket.destroySoon` half is closed and proven (0 occurrences in 4
+  runs), but F01's acceptance criterion — *repeated runs complete with no unhandled errors AND
+  consistent exit status* — is **not yet met**, because this unrelated intermittent still moves the
+  exit code. ADR-0106 closed a cause; it did not make the suite deterministic on its own. **F01
+  stays OPEN.**
+
 - **S7 — TWO ADJACENT VOCABULARIES FOR ONE CONCEPT (found 2026-09-08).** `audit_log.effect` and the
   kernel's `DecisionEffect` spell it **`require_approval`**; `GovernedToolCallOutcome.kind` spells
   it **`approval_required`**. Both are correct inside their own domain, and neither is worth the

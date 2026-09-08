@@ -6,10 +6,15 @@ each sets a real password on first sign-in. Mark rows as you go; report the row
 number + what you saw for anything off.
 
 > **Running the gateway suite (learned the hard way, 2026-09-07).**
-> - **Always drop and recreate the database first.** These suites are NOT re-runnable against a
->   populated one: fixed-name fixtures 400/409 on a second pass and vitest then reports mass
->   *skips*, which reads like success. A run reporting hundreds of skips is a dirty database, not
->   a passing suite.
+> - **Always drop and recreate the database first, and PROVE it worked.** These suites are NOT
+>   re-runnable against a populated one: fixed-name fixtures 400/409 on a second pass and vitest
+>   then reports mass *skips*, which reads like success. A run reporting hundreds of skips is a
+>   database problem, not a passing suite — and it is **not only the DIRTY case**. An *absent* or
+>   *unreachable* database produces the same shape: on 2026-09-08 a run reported 159 of 173 files
+>   failing with 2464 skipped, and the cause was Postgres being down while the harness discarded
+>   the setup command's stderr to `/dev/null` (M-032). **Never redirect a setup step's errors**, and
+>   probe the database with a real query before starting — a harness that cannot tell "the code is
+>   broken" from "my instrument is missing" gives evidence for neither.
 > - **Judge by the failure count AND the exit status AND the unhandled-error block** — not the
 >   summary line alone. The exit code is currently non-deterministic (PENDING §5).
 > - A green run is not proof a flake is fixed. Two of the suite's known flakes are intermittent;
