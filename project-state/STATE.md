@@ -21,6 +21,48 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-08 — B14 closed and retested: a consent is now bound to the policy that demanded it, and
+expires.** ([ADR-0105](../docs/decisions/0105-consent-context-binding-and-expiry.md), migration
+0107.) A third external review run raised **AER-004 (HIGH)**, and it was true on all three counts I
+checked: ADR-0104's fingerprint covered `{projectId, arguments}` only; `approvals` carried `ruleId`
+and `approverUserId` but **no expiry and no rule/config-version identity**; and consumption was
+`WHERE id=? AND status='approved'` with no digest recheck and no freshness test. Two gaps —
+consent approved under rule version A stayed spendable after a stricter version B activated or the
+required approver changed (an authorization time-of-check/time-of-use hole), and an approved-but-
+unconsumed row lasted forever. The fix needed no new versioning concept: **ADR-0073 already
+resolves every approval rule through `config_versions`**, so the active version id per rule was
+already there to bind against. Consent is now fingerprinted over matched-rule × active-version ×
+required-approver × scope, given a queue-time TTL (72h default dial), and **both are re-derived
+inside the single atomic UPDATE that spends the row** — so nothing can be checked good and spent
+bad. Stale rows are **superseded visibly** and re-queued, not silently ignored. The required
+approver comes from a no-consent evaluation pass, which asks the kernel rather than re-deriving its
+selection order and breaks the digest↔selection↔decision circularity.
+
+**Verified independently: 172 files / 2685 passed + 9 MinIO skips, 0 failed**, on a fresh DB, plus
+a clean repo-wide build and `tsc --noEmit`. Its negative control is the strongest of the three
+batches — 6 of 11 reddened including both headline cases, and the load-bearing green stayed green:
+*an unrelated rule versioned → consent still spendable*, which is what proves the digest is not
+over-broad.
+
+**A third flake, found by my run and not the agent's** — the same family as the previous two.
+`zz-zz-copilot-live.test.ts` asserted citation labels against
+`/^(allow|deny|approval_required|error)/`, but `audit_log.effect` is
+`["allow","deny","require_approval"]` and `copilot.ts:1055` builds the label straight off the row,
+so a cited `require_approval` row could **never** match. It passed only while retrieval sampled
+none; B14's suite writes many such rows into the shared DB and the luck ran out. Fixed
+(`d8aa906`). **Root cause recorded as S7**: the codebase carries two adjacent vocabularies for one
+concept — `audit_log.effect`/`DecisionEffect` say `require_approval`, `GovernedToolCallOutcome.kind`
+says `approval_required` — each correct in its own domain, and reaching for the wrong one fails
+silently most of the time.
+
+**Three flakes in three batches, every one caught by the independent retest rather than the build
+agent's run, all the same disease: an assertion that passes by luck of what the shared database
+holds.** That is F01's substance and it raises the value of the `.at(-1)` sweep (N2).
+
+**Fresh reproduction of the exit-code defect, on this very run**: 2685 passed, **0 failed**, and
+the process still exited **1** on one unhandled `socket.destroySoon`. Going at N1 next while the
+reproduction is in hand.
+
 **2026-09-07 (later still) — two external review documents taken into the build plan.** The owner
 supplied an updated `codexInputs.md` (F01–F08 plus an automated block **AER-001…003** from two
 review runs) and a second document, `PathForward.md` (**PF-01…PF-14**, Waves 0–4), proposing

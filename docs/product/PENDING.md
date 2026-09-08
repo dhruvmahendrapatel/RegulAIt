@@ -101,6 +101,18 @@ caught on read. **The sweeps buy timeliness, never correctness.**
 
 ## 5. Test-infrastructure debt
 
+- **S7 — TWO ADJACENT VOCABULARIES FOR ONE CONCEPT (found 2026-09-08).** `audit_log.effect` and the
+  kernel's `DecisionEffect` spell it **`require_approval`**; `GovernedToolCallOutcome.kind` spells
+  it **`approval_required`**. Both are correct inside their own domain, and neither is worth the
+  wide, risky rename — but the pair is a live hazard, because an assertion or a switch that reaches
+  for the wrong one is silently almost-always right. It has already caused one defect:
+  `zz-zz-copilot-live.test.ts` asserted audit-row labels against the OUTCOME vocabulary, so a cited
+  `require_approval` row could never satisfy it, and the test passed for as long as its scoped
+  retrieval happened to sample none (fixed `d8aa906`). Recorded as a **cause**, not an instance:
+  any future assertion over either surface can repeat it. A cheap mitigation, if one is ever
+  wanted, is to export the enum from `@regulait/db` and assert against the constant rather than a
+  hand-typed literal.
+
 - **The gateway suite's EXIT CODE is not trustworthy (found 2026-09-06).** Two unhandled
   `TypeError: socket.destroySoon is not a function` exceptions escape while
   `apps/gateway/src/mcp-admission-auth.test.ts` runs (ADR-0097's own e2e file, which starts real
