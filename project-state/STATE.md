@@ -21,6 +21,51 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-09 — N2 landed, and a flake sweep turned up a production serving bug.**
+([ADR-0107](../docs/decisions/0107-unordered-single-row-reads.md), no migration.) The task was
+meant to be test hygiene: four intermittents in four batches, all the same disease — *a query that
+does not ask for an order, whose caller then depends on one*. Scoping it changed what it was. The
+real pattern is not the 86 `.at(-1)` sites but `const [x] = await db.select()` with no `ORDER BY`,
+which appears **874 times**; after excluding aggregates (a `count()` returns one row by
+definition), singleton tables and primary-key lookups, **286 genuine candidates remained, 142 of
+them in PRODUCTION**. An unordered single-row read in production is a correctness bug, not a
+nuisance — ADR-0105 had already fixed one by accident, where an arbitrary row decided an
+authorization outcome.
+
+**The severe one, confirmed independently against the schema**: `training_artifacts` is
+`uniqueIndex(...).on(t.jobId)` — unique on `job_id`, with **`agent_id` unconstrained**. A second
+training job registers a second artifact against the same agent, and
+`resolveArtifactProviderForDispatch` read it unordered. **Which model answered an inference call
+was arbitrary and could differ between two identical requests.** Fixed with a total order
+(`desc(createdAt), desc(id)` — `created_at` alone ties for rows written in one transaction).
+**19 production sites fixed**, 11 **deferred to unique constraints** rather than tiebreaks, on the
+reasoning that an `ORDER BY` *accommodates* a duplicate where a constraint *states and enforces*
+the belief that there is none.
+
+**The agent improved on my brief, and the correction matters.** I told it to read `schema.ts` for
+uniqueness. It refused to trust that, applied all 107 migrations to a fresh database and queried
+`pg_index` directly — finding 274 unique indexes **plus 16 PARTIAL ones**, which is exactly where
+schema-reading fails in *both* directions: `compliance_packs_one_active_uq ON (framework) WHERE
+status='active'` clears a site that looks unprotected, while `guardrail_configs_org_uq ON (scope)
+WHERE scope_id IS NULL` does **not** cover a bare `eq(scope,'org')` — and that gap was one of the
+bugs. My instruction would have produced both false positives and false negatives.
+
+**Verified: 174 files / 2691 passed + 9 MinIO skips, 0 failed, exit 0**, on a fresh DB with the
+instrument itself checked (`ECONNREFUSED: 0`, `destroySoon: 0` — the assertion added after M-032).
+Repo-wide build and `tsc --noEmit` clean. Non-vacuity measured: two `ORDER BY`s reverted in place
+reddened 2 of 3 tests — the **stale artifact was served** and the **superseded delegation window
+returned** — while the third correctly stayed green as its own negative control.
+
+**F01 remains OPEN, and the partition is stated rather than blurred.** Production is swept; **103
+at-risk TEST sites are classified but not fixed**, clustering over `audit_log` (15),
+`shadow_ai_findings` (12) and `imported_cost_lines` (11) — the same shape as the two flakes already
+found, so each is a latent intermittent. The scan also matches only **two syntactic shapes**:
+`.at(-1)`, `rows[0]`, `sql.raw` and `Promise.all` destructuring are unswept, and the
+`use-cases-eu-tier` flake was itself an `.at(-1)`, so that class is known real and known unswept.
+**S8** is still undiagnosed. Five sites where ordering is a *semantic* choice were flagged, not
+decided silently — including which external PM tool receives a mirror, where mirroring to every
+link is arguably more correct and belongs to its own decision.
+
 **2026-09-08 — N1 landed: the `socket.destroySoon` cause is closed and proven, but F01 stays OPEN.**
 ([ADR-0106](../docs/decisions/0106-mock-socket-net-contract.md), no migration.) Also closes
 **AER-003**'s residue via a documented pinned clean-checkout sequence in `README.md`.

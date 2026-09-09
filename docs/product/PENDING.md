@@ -101,6 +101,26 @@ caught on read. **The sweeps buy timeliness, never correctness.**
 
 ## 5. Test-infrastructure debt
 
+- **S9 — 103 at-risk TEST sites still unswept, plus two unswept syntactic shapes (opened 2026-09-09,
+  ADR-0107).** N2 swept production (19 fixed, 11 deferred to constraints) but deliberately stopped
+  there. The remaining test sites cluster in `cost-import.test.ts` (9), `spend-monitor.test.ts` (8),
+  `data-key-custody.test.ts` (7), `shadow-ai-adapters.test.ts` (7), and by table over `audit_log`
+  (15), `shadow_ai_findings` (12), `imported_cost_lines` (11). Each is a latent intermittent of
+  exactly the shape that has now bitten four times. **Separately**, the scan matched only
+  `const [x] = await db.select()` and `.limit(1)`; **`.at(-1)`, `rows[0]`, `sql.raw` and
+  `Promise.all` destructuring are unmatched** — and the `use-cases-eu-tier` flake was an `.at(-1)`,
+  so that class is known real and known unswept. A follow-up batch owes both.
+
+- **S10 — eleven production sites want a UNIQUE CONSTRAINT, not an ORDER BY (opened 2026-09-09).**
+  Deferred out of ADR-0107 because a schema change deserves its own decision. The reasoning is
+  worth keeping: an `ORDER BY` *accommodates* a second row, a constraint *states and enforces* that
+  there should not be one. Sites: `approval_id` on `grant_certification_items`,
+  `model_card_approvals`, `training_jobs`, `sod_override_requests`; `workflow_instance_id` on
+  `ai_use_cases`, `ai_vendors`; `cert_inventory(resource_id, common_name)`; `backup_runs`;
+  `trace_spans(trace_id, run_id) WHERE kind='run'`; `data_key_state` (a singleton by convention
+  only); and **`users(lower(email))`** — the most valuable, and the real fix behind the case-folded
+  login lookup that ADR-0107 could only make deterministic.
+
 - **S8 — a FOURTH intermittent, order-dependent test failure. OPEN, and NOT diagnosed (2026-09-08).**
   `compat-longtail.test.ts` — *"THE ASYMMETRY, provider side"* — asserts that a dispatch to an
   `anthropic`-provider agent with no credential configured returns **409 `no_model_credential`**.
