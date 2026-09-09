@@ -111,11 +111,27 @@ caught on read. **The sweeps buy timeliness, never correctness.**
   re-run twice more; **it did not reproduce**, so the probe was reverted and no diagnosis was
   reached. Recorded rather than guessed at.
 
-  **Untested hypothesis, written down so it is not mistaken for a finding**: a 500 where the
-  contract is "no credential ⇒ 409" is consistent with some *other* file registering an `anthropic`
-  provider credential into the shared database first, turning a credential-less dispatch into a
-  real provider attempt. That is a guess. It has not been checked, and the next person should
-  check it before acting on it.
+  **Investigated 2026-09-09 — two hypotheses ELIMINATED with evidence, cause still unknown.**
+  The 409 requires three simultaneous absences (`agents-connectors.ts:1636`): no user credential,
+  no platform credential, and no env-key fallback. So a 500 means one of them was present.
+  - **A leaked PLATFORM credential — eliminated.** `model_credentials` is **empty** in the failing
+    run's surviving database *and* in a passing one. Both files that write an anthropic platform
+    credential (`env-fallback`, `setup-status`) delete it in `afterAll`.
+  - **An unrestored `ANTHROPIC_API_KEY` — eliminated for the two files that set it.**
+    `env-fallback.test.ts` and `setup-status.test.ts` both `clearEnv()` *first* in `afterAll` and
+    then restore only originally-defined vars, so a var that started unset ends unset;
+    `setup-status` also clears inline immediately after use. Neither leaks.
+  - **Confirmed and relevant**: `org_settings.env_key_fallback_enabled` is `true` with `anthropic`
+    allow-listed at end-state in **every** run, failing and passing alike. That is the shared
+    singleton which makes the 409 depend entirely on whether `process.env.ANTHROPIC_API_KEY` is set
+    at that instant — so the remaining suspect is a *transient* process-env or timing condition,
+    not stored state.
+
+  **Why the forensics stopped there, stated honestly**: the state that would settle it —
+  `process.env` at that moment — is not persisted, so comparing end-state databases cannot reach
+  it, and the failure did not reproduce under instrumentation. What remains is a stress/repeat
+  approach or per-file env assertions, not more reading. **No further guess is recorded here**;
+  the previous entry's hypothesis is withdrawn as eliminated, not carried forward.
 
   **Consequence for F01**: the `socket.destroySoon` half is closed and proven (0 occurrences in 4
   runs), but F01's acceptance criterion — *repeated runs complete with no unhandled errors AND
