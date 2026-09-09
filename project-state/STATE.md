@@ -21,6 +21,54 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-09 (later still) — S10 closed: nine constraints added, and TWO REFUSED on evidence.**
+([ADR-0109](../docs/decisions/0109-deferred-unique-constraints.md), migration 0108.) ADR-0107
+deferred 11 sites where an `ORDER BY` would encode the wrong claim — *"several are expected, here is
+the tiebreak"* — when the truth is *"a second one is a bug the database should refuse"*. The design
+I set was conservative: **the migration adds constraints and REFUSES; it never repairs, merges or
+deletes.** On a deployment holding duplicates the upgrade stops, which for a governance product
+beats silently merging somebody's records — the same reasoning ADR-0104 used declining to backfill
+consent. A pre-flight report shows an operator what blocks them before they upgrade.
+
+**Nine added** (partial where the column is nullable, total where not), including the valuable one:
+**`users_email_lower_uq ON users (lower(email))`** — the real fix behind the case-folded login
+lookup ADR-0107 could only make deterministic and explicitly called a stopgap. Every creation path
+was read: **SCIM create/replace, OIDC JIT, SAML JIT and the bulk importer all case-fold or
+pre-check and are unaffected**; the one unguarded path, `POST /v1/users`, now answers **409**
+instead of creating a second account. Normalising the schema to lower case was rejected — it would
+silently *adopt* an existing account's address.
+
+**The two refusals are the better half of this batch.**
+- **`backup_runs` — REFUSED, and it is a bug in the WRITING code.** I verified the state machine
+  myself: the idempotency read matches only `status='missed'` (`infra.ts:198`), proposing a restore
+  sets `restore_proposed` (`:1397`), and denying sets it **back** to `missed` (`:734`). So propose →
+  a re-scan inserts a second `missed` row → **denying would fail with 23505 and the operator could
+  not refuse the restore.** A constraint that blocks a governance decision is worse than the
+  duplicate it prevents. Shipped as an advisory pre-flight instead.
+- **`data_key_state` — ADR-0107's entry is factually WRONG.** It says "singleton by convention
+  only"; migration 0075 already gives the table `id text PRIMARY KEY DEFAULT 'singleton'` **plus**
+  `CHECK (id='singleton')` — the identical shape `org_settings` uses. Verified against the migration.
+  ADR-0109 corrects it in a new ADR rather than editing an accepted one.
+
+**The `trace_spans` contradiction I flagged dissolved**: the two sites read different predicates.
+`closeRunSpan` reads `(trace_id, kind='run')` with no run id and is genuinely multi-row (a trace can
+carry a sub-run), so its `asc(seq)` fix stands untouched; the constraint covers the strictly
+narrower `(trace_id, kind='run', run_id)`.
+
+**M-033's lesson was applied without being asked twice**: the tests assert both SQLSTATE `23505`
+**and** the exact `error.constraint` name, so a refusal by the pre-existing `users_email_unique`
+reddens instead of passing as a false success — and each partial index's *excluded* population is
+exercised, so an accidentally-total index reddens. Non-vacuity: all nine dropped on a fresh DB →
+**11/11 tests fail**, each on its own index; every one is independently load-bearing.
+
+**Verified: 175 files / 2702 passed + 9 MinIO skips, 0 failed, exit 0**, repo-wide build and
+typecheck clean, and **9 of 9 indexes confirmed present in the migrated database** — the migration
+applied, not merely compiled.
+
+**New, both owed a decision**: the `backup_runs` writing-code fix (does a re-scan re-open a miss
+while a restore is pending?), and the fact that **the pre-flight is wired into no CI or deploy
+path** — a check nobody runs is worth nothing.
+
 **2026-09-09 (later) — S9 closed: the test-side sweep found two tests that were VACUOUS, not
 flaky.** ([ADR-0108](../docs/decisions/0108-test-side-unordered-reads.md), no migration.) The build
 agent hit an account rate limit mid-probe; I picked the batch up, reverted an unreverted probe it had

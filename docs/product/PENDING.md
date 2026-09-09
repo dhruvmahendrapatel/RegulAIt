@@ -120,7 +120,29 @@ caught on read. **The sweeps buy timeliness, never correctness.**
   `Promise.all` destructuring are unmatched** — and the `use-cases-eu-tier` flake was an `.at(-1)`,
   so that class is known real and known unswept. A follow-up batch owes both.
 
-- **S10 — eleven production sites want a UNIQUE CONSTRAINT, not an ORDER BY (opened 2026-09-09).**
+- ~~**S10 — eleven production sites want a UNIQUE CONSTRAINT**~~ **CLOSED 2026-09-09
+  ([ADR-0109](../decisions/0109-deferred-unique-constraints.md), migration 0108)** — **nine added,
+  two refused on evidence.** `data_key_state` needed nothing: ADR-0107's "singleton by convention
+  only" was factually wrong, as migration 0075 already gives it a PK plus `CHECK (id='singleton')`.
+  `backup_runs` was **refused because the constraint would break a governance decision** — see S11.
+  Original entry retained below.
+
+- **S11 — `backup_runs` re-opens a miss while a restore is pending (found 2026-09-09).** The
+  idempotency read matches only `status='missed'` (`infra.ts:198`); proposing a restore sets
+  `restore_proposed` (`:1397`); denying sets it back to `missed` (`:734`). So a re-scan between
+  propose and deny inserts a SECOND `missed` row, and with a unique constraint the **deny would fail
+  with 23505 — an operator could not refuse a restore.** The constraint was therefore not added.
+  The fix is to widen the idempotency read to `status IN ('missed','restore_proposed')`, but that is
+  a behaviour change owed a product answer: **should a re-scan re-open a miss while a restore is
+  pending?** Until then the duplicate is visible through the advisory pre-flight.
+
+- **S12 — the duplicate pre-flight is wired into nothing (found 2026-09-09).** ADR-0109 ships
+  `deferred-unique-preflight.ts` and `scripts/preflight-unique-constraints.mjs` so an operator can
+  see what would block migration 0108, but no CI job or deploy step runs it, and today it depends on
+  someone reading the migration header. **A check nobody runs is worth nothing.** Small, and it is
+  the natural companion to F01/PF-04's "one pinned verification command".
+
+- **S10 (original entry, superseded above) — eleven production sites want a UNIQUE CONSTRAINT, not an ORDER BY (opened 2026-09-09).**
   Deferred out of ADR-0107 because a schema change deserves its own decision. The reasoning is
   worth keeping: an `ORDER BY` *accommodates* a second row, a constraint *states and enforces* that
   there should not be one. Sites: `approval_id` on `grant_certification_items`,

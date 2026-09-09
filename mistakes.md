@@ -509,3 +509,37 @@ that the assertion would fail on wrong data. Where an assertion is a negative
 (`not.toContain`, `not.toBe`, `toBeNull`), suspect vacuity first — a negative
 assertion is satisfied by the absence of a thing, which is exactly what reading
 the wrong row gives you.**
+
+## M-034 (2026-09-09) — deferred claims are the least-verified content in this repo, and I verify proportionally to what changed
+
+ADR-0109 found that ADR-0107's deferred-sites table says `data_key_state` is "a
+singleton by convention only". It is not: migration **0075** already gives it
+`id text PRIMARY KEY DEFAULT 'singleton'` **plus** `CHECK (id = 'singleton')` —
+the identical shape `org_settings` uses. The claim was wrong when written, and I
+verified ADR-0107 without catching it.
+
+My review was proportionate in the ordinary sense: I ran the suite, confirmed the
+headline fix against the schema, and read the honest-limits section. What I did
+not do — and would not normally do — is check each of eleven claims about work
+that was **deliberately not done**. And that is the pattern worth naming.
+
+**Verification effort in this project tracks what CHANGED. Deferred items change
+nothing, so they attract none — while being exactly the material that future
+batches are planned from.** A fixed line of code is exercised by a test the same
+day. A sentence saying "this other thing needs a constraint" is exercised by
+nobody, possibly for months, and then becomes a work item somebody scopes from.
+
+This is the third instance. F08 caught two stale rows in `PENDING.md`'s backlog
+inventory — the S3 Object-Lock sink described as unwired when `audit-chain.ts`
+imports `GetObjectLockConfigurationCommand`, and copilot proposals described as
+having no applier when B8c had built one. An external reviewer was misled by both.
+Now a deferred-work table in an accepted ADR. Three for three: the errors are not
+in the code, they are in the prose describing work not yet done.
+
+**Rule: when an artifact defers work, the deferral's factual premise is a claim
+like any other and gets checked at the moment it is written — "X lacks a
+constraint", "Y is unwired", "Z has no applier" are all one command. And when
+picking up deferred work later, re-verify its premise BEFORE scoping from it:
+the reason the premise survived unchallenged is that nothing executes prose. The
+cheapest place to catch this is the batch that writes the deferral, not the batch
+that inherits it.**
