@@ -3,6 +3,7 @@ import {
   agentGrants,
   agents,
   approvals,
+  asc,
   auditLog,
   and,
   costEvents,
@@ -1565,10 +1566,17 @@ export async function closeRunTrace(db: Db, run: RunRow): Promise<void> {
       .orderBy(desc(traces.startedAt))
       .limit(1);
     if (!t) return;
+    // ADR-0107 (F01): a trace can carry more than one `run` span (a sub-run
+    // opened under the same trace), and nothing constrains it to one. The span
+    // being closed here is the ROOT one, so it is asked for by POSITION rather
+    // than left to the planner: `seq` is the trace's own monotonic ordering
+    // column (it backs `trace_spans_trace_idx`), and the lowest one in a trace
+    // is the span that opened it.
     const [rootSpan] = await db
       .select({ id: traceSpans.id })
       .from(traceSpans)
       .where(and(eq(traceSpans.traceId, t.id), eq(traceSpans.kind, "run")))
+      .orderBy(asc(traceSpans.seq), asc(traceSpans.id))
       .limit(1);
     await closeSpan(
       db,

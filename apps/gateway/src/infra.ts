@@ -24,6 +24,7 @@ import type { FastifyInstance } from "fastify";
 import {
   and,
   approvals,
+  asc,
   auditLog,
   backupRuns,
   certInventory,
@@ -328,9 +329,24 @@ async function effectiveInfraPolicy(db: Db, resource: InfraResourceRow, policies
  * bootstrap-token call (the seeder) does not — fall back to a real admin. */
 async function resolveActor(db: Db, userId: string | null): Promise<string> {
   if (userId) return userId;
-  const [admin] = await db.select({ id: users.id }).from(users).where(eq(users.isAdmin, true)).limit(1);
+  // ADR-0107 (F01): `is_admin` is not unique and neither is "any user", so
+  // WHICH HUMAN an unattributed infra act was recorded against was arbitrary —
+  // an audit trail that names a different person on two identical runs is not
+  // an audit trail. Oldest account wins in both fallbacks: the first admin a
+  // deployment ever had is its bootstrap operator, and that is a stable,
+  // explainable answer rather than a stable-looking accident.
+  const [admin] = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(eq(users.isAdmin, true))
+    .orderBy(asc(users.createdAt), asc(users.id))
+    .limit(1);
   if (admin) return admin.id;
-  const [any] = await db.select({ id: users.id }).from(users).limit(1);
+  const [any] = await db
+    .select({ id: users.id })
+    .from(users)
+    .orderBy(asc(users.createdAt), asc(users.id))
+    .limit(1);
   if (!any) throw new Error("no user to attribute the infra operation to");
   return any.id;
 }
@@ -471,10 +487,19 @@ async function applyInfraActionDecision(
   const [resource] = await tx.select().from(infraResources).where(eq(infraResources.id, resourceId!));
   const refTable =
     action === "cert_rotate" ? "cert_inventory" : action === "patch_apply" ? "patch_records" : "backup_runs";
+  // ADR-0107 (F01): the natural key of `infra_findings` is
+  // (resource_id, kind, detail->>'signature') — NOT (ref_table, ref_id). Two
+  // findings of the same kind whose signatures differ (a re-scan that observed
+  // a changed expiry, say) both point at the same ledger row, so this
+  // predicate can match several. The code then reads `status`/`signature` and
+  // MUTATES the row it got. Newest-detected wins: the live finding is the one
+  // the latest scan raised.
   const [finding] = await tx
     .select()
     .from(infraFindings)
-    .where(and(eq(infraFindings.refTable, refTable), eq(infraFindings.refId, ledgerId)));
+    .where(and(eq(infraFindings.refTable, refTable), eq(infraFindings.refId, ledgerId)))
+    .orderBy(desc(infraFindings.detectedAt), desc(infraFindings.id))
+    .limit(1);
   // A4: one lookup serves both the boundary check and the audit-mode stamp
   const deployMode = await resourceDeployMode(tx, resource?.deployTargetId ?? null);
   const airGapped = deployMode === "air_gapped";
@@ -846,10 +871,13 @@ async function proposeInfraAction(
   approverUserId: string,
   actorId: string,
 ): Promise<string> {
+  // ADR-0107 (F01): see the note on `applyInfraActionDecision` — newest-detected wins.
   const [finding] = await db
     .select()
     .from(infraFindings)
-    .where(and(eq(infraFindings.refTable, ledger.refTable), eq(infraFindings.refId, ledger.id)));
+    .where(and(eq(infraFindings.refTable, ledger.refTable), eq(infraFindings.refId, ledger.id)))
+    .orderBy(desc(infraFindings.detectedAt), desc(infraFindings.id))
+    .limit(1);
   const [resource] = await db
     .select()
     .from(infraResources)
@@ -1271,10 +1299,15 @@ export function registerInfraRoutes(app: FastifyInstance, db: Db, _dataKey?: str
     // O6: the attempt's own ledger row, created AT PROPOSE (status
     // 'proposed'); the /decide hook advances it to rotated/denied/failed —
     // every attempt leaves a durable, reasoned record.
+    // ADR-0107 (F01): see the note on `applyInfraActionDecision` — the rotation
+    // attempt is stamped with the finding that is currently live, not with
+    // whichever of several the planner reached first.
     const [linkedFinding] = await db
       .select({ id: infraFindings.id })
       .from(infraFindings)
-      .where(and(eq(infraFindings.refTable, "cert_inventory"), eq(infraFindings.refId, certId)));
+      .where(and(eq(infraFindings.refTable, "cert_inventory"), eq(infraFindings.refId, certId)))
+      .orderBy(desc(infraFindings.detectedAt), desc(infraFindings.id))
+      .limit(1);
     await db.insert(certRotations).values({
       certId,
       findingId: linkedFinding?.id ?? null,

@@ -8,6 +8,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   and,
   apiKeys,
+  asc,
   auditLog,
   authMfaPending,
   authSessions,
@@ -821,10 +822,20 @@ export async function refuseIpBlockedLogin(
  * to impersonate another account through it).
  */
 export async function loadUserByEmail(db: Db, email: string) {
+  // ADR-0107 (F01): `users_email_unique` is UNIQUE on `email` EXACTLY, not on
+  // `lower(email)`. This lookup case-folds, so 'Ada@x' and 'ada@x' — two
+  // separate, both-legal rows — BOTH match it, and unordered the row that got
+  // authenticated (or SCIM-updated) was arbitrary. Oldest account wins: the
+  // first registration of an address is the one that owns it. The real fix is
+  // a UNIQUE index on lower(email), which is a schema change and is deferred
+  // to its own decision (see the ADR); this only makes the current answer
+  // stable, it does not make two case-variant accounts legitimate.
   const [row] = await db
     .select()
     .from(users)
-    .where(sql`lower(${users.email}) = ${email.toLowerCase()}`);
+    .where(sql`lower(${users.email}) = ${email.toLowerCase()}`)
+    .orderBy(asc(users.createdAt), asc(users.id))
+    .limit(1);
   return row ?? null;
 }
 

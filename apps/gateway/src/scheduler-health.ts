@@ -23,7 +23,7 @@
  * A tick still never crashes the gateway, and the next tick still retries —
  * the change is that a human can now find out.
  */
-import { auditLog, eq, users, type Db } from "@regulait/db";
+import { asc, auditLog, eq, users, type Db } from "@regulait/db";
 
 export type SchedulerName = "audit-prune" | "backup-verify";
 
@@ -153,10 +153,14 @@ const SYSTEM_ACTOR = "00000000-0000-0000-0000-000000000000";
 
 async function failureActor(db: Db): Promise<string> {
   try {
+    // ADR-0107 (F01): `is_admin` is not unique, so the human this failure was
+    // recorded against was arbitrary. Oldest admin wins — the deployment's
+    // bootstrap operator — so the same failure names the same person twice.
     const [admin] = await db
       .select({ id: users.id })
       .from(users)
       .where(eq(users.isAdmin, true))
+      .orderBy(asc(users.createdAt), asc(users.id))
       .limit(1);
     return admin?.id ?? SYSTEM_ACTOR;
   } catch {

@@ -46,6 +46,7 @@ import {
   gte,
   guardrailConfigs,
   inArray,
+  isNull,
   or,
   redteamRuns,
   roleAgentGrants,
@@ -261,7 +262,18 @@ export async function computeCardAutofill(
 
   // --- guardrail configs in force (ADR-0042) — configuration, not proof ----
   const [orgConfig, agentOverrides] = await Promise.all([
-    db.select().from(guardrailConfigs).where(eq(guardrailConfigs.scope, "org")).limit(1),
+    // ADR-0107 (F01): the ORG-DEFAULT row is the one with a NULL `scope_id`,
+    // and `guardrail_configs_org_uq` is UNIQUE on (scope) only WHERE
+    // `scope_id IS NULL`. Asking for scope='org' alone was outside that index,
+    // so an org-scoped row that carried a `scope_id` could be returned as the
+    // org default. The predicate is tightened to match `loadOrgGuardrailConfig`
+    // — the canonical loader in guardrails.ts — which makes this provably a
+    // single-row read rather than an ordered guess at one.
+    db
+      .select()
+      .from(guardrailConfigs)
+      .where(and(eq(guardrailConfigs.scope, "org"), isNull(guardrailConfigs.scopeId)))
+      .limit(1),
     agentIds.length
       ? db
           .select()

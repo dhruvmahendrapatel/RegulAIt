@@ -67,6 +67,7 @@ import type { FastifyInstance } from "fastify";
 import {
   and,
   approvals,
+  asc,
   auditLog,
   chatIdentityLinks,
   chatopsConnections,
@@ -436,7 +437,19 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
 
     const [conn] = body.connectionName
       ? await db.select().from(chatopsConnections).where(eq(chatopsConnections.name, body.connectionName))
-      : await db.select().from(chatopsConnections).where(eq(chatopsConnections.enabled, true)).limit(1);
+      : // ADR-0107 (F01): `chatops_connections` is UNIQUE on `name`, not on
+        // `enabled` — a deployment may have Slack and Teams both switched on.
+        // Unordered, WHICH CHAT WORKSPACE an approval card was posted into was
+        // arbitrary, and an approver could find the card in a different place
+        // on two identical mirrors. Oldest-created wins: the first connection a
+        // deployment configured is its default destination, and an operator who
+        // wants another one names it explicitly (the branch above).
+        await db
+          .select()
+          .from(chatopsConnections)
+          .where(eq(chatopsConnections.enabled, true))
+          .orderBy(asc(chatopsConnections.createdAt), asc(chatopsConnections.id))
+          .limit(1);
     if (!conn) return reply.status(400).send({ error: "no_chatops_connection" });
     if (!conn.enabled) return reply.status(422).send({ error: "connection_disabled" });
 

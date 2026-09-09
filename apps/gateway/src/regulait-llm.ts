@@ -431,10 +431,19 @@ export async function resolveArtifactProviderForDispatch(
   db: Db,
   agentId: string,
 ): Promise<ArtifactProviderResolution> {
+  // ADR-0107 (F01): `training_artifacts` is UNIQUE on `job_id`, NOT on
+  // `agent_id` — a second training job for the same agent registers a second
+  // artifact against it. Without an order, Postgres was free to hand back
+  // either, so WHICH MODEL ANSWERED an inference call was arbitrary and could
+  // change between two identical requests. Newest-registered wins: registering
+  // an artifact against an agent is the act of saying "serve this one now", and
+  // `id` breaks a same-millisecond tie so the order is total, not merely likely.
   const [artifact] = await db
     .select()
     .from(trainingArtifacts)
-    .where(eq(trainingArtifacts.agentId, agentId));
+    .where(eq(trainingArtifacts.agentId, agentId))
+    .orderBy(desc(trainingArtifacts.createdAt), desc(trainingArtifacts.id))
+    .limit(1);
   if (!artifact) {
     return {
       ok: false,

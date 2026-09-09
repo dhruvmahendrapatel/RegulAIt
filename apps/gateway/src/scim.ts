@@ -56,6 +56,7 @@ import { randomBytes } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   and,
+  asc,
   auditLog,
   authSessions,
   eq,
@@ -386,10 +387,14 @@ export function registerScimRoutes(app: FastifyInstance, db: Db) {
     return row ?? null;
   };
   const loadUserByEmail = async (email: string): Promise<UserRow | null> => {
+    // ADR-0107 (F01): see `loadUserByEmail` in auth.ts — `lower(email)` is not
+    // unique-backed; oldest account wins, deterministically.
     const [row] = await db
       .select()
       .from(users)
-      .where(sql`lower(${users.email}) = ${email.toLowerCase()}`);
+      .where(sql`lower(${users.email}) = ${email.toLowerCase()}`)
+      .orderBy(asc(users.createdAt), asc(users.id))
+      .limit(1);
     return row ?? null;
   };
 
