@@ -314,5 +314,47 @@ written and asserted to land (with a `count = 2` on `lower(email)`), the probe r
 the index is restored in a `finally` — with the restoration **asserted** against `pg_indexes` and
 re-proved by a further refused insert, because this database is shared with 173 other test files.
 
-**Suite baseline** and the duplicate scan on a database populated by a full run are reported with the
-batch.
+### The duplicate scan, measured on a database populated by a full suite run
+
+The scan the brief asked for, run against the database left behind by the final full-suite run —
+with row populations alongside, because a zero over an empty table says nothing:
+
+| check | rows / keyed rows | duplicate groups |
+| --- | ---: | ---: |
+| `users` `lower(email)` | 572 / 572 | **0** |
+| `trace_spans` `(trace_id, run_id)` `kind='run'` | 42 / 42 | **0** |
+| `ai_use_cases` `workflow_instance_id` | 30 / 24 | **0** |
+| `grant_certification_items` `approval_id` | 29 / 27 | **0** |
+| `ai_vendors` `workflow_instance_id` | 16 / 16 | **0** |
+| `cert_inventory` `(resource_id, common_name)` | 9 / 9 | **0** |
+| `sod_override_requests` `approval_id` | 4 / 4 | **0** |
+| `training_jobs` `approval_id` | 3 / **1** | **0** |
+| `model_card_approvals` `approval_id` | 2 / **1** | **0** |
+| `backup_runs` `finding_id` (`kind='backup'`, `missed`) — ADVISORY | 2 / 2 | **0** |
+| `data_key_state` | **0** | n/a — structurally impossible (PK + CHECK) |
+
+**Where that evidence is thin, and it is said rather than rounded up.** `training_jobs` and
+`model_card_approvals` carry exactly ONE approval-keyed row each under the whole suite, and
+`backup_runs` two: a scan cannot find a duplicate in a population of one, so for those three the
+"zero duplicates" figure is nearly vacuous and the real evidence is the constraint test, not the
+count. `data_key_state` holds no rows at all on the shared suite database (its custody tests build
+their own), which is why §6's argument rests on `pg_constraint` rather than on a row count.
+
+**The stronger measurement is the suite itself.** These constraints were in place for the entire
+run, and none of the write paths uses `ON CONFLICT`, so a duplicate produced anywhere by the writing
+code would have surfaced as a 23505 failure rather than as a row to count later. It did not.
+
+**Suite baseline**: **175 files / 2702 passed / 9 skipped / 0 failed, exit 0**, on a freshly created
+database. Against the pre-batch baseline of 174 / 2691 / 9 / exit 0 that is exactly +1 file and +11
+tests — this batch's own file — with no other count moved. Repo-wide `pnpm -r build` then
+`pnpm -r exec tsc --noEmit`: clean.
+
+**One existing test was superseded rather than left to fail.**
+`unordered-single-row.test.ts`'s third case pinned ADR-0107's stopgap by inserting two case-variant
+users and asserting the older one wins. Migration 0108 makes that fixture *unconstructible*, and the
+test's own comment named this ADR as what it was waiting for. It is rewritten to assert the stronger
+property that replaced it — 23505 from `users_email_lower_uq` **specifically**, not from
+`users_email_unique`, since a refusal by the exact-email index would mean the fixture had stopped
+exercising the case variant — while keeping the half that still means something: `loadUserByEmail`
+gives the same answer twice, now single by construction rather than by tiebreak. Probed: with the
+index dropped it reddens on *the case-variant row was accepted*.
