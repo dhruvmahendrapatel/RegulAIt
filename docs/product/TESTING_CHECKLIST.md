@@ -17,6 +17,14 @@ number + what you saw for anything off.
 >   broken" from "my instrument is missing" gives evidence for neither.
 > - **Judge by the failure count AND the exit status AND the unhandled-error block** — not the
 >   summary line alone. The exit code is currently non-deterministic (PENDING §5).
+> - **A green probe is not proof a test is sound.** Neutralising a fix and watching tests redden
+>   answers "is this FIX load-bearing?" — it cannot answer "is this ASSERTION discriminating?" A
+>   vacuous assertion stays green under any probe and looks exactly like a correctly-unaffected
+>   negative control. Suspect it first where the assertion is a NEGATIVE (`not.toContain`,
+>   `toBeNull`): a negative is satisfied by the absence of a thing, which is precisely what reading
+>   the wrong row gives you. Two such tests were found on 2026-09-09 (M-033, ADR-0108) — one of them
+>   existed to prove one user's key never leaks into another's ciphertext, and was satisfying itself
+>   against a row belonging to nobody in particular.
 > - A green run is not proof a flake is fixed. Two of the suite's known flakes are intermittent;
 >   the same commit has produced 2663/1-failed and 2664/0 on consecutive runs.
 > - Test-authoring trap: `executeGovernedToolCall` with `arguments: undefined` returns

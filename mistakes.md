@@ -473,3 +473,39 @@ preconditions ASSERT rather than assume: probe the dependency, fail loudly, and
 abort — a run that cannot distinguish "the code is broken" from "my instrument is
 absent" produces no evidence in either direction. And when a result is dramatic,
 that is the moment to check the instrument first, not the code.**
+
+## M-033 (2026-09-09) — my non-vacuity technique cannot see a vacuous assertion, and I had been claiming it could
+
+Across five batches — B13a, B14, N1, N2 and S9 — I have certified work as
+non-vacuous the same way: neutralise the control in place, re-run, and confirm
+the relevant tests redden. I treated a red as proof the test was doing its job,
+and a green on an "unchanged behaviour" case as the correct negative control.
+
+S9 showed the gap. Of three fixed sites, only one reddened. The other two stayed
+green **while demonstrably reading the wrong row** — verified, not assumed. The
+sharpest is `credentials-keys.test.ts`: it asserts
+`not.toContain("sk-nina-own-key")` against a row fetched by an unordered read. A
+row belonging to *another user* satisfies that assertion trivially. The test
+exists to prove one user's stored key never leaks into another's ciphertext, and
+it was capable of proving that about a row belonging to nobody in particular.
+
+**Reverting a fix tests whether the FIX is load-bearing. It cannot test whether
+the ASSERTION is.** And the two failure modes are indistinguishable from the
+outside: a vacuous assertion staying green under a probe looks exactly like a
+correctly-unaffected negative control. Every "N of M reddened, the rest correctly
+stayed green" I have reported this session carries that ambiguity, and I did not
+flag it once, because the technique had been working and I never asked what it
+could not see.
+
+I did not manufacture a red to reach 3-of-3, which is the failure this could
+easily have become — the pressure to do so was real, since a clean sweep reads
+better than a ragged one. But the honest report is only half the fix.
+
+**Rule: a non-vacuity probe answers "is this fix load-bearing?", never "is this
+assertion discriminating?" — treat them as two separate questions. When a probe
+leaves a test GREEN, do not record it as a passing negative control until you
+have checked WHY: confirm the neutralised code path was actually exercised and
+that the assertion would fail on wrong data. Where an assertion is a negative
+(`not.toContain`, `not.toBe`, `toBeNull`), suspect vacuity first — a negative
+assertion is satisfied by the absence of a thing, which is exactly what reading
+the wrong row gives you.**

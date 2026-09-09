@@ -101,8 +101,17 @@ caught on read. **The sweeps buy timeliness, never correctness.**
 
 ## 5. Test-infrastructure debt
 
-- **S9 — 103 at-risk TEST sites still unswept, plus two unswept syntactic shapes (opened 2026-09-09,
-  ADR-0107).** N2 swept production (19 fixed, 11 deferred to constraints) but deliberately stopped
+- ~~**S9 — 103 at-risk TEST sites still unswept, plus two unswept syntactic shapes**~~ **CLOSED
+  2026-09-09 ([ADR-0108](../decisions/0108-test-side-unordered-reads.md)).** The "103" was a count of
+  syntactic candidates, not of defects: instrumenting 145 of 148 sites and measuring them under the
+  real shared-database condition showed **only nine can match more than one row**, six of which
+  assert something true of every matching row. **Three fixed, all pinned rather than ordered.**
+  **The finding that outranks the sweep**: two of those three tests were **vacuous, not flaky** —
+  they pass while reading the wrong row (`credentials-keys` asserts `not.toContain(...)`, which a
+  foreign row satisfies trivially). Original scope note retained below for the record.
+
+- **S9 (original framing, superseded above) — 103 at-risk TEST sites, plus two unswept syntactic
+  shapes (opened 2026-09-09, ADR-0107).** N2 swept production (19 fixed, 11 deferred to constraints) but deliberately stopped
   there. The remaining test sites cluster in `cost-import.test.ts` (9), `spend-monitor.test.ts` (8),
   `data-key-custody.test.ts` (7), `shadow-ai-adapters.test.ts` (7), and by table over `audit_log`
   (15), `shadow_ai_findings` (12), `imported_cost_lines` (11). Each is a latent intermittent of

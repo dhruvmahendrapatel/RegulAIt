@@ -21,6 +21,49 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-09 (later) — S9 closed: the test-side sweep found two tests that were VACUOUS, not
+flaky.** ([ADR-0108](../docs/decisions/0108-test-side-unordered-reads.md), no migration.) The build
+agent hit an account rate limit mid-probe; I picked the batch up, reverted an unreverted probe it had
+left in `mcp-tool-pricing.test.ts` (fix backed out, a raw `UPDATE` shuffling heap order, a
+`console.log`), ran the probes it had not finished, and completed its ADR — whose draft still
+described a *single* fix and carried a `[NON-VACUITY RESULT PENDING]` placeholder.
+
+**Scope collapsed under measurement — for the second batch running.** My brief said "~103 at-risk
+test sites". Rather than judge cardinality from `pg_index` as I had instructed, the agent
+**instrumented 145 of 148 candidate sites in place and ran the suite under the real condition** —
+one shared Postgres across all 174 files — turning every count into a fact. **Only NINE sites can
+match more than one row**; six of those assert something true of *every* matching row and were
+deliberately left alone. **Three needed fixing**, and all three are **pinned rather than ordered**,
+because each test already held the identifier for the row it meant. That is the stronger fix, and it
+is the second consecutive batch in which measuring beat the inference method I briefed.
+
+**The finding outranks the fixes.** Probing all three, **only ONE reddens**: `data-key-reencrypt`
+fails on `completed_with_failures` once the oldest of its four rows is rewritten to the heap end,
+which is what `.at(-1)` then picks — a real intermittent, really fixed. The other two stay **green
+with the fix reverted while demonstrably reading the wrong row**. `credentials-keys` asserts
+`not.toContain("sk-nina-own-key")`, which a **foreign row satisfies trivially** — so a test whose
+entire purpose is proving one user's stored key never leaks into another's ciphertext was capable of
+proving that about a row belonging to nobody in particular, and would have passed forever.
+`mcp-tool-pricing` passes on either row because a neighbouring file's row carries an identical
+`{before, after}`.
+
+**Those two were not flaky. They were vacuous, and that is worse** — a flaky test eventually tells
+you something is wrong; a vacuous one never does. Recorded as found rather than smoothed into a
+3-of-3 count.
+
+**A limit in my own standard technique, now written down (M-033).** I have claimed non-vacuity
+across B13a, B14, N1, N2 and S9 by neutralising a control and watching tests redden. That tests
+whether the **FIX** is load-bearing. It cannot test whether the **ASSERTION** is — a vacuous
+assertion stays green under any probe, and reads as "correctly unaffected". Two of the three sites
+here look identical to a legitimate negative control from the outside.
+
+**Verified: 174 files / 2691 passed + 9 MinIO skips, 0 failed, exit 0** on a fresh DB, with the
+instrument asserted (`ECONNREFUSED: 0`, `destroySoon: 0`, `PROBE leftovers: 0`). Counts match the
+N2 baseline exactly, as expected — S9 changed three predicates and added no tests.
+
+**Still open**: **S8** (parked, two hypotheses eliminated), **S10** (eleven sites wanting a unique
+constraint, incl. `users(lower(email))`), **R0**, **R3**. F01 remains open on S8.
+
 **2026-09-09 — N2 landed, and a flake sweep turned up a production serving bug.**
 ([ADR-0107](../docs/decisions/0107-unordered-single-row-reads.md), no migration.) The task was
 meant to be test hygiene: four intermittents in four batches, all the same disease — *a query that
