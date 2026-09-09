@@ -102,6 +102,16 @@ export const users = pgTable("users", {
     // distinct), so an IdP id maps to at most one account while every user
     // that never came from an IdP keeps a null.
     uniqueIndex("users_scim_external_id_uq").on(t.scimExternalId),
+    /** ADR-0109 (migration 0108) — THE FUNCTIONAL index. `users_email_unique`
+     * is UNIQUE on `email` EXACTLY, but every identity path in this codebase
+     * (login, OIDC/SAML JIT, SCIM, the bulk importer) looks the address up
+     * CASE-FOLDED, so 'Ada@x' and 'ada@x' were two legal rows that both matched
+     * one login. ADR-0107 could only make that lookup deterministic
+     * (`asc(createdAt), asc(id)`, "first registration owns the address") and
+     * called it a stopgap; this is the fix. Consequence, deliberately visible:
+     * POST /v1/users with a case-variant of an existing address now answers 409
+     * (app.ts already maps 23505) instead of creating a second account. */
+    uniqueIndex("users_email_lower_uq").on(sql`lower(${t.email})`),
   ],
 );
 
@@ -2760,7 +2770,15 @@ export const certInventory = pgTable(
       .default("active"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("cert_inventory_resource_idx").on(t.resourceId)],
+  (t) => [
+    index("cert_inventory_resource_idx").on(t.resourceId),
+    /** ADR-0109 (migration 0108) — the natural key `syncFindingLedger` already
+     * upserts on by hand ("cert by (resource,commonName)"), now enforced. TOTAL,
+     * not partial: both columns are NOT NULL, so there is no subset to exclude.
+     * `patch_records` got the matching index when it was written; this one was
+     * left to convention. */
+    uniqueIndex("cert_inventory_resource_cn_uq").on(t.resourceId, t.commonName),
+  ],
 );
 
 // O6 (ADR-0027): one row PER ROTATION ATTEMPT, created at PROPOSE time
@@ -4040,6 +4058,14 @@ export const modelCardApprovals = pgTable(
     uniqueIndex("model_card_approvals_one_pending_uq")
       .on(t.cardId)
       .where(sql`${t.status} = 'pending'`),
+    /** ADR-0109 (migration 0108): ONE queue row decides ONE sign-off request.
+     * `applyModelCardApprovalDecision` reads this table by `approval_id` and
+     * acts on the result; a second match would be one human decision executing
+     * against a record they were not shown. Partial because NULL is normal — a
+     * card can exist before anyone requests sign-off. */
+    uniqueIndex("model_card_approvals_approval_uq")
+      .on(t.approvalId)
+      .where(sql`${t.approvalId} IS NOT NULL`),
   ],
 );
 
@@ -6648,6 +6674,13 @@ export const trainingJobs = pgTable(
     check("training_jobs_progress_check", sql`${t.progress} >= 0 AND ${t.progress} <= 1`),
     index("training_jobs_status_idx").on(t.status, t.createdAt),
     index("training_jobs_dataset_idx").on(t.datasetId, t.datasetVersion),
+    /** ADR-0109 (migration 0108): ONE queue row gates ONE job.
+     * `applyTrainingJobApprovalDecision` reads by `approval_id` and cancels or
+     * releases the job it finds. Partial: NULL = under threshold, no approval
+     * was ever required, which is the common case. */
+    uniqueIndex("training_jobs_approval_uq")
+      .on(t.approvalId)
+      .where(sql`${t.approvalId} IS NOT NULL`),
   ],
 );
 
@@ -7263,6 +7296,18 @@ export const traceSpans = pgTable(
     index("trace_spans_parent_idx").on(t.parentSpanId),
     index("trace_spans_usage_idx").on(t.usageEventId),
     index("trace_spans_run_idx").on(t.runId),
+    /** ADR-0109 (migration 0108) — and note this table appears in BOTH of
+     * ADR-0107's tables without contradiction, because the two sites have
+     * different predicates. `closeRunSpan` reads `(trace_id, kind='run')` with
+     * NO run id: a trace can legitimately carry more than one run span, so that
+     * read is genuinely multi-row and keeps ADR-0107's `asc(seq), asc(id)`.
+     * `ensureRunSpan` reads `(trace_id, kind='run', run_id)` — an
+     * insert-if-absent guard naming ONE run — and THAT is what this index makes
+     * provably single. `run_id` is excluded where null: a run-kind span with no
+     * run id carries no identity to be unique on. */
+    uniqueIndex("trace_spans_run_uq")
+      .on(t.traceId, t.runId)
+      .where(sql`${t.kind} = 'run' AND ${t.runId} IS NOT NULL`),
   ],
 );
 
@@ -7352,6 +7397,14 @@ export const aiUseCases = pgTable(
     index("ai_use_cases_owner_idx").on(t.ownerUserId),
     index("ai_use_cases_status_idx").on(t.status),
     index("ai_use_cases_instance_idx").on(t.workflowInstanceId),
+    /** ADR-0109 (migration 0108): ONE pillar-2 instance governs ONE use case.
+     * `syncUseCaseForInstance` mirrors an instance's status onto the object it
+     * finds; two objects on one instance would mean a single sign-off silently
+     * approving one of two things. Partial: a use case may be proposed before
+     * any instance governs it. */
+    uniqueIndex("ai_use_cases_instance_uq")
+      .on(t.workflowInstanceId)
+      .where(sql`${t.workflowInstanceId} IS NOT NULL`),
   ],
 );
 
@@ -7459,6 +7512,11 @@ export const aiVendors = pgTable(
     index("ai_vendors_owner_idx").on(t.ownerUserId),
     index("ai_vendors_status_idx").on(t.status),
     index("ai_vendors_instance_idx").on(t.workflowInstanceId),
+    /** ADR-0109 (migration 0108): the `ai_use_cases` argument, verbatim —
+     * `syncVendorForInstance` is the same shape. */
+    uniqueIndex("ai_vendors_instance_uq")
+      .on(t.workflowInstanceId)
+      .where(sql`${t.workflowInstanceId} IS NOT NULL`),
   ],
 );
 
@@ -7668,6 +7726,13 @@ export const grantCertificationItems = pgTable(
     ),
     index("grant_cert_items_campaign_idx").on(t.campaignId),
     index("grant_cert_items_approval_idx").on(t.approvalId),
+    /** ADR-0109 (migration 0108): ONE queue row decides ONE certification item.
+     * Both the pre-check and the apply path read by `approval_id` and then
+     * revoke a real grant on the strength of it. Partial: NULL until the item
+     * is queued. */
+    uniqueIndex("grant_cert_items_approval_uq")
+      .on(t.approvalId)
+      .where(sql`${t.approvalId} IS NOT NULL`),
     index("grant_cert_items_reviewer_idx").on(t.reviewerUserId),
   ],
 );
@@ -7843,6 +7908,13 @@ export const sodOverrideRequests = pgTable(
     ),
     index("sod_override_rule_idx").on(t.ruleId),
     index("sod_override_approval_idx").on(t.approvalId),
+    /** ADR-0109 (migration 0108): ONE queue row decides ONE override request —
+     * and an approval here MINTS a grant the SoD engine refused, so a second
+     * match would mint against a payload the approver never saw. Partial: NULL
+     * until the request is queued. */
+    uniqueIndex("sod_override_approval_uq")
+      .on(t.approvalId)
+      .where(sql`${t.approvalId} IS NOT NULL`),
     index("sod_override_status_idx").on(t.status),
   ],
 );

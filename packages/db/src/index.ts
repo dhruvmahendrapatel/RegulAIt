@@ -25,6 +25,21 @@ export {
   withProseScrub,
 } from "./prose-scrub.js";
 
+// ADR-0109 — the PRE-FLIGHT duplicate report for migration 0108's unique
+// constraints. 0108 ADDS and REFUSES; it never repairs. This is how an
+// operator finds out what would block the upgrade BEFORE running it.
+export {
+  DEFERRED_UNIQUE_CHECKS,
+  deferredUniqueInventory,
+  formatDeferredUniquePreflight,
+  runDeferredUniquePreflight,
+} from "./deferred-unique-preflight.js";
+export type {
+  DeferredUniqueCheck,
+  DeferredUniqueFinding,
+  DeferredUniquePreflightReport,
+} from "./deferred-unique-preflight.js";
+
 export type Db = ReturnType<typeof createDb>;
 
 /**
