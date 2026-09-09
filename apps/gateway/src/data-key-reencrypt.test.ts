@@ -32,6 +32,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  and,
   auditLog,
   createDb,
   dataKeyReencryptionFailures,
@@ -495,7 +496,21 @@ describe("a row that decrypts under neither key", () => {
     // the run and the audit record both refuse the word "completed"
     const [run] = await db.select().from(dataKeyReencryptionRuns).where(eq(dataKeyReencryptionRuns.id, outcome.runId));
     expect(run?.status).toBe("completed_with_failures");
-    const audits = await db.select().from(auditLog).where(eq(auditLog.ruleId, REENCRYPTION_RULE_IDS.completed));
+    // ADR-0108: by this point the file has run FOUR walks, so four
+    // `completed` rows exist — and only THIS one says completed_with_failures
+    // and names the corpse. `.at(-1)` on an unordered read picks whichever row
+    // the heap happens to hold last, which is not "the newest" and is not
+    // stable across a row rewrite. Pin the row this walk wrote, by the same
+    // run id the `data_key_reencryption_runs` lookup above already uses.
+    const audits = await db
+      .select()
+      .from(auditLog)
+      .where(
+        and(
+          eq(auditLog.ruleId, REENCRYPTION_RULE_IDS.completed),
+          sql`${auditLog.detail}->>'runId' = ${outcome.runId}`,
+        ),
+      );
     const last = audits.at(-1)!;
     expect(last.reason).toContain("completed_with_failures");
     expect(last.reason).toContain(corpse!.id);

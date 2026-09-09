@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createDb, modelCredentials, runMigrations, userModelCredentials, type Db } from "@regulait/db";
+import { and, createDb, eq, modelCredentials, runMigrations, userModelCredentials, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 
 /**
@@ -215,7 +215,16 @@ describe("/app self-service BYO keys", () => {
     expect(listed.json().credentials[0].baseUrl).toBe(BYO_BASE);
     expect(JSON.stringify(listed.json())).not.toContain("sk-nina-own-key");
 
-    const [stored] = await db.select().from(userModelCredentials);
+    // ADR-0108: measured at TWO rows under the full suite — this table holds
+    // every user's credential, not just Nina's. An unordered read could hand
+    // back somebody else's row, and `not.toContain("sk-nina-own-key")` would
+    // then pass without ever looking at the row it claims to be about. Pin the
+    // row this test means; (user_id, provider) is
+    // `user_model_credentials_user_provider_uq`, so this is provably single.
+    const [stored] = await db
+      .select()
+      .from(userModelCredentials)
+      .where(and(eq(userModelCredentials.userId, ninaId), eq(userModelCredentials.provider, "anthropic")));
     expect(stored!.keyCiphertext).not.toContain("sk-nina-own-key");
 
     // the admin's per-user viewer reads the same list
