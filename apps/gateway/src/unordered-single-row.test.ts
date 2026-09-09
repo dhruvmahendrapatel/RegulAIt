@@ -204,50 +204,88 @@ describe("approval delegations: overlapping windows must resolve to the latest o
 // 3. WHICH ACCOUNT LOGS IN
 // ---------------------------------------------------------------------------
 
-describe("email lookup: `users_email_unique` is on `email`, not on `lower(email)`", () => {
+describe("email lookup: `lower(email)` is now unique-backed (ADR-0109, migration 0108)", () => {
   /**
-   * The unique index is EXACT. `loadUserByEmail` case-folds, so two legal rows
-   * that differ only in case both satisfy it. Unordered, WHICH ACCOUNT a login
-   * or a SCIM update resolved to was arbitrary — an authentication outcome
-   * decided by the planner.
+   * WHAT THIS TEST USED TO SAY, AND WHY IT CHANGED.
    *
-   * This test pins the determinism only. It deliberately does NOT assert that
-   * two case-variant accounts are acceptable: the real fix is a UNIQUE index on
-   * `lower(email)`, which is a schema change and is deferred to its own
-   * decision (ADR-0107, "Deferred"). Until that lands, the answer must at least
-   * be the same answer twice.
+   * `users_email_unique` is EXACT, and `loadUserByEmail` case-folds — so two
+   * legal rows differing only in case both satisfied it, and unordered, WHICH
+   * ACCOUNT a login or a SCIM update resolved to was arbitrary: an
+   * authentication outcome decided by the planner. ADR-0107 fixed the
+   * determinism (`asc(createdAt), asc(id)` — first registration owns the
+   * address) and this test pinned it by inserting the LATER account first, so
+   * heap order would give the wrong answer. Its own comment said what it was
+   * waiting for:
    *
-   * The LATER account is inserted first, so heap order is the wrong answer.
+   *     the real fix is a UNIQUE index on `lower(email)`, which is a schema
+   *     change and is deferred to its own decision. Until that lands, the
+   *     answer must at least be the same answer twice.
+   *
+   * **That has landed.** ADR-0109 / migration 0108 ships `users_email_lower_uq`
+   * — `CREATE UNIQUE INDEX ... ON users (lower(email))` — so the fixture the
+   * old test built is now a state the database REFUSES. The old assertion is
+   * not merely unnecessary, it is unconstructible, and keeping it would have
+   * meant keeping a test that asserts a stopgap against a schema that has
+   * superseded it.
+   *
+   * So the case is rewritten to assert the STRONGER property that replaced it,
+   * and to keep the half of the old one that is still meaningful:
+   *
+   *   1. the second, case-variant row is REFUSED — by SQLSTATE 23505 and by
+   *      `users_email_lower_uq` specifically, not by `users_email_unique`
+   *      (which would mean the fixture had stopped exercising the case
+   *      variant, and would make this assertion vacuous); and
+   *   2. `loadUserByEmail` still resolves case-insensitively, and still gives
+   *      THE SAME ANSWER TWICE — the property whose absence started all of
+   *      this. It is now single by construction rather than by tiebreak.
    */
-  it("resolves to the account registered first, deterministically", async () => {
+  it("refuses the second case-variant row, and resolves the surviving one case-insensitively", async () => {
     const local = `N2F01-Case-${RUN}`;
-    const later = new Date();
-    const earlier = new Date(later.getTime() - 24 * 3600 * 1000);
 
-    const [second] = await db
-      .insert(users)
-      .values({
-        email: `${local.toUpperCase()}@example.test`,
-        displayName: "n2f01 later registration",
-        createdAt: later,
-      })
-      .returning();
     const [first] = await db
       .insert(users)
       .values({
         email: `${local.toLowerCase()}@example.test`,
         displayName: "n2f01 earlier registration",
-        createdAt: earlier,
       })
       .returning();
-    created.users.push(second!.id, first!.id);
+    created.users.push(first!.id);
 
+    // The row ADR-0107 could only ORDER around. It cannot be written any more.
+    let thrown: unknown;
+    try {
+      await db.insert(users).values({
+        email: `${local.toUpperCase()}@example.test`,
+        displayName: "n2f01 later registration",
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown, "the case-variant row was accepted — users_email_lower_uq is missing").toBeDefined();
+    let cur: unknown = thrown;
+    let code: string | undefined;
+    let constraint: string | undefined;
+    for (let i = 0; i < 6 && cur && typeof cur === "object"; i += 1) {
+      const c = cur as { code?: unknown; constraint?: unknown; cause?: unknown };
+      if (typeof c.code === "string") {
+        code = c.code;
+        constraint = typeof c.constraint === "string" ? c.constraint : undefined;
+        break;
+      }
+      cur = c.cause;
+    }
+    // 23505 specifically — a CHECK or NOT NULL failure would mean the fixture
+    // is broken, not that the constraint works.
+    expect(code).toBe("23505");
+    // and by the FUNCTIONAL index, not the exact-email one: the two addresses
+    // are not byte-equal, so `users_email_unique` cannot be what refused this.
+    expect(constraint).toBe("users_email_lower_uq");
+
+    // The property the original test existed to protect, unchanged: the same
+    // answer twice, whatever case the caller supplies.
     const resolved = await loadUserByEmail(db, `${local}@example.test`);
     expect(resolved).not.toBeNull();
     expect(resolved!.id).toBe(first!.id);
-    expect(resolved!.id).not.toBe(second!.id);
-
-    // and it is the SAME answer on a repeat call — the property that was absent
     const again = await loadUserByEmail(db, `${local.toUpperCase()}@example.test`);
     expect(again!.id).toBe(first!.id);
   });
