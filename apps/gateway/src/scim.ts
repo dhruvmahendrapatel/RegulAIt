@@ -387,8 +387,10 @@ export function registerScimRoutes(app: FastifyInstance, db: Db) {
     return row ?? null;
   };
   const loadUserByEmail = async (email: string): Promise<UserRow | null> => {
-    // ADR-0107 (F01): see `loadUserByEmail` in auth.ts — `lower(email)` is not
-    // unique-backed; oldest account wins, deterministically.
+    // ADR-0107 (F01) / ADR-0109: see `loadUserByEmail` in auth.ts. `lower(email)`
+    // IS now unique-backed (`users_email_lower_uq`, migration 0108), so this
+    // matches at most one row; the order is kept for a pre-0108 database and
+    // for the reason given there.
     const [row] = await db
       .select()
       .from(users)

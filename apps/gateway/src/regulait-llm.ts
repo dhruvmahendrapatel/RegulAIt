@@ -936,6 +936,9 @@ export async function applyTrainingJobApprovalDecision(
   decision: "approved" | "denied",
   deciderUserId: string,
 ): Promise<((db: Db) => Promise<void>) | null> {
+  // ADR-0109 (migration 0108): single-row by `training_jobs_approval_uq`
+  // UNIQUE (approval_id) WHERE approval_id IS NOT NULL — deliberately a
+  // constraint rather than the `ORDER BY` ADR-0107 declined to add.
   const [job] = await tx.select().from(trainingJobs).where(eq(trainingJobs.approvalId, approvalRow.id));
   if (!job || job.status !== "pending_approval") return null;
 

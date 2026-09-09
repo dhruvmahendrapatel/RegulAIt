@@ -4,7 +4,7 @@
  *
  * WHY THIS FILE EXISTS
  * --------------------
- * Migration 0108 turns eight beliefs about this schema into constraints the
+ * Migration 0108 turns nine beliefs about this schema into constraints the
  * database enforces. A unique constraint is a CLAIM ABOUT DATA THAT ALREADY
  * EXISTS: on a deployment that already holds a pair of rows the claim forbids,
  * `CREATE UNIQUE INDEX` fails and the upgrade stops.
@@ -38,7 +38,7 @@
  * - It does not replace the constraint. A green pre-flight is a statement about
  *   one instant; the constraint is what holds afterwards.
  */
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 
 /** One thing 0108 claims, expressed so it can be checked before it is enforced. */
 export type DeferredUniqueCheck = {
@@ -195,7 +195,8 @@ export function deferredUniqueInventory(): string[] {
   return DEFERRED_UNIQUE_CHECKS.map((c) => `${c.table}:${c.key}`).sort();
 }
 
-type Executor = { execute: (query: unknown) => Promise<unknown> };
+/** Anything with drizzle's `execute` — a `Db`, or a transaction handle. */
+type Executor = { execute: (query: SQL) => Promise<unknown> };
 
 function rowsOf(res: unknown): Array<Record<string, unknown>> {
   if (Array.isArray(res)) return res as Array<Record<string, unknown>>;

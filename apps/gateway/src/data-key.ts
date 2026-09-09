@@ -480,6 +480,14 @@ export interface DataKeyBootResult extends DataKeyBootDecision {
 }
 
 async function readState(db: Db): Promise<DataKeyStateRow | undefined> {
+  // ADR-0107 listed `data_key_state` as "a singleton by CONVENTION only" and
+  // deferred it for a one-row constraint. ADR-0109 checked `pg_constraint` on a
+  // migrated database and found that entry is WRONG: migration 0075 already
+  // created this table with `id text PRIMARY KEY DEFAULT 'singleton'` AND
+  // `CHECK (id = 'singleton')` — a primary key over a column a CHECK pins to
+  // one value admits at most one row, which is the same shape `org_settings`
+  // and `interception_settings` use. So this unordered `limit(1)` is already
+  // provably single-row and 0108 adds nothing here.
   const [row] = await db.select().from(dataKeyState).limit(1);
   return row;
 }

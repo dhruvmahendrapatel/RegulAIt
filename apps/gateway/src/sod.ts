@@ -892,6 +892,11 @@ export async function precheckSodOverrideDecision(
   deciderUserId: string,
   decision: "approved" | "denied",
 ): Promise<SodDecideRefusal | null> {
+  // ADR-0109 (migration 0108): `sod_override_approval_uq` UNIQUE (approval_id)
+  // WHERE approval_id IS NOT NULL makes this single-row. It matters more here
+  // than anywhere else in the deferred set: approving one of these MINTS a
+  // grant the SoD engine refused, so a second match would mint against a
+  // payload the approver never saw.
   const [request] = await db
     .select()
     .from(sodOverrideRequests)
@@ -1041,6 +1046,8 @@ export async function applySodOverrideDecision(
   decision: "approved" | "denied",
   deciderUserId: string,
 ): Promise<void> {
+  // single-row by `sod_override_approval_uq` (ADR-0109 / migration 0108) — see
+  // `precheckSodOverrideDecision`.
   const [request] = await tx
     .select()
     .from(sodOverrideRequests)

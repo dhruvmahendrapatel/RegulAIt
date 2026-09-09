@@ -826,10 +826,16 @@ export async function loadUserByEmail(db: Db, email: string) {
   // `lower(email)`. This lookup case-folds, so 'Ada@x' and 'ada@x' — two
   // separate, both-legal rows — BOTH match it, and unordered the row that got
   // authenticated (or SCIM-updated) was arbitrary. Oldest account wins: the
-  // first registration of an address is the one that owns it. The real fix is
-  // a UNIQUE index on lower(email), which is a schema change and is deferred
-  // to its own decision (see the ADR); this only makes the current answer
-  // stable, it does not make two case-variant accounts legitimate.
+  // first registration of an address is the one that owns it.
+  //
+  // ADR-0109 (migration 0108) SHIPPED THE REAL FIX ADR-0107 deferred:
+  // `users_email_lower_uq`, a functional UNIQUE index ON users (lower(email)).
+  // On any database carrying that migration this predicate now matches AT MOST
+  // ONE ROW and the `orderBy` below is a no-op. It is KEPT rather than removed
+  // because it is the honest behaviour for a database that has not yet been
+  // migrated, and because removing it would say ordering never mattered here.
+  // The consequence of the index is stated at POST /v1/users, the one path
+  // that could create a case-variant: it now answers 409 instead.
   const [row] = await db
     .select()
     .from(users)

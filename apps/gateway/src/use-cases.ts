@@ -282,6 +282,10 @@ export async function syncUseCaseForInstance(
   actorUserId: string | null,
 ): Promise<void> {
   if (!instanceId) return;
+  // ADR-0109 (migration 0108): `ai_use_cases_instance_uq` UNIQUE
+  // (workflow_instance_id) WHERE workflow_instance_id IS NOT NULL. One pillar-2
+  // instance governs ONE use case, so this is single-row by constraint —
+  // ordering it would have implied a second object on one sign-off is expected.
   const [useCase] = await db
     .select()
     .from(aiUseCases)

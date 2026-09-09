@@ -294,7 +294,11 @@ export async function runReencryptionWalk(db: Db, opts: ReencryptWalkOptions): P
     // outside it. Exit 0 and say so — an idempotent re-invocation is not an
     // error, and pretending work happened would be a lie in the other
     // direction.
-    const [state] = await db.select().from(dataKeyState).limit(1);
+    // single-row by PK + CHECK (id='singleton') from migration 0075 — see the
+    // note on `readState` in data-key.ts; ADR-0107's "convention only" entry
+    // was wrong and ADR-0109 adds no constraint here.
+    // single-row by PK + CHECK (id='singleton'); see data-key.ts `readState`.
+  const [state] = await db.select().from(dataKeyState).limit(1);
     if (state?.fingerprint === fpNew && (await countRowsNotUnder(db, fpNewBody)) === 0) {
       return {
         kind: "nothing_to_do",

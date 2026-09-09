@@ -169,6 +169,8 @@ export async function syncVendorForInstance(
   actorUserId: string | null,
 ): Promise<void> {
   if (!instanceId) return;
+  // ADR-0109 (migration 0108): `ai_vendors_instance_uq` — the
+  // `syncUseCaseForInstance` argument, verbatim.
   const [vendor] = await db
     .select()
     .from(aiVendors)

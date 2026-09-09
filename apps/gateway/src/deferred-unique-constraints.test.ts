@@ -206,7 +206,7 @@ beforeAll(async () => {
 
   const [res] = await db
     .insert(infraResources)
-    .values({ kind: "host", name: `${T}-resource` })
+    .values({ kind: "control_plane", name: `${T}-resource` })
     .returning({ id: infraResources.id });
   F.resource = res!.id;
 

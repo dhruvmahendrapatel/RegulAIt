@@ -566,6 +566,15 @@ async function ensureRunSpan(
 ): Promise<string | null> {
   if (!ctx) return null;
   try {
+    // ADR-0109 (migration 0108): `trace_spans_run_uq` UNIQUE (trace_id, run_id)
+    // WHERE kind = 'run' AND run_id IS NOT NULL covers this predicate exactly,
+    // so this insert-if-absent guard is single-row by constraint.
+    //
+    // NOTE THE CONTRAST WITH `closeRunSpan` BELOW, which ADR-0107 fixed with
+    // `asc(seq)`. That read names NO run id — a trace can carry more than one
+    // run span — so it is genuinely multi-row and keeps its order. This one
+    // names ONE run, and that is what the index constrains. The two do not
+    // contradict each other.
     const [existing] = await db
       .select({ id: traceSpans.id })
       .from(traceSpans)

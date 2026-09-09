@@ -393,6 +393,12 @@ export async function precheckGrantCertificationDecision(
   approval: { id: string },
   deciderUserId: string,
 ): Promise<CertRefusal | null> {
+  // ADR-0107 deferred this read: an `ORDER BY` would have said "several items
+  // per approval are expected, here is the tiebreak", when the truth is that a
+  // second one is a bug. ADR-0109 (migration 0108) says so instead —
+  // `grant_cert_items_approval_uq` UNIQUE (approval_id) WHERE approval_id IS
+  // NOT NULL makes this predicate match at most one row, so it is deliberately
+  // left unordered.
   const [item] = await db
     .select()
     .from(grantCertificationItems)
@@ -480,6 +486,8 @@ export async function applyGrantCertificationDecision(
   decision: "approved" | "denied",
   deciderUserId: string,
 ): Promise<void> {
+  // single-row by `grant_cert_items_approval_uq` (ADR-0109 / migration 0108),
+  // not by order — see `precheckGrantCertificationDecision`.
   const [item] = await tx
     .select()
     .from(grantCertificationItems)

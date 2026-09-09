@@ -132,6 +132,11 @@ async function syncFindingLedger(
   if (report.kind === "cert_expiring") {
     const commonName = String(d.commonName ?? resource.name);
     const notAfter = d.notAfter ? new Date(String(d.notAfter)) : new Date();
+    // ADR-0109 (migration 0108): `cert_inventory_resource_cn_uq` UNIQUE
+    // (resource_id, common_name) — TOTAL, since both columns are NOT NULL. The
+    // idempotency this function's header claims ("cert by (resource,
+    // commonName)") is now enforced rather than conventional, so this read is
+    // single-row without an order.
     const [existing] = await db
       .select()
       .from(certInventory)
@@ -169,6 +174,20 @@ async function syncFindingLedger(
   }
   if (report.kind === "backup_missed") {
     // one 'missed' run per finding — idempotent on re-scan.
+    //
+    // ADR-0109 examined this for a unique index and REFUSED to add one, and the
+    // read is therefore STILL not provably single-row. A restore proposal moves
+    // this row to status='restore_proposed', at which point a re-scan of the
+    // same finding no longer matches here and inserts a SECOND 'missed' row;
+    // denying the proposal then moves the first row back to 'missed'. A
+    // constraint would make that DENIAL fail with 23505 — a constraint that
+    // blocks a governance decision is worse than the duplicate it prevents. The
+    // fix belongs here, not in the schema: widen this predicate to
+    // status IN ('missed','restore_proposed') so the second row is never
+    // written. That is a behaviour change (does a re-scan re-open a miss while
+    // a restore is pending?) and it is its own decision. The pre-flight in
+    // packages/db/src/deferred-unique-preflight.ts ships this check as ADVISORY
+    // so the number stays visible meanwhile.
     const [existing] = await db
       .select({ id: backupRuns.id })
       .from(backupRuns)

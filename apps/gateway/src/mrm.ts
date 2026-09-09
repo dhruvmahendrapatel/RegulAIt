@@ -297,6 +297,10 @@ export async function applyModelCardApprovalDecision(
   decision: "approved" | "denied",
   deciderUserId: string,
 ): Promise<void> {
+  // ADR-0109 (migration 0108): `model_card_approvals_approval_uq` UNIQUE
+  // (approval_id) WHERE approval_id IS NOT NULL makes this single-row. ADR-0107
+  // deferred it here rather than ordering it, because a second sign-off request
+  // on one queue row is a bug, not a tie to break.
   const [record] = await tx
     .select()
     .from(modelCardApprovals)
