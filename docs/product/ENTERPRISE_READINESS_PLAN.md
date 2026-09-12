@@ -9,6 +9,24 @@
 > (must ship before go-live)**, and **DEFERRED** — and assigns an ADR to everything in the first
 > two. The ADRs (0036–0061) are **Proposed**: the *decision to pursue* is made; the design in each
 > is the starting proposal and gates on implementation, not a claim that it is built.
+>
+> ---
+>
+> **RECONCILED 2026-09-12 (R0) — the paragraph above is now FALSE, and is left in place as a dated
+> record rather than rewritten.** Every ADR in that range has since been accepted and built:
+> **26 of 26 are `Accepted`, ZERO remain `Proposed`** (measured against
+> [docs/decisions/README.md](../decisions/README.md), 0036–0061 inclusive, 0056 included).
+> The tree is at **ADR-0109 and migration 0109**.
+>
+> **So an unticked row in Buckets 1–3 below is NOT evidence that something is unbuilt.** Those
+> tables were written 2026-08-01 and have not been maintained since, in breach of this document's
+> own closing rule ("When an ADR moves from Proposed → Accepted (i.e. built), update both"). Read
+> them as *what was scheduled then*, and check `docs/decisions/README.md` for what is true now.
+>
+> This is the same failure F08 caught in `PENDING.md`, where two stale backlog rows misled an
+> external reviewer into reporting shipped work as missing — and the third instance of the pattern
+> recorded as **M-034**: the errors in this repository are not in the code, they are in the prose
+> describing work that is not yet done, because nothing executes prose.
 
 ---
 
@@ -30,6 +48,10 @@ here so they are never lost behind feature work:
 ---
 
 ## Bucket 1 — NOW (build next)
+
+> **Stale as of 2026-09-12 — see the R0 reconciliation at the top.** Every ADR referenced in this
+> bucket is `Accepted` and built. This table records what was *scheduled* on 2026-08-01, not what
+> is outstanding; `docs/decisions/README.md` is authoritative for status.
 
 ### Identity & Access (all five — owner: "include all")
 
@@ -74,6 +96,10 @@ here so they are never lost behind feature work:
 
 ## Bucket 2 — CORE (must ship before go-live)
 
+> **Stale as of 2026-09-12 — see the R0 reconciliation at the top.** Every ADR referenced in this
+> bucket is `Accepted` and built. This table records what was *scheduled* on 2026-08-01, not what
+> is outstanding; `docs/decisions/README.md` is authoritative for status.
+
 The seven differentiators the owner elevated to launch-blocking. These are what make RegulAIt
 *chosen*, not merely *buyable*, and several dogfood the governance product on the AI it governs.
 
@@ -90,6 +116,10 @@ The seven differentiators the owner elevated to launch-blocking. These are what 
 ---
 
 ## Bucket 3 — DEFERRED (tracked, not scheduled)
+
+> **Stale as of 2026-09-12 — see the R0 reconciliation at the top.** Every ADR referenced in this
+> bucket is `Accepted` and built. This table records what was *scheduled* on 2026-08-01, not what
+> is outstanding; `docs/decisions/README.md` is authoritative for status.
 
 By owner decision these are real and wanted but **later**. Kept here so nothing is silently lost.
 
@@ -137,6 +167,13 @@ The ADRs are independent decisions, but a sane build order maximizes salability 
 
 Status of each ADR is tracked in [docs/decisions/README.md](../decisions/README.md); this plan
 tracks the *bucketing*. When an ADR moves from Proposed → Accepted (i.e. built), update both.
+
+> **This rule was not kept** — between 2026-08-01 and 2026-09-12 all 26 ADRs in the 0036–0061 range
+> moved to `Accepted` and none of the tables above changed. The rule is restated rather than
+> softened, with the reason it failed: updating two files is a step nobody is forced to take, and a
+> planning document that silently rots is worse than none, because it is read as current. If this
+> drifts again, the answer is to make the bucketing DERIVE from the ADR index rather than duplicate
+> it — a table generated from `docs/decisions/README.md` cannot disagree with it.
 
 ---
 
@@ -214,7 +251,7 @@ dedup keyed on the digest so two payloads cannot collapse into one approval.
 
 | Ref | Item |
 |---|---|
-| **R0** | Reconcile §Bucket 1–3 against `docs/decisions/README.md`; mark built ADRs. Without this the plan actively misleads — the failure F08 already caught once. |
+| ~~**R0**~~ | ~~Reconcile §Bucket 1–3 against `docs/decisions/README.md`~~ **DONE 2026-09-12.** Measured: **26 of 26 ADRs in 0036–0061 are `Accepted`, zero `Proposed`** — the plan's framing paragraph was wholly false, not merely dated. Corrected in place with a dated note at the top and a banner on each bucket; the historical text is left standing rather than rewritten. The closing rule that should have prevented this is restated with the reason it failed, and with the durable fix named: derive the bucketing from the ADR index instead of duplicating it. |
 | ~~**R1**~~ | ~~Fix the "paid tool calls" wording~~ **DONE 2026-09-07.** Scope was smaller than filed — the ADR and checklist were already accurate; only `STATE.md`'s headline was narrow. ADR-0103 gained an explicitly named contract line ("project dispatch freeze"). |
 | **R2** | One documented, pinned clean-checkout command (corepack + `--frozen-lockfile` + build + typecheck + test) that leaves `git status --short` clean; correct `README.md:69`. Closes AER-003's real residue. |
 | **R3** | Assess F04's untouched surfaces — exports, backups, traces, conversations — with synthetic secrets. Assess before asserting either way. |
