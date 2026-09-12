@@ -127,7 +127,28 @@ caught on read. **The sweeps buy timeliness, never correctness.**
   `backup_runs` was **refused because the constraint would break a governance decision** — see S11.
   Original entry retained below.
 
-- **S11 — `backup_runs` re-opens a miss while a restore is pending (found 2026-09-09).** The
+- ~~**S11 — `backup_runs` re-opens a miss while a restore is pending**~~ **CLOSED 2026-09-12
+  ([ADR-0110](../decisions/0110-backup-rescan-reopen-and-preflight-gate.md), migration 0109)** —
+  owner decided a re-scan **should** re-open. One row per finding; `missed`/`restore_proposed`
+  re-open with the superseded proposal audited, `restored` does not; the constraint ADR-0109 refused
+  is now added and proven to bite.
+
+- ~~**S12 — the duplicate pre-flight is wired into nothing**~~ **CLOSED 2026-09-12** — one CI step
+  after the suite, 10 checks enforced. **Residue: the step has never actually executed**, because
+  GitHub Actions is exhausted for this repo; it was verified locally in all three exit states
+  (clean 0 / blocked 1 / unreachable 2). Building it also found a defect in the script itself:
+  `console.log` + `process.exit()` means Node's async stdout on a pipe could drop the output, so a
+  blocked pre-flight could have failed CI with **no reason printed**. Fixed to `fs.writeSync`.
+
+- **S13 — a re-scan re-opens the ledger row but never the FINDING (found 2026-09-12).** After a
+  restore that reported success while the gap is in fact still live, `infra_findings.status` stays
+  `remediated` and `syncFindingLedger` leaves a `restored` row alone — so the live gap is **invisible
+  on the findings surface** even though the backup ledger re-opened. This is pre-existing ADR-0017
+  behaviour ("a re-scan never resets a finding's status"), was not made worse by ADR-0110, and was
+  deliberately not fixed there. It is a genuine honesty gap — the product would be showing an
+  operator a remediated finding over a live one — and it is owed its own decision.
+
+- **S11 (original entry, superseded above) — `backup_runs` re-opens a miss while a restore is pending (found 2026-09-09).** The
   idempotency read matches only `status='missed'` (`infra.ts:198`); proposing a restore sets
   `restore_proposed` (`:1397`); denying sets it back to `missed` (`:734`). So a re-scan between
   propose and deny inserts a SECOND `missed` row, and with a unique constraint the **deny would fail

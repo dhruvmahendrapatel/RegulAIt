@@ -21,6 +21,57 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-12 — S11 and S12 closed, and R0 reconciled.**
+([ADR-0110](../docs/decisions/0110-backup-rescan-reopen-and-preflight-gate.md), migration 0109.)
+
+**S11 — the owner decided a re-scan SHOULD re-open a miss, and that is now what happens.** One
+`backup_runs` row per finding: the idempotency read keys on `finding_id` + `kind='backup'`
+**regardless of status** and updates in place instead of inserting a second row. `missed` and
+`restore_proposed` re-open (the latter **superseding** a pending proposal, audited as
+`infra-restore-proposal-superseded` so it is visible, never silent); `restored` does **not** — the
+restore executed, and re-opening it would rewrite history. The constraint ADR-0109 **refused** is
+now added and bites (`backup_runs_finding_uq`, partial on `kind='backup' AND finding_id IS NOT
+NULL`). **The `kind` predicate is load-bearing on real data**: three `kind='restore'` rows share a
+`finding_id` with a `kind='backup'` row in one suite run, so a total index would have broken the
+approve path three times over — the same partial-index trap that already caused one bug here.
+
+**Probe B showed the old code was worse than ADR-0109 predicted.** Reverting to the old
+`status='missed'` read with the index present made the **RE-SCAN itself 409** — the second INSERT
+hit `23505` before any deny was reached. The old lifecycle was broken in **two** places, not one;
+ADR-0109 had listed that hazard as an unproven limit and it is now reproduced end to end.
+
+**One necessary corollary, verified rather than accepted**: the approve path now marks its source
+row `restored`. The old code inserted a new `kind:"restore"` row and marked the finding
+`remediated` but **never touched the source row**, leaving it at `restore_proposed` for ever — which
+was already inaccurate and, under the new rule, would have made an executed restore
+indistinguishable from a pending one, so a re-scan would have superseded work already done.
+
+**S12 — the pre-flight is now a real gate, and building it found a defect in the thing being
+wired.** `scripts/preflight-unique-constraints.mjs` printed with `console.log` and then called
+`process.exit()`; **Node's stdout is async on a pipe, so a blocked pre-flight could have handed CI a
+non-zero exit with NO reason printed** — a gate that fails silently is worse than none. Fixed to
+`fs.writeSync` with blockers repeated on stderr. One step added to the existing CI job after the
+suite (it needs a *migrated* database; on an empty one every check is trivially zero). `backup_runs`
+promoted advisory → blocking: **10 enforced, none advisory.**
+
+**Verified independently: 176 files / 2708 passed + 9 MinIO skips, 0 failed, exit 0**; repo-wide
+build and typecheck clean; migration 0109's index confirmed present in the migrated database; and
+**the pre-flight run exactly as CI runs it → `CLEAN`, exit 0.**
+
+**R0 — the enterprise plan's buckets were not stale, they were FALSE.** Its framing paragraph said
+ADRs 0036–0061 are "Proposed… not a claim that it is built". Measured: **26 of 26 Accepted, zero
+Proposed**, against a tree at ADR-0110. Every unticked row read as evidence something was unbuilt.
+Corrected with a dated note and a per-bucket banner, the historical text left standing rather than
+tidied. The plan's own rule to update the bucketing already existed and went unkept for six weeks;
+it is restated **with the durable fix named** — derive the bucketing from the ADR index instead of
+duplicating it, because a generated table cannot disagree with its source.
+
+**Honestly outstanding, both recorded**: the new CI step **has never actually run** (GitHub Actions
+is exhausted for this repo; verified locally only), and **a re-scan re-opens the ledger row but
+never the FINDING** — after a restore that claimed success while the gap is still live,
+`infraFindings.status` stays `remediated`, so the live gap is invisible on the findings surface.
+Pre-existing ADR-0017 behaviour, not worsened here, deliberately not fixed here (**S13**).
+
 **2026-09-09 (later still) — S10 closed: nine constraints added, and TWO REFUSED on evidence.**
 ([ADR-0109](../docs/decisions/0109-deferred-unique-constraints.md), migration 0108.) ADR-0107
 deferred 11 sites where an `ORDER BY` would encode the wrong claim — *"several are expected, here is
