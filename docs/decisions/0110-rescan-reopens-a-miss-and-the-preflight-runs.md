@@ -298,6 +298,28 @@ DETAIL:  Key (finding_id)=(9300d9ed-…) is duplicated.
 Runtime of the clean run: **0.58 s** for ten scans. The CI budget arithmetic at the top of
 `ci.yml` does not move.
 
+### The duplicate scan, on a database populated by the final full-suite run
+
+ADR-0109 reported this table with `backup_runs` as its advisory row (2 rows, and it said the
+figure was near-vacuous at that population). Re-run against the database the final suite run left
+behind, with populations alongside — a zero over an empty table says nothing:
+
+| `backup_runs` slice | rows | finding-keyed | duplicate groups |
+| --- | ---: | ---: | ---: |
+| `kind='backup'`, `status='missed'` | 5 | 5 | **0** |
+| `kind='backup'`, `status='restored'` (a closed miss, §4) | 2 | 2 | **0** |
+| `kind='backup'`, `status='success'` (scheduler-verified) | 4 | **0** — outside the index | n/a |
+| `kind='restore'`, `status='restored'` | 3 | 3 | outside the index by `kind` |
+| **the constrained population** (`kind='backup' AND finding_id IS NOT NULL`) | **7** | 7 | **0** |
+
+The other nine checks are 0 duplicate groups as ADR-0109 reported them.
+
+**The `kind='backup'` predicate is load-bearing on real data, not only in argument.** Measured on
+that same database: **3** `kind='restore'` rows share a `finding_id` with a `kind='backup'` row.
+A total index on `finding_id` would have refused all three — i.e. it would have broken the approve
+path three times over in one suite run. That is the mirror image of the bug ADR-0109 refused the
+index over, and it is why §5 spends a paragraph on a one-line predicate.
+
 **Suite**: **176 files / 2708 passed / 9 skipped / 0 failed, exit 0**, on a freshly created
 database. Against ADR-0109's baseline of 175 / 2702 / 9 / exit 0 that is exactly **+1 file and +6
 tests** — this batch's own file — with no other count moved. Repo-wide `pnpm -r build` then
