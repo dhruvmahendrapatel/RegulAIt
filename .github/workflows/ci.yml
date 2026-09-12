@@ -124,6 +124,41 @@ jobs:
           # 64-hex test-fixture key, same shape secrets.ts asserts. Not a secret.
           REGULAIT_DATA_KEY: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
+      # ADR-0110 — the deferred-unique PRE-FLIGHT, as a real gate.
+      #
+      # ADR-0109 shipped `scripts/preflight-unique-constraints.mjs` and said so
+      # in its own honest-limits section: "The pre-flight is not wired into any
+      # deploy path... A check nobody runs is worth nothing." Nothing ran it.
+      # This step is that sentence being paid off. It exits 0 clean, 1 when a
+      # duplicate would block one of migration 0108/0109's constraints, and 2 if
+      # it could not run at all — any non-zero fails the job.
+      #
+      # WHY IT RUNS *AFTER* `pnpm -r test`, NOT BEFORE:
+      #  1. It needs a MIGRATED database and the suite is what migrates one —
+      #     every gateway test file calls `runMigrations` on boot. Putting the
+      #     check first would mean adding a separate migrate step (a second way
+      #     to apply migrations, kept in sync by hand) for no gain.
+      #  2. On an empty freshly-migrated database every check is trivially zero
+      #     and proves nothing. After the suite the tables hold rows the
+      #     PRODUCT'S OWN WRITE PATHS wrote — which is exactly ADR-0109's
+      #     argument that "the stronger measurement is the suite itself". This
+      #     is the only moment in CI when the scan has anything to scan.
+      #  3. It is where an ADVISORY check would earn its keep: a check for a
+      #     constraint not yet added (`enforced: false`) describes duplicates
+      #     the database still permits, and only a scan over real rows finds
+      #     them. There are none today — ADR-0110 promoted the last one,
+      #     `backup_runs`, to enforced — and that is stated rather than implied.
+      #
+      # It also does the one thing nothing else does: EXECUTE the script. It is
+      # the only caller in the repo, so without this a broken import into
+      # packages/db/dist or a renamed export would go unnoticed indefinitely.
+      #
+      # Cost: a step inside an existing job, so no extra runner startup — ten
+      # read-only GROUP BY scans over small tables, ~1 second. The budget
+      # arithmetic at the top of this file does not move.
+      - name: Pre-flight — duplicates that would block a unique constraint (ADR-0109/0110)
+        run: node scripts/preflight-unique-constraints.mjs "$DATABASE_URL"
+
   docker-build:
     # The quickstart path must never rot: prove the compose image still builds.
     #

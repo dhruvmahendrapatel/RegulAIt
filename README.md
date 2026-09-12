@@ -85,10 +85,11 @@ Tests (`pnpm -r test`) need `DATABASE_URL` pointing at a scratch database.
 ### Verifying a clean checkout
 
 Run this — verbatim — before trusting a fresh clone, a rebase, or a dependency
-change. It is the same sequence CI runs (`.github/workflows/ci.yml`), plus a
-repo-wide `--noEmit` typecheck and an explicitly disposable database, and it is
-the only sequence whose result is meaningful: anything that skips a step below
-can go green on a tree that does not actually build.
+change. It is the same sequence CI runs (`.github/workflows/ci.yml`) — build,
+test, then the unique-constraint pre-flight — plus a repo-wide `--noEmit`
+typecheck and an explicitly disposable database, and it is the only sequence
+whose result is meaningful: anything that skips a step below can go green on a
+tree that does not actually build.
 
 ```bash
 # 0. Use the package manager this repo pins. package.json declares
@@ -122,6 +123,20 @@ export DATABASE_URL="postgres://regulait:regulait@localhost:5432/$PGDATABASE_VER
 # 64-hex fixture key, the shape secrets.ts asserts. Not a secret.
 export REGULAIT_DATA_KEY=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 pnpm -r test
+
+# 5. Pre-flight the unique constraints, against the database step 4 just
+#    migrated AND populated. It reports, per constraint, how many duplicate
+#    groups would block migration 0108 or 0109 from applying, with example
+#    keys. Exit 0 clean, 1 blocked, 2 could not run.
+#
+#    Run it HERE and not before: on an empty freshly-migrated database every
+#    check is trivially zero, whereas after the suite the tables hold rows the
+#    product's own write paths wrote. Migrations 0108/0109 ADD constraints and
+#    REFUSE — they never repair, merge or delete — so this is the report that
+#    tells an operator what a failed upgrade would have been about, before the
+#    upgrade fails. See ADR-0109 and ADR-0110. CI runs this same step.
+node scripts/preflight-unique-constraints.mjs "$DATABASE_URL"
+
 dropdb --if-exists "$PGDATABASE_VERIFY"
 ```
 
