@@ -1,6 +1,8 @@
 /**
  * ADR-0109 — the PRE-FLIGHT DUPLICATE REPORT for migration 0108's unique
- * constraints.
+ * constraints, extended by ADR-0110 (migration 0109) with the TENTH — the
+ * `backup_runs` check that shipped ADVISORY because ADR-0109 had refused its
+ * constraint, and which is now enforced like the rest.
  *
  * WHY THIS FILE EXISTS
  * --------------------
@@ -32,9 +34,11 @@
  * --------------------------------
  * - It does not fix anything. It reports. Deciding which of two conflicting
  *   governance rows is the real one is a product question with a human in it.
- * - It does not run itself. Nothing calls it on boot: a read-only scan of nine
- *   tables is cheap but not free, and an upgrade check that runs on every start
- *   is a check nobody reads.
+ * - It does not run itself ON BOOT. A read-only scan of ten tables is cheap but
+ *   not free, and an upgrade check that runs on every start is a check nobody
+ *   reads. ADR-0110 does wire it into CI (`.github/workflows/ci.yml`) and into
+ *   README's "Verifying a clean checkout" sequence, because ADR-0109's own
+ *   honest-limits section said a check nobody runs is worth nothing.
  * - It does not replace the constraint. A green pre-flight is a statement about
  *   one instant; the constraint is what holds afterwards.
  */
@@ -42,7 +46,9 @@ import { sql, type SQL } from "drizzle-orm";
 
 /** One thing 0108 claims, expressed so it can be checked before it is enforced. */
 export type DeferredUniqueCheck = {
-  /** the index migration 0108 creates, or `null` for an advisory-only check */
+  /** the index the migration creates (0108 for nine of these, 0109 for
+   * `backup_runs`), or `null` for an advisory-only check. No check is advisory
+   * today — the field is kept because the NEXT deferred constraint will be. */
   readonly index: string | null;
   readonly table: string;
   /** the key, in the words the ADR uses */
@@ -50,9 +56,10 @@ export type DeferredUniqueCheck = {
   /** the index's WHERE clause, or null for a total index */
   readonly predicate: string | null;
   /**
-   * false = 0108 does NOT create this index; the check is reported so an
-   * operator can see the number that kept it out. See ADR-0109 on
-   * `backup_runs`.
+   * false = no migration creates this index; the check is reported anyway so an
+   * operator can see the number that kept it out. ADR-0109 used this for
+   * `backup_runs`; ADR-0110 flipped it to true once the writing code made the
+   * claim true.
    */
   readonly enforced: boolean;
   /** SQL fragment naming the grouping columns */
@@ -151,17 +158,26 @@ export const DEFERRED_UNIQUE_CHECKS: readonly DeferredUniqueCheck[] = [
     keyExpr: "lower(email)",
   },
   {
-    // ADVISORY. 0108 does NOT create this one — the restore-proposal lifecycle
-    // can legitimately produce a second `missed` row for one finding, so the
-    // constraint would refuse a governed DENY. ADR-0109 argues it in full. The
-    // check ships anyway because the number it reports is the evidence for that
-    // decision, and a deployment with a large count here has the ADR-0107 bug
-    // happening to it right now.
-    index: null,
+    // ADR-0110 (migration 0109) — NO LONGER ADVISORY. ADR-0109 shipped this
+    // check with `enforced: false` because it had REFUSED the constraint: the
+    // restore-proposal lifecycle could legitimately produce a second `missed`
+    // row for one finding, and the index would then have made a governed DENY
+    // fail with 23505. ADR-0110 fixed the writing code — a re-scan RE-OPENS the
+    // finding's existing row instead of inserting a second one — so the second
+    // row is never written, the deny still works, and the claim is now
+    // enforceable. Migration 0109 creates it and this check BLOCKS on it.
+    //
+    // The predicate lost its `status = 'missed'` clause with the same change:
+    // ONE row now carries the finding through its whole lifecycle
+    // ('missed' -> 'restore_proposed' -> back to 'missed', or -> 'restored'),
+    // so scoping the check to one status would miss exactly the duplicates it
+    // exists to find. `kind = 'backup'` stays and is load-bearing: an executed
+    // restore appends a `kind='restore'` row carrying the same finding_id.
+    index: "backup_runs_finding_uq",
     table: "backup_runs",
-    key: "finding_id (kind='backup', status='missed')",
-    predicate: "kind = 'backup' AND status = 'missed' AND finding_id IS NOT NULL",
-    enforced: false,
+    key: "finding_id (kind='backup')",
+    predicate: "kind = 'backup' AND finding_id IS NOT NULL",
+    enforced: true,
     groupBy: "finding_id",
     keyExpr: "finding_id::text",
   },
@@ -183,7 +199,7 @@ export type DeferredUniqueFinding = {
 };
 
 export type DeferredUniquePreflightReport = {
-  /** true when every ENFORCED check is clean — i.e. 0108 will apply */
+  /** true when every ENFORCED check is clean — i.e. 0108 and 0109 will apply */
   readonly clean: boolean;
   /** enforced checks that are NOT clean; empty when `clean` */
   readonly blocking: readonly DeferredUniqueFinding[];
@@ -205,7 +221,7 @@ function rowsOf(res: unknown): Array<Record<string, unknown>> {
 }
 
 /**
- * Run every check and report what would block migration 0108.
+ * Run every check and report what would block migration 0108 or 0109.
  *
  * One round trip per check. Read-only: nothing here writes, locks or takes a
  * transaction, so it is safe against a live deployment.
@@ -255,7 +271,7 @@ export async function runDeferredUniquePreflight(
 /** A plain-text rendering an operator can paste into a ticket. */
 export function formatDeferredUniquePreflight(report: DeferredUniquePreflightReport): string {
   const lines: string[] = [];
-  lines.push("ADR-0109 pre-flight — duplicates that would block migration 0108");
+  lines.push("ADR-0109/0110 pre-flight — duplicates that would block migration 0108 or 0109");
   lines.push("");
   for (const f of report.findings) {
     const tag = f.enforced ? (f.duplicateGroups > 0 ? "BLOCKS" : "ok") : "advisory";
@@ -268,10 +284,11 @@ export function formatDeferredUniquePreflight(report: DeferredUniquePreflightRep
   lines.push("");
   lines.push(
     report.clean
-      ? "CLEAN — migration 0108 will apply."
+      ? "CLEAN — migrations 0108 and 0109 will apply."
       : `BLOCKED — ${report.blocking.length} constraint(s) cannot be created. ` +
-          "0108 refuses rather than repairs: resolve each pair by hand (decide which row is " +
-          "the real one and remove or re-key the other) before upgrading. See ADR-0109.",
+          "These migrations refuse rather than repair: resolve each pair by hand (decide which " +
+          "row is the real one and remove or re-key the other) before upgrading. See ADR-0109 " +
+          "and ADR-0110.",
   );
   return lines.join("\n");
 }

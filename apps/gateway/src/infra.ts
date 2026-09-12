@@ -90,11 +90,18 @@ const backupIdParam = z.object({ backupId: z.string().uuid() });
 
 /** ADR-0017 — after a finding is upserted on scan, upsert its durable ledger
  * row and stamp the finding's ref_table/ref_id back-link. Idempotent by
- * construction (patch via UNIQUE(resource,cve); cert by (resource,commonName);
- * backup by (finding, missed)), so a re-scan never duplicates a ledger row.
- * drift has no ledger — its ref stays null. */
+ * construction (patch via UNIQUE(resource,cve); cert by
+ * `cert_inventory_resource_cn_uq`; backup by `backup_runs_finding_uq` — ONE row
+ * per finding, ADR-0110/migration 0109, which is why the backup branch now
+ * RE-OPENS its row rather than inserting a second one), so a re-scan never
+ * duplicates a ledger row. drift has no ledger — its ref stays null.
+ *
+ * `actorId` is the scanning actor: the backup branch can write an audit row of
+ * its own when a re-scan supersedes a pending restore proposal, and an audited
+ * fact with no actor on it is not much of an audit row. */
 async function syncFindingLedger(
   db: Db,
+  actorId: string,
   resource: InfraResourceRow,
   findingId: string,
   report: InfraFindingReport,
@@ -173,34 +180,84 @@ async function syncFindingLedger(
     return;
   }
   if (report.kind === "backup_missed") {
-    // one 'missed' run per finding — idempotent on re-scan.
+    // ADR-0110 (migration 0109): `backup_runs_finding_uq` UNIQUE (finding_id)
+    // WHERE kind = 'backup' — EXACTLY ONE backup ledger row per finding, and
+    // this read is therefore single-row without an order.
     //
-    // ADR-0109 examined this for a unique index and REFUSED to add one, and the
-    // read is therefore STILL not provably single-row. A restore proposal moves
-    // this row to status='restore_proposed', at which point a re-scan of the
-    // same finding no longer matches here and inserts a SECOND 'missed' row;
-    // denying the proposal then moves the first row back to 'missed'. A
-    // constraint would make that DENIAL fail with 23505 — a constraint that
-    // blocks a governance decision is worse than the duplicate it prevents. The
-    // fix belongs here, not in the schema: widen this predicate to
-    // status IN ('missed','restore_proposed') so the second row is never
-    // written. That is a behaviour change (does a re-scan re-open a miss while
-    // a restore is pending?) and it is its own decision. The pre-flight in
-    // packages/db/src/deferred-unique-preflight.ts ships this check as ADVISORY
-    // so the number stays visible meanwhile.
+    // WHY THIS READ NO LONGER FILTERS ON STATUS. ADR-0109 REFUSED this
+    // constraint, and it was right to on the code as it then stood: the read
+    // was `status='missed'`, a restore proposal moved the row to
+    // 'restore_proposed', a re-scan of the same finding then matched nothing
+    // and inserted a SECOND 'missed' row, and the DENY path's UPDATE of the
+    // FIRST row back to 'missed' would have raised 23505 — a constraint that
+    // blocks an operator from refusing a restore is worse than the duplicate
+    // it prevents.
+    //
+    // The owner answered the behaviour question ADR-0109 left open — *should a
+    // re-scan re-open a miss while a restore is pending?* — with YES. So the
+    // read is keyed on the FINDING ALONE and the existing row is RE-OPENED in
+    // place instead of duplicated. The second row is never written, so the
+    // deny's UPDATE has nothing to collide with.
+    //
+    // WHICH STATUSES RE-OPEN, AND WHICH DO NOT (ADR-0110 §2):
+    //   'missed'           RE-OPENS — already open; the detection metadata is
+    //                      refreshed, nothing else changes.
+    //   'restore_proposed' RE-OPENS — the backup is STILL absent, so the gap is
+    //                      live and the pending proposal is SUPERSEDED. That is
+    //                      a visible fact, not a silent one: an
+    //                      `infra-restore-proposal-superseded` audit row records
+    //                      why the operator's proposal went away. The row
+    //                      returns to 'missed', which is re-proposable.
+    //   'restored'         DOES NOT re-open — the governed restore EXECUTED.
+    //                      Re-opening a completed restore would rewrite history.
+    //   'success'/'failed' DO NOT re-open — not a miss at all. Unreachable for a
+    //                      finding-keyed row today (the scheduler's verified
+    //                      'success' rows carry a NULL finding_id and so are
+    //                      outside the index), and refused defensively rather
+    //                      than assumed away.
     const [existing] = await db
-      .select({ id: backupRuns.id })
+      .select({ id: backupRuns.id, status: backupRuns.status })
       .from(backupRuns)
-      .where(
-        and(
-          eq(backupRuns.findingId, findingId),
-          eq(backupRuns.kind, "backup"),
-          eq(backupRuns.status, "missed"),
-        ),
-      );
+      .where(and(eq(backupRuns.findingId, findingId), eq(backupRuns.kind, "backup")));
     let runId: string;
     if (existing) {
       runId = existing.id;
+      if (existing.status === "missed" || existing.status === "restore_proposed") {
+        const supersededProposal = existing.status === "restore_proposed";
+        await db
+          .update(backupRuns)
+          .set({
+            status: "missed",
+            retentionUntil: d.retentionUntil ? new Date(String(d.retentionUntil)) : null,
+          })
+          .where(eq(backupRuns.id, runId));
+        if (supersededProposal) {
+          await db.insert(auditLog).values({
+            userId: actorId,
+            objectType: "infra_operation",
+            objectId: findingId,
+            detail: {
+              phase: "scan",
+              resource: resource.name,
+              kind: report.kind,
+              signature: report.signature,
+              ledgerId: runId,
+              supersededStatus: "restore_proposed",
+              reopenedStatus: "missed",
+            },
+            effect: "allow",
+            ruleId: "infra-restore-proposal-superseded",
+            ruleChain: [],
+            reason:
+              `re-scan still observed the backup missing on ${resource.name}; the pending restore ` +
+              `proposal on backup run ${runId} was SUPERSEDED and the miss re-opened as 'missed' ` +
+              `(the proposal can be re-made). ADR-0110: a live gap is never hidden behind a ` +
+              `pending proposal.`,
+          });
+        }
+      }
+      // 'restored' (and the two statuses a finding-keyed row cannot hold) are
+      // left exactly as they are — see the table above.
     } else {
       const [row] = await db
         .insert(backupRuns)
@@ -672,6 +729,17 @@ async function applyInfraActionDecision(
         finishedAt: now,
         retentionUntil: backupRow!.retentionUntil ?? null,
       });
+      // ADR-0110: CLOSE the miss row the restore was proposed against. Before
+      // this it stayed at 'restore_proposed' for ever — which was already a
+      // lie (the proposal is not pending, it EXECUTED) and becomes a harmful
+      // one now that a re-scan re-opens a pending proposal: an executed
+      // restore and an outstanding one would be indistinguishable on the row,
+      // and syncFindingLedger would "supersede" work that had already been
+      // done. 'restored' is the terminal state, and it is the one status the
+      // re-open rule refuses to touch. The kind='restore' row inserted just
+      // above remains the record of the restore ITSELF; this one records that
+      // the MISS is closed.
+      await tx.update(backupRuns).set({ status: "restored" }).where(eq(backupRuns.id, backupRow!.id));
     }
     if (finding) {
       await tx.update(infraFindings).set({ status: "remediated" }).where(eq(infraFindings.id, finding.id));
@@ -818,7 +886,7 @@ async function scanResource(
         .set({ detectedAt: new Date(), detail: report.detail, severity: report.severity })
         .where(eq(infraFindings.id, existing.id));
       // keep the durable ledger + back-link current (idempotent — no dup rows)
-      await syncFindingLedger(db, resource, existing.id, report);
+      await syncFindingLedger(db, actorId, resource, existing.id, report);
       await auditDetection(db, actorId, resource, report, existing.id);
       refreshed++;
       continue;
@@ -835,7 +903,7 @@ async function scanResource(
       .returning();
     created++;
     // materialize the durable ledger row + stamp the finding's ref back-link
-    await syncFindingLedger(db, resource, inserted!.id, report);
+    await syncFindingLedger(db, actorId, resource, inserted!.id, report);
     await auditDetection(db, actorId, resource, report, inserted!.id);
 
     // THE AUTO-VS-GATE DECISION on a NEW finding. critical is never auto (the

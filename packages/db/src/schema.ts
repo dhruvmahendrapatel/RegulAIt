@@ -2858,7 +2858,28 @@ export const backupRuns = pgTable(
     source: text("source"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("backup_runs_resource_idx").on(t.resourceId)],
+  (t) => [
+    index("backup_runs_resource_idx").on(t.resourceId),
+    /** ADR-0110 (migration 0109): ONE backup ledger row per finding.
+     *
+     * ADR-0109 REFUSED this index: `syncFindingLedger`'s idempotency read was
+     * filtered to `status='missed'`, so a restore proposal (which moves the row
+     * to 'restore_proposed') let a re-scan insert a SECOND row, and the deny
+     * path's UPDATE of the first row back to 'missed' would then have raised
+     * 23505 — blocking an operator from refusing a restore. ADR-0110 fixed the
+     * writing code first: the read now keys on the finding alone and RE-OPENS
+     * the row in place, so the second row is never written and the deny has
+     * nothing to collide with.
+     *
+     * PARTIAL on `kind='backup'` because the ledger also holds the
+     * `kind='restore'` row an executed restore appends, which carries the SAME
+     * finding_id by design. `finding_id IS NOT NULL` is stated rather than left
+     * to Postgres's NULL-distinctness rule: the scheduler's verified
+     * `status='success'` rows have no finding and can never participate. */
+    uniqueIndex("backup_runs_finding_uq")
+      .on(t.findingId)
+      .where(sql`${t.kind} = 'backup' AND ${t.findingId} IS NOT NULL`),
+  ],
 );
 
 // ---------------------------------------------------------------------------

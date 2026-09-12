@@ -499,14 +499,20 @@ describe("ADR-0109 — non-vacuity: the constraint, not the fixture, is doing th
  * shipping if it agrees with the database it is describing.
  */
 describe("ADR-0109 — the pre-flight report", () => {
-  it("covers exactly the nine enforced constraints plus the advisory one, and each check runs", async () => {
+  it("covers exactly the ten enforced constraints, and each check runs", async () => {
     const { DEFERRED_UNIQUE_CHECKS, runDeferredUniquePreflight, formatDeferredUniquePreflight } =
       await import("@regulait/db");
     const enforced = DEFERRED_UNIQUE_CHECKS.filter((c) => c.enforced);
-    expect(enforced).toHaveLength(9);
-    expect(DEFERRED_UNIQUE_CHECKS.filter((c) => !c.enforced).map((c) => c.table)).toEqual([
-      "backup_runs",
-    ]);
+    // NINE when ADR-0109 shipped. TEN since ADR-0110 (migration 0109): the
+    // `backup_runs` check was the one ADR-0109 shipped as ADVISORY because it
+    // had refused the constraint over a governed DENY that would have 23505'd.
+    // ADR-0110 fixed the writing code — a re-scan RE-OPENS the finding's row
+    // instead of inserting a second one — so the claim became enforceable and
+    // the check now BLOCKS. Nothing is advisory today; the `enforced` flag
+    // stays because the next deferred constraint will need it.
+    expect(enforced).toHaveLength(10);
+    expect(DEFERRED_UNIQUE_CHECKS.filter((c) => !c.enforced)).toEqual([]);
+    expect(enforced.map((c) => c.index)).toContain("backup_runs_finding_uq");
 
     // every enforced check names an index that really exists on this database —
     // this is what stops the report and the migration drifting apart.
