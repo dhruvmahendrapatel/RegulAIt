@@ -515,6 +515,13 @@ describe("6. the covered / NOT-covered inventory", () => {
     "spend_anomalies.decision_reason",
     "spend_anomalies.explanation",
     "spend_scheduled_changes.reason",
+    // ADR-0111 — the EXPORTED OBSERVABILITY COPY. Not prose: a governed tool
+    // call's arguments and result (and, on an `llm` span, the prompt and
+    // completion). Registered because they are a DUPLICATE of a record ADR-0104
+    // and ADR-0099 already scrub, and because ADR-0070 puts them on the OTLP
+    // wire as `gen_ai.input.messages` / `gen_ai.output.messages`.
+    "trace_spans.input_preview",
+    "trace_spans.output_preview",
     "trace_spans.status_reason",
     "training_datasets.note",
     "vendor_account_aliases.reason",

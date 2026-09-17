@@ -151,11 +151,41 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.aiUseCases, ["retiredReason"]],
   [s.aiVendors, ["retiredReason"]],
   [s.aiRisks, ["acceptanceNote"]],
-  // --- machine-written free text that quotes an error ---
+  // --- machine-written free text that quotes an error, and ADR-0111's
+  //     EXPORTED OBSERVABILITY COPY ---
+  //
   // `statusReason` takes `(err as Error).message` verbatim at several dispatch
   // sites, and an exception message is one of the classic places a connection
   // string or bearer token surfaces. Not operator prose, but the same risk.
-  [s.traceSpans, ["statusReason"]],
+  //
+  // ADR-0111 — THE EXPORTED OBSERVABILITY COPY.
+  //
+  // These two are NOT prose, and registering them is a DIFFERENT argument from
+  // every entry above. `input_preview` is a governed tool call's ARGUMENTS and
+  // `output_preview` is its RESULT (or, on an `llm` span, the prompt and the
+  // completion) — content, which this file's header explicitly declines to
+  // scrub for `name`/`title`/`description`/`summary`/`body`. Two facts put
+  // them on the other side of that line:
+  //
+  //  1. THEY ARE A DUPLICATE OF A RECORD THAT IS ALREADY SCRUBBED. ADR-0104
+  //     writes the SAME tool arguments into `approvals.arguments_preview`
+  //     through `scrubAuditDetail`, and ADR-0099 writes the same call's
+  //     evidence into `audit_log`. Leaving the trace copy in plaintext is S5's
+  //     defect verbatim: one event, two stores, disagreeing about whether the
+  //     secret was contained. A description has no scrubbed twin; these do.
+  //  2. THEY LEAVE THE PLATFORM. ADR-0070 exports spans over OTLP, and
+  //     `otelAttributesForSpan` puts these two columns into
+  //     `gen_ai.input.messages` / `gen_ai.output.messages` on the wire. Every
+  //     other column here is an at-rest risk; this one is egress to a
+  //     third-party backend.
+  //
+  // WHAT IS LOST. A preview that genuinely contained credential-shaped text no
+  // longer shows it. That is a real cost and is stated in ADR-0111: the preview
+  // is already a LOSSY surface — truncated at `previewMaxChars` and switched
+  // off wholesale by `tracingCaptureContent` — and it is not the record of
+  // what was said. `conversation_messages.content` and `eval_results.output_text`
+  // are, and ADR-0111 deliberately leaves both untouched.
+  [s.traceSpans, ["statusReason", "inputPreview", "outputPreview"]],
 ];
 
 /**
@@ -180,9 +210,29 @@ export const PROSE_SCRUB_EXCLUSIONS: readonly string[] = [
   "usage_events.stop_reason",
 ];
 
-const PROSE_COLUMNS: ReadonlyMap<object, ReadonlySet<string>> = new Map(
-  REGISTRY.map(([table, cols]) => [table, new Set(cols)] as const),
-);
+/**
+ * ONE ENTRY PER TABLE, enforced rather than assumed.
+ *
+ * `new Map(pairs)` keeps the LAST value for a repeated key, so a second entry
+ * for a table already in the registry would silently DROP the first one's
+ * columns while `proseScrubInventory()` — which reads the array — kept
+ * reporting them as covered. That is a scrub that looks registered and is not,
+ * which is the exact failure class this file exists to prevent. ADR-0111 added
+ * two columns to a table that already had one and would have hit it.
+ */
+const PROSE_COLUMNS: ReadonlyMap<object, ReadonlySet<string>> = (() => {
+  const m = new Map<object, ReadonlySet<string>>();
+  for (const [table, cols] of REGISTRY) {
+    if (m.has(table)) {
+      throw new Error(
+        `prose-scrub registry lists ${getTableName(table as never)} twice — ` +
+          `merge the column lists into one entry, or the earlier one is silently dropped`,
+      );
+    }
+    m.set(table, new Set(cols));
+  }
+  return m;
+})();
 
 /**
  * `table.column` in SQL names for every covered column, DERIVED from the
