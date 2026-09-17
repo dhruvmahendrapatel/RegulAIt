@@ -101,6 +101,27 @@ caught on read. **The sweeps buy timeliness, never correctness.**
 
 ## 5. Test-infrastructure debt
 
+- **S14 — conversations hold a pasted credential verbatim. OWNER DECISION (opened 2026-09-17,
+  ADR-0111).** Proven with a row: `conversation_messages.content` (both the user turn and the
+  assistant turn), `conversations.title` via `autoTitle`, and the compaction summary. **Deliberately
+  not fixed** — scrubbing user chat content is a different contract from scrubbing operator prose,
+  and getting it wrong is silent data loss where the product promises fidelity. ADR-0111's interim
+  position scrubs **the observability copy, not the record**, which closes the egress path today at
+  the stated cost that the two records of one turn now disagree. **The four options as recorded**:
+  (a) leave it; (b) scrub like any other column, accepting fidelity loss; (c) scrub the read/export
+  surfaces while storing faithfully; (d) detect-and-warn at intake without altering what is stored.
+
+- **S15 — two error echoes, proven and ACCEPTED rather than closed (2026-09-17, ADR-0111).** zod
+  `invalid_enum_value` returns the caller their own rejected value in `received`; a 409 `detail`
+  interpolates a stored `name` the same caller can `GET`. Nothing persists either and no third party
+  sees them, and the fix would put a scrub on every 400 in the product. Neither is claimed *safe* —
+  they are recorded so the next reviewer does not spend the afternoon re-finding them.
+
+- **S16 — no backfill, and no scrub-on-read (2026-09-17, ADR-0111).** Trace rows written before
+  today still hold unscrubbed payloads, and the OTLP exporter will export them. Deliberate: the
+  write is the chance, and rewriting historical observability data is a worse precedent than leaving
+  it. An operator who needs the old rows gone must decide that themselves.
+
 - ~~**S9 — 103 at-risk TEST sites still unswept, plus two unswept syntactic shapes**~~ **CLOSED
   2026-09-09 ([ADR-0108](../decisions/0108-test-side-unordered-reads.md)).** The "103" was a count of
   syntactic candidates, not of defects: instrumenting 145 of 148 sites and measuring them under the

@@ -21,6 +21,63 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-17 — R3 landed and retested: the trace surface was leaking credentials BY DEFAULT, and
+off the platform.** ([ADR-0111](../docs/decisions/0111-trace-preview-credential-scrub.md), no
+migration.) F04 named five surfaces nobody had assessed. All five are now assessed with a synthetic
+key (`AKIAIOSFODNN7EXAMPLE`, AWS's own published example): **one fixed, three proven clean, one left
+with the risk stated, and one referred to the owner.**
+
+**The finding.** `toolPayloadPreview` only truncated, so a governed tool call wrote its **raw
+arguments** into `trace_spans.input_preview` and its **raw result** into `output_preview` — the same
+payload ADR-0104 carefully scrubs into `approvals.arguments_preview` two tables away. S5's defect
+verbatim: one event, two stores, disagreeing about whether the secret was contained. **Two things
+make it worse than S5.** (a) **It is the shipped default** — `tracing_enabled` and
+`tracing_capture_content` are both `NOT NULL DEFAULT true` and read as `!== false`, so capture is on
+unless an operator turns it off. (b) **It egresses**: ADR-0070 exports spans over OTLP and
+`otelAttributesForSpan` puts both columns on the wire as `gen_ai.input.messages` /
+`gen_ai.output.messages`. Captured OTLP bytes showed the key in both.
+
+Worth recording the shape of the miss: `loadTracingPolicy`'s catch block reads *"Fail CLOSED on
+content (never store a prompt we could not confirm we are allowed to store)"*. The author thought
+hard about **authorisation to capture** and never asked **what the capture contains**. Two different
+questions; only the first got asked.
+
+**The fix is two strings in ADR-0102's existing registry** — same `createDb` Proxy, same
+`scrubAuditText`, no new detector, no per-call-site convention, no migration. It fixes the OTLP
+exporter for free, because the exporter reads the stored columns: row and wire cannot disagree.
+**Incidental hardening**: `PROSE_COLUMNS` was built with `new Map(REGISTRY.map(…))`, which keeps only
+the LAST entry for a repeated table — so a second `traceSpans` entry would have silently dropped
+`statusReason`'s coverage **while `proseScrubInventory()` kept reporting it covered**. A scrub that
+looks registered and isn't. The map now throws on a duplicate table at module load.
+
+**My independent retest — criteria written before results, all eight pass.** P1b: the Proxy scrubs
+**both** columns before the INSERT (proven through the real `createDb` path). P2 **over-redaction
+control**: ordinary prose, uuids and emails stored byte-identical — the probe that matters most,
+since this product stores payloads so an operator can audit what happened. P3: the marker is
+**character-identical** across stores and `PROSE_SCRUB === scrubAuditText` is pinned. P4 **egress**,
+asserted separately from storage: the OTLP wire carries the marker, not the key. P5: I attempted my
+own leak into a surface the report calls clean (zod `invalid_string`) and confirmed the body carries
+only `validation`/`code`/`path` — the value is absent. P6: one registry line, no second redactor.
+P7: the only credential-shaped string in the diff is AWS's published example. **P8: 177 files /
+2713 passed + 9 MinIO skips, 0 failed, exit 0**, build and repo-wide typecheck clean, instrument
+asserted.
+
+**Open, and referred rather than decided: conversations.** `conversation_messages.content`,
+`conversations.title` and the compaction summary hold a pasted credential verbatim — proven with a
+row. Deliberately **not** fixed: scrubbing a user's chat content is a different contract from
+scrubbing operator prose, and silently altering what someone said is data loss where the product
+promises fidelity. ADR-0111 draws the line at **the observability copy, not the record**, and states
+the cost plainly: the two records of one turn now deliberately disagree — S5's shape inverted,
+accepted only because the disagreement runs in the safe direction. **Four options are recorded for
+the owner (S14).**
+
+**Proven and accepted rather than closed**: two low-severity error echoes — zod `invalid_enum_value`
+returns the rejected value in `received`, and a 409 `detail` interpolates a stored server name.
+Neither persists or reaches a third party; both recorded so the next reviewer does not re-find them.
+**No backfill**: rows written before today still hold what they held, and the exporter will export
+an old unscrubbed span. Deliberate — the write is the chance, and rewriting historical observability
+data is a worse precedent.
+
 **2026-09-12 — S11 and S12 closed, and R0 reconciled.**
 ([ADR-0110](../docs/decisions/0110-backup-rescan-reopen-and-preflight-gate.md), migration 0109.)
 
