@@ -284,11 +284,48 @@ export interface ApprovalCardInput {
   decidable: boolean;
 }
 
+/**
+ * ONE semantic decide button, provider-neutral. ADR-0113 added this so a second
+ * chat provider renders its OWN buttons from the SAME decision rather than
+ * re-deriving one: `actions` is empty exactly when `chatDecidable` said no, so
+ * a renderer cannot accidentally offer a tap the fence forbade. The payload is
+ * still only the OPAQUE approval id plus the verb — nothing replayable into
+ * authority, on either provider.
+ */
+export interface ApprovalCardAction {
+  /** the Slack `action_id`; Teams carries the verb in `data.action` instead */
+  id: "regulait_approve" | "regulait_reject";
+  label: string;
+  approvalId: string;
+  action: ChatOpsAction;
+}
+
 export interface ApprovalCard {
   text: string;
   blocks: Array<Record<string, unknown>>;
   /** true when the card deliberately omits the gated action's details */
   redacted: boolean;
+  /** where the human goes to decide it properly — carried on EVERY card */
+  portalUrl: string;
+  /** EMPTY when the sensitivity fence (or a decided card) forbids deciding
+   * from chat. A renderer that emits a button when this is empty is a bug. */
+  actions: ApprovalCardAction[];
+  /** the sentence shown in place of the buttons when `actions` is empty */
+  inAppOnlyNote: string | null;
+}
+
+const IN_APP_ONLY_NOTE =
+  "This approval is in-app only: a chat tap is not a re-authenticated session, and this approval's " +
+  "sensitivity classification requires deciding it in the portal.";
+
+/** the decide buttons this card is allowed to offer — the ONE place that turns
+ * `decidable` into actions, for every provider */
+function approvalCardActions(approvalId: string, decidable: boolean): ApprovalCardAction[] {
+  if (!decidable) return [];
+  return [
+    { id: "regulait_approve", label: "Approve", approvalId, action: "approve" },
+    { id: "regulait_reject", label: "Reject", approvalId, action: "reject" },
+  ];
 }
 
 /**
@@ -319,32 +356,36 @@ export function composeApprovalCard(input: ApprovalCardInput): ApprovalCard {
     blocks.push({ type: "section", text: { type: "mrkdwn", text: `<${input.portalUrl}|Open in RegulAIt>` } });
   }
 
-  if (input.decidable) {
+  const actions = approvalCardActions(input.approvalId, input.decidable);
+  if (actions.length > 0) {
     // THE BUTTON CARRIES ONLY THE OPAQUE APPROVAL ID. No user id, no role, no
     // signed grant — nothing that could be replayed into authority. The value
     // is a *request* to decide.
     blocks.push({
       type: "actions",
-      elements: [
-        { type: "button", action_id: "regulait_approve", style: "primary", text: { type: "plain_text", text: "Approve" }, value: input.approvalId },
-        { type: "button", action_id: "regulait_reject", style: "danger", text: { type: "plain_text", text: "Reject" }, value: input.approvalId },
-      ],
+      elements: actions.map((a) => ({
+        type: "button",
+        action_id: a.id,
+        style: a.action === "approve" ? "primary" : "danger",
+        text: { type: "plain_text", text: a.label },
+        value: a.approvalId,
+      })),
     });
   } else {
     blocks.push({
       type: "context",
-      elements: [
-        {
-          type: "mrkdwn",
-          text:
-            "_This approval is in-app only: a chat tap is not a re-authenticated session, and this approval's " +
-            "sensitivity classification requires deciding it in the portal._",
-        },
-      ],
+      elements: [{ type: "mrkdwn", text: `_${IN_APP_ONLY_NOTE}_` }],
     });
   }
 
-  return { text, blocks, redacted: input.fenced };
+  return {
+    text,
+    blocks,
+    redacted: input.fenced,
+    portalUrl: input.portalUrl,
+    actions,
+    inAppOnlyNote: actions.length > 0 ? null : IN_APP_ONLY_NOTE,
+  };
 }
 
 /** the card a decided approval is edited down to — the buttons are retired */
@@ -357,5 +398,97 @@ export function composeDecidedCard(input: { approvalId: string; decision: string
       { type: "section", text: { type: "mrkdwn", text: `<${input.portalUrl}|View in RegulAIt>` } },
     ],
     redacted: false,
+    portalUrl: input.portalUrl,
+    // a DECIDED card never offers a decide button again, on any provider
+    actions: [],
+    inAppOnlyNote: null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0113 — RENDERING THE SAME CARD FOR TEAMS
+// ---------------------------------------------------------------------------
+//
+// Teams cannot render Slack Block Kit, so a second renderer is unavoidable. The
+// thing that must NOT be duplicated is the DECISION about what the card is
+// allowed to say and offer, because a second copy of that is a second place for
+// the sensitivity fence to drift. So this function takes the ALREADY-COMPOSED
+// `ApprovalCard` and re-renders it: `text` is reused byte-for-byte (modulo the
+// bold-marker conversion below), and the buttons come from `card.actions`,
+// which `composeApprovalCard` already emptied if the fence said so. A fenced
+// approval therefore produces a Teams card with a link and no Action.Submit for
+// the same reason and by the same code path as on Slack.
+//
+// The Action.Submit `data` is exactly what `parseTeamsInteraction` reads back:
+// `{approvalId, action}` arrives as the inbound Activity's `value`.
+//
+// FIDELITY, STATED RATHER THAN IMPLIED. Adaptive Cards support a smaller
+// markdown subset than Slack mrkdwn. Bold is spelled `**x**` instead of `*x*`,
+// so that one marker is converted. Slack's backtick code spans have no Adaptive
+// Cards equivalent and are LEFT ALONE — they render as literal backticks in
+// Teams. That is a cosmetic difference in a card whose content is otherwise
+// identical, and it is recorded in ADR-0113 rather than papered over.
+export const TEAMS_ADAPTIVE_CARD_CONTENT_TYPE = "application/vnd.microsoft.card.adaptive";
+/** the schema version pinned for the card body — 1.4 is broadly supported by
+ * shipped Teams clients; 1.5 is not uniformly rendered */
+export const TEAMS_ADAPTIVE_CARD_VERSION = "1.4";
+
+/** Slack mrkdwn `*bold*` → Adaptive Cards `**bold**`. Deliberately narrow: it
+ * only touches a `*…*` run that contains no `*` and no newline. */
+function toAdaptiveMarkdown(text: string): string {
+  return text.replace(/(^|[\s(])\*([^*\n]+)\*(?=$|[\s.,;:!?)])/g, (_m, lead: string, inner: string) => `${lead}**${inner}**`);
+}
+
+export interface TeamsActivityPayload {
+  text: string;
+  attachments: Array<{ contentType: string; content: Record<string, unknown> }>;
+}
+
+/**
+ * Render an already-composed `ApprovalCard` as the Bot Framework Activity
+ * fields a Teams post carries. Pure: no clock, no network, no db.
+ */
+export function teamsActivityForCard(card: ApprovalCard): TeamsActivityPayload {
+  const body: Array<Record<string, unknown>> = [
+    { type: "TextBlock", text: toAdaptiveMarkdown(card.text), wrap: true },
+    // The link is carried as TEXT as well as (when absolute) an action, so a
+    // fenced card always still says WHERE to go even on a client that drops
+    // the action bar. This is the "a link, not the content" half of the fence.
+    { type: "TextBlock", text: card.portalUrl, wrap: true, isSubtle: true },
+  ];
+  if (card.inAppOnlyNote) {
+    body.push({ type: "TextBlock", text: `_${card.inAppOnlyNote}_`, wrap: true, isSubtle: true });
+  }
+
+  const actions: Array<Record<string, unknown>> = [];
+  // Action.OpenUrl needs an ABSOLUTE url; a deployment that has not configured
+  // its public base URL gets the path as text above and no dead button.
+  if (/^https?:\/\//i.test(card.portalUrl)) {
+    actions.push({ type: "Action.OpenUrl", title: "Open in RegulAIt", url: card.portalUrl });
+  }
+  for (const a of card.actions) {
+    // SAME rule as the Slack button: the payload is the opaque approval id and
+    // a verb, nothing that could be replayed into authority.
+    actions.push({
+      type: "Action.Submit",
+      title: a.label,
+      data: { approvalId: a.approvalId, action: a.action },
+    });
+  }
+
+  return {
+    text: card.text,
+    attachments: [
+      {
+        contentType: TEAMS_ADAPTIVE_CARD_CONTENT_TYPE,
+        content: {
+          $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
+          type: "AdaptiveCard",
+          version: TEAMS_ADAPTIVE_CARD_VERSION,
+          body,
+          ...(actions.length > 0 ? { actions } : {}),
+        },
+      },
+    ],
   };
 }

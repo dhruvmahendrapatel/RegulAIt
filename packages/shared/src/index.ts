@@ -2824,6 +2824,8 @@ export {
   CHATOPS_REPLAY_WINDOW_SECONDS,
   SLACK_SIGNATURE_HEADER,
   SLACK_TIMESTAMP_HEADER,
+  TEAMS_ADAPTIVE_CARD_CONTENT_TYPE,
+  TEAMS_ADAPTIVE_CARD_VERSION,
   TEAMS_AUTHORIZATION_HEADER,
   chatContentFenced,
   chatDecidable,
@@ -2834,9 +2836,11 @@ export {
   parseTeamsInteraction,
   slackSignature,
   slackSignatureBaseString,
+  teamsActivityForCard,
   teamsSignature,
   verifyChatSignature,
   type ApprovalCard,
+  type ApprovalCardAction,
   type ApprovalCardInput,
   type ChatInteraction,
   type ChatOpsAction,
@@ -2844,6 +2848,7 @@ export {
   type ChatSignatureFailure,
   type ChatSignatureInput,
   type ChatSignatureResult,
+  type TeamsActivityPayload,
 } from "./chatops.js";
 // ADR-0057 — continuous red-teaming's pure half: the attack-class registry
 // (each class next to what it CANNOT tell you), the versioned built-in probe
