@@ -491,6 +491,13 @@ describe("6. the covered / NOT-covered inventory", () => {
     "decisions.rationale",
     "egress_allow_hosts.note",
     "eval_datasets.note",
+    // ADR-0115 — the DISPATCH FAILURE, not the answer. An upstream exception
+    // message can carry the credential that caused it, and unlike
+    // `output_text` it is never evidence of anything: a red-team defeat is
+    // proved by what the model SAID, not by what the transport threw. So this
+    // one is scrubbed at WRITE time while `output_text` stays faithful at rest
+    // and is redacted at the presentation boundary instead.
+    "eval_results.error",
     "eval_results.judge_rationale",
     "eval_runs.gate_reason",
     "eval_runs.note",
