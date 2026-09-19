@@ -1881,147 +1881,6 @@
         }
       }
     },
-    "/v1/conversations": {
-      "post": {
-        "operationId": "postV1Conversations",
-        "summary": "Create a conversation.",
-        "tags": [
-          "conversations"
-        ],
-        "security": [
-          {
-            "apiKey": []
-          }
-        ],
-        "x-regulait-stability": "public-beta",
-        "x-regulait-auth": "user",
-        "x-regulait-guarantee": "in the published spec and clients, but may change within the major with notice; the deprecation window is 90 days, not 12 months",
-        "x-regulait-schema": "unspecified",
-        "responses": {
-          "400": {
-            "description": "Request body failed schema validation."
-          },
-          "401": {
-            "description": "Missing, invalid, or revoked credential."
-          },
-          "429": {
-            "description": "Rate limited. Retry after the `retry-after` header."
-          },
-          "2XX": {
-            "description": "Success."
-          }
-        }
-      },
-      "get": {
-        "operationId": "getV1Conversations",
-        "summary": "The caller's conversations.",
-        "tags": [
-          "conversations"
-        ],
-        "security": [
-          {
-            "apiKey": []
-          }
-        ],
-        "x-regulait-stability": "public-beta",
-        "x-regulait-auth": "user",
-        "x-regulait-guarantee": "in the published spec and clients, but may change within the major with notice; the deprecation window is 90 days, not 12 months",
-        "responses": {
-          "400": {
-            "description": "Request body failed schema validation."
-          },
-          "401": {
-            "description": "Missing, invalid, or revoked credential."
-          },
-          "429": {
-            "description": "Rate limited. Retry after the `retry-after` header."
-          },
-          "2XX": {
-            "description": "Success."
-          }
-        }
-      }
-    },
-    "/v1/conversations/{conversationId}": {
-      "get": {
-        "operationId": "getV1ConversationsByConversationId",
-        "summary": "One conversation.",
-        "tags": [
-          "conversations"
-        ],
-        "security": [
-          {
-            "apiKey": []
-          }
-        ],
-        "x-regulait-stability": "public-beta",
-        "x-regulait-auth": "user",
-        "x-regulait-guarantee": "in the published spec and clients, but may change within the major with notice; the deprecation window is 90 days, not 12 months",
-        "parameters": [
-          {
-            "name": "conversationId",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "400": {
-            "description": "Request body failed schema validation."
-          },
-          "401": {
-            "description": "Missing, invalid, or revoked credential."
-          },
-          "429": {
-            "description": "Rate limited. Retry after the `retry-after` header."
-          },
-          "2XX": {
-            "description": "Success."
-          }
-        }
-      },
-      "delete": {
-        "operationId": "deleteV1ConversationsByConversationId",
-        "summary": "Delete a conversation.",
-        "tags": [
-          "conversations"
-        ],
-        "security": [
-          {
-            "apiKey": []
-          }
-        ],
-        "x-regulait-stability": "public-beta",
-        "x-regulait-auth": "user",
-        "x-regulait-guarantee": "in the published spec and clients, but may change within the major with notice; the deprecation window is 90 days, not 12 months",
-        "parameters": [
-          {
-            "name": "conversationId",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "400": {
-            "description": "Request body failed schema validation."
-          },
-          "401": {
-            "description": "Missing, invalid, or revoked credential."
-          },
-          "429": {
-            "description": "Rate limited. Retry after the `retry-after` header."
-          },
-          "2XX": {
-            "description": "Success."
-          }
-        }
-      }
-    },
     "/v1/projects": {
       "post": {
         "operationId": "postV1Projects",
@@ -3077,6 +2936,147 @@
           },
           "403": {
             "description": "Caller is not an administrator."
+          },
+          "429": {
+            "description": "Rate limited. Retry after the `retry-after` header."
+          },
+          "2XX": {
+            "description": "Success."
+          }
+        }
+      }
+    },
+    "/v1/conversations": {
+      "post": {
+        "operationId": "postV1Conversations",
+        "summary": "Create a conversation.",
+        "tags": [
+          "conversations"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "x-regulait-stability": "public-beta",
+        "x-regulait-auth": "user",
+        "x-regulait-guarantee": "in the published spec and clients, but may change within the major with notice; the deprecation window is 90 days, not 12 months",
+        "x-regulait-schema": "unspecified",
+        "responses": {
+          "400": {
+            "description": "Request body failed schema validation."
+          },
+          "401": {
+            "description": "Missing, invalid, or revoked credential."
+          },
+          "429": {
+            "description": "Rate limited. Retry after the `retry-after` header."
+          },
+          "2XX": {
+            "description": "Success."
+          }
+        }
+      },
+      "get": {
+        "operationId": "getV1Conversations",
+        "summary": "The caller's conversations.",
+        "tags": [
+          "conversations"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "x-regulait-stability": "public-beta",
+        "x-regulait-auth": "user",
+        "x-regulait-guarantee": "in the published spec and clients, but may change within the major with notice; the deprecation window is 90 days, not 12 months",
+        "responses": {
+          "400": {
+            "description": "Request body failed schema validation."
+          },
+          "401": {
+            "description": "Missing, invalid, or revoked credential."
+          },
+          "429": {
+            "description": "Rate limited. Retry after the `retry-after` header."
+          },
+          "2XX": {
+            "description": "Success."
+          }
+        }
+      }
+    },
+    "/v1/conversations/{conversationId}": {
+      "get": {
+        "operationId": "getV1ConversationsByConversationId",
+        "summary": "One conversation.",
+        "tags": [
+          "conversations"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "x-regulait-stability": "public-beta",
+        "x-regulait-auth": "user",
+        "x-regulait-guarantee": "in the published spec and clients, but may change within the major with notice; the deprecation window is 90 days, not 12 months",
+        "parameters": [
+          {
+            "name": "conversationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Request body failed schema validation."
+          },
+          "401": {
+            "description": "Missing, invalid, or revoked credential."
+          },
+          "429": {
+            "description": "Rate limited. Retry after the `retry-after` header."
+          },
+          "2XX": {
+            "description": "Success."
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteV1ConversationsByConversationId",
+        "summary": "Delete a conversation.",
+        "tags": [
+          "conversations"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "x-regulait-stability": "public-beta",
+        "x-regulait-auth": "user",
+        "x-regulait-guarantee": "in the published spec and clients, but may change within the major with notice; the deprecation window is 90 days, not 12 months",
+        "parameters": [
+          {
+            "name": "conversationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Request body failed schema validation."
+          },
+          "401": {
+            "description": "Missing, invalid, or revoked credential."
           },
           "429": {
             "description": "Rate limited. Retry after the `retry-after` header."
