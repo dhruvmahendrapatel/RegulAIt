@@ -101,6 +101,24 @@ caught on read. **The sweeps buy timeliness, never correctness.**
 
 ## 5. Test-infrastructure debt
 
+- **S20 — chat-to-dispatch: let a Teams/Slack message BE a governed agent turn. QUEUED, and it
+  needs an authorisation decision before any code (opened 2026-09-19).** ChatOps today mirrors
+  **approvals** and accepts **decisions**; it does not let a user converse with an agent from chat.
+  The plumbing to do so largely exists — ADR-0061 already solved the two hard parts (**admin-managed
+  identity binding**, because a chat user id is an *assertion* and a self-serve claim would let
+  anyone bind to anyone; and **signature-verified inbound**, which already works for Teams) — and
+  `conversations` already carries `projectId`, so a dispatch from chat would inherit that project's
+  budget gate, PII cascade, compliance tags and cost attribution for free.
+
+  **What must be decided first, not discovered later.** ADR-0061's fence exists because *a chat tap
+  is not a re-authenticated session*; that reasoning binds harder here. Approving from chat is
+  bounded by an approval that already exists and was already scoped. **Dispatching from chat spends
+  real project budget and reaches real tools from a client we do not control.** Questions owed an
+  answer: is chat dispatch opt-in per workspace (mirroring `allowFencedDecide`)? Is it refused
+  outright for `block`-mode projects? Which agent does a bare message reach, and who chose it? Does
+  a chat turn inherit the full entitlement set of the bound user, or a narrower one? Until those are
+  answered this stays queued — building it first would decide them by accident.
+
 - **S17 — GitHub Copilot is invisible to shadow-AI discovery (opened 2026-09-19).** Measured:
   `packages/shared/src/shadow-discovery.ts` carries **37 endpoint signatures**, and the only Copilot
   entry is `ep-microsoft-copilot-web` → `copilot.microsoft.com`, annotated in our own code as
