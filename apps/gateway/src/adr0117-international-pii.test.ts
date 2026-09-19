@@ -7,9 +7,9 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { and, auditLog, createDb, eq, runMigrations, usageEvents, type Db } from "@regulait/db";
-import { agents, type AgentRow } from "@regulait/db";
+import { agents } from "@regulait/db";
 import { buildApp } from "./app.js";
-import { executeGovernedDispatch } from "./agents-connectors.js";
+import { executeGovernedDispatch, type AgentRow } from "./agents-connectors.js";
 import { executeGovernedToolCall, PROJECT_HEADER } from "./mcp-proxy.js";
 
 /**
