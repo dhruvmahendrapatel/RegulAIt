@@ -1229,6 +1229,11 @@ export const connectorProviderKindSchema = z.enum([
   "http",
   "webhook",
   "slack",
+  // ADR-0113 — the Bot Framework Connector adapter. NOTE: its credential is
+  // ADR-0023's structured JSON ({appId, appPassword, tenantId?, loginBaseUrl?}),
+  // validated by the adapter at resolve time rather than at credential-write
+  // time; see ADR-0113's honest limits.
+  "teams",
   "github",
   "jira",
   "snowflake",

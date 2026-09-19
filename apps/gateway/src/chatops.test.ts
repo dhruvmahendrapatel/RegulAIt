@@ -53,6 +53,7 @@ import {
   inArray,
   projects,
   runMigrations,
+  sql,
   users,
   type Db,
 } from "@regulait/db";
@@ -74,6 +75,12 @@ const SIGNING_SECRET = "chatops-suite-signing-secret";
 const CONNECTION = "chatops-suite-slack";
 const CHANNEL = "C-DEPLOYS";
 const PROFILE_TAG = "chatops-suite-block";
+// ADR-0113 — per-run-unique Teams fixtures, kept distinct from the Slack ones
+const TEAMS_CONNECTION = "chatops-suite-teams";
+const TEAMS_CONV = "19:chatops-suite@thread.tacv2";
+const BAD_LOGIN_CONNECTION = "chatops-suite-teams-badlogin";
+/** a host that is NOT on the egress allow-list (the suite allows 127.0.0.1 only) */
+const UNLISTED_LOGIN_HOST = "http://127.0.0.2:9";
 
 let db: Db;
 let app: ReturnType<typeof buildApp>;
@@ -85,10 +92,17 @@ let connectorId: string;
 let connectionId: string;
 let fencedProjectId: string;
 let slackBase: string;
+/** ADR-0113 — the Teams half: its own connector, credential and workspace */
+let teamsConnectorId: string;
+let teamsConnectionId: string;
+let badLoginConnectorId: string;
+let badLoginConnectionId: string;
 
 /** every card the gateway really posted, captured off a real HTTP server so
  * the assertion is about bytes on a socket, not about a mock's arguments */
 const posted: Array<Record<string, unknown>> = [];
+/** ADR-0113 — every app-only token exchange the Teams adapter really made */
+const tokenRequests: string[] = [];
 let upstream: http.Server;
 
 const post = (url: string, payload: unknown, headers = AUTH) =>
@@ -158,13 +172,26 @@ beforeAll(async () => {
     let body = "";
     req.on("data", (c) => (body += c));
     req.on("end", () => {
+      const url = req.url ?? "";
+      // ADR-0113: the SAME server plays the Microsoft Entra login service as
+      // well, because a Teams post is TWO requests to TWO hosts. Token calls
+      // are kept in their own array so `posted` stays "cards that reached a
+      // chat surface" and the existing Slack deltas keep meaning what they did.
+      if (url.includes("/oauth2/v2.0/token")) {
+        tokenRequests.push(body);
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ token_type: "Bearer", expires_in: 3600, access_token: "minted-test-jwt" }));
+        return;
+      }
       try {
         posted.push(JSON.parse(body || "{}") as Record<string, unknown>);
       } catch {
         posted.push({ raw: body });
       }
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ ok: true, ts: `17850000${posted.length}.0001` }));
+      // Slack answers `{ok, ts}`; the Bot Connector answers a ResourceResponse
+      // `{id}`. Sending both lets one server serve both adapters honestly.
+      res.end(JSON.stringify({ ok: true, ts: `17850000${posted.length}.0001`, id: `act-${posted.length}` }));
     });
   });
   await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
@@ -225,6 +252,59 @@ beforeAll(async () => {
   });
   expect(link2.statusCode).toBe(201);
 
+  // ------------------------------------------------------------------
+  // ADR-0113 — the TEAMS workspace, built exactly like the Slack one: an
+  // ORDINARY connector holding an ORDINARY credential. The credential is the
+  // bot's app registration (ADR-0023's structured-JSON convention), NOT a
+  // bearer token, and its `loginBaseUrl` points at the same local server so
+  // the token exchange is observable.
+  // ------------------------------------------------------------------
+  const teamsConn = await post("/v1/connectors", {
+    name: "chatops-suite-teams-connector",
+    kind: "chat",
+    providerKind: "teams",
+    baseUrl: slackBase,
+  });
+  expect(teamsConn.statusCode).toBe(201);
+  teamsConnectorId = teamsConn.json().id;
+  const teamsCred = await post(`/v1/connectors/${teamsConnectorId}/credential`, {
+    token: JSON.stringify({ appId: "suite-app-id", appPassword: "suite-app-password", loginBaseUrl: slackBase }),
+  });
+  expect([200, 201]).toContain(teamsCred.statusCode);
+  const teamsCreated = await post("/v1/chatops/connections", {
+    name: TEAMS_CONNECTION,
+    provider: "teams",
+    connectorId: teamsConnectorId,
+    signingSecret: SIGNING_SECRET,
+    defaultChannel: TEAMS_CONV,
+  });
+  expect(teamsCreated.statusCode).toBe(201);
+  teamsConnectionId = teamsCreated.json().id;
+
+  // a SECOND Teams workspace whose credential names a login host that is NOT
+  // egress-permitted — the two-host proof
+  const badConn = await post("/v1/connectors", {
+    name: "chatops-suite-teams-badlogin-connector",
+    kind: "chat",
+    providerKind: "teams",
+    baseUrl: slackBase,
+  });
+  expect(badConn.statusCode).toBe(201);
+  badLoginConnectorId = badConn.json().id;
+  const badCred = await post(`/v1/connectors/${badLoginConnectorId}/credential`, {
+    token: JSON.stringify({ appId: "a", appPassword: "b", loginBaseUrl: UNLISTED_LOGIN_HOST }),
+  });
+  expect([200, 201]).toContain(badCred.statusCode);
+  const badCreated = await post("/v1/chatops/connections", {
+    name: BAD_LOGIN_CONNECTION,
+    provider: "teams",
+    connectorId: badLoginConnectorId,
+    signingSecret: SIGNING_SECRET,
+    defaultChannel: TEAMS_CONV,
+  });
+  expect(badCreated.statusCode).toBe(201);
+  badLoginConnectionId = badCreated.json().id;
+
   // a project whose compliance classification blocks sensitive content
   await post("/v1/compliance/profiles", { tag: PROFILE_TAG, piiMode: "block" });
   const proj = await post("/v1/projects", { name: "chatops-suite-fenced", classifications: [PROFILE_TAG] });
@@ -236,12 +316,15 @@ afterAll(async () => {
   await db.delete(chatopsInteractions);
   await db.delete(chatopsMessages);
   await db.delete(chatIdentityLinks);
-  await db.delete(chatopsConnections).where(eq(chatopsConnections.id, connectionId));
+  await db
+    .delete(chatopsConnections)
+    .where(inArray(chatopsConnections.id, [connectionId, teamsConnectionId, badLoginConnectionId].filter(Boolean)));
   await db.delete(approvals).where(eq(approvals.userId, requesterId));
   if (fencedProjectId) await db.delete(projects).where(eq(projects.id, fencedProjectId));
   await db.delete(complianceProfiles).where(eq(complianceProfiles.tag, PROFILE_TAG));
-  await db.delete(connectorCredentials).where(eq(connectorCredentials.connectorId, connectorId));
-  await db.delete(connectors).where(eq(connectors.id, connectorId));
+  const allConnectors = [connectorId, teamsConnectorId, badLoginConnectorId].filter(Boolean);
+  await db.delete(connectorCredentials).where(inArray(connectorCredentials.connectorId, allConnectors));
+  await db.delete(connectors).where(inArray(connectors.id, allConnectors));
   await db.delete(auditLog).where(inArray(auditLog.ruleId, RULE_IDS));
   await db.delete(users).where(inArray(users.email, EMAILS));
   await db.delete(egressAllowHosts).where(eq(egressAllowHosts.host, "127.0.0.1"));
@@ -512,5 +595,217 @@ describe("outbound posting", () => {
         });
       }
     }
+  });
+});
+
+// ===========================================================================
+// 5. ADR-0113 — THE TEAMS OUTBOUND COURIER
+//
+// ADR-0061 shipped Teams INBOUND only; the outbound half refused with
+// `outbound_provider_unsupported`. These tests prove the courier exists, that
+// it did NOT become a pass-through, and — the two things that had to survive —
+// that the egress guard and the sensitivity fence apply to Teams identically.
+// ===========================================================================
+
+/** the last Activity the gateway really posted, as an object */
+function lastCard(): Record<string, unknown> {
+  return posted[posted.length - 1] as Record<string, unknown>;
+}
+/** the Adaptive Card `actions` array of the last posted Activity (or []) */
+function lastCardActions(): Array<Record<string, unknown>> {
+  const att = (lastCard().attachments ?? []) as Array<{ content?: Record<string, unknown> }>;
+  return (att[0]?.content?.actions ?? []) as Array<Record<string, unknown>>;
+}
+
+describe("ADR-0113: Teams outbound", () => {
+  it("POSTS an Adaptive Card through the Bot Connector, minting an app-only token first", async () => {
+    const approvalId = await makeApproval({ approverUserId: danaId });
+    const before = posted.length;
+    const tokBefore = tokenRequests.length;
+
+    const res = await post(`/v1/chatops/approvals/${approvalId}/post`, { connectionName: TEAMS_CONNECTION });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().redacted).toBe(false);
+    expect(res.json().decidable).toBe(true);
+    // the ResourceResponse `{id}` is what a Teams message is known by — NOT a
+    // Slack `ts`, which this upstream also offers, so this asserts the adapter
+    // read the right field
+    expect(String(res.json().messageRef)).toMatch(/^act-/);
+
+    // the token exchange really happened, with the documented grant
+    expect(tokenRequests.length).toBe(tokBefore + 1);
+    const form = new URLSearchParams(tokenRequests[tokenRequests.length - 1]!);
+    expect(form.get("grant_type")).toBe("client_credentials");
+    expect(form.get("scope")).toBe("https://api.botframework.com/.default");
+
+    // exactly one card, and it is a Bot Framework Activity carrying an
+    // Adaptive Card — not Slack blocks
+    expect(posted.length).toBe(before + 1);
+    const card = lastCard();
+    expect(card.type).toBe("message");
+    expect(card.conversation).toEqual({ id: TEAMS_CONV });
+    expect(card.blocks).toBeUndefined();
+    const attachments = card.attachments as Array<{ contentType: string; content: Record<string, unknown> }>;
+    expect(attachments).toHaveLength(1);
+    expect(attachments[0]!.contentType).toBe("application/vnd.microsoft.card.adaptive");
+    expect(attachments[0]!.content.type).toBe("AdaptiveCard");
+
+    // an UNfenced Teams card may name the gated action, and DOES carry the
+    // decide buttons whose payload is exactly what parseTeamsInteraction reads
+    expect(JSON.stringify(card)).toContain("patients.read");
+    const submits = lastCardActions().filter((a) => a.type === "Action.Submit");
+    expect(submits).toHaveLength(2);
+    expect(submits.map((a) => (a.data as Record<string, unknown>).action).sort()).toEqual(["approve", "reject"]);
+    for (const a of submits) {
+      expect((a.data as Record<string, unknown>).approvalId).toBe(approvalId);
+    }
+
+    const msgs = await db.select().from(chatopsMessages).where(eq(chatopsMessages.approvalId, approvalId));
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]?.redacted).toBe(false);
+    expect(msgs[0]?.decidable).toBe(true);
+  });
+
+  it("THE FENCE, FOR TEAMS: a block-mode project posts a LINK WITHOUT BUTTONS", async () => {
+    const approvalId = await makeApproval({ approverUserId: danaId, projectId: fencedProjectId });
+    const before = posted.length;
+
+    const res = await post(`/v1/chatops/approvals/${approvalId}/post`, { connectionName: TEAMS_CONNECTION });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().redacted).toBe(true);
+    // fenced ⇒ in-app only by default, on Teams exactly as on Slack
+    expect(res.json().decidable).toBe(false);
+
+    expect(posted.length).toBe(before + 1);
+    const card = lastCard();
+    const serialized = JSON.stringify(card);
+    // the CONTENT is withheld
+    expect(serialized).not.toContain("patients.read");
+    expect(serialized).not.toContain("prod-signoff");
+    expect(serialized).not.toContain(EMAILS[2]!);
+    // ...and a LINK is what is there instead (M-033: the negatives above are
+    // paired with these positives, so an empty card cannot satisfy the test)
+    expect(serialized).toContain(approvalId);
+    expect(serialized).toMatch(/review-workbench/);
+    expect(serialized).toMatch(/not a re-authenticated session/);
+
+    // NO decide button of any kind reached Teams
+    expect(lastCardActions().filter((a) => a.type === "Action.Submit")).toHaveLength(0);
+    // and the record agrees
+    const msgs = await db.select().from(chatopsMessages).where(eq(chatopsMessages.approvalId, approvalId));
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]?.redacted).toBe(true);
+    expect(msgs[0]?.decidable).toBe(false);
+  });
+
+  it("THE EGRESS GUARD, FOR TEAMS: with the allow entry withdrawn, nothing leaves — not even the token call", async () => {
+    const approvalId = await makeApproval({ approverUserId: danaId });
+    const saved = await db.select().from(egressAllowHosts).where(eq(egressAllowHosts.host, "127.0.0.1"));
+    await db.delete(egressAllowHosts).where(eq(egressAllowHosts.host, "127.0.0.1"));
+    try {
+      const before = posted.length;
+      const tokBefore = tokenRequests.length;
+      const auditsBefore = (await auditRows(CHATOPS_RULE_IDS.postRefusedEgress)).length;
+
+      const res = await post(`/v1/chatops/approvals/${approvalId}/post`, { connectionName: TEAMS_CONNECTION });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error).toBe("egress_blocked");
+      // air-gapped: no card AND no token request — refused before any socket
+      expect(posted.length).toBe(before);
+      expect(tokenRequests.length).toBe(tokBefore);
+      // the refusal is filed (delta, not an absolute count)
+      expect((await auditRows(CHATOPS_RULE_IDS.postRefusedEgress)).length).toBeGreaterThan(auditsBefore);
+      // and no mirror record was written
+      expect(await db.select().from(chatopsMessages).where(eq(chatopsMessages.approvalId, approvalId))).toHaveLength(0);
+    } finally {
+      for (const row of saved) {
+        await db.insert(egressAllowHosts).values({
+          host: row.host,
+          allowPrivateRanges: row.allowPrivateRanges,
+          allowPlaintextHttp: row.allowPlaintextHttp,
+          note: row.note,
+        });
+      }
+    }
+    // POSITIVE PAIR (M-033): with the entry restored, the SAME post succeeds —
+    // so the refusal above was the guard, not a broken fixture
+    const again = await makeApproval({ approverUserId: danaId });
+    const ok = await post(`/v1/chatops/approvals/${again}/post`, { connectionName: TEAMS_CONNECTION });
+    expect(ok.statusCode).toBe(200);
+  });
+
+  it("BOTH Teams hosts are adjudicated: an unlisted LOGIN host is refused although the service host is permitted", async () => {
+    const approvalId = await makeApproval({ approverUserId: danaId });
+    const before = posted.length;
+    const tokBefore = tokenRequests.length;
+    const auditsBefore = (await auditRows(CHATOPS_RULE_IDS.postRefusedEgress)).length;
+
+    // this workspace's service host IS 127.0.0.1 (allow-listed); only its
+    // credential's loginBaseUrl names an unlisted host
+    const res = await post(`/v1/chatops/approvals/${approvalId}/post`, { connectionName: BAD_LOGIN_CONNECTION });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toBe("egress_blocked");
+    expect(String(res.json().detail)).toMatch(/BOTH need an Egress Allow Hosts entry/);
+    expect(posted.length).toBe(before);
+    expect(tokenRequests.length).toBe(tokBefore);
+    expect((await auditRows(CHATOPS_RULE_IDS.postRefusedEgress)).length).toBeGreaterThan(auditsBefore);
+  });
+
+  it("the guard did NOT become a pass-through: a provider with no outbound adapter still refuses 501", async () => {
+    // The `provider` column carries a CHECK constraint over ('slack','teams'),
+    // so a third provider cannot be created through the API — and asserting on
+    // a constant would be vacuous. The constraint is lifted for the length of
+    // this test, and restored in `finally`, so the assertion is about the
+    // SHIPPED branch answering a REAL request.
+    const approvalId = await makeApproval({ approverUserId: danaId });
+    const forged = "chatops-suite-unsupported";
+    await db.execute(
+      sql`ALTER TABLE "chatops_connections" DROP CONSTRAINT "chatops_connections_provider_ck"`,
+    );
+    try {
+      await db.execute(sql`
+        INSERT INTO "chatops_connections"
+          ("name", "provider", "connector_id", "signing_secret_ciphertext", "default_channel")
+        SELECT ${forged}, 'webex', "connector_id", "signing_secret_ciphertext", "default_channel"
+        FROM "chatops_connections" WHERE "name" = ${TEAMS_CONNECTION}
+      `);
+      const before = posted.length;
+      const tokBefore = tokenRequests.length;
+
+      const res = await post(`/v1/chatops/approvals/${approvalId}/post`, { connectionName: forged });
+      expect(res.statusCode).toBe(501);
+      expect(res.json().error).toBe("outbound_provider_unsupported");
+      expect(String(res.json().detail)).toContain("webex");
+      expect(posted.length).toBe(before);
+      expect(tokenRequests.length).toBe(tokBefore);
+
+      // POSITIVE PAIR: the identical request against the TEAMS workspace — same
+      // connector, same credential, same channel — succeeds, so the 501 is
+      // about the provider and not about the fixture
+      const ok = await post(`/v1/chatops/approvals/${approvalId}/post`, { connectionName: TEAMS_CONNECTION });
+      expect(ok.statusCode).toBe(200);
+      expect(posted.length).toBe(before + 1);
+    } finally {
+      await db.delete(chatopsConnections).where(eq(chatopsConnections.name, forged));
+      await db.execute(sql`
+        ALTER TABLE "chatops_connections"
+        ADD CONSTRAINT "chatops_connections_provider_ck" CHECK ("provider" IN ('slack', 'teams'))
+      `);
+    }
+  });
+
+  it("Slack is UNAFFECTED: it still posts Block Kit and no token exchange happens", async () => {
+    const approvalId = await makeApproval({ approverUserId: danaId });
+    const before = posted.length;
+    const tokBefore = tokenRequests.length;
+    const res = await post(`/v1/chatops/approvals/${approvalId}/post`, { connectionName: CONNECTION });
+    expect(res.statusCode).toBe(200);
+    expect(posted.length).toBe(before + 1);
+    // Slack's credential is a bare bot token — there is nothing to exchange
+    expect(tokenRequests.length).toBe(tokBefore);
+    const card = lastCard();
+    expect(Array.isArray(card.blocks)).toBe(true);
+    expect(card.attachments).toBeUndefined();
+    expect(String(res.json().messageRef)).toMatch(/^17850000/);
   });
 });

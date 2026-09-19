@@ -482,9 +482,11 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
     const body = (result.body ?? {}) as Record<string, unknown>;
     // Slack returns `{ok, ts}`; the Bot Connector returns a ResourceResponse
     // `{id}`. Both are "the handle this message is known by", which is what
-    // `chatops_messages.message_ref` stores.
-    const messageRef =
-      typeof body.ts === "string" ? body.ts : typeof body.id === "string" ? body.id : null;
+    // `chatops_messages.message_ref` stores — but the field is read PER
+    // PROVIDER rather than by a `ts ?? id` fallback, so a response that happens
+    // to carry both cannot silently make one provider read the other's handle.
+    const refField = conn.provider === "teams" ? "id" : "ts";
+    const messageRef = typeof body[refField] === "string" ? (body[refField] as string) : null;
     return { ok: true, messageRef };
   }
 
