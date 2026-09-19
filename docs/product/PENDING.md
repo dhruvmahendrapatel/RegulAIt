@@ -101,6 +101,34 @@ caught on read. **The sweeps buy timeliness, never correctness.**
 
 ## 5. Test-infrastructure debt
 
+- **S17 — GitHub Copilot is invisible to shadow-AI discovery (opened 2026-09-19).** Measured:
+  `packages/shared/src/shadow-discovery.ts` carries **37 endpoint signatures**, and the only Copilot
+  entry is `ep-microsoft-copilot-web` → `copilot.microsoft.com`, annotated in our own code as
+  *"Browser usage, not an API integration."* **There is no GitHub Copilot signature at all**, so the
+  IDE case — the one an enterprise actually cares about — is neither governed nor even *detected*.
+  Small and cheap: add the signature(s) so it becomes visible on the Shadow-AI surface.
+  **Do NOT take the hostnames from this entry — there are none here on purpose.** Whoever builds it
+  must verify GitHub Copilot's real endpoints against current documentation or observed traffic
+  rather than inheriting a guess; a wrong signature is worse than none, because it reports clean.
+  Detection only — it does not make Copilot governable (see S18 and the enforcement ladder).
+
+- **S18 — document the Copilot-via-MCP path in `IDE_INTEGRATION.md` as a supported configuration
+  (opened 2026-09-19).** **No new code — this is documenting a capability that already ships.**
+  `POST /mcp/:serverId` is a standard streamable-HTTP MCP endpoint, and GitHub Copilot supports MCP
+  servers; pointing its MCP config at our proxy puts every tool call it makes through entitlement
+  checks, data scope, approvals (ADR-0104/0105), project budget (ADR-0103), PII/guardrails and the
+  audit trail. That governs what Copilot **does**, which is the strongest honest claim we have here.
+  The write-up must keep `IDE_INTEGRATION.md`'s existing framing rather than soften it:
+  - **It governs actions, not completions.** Copilot's model calls still go to GitHub's backend.
+  - **`key_custody` — our cheapest non-bypassable rung — does NOT apply to Copilot.** That rung
+    works by withholding raw provider keys; Copilot's credential is a **GitHub entitlement**, not a
+    vendor API key the org issues, and it does not speak to an OpenAI-compatible endpoint that could
+    be repointed. Only the `network` rung closes the completion path, and that is infrastructure at
+    the customer's boundary, never product code.
+  - A developer can remove the MCP server from their own config, so on the ladder this is
+    `managed`/`voluntary` for the tools too unless the MCP servers themselves are only reachable
+    through us.
+
 - **S14 — conversations hold a pasted credential verbatim. OWNER DECISION (opened 2026-09-17,
   ADR-0111).** Proven with a row: `conversation_messages.content` (both the user turn and the
   assistant turn), `conversations.title` via `autoTitle`, and the compaction summary. **Deliberately
