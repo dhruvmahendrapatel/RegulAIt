@@ -223,13 +223,18 @@ caught on read. **The sweeps buy timeliness, never correctness.**
   `console.log` + `process.exit()` means Node's async stdout on a pipe could drop the output, so a
   blocked pre-flight could have failed CI with **no reason printed**. Fixed to `fs.writeSync`.
 
-- **S13 — a re-scan re-opens the ledger row but never the FINDING (found 2026-09-12).** After a
-  restore that reported success while the gap is in fact still live, `infra_findings.status` stays
-  `remediated` and `syncFindingLedger` leaves a `restored` row alone — so the live gap is **invisible
-  on the findings surface** even though the backup ledger re-opened. This is pre-existing ADR-0017
-  behaviour ("a re-scan never resets a finding's status"), was not made worse by ADR-0110, and was
-  deliberately not fixed there. It is a genuine honesty gap — the product would be showing an
-  operator a remediated finding over a live one — and it is owed its own decision.
+- **S13 — a re-scan re-opened the ledger row but never the FINDING. CLOSED 2026-09-19 by
+  [ADR-0114](../decisions/0114-rescan-reopens-a-contradicted-finding.md), no migration.** A re-scan
+  that observes the **same signature** now re-opens a finding whose status claims the problem is
+  resolved (`remediated`, `auto_remediated`), audits the contradiction as `infra-finding-reopened`
+  with what was CLAIMED and what was OBSERVED, and leaves `accepted_risk` and `remediation_proposed`
+  alone with a stated reason for each. **The entry's own premise was wrong and is recorded as
+  M-036**: this was filed as *pre-existing ADR-0017 behaviour ("a re-scan never resets a finding's
+  status")*, and **ADR-0017 contains no such claim** — its only idempotency statement is that a
+  re-scan never duplicates a LEDGER row. The rule was an inline comment at `infra.ts:883`, and the
+  ADR citation is precisely what kept it from being revisited for a week. Flapping is **bounded,
+  not eliminated** (fires at most once per false close; no findings-scan scheduler exists today) —
+  see the ADR's Honest limits before adding one.
 
 - **S11 (original entry, superseded above) — `backup_runs` re-opens a miss while a restore is pending (found 2026-09-09).** The
   idempotency read matches only `status='missed'` (`infra.ts:198`); proposing a restore sets

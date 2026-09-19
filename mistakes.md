@@ -575,3 +575,40 @@ covering one of several producers passes while another is broken, and a positive
 assertion is no protection against that: it only proves the path it happens to
 exercise. Ask "what else could have produced this value, and would my test have
 noticed if that one broke?"**
+
+---
+
+## M-036 (2026-09-19) — I attributed a product rule to an ADR that never contained it, and the citation is what stopped anyone revisiting it
+
+ADR-0110's Honest limits recorded a gap I was leaving open — a re-scan re-opens
+the backup LEDGER row but never the FINDING — and excused it as **"pre-existing
+ADR-0017 behaviour"**. STATE.md then repeated the attribution, and so did
+PENDING.md's S13 entry, quoting a rule in quotation marks: *"a re-scan never
+resets a finding's status"*.
+
+**ADR-0017 does not say that, and never did.** Its only idempotency claim is that
+*a re-scan never duplicates a ledger row* — a statement about **rows**, not about
+**status**. The rule I quoted lived in exactly one place: an inline comment in
+`apps/gateway/src/infra.ts` (line 883 at `48de1f0`). I had put quotation marks
+around a code comment and a decision record's number around a line nobody decided.
+
+**Why it cost something rather than nothing.** A rule attributed to an ADR reads
+as *decided* — weighed once, by someone, for a reason recorded elsewhere — so the
+honest move when you meet it is to respect it. The same rule sitting in a code
+comment reads as *how it happens to work*, which invites the question "should it?"
+By citing ADR-0017 I converted the second into the first, and S13 sat open for a
+week behind a decision that had never been taken. It was caught only because S13's
+brief told the agent to verify the premise; a brief that said "implement S13 as
+filed" would have inherited the error and cited it again, which is how a
+misattribution becomes load-bearing.
+
+This is M-034's shape in a new place. There the lesson was that a *deferred* claim
+is the least-verified content in the repo; here it is that a *citation* is, because
+a reader's whole reason for not checking it is that it looks checked.
+
+**Rule: before writing "pre-existing <ADR-NNNN> behaviour", or putting a rule in
+quotation marks and a reference beside it, GREP THAT ADR FOR THE CLAIM. If the
+text is not there, say where the rule actually lives — "an inline comment in
+`<file>:<line>`" is a perfectly good provenance and an honest one, and it tells
+the next reader the thing the ADR citation actively hides: that nobody has
+decided this yet.**

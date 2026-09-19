@@ -21,6 +21,70 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-19 (later still) — S13 closed: a re-scan that still sees the SAME signature now RE-OPENS
+a finding whose status claims the problem is fixed, and the rule it replaces was never ADR-0017's.**
+([ADR-0114](../docs/decisions/0114-rescan-reopens-a-contradicted-finding.md), **no migration** —
+`open` was already in the enum.) ADR-0110 made the backup **ledger** row re-open; the **finding**
+did not follow. So a restore that reported success over a gap that is still live left
+`infra_findings.status` at `remediated` — the product showing an operator a **closed finding over a
+live gap**, on `/v1/infra/findings` and `/v1/infra/posture`, the surfaces they read *first*, while
+the ledger that now tells the truth is the one they reach for second.
+
+**The premise was wrong, and correcting it is the substance of the batch (now M-036).** S13 was
+filed — by me, in ADR-0110's Honest limits, and repeated into STATE.md and PENDING.md — as
+"pre-existing **ADR-0017** behaviour", quoting *"a re-scan never resets a finding's status"*.
+**ADR-0017 does not contain that sentence.** I checked it myself: its only idempotency claim is that
+a re-scan never duplicates a **ledger row** — rows, not status. The rule lived in exactly one place,
+an inline comment at `infra.ts:883`. I had put quotation marks around a code comment and an ADR
+number beside it. That is why it matters: a rule attributed to an ADR reads as *decided*, so the
+respectful move is to leave it alone; the same rule in a comment reads as *how it happens to work*,
+which invites the question. The citation is what kept it unexamined.
+
+**With the premise corrected it stops being a trade-off and becomes an inconsistency.**
+`infra.ts:670` already re-opens a finding when a cert rotation **fails** — *"re-proposable: the
+finding goes back to open, never silently closed."* A remediation that **reported success** while
+the same signature is still observable is not a scanner overruling a human; it is evidence the
+decision did not take effect. Re-opening the loud failure and staying silent on the quiet one is
+backwards — the quiet one is the one an operator cannot otherwise discover.
+
+**Per-status, each argued rather than decided by omission**: `remediated` and `auto_remediated`
+re-open (the second more strongly — same claim, but **nobody looked**). **`accepted_risk` does
+not** — a human chose to live with a known problem, the scan still seeing it is *expected*, and
+re-opening would nag an operator for doing exactly what the product asked, turning `accepted_risk`
+into a delay rather than a decision. **`remediation_proposed` does not** — it claims the problem is
+*being worked*, not resolved, so there is no contradiction to report; this is where ADR-0114
+**deliberately parts from ADR-0110 §2**, because on the ledger `restore_proposed` was the state that
+stopped the row saying the gap was live, while on the finding it would destroy an in-flight proposal
+and buy nothing. `open` is a no-op **with no audit row** — no closed claim to contradict, and that
+is also the flapping bound. `approved` is refused defensively and shown unreachable.
+
+**Flapping is bounded, not eliminated, and the bounds are existing mechanisms rather than an
+invented debounce**: it fires **at most once per false close** (`open` does not re-open, so no
+oscillation and no audit-row storm — asserted, not argued), and `scanResource` has exactly **one
+caller repo-wide** with no findings-scan scheduler anywhere. The second bound is disclosed as a
+property of *today's* deployment: whoever schedules fleet scans narrows the window in proportion.
+
+**Verified by me on a freshly created database**: **179 files / 2740 passed / 9 MinIO skips, exit
+0** — exactly **+1 file, +6 tests** over S21's 178/2734, nothing else moved. Repo-wide build and
+`tsc --noEmit` clean; instrument asserted (`ECONNREFUSED: 0`, `destroySoon: 0`, unhandled-error
+block empty). I re-derived the two load-bearing premises from source rather than from the report:
+ADR-0017 carries no status claim (`grep` returns nothing), and all **ten** writers of
+`infra_findings.status` are where the ADR says, with **no path anywhere setting `approved`**.
+
+**My own non-vacuity probe, additive to the agent's three and with the prediction written first**:
+the status flip and the audit row are two separable claims, so removing **only** the `auditLog`
+insert — keeping both the status change and the counter — had to redden something, or the
+"contradiction is audited, never silent" guarantee rests on nothing. Three tests went red, including
+the one pinning `priorStatus: "auto_remediated"`. Probe reverted and the revert verified clean.
+
+**The honest limits, which the ADR gives its own section**: flapping is bounded rather than removed
+and a future scan scheduler weakens the second bound; `priorDetectedAt` is the last observation
+before the close, **not** a remediation timestamp (there is no `remediated_at` column and no
+migration was added to invent one — the remediation's own moment is already in the audit log under
+the same `objectId`); "the same signature" is only as good as the provider's signature, and an
+unstable one would create new findings rather than re-open; and the provider under test is
+`MockInfraProvider` — the right fixture for a false success, and a narrow one.
+
 **2026-09-19 (later still) — S21 closed: the conversation list can now be asked for ONE project,
 and `none` for the unattributed ones.** (No ADR, no migration — a query parameter on an existing
 route, resolved inside an existing owner-scoped predicate.) `conversations.projectId` has always
@@ -239,7 +303,11 @@ duplicating it, because a generated table cannot disagree with its source.
 is exhausted for this repo; verified locally only), and **a re-scan re-opens the ledger row but
 never the FINDING** — after a restore that claimed success while the gap is still live,
 `infraFindings.status` stays `remediated`, so the live gap is invisible on the findings surface.
-Pre-existing ADR-0017 behaviour, not worsened here, deliberately not fixed here (**S13**).
+Deliberately not fixed here (**S13**). **Corrected 2026-09-19 (ADR-0114, M-036): calling this
+"pre-existing ADR-0017 behaviour" was a mis-attribution** — ADR-0017 makes no claim about finding
+status, only that a re-scan never duplicates a LEDGER row. The rule was an inline comment at
+`infra.ts:883`. S13 is now CLOSED; this paragraph is left otherwise unedited as the record of what
+was believed at the time.
 
 **2026-09-09 (later still) — S10 closed: nine constraints added, and TWO REFUSED on evidence.**
 ([ADR-0109](../docs/decisions/0109-deferred-unique-constraints.md), migration 0108.) ADR-0107
