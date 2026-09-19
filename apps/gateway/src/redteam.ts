@@ -135,6 +135,7 @@ import {
 import { type AgentRow } from "./agents-connectors.js";
 import { buildAgentDecider, runEvalSuite, type EvalRunOutcome } from "./evals.js";
 import { assertProjectAttribution } from "./projects.js";
+import { installPresentationScrub } from "./conversation-presentation.js";
 import {
   auditAdjudication,
   runSequenceProbeTrial,
@@ -1536,232 +1537,271 @@ export function registerRedTeamRoutes(app: FastifyInstance, db: Db, opts: RedTea
   });
 
   /**
-   * ADR-0068 §1 — THE PER-TRIAL RECORD. A reviewer asking "was that 2 of 3 or
-   * 40 of 60, and did it flap between trials?" gets an answer from the stored
-   * rows rather than from a mean somebody else computed.
+   * ADR-0115 — THE RED-TEAM RESULT PRESENTATION SCOPE.
+   *
+   * `redteam_findings.output_snippet` and `redteam_probe_trials.output_snippet`
+   * are `eval_results.output_text.slice(0, 4000)` — literal copies of the same
+   * bytes, written at redteam.ts's read-back of the eval run. An S22 probe
+   * armed the agent's system prompt with the shipped canary AND
+   * `AKIAIOSFODNN7EXAMPLE`, ran the shipped corpus, and found the key at rest
+   * in 4 of 5 findings and 8 of 9 probe trials, and on the wire from every one
+   * of these four routes. Covering the eval route alone would have been a fix
+   * that watches one producer while another stays open (M-035), so the copies
+   * are covered where they are presented.
+   *
+   * THE DEFEAT EVIDENCE IS NOT DESTROYED, and that is the whole reason this is
+   * a presentation scrub rather than a registry entry. A red-team probe's
+   * PURPOSE can be to prove the agent disclosed a secret; the stored snippet
+   * and the `eval_results` row it points at still hold exactly what the agent
+   * said, so `psql`, a restore and an incident review still see the defeat in
+   * full. What changes is that the API no longer hands the secret back out.
+   *
+   * DETECTION IS UNAFFECTED, verified rather than assumed: the oracle scores in
+   * memory inside `runEvalSuite` before any row is inserted, and this file's
+   * polarity decision reads `r.passed` / `r.score` / `detail.errorCode` — never
+   * the text.
+   *
+   * WHY THE LIBRARY AND PROBE ROUTES ARE OUTSIDE THIS SCOPE, deliberately and
+   * not by omission: `packages/shared/src/redteam.ts` tells operators they may
+   * "author a probe whose `forbidden` marker is your own deployment's secret".
+   * A scrub over `GET /v1/redteam/libraries/:id` would redact the canary an
+   * operator configured from the only screen that can show them what they
+   * configured — breaking a documented workflow to protect a value that
+   * operator typed in themselves.
    */
-  app.get("/v1/redteam/runs/:id/trials", async (req, reply) => {
-    const { id } = idParam.parse(req.params);
-    const [run] = await db.select().from(redteamRuns).where(eq(redteamRuns.id, id));
-    if (!run) return reply.status(404).send({ error: "unknown_redteam_run" });
-    const trialRows = await db
-      .select()
-      .from(redteamTrials)
-      .where(eq(redteamTrials.runId, run.id))
-      .orderBy(asc(redteamTrials.trial));
-    const probeTrials = await db
-      .select()
-      .from(redteamProbeTrials)
-      .where(eq(redteamProbeTrials.runId, run.id))
-      .orderBy(asc(redteamProbeTrials.probeKey), asc(redteamProbeTrials.trial));
-    return {
-      run: {
-        id: run.id,
-        trials: run.trials,
-        measurementQuality: run.measurementQuality,
-        asr: run.asr,
-        asrTrials: run.asrTrials,
-        asrLower: run.asrLower,
-        asrUpper: run.asrUpper,
-        notRunProbes: run.notRunProbes,
-        platformHeld: run.platformHeld,
-        corpusVersion: run.corpusVersion,
-        presetTightened: run.presetTightened,
-      },
-      trials: trialRows,
-      probeTrials,
-      probeStats: run.probeStats,
-      asrDisclosure: RED_TEAM_ASR_DISCLOSURE,
-      disclosure: RED_TEAM_COVERAGE_DISCLOSURE,
-    };
-  });
+  app.register(async (scope) => {
+    installPresentationScrub(scope);
 
-  app.get("/v1/redteam/runs", async (req) => {
-    const q = z
-      .object({
-        agentId: z.string().uuid().optional(),
-        libraryId: z.string().uuid().optional(),
-        limit: z.coerce.number().int().min(1).max(200).default(50),
-      })
-      .parse(req.query);
-    const rows = await db
-      .select()
-      .from(redteamRuns)
-      .where(
-        and(
-          q.agentId ? eq(redteamRuns.agentId, q.agentId) : undefined,
-          q.libraryId ? eq(redteamRuns.libraryId, q.libraryId) : undefined,
-        ),
-      )
-      .orderBy(desc(redteamRuns.startedAt))
-      .limit(q.limit);
-    return { runs: rows, disclosure: RED_TEAM_COVERAGE_DISCLOSURE };
-  });
 
-  app.get("/v1/redteam/runs/:id", async (req, reply) => {
-    const { id } = idParam.parse(req.params);
-    const [run] = await db.select().from(redteamRuns).where(eq(redteamRuns.id, id));
-    if (!run) return reply.status(404).send({ error: "unknown_redteam_run" });
-    const findings = await db
-      .select()
-      .from(redteamFindings)
-      .where(eq(redteamFindings.runId, run.id))
-      .orderBy(asc(redteamFindings.attackClass), asc(redteamFindings.probeKey));
-    const [evalRun] = await db.select().from(evalRuns).where(eq(evalRuns.id, run.evalRunId));
-    const evidence = await db
-      .select({ id: modelCardEvidence.id, cardId: modelCardEvidence.cardId, label: modelCardEvidence.label })
-      .from(modelCardEvidence)
-      .where(eq(modelCardEvidence.evalRunId, run.evalRunId));
-    let baseline: RedTeamRunRow | null = null;
-    if (run.baselineRunId) {
-      const [b] = await db.select().from(redteamRuns).where(eq(redteamRuns.id, run.baselineRunId));
-      baseline = b ?? null;
-    }
-    return {
-      run,
-      classes: run.classSummary,
-      findings,
-      /** the governed, metered, audited eval run that produced every number
-       * above — a red-team verdict is never detachable from its transcripts */
-      evalRun: evalRun ?? null,
-      baseline,
-      modelCardEvidence: evidence,
-      disclosure: RED_TEAM_COVERAGE_DISCLOSURE,
-    };
-  });
-
-  /**
-   * ATTACH THIS RUN AS MODEL-CARD EVIDENCE (ADR-0045 §5). It writes into the
-   * EXISTING `model_card_evidence` table with `kind = 'eval_run'` and the SAME
-   * audit ruleId the MRM route uses — there is deliberately no second evidence
-   * store, so a reviewer reading a model card sees red-team evidence and
-   * quality evidence in one list.
-   */
-  app.post("/v1/redteam/runs/:id/evidence", async (req, reply) => {
-    const { id } = idParam.parse(req.params);
-    const body = attachRedTeamEvidenceSchema.parse(req.body);
-    const [run] = await db.select().from(redteamRuns).where(eq(redteamRuns.id, id));
-    if (!run) return reply.status(404).send({ error: "unknown_redteam_run" });
-    const [card] = await db.select().from(modelCards).where(eq(modelCards.id, body.cardId));
-    if (!card) return reply.status(404).send({ error: "unknown_model_card" });
-    const [dupe] = await db
-      .select({ id: modelCardEvidence.id })
-      .from(modelCardEvidence)
-      .where(
-        and(eq(modelCardEvidence.cardId, body.cardId), eq(modelCardEvidence.evalRunId, run.evalRunId)),
-      );
-    if (dupe) return reply.status(409).send({ error: "evidence_already_attached" });
-    const [row] = await db
-      .insert(modelCardEvidence)
-      .values({
-        cardId: body.cardId,
-        kind: "eval_run",
-        evalRunId: run.evalRunId,
-        externalRef: null,
-        label:
-          body.label ??
-          `red-team '${run.libraryName}' v${run.libraryVersion}: ${run.defeated}/${run.probes} probe(s) defeated`,
-        note:
-          body.note ??
-          `${run.gateReason ?? ""} — ${RED_TEAM_COVERAGE_DISCLOSURE}`.trim(),
-        attachedByUserId: req.authCtx.userId ?? null,
-      })
-      .returning();
-    await db.insert(auditLog).values({
-      userId: req.authCtx.userId ?? NIL_UUID,
-      objectType: "model_card",
-      objectId: body.cardId,
-      detail: {
-        phase: "evidence",
-        action: "attached",
-        evidenceId: row!.id,
-        kind: "eval_run",
-        evalRunId: run.evalRunId,
-        redteamRunId: run.id,
-        defeated: run.defeated,
-        probes: run.probes,
-      },
-      effect: "allow",
-      ruleId: "mrm-evidence-attached",
-      ruleChain: [],
-      reason:
-        `an ADR-0057 red-team run ('${run.libraryName}' v${run.libraryVersion}, ${run.defeated} of ${run.probes} ` +
-        "probes defeated) was attached as measured evidence behind this risk position",
+    /**
+     * ADR-0068 §1 — THE PER-TRIAL RECORD. A reviewer asking "was that 2 of 3 or
+     * 40 of 60, and did it flap between trials?" gets an answer from the stored
+     * rows rather than from a mean somebody else computed.
+     */
+    scope.get("/v1/redteam/runs/:id/trials", async (req, reply) => {
+      const { id } = idParam.parse(req.params);
+      const [run] = await db.select().from(redteamRuns).where(eq(redteamRuns.id, id));
+      if (!run) return reply.status(404).send({ error: "unknown_redteam_run" });
+      const trialRows = await db
+        .select()
+        .from(redteamTrials)
+        .where(eq(redteamTrials.runId, run.id))
+        .orderBy(asc(redteamTrials.trial));
+      const probeTrials = await db
+        .select()
+        .from(redteamProbeTrials)
+        .where(eq(redteamProbeTrials.runId, run.id))
+        .orderBy(asc(redteamProbeTrials.probeKey), asc(redteamProbeTrials.trial));
+      return {
+        run: {
+          id: run.id,
+          trials: run.trials,
+          measurementQuality: run.measurementQuality,
+          asr: run.asr,
+          asrTrials: run.asrTrials,
+          asrLower: run.asrLower,
+          asrUpper: run.asrUpper,
+          notRunProbes: run.notRunProbes,
+          platformHeld: run.platformHeld,
+          corpusVersion: run.corpusVersion,
+          presetTightened: run.presetTightened,
+        },
+        trials: trialRows,
+        probeTrials,
+        probeStats: run.probeStats,
+        asrDisclosure: RED_TEAM_ASR_DISCLOSURE,
+        disclosure: RED_TEAM_COVERAGE_DISCLOSURE,
+      };
     });
-    return reply.status(201).send({ evidence: row });
+
+    scope.get("/v1/redteam/runs", async (req) => {
+      const q = z
+        .object({
+          agentId: z.string().uuid().optional(),
+          libraryId: z.string().uuid().optional(),
+          limit: z.coerce.number().int().min(1).max(200).default(50),
+        })
+        .parse(req.query);
+      const rows = await db
+        .select()
+        .from(redteamRuns)
+        .where(
+          and(
+            q.agentId ? eq(redteamRuns.agentId, q.agentId) : undefined,
+            q.libraryId ? eq(redteamRuns.libraryId, q.libraryId) : undefined,
+          ),
+        )
+        .orderBy(desc(redteamRuns.startedAt))
+        .limit(q.limit);
+      return { runs: rows, disclosure: RED_TEAM_COVERAGE_DISCLOSURE };
+    });
+
+    scope.get("/v1/redteam/runs/:id", async (req, reply) => {
+      const { id } = idParam.parse(req.params);
+      const [run] = await db.select().from(redteamRuns).where(eq(redteamRuns.id, id));
+      if (!run) return reply.status(404).send({ error: "unknown_redteam_run" });
+      const findings = await db
+        .select()
+        .from(redteamFindings)
+        .where(eq(redteamFindings.runId, run.id))
+        .orderBy(asc(redteamFindings.attackClass), asc(redteamFindings.probeKey));
+      const [evalRun] = await db.select().from(evalRuns).where(eq(evalRuns.id, run.evalRunId));
+      const evidence = await db
+        .select({ id: modelCardEvidence.id, cardId: modelCardEvidence.cardId, label: modelCardEvidence.label })
+        .from(modelCardEvidence)
+        .where(eq(modelCardEvidence.evalRunId, run.evalRunId));
+      let baseline: RedTeamRunRow | null = null;
+      if (run.baselineRunId) {
+        const [b] = await db.select().from(redteamRuns).where(eq(redteamRuns.id, run.baselineRunId));
+        baseline = b ?? null;
+      }
+      return {
+        run,
+        classes: run.classSummary,
+        findings,
+        /** the governed, metered, audited eval run that produced every number
+         * above — a red-team verdict is never detachable from its transcripts */
+        evalRun: evalRun ?? null,
+        baseline,
+        modelCardEvidence: evidence,
+        disclosure: RED_TEAM_COVERAGE_DISCLOSURE,
+      };
+    });
+
+    /**
+     * ATTACH THIS RUN AS MODEL-CARD EVIDENCE (ADR-0045 §5). It writes into the
+     * EXISTING `model_card_evidence` table with `kind = 'eval_run'` and the SAME
+     * audit ruleId the MRM route uses — there is deliberately no second evidence
+     * store, so a reviewer reading a model card sees red-team evidence and
+     * quality evidence in one list.
+     */
+    scope.post("/v1/redteam/runs/:id/evidence", async (req, reply) => {
+      const { id } = idParam.parse(req.params);
+      const body = attachRedTeamEvidenceSchema.parse(req.body);
+      const [run] = await db.select().from(redteamRuns).where(eq(redteamRuns.id, id));
+      if (!run) return reply.status(404).send({ error: "unknown_redteam_run" });
+      const [card] = await db.select().from(modelCards).where(eq(modelCards.id, body.cardId));
+      if (!card) return reply.status(404).send({ error: "unknown_model_card" });
+      const [dupe] = await db
+        .select({ id: modelCardEvidence.id })
+        .from(modelCardEvidence)
+        .where(
+          and(eq(modelCardEvidence.cardId, body.cardId), eq(modelCardEvidence.evalRunId, run.evalRunId)),
+        );
+      if (dupe) return reply.status(409).send({ error: "evidence_already_attached" });
+      const [row] = await db
+        .insert(modelCardEvidence)
+        .values({
+          cardId: body.cardId,
+          kind: "eval_run",
+          evalRunId: run.evalRunId,
+          externalRef: null,
+          label:
+            body.label ??
+            `red-team '${run.libraryName}' v${run.libraryVersion}: ${run.defeated}/${run.probes} probe(s) defeated`,
+          note:
+            body.note ??
+            `${run.gateReason ?? ""} — ${RED_TEAM_COVERAGE_DISCLOSURE}`.trim(),
+          attachedByUserId: req.authCtx.userId ?? null,
+        })
+        .returning();
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId ?? NIL_UUID,
+        objectType: "model_card",
+        objectId: body.cardId,
+        detail: {
+          phase: "evidence",
+          action: "attached",
+          evidenceId: row!.id,
+          kind: "eval_run",
+          evalRunId: run.evalRunId,
+          redteamRunId: run.id,
+          defeated: run.defeated,
+          probes: run.probes,
+        },
+        effect: "allow",
+        ruleId: "mrm-evidence-attached",
+        ruleChain: [],
+        reason:
+          `an ADR-0057 red-team run ('${run.libraryName}' v${run.libraryVersion}, ${run.defeated} of ${run.probes} ` +
+          "probes defeated) was attached as measured evidence behind this risk position",
+      });
+      return reply.status(201).send({ evidence: row });
+    });
+
+    /** the posture view the admin screen opens on: what got through recently,
+     * ranked by severity, with who ran it */
+    scope.get("/v1/redteam/summary", async () => {
+      const runs = await db.select().from(redteamRuns).orderBy(desc(redteamRuns.startedAt)).limit(200);
+      const runIds = runs.map((r) => r.id);
+      const findings = runIds.length
+        ? await db.select().from(redteamFindings).where(inArray(redteamFindings.runId, runIds))
+        : [];
+      const userRows = await db.select({ id: users.id, email: users.email }).from(users);
+      const emails = new Map(userRows.map((u) => [u.id, u.email]));
+      const bySeverity: Record<string, number> = { low: 0, medium: 0, high: 0, critical: 0 };
+      const byClass: Record<string, number> = {};
+      for (const f of findings) {
+        bySeverity[f.severity] = (bySeverity[f.severity] ?? 0) + 1;
+        byClass[f.attackClass] = (byClass[f.attackClass] ?? 0) + 1;
+      }
+      return {
+        runs: runs.length,
+        regressions: runs.filter((r) => r.regression).length,
+        failed: runs.filter((r) => r.gatePassed === false).length,
+        findings: findings.length,
+        bySeverity,
+        byClass,
+        totalCostUsd: Number(runs.reduce((a, r) => a + r.costUsd, 0).toFixed(6)),
+        recent: runs.slice(0, 25).map((r) => ({
+          id: r.id,
+          agentName: r.agentName,
+          libraryName: r.libraryName,
+          libraryVersion: r.libraryVersion,
+          trigger: r.trigger,
+          probes: r.probes,
+          defeated: r.defeated,
+          resistRate: r.resistRate,
+          gatePassed: r.gatePassed,
+          regression: r.regression,
+          startedAt: r.startedAt,
+          by: r.initiatedByUserId ? (emails.get(r.initiatedByUserId) ?? null) : null,
+        })),
+        disclosure: RED_TEAM_COVERAGE_DISCLOSURE,
+      };
+    });
+
+    /** every defeat still standing, newest first — the one list a security
+     * reviewer reads. A RECORD, not a queue: there is no status to change here,
+     * because remediation is a workflow and a sign-off is an approval. */
+    scope.get("/v1/redteam/findings", async (req) => {
+      const q = z
+        .object({
+          attackClass: z.enum(RED_TEAM_ATTACK_CLASSES).optional(),
+          severity: z.enum(["low", "medium", "high", "critical"]).optional(),
+          limit: z.coerce.number().int().min(1).max(500).default(100),
+        })
+        .parse(req.query);
+      const rows = await db
+        .select({
+          finding: redteamFindings,
+          agentName: redteamRuns.agentName,
+          libraryName: redteamRuns.libraryName,
+          libraryVersion: redteamRuns.libraryVersion,
+          startedAt: redteamRuns.startedAt,
+        })
+        .from(redteamFindings)
+        .innerJoin(redteamRuns, eq(redteamRuns.id, redteamFindings.runId))
+        .where(
+          and(
+            q.attackClass ? eq(redteamFindings.attackClass, q.attackClass) : undefined,
+            q.severity ? eq(redteamFindings.severity, q.severity) : undefined,
+          ),
+        )
+        .orderBy(desc(redteamRuns.startedAt))
+        .limit(q.limit);
+      return { findings: rows, disclosure: RED_TEAM_COVERAGE_DISCLOSURE };
+    });
   });
 
-  /** the posture view the admin screen opens on: what got through recently,
-   * ranked by severity, with who ran it */
-  app.get("/v1/redteam/summary", async () => {
-    const runs = await db.select().from(redteamRuns).orderBy(desc(redteamRuns.startedAt)).limit(200);
-    const runIds = runs.map((r) => r.id);
-    const findings = runIds.length
-      ? await db.select().from(redteamFindings).where(inArray(redteamFindings.runId, runIds))
-      : [];
-    const userRows = await db.select({ id: users.id, email: users.email }).from(users);
-    const emails = new Map(userRows.map((u) => [u.id, u.email]));
-    const bySeverity: Record<string, number> = { low: 0, medium: 0, high: 0, critical: 0 };
-    const byClass: Record<string, number> = {};
-    for (const f of findings) {
-      bySeverity[f.severity] = (bySeverity[f.severity] ?? 0) + 1;
-      byClass[f.attackClass] = (byClass[f.attackClass] ?? 0) + 1;
-    }
-    return {
-      runs: runs.length,
-      regressions: runs.filter((r) => r.regression).length,
-      failed: runs.filter((r) => r.gatePassed === false).length,
-      findings: findings.length,
-      bySeverity,
-      byClass,
-      totalCostUsd: Number(runs.reduce((a, r) => a + r.costUsd, 0).toFixed(6)),
-      recent: runs.slice(0, 25).map((r) => ({
-        id: r.id,
-        agentName: r.agentName,
-        libraryName: r.libraryName,
-        libraryVersion: r.libraryVersion,
-        trigger: r.trigger,
-        probes: r.probes,
-        defeated: r.defeated,
-        resistRate: r.resistRate,
-        gatePassed: r.gatePassed,
-        regression: r.regression,
-        startedAt: r.startedAt,
-        by: r.initiatedByUserId ? (emails.get(r.initiatedByUserId) ?? null) : null,
-      })),
-      disclosure: RED_TEAM_COVERAGE_DISCLOSURE,
-    };
-  });
-
-  /** every defeat still standing, newest first — the one list a security
-   * reviewer reads. A RECORD, not a queue: there is no status to change here,
-   * because remediation is a workflow and a sign-off is an approval. */
-  app.get("/v1/redteam/findings", async (req) => {
-    const q = z
-      .object({
-        attackClass: z.enum(RED_TEAM_ATTACK_CLASSES).optional(),
-        severity: z.enum(["low", "medium", "high", "critical"]).optional(),
-        limit: z.coerce.number().int().min(1).max(500).default(100),
-      })
-      .parse(req.query);
-    const rows = await db
-      .select({
-        finding: redteamFindings,
-        agentName: redteamRuns.agentName,
-        libraryName: redteamRuns.libraryName,
-        libraryVersion: redteamRuns.libraryVersion,
-        startedAt: redteamRuns.startedAt,
-      })
-      .from(redteamFindings)
-      .innerJoin(redteamRuns, eq(redteamRuns.id, redteamFindings.runId))
-      .where(
-        and(
-          q.attackClass ? eq(redteamFindings.attackClass, q.attackClass) : undefined,
-          q.severity ? eq(redteamFindings.severity, q.severity) : undefined,
-        ),
-      )
-      .orderBy(desc(redteamRuns.startedAt))
-      .limit(q.limit);
-    return { findings: rows, disclosure: RED_TEAM_COVERAGE_DISCLOSURE };
-  });
 }

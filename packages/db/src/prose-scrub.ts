@@ -134,7 +134,31 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   // --- model risk, evals, red team ---
   [s.evalDatasets, ["note"]],
   [s.evalRuns, ["gateReason", "note"]],
-  [s.evalResults, ["judgeRationale"]],
+  // ADR-0115 — `error` joins `judgeRationale` here, and it is the SAME argument
+  // ADR-0102 already made for `trace_spans.status_reason`: this column takes
+  // `(e as Error).message` verbatim at two sites in the eval runner
+  // (`judge_failed: …`, `external_scorer_failed: …`), and an exception message
+  // from an HTTP judge or an external scorer is one of the classic places a
+  // bearer token or a connection string surfaces. Measured, not assumed: an
+  // S22 probe stored `judge_failed: judge upstream 401 using key
+  // AKIAIOSFODNN7EXAMPLE for endpoint` character for character.
+  //
+  // WHY THIS COLUMN IS SCRUBBED AT WRITE TIME WHILE `output_text` IS NOT:
+  // `error` says why the INSTRUMENT fell over. It is never the agent's answer
+  // and it is never a red-team defeat's evidence, so redacting a credential
+  // out of it destroys nothing a reader needs — the sentence around the marker
+  // survives intact, which is exactly ADR-0102's safety case. `output_text` IS
+  // the record of what the model said, and ADR-0115 leaves it faithful and
+  // redacts it at the presentation boundary instead.
+  //
+  // It does NOT change red-team failure classification: `classifyDispatchFailure`
+  // is fed `detail.errorCode` first (a jsonb field this registry cannot reach)
+  // and the codes it matches are bare enum-like strings that no credential rule
+  // can match. `eval_results.detail` is deliberately absent from this list:
+  // the registry scrubs declared STRING columns only, and a jsonb bag is
+  // ADR-0111's `trace_spans.attributes` question, answered there and answered
+  // differently here — see ADR-0115.
+  [s.evalResults, ["judgeRationale", "error"]],
   [s.modelCards, ["note"]],
   [s.modelCardApprovals, ["decisionReason"]],
   [s.modelCardEvidence, ["note"]],

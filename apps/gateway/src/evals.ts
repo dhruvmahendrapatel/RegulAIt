@@ -109,6 +109,7 @@ import {
 import { loadAgentRevocations, loadRoleAgentGrants } from "./entitlements.js";
 import { beginTrace, childContext, closeSpan, finishTrace, openSpan } from "./tracing.js";
 import { assertProjectAttribution } from "./projects.js";
+import { installPresentationScrub } from "./conversation-presentation.js";
 import {
   callExternalScorer,
   resolveExternalScorersByName,
@@ -1689,94 +1690,124 @@ export function registerEvalRoutes(app: FastifyInstance, db: Db, opts: EvalRoute
     return { runs: rows.map((r) => ({ ...r, datasetName: nameMap.get(r.datasetId) ?? null })) };
   });
 
-  /** a run, its per-case results, and the CASE-LEVEL DIFF against the baseline
-   * — "which cases got worse" is the question a regression report has to answer,
-   * and an aggregate alone cannot */
-  app.get("/v1/evals/runs/:id", async (req, reply) => {
-    const { id } = idParam.parse(req.params);
-    const [run] = await db.select().from(evalRuns).where(eq(evalRuns.id, id));
-    if (!run) return reply.status(404).send({ error: "unknown_run" });
-    const results = await db
-      .select()
-      .from(evalResults)
-      .where(eq(evalResults.runId, run.id))
-      .orderBy(asc(evalResults.createdAt), asc(evalResults.id));
-    const [dataset] = await db.select().from(evalDatasets).where(eq(evalDatasets.id, run.datasetId));
-    const cases = await db
-      .select()
-      .from(evalCases)
-      .where(and(eq(evalCases.datasetId, run.datasetId), eq(evalCases.datasetVersion, run.datasetVersion)));
-    const caseMap = new Map(cases.map((c) => [c.id, c]));
-    let baseline: EvalRunRow | null = null;
-    let diff: Array<{
-      caseId: string | null;
-      input: string | null;
-      score: number;
-      baselineScore: number | null;
-      delta: number | null;
-      passed: boolean;
-      baselinePassed: boolean | null;
-      regressed: boolean;
-    }> = [];
-    if (run.baselineRunId) {
-      const [b] = await db.select().from(evalRuns).where(eq(evalRuns.id, run.baselineRunId));
-      baseline = b ?? null;
-      const baseResults = b
-        ? await db.select().from(evalResults).where(eq(evalResults.runId, b.id))
-        : [];
-      const baseMap = new Map(baseResults.map((r) => [r.caseId, r]));
-      diff = results.map((r) => {
-        const prior = r.caseId ? baseMap.get(r.caseId) : undefined;
-        return {
-          caseId: r.caseId,
+  /**
+   * ADR-0115 — THE EVAL-RESULT PRESENTATION SCOPE.
+   *
+   * An S22 probe pushed `AKIAIOSFODNN7EXAMPLE` through a real governed eval run
+   * and read the stored rows back by raw SQL. `eval_results.output_text` held
+   * the key character for character, and `eval_results.detail` held it inside
+   * the judge's per-claim verdicts. This route spreads whole result rows
+   * (`...r`) and re-derives `groundedness.unsupportedClaims[].claim` from that
+   * same jsonb, so both reached the wire.
+   *
+   * The stored rows are LEFT FAITHFUL, exactly as ADR-0112 left conversations,
+   * and for a sharper reason: a red-team defeat's evidence is that transcript.
+   * Scrubbing `output_text` at write time would leave the product recording
+   * "a probe got through" while deleting what got through. So the record stays
+   * true and what the route HANDS OUT is redacted.
+   *
+   * WHY THIS SCOPE AND NOT THE WHOLE REGISTRAR. `/v1/evals/datasets/*` returns
+   * the cases an operator AUTHORED, and `packages/shared/src/redteam.ts` openly
+   * invites authoring a probe "whose `forbidden` marker is your own
+   * deployment's secret" as a canary. Redacting an authoring read-back would
+   * break the one workflow the product tells operators to use, so those routes
+   * stay faithful and are named here rather than merely left out. `/v1/evals/
+   * runs` (list) and `/v1/evals/summary` read `eval_runs` only — no result row,
+   * no case text — and are outside for want of anything to scrub.
+   */
+  app.register(async (scope) => {
+    installPresentationScrub(scope);
+
+    /** a run, its per-case results, and the CASE-LEVEL DIFF against the baseline
+     * — "which cases got worse" is the question a regression report has to answer,
+     * and an aggregate alone cannot */
+    scope.get("/v1/evals/runs/:id", async (req, reply) => {
+      const { id } = idParam.parse(req.params);
+      const [run] = await db.select().from(evalRuns).where(eq(evalRuns.id, id));
+      if (!run) return reply.status(404).send({ error: "unknown_run" });
+      const results = await db
+        .select()
+        .from(evalResults)
+        .where(eq(evalResults.runId, run.id))
+        .orderBy(asc(evalResults.createdAt), asc(evalResults.id));
+      const [dataset] = await db.select().from(evalDatasets).where(eq(evalDatasets.id, run.datasetId));
+      const cases = await db
+        .select()
+        .from(evalCases)
+        .where(and(eq(evalCases.datasetId, run.datasetId), eq(evalCases.datasetVersion, run.datasetVersion)));
+      const caseMap = new Map(cases.map((c) => [c.id, c]));
+      let baseline: EvalRunRow | null = null;
+      let diff: Array<{
+        caseId: string | null;
+        input: string | null;
+        score: number;
+        baselineScore: number | null;
+        delta: number | null;
+        passed: boolean;
+        baselinePassed: boolean | null;
+        regressed: boolean;
+      }> = [];
+      if (run.baselineRunId) {
+        const [b] = await db.select().from(evalRuns).where(eq(evalRuns.id, run.baselineRunId));
+        baseline = b ?? null;
+        const baseResults = b
+          ? await db.select().from(evalResults).where(eq(evalResults.runId, b.id))
+          : [];
+        const baseMap = new Map(baseResults.map((r) => [r.caseId, r]));
+        diff = results.map((r) => {
+          const prior = r.caseId ? baseMap.get(r.caseId) : undefined;
+          return {
+            caseId: r.caseId,
+            input: r.caseId ? (caseMap.get(r.caseId)?.input ?? null) : null,
+            score: r.score,
+            baselineScore: prior?.score ?? null,
+            delta: prior ? Number((r.score - prior.score).toFixed(4)) : null,
+            passed: r.passed,
+            baselinePassed: prior?.passed ?? null,
+            regressed: prior ? r.score < prior.score : false,
+          };
+        });
+      }
+      return {
+        run,
+        dataset: dataset ?? null,
+        results: results.map((r) => ({
+          ...r,
           input: r.caseId ? (caseMap.get(r.caseId)?.input ?? null) : null,
-          score: r.score,
-          baselineScore: prior?.score ?? null,
-          delta: prior ? Number((r.score - prior.score).toFixed(4)) : null,
-          passed: r.passed,
-          baselinePassed: prior?.passed ?? null,
-          regressed: prior ? r.score < prior.score : false,
-        };
-      });
-    }
-    return {
-      run,
-      dataset: dataset ?? null,
-      results: results.map((r) => ({
-        ...r,
-        input: r.caseId ? (caseMap.get(r.caseId)?.input ?? null) : null,
-        expected: r.caseId ? (caseMap.get(r.caseId)?.expected ?? null) : null,
-        // ADR-0067: how much context the case supplied and whether the model
-        // saw it. The chunk TEXT is on the case, not repeated per result.
-        contextChunks: r.caseId ? (caseMap.get(r.caseId)?.context ?? []).length : 0,
-        contextInPrompt: r.caseId ? (caseMap.get(r.caseId)?.contextInPrompt ?? null) : null,
-      })),
-      // ADR-0067: null unless this run scored a groundedness metric, so an
-      // ordinary run's payload is unchanged in shape apart from one null field.
-      groundedness: summarizeGroundedness(results),
-      baseline,
-      diff,
-      // ADR-0072 — WHICH SEMANTICS PRODUCED THESE NUMBERS, on the payload a
-      // reviewer actually opens. A run predating the correction says so here
-      // rather than looking identical to a current one.
-      scoringSemantics: {
-        version: run.scoringSemantics,
-        current: SCORING_SEMANTICS_VERSION,
-        comparableToCurrent: run.scoringSemantics === SCORING_SEMANTICS_VERSION,
-        summary:
-          SCORING_SEMANTICS_CHANGELOG.find((c) => c.version === run.scoringSemantics)?.summary ??
-          `unknown scoring semantics version ${run.scoringSemantics}`,
-        ...(run.scoringSemantics === SCORING_SEMANTICS_VERSION
-          ? {}
-          : {
-              note: scoringSemanticsMismatchReason(
-                SCORING_SEMANTICS_VERSION,
-                run.scoringSemantics,
-              ),
-            }),
-      },
-    };
+          expected: r.caseId ? (caseMap.get(r.caseId)?.expected ?? null) : null,
+          // ADR-0067: how much context the case supplied and whether the model
+          // saw it. The chunk TEXT is on the case, not repeated per result.
+          contextChunks: r.caseId ? (caseMap.get(r.caseId)?.context ?? []).length : 0,
+          contextInPrompt: r.caseId ? (caseMap.get(r.caseId)?.contextInPrompt ?? null) : null,
+        })),
+        // ADR-0067: null unless this run scored a groundedness metric, so an
+        // ordinary run's payload is unchanged in shape apart from one null field.
+        groundedness: summarizeGroundedness(results),
+        baseline,
+        diff,
+        // ADR-0072 — WHICH SEMANTICS PRODUCED THESE NUMBERS, on the payload a
+        // reviewer actually opens. A run predating the correction says so here
+        // rather than looking identical to a current one.
+        scoringSemantics: {
+          version: run.scoringSemantics,
+          current: SCORING_SEMANTICS_VERSION,
+          comparableToCurrent: run.scoringSemantics === SCORING_SEMANTICS_VERSION,
+          summary:
+            SCORING_SEMANTICS_CHANGELOG.find((c) => c.version === run.scoringSemantics)?.summary ??
+            `unknown scoring semantics version ${run.scoringSemantics}`,
+          ...(run.scoringSemantics === SCORING_SEMANTICS_VERSION
+            ? {}
+            : {
+                note: scoringSemanticsMismatchReason(
+                  SCORING_SEMANTICS_VERSION,
+                  run.scoringSemantics,
+                ),
+              }),
+        },
+      };
+    });
   });
+
 
   /** pin (or unpin) a run as THE baseline for its (dataset version, agent).
    * The DB permits at most one pinned baseline per triple, so this replaces

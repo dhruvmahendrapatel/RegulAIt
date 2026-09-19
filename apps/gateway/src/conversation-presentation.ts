@@ -135,8 +135,20 @@ function isJsonContentType(ct: unknown): boolean {
  * Call this at the TOP of an encapsulated scope, before any route is declared
  * on it: every route in the scope is then covered by construction, and a route
  * added later inherits the coverage without its author doing anything.
+ *
+ * ADR-0115 GENERALISED THIS. ADR-0112 wrote it for conversations and named it
+ * after them; the mechanism is not conversation-specific and the eval-result
+ * read surfaces need exactly the same two hooks. Rather than a second copy —
+ * which is the drift ADR-0102's "one detector, not two" argument exists to
+ * prevent, applied to the installer instead of the detector — the generic
+ * installer lives here and `installConversationPresentationScrub` is a
+ * one-line alias for it, kept because ADR-0112 names that symbol.
+ *
+ * The FILE is still called `conversation-presentation.ts` on purpose. Renaming
+ * it would make an accepted ADR's path citation stale, and a stale citation in
+ * a decision record is worse than an under-descriptive filename.
  */
-export function installConversationPresentationScrub(scope: FastifyInstance): void {
+export function installPresentationScrub(scope: FastifyInstance): void {
   scope.addHook("preSerialization", async (_req, _reply, payload) =>
     scrubPresentedPayload(payload),
   );
@@ -150,4 +162,9 @@ export function installConversationPresentationScrub(scope: FastifyInstance): vo
     }
     return payload;
   });
+}
+
+/** ADR-0112's name for the installer above, by delegation and not by copy. */
+export function installConversationPresentationScrub(scope: FastifyInstance): void {
+  installPresentationScrub(scope);
 }

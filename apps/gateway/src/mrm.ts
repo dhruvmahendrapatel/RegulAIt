@@ -81,6 +81,7 @@ import {
 } from "@regulait/shared";
 import { loadOrgSettings } from "./org-settings.js";
 import { summarizeGroundedness } from "./evals.js";
+import { installPresentationScrub } from "./conversation-presentation.js";
 import {
   computeCardAutofill,
   computeCardStaleness,
@@ -557,150 +558,173 @@ export function registerMrmRoutes(app: FastifyInstance, db: Db) {
     };
   });
 
-  app.get("/v1/mrm/cards", async () => {
-    const org = await loadOrgSettings(db);
-    const now = new Date();
-    const rows = await db.select().from(modelCards).orderBy(desc(modelCards.createdAt));
-    const agentRows = await db.select({ id: agents.id, name: agents.name, model: agents.model }).from(agents);
-    const providerRows = await db
-      .select({ id: customModelProviders.id, name: customModelProviders.name })
-      .from(customModelProviders);
-    const agentName = new Map(agentRows.map((a) => [a.id, a.name]));
-    const agentModel = new Map(agentRows.map((a) => [a.id, a.model]));
-    const providerName = new Map(providerRows.map((p) => [p.id, p.name]));
-    const cards = [];
-    for (const row of rows) {
-      const view = await cardView(db, row, now, org.mrmExpiryWarnDays);
-      cards.push({
-        ...view,
-        subjectKind: row.agentId ? "agent" : "custom_provider",
-        subjectName: row.agentId
-          ? (agentName.get(row.agentId) ?? null)
-          : (providerName.get(row.customProviderId ?? "") ?? null),
-        subjectModel: row.agentId ? (agentModel.get(row.agentId) ?? null) : null,
-      });
-    }
-    return { cards, enforced: org.mrmEnforced };
-  });
-
   /**
-   * THE DETAIL READ — and, since ADR-0086, the WINDOW. The card's
-   * evidence-shaped sections arrive filled from the ledgers at request time
-   * (`autofill`), visibly apart from the manually attached `evidence`, plus a
-   * `staleness` block saying what has moved since the last certification.
-   * Read-time only, deliberately: nothing here writes a card row, an audit
-   * row, or a cache — the one write is the decide-path snapshot (see
-   * `applyModelCardApprovalDecision`).
+   * ADR-0115 — THE MODEL-CARD PRESENTATION SCOPE.
+   *
+   * `cardView` re-derives `groundedness.unsupportedClaims[].claim` from
+   * `eval_results.detail` for every cited eval run, so a credential the judge
+   * quoted into a per-claim verdict travels out on the card as well as on the
+   * eval run. Measured, not inferred: the S22 probe attached a run whose judge
+   * claims named `AKIAIOSFODNN7EXAMPLE` and found it on BOTH `GET /v1/mrm/
+   * cards/:id` and the `GET /v1/mrm/cards` list.
+   *
+   * All four `cardView` callers are inside this scope — the two reads and the
+   * create/edit routes that echo a freshly-built view back — because a guard
+   * that covers some of a value's producers and not the rest passes while the
+   * rest stay open (M-035). `POST /v1/mrm/cards/:id/sign-off`, `revoke`, the
+   * evidence routes and the sweeps are outside: none of them calls `cardView`
+   * or reads `eval_results`.
    */
-  app.get("/v1/mrm/cards/:id", async (req, reply) => {
-    const { id } = idParam.parse(req.params);
-    const org = await loadOrgSettings(db);
-    const [row] = await db.select().from(modelCards).where(eq(modelCards.id, id));
-    if (!row) return reply.status(404).send({ error: "unknown_model_card" });
-    const now = new Date();
-    const view = await cardView(db, row, now, org.mrmExpiryWarnDays);
-    const [autofill, staleness] = await Promise.all([
-      computeCardAutofill(db, row, now),
-      computeCardStaleness(db, row, view.approvals, now),
-    ]);
-    return { card: { ...view, autofill, staleness } };
-  });
+  app.register(async (scope) => {
+    installPresentationScrub(scope);
 
-  app.post("/v1/mrm/cards", async (req, reply) => {
-    const body = createModelCardSchema.parse(req.body);
-    if (body.agentId) {
-      const [a] = await db.select({ id: agents.id }).from(agents).where(eq(agents.id, body.agentId));
-      if (!a) return reply.status(404).send({ error: "unknown_agent" });
-    } else if (body.customProviderId) {
-      const [p] = await db
-        .select({ id: customModelProviders.id })
-        .from(customModelProviders)
-        .where(eq(customModelProviders.id, body.customProviderId));
-      if (!p) return reply.status(404).send({ error: "unknown_custom_provider" });
-    }
-    const [existing] = await db
-      .select({ id: modelCards.id })
-      .from(modelCards)
-      .where(
-        and(
-          body.agentId ? eq(modelCards.agentId, body.agentId) : eq(modelCards.customProviderId, body.customProviderId!),
-          eq(modelCards.intendedUse, body.intendedUse),
-        ),
-      );
-    if (existing) {
-      return reply.status(409).send({
-        error: "model_card_exists",
-        detail:
-          "a card already records a risk position on this model for this intended use — edit it, or " +
-          "author a card for a DIFFERENT intended use",
+
+    scope.get("/v1/mrm/cards", async () => {
+      const org = await loadOrgSettings(db);
+      const now = new Date();
+      const rows = await db.select().from(modelCards).orderBy(desc(modelCards.createdAt));
+      const agentRows = await db.select({ id: agents.id, name: agents.name, model: agents.model }).from(agents);
+      const providerRows = await db
+        .select({ id: customModelProviders.id, name: customModelProviders.name })
+        .from(customModelProviders);
+      const agentName = new Map(agentRows.map((a) => [a.id, a.name]));
+      const agentModel = new Map(agentRows.map((a) => [a.id, a.model]));
+      const providerName = new Map(providerRows.map((p) => [p.id, p.name]));
+      const cards = [];
+      for (const row of rows) {
+        const view = await cardView(db, row, now, org.mrmExpiryWarnDays);
+        cards.push({
+          ...view,
+          subjectKind: row.agentId ? "agent" : "custom_provider",
+          subjectName: row.agentId
+            ? (agentName.get(row.agentId) ?? null)
+            : (providerName.get(row.customProviderId ?? "") ?? null),
+          subjectModel: row.agentId ? (agentModel.get(row.agentId) ?? null) : null,
+        });
+      }
+      return { cards, enforced: org.mrmEnforced };
+    });
+
+    /**
+     * THE DETAIL READ — and, since ADR-0086, the WINDOW. The card's
+     * evidence-shaped sections arrive filled from the ledgers at request time
+     * (`autofill`), visibly apart from the manually attached `evidence`, plus a
+     * `staleness` block saying what has moved since the last certification.
+     * Read-time only, deliberately: nothing here writes a card row, an audit
+     * row, or a cache — the one write is the decide-path snapshot (see
+     * `applyModelCardApprovalDecision`).
+     */
+    scope.get("/v1/mrm/cards/:id", async (req, reply) => {
+      const { id } = idParam.parse(req.params);
+      const org = await loadOrgSettings(db);
+      const [row] = await db.select().from(modelCards).where(eq(modelCards.id, id));
+      if (!row) return reply.status(404).send({ error: "unknown_model_card" });
+      const now = new Date();
+      const view = await cardView(db, row, now, org.mrmExpiryWarnDays);
+      const [autofill, staleness] = await Promise.all([
+        computeCardAutofill(db, row, now),
+        computeCardStaleness(db, row, view.approvals, now),
+      ]);
+      return { card: { ...view, autofill, staleness } };
+    });
+
+    scope.post("/v1/mrm/cards", async (req, reply) => {
+      const body = createModelCardSchema.parse(req.body);
+      if (body.agentId) {
+        const [a] = await db.select({ id: agents.id }).from(agents).where(eq(agents.id, body.agentId));
+        if (!a) return reply.status(404).send({ error: "unknown_agent" });
+      } else if (body.customProviderId) {
+        const [p] = await db
+          .select({ id: customModelProviders.id })
+          .from(customModelProviders)
+          .where(eq(customModelProviders.id, body.customProviderId));
+        if (!p) return reply.status(404).send({ error: "unknown_custom_provider" });
+      }
+      const [existing] = await db
+        .select({ id: modelCards.id })
+        .from(modelCards)
+        .where(
+          and(
+            body.agentId ? eq(modelCards.agentId, body.agentId) : eq(modelCards.customProviderId, body.customProviderId!),
+            eq(modelCards.intendedUse, body.intendedUse),
+          ),
+        );
+      if (existing) {
+        return reply.status(409).send({
+          error: "model_card_exists",
+          detail:
+            "a card already records a risk position on this model for this intended use — edit it, or " +
+            "author a card for a DIFFERENT intended use",
+        });
+      }
+      const [row] = await db
+        .insert(modelCards)
+        .values({
+          agentId: body.agentId ?? null,
+          customProviderId: body.customProviderId ?? null,
+          intendedUse: body.intendedUse,
+          dataClaims: body.dataClaims,
+          limitations: body.limitations ?? null,
+          biasFairness: body.biasFairness,
+          standardRefs: body.standardRefs,
+          note: body.note ?? null,
+          createdByUserId: req.authCtx.userId ?? null,
+        })
+        .returning();
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId ?? NO_IDENTITY,
+        objectType: "model_card",
+        objectId: row!.id,
+        detail: {
+          phase: "authoring",
+          action: "create",
+          agentId: row!.agentId,
+          customProviderId: row!.customProviderId,
+          intendedUse: row!.intendedUse,
+          standardRefs: row!.standardRefs,
+        },
+        effect: "allow",
+        ruleId: "mrm-card-created",
+        ruleChain: [],
+        reason: `model card authored for intended use '${row!.intendedUse}' — a card enforces NOTHING until it carries an approved sign-off`,
       });
-    }
-    const [row] = await db
-      .insert(modelCards)
-      .values({
-        agentId: body.agentId ?? null,
-        customProviderId: body.customProviderId ?? null,
-        intendedUse: body.intendedUse,
-        dataClaims: body.dataClaims,
-        limitations: body.limitations ?? null,
-        biasFairness: body.biasFairness,
-        standardRefs: body.standardRefs,
-        note: body.note ?? null,
-        createdByUserId: req.authCtx.userId ?? null,
-      })
-      .returning();
-    await db.insert(auditLog).values({
-      userId: req.authCtx.userId ?? NO_IDENTITY,
-      objectType: "model_card",
-      objectId: row!.id,
-      detail: {
-        phase: "authoring",
-        action: "create",
-        agentId: row!.agentId,
-        customProviderId: row!.customProviderId,
-        intendedUse: row!.intendedUse,
-        standardRefs: row!.standardRefs,
-      },
-      effect: "allow",
-      ruleId: "mrm-card-created",
-      ruleChain: [],
-      reason: `model card authored for intended use '${row!.intendedUse}' — a card enforces NOTHING until it carries an approved sign-off`,
+      const org = await loadOrgSettings(db);
+      return reply.status(201).send({ card: await cardView(db, row!, new Date(), org.mrmExpiryWarnDays) });
     });
-    const org = await loadOrgSettings(db);
-    return reply.status(201).send({ card: await cardView(db, row!, new Date(), org.mrmExpiryWarnDays) });
+
+    scope.patch("/v1/mrm/cards/:id", async (req, reply) => {
+      const { id } = idParam.parse(req.params);
+      const body = updateModelCardSchema.parse(req.body);
+      const [row] = await db.select().from(modelCards).where(eq(modelCards.id, id));
+      if (!row) return reply.status(404).send({ error: "unknown_model_card" });
+      const [updated] = await db
+        .update(modelCards)
+        .set({
+          ...(body.intendedUse !== undefined ? { intendedUse: body.intendedUse } : {}),
+          ...(body.dataClaims !== undefined ? { dataClaims: body.dataClaims } : {}),
+          ...(body.limitations !== undefined ? { limitations: body.limitations ?? null } : {}),
+          ...(body.biasFairness !== undefined ? { biasFairness: body.biasFairness } : {}),
+          ...(body.standardRefs !== undefined ? { standardRefs: body.standardRefs } : {}),
+          ...(body.note !== undefined ? { note: body.note ?? null } : {}),
+          updatedAt: new Date(),
+        })
+        .where(eq(modelCards.id, id))
+        .returning();
+      await db.insert(auditLog).values({
+        userId: req.authCtx.userId ?? NO_IDENTITY,
+        objectType: "model_card",
+        objectId: id,
+        detail: { phase: "authoring", action: "update", fields: Object.keys(body) },
+        effect: "allow",
+        ruleId: "mrm-card-updated",
+        ruleChain: [],
+        reason: "model card edited",
+      });
+      const org = await loadOrgSettings(db);
+      return { card: await cardView(db, updated!, new Date(), org.mrmExpiryWarnDays) };
+    });
   });
 
-  app.patch("/v1/mrm/cards/:id", async (req, reply) => {
-    const { id } = idParam.parse(req.params);
-    const body = updateModelCardSchema.parse(req.body);
-    const [row] = await db.select().from(modelCards).where(eq(modelCards.id, id));
-    if (!row) return reply.status(404).send({ error: "unknown_model_card" });
-    const [updated] = await db
-      .update(modelCards)
-      .set({
-        ...(body.intendedUse !== undefined ? { intendedUse: body.intendedUse } : {}),
-        ...(body.dataClaims !== undefined ? { dataClaims: body.dataClaims } : {}),
-        ...(body.limitations !== undefined ? { limitations: body.limitations ?? null } : {}),
-        ...(body.biasFairness !== undefined ? { biasFairness: body.biasFairness } : {}),
-        ...(body.standardRefs !== undefined ? { standardRefs: body.standardRefs } : {}),
-        ...(body.note !== undefined ? { note: body.note ?? null } : {}),
-        updatedAt: new Date(),
-      })
-      .where(eq(modelCards.id, id))
-      .returning();
-    await db.insert(auditLog).values({
-      userId: req.authCtx.userId ?? NO_IDENTITY,
-      objectType: "model_card",
-      objectId: id,
-      detail: { phase: "authoring", action: "update", fields: Object.keys(body) },
-      effect: "allow",
-      ruleId: "mrm-card-updated",
-      ruleChain: [],
-      reason: "model card edited",
-    });
-    const org = await loadOrgSettings(db);
-    return { card: await cardView(db, updated!, new Date(), org.mrmExpiryWarnDays) };
-  });
 
   app.delete("/v1/mrm/cards/:id", async (req, reply) => {
     const { id } = idParam.parse(req.params);
