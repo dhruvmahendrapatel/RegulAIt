@@ -21,6 +21,35 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-19 (later still) — S21 closed: the conversation list can now be asked for ONE project,
+and `none` for the unattributed ones.** (No ADR, no migration — a query parameter on an existing
+route, resolved inside an existing owner-scoped predicate.) `conversations.projectId` has always
+been the pillar-5 default attribution for every turn dispatched in a thread, and the list route
+already *returned* `projectName`; it could not be *asked* for one. An operator with a dozen threads
+had no way to answer "what have I been running against project X".
+
+**The `none` vocabulary is borrowed, not invented.** ADR-0024 O11 already exposes the null-project
+bucket as `GET /v1/costs/unattributed`, on the reasoning that spend belonging to no project must
+stay visible rather than be silently folded into one. The same argument applies here: without
+`none`, a user whose threads are mostly unattributed can filter to every project *except* the one
+they actually live in. One condition, one name, two surfaces.
+
+**The property that mattered is "narrows, never widens", and it is asserted rather than assumed.**
+The ownership predicate is applied *regardless* of the filter — `and(eq(userId), projectFilter)` —
+so passing another user's project id returns an **empty list**, not their threads. Five tests pin
+it: the two narrowing cases, and the never-widen case checked from **both** users' sides, because
+M-035's lesson is that a guarantee watching one producer is not a guarantee.
+
+**Non-vacuity, with the prediction written before the run** (M-023): removing the filter should
+redden the two narrowing tests and leave the three never-widen tests **green**, since ownership is
+enforced independently of the filter and a vacuous "never widens" would be indistinguishable from a
+sound one under a probe that also broke ownership. Result: exactly 2 red, 3 green. The probe was
+reverted and the revert verified (`0` matches).
+
+**Verified by me on a fresh database**: gateway **178 files / 2734 passed + 9 MinIO skips, exit 0**
+— exactly **+5** over S19's 2729, which are my five tests and nothing else. Instrument asserted
+(`ECONNREFUSED: 0`, `destroySoon: 0`).
+
 **2026-09-19 (later) — S19 closed: Teams ChatOps parity is complete, and the deferred verification
 for BOTH batches is done.** ([ADR-0113](../docs/decisions/0113-teams-outbound-courier.md), no
 migration.) ADR-0061 shipped Teams **inbound** — signature-verified callbacks that can decide
