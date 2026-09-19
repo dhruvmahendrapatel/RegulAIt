@@ -42,8 +42,24 @@ export interface InternationalDetector {
   /** ISO 3166-1 alpha-2 of the issuing jurisdiction. */
   readonly jurisdiction: string;
   /** True when a published check digit is verified before a match counts.
-   * False means structure-only — necessarily weaker, hence opt-in. */
+   * False means structure-only.
+   *
+   * THIS FIELD IS NOT A SAFETY RATING, and an earlier draft of this module
+   * treated it as one. See `falsePositivePct`. */
   readonly checksum: boolean;
+  /**
+   * MEASURED percentage of uniformly-random strings of this scheme's own
+   * shape that this detector accepts — its false-positive rate against
+   * structureless input such as an order number, a part number or a
+   * timestamp. Measured, not estimated; the method and the pinning test are
+   * in `pii-conformance.test.ts`, and ADR-0117 records the date.
+   *
+   * A single decimal check digit can only ever divide by ten, so every
+   * one-check-digit scheme here sits near 8-9%. That is the number that
+   * decides whether a jurisdiction is safe to switch on for a given
+   * deployment, and it is why NOTHING in this module is on by default.
+   */
+  readonly falsePositivePct: number;
   /** What this detector cannot do. Quoted into the guardrail registry so the
    * product's own limits page stays honest. */
   readonly limits: string;
@@ -79,13 +95,23 @@ const VERHOEFF_P: readonly (readonly number[])[] = [
   [7, 0, 4, 6, 9, 1, 3, 2, 5, 8],
 ];
 
-/** True when `digits` (pure digits, check digit included) passes Verhoeff. */
+/**
+ * True when `digits` (pure digits, check digit included) passes Verhoeff.
+ *
+ * INDEXING, BECAUSE GETTING IT WRONG IS SILENT. `i` counts from 0 at the
+ * RIGHTMOST digit (the check digit itself) and the permutation row is
+ * `p[i % 8]`. The `p[(i + 1) % 8]` offset belongs to the GENERATION loop,
+ * which runs over the payload WITHOUT its check digit; using it to validate
+ * computes a different function that still accepts about one in ten random
+ * inputs, so it looks like a working checksum and is not one. Anchored by the
+ * published worked example payload 236 -> check digit 3, i.e. 2363 validates.
+ */
 function verhoeffValid(digits: string): boolean {
   let c = 0;
   for (let i = 0; i < digits.length; i++) {
     const d = digits.charCodeAt(digits.length - 1 - i) - 48;
     if (d < 0 || d > 9) return false;
-    const row = VERHOEFF_P[(i + 1) % 8];
+    const row = VERHOEFF_P[i % 8];
     const dRow = VERHOEFF_D[c];
     if (!row || !dRow) return false;
     const p = row[d];
@@ -220,8 +246,12 @@ function steuerIdValid(d: string): boolean {
   const entry = repeats[0];
   if (!entry) return false;
   const [value, n] = entry;
-  if (n === 3 && !head.includes(value.repeat(3))) return false;
   if (n > 3) return false;
+  // The published rule: where a digit occurs THREE times in the first ten, the
+  // three occurrences must NOT stand in directly consecutive positions. So a
+  // single adjacent pair among them disqualifies the number. (A digit
+  // occurring exactly TWICE carries no adjacency constraint.)
+  if (n === 3 && head.includes(value.repeat(2))) return false;
   return mod11_10Valid(d);
 }
 
@@ -240,7 +270,11 @@ function nirValid(d: string): boolean {
   const key = d.slice(13);
   let rem = 0;
   for (let i = 0; i < 13; i++) rem = (rem * 10 + at(body, i)) % 97;
-  const expected = (97 - rem) % 97;
+  // The key runs 01..97, NOT 00..96: it is 97 - (body mod 97), and a body that
+  // is an exact multiple of 97 therefore carries the key 97. Reducing this
+  // modulo 97 would both MISS every real NIR keyed 97 and ACCEPT a fabricated
+  // one keyed 00 — roughly one NIR in ninety-seven, in both directions.
+  const expected = 97 - rem;
   return expected === Number(key);
 }
 
@@ -304,9 +338,22 @@ function countDigitScheme(
 ): number {
   const sep = sepClass ? `[${sepClass}]?` : "";
   const re = new RegExp(`(?<![0-9])(?:[0-9]${sep}){${len - 1}}[0-9](?![0-9])`, "g");
+  const sepSet = new Set(sepClass.split(""));
+  const isDigit = (c: string | undefined) => c !== undefined && c >= "0" && c <= "9";
   let n = 0;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
+    // The bare `(?<![0-9])`/`(?![0-9])` anchors stop a LONGER BARE digit run
+    // from yielding a shorter scheme out of its middle, but they are satisfied
+    // by the scheme's OWN separator — so `4111 1111 1111 1111`, a space-grouped
+    // 16-digit card, offers its first twelve digits as an Aadhaar candidate and
+    // only the check digit stands between that and a refusal. Extend the anchor
+    // by one character in each direction: a separator that is itself adjacent to
+    // a digit means the run CONTINUES, and this is a slice of something longer.
+    const start = m.index;
+    const end = m.index + m[0].length;
+    if (sepSet.has(text[start - 1] ?? "") && isDigit(text[start - 2])) continue;
+    if (sepSet.has(text[end] ?? "") && isDigit(text[end + 1])) continue;
     const digits = m[0].replace(/[^0-9]/g, "");
     if (digits.length === len && validate(digits)) n++;
   }
@@ -400,6 +447,7 @@ export const INTERNATIONAL_DETECTORS: readonly InternationalDetector[] = [
     category: "aadhaar",
     jurisdiction: "IN",
     checksum: true,
+    falsePositivePct: 8.03,
     limits: "Verhoeff-validated 12-digit runs, optionally 4-4-4 spaced or hyphenated. Does not read a VID or an Aadhaar masked to its last four digits.",
     count: countAadhaar,
   },
@@ -407,6 +455,7 @@ export const INTERNATIONAL_DETECTORS: readonly InternationalDetector[] = [
     category: "cpf",
     jurisdiction: "BR",
     checksum: true,
+    falsePositivePct: 1.02,
     limits: "Two mod-11 check digits over 11 digits, bare or 000.000.000-00 formatted. Repdigits excluded. Does not cover CNPJ (a company, not a person).",
     count: countCpf,
   },
@@ -414,6 +463,7 @@ export const INTERNATIONAL_DETECTORS: readonly InternationalDetector[] = [
     category: "bsn",
     jurisdiction: "NL",
     checksum: true,
+    falsePositivePct: 9.03,
     limits: "11-proef over exactly 9 digits. A BSN written with its leading zero dropped (8 digits) is NOT detected — it is indistinguishable from any 8-digit number.",
     count: countBsn,
   },
@@ -421,6 +471,7 @@ export const INTERNATIONAL_DETECTORS: readonly InternationalDetector[] = [
     category: "sin",
     jurisdiction: "CA",
     checksum: true,
+    falsePositivePct: 8.09,
     limits: "Luhn over 9 digits, leading 0/8 excluded. Luhn is a weaker guarantee than mod-11: roughly 1 in 10 random 9-digit runs pass it, so the leading-digit rule is doing real work here.",
     count: countSin,
   },
@@ -428,6 +479,7 @@ export const INTERNATIONAL_DETECTORS: readonly InternationalDetector[] = [
     category: "tfn",
     jurisdiction: "AU",
     checksum: true,
+    falsePositivePct: 9.00,
     limits: "Weighted mod-11 over 9 digits. The legacy 8-digit TFN is NOT detected — accepting 8 digits would collide with too many order numbers.",
     count: countTfn,
   },
@@ -435,6 +487,7 @@ export const INTERNATIONAL_DETECTORS: readonly InternationalDetector[] = [
     category: "steuer_id",
     jurisdiction: "DE",
     checksum: true,
+    falsePositivePct: 0.23,
     limits: "ISO 7064 MOD 11,10 plus the BZSt repeated-digit rule over 11 digits. Does not cover the Steuernummer (a per-Land tax file reference, not a personal identifier).",
     count: countSteuerId,
   },
@@ -442,6 +495,7 @@ export const INTERNATIONAL_DETECTORS: readonly InternationalDetector[] = [
     category: "nir",
     jurisdiction: "FR",
     checksum: true,
+    falsePositivePct: 0.06,
     limits: "mod-97 key over a 15-digit NIR. Corsica's 2A/2B department codes are NOT detected — those carry letters the numeric key rule cannot consume.",
     count: countNir,
   },
@@ -449,6 +503,7 @@ export const INTERNATIONAL_DETECTORS: readonly InternationalDetector[] = [
     category: "dni_nie",
     jurisdiction: "ES",
     checksum: true,
+    falsePositivePct: 3.87,
     limits: "mod-23 check letter over a DNI (8 digits) or NIE (X/Y/Z + 7 digits). A DNI written without its letter is NOT detected — there is nothing left to validate.",
     count: countDniNie,
   },
@@ -456,6 +511,7 @@ export const INTERNATIONAL_DETECTORS: readonly InternationalDetector[] = [
     category: "codice_fiscale",
     jurisdiction: "IT",
     checksum: true,
+    falsePositivePct: 3.87,
     limits: "mod-26 check character over the 16-character personal form. The omocodia variant (digits substituted by letters to break a collision) is NOT detected.",
     count: countCodiceFiscale,
   },
@@ -463,16 +519,37 @@ export const INTERNATIONAL_DETECTORS: readonly InternationalDetector[] = [
     category: "nino",
     jurisdiction: "GB",
     checksum: false,
+    falsePositivePct: 8.47,
     limits: "STRUCTURE ONLY — a NINO has no check digit. Prefix/suffix exclusions only, so the false-positive risk is materially higher than every checksum scheme above. Opt-in for that reason.",
     count: countNino,
   },
 ];
 
-/** The categories enabled when a deployment expresses no preference: exactly
- * the ones whose check digit we verify. See ADR-0117 for why the line is drawn
- * at "can we validate it" rather than at a market-size ranking. */
-export const DEFAULT_INTERNATIONAL_CATEGORIES: readonly InternationalPiiCategory[] =
-  INTERNATIONAL_DETECTORS.filter((d) => d.checksum).map((d) => d.category);
+/**
+ * The categories enabled when a deployment expresses no preference: NONE.
+ *
+ * An earlier draft of this module defaulted to "every checksum-backed
+ * category", on the reasoning that a verified check digit is enough to make a
+ * detector safe to leave on. MEASUREMENT KILLED THAT REASONING. A single
+ * decimal check digit divides the candidate space by ten and no more, so the
+ * Dutch BSN accepts 9.03% of random 9-digit runs, the Australian TFN 9.00%, the
+ * Canadian SIN 8.09% and Aadhaar 8.03% — roughly one bare order number in
+ * eleven. Only the multi-digit and structurally-constrained schemes (CPF 1.02%,
+ * German IdNr 0.23%, French NIR 0.06%) are cheap to switch on blind.
+ *
+ * Those rates are per-jurisdiction facts, not a product-wide one, so the
+ * product may not pick for the customer: a German deployment switching on
+ * Brazilian CPF buys false refusals it has no use for, and a Dutch one
+ * switching on BSN is knowingly accepting a 9% rate on bare 9-digit runs in
+ * exchange for catching the real thing. The admin chooses, per jurisdiction,
+ * with `falsePositivePct` on the screen next to the switch.
+ *
+ * It is also the UPGRADE posture, and that is not negotiable here: an install
+ * that upgrades into this code detects EXACTLY what it detected before, and no
+ * prompt that was allowed yesterday is refused today until an administrator
+ * acts. See ADR-0117.
+ */
+export const DEFAULT_INTERNATIONAL_CATEGORIES: readonly InternationalPiiCategory[] = [];
 
 /** Every category this module can detect, default-on or not. */
 export const ALL_INTERNATIONAL_CATEGORIES: readonly InternationalPiiCategory[] =
