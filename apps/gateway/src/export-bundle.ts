@@ -396,10 +396,32 @@ export async function readChainSegment(db: Db, subjectId: string | null): Promis
 // artifact whose bytes change between two identical exports is one an auditor
 // cannot diff.
 
-function tarHeader(name: string, size: number): Buffer {
-  if (Buffer.byteLength(name, "utf8") > 99) {
-    throw new Error(`export bundle: path too long for ustar (${name})`);
+/**
+ * ustar splits a long path across `prefix` (155 bytes) and `name` (100 bytes),
+ * joined with "/". Implemented rather than avoided by shortening names: the
+ * bundle's paths carry the subject's uuid twice (once in the root directory,
+ * once in the content filename) because an auditor holding several bundles
+ * needs to tell them apart from the extracted tree alone, and truncating the
+ * id to fit a header field would be an evidence artifact losing information to
+ * an archive format's 1988 layout.
+ */
+function splitUstarPath(full: string): { name: string; prefix: string } {
+  if (Buffer.byteLength(full, "utf8") <= 99) return { name: full, prefix: "" };
+  // the LAST separator that leaves a name short enough, so the prefix carries
+  // as much of the path as it can
+  for (let i = full.length - 1; i > 0; i--) {
+    if (full[i] !== "/") continue;
+    const name = full.slice(i + 1);
+    const prefix = full.slice(0, i);
+    if (Buffer.byteLength(name, "utf8") <= 99 && Buffer.byteLength(prefix, "utf8") <= 154) {
+      return { name, prefix };
+    }
   }
+  throw new Error(`export bundle: path too long for ustar (${full})`);
+}
+
+function tarHeader(full: string, size: number): Buffer {
+  const { name, prefix } = splitUstarPath(full);
   const h = Buffer.alloc(512);
   const put = (s: string, off: number, len: number) => h.write(s, off, len, "utf8");
   const oct = (n: number, off: number, len: number) =>
@@ -415,6 +437,7 @@ function tarHeader(name: string, size: number): Buffer {
   h.write("0", 156, 1, "ascii"); // typeflag: regular file
   h.write("ustar\0", 257, 6, "ascii");
   h.write("00", 263, 2, "ascii");
+  if (prefix) put(prefix, 345, 155);
 
   let sum = 0;
   for (const b of h) sum += b;

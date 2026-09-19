@@ -341,7 +341,28 @@ else
       "chain.tsv claims a row at seq $seq and the bundle does not carry its" \
       "bytes, so its content_hash cannot be checked against anything."
 
-    # (a) does the row's own text hash to the content_hash it claims?
+    # The four checks run in ADR-0060's own order — ORDER, LINKAGE, CONTENT,
+    # then the linked value — so that the FIRST thing reported is the closest
+    # description of what was actually done. A deleted row shows up as a gap
+    # rather than as whatever downstream hash the deletion happened to break.
+
+    # (a) ORDER. A deletion shows up here first.
+    if [ -n "$PREV" ] && [ "$seq" != "$EXPECT_SEQ" ]; then
+      refuse "CHAIN BROKEN — sequence gap: expected seq $EXPECT_SEQ, found $seq" \
+        "$((seq - EXPECT_SEQ)) row(s) were deleted or renumbered between them." \
+        "Rows are consecutive by construction; a hole is a removal."
+    fi
+
+    # (b) LINKAGE. Reordering and predecessor-replacement land here.
+    if [ -n "$PREV" ] && [ "$phash" != "$PREV" ]; then
+      refuse "CHAIN BROKEN at seq $seq — prev_hash does not name the preceding row's row_hash" \
+        "expected prev_hash: $PREV" \
+        "recorded prev_hash: $phash" \
+        "A row was moved, replaced or removed, or a segment from a different" \
+        "deployment's log was spliced in here."
+    fi
+
+    # (c) CONTENT. Does the row's own text hash to the content_hash it claims?
     ACTUAL_C="$(sha256_of "$PFILE")"
     if [ "$ACTUAL_C" != "$chash" ]; then
       refuse "AUDIT ROW TAMPERED at seq $seq — content_hash does not cover its bytes" \
@@ -351,7 +372,7 @@ else
         "written. Read that file: its text is the record that was changed."
     fi
 
-    # (b) does row_hash follow from prev_hash and content_hash?
+    # (d) THE LINKED VALUE itself.
     ACTUAL_R="$(printf '%s%s' "$phash" "$chash" | { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi } | awk '{print $1}')"
     if [ "$ACTUAL_R" != "$rhash" ]; then
       refuse "CHAIN BROKEN at seq $seq — row_hash does not follow from prev_hash and content_hash" \
@@ -361,20 +382,7 @@ else
         "linked value was edited directly."
     fi
 
-    # (c) does this row link to the one before it?
-    if [ -n "$PREV" ]; then
-      if [ "$phash" != "$PREV" ]; then
-        refuse "CHAIN BROKEN at seq $seq — prev_hash does not name the preceding row's row_hash" \
-          "expected prev_hash: $PREV" \
-          "recorded prev_hash: $phash" \
-          "A row was moved, replaced or removed, or a segment from a different" \
-          "deployment's log was spliced in here."
-      fi
-      if [ "$seq" != "$EXPECT_SEQ" ]; then
-        refuse "CHAIN BROKEN — sequence gap: expected seq $EXPECT_SEQ, found $seq" \
-          "$((seq - EXPECT_SEQ)) row(s) were deleted or renumbered between them."
-      fi
-    else
+    if [ -z "$PREV" ]; then
       if [ -n "$SEG_FROM" ] && [ "$seq" != "$SEG_FROM" ]; then
         refuse "CHAIN BROKEN — the segment does not start where the signed manifest says" \
           "manifest segmentFromSeq: $SEG_FROM" \
