@@ -10,8 +10,20 @@ import { MCP_ADMISSION_MODES } from "./mcp-admission.js";
 // re-exported below) so `createApprovalRuleSchema` validates against the one
 // authoritative list rather than a second copy of the two strings.
 import { APPROVAL_SCOPES } from "./approval-binding.js";
+// ADR-0117: the international category tuple is consumed by
+// updateOrgSettingsSchema below, so it is imported as well as re-exported.
+import { INTERNATIONAL_PII_CATEGORIES } from "./pii-international.js";
 
-export { detectPII, type PiiHit, type PiiCategory } from "./pii.js";
+export { detectPII, type PiiHit, type PiiCategory, type BasePiiCategory } from "./pii.js";
+// ADR-0117 — the opt-in international national-identifier detectors.
+export {
+  INTERNATIONAL_DETECTORS,
+  INTERNATIONAL_PII_CATEGORIES,
+  ALL_INTERNATIONAL_CATEGORIES,
+  DEFAULT_INTERNATIONAL_CATEGORIES,
+  type InternationalDetector,
+  type InternationalPiiCategory,
+} from "./pii-international.js";
 
 // ADR-0044 — the evaluation harness's pure half: the scorer registry (six
 // deterministic kinds plus the model-backed judge's deterministic prompt/parse
@@ -1960,6 +1972,19 @@ export const updateOrgSettingsSchema = z
     summarizerAgentId: z.string().uuid().nullable().optional(),
     // governance / compliance defaults
     defaultPiiMode: orgPiiModeSchema.optional(),
+    /** ADR-0117: WHICH international national-identifier jurisdictions this
+     * deployment detects. Ships EMPTY and an upgrade never changes it, so an
+     * install that upgrades into ADR-0117 refuses exactly what it refused
+     * before. Each entry costs a measured false-positive rate against
+     * structureless input (see `INTERNATIONAL_DETECTORS[].falsePositivePct`,
+     * 0.06% for the French NIR up to 9.03% for the Dutch BSN), which is why
+     * the product will not pick a set on an administrator's behalf. These
+     * categories only ever ADD to the four base detectors; nothing here can
+     * switch email/ssn/credit_card/phone off. */
+    piiInternationalCategories: z
+      .array(z.enum(INTERNATIONAL_PII_CATEGORIES))
+      .max(INTERNATIONAL_PII_CATEGORIES.length)
+      .optional(),
     envKeyFallbackEnabled: z.boolean().optional(),
     envFallbackProviders: z
       .array(z.enum(["anthropic", "openai", "google", "xai"]))

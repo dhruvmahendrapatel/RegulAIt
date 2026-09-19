@@ -25,17 +25,20 @@
 /** A national-identifier category. One per jurisdiction+scheme, because a
  * deny reason that names `aadhaar` is more actionable than one that says
  * `national_id`, and naming the scheme is still counts-only/§8.4-safe. */
-export type InternationalPiiCategory =
-  | "aadhaar" // India — Unique Identification Authority of India number
-  | "cpf" // Brazil — Cadastro de Pessoas Físicas
-  | "bsn" // Netherlands — Burgerservicenummer
-  | "sin" // Canada — Social Insurance Number
-  | "tfn" // Australia — Tax File Number
-  | "steuer_id" // Germany — steuerliche Identifikationsnummer (IdNr)
-  | "nir" // France — INSEE/NIR (numéro de sécurité sociale)
-  | "dni_nie" // Spain — DNI / NIE
-  | "codice_fiscale" // Italy — Codice Fiscale
-  | "nino"; // United Kingdom — National Insurance number
+export const INTERNATIONAL_PII_CATEGORIES = [
+  "aadhaar", // India — Unique Identification Authority of India number
+  "cpf", // Brazil — Cadastro de Pessoas Físicas
+  "bsn", // Netherlands — Burgerservicenummer
+  "sin", // Canada — Social Insurance Number
+  "tfn", // Australia — Tax File Number
+  "steuer_id", // Germany — steuerliche Identifikationsnummer (IdNr)
+  "nir", // France — INSEE/NIR (numéro de sécurité sociale)
+  "dni_nie", // Spain — DNI / NIE
+  "codice_fiscale", // Italy — Codice Fiscale
+  "nino", // United Kingdom — National Insurance number
+] as const;
+
+export type InternationalPiiCategory = (typeof INTERNATIONAL_PII_CATEGORIES)[number];
 
 export interface InternationalDetector {
   readonly category: InternationalPiiCategory;

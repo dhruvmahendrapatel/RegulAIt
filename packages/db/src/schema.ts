@@ -986,6 +986,14 @@ export const auditLog = pgTable(
         // override ride the approval's own objectType. Plain text column —
         // no DDL needed.
         "sod_override",
+        // ADR-0116: a SIGNED, offline-verifiable export bundle was produced.
+        // Its own object type rather than filed under the thing exported,
+        // because "what left this deployment as evidence, when, and who took
+        // it" is the question an auditor asks about the EXPORTS themselves —
+        // and because the row is written BEFORE the bundle is built, so the
+        // bundle's manifest commits to a chain head that already contains the
+        // record of its own creation. Plain text column — no DDL needed.
+        "audit_export",
       ],
     })
       .notNull()
@@ -3122,6 +3130,16 @@ export const orgSettings = pgTable(
     /** effective piiMode for a project whose classifications resolve to none.
      * 'none' (default) = today's no-enforcement. */
     defaultPiiMode: text("default_pii_mode", { enum: ORG_PII_MODES }).notNull().default("none"),
+    /** ADR-0117 (migration 0110) — WHICH international national-identifier
+     * jurisdictions `detectPII` runs, on top of its four always-on base
+     * detectors. Ships EMPTY and the migration's DEFAULT is EMPTY, so an
+     * existing install upgrades into ADR-0117 detecting exactly what it
+     * detected before and refusing exactly what it refused before. Widening it
+     * is an explicit, audited admin act. */
+    piiInternationalCategories: jsonb("pii_international_categories")
+      .$type<string[]>()
+      .notNull()
+      .default([]),
     /** platform-key-via-environment fallback (ANTHROPIC_API_KEY etc.). ON =
      * today; a regulated org can force every credential through the encrypted
      * store. envFallbackProviders narrows WHICH providers may fall back. */

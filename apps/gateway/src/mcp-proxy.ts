@@ -71,6 +71,7 @@ import { effectiveTechniqueMode, loadOrgSettings } from "./org-settings.js";
 import {
   assertProjectAttribution,
   enforcePII,
+  piiInternationalCategories,
   piiCategoryList,
   piiWithheldMarker,
   preDispatchProjectGate,
@@ -702,9 +703,12 @@ async function executeGovernedToolCallInner(
     // before the upstream is contacted, so a block executes nothing, consumes
     // no approval and bills nothing.
     const piiMode: PiiMode | null = await projectPiiMode(db, projectId ?? null);
+    // ADR-0117: the jurisdiction set, resolved once for this tool call and
+    // shared by the argument gate and the tool-result gate below.
+    const piiIntl = await piiInternationalCategories(db);
     let inputHits: PiiHit[] = [];
     if (piiMode) {
-      const chk = enforcePII(piiMode, { input: JSON.stringify(args.arguments ?? null) });
+      const chk = enforcePII(piiMode, { input: JSON.stringify(args.arguments ?? null) }, piiIntl);
       inputHits = chk.hits;
       if (chk.action === "block") {
         const reason = `input contains PII: ${piiCategoryList(chk.hits)}`;
@@ -870,7 +874,7 @@ async function executeGovernedToolCallInner(
     let resultContent: unknown = content;
     let withheld = false;
     if (piiMode) {
-      const chk = enforcePII(piiMode, { output: JSON.stringify(content ?? null) });
+      const chk = enforcePII(piiMode, { output: JSON.stringify(content ?? null) }, piiIntl);
       outputHits = chk.hits;
       if (chk.action === "block") {
         withheld = true;

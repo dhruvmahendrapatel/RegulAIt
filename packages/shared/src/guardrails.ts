@@ -496,9 +496,11 @@ export const piiDetector: GuardrailDetector = {
   summary:
     "Formatted personal identifiers: email, bounded US SSN, Luhn-validated card runs, separator-bearing US phone (§8.4's detectPII, unchanged).",
   limits:
-    "Pattern-matched US-centric identifiers only. No names, no addresses, no non-US formats, no free-text personal data.",
+    "Pattern-matched US-centric identifiers only. No names, no addresses, no free-text personal data. ADR-0117's international national-identifier detectors are NOT reachable from this registration: `GuardrailDetector.detect` takes no deployment configuration, and the jurisdiction set is deployment configuration. The DISPATCH path (which calls `enforcePII` directly, as the note below says) DOES apply them. So this registration — the admin registry view and the tuning sandbox — is narrower than what actually enforces, and says so rather than implying parity.",
   ruleIds: ["pii.email", "pii.ssn", "pii.credit_card", "pii.phone"],
   detect(text) {
+    // Deliberately NOT passing a jurisdiction set: there is none to pass here.
+    // See `limits` — this is the narrower of the two PII surfaces, on purpose.
     return detectPII(text).map((h: PiiHit) => ({
       detector: "pii" as const,
       category: h.category,

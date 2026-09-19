@@ -10,7 +10,17 @@
  * exist to cut the false positives a naive digit-run regex would produce.
  */
 
-export type PiiCategory = "email" | "ssn" | "credit_card" | "phone";
+import {
+  INTERNATIONAL_DETECTORS,
+  type InternationalPiiCategory,
+} from "./pii-international.js";
+
+/** The four original, live-verified categories. Named separately so the
+ * boundary between "what this detector has always done" and "what a
+ * deployment opted into" is visible in the type system, not just in prose. */
+export type BasePiiCategory = "email" | "ssn" | "credit_card" | "phone";
+
+export type PiiCategory = BasePiiCategory | InternationalPiiCategory;
 
 /** A per-category hit: how MANY matches of `category` were found — never what
  * they were. */
@@ -78,15 +88,46 @@ function countCreditCards(text: string): number {
  * matched at least once, in a stable category order. Empty input (or no
  * matches) returns []. The result carries COUNTS ONLY — never the matched
  * text — so it is safe to persist in an audit/usage detail.
+ *
+ * `international` names the national-identifier jurisdictions this deployment
+ * has SWITCHED ON. It is a required argument rather than an optional one on
+ * purpose: `detectPII` is the single point every governed dispatch path
+ * reaches PII through, and a new call site that forgets the list would
+ * silently enforce less than the deployment asked for — the one failure mode
+ * this work exists to close. An empty array is the shipped value and is
+ * byte-identical to the pre-ADR-0117 behaviour: the four base detectors run,
+ * nothing else does, and `pii-international.ts` is never entered.
+ *
+ * The four base categories ALWAYS run and are never configurable here. They
+ * are live-verified (LIVE_VERIFICATION_2026-08 V3) and nothing in this
+ * argument can turn one of them off.
  */
-export function detectPII(text: string): PiiHit[] {
+export function detectPII(
+  text: string,
+  international: readonly InternationalPiiCategory[] = [],
+): PiiHit[] {
   if (!text) return [];
-  const counts: Record<PiiCategory, number> = {
+  const counts: Partial<Record<PiiCategory, number>> = {
     email: countMatches(text, EMAIL_RE),
     ssn: countMatches(text, SSN_RE),
     credit_card: countCreditCards(text),
     phone: countMatches(text, PHONE_RE),
   };
   const order: PiiCategory[] = ["email", "ssn", "credit_card", "phone"];
-  return order.filter((c) => counts[c] > 0).map((c) => ({ category: c, count: counts[c] }));
+  if (international.length > 0) {
+    const on = new Set<string>(international);
+    // Registry order, not caller order, so the audit reason string for a given
+    // text is the same whatever order an admin happened to list jurisdictions.
+    for (const detector of INTERNATIONAL_DETECTORS) {
+      if (!on.has(detector.category)) continue;
+      const n = detector.count(text);
+      if (n > 0) {
+        counts[detector.category] = n;
+        order.push(detector.category);
+      }
+    }
+  }
+  return order
+    .filter((c) => (counts[c] ?? 0) > 0)
+    .map((c) => ({ category: c, count: counts[c] ?? 0 }));
 }

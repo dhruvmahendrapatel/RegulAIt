@@ -119,6 +119,7 @@ import { decryptSecret, encryptSecret } from "./secrets.js";
 import {
   assertProjectAttribution,
   enforcePII,
+  piiInternationalCategories,
   piiCategoryList,
   piiWithheldMarker,
   postDispatchProjectAlert,
@@ -275,7 +276,10 @@ async function enforceProjectInputPii(
 ): Promise<{ status: 403; error: "pii_blocked"; detail: string; pii: DispatchPii } | null> {
   const piiMode = await projectPiiMode(db, projectId);
   if (!piiMode) return null;
-  const chk = enforcePII(piiMode, { input });
+  // ADR-0117: the jurisdiction set is the OTHER half of the §8.4 decision and
+  // is resolved on the SAME line of reasoning as the mode — org-wide, shipped
+  // empty, widened only by an explicit admin act.
+  const chk = enforcePII(piiMode, { input }, await piiInternationalCategories(db));
   if (chk.action !== "block") return null;
   const detail = `input contains PII: ${piiCategoryList(chk.hits)}`;
   const pii: DispatchPii = {
@@ -318,7 +322,10 @@ async function enforceProjectCachedOutputPii(
 ): Promise<{ status: 403; error: "pii_blocked"; detail: string; pii: DispatchPii } | null> {
   const piiMode = await projectPiiMode(db, projectId);
   if (!piiMode) return null;
-  const chk = enforcePII(piiMode, { output: outputText });
+  // ADR-0117: the jurisdiction set is the OTHER half of the §8.4 decision and
+  // is resolved on the SAME line of reasoning as the mode — org-wide, shipped
+  // empty, widened only by an explicit admin act.
+  const chk = enforcePII(piiMode, { output: outputText }, await piiInternationalCategories(db));
   if (chk.action !== "block") return null;
   const detail = `cached output withheld: contains PII (${piiCategoryList(chk.hits)})`;
   const pii: DispatchPii = {
@@ -1360,11 +1367,15 @@ async function dispatchAttempt(
   // resolved from its compliance cascade; an unclassified/unmatched project
   // yields null and every check below is a no-op (byte-identical behaviour).
   const piiMode = await projectPiiMode(db, args.projectId ?? null);
+  // ADR-0117: resolved ONCE for this dispatch and reused by the output check
+  // below, so the input and output gates can never disagree about which
+  // jurisdictions are in force for the same call.
+  const piiIntl = await piiInternationalCategories(db);
   let inputHits: PiiHit[] = [];
   if (piiMode) {
     // INPUT check runs BEFORE any provider work, so a block incurs no cost —
     // no usage row, no dispatch, no tokens.
-    const chk = enforcePII(piiMode, { input: args.input });
+    const chk = enforcePII(piiMode, { input: args.input }, piiIntl);
     inputHits = chk.hits;
     if (chk.action === "block") {
       const reason = `input contains PII: ${piiCategoryList(chk.hits)}`;
@@ -1911,7 +1922,7 @@ async function dispatchAttempt(
   let outputText = result.outputText;
   let withheld = false;
   if (piiMode) {
-    const chk = enforcePII(piiMode, { output: result.outputText });
+    const chk = enforcePII(piiMode, { output: result.outputText }, piiIntl);
     outputHits = chk.hits;
     if (chk.action === "block") {
       withheld = true;
@@ -4745,11 +4756,15 @@ export function registerAgentConnectorRoutes(
       // attribution dodge the floor exists to close. The INPUT check runs BEFORE
       // provider.invoke, so a block executes nothing and bills nothing.
       const piiMode: PiiMode | null = await projectPiiMode(db, projectId ?? null);
+      // ADR-0117: resolved once, shared by the input and output gates below.
+      const piiIntl = await piiInternationalCategories(db);
       let inputHits: PiiHit[] = [];
       if (piiMode) {
-        const chk = enforcePII(piiMode, {
-          input: JSON.stringify({ object: body.object ?? null, payload: body.payload ?? null }),
-        });
+        const chk = enforcePII(
+          piiMode,
+          { input: JSON.stringify({ object: body.object ?? null, payload: body.payload ?? null }) },
+          piiIntl,
+        );
         inputHits = chk.hits;
         if (chk.action === "block") {
           const reason = `input contains PII: ${piiCategoryList(chk.hits)}`;
@@ -4971,7 +4986,7 @@ export function registerAgentConnectorRoutes(
       let respBody = result.body;
       let withheld = false;
       if (piiMode) {
-        const chk = enforcePII(piiMode, { output: JSON.stringify(result.body ?? null) });
+        const chk = enforcePII(piiMode, { output: JSON.stringify(result.body ?? null) }, piiIntl);
         outputHits = chk.hits;
         if (chk.action === "block") {
           withheld = true;

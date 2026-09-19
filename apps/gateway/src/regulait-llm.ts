@@ -102,6 +102,7 @@ import {
 import { evaluateAgent, type AgentDecision } from "@regulait/policy-kernel";
 import {
   detectPII,
+  type InternationalPiiCategory,
   evaluateGuardrails,
   guardrailCategoryList,
   type GuardrailMode,
@@ -130,7 +131,11 @@ import {
 } from "@regulait/training-provider";
 import { loadOrgSettings } from "./org-settings.js";
 import { loadAgentRevocations, loadRoleAgentGrants } from "./entitlements.js";
-import { assertProjectAttribution, projectPiiMode } from "./projects.js";
+import {
+  assertProjectAttribution,
+  piiInternationalCategories,
+  projectPiiMode,
+} from "./projects.js";
 import { resolveGuardrailPolicy } from "./guardrails.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { loadEgressAllowList } from "./custom-providers.js";
@@ -179,6 +184,11 @@ export interface RegulAItLlmOptions {
 export function scanTrainingRows(
   rows: TrainingRow[],
   guardrailModes: GuardrailModes,
+  /** ADR-0117: the org's opted-in national-identifier jurisdictions. Required,
+   * not defaulted — a training corpus is model-bound content and must be
+   * scanned to the SAME breadth as a prompt, or the corpus becomes the way a
+   * jurisdiction's identifiers reach a provider unscanned. */
+  piiInternational: readonly InternationalPiiCategory[],
 ): { findings: ScanFindings; piiHits: PiiHit[]; hasPii: boolean; guardrailBlocked: boolean } {
   const piiCounts = new Map<string, number>();
   const guardrailCounts = new Map<string, { detector: string; category: string; count: number }>();
@@ -190,7 +200,7 @@ export function scanTrainingRows(
     // whose answers carry customer emails is exactly as leaky as one whose
     // questions do
     const text = `${row.input}\n${row.output ?? ""}`;
-    for (const hit of detectPII(text)) {
+    for (const hit of detectPII(text, piiInternational)) {
       allHits.push(hit);
       piiCounts.set(hit.category, (piiCounts.get(hit.category) ?? 0) + hit.count);
     }
@@ -2087,7 +2097,7 @@ export function registerRegulAItLlmRoutes(app: FastifyInstance, db: Db, opts: Re
     const mode = effectiveIngestMode(requested, piiFloor);
     // The detectors run at their configured strength for content classes, and
     // PII runs at the composed ingest mode above.
-    const scan = scanTrainingRows(rows, policy.modes);
+    const scan = scanTrainingRows(rows, policy.modes, await piiInternationalCategories(database));
     const findings = scan.findings;
     const anything = scan.hasPii || findings.guardrails.length > 0;
     if (!anything) {

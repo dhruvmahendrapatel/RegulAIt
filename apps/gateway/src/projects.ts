@@ -45,6 +45,7 @@ import {
   createTeamSchema,
   deleteTeamSchema,
   detectPII,
+  type InternationalPiiCategory,
   patchProjectMemberSchema,
   promoteContextSchema,
   reclassifySchema,
@@ -60,7 +61,13 @@ import {
   type InstanceState,
   type WorkflowDefinition,
 } from "@regulait/workflow-kernel";
-import { loadOrgSettings, orgDefaultPiiMode, retentionFloor, runAuditPruneOnce } from "./org-settings.js";
+import {
+  loadOrgSettings,
+  orgDefaultPiiMode,
+  piiInternationalCategories,
+  retentionFloor,
+  runAuditPruneOnce,
+} from "./org-settings.js";
 import { ConfigVersionUnresolvableError, resolveRuleVersions } from "./rule-versions.js";
 // ADR-0074: a compliance-profile UPDATE rewrites twelve versioned fields, so it
 // goes through the one choke point rather than straight at the read-model.
@@ -494,6 +501,12 @@ export async function projectMcpMode(
   };
 }
 
+/** ADR-0117: re-exported here so every dispatch path resolves BOTH halves of
+ * the §8.4 decision — the mode and the jurisdiction set — from the one module
+ * it already imports `projectPiiMode`/`enforcePII` from. Nothing enforcing PII
+ * should have to know that one half lives in `org-settings.ts`. */
+export { piiInternationalCategories };
+
 export interface PiiEnforcement {
   action: "allow" | "warn" | "block";
   hits: PiiHit[];
@@ -522,14 +535,23 @@ export function piiWithheldMarker(hits: PiiHit[]): string {
  *  - log  : hits present -> 'allow' (proceed silently; the caller records the
  *    category counts in its usage/audit detail).
  * No hits (or no mode) -> 'allow', so a clean payload on a classified project
- * stays byte-identical to the pre-enforcement behaviour. Pure over its args. */
+ * stays byte-identical to the pre-enforcement behaviour. Pure over its args.
+ *
+ * ADR-0117: `international` names the national-identifier jurisdictions the
+ * deployment has switched on (`piiInternationalCategories`, shipped empty).
+ * It is REQUIRED rather than defaulted precisely because this function is the
+ * §8.4 choke point: a dispatch path added later that forgot the argument would
+ * enforce LESS than the org configured, silently, and only on that one path —
+ * so the compiler is made to ask. Pass `[]` where a caller genuinely has no
+ * org context, and say why at the call site. */
 export function enforcePII(
   mode: PiiMode,
   io: { input?: string | undefined; output?: string | undefined },
+  international: readonly InternationalPiiCategory[],
 ): PiiEnforcement {
   const phase: "input" | "output" = io.output !== undefined ? "output" : "input";
   const text = phase === "output" ? (io.output ?? "") : (io.input ?? "");
-  const hits = detectPII(text);
+  const hits = detectPII(text, international);
   if (hits.length === 0) return { action: "allow", hits, phase };
   const action = mode === "block" ? "block" : mode === "warn" ? "warn" : "allow";
   return { action, hits, phase };

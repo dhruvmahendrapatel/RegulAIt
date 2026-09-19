@@ -131,7 +131,11 @@ import {
 } from "@regulait/shared";
 import { effectiveIngestMode } from "./regulait-llm.js";
 import { resolveGuardrailPolicy } from "./guardrails.js";
-import { orgDefaultPiiMode, loadOrgSettings } from "./org-settings.js";
+import {
+  loadOrgSettings,
+  orgDefaultPiiMode,
+  piiInternationalCategories,
+} from "./org-settings.js";
 import { reinstateLinesSupersededBy } from "./cost-reconcile.js";
 import { securityHeaders } from "./security-headers.js";
 
@@ -220,6 +224,11 @@ export async function scanFreeTexts(
   const policy = await resolveGuardrailPolicy(db, { projectId: null });
   const floor = await orgPiiFloor(db);
   const mode = effectiveIngestMode(requested, floor);
+  // ADR-0117: an imported cost line or roster row is free text that the org
+  // has asked to be scanned for PII; it gets the same jurisdiction set a
+  // prompt gets, or an identifier could be ingested here that would have been
+  // refused on the prompt path.
+  const piiIntl = await piiInternationalCategories(db);
 
   const piiCounts = new Map<string, number>();
   const guardCounts = new Map<string, { detector: string; category: string; count: number }>();
@@ -228,7 +237,7 @@ export async function scanFreeTexts(
 
   for (const text of texts) {
     if (text.length === 0) continue;
-    for (const hit of detectPII(text)) {
+    for (const hit of detectPII(text, piiIntl)) {
       hasPii = true;
       piiCounts.set(hit.category, (piiCounts.get(hit.category) ?? 0) + hit.count);
     }

@@ -38,6 +38,8 @@ import {
   type SQL,
 } from "@regulait/db";
 import {
+  INTERNATIONAL_PII_CATEGORIES,
+  type InternationalPiiCategory,
   revocationKindParamSchema,
   ruleKindParamSchema,
   setRevocationScopeSchema,
@@ -105,6 +107,33 @@ export function effectiveTechniqueMode(
  * no-enforcement. */
 export function orgDefaultPiiMode(org: OrgSettingsRow): "block" | "warn" | "log" | null {
   return org.defaultPiiMode === "none" ? null : org.defaultPiiMode;
+}
+
+/**
+ * ADR-0117: the international national-identifier jurisdictions this
+ * deployment detects, filtered to the ones this build actually implements.
+ *
+ * The filter is not defensive decoration. The column is jsonb and a
+ * deployment can be rolled BACK to a build that knows fewer categories than
+ * the row lists; an unknown string must then be ignored rather than silently
+ * widening or narrowing anything, and it must never reach a detector lookup
+ * that would return undefined. Ships empty, so a deployment that has not
+ * opted in gets `[]` and `detectPII` never enters the international module.
+ */
+export function orgPiiInternationalCategories(
+  org: OrgSettingsRow,
+): readonly InternationalPiiCategory[] {
+  const raw = org.piiInternationalCategories ?? [];
+  return INTERNATIONAL_PII_CATEGORIES.filter((c) => raw.includes(c));
+}
+
+/** ADR-0117: the same value, resolved from the database. This is what the
+ * dispatch paths call — one indexed singleton read, exactly as
+ * `orgDefaultPiiMode`'s caller already does. */
+export async function piiInternationalCategories(
+  db: Db,
+): Promise<readonly InternationalPiiCategory[]> {
+  return orgPiiInternationalCategories(await loadOrgSettings(db));
 }
 
 /** ADR-0021: whether the platform-key ENV fallback may engage for `provider`.
