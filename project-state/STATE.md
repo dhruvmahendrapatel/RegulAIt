@@ -21,6 +21,47 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-19 (later) — S19 closed: Teams ChatOps parity is complete, and the deferred verification
+for BOTH batches is done.** ([ADR-0113](../docs/decisions/0113-teams-outbound-courier.md), no
+migration.) ADR-0061 shipped Teams **inbound** — signature-verified callbacks that can decide
+approvals — and refused outbound with `outbound_provider_unsupported` because
+`connector-provider` had no Teams adapter. That courier now exists: `"teams"` in
+`CONNECTOR_PROVIDER_KINDS`, a **Bot Framework Connector REST** adapter, and `chatops.ts` routing
+through it.
+
+**Verified by me in one run, covering S14 and S19 together**: gateway **178 files / 2729 passed +
+9 MinIO skips, exit 0**; `connector-provider` **70 passed, exit 0**; repo-wide build and
+`tsc --noEmit` clean; instrument asserted (`ECONNREFUSED: 0`, `destroySoon: 0`). The numbers
+reconcile against S14's 2723 — S19 added six tests to the existing `chatops.test.ts`, so the file
+count is unchanged and its adapter tests live in the separate package.
+
+**Two things the agent did beyond the brief.** (a) **A message-redirection defence**: every call
+derives its `/v3/conversations/{id}/` prefix from the governed `object`, and the Activity's own
+`conversation.id` is **overwritten** from it — so a crafted payload cannot redirect a post to
+another Teams conversation. (b) **It found Teams is structurally different from Slack on egress**:
+one post touches **two hosts** (Entra login + Bot Connector), both routed through the guarded fetch
+that re-adjudicates every request URL. Neither is exempt, and an air-gapped install has neither
+allow-list entry, so the courier is simply absent rather than failing open.
+
+**Its non-vacuity table is the strongest of this session.** One neutralisation stayed **GREEN** —
+removing the entry-point adjudication — and rather than bury that it explains why it is not
+vacuity (the guarded fetch alone still refuses), then proves it in the next row by removing **both**
+egress layers and watching three tests redden, including ADR-0061's **pre-existing Slack** egress
+test. That is M-033 and M-035's lesson applied unprompted.
+
+**Honest about what is weaker**: card fidelity is **not** identical to Slack and the ADR does not
+claim it is — code spans have no Adaptive Cards equivalent and render as literal backticks; the
+portal link is an `Action.OpenUrl` only when `portalUrl` is absolute. The *content* and the
+*sensitivity fence* are identical; the markup is poorer.
+
+**A process note worth keeping.** The building agent was cut off by a rate limit one step before
+writing its ADR, having already committed the implementation and tests. I finished the batch: the
+ADR was **orphaned**, not in-flight, so committing it was the right call where leaving a *running*
+agent's files alone had been right three times before. I also briefly misread the commit range —
+the implementation landed *before* my own S14 status commit, so a `759e5b3..HEAD` diff showed only
+the test commit and I thought the adapter was missing. It was not; checking the code rather than
+trusting the range settled it.
+
 **2026-09-19 — S14 closed: the owner chose option (c), and conversations are now scrubbed at the
 PRESENTATION boundary.** ([ADR-0112](../docs/decisions/0112-conversation-presentation-scrub.md), no
 migration.) Stored rows keep byte-for-byte what was said; only what the four conversation routes
