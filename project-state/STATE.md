@@ -21,6 +21,45 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-19 (evening) — S22 closed: the eval surface held the credential, and the fix is deliberately
+NOT one rule for all four columns.**
+([ADR-0115](../docs/decisions/0115-eval-result-credential-surface.md), no migration.) ADR-0111 named
+`eval_results.output_text` as a sixth surface and never probed it; ADR-0112 left it out of scope. A
+synthetic AWS example key was driven through a **real** governed eval run and a **real** red-team run,
+and every stored column read back by raw SQL — measured, not argued from the code.
+
+**Four columns, four answers, each argued.** `output_text` held the key **character for character**
+and is **left faithful at rest**, redacted at the presentation boundary; `detail` (jsonb) held it in
+the judge's per-claim verdicts and takes the same hook; **`error` is scrubbed at WRITE time** in
+ADR-0102's registry; `judge_rationale` already carried the marker and is unchanged.
+
+**The reason `error` splits from `output_text` is the whole point of the batch.** A red-team probe's
+purpose can be to prove the agent disclosed a secret — a product that records "a probe got through"
+while deleting what got through has not been made safer, it has destroyed its own evidence. But an
+upstream exception message is **never** evidence of anything: a defeat is proved by what the model
+*said*, not by what the transport threw. So the defeat evidence stays intact and a test pins it.
+
+**The copies were the other half of the finding.** `redteam_findings.output_snippet` and
+`redteam_probe_trials.output_snippet` are slices of `output_text`, and `cardView` re-derives the
+judge's claims onto a model card — so **six read routes** handed the key out, across three files.
+All six are now inside an encapsulated Fastify scope, the ADR-0112 pattern reused rather than
+re-invented.
+
+**Completed by me after the agent was killed mid-verification.** A session rate limit took it out
+while it was running the suite that would have caught the one defect it left: `eval_results.error`
+was added to the scrub registry but not to the **inventory that pins the registry's contents**. My
+run found exactly that. It is ADR-0102's structural guard working as designed — a registry addition
+cannot slip in unannounced — and the inventory entry now carries the write-time-vs-presentation
+reasoning above.
+
+**Verified by me on a freshly created database**: **180 files / 2753 passed / 9 MinIO skips, exit 0**
+— **+1 file, +13 tests** over S13's 179/2740, nothing else moved. Repo-wide build and `tsc --noEmit`
+clean; instrument asserted (`ECONNREFUSED: 0`, `destroySoon: 0`, unhandled-error block empty).
+
+**Worth keeping from its non-vacuity table: five probes, and it reports the one prediction it got
+wrong** (N5, over-eager scrub — it predicted 2 failures and got 3). Recording the miss rather than
+quietly restating the prediction is the discipline M-023 exists for.
+
 **2026-09-19 (later still) — S13 closed: a re-scan that still sees the SAME signature now RE-OPENS
 a finding whose status claims the problem is fixed, and the rule it replaces was never ADR-0017's.**
 ([ADR-0114](../docs/decisions/0114-rescan-reopens-a-contradicted-finding.md), **no migration** —

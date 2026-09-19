@@ -159,9 +159,15 @@ caught on read. **The sweeps buy timeliness, never correctness.**
   the input, persisting nothing and reaching no third party. Recorded alongside ADR-0111's 5b/5c so
   it is not re-found.
 
-- **S22 — `eval_results.output_text` unassessed for credential leakage (opened 2026-09-19).** Named
-  by ADR-0111, deliberately out of scope for ADR-0112 because eval content is not conversation
-  content. It is the obvious next surface in the same family and has had no synthetic-secret probe.
+- **S22 — the eval surface held the credential. CLOSED 2026-09-19 by
+  [ADR-0115](../decisions/0115-eval-result-credential-surface.md), no migration.** Probed with a
+  synthetic key through a real eval run and a real red-team run. `output_text` held it verbatim and
+  `detail` held it in the judge's verdicts — **both left faithful at rest** and redacted at the
+  presentation boundary, because a red-team probe's purpose can be to prove the agent disclosed a
+  secret and deleting the disclosure destroys the evidence. **`error` splits from them and is
+  scrubbed at WRITE time**: an exception message can carry the credential that caused it and is
+  never evidence of anything. Six read routes across three files were covered, including the
+  `output_snippet` copies in `redteam_findings`/`redteam_probe_trials` and the model-card re-derivation.
 
 - **S14 (original entry, superseded above) — conversations hold a pasted credential verbatim. OWNER DECISION (opened 2026-09-17,
   ADR-0111).** Proven with a row: `conversation_messages.content` (both the user turn and the
