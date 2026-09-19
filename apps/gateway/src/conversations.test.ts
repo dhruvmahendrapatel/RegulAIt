@@ -517,3 +517,98 @@ describe("hard delete", () => {
     expect(rows).toHaveLength(0);
   });
 });
+
+/**
+ * S21 — `?projectId=` on the conversations list.
+ *
+ * `conversations.projectId` is the pillar-5 default attribution for every turn
+ * dispatched in a thread, so "my chats on project X" is the question an operator
+ * actually asks. The list already carried `projectName`; it could not be asked
+ * for one.
+ *
+ * The claim under test is deliberately TWO-SIDED, per M-035: the filter must
+ * NARROW (a thread on another project disappears) and must never WIDEN (another
+ * user's thread on the SAME project must still be invisible). A filter that only
+ * proved the first half would pass while quietly serving somebody else's
+ * conversations, which is the exact failure the ownership predicate exists to
+ * prevent — so it is asserted, not assumed.
+ */
+describe("S21 — listing conversations filtered by project", () => {
+  let projectB: string;
+  let onA: string;
+  let onB: string;
+  let unattributed: string;
+  let rexOnA: string;
+
+  beforeAll(async () => {
+    const pb = await app.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/projects",
+      payload: { name: `convo-s21-b-${Math.random().toString(36).slice(2, 8)}` },
+    });
+    expect(pb.statusCode).toBe(201);
+    projectB = pb.json().id;
+
+    const mk = async (auth: { authorization: string }, project?: string) => {
+      const r = await app.inject({
+        method: "POST",
+        headers: auth,
+        url: "/v1/conversations",
+        payload: project ? { agentId, projectId: project } : { agentId },
+      });
+      expect(r.statusCode).toBe(201);
+      return r.json().id as string;
+    };
+    onA = await mk(miaAuth, projectId);
+    onB = await mk(miaAuth, projectB);
+    unattributed = await mk(miaAuth);
+    rexOnA = await mk(rexAuth, projectId);
+  });
+
+  const idsFor = async (query: string) => {
+    const r = await app.inject({ method: "GET", headers: miaAuth, url: `/v1/conversations${query}` });
+    expect(r.statusCode).toBe(200);
+    return (r.json().conversations as Array<{ id: string }>).map((c) => c.id);
+  };
+
+  it("NARROWS to the named project, and drops this user's threads on every other one", async () => {
+    const ids = await idsFor(`?projectId=${projectB}`);
+    expect(ids).toContain(onB);
+    expect(ids).not.toContain(onA);
+    expect(ids).not.toContain(unattributed);
+    // positive pin so an empty list cannot satisfy the two negatives above
+    expect(ids.length).toBeGreaterThan(0);
+  });
+
+  it("NEVER WIDENS — another user's thread on the same project stays invisible", async () => {
+    const ids = await idsFor(`?projectId=${projectId}`);
+    expect(ids).toContain(onA); // the filter really did return this project
+    expect(ids).not.toContain(rexOnA); // ...and still only mine
+    const rexIds = (await (async () => {
+      const r = await app.inject({ method: "GET", headers: rexAuth, url: `/v1/conversations?projectId=${projectId}` });
+      expect(r.statusCode).toBe(200);
+      return (r.json().conversations as Array<{ id: string }>).map((c) => c.id);
+    })())!;
+    expect(rexIds).toContain(rexOnA); // rex sees his own
+    expect(rexIds).not.toContain(onA); // ...and not mia's
+  });
+
+  it("`none` selects the UNATTRIBUTED threads — the ADR-0024 bucket, not an invented word", async () => {
+    const ids = await idsFor("?projectId=none");
+    expect(ids).toContain(unattributed);
+    expect(ids).not.toContain(onA);
+    expect(ids).not.toContain(onB);
+  });
+
+  it("omitting the filter is unchanged — every thread of mine, across projects", async () => {
+    const ids = await idsFor("");
+    expect(ids).toEqual(expect.arrayContaining([onA, onB, unattributed]));
+    expect(ids).not.toContain(rexOnA);
+  });
+
+  it("a projectId that is neither a uuid nor `none` is refused, not silently ignored", async () => {
+    const r = await app.inject({ method: "GET", headers: miaAuth, url: "/v1/conversations?projectId=not-a-uuid" });
+    expect(r.statusCode).toBe(400);
+  });
+});

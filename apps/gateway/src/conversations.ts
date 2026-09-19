@@ -1,12 +1,14 @@
 import type { FastifyInstance } from "fastify";
 import {
   agents,
+  and,
   asc,
   conversationMessages,
   conversations,
   count,
   desc,
   eq,
+  isNull,
   projects,
   type Db,
 } from "@regulait/db";
@@ -195,6 +197,31 @@ export function registerConversationRoutes(app: FastifyInstance, db: Db) {
     scope.get("/v1/conversations", async (req, reply) => {
       const userId = req.authCtx.userId;
       if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_converse" });
+      // S21: narrow this user's threads to ONE project. `conversations.projectId`
+      // is the pillar-5 default attribution for every turn dispatched in the
+      // thread, so "my chats on project X" is the question an operator actually
+      // asks — the unfiltered list already carried `projectName`, it just could
+      // not be asked for one.
+      //
+      // `none` selects the UNATTRIBUTED threads. That vocabulary is not invented
+      // here: ADR-0024 O11 already exposes the null-project bucket as
+      // `GET /v1/costs/unattributed`, on the reasoning that spend belonging to no
+      // project must stay VISIBLE rather than be silently folded into one. The
+      // same argument applies to a conversation: without this, a user with
+      // unattributed threads has no way to isolate them.
+      //
+      // This narrows; it never widens. The ownership predicate below is applied
+      // regardless, so a projectId belonging to somebody else's conversations
+      // returns an empty list, not theirs.
+      const { projectId } = z
+        .object({ projectId: z.union([z.literal("none"), z.string().uuid()]).optional() })
+        .parse(req.query);
+      const projectFilter =
+        projectId === undefined
+          ? undefined
+          : projectId === "none"
+            ? isNull(conversations.projectId)
+            : eq(conversations.projectId, projectId);
       const rows = await db
         .select({
           id: conversations.id,
@@ -211,7 +238,9 @@ export function registerConversationRoutes(app: FastifyInstance, db: Db) {
         .leftJoin(agents, eq(agents.id, conversations.agentId))
         .leftJoin(projects, eq(projects.id, conversations.projectId))
         .leftJoin(conversationMessages, eq(conversationMessages.conversationId, conversations.id))
-        .where(eq(conversations.userId, userId))
+        .where(
+          projectFilter ? and(eq(conversations.userId, userId), projectFilter) : eq(conversations.userId, userId),
+        )
         .groupBy(conversations.id, agents.name, projects.name)
         .orderBy(desc(conversations.updatedAt));
       return { conversations: rows };
