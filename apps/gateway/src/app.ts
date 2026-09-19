@@ -55,7 +55,9 @@ import {
   csvBatchRows,
   csvMaxRows,
   resolveCsvWindow,
+  collectCsv,
   streamCsv,
+  type CsvStreamSpec,
 } from "./csv-export.js";
 import { afterCursorDesc, atTextSql, decodeCursor, encodeCursor } from "./pagination.js";
 import { resolveTrustProxy, type TrustProxySetting } from "./trusted-proxy.js";
@@ -175,6 +177,7 @@ import {
   refuseIfExpansionBlocked,
   refuseIfSeatCapReached,
   registerLicensingRoutes,
+  resolveLicense,
 } from "./licensing.js";
 import { registerAuditChainRoutes, type AnchorSink } from "./audit-chain.js";
 import {
@@ -317,6 +320,11 @@ import type { CopilotNarrator, RecommendationJudge } from "@regulait/shared";
 import { registerChatOpsRoutes } from "./chatops.js";
 import path from "node:path";
 import { registerSpaInlineScripts, securityHeaders } from "./security-headers.js";
+import {
+  buildExportBundle,
+  exportBundleMaxCsvRows,
+  resolveExportSigningKey,
+} from "./export-bundle.js";
 import { MergeConflictError, WorkflowStateError } from "@regulait/workflow-kernel";
 
 const uuidParam = z.object({ serverId: z.string().uuid() });
@@ -3516,6 +3524,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
 
   app.get("/v1/audit.csv", async (req, reply) => {
     const q = auditCsvQuery.parse(req.query);
+    // ADR-0116. `signed=1` wraps THE SAME bytes in an offline-verifiable
+    // bundle. It is a separate parse because auditFilterQuery is shared with
+    // the JSON list route, which has no bundle form.
+    const wantsBundle = (() => {
+      const raw = (req.query as Record<string, unknown> | undefined)?.signed;
+      return raw === "1" || raw === "true";
+    })();
     const win = resolveCsvWindow(q.from, q.to);
     const filters = auditFilters(q, win.from, win.to);
     const where = filters.length ? and(...filters) : undefined;
@@ -3545,12 +3560,17 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
     // with different filters never collide in a downloads folder
     const suffix = `${q.userId ? `-${q.userId.slice(0, 8)}` : ""}${q.deployMode ? `-${q.deployMode}` : ""}`;
     type Row = typeof auditLog.$inferSelect & { atText: string };
-    await streamCsv<Row>(reply, {
+    // A bundle is held in memory to be hashed and signed, so it takes its own
+    // (lower, and DISCLOSED) ceiling rather than the streaming one. The
+    // truncation notice `emitCsv` appends is inside the signed bytes, so a
+    // short bundle says it is short.
+    const bundleMaxRows = exportBundleMaxCsvRows();
+    const spec: CsvStreamSpec<Row> = {
       filename: `audit-log${suffix}.csv`,
       header: AUDIT_CSV_HEADER,
       eol: "\n",
       batchSize: csvBatchRows(),
-      maxRows: csvMaxRows(),
+      maxRows: wantsBundle ? Math.min(csvMaxRows(), bundleMaxRows) : csvMaxRows(),
       window: win,
       fetchPage: async (after, limit) => {
         const pageWhere = after
@@ -3595,7 +3615,105 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
           .limit(1);
         return rows.length > 0;
       },
+    };
+
+    if (!wantsBundle) {
+      await streamCsv<Row>(reply, spec);
+      return;
+    }
+
+    const collected = await collectCsv<Row>(spec);
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "audit_export",
+      objectId: null,
+      effect: "allow",
+      ruleId: "audit-export-signed",
+      ruleChain: [],
+      reason:
+        `the audit trail was exported as a SIGNED, offline-verifiable bundle (${collected.rows} row(s)` +
+        `${collected.truncated ? ", TRUNCATED at the bundle row ceiling" : ""}) — the whole point of ` +
+        "the bundle is that it leaves the platform and is checked without it, so the act of producing " +
+        "one is itself a chained record",
+      detail: {
+        rows: collected.rows,
+        truncated: collected.truncated,
+        disclosed: collected.disclosed,
+        maxRows: spec.maxRows,
+        windowSource: win.source,
+      },
     });
+    const license = await resolveLicense(db);
+    const bundle = await buildExportBundle({
+      db,
+      subject: {
+        kind: "audit-log",
+        id: null,
+        descriptor: {
+          filters: {
+            userId: q.userId ?? null,
+            objectType: q.objectType ?? null,
+            effect: q.effect ?? null,
+            deployMode: q.deployMode ?? null,
+          },
+          windowFrom: win.from ? win.from.toISOString() : null,
+          windowTo: win.to ? win.to.toISOString() : null,
+          windowSource: win.source,
+          rows: collected.rows,
+          rowCeiling: spec.maxRows,
+          truncated: collected.truncated,
+          disclosureRowAppended: collected.disclosed,
+        },
+      },
+      content: [
+        { name: spec.filename, contentType: "text/csv", body: Buffer.from(collected.csv, "utf8") },
+      ],
+      actor: { userId: req.authCtx.userId ?? null, via: req.authCtx.via },
+      licenseId: license.document?.licenseId ?? null,
+    });
+    if (!bundle.ok) {
+      return reply.status(409).send({ error: bundle.ruleId, detail: bundle.reason });
+    }
+    for (const [k, v] of Object.entries(securityHeaders("application/gzip"))) reply.header(k, v);
+    reply.header("content-type", "application/gzip");
+    reply.header("content-disposition", `attachment; filename="${bundle.filename}"`);
+    reply.header("x-regulait-export-signing-key-id", bundle.keyId);
+    reply.header("x-regulait-export-signing-key-fingerprint", bundle.fingerprint);
+    reply.header("x-regulait-export-row-limit", String(spec.maxRows));
+    return reply.send(bundle.archive);
+  });
+
+  /**
+   * ADR-0116 — the OUT-OF-BAND publication point for the export trust root.
+   *
+   * This is the value an admin reads once and hands to their auditor through a
+   * channel the auditor already trusts. It is deliberately NOT what
+   * `scripts/verify-export-bundle.sh` fetches: a verifier that phoned this
+   * endpoint would be back to "verification requires the product running",
+   * which is the thing the bundle exists to escape.
+   */
+  app.get("/v1/exports/signing-key", async (_req, reply) => {
+    const key = resolveExportSigningKey();
+    if (!key.ok) {
+      return reply.status(409).send({
+        configured: false,
+        error: key.ruleId,
+        detail: key.reason,
+      });
+    }
+    return {
+      configured: true,
+      keyId: key.keyId,
+      fingerprint: key.fingerprint,
+      publicKeyPem: key.publicKeyPem,
+      algorithm: "ed25519",
+      reproduce: "openssl pkey -pubin -in <key>.pub -outform DER | sha256sum",
+      note:
+        "Give this fingerprint to your auditor ONCE, through a channel they already trust. They pass " +
+        "it to scripts/verify-export-bundle.sh --fingerprint and never need to contact this " +
+        "deployment, or the vendor, again. The key is held by THIS deployment; the vendor does not " +
+        "have it and cannot verify on your behalf.",
+    };
   });
 
   return app;
