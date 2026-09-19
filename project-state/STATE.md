@@ -21,6 +21,48 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-19 — S14 closed: the owner chose option (c), and conversations are now scrubbed at the
+PRESENTATION boundary.** ([ADR-0112](../docs/decisions/0112-conversation-presentation-scrub.md), no
+migration.) Stored rows keep byte-for-byte what was said; only what the four conversation routes
+**hand out** is redacted. Thirteen surfaces were enumerated — three carried content and are covered,
+six were checked and found to carry only ids, and a conversation export route **does not exist**
+(the `onSend` backstop means adding one later cannot silently reopen the surface).
+
+**The chokepoint, verified myself.** The scrub installs inside an encapsulated Fastify scope
+**before the first route is declared**, via `preSerialization` (walks the object, so a marker can
+never break the JSON) with `onSend` as the string/Buffer backstop. A route added to that file next
+month is covered by *where it is declared*, not by its author remembering a rule — ADR-0099/0102's
+own argument applied to the read side. `PRESENTATION_SCRUB` is `scrubAuditText` **by reference**
+through ADR-0102's alias, so the marker stays character-identical across `audit_log`, `trace_spans`
+and now conversations. Rejected, each for a stated reason: a DB-read scrub (corrupts replay), a
+per-route `presentX()` call (the convention ADR-0099 rejected), and a global `onSend` (would put the
+detector on every 4xx echo product-wide).
+
+**The find that matters more than the fix — recorded as M-035.** The guard protecting model replay
+**passed 10 of 10 while the provider was being handed redacted text.** The invoke path has **two**
+model-bound sources and only one runs per dispatch: with compaction eligible the wire comes from
+`ConversationContext.messages`; on optimizer `passthrough` compaction is skipped and it comes from
+`ConversationContext.history`. The guard watched the first. It was caught only because the probe was
+"mis-site the scrub on path X" rather than "remove the control" — a blunter probe would have left it
+green and shipped a guarantee that did not hold. **A positive assertion is vacuous in the same way a
+negative is, if it watches one of several producers.** `loadOwnConversation` is now
+`loadOwnConversationForReplay`, with both paths asserted on two identities.
+
+**The honest limit, which ADR-0112 gives its own top-level section rather than a footnote**: option
+(c) protects the API surface, **not the data at rest**. `pg_dump`, a restored backup, a `psql`
+session, or any module opening its own `pg.Pool` still reads the credential in the clear. **The
+operator procedure for "a customer pasted a key into chat" is therefore: ROTATE IT.** The product
+did not contain the secret, it stopped echoing it. And **model replay still sends the original text
+to the provider** — on the turn it was typed, on every later turn of that thread, and inside the
+compaction summarisation dispatch. Inherent to (c) and to everything short of (b).
+
+**Status of my own verification, stated rather than implied**: I verified the structure from the
+committed code (the rename and its two callers, the scope/hook siting, the detector identity). The
+agent reports **178 files / 2723 passed / 9 skipped, exit 0**. **I have NOT re-run the suite
+myself**, because a second agent (S19, Teams outbound) currently has uncommitted in-flight work in
+`chatops.ts` that fails typecheck — a run now would fail for reasons unrelated to S14. One suite
+covering both will follow when S19 lands.
+
 **2026-09-17 — R3 landed and retested: the trace surface was leaking credentials BY DEFAULT, and
 off the platform.** ([ADR-0111](../docs/decisions/0111-trace-preview-credential-scrub.md), no
 migration.) F04 named five surfaces nobody had assessed. All five are now assessed with a synthetic

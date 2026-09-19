@@ -147,7 +147,23 @@ caught on read. **The sweeps buy timeliness, never correctness.**
     `managed`/`voluntary` for the tools too unless the MCP servers themselves are only reachable
     through us.
 
-- **S14 — conversations hold a pasted credential verbatim. OWNER DECISION (opened 2026-09-17,
+- ~~**S14 — conversations hold a pasted credential verbatim**~~ **CLOSED 2026-09-19 by
+  [ADR-0112](../decisions/0112-conversation-presentation-scrub.md)** — owner chose **option (c)**:
+  stored faithfully, redacted at the presentation boundary. Three residuals carried forward:
+  **(1) AT REST IS UNPROTECTED — the operator procedure for "someone pasted a key into chat" is
+  still ROTATE IT.** A `pg_dump`, a restored backup or a `psql` session reads it in the clear; (c)
+  stopped the API echoing it, it did not contain it. **(2)** `eval_results.output_text` remains
+  unassessed for the same leak — ADR-0111 named it, ADR-0112 did not take it (**S22**).
+  **(3)** the live `POST /v1/agents/:id/invoke` response echoes the current turn unscrubbed, by
+  deliberate decision — it is the caller's own answer travelling back to the caller who just typed
+  the input, persisting nothing and reaching no third party. Recorded alongside ADR-0111's 5b/5c so
+  it is not re-found.
+
+- **S22 — `eval_results.output_text` unassessed for credential leakage (opened 2026-09-19).** Named
+  by ADR-0111, deliberately out of scope for ADR-0112 because eval content is not conversation
+  content. It is the obvious next surface in the same family and has had no synthetic-secret probe.
+
+- **S14 (original entry, superseded above) — conversations hold a pasted credential verbatim. OWNER DECISION (opened 2026-09-17,
   ADR-0111).** Proven with a row: `conversation_messages.content` (both the user turn and the
   assistant turn), `conversations.title` via `autoTitle`, and the compaction summary. **Deliberately
   not fixed** — scrubbing user chat content is a different contract from scrubbing operator prose,

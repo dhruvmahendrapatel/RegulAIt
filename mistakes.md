@@ -543,3 +543,35 @@ picking up deferred work later, re-verify its premise BEFORE scoping from it:
 the reason the premise survived unchallenged is that nothing executes prose. The
 cheapest place to catch this is the batch that writes the deferral, not the batch
 that inherits it.**
+
+## M-035 (2026-09-19) — a POSITIVE assertion can be vacuous too, if it watches one of several producers
+
+M-033 recorded that a negative assertion (`not.toContain(secret)`) is satisfied by
+an empty column, a missing row or a capture that never happened. S14 found the
+mirror image, and it is the more dangerous one because it *looks* like a strong
+test.
+
+ADR-0112 scrubs conversations at the presentation boundary and must leave the
+**model-bound replay** untouched. The guard for that asserted the provider
+received the original text, and it passed **10 of 10** — while a deliberate
+mis-siting probe had the provider being handed redacted text.
+
+The cause: the invoke path has **two** model-bound sources and only one runs per
+dispatch. With compaction eligible the wire comes from
+`ConversationContext.messages` via `prepareConversationContext`; with the caller
+on optimizer `passthrough`, compaction is skipped and the wire is
+`ConversationContext.history`. The guard watched the first. The second was
+silently broken and nothing went red.
+
+It was caught only because the probe was written as "mis-site the scrub on path X"
+rather than "remove the scrub" — a probe aimed at a *specific* producer, not at
+the control as a whole. A blunter probe would have left it green and the ADR would
+have shipped a guarantee it did not hold.
+
+**Rule: when a test pins "X is unchanged" or "X still receives the real value",
+first ENUMERATE the code paths that can produce X, then assert each one — and
+write at least one probe per path rather than one probe for the control. A guard
+covering one of several producers passes while another is broken, and a positive
+assertion is no protection against that: it only proves the path it happens to
+exercise. Ask "what else could have produced this value, and would my test have
+noticed if that one broke?"**
