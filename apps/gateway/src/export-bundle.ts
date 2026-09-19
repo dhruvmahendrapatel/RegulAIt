@@ -160,8 +160,8 @@ export function resolveExportSigningKey(): ExportSigningKey | ExportSigningRefus
         "so a signed export cannot be produced. This is a REFUSAL, not a fallback: an unsigned bundle " +
         "would look like evidence and prove nothing, and a keypair generated here at first use would " +
         "prove only that whoever holds this machine signed it. Generate the keypair off this host, " +
-        "install the private key, and publish its fingerprint to your auditors out of band — the same " +
-        "custody model as infra/release-keys/README.md.",
+        "install the private key, and publish its fingerprint to your auditors out of band. " +
+        "infra/export-keys/README.md has the exact commands and the rotation rules.",
     };
   }
   if (!keyId || keyId.trim() === "") {

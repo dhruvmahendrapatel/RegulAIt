@@ -121,6 +121,12 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/approvals/workload": "internal",
   "GET /v1/audit": "public-stable",
   "GET /v1/audit.csv": "public-stable",
+  // ADR-0116 — the export-signing key's fingerprint, the OUT-OF-BAND
+  // publication point an admin reads once and hands to an auditor. `internal`
+  // on purpose: it is an operator surface, not something an SDK calls, and a
+  // verifier must never fetch it (that would put the running product back in
+  // the verification path, which is the thing the bundle exists to escape).
+  "GET /v1/exports/signing-key": "internal",
   "POST /v1/audit/prune": "internal",
   "GET /v1/audit/retention": "internal",
   // ADR-0060 — the tamper-evident chain's operator surface. `internal` on
@@ -782,6 +788,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/approvals/workload": "approvals",
   "GET /v1/audit": "audit",
   "GET /v1/audit.csv": "audit",
+  "GET /v1/exports/signing-key": "audit",
   "POST /v1/audit/prune": "audit",
   "GET /v1/audit/verify": "audit",
   "POST /v1/audit/anchor": "audit",
