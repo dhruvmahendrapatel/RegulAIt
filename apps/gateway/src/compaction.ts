@@ -116,7 +116,7 @@ export async function prepareConversationContext(
   args: {
     userId: string;
     conversation: ConversationRow;
-    /** every stored row in order, denied included (loadOwnConversation.messages) */
+    /** every stored row in order, denied included (loadOwnConversationForReplay.messages) */
     messages: StoredConversationMessage[];
     /** entitled + dispatchable agents the summarizer may be chosen from */
     candidates: readonly AgentRow[];

@@ -127,7 +127,7 @@ import {
   type PiiMode,
 } from "./projects.js";
 import {
-  loadOwnConversation,
+  loadOwnConversationForReplay,
   recordConversationTurns,
   type ConversationContext,
 } from "./conversations.js";
@@ -3318,7 +3318,7 @@ export function registerAgentConnectorRoutes(
     // conversations are personal, see conversations.ts).
     let convo: Extract<ConversationContext, { ok: true }> | null = null;
     if (body.conversationId) {
-      const loaded = await loadOwnConversation(db, body.conversationId, userId);
+      const loaded = await loadOwnConversationForReplay(db, body.conversationId, userId);
       if (!loaded.ok) return reply.status(loaded.status).send({ error: loaded.error });
       convo = loaded;
     }
@@ -4349,7 +4349,7 @@ export function registerAgentConnectorRoutes(
       }
       // A denied conversation turn is recorded honestly (detail.denied, no
       // assistant turn) but never replayed to a provider on later turns —
-      // loadOwnConversation filters it out of the model-bound history.
+      // loadOwnConversationForReplay filters it out of the model-bound history.
       if (convo && body.dispatch) {
         await recordConversationTurns(db, convo.conversation, {
           userContent: body.input ?? "",

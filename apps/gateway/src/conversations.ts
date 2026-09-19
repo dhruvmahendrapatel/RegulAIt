@@ -14,6 +14,7 @@ import type { ModelChatMessage } from "@regulait/model-provider";
 import { createConversationSchema } from "@regulait/shared";
 import { z } from "zod";
 import { assertProjectAttribution } from "./projects.js";
+import { installConversationPresentationScrub } from "./conversation-presentation.js";
 
 /**
  * MULTI-TURN CONVERSATIONS — the storage and access layer behind the
@@ -60,9 +61,24 @@ export type ConversationContext =
     }
   | { ok: false; status: number; error: string };
 
-/** Load a conversation for the invoke path: 404 unknown, 403 not the
- * caller's own (admins included), else the row plus its model-bound history. */
-export async function loadOwnConversation(
+/**
+ * Load a conversation for the INVOKE path: 404 unknown, 403 not the caller's
+ * own (admins included), else the row plus its model-bound history.
+ *
+ * ADR-0112 — THIS LOADER IS FAITHFUL ON PURPOSE, AND THE NAME SAYS SO.
+ * What it returns is REPLAY material: `history` becomes the prior turns sent to
+ * the model provider on a multi-turn dispatch, and `messages` is what
+ * `compaction.ts` summarizes. It must carry the user's ORIGINAL text, marker-
+ * free, or the model receives `[redacted:…]` where the question was and the
+ * thread starts answering something nobody asked.
+ *
+ * So: DO NOT scrub here, and do not reuse this for anything a human or a file
+ * will see. The owner's ADR-0112 choice — store faithfully, redact what is
+ * handed out — is implemented at the presentation boundary instead, by
+ * `installConversationPresentationScrub` on the route scope below. Presentation
+ * is not replay.
+ */
+export async function loadOwnConversationForReplay(
   db: Db,
   conversationId: string,
   userId: string,
@@ -140,96 +156,113 @@ export async function recordConversationTurns(
 /** Own-scoped CRUD for conversations (all four are NON_ADMIN_ROUTES; the
  * dispatch-with-history path lives on the existing governed invoke route). */
 export function registerConversationRoutes(app: FastifyInstance, db: Db) {
-  app.post("/v1/conversations", async (req, reply) => {
-    const body = createConversationSchema.parse(req.body);
-    const userId = req.authCtx.userId;
-    if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_converse" });
-    // fail early on a dangling agent id — every turn will invoke it
-    const [agent] = await db.select({ id: agents.id }).from(agents).where(eq(agents.id, body.agentId));
-    if (!agent) return reply.status(404).send({ error: "unknown_agent" });
-    // pillar 5: the thread's default attribution must be a project the
-    // caller may bill to — same gate as a direct attributed invoke
-    if (body.projectId) {
-      const attribution = await assertProjectAttribution(db, body.projectId, userId, req.authCtx.isAdmin);
-      if (!attribution.ok) return reply.status(attribution.status).send({ error: attribution.error });
-    }
-    const [row] = await db
-      .insert(conversations)
-      .values({ userId, agentId: body.agentId, projectId: body.projectId ?? null })
-      .returning();
-    return reply.status(201).send(row);
-  });
+  /**
+   * ADR-0112 — THE PRESENTATION CHOKEPOINT.
+   *
+   * Every conversation route lives inside this ENCAPSULATED scope, and the
+   * scrub is installed on the scope before the first route is declared. That
+   * is what makes it by-construction rather than by-convention: a route added
+   * to this function next month is covered without its author knowing this
+   * comment exists, exactly as ADR-0099/0102 argued for the write side.
+   *
+   * The stored rows are untouched — `conversation_messages.content`,
+   * `conversations.title` and `conversations.summary` still hold byte-for-byte
+   * what was said. Only what these routes HAND OUT is redacted.
+   */
+  app.register(async (scope) => {
+    installConversationPresentationScrub(scope);
 
-  app.get("/v1/conversations", async (req, reply) => {
-    const userId = req.authCtx.userId;
-    if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_converse" });
-    const rows = await db
-      .select({
-        id: conversations.id,
-        title: conversations.title,
-        agentId: conversations.agentId,
-        agentName: agents.name,
-        projectId: conversations.projectId,
-        projectName: projects.name,
-        createdAt: conversations.createdAt,
-        updatedAt: conversations.updatedAt,
-        messageCount: count(conversationMessages.id),
-      })
-      .from(conversations)
-      .leftJoin(agents, eq(agents.id, conversations.agentId))
-      .leftJoin(projects, eq(projects.id, conversations.projectId))
-      .leftJoin(conversationMessages, eq(conversationMessages.conversationId, conversations.id))
-      .where(eq(conversations.userId, userId))
-      .groupBy(conversations.id, agents.name, projects.name)
-      .orderBy(desc(conversations.updatedAt));
-    return { conversations: rows };
-  });
+    scope.post("/v1/conversations", async (req, reply) => {
+      const body = createConversationSchema.parse(req.body);
+      const userId = req.authCtx.userId;
+      if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_converse" });
+      // fail early on a dangling agent id — every turn will invoke it
+      const [agent] = await db.select({ id: agents.id }).from(agents).where(eq(agents.id, body.agentId));
+      if (!agent) return reply.status(404).send({ error: "unknown_agent" });
+      // pillar 5: the thread's default attribution must be a project the
+      // caller may bill to — same gate as a direct attributed invoke
+      if (body.projectId) {
+        const attribution = await assertProjectAttribution(db, body.projectId, userId, req.authCtx.isAdmin);
+        if (!attribution.ok) return reply.status(attribution.status).send({ error: attribution.error });
+      }
+      const [row] = await db
+        .insert(conversations)
+        .values({ userId, agentId: body.agentId, projectId: body.projectId ?? null })
+        .returning();
+      return reply.status(201).send(row);
+    });
 
-  app.get("/v1/conversations/:conversationId", async (req, reply) => {
-    const { conversationId } = conversationIdParam.parse(req.params);
-    const userId = req.authCtx.userId;
-    if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_converse" });
-    const [row] = await db.select().from(conversations).where(eq(conversations.id, conversationId));
-    if (!row) return reply.status(404).send({ error: "unknown_conversation" });
-    // personal, admins included — see module doc
-    if (row.userId !== userId) return reply.status(403).send({ error: "forbidden" });
-    const [[agent], [project], messages] = await Promise.all([
-      db.select({ name: agents.name }).from(agents).where(eq(agents.id, row.agentId)),
-      row.projectId
-        ? db.select({ name: projects.name }).from(projects).where(eq(projects.id, row.projectId))
-        : Promise.resolve([undefined]),
-      db
+    scope.get("/v1/conversations", async (req, reply) => {
+      const userId = req.authCtx.userId;
+      if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_converse" });
+      const rows = await db
         .select({
-          id: conversationMessages.id,
-          role: conversationMessages.role,
-          content: conversationMessages.content,
-          detail: conversationMessages.detail,
-          createdAt: conversationMessages.createdAt,
+          id: conversations.id,
+          title: conversations.title,
+          agentId: conversations.agentId,
+          agentName: agents.name,
+          projectId: conversations.projectId,
+          projectName: projects.name,
+          createdAt: conversations.createdAt,
+          updatedAt: conversations.updatedAt,
+          messageCount: count(conversationMessages.id),
         })
-        .from(conversationMessages)
-        .where(eq(conversationMessages.conversationId, conversationId))
-        .orderBy(asc(conversationMessages.createdAt)),
-    ]);
-    return {
-      ...row,
-      agentName: agent?.name ?? null,
-      projectName: project?.name ?? null,
-      messages,
-    };
-  });
+        .from(conversations)
+        .leftJoin(agents, eq(agents.id, conversations.agentId))
+        .leftJoin(projects, eq(projects.id, conversations.projectId))
+        .leftJoin(conversationMessages, eq(conversationMessages.conversationId, conversations.id))
+        .where(eq(conversations.userId, userId))
+        .groupBy(conversations.id, agents.name, projects.name)
+        .orderBy(desc(conversations.updatedAt));
+      return { conversations: rows };
+    });
 
-  app.delete("/v1/conversations/:conversationId", async (req, reply) => {
-    const { conversationId } = conversationIdParam.parse(req.params);
-    const userId = req.authCtx.userId;
-    if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_converse" });
-    const [row] = await db
-      .select({ id: conversations.id, userId: conversations.userId })
-      .from(conversations)
-      .where(eq(conversations.id, conversationId));
-    if (!row) return reply.status(404).send({ error: "unknown_conversation" });
-    if (row.userId !== userId) return reply.status(403).send({ error: "forbidden" });
-    // hard delete; conversation_messages cascade with the FK
-    await db.delete(conversations).where(eq(conversations.id, conversationId));
-    return { removed: true };
+    scope.get("/v1/conversations/:conversationId", async (req, reply) => {
+      const { conversationId } = conversationIdParam.parse(req.params);
+      const userId = req.authCtx.userId;
+      if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_converse" });
+      const [row] = await db.select().from(conversations).where(eq(conversations.id, conversationId));
+      if (!row) return reply.status(404).send({ error: "unknown_conversation" });
+      // personal, admins included — see module doc
+      if (row.userId !== userId) return reply.status(403).send({ error: "forbidden" });
+      const [[agent], [project], messages] = await Promise.all([
+        db.select({ name: agents.name }).from(agents).where(eq(agents.id, row.agentId)),
+        row.projectId
+          ? db.select({ name: projects.name }).from(projects).where(eq(projects.id, row.projectId))
+          : Promise.resolve([undefined]),
+        db
+          .select({
+            id: conversationMessages.id,
+            role: conversationMessages.role,
+            content: conversationMessages.content,
+            detail: conversationMessages.detail,
+            createdAt: conversationMessages.createdAt,
+          })
+          .from(conversationMessages)
+          .where(eq(conversationMessages.conversationId, conversationId))
+          .orderBy(asc(conversationMessages.createdAt)),
+      ]);
+      return {
+        ...row,
+        agentName: agent?.name ?? null,
+        projectName: project?.name ?? null,
+        messages,
+      };
+    });
+
+    scope.delete("/v1/conversations/:conversationId", async (req, reply) => {
+      const { conversationId } = conversationIdParam.parse(req.params);
+      const userId = req.authCtx.userId;
+      if (!userId) return reply.status(403).send({ error: "bootstrap_cannot_converse" });
+      const [row] = await db
+        .select({ id: conversations.id, userId: conversations.userId })
+        .from(conversations)
+        .where(eq(conversations.id, conversationId));
+      if (!row) return reply.status(404).send({ error: "unknown_conversation" });
+      if (row.userId !== userId) return reply.status(403).send({ error: "forbidden" });
+      // hard delete; conversation_messages cascade with the FK
+      await db.delete(conversations).where(eq(conversations.id, conversationId));
+      return { removed: true };
+    });
   });
 }
