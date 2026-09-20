@@ -147,6 +147,12 @@ import {
   envFallbackAllowed,
   loadOrgSettings,
 } from "./org-settings.js";
+import {
+  lookupSemanticCache,
+  semanticCacheKey,
+  storeSemanticCache,
+  type SemanticCacheKey,
+} from "./semantic-cache-shared.js";
 import { loadInterceptionSettings } from "./compat-core.js";
 import { resolveCustomProviderForDispatch } from "./custom-providers.js";
 import { resolveArtifactProviderForDispatch } from "./regulait-llm.js";
@@ -313,7 +319,7 @@ async function enforceProjectInputPii(
  * would leak it, so the cached text is checked before it is served, with the
  * same audit shape as the input gate above.
  */
-async function enforceProjectCachedOutputPii(
+export async function enforceProjectCachedOutputPii(
   db: Db,
   userId: string,
   agentObjectId: string,
@@ -3496,28 +3502,20 @@ export function registerAgentConnectorRoutes(
         !!body.input &&
         !convo &&
         routingModeForCache !== "passthrough";
-      let cacheNorm: string | null = null;
-      let cacheHash: string | null = null;
+      // ADR-0119: the key derivation, the scoped read and the collision guard
+      // moved to `semantic-cache-shared.ts` so the compat/IDE path runs THE
+      // SAME governance boundary rather than a second copy of it. The behaviour
+      // here is unchanged — the helper is the code that used to be inline.
+      let cacheKey: SemanticCacheKey | null = null;
       if (wantCache && body.input) {
-        cacheNorm = normalizeCacheInput(body.input);
-        cacheHash = createHash("sha256").update(cacheNorm).digest("hex");
-        const ttlCutoff = new Date(Date.now() - org.semanticCacheTtlSeconds * 1000);
-        // THE GOVERNANCE BOUNDARY: userId AND agentId (the invoked agent) AND a
-        // fresh row; the stored normalizedInput is re-checked as a hash-collision
-        // guard before anything is served.
-        const [hit] = await db
-          .select()
-          .from(semanticCache)
-          .where(
-            and(
-              eq(semanticCache.userId, userId),
-              eq(semanticCache.agentId, agent.id),
-              eq(semanticCache.promptHash, cacheHash),
-              gte(semanticCache.createdAt, ttlCutoff),
-            ),
-          )
-          .limit(1);
-        if (hit && hit.normalizedInput === cacheNorm) {
+        cacheKey = semanticCacheKey(body.input);
+        const hit = await lookupSemanticCache(db, {
+          userId,
+          agentId: agent.id,
+          key: cacheKey,
+          ttlSeconds: org.semanticCacheTtlSeconds,
+        });
+        if (hit) {
           // The input was gated above; the CACHED OUTPUT may still carry PII it
           // acquired under a different, ungated attribution. Withhold it rather
           // than serve it on a project whose mode is `block`.
@@ -4147,33 +4145,20 @@ export function registerAgentConnectorRoutes(
       // otherwise a no-op (byte-identical to the pre-caching path). No
       // cost_events on a miss — nothing was saved yet.
       const storeSemanticCacheIf = async (outcome: DispatchOutcome) => {
-        if (!wantCache || !cacheHash || cacheNorm == null || !outcome.ok) return;
+        if (!wantCache || !cacheKey || !outcome.ok) return;
         const r = outcome.result;
         // never store a refusal, an empty output, or a PII-withheld marker
         if (r.refusal || !r.outputText || r.pii?.withheld) return;
-        await db
-          .insert(semanticCache)
-          .values({
-            userId,
-            agentId: agent.id,
-            promptHash: cacheHash,
-            normalizedInput: cacheNorm,
-            outputText: r.outputText,
-            model: r.model,
-            inputTokens: r.usage.inputTokens,
-            outputTokens: r.usage.outputTokens,
-          })
-          .onConflictDoUpdate({
-            target: [semanticCache.userId, semanticCache.agentId, semanticCache.promptHash],
-            set: {
-              normalizedInput: cacheNorm,
-              outputText: r.outputText,
-              model: r.model,
-              inputTokens: r.usage.inputTokens,
-              outputTokens: r.usage.outputTokens,
-              createdAt: new Date(),
-            },
-          });
+        // ADR-0119: shared with the compat/IDE path, so the two cannot drift.
+        await storeSemanticCache(db, {
+          userId,
+          agentId: agent.id,
+          key: cacheKey,
+          outputText: r.outputText,
+          model: r.model,
+          inputTokens: r.usage.inputTokens,
+          outputTokens: r.usage.outputTokens,
+        });
       };
 
       // MODEL DISPATCH: real execution, strictly after governance + routing —
