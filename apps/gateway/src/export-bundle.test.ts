@@ -456,7 +456,18 @@ describe("TAMPERING — every one of these must be caught, with its OWN message"
     const p = path.join(rowsDir, victim);
     const before = readFileSync(p, "utf8");
     expect(before).toContain("regulait.audit.v1");
-    writeFileSync(p, before.replace('"effect":"allow"', '"effect":"deny"'));
+    // Flip whichever effect this row actually carries. Replacing only
+    // allow->deny made the tamper CONDITIONAL on the victim row: in a shared
+    // database the first row of the segment is whatever another file happened
+    // to write, and when that row was already a deny the replace was a no-op,
+    // the bundle was left pristine, and the verifier "correctly" passed — a
+    // tamper test that tampers with nothing (M-033).
+    const tampered = before.includes('"effect":"allow"')
+      ? before.replace('"effect":"allow"', '"effect":"deny"')
+      : before.replace('"effect":"deny"', '"effect":"allow"');
+    // The tamper must have HAPPENED before we can assert it is caught.
+    expect(tampered).not.toBe(before);
+    writeFileSync(p, tampered);
     const out = expectRefused(
       repack(dir, "t-row"),
       ["--fingerprint", realFingerprint],
