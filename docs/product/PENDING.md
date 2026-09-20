@@ -277,6 +277,15 @@ caught on read. **The sweeps buy timeliness, never correctness.**
   re-run twice more; **it did not reproduce**, so the probe was reverted and no diagnosis was
   reached. Recorded rather than guessed at.
 
+  **A THIRD HYPOTHESIS, opened 2026-09-20 by M-037 — untested, and stated as a hypothesis.**
+  ADR-0117 found that `POST /v1/messages` resolves its agent by the MODEL STRING, and that in the
+  shared suite database ADR-0020's tie-break legitimately selects another file's agent carrying the
+  same model. S8 is a **compat-path** test (`compat-longtail.test.ts`) that got a 500 where it
+  expected 409 `no_model_credential`, is order-dependent, and passes 3/3 in isolation — the same
+  shape and the same surface. If that file also resolves by model string, the agent it actually
+  reached may not be the one whose credential absence it is asserting about. **This has NOT been
+  checked**; it is recorded so the next session starts here rather than re-deriving it.
+
   **Investigated 2026-09-09 — two hypotheses ELIMINATED with evidence, cause still unknown.**
   The 409 requires three simultaneous absences (`agents-connectors.ts:1636`): no user credential,
   no platform credential, and no env-key fallback. So a 500 means one of them was present.

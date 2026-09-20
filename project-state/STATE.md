@@ -21,6 +21,69 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-20 — ADR-0116 and ADR-0117 landed together: two of the deck's four false claims are now
+true, and both batches were finished by me after rate limits killed their agents mid-flight.**
+
+**ADR-0116 — signed, offline-verifiable exports** (no migration). The deck claimed *"a signed,
+self-verifying bundle your auditor can check independently."* Exports were **plain unsigned CSV or
+JSON**, and audit verification was a **live API call against the running system** — the opposite of
+the promise. Now: an Ed25519-signed bundle and a standalone verifier needing no database, no
+gateway, no network.
+
+**The design turns on a trap I had found in the sibling LLM product hours earlier**, and the ADR
+title states the answer: *the trust root is a fingerprint obtained OUT OF BAND, and the bundled
+public key is never the authority.* A bundle carrying its own key is self-*consistent*, not
+self-*verifying* — anyone can re-sign a doctored bundle with a fresh key. The verifier takes
+`--fingerprint` or a pinned `--keyring`; the bundled copy is a convenience and is never treated as
+authority. **No signing key produces a refusal, never a quietly unsigned bundle.** Rotation does not
+invalidate past bundles.
+
+**Six export producers were enumerated and only two are covered** — the compliance report artifact
+and `GET /v1/audit.csv`. Cost CSVs, billing statements and the onboarding snapshot are **not** signed,
+and the ADR says so in a table rather than letting "exports, plural" imply otherwise. **The deck
+sentence is written to describe what is covered**; used beside a screenshot of a cost CSV it becomes
+an overstatement again.
+
+**ADR-0117 — international identifier PII** (migration 0110). Ten jurisdictions, and the finding is
+that the batch's own premise was wrong. It first defaulted to "the checksum-backed jurisdictions";
+**three of its checksums were defective** — Verhoeff used the *generation* permutation offset inside
+the *validation* loop (rejecting the published example while still accepting ~10% of random input: a
+checksum-shaped function that was not the checksum), the German IdNr structural rule was **inverted**
+in a way the single published example could not expose, and the French NIR key range was off by one
+in both directions.
+
+**Then the reasoning itself fell.** Measured: **one decimal check digit divides the candidate space
+by ten and no more** — BSN **9.03%**, TFN 9.00%, NINO 8.47%, SIN 8.09%, Aadhaar 8.03% false positives
+on random digit runs, against Steuer-ID 0.23% and NIR 0.06%. In `block` mode that **refuses
+legitimate work the user cannot route around**. So the shipped default is **empty**, selection is
+per jurisdiction, and each measured rate is published next to its switch. "Checksum-backed" is no
+longer used as a safety rating anywhere.
+
+`enforcePII` now takes the enabled set as a **required** argument, so a path added later cannot
+silently enforce less than the org configured — the compiler asks, and the type error enumerated the
+**ten** call sites.
+
+**The compat/IDE path was passing for the wrong reason, and that is recorded as M-037.** `POST
+/v1/messages` resolved its agent by the `mock-balanced` **model string**; in the shared suite
+database ADR-0020's deterministic tie-break correctly picks another file's agent, refusing with
+`agent_denied`. An assertion asking only for "not 200" was satisfied by a refusal that had nothing
+to do with PII, so the enforcement claim on the IDE path had **never been tested in a full run**.
+The product was right; the test trusted a coincidence.
+
+**Verified by me on a freshly created database**: **182 files / 2794 passed / 9 MinIO skips, exit 0**
+— +2 files and +41 tests over S22's 180/2753. Repo-wide build and `tsc --noEmit` clean; instrument
+asserted (`ECONNREFUSED: 0`, `destroySoon: 0`, unhandled-error block empty). My own probe, predicted
+before running: removing the agent pin should redden exactly the two compat cases and leave the other
+37 green — it did, exactly.
+
+**What I had to finish, and it is a pattern now**: four agents died on one session limit, two more on
+the next. ADR-0117 **was never written by its agent at all** — its implementation, tests and vectors
+were committed without a decision record, which `CLAUDE.md` forbids. I reconstructed it from the
+committed code and the commit messages, re-read the measured rates from the registry rather than
+copying them from prose, and checked every cross-referenced ADR filename resolved — **two of my own
+first-draft links did not**, and I verified the ADR-0020 tie-break claim against ADR-0020's text
+rather than trusting the code comment that cited it (M-036).
+
 **2026-09-19 (evening) — S22 closed: the eval surface held the credential, and the fix is deliberately
 NOT one rule for all four columns.**
 ([ADR-0115](../docs/decisions/0115-eval-result-credential-surface.md), no migration.) ADR-0111 named

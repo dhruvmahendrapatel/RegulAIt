@@ -612,3 +612,50 @@ text is not there, say where the rule actually lives — "an inline comment in
 `<file>:<line>`" is a perfectly good provenance and an honest one, and it tells
 the next reader the thing the ADR citation actively hides: that nobody has
 decided this yet.**
+
+---
+
+## M-037 (2026-09-20) — a fixture resolved by a NON-UNIQUE natural key binds to another file's row, and "not 200" cheerfully accepts the wrong refusal
+
+ADR-0117 had to prove that international PII is enforced on the compat/IDE
+path. The test posted to `/v1/messages` with `model: "mock-balanced"` and
+asserted `expect(res.statusCode).not.toBe(200)`.
+
+It passed. It was not testing what it claimed.
+
+The gateway's suite shares one database across files. Another file
+(`redteam-depth.test.ts`) leaves an enabled agent — `rtd-subject` — carrying
+the **same model string**. ADR-0020's tie-break for a duplicated model id is
+deterministic and correct (lowest tier, then oldest `createdAt`, then id), and
+it selects that foreign agent. This test's user has no grant on it, so the
+route returns **403 `agent_denied`** — a refusal with nothing whatsoever to do
+with PII, which satisfies `not.toBe(200)` perfectly.
+
+So the enforcement claim on the IDE path had never once been exercised in a
+full-suite run. **In isolation it passed for the right reason; in the suite it
+passed for the wrong one** — the worst combination, because the isolated run is
+the one a developer reaches for when something looks suspicious.
+
+Two things make this its own entry rather than a restatement of M-026:
+
+1. **The trap is the LOOKUP, not the assertion.** M-026 says verify by the row
+   rather than the status code. Here even a careful author can pick a fixture
+   by what looks like an identifier — a model name, an email, a slug — and in a
+   shared database that key is not unique, so the *subject under test* silently
+   becomes someone else's row. ADR-0107 recorded this shape for unordered
+   single-row reads in **product** code; this is the same bug wearing a test's
+   clothes, and a deterministic, correct tie-break is what delivers it.
+2. **The weak assertion is what conceals it.** A refusal-shaped test is the
+   easiest place in a codebase to accept the wrong reason, because the happy
+   path is the one everybody scrutinises.
+
+It surfaced only because the assertion was being strengthened for an unrelated
+reason — to name the PII category rather than accept any non-200. The
+strengthening failed, and the failure was the finding.
+
+**Rule: in a suite that shares a database, resolve every fixture by an
+identifier YOU created — an id, or a per-run unique token — never by a natural
+key another file could also be using. And when a test asserts a refusal, assert
+WHICH refusal: `not.toBe(200)` and `not.toBeNull()` are the same false comfort
+as `not.toContain()`, satisfied by any outcome of the right shape. Ask "what
+else in this database answers to the name I just used?"**
