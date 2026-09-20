@@ -135,6 +135,7 @@ import { applyModelCardApprovalDecision, registerMrmRoutes } from "./mrm.js";
 import { registerRedTeamRoutes } from "./redteam.js";
 import { registerReportingRoutes } from "./reporting.js";
 import { registerPostureRoutes } from "./posture.js";
+import { registerPosturePresetRoutes } from "./posture-preset.js";
 import { registerInventoryRoutes } from "./inventory.js";
 // ADR-0090 — grant certification campaigns: the decide-path hooks (the ONE
 // queue carries the keep/revoke decisions) and the campaign CRUD routes.
@@ -3348,6 +3349,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // GET/PUT routes are admin-only (deliberately NOT in NON_ADMIN_ROUTES); the
   // audit auto-prune scheduler is OFF by default and unref'd, stopped on close.
   registerOrgSettingsRoutes(app, db);
+  registerPosturePresetRoutes(app, db);
 
   // Getting-started journey (admin-only via the default gate): one read-only
   // aggregation of real readiness signals the /admin checklist card renders.
