@@ -32,6 +32,9 @@
  * the authorized object:
  *   - slack     → a channel ID (e.g. "C0123456789")
  *   - teams     → a Bot Framework CONVERSATION ID (e.g. "19:…@thread.tacv2")
+ *   - outlook   → ONE recipient mailbox address (e.g. "ana@acme.com"). A
+ *                 mailbox, never a distribution list the adapter resolves:
+ *                 the authorized object has to be the thing that receives.
  *   - github    → an "owner/repo" slug (e.g. "acme/billing")
  *   - jira      → a project key (e.g. "PLAT")
  *   - snowflake → a "DATABASE.SCHEMA" pair (e.g. "ANALYTICS.PUBLIC")
@@ -50,6 +53,7 @@ export const CONNECTOR_PROVIDER_KINDS = [
   "webhook",
   "slack",
   "teams",
+  "outlook",
   "github",
   "jira",
   "snowflake",
@@ -809,6 +813,200 @@ export class TeamsConnectorProvider implements ConnectorProvider {
 // minus now.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// ADR-0121 — OUTLOOK: the approval COURIER, and deliberately nothing more.
+//
+// Microsoft Graph `sendMail`, app-only. Two things about the shape are worth
+// stating because they are decisions rather than defaults.
+//
+// THE TENANT IS REQUIRED, unlike Teams. The Bot Connector accepts a
+// multi-tenant bot against `botframework.com`; Graph app-only has no such
+// thing — a client-credentials token is minted for ONE tenant, and a
+// credential without it could only ever be guessed at.
+//
+// READ IS REFUSED OUTRIGHT. `operation: "read"` on a mailbox means `GET
+// /messages`, which is the whole mailbox. Nothing in an approval flow needs to
+// read mail, and a connector that CAN read every message an approver has ever
+// received is a vastly larger capability than one that can send one. A
+// read-only grant on this provider therefore authorizes nothing, and the
+// adapter says so rather than quietly offering a listing.
+// ---------------------------------------------------------------------------
+
+export const OUTLOOK_DEFAULT_GRAPH_BASE_URL = "https://graph.microsoft.com";
+/** the Entra login host; sovereign clouds override it on the credential */
+export const OUTLOOK_DEFAULT_LOGIN_BASE_URL = "https://login.microsoftonline.com";
+/** the app-only scope Graph accepts for client credentials */
+export const OUTLOOK_GRAPH_SCOPE = "https://graph.microsoft.com/.default";
+
+export const outlookCredentialSchema = z
+  .object({
+    appId: z.string().min(1),
+    appPassword: z.string().min(1),
+    /** REQUIRED — see the header: Graph app-only is single-tenant by nature */
+    tenantId: z.string().min(1),
+    /** the mailbox the approval is SENT FROM (`/users/{senderUpn}/sendMail`) */
+    senderUpn: z.string().min(1),
+    loginBaseUrl: z.string().url().optional(),
+  })
+  .strict();
+export type OutlookCredential = z.infer<typeof outlookCredentialSchema>;
+
+export function parseOutlookCredential(token: string): OutlookCredential {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(token);
+  } catch {
+    throw new ConnectorProviderError(
+      "outlook credential must be a JSON document {appId, appPassword, tenantId, senderUpn, loginBaseUrl?} " +
+        "(the app registration plus the mailbox approvals are sent FROM, serialized then stored as the " +
+        "connection's single token) — got a non-JSON token. A raw Graph bearer token is NOT accepted: it " +
+        "expires in about an hour, so storing one would work once and then fail silently.",
+      400,
+    );
+  }
+  const parsed = outlookCredentialSchema.safeParse(raw);
+  if (!parsed.success) {
+    const issues = parsed.error.issues
+      .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
+      .join("; ");
+    throw new ConnectorProviderError(
+      `outlook credential JSON is invalid — expected {appId, appPassword, tenantId, senderUpn, loginBaseUrl?}: ${issues}`,
+      400,
+    );
+  }
+  return parsed.data;
+}
+
+export interface OutlookAdapterOptions {
+  credential: OutlookCredential;
+  /** the Graph base; defaults to the global endpoint */
+  baseUrl?: string | null;
+  fetchImpl?: FetchLike;
+}
+
+export class OutlookConnectorProvider implements ConnectorProvider {
+  readonly kind = "outlook" as const;
+  private readonly base: string;
+  private readonly login: string;
+  private readonly cred: OutlookCredential;
+  private readonly fetchImpl: FetchLike;
+
+  constructor(opts: OutlookAdapterOptions) {
+    this.base = (opts.baseUrl ?? OUTLOOK_DEFAULT_GRAPH_BASE_URL).replace(/\/$/, "");
+    this.cred = opts.credential;
+    this.login = (opts.credential.loginBaseUrl ?? OUTLOOK_DEFAULT_LOGIN_BASE_URL).replace(/\/$/, "");
+    this.fetchImpl = opts.fetchImpl ?? (fetch as unknown as FetchLike);
+  }
+
+  /** One token per invoke, for the same reason the Teams adapter does it: a
+   * cached token outliving a revoked credential is worse than a second
+   * round-trip, and this interface has no lifecycle hook to evict one. It goes
+   * through the SAME `fetchImpl`, so the login host is egress-adjudicated too. */
+  private async accessToken(): Promise<string> {
+    const url = `${this.login}/${encodeURIComponent(this.cred.tenantId)}/oauth2/v2.0/token`;
+    const form = new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: this.cred.appId,
+      client_secret: this.cred.appPassword,
+      scope: OUTLOOK_GRAPH_SCOPE,
+    });
+    const res = await this.fetchImpl(url, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+      body: form.toString(),
+    });
+    const text = await res.text();
+    if (res.status === 429) {
+      throw new ConnectorProviderError(
+        "outlook token request rate-limited by the Microsoft Entra login service (HTTP 429)",
+        429,
+      );
+    }
+    if (res.status >= 400) {
+      throw new ConnectorProviderError(`outlook token request failed: ${text}`, res.status);
+    }
+    const decoded = decodeBody(res.status, text).body as { access_token?: unknown } | null;
+    const token = decoded && typeof decoded === "object" ? decoded.access_token : null;
+    if (typeof token !== "string" || !token) {
+      throw new ConnectorProviderError(
+        "outlook token response carried no access_token — refusing to send with no credential",
+        502,
+      );
+    }
+    return token;
+  }
+
+  async invoke(invocation: ConnectorInvocation): Promise<ConnectorInvokeResult> {
+    const payload = invocation.payload ?? {};
+    const op = typeof payload.op === "string" ? payload.op : null;
+    const recipient = invocation.object ?? null;
+
+    if (invocation.operation !== "write") {
+      throw new ConnectorProviderError(
+        "outlook is send-only: `operation: 'read'` on a mailbox means reading the mailbox, which is a far " +
+          "larger capability than delivering one approval and is not needed to deliver one. A read-only " +
+          "grant on this connector authorizes nothing.",
+        400,
+      );
+    }
+    if (op !== null && op !== "sendMail") {
+      throw new ConnectorProviderError(
+        `outlook write supports 'sendMail' (got op '${op}')`,
+        400,
+      );
+    }
+    if (!recipient) {
+      throw new ConnectorProviderError(
+        "outlook write requires an object (the recipient mailbox address) — a message with no recipient is meaningless",
+        400,
+      );
+    }
+
+    // THE RECIPIENT COMES FROM THE GOVERNED OBJECT, NEVER THE PAYLOAD. The
+    // destructure drops any caller-supplied recipients before the spread, so a
+    // crafted payload cannot redirect an approval to another mailbox — the same
+    // defence the Teams adapter applies to `conversation.id`.
+    const { op: _op, toRecipients: _to, ccRecipients: _cc, bccRecipients: _bcc, ...message } = payload;
+    const body = JSON.stringify({
+      message: {
+        ...message,
+        toRecipients: [{ emailAddress: { address: recipient } }],
+      },
+      // An approval that was sent is a fact the operator's own mailbox should
+      // carry too, so it is not silently absent from Sent Items.
+      saveToSentItems: true,
+    });
+
+    // Token first, so a credential failure never opens a socket to Graph.
+    const accessToken = await this.accessToken();
+    const url = `${this.base}/v1.0/users/${encodeURIComponent(this.cred.senderUpn)}/sendMail`;
+    const res = await this.fetchImpl(url, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        authorization: `Bearer ${accessToken}`,
+        "content-type": "application/json",
+      },
+      body,
+    });
+    const text = await res.text();
+    const decoded = decodeBody(res.status, text);
+    if (res.status === 429) {
+      throw new ConnectorProviderError("outlook sendMail rate-limited by Microsoft Graph (HTTP 429)", 429);
+    }
+    if (res.status >= 400) {
+      throw new ConnectorProviderError(`outlook sendMail failed: ${text}`, res.status);
+    }
+    // Graph answers 202 with an EMPTY body on success. Reporting that honestly
+    // matters: "accepted for delivery" is not "delivered", and the adapter does
+    // not have, and must not imply, delivery confirmation.
+    return {
+      status: res.status,
+      body: decoded.body ?? { accepted: true, op: "sendMail", recipient },
+    };
+  }
+}
+
 export const GITHUB_DEFAULT_BASE_URL = "https://api.github.com";
 
 export interface GitHubAdapterOptions {
@@ -1551,6 +1749,18 @@ export function resolveConnectorProvider(
   switch (config.kind) {
     case "mock":
       return sharedMock;
+    case "outlook": {
+      if (!config.token) {
+        throw new ConnectorProviderError(
+          "outlook connector requires a credential (the app registration JSON — see parseOutlookCredential)",
+        );
+      }
+      return new OutlookConnectorProvider({
+        credential: parseOutlookCredential(config.token),
+        baseUrl: config.baseUrl ?? null,
+        ...(fetchImpl ? { fetchImpl } : {}),
+      });
+    }
     case "generic":
     case "http": {
       if (!config.baseUrl) {

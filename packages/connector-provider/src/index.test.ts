@@ -13,6 +13,8 @@ import {
   SnowflakeConnectorProvider,
   TEAMS_DEFAULT_BASE_URL,
   TeamsConnectorProvider,
+  OutlookConnectorProvider,
+  parseOutlookCredential,
   WebhookConnectorProvider,
   buildSnowflakeJwt,
   connectorDefaultBaseUrl,
@@ -1400,5 +1402,135 @@ describe("teams adapter (fake upstream: login service + Bot Connector)", () => {
     // teams has a COMPILED destination, so ADR-0062's posture gate can
     // adjudicate it — it is not an exempt `undefined`
     expect(connectorDefaultBaseUrl("teams")).toBe(TEAMS_DEFAULT_BASE_URL);
+  });
+});
+
+const OUTLOOK_CRED = JSON.stringify({
+  appId: "app-3333",
+  appPassword: "pw-4444",
+  tenantId: "contoso.onmicrosoft.com",
+  senderUpn: "regulait-approvals@contoso.com",
+});
+
+describe("outlook adapter (fake upstream: Entra login + Microsoft Graph)", () => {
+  it("mints an app-only token, THEN sends to the governed recipient", async () => {
+    await withUpstream(
+      teamsUpstream((_req, res) => reply(res, 202, {})),
+      async (up) => {
+        const outlook = new OutlookConnectorProvider({
+          credential: parseOutlookCredential(
+            JSON.stringify({ ...JSON.parse(OUTLOOK_CRED), loginBaseUrl: up.url }),
+          ),
+          baseUrl: up.url,
+        });
+        const res = await outlook.invoke({
+          operation: "write",
+          object: "ana@acme.com",
+          payload: { subject: "Approval needed", body: { contentType: "HTML", content: "<p>hi</p>" } },
+        });
+        expect(res.status).toBe(202);
+
+        const token = up.requests.find((r) => r.url.includes("/oauth2/v2.0/token"));
+        const send = up.requests.find((r) => r.url.includes("/sendMail"));
+        expect(token).toBeTruthy();
+        expect(send).toBeTruthy();
+        // the token is minted BEFORE the Graph call, so a bad credential never
+        // opens a socket to the mail service
+        expect(up.requests.indexOf(token!)).toBeLessThan(up.requests.indexOf(send!));
+        // app-only client credentials against the named tenant, Graph scope
+        expect(token!.body).toContain("grant_type=client_credentials");
+        expect(token!.body).toContain(encodeURIComponent("https://graph.microsoft.com/.default"));
+        expect(token!.url).toContain(encodeURIComponent("contoso.onmicrosoft.com"));
+        // sent FROM the credential's mailbox
+        expect(send!.url).toContain(encodeURIComponent("regulait-approvals@contoso.com"));
+        expect(send!.headers.authorization).toBe("Bearer minted-jwt");
+      },
+    );
+  });
+
+  it("takes the recipient from the GOVERNED OBJECT — a crafted payload cannot redirect it", async () => {
+    await withUpstream(
+      teamsUpstream((_req, res) => reply(res, 202, {})),
+      async (up) => {
+        const outlook = new OutlookConnectorProvider({
+          credential: parseOutlookCredential(
+            JSON.stringify({ ...JSON.parse(OUTLOOK_CRED), loginBaseUrl: up.url }),
+          ),
+          baseUrl: up.url,
+        });
+        await outlook.invoke({
+          operation: "write",
+          object: "ana@acme.com",
+          payload: {
+            subject: "Approval needed",
+            toRecipients: [{ emailAddress: { address: "attacker@evil.test" } }],
+            ccRecipients: [{ emailAddress: { address: "cc@evil.test" } }],
+            bccRecipients: [{ emailAddress: { address: "bcc@evil.test" } }],
+          },
+        });
+        const send = up.requests.find((r) => r.url.includes("/sendMail"))!;
+        const sent = JSON.parse(send.body) as {
+          message: { toRecipients: Array<{ emailAddress: { address: string } }> };
+        };
+        // the governed object won, and the crafted recipients are GONE rather
+        // than merely outranked — a cc would have delivered just as well
+        expect(sent.message.toRecipients).toEqual([{ emailAddress: { address: "ana@acme.com" } }]);
+        expect(send.body).not.toContain("evil.test");
+      },
+    );
+  });
+
+  it("REFUSES read outright — a mailbox read is not what delivering an approval needs", async () => {
+    const outlook = new OutlookConnectorProvider({
+      credential: parseOutlookCredential(OUTLOOK_CRED),
+    });
+    await expect(
+      outlook.invoke({ operation: "read", object: "ana@acme.com" }),
+    ).rejects.toThrow(/send-only/i);
+  });
+
+  it("refuses a write with no recipient, and an unknown op", async () => {
+    const outlook = new OutlookConnectorProvider({
+      credential: parseOutlookCredential(OUTLOOK_CRED),
+    });
+    await expect(outlook.invoke({ operation: "write", object: null })).rejects.toThrow(/recipient/i);
+    await expect(
+      outlook.invoke({ operation: "write", object: "ana@acme.com", payload: { op: "deleteMail" } }),
+    ).rejects.toThrow(/sendMail/);
+  });
+
+  it("refuses a credential that is not the app registration JSON, and one missing the tenant", () => {
+    expect(() => parseOutlookCredential("a-raw-bearer-token")).toThrow(/non-JSON token/);
+    // tenantId is required here even though Teams allows a multi-tenant bot:
+    // Graph app-only mints for ONE tenant and there is nothing to guess
+    expect(() =>
+      parseOutlookCredential(
+        JSON.stringify({ appId: "a", appPassword: "b", senderUpn: "x@y.com" }),
+      ),
+    ).toThrow(/tenantId/);
+    expect(() =>
+      parseOutlookCredential(JSON.stringify({ appId: "a", appPassword: "b", tenantId: "t" })),
+    ).toThrow(/senderUpn/);
+  });
+
+  it("reports Graph's empty 202 honestly — accepted for delivery is not delivered", async () => {
+    await withUpstream(
+      teamsUpstream((_req, res) => reply(res, 202, {})),
+      async (up) => {
+        const outlook = new OutlookConnectorProvider({
+          credential: parseOutlookCredential(
+            JSON.stringify({ ...JSON.parse(OUTLOOK_CRED), loginBaseUrl: up.url }),
+          ),
+          baseUrl: up.url,
+        });
+        const res = await outlook.invoke({
+          operation: "write",
+          object: "ana@acme.com",
+          payload: { subject: "s" },
+        });
+        expect(res.status).toBe(202);
+        expect(JSON.stringify(res.body)).not.toMatch(/delivered/i);
+      },
+    );
   });
 });
