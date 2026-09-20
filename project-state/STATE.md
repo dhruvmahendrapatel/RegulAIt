@@ -21,6 +21,51 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-20 (later still) — ADR-0119: the semantic cache reaches the IDE path, and the honest
+ceiling for that surface is THREE of seven techniques, not seven.** (No migration.) The deck sold
+"seven techniques applied automatically on every call" beside a slide selling the compat endpoints as
+where "the work developers already do arrives inside the same controls". That surface ran **one**.
+
+**The scoping was the substance.** Each remaining technique was checked against the **wire format**
+rather than against convenience, and three cannot follow because a vendor-shaped request has nowhere
+to carry what they need: **edit-vs-rewrite** diffs against `body.baseline` and there is no baseline
+field; **file pre-processing** shrinks `body.attachments` and the surface carries none; **context
+compaction** summarises a **stored conversation** and the surface is stateless. Compacting the
+supplied array in-flight would be a *different* technique costing a model call and latency on a
+synchronous IDE request — deliberately not smuggled in under this batch's name. Lazy tool loading and
+request batching belong to other surfaces. So this takes the surface from **one to two**, and says so,
+because the alternative was to make the slide true by redefining "applied" to mean "considered".
+
+**What was about to be duplicated was not a lookup but a governance boundary** — servable only to the
+same user, for the same agent, inside the TTL, and only after the stored normalized input is
+re-compared as a collision guard. Two copies would drift and **the copy that drifted would serve one
+user's answer to another**. It now lives in `semantic-cache-shared.ts` and **both paths call it**;
+the invoke path's existing tests passed unchanged, which is what makes that a refactor rather than a
+rewrite — and makes "both paths call it" verified rather than asserted. PII re-gating stays with the
+caller (a JSON API and a wire-compatible shim must refuse differently) while the **gate itself is
+shared**, so a cached answer still cannot be served onto a `block`-mode project.
+
+**Two behaviours differ from the invoke path and both are consequences, not choices.** `opt_in`
+cannot engage here — it means "the caller sets `semanticCache: true`", and inventing that field would
+break the wire compatibility that is the surface's whole purpose. And a **tool-bearing turn is never
+cached**, because its answer is not a pure function of the prompt: serving a previous one would be
+*wrong*, not merely stale.
+
+**Evidence is "no provider call", never "the answer matched"** — two identical requests return the
+same text whether or not a cache exists, so equality proves nothing. Every hit assertion pairs with a
+`usage_events` delta of **zero** and every miss with **one**. The cross-user test first **proves A
+hits**, so B's miss is about scope rather than an empty cache.
+
+**Verified by me on a freshly created database**: **184 files / 2813 passed / 9 MinIO skips, exit 0**
+— +1 file, +6 tests. Build and `tsc --noEmit` clean; instrument asserted (`ECONNREFUSED: 0`,
+`destroySoon: 0`). Probe predicted first: force a permanent miss and 4 of 6 redden, 2 stay green.
+Exactly 4 and 2.
+
+**Honest limits**: **exact-match only** — "semantic" is the technique's name, not its matching, so a
+re-worded question misses; a hit reports the model that produced the **cached** answer, not what
+routing would pick today; poisoning is bounded by scope rather than prevented; and the TTL **slides
+on reuse**, so a popular question can stay cached well beyond one TTL from its first ask.
+
 **2026-09-20 (later) — ADR-0118 landed: the hardened posture preset, built by me rather than
 dispatched.** (No migration.) Six agent deaths on session limits made delegation the slower path, so
 this one was built in-session. Eight controls the deck sells as active ship **off**; every default is
