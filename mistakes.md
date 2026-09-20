@@ -659,3 +659,35 @@ key another file could also be using. And when a test asserts a refusal, assert
 WHICH refusal: `not.toBe(200)` and `not.toBeNull()` are the same false comfort
 as `not.toContain()`, satisfied by any outcome of the right shape. Ask "what
 else in this database answers to the name I just used?"**
+
+---
+
+## M-038 (2026-09-20) — a passing suite is not a typecheck, and I treated it as one
+
+ADR-0120's test file inserted a `config_versions` fixture with
+`createdByUserId`. The column is `authorUserId`. There is no such field.
+
+It passed. Not "passed a narrow run" — it passed **the full 2,819-test suite,
+exit 0**, twice, and I had already started writing the ADR's verification
+section around those numbers.
+
+Two things had to line up. Vitest transforms through **esbuild**, which strips
+types and never checks them, so nothing in the test run reads the schema type
+at all. And **drizzle silently dropped the unknown key** rather than throwing,
+so the insert succeeded with a null author and the row the test needed existed.
+The fixture was wrong in a way that could not affect the assertion it supported.
+
+The process error is mine and it is simple: after adding a new test file I ran
+the suite and moved on. I had run `tsc` several times earlier in the same batch
+— on the implementation — so "typecheck is clean" was true when I last checked
+and I carried it forward past the point where it stopped being true. It was
+caught only because the verification checklist runs build and tsc *after* the
+suite, and even then I had piped both to `/dev/null` and read the exit codes,
+which is the only reason I noticed rather than reporting green.
+
+**Rule: a test file is CODE and gets the same gate as code — run `tsc --noEmit`
+after adding or editing one, not just the suite. And never carry a "typecheck
+passed" from earlier in a batch across a file you have since written: the
+question is not whether it passed once, it is whether it passes NOW. When
+reporting suite/build/typecheck together, read all three results — a suppressed
+non-zero exit is worth more than a green summary line.**

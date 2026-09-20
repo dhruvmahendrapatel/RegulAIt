@@ -21,6 +21,48 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-20 (evening) — ADR-0120: policy simulation reaches approval rules and rate limits, and
+REFUSES data-scope rules for a stated reason.** (Migration 0111.) The deck listed "policy simulation
+and blast-radius preview"; the surface accepted exactly one thing, an ABAC policy version, and
+`policy_simulations.policy_version_id` was NOT NULL with an FK to `abac_policy_versions` — so the
+**storage** could not describe another candidate even if the code had wanted to.
+
+**The finding that shaped the work: the evaluation was never the missing part.** ADR-0073's shadow
+pass already evaluates candidate approval rules, rate limits and data-scope rules on the live path,
+and already recomputes a candidate limit's count when its window moves. What it could not do was be
+**asked** — it evaluates whatever version is marked `canary`, on real traffic, as it happens. So this
+batch adds almost no evaluation logic; it adds a way to ask. `governedEvaluate` gains a dry-run mode
+that forces a named version as the candidate and **returns** its decision, computed by the same
+`evaluateWith` the served decision came from.
+
+**I made the M-030 mistake again and caught it in time.** I checked `governed-evaluate.ts` for writes
+by grepping its own file, found none, and concluded it was side-effect free. It is not: it writes
+through `recordCanaryObservations`. A replay calling it once per recorded decision would have written
+**one canary observation per transcript row**, corrupting the very measurements an operator relies
+on, from a module whose header says it "executes NOTHING". The guard is one clause and its absence
+would not have surfaced until someone wondered why their canary percentages had moved.
+
+**`data_scope_rule` is refused, not approximated** — 422 with a self-explaining body, storing nothing.
+Judging one needs the call's **arguments**, and the MCP decision transcript records counts only by
+design (§8.4). That is ADR-0119's shape again: the product's own privacy discipline is what makes the
+feature impossible, and saying so beats a fabricated number on a surface whose whole value is that
+its numbers can be trusted.
+
+**Verified by me on a freshly created database**: **185 files / 2819 passed / 9 MinIO skips, exit 0**
+— +1 file, +6 tests. Build and `tsc --noEmit` clean; instruments asserted. Probe predicted before
+running: neutralise the candidate evaluation, 2 of 6 redden, 4 stay green. Exactly 2 and 4.
+
+**And a second process error, now M-038.** A fixture used `createdByUserId` where the column is
+`authorUserId`. It passed the **full 2,819-test suite, twice** — vitest transforms through esbuild
+and never typechecks, and drizzle silently dropped the unknown key — and I had begun writing the
+ADR's verification section around those numbers. It was caught only because build and tsc run after
+the suite, and only because I read their exit codes rather than the green summary above them. **A
+test file is code and gets the same gate as code.**
+
+**Honest limits**: two rule kinds of three; the replay covers MCP tool decisions only; project
+attribution is not reconstructed for rule candidates; the preview substitutes ONE version into
+today's rules, so two changes previewed separately do not tell you what they do together.
+
 **2026-09-20 (later still) — ADR-0119: the semantic cache reaches the IDE path, and the honest
 ceiling for that surface is THREE of seven techniques, not seven.** (No migration.) The deck sold
 "seven techniques applied automatically on every call" beside a slide selling the compat endpoints as
