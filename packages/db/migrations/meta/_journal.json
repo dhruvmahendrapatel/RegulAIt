@@ -771,6 +771,13 @@
       "when": 1785045000000,
       "tag": "0110_pii_international_categories",
       "breakpoints": true
+    },
+    {
+      "idx": 111,
+      "version": "7",
+      "when": 1785046000000,
+      "tag": "0111_policy_simulation_rule_candidates",
+      "breakpoints": true
     }
   ]
 }

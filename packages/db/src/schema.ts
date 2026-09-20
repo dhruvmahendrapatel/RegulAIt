@@ -6123,9 +6123,21 @@ export const policySimulations = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     policyId: uuid("policy_id").references(() => abacPolicies.id, { onDelete: "cascade" }),
-    policyVersionId: uuid("policy_version_id")
-      .notNull()
-      .references(() => abacPolicyVersions.id, { onDelete: "restrict" }),
+    /** ADR-0120: nullable since migration 0111 — a simulation of a proposed
+     * APPROVAL RULE or RATE LIMIT has no `abac_policy_versions` row to point
+     * at. Exactly one of this and `candidateVersionId` is set, enforced by a
+     * CHECK rather than by convention. */
+    policyVersionId: uuid("policy_version_id").references(() => abacPolicyVersions.id, {
+      onDelete: "restrict",
+    }),
+    /** ADR-0120 — the non-ABAC candidate: which `config_versions` artifact type
+     * this preview was run for. Deliberately NOT an FK to `config_versions`:
+     * the version may be superseded or deleted after the preview is taken, and
+     * a stored preview must survive that exactly as an audit row does. */
+    candidateArtifactType: text("candidate_artifact_type", {
+      enum: ["approval_rule", "rate_limit"],
+    }),
+    candidateVersionId: uuid("candidate_version_id"),
     /** stamped, so a stored preview stays readable after a rename */
     policyName: text("policy_name").notNull(),
     policyVersion: integer("policy_version").notNull(),
@@ -6165,6 +6177,14 @@ export const policySimulations = pgTable(
   (t) => [
     index("policy_simulations_version_idx").on(t.policyVersionId, t.createdAt),
     index("policy_simulations_requested_idx").on(t.requestedByUserId),
+    /** ADR-0120 (migration 0111): exactly one kind of candidate, never both and
+     * never neither — a preview naming nothing is one nobody can reproduce. */
+    check(
+      "policy_simulations_one_candidate_check",
+      sql`(${t.policyVersionId} IS NOT NULL AND ${t.candidateVersionId} IS NULL)
+          OR (${t.policyVersionId} IS NULL AND ${t.candidateVersionId} IS NOT NULL
+              AND ${t.candidateArtifactType} IS NOT NULL)`,
+    ),
   ],
 );
 
