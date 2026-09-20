@@ -21,6 +21,58 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-20 (later) — ADR-0118 landed: the hardened posture preset, built by me rather than
+dispatched.** (No migration.) Six agent deaths on session limits made delegation the slower path, so
+this one was built in-session. Eight controls the deck sells as active ship **off**; every default is
+a deliberate, upgrade-safe choice and **not one of them was changed**. What is new is a governed
+operation that turns the enforcing set on together, and a read that answers "what is enforcing right
+now?" in one call.
+
+**The read is the primary deliverable.** `GET /v1/org/posture` gives each control its value, whether
+it is satisfied and settable, and **what turning it on would refuse** — specific enough to act on
+(that `useCaseGateMode` binds only dispatches naming a project; that `mrmEnforced` bites on the
+**clock**; that `defaultPiiMode: block` must be read beside ADR-0117's false-positive rates). It is
+useful to an operator who never applies the preset.
+
+**Two controls are reported and never claimed.** The anchor is env-backed and so is the scheduler —
+an API call cannot set an environment variable. They carry `settable: false` and their **observed**
+state, `harden` neither touches nor counts them, and the overall verdict stays **false** even when
+every settable control is satisfied. So `hardened: true` is **unreachable on a default install**,
+which is honest rather than convenient. ADR-0060's precedent, applied.
+
+**Three design calls worth keeping**: enforcement and optimisation are separate groups and `harden`
+defaults to enforcement only, because bundling a cache policy into a switch called "hardened"
+conflates a cost decision with a security one; `mrmEnforced` emits **its own** audit row as well, or
+an operator alerting on `mrm-enforcement-enabled` would silently miss a preset-driven enablement; and
+the preset persists **no** "am I hardened" flag, so the answer is derived from the controls and
+cannot drift from them.
+
+**Proof is behavioural — allowed before, refused after — and writing it surfaced that the gates are
+ORDERED.** With everything hardened, an unattributed dispatch is refused `mrm_approval_required`,
+not `attribution_required`: MRM answers first. An assertion naming attribution therefore **fails
+while the attribution gate is perfectly healthy**, and my first draft made exactly that mistake. Each
+gate is now proved twice — through the preset, and **in isolation** by moving one dial.
+
+**It also exposed a vacuous test in ADR-0116.** The full suite failed *"one altered exported audit
+row"*, reporting that a tampered bundle verified clean. A **test** defect, not a product one: the
+mutation was `allow -> deny` on the first row of the exported segment, and in the shared database
+that row is whatever another file wrote — when it was already a `deny` the replace was a **no-op**
+and the bundle reached the verifier pristine. This batch's own MRM `deny` row shifted the segment and
+exposed it. **M-033 in a new place: the vacuity was in the SETUP, not the assertion** — the tamper
+test was tampering with nothing, and every sibling tamper case passing is what made it look fine.
+
+**Verified by me on a freshly created database**: **183 files / 2807 passed / 9 MinIO skips, exit 0**
+— +1 file, +13 tests. Repo-wide build and `tsc --noEmit` clean; instrument asserted
+(`ECONNREFUSED: 0`, `destroySoon: 0`, unhandled-error block empty). Non-vacuity predicted before
+running: neutralise only the write and 6 of 13 redden, 7 stay green including the isolation cases.
+Exactly 6 and 7.
+
+**Honest limits, stated in the ADR rather than discovered later**: "one switch" is true of **six** of
+eight; there is **no dry-run**, so applying it to a live install with unregistered use cases starts
+refusing real traffic immediately; there is no un-harden operation, deliberately; and a control that
+later gains its own toggle semantics would need the same dual-audit treatment `mrmEnforced` got, with
+nothing in the type system enforcing it.
+
 **2026-09-20 — ADR-0116 and ADR-0117 landed together: two of the deck's four false claims are now
 true, and both batches were finished by me after rate limits killed their agents mid-flight.**
 
