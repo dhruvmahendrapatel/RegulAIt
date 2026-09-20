@@ -11,6 +11,7 @@ import { agents } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { executeGovernedDispatch, type AgentRow } from "./agents-connectors.js";
 import { executeGovernedToolCall, PROJECT_HEADER } from "./mcp-proxy.js";
+import { AGENT_HEADER } from "./compat-core.js";
 
 /**
  * ADR-0117 — INTERNATIONAL NATIONAL-IDENTIFIER PII, ENFORCED ON EVERY PATH.
@@ -246,10 +247,27 @@ describe("the shipped default: an existing install refuses exactly what it refus
   it("the compat shim ALLOWS it", async () => {
     const res = await app.inject({
       method: "POST", url: "/v1/messages",
-      headers: { ...userAuth, [PROJECT_HEADER]: blockProj },
+      // Name the agent. Resolving by the "mock-balanced" MODEL STRING is
+      // ambiguous in the shared suite database: ADR-0020's tie-break is
+      // deterministic (lowest tier, then oldest, then id) and will legitimately
+      // pick another file's agent carrying the same model, whereupon this user
+      // is refused with agent_denied — a refusal that has nothing to do with PII
+      // and would let this test pass for the wrong reason (M-026, M-033).
+      headers: { ...userAuth, [PROJECT_HEADER]: blockProj, [AGENT_HEADER]: agentId },
       payload: { model: "mock-balanced", max_tokens: 64, messages: [{ role: "user", content: `tax id ${IDNR}` }] },
     });
-    expect(res.statusCode).toBe(200);
+    // The claim is "the IdNr causes NO PII refusal here", not "this route
+    // returns 200". Another suite sharing this database can leave a scope rule
+    // or policy that refuses the compat surface for an unrelated reason, and
+    // that is not a counterexample to the upgrade posture (M-026). The body is
+    // asserted, and included in the message so a future failure is diagnosable.
+    const body = JSON.stringify(res.json());
+    expect(`${res.statusCode} ${body}`.toLowerCase()).not.toMatch(/pii|steuer_id/);
+    // NOT `not.toContain(IDNR)`: this case is the identifier being ALLOWED
+    // through, and the mock echoes the prompt, so the IdNr in the answer is
+    // the expected outcome rather than a leak. Asserting its absence here
+    // would contradict the name of this test.
+    expect(body).toContain(IDNR);
   });
 
   it("and the four BASE categories are enforced throughout — the default disables nothing that worked", async () => {
@@ -371,11 +389,21 @@ describe("with steuer_id switched on, EVERY governed path refuses the same ident
   it("PATH 5 — the compat/IDE shim: refused, so the shim inherits the core's gate in fact", async () => {
     const res = await app.inject({
       method: "POST", url: "/v1/messages",
-      headers: { ...userAuth, [PROJECT_HEADER]: blockProj },
+      // Name the agent. Resolving by the "mock-balanced" MODEL STRING is
+      // ambiguous in the shared suite database: ADR-0020's tie-break is
+      // deterministic (lowest tier, then oldest, then id) and will legitimately
+      // pick another file's agent carrying the same model, whereupon this user
+      // is refused with agent_denied — a refusal that has nothing to do with PII
+      // and would let this test pass for the wrong reason (M-026, M-033).
+      headers: { ...userAuth, [PROJECT_HEADER]: blockProj, [AGENT_HEADER]: agentId },
       payload: { model: "mock-balanced", max_tokens: 64, messages: [{ role: "user", content: `tax id ${IDNR}` }] },
     });
     expect(res.statusCode).not.toBe(200);
-    expect(JSON.stringify(res.json())).not.toContain(IDNR);
+    // VERIFY THE REASON, NOT THE STATUS (M-026). A 403 from some other
+    // governance rule would satisfy `!== 200` and prove nothing about PII.
+    const blocked = JSON.stringify(res.json());
+    expect(blocked.toLowerCase()).toMatch(/pii|steuer_id/);
+    expect(blocked).not.toContain(IDNR);
   });
 
   it("the gate discriminates on the CHECK DIGIT, not on 'an 11-digit number appeared'", async () => {
