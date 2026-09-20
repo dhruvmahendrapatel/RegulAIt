@@ -265,7 +265,7 @@ describe("what it refuses rather than approximates", () => {
         version: 1,
         status: "draft",
         body: { toolName: TOOL },
-        createdByUserId: null,
+        authorUserId: null,
       })
       .returning();
 
