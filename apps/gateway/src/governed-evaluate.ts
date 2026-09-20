@@ -1,4 +1,5 @@
 import {
+  configVersions,
   and,
   approvalRules,
   asc,
@@ -111,6 +112,14 @@ export interface GovernedEvaluation {
    * a preview.
    */
   retiredApprovals: RetiredApproval[];
+  /**
+   * ADR-0120 — the CANDIDATE's decision for this same call, present only when
+   * the caller passed `simulate`. It is what a named rule version WOULD have
+   * decided, computed by the same `evaluateWith` the served decision came from,
+   * so a preview can never drift from the gate. Absent on the enforcement path,
+   * where a shadow is recorded rather than returned.
+   */
+  candidateDecision?: Decision;
 }
 
 /** one stored consent this call refused to spend, and why */
@@ -183,6 +192,19 @@ export async function governedEvaluate(
    * property of the REQUEST, not of the user. Absent = the honest 'unknown'
    * defaults, never a silently-strong claim. */
   principal?: AbacPrincipalContext,
+  /**
+   * ADR-0120 — DRY-RUN MODE. Names ONE `config_versions` row to force as the
+   * candidate, regardless of its status or canary bucket, and returns its
+   * decision as `candidateDecision`.
+   *
+   * It also SUPPRESSES the canary write. That suppression is the point: this
+   * function is not otherwise side-effect free — `recordCanaryObservations`
+   * inserts a row whenever a candidate exists — so a replay that called it once
+   * per recorded decision would write one observation per transcript row and
+   * corrupt the very canary measurements an operator is relying on. A preview
+   * must execute nothing.
+   */
+  simulate?: { versionId: string },
 ): Promise<GovernedEvaluation> {
   // PILLAR 1 rule scoping: resolve the user's role/team memberships first, then
   // widen every rule load from the exact (userId, serverId) match to every
@@ -611,12 +633,59 @@ export async function governedEvaluate(
   // completely unchanged answer. A canary that can break production is worse
   // than no canary.
   // ---------------------------------------------------------------------
+  // ADR-0120 — DRY RUN. A named version is forced as the candidate for its own
+  // artifact type; the other two sets stay as served, so a flip is attributable
+  // to the rule under test and to nothing else. The shadow is RETURNED and the
+  // canary write below is skipped entirely.
+  let candidateDecision: Decision | undefined;
+  if (simulate) {
+    const [ver] = await db
+      .select()
+      .from(configVersions)
+      .where(eq(configVersions.id, simulate.versionId));
+    if (ver) {
+      const swap = <T extends { id: string }>(rows: readonly T[]): T[] =>
+        rows.map((r) => (r.id === ver.artifactId ? ({ ...r, ...(ver.body as object) } as T) : r));
+      if (ver.artifactType === "approval_rule") {
+        candidateDecision = evaluateWith(
+          swap(servedARules),
+          limitsWithCounts,
+          servedScopeRules,
+          approvedApprovalId,
+        );
+      } else if (ver.artifactType === "rate_limit") {
+        // a candidate limit may move the WINDOW or the TOOL it counts, so its
+        // count is recomputed rather than inherited — the same reasoning the
+        // canary path uses, for the same reason: inheriting it would make a
+        // window change look like no change at all.
+        const swapped = swap(servedLimits);
+        const candidateLimits = await Promise.all(
+          swapped.map(async (l) => {
+            const twin = limitsWithCounts.find((t) => t.id === l.id);
+            const same =
+              twin != null && twin.windowSeconds === l.windowSeconds && twin.toolName === l.toolName;
+            return { ...l, currentCount: same ? twin.currentCount : await countFor(l) };
+          }),
+        );
+        candidateDecision = evaluateWith(
+          servedARules,
+          candidateLimits,
+          servedScopeRules,
+          approvedApprovalId,
+        );
+      }
+      // `data_scope_rule` is deliberately absent — see ADR-0120. Evaluating one
+      // needs the call's ARGUMENTS, and the recorded transcript stores counts
+      // only (§8.4), so a replayed answer would be a guess wearing a number.
+    }
+  }
+
   const notes: CandidateNote[] = [
     ...aResolved.notes,
     ...limitsResolved.notes,
     ...scopeResolved.notes,
   ];
-  if (notes.length > 0) {
+  if (!simulate && notes.length > 0) {
     const ctx = {
       userId,
       serverId,
@@ -681,5 +750,6 @@ export async function governedEvaluate(
     approvalScope,
     contextDigest,
     retiredApprovals,
+    ...(candidateDecision ? { candidateDecision } : {}),
   };
 }
