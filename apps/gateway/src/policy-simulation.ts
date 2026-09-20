@@ -62,6 +62,7 @@
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import {
+  configVersions,
   abacPolicies,
   abacPolicyVersions,
   and,
@@ -106,6 +107,7 @@ import {
 } from "@regulait/shared";
 import { assembleAbacRequest } from "./abac.js";
 import { loadComplianceProfileCanaryDivergence } from "./config-versions.js";
+import { governedEvaluate } from "./governed-evaluate.js";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 const SINGLETON = "singleton";
@@ -210,6 +212,281 @@ function candidateEffectOf(decision: { effect: string }): CandidateEffect {
  * candidate version alone, folds them into a named blast radius, and writes the
  * preview plus one audit row. It executes NOTHING.
  */
+/**
+ * THE RECORDED TRANSCRIPT — every governed MCP tool decision in the window that
+ * names a server and a tool. Shared by both candidate kinds (ADR-0120) so the
+ * two previews are always reading the SAME evidence; a candidate that appeared
+ * to flip fewer calls because it replayed a different transcript would be worse
+ * than no preview at all.
+ */
+export async function loadReplayTranscript(
+  db: Db,
+  args: { windowStart: Date; now: Date; rowCap: number; scoped: string[] | null },
+): Promise<{
+  capped: boolean;
+  considered: Array<{
+    id: string;
+    at: Date;
+    userId: string;
+    serverId: string | null;
+    toolName: string | null;
+    effect: string;
+  }>;
+}> {
+  const rows = await db
+    .select({
+      id: auditLog.id,
+      at: auditLog.at,
+      userId: auditLog.userId,
+      serverId: auditLog.serverId,
+      toolName: auditLog.toolName,
+      effect: auditLog.effect,
+    })
+    .from(auditLog)
+    .where(
+      and(
+        eq(auditLog.objectType, "mcp_tool"),
+        isNotNull(auditLog.serverId),
+        isNotNull(auditLog.toolName),
+        gte(auditLog.at, args.windowStart),
+        lte(auditLog.at, args.now),
+        args.scoped ? inArray(auditLog.userId, args.scoped) : undefined,
+      ),
+    )
+    .orderBy(desc(auditLog.at))
+    .limit(args.rowCap + 1);
+  const capped = rows.length > args.rowCap;
+  return { capped, considered: capped ? rows.slice(0, args.rowCap) : rows };
+}
+
+export interface RuleSimulationOptions {
+  /** a `config_versions` row id — the proposed approval rule or rate limit */
+  ruleVersionId: string;
+  windowDays: number;
+  rowCap: number;
+  scope: PolicySimulationScopeDecision;
+  requestedByUserId: string | null;
+  note?: string | null | undefined;
+  now?: Date;
+}
+
+/** Decision.effect (the kernel's vocabulary) -> the replay vocabulary. */
+function candidateEffectOfDecision(effect: string): CandidateEffect {
+  if (effect === "deny") return "forbid";
+  if (effect === "require_approval") return "require_approval";
+  return "permit";
+}
+
+/**
+ * ADR-0120 — THE DRY RUN FOR A PROPOSED APPROVAL RULE OR RATE LIMIT.
+ *
+ * Same transcript, same blast-radius vocabulary and same storage as the ABAC
+ * preview; the only difference is WHAT is re-decided. Each recorded decision is
+ * replayed through `governedEvaluate` in `simulate` mode, which forces the named
+ * version as the candidate and returns what it would have decided — so the
+ * preview is computed by the gate itself rather than by a copy of it.
+ *
+ * `data_scope_rule` is REFUSED rather than approximated: evaluating one needs
+ * the call's arguments, and the MCP decision transcript records counts only by
+ * design (§8.4). A number produced without the inputs is a guess, and a guess on
+ * a compliance surface is worse than an honest refusal.
+ */
+export async function runRuleSimulation(
+  db: Db,
+  opts: RuleSimulationOptions,
+): Promise<PolicySimulationOutcome> {
+  const [version] = await db
+    .select()
+    .from(configVersions)
+    .where(eq(configVersions.id, opts.ruleVersionId));
+  if (!version) return { ok: false, status: 404, error: "unknown_rule_version" };
+  if (version.artifactType !== "approval_rule" && version.artifactType !== "rate_limit") {
+    return {
+      ok: false,
+      status: 422,
+      error: "artifact_not_simulable",
+      detail:
+        `'${version.artifactType}' cannot be replayed against the recorded transcript. A data-scope ` +
+        `rule is evaluated against the call's ARGUMENTS, and governed tool decisions record counts ` +
+        `only — never the arguments themselves — so any answer here would be a guess rather than a ` +
+        `preview. Nothing was simulated and nothing was stored.`,
+    };
+  }
+
+  const scoped = opts.scope.userIds;
+  if (scoped && scoped.length === 0) {
+    return { ok: false, status: 403, error: "empty_simulation_scope" };
+  }
+
+  const now = opts.now ?? new Date();
+  const windowStart = new Date(now.getTime() - opts.windowDays * 24 * 60 * 60 * 1000);
+  const { capped, considered } = await loadReplayTranscript(db, {
+    windowStart,
+    now,
+    rowCap: opts.rowCap,
+    scoped,
+  });
+
+  const subjectIds = [...new Set(considered.map((r) => r.userId))];
+  const userRows = subjectIds.length
+    ? await db
+        .select({ id: users.id, email: users.email, displayName: users.displayName })
+        .from(users)
+        .where(inArray(users.id, subjectIds))
+    : [];
+  const userLabel = new Map(userRows.map((u) => [u.id, u.displayName || u.email]));
+
+  const serverIds = [...new Set(considered.map((r) => r.serverId!).filter(Boolean))];
+  const toolRows = serverIds.length
+    ? await db
+        .select({ serverId: mcpTools.serverId, name: mcpTools.name, kind: mcpTools.kind })
+        .from(mcpTools)
+        .where(inArray(mcpTools.serverId, serverIds))
+    : [];
+  const toolKind = new Map(toolRows.map((t) => [`${t.serverId}|${t.name}`, t.kind]));
+
+  const replayed: ReplayedDecision[] = [];
+  for (const row of considered) {
+    const serverId = row.serverId!;
+    const toolName = row.toolName!;
+    const kind = toolKind.get(`${serverId}|${toolName}`);
+    let candidate: CandidateEffect = null;
+    let ruleId: string | null = null;
+    if (kind) {
+      // A tool that has left the inventory cannot have its call rebuilt, so
+      // that row stays INDETERMINATE rather than being guessed at.
+      const evaluation = await governedEvaluate(
+        db,
+        row.userId,
+        serverId,
+        { serverId, name: toolName, kind },
+        undefined,
+        null,
+        null,
+        undefined,
+        { versionId: version.id },
+      );
+      if (evaluation.candidateDecision) {
+        candidate = candidateEffectOfDecision(evaluation.candidateDecision.effect);
+        ruleId = evaluation.candidateDecision.ruleId ?? null;
+      }
+    }
+    replayed.push({
+      auditLogId: row.id,
+      userId: row.userId,
+      userLabel: userLabel.get(row.userId) ?? null,
+      projectId: null,
+      projectName: null,
+      serverId,
+      toolName,
+      recorded: row.effect as RecordedEffect,
+      candidate,
+      bucket: classifyReplay({ recorded: row.effect as RecordedEffect, candidate }),
+      policyId: ruleId,
+      occurredAt: row.at.toISOString(),
+    });
+  }
+
+  const radius = summarizeBlastRadius(replayed, {
+    sampleLimit: SAMPLE_LIMIT,
+    windowDays: opts.windowDays,
+  });
+
+  const [simulation] = await db
+    .insert(policySimulations)
+    .values({
+      policyId: null,
+      policyVersionId: null,
+      candidateArtifactType: version.artifactType,
+      candidateVersionId: version.id,
+      policyName: `${version.artifactType} ${version.artifactId}`,
+      policyVersion: version.version,
+      requestedByUserId: opts.requestedByUserId,
+      scopeUserIds: opts.scope.userIds,
+      scopeRuleId: opts.scope.ruleId,
+      windowDays: opts.windowDays,
+      windowStart,
+      windowEnd: now,
+      rowCap: opts.rowCap,
+      capped,
+      considered: radius.considered,
+      newlyDenied: radius.buckets.newly_denied,
+      newlyApprovalRequired: radius.buckets.newly_approval_required,
+      newlyAllowed: radius.buckets.newly_allowed,
+      unchanged: radius.buckets.unchanged,
+      indeterminate: radius.buckets.indeterminate,
+      affectedUsers: radius.affectedUsers.length,
+      affectedProjects: radius.affectedProjects.length,
+      affectedTools: radius.affectedTools.length,
+      blastRadius: {
+        buckets: radius.buckets,
+        affectedUsers: radius.affectedUsers,
+        affectedProjects: radius.affectedProjects,
+        affectedTools: radius.affectedTools,
+        samples: radius.samples,
+      },
+      headline: radius.headline,
+      note: opts.note ?? null,
+    })
+    .returning();
+
+  // The sampled flips — "which calls, exactly" must be answerable for a rule
+  // candidate for the same reason it is for an ABAC one.
+  const samples = replayed.filter((r) => isFlip(r.bucket)).slice(0, SAMPLE_LIMIT);
+  if (samples.length > 0) {
+    await db.insert(policySimulationFlips).values(
+      samples.map((sm) => ({
+        simulationId: simulation!.id,
+        auditLogId: sm.auditLogId,
+        userId: sm.userId,
+        userLabel: sm.userLabel ?? null,
+        projectId: null,
+        projectName: null,
+        serverId: sm.serverId,
+        toolName: sm.toolName,
+        recordedEffect: sm.recorded,
+        simulatedEffect: sm.candidate ?? "indeterminate",
+        bucket: sm.bucket,
+        policyId: sm.policyId ?? null,
+        occurredAt: new Date(sm.occurredAt),
+      })),
+    );
+  }
+
+  await db.insert(auditLog).values({
+    userId: opts.requestedByUserId ?? "00000000-0000-0000-0000-000000000000",
+    // ADR-0027's existing vocabulary: an approval rule and a rate limit are
+    // both pillar-1 RESTRICTION RULES, so no new objectType is minted for a
+    // preview of one. The ABAC preview audits as `abac_policy` for the same
+    // reason — the candidate's own kind, not the simulation machinery's.
+    objectType: "restriction_rule",
+    objectId: simulation!.id,
+    detail: {
+      candidateArtifactType: version.artifactType,
+      candidateVersionId: version.id,
+      considered: radius.considered,
+      buckets: radius.buckets,
+      windowDays: opts.windowDays,
+      capped,
+    },
+    effect: "allow",
+    ruleId: "policy-simulation-run",
+    ruleChain: [],
+    reason:
+      `dry run of ${version.artifactType} version ${version.version}: ` +
+      `${radius.considered} recorded decisions replayed, ` +
+      `${radius.buckets.newly_denied} newly denied, ` +
+      `${radius.buckets.newly_approval_required} newly requiring approval, ` +
+      `${radius.buckets.newly_allowed} newly allowed. Nothing was executed.`,
+  });
+
+  const flips =
+    radius.buckets.newly_denied +
+    radius.buckets.newly_approval_required +
+    radius.buckets.newly_allowed;
+  return { ok: true, simulation: simulation!, flips };
+}
+
 export async function runPolicySimulation(
   db: Db,
   opts: PolicySimulationOptions,
@@ -252,30 +529,12 @@ export async function runPolicySimulation(
   if (scoped && scoped.length === 0) {
     return { ok: false, status: 403, error: "empty_simulation_scope" };
   }
-  const rows = await db
-    .select({
-      id: auditLog.id,
-      at: auditLog.at,
-      userId: auditLog.userId,
-      serverId: auditLog.serverId,
-      toolName: auditLog.toolName,
-      effect: auditLog.effect,
-    })
-    .from(auditLog)
-    .where(
-      and(
-        eq(auditLog.objectType, "mcp_tool"),
-        isNotNull(auditLog.serverId),
-        isNotNull(auditLog.toolName),
-        gte(auditLog.at, windowStart),
-        lte(auditLog.at, now),
-        scoped ? inArray(auditLog.userId, scoped) : undefined,
-      ),
-    )
-    .orderBy(desc(auditLog.at))
-    .limit(opts.rowCap + 1);
-  const capped = rows.length > opts.rowCap;
-  const considered = capped ? rows.slice(0, opts.rowCap) : rows;
+  const { capped, considered } = await loadReplayTranscript(db, {
+    windowStart,
+    now,
+    rowCap: opts.rowCap,
+    scoped,
+  });
 
   // Names for the blast radius. A preview that reports opaque uuids is not a
   // preview anyone can act on.
@@ -585,19 +844,31 @@ export function registerPolicySimulationRoutes(app: FastifyInstance, db: Db): vo
       // THE REFUSAL IS A RECORD. Repeated attempts to preview outside one's own
       // visibility are exactly the signal an operator needs.
       await refuse(callerId, scope.ruleId, scope.reason, {
-        policyVersionId: body.policyVersionId,
+        policyVersionId: body.policyVersionId ?? null,
+        ruleVersionId: body.ruleVersionId ?? null,
         requestedUserIds: body.userIds?.length ?? 0,
       });
       return reply.status(403).send({ error: "simulation_scope_denied", detail: scope.reason });
     }
-    const outcome = await runPolicySimulation(db, {
-      policyVersionId: body.policyVersionId,
-      windowDays: body.windowDays,
-      rowCap: body.rowCap,
-      scope,
-      requestedByUserId: callerId,
-      note: body.note ?? null,
-    });
+    // ADR-0120: the same surface, the same scope check and the same stored
+    // shape for both candidate kinds — only the re-decision differs.
+    const outcome = body.ruleVersionId
+      ? await runRuleSimulation(db, {
+          ruleVersionId: body.ruleVersionId,
+          windowDays: body.windowDays,
+          rowCap: body.rowCap,
+          scope,
+          requestedByUserId: callerId,
+          note: body.note ?? null,
+        })
+      : await runPolicySimulation(db, {
+          policyVersionId: body.policyVersionId!,
+          windowDays: body.windowDays,
+          rowCap: body.rowCap,
+          scope,
+          requestedByUserId: callerId,
+          note: body.note ?? null,
+        });
     if (!outcome.ok) {
       return reply
         .status(outcome.status)

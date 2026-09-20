@@ -402,10 +402,15 @@ export const POLICY_SIMULATION_MAX_ROWS = 20_000;
 export const POLICY_SIMULATION_DEFAULT_WINDOW_DAYS = 30;
 export const POLICY_SIMULATION_DEFAULT_ROW_CAP = 5_000;
 
-export const startPolicySimulationSchema = z.object({
+export const startPolicySimulationSchema = z
+  .object({
   /** the PROPOSED policy version — a simulation always targets a specific
-   * immutable version (ADR-0048), never "the policy" */
-  policyVersionId: z.string().uuid(),
+   * immutable version (ADR-0048), never "the policy". ADR-0120 made it
+   * optional: a simulation may instead name a `config_versions` row via
+   * `ruleVersionId`. Exactly one, enforced below. */
+  policyVersionId: z.string().uuid().optional(),
+  /** ADR-0120 — the proposed APPROVAL RULE or RATE LIMIT version to preview */
+  ruleVersionId: z.string().uuid().optional(),
   windowDays: z
     .number()
     .int()
@@ -421,7 +426,13 @@ export const startPolicySimulationSchema = z.object({
   /** narrow the replay to specific subjects; never widens the caller's scope */
   userIds: z.array(z.string().uuid()).max(500).optional(),
   note: z.string().max(2000).optional(),
-});
+  })
+  // Exactly one candidate. Accepting both would leave it to the handler to pick
+  // one silently, and a preview whose subject is ambiguous is worthless.
+  .refine((b) => (b.policyVersionId ? 1 : 0) + (b.ruleVersionId ? 1 : 0) === 1, {
+    message:
+      "name exactly one candidate: policyVersionId (an ABAC policy version) or ruleVersionId (an approval-rule or rate-limit version)",
+  });
 
 export const policySimulationSettingsSchema = z.object({
   /**
