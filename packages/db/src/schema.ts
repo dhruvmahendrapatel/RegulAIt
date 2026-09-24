@@ -5406,7 +5406,13 @@ export const chatopsConnections = pgTable("chatops_connections", {
   connectorId: uuid("connector_id")
     .notNull()
     .references(() => connectors.id, { onDelete: "cascade" }),
-  signingSecretCiphertext: text("signing_secret_ciphertext").notNull(),
+  /** ADR-0121 — NULLABLE, and null is meaningful rather than missing. This
+   * verifies an INBOUND callback's HMAC. Slack signs its bodies and the Bot
+   * Connector authenticates its caller; email signs nothing this product can
+   * verify, so outlook has no inbound path at all and therefore no secret to
+   * hold. A DB check (migration 0112) requires one for slack/teams and forbids
+   * one for outlook, so neither state can be created by any path. */
+  signingSecretCiphertext: text("signing_secret_ciphertext"),
   defaultChannel: text("default_channel").notNull(),
   /** ADR-0061's sensitivity dial. FALSE (the default) = an approval whose
    * project is in PII mode `block` posts a LINK with no buttons: a chat tap is

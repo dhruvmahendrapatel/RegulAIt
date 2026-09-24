@@ -778,6 +778,13 @@
       "when": 1785046000000,
       "tag": "0111_policy_simulation_rule_candidates",
       "breakpoints": true
+    },
+    {
+      "idx": 112,
+      "version": "7",
+      "when": 1785047000000,
+      "tag": "0112_chatops_outlook_send_only",
+      "breakpoints": true
     }
   ]
 }

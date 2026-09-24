@@ -151,7 +151,11 @@ const createConnectionSchema = z
     name: z.string().min(1).max(200),
     provider: z.enum(CHATOPS_PROVIDERS),
     connectorId: z.string().uuid(),
-    signingSecret: z.string().min(8).max(500),
+    /** ADR-0121 — OPTIONAL on the wire, and conditionally required below.
+     * Slack and teams must carry one (it verifies their inbound callbacks);
+     * outlook must NOT (it has no inbound path, so a secret here would be a
+     * field that looks like a security control and verifies nothing). */
+    signingSecret: z.string().min(8).max(500).optional(),
     defaultChannel: z.string().min(1).max(200),
     allowFencedDecide: z.boolean().default(false),
     enabled: z.boolean().default(true),
@@ -215,7 +219,10 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         createdAt: r.createdAt,
         // the signing secret is NEVER returned: a reader who could see it could
         // forge callbacks, which is strictly worse than reading a bot token
-        signingSecretSet: true,
+        // ADR-0121 — read from the column, not hard-coded: a send-only
+        // outlook connection legitimately holds none, and reporting `true`
+        // for it would assert a control that does not exist.
+        signingSecretSet: r.signingSecretCiphertext !== null,
       })),
       posture:
         "The chat surface is a COURIER. Every decision goes through the same decide function the portal calls, " +
@@ -241,13 +248,39 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
         detail: `connector '${connector.name}' has providerKind '${connector.providerKind ?? "null"}', not '${body.provider}' — ChatOps posts through the existing connector adapter and its existing credential`,
       });
     }
+    // ADR-0121 — THE SIGNING SECRET IS PER-PROVIDER, AND BOTH DIRECTIONS ARE
+    // REFUSED RATHER THAN QUIETLY TOLERATED.
+    //
+    // Missing on slack/teams would register a workspace whose callbacks can
+    // never be verified — a courier that can post and can never be answered.
+    // Supplied on outlook is the more interesting error: it means the operator
+    // believes there is an inbound path to secure. There is not, by decision,
+    // so the refusal names the decision instead of storing the secret and
+    // letting them find out when no reply is ever acted on.
+    if (body.provider === "outlook" && body.signingSecret !== undefined) {
+      return reply.status(400).send({
+        error: "signing_secret_not_applicable",
+        detail:
+          "outlook is send-only: a signing secret verifies an INBOUND callback's HMAC and outlook has no " +
+          "inbound path — an email is an unauthenticated assertion, not a signed callback. Register it with " +
+          "no signing secret; approvals are decided from the portal link the message carries.",
+      });
+    }
+    if (body.provider !== "outlook" && body.signingSecret === undefined) {
+      return reply.status(400).send({
+        error: "signing_secret_required",
+        detail: `${body.provider} callbacks are HMAC-verified against this secret — registering without one would create a workspace that can post and can never be answered`,
+      });
+    }
+
     const [row] = await db
       .insert(chatopsConnections)
       .values({
         name: body.name,
         provider: body.provider,
         connectorId: body.connectorId,
-        signingSecretCiphertext: encryptSecret(opts.dataKey, body.signingSecret),
+        signingSecretCiphertext:
+          body.signingSecret === undefined ? null : encryptSecret(opts.dataKey, body.signingSecret),
         defaultChannel: body.defaultChannel,
         allowFencedDecide: body.allowFencedDecide,
         enabled: body.enabled,
@@ -569,6 +602,23 @@ export function registerChatOpsRoutes(app: FastifyInstance, db: Db, opts: ChatOp
       const rawBody = typeof req.body === "string" ? req.body : "";
       const headers: Record<string, string | undefined> = {};
       for (const [k, v] of Object.entries(req.headers)) headers[k.toLowerCase()] = Array.isArray(v) ? v[0] : v;
+
+      // ---- WALL 0: a provider with no inbound path is refused HERE ---------
+      // ADR-0121. This is ordered before the decrypt for two reasons, and the
+      // second is the load-bearing one:
+      //
+      //  - a send-only connection holds NO signing secret (it is null by DB
+      //    check), so decrypting first would throw on a public, unauthenticated
+      //    route and turn a designed refusal into a 500;
+      //  - refusing before any cryptographic work is the same cheapness rule
+      //    WALL 1 keeps: an unsolicited packet aimed at this path must cost us
+      //    nothing.
+      //
+      // The 401 matches every other unverifiable inbound, so a prober still
+      // learns nothing about which workspaces exist or what kind they are.
+      if (conn.provider === "outlook" || conn.signingSecretCiphertext === null) {
+        return reply.status(401).send({ error: "unauthenticated", code: "inbound_unsupported_by_design" });
+      }
 
       // ---- WALL 1: signature + replay window, before ANY other work --------
       const signingSecret = decryptSecret(opts.dataKey, conn.signingSecretCiphertext);

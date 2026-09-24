@@ -1246,6 +1246,12 @@ export const connectorProviderKindSchema = z.enum([
   // validated by the adapter at resolve time rather than at credential-write
   // time; see ADR-0113's honest limits.
   "teams",
+  // ADR-0121 — the Graph sendMail courier. SEND-ONLY: `operation: "read"` on a
+  // mailbox means reading the mailbox, which the adapter refuses outright.
+  // Its credential is ADR-0023 structured JSON and, unlike teams, `tenantId`
+  // and `senderUpn` are REQUIRED — Graph app-only is single-tenant by nature
+  // and a message needs a mailbox to be sent from.
+  "outlook",
   "github",
   "jira",
   "snowflake",
