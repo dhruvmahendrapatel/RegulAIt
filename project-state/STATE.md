@@ -21,6 +21,44 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-24 (later) — the seeded AND hardened demo environment, and the overstatement it found.**
+
+Two commands beyond the seed: `demo:mcp` stands up a real Streamable HTTP MCP server on loopback,
+and `demo:setup` creates what the gates need, verifies the happy path, and only then applies the
+ADR-0118 preset. The order is load-bearing — the five gates fire in sequence, so hardening first
+means every refusal demoed afterwards names the first unmet gate rather than the intended one.
+`demo:setup` measures a real user's dispatch either side of the preset and says plainly not to
+present if the hardened one fails.
+
+**The demo landmine is closed.** The seeded servers pointed at the discard port deliberately, and
+`POST /mcp/:serverId` connects upstream before reading any JSON-RPC message, so every request died
+at connect and the gateway looked broken rather than governed. With a real upstream the whole
+precedence chain now runs live over the real protocol: `read_file` allowed, `search_code` denied by
+a per-user revocation, `write_file` queued to a named approver — and `tools/list` is already
+filtered, so the deny is not a UI decoration.
+
+**Each demo server gets its OWN loopback address.** ADR-0122's registry diff keys on host, so two
+servers sharing one collapse onto whichever registry row came last. That limit is disclosed and
+real, but on a demo it reads as the product attributing traffic to the wrong server — the first
+rehearsal did exactly that.
+
+**The finding worth keeping: the ADR-0118 preset was overstating what it binds.** There are THREE
+independent attribution switches — `org_settings.dispatch_attribution_required` for the native
+dispatch, and `interception_settings.require_project_attribution` / `require_mcp_attribution` for
+the compat edge and the MCP proxy. Hardening sets one. The control's `refuses` text read "any
+dispatch that names no project", which an operator would reasonably read as all of them; a fully
+hardened deployment still serves an unattributed MCP tool call, which is now verified rather than
+assumed. The schema had always said it precisely — the preset's sentence just did not carry it. The
+text now names the scope and the other two switches, and a test asserts BOTH the behaviour and the
+disclosure, so widening the preset later fails until the sentence is rewritten. That column is the
+entire value of the posture page, and it is about to be read aloud to a customer.
+
+**Verification**: gateway **187 files / 2833 passed / 9 MinIO skips, exit 0 on a fresh database**,
+instrument counters at zero. The demo environment itself was rehearsed end to end on a hardened
+database: criteria (a) and (b) confirmed live, the happy path 200 on both sides of the preset.
+Docker is unavailable in this container, so the two environment-backed controls are handed to the
+demo box as exact commands rather than claimed — `docs/product/DEMO_RUNBOOK.md`.
+
 **2026-09-24 — ADR-0121 (Outlook, send-only), ADR-0122 (MCP discovery + the registry diff), the
 enforcement-posture page, and a correction to ADR-0120 that only a FRESH database could find.**
 (Migrations 0112, 0113.)
