@@ -2747,6 +2747,18 @@ export {
   type ShadowDiscoverySourceKind,
 } from "./shadow-discovery.js";
 
+// ADR-0122 — MCP-server discovery from supplied evidence. Its own module, not
+// catalogue entries: an MCP server is identified by the SHAPE of a call rather
+// than by who operates it, so the matching rule differs from "is this hostname
+// a known vendor's" (see the module header).
+export {
+  findMcpEndpoints,
+  MCP_DISCOVERY_POSTURE,
+  MCP_SDK_PACKAGES,
+  type McpEndpointObservation,
+  type McpEvidenceConfidence,
+} from "./mcp-discovery.js";
+
 // ADR-0069 — CROSS-VENDOR COST CONSOLIDATION, the pure half: the adapter
 // registry (a new vendor is a new adapter, not a new code path), the
 // character-scanned amount/date parsers that refuse rather than guess, the
