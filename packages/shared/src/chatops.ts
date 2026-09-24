@@ -34,7 +34,7 @@
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
 
-export const CHATOPS_PROVIDERS = ["slack", "teams"] as const;
+export const CHATOPS_PROVIDERS = ["slack", "teams", "outlook"] as const;
 export type ChatOpsProvider = (typeof CHATOPS_PROVIDERS)[number];
 
 /** Slack's own recommendation, and the value we enforce. */
@@ -55,7 +55,12 @@ export type ChatSignatureFailure =
   | "future_timestamp"
   | "bad_signature"
   | "body_too_large"
-  | "unsupported_provider";
+  | "unsupported_provider"
+  /** ADR-0121: the provider exists and is registrable, but takes no inbound —
+   * distinct from `unsupported_provider`, which means we do not know it at all.
+   * A reader of this union should be able to tell "refused by decision" from
+   * "not implemented". */
+  | "inbound_unsupported_by_design";
 
 export interface ChatSignatureOk {
   ok: true;
@@ -158,6 +163,29 @@ export function verifyChatSignature(input: ChatSignatureInput): ChatSignatureRes
     return { ok: true, provider: "teams", replayWindowEnforced: false };
   }
 
+  if (input.provider === "outlook") {
+    // ADR-0121 — A DECISION, NOT A GAP, stated here because this is where
+    // someone will look for it.
+    //
+    // Chat inbound is accepted because the PLATFORM signs it: Slack HMACs the
+    // body, the Bot Connector authenticates the caller. Email has no such
+    // thing. An inbound message asserting it is from an approver is exactly
+    // that — an assertion — and SPF/DKIM/DMARC would only move the trust onto
+    // a relay's header parsing. Accepting a governance decision on that basis
+    // would be worse than having no email channel at all, because it would
+    // LOOK like a verified one.
+    //
+    // Microsoft Actionable Messages is the cryptographic path (a
+    // Microsoft-signed bearer token, verifiable against their JWKS) and is how
+    // this would become decide-from-inbox. It needs an originator id
+    // registered per tenant — a deployment fact this codebase cannot hold or
+    // verify for a customer — so it is not pretended at here.
+    return refuse(
+      "inbound_unsupported_by_design",
+      "outlook is a send-only ChatOps provider: an inbound email is an unauthenticated assertion, not a " +
+        "signed callback, so a decision is never taken from one. Decide from the portal link in the message.",
+    );
+  }
   return refuse("unsupported_provider", `unknown chat provider '${String(input.provider)}'`);
 }
 
@@ -448,6 +476,58 @@ export interface TeamsActivityPayload {
  * Render an already-composed `ApprovalCard` as the Bot Framework Activity
  * fields a Teams post carries. Pure: no clock, no network, no db.
  */
+export interface OutlookMessagePayload {
+  subject: string;
+  body: { contentType: "HTML"; content: string };
+}
+
+/** Minimal HTML escaping — this content reaches a mail client, and a tool name
+ * or approver label is operator-supplied text, not markup. */
+function escapeHtml(v: string): string {
+  return v
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/**
+ * ADR-0121 — render an already-composed `ApprovalCard` as the mail fields a
+ * Graph `sendMail` carries. Pure: no clock, no network, no db.
+ *
+ * THERE ARE NO DECIDE ACTIONS HERE, AND THAT IS THE POINT. `card.actions` is
+ * deliberately not rendered. ADR-0061's fence reasons that a chat tap is not a
+ * re-authenticated session; an email is weaker still — it forwards, it sits in
+ * an unlocked mailbox, it survives in archives and backups, and anyone holding
+ * a copy holds whatever the copy can do. So the message carries the SAME
+ * content and the portal link, and the decision is taken where the approver is
+ * authenticated. A deployment cannot opt out with `allowFencedDecide`: that
+ * switch loosens the FENCE, not this channel's own limits.
+ */
+export function outlookMessageForCard(card: ApprovalCard): OutlookMessagePayload {
+  const lines = [`<p>${escapeHtml(card.text).replace(/\n/g, "<br/>")}</p>`];
+  if (/^https?:\/\//i.test(card.portalUrl)) {
+    lines.push(`<p><a href="${escapeHtml(card.portalUrl)}">Open in RegulAIt to decide</a></p>`);
+  } else {
+    // no public base URL configured: say where to go rather than emit a dead
+    // link, exactly as the Teams renderer declines a dead Action.OpenUrl
+    lines.push(`<p>Decide in RegulAIt: ${escapeHtml(card.portalUrl)}</p>`);
+  }
+  if (card.inAppOnlyNote) {
+    lines.push(`<p><em>${escapeHtml(card.inAppOnlyNote)}</em></p>`);
+  }
+  lines.push(
+    "<p><small>Approvals are decided in RegulAIt, never by replying to this message — " +
+      "a reply is not a signed instruction and will not be acted on.</small></p>",
+  );
+  return {
+    subject: card.redacted
+      ? "RegulAIt: an approval needs you (content withheld)"
+      : "RegulAIt: an approval needs you",
+    body: { contentType: "HTML", content: lines.join("\n") },
+  };
+}
+
 export function teamsActivityForCard(card: ApprovalCard): TeamsActivityPayload {
   const body: Array<Record<string, unknown>> = [
     { type: "TextBlock", text: toAdaptiveMarkdown(card.text), wrap: true },
