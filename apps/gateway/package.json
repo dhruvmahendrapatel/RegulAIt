@@ -10,6 +10,8 @@
     "start": "node dist/main.js",
     "test": "vitest run",
     "seed": "node dist/seed.js",
+    "demo:mcp": "node dist/demo-mcp-server.js",
+    "demo:setup": "node dist/demo-setup.js",
     "reencrypt": "node dist/reencrypt.js"
   },
   "dependencies": {

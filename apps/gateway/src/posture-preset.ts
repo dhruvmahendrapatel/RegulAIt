@@ -116,9 +116,14 @@ const SETTABLE: ReadonlyArray<{
     group: "enforcement",
     hardened: true,
     refuses:
-      "any dispatch that names no project. This is what closes the project budget gate and the " +
-      "use-case gate, both of which return early on a null project by design — without it, spend " +
-      "controls bind only the callers who volunteer a project.",
+      "a NATIVE governed dispatch that names no project — and only that surface. This is what " +
+      "closes the project budget gate and the use-case gate, both of which return early on a null " +
+      "project by design; without it, spend controls bind only the callers who volunteer a " +
+      "project. READ THE SCOPE: there are THREE independent attribution switches, and hardening " +
+      "sets one. `interception_settings.require_project_attribution` guards the IDE/compat edge " +
+      "and `interception_settings.require_mcp_attribution` guards the MCP proxy; neither is part " +
+      "of this preset, so a hardened deployment still accepts an unattributed MCP tool call or " +
+      "compat request until you set them too.",
   },
   {
     key: "semanticCachePolicy",

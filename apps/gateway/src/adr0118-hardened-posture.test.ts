@@ -323,6 +323,62 @@ describe("what the preset does NOT do", () => {
     await restoreShippedDefaults();
   });
 
+  it("does NOT set the other two attribution switches, and its own text says so", async () => {
+    /**
+     * FOUND WHILE BUILDING THE DEMO ENVIRONMENT, and the reason this test
+     * exists rather than a comment.
+     *
+     * There are THREE independent attribution switches. `org_settings.
+     * dispatch_attribution_required` guards the native governed dispatch;
+     * `interception_settings.require_project_attribution` guards the compat
+     * edge; `interception_settings.require_mcp_attribution` guards the MCP
+     * proxy. The schema has always said they guard surfaces each other cannot
+     * reach — but this preset's `refuses` sentence read "any dispatch that
+     * names no project", which an operator hardening a deployment would
+     * reasonably take to mean all of them. A fully hardened deployment still
+     * accepts an unattributed MCP tool call.
+     *
+     * The blast-radius column is the whole value of the posture read. So the
+     * scope is asserted BOTH ways: the preset really does leave the other two
+     * alone, AND the sentence really does say which surfaces stay open. If
+     * someone later widens the preset, this fails until the sentence is
+     * rewritten to match — which is the point.
+     */
+    await restoreShippedDefaults();
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/org/posture/harden",
+      headers: AUTH,
+      payload: { groups: ["enforcement"] },
+    });
+    expect(res.statusCode).toBe(200);
+
+    // positive control: the switch this preset DOES own really moved
+    expect(Object.keys(res.json().applied)).toContain("dispatchAttributionRequired");
+    expect((await loadOrgSettings(db)).dispatchAttributionRequired).toBe(true);
+
+    // the two it does not own are absent from the preset entirely — not set,
+    // not reported as applied, not reported as already-satisfied
+    const outcome = res.json();
+    const named = [
+      ...Object.keys(outcome.applied),
+      ...outcome.alreadySatisfied,
+      ...outcome.notSettable.map((n: { key: string }) => n.key),
+    ];
+    expect(named).not.toContain("requireProjectAttribution");
+    expect(named).not.toContain("requireMcpAttribution");
+
+    // and the DISCLOSURE: the control's own sentence names the surfaces that
+    // stay open, so a reader of the posture page is not misled by it
+    const report = buildPostureReport(await loadOrgSettings(db), {} as NodeJS.ProcessEnv);
+    const attribution = report.controls.find((c) => c.key === "dispatchAttributionRequired")!;
+    expect(attribution.refuses).toMatch(/require_mcp_attribution/);
+    expect(attribution.refuses).toMatch(/require_project_attribution/);
+    expect(attribution.refuses).toMatch(/unattributed MCP tool call/);
+
+    await restoreShippedDefaults();
+  });
+
   it("never claims the environment-backed controls, even when everything settable is hardened", async () => {
     await restoreShippedDefaults();
     const res = await app.inject({

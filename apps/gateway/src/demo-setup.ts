@@ -1,0 +1,464 @@
+/**
+ * Turn a seeded playground into a SEEDED AND HARDENED demo environment.
+ *
+ * Run AFTER `pnpm --filter @regulait/gateway seed`, and with
+ * `demo:mcp` running. Idempotent: safe to re-run before the meeting.
+ *
+ * ────────────────────────────────────────────────────────────────────────
+ * WHY THIS IS A SECOND STEP AND NOT PART OF THE SEED
+ *
+ * The seed builds a playground where everything is reachable, because that is
+ * what a playground is for. A hardened deployment REFUSES things, and the
+ * whole point of demoing one is that the refusals are real. Those two jobs
+ * pull in opposite directions, so they are two commands: the seed stays the
+ * thing you run to explore, and this is the thing you run to present.
+ *
+ * THE ORDER HERE IS LOAD-BEARING. Hardening turns on five gates that fire in
+ * a fixed sequence — MRM, then attribution, then use-case, then project
+ * budget, then PII. If you harden FIRST, the legitimate happy-path dispatch
+ * stops working and every refusal you then demo reports the first unmet gate
+ * rather than the one you meant to show. So this script creates the artifacts
+ * that SATISFY each gate, verifies the happy path still works, and only then
+ * applies the preset.
+ *
+ * WHAT IT DELIBERATELY DOES NOT DO
+ *
+ *  - It does not touch the two environment-backed controls. It cannot: an API
+ *    call cannot set an environment variable. It prints exactly what to export
+ *    instead, and the posture page will keep reporting them unmet until you do
+ *    — which is the honest behaviour and worth showing rather than hiding.
+ *  - It creates nothing named `prod` or `production` and deploys nowhere.
+ *  - It invents no credentials that outlive the demo: every secret it mints is
+ *    printed once, exactly like every other secret in this product.
+ */
+
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { writeFileSync } from "node:fs";
+import { createDb, runMigrations } from "@regulait/db";
+import { buildApp } from "./app.js";
+
+const connectionString =
+  process.env.DATABASE_URL ?? "postgres://regulait:regulait@localhost:5432/regulait";
+const BOOT = process.env.REGULAIT_BOOTSTRAP_TOKEN ?? "seed-bootstrap";
+const AUTH = { authorization: `Bearer ${BOOT}` };
+const DATA_KEY = process.env.REGULAIT_DATA_KEY;
+
+/**
+ * Where the demo MCP server is listening. An IP LITERAL on purpose — the
+ * egress guard blocks the hostname `localhost` outright, while loopback by
+ * address is permitted with no ceremony under the default posture.
+ */
+const MCP_PORT = process.env.REGULAIT_DEMO_MCP_PORT ?? "8931";
+/**
+ * One address PER SERVER. ADR-0122's registry diff keys on HOST, so two
+ * servers sharing one host collapse onto whichever registry row came last —
+ * which on a demo reads as the product attributing traffic to the wrong
+ * server. 127.0.0.0/8 is all loopback, so this costs nothing and keeps the
+ * diff's answer literally correct.
+ */
+const MCP_HOSTS: Record<string, string> = {
+  "repo-tools": process.env.REGULAIT_DEMO_MCP_HOST_REPO ?? "127.0.0.1",
+  "data-warehouse": process.env.REGULAIT_DEMO_MCP_HOST_WAREHOUSE ?? "127.0.0.2",
+};
+
+const db = createDb(connectionString);
+(db.$client as { on: (ev: string, fn: (err: Error) => void) => void }).on("error", () => {});
+await runMigrations(
+  db,
+  path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../packages/db/migrations"),
+);
+const app = buildApp(db, { bootstrapToken: BOOT, dataKey: DATA_KEY });
+
+type Json = Record<string, any>;
+async function call(
+  method: string,
+  url: string,
+  payload?: unknown,
+  headers: Record<string, string> = AUTH,
+): Promise<Json> {
+  const res = await app.inject({
+    method: method as "GET",
+    url,
+    headers,
+    ...(payload ? { payload } : {}),
+  });
+  if (res.statusCode >= 400 && res.statusCode !== 409) {
+    throw new Error(`${method} ${url} -> ${res.statusCode}: ${res.body}`);
+  }
+  try {
+    return res.json();
+  } catch {
+    return {};
+  }
+}
+/** the same call, but the caller wants to SEE a refusal rather than throw */
+async function probe(
+  method: string,
+  url: string,
+  payload?: unknown,
+  headers: Record<string, string> = AUTH,
+): Promise<{ status: number; body: Json }> {
+  const res = await app.inject({
+    method: method as "GET",
+    url,
+    headers,
+    ...(payload ? { payload } : {}),
+  });
+  let body: Json = {};
+  try {
+    body = res.json();
+  } catch {
+    /* non-JSON is fine; the status is the fact */
+  }
+  return { status: res.statusCode, body };
+}
+
+const notes: string[] = [];
+const note = (s: string) => notes.push(s);
+
+// ── 1. Point the MCP servers at something that actually answers ───────────
+//
+// THE DEMO LANDMINE. The seed registers both servers against
+// `http://127.0.0.1:9/` — the discard port — so that seeding needs no
+// listener. But `POST /mcp/:serverId` connects upstream at the TOP of the
+// handler, before any JSON-RPC message is read, so every request dies at
+// connect and the gateway looks broken rather than governed. Repointing is a
+// PATCH because the seed's `ensureServer` matches on name and returns the
+// existing row untouched — re-seeding will NOT fix a URL.
+
+const servers: Json[] = (await call("GET", "/v1/servers")).servers ?? [];
+const MCP_PATHS: Record<string, string> = {
+  "repo-tools": "/repo-mcp",
+  "data-warehouse": "/warehouse-mcp",
+};
+for (const server of servers) {
+  const mcpPath = MCP_PATHS[server.name as string];
+  if (!mcpPath) continue;
+  const want = `http://${MCP_HOSTS[server.name as string]}:${MCP_PORT}${mcpPath}`;
+  if (server.url === want) {
+    note(`  mcp     ${server.name} already points at ${want}`);
+    continue;
+  }
+  await call("PATCH", `/v1/servers/${server.id}`, { url: want });
+  note(`  mcp     ${server.name}: ${server.url} -> ${want}`);
+}
+
+// ── 2. Model cards, so mrmEnforced does not refuse the happy path ─────────
+//
+// MRM is keyed PER AGENT, not per model string: two agents on one model need
+// two cards. It is also recomputed from `validUntil` on every dispatch rather
+// than read from a stored status, so a card that expires mid-demo really does
+// start refusing mid-demo. These are dated well out.
+
+const agents: Json[] = (await call("GET", "/v1/agents")).agents ?? [];
+const users: Json[] = (await call("GET", "/v1/users")).users ?? [];
+const byEmail = (email: string) => users.find((u) => u.email === email);
+const admin = byEmail("admin@regulait.local");
+const dana = byEmail("dana@regulait.local");
+const avery = byEmail("avery@regulait.local");
+if (!admin || !dana || !avery) {
+  throw new Error("personas missing — run `pnpm --filter @regulait/gateway seed` first");
+}
+
+/**
+ * A KEY FOR THE APPROVER, because the bootstrap token deliberately cannot
+ * decide an approval (`bootstrap_cannot_decide`). That refusal is correct and
+ * worth understanding rather than working around: an approval is a person's
+ * act, and a machine token is not a person. So the card's sign-off below is
+ * decided BY Avery, the named approver — which is also what makes the audit
+ * row say something true.
+ *
+ * Minted fresh on every run and printed once, like every secret here.
+ */
+const averyKey: string = (
+  await call("POST", `/v1/users/${avery.id}/keys`, { name: "demo-setup" })
+).token;
+const AVERY_AUTH = { authorization: `Bearer ${averyKey}` };
+
+/**
+ * And one for Dana, because the happy-path check below must be made by a
+ * PERSON too. The bootstrap token cannot dispatch either
+ * (`bootstrap_cannot_invoke`) — a check run as the bootstrap token would have
+ * proved nothing about whether a user's work still flows, which is the only
+ * question that matters before presenting.
+ */
+const danaKey: string = (
+  await call("POST", `/v1/users/${dana.id}/keys`, { name: "demo-setup" })
+).token;
+const DANA_AUTH = { authorization: `Bearer ${danaKey}` };
+
+/** the agents the demo actually dispatches: mock, so zero external credentials */
+const DEMO_AGENTS = ["fast-mock", "balanced-mock", "premium-mock"];
+const VALID_UNTIL = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
+
+/**
+ * Re-runnable for real, which took two attempts to get right and is worth
+ * stating. The first version created a card and then failed at the decide
+ * step; on the next run `POST /v1/mrm/cards` answered 409 `model_card_exists`
+ * — correctly — and the script carried an undefined id forward. A setup script
+ * you re-run before a meeting has to survive its own half-finished previous
+ * run, so this reads the world back at every step instead of assuming the
+ * previous one landed.
+ *
+ * `state` is the field that matters, and it is RECOMPUTED from the sign-off's
+ * validUntil rather than stored: `approved`, `expiring`, `pending`,
+ * `unsigned`, `expired`, `revoked`.
+ */
+const cardsFor = async (agentId: string): Promise<Json | undefined> =>
+  ((await call("GET", "/v1/mrm/cards")).cards ?? []).find((c: Json) => c.agentId === agentId);
+
+let cardsMade = 0;
+for (const agent of agents.filter((a) => DEMO_AGENTS.includes(a.name))) {
+  let card = await cardsFor(agent.id);
+
+  if (card && (card.state === "approved" || card.state === "expiring")) {
+    note(`  mrm     ${agent.name} already carries a live card (${card.state})`);
+    continue;
+  }
+
+  if (!card) {
+    const created = await call("POST", "/v1/mrm/cards", {
+      agentId: agent.id,
+      intendedUse:
+        "Demonstration dispatch on the RegulAIt capability demo. Mock provider: no customer data, no external call.",
+      // `dataClaims` is a RECORD, not prose — it is meant to be queried.
+      dataClaims: {
+        trainingData: "none — deterministic mock provider, no model was trained",
+        customerData: "none reaches this agent; the provider is in-process",
+        retention: "not applicable",
+      },
+      limitations:
+        "A demo double. It is not evaluated for accuracy, bias or robustness and must not be relied on for any decision.",
+      // Carried on the card so criterion (d) has framework evidence attached
+      // to the thing being governed, not only to the project.
+      standardRefs: [
+        "NIST AI RMF 1.0 — GOVERN 1.1 (policies for AI risk management)",
+        "NIST AI RMF 1.0 — MAP 2.3 (documented intended use and limitations)",
+        "NIST AI RMF 1.0 — MEASURE 2.1 (test sets and evaluation documented)",
+      ],
+    });
+    card = created.card;
+    if (!card?.id) {
+      // 409 on a card this run did not see: re-read rather than guess
+      card = await cardsFor(agent.id);
+    }
+  }
+  if (!card?.id) throw new Error(`could not resolve a model card for ${agent.name}`);
+
+  // A pending sign-off from an interrupted run is DECIDED, not re-requested:
+  // asking for a second one while one is open is a 409 by design.
+  let approvalId: string | undefined = (card.approvals ?? []).find(
+    (a: Json) => a.status === "pending",
+  )?.approvalId;
+
+  if (!approvalId) {
+    const signOff = await call("POST", `/v1/mrm/cards/${card.id}/sign-off`, {
+      approverUserId: avery.id,
+      validUntil: VALID_UNTIL,
+      reason:
+        "demo environment: approving the mock provider's card so the governed path is exercisable",
+    });
+    approvalId = signOff.approvalId ?? signOff.approval?.id;
+  }
+  if (!approvalId) throw new Error(`no approval id for ${agent.name}'s sign-off`);
+
+  await call(
+    "POST",
+    `/v1/approvals/${approvalId}/decide`,
+    { decision: "approved", reason: "demo environment setup — approved by the named approver" },
+    AVERY_AUTH,
+  );
+
+  const settled = await cardsFor(agent.id);
+  cardsMade += 1;
+  note(
+    `  mrm     ${agent.name}: card ${settled?.state ?? "?"}, valid until ${VALID_UNTIL.slice(0, 10)}`,
+  );
+}
+
+// ── 3. Evidence for the MCP-discovery demo (ADR-0122) ─────────────────────
+//
+// Written to a FILE rather than seeded into the database, because that is what
+// the capability actually takes: evidence the operator supplies. Handing the
+// demo a pre-loaded result would be demoing a fixture.
+//
+// It contains a host that IS registered here and one that is NOT, so the
+// answer shows both halves of the diff. Everything else in it is ordinary web
+// traffic that must stay silent.
+
+const discoveryEvidence = [
+  "# Proxy export, 2026-09-22 — trimmed to one hour for the demo.",
+  "2026-09-22T09:14:02Z CONNECT www.example.com:443 200",
+  `2026-09-22T09:14:11Z POST http://${MCP_HOSTS["repo-tools"]}:${MCP_PORT}/repo-mcp 200 {"jsonrpc":"2.0","method":"tools/list"}`,
+  "2026-09-22T09:15:40Z GET  https://cdn.example.com/assets/app.js 200",
+  '2026-09-22T09:16:03Z POST https://10.4.19.77:8080/mcp 200 {"jsonrpc":"2.0","method":"tools/call","params":{"name":"query_warehouse"}}',
+  "2026-09-22T09:16:04Z GET  https://example.com/downloads/mcp-guide.pdf 200",
+  '2026-09-22T09:17:22Z POST https://10.4.19.77:8080/mcp 200 {"jsonrpc":"2.0","method":"tools/call","params":{"name":"export_rows"}}',
+  "2026-09-22T09:18:00Z GET  https://example.com/mcpartner/signup 200",
+  "2026-09-22T09:19:31Z POST https://api.stripe.com/v1/charges 200",
+  '2026-09-22T09:21:05Z POST https://10.4.19.77:8080/mcp 200 "MCP-Protocol-Version: 2026-03-26"',
+].join("\n");
+
+// Repo ROOT, not process.cwd() — run through `pnpm --filter` the cwd is the
+// package directory, and a driver hunting for this file before a meeting
+// should not have to know that.
+const evidencePath = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../../demo-mcp-evidence.log",
+);
+writeFileSync(evidencePath, discoveryEvidence + "\n", "utf8");
+note(`  disc    evidence written to ${evidencePath}`);
+
+// ── 4. Prove the happy path BEFORE hardening, so a later failure is ───────
+//      attributable to the preset rather than to the seed.
+
+const balanced = agents.find((a) => a.name === "balanced-mock");
+const demoProject: Json | undefined = ((await call("GET", "/v1/projects")).projects ?? []).find(
+  (p: Json) => p.name === "demo-project",
+);
+let preHarden = "skipped (no balanced-mock agent or demo-project)";
+if (balanced && demoProject) {
+  const before = await probe(
+    "POST",
+    `/v1/agents/${balanced.id}/invoke`,
+    {
+      mode: "chat",
+      input: "Summarise the checkout refactor in one sentence.",
+      dispatch: true,
+      projectId: demoProject.id,
+    },
+    DANA_AUTH,
+  );
+  preHarden = `${before.status}`;
+}
+
+// ── 5. Apply the hardened preset ──────────────────────────────────────────
+//
+// `enforcement` only. The optimisation group is a COST decision, not a
+// security one, and turning it on would mean a repeat question in the demo is
+// answered from cache — which looks like the model being fast and is not.
+
+const harden = await call("POST", "/v1/org/posture/harden", { groups: ["enforcement"] });
+const posture = harden.posture ?? (await call("GET", "/v1/org/posture"));
+
+// ── 6. And prove the happy path STILL works, hardened. ────────────────────
+let postHarden = preHarden === "skipped (no balanced-mock agent or demo-project)" ? preHarden : "";
+let postHardenBody: Json = {};
+if (balanced && demoProject) {
+  const after = await probe(
+    "POST",
+    `/v1/agents/${balanced.id}/invoke`,
+    {
+      mode: "chat",
+      input: "Summarise the checkout refactor in one sentence.",
+      dispatch: true,
+      projectId: demoProject.id,
+    },
+    DANA_AUTH,
+  );
+  postHarden = `${after.status}`;
+  postHardenBody = after.body;
+}
+
+const enf = posture.summary;
+const blocked: string[] = enf?.blockedByEnvironment ?? [];
+
+console.log(`
+
+RegulAIt demo environment — seeded AND hardened.
+
+  What this script changed
+${notes.join("\n")}
+  keys minted fresh for this run, shown ONCE:
+          avery (approver, signed the cards)  ${averyKey}
+          dana  (requester, drives the demo)  ${danaKey}
+  posture applied: ${Object.keys(harden.applied ?? {}).join(", ") || "(already hardened — nothing to change)"}
+
+  ENFORCEMENT POSTURE NOW: ${enf?.enforcementSatisfied} of ${enf?.enforcementTotal} on${
+    posture.hardened ? " — FULLY HARDENED" : `, overall verdict: NOT hardened`
+  }
+${
+  blocked.length === 0
+    ? ""
+    : `
+  Still unmet, and NOT settable from any API — this is the honest half and it
+  is worth showing rather than hiding:
+
+${blocked
+  .map((k) =>
+    k === "schedulerEnabled"
+      ? "    schedulerEnabled              export REGULAIT_SCHEDULER=on  and restart the gateway"
+      : k === "auditAnchorTamperResistant"
+        ? "    auditAnchorTamperResistant    docker compose up  (MinIO gives a REAL Object Lock\n" +
+          "                                  COMPLIANCE bucket; the gateway grades the bucket by\n" +
+          "                                  asking it, so no flag can fake this)"
+        : `    ${k}`,
+  )
+  .join("\n")}
+
+  With BOTH of those set, the posture page reads ${enf?.enforcementTotal} of ${enf?.enforcementTotal} and 'hardened: true'.
+  Note docker compose does not pass REGULAIT_SCHEDULER through by default —
+  set it in your .env and confirm the posture page before you present.`
+}
+
+  THE HAPPY PATH, measured either side of the preset:
+    before hardening   POST /v1/agents/balanced-mock/invoke -> ${preHarden}
+    after  hardening   POST /v1/agents/balanced-mock/invoke -> ${postHarden}${
+      postHarden !== "200" && postHardenBody?.error
+        ? `   <-- ${postHardenBody.error}: ${String(postHardenBody.detail ?? "").slice(0, 160)}`
+        : ""
+    }
+  ${
+    postHarden === "200"
+      ? "Both 200: the gates are on AND legitimate work still flows. That is the\n  claim the demo rests on — show it in this order."
+      : "*** The hardened dispatch did NOT succeed. Do not present until this is\n  *** green: every refusal you demo afterwards will name this gate, not the\n  *** one you meant to show. Re-read the error above."
+  }
+
+  ─────────────────────────────────────────────────────────────────────────
+  REHEARSAL — the four PoC criteria, in the order they build
+
+  (0) SET THE SCENE: /admin -> Enforcement posture
+      Read the 'what turning it on refuses' column out loud. This is the page
+      that says what is enforcing RIGHT NOW. Note the two controls it refuses
+      to claim, and why: an API call cannot set an environment variable.
+
+  (b) BLOCK A POLICY-VIOLATING TOOL CALL  — strongest, lead with it
+      As Dana, against the repo-tools server:
+        read_file     -> ALLOWED     (her role grants read-only)
+        search_code   -> DENIED      (her per-user revocation beats the role)
+        write_file    -> APPROVAL    (queued to Avery BY NAME)
+      Real MCP protocol on the wire, and tools/list is already filtered to
+      what she may see — the deny is not a UI decoration.
+
+  (c) THE AUDIT RECORD OF THAT BLOCK
+      /admin -> Audit. The deny carries effect, ruleId, ruleChain and a
+      reason; the chain is hash-linked. Then export it signed and verify the
+      bundle with scripts/verify-export-bundle.sh — no database, no gateway,
+      no network. The trust root is the fingerprint you hand over once.
+
+  (a) DISCOVER AN UNREGISTERED MCP SERVER            [NEW — ADR-0122]
+      POST /v1/shadow-ai/mcp-discovery with the contents of
+      ${evidencePath}
+      One registered host comes back GOVERNED AND NAMED and one comes back
+      UNREGISTERED, from the same file. Say the limit out loud, because the
+      payload does: this classifies evidence YOU supply. It is not a claim to
+      have searched their estate, and a stdio MCP server never appears in a
+      proxy log at all.
+
+  (d) MAP A USE CASE TO A FRAMEWORK WITH EVIDENCE
+      Two hops, and narrate the seam rather than be caught at it: pack
+      evaluation is scoped by PROJECT, and the use-case preview is wired to
+      the EU AI Act. Walk project -> pack -> control -> evidence.
+
+  DO NOT, on this environment:
+    · demo the optimisation cache (deliberately left off — a cached answer
+      looks like a fast model and is not one);
+    · claim hardening blocks unattributed calls everywhere. It binds the
+      NATIVE dispatch only. The MCP proxy and the compat edge have their own
+      switches and this preset sets neither — the posture page says so in the
+      attribution control's own text, so read it rather than talking past it.
+`);
+
+await app.close();
+await (db.$client as unknown as { end: () => Promise<void> }).end();
