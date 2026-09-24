@@ -80,6 +80,7 @@ import FirstRunPage from "./views/admin/settings/FirstRunPage";
 import LicensingPage from "./views/admin/settings/LicensingPage";
 import DataKeyPage from "./views/admin/settings/DataKeyPage";
 import SchedulerPage from "./views/admin/settings/SchedulerPage";
+import EnforcementPosturePage from "./views/admin/settings/EnforcementPosturePage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -220,6 +221,9 @@ export default function App() {
                         <Route path="data-key" element={<DataKeyPage />} />
                         {/* ADR-0064 */}
                         <Route path="scheduler" element={<SchedulerPage />} />
+                        {/* ADR-0118 — distinct from "posture" above, which is the
+                            ADR-0082 executive one-pager: this is the configuration read. */}
+                        <Route path="enforcement-posture" element={<EnforcementPosturePage />} />
                         <Route path="setup" element={<GettingStartedPage />} />
                         {/* ADR-0054: the ordered, resumable first-run FLOW. Distinct from
                             "setup" above, which is a read-only readiness mirror. */}

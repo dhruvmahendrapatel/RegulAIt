@@ -289,6 +289,12 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // property of THIS installation, and the page whose row of null
       // timestamps is itself the finding.
       { label: "Scheduled jobs", to: "/admin/scheduler" },
+      // ADR-0118 — which enforcement gates are actually switched on in THIS
+      // install, what each one would start refusing, and the one button that
+      // turns them on. Settings rather than Governance because it is a
+      // property of this installation and it WRITES; the Governance
+      // "Posture" page is the read-only executive one-pager and stays there.
+      { label: "Enforcement posture", to: "/admin/enforcement-posture" },
       { label: "First-run setup", to: "/admin/first-run" },
       { label: "Getting started", to: "/admin/setup" },
     ],
