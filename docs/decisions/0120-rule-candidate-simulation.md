@@ -124,3 +124,28 @@ typecheck**, and running one after adding a test file is not a substitute for ru
 > and how many — replayed through the same gate that makes the real decision, executing nothing. A
 > data-scope rule is the one kind we will not preview, because judging it needs the call's arguments
 > and governed tool decisions deliberately record counts rather than content."**
+
+## Correction, 2026-09-24 — migration 0113: a flip can name a rule that is not a row
+
+As shipped, this ADR reused `policy_simulation_flips.policy_id` — a **uuid** — for the rule path's
+`Decision.ruleId`. That column was right for what it was built for: ABAC simulation writes
+`decision.policyId`, which is always a real `abac_policies` row. A kernel rule id is not. It is a
+uuid when a stored approval-rule or rate-limit row matched, and a **symbolic** identifier
+(`default-deny` and its siblings) when the kernel reached the decision without one. Postgres raised
+`22P02` on the flip insert and the whole simulation returned **500**.
+
+**It failed on exactly the traffic this feature exists to serve.** A preview of a restrictive rule
+over real calls is the case that produces fall-through decisions; the original fixture had one
+entitled caller making three allowed calls, so every replayed decision named a stored row and the
+other half of the value space was never constructed. Six green tests, on a shape of input that
+could not reach the bug. It surfaced only on a **fresh** database, where a different file ordering
+put unentitled callers into the replay window — this feature reads every `mcp_tool` audit row in
+the window rather than its own fixtures, so a shared development database cannot verify it.
+
+Migration 0113 adds `decision_rule_id text`. Both facts are kept rather than one dropped: `policy_id`
+returns to meaning an `abac_policies` reference and is **null** for rule and rate-limit candidates,
+and `decision_rule_id` carries the kernel's id verbatim whatever shape it takes — because it is the
+reason the row flipped, and that is what a blast-radius preview is read for.
+
+Recorded as **M-039** in [`mistakes.md`](../../mistakes.md): a column's type is a claim about every
+producer, not the one in front of you, and the fixture belongs on the branch that differs.

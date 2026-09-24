@@ -691,3 +691,48 @@ passed" from earlier in a batch across a file you have since written: the
 question is not whether it passed once, it is whether it passes NOW. When
 reporting suite/build/typecheck together, read all three results — a suppressed
 non-zero exit is worth more than a green summary line.**
+
+## M-039 (2026-09-24) — I reused a uuid column for a value that is only sometimes a uuid, and built the fixture from the case that never differs
+
+ADR-0120 widened policy simulation from ABAC policies to approval rules and rate
+limits. The existing flip table had `policy_id uuid`, which was right for what it
+was built for: ABAC simulation writes `decision.policyId`, always a real
+`abac_policies` row. I reused that column for the rule path's
+`Decision.ruleId` — and a kernel rule id is a uuid only when a **stored rule row**
+matched. When the kernel reaches a decision without one it hands back a
+**symbolic** id (`default-deny` and its siblings). Postgres raised 22P02 on the
+insert and the whole simulation returned 500.
+
+**It failed on precisely the traffic the feature exists to serve.** A preview of a
+restrictive rule over real calls is the case that produces fall-through
+decisions. My fixture had one entitled caller making three allowed calls, so
+every replayed decision named a stored row and the other half of the value space
+was never constructed. Six tests, all green, on a shape of input that could not
+reach the bug.
+
+Two things let it through the verification I did run. The dev database is shared
+across sessions, so the transcript there happened to contain only rows whose
+decisions matched stored rules — the feature reads **every** `mcp_tool` audit row
+in the window, not just its own fixtures, and that widening of input is exactly
+what made the shared DB an unreliable witness. And the full-suite run I did do
+was on that same shared database, so the file ordering that produces a
+fall-through row never occurred. It surfaced only when I ran the suite on a
+**fresh** database, where a different file ordering put `mcp-proxy`'s unentitled
+callers into the window first. It then reproduced two runs in three, which is
+what a shared-state flake looks like from the outside — and the tempting reading,
+which I nearly took, was "flaky suite" rather than "real 500".
+
+The same fresh-DB run exposed a second, milder version of M-037 in my own new
+file: `adr0122-mcp-discovery` asserted a specific `registeredAs` for a server on
+`127.0.0.1`. The diff keys on host, most files in the package register fixtures
+on that address, and so the assertion was about which suite ran last.
+
+**Rule: a column's type is a claim about EVERY producer, not the one in front of
+you. Before reusing a typed column for a newly-widened input, enumerate what the
+new producer can actually emit — and if any case differs in shape, give it its
+own column rather than the case you already had. Build the fixture from the
+branch that differs, not the branch you wrote first. And when a feature reads
+whole-table history rather than its own fixtures, a shared database cannot
+verify it: run it on a FRESH one before believing green, and treat an
+intermittent failure there as a defect to reproduce rather than a flake to
+re-run.**
