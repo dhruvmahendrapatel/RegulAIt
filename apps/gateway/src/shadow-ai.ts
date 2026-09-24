@@ -82,6 +82,7 @@ import {
   userModelCredentials,
   workflowInstances,
   type Db,
+  mcpServers,
 } from "@regulait/db";
 import {
   DEFAULT_AI_SIGNATURES,
@@ -105,6 +106,8 @@ import {
   evidenceImportSchema,
   getEvidenceAdapter,
   normalizeEvidenceHost,
+  findMcpEndpoints,
+  MCP_DISCOVERY_POSTURE,
   rawEvidenceImportRequestSchema,
   screenEvidencePayload,
   type AiSignature,
@@ -842,6 +845,87 @@ export function registerShadowAiRoutes(app: FastifyInstance, db: Db): void {
    * The pasted content itself is NEVER persisted — only its SHA-256, the
    * bounded classification summary and any evidence rows survive the request.
    */
+  /**
+   * ADR-0122 — MCP-SERVER DISCOVERY, AND THE REGISTRY DIFF THAT MAKES IT MEAN
+   * SOMETHING.
+   *
+   * Finding an MCP endpoint in a log is half a capability. The half that
+   * matters to an operator is "and it is not one of mine" — which this
+   * deployment can answer exactly, because it HAS a registry. A host that
+   * appears in supplied evidence and matches no `mcp_servers` row is
+   * UNREGISTERED, and that is a precise claim about two things we hold rather
+   * than a claim to have searched anyone's estate.
+   *
+   * Read-only by default. `mode: "apply"` is a separate, explicit act.
+   */
+  app.post("/v1/shadow-ai/mcp-discovery", async (req, reply) => {
+    const body = z
+      .object({
+        // the SAME bound the evidence-import front door uses -- one size rule
+        // for supplied evidence, not a second one that drifts from it
+        content: z.string().min(1).max(EVIDENCE_MAX_BYTES),
+        mode: z.enum(["preview", "apply"]).default("preview"),
+      })
+      .safeParse(req.body);
+    if (!body.success) {
+      return reply.status(400).send({
+        error: "invalid_request",
+        issues: body.error.issues.slice(0, 10).map((i) => ({ path: i.path.join("."), message: i.message })),
+      });
+    }
+
+    const observations = findMcpEndpoints(body.data.content);
+
+    // THE REGISTRY, normalized through the SAME host normalizer the evidence
+    // went through — comparing a raw URL to a parsed host is how a registered
+    // server gets reported as shadow.
+    const registered = new Map<string, string>();
+    for (const row of await db.select().from(mcpServers)) {
+      const host = normalizeEvidenceHost(row.url);
+      if (host) registered.set(host, row.name);
+    }
+
+    const results = observations.map((o) => {
+      const match = registered.get(o.host) ?? null;
+      return {
+        ...o,
+        registered: match !== null,
+        registeredAs: match,
+        // Said in words as well as a boolean: this is the sentence an operator
+        // will read out, and it should carry its own limits.
+        verdict:
+          match !== null
+            ? `governed — this host is registered in this deployment as MCP server '${match}', so its tool calls go through the gate`
+            : `UNREGISTERED — this host appears in your evidence and matches no MCP server in this deployment's registry, so nothing about its tool calls is governed here`,
+      };
+    });
+
+    const unregistered = results.filter((r) => !r.registered);
+
+    if (body.data.mode === "apply" && unregistered.length > 0) {
+      // One audited record of the act, and nothing silent. The findings
+      // themselves ride the existing evidence pipeline's vocabulary.
+      await audit(
+        req.authCtx.userId ?? null,
+        "shadow_ai_finding",
+        null,
+        "mcp-discovery-applied",
+        "allow",
+        `MCP discovery over supplied evidence: ${unregistered.length} unregistered host(s) of ` +
+          `${results.length} observed — ${unregistered.map((u) => u.host).join(", ")}`,
+        { observed: results.length, unregistered: unregistered.length },
+      );
+    }
+
+    return {
+      posture: MCP_DISCOVERY_POSTURE,
+      observed: results.length,
+      unregistered: unregistered.length,
+      registryCount: registered.size,
+      results,
+    };
+  });
+
   app.post("/v1/shadow-ai/discovery", async (req, reply) => {
     const parsedReq = discoveryRequestSchema.safeParse(req.body);
     if (!parsedReq.success) {
