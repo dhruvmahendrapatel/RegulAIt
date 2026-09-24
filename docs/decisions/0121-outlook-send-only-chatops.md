@@ -156,6 +156,16 @@ Graph. The token exchange, the `sendMail` shape and the error mapping are exerci
 consent flow and the real permission grant (`Mail.Send` application) are not, and cannot be from
 this repository. That is the same limit ADR-0113 discloses for the Bot Connector.
 
+**One more thing 0112 flushed out, worth stating because it will happen again.**
+`chatops.test.ts` drops the provider CHECK so an unsupported provider can reach the outbound switch,
+and its `finally` re-added a **hardcoded** `IN ('slack','teams')`. A test that mutates shared DDL and
+restores what it *remembered* rather than what it *found* silently narrowed the constraint back for
+every file that ran after it — so the Outlook suite passed alone and on a fresh database, and failed
+only in the full run, which is indistinguishable from a flake. The restore now reads
+`pg_get_constraintdef` before the drop and replays that text, and asserts the restored definition
+matches, so an unfaithful restore fails in the file that caused it rather than in whichever suite
+runs next.
+
 **Follow-up this creates.**
 
 - Actionable Messages remains open, and is the only path to a verifiable inbound decision. It should

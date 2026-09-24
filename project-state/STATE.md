@@ -21,6 +21,59 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-24 — ADR-0121 (Outlook, send-only), ADR-0122 (MCP discovery + the registry diff), the
+enforcement-posture page, and a correction to ADR-0120 that only a FRESH database could find.**
+(Migrations 0112, 0113.)
+
+**ADR-0121 — Outlook approvals is a courier that can only carry.** ADR-0061 and ADR-0113 both rested
+on a property neither had to state, because both providers happened to satisfy it: *the platform
+authenticates the inbound callback*. Email does not, and every way to invent one is worse than not
+having the channel — reply-to-approve trusts an assertion anyone who can put mail in a mailbox can
+make, SPF/DKIM/DMARC relocate the trust onto a relay's header parsing, and a secret link is a bearer
+token in a medium built to be forwarded and archived. So inbound is refused under its own code,
+`inbound_unsupported_by_design`, and the mail carries the content plus a portal link and **no decide
+actions** — with `allowFencedDecide` unable to opt out, because it loosens ADR-0061's fence rather
+than this channel's own limits.
+
+**The duller half of 0121 is the instructive one, and it is the session's theme.** The adapter had
+shipped an `outlook` case **no caller could reach**, and the full suite passed throughout. Two
+hand-maintained mirrors had drifted from it: shared's `connectorProviderKindSchema` had never learned
+the kind, so the connector could not be created; and drizzle's `text({enum})` widened while migration
+0069's CHECK still read `IN ('slack','teams')`, so the type said yes, the storage said no, and the
+route surfaced the violation as a 500. Both fixed, and the *class* is guarded by a test asserting the
+two kind lists are equal — living in the gateway because that is the only package that can see both,
+which is exactly why the drift was invisible.
+
+**ADR-0122 — detection is half a capability; the registry diff is the other half.** ADR-0055's
+catalogue was structurally MCP-blind (its signatures ask "is this a known vendor's hostname", and the
+interesting MCP servers are self-hosted on hostnames nobody can enumerate), and its corpus is
+hash-pinned on purpose, so this is a separate module rather than new entries. Confidence is graded and
+never averaged. The load-bearing part is the diff: from one piece of supplied evidence, a registered
+host comes back governed and named and an unknown one comes back `UNREGISTERED`, in the same response.
+
+**The enforcement-posture page is now a screen**, at `/admin/enforcement-posture` — deliberately NOT
+`/admin/posture`, which is ADR-0082's read-only executive one-pager. A control that starts refusing
+live traffic does not belong on a page people print for a meeting.
+
+**ADR-0120 was wrong in a way its own tests could not reach, and a fresh database found it.** The
+rule path reused `policy_simulation_flips.policy_id` — a uuid — for the kernel's `Decision.ruleId`,
+which is a uuid only when a stored rule row matched and a **symbolic** id (`default-deny`) when the
+kernel decided without one. 22P02 on the flip insert, 500 on the whole simulation — **on precisely
+the traffic a restrictive-rule preview exists to be run against**. The fixture's every caller was
+entitled, so the other half of the value space was never constructed. Migration 0113 adds
+`decision_rule_id text` and keeps both facts. Recorded as **M-039**.
+
+**Two shared-state defects were diagnosed rather than re-run as flakes.** This feature replays *every*
+`mcp_tool` audit row in the window rather than its own fixtures, so a shared development database
+cannot verify it. And `chatops.test.ts` was dropping a CHECK constraint and restoring a **hardcoded,
+now-stale** definition — a test mutating shared DDL and restoring what it remembered rather than what
+it found, which silently narrowed the constraint for every file that ran after it. It now reads
+`pg_get_constraintdef` before the drop and asserts the restore was faithful.
+
+**Verification**: gateway **187 files / 2832 passed / 9 MinIO skips, exit 0 on a FRESH database**,
+with `ECONNREFUSED`, `destroySoon`, unhandled and uncaught all at zero; all eleven packages green
+(1721 tests); web typecheck and build clean.
+
 **2026-09-20 (evening) — ADR-0120: policy simulation reaches approval rules and rate limits, and
 REFUSES data-scope rules for a stated reason.** (Migration 0111.) The deck listed "policy simulation
 and blast-radius preview"; the surface accepted exactly one thing, an ABAC policy version, and
