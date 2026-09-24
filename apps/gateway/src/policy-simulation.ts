@@ -382,7 +382,12 @@ export async function runRuleSimulation(
       recorded: row.effect as RecordedEffect,
       candidate,
       bucket: classifyReplay({ recorded: row.effect as RecordedEffect, candidate }),
-      policyId: ruleId,
+      // policy_id is an abac_policies reference and NOTHING else. A rule
+      // candidate has no policy, and the kernel's rule id is not a uuid in
+      // general — writing it here is what made this path 500 on any transcript
+      // containing a decision the kernel reached without a stored row.
+      policyId: null,
+      decisionRuleId: ruleId,
       occurredAt: row.at.toISOString(),
     });
   }
@@ -448,6 +453,7 @@ export async function runRuleSimulation(
         simulatedEffect: sm.candidate ?? "indeterminate",
         bucket: sm.bucket,
         policyId: sm.policyId ?? null,
+        decisionRuleId: sm.decisionRuleId ?? null,
         occurredAt: new Date(sm.occurredAt),
       })),
     );

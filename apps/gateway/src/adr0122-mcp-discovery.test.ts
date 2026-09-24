@@ -32,10 +32,21 @@ const AUTH = { authorization: `Bearer ${BOOT}` };
  * and it rules out invented hostnames as fixtures. Loopback resolves, is
  * permitted under the default private-ranges posture, and reaches nothing.
  */
+/**
+ * NOT 127.0.0.1. The diff maps host -> server NAME, and a host is the key, so
+ * two servers on one host collapse onto whichever row the registry SELECT
+ * returned last — a disclosed limit of ADR-0122, and a real one: this deployment
+ * cannot tell them apart either. Most suites in this package register their
+ * fixtures on 127.0.0.1, so asserting a specific `registeredAs` there asserts
+ * suite ORDERING rather than behaviour (M-037: resolve a fixture by something
+ * you created, not by something you share). 127.9.x is loopback, resolves, is
+ * permitted under the default private-ranges posture, reaches nothing, and is
+ * used by no other file here.
+ */
 /** the host we REGISTER, so the governed side of the diff is real */
-const KNOWN = "127.0.0.1";
+const KNOWN = "127.9.0.1";
 /** the host we do NOT register — the thing the PoC criterion asks for */
-const UNKNOWN = "127.0.0.2";
+const UNKNOWN = "127.9.0.2";
 
 let db: Db;
 let app: ReturnType<typeof buildApp>;

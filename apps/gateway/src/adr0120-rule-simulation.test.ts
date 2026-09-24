@@ -11,6 +11,7 @@ import {
   configVersions,
   createDb,
   eq,
+  policySimulationFlips,
   policySimulations,
   runMigrations,
   type Db,
@@ -46,6 +47,9 @@ let db: Db;
 let app: ReturnType<typeof buildApp>;
 let userId: string;
 let approverId: string;
+/** ADR-0120 correction: a caller with NO entitlement to TOOL, so the kernel
+ * decides without a stored rule row and hands back a SYMBOLIC rule id. */
+let strangerId: string;
 let serverId: string;
 let ruleId: string;
 let upstreamClose: () => Promise<void>;
@@ -102,6 +106,7 @@ beforeAll(async () => {
   };
   userId = await mk("caller");
   approverId = await mk("approver");
+  strangerId = await mk("stranger");
 
   const up = await startUpstream();
   upstreamClose = up.close;
@@ -132,6 +137,31 @@ beforeAll(async () => {
     });
     expect(out.kind).toBe("allowed");
   }
+
+  // A FOURTH transcript row, belonging to somebody who is NOT entitled to this
+  // tool. Written straight into the ledger because that is what it is — a
+  // historical decision, recorded when the entitlement existed or under an
+  // earlier posture — and the replay reads the ledger, not the grants.
+  //
+  // It is here because of a real defect this suite did not catch. When the
+  // replay re-decides this row the kernel has no stored rule to point at, so
+  // `Decision.ruleId` comes back SYMBOLIC ('default-deny' and its siblings)
+  // rather than as a uuid, and that value was being written into
+  // `policy_simulation_flips.policy_id`, a uuid column. The insert failed
+  // 22P02 and the whole simulation returned 500 — on precisely the traffic a
+  // restrictive-rule preview exists to be run against, while passing here
+  // because every fixture caller was entitled and every decision named a row.
+  await db.insert(auditLog).values({
+    userId: strangerId,
+    objectType: "mcp_tool",
+    objectId: serverId,
+    serverId,
+    toolName: TOOL,
+    effect: "allow",
+    ruleId: "adr0120-historical-allow",
+    ruleChain: [],
+    reason: "a decision recorded before this caller lost the entitlement",
+  });
 
   // A live approval rule that does NOT match this tool, so today's decisions
   // stand — the candidate below is what changes them.
@@ -181,7 +211,7 @@ describe("a proposed APPROVAL RULE can be previewed", () => {
       headers: AUTH,
       payload: { ruleVersionId: versionId, windowDays: 1 },
     });
-    expect(res.statusCode).toBe(201);
+    expect(res.statusCode, res.body).toBe(201);
     const sim = res.json().simulation ?? res.json();
 
     // it really replayed something — without this the zero-execution
@@ -316,5 +346,52 @@ describe("what it refuses rather than approximates", () => {
     });
     expect(res.statusCode).toBe(404);
     expect(res.json().error).toBe("unknown_rule_version");
+  });
+});
+
+describe("the flip row can name a rule that is not a row", () => {
+  /**
+   * PASS CRITERIA, WRITTEN BEFORE THE RUN (M-023):
+   *
+   *  1. The simulation returns 201 over a transcript containing a decision the
+   *     kernel reaches WITHOUT a stored rule. It used to return 500.
+   *  2. At least one stored flip carries a NON-UUID `decisionRuleId` — the
+   *     symbolic id, kept rather than dropped, because it is the reason the row
+   *     flipped and a blast-radius preview is read for exactly that.
+   *  3. `policyId` is NULL on every flip of a rule simulation. It is an
+   *     `abac_policies` reference and a rule candidate has no policy; writing
+   *     the kernel's id there is the defect itself, so asserting 2 without 3
+   *     would leave the bad write available under a new name.
+   */
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  it("survives a decision with a SYMBOLIC rule id, and keeps it", async () => {
+    const versionId = await proposeRuleVersion();
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/policy-simulations",
+      headers: AUTH,
+      payload: { ruleVersionId: versionId, windowDays: 1 },
+    });
+    // criterion 1 — the body is attached because "500 internal" told us
+    // nothing the first time this failed
+    expect(res.statusCode, res.body).toBe(201);
+    const simId = (res.json().simulation ?? res.json()).id as string;
+
+    const flips = await db
+      .select()
+      .from(policySimulationFlips)
+      .where(eq(policySimulationFlips.simulationId, simId));
+    expect(flips.length).toBeGreaterThan(0);
+
+    // criterion 2 — the symbolic id is PRESENT, not silently nulled. Asserting
+    // only "no crash" would pass against a fix that dropped the value.
+    const symbolic = flips.filter(
+      (f) => f.decisionRuleId !== null && !UUID.test(f.decisionRuleId),
+    );
+    expect(symbolic.length).toBeGreaterThan(0);
+
+    // criterion 3 — and it did not simply move into the uuid column
+    for (const f of flips) expect(f.policyId).toBeNull();
   });
 });

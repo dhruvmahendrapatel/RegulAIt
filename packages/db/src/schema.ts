@@ -6219,8 +6219,17 @@ export const policySimulationFlips = pgTable(
     recordedEffect: text("recorded_effect").notNull(),
     simulatedEffect: text("simulated_effect").notNull(),
     bucket: text("bucket", { enum: POLICY_SIMULATION_BUCKET_VALUES }).notNull(),
-    /** the candidate policy that fired on this row */
+    /** the candidate ABAC POLICY that fired on this row. A real
+     * `abac_policies` id or null — never a kernel rule id; see below. */
     policyId: uuid("policy_id"),
+    /** ADR-0120 — the kernel's `Decision.ruleId` verbatim, whatever shape it
+     * takes: a uuid when a stored approval-rule or rate-limit row matched, and
+     * a SYMBOLIC id (`default-deny` and its siblings) when the kernel decided
+     * without one. It is text rather than uuid because the second case is not
+     * a row, and squeezing it into `policy_id` is what made a preview over
+     * real traffic fail with 22P02 — on exactly the transcripts the feature
+     * exists to serve. */
+    decisionRuleId: text("decision_rule_id"),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
   },
   (t) => [

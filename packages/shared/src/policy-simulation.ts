@@ -250,8 +250,16 @@ export interface ReplayedDecision {
   recorded: RecordedEffect;
   candidate: CandidateEffect;
   bucket: PolicySimulationBucket;
-  /** the candidate policy that fired, when one did */
+  /** the candidate ABAC POLICY that fired, when one did — an `abac_policies`
+   * id, and only ever that. */
   policyId?: string | null;
+  /** ADR-0120 — the kernel's `Decision.ruleId` verbatim, for a rule or
+   * rate-limit candidate. A uuid when a stored row matched, a SYMBOLIC id
+   * (`default-deny` and its siblings) when the kernel decided without one.
+   * Kept separate from `policyId` because the second case is not a row, and it
+   * is the reason the flip happened — the thing a blast-radius preview is
+   * read for. */
+  decisionRuleId?: string | null;
   occurredAt: string;
 }
 
