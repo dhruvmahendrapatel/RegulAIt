@@ -759,6 +759,22 @@ describe("ADR-0113: Teams outbound", () => {
     // SHIPPED branch answering a REAL request.
     const approvalId = await makeApproval({ approverUserId: danaId });
     const forged = "chatops-suite-unsupported";
+    // READ THE CONSTRAINT BEFORE DROPPING IT, and restore THAT text.
+    //
+    // This used to re-add a hardcoded `IN ('slack','teams')` in the finally
+    // block. That is a test mutating shared DDL and restoring what it
+    // REMEMBERED rather than what it FOUND — so when migration 0112 widened the
+    // constraint to admit 'outlook', this file silently narrowed it back for
+    // every test file that ran after it, and a later suite's perfectly valid
+    // registration failed with a CHECK violation it had no way to explain.
+    // Reading the definition out of the catalogue cannot drift from the
+    // migration, because it IS the migration's result.
+    const [ck] = (
+      await db.execute(
+        sql`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = 'chatops_connections_provider_ck'`,
+      )
+    ).rows as Array<{ def: string }>;
+    expect(ck?.def, "the provider CHECK must exist before this test drops it").toBeTruthy();
     await db.execute(
       sql`ALTER TABLE "chatops_connections" DROP CONSTRAINT "chatops_connections_provider_ck"`,
     );
@@ -787,10 +803,19 @@ describe("ADR-0113: Teams outbound", () => {
       expect(posted.length).toBe(before + 1);
     } finally {
       await db.delete(chatopsConnections).where(eq(chatopsConnections.name, forged));
-      await db.execute(sql`
-        ALTER TABLE "chatops_connections"
-        ADD CONSTRAINT "chatops_connections_provider_ck" CHECK ("provider" IN ('slack', 'teams'))
-      `);
+      await db.execute(
+        sql.raw(
+          `ALTER TABLE "chatops_connections" ADD CONSTRAINT "chatops_connections_provider_ck" ${ck!.def}`,
+        ),
+      );
+      // and PROVE the restore was faithful, so the next file to register a
+      // provider this suite never heard of gets the constraint it expects
+      const [after] = (
+        await db.execute(
+          sql`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = 'chatops_connections_provider_ck'`,
+        )
+      ).rows as Array<{ def: string }>;
+      expect(after?.def).toBe(ck!.def);
     }
   });
 

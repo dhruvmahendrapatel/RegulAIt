@@ -145,7 +145,7 @@ describe("registering a send-only provider", () => {
       defaultChannel: "approvers@example.com",
     });
     // the exact call that used to be a 500 on the CHECK constraint
-    expect(outlook.statusCode).toBe(201);
+    expect(outlook.statusCode, outlook.body).toBe(201);
 
     const slack = await post("/v1/chatops/connections", {
       name: SLACK_CONNECTION,
@@ -154,7 +154,7 @@ describe("registering a send-only provider", () => {
       signingSecret: `adr0121-signing-${RUN}`,
       defaultChannel: "C-ADR0121",
     });
-    expect(slack.statusCode).toBe(201);
+    expect(slack.statusCode, slack.body).toBe(201);
 
     // VERIFIED BY THE ROW, not by the status code
     const oRow = await rowFor(OUTLOOK_CONNECTION);
