@@ -620,6 +620,9 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   "GET /v1/use-cases": "internal",
   "POST /v1/use-cases": "internal",
   "GET /v1/use-cases/:useCaseId": "internal",
+  // ADR-0123 — the framework mapping. Internal like its siblings until the
+  // use-cases surface as a whole is published.
+  "GET /v1/use-cases/:useCaseId/frameworks": "internal",
   "PATCH /v1/use-cases/:useCaseId": "internal",
   "POST /v1/use-cases/:useCaseId/retire": "internal",
   // ADR-0084 — the AI vendor registry: new surface, internal until the shape settles
@@ -1218,6 +1221,7 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "GET /v1/use-cases": "use-cases",
   "POST /v1/use-cases": "use-cases",
   "GET /v1/use-cases/:useCaseId": "use-cases",
+  "GET /v1/use-cases/:useCaseId/frameworks": "use-cases",
   "PATCH /v1/use-cases/:useCaseId": "use-cases",
   "POST /v1/use-cases/:useCaseId/retire": "use-cases",
   "GET /v1/vendors": "vendors",

@@ -736,3 +736,40 @@ whole-table history rather than its own fixtures, a shared database cannot
 verify it: run it on a FRESH one before believing green, and treat an
 intermittent failure there as a defect to reproduce rather than a flake to
 re-run.**
+
+## M-040 (2026-09-25) — I built a fixture on org-global singleton state, one batch after writing the rule that says not to
+
+M-039 ended with: *"when a feature reads whole-table history rather than its own
+fixtures, a shared database cannot verify it."* I then wrote a new test file
+whose `beforeAll` called `POST /v1/compliance/packs/seed`.
+
+`compliance_packs` is unique on `(framework, version)`. It is org-global
+singleton state. `compliance-packs.test.ts` asserts that ITS seed call creates
+seven packs; mine had already created them, so its seed created zero and it
+failed with `expected +0 to be 7`. My file passed. The suite that broke was the
+one that had been correct for months.
+
+**The tell I walked past.** I reached for the seed endpoint because it was the
+convenient way to get a pack with the exact `controlRef` I wanted to assert on.
+But the thing under test was the ROUTE — that the framework is a parameter, that
+evidence is project-scoped, that a missing project yields nulls — and not one of
+those assertions needed the shipped catalogue. I used shared state for
+convenience and paid for it in someone else's file.
+
+The fix was to author two packs with run-unique framework names, and to assert
+the shipped NIST pack's content against the exported CONSTANT instead — which
+needs no database at all, so it cannot collide with anything.
+
+A second, duller error in the same file: a `sed` that replaced only the first
+occurrence of a URL left two tests still querying the framework I had stopped
+seeding. One of them passed anyway (it asserted on a later call that used the
+right name), so the failure pointed at the wrong test. **When a
+search-and-replace is part of a fix, grep for the pattern afterwards and count
+the hits** — the edit is not done because one call site changed.
+
+**Rule: before a fixture writes anything, ask whether the row is SCOPED TO THIS
+RUN or SHARED BY THE ORG. A singleton — org settings, a seeded catalogue, an
+activation pointer, a CHECK constraint — belongs to every suite, so creating it
+is as much an act on other files as deleting it would be. Prefer run-unique
+rows; where the shipped content itself is the claim, assert it against the
+exported constant rather than seeding it.**

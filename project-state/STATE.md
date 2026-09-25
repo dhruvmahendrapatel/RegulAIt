@@ -21,6 +21,55 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-25 — ADR-0123: criterion (d) tightened, and the ISACA assessment on the roadmap.**
+
+**The framework was a constant, and a refusal was not countable.** PoC criterion (d) was rated
+"yes, with a seam to narrate". Two causes. `euAiActScreeningFor` cited packs only on reaching an EU
+`high`/`prohibited` tier and filtered on the literal `"eu-ai-act"`, so every other pack we ship was
+unreachable from a use case — including the NIST AI RMF pack, which **has shipped since ADR-0058**
+and has no tier concept, so it could never have arrived through a screening gate anyway.
+
+**The half that mattered was worse than a missing feature.** A pack's `audit_decisions` collector
+reaches a decision only through `detail->>'projectId'`, and the governed DECISION rows on the MCP
+tool and connector paths did not carry it — while the PII-block rows on those same paths did. So
+`nist-ai-rmf:MANAGE-2.2`, whose own ownerNote reads "evidenced by refusals actually occurring",
+counted **zero** while the refusals sat in the ledger, correct, hash-chained and invisible. The
+product was telling an auditor that evidence did not exist when it did. `usage_events` already
+carried the project for the same call; the two records now agree.
+
+`GET /v1/use-cases/:id/frameworks` is a MAPPING, not a widened screening — inventing a tier for
+frameworks that do not have one would be the wrong shape. The remaining seam is named on every
+response rather than narrated around: evidence is collected per PROJECT and the payload says so, a
+use case with no project returns null statuses (not measured ≠ measured as none), entitlement is
+ADR-0047's own `evaluateReportAccess`, and the route persists nothing.
+
+**Criterion (d) now pairs with (b) on one screen**: the refusal demonstrated in (b) is what turns
+MANAGE-2.2 green, provided it carried the project header — and an unattributed refusal is still
+correctly not counted.
+
+**Three demo blockers found only by trying it.** Compliance packs are tier-gated and an unlicensed
+deployment runs default CLOSED, so (d) could not be shown at all; packs seed as draft and evaluate
+nothing until activated; and there was no use case to map. `demo:setup` now mints an EPHEMERAL
+licence (keypair in memory, public half only, outside the source tree — the committed dev key's
+private half was destroyed on purpose and this does not weaken that), activates the two packs, and
+creates the use case.
+
+**An unaudited governance write, closed.** `POST /v1/agents/:agentId/enabled` wrote nothing to the
+ledger and took no reason — three lines beneath a comment promising "audited acts — never silent
+PATCH writes" — despite being kernel-enforced platform-wide and the nearest thing we have to an
+emergency stop.
+
+**ISACA — *Cybersecurity Recommendations for Securing AI Agents* (2026), assessed and shelved as
+asked.** ROADMAP §7 holds an audit against its 15-item Secure-by-Default checklist done against
+ENFORCING CODE rather than ADRs: **4 full, 9 partial, 2 absent**, with both absences in the one
+category we have barely touched (Reliability, Resilience, Kill Switches). Ten ranked items, led by
+a kill switch and safe mode — we have every primitive and nothing that reads as an emergency
+control — and an ISACA compliance pack, which is the cheapest credibility on the list and would put
+our own gaps on our own dashboard. Two claims to stop making are recorded there and in the demo
+runbook: least privilege is enforced for the HUMANS holding agent grants, not for agents; and the
+injection detector runs at runtime but ships in `log` mode with no provenance model, so it is a
+detector rather than a defense.
+
 **2026-09-24 (later) — the seeded AND hardened demo environment, and the overstatement it found.**
 
 Two commands beyond the seed: `demo:mcp` stands up a real Streamable HTTP MCP server on loopback,

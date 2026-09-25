@@ -22,6 +22,9 @@ pnpm --filter @regulait/gateway seed
 pnpm --filter @regulait/gateway demo:mcp
 
 # (4) Make it hardened, and check it. Re-runnable; run it again if anything drifts.
+#     Also mints an EPHEMERAL demo licence (compliance packs are tier-gated and an
+#     unlicensed deployment runs default CLOSED, so criterion (d) needs one), activates
+#     the NIST and EU packs, and creates the use case (d) is about.
 pnpm --filter @regulait/gateway demo:setup
 
 # (5) The gateway itself.
@@ -111,13 +114,33 @@ does**: this classifies evidence *you* supply. It is not a claim to have searche
 stdio MCP server — a local subprocess, a very common deployment — never appears in a proxy log at
 all. Conceding that is what makes the rest of the answer credible.
 
-### (d) Map a use case to a framework with evidence
+### (d) Map a use case to a framework with evidence — **do this straight after (b)**
 
-Two hops, and **narrate the seam rather than get caught at it**: pack evaluation is scoped by
-*project*, and the use-case→pack preview is wired to the EU AI Act. Walk project → pack → control →
-evidence. The model cards `demo:setup` signs carry NIST AI RMF references (`GOVERN 1.1`, `MAP 2.3`,
-`MEASURE 2.1`), so there is framework evidence attached to the governed thing and not only to the
-project.
+```
+GET /v1/use-cases/<id>/frameworks?framework=nist-ai-rmf
+```
+
+Five NIST AI RMF controls with **live evidence counts**, in one call, for any framework we ship.
+No longer a two-hop narration.
+
+**The moment worth setting up.** Keep the same screen from (b). The refusal you just demonstrated
+*is* the evidence for `nist-ai-rmf:MANAGE-2.2` — "mechanisms are in place to supersede, disengage
+or deactivate an AI system". It moves from `unsatisfied` to `satisfied` because a deny landed in
+the ledger attributed to this project. So: read the control as unsatisfied, make the refused call,
+re-read, watch it go green.
+
+**Make the refused call with the project header** (`x-regulait-project-id`) or it will not count.
+That is honest behaviour rather than a trick: an unattributed refusal is not evidence about any
+project, and the product declines to pretend otherwise.
+
+Two things to say out loud while it is on screen, because the payload says them:
+
+- **Evidence is collected per project.** The counts cover everything governed in that project, not
+  this use case alone. A use case attributed to no project returns nulls, not zeros — "not
+  measured" and "measured as none" are different claims.
+- **The attestation-required control stays outstanding.** `GOVERN-4.1` is organisational and the
+  platform will never count it as satisfied on its own say-so. A tool that marked it green would be
+  the tick-box exercise this product exists to replace.
 
 ---
 
@@ -131,6 +154,11 @@ project.
 - **Do not demo the optimisation cache.** It is deliberately left off. A cached answer looks like a
   fast model and is not one, and being caught on that costs more than the feature is worth here.
 - **Do not present discovery as autonomous.** See (a).
+- **Do not claim "least privilege for agents".** We enforce least privilege for the *humans* who
+  hold agent grants; there is no per-agent principal in the policy kernel. The accurate and still
+  strong sentence is "every agent call is bound to an entitled human identity".
+- **Do not claim a kill switch.** There isn't one — no global stop, no per-tool emergency disable.
+  A per-agent `enabled` flag is enforced in the kernel and is now audited, and that is what to say.
 - **Do not promise SAP.** There is no code. One incidental comment in a migration header is the only
   hit in the repository.
 - **Do not open a `prod` anything.** Nothing in this environment is production and nothing should be
@@ -147,6 +175,9 @@ project.
 | a dispatch returns `attribution_required` | the call named no project | pass `projectId` — this is the gate working |
 | posture reads fewer controls than expected | the gateway was restarted without the env | re-export and restart; the page is reading the truth |
 | a tool that should be a write behaves as a read | the upstream lost its `readOnlyHint` and the live manifest overwrote the inventory | check `demo-mcp-server.ts`; the hint *is* the classification |
+| activating a pack answers `license_feature_not_licensed` | the ephemeral demo licence is missing, or the gateway cannot see the keyring | re-run `demo:setup`, and start the gateway with `REGULAIT_LICENSE_KEYRING=<repo>/demo-license-keys` |
+| every MCP call returns a bare `{"error":"internal"}` | the demo MCP server is not running — an upstream connection failure currently surfaces as an opaque 500 rather than a named refusal | restart `demo:mcp`. (Worth knowing: unlike `egress_blocked` and `mcp_admission_held`, this one is not named yet.) |
+| `MANAGE-2.2` stays `unsatisfied` after a refusal | the refused call carried no `x-regulait-project-id` | repeat it with the header; an unattributed refusal is correctly not counted |
 
 Re-running `demo:setup` is safe at any point. It reads the world back at each step rather than
 assuming the previous run landed, and it mints fresh keys for Dana and Avery each time.

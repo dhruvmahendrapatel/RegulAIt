@@ -10,6 +10,7 @@ import {
   runMigrations,
   type Db,
 } from "@regulait/db";
+import { DEFAULT_COMPLIANCE_PACKS } from "@regulait/shared";
 import { buildApp } from "./app.js";
 
 /**
@@ -65,6 +66,10 @@ let ownerAuth: { authorization: string } = { authorization: "" };
 let projectId = "";
 let otherProjectId = "";
 let nistPackId = "";
+/** stands in for the NIST pack; run-unique so this file owns its own rows */
+const PRIMARY_FRAMEWORK = `adr0123-primary-${RUN}`;
+/** a SECOND framework, so "the framework is a parameter" is provable */
+const SECOND_FRAMEWORK = `adr0123-second-${RUN}`;
 
 const post = (url: string, payload?: unknown, headers = AUTH) =>
   app.inject({ method: "POST", url, headers, ...(payload ? { payload: payload as object } : {}) });
@@ -73,13 +78,14 @@ const post = (url: string, payload?: unknown, headers = AUTH) =>
 async function manage22(useCaseId: string, headers = AUTH): Promise<number | null> {
   const res = await app.inject({
     method: "GET",
-    url: `/v1/use-cases/${useCaseId}/frameworks?framework=nist-ai-rmf`,
+    url: `/v1/use-cases/${useCaseId}/frameworks?framework=${PRIMARY_FRAMEWORK}`,
     headers,
   });
   expect(res.statusCode, res.body).toBe(200);
   const pack = res.json().frameworks[0];
-  return pack.controls.find((c: { controlRef: string }) => c.controlRef === "nist-ai-rmf:MANAGE-2.2")
-    ?.evidenceCount;
+  return pack.controls.find(
+    (c: { controlRef: string }) => c.controlRef === `${PRIMARY_FRAMEWORK}:MANAGE-2.2`,
+  )?.evidenceCount;
 }
 
 /**
@@ -117,21 +123,72 @@ beforeAll(async () => {
   projectId = (await post("/v1/projects", { name: `adr0123-project-${RUN}` })).json().id;
   otherProjectId = (await post("/v1/projects", { name: `adr0123-other-${RUN}` })).json().id;
 
-  // Packs seed as DRAFT and evaluate nothing until activated; activation is
-  // licence-gated, so the fixture activates by column rather than by route —
-  // this test is about the mapping, not about ADR-0052.
-  await post("/v1/compliance/packs/seed", {});
-  const [nist] = await db
-    .select()
-    .from(compliancePacks)
-    .where(eq(compliancePacks.framework, "nist-ai-rmf"));
-  nistPackId = nist!.id;
-  await db.update(compliancePacks).set({ status: "active" }).where(eq(compliancePacks.id, nistPackId));
-  const [eu] = await db
-    .select()
-    .from(compliancePacks)
-    .where(eq(compliancePacks.framework, "eu-ai-act"));
-  await db.update(compliancePacks).set({ status: "active" }).where(eq(compliancePacks.id, eu!.id));
+  /**
+   * RUN-UNIQUE PACKS, NOT THE SHIPPED CATALOGUE.
+   *
+   * `POST /v1/compliance/packs/seed` writes the seven launch packs, and
+   * `compliance_packs` is unique on `(framework, version)` — so it is
+   * ORG-GLOBAL SINGLETON state. A first draft of this file seeded it, and
+   * `compliance-packs.test.ts` (which asserts its own seed CREATES seven) then
+   * saw zero created and failed. That is M-039's lesson a second time: a
+   * fixture built on shared singleton state breaks whichever suite happens to
+   * run second.
+   *
+   * These packs are authored with run-unique framework names instead. The
+   * route's behaviour — that the framework is a PARAMETER, that evidence is
+   * project-scoped, that a missing project yields nulls — is what is under
+   * test, and none of it depends on the shipped content. That the real NIST
+   * pack ships with the control this ADR is about is asserted separately,
+   * against the shipped CONSTANT, where it needs no database at all.
+   */
+  const authorPack = async (framework: string, withDenyControl: boolean) => {
+    const res = await post("/v1/compliance/packs", {
+      framework,
+      version: 1,
+      title: `ADR-0123 fixture pack ${framework}`,
+      provenance: { source: "adr0123 test fixture" },
+      controls: withDenyControl
+        ? [
+            {
+              controlRef: `${framework}:MANAGE-2.2`,
+              title: "Refusals actually occur",
+              coverage: "enforced",
+              collector: "audit_decisions",
+              collectorParams: { effect: "deny" },
+              minEvidenceCount: 1,
+              attestationRequired: false,
+            },
+            {
+              controlRef: `${framework}:GOVERN-4.1`,
+              title: "Organisational — the platform must never self-certify this",
+              coverage: "unaddressed",
+              collector: "none",
+              collectorParams: {},
+              minEvidenceCount: 1,
+              attestationRequired: true,
+            },
+          ]
+        : [
+            {
+              controlRef: `${framework}:ART-12`,
+              title: "A control from the OTHER framework",
+              coverage: "evidenced",
+              collector: "audit_decisions",
+              collectorParams: {},
+              minEvidenceCount: 1,
+              attestationRequired: false,
+            },
+          ],
+    });
+    expect(res.statusCode, res.body).toBe(201);
+    const id = res.json().pack?.id ?? res.json().id;
+    // activation is licence-gated (ADR-0052) and this test is about the
+    // mapping, so the fixture activates by column rather than by route
+    await db.update(compliancePacks).set({ status: "active" }).where(eq(compliancePacks.id, id));
+    return id as string;
+  };
+  nistPackId = await authorPack(PRIMARY_FRAMEWORK, true);
+  await authorPack(SECOND_FRAMEWORK, false);
 });
 
 afterAll(async () => {
@@ -157,29 +214,29 @@ async function makeUseCase(attributed: boolean): Promise<string> {
 }
 
 describe("a use case maps to ANY shipped framework", () => {
-  it("a: returns the NIST pack's controls — the framework is no longer a constant", async () => {
+  it("a: returns the named framework's controls — the framework is no longer a constant", async () => {
     const useCaseId = await makeUseCase(true);
     const res = await app.inject({
       method: "GET",
-      url: `/v1/use-cases/${useCaseId}/frameworks?framework=nist-ai-rmf`,
+      url: `/v1/use-cases/${useCaseId}/frameworks?framework=${PRIMARY_FRAMEWORK}`,
       headers: ownerAuth,
     });
     expect(res.statusCode, res.body).toBe(200);
     const packs = res.json().frameworks;
-    expect(packs).toHaveLength(1);
-    expect(packs[0].framework).toBe("nist-ai-rmf");
+    expect(packs, res.body).toHaveLength(1);
+    expect(packs[0].framework).toBe(PRIMARY_FRAMEWORK);
     expect(packs[0].controls.map((c: { controlRef: string }) => c.controlRef)).toContain(
-      "nist-ai-rmf:MANAGE-2.2",
+      `${PRIMARY_FRAMEWORK}:MANAGE-2.2`,
     );
 
-    // PAIRED (M-033): the EU pack is reachable through the SAME route, so this
-    // is a parameter rather than one constant swapped for another.
-    const eu = await app.inject({
+    // PAIRED (M-033): a SECOND framework is reachable through the SAME route,
+    // so this is a parameter rather than one constant swapped for another.
+    const second = await app.inject({
       method: "GET",
-      url: `/v1/use-cases/${useCaseId}/frameworks?framework=eu-ai-act`,
+      url: `/v1/use-cases/${useCaseId}/frameworks?framework=${SECOND_FRAMEWORK}`,
       headers: ownerAuth,
     });
-    expect(eu.json().frameworks[0].framework).toBe("eu-ai-act");
+    expect(second.json().frameworks[0].framework).toBe(SECOND_FRAMEWORK);
 
     // and with no filter, BOTH come back
     const all = await app.inject({
@@ -188,15 +245,29 @@ describe("a use case maps to ANY shipped framework", () => {
       headers: ownerAuth,
     });
     const frameworks = all.json().frameworks.map((f: { framework: string }) => f.framework);
-    expect(frameworks).toContain("nist-ai-rmf");
-    expect(frameworks).toContain("eu-ai-act");
+    expect(frameworks).toContain(PRIMARY_FRAMEWORK);
+    expect(frameworks).toContain(SECOND_FRAMEWORK);
+  });
+
+  it("the SHIPPED NIST pack really does carry the control this ADR is about", () => {
+    /**
+     * Asserted against the shipped CONSTANT, not the database: it needs no
+     * seeding, so it cannot collide with another suite over org-global rows,
+     * and it is the claim that matters — that a customer activating
+     * `nist-ai-rmf` gets a control whose evidence is refusals occurring.
+     */
+    const nist = DEFAULT_COMPLIANCE_PACKS.find((p) => p.framework === "nist-ai-rmf");
+    expect(nist, "the NIST AI RMF pack must ship").toBeTruthy();
+    const manage = nist!.controls.find((c) => c.controlRef === "nist-ai-rmf:MANAGE-2.2");
+    expect(manage?.collector).toBe("audit_decisions");
+    expect((manage?.collectorParams as { effect?: string })?.effect).toBe("deny");
   });
 
   it("b: a use case with NO project is mapped but explicitly NOT evidenced", async () => {
     const useCaseId = await makeUseCase(false);
     const res = await app.inject({
       method: "GET",
-      url: `/v1/use-cases/${useCaseId}/frameworks?framework=nist-ai-rmf`,
+      url: `/v1/use-cases/${useCaseId}/frameworks?framework=${PRIMARY_FRAMEWORK}`,
       headers: ownerAuth,
     });
     expect(res.statusCode, res.body).toBe(200);
@@ -232,14 +303,14 @@ describe("a project-attributed refusal is countable evidence", () => {
     expect(await manage22(useCaseId, ownerAuth)).toBe((before ?? 0) + 1);
   });
 
-  it("the control that reports it is the one whose claim is about refusals", async () => {
-    // Guards the fixture as much as the code: if MANAGE-2.2 ever stops using
-    // the audit_decisions collector with effect=deny, the test above would be
-    // measuring something else while still passing.
+  it("the fixture control really is the one whose claim is about refusals", async () => {
+    // Guards the FIXTURE as much as the code: if this control stopped using
+    // the audit_decisions collector with effect=deny, the delta test above
+    // would be measuring something else while still passing.
     const [control] = await db
       .select()
       .from(compliancePackControls)
-      .where(eq(compliancePackControls.controlRef, "nist-ai-rmf:MANAGE-2.2"));
+      .where(eq(compliancePackControls.controlRef, `${PRIMARY_FRAMEWORK}:MANAGE-2.2`));
     expect(control?.collector).toBe("audit_decisions");
     expect((control?.collectorParams as { effect?: string })?.effect).toBe("deny");
   });
