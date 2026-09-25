@@ -65,6 +65,19 @@ interface AuditedWriter {
 
 const AUDITED_WRITERS: AuditedWriter[] = [
   {
+    file: "execution-control.ts",
+    method: "update",
+    expr: "agents",
+    // TWO occurrences — halt and unhalt.
+    count: 2,
+    why:
+      "ADR-0124's emergency stop. It writes ONLY `halted_at` / `halted_reason` / `halted_by_user_id`, none of " +
+      "which is in VERSIONED_RULE_FIELDS, so there is no version to mint and nothing is silently discarded at " +
+      "dispatch — the failure mode this guard exists for cannot occur here. It is deliberately NOT routed " +
+      "through `applyRuleEdit`: an emergency stop must be one write with no version ceremony between the " +
+      "operator and the thing stopping, and it is audited under its own rule ids either way.",
+  },
+  {
     file: "config-versions.ts",
     method: "update",
     expr: "table",

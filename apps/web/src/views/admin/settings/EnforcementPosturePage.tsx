@@ -63,6 +63,14 @@ interface PostureReport {
     blockedByEnvironment: string[];
   };
   controls: PostureControl[];
+  /** ADR-0124 — what is STOPPED right now, as opposed to what is enforcing */
+  execution: {
+    mode: string;
+    reason: string | null;
+    setAt: string | null;
+    restricted: boolean;
+    note: string;
+  };
 }
 
 /**
@@ -160,6 +168,14 @@ export default function EnforcementPosturePage() {
                 label="overall"
               />
               <Stat
+                value={
+                  <Badge tone={report?.execution.restricted ? "danger" : "ok"}>
+                    {report?.execution.mode.replace("_", "-") ?? "—"}
+                  </Badge>
+                }
+                label="execution"
+              />
+              <Stat
                 value={`${report?.summary.enforcementSatisfied ?? 0} of ${report?.summary.enforcementTotal ?? 0}`}
                 label="enforcement controls on"
               />
@@ -168,6 +184,29 @@ export default function EnforcementPosturePage() {
                 label="optimisation controls on"
               />
             </div>
+
+            {/*
+              ADR-0124 — THE FIRST THING ON THE PAGE WHEN IT IS TRUE.
+              An operator opening this screen mid-incident needs "execution is
+              stopped" before anything else, and the reason beside it. When
+              nothing is stopped this renders nothing at all: a permanent
+              "not halted" banner is noise that trains people to ignore the
+              place the real one will appear.
+            */}
+            {report?.execution.restricted && (
+              <EmptyState
+                title={`Execution is RESTRICTED — ${report.execution.mode.replace("_", "-")}`}
+                body={
+                  <>
+                    <p>{report.execution.reason ?? "(no reason recorded)"}</p>
+                    <p className={v.faint}>
+                      {report.execution.note}
+                      {report.execution.setAt ? ` Set ${report.execution.setAt}.` : ""}
+                    </p>
+                  </>
+                }
+              />
+            )}
 
             {blocked.length > 0 && (
               <EmptyState

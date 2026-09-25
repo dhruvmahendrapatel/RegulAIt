@@ -470,6 +470,7 @@ describe("6. the covered / NOT-covered inventory", () => {
    */
   const COVERED = [
     "agent_revocations.reason",
+    "agents.halted_reason",
     "agents.lifecycle_reason",
     "ai_endpoint_signatures.replacement_note",
     "ai_risks.acceptance_note",
@@ -527,6 +528,8 @@ describe("6. the covered / NOT-covered inventory", () => {
     // completion). Registered because they are a DUPLICATE of a record ADR-0104
     // and ADR-0099 already scrub, and because ADR-0070 puts them on the OTLP
     // wire as `gen_ai.input.messages` / `gen_ai.output.messages`.
+    "mcp_tools.halted_reason",
+    "org_settings.execution_mode_reason",
     "trace_spans.input_preview",
     "trace_spans.output_preview",
     "trace_spans.status_reason",

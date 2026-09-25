@@ -108,7 +108,13 @@ const REGISTRY: ReadonlyArray<readonly [object, readonly string[]]> = [
   [s.approvalDelegations, ["reason"]],
   [s.agentRevocations, ["reason"]],
   [s.connectorRevocations, ["reason"]],
-  [s.agents, ["lifecycleReason"]],
+  // ADR-0124 — the emergency-stop reasons. Operator free prose typed under
+  // incident pressure, which is exactly when somebody pastes the credential
+  // they are rotating into the explanation. Same reasoning as
+  // `mcp_servers.admission_clear_reason`.
+  [s.agents, ["lifecycleReason", "haltedReason"]],
+  [s.mcpTools, ["haltedReason"]],
+  [s.orgSettings, ["executionModeReason"]],
   [s.sodRules, ["reason"]],
   [s.decisions, ["rationale"]],
   [s.interceptionScopeRules, ["note"]],

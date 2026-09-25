@@ -188,6 +188,26 @@ export interface PostureReport {
     readonly blockedByEnvironment: readonly string[];
   };
   readonly controls: readonly PostureControl[];
+  /**
+   * ADR-0124 — WHAT IS STOPPED RIGHT NOW, reported beside what is enforcing.
+   *
+   * DELIBERATELY NOT A `SETTABLE` CONTROL, and this is the important part: if
+   * the execution dial were one of the controls the hardened preset applies,
+   * then "harden this deployment" would mean "halt this deployment". That is
+   * not a hardened posture, it is an outage. `normal` is the correct steady
+   * state of a fully hardened install.
+   *
+   * So it is reported and never preset. A reviewer tempted to add it to
+   * SETTABLE should read this paragraph first.
+   */
+  readonly execution: {
+    readonly mode: string;
+    readonly reason: string | null;
+    readonly setAt: string | null;
+    /** true when this deployment is NOT executing normally */
+    readonly restricted: boolean;
+    readonly note: string;
+  };
 }
 
 export function buildPostureReport(
@@ -213,7 +233,22 @@ export function buildPostureReport(
   };
   const enf = count("enforcement");
   const opt = count("optimisation");
+  const mode = settings.executionMode;
   return {
+    execution: {
+      mode,
+      reason: settings.executionModeReason ?? null,
+      setAt: settings.executionModeSetAt?.toISOString() ?? null,
+      restricted: mode !== "normal",
+      note:
+        mode === "normal"
+          ? "Executing normally. This is the correct steady state of a hardened deployment — the " +
+            "hardened preset deliberately never touches this dial, because 'harden' must never " +
+            "mean 'halt'."
+          : `EXECUTION IS RESTRICTED (${mode}). This is an operator intervention, not a posture ` +
+            "setting: see GET /v1/execution for the reason, who set it, and any individually " +
+            "halted agents or tools.",
+    },
     hardened: controls.every((c) => c.satisfied),
     summary: {
       enforcementSatisfied: enf.satisfied,

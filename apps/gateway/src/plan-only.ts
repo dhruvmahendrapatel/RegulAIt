@@ -57,15 +57,16 @@ type InstanceRow = typeof workflowInstances.$inferSelect;
  * — `plan`, `review` and `chat` appear in the seed's own dispatch mix — plus
  * the two obvious read synonyms, so the allow-list is a vocabulary rather than
  * a list of two.
+ *
+ * ADR-0124 MOVED THE DEFINITION INTO THE POLICY KERNEL and re-exports it here
+ * so every existing importer is unchanged. It moved because "does this mode
+ * mutate anything?" is a POLICY judgement, and ADR-0124's read-only mode has
+ * to answer exactly the same question on the dispatch path. Two copies of that
+ * judgement would eventually disagree, and the disagreement would show up as a
+ * safe mode that let a write through.
  */
-export const PLAN_SAFE_MODES = ["plan", "review", "chat", "ask", "read"] as const;
-
-const PLAN_SAFE = new Set<string>(PLAN_SAFE_MODES);
-
-/** normalized membership test — the ONE definition of "mutating mode" */
-export function isPlanSafeMode(mode: string): boolean {
-  return PLAN_SAFE.has(mode.trim().toLowerCase());
-}
+import { PLAN_SAFE_MODES, isPlanSafeMode } from "@regulait/policy-kernel";
+export { PLAN_SAFE_MODES, isPlanSafeMode };
 
 export interface InstanceAttributionFailure {
   ok: false;
