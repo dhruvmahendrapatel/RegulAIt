@@ -72,11 +72,12 @@ export async function resolveExecutionPosture(
 ): Promise<ExecutionPosture> {
   const org = settings ?? (await loadOrgSettings(db));
   const mode = org.executionMode as ExecutionMode;
+  const approverUserId = org.executionModeApproverUserId ?? null;
   const subjectHalt = await resolveSubjectHalt(db, subject);
   // `mode` and `subjectHalt` are independent: a halted tool is refused even
   // while the deployment as a whole is `normal`, which is the entire point of
   // a per-capability stop.
-  return subjectHalt ? { mode, subjectHalt } : { mode };
+  return subjectHalt ? { mode, approverUserId, subjectHalt } : { mode, approverUserId };
 }
 
 async function resolveSubjectHalt(
@@ -129,6 +130,24 @@ export async function loadExecutionMode(
 ): Promise<ExecutionMode> {
   const org = settings ?? (await loadOrgSettings(db));
   return org.executionMode as ExecutionMode;
+}
+
+/**
+ * The dial PLUS its approver, for paths that can queue.
+ *
+ * Only the MCP tool path needs this: it is the one path that turns
+ * `require_approval` into a real queued approval, and `approvals`
+ * .approver_user_id is NOT NULL.
+ */
+export async function loadExecutionDial(
+  db: Db,
+  settings?: OrgSettingsRow,
+): Promise<{ mode: ExecutionMode; approverUserId: string | null }> {
+  const org = settings ?? (await loadOrgSettings(db));
+  return {
+    mode: org.executionMode as ExecutionMode,
+    approverUserId: org.executionModeApproverUserId ?? null,
+  };
 }
 
 /** A row that carries the three halt columns — agents and mcp_tools both do. */

@@ -150,6 +150,11 @@ export const NON_ADMIN_ROUTES = new Set([
   // evaluateReportAccess, so a non-admin owner sees the control mapping and
   // only the counts their report entitlement already permits.
   "GET /v1/use-cases/:useCaseId/frameworks",
+  // ADR-0124 — the execution read is NOT admin-only, on purpose. It is the
+  // endpoint somebody opens when their work starts being refused, and "the
+  // deployment is halted" is a far better answer than a silent denial that
+  // looks like lost access. It exposes no secret and no other user's data.
+  "GET /v1/execution",
   "PATCH /v1/use-cases/:useCaseId",
   // ADR-0081 — the AI risk register, the same shape as the use-case routes
   // above: naming a risk is a front-door act, and list/detail/edit/transition

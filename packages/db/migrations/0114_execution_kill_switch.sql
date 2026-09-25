@@ -77,3 +77,19 @@ ALTER TABLE "mcp_tools"
 -- keeps that lookup cheap and the index tiny.
 CREATE INDEX IF NOT EXISTS "agents_halted_idx" ON "agents" ("id") WHERE "halted_at" IS NOT NULL;
 CREATE INDEX IF NOT EXISTS "mcp_tools_halted_idx" ON "mcp_tools" ("server_id", "name") WHERE "halted_at" IS NOT NULL;
+
+-- ── 4. Who signs off while `require_approval` is set ─────────────────────
+--
+-- "Nothing runs unattended" has to say who is attending. `approvals`
+-- .approver_user_id is NOT NULL, and an approval nobody is named on is one
+-- nobody is accountable for deciding — so the mode cannot be set without an
+-- approver, and the constraint says so rather than the route alone.
+ALTER TABLE "org_settings"
+  ADD COLUMN IF NOT EXISTS "execution_mode_approver_user_id" uuid
+    REFERENCES "users"("id") ON DELETE SET NULL;
+
+ALTER TABLE "org_settings"
+  ADD CONSTRAINT "org_settings_execution_approver_ck"
+  CHECK (
+    "execution_mode" <> 'require_approval' OR "execution_mode_approver_user_id" IS NOT NULL
+  );

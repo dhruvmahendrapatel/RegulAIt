@@ -623,6 +623,13 @@ export const ROUTE_STABILITY: Readonly<Record<string, Stability>> = {
   // ADR-0123 — the framework mapping. Internal like its siblings until the
   // use-cases surface as a whole is published.
   "GET /v1/use-cases/:useCaseId/frameworks": "internal",
+  // ADR-0124
+  "GET /v1/execution": "internal",
+  "PUT /v1/execution/mode": "internal",
+  "POST /v1/agents/:agentId/halt": "internal",
+  "POST /v1/agents/:agentId/unhalt": "internal",
+  "POST /v1/servers/:serverId/tools/:toolName/halt": "internal",
+  "POST /v1/servers/:serverId/tools/:toolName/unhalt": "internal",
   "PATCH /v1/use-cases/:useCaseId": "internal",
   "POST /v1/use-cases/:useCaseId/retire": "internal",
   // ADR-0084 — the AI vendor registry: new surface, internal until the shape settles
@@ -1222,6 +1229,12 @@ export const ROUTE_TAGS: Readonly<Record<string, string>> = {
   "POST /v1/use-cases": "use-cases",
   "GET /v1/use-cases/:useCaseId": "use-cases",
   "GET /v1/use-cases/:useCaseId/frameworks": "use-cases",
+  "GET /v1/execution": "org-settings",
+  "PUT /v1/execution/mode": "org-settings",
+  "POST /v1/agents/:agentId/halt": "agents",
+  "POST /v1/agents/:agentId/unhalt": "agents",
+  "POST /v1/servers/:serverId/tools/:toolName/halt": "servers",
+  "POST /v1/servers/:serverId/tools/:toolName/unhalt": "servers",
   "PATCH /v1/use-cases/:useCaseId": "use-cases",
   "POST /v1/use-cases/:useCaseId/retire": "use-cases",
   "GET /v1/vendors": "vendors",

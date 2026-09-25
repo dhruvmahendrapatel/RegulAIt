@@ -3436,6 +3436,12 @@ export const orgSettings = pgTable(
       onDelete: "set null",
     }),
     executionModeSetAt: timestamp("execution_mode_set_at", { withTimezone: true }),
+    /** ADR-0124 — who signs off while `require_approval` is set. Required for
+     * that mode by DB CHECK: `approvals.approver_user_id` is NOT NULL, and an
+     * approval nobody is named on is one nobody is accountable for deciding. */
+    executionModeApproverUserId: uuid("execution_mode_approver_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
 
     // --- L6c / ADR-0092 amendment (migration 0100): the model-judged half ---
     /** FALSE (default) = the ADR-0092 access-recommendation report is exactly

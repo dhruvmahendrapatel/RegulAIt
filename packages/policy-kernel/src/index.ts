@@ -75,6 +75,15 @@ export interface SubjectHalt {
  */
 export interface ExecutionPosture {
   readonly mode: ExecutionMode;
+  /**
+   * Who signs off while `require_approval` is set. REQUIRED for that mode and
+   * meaningless for the others.
+   *
+   * "Nothing runs unattended" has to say who is attending: `approvals` has a
+   * NOT NULL approver, and an approval nobody is named on is one nobody is
+   * accountable for deciding. The route refuses to set the mode without one.
+   */
+  readonly approverUserId?: string | null;
   /** set when THIS agent or tool is individually halted. Independent of
    * `mode`: a halted tool is refused even while the deployment is `normal`. */
   readonly subjectHalt?: SubjectHalt | null;
@@ -129,7 +138,7 @@ export function executionGate(
    * claimed to queue would be worse than not offering the mode.
    */
   canQueue: boolean,
-): { effect: DecisionEffect; ruleId: string; reason: string } | null {
+): { effect: DecisionEffect; ruleId: string; reason: string; approverUserId?: string } | null {
   // A SUBJECT HALT OUTRANKS THE DIAL. It is narrower and more specific, and an
   // operator who stopped one tool during an incident means it regardless of
   // what the deployment as a whole is doing.
@@ -173,6 +182,7 @@ export function executionGate(
         return {
           effect: "require_approval",
           ruleId: EXECUTION_RULE_IDS.requireApproval,
+          ...(execution.approverUserId ? { approverUserId: execution.approverUserId } : {}),
           reason:
             "this deployment requires human approval for every governed call, including " +
             `${subjectLabel}. Nothing runs unattended while this mode is set; the call is queued, ` +
@@ -651,6 +661,9 @@ export function evaluate(input: EvaluationInput): Decision {
       ruleId: gated.ruleId,
       ruleChain: [{ rule: gated.ruleId as RuleName, outcome: traceOutcome(gated.effect) }],
       reason: gated.reason,
+      // carried through so the queued approval names a real human — see
+      // ExecutionPosture.approverUserId
+      ...(gated.approverUserId ? { approverUserId: gated.approverUserId } : {}),
     };
   }
 

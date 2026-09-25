@@ -99,6 +99,10 @@ const proxyParams = z.object({ serverId: z.string().uuid() });
  * project policy to enforce) and can never touch a project budget. An admin
  * can refuse unattributed calls outright with require_mcp_attribution.
  */
+export /** ADR-0124 — a rule id may be a row id or a symbolic name; only the first
+ * belongs in a uuid column. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export const PROJECT_HEADER = "x-regulait-project-id";
 const proxyHeaders = z.object({
   [PROJECT_HEADER]: z.string().uuid().optional(),
@@ -653,7 +657,19 @@ async function executeGovernedToolCallInner(
               userId,
               serverId,
               toolName,
-              ruleId: decision.ruleId,
+              /**
+               * ADR-0124 — `approvals.rule_id` is a UUID referring to an
+               * `approval_rules` row. An ORDINARY require_approval carries one.
+               * The execution dial's `require_approval` mode does not: its rule
+               * id is symbolic (`execution-require-approval`), because no rule
+               * row demanded it — the deployment's posture did. Writing the
+               * symbolic id here raised 22P02 and failed the queue outright,
+               * which is the same mistake M-039 recorded: a column's type is a
+               * claim about every producer. NULL is the honest value, and the
+               * audit row beside this carries the symbolic id, so nothing is
+               * lost.
+               */
+              ruleId: UUID_RE.test(decision.ruleId) ? decision.ruleId : null,
               approverUserId: decision.approverUserId!,
               // ADR-0104: the fingerprint the consent will be BOUND to, and
               // beside it the SCRUBBED payload the approver actually reads.
