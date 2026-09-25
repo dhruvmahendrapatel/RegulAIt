@@ -379,6 +379,52 @@ if (seeded.status >= 400 && packList.length === 0) {
   note(`  packs   *** seeding failed (${seeded.status}) — criterion (d) has nothing to show`);
 }
 
+/** the project everything in the demo is attributed to */
+const demoProject: Json | undefined = ((await call("GET", "/v1/projects")).projects ?? []).find(
+  (p: Json) => p.name === "demo-project",
+);
+
+// ── 3b. A USE CASE, so criterion (d) has a subject ───────────────────────
+//
+// Attributed to the demo project on purpose: pack evidence is collected PER
+// PROJECT, so an unattributed use case renders as mapped-but-not-evidenced —
+// correct, and nothing to demo. Created as the requester rather than the
+// bootstrap token, which cannot propose one (`bootstrap_cannot_propose`) for
+// the same reason it cannot approve: proposing is a person's act.
+//
+// It is left in `proposed`. Driving it to `approved` means walking the
+// pillar-2 intake workflow, and that walk is itself worth showing — so the
+// script sets it up and the runbook drives it, rather than the script
+// quietly finishing the story.
+
+const existingUseCases: Json[] = (await call("GET", "/v1/use-cases")).useCases ?? [];
+const USE_CASE_NAME = "Checkout assistant";
+if (existingUseCases.some((u) => u.name === USE_CASE_NAME)) {
+  note(`  usecase '${USE_CASE_NAME}' already exists`);
+} else if (demoProject) {
+  const created = await probe(
+    "POST",
+    "/v1/use-cases",
+    {
+      name: USE_CASE_NAME,
+      description:
+        "Drafts and reviews changes to the checkout service for the payments team, through the governed gateway.",
+      businessContext:
+        "Reduces cycle time on checkout changes. No customer PII is in scope; the agent reads and proposes, a human merges.",
+      dataSensitivity: "internal",
+      projectId: demoProject.id,
+    },
+    DANA_AUTH,
+  );
+  note(
+    created.status === 201
+      ? `  usecase '${USE_CASE_NAME}' proposed and attributed to demo-project`
+      : `  usecase *** could not be created (${created.status}): ${String(created.body?.error ?? "")}`,
+  );
+} else {
+  note("  usecase *** demo-project missing — criterion (d) will have no subject");
+}
+
 // ── 3. Evidence for the MCP-discovery demo (ADR-0122) ─────────────────────
 //
 // Written to a FILE rather than seeded into the database, because that is what
@@ -416,9 +462,7 @@ note(`  disc    evidence written to ${evidencePath}`);
 //      attributable to the preset rather than to the seed.
 
 const balanced = agents.find((a) => a.name === "balanced-mock");
-const demoProject: Json | undefined = ((await call("GET", "/v1/projects")).projects ?? []).find(
-  (p: Json) => p.name === "demo-project",
-);
+
 let preHarden = "skipped (no balanced-mock agent or demo-project)";
 if (balanced && demoProject) {
   const before = await probe(
@@ -548,10 +592,24 @@ ${blocked
       have searched their estate, and a stdio MCP server never appears in a
       proxy log at all.
 
-  (d) MAP A USE CASE TO A FRAMEWORK WITH EVIDENCE
-      Two hops, and narrate the seam rather than be caught at it: pack
-      evaluation is scoped by PROJECT, and the use-case preview is wired to
-      the EU AI Act. Walk project -> pack -> control -> evidence.
+  (d) MAP A USE CASE TO A FRAMEWORK WITH EVIDENCE   [tightened — ADR-0123]
+      GET /v1/use-cases/<id>/frameworks?framework=nist-ai-rmf
+      Five NIST controls with LIVE evidence counts, in one call, for any
+      shipped framework — not a two-hop narration any more.
+
+      DO THIS RIGHT AFTER (b), and keep the same screen up: the refusal you
+      just demonstrated IS the evidence for nist-ai-rmf:MANAGE-2.2
+      ("mechanisms to supersede, disengage or deactivate"). It moves from
+      unsatisfied to satisfied because a deny landed in the ledger attributed
+      to this project. Make the refused call WITH the project header
+      (x-regulait-project-id) or it will not count — and that is the honest
+      behaviour, not a trick: an unattributed refusal is not evidence about
+      any project.
+
+      Read the scope sentence out: evidence is collected per PROJECT, so the
+      counts cover everything in that project, not this use case alone. And
+      the attestation-required control stays outstanding — an organisational
+      control is never counted as satisfied by the platform.
 
   DO NOT, on this environment:
     · demo the optimisation cache (deliberately left off — a cached answer
