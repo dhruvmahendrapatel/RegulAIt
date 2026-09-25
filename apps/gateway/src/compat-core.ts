@@ -77,6 +77,7 @@ import {
   semanticCacheSavings,
   storeSemanticCache,
 } from "./semantic-cache-shared.js";
+import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
 import {
   loadVirtualKeyContext,
   virtualKeyAdmits,
@@ -649,9 +650,13 @@ export async function prepareCompatCall(
       .where(eq(agents.id, policy.ceilingAgentId));
     ceilingTier = ceiling?.tier ?? null;
   }
+  const compatExecutionMode = await loadExecutionMode(db);
   const evalFor = (a: AgentRow) =>
     evaluateAgent({
       userId,
+      // ADR-0124 — the IDE surface is a dispatch path and is gated like one.
+      // Developers' traffic is exactly what a halt is usually thrown for.
+      execution: postureOf(compatExecutionMode, agentHaltOf(a)),
       agent: { id: a.id, name: a.name, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
       mode: COMPAT_MODE,
       agentGrants: grants,

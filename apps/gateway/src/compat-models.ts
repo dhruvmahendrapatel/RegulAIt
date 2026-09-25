@@ -44,6 +44,7 @@ import {
   virtualKeyAdmits,
   type VirtualKeyContext,
 } from "./virtual-keys.js";
+import { EVALUATION_ONLY_EXECUTION } from "./execution-posture.js";
 
 /** The header the Anthropic SDK sends on every request, and the ONLY thing
  * this module uses to choose an envelope. Absent ⇒ OpenAI shape, which is the
@@ -107,6 +108,14 @@ export async function listEntitledModels(
     // client sees listed and what it may call cannot drift.
     const decision = evaluateAgent({
       userId,
+      /**
+       * ADR-0124 — VISIBILITY, not execution. This is the `/v1/models` listing
+       * an IDE reads to populate its picker. Emptying it during a halt would
+       * look to the developer like their entitlements had been revoked, and
+       * would leave the client with nothing to name in the call that should
+       * come back with a clear "this deployment is halted".
+       */
+      execution: EVALUATION_ONLY_EXECUTION,
       agent: { id: a.id, name: a.name, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
       mode: COMPAT_MODE,
       agentGrants: grants,

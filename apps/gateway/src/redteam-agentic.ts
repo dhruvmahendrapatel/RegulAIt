@@ -57,6 +57,7 @@ import {
   type Db,
   type RedTeamProbeRow,
 } from "@regulait/db";
+import { EVALUATION_ONLY_EXECUTION } from "./execution-posture.js";
 import { evaluateConnector } from "@regulait/policy-kernel";
 import type { ModelChatMessage, ModelToolDef } from "@regulait/model-provider";
 import {
@@ -242,6 +243,16 @@ export async function adjudicateInducedCall(
     ]);
     const decision = evaluateConnector({
       userId: input.userId,
+      /**
+       * ADR-0124 — EVALUATION ONLY, and this one matters.
+       *
+       * The agentic adjudicator asks the kernel what it WOULD decide and never
+       * executes the call — that is ADR-0057's whole design. Gating it would
+       * make every red-team probe report "refused: the deployment is halted",
+       * which says nothing about whether the platform would have held, and
+       * would quietly destroy the evidence a halted deployment most needs.
+       */
+      execution: EVALUATION_ONLY_EXECUTION,
       connectorId: connector.id,
       connectorName: connector.name,
       operation: vector.connectorOperation ?? "write",

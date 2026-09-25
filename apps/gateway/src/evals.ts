@@ -63,6 +63,7 @@ import {
   type EvalDatasetRow,
   type EvalRunRow,
 } from "@regulait/db";
+import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
 import { evaluateAgent, type AgentDecision } from "@regulait/policy-kernel";
 import { isModelProviderKind } from "@regulait/model-provider";
 import {
@@ -312,9 +313,14 @@ async function agentDecider(db: Db, userId: string) {
       .where(eq(agents.id, policy.ceilingAgentId));
     ceilingTier = ceiling?.tier ?? null;
   }
+  const evalExecutionMode = await loadExecutionMode(db);
   return (agent: AgentRow, mode: string): AgentDecision =>
     evaluateAgent({
       userId,
+      // ADR-0124 — an eval run really dispatches to the agent under test, so a
+      // halt stops it. A halted deployment that kept grading models would be
+      // spending money on the one thing an operator just said to stop.
+      execution: postureOf(evalExecutionMode, agentHaltOf(agent)),
       agent: {
         id: agent.id,
         name: agent.name,

@@ -21,6 +21,7 @@ import {
   type SQL,
 } from "@regulait/db";
 import { evaluate, matchingApprovalRules, type Decision, type ToolRef } from "@regulait/policy-kernel";
+import { EVALUATION_ONLY_EXECUTION, resolveExecutionPosture } from "./execution-posture.js";
 import {
   approvalArgumentsDigest,
   approvalContextDigest,
@@ -501,6 +502,12 @@ export async function governedEvaluate(
    * pass and the shadow pass differ in the rule bodies and in NOTHING ELSE.
    * Anything else varying between them would make a divergence unattributable
    * to the version change it is supposed to measure. */
+  // Resolved once per governed call: org dial + this tool's own halt.
+  const executionPosture = await resolveExecutionPosture(db, {
+    serverId,
+    toolName: tool.name,
+  });
+
   const evaluateWith = (
     rules: typeof servedARules,
     limitRows: typeof limitsWithCounts,
@@ -514,6 +521,17 @@ export async function governedEvaluate(
     evaluate({
       userId,
       serverId,
+      /**
+       * ADR-0124 — the kill switch, resolved ONCE above for this call and
+       * reused by both passes.
+       *
+       * A SIMULATION IS NOT AN EXECUTION. ADR-0120's dry run replays recorded
+       * traffic through this same function to answer "what would this rule
+       * do?"; reporting "denied — the deployment is halted" would answer a
+       * question nobody asked and make every preview useless during the one
+       * period an operator most needs to reason about policy.
+       */
+      execution: simulate ? EVALUATION_ONLY_EXECUTION : executionPosture,
       userName: nameOf.get(userId) ?? null,
       serverName: serverRows[0]?.name ?? null,
       tool,

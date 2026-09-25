@@ -8,6 +8,10 @@ import { deriveDeployContext, governedEvaluate } from "./governed-evaluate.js";
 import { effectiveModeOverrides, runAuditPruneOnce, retentionFloor } from "./org-settings.js";
 import { isCsvNoticeRow } from "./csv-export.js";
 
+/** ADR-0124 — the shipped posture; these suites are about entitlement, not
+ * about the kill switch, so the dial adds nothing to their decisions. */
+const EXEC = { mode: "normal" } as const;
+
 /**
  * A4 (ADR-0027, migration 0044 — decomposing ADR-0019's deferred A4):
  * (a) the deploy_mode dimension on audit rows written by deploy-mode-scoped
@@ -119,26 +123,33 @@ describe("(c) kernel: deploy-mode-scoped restriction rules", () => {
   };
 
   it("no derivable context (null/empty) = a mode-scoped rule does NOT match — default is today's allow", () => {
-    expect(evaluate({ ...base, approvalRules: [modeRule] }).effect).toBe("allow");
-    expect(evaluate({ ...base, approvalRules: [modeRule], deployContext: [] }).effect).toBe("allow");
-    expect(evaluate({ ...base, approvalRules: [modeRule], deployContext: ["byoc"] }).effect).toBe("allow");
+    expect(evaluate({
+    execution: EXEC, ...base, approvalRules: [modeRule] }).effect).toBe("allow");
+    expect(evaluate({
+    execution: EXEC, ...base, approvalRules: [modeRule], deployContext: [] }).effect).toBe("allow");
+    expect(evaluate({
+    execution: EXEC, ...base, approvalRules: [modeRule], deployContext: ["byoc"] }).effect).toBe("allow");
   });
 
   it("a matching context pauses the call, and the reason names the deploy-mode scope", () => {
-    const d = evaluate({ ...base, approvalRules: [modeRule], deployContext: ["air_gapped", "hosted"] });
+    const d = evaluate({
+    execution: EXEC, ...base, approvalRules: [modeRule], deployContext: ["air_gapped", "hosted"] });
     expect(d.effect).toBe("require_approval");
     expect(d.reason).toContain("deploy-mode air_gapped");
   });
 
   it("mode-unscoped rules are byte-identical regardless of context (deployMode null/absent)", () => {
     const plain = { ...modeRule, deployMode: null };
-    expect(evaluate({ ...base, approvalRules: [plain] }).effect).toBe("require_approval");
-    expect(evaluate({ ...base, approvalRules: [plain], deployContext: ["byoc"] }).effect).toBe("require_approval");
+    expect(evaluate({
+    execution: EXEC, ...base, approvalRules: [plain] }).effect).toBe("require_approval");
+    expect(evaluate({
+    execution: EXEC, ...base, approvalRules: [plain], deployContext: ["byoc"] }).effect).toBe("require_approval");
   });
 
   it("mode scoping is additive-only: it narrows restrictions, it can never rescue an ungranted call", () => {
     const ungranted = { ...base, toolGrants: [] };
-    const d = evaluate({ ...ungranted, approvalRules: [modeRule], deployContext: ["air_gapped"] });
+    const d = evaluate({
+    execution: EXEC, ...ungranted, approvalRules: [modeRule], deployContext: ["air_gapped"] });
     expect(d.effect).toBe("deny");
     expect(d.ruleId).toBe("default-deny");
   });
@@ -149,8 +160,10 @@ describe("(c) kernel: deploy-mode-scoped restriction rules", () => {
       scope: "fleet" as const, serverScope: "all" as const, deployMode: "byoc" as const,
       toolName: null, maxCalls: 1, windowSeconds: 60, currentCount: 5,
     };
-    expect(evaluate({ ...base, rateLimits: [limit] }).effect).toBe("allow");
-    expect(evaluate({ ...base, rateLimits: [limit], deployContext: ["byoc"] }).effect).toBe("deny");
+    expect(evaluate({
+    execution: EXEC, ...base, rateLimits: [limit] }).effect).toBe("allow");
+    expect(evaluate({
+    execution: EXEC, ...base, rateLimits: [limit], deployContext: ["byoc"] }).effect).toBe("deny");
   });
 });
 

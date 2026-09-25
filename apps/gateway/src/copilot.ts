@@ -57,6 +57,12 @@
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import {
+  EVALUATION_ONLY_EXECUTION,
+  agentHaltOf,
+  loadExecutionMode,
+  postureOf,
+} from "./execution-posture.js";
+import {
   agentGrants,
   agents,
   aiRisks,
@@ -452,6 +458,8 @@ async function lookupEntityCandidate(
       if (!actor.isAdmin) {
         const decision = evaluateConnector({
           userId: actor.userId,
+          // ADR-0124 — listing which connectors the actor may use. Visibility.
+          execution: EVALUATION_ONLY_EXECUTION,
           connectorId: c.id,
           connectorName: c.name,
           operation: "read",
@@ -1321,6 +1329,9 @@ async function agentDecision(db: Db, userId: string, agent: AgentRow): Promise<A
   }
   return evaluateAgent({
     userId,
+    // ADR-0124 — the copilot's narrator really dispatches, and its own comment
+    // says it "is not exempt from anything". A halt is no exception.
+    execution: postureOf(await loadExecutionMode(db), agentHaltOf(agent)),
     agent: {
       id: agent.id,
       name: agent.name,

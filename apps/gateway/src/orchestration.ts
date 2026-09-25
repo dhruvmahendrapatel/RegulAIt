@@ -22,6 +22,7 @@ import {
   type Db,
   type TraceStatus,
 } from "@regulait/db";
+import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
 import type { WorkflowDefinition } from "@regulait/workflow-kernel";
 import { evaluateAgent, type AgentDecision } from "@regulait/policy-kernel";
 import {
@@ -1428,6 +1429,11 @@ async function evaluateNodeOwner(
   return {
     decision: evaluateAgent({
       userId,
+      // ADR-0124 — a pillar-7 worker is a real dispatch under the initiating
+      // user's entitlements. It inherits the halt for the same reason it
+      // inherits every other ceiling: a delegated run must never be able to do
+      // what a direct caller cannot.
+      execution: postureOf(await loadExecutionMode(db), agentHaltOf(agent)),
       agent: { id: agent.id, tier: agent.tier, enabled: agent.enabled, modes: agent.modes ?? null },
       mode,
       agentGrants: grants,
@@ -1751,6 +1757,7 @@ export async function planRun(
     if (policy?.ceilingAgentId) {
       ceilingTier = agentById.get(policy.ceilingAgentId)?.tier ?? null;
     }
+    const ownerExecutionMode = await loadExecutionMode(db);
     const evalOwner = (
       agentId: string,
       mode: string,
@@ -1760,6 +1767,8 @@ export async function planRun(
       if (!agent) return null;
       return evaluateAgent({
         userId,
+        // ADR-0124 — same rule as every other worker dispatch.
+        execution: postureOf(ownerExecutionMode, agentHaltOf(agent)),
         agent: { id: agent.id, tier: agent.tier, enabled: agent.enabled, modes: agent.modes ?? null },
         mode,
         agentGrants: grants,

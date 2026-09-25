@@ -31,6 +31,7 @@ import { deleteAgentGrantById, deleteConnectorGrantById } from "./grant-revocati
 // agent/connector grant endpoints (the other seven mint paths live in app.ts).
 import { refuseSodMint } from "./sod.js";
 import { evaluateAgent, evaluateConnector } from "@regulait/policy-kernel";
+import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
 import {
   ConnectorProviderError,
   connectorDefaultBaseUrl,
@@ -667,8 +668,13 @@ export async function executeGovernedDispatch(
       continue;
     }
     // RULE 2 — re-evaluate, never inherit.
+    const hopExecutionMode = await loadExecutionMode(db);
     const decision = evaluateAgent({
       userId: args.userId,
+      // ADR-0124 — a fallback hop is a real dispatch, so it is gated like one.
+      // The hop agent's OWN halt matters most here: halting an agent must also
+      // stop traffic being routed INTO it by somebody else's fallback chain.
+      execution: postureOf(hopExecutionMode, agentHaltOf(hopAgent)),
       agent: {
         id: hopAgent.id,
         name: hopAgent.name,
@@ -3464,6 +3470,8 @@ export function registerAgentConnectorRoutes(
 
     const decision = evaluateAgent({
       userId,
+      // ADR-0124 — the kill switch on the native dispatch path.
+      execution: postureOf(await loadExecutionMode(db), agentHaltOf(agent)),
       // the display name rides along so denial prose says "premium-mock
       // (c8d62183…)" instead of a bare UUID (the id stays in the trace)
       agent: {
@@ -3664,11 +3672,20 @@ export function registerAgentConnectorRoutes(
         if (pendingCostEvents.length > 0) await db.insert(costEvents).values(pendingCostEvents);
       };
 
-      const registry = await db.select().from(agents).where(eq(agents.enabled, true));
+      // ADR-0124 — a HALTED agent is unroutable, excluded here rather than
+      // per-candidate: the optimiser must never select something an operator
+      // has stopped, and filtering at the query keeps that impossible rather
+      // than merely checked.
+      const registry = await db
+        .select()
+        .from(agents)
+        .where(and(eq(agents.enabled, true), isNull(agents.haltedAt)));
+      const routingExecutionMode = await loadExecutionMode(db);
       const entitled = registry.filter(
         (a) =>
           evaluateAgent({
             userId,
+            execution: postureOf(routingExecutionMode, agentHaltOf(a)),
             agent: { id: a.id, name: a.name, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
             mode: body.mode,
             agentGrants: grants,
@@ -4701,6 +4718,9 @@ export function registerAgentConnectorRoutes(
 
       const decision = evaluateConnector({
         userId,
+        // ADR-0124 — the kill switch on the connector path. A connector has no
+        // per-subject halt of its own; the dial governs it.
+        execution: postureOf(await loadExecutionMode(db), null),
         connectorId,
         connectorName: connector.name,
         operation: body.operation,

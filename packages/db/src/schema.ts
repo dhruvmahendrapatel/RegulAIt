@@ -580,6 +580,15 @@ export const mcpTools = pgTable(
       .references(() => mcpServers.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     kind: text("kind", { enum: ["read", "write"] }).notNull(),
+    /** ADR-0124 — an EMERGENCY stop on this one subject, deliberately distinct
+     * from any "not in service" flag beside it. `enabled = false` is a registry
+     * decision that may be months old; a halt is an incident. Collapsing them
+     * would mean lifting a halt silently returns something to service that
+     * somebody had deliberately retired. NULL = not halted; the DB CHECK makes
+     * "halted with no reason" unrepresentable. */
+    haltedAt: timestamp("halted_at", { withTimezone: true }),
+    haltedReason: text("halted_reason"),
+    haltedByUserId: uuid("halted_by_user_id").references(() => users.id, { onDelete: "set null" }),
     description: text("description"),
     /** O10 (migration 0045): optional PER-TOOL price override. Resolution is
      * tool-first, server-flat-price fallback (ADR-0019 recorded the flat
@@ -1538,6 +1547,15 @@ export const agents = pgTable("agents", {
   tier: integer("tier").notNull(),
   modes: jsonb("modes").$type<string[]>(),
   enabled: boolean("enabled").notNull().default(true),
+  /** ADR-0124 — an EMERGENCY stop on this one subject, deliberately distinct
+   * from any "not in service" flag beside it. `enabled = false` is a registry
+   * decision that may be months old; a halt is an incident. Collapsing them
+   * would mean lifting a halt silently returns something to service that
+   * somebody had deliberately retired. NULL = not halted; the DB CHECK makes
+   * "halted with no reason" unrepresentable. */
+  haltedAt: timestamp("halted_at", { withTimezone: true }),
+  haltedReason: text("halted_reason"),
+  haltedByUserId: uuid("halted_by_user_id").references(() => users.id, { onDelete: "set null" }),
   // ADR-0089 (migration 0091): the accountable HUMAN for this agent — a
   // governance record, not authentication. NULLABLE ON PURPOSE: existing
   // agents have no owner and inventing one would forge an accountability
@@ -3390,6 +3408,34 @@ export const orgSettings = pgTable(
     dispatchAttributionRequired: boolean("dispatch_attribution_required")
       .notNull()
       .default(false),
+
+    // --- ADR-0124: the kill switch and safe modes ------------------------
+    /**
+     * ONE DIAL, FOUR POSITIONS, checked before every other rule at all three
+     * governed entry points. `normal` (the default, and what every existing
+     * deployment upgrades into) adds nothing to any decision.
+     *
+     *  read_only         reads pass, writes refused
+     *  require_approval  nothing runs unattended — queued on the MCP tool
+     *                    path, REFUSED on dispatch/connector, which have no
+     *                    per-call approval queue to hand work to
+     *  halted            the kill switch: every governed call refused
+     *
+     * Reading the audit trail, the approvals queue and the posture page is
+     * never gated by this, or the halt could not be investigated or lifted.
+     */
+    executionMode: text("execution_mode", {
+      enum: ["normal", "read_only", "require_approval", "halted"],
+    })
+      .notNull()
+      .default("normal"),
+    /** REQUIRED by DB CHECK for any mode other than `normal` — an emergency
+     * stop with no stated reason is an outage of unknown cause. */
+    executionModeReason: text("execution_mode_reason"),
+    executionModeSetByUserId: uuid("execution_mode_set_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    executionModeSetAt: timestamp("execution_mode_set_at", { withTimezone: true }),
 
     // --- L6c / ADR-0092 amendment (migration 0100): the model-judged half ---
     /** FALSE (default) = the ADR-0092 access-recommendation report is exactly

@@ -5,6 +5,10 @@ import { auditLog, createDb, eq, runMigrations, type Db } from "@regulait/db";
 import { evaluate, evaluateConnector } from "@regulait/policy-kernel";
 import { buildApp } from "./app.js";
 
+/** ADR-0124 — the shipped posture; these suites are about entitlement, not
+ * about the kill switch, so the dial adds nothing to their decisions. */
+const EXEC = { mode: "normal" } as const;
+
 /**
  * O9 (ADR-0027, migration 0045) — partial revocations. scope 'full' (default
  * = every pre-O9 row = ADR-0019's total semantics) suppresses everything;
@@ -59,6 +63,7 @@ describe("kernel — MCP role-derived revocations with scope", () => {
     revocations: [
       { id: "rev1", userId: "u1", serverId: "s1", toolName: null, ...(revScope ? { scope: revScope } : {}) },
     ],
+    execution: EXEC,
   });
 
   it("read_only scope: the write tool is revoked, the read tool stays allowed", () => {
@@ -93,6 +98,7 @@ describe("kernel — connector revocations with scope", () => {
     connectorRevocations: [
       { id: "rev1", userId: "u1", connectorId: "c1", ...(scope ? { scope } : {}) },
     ],
+    execution: EXEC,
   });
 
   it("read_only scope: writes denied (reason names the scope), reads allowed", () => {

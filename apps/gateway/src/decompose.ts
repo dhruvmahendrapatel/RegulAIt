@@ -27,6 +27,7 @@ import {
   userAgentPolicies,
   type Db,
 } from "@regulait/db";
+import { agentHaltOf, loadExecutionMode, postureOf } from "./execution-posture.js";
 import { evaluateAgent, visibleTools, type AgentDecision, type ToolRef } from "@regulait/policy-kernel";
 import { validateGraph } from "@regulait/orchestration-kernel";
 import { isModelProviderKind, TASK_DECOMPOSITION_SENTINEL } from "@regulait/model-provider";
@@ -326,9 +327,13 @@ export function registerDecomposeRoutes(
     if (policy?.ceilingAgentId) {
       ceilingTier = registry.find((a) => a.id === policy.ceilingAgentId)?.tier ?? null;
     }
+    const decomposeExecutionMode = await loadExecutionMode(db);
     const evalFor = (a: AgentRow, mode: string): AgentDecision =>
       evaluateAgent({
         userId,
+        // ADR-0124 — decomposition dispatches a lead agent to draft the graph,
+        // so it is execution and is gated.
+        execution: postureOf(decomposeExecutionMode, agentHaltOf(a)),
         agent: { id: a.id, name: a.name, tier: a.tier, enabled: a.enabled, modes: a.modes ?? null },
         mode,
         agentGrants: grants,
