@@ -496,3 +496,74 @@ the cited source holds the detail. This is an index, not a commitment to build a
 | 15 | ~~`key_custody` + `network` enforcement rungs — declared, not enforced~~ **key_custody SHIPPED 2026-07-31 (ADR-0024)** — `key_custody_enforced` makes BYO user credentials 409 + inert at dispatch (reversible), posture UI labels enforced-vs-declared honestly; `network` documented as an egress-allowlist recipe in IDE_INTEGRATION.md (infra-level by nature — product-side portion done; the actual egress control remains a Batch C/BYOC infra concern) | ADR-0020 / Batch H ladder → ADR-0024 | **done** (product side) |
 | 16 | Deeper a11y — beyond the shipped contrast/focus/aria-live pass (full keyboard-nav audit, screen-reader flows) | UX/a11y pass (STATE.md addendum 33) | **D** |
 | 17 | ~~Login by **user ID / username** instead of email~~ **SHIPPED 2026-08-01 (ADR-0030)** — nullable+unique `users.username` (migration 0047) whose CHECK forbids `@`, making the username and email namespaces provably disjoint so one login field resolves both ('@' ⇒ email, else username) with no impersonation path; case-insensitive by construction (lowercase-only storage, normalize-on-write); `{email, password}` still accepted so every shipped client keeps working; ADR-0025's uniform 401 (status, body AND scrypt cost) holds across the new namespace; admin-managed by default with an `org_settings.username_self_service` opt-in; OIDC deliberately still maps on verified email | owner request 2026-07-31 (ADR-0028 session) → ADR-0030 | **done** |
+
+---
+
+## 7. ISACA — *Cybersecurity Recommendations for Securing AI Agents* (2026)
+
+*Added 2026-09-25 at the owner's request: read the paper, say what we can take from it, and put it
+on the roadmap rather than building it now. Nothing below is committed.*
+
+**Why this document is worth taking seriously.** It is not a framework we would have to contort the
+product to fit. Its 11 practice categories are close to a description of what this product already
+is — a deterministic policy enforcement point between agent outputs and action-capable systems,
+with human approval for high-risk actions and a tamper-resistant ledger. Two of its controls read
+almost as our own design notes: *"do not let retrieved content directly trigger actions without a
+separate policy decision"* and *"implement a deterministic PEP … validating action type, target
+system, actor identity, authorization, business rules, risk thresholds, and required approvals."*
+
+That cuts both ways. Where we do **not** match it, the gap is conspicuous precisely because the rest
+lines up — and a security-led buyer (which Reynolds is) will read this paper.
+
+### 7.1 Honest self-assessment against the 15-item Secure-by-Default checklist
+
+Audited against **enforcing code**, not ADRs. Anything that could not be traced to code that runs is
+marked accordingly.
+
+| # | Checklist item | Us | Note |
+|---|---|---|---|
+| 1 | Inventory agents, tools, models, memory, providers | **Partial** | `GET /v1/inventory/*` covers agents, connectors, MCP servers, grants, providers, vendors, use cases, risks, and splits *granted* from *observed*. **Memory stores are not inventoried at all.** |
+| 2 | Trust boundaries and owners | **Partial** | Owners exist on agents, risks, vendors, use cases. Boundaries are implicit (deploy mode, project cascade, egress allow-list); no first-class object, and MCP servers/connectors have no owner. |
+| 3 | Per-agent identity, least privilege | **No, as specified** | Least privilege is real but **per-human**. `tool_grants` is `(userId, serverId, toolName)`; the ABAC schema has only a `User` principal. An agent's effective permission is the union of its grant-holders'. |
+| 4 | Short-lived credentials, federated identity | **Partial** | Real STS for customer cloud infra; expiry primitives on API keys, virtual keys, sessions, approvals. **No federated workload identity for agents**; model-provider credentials are long-lived stored keys. |
+| 5 | Sandbox execution, network segmentation | **No (sandbox)** | We proxy to remote MCP servers; nothing executes tools locally, so there is no sandbox to speak of — and also no local execution risk. Network side is one flat compose network and a wide-open Terraform egress rule. |
+| 6 | Deny outbound by default | **Yes** (application layer) | The egress guard: default-deny allow-list, no wildcards, resolved-address range blocks, IMDS carve-out, redirect refusal, DNS-rebind closed. Enforced at write time *and* every dispatch. Process-level egress is still open. |
+| 7 | Treat retrieved content and tool output as untrusted | **Partial** | A prompt-injection detector runs at **runtime** on MCP tool arguments *and output*, and on agent input/output. But it ships in `log` mode, does not see conversation history, system prompts or shared context, and there is **no provenance/trust-level tagging and no instruction-hierarchy enforcement**. |
+| 8 | Memory isolation and retention | **Partial** | Isolation is good (cache scoped per user+agent, conversations own-scoped, project context membership-gated). **Retention is not enforced** — the cache TTL is a read-time filter with no purge job, and conversations have no sweeper. |
+| 9 | All tool actions behind a PEP | **Yes** | One choke point: `governedEvaluate` → the policy kernel. Entitlements, ABAC, approvals, rate limits, data scopes, budgets, PII, guardrails, admission, plan-only. |
+| 10 | Human approval for high-risk actions | **Partial** | Strong core: payload-bound consent, policy-bound consent with TTL, atomic single-winner consume, SoD. **Missing: dual control** (tool-call rules name one approver) **and step-up re-auth** (MFA is a login-time session attribute). |
+| 11 | Log prompts, tool calls, decisions, approvals with redaction | **Yes** | Hash-chained ledger, WORM anchoring graded by asking the bucket, credential scrub at the DB chokepoint over 53 declared prose columns. *(The one hole found — an unaudited agent enable/disable — was closed in ADR-0123.)* |
+| 12 | Pin models and dependencies; SBOM; signing | **Partial — our weakest** | Ed25519-signed update bundles with verify-before-apply is real. **No SBOM or AI-BOM, no image signing, no digest-pinned base image, and no model version/endpoint pinning** (`agents.model` is a free-form string). |
+| 13 | Secure SDLC and change control | **Split** | *In-product* change control is strong (immutable versions, canary, rollback, policy dry-run, workflow gates). *Our own* CI runs build/typecheck/test only — no SAST, dependency, secret or container scanning. |
+| 14 | Kill switches, rollback, safe mode | **Partial — no kill switch** | Rollback is real. **There is no kill switch**: no global stop, no per-tool emergency disable. The nearest thing is a per-agent `enabled` flag (enforced in the kernel, now audited). **No read-only or recommendation-only mode** at agent or deployment scope. |
+| 15 | Continuous red teaming | **Yes — our strongest** | Versioned attack libraries including indirect prompt injection, multi-turn sequences, an adjudicator that asks the kernel what it *would* decide and executes nothing, a scheduled daily sweep, regression gating, evidence onto model cards. |
+
+**Score, stated plainly: 4 full, 9 partial, 2 absent.** For a product this young that is a good
+result, and the two absent ones are both in category 11 (*Reliability, Resilience, Kill Switches*) —
+the one category we have barely touched.
+
+### 7.2 What to build, ranked
+
+Ordered by *buyer-visible gap × cost to close*, not by how interesting it is.
+
+| # | Item | Why | Rough size |
+|---|---|---|---|
+| **I1** | **Kill switch + safe mode.** A global stop, a per-agent and per-tool emergency disable, and a deployment-wide read-only/recommendation-only mode. Audited, reversible, reason-required, surfaced on the posture page. | The single most conspicuous absence for a governance product, and the one a CISO asks about first. ISACA lists it twice (checklist 14, category 11). We already have every primitive — `enabled`, `plan-only`, connector `read` mode — but nothing that reads as an emergency control. | **M** |
+| **I2** | **An ISACA compliance pack.** The 15-item checklist is almost exactly the shape of a pack: one control per item, `collector` where we can evidence it, `attestationRequired` where it is organisational. | Cheapest credibility in the list — the machinery exists (ADR-0058), and §7.1 shows most controls would evidence themselves. It also makes our own gaps visible on our own dashboard, which is the right pressure. | **S** |
+| **I3** | **Memory retention that actually runs.** A TTL/purge sweep for `semantic_cache` and a conversation retention policy, driven by the existing scheduler. | We *declare* retention and do not enforce it. `semantic_cache` holds prompts and outputs and is never deleted — a privacy finding waiting to be written up, and ISACA calls it out explicitly. | **S/M** |
+| **I4** | **Content provenance and trust levels.** Tag retrieved content and tool output with a source trust level, and refuse to let low-trust content carry high action authority. Plus an instruction-hierarchy boundary so external content cannot override system instructions. | ISACA's category 5 in one line, and the thing our injection detector cannot do: it pattern-matches text rather than tracking where the text came from. This is a real differentiator, not just a gap-filler. | **L** |
+| **I5** | **SBOM / AI-BOM, image signing, model pinning.** CycloneDX in CI, cosign on the image, digest-pinned base, and a pinned model-version concept beside the free-form `agents.model`. | Supply chain is our weakest row and the easiest to be embarrassed on: a buyer asks for an SBOM and we have none. Model pinning also closes a real governance hole — a provider can change what `gpt-5` means underneath an approved model card. | **M** |
+| **I6** | **Dual control and step-up auth.** Quorum on tool-call approval rules (workflow stages already have it), and a re-authentication challenge at the sensitive action rather than a login-time MFA attribute. | ISACA asks for both explicitly for destructive/financial/irreversible actions. We have the approval machinery; this is an extension of it rather than a new subsystem. | **M** |
+| **I7** | **Per-agent identity.** An Agent principal in the ABAC schema, with its own entitlements rather than the union of its grant-holders'. | The most architecturally significant item here and the one we should be slowest about — it touches the kernel. But "least privilege for agents" is not a claim we can make today, and ISACA's category 3 is entirely about it. | **XL** |
+| **I8** | **Our own security CI.** SAST, dependency, secret and container scanning on the repository. | Not customer-facing, but it is checklist item 13 and we would fail our own pack. | **S** |
+| **I9** | **Memory-store inventory and connector/server ownership.** Extend the inventory to memory stores; add owners to MCP servers and connectors. | Closes checklist items 1 and 2 to *full*, cheaply. | **S** |
+| **I10** | **Data classification handling matrix** (ISACA Appendix A). Its Store/Send/Access/Keep/Dispose verbs per classification tier map onto our compliance-profile cascade, which already drives retention and PII mode. | Would let a compliance profile express handling rules in a vocabulary an auditor already knows. | **M** |
+
+### 7.3 Two things to change in how we *talk*, not what we build
+
+- **Do not claim "least privilege for agents."** We enforce least privilege for the *humans* who
+  hold agent grants. Until I7, the accurate sentence is "every agent call is bound to an entitled
+  human identity" — which is a strong claim, and a different one.
+- **The injection detector should be described as a detector, not a defense.** It runs at runtime on
+  tool arguments and output, which is more than registration-time scanning — and it ships in `log`
+  mode with no provenance model, which is less than a defense. Both halves, or neither.

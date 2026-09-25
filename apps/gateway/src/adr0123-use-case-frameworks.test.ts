@@ -244,3 +244,47 @@ describe("a project-attributed refusal is countable evidence", () => {
     expect((control?.collectorParams as { effect?: string })?.effect).toBe("deny");
   });
 });
+
+/**
+ * Found while auditing against ISACA's "log decisions and approvals" item.
+ * `POST /v1/agents/:agentId/enabled` is the most consequential switch on an
+ * agent — the kernel refuses every caller when it is off, regardless of grant
+ * — and it wrote NOTHING to the ledger, three lines above a comment promising
+ * "audited acts, never silent PATCH writes".
+ */
+describe("disabling an agent is an audited act", () => {
+  it("records both directions under distinct rule ids, and the effect follows the consequence", async () => {
+    const agent = await post("/v1/agents", {
+      name: `adr0123-agent-${RUN}`,
+      provider: "mock",
+      model: "mock-fast",
+      tier: 1,
+    });
+    expect(agent.statusCode, agent.body).toBe(201);
+    const agentId = agent.json().id;
+
+    const rows = async (ruleId: string) =>
+      (await db.select().from(auditLog).where(eq(auditLog.ruleId, ruleId))).filter(
+        (r) => r.objectId === agentId,
+      );
+
+    await post(`/v1/agents/${agentId}/enabled`, { enabled: false });
+    const disabled = await rows("agent-disabled");
+    expect(disabled).toHaveLength(1);
+    // turning it OFF starts refusing, so it is recorded as a deny
+    expect(disabled[0]!.effect).toBe("deny");
+    expect(disabled[0]!.detail).toMatchObject({ from: true, to: false });
+
+    await post(`/v1/agents/${agentId}/enabled`, { enabled: true });
+    const enabled = await rows("agent-enabled");
+    expect(enabled).toHaveLength(1);
+    expect(enabled[0]!.effect).toBe("allow");
+
+    // PAIRED NEGATIVE: a no-op write mints no row. Without this, a route that
+    // audited unconditionally would pass everything above while filling the
+    // ledger with events that never happened.
+    const beforeNoop = (await rows("agent-enabled")).length;
+    await post(`/v1/agents/${agentId}/enabled`, { enabled: true });
+    expect((await rows("agent-enabled")).length).toBe(beforeNoop);
+  });
+});

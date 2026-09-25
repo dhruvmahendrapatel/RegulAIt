@@ -2964,12 +2964,45 @@ export function registerAgentConnectorRoutes(
   app.post("/v1/agents/:agentId/enabled", async (req, reply) => {
     const { agentId } = agentIdParam.parse(req.params);
     const body = setAgentEnabledSchema.parse(req.body);
+    const [before] = await db.select().from(agents).where(eq(agents.id, agentId));
+    if (!before) return reply.status(404).send({ error: "unknown_agent" });
+    if (before.enabled === body.enabled) return before;
+
     const [row] = await db
       .update(agents)
       .set({ enabled: body.enabled })
       .where(eq(agents.id, agentId))
       .returning();
-    if (!row) return reply.status(404).send({ error: "unknown_agent" });
+
+    /**
+     * THIS WRITE USED TO BE SILENT, three lines above a comment promising
+     * "audited acts — never silent PATCH writes".
+     *
+     * It is the most consequential switch on an agent: `enabled = false` is
+     * enforced in the policy kernel and refuses EVERY caller platform-wide,
+     * regardless of grants. It is also the closest thing this product has to
+     * an emergency stop. An operator reconstructing "when did this agent stop
+     * answering, and who stopped it?" had nothing in the ledger to find —
+     * which is exactly the question an audit trail exists for.
+     *
+     * Distinct rule ids per direction, because disabling and re-enabling are
+     * different facts and an operator alerting on one must not match the
+     * other. Effect follows the consequence: turning it OFF starts refusing,
+     * so it is recorded as a `deny`.
+     */
+    await db.insert(auditLog).values({
+      userId: req.authCtx.userId ?? "00000000-0000-0000-0000-000000000000",
+      objectType: "agent",
+      objectId: agentId,
+      detail: { from: before.enabled, to: body.enabled, via: req.authCtx.via },
+      effect: body.enabled ? "allow" : "deny",
+      ruleId: body.enabled ? "agent-enabled" : "agent-disabled",
+      ruleChain: [],
+      reason: body.enabled
+        ? `agent '${before.name}' re-enabled — it can be dispatched again by anyone already granted it`
+        : `agent '${before.name}' DISABLED platform-wide — every dispatch to it is now refused in the ` +
+          "policy kernel regardless of grant",
+    });
     return row;
   });
 
