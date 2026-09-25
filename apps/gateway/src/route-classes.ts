@@ -145,6 +145,11 @@ export const NON_ADMIN_ROUTES = new Set([
   "POST /v1/use-cases",
   "GET /v1/use-cases",
   "GET /v1/use-cases/:useCaseId",
+  // ADR-0058 mapping view. Non-admin for the same reason the detail route is:
+  // it is the owner's own use case. The EVIDENCE half is separately gated by
+  // evaluateReportAccess, so a non-admin owner sees the control mapping and
+  // only the counts their report entitlement already permits.
+  "GET /v1/use-cases/:useCaseId/frameworks",
   "PATCH /v1/use-cases/:useCaseId",
   // ADR-0081 — the AI risk register, the same shape as the use-case routes
   // above: naming a risk is a front-door act, and list/detail/edit/transition

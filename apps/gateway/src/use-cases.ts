@@ -85,9 +85,17 @@ import {
   EU_AI_ACT_RULESET_VERSION,
   EU_AI_ACT_SCREENING_DISCLAIMER,
   type EuAiActReason,
+  COMPLIANCE_PACK_DISCLAIMER,
+  REPORT_PERIODS,
+  resolveReportPeriod,
+  evaluateReportAccess,
 } from "@regulait/shared";
 import { z } from "zod";
 import { complianceProfilesForTags, effectiveCompliancePolicy } from "./projects.js";
+// ADR-0058's evaluator, reused rather than reimplemented: a second copy of the
+// collector logic would drift from the one that produces real pack reports.
+import { evaluatePack } from "./compliance-packs.js";
+import { callerProjectIds, callerTeamIds, resolveScopeProjectIds } from "./reporting.js";
 // ADR-0089 (gap L21): the ONE granted computation and its never-blend note —
 // imported from the inventory, never reimplemented.
 import { buildAgentHolderIndex, INVENTORY_NOTES } from "./inventory.js";
@@ -908,6 +916,186 @@ export function registerUseCaseRoutes(
   // The linked intake instance, if still live, is left to run out — a retired
   // use case never changes status again (syncUseCaseForInstance treats
   // retired as terminal).
+  /**
+   * THE FRAMEWORK MAPPING — "show me this use case against NIST AI RMF, with
+   * evidence", answerable in ONE call and for ANY shipped framework.
+   *
+   * WHY THIS IS NOT PART OF THE EU-AI-ACT SCREENING ABOVE. That screening is a
+   * SCREENING: a questionnaire, a tier, and a refusal reason, and all three are
+   * specific to the Act. `euAiActScreeningFor` cites packs only as a
+   * consequence of reaching a high/prohibited tier, filtered to
+   * `framework = "eu-ai-act"` — so every other framework we ship was
+   * unreachable from a use case, and NIST AI RMF (which has no tier concept at
+   * all) could never appear. A mapping is a different question from a
+   * screening and gets its own route rather than a widened screening that
+   * would have to invent a tier for frameworks that do not have one.
+   *
+   * THE SEAM IS NAMED, NOT HIDDEN. Pack evaluation is scoped by PROJECT — that
+   * is what the collectors' WHERE clauses are built from, and this route does
+   * not change it. So the evidence counts describe **everything in the project
+   * this use case is attributed to**, not this use case alone. That is stated
+   * on the response, in `evidenceScope.note`, on every call. A use case with
+   * no project is reported as `mapped, not evidenced` rather than being given
+   * numbers from somewhere else.
+   *
+   * IT PERSISTS NOTHING. `POST /v1/compliance/packs/:id/evaluate` writes a
+   * `compliance_pack_reports` row because that call IS the artifact. This is a
+   * read, and a page-view that minted a report each time would fill the
+   * evidence ledger with noise and make the real reports impossible to find.
+   * The entitlement decision is the SAME `evaluateReportAccess` the report
+   * route uses, so a preview can never show more than a report would.
+   */
+  app.get("/v1/use-cases/:useCaseId/frameworks", async (req, reply) => {
+    const { useCaseId } = useCaseIdParam.parse(req.params);
+    const q = z
+      .object({
+        /** one framework, or all active packs when omitted */
+        framework: z.string().min(1).max(100).optional(),
+        period: z.enum(REPORT_PERIODS).optional(),
+      })
+      .parse(req.query ?? {});
+
+    const [useCase] = await db.select().from(aiUseCases).where(eq(aiUseCases.id, useCaseId));
+    if (!useCase) return reply.status(404).send({ error: "not_found" });
+    // the SAME visibility rule the detail route applies — a mapping must not
+    // be a way to read a use case you cannot read
+    if (!req.authCtx.isAdmin && req.authCtx.userId !== useCase.ownerUserId) {
+      return reply.status(403).send({
+        error: "forbidden",
+        detail: "a use case is visible to its owner and to admins",
+      });
+    }
+
+    const activePacks = await db
+      .select()
+      .from(compliancePacks)
+      .where(
+        q.framework
+          ? and(eq(compliancePacks.status, "active"), eq(compliancePacks.framework, q.framework))
+          : eq(compliancePacks.status, "active"),
+      )
+      .orderBy(compliancePacks.framework);
+
+    const project = await projectSummaryFor(db, useCase);
+    const now = new Date();
+    const period = q.period ?? "current_month";
+    const resolved = resolveReportPeriod(period, now);
+
+    /**
+     * The entitlement decision, taken ONCE against the use case's project and
+     * reused for every pack. `null` here means "not evidenced" for an honest
+     * reason, and the reason is carried through to the caller.
+     */
+    let projectIds: string[] | null = null;
+    let evidenceKind: "project" | "no_project" | "not_entitled" = "no_project";
+    let evidenceReason =
+      "this use case is not attributed to a project, and pack evidence is collected per project — " +
+      "so the controls below are MAPPED but not evidenced. Attributing it to a project is the " +
+      "missing step, not a limitation of the framework.";
+
+    if (useCase.projectId && project) {
+      const scopeProjectIds = await resolveScopeProjectIds(db, {
+        scopeKind: "project",
+        scopeId: useCase.projectId,
+      });
+      const decision = evaluateReportAccess({
+        isAdmin: req.authCtx.isAdmin,
+        userId: req.authCtx.userId ?? null,
+        definition: {
+          kind: "compliance",
+          scopeKind: "project",
+          scopeId: useCase.projectId,
+          entitlementScope: "project",
+        },
+        scopeProjectIds,
+        callerProjectIds: await callerProjectIds(db, req.authCtx.userId ?? null),
+        callerTeamIds: await callerTeamIds(db, req.authCtx.userId ?? null),
+      });
+      if (decision.allowed) {
+        projectIds = decision.projectIds;
+        evidenceKind = "project";
+        evidenceReason =
+          `evidence is counted over PROJECT '${project.name}' for ${resolved.label} — which means ` +
+          "it describes everything governed in that project, not this use case alone. A use case " +
+          "and a project are not the same scope, and the numbers below do not pretend otherwise.";
+      } else {
+        evidenceKind = "not_entitled";
+        evidenceReason = `mapped but not evidenced: ${decision.reason}`;
+      }
+    }
+
+    const frameworks = [];
+    for (const pack of activePacks) {
+      const controls = await db
+        .select()
+        .from(compliancePackControls)
+        .where(eq(compliancePackControls.packId, pack.id))
+        .orderBy(compliancePackControls.controlRef);
+
+      const profiles = pack.cascadeTag ? await complianceProfilesForTags(db, [pack.cascadeTag]) : [];
+      const scorecard =
+        evidenceKind === "project"
+          ? await evaluatePack(db, {
+              pack,
+              controls,
+              projectIds,
+              periodStart: resolved.start,
+              periodEnd: resolved.end,
+              period,
+              periodLabel: resolved.label,
+              scopeKind: "project",
+              scopeId: useCase.projectId,
+              now,
+            })
+          : null;
+
+      frameworks.push({
+        id: pack.id,
+        framework: pack.framework,
+        version: pack.version,
+        title: pack.title,
+        cascadeTag: pack.cascadeTag,
+        /** does a §8.3 profile exist for this pack's tag in THIS org today? */
+        profileExists: profiles.length > 0,
+        carriedByUseCase:
+          pack.cascadeTag !== null && useCase.complianceTags.includes(pack.cascadeTag),
+        /** the pack's own control vocabulary, always — the MAPPING half */
+        controls: controls.map((c) => ({
+          controlRef: c.controlRef,
+          title: c.title,
+          coverage: c.coverage,
+          attestationRequired: c.attestationRequired,
+          /** the EVIDENCE half, present only when it was really computed */
+          status: scorecard?.controls.find((a) => a.controlRef === c.controlRef)?.status ?? null,
+          evidenceCount:
+            scorecard?.controls.find((a) => a.controlRef === c.controlRef)?.evidenceCount ?? null,
+        })),
+        totals: scorecard?.totals ?? null,
+        statement: scorecard?.statement ?? null,
+      });
+    }
+
+    return {
+      useCase: {
+        id: useCase.id,
+        name: useCase.name,
+        status: useCase.status,
+        complianceTags: useCase.complianceTags,
+      },
+      project,
+      evidenceScope: {
+        kind: evidenceKind,
+        projectId: useCase.projectId,
+        period,
+        periodLabel: resolved.label,
+        note: evidenceReason,
+      },
+      frameworks,
+      /** the same clause every pack report carries — one sentence, one meaning */
+      disclaimer: COMPLIANCE_PACK_DISCLAIMER,
+    };
+  });
+
   app.post("/v1/use-cases/:useCaseId/retire", async (req, reply) => {
     const { useCaseId } = useCaseIdParam.parse(req.params);
     const body = retireUseCaseSchema.parse(req.body);

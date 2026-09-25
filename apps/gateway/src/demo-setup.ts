@@ -34,8 +34,10 @@
 
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { generateKeyPairSync, sign } from "node:crypto";
 import { createDb, runMigrations } from "@regulait/db";
+import { LICENSE_FEATURES, LICENSE_SCHEMA_ID, canonicalLicenseBytes } from "@regulait/shared";
 import { buildApp } from "./app.js";
 
 const connectionString =
@@ -275,6 +277,106 @@ for (const agent of agents.filter((a) => DEMO_AGENTS.includes(a.name))) {
   note(
     `  mrm     ${agent.name}: card ${settled?.state ?? "?"}, valid until ${VALID_UNTIL.slice(0, 10)}`,
   );
+}
+
+// ── 3. A DEMO LICENSE, and the compliance packs it unlocks ───────────────
+//
+// Compliance packs are a tier-gated feature (ADR-0052) and a deployment with
+// no license runs **default CLOSED** — so activating a pack answers
+// `license_feature_not_licensed` and PoC criterion (d) cannot be demonstrated
+// at all. That refusal is correct behaviour; it is simply fatal to a demo, and
+// finding it on the day would be worse.
+//
+// THE KEY IS GENERATED HERE AND THROWN AWAY. The committed dev key's private
+// half was destroyed on generation on purpose, so nothing in this repository
+// can mint a license the default keyring accepts — the correct fail-closed
+// direction. This mints an EPHEMERAL keypair, writes only its PUBLIC half into
+// a scratch keyring outside the source tree, signs one short-dated demo
+// license, and never writes the private half anywhere. It is the same thing
+// the licensing suite does, for the same reason.
+//
+// This touches neither `infra/release-keys/` nor `infra/license-keys/`, and
+// nothing here is production: the license says so on its face.
+
+const keyringDir = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../../demo-license-keys",
+);
+const LICENSE_KEY_ID = "regulait-demo-ephemeral";
+
+let licenseNote: string;
+const licenseStatus = await probe("GET", "/v1/licenses/status");
+if (licenseStatus.body?.state === "valid") {
+  licenseNote = `  license already installed and valid (tier '${licenseStatus.body?.license?.tier ?? "?"}')`;
+} else {
+  mkdirSync(keyringDir, { recursive: true });
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  writeFileSync(
+    path.join(keyringDir, `${LICENSE_KEY_ID}.pub`),
+    publicKey.export({ type: "spki", format: "pem" }).toString(),
+    "utf8",
+  );
+  // the running gateway reads the keyring from this env var; set it for THIS
+  // process so the install below verifies, and tell the driver to set it too
+  process.env.REGULAIT_LICENSE_KEYRING = keyringDir;
+
+  const nowIso = new Date().toISOString();
+  const doc = {
+    schema: LICENSE_SCHEMA_ID as "regulait.license/1",
+    licenseId: `demo-${Date.now()}`,
+    tenant: "RegulAIt capability demo — NOT A PRODUCTION DEPLOYMENT",
+    tier: "enterprise",
+    seatCap: 25,
+    features: [...LICENSE_FEATURES] as string[],
+    deploymentMode: "hosted" as const,
+    issuedAt: nowIso,
+    notBefore: nowIso,
+    // deliberately short: a demo license should not outlive the demo
+    expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+    graceDays: 0,
+    hardStopOnExpiry: false,
+  };
+  // sign the EXACT BYTES that are delivered — the verifier checks the
+  // signature over what arrives, never over a re-parse
+  const bytes = Buffer.from(canonicalLicenseBytes(doc), "utf8");
+  const signature = sign(null, bytes, privateKey).toString("base64");
+  const installed = await probe("POST", "/v1/licenses", {
+    documentBase64: bytes.toString("base64"),
+    signature,
+    signingKeyId: LICENSE_KEY_ID,
+  });
+  licenseNote =
+    installed.status === 200 || installed.status === 201
+      ? `  license  ephemeral demo license installed (expires in 30 days, keyring ${keyringDir})`
+      : `  license  *** INSTALL FAILED (${installed.status}): ${JSON.stringify(installed.body).slice(0, 200)}`;
+}
+note(licenseNote);
+
+// The packs themselves. Seeding is open; ACTIVATION is the licensed act, and
+// a seeded-but-draft pack evaluates nothing — so both steps are needed before
+// criterion (d) has anything to show.
+const seeded = await probe("POST", "/v1/compliance/packs/seed", {});
+const packList: Json[] = (await call("GET", "/v1/compliance/packs")).packs ?? [];
+/** the two the demo actually walks through */
+const DEMO_PACKS = ["nist-ai-rmf", "eu-ai-act"];
+let activated = 0;
+for (const pack of packList.filter((p) => DEMO_PACKS.includes(p.framework as string))) {
+  if (pack.status === "active") {
+    note(`  packs   ${pack.framework} v${pack.version} already active`);
+    continue;
+  }
+  const res = await probe("POST", `/v1/compliance/packs/${pack.id}/activate`, {});
+  if (res.status === 200 || res.status === 201) {
+    activated += 1;
+    note(`  packs   ${pack.framework} v${pack.version} activated`);
+  } else {
+    note(
+      `  packs   *** ${pack.framework} could NOT be activated (${res.status}): ${String(res.body?.error ?? "")}`,
+    );
+  }
+}
+if (seeded.status >= 400 && packList.length === 0) {
+  note(`  packs   *** seeding failed (${seeded.status}) — criterion (d) has nothing to show`);
 }
 
 // ── 3. Evidence for the MCP-discovery demo (ADR-0122) ─────────────────────

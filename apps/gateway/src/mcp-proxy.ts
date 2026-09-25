@@ -468,7 +468,16 @@ async function executeGovernedToolCallInner(
       // ADR-0105 adds the CONSENT-CONTEXT identity beside ADR-0104's payload
       // fingerprint. Still digests only — the ledger records WHICH call ran and
       // WHICH policy governed it, never the arguments themselves.
-      detail: { argumentsDigest, approvalScope, contextDigest },
+      // ADR-0058 SCOPE: the attributed project rides the ledger row, because a
+      // compliance pack's `audit_decisions` collector scopes by
+      // `detail->>'projectId'` and has no other way to reach a tool decision.
+      // Without it, a project-scoped evaluation of a control whose whole claim
+      // is "refusals actually occur" counts ZERO — while the refusals sit in
+      // the ledger, correct and invisible. `usage_events` already carried the
+      // project for the same call; the two records now agree.
+      // NULL for an unattributed call, exactly as the usage row is: an
+      // unattributed refusal is not evidence about any project.
+      detail: { argumentsDigest, approvalScope, contextDigest, projectId },
       effect: decision.effect,
       ruleId: decision.ruleId,
       ruleChain: decision.ruleChain,

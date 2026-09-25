@@ -4682,7 +4682,16 @@ export function registerAgentConnectorRoutes(
         userId,
         objectType: "connector",
         objectId: connectorId,
-        detail: { operation: body.operation, ...(body.object ? { object: body.object } : {}) },
+        // ADR-0058 SCOPE, same reason as the MCP tool path: a pack's
+        // `audit_decisions` collector reaches a decision only through
+        // `detail->>'projectId'`. The PII-block rows on this same path already
+        // carried it; the DECISION row did not, so a project-scoped count of
+        // connector refusals was structurally zero. Null when unattributed.
+        detail: {
+          operation: body.operation,
+          ...(body.object ? { object: body.object } : {}),
+          projectId: projectId ?? null,
+        },
         effect: decision.effect,
         ruleId: decision.ruleId,
         ruleChain: decision.ruleChain,
