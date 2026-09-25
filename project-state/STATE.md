@@ -21,6 +21,58 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-25 (later) — ADR-0124: the kill switch and safe modes. Roadmap item I1, shipped.**
+(Migration 0114.)
+
+**One dial, four positions, checked first.** `org_settings.execution_mode` —
+`normal` / `read_only` / `require_approval` / `halted` — consulted ahead of every grant, rule, limit
+and scope at all three governed entry points (`evaluate`, `evaluateAgent`, `evaluateConnector`).
+Every effectful path in the product reaches one of those three, so a new caller inherits the gate
+without knowing it exists.
+
+**`execution` is a REQUIRED kernel input, and that is the whole design.** Optional-with-a-safe-
+default is the shape that rots: a future call site omits it, the deployment believes it is halted,
+and one path keeps running. Required means the COMPILER enumerates the call sites — 148 of them in
+this batch, and every one added later. Each needed a judgement (does this EXECUTE, or only
+EVALUATE?), and getting it wrong either way is a bug: an executing path marked evaluation-only is a
+bypass, a preview marked executing is a preview that reports "halted" during the one period an
+operator most needs to reason about policy.
+
+**Three scopes, because "stop everything" is usually the wrong tool.** Deployment, agent and tool,
+with a subject halt OUTRANKING the dial. The halt columns are deliberately separate from
+`agents.enabled`: "not in service" and "stopped in an incident" are different facts, and collapsing
+them would mean lifting a halt silently returns a deliberately-retired agent to service.
+
+**What it does NOT stop is the part to remember.** Reading the ledger, the queue and the posture
+page is never gated — a switch that locks the door behind you is a worse outage than the one it was
+thrown for, and `GET /v1/execution` is not even admin-only. Discovery ignores the dial, because an
+empty tool list mid-incident reads as revoked access. The platform's own governance sweeps keep
+running. Policy simulation and the red-team adjudicator use a named `EVALUATION_ONLY_EXECUTION` so
+that reaching for it is a checkable claim. Queued approvals are made unspendable, never destroyed.
+
+**`require_approval` is asymmetric and says so.** Only the MCP tool path can queue; `AgentDecision`
+and `ConnectorDecision` cannot even express the effect. It refuses on those two with a reason naming
+why, rather than silently denying where it claimed to queue.
+
+**Building it surfaced two real defects, both in that mode.** `approvals.rule_id` is a uuid and the
+dial's rule id is symbolic — **M-039 a third time**: a column's type is a claim about every producer.
+And `approver_user_id` is NOT NULL, so "nothing runs unattended" now has to name who is attending,
+enforced by route and DB CHECK.
+
+**Two structural guards earned their keep again**: ADR-0074's rule-write guard caught the halt write
+against `agents` (registered with why it is safe), and ADR-0102's prose inventory caught the three
+new reason columns (scrubbed — operator prose typed under incident pressure is exactly when someone
+pastes the credential they are rotating). And the ADR's claim that `PLAN_SAFE_MODES` "moved" to the
+kernel was false when written — it had been copied. Now one definition, re-exported.
+
+**Verification**: **189 files / 2849 passed / 9 MinIO skips, zero failures on a FRESH database**,
+instrument counters at zero; all packages green; web typecheck and build clean. The 129 pre-existing
+kernel tests pass unchanged with the dial at `normal`, which is the upgrade-safety proof.
+
+**Still open on I1**: no UI for throwing it (the posture page reports the dial; setting it is an API
+call), no automatic or scheduled trip, one approver for the whole deployment, and no per-connector
+halt.
+
 **2026-09-25 — ADR-0123: criterion (d) tightened, and the ISACA assessment on the roadmap.**
 
 **The framework was a constant, and a refusal was not countable.** PoC criterion (d) was rated

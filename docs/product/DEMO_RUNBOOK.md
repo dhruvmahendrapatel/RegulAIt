@@ -114,6 +114,31 @@ does**: this classifies evidence *you* supply. It is not a claim to have searche
 stdio MCP server — a local subprocess, a very common deployment — never appears in a proxy log at
 all. Conceding that is what makes the rest of the answer credible.
 
+### (e) The kill switch — worth showing to a security-led buyer   [NEW — ADR-0124]
+
+Not one of the four PoC criteria, and the thing a CISO asks about first. Keep it short:
+
+```
+GET /v1/execution                 # what is stopped right now
+PUT /v1/execution/mode            # {"mode":"halted","reason":"..."} — a reason is required
+```
+
+Three beats, in this order:
+
+1. **Halt one tool, not the business.** Halt the write tool with a reason, retry it (refused,
+   `execution-subject-halted`), then call a *read* tool on the same server — still works. That is
+   what "per-capability" buys.
+2. **Then halt the deployment**, and show that `GET /v1/execution` still answers and the tool list
+   is still populated. Say why: an empty list mid-incident looks like revoked access, and a switch
+   that locks the door behind you is a worse outage than the one you threw it for.
+3. **Lift it** — and note that lifting also requires a reason, because *"why was it safe to
+   resume?"* is the question the auditor asks afterwards. Both directions are in the ledger under
+   their own rule ids.
+
+Two things to say plainly, because a technical buyer will find them: **there is no UI for throwing
+it yet** (the posture page reports it; setting it is an API call), and **nothing trips it
+automatically** — every position is a deliberate act.
+
 ### (d) Map a use case to a framework with evidence — **do this straight after (b)**
 
 ```
