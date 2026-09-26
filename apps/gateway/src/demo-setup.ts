@@ -543,9 +543,12 @@ ${blocked
   )
   .join("\n")}
 
-  With BOTH of those set, the posture page reads ${enf?.enforcementTotal} of ${enf?.enforcementTotal} and 'hardened: true'.
+  With ${blocked.length === 1 ? "that" : "BOTH of those"} set, the posture page reads ${enf?.enforcementTotal} of ${enf?.enforcementTotal} and 'hardened: true'.
   Note docker compose does not pass REGULAIT_SCHEDULER through by default —
-  set it in your .env and confirm the posture page before you present.`
+  set it in your .env and confirm the posture page before you present.
+  On the runbook's §1.1 native-Postgres path there is no MinIO at all, so the
+  anchor row cannot reach true and 6 of 7 is the honest ceiling — §2 says how
+  to present that row rather than apologise for it.`
 }
 
   THE HAPPY PATH, measured either side of the preset:
@@ -558,7 +561,22 @@ ${blocked
   ${
     postHarden === "200"
       ? "Both 200: the gates are on AND legitimate work still flows. That is the\n  claim the demo rests on — show it in this order."
-      : "*** The hardened dispatch did NOT succeed. Do not present until this is\n  *** green: every refusal you demo afterwards will name this gate, not the\n  *** one you meant to show. Re-read the error above."
+      : postHardenBody?.error === "use_case_approval_required"
+        ? // EXPECTED, and caused by this script on purpose. §3b leaves the use
+          // case in `proposed` because driving it to `approved` means walking
+          // the pillar-2 intake workflow, and that walk is itself worth
+          // showing. With useCaseGateMode=enforcing that proposal legitimately
+          // blocks every dispatch attributed to the project — the gate working,
+          // not a broken environment. Saying "do not present" here would send
+          // an operator hunting a fault that does not exist, so this case is
+          // named and given its one action instead.
+          `Expected, and this script caused it: the use case '${USE_CASE_NAME}' is\n` +
+          "  still 'proposed', and useCaseGateMode=enforcing refuses any dispatch\n" +
+          "  attributed to its project until a human approves it. The gate is\n" +
+          "  working. APPROVE IT BEFORE YOU PRESENT — as Avery, walk the intake\n" +
+          "  sign-off — then re-run this script and expect 200. The approval walk\n" +
+          "  is worth showing in its own right, which is why it is not automated."
+        : "*** The hardened dispatch did NOT succeed. Do not present until this is\n  *** green: every refusal you demo afterwards will name this gate, not the\n  *** one you meant to show. Re-read the error above."
   }
 
   ─────────────────────────────────────────────────────────────────────────

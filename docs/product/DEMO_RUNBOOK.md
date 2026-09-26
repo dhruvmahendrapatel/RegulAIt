@@ -34,10 +34,6 @@ pnpm --filter @regulait/gateway demo:setup
 pnpm --filter @regulait/gateway start
 ```
 
-`demo:setup` ends by dispatching as a real user **before and after** applying the preset. If the
-second one is not `200` it says so in as many words. **Do not present until it is** — with the gates
-on, every refusal you then demo will name the first unmet gate rather than the one you meant to show.
-
 ### 1.1 Without docker — a native Postgres path
 
 Docker is not available everywhere this gets demoed (a locked-down laptop, a cloud dev box, a
@@ -103,6 +99,23 @@ seeding needs no listener. But `POST /mcp/:serverId` connects upstream at the *t
 before any JSON-RPC message is read, so that egress and admission refusals come back as plain HTTP
 rather than as protocol errors. Against the discard port every request dies at connect, and the
 gateway looks broken rather than governed. `demo:setup` repoints the rows at the real server.
+
+### 1.2 Approve the use case — **the step that is easy to skip and will cost you the demo**
+
+`demo:setup` ends by dispatching as a real user **before and after** applying the preset. On a
+first run the second one comes back **`409 use_case_approval_required`**, and that is the script's
+own doing: the setup script (`demo-setup.ts` §3b) creates the *Checkout assistant* use case and deliberately leaves it `proposed`,
+because driving it to `approved` means walking the pillar-2 intake sign-off and that walk is worth
+showing. With `useCaseGateMode=enforcing` a proposal legitimately blocks every dispatch attributed
+to its project.
+
+So **as Avery, approve it before you present**, then re-run `demo:setup` and expect `200`. The
+script names this case explicitly rather than telling you to stop — the gate is working, and it is
+the only refusal in the run that is not one you meant to show.
+
+Any *other* non-`200` on that second dispatch is a real problem: **do not present until it is
+green**, because every refusal you then demo will name the first unmet gate rather than the one you
+were aiming at.
 
 ---
 
@@ -286,4 +299,28 @@ Two things to say out loud while it is on screen, because the payload says them:
 | posture reads 6 of 7 with the anchor row on a local destination | expected on the §1.1 path — no Object Lock bucket to grade | nothing to fix; present it as §2 describes |
 
 Re-running `demo:setup` is safe at any point. It reads the world back at each step rather than
-assuming the previous run landed, and it mints fresh keys for Dana and Avery each time.
+assuming the previous run landed, and it mints fresh keys for Dana and Avery each time. One
+consequence worth knowing: on a re-run the *"before hardening"* dispatch is measured against an
+already-hardened deployment, so it reads the same as the *"after"* one. That is the re-run, not a
+regression.
+
+---
+
+## 6. Verified
+
+The §1.1 native path was walked end to end on 2026-09-26 — fresh database, `seed`, `demo:mcp`,
+`demo:setup`, `start` — and then exercised over HTTP against the running gateway:
+
+| Check | Result |
+|---|---|
+| `GET /health` | `{"status":"ok","database":"ok"}` |
+| `GET /v1/org/posture` | 6 of 7 enforcement controls, the unmet one `auditAnchorTamperResistant` (`settable: false`) |
+| `GET /v1/execution` | answers without admin, `mode: normal`, *"Nothing is stopped."* |
+| `tools/list` as Dana, real MCP protocol | `["list_branches","read_file","write_file"]` — **`search_code` absent**, so her per-user revocation is enforced in discovery, not just at call time |
+| halt `write_file`, then call it | refused, and the message distinguishes an emergency stop from a missing grant |
+| `read_file` on the same server while halted | still works — that is what per-capability buys |
+| lift the halt | `200` |
+| both MCP loopback addresses (`127.0.0.1`, `127.0.0.2`) | reachable natively, so ADR-0122's host-keyed registry diff still names the right server |
+
+Re-walk this after any change to the seed, the preset or the kill switch. A runbook that has not
+been run is a guess — the `openssl rand -base64 32` line that used to be in §1.1 is the proof.
