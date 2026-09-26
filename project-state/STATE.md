@@ -21,6 +21,58 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-26 (latest) — D01 and G1 fixed. ADR-0125, migration 0115. Both write-ups were wrong first.**
+
+**D01, and I had described it wrongly.** I wrote that a malformed `REGULAIT_DATA_KEY` "boots clean".
+It does not — `keyBytes` throws and nothing starts. I had read the code instead of running it; the
+PENDING entry now carries that correction in its own heading. What was *actually* wrong was two
+narrower things. (i) The refusal was right and the **message** was not: `keyBytes` threw a plain
+`Error` and `main.ts` only converts `DataKeyBootError` into the operator sentence, so the one place
+written to be read mid-restore printed a stack trace. There is now a `malformed_key` code decided
+**first** — with a recorded fingerprint present the old ordering would have reported `key_missing`
+and sent an operator hunting a lost key rather than fixing a typo. (ii) **The seeder had no gate at
+all**, which is where the bare 500 came from: `seed.ts` builds an app directly rather than through
+`startGateway`, and it is usually the FIRST thing run on a new deployment. It now checks shape up
+front.
+
+**And fixing it exposed a worse bug than the one I was fixing.** The `switch` in
+`verifyDataKeyOnBoot` is what stops a boot — `decision.ok === false` stops nothing, the `throw`
+does — and it had no exhaustiveness check. Adding a code without a case would have made the gateway
+**come up on a key it had just refused**. There is a `never` default now. Root cause of my own
+error: `secrets.ts` said hex, `audit-scrub.ts` said base64, and only `Buffer.from` settled it. One
+exported authority (`dataKeyFormatError`) which `keyBytes` itself uses, so the validator can never
+be more lenient than the parser.
+
+**G1, and that item was too broad too.** Auditing before building found almost every enforcement
+counter was ALREADY shared because it was already SQL — `count()` over `audit_log` for the kernel's
+rate limits, `sum(usage_events)` for project budgets, an atomic increment for virtual keys, a column
+for lockout. **Exactly two were not**, failing in opposite directions:
+
+- **The HTTP edge limiter** on the plugin's per-process `Map`: N replicas enforced N × the ceiling
+  while the posture page reported the ceiling. Now Postgres-backed — but **local-first**, because
+  the naive one-write-per-request version lets an attacker turn a request flood into a Postgres
+  flood and makes the limiter the amplifier it exists to prevent. The local short-circuit is what
+  bounds writes to `max` per process per window. It is `>` not `>=`, and that is load-bearing: at
+  `hits === max` the request is still allowed, so `>=` would leave the last request of every window
+  unrecorded. Written as `>=` first; a test caught it. It fails **open** to the local count, stated
+  rather than discovered — no governed request can be answered without Postgres anyway.
+- **`orchestration_runs.budget`** was Postgres-backed but read-modify-write, and pillar 7 runs nodes
+  in parallel, so two workers each wrote an absolute and the second **erased the first's charges** —
+  a run could pass its cap with the ledger showing it under. Now a delta added under a blocking
+  `FOR UPDATE` (not `SKIP LOCKED`: the second writer must wait and then add).
+
+**Both new test files were run against the OLD implementations to confirm they go red**, because a
+single-process test cannot see either defect. The write-bounding test also asserts the counter
+reaches `max` *before* it stops advancing — a store that never wrote at all would satisfy "stops
+advancing" trivially, and did, during exactly that check.
+
+**This is NOT HA**, and the roadmap now says so where it used to say only "one replica": no
+timeouts, no breaker, no `/metrics`, a fixed host port, and per-process state outside the limiter
+unaudited. G2 and G8 come first.
+
+**Verification**: **191 files / 2867 passed / 9 skipped, exit 0 on a fresh database** (+18 tests,
++2 files), all packages built, web typecheck clean, instrument counters at zero.
+
 **2026-09-26 (later) — the demo runbook walked on a docker-less box. Two blockers, and M-041.**
 
 The container this session runs in has no docker daemon, so the runbook's very first command
