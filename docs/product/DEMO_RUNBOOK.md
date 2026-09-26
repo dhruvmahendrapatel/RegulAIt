@@ -55,8 +55,14 @@ sudo -u postgres psql -c "CREATE DATABASE regulait OWNER regulait;"
 **Mint the data key ONCE**, in one terminal, and read it off the screen:
 
 ```bash
-openssl rand -base64 32        # 32 random bytes, base64 — copy this value
+openssl rand -hex 32           # 64 HEX characters — copy this value
 ```
+
+**Hex, not base64.** `keyBytes` (`apps/gateway/src/secrets.ts:32-35`) does
+`Buffer.from(key, "hex")` and requires exactly 32 bytes. A base64 key is not rejected at
+start-up — the ADR-0063 boot gate checks key *continuity*, not *format*, so the gateway boots
+clean, seeding gets most of the way through, and then the first credential write answers a bare
+**`500 internal`**. It cost a verification run to find; do not rediscover it at a customer.
 
 Then paste **that same literal** into **every** terminal, and run §1 steps 2–5 unchanged:
 
@@ -67,7 +73,7 @@ export REGULAIT_DATA_KEY="<the value you just minted>"
 export REGULAIT_SCHEDULER=on
 ```
 
-Do **not** put `$(openssl rand -base64 32)` in each terminal's export — that mints a different key
+Do **not** put `$(openssl rand -hex 32)` in each terminal's export — that mints a different key
 per shell, and the failure is delayed and confusing: seeding works, the gateway starts, and then a
 connector invoke answers `no_data_key` or fails to decrypt a credential the seed wrote minutes ago.
 
@@ -75,10 +81,10 @@ Three things worth knowing rather than discovering:
 
 - **The gateway migrates on start-up**, so there is no separate migrate step and an empty database
   is the right starting point. `pnpm --filter @regulait/gateway seed` will populate it.
-- **`REGULAIT_DATA_KEY` must be the same value in every terminal and across restarts.** It is the
-  AES-256-GCM key for stored credentials; a new key on restart does not rotate anything, it makes
-  every stored credential undecryptable. Generate it once, keep it in the shell, and **do not write
-  it into a file** — it dies with the session by design.
+- **`REGULAIT_DATA_KEY` must be the same 64-hex-character value in every terminal and across
+  restarts.** It is the AES-256-GCM key for stored credentials; a new key on restart does not
+  rotate anything, it makes every stored credential undecryptable. Mint it once, keep it in the
+  shell, and **do not write it into a file** — it dies with the session by design.
 - **`demo:setup` talks to Postgres directly**, not over HTTP, and already defaults to
   `postgres://regulait:regulait@localhost:5432/regulait`. It does not care that there is no docker.
 

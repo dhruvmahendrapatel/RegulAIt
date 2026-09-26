@@ -783,3 +783,49 @@ digest binds the arguments, not the state they act on.
 - **Not assessed**: the marketing-claim items (guardrails as heuristics, training-provider as
   retrieval + classical classification rather than local transformer training). Both look right on
   their face and neither is a code defect.
+
+---
+
+# Addendum — found while walking the demo runbook on a docker-less box (2026-09-26)
+
+## D01 — a malformed `REGULAIT_DATA_KEY` boots clean and fails later as a bare `500`
+
+**Found by making the mistake.** Writing the runbook's native-Postgres path I told the operator to
+mint the key with `openssl rand -base64 32`. Wrong: `keyBytes` (`apps/gateway/src/secrets.ts:32-35`)
+does `Buffer.from(key, "hex")` and requires exactly 32 bytes, so the key must be **64 hex
+characters**. What makes it worth recording is not the typo but **what the product did with it**.
+
+ADR-0063's boot gate (`verifyDataKeyOnBoot`, `apps/gateway/src/data-key.ts:529`) exists precisely so
+that a key problem is caught at start-up, with a message written for an operator mid-restore rather
+than a stack trace. It checks key **continuity** — does this fingerprint match the one this
+deployment's ciphertext was written under — and never key **format**. `dataKeyFingerprint` HMACs
+`Buffer.from(hex, "hex")`, which silently yields a short buffer for a non-hex string instead of
+throwing. So:
+
+1. the gateway boots clean and prints its posture block;
+2. seeding runs and gets most of the way through;
+3. the **first credential write** — `POST /v1/git/connections`, `workflows.ts:1307` — throws inside
+   `encryptSecret` and surfaces as `500 {"error":"internal"}`.
+
+Six `seed.test.ts` tests fail with that 500 and none of them names the cause. It cost a full
+verification run to attribute.
+
+**The fix is small and belongs in the boot gate**: validate the format before fingerprinting, and
+raise a `DataKeyBootError` naming the expected shape. That turns the simplest possible
+misconfiguration into the 3am message the gate was built to give, instead of the one error shape
+this product tries hardest never to emit — an unnamed 500. Not done here: it changes start-up
+behaviour, `boot.test.ts` drives the real path, and this was a documentation task.
+
+**Also corrected in passing:** `packages/shared/src/audit-scrub.ts` carried a comment asserting the
+key "is base64 of 32 random bytes and looks like any other base64". It is hex, and that comment is
+what sent me the wrong way. Fixed in the same commit — a wrong comment in a security file is a
+defect, and this one demonstrably misled a reader.
+
+## D02 — the runbook's first command does not run without docker
+
+`docker compose up -d db minio minio-init` is step 1 and there is no container runtime on every box
+this gets demoed from. Closed by **DEMO_RUNBOOK §1.1** (native Postgres 16, three env vars, steps
+2–5 unchanged). The only real loss is MinIO and therefore the WORM anchor: without an Object Lock
+bucket `resolveAnchorSink` (`apps/gateway/src/audit-chain.ts:601-606`) falls through to the **local
+buffer**, not to `off`, so the posture ceiling is **6 of 7** with the anchor row reading
+`tamperResistant: false`. §2 now argues that row is worth showing rather than apologising for.

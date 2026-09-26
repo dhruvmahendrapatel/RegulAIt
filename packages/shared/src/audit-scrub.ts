@@ -87,8 +87,8 @@ export const AUDIT_SCRUB_MARKER_PREFIX = "[redacted:";
  * Field names whose VALUE is a credential whatever it looks like.
  *
  * The shape rules cannot help here: a bootstrap token is deploy-time config
- * with no format at all, `REGULAIT_DATA_KEY` is base64 of 32 random bytes and
- * looks like any other base64, and a connector/model credential is whatever the
+ * with no format at all, `REGULAIT_DATA_KEY` is 64 hex characters and
+ * looks like any other hex digest, and a connector/model credential is whatever the
  * third party issues. What they DO have is a name, so the name is the signal.
  *
  * Matched on the key NORMALIZED to lowercase alphanumerics, and ONLY on exact

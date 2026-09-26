@@ -773,3 +773,52 @@ activation pointer, a CHECK constraint — belongs to every suite, so creating i
 is as much an act on other files as deleting it would be. Prefer run-unique
 rows; where the shipped content itself is the claim, assert it against the
 exported constant rather than seeding it.**
+
+## M-041 (2026-09-26) — I wrote a runbook command I had never run, and shipped it
+
+Asked to add a native-Postgres path to the demo runbook, I wrote the whole
+section — commands, environment variables, caveats — and committed it. Then I
+went to verify it, and the very first thing I had told an operator to type was
+wrong:
+
+```bash
+openssl rand -base64 32     # what I wrote
+openssl rand -hex 32        # what the product requires
+```
+
+`keyBytes` (`apps/gateway/src/secrets.ts:32-35`) does `Buffer.from(key, "hex")`
+and demands 32 bytes. A base64 key is 44 characters of mostly-not-hex.
+
+**Why I got it wrong is the interesting part**, and it is not carelessness about
+the code. I *did* look it up. `packages/shared/src/audit-scrub.ts` says, in a
+comment about what a secret looks like, that `REGULAIT_DATA_KEY` "is base64 of
+32 random bytes and looks like any other base64." I read that, believed it, and
+wrote the runbook from it. `app.ts:206` says "hex AES-256 key" eleven hundred
+lines from where I was reading. **Two comments in this repo disagreed and I
+happened to read the wrong one** — and an implementation is not a comment, so
+the only source that could have settled it was `keyBytes`, which I did not open
+until the suite failed.
+
+**What the failure looked like, which is the second lesson.** Nothing rejected
+the bad key. The ADR-0063 boot gate checks key *continuity*, not *format*;
+`dataKeyFingerprint` HMACs `Buffer.from(hex,"hex")`, which returns a short
+buffer rather than throwing. So the gateway booted clean, printed its posture,
+seeded most of the way, and then failed at the first credential write as
+`500 {"error":"internal"}` — six `seed.test.ts` tests red, none naming the
+cause. I initially read that as a regression in my own change. It was not; it
+was my key. Recorded as **D01** in PENDING, because a product that answers an
+unnamed 500 to its simplest misconfiguration has a real defect independent of
+my typo.
+
+I had also, in the same turn, told the owner the section was written "but not
+executed end-to-end yet" and that I would walk it. That disclosure is the only
+reason this is a small mistake instead of a live failure at a customer demo on
+Monday — but disclosing that something is unverified is not a substitute for
+verifying it before committing it.
+
+**Rule: a procedure is not documentation until it has been executed. Never
+commit a runbook step, install command, or env-var value that has not been RUN
+in the state the reader will be in — and when a value's format is the claim,
+read the PARSER, not a comment about it. Comments disagree; `Buffer.from` does
+not. If a procedure must be written before it can be run, say so IN THE FILE,
+not only in chat, and go run it before the turn ends.**
