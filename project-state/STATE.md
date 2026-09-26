@@ -21,6 +21,47 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-26 (later) — the demo runbook walked on a docker-less box. Two blockers, and M-041.**
+
+The container this session runs in has no docker daemon, so the runbook's very first command
+(`docker compose up -d db minio minio-init`) does not work here at all — a live failure waiting for
+Monday if the demo runs from a machine like this. DEMO_RUNBOOK §1.1 is the native-Postgres path.
+
+**I got its first command wrong, and that is M-041.** I wrote `openssl rand -base64 32`;
+`keyBytes` (`secrets.ts:32-35`) does `Buffer.from(key, "hex")` and requires 32 bytes, so it must be
+64 hex characters. I had looked it up — `audit-scrub.ts` asserted in a comment that the key "is
+base64 of 32 random bytes", `app.ts:206` says "hex AES-256 key" eleven hundred lines away, and I
+read the wrong one. **Two comments disagreed; only the parser settles it.** The wrong comment is
+fixed, because a wrong comment in a security file is a defect.
+
+**What it exposed is worth more than the typo, and is PENDING D01.** Nothing rejected the bad key.
+ADR-0063's boot gate checks key CONTINUITY, not FORMAT, and `dataKeyFingerprint` HMACs a buffer that
+comes back short rather than throwing. So the gateway boots clean, prints its posture block, seeds
+most of the way, and fails at the first credential write as a bare `500 {"error":"internal"}` — six
+`seed.test.ts` tests red, none naming the cause. The gate exists to hand an operator a real message
+mid-restore; it does not fire for the simplest possible misconfiguration. **Not fixed here** — it
+changes start-up behaviour and `boot.test.ts` drives that path, so it is the owner's call.
+
+**Then I walked it, and it found two more, neither native-specific.** (1) `demo:setup` printed a red
+*"do not present"* over a state it creates itself: §3b deliberately leaves the use case `proposed`,
+and `useCaseGateMode=enforcing` correctly blocks every dispatch attributed to its project, so the
+script's own happy-path probe returns 409. An operator would hunt a fault that does not exist. It
+now names that one case, says the gate is working, and gives the single action — every other
+non-200 keeps the abort. (2) *"With BOTH of those set"* was hardcoded for two unmet controls and
+printed when only one was.
+
+**Verified live, not reasoned about** (runbook §6): posture **6 of 7** with `auditAnchorTamperResistant`
+unmet and `settable: false`, exactly as §1.1 predicted; `GET /v1/execution` answering without admin;
+`tools/list` as Dana over the real MCP protocol returning `list_branches/read_file/write_file` with
+**`search_code` absent**, so her per-user revocation is enforced in DISCOVERY and not only at call
+time; a per-tool halt refusing `write_file` with a message that distinguishes an emergency stop from
+a missing grant while `read_file` on the same server kept working; the lift; both MCP loopback
+addresses reachable natively.
+
+**Suite: 189 files / 2849 passed / 9 skipped, exit 0 on a fresh database**, instrument counters at
+zero — the same number as before the kill-switch UI, so that work regressed nothing. The 9 failures
+reported mid-session were my own malformed key plus contamination from my own smoke run, not code.
+
 **2026-09-26 — gateway parity, measured against Kong. ROADMAP §8. No code; an honest answer.**
 
 Asked to confirm we work as a central gateway for every MCP call, and to say what
