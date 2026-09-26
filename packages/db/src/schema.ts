@@ -467,6 +467,26 @@ export const mcpServers = pgTable("mcp_servers", {
   admissionClearedBy: uuid("admission_cleared_by"),
   admissionClearedAt: timestamp("admission_cleared_at", { withTimezone: true }),
   admissionClearReason: text("admission_clear_reason"),
+  /**
+   * ADR-0126 (migration 0116) — the circuit breaker, on the server row because
+   * the proxy already reads that row on every request, so the state costs no
+   * extra query on the hot path of the thing built to avoid work.
+   *
+   * A THIRD FACT, deliberately not merged with the other two. `agents.enabled`
+   * is "not in service"; ADR-0124's `halted_at` is "a human stopped this during
+   * an incident"; these are "failing right now, observed by the platform".
+   * Collapsing any pair would let one clear another — a recovered upstream must
+   * not un-halt something an operator deliberately stopped.
+   *
+   * `breakerOpenedAt` null = closed. Non-null means refuse fast until the
+   * cooldown elapses, after which exactly one request is elected to probe (see
+   * upstream-breaker.ts). Never evidence: rewritten constantly, safe to lose,
+   * and it is the TRANSITIONS that reach the audit trail.
+   */
+  breakerConsecutiveFailures: integer("breaker_consecutive_failures").notNull().default(0),
+  breakerOpenedAt: timestamp("breaker_opened_at", { withTimezone: true }),
+  breakerLastFailureAt: timestamp("breaker_last_failure_at", { withTimezone: true }),
+  breakerLastError: text("breaker_last_error"),
   /** ADR-0101 (migration 0105) — FEDERATION PROVENANCE, on the server row
    * itself, because "where did this come from" is asked while looking at the
    * server. `local` is the migration DEFAULT and the only value a pre-0105 row

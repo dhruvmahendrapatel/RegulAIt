@@ -65,6 +65,8 @@ import { resolveHsts } from "./hsts.js";
 import fastifyRateLimit from "@fastify/rate-limit";
 import { schedulerHealth } from "./scheduler-health.js";
 import { SharedRateLimitStore } from "./rate-limit-store.js";
+import { resolveTimeoutConfig, setTimeoutConfig, type TimeoutConfig } from "./timeouts.js";
+import { resolveBreakerConfig, setBreakerConfig, type BreakerConfig } from "./upstream-breaker.js";
 import {
   rateLimitKey,
   rateLimitMax,
@@ -204,6 +206,10 @@ declare module "fastify" {
 export interface BuildAppOptions {
   /** deploy-time admin token used to create the first real user + key */
   bootstrapToken?: string;
+  /** ROADMAP G2 deadlines; a test pins these rather than touching process.env */
+  timeouts?: Partial<TimeoutConfig>;
+  /** ADR-0126 circuit-breaker thresholds; same reason */
+  breaker?: Partial<BreakerConfig>;
   /** hex AES-256 key for encrypting stored git tokens (REGULAIT_DATA_KEY) */
   dataKey?: string;
   /** ADR-0031: which peers may speak for the client via X-Forwarded-*.
@@ -482,7 +488,25 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // docker-compose.yml sets to the compose network for the `tls` profile.
   // Default when unset: trust nothing. See trusted-proxy.ts.
   const trustProxy = opts.trustProxy ?? resolveTrustProxy();
-  const app = Fastify({ logger: false, trustProxy });
+  // ROADMAP G2 — the two inbound bounds. `requestTimeout` was Fastify's `0`,
+  // i.e. disabled; `bodyLimit` was ALREADY 1 MiB by default and is restated
+  // here so it is findable and tunable rather than inherited invisibly — no
+  // request that worked before this line stops working.
+  //
+  // `connectionTimeout` is deliberately absent. It is socket inactivity, and
+  // this product holds sockets open on purpose: the MCP proxy hijacks the
+  // reply and streams, both compat edges stream SSE, `/v1/audit.csv` streams a
+  // batched DB walk. An idle-socket deadline would sever correct long streams
+  // and report them as timeouts. See timeouts.ts.
+  const timeoutCfg = resolveTimeoutConfig(process.env, opts.timeouts ?? {});
+  setTimeoutConfig(timeoutCfg);
+  setBreakerConfig(resolveBreakerConfig(process.env, opts.breaker ?? {}));
+  const app = Fastify({
+    logger: false,
+    trustProxy,
+    requestTimeout: timeoutCfg.requestTimeoutMs,
+    bodyLimit: timeoutCfg.bodyLimitBytes,
+  });
 
   // ADR-0053 — THE ROUTE INVENTORY. Registered FIRST, before any route, because
   // Fastify's `onRoute` hook only fires for routes added after it. Every

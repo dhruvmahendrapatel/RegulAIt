@@ -275,8 +275,10 @@ Two things to say out loud while it is on screen, because the payload says them:
 - **Do not claim the kill switch is automatic.** It is real at all three scopes and it has a UI
   (ADR-0124), but nothing trips it on its own. Say "one operator, one reason, on the record" —
   not "the platform detects and contains".
-- **Do not promise SAP.** There is no code. One incidental comment in a migration header is the only
-  hit in the repository.
+- **Do not promise SAP.** There is none in the product: nothing on `main`, and one incidental
+  comment in a migration header. The claim is about the PRODUCT and it is exact — do not widen it to
+  "there is no SAP code anywhere", because an abandoned branch has some (see PENDING D03). Nothing
+  on it ships, is tested, or is reachable.
 - **Do not open a `prod` anything.** Nothing in this environment is production and nothing should be
   made to look like it.
 
@@ -292,7 +294,8 @@ Two things to say out loud while it is on screen, because the payload says them:
 | posture reads fewer controls than expected | the gateway was restarted without the env | re-export and restart; the page is reading the truth |
 | a tool that should be a write behaves as a read | the upstream lost its `readOnlyHint` and the live manifest overwrote the inventory | check `demo-mcp-server.ts`; the hint *is* the classification |
 | activating a pack answers `license_feature_not_licensed` | the ephemeral demo licence is missing, or the gateway cannot see the keyring | re-run `demo:setup`, and start the gateway with `REGULAIT_LICENSE_KEYRING=<repo>/demo-license-keys` |
-| every MCP call returns a bare `{"error":"internal"}` | the demo MCP server is not running — an upstream connection failure currently surfaces as an opaque 500 rather than a named refusal | restart `demo:mcp`. (Worth knowing: unlike `egress_blocked` and `mcp_admission_held`, this one is not named yet.) |
+| every MCP call returns `502 mcp_upstream_unreachable` | the demo MCP server is not running | restart `demo:mcp`. Since ADR-0126 this is a NAMED, audited refusal naming the server and its URL — it used to be an opaque 500 |
+| every MCP call returns `503 mcp_upstream_circuit_open` | five consecutive failures opened the breaker; it is refusing without contacting the upstream | start `demo:mcp`, then wait out the 30s cooldown — the next call probes and closes the circuit by itself. Nothing to reset by hand |
 | `MANAGE-2.2` stays `unsatisfied` after a refusal | the refused call carried no `x-regulait-project-id` | repeat it with the header; an unattributed refusal is correctly not counted |
 | `docker compose up` fails / no docker daemon | the box has no container runtime | use the §1.1 native-Postgres path; you lose only the WORM anchor |
 | `no_data_key`, or stored credentials stop decrypting after a restart | `REGULAIT_DATA_KEY` was unset or regenerated between runs | export the SAME key in every terminal; on the native path a new key means re-seeding, not re-entering credentials |

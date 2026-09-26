@@ -822,3 +822,44 @@ in the state the reader will be in — and when a value's format is the claim,
 read the PARSER, not a comment about it. Comments disagree; `Buffer.from` does
 not. If a procedure must be written before it can be run, say so IN THE FILE,
 not only in chat, and go run it before the turn ends.**
+
+## M-042 (2026-09-26) — I made M-040 again, one file later, and the rule as written did not stop me
+
+M-040 says: *"before a fixture writes anything, ask whether the row is SCOPED
+TO THIS RUN or SHARED BY THE ORG."* I read that rule this session. I then wrote
+a G2 test that flipped `mcpPrivateRangesDefault` — the org-settings **singleton**
+— to prove that an egress refusal does not trip the new circuit breaker.
+
+It passed alone. It failed in the full suite: `expected 502 to be 403`. Some
+sibling file had left `127.0.0.1` in the shared `egress_allow_hosts` table, so
+my "now it is refused" step refused nothing and the call reached the dead port
+instead. One failure out of 2,889, entirely mine, on the last run before a
+merge.
+
+**Why M-040 did not stop me is the part worth writing down.** M-040 is phrased
+around WRITING shared state, and I checked myself against that: I wrote the
+singleton and I put it back in a `finally`, so I thought I had complied. The
+defect was the other half — my assertion **DEPENDED** on shared state I did not
+own. `egress_allow_hosts` I never touched at all, and it is what broke me. A
+rule about writes cannot catch a test whose correctness rests on a table it
+only reads.
+
+There is a second tell I walked past. This test existed in three versions and
+each one was reaching for a bigger lever: first a per-server flag, then the org
+default, then the org default plus a restore. **Escalating scope to make an
+assertion hold is the symptom.** The fix went the other way entirely — a literal
+RFC 5737 TEST-NET-3 address, randomised per run. It is public, so the
+private-range posture is irrelevant whatever the org says; it is on nobody's
+allow-list; the guard refuses it without resolving or contacting anything. No
+shared row is read or written, and the test cannot be broken by a sibling.
+
+Worth noting what did work: the test was not vacuous, and the full suite caught
+it. The cost was one re-run, not a false green.
+
+**Rule (supersedes and widens M-040): a fixture must not READ shared state its
+assertion depends on, not merely avoid writing it. Before asserting, ask "could
+another file in this suite make this assertion false without touching my rows?"
+— and if the answer is yes, change the FIXTURE, not the setup. Reaching for a
+wider lever to make an assertion hold is the signal that the fixture is wrong:
+the right move is almost always a value so specific to this run that no sibling
+could collide with it.**

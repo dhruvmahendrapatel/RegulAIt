@@ -264,6 +264,7 @@ export class AnthropicProvider implements ModelProvider {
       ...(opts.baseUrl ? { baseURL: opts.baseUrl } : {}),
       ...(opts.fetchImpl ? { fetch: opts.fetchImpl } : {}),
       maxRetries: 2,
+      timeout: modelDispatchTimeout(),
     });
   }
 
@@ -955,6 +956,7 @@ export class OpenAiProvider implements ModelProvider {
       ...(opts.baseUrl ? { baseURL: opts.baseUrl } : {}),
       ...(opts.fetchImpl ? { fetch: opts.fetchImpl } : {}),
       maxRetries: 2,
+      timeout: modelDispatchTimeout(),
     });
   }
 
@@ -985,6 +987,7 @@ export class XaiProvider implements ModelProvider {
       baseURL: opts.baseUrl ?? XAI_DEFAULT_BASE,
       ...(opts.fetchImpl ? { fetch: opts.fetchImpl } : {}),
       maxRetries: 2,
+      timeout: modelDispatchTimeout(),
     });
   }
 
@@ -1059,6 +1062,7 @@ export class CustomProvider implements ModelProvider {
       ...(opts.apiKey ? {} : { defaultHeaders: { Authorization: null } }),
       ...(opts.fetchImpl ? { fetch: opts.fetchImpl } : {}),
       maxRetries: 2,
+      timeout: modelDispatchTimeout(),
     });
   }
 
@@ -2357,6 +2361,35 @@ export interface ModelProviderConfig {
    * admin-registered endpoint speaks. There is no default: guessing a wire
    * protocol would mean silently sending a request the endpoint cannot parse. */
   wireProtocol?: CustomWireProtocol | null;
+}
+
+/**
+ * ROADMAP G2 — the deadline every real SDK client is constructed with.
+ *
+ * WHY THIS LIVES HERE AND THE ENV VAR DOES NOT. The number belongs to the
+ * package that uses it, so there is one definition; the gateway's `timeouts.ts`
+ * IMPORTS this default and is the only thing that reads
+ * `REGULAIT_MODEL_TIMEOUT_MS`, then pushes the resolved value in. One number,
+ * one env reader, no mirrored constant to drift — this repo has already been
+ * bitten once by a hand-maintained mirror (ADR-0121's connector-kind list).
+ *
+ * WHY IT MATTERS. Both SDKs default to a TEN-MINUTE timeout and both retry
+ * twice, so the real worst case for one held request was around half an hour,
+ * inherited silently from a vendor default nobody chose. Five minutes is
+ * deliberately not aggressive: a long completion is legitimate work and this is
+ * a governance layer, not a latency budget.
+ */
+export const MODEL_DISPATCH_TIMEOUT_MS_DEFAULT = 300_000;
+
+let modelDispatchTimeoutMs: number = MODEL_DISPATCH_TIMEOUT_MS_DEFAULT;
+
+/** Called by the gateway once at start-up, and by tests that need a short one. */
+export function setModelDispatchTimeoutMs(ms: number): void {
+  modelDispatchTimeoutMs = ms;
+}
+
+export function modelDispatchTimeout(): number {
+  return modelDispatchTimeoutMs;
 }
 
 /** shared mock instance so state persists across resolutions in one process */

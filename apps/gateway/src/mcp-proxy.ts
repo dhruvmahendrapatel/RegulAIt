@@ -55,7 +55,17 @@ import {
 } from "./guardrails.js";
 import { governedEvaluate, type RetiredApproval } from "./governed-evaluate.js";
 import { abacPrincipalFromRequest, type AbacPrincipalContext } from "./abac-principal.js";
-import { guardedMcpConnect, McpEgressBlockedError } from "./mcp-egress.js";
+import {
+  auditMcpUpstreamUnreachable,
+  guardedMcpConnect,
+  McpEgressBlockedError,
+} from "./mcp-egress.js";
+import { timeouts } from "./timeouts.js";
+import {
+  breakerAdmits,
+  recordUpstreamFailure,
+  recordUpstreamSuccess,
+} from "./upstream-breaker.js";
 // ADR-0097 — ADMISSION SCANNING. ADR-0043 governs the DESTINATION; this governs
 // what comes back. The gate runs at the top of connectUpstream (before the only
 // thing that opens an outbound socket) and the scan runs inside
@@ -280,6 +290,26 @@ export interface McpPii {
   inputHits: PiiHit[];
   outputHits: PiiHit[];
   withheld: boolean;
+}
+
+/**
+ * Is this failure a DEADLINE rather than a refusal?
+ *
+ * Three shapes reach here and they come from different layers, which is why
+ * this is a predicate and not an `instanceof`: `AbortSignal.timeout` rejects
+ * with a DOMException named `TimeoutError`, the MCP SDK raises `McpError` with
+ * `ErrorCode.RequestTimeout` (-32001) when ITS timer fires first, and undici
+ * surfaces some connect deadlines as an `Error` whose `cause.code` is one of
+ * the ETIMEDOUT family. Missing one would silently downgrade a timeout to
+ * "unreachable", which points an operator at the wrong thing.
+ */
+function isDeadlineError(err: unknown): boolean {
+  if (err instanceof McpError && err.code === ErrorCode.RequestTimeout) return true;
+  const e = err as { name?: string; code?: unknown; cause?: { code?: unknown } } | null;
+  if (!e) return false;
+  if (e.name === "TimeoutError" || e.name === "AbortError") return true;
+  const code = e.code ?? e.cause?.code;
+  return code === "ETIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT" || code === "UND_ERR_HEADERS_TIMEOUT";
 }
 
 export async function executeGovernedToolCall(
@@ -890,7 +920,14 @@ async function executeGovernedToolCallInner(
     // An upstream FAILURE throws out of here before any metering — a failed
     // call bills nothing, exactly like a failed model dispatch or connector
     // invoke.
-    const content = await upstream.callTool({ name: toolName, arguments: args.arguments });
+    const content = await upstream.callTool(
+      { name: toolName, arguments: args.arguments },
+      undefined,
+      // G2: by far the most generous of the three deadlines, because this is
+      // the upstream doing real work — a build, a query, a scan. A bound that
+      // severs legitimate work is worse than the hang it replaced.
+      { timeout: timeouts().mcpCallToolMs },
+    );
 
     // §8.4 OUTPUT check: the tool already ran, so a block here is BILL-AND-
     // WITHHOLD — the usage row below records the honest spend, but the result
@@ -1055,7 +1092,8 @@ export async function syncUpstreamTools(
   client: Client,
   trigger: McpAdmissionTrigger = "sync",
 ): Promise<Tool[]> {
-  const { tools } = await client.listTools();
+  // G2: a manifest is small, so a slow one is a sick upstream, not a busy one.
+  const { tools } = await client.listTools(undefined, { timeout: timeouts().mcpListToolsMs });
   // ADR-0097 — SCAN BEFORE UPSERT. This is the one moment the gateway sees a
   // manifest, and scanning here rather than after the upsert is what keeps a
   // poisoned description out of `mcp_tools` ENTIRELY: under `enforce` a dirty
@@ -1269,6 +1307,26 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
       }
     }
 
+    // ADR-0126 / G2 — the breaker, consulted before anything is attempted.
+    // Reading it cost nothing: it rides the `serverRow` already fetched above.
+    //
+    // It sits AFTER the egress guard's own refusal path and BEFORE the connect,
+    // because a circuit-broken upstream must not be contacted at all — that is
+    // the entire point. 503 with Retry-After, because unlike 502/504 this is a
+    // refusal the gateway is making on its own initiative and it can say when
+    // to come back.
+    const breaker = await breakerAdmits(db, serverRow);
+    if (breaker) {
+      return reply
+        .status(503)
+        .header("retry-after", String(Math.ceil(breaker.refusedUntilMs / 1000)))
+        .send({
+          error: "mcp_upstream_circuit_open",
+          detail: breaker.reason,
+          retryAfterMs: breaker.refusedUntilMs,
+        });
+    }
+
     // ADR-0043: the connect-time egress verdict surfaces HERE, before the
     // reply is hijacked into an MCP transport, as the route's ordinary
     // pre-hijack refusal shape — a plain 403 naming the real reason. The
@@ -1295,8 +1353,49 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
           findings: err.findings,
         });
       }
-      throw err;
+      // ROADMAP G2 — the third refusal shape, and the one the demo runbook had
+      // a troubleshooting row for: the server is registered, the egress guard
+      // permitted it and admission cleared it, and the upstream did not answer.
+      //
+      // This USED TO `throw err`, which escaped to the global handler and
+      // became `500 {"error":"internal"}` — with nothing audited. That is the
+      // single error shape this product tries hardest never to emit, on a route
+      // whose entire value proposition is that every refusal is named. It is
+      // also, in practice, the most common failure a new deployment hits: the
+      // upstream simply is not running.
+      //
+      // 502, not 500: the gateway is fine and the upstream is not, and that
+      // distinction is the first thing an operator needs. A DEADLINE exceeded
+      // reports 504 instead, because "it refused us" and "it never finished"
+      // send you to different places.
+      const timedOut = isDeadlineError(err);
+      const detail = timedOut
+        ? `upstream MCP server '${serverRow.name}' did not complete the session handshake within ${timeouts().mcpConnectMs}ms`
+        : `upstream MCP server '${serverRow.name}' could not be reached at ${serverRow.url}`;
+      await auditMcpUpstreamUnreachable(db, {
+        userId,
+        serverId: serverRow.id,
+        url: serverRow.url,
+        reason: detail,
+        timedOut,
+        deadlineMs: timeouts().mcpConnectMs,
+      });
+      // count it towards the breaker. This is the ONLY place a connect failure
+      // is counted: an egress refusal and an admission hold return above, and
+      // neither is the upstream's fault — tripping a breaker on our own policy
+      // decision would mean a governance change looked like an outage.
+      await recordUpstreamFailure(db, serverRow, detail);
+      return reply.status(timedOut ? 504 : 502).send({
+        error: timedOut ? "mcp_upstream_timeout" : "mcp_upstream_unreachable",
+        detail,
+        deadlineMs: timeouts().mcpConnectMs,
+      });
     }
+
+    // The connect succeeded, so whatever the breaker thought, this upstream is
+    // answering. Resets the count and — only if the circuit was actually open —
+    // files the recovery transition. A healthy call writes nothing.
+    await recordUpstreamSuccess(db, serverRow);
 
     const proxy = new Server(
       { name: "regulait-gateway", version: "0.1.0" },
