@@ -275,8 +275,10 @@ Two things to say out loud while it is on screen, because the payload says them:
 - **Do not claim the kill switch is automatic.** It is real at all three scopes and it has a UI
   (ADR-0124), but nothing trips it on its own. Say "one operator, one reason, on the record" —
   not "the platform detects and contains".
-- **Do not promise SAP.** There is no code. One incidental comment in a migration header is the only
-  hit in the repository.
+- **Do not promise SAP.** There is none in the product: nothing on `main`, and one incidental
+  comment in a migration header. The claim is about the PRODUCT and it is exact — do not widen it to
+  "there is no SAP code anywhere", because an abandoned branch has some (see PENDING D03). Nothing
+  on it ships, is tested, or is reachable.
 - **Do not open a `prod` anything.** Nothing in this environment is production and nothing should be
   made to look like it.
 
