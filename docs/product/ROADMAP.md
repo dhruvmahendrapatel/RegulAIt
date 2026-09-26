@@ -569,3 +569,135 @@ Ordered by *buyer-visible gap × cost to close*, not by how interesting it is.
 - **The injection detector should be described as a detector, not a defense.** It runs at runtime on
   tool arguments and output, which is more than registration-time scanning — and it ships in `log`
   mode with no provenance model, which is less than a defense. Both halves, or neither.
+
+---
+
+## 8. Gateway parity — "a central point for every MCP call", measured against Kong
+
+*Added 2026-09-26 at the owner's request: confirm we already work as a gateway, and say what
+`github.com/Kong/kong` has that we do not. Nothing below is committed. Kong's own positioning has
+moved — its README now calls it an "**API · LLM · MCP** Gateway", and MCP is a first-class product
+line (`ai-mcp-proxy`, Gateway 3.12+, **AI Gateway Enterprise only**). So this is a direct overlap,
+not an analogy, and it is worth being exact about.*
+
+### 8.1 Confirmed: the gateway exists, and it is in-line
+
+Yes — this is already a gateway, not a policy library. Every governed call is made **by us**, over
+a socket **we** open, after the decision:
+
+| Surface | Route | Note |
+|---|---|---|
+| MCP | `POST /mcp/:serverId` — `apps/gateway/src/mcp-proxy.ts:1203` | the upstream connection is opened at `mcp-proxy.ts:1278`, **before the JSON-RPC body is interpreted**, so egress and admission refusals come back as plain HTTP rather than protocol errors |
+| OpenAI-compatible | `POST /v1/chat/completions` — `compat-openai.ts:438` | |
+| Anthropic-compatible | `POST /v1/messages` — `compat-anthropic.ts:454` | |
+| Model discovery | `GET /v1/models` — `compat-models.ts:153` | |
+| Native dispatch | `POST /v1/agents/:agentId/invoke` — `agents-connectors.ts:3303` | |
+| Connectors | `POST /v1/connectors/:connectorId/invoke` — `agents-connectors.ts:4662` | |
+
+`tools/list` is governance-filtered through `visibleTools` (`mcp-proxy.ts:1327`) and `tools/call`
+runs `executeGovernedToolCall` (`mcp-proxy.ts:285`), which maps ten distinct governance outcomes
+onto typed MCP errors (`mcp-proxy.ts:1396-1474`). There is also an out-of-band PDP —
+`POST /v1/evaluate` (`app.ts:2018`), decision-only, consumes no approvals.
+
+**Three caveats that belong in the same breath as the confirmation.**
+
+1. **It is not a transparent proxy — it is a method-aware re-implementation.** Exactly two MCP
+   methods are handled: `ListToolsRequestSchema` (`mcp-proxy.ts:1306`) and `CallToolRequestSchema`
+   (`mcp-proxy.ts:1373`). `resources/*`, `prompts/*`, `completion/*`, `logging/*`, sampling and
+   notifications have **no handler anywhere** in the repo, so the SDK answers `MethodNotFound`.
+   Nothing is byte-forwarded. For governance that is a feature — an unknown method cannot slip
+   through ungoverned. For "central point for **all** MCP traffic" it is a conformance gap: a
+   server whose value is its resources or prompts cannot be fronted by us at all.
+2. **One transport, inbound and out.** Streamable HTTP only, stateless, one transport per request,
+   no session id (`mcp-proxy.ts:1479`, comment: *"Stateless mode … no session tracking yet"*).
+   Zero hits repo-wide for `StdioClientTransport` or any SSE transport. **stdio — a local
+   subprocess, and the single most common MCP deployment shape — cannot be fronted by us.** The
+   discovery work (ADR-0122) already concedes this in the payload; the gateway inherits it.
+3. **Being in the path is an operator posture, not an invariant.** Enforcement depends entirely on
+   the client choosing our base URL. No network capture, no mTLS client certs, no proof-of-transit.
+   A developer who points their SDK at the real upstream is invisible to us — which is precisely
+   what `shadow-ai.ts:861` exists to *detect afterwards*, not to prevent. The compat and MCP
+   surfaces can also be disabled per scope and then answer an indistinguishable 404
+   (`app.ts:696-745`).
+
+### 8.2 What Kong has that we do not
+
+Split three ways, because "Kong has it" is not by itself an argument for building it.
+
+**(i) Table stakes we are actually missing — these are the real list.**
+
+| Kong | Us | Evidence |
+|---|---|---|
+| Distributed rate limiting (`rate-limiting-advanced`, shared counters) | **In-memory, per-process** | `app.ts:532-561`, `rate-limit.ts:59`; zero hits for `redis`/`ioredis` in any `package.json`. **Two replicas means twice every limit.** This is a correctness defect in a governance product, not a missing feature |
+| Request/connection timeouts, body limits | **Neither** | `Fastify({ logger: false, trustProxy })` — `app.ts:484`. A hung upstream MCP server holds the socket indefinitely |
+| Active/passive upstream health checks, retries, circuit breaking | **Health: none. Retries: only `maxRetries: 2` inside the model SDKs** (`packages/model-provider/src/index.ts:266`). **Breaker: none** | one bad MCP server degrades every caller until a human notices |
+| Load balancing across upstream instances | **One logical server = one URL** (`mcpServers.url`) | the nearest analogue is `agent_fallbacks`, an ordered *failover* chain on dispatch failure (`agents-connectors.ts:553`) — not balancing |
+| Prometheus `/metrics` | **None** | zero hits for `/metrics` or `prom-client`; Fastify's own logger is explicitly off (`app.ts:484`). We have a rich DB-backed audit + usage ledger and OTel-GenAI span export (`packages/shared/src/tracing.ts:258`) — but nothing an SRE can scrape |
+| Declarative config (decK, DB-less mode, GitOps) | **Everything is DB rows** | no route/service/upstream manifest, no yaml dependency anywhere. `config-versions.ts` versions governance artifacts, which is adjacent but not the same thing |
+| Hybrid control-plane / data-plane, clustering, config propagation | **Single process, config read from Postgres per request** | scheduler health is in-process on purpose (`app.ts:3055`) |
+| Plugin SDK (Lua/Go/JS), 300+ plugin hub | **No extension point** | behaviour is added by editing `register*Routes` in `app.ts:122-324` |
+| CORS | **None** | no `@fastify/cors`, no `Access-Control-*` emitted. Browser-hosted MCP clients cannot reach us |
+| mTLS / client certificates | **None** | TLS is terminated by a Caddy sidecar (`docs/ops/TLS.md:21`); the gateway speaks plain HTTP |
+| Multi-tenancy | **One deployment = one org** | `org_settings` is an enforced singleton (`org-settings.ts:63-76`). Fine for BYOC and air-gapped (pillar 3); a hard blocker for hosted fast-start |
+| Canary / traffic splitting | **None** | the interception ladder (`compat-core.ts:181`) is a feature-flag precedence chain, not traffic splitting |
+| Runtime service discovery | **Static rows** | the federated registry sync (`mcp-registry.ts:1148`) is catalogue → *explicit human import* → fixed URL, deliberately (ADR-0101) |
+| WebSocket / gRPC / L4 | **None** | *(Kong's own MCP plugin does not support these upstreams either — see (iii))* |
+
+**(ii) Things Kong has that we should deliberately not build.** A Kubernetes ingress controller, L4
+proxying, a Lua plugin runtime, and a 300-plugin hub are a different product. Chasing them turns a
+governance layer into a second-rate API gateway. The right posture for a customer who already runs
+Kong is **behind or beside it, not instead of it** — and we are unusually well placed for that,
+because `POST /v1/evaluate` (`app.ts:2018`) is already a decision-only PDP, which is the exact shape
+of an Envoy `ext_authz` / Kong pre-function callout. That is item **G9** below and it is cheap.
+
+**(iii) Where we are ahead, and it is not close.** Worth stating because the gap list above is long
+and it would be easy to read it as "Kong wins".
+
+- Kong's MCP access control is **allow/deny lists of Consumers and Consumer Groups**, evaluated
+  per tool. Ours is a per-user, per-tool entitlement with **approvals bound to the exact arguments
+  that were approved** (ADR-0104), separation of duties, consent expiry, and per-user revocation
+  that beats a role grant.
+- Kong's own docs list **"AI Guardrails: not supported"** for MCP traffic. We run prompt-injection
+  detection and PII handling on MCP tool arguments *and* output.
+- Hash-chained audit with WORM anchoring graded by asking the bucket (ADR-0060), signed offline-
+  verifiable export, compliance packs with computed evidence (ADR-0058) — Kong has logging plugins.
+- Default-deny egress with resolved-address range blocking, DNS pinning and redirect refusal
+  (`egress-guard.ts`, `mcp-egress.ts:186`), re-run on every dispatch.
+- Per-project cost attribution at the point of every gateway call (pillar 5), and the kill switch
+  at three scopes (ADR-0124).
+- And the commercial point: Kong's `ai-mcp-proxy` is **AI Gateway Enterprise**. The comparison a
+  prospect will actually make is against a paid tier, not against OSS Kong.
+
+### 8.3 What to build, ranked
+
+Ordered by *risk if we ship without it × cost to close*. **G1 and G2 are not feature work — they
+are defects**, and they should not wait behind anything on this list.
+
+| # | Item | Why | Rough size |
+|---|---|---|---|
+| **G1** | **Shared rate-limit and budget counters.** Move the in-process buckets to a shared store; make the kernel's `rate_limits` and project budgets safe under more than one replica. | Today, scaling out silently multiplies every limit and every budget ceiling. We would be enforcing a number we cannot name. Worse than having no limit, because the dashboard says the limit is on. | **M** |
+| **G2** | **Timeouts, body limits, upstream retry and a breaker.** Fastify `requestTimeout`/`bodyLimit`, a connect+read deadline on MCP and model upstreams, and a circuit breaker per upstream. | A hung or hostile upstream currently has no bound. This is also the fix for the runbook's own "every MCP call returns a bare `{"error":"internal"}`" row — an upstream failure should be a *named refusal*, like `egress_blocked` and `mcp_admission_held` already are. | **S/M** |
+| **G3** | **MCP protocol conformance: `resources/*`, `prompts/*`, `completion/*`, `logging/*` and notifications** — each with its own governed decision, not a pass-through. | Without it, "central point for all MCP calls" is not a claim we can make. A resource read is a *data-access* decision and deserves the kernel, not a hole. Design note: keep refusing unknown methods; the value is that the governed set is enumerated. | **M/L** |
+| **G4** | **stdio and SSE upstream transports.** | stdio is the most common MCP deployment shape in the wild and we cannot front it at all. This is the single biggest hole in the coverage claim, and it is also the answer ADR-0122's discovery payload currently has to apologise for. | **M** |
+| **G5** | **`/metrics` (Prometheus) and first-class operational telemetry.** | We have excellent *governance* observability and effectively no *operational* observability. An SRE asked to run this has nothing to scrape and no request log — `logger: false`. Cheapest item here with a real buyer-facing answer. | **S** |
+| **G6** | **Session-aware MCP proxying.** Honour MCP sessions and resumable streams rather than one stateless transport per request. | Stateless-per-request is fine for tool calls and wrong for anything long-running. Also a prerequisite for G3's notifications. | **M** |
+| **G7** | **Declarative governed-estate config (our decK).** Export/import servers, tools, grants, rules, egress allow-list and org settings as a reviewable manifest, with plan/apply. | This is not Kong-envy — it is the answer to *"how do I review a policy change in a pull request?"*, which is a question pillar 2 should already have an opinion about. ADR-0120's policy simulation is the dry-run half; this is the artifact half. | **L** |
+| **G8** | **Upstream breadth: multiple URLs per logical MCP server, with active health checks and balancing.** | Follows G2 naturally and removes a single point of failure we currently hand every customer. | **M** |
+| **G9** | **Ship the PDP as a sidecar/callout** — an Envoy `ext_authz` and Kong pre-function adapter over `POST /v1/evaluate`, plus a documented deployment topology. | The highest-leverage item on this list per unit of work: it makes "you already have Kong, keep it" a *sale* rather than an objection, and the endpoint already exists and already executes nothing. | **S/M** |
+| **G10** | **Real multi-tenancy.** Retire the `org_settings` singleton (`org-settings.ts:63`) for a tenant-scoped model. | Pillar 3 promises a hosted fast-start mode. Today the product cannot serve two customers from one deployment. Large and invasive — worth doing once, deliberately, not incrementally. | **XL** |
+| **G11** | **Bypass prevention, so being in the path is an invariant.** mTLS client certs, and a documented network posture (egress allow-listing at the perimeter) so the gateway is the only route out. | Turns §8.1's third caveat from a caveat into a control. Partly a deployment-guide problem, not only code — which is why it is cheap to *document* and expensive to *enforce*. | **L** |
+| **G12** | **REST→MCP generation from an OpenAPI schema** (Kong's `conversion-*` modes). | Not table stakes, and genuinely useful: it would let a customer bring a governed internal API into the agent estate without writing an MCP server. Worth a decision, not an assumption. | **M** |
+
+### 8.4 How to talk about it
+
+- **Say "governed MCP gateway", not "MCP gateway".** The honest sentence is: *every MCP tool call
+  and every model call that goes through us is authorised, attributed, scrubbed and recorded before
+  it leaves the building.* That is a stronger claim than Kong's and a narrower one.
+- **Concede the transport gap before it is found.** "We front remote HTTP MCP servers. A local
+  stdio server is something we *discover*, not something we *proxy* — yet." Volunteering it is what
+  makes the rest credible; it is the same move that works for discovery in the runbook.
+- **Do not claim operational parity with an API gateway.** No health checks, no breaker, no
+  timeouts, no `/metrics`, one replica. Against a platform team that runs Kong, claiming otherwise
+  fails on the first question. "We sit behind yours" is a better answer and, after **G9**, a true one.
+- **Never imply the rate limits hold under scale.** Until **G1**, they hold for one process. If
+  asked how we scale horizontally today, the answer is that we do not.

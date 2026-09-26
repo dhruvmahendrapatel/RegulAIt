@@ -21,6 +21,46 @@ roadmap: ../docs/product/ROADMAP.md
 
 ## Where we are (read this paragraph first)
 
+**2026-09-26 — gateway parity, measured against Kong. ROADMAP §8. No code; an honest answer.**
+
+Asked to confirm we work as a central gateway for every MCP call, and to say what
+`github.com/Kong/kong` has that we do not.
+
+**Confirmed, with three caveats.** We are in-line, not a policy library: six inbound surfaces open
+the upstream socket themselves after the decision (`mcp-proxy.ts:1203`, `compat-openai.ts:438`,
+`compat-anthropic.ts:454`, `compat-models.ts:153`, `agents-connectors.ts:3303` and `:4662`), and on
+the MCP path the connect happens at `mcp-proxy.ts:1278` *before the JSON-RPC body is interpreted*,
+so egress and admission refusals arrive as plain HTTP. The caveats: (1) it is a **method-aware
+re-implementation, not a transparent proxy** — exactly two handlers exist, `tools/list` and
+`tools/call`, and `resources/*`, `prompts/*`, `completion/*`, `logging/*`, sampling and
+notifications have no handler anywhere, so they are refused; (2) **streamable HTTP only** — zero
+hits for any stdio or SSE transport, so a local stdio MCP server, the commonest shape in the wild,
+cannot be fronted at all; (3) being in the path is an **operator posture, not an invariant** — no
+mTLS, no network capture, and the surfaces can be disabled into an indistinguishable 404.
+
+**Kong has moved onto our ground.** Its README now says "API · LLM · MCP Gateway" and `ai-mcp-proxy`
+(3.12+) fronts third-party MCP servers with per-tool ACLs — but as **AI Gateway Enterprise**, and
+its own docs say "AI Guardrails: not supported" for MCP traffic. So the comparison a prospect makes
+is against a paid tier, and we are well ahead on the governance half: per-user per-tool entitlement
+with argument-bound approvals versus Kong's consumer allow/deny lists, PII and injection handling on
+MCP payloads, hash-chained audit, default-deny egress, per-project cost, the kill switch.
+
+**Two of the twelve gaps are defects, not features, and are written as such.** **G1** — rate limits
+and budgets live in process memory (`app.ts:532`, no Redis anywhere), so a second replica silently
+doubles every limit while the dashboard says the limit is on. **G2** — no request timeout, no body
+limit, no upstream breaker (`Fastify({ logger: false, trustProxy })`, `app.ts:484`): a hung upstream
+has no bound, and it is also why the runbook has a row for an opaque `{"error":"internal"}`.
+
+**The cheapest strategic item is G9**: ship the existing decision-only PDP (`POST /v1/evaluate`,
+`app.ts:2018`) as an Envoy `ext_authz` / Kong callout. It makes "you already run Kong, keep it" a
+sale rather than an objection, and the endpoint already exists and already executes nothing. The
+honest posture against a platform team is **behind their gateway, not instead of it** — we should
+not grow a Lua plugin runtime or an ingress controller.
+
+**§8.4 says what not to claim**: not operational parity (no health checks, no breaker, no
+`/metrics`, one replica), and never that the rate limits hold under scale, because until G1 they
+hold for one process.
+
 **2026-09-25 (later) — ADR-0124: the kill switch and safe modes. Roadmap item I1, shipped.**
 (Migration 0114.)
 
