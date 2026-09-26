@@ -456,35 +456,37 @@ describe("the circuit breaker", () => {
     // An egress refusal is OUR decision, not the upstream's fault. If it
     // counted, tightening the allow-list would trip breakers across the estate
     // and a governance change would present as an outage — with the ledger
-    // saying the upstreams failed, which would be false.
+    // asserting the upstreams failed, which would be false.
     //
-    // Registered while private ranges are permitted, then refused by flipping
-    // the org default: the write-time guard means it cannot be registered after.
-    const id = await brRegister(closedUrl);
-    const setPrivate = async (open: boolean) => {
-      const r = await brApp.inject({
-        method: "PUT",
-        headers: AUTH,
-        url: "/v1/org/settings",
-        payload: { mcpPrivateRangesDefault: open },
-      });
-      expect(r.statusCode).toBe(200);
-    };
+    // RUN-LOCAL ON PURPOSE (M-040, and M-042 for making the same mistake
+    // twice). The first version of this test flipped `mcpPrivateRangesDefault`,
+    // an ORG-GLOBAL singleton, and the second read the shared
+    // `egress_allow_hosts` table. Both pass alone and both break behind
+    // whichever sibling suite touched that state — which is exactly what
+    // happened: 502 instead of 403 in the full run.
+    //
+    // A literal TEST-NET-3 address (RFC 5737, randomised per run) needs none of
+    // it: it is PUBLIC, so the private-range posture is irrelevant whatever the
+    // org default says, and no other suite allow-lists it. The default-deny
+    // allow-list refuses it without resolving or contacting anything.
+    const unroutable = `http://203.0.113.${1 + Math.floor(Math.random() * 250)}:8931/`;
 
-    await setPrivate(false);
-    try {
-      // well past the threshold of 2
-      for (let i = 0; i < 6; i += 1) {
-        const res = await brCall(id);
-        expect(res.statusCode).toBe(403);
-        expect(res.json().error).toBe("egress_blocked");
-      }
-      const [row] = await db.select().from(mcpServers).where(eq(mcpServers.id, id));
-      expect(row!.breakerConsecutiveFailures).toBe(0);
-      expect(row!.breakerOpenedAt).toBeNull();
-    } finally {
-      // leave the shared database in the shipped posture for whatever runs next
-      await setPrivate(true);
+    // Registered against a permitted URL, then pointed at the refused one
+    // directly, because the WRITE-TIME guard would refuse the registration.
+    // That is a real situation, not a contrivance: it is what a server looks
+    // like after the allow-list is tightened underneath it.
+    const id = await brRegister(closedUrl);
+    await db.update(mcpServers).set({ url: unroutable }).where(eq(mcpServers.id, id));
+
+    // well past the threshold of 2
+    for (let i = 0; i < 6; i += 1) {
+      const res = await brCall(id);
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error).toBe("egress_blocked");
     }
+
+    const [row] = await db.select().from(mcpServers).where(eq(mcpServers.id, id));
+    expect(row!.breakerConsecutiveFailures).toBe(0);
+    expect(row!.breakerOpenedAt).toBeNull();
   }, 30_000);
 });
