@@ -61,6 +61,11 @@ import {
   McpEgressBlockedError,
 } from "./mcp-egress.js";
 import { timeouts } from "./timeouts.js";
+import {
+  breakerAdmits,
+  recordUpstreamFailure,
+  recordUpstreamSuccess,
+} from "./upstream-breaker.js";
 // ADR-0097 — ADMISSION SCANNING. ADR-0043 governs the DESTINATION; this governs
 // what comes back. The gate runs at the top of connectUpstream (before the only
 // thing that opens an outbound socket) and the scan runs inside
@@ -1302,6 +1307,26 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
       }
     }
 
+    // ADR-0126 / G2 — the breaker, consulted before anything is attempted.
+    // Reading it cost nothing: it rides the `serverRow` already fetched above.
+    //
+    // It sits AFTER the egress guard's own refusal path and BEFORE the connect,
+    // because a circuit-broken upstream must not be contacted at all — that is
+    // the entire point. 503 with Retry-After, because unlike 502/504 this is a
+    // refusal the gateway is making on its own initiative and it can say when
+    // to come back.
+    const breaker = await breakerAdmits(db, serverRow);
+    if (breaker) {
+      return reply
+        .status(503)
+        .header("retry-after", String(Math.ceil(breaker.refusedUntilMs / 1000)))
+        .send({
+          error: "mcp_upstream_circuit_open",
+          detail: breaker.reason,
+          retryAfterMs: breaker.refusedUntilMs,
+        });
+    }
+
     // ADR-0043: the connect-time egress verdict surfaces HERE, before the
     // reply is hijacked into an MCP transport, as the route's ordinary
     // pre-hijack refusal shape — a plain 403 naming the real reason. The
@@ -1355,12 +1380,22 @@ export function registerMcpProxy(app: FastifyInstance, db: Db) {
         timedOut,
         deadlineMs: timeouts().mcpConnectMs,
       });
+      // count it towards the breaker. This is the ONLY place a connect failure
+      // is counted: an egress refusal and an admission hold return above, and
+      // neither is the upstream's fault — tripping a breaker on our own policy
+      // decision would mean a governance change looked like an outage.
+      await recordUpstreamFailure(db, serverRow, detail);
       return reply.status(timedOut ? 504 : 502).send({
         error: timedOut ? "mcp_upstream_timeout" : "mcp_upstream_unreachable",
         detail,
         deadlineMs: timeouts().mcpConnectMs,
       });
     }
+
+    // The connect succeeded, so whatever the breaker thought, this upstream is
+    // answering. Resets the count and — only if the circuit was actually open —
+    // files the recovery transition. A healthy call writes nothing.
+    await recordUpstreamSuccess(db, serverRow);
 
     const proxy = new Server(
       { name: "regulait-gateway", version: "0.1.0" },

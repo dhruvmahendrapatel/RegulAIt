@@ -66,6 +66,7 @@ import fastifyRateLimit from "@fastify/rate-limit";
 import { schedulerHealth } from "./scheduler-health.js";
 import { SharedRateLimitStore } from "./rate-limit-store.js";
 import { resolveTimeoutConfig, setTimeoutConfig, type TimeoutConfig } from "./timeouts.js";
+import { resolveBreakerConfig, setBreakerConfig, type BreakerConfig } from "./upstream-breaker.js";
 import {
   rateLimitKey,
   rateLimitMax,
@@ -207,6 +208,8 @@ export interface BuildAppOptions {
   bootstrapToken?: string;
   /** ROADMAP G2 deadlines; a test pins these rather than touching process.env */
   timeouts?: Partial<TimeoutConfig>;
+  /** ADR-0126 circuit-breaker thresholds; same reason */
+  breaker?: Partial<BreakerConfig>;
   /** hex AES-256 key for encrypting stored git tokens (REGULAIT_DATA_KEY) */
   dataKey?: string;
   /** ADR-0031: which peers may speak for the client via X-Forwarded-*.
@@ -497,6 +500,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // and report them as timeouts. See timeouts.ts.
   const timeoutCfg = resolveTimeoutConfig(process.env, opts.timeouts ?? {});
   setTimeoutConfig(timeoutCfg);
+  setBreakerConfig(resolveBreakerConfig(process.env, opts.breaker ?? {}));
   const app = Fastify({
     logger: false,
     trustProxy,

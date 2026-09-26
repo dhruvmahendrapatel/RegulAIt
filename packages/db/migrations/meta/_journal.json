@@ -806,6 +806,13 @@
       "when": 1785050000000,
       "tag": "0115_rate_limit_counters",
       "breakpoints": true
+    },
+    {
+      "idx": 116,
+      "version": "7",
+      "when": 1785051000000,
+      "tag": "0116_upstream_circuit_breaker",
+      "breakpoints": true
     }
   ]
 }

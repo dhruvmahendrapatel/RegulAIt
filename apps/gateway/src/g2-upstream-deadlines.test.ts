@@ -22,9 +22,11 @@ import http from "node:http";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { auditLog, createDb, desc, eq, runMigrations, type Db } from "@regulait/db";
+import { and, auditLog, createDb, desc, eq, mcpServers, runMigrations, type Db } from "@regulait/db";
 import { buildApp } from "./app.js";
 import { TIMEOUT_DEFAULTS, resolveTimeoutConfig } from "./timeouts.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) throw new Error("DATABASE_URL must be set for gateway integration tests");
@@ -244,7 +246,7 @@ describe("requestTimeout does not sever a slow RESPONSE", () => {
 
       // our deadline won, not the inbound one
       expect(res.status).toBe(504);
-      expect((await res.json()).error).toBe("mcp_upstream_timeout");
+      expect(((await res.json()) as { error: string }).error).toBe("mcp_upstream_timeout");
       // and it genuinely outlived requestTimeout rather than racing it
       expect(elapsed).toBeGreaterThan(600);
     } finally {
@@ -277,4 +279,212 @@ describe("the config", () => {
     const cfg = resolveTimeoutConfig({ REGULAIT_MCP_CONNECT_TIMEOUT_MS: "9999" }, { mcpConnectMs: 42 });
     expect(cfg.mcpConnectMs).toBe(42);
   });
+});
+
+// ===========================================================================
+// ADR-0126 — the circuit breaker
+// ===========================================================================
+//
+// The deadline bounds ONE call; the breaker bounds the tenth caller paying that
+// same bound to learn what the first one learned. These tests use a threshold
+// of 2 and a 600ms cooldown so the state machine is exercised in under a
+// second — the shipped numbers are 5 and 30s and the behaviour is identical.
+
+describe("the circuit breaker", () => {
+  let brApp: ReturnType<typeof buildApp>;
+  let brAuth: { authorization: string };
+
+  beforeAll(async () => {
+    brApp = buildApp(db, {
+      bootstrapToken: BOOT,
+      timeouts: { mcpConnectMs: 300 },
+      breaker: { failureThreshold: 2, cooldownMs: 600 },
+    });
+    const user = await brApp.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/users",
+      payload: { email: `g2-br-${Date.now()}@deadlines.example`, displayName: "G2BR" },
+    });
+    const key = await brApp.inject({
+      method: "POST",
+      headers: AUTH,
+      url: `/v1/users/${user.json().id}/keys`,
+      payload: { name: "g2-br-key" },
+    });
+    brAuth = { authorization: `Bearer ${key.json().token}` };
+  }, 60_000);
+
+  afterAll(async () => {
+    brApp.server.closeAllConnections();
+    await brApp.close();
+  });
+
+  const brRegister = async (url: string) => {
+    const reg = await brApp.inject({
+      method: "POST",
+      headers: AUTH,
+      url: "/v1/servers",
+      payload: { name: `g2-br-${Math.random().toString(36).slice(2)}`, url },
+    });
+    expect(reg.statusCode).toBe(201);
+    return reg.json().id as string;
+  };
+  const brCall = (id: string) =>
+    brApp.inject({
+      method: "POST",
+      url: `/mcp/${id}`,
+      headers: { ...brAuth, "content-type": "application/json", accept: "application/json, text/event-stream" },
+      payload: { jsonrpc: "2.0", id: 1, method: "tools/list" },
+    });
+
+  it("opens after the threshold, and then refuses WITHOUT contacting the upstream", async () => {
+    const id = await brRegister(closedUrl);
+
+    // below the threshold: each attempt really goes out and really fails
+    expect((await brCall(id)).statusCode).toBe(502);
+    expect((await brCall(id)).statusCode).toBe(502);
+
+    // threshold crossed — now it is refused by us, not by the network
+    const third = await brCall(id);
+    expect(third.statusCode).toBe(503);
+    expect(third.json().error).toBe("mcp_upstream_circuit_open");
+    // and it tells the caller when to come back, which 502 cannot
+    expect(third.headers["retry-after"]).toBeDefined();
+
+    // THE PROPERTY THAT MATTERS: an open circuit is fast because it contacts
+    // nobody. Ten refusals must cost far less than one 300ms connect deadline.
+    const started = Date.now();
+    for (let i = 0; i < 10; i += 1) expect((await brCall(id)).statusCode).toBe(503);
+    expect(Date.now() - started).toBeLessThan(300);
+  }, 30_000);
+
+  it("files the OPENING in the ledger, but not each refusal — an outage is not a log flood", async () => {
+    const id = await brRegister(closedUrl);
+    await brCall(id);
+    await brCall(id);
+    for (let i = 0; i < 8; i += 1) await brCall(id);
+
+    const opened = await db
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.ruleId, "mcp-upstream-breaker-opened"), eq(auditLog.serverId, id)));
+    // exactly one transition, not one row per refused call
+    expect(opened).toHaveLength(1);
+    expect(opened[0]!.effect).toBe("deny");
+  }, 30_000);
+
+  it("after the cooldown it probes, and a recovered upstream closes it", async () => {
+    // One address that is dead first and alive later — the point being that the
+    // breaker must stop contacting it while open, and find it again afterwards.
+    // Reserve a real port and release it, so nothing is listening there yet.
+    const reserve = net.createServer();
+    const port = await listenOnEphemeral(reserve);
+    await new Promise<void>((resolve) => reserve.close(() => resolve()));
+    const id = await brRegister(`http://127.0.0.1:${port}/`);
+
+    await brCall(id);
+    await brCall(id);
+    expect((await brCall(id)).statusCode).toBe(503);
+
+    // bring a real MCP server up at that address
+    const live = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        void (async () => {
+          const server = new McpServer({ name: "g2-recovered", version: "0.0.1" });
+          server.registerTool(
+            "ping",
+            { description: "ping", inputSchema: {}, annotations: { readOnlyHint: true } },
+            async () => ({ content: [{ type: "text", text: "pong" }] }),
+          );
+          const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+          await server.connect(transport);
+          await transport.handleRequest(req, res, body ? JSON.parse(body) : undefined);
+        })().catch(() => {
+          if (!res.headersSent) res.writeHead(500).end();
+        });
+      });
+    });
+    await new Promise<void>((resolve) => live.listen(port, "127.0.0.1", resolve));
+
+    try {
+      // still inside the cooldown: refused without even trying the now-live server
+      expect((await brCall(id)).statusCode).toBe(503);
+
+      await new Promise((r) => setTimeout(r, 700));
+
+      // cooldown elapsed: this request is elected to probe, and it succeeds
+      const probe = await brCall(id);
+      expect(probe.statusCode).toBe(200);
+
+      const [row] = await db.select().from(mcpServers).where(eq(mcpServers.id, id));
+      expect(row!.breakerOpenedAt).toBeNull();
+      expect(row!.breakerConsecutiveFailures).toBe(0);
+
+      const closedRows = await db
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.ruleId, "mcp-upstream-breaker-closed"), eq(auditLog.serverId, id)));
+      expect(closedRows).toHaveLength(1);
+    } finally {
+      live.closeAllConnections();
+      await new Promise<void>((resolve) => live.close(() => resolve()));
+    }
+  }, 30_000);
+
+  it("elects exactly ONE prober, so a backlog does not become a thundering herd", async () => {
+    const id = await brRegister(blackHoleUrl);
+    // two hangs to open it (each costs the 300ms connect deadline)
+    await brCall(id);
+    await brCall(id);
+    expect((await brCall(id)).statusCode).toBe(503);
+
+    await new Promise((r) => setTimeout(r, 700));
+
+    // twelve at once, the instant the cooldown expires. Exactly one may pay the
+    // connect deadline against the black hole; the rest must fast-fail.
+    const results = await Promise.all(Array.from({ length: 12 }, () => brCall(id)));
+    const probed = results.filter((r) => r.statusCode === 504).length;
+    const fastFailed = results.filter((r) => r.statusCode === 503).length;
+    expect(probed).toBe(1);
+    expect(fastFailed).toBe(11);
+  }, 30_000);
+
+  it("a POLICY refusal does not count towards the breaker, however many times it happens", async () => {
+    // An egress refusal is OUR decision, not the upstream's fault. If it
+    // counted, tightening the allow-list would trip breakers across the estate
+    // and a governance change would present as an outage — with the ledger
+    // saying the upstreams failed, which would be false.
+    //
+    // Registered while private ranges are permitted, then refused by flipping
+    // the org default: the write-time guard means it cannot be registered after.
+    const id = await brRegister(closedUrl);
+    const setPrivate = async (open: boolean) => {
+      const r = await brApp.inject({
+        method: "PUT",
+        headers: AUTH,
+        url: "/v1/org/settings",
+        payload: { mcpPrivateRangesDefault: open },
+      });
+      expect(r.statusCode).toBe(200);
+    };
+
+    await setPrivate(false);
+    try {
+      // well past the threshold of 2
+      for (let i = 0; i < 6; i += 1) {
+        const res = await brCall(id);
+        expect(res.statusCode).toBe(403);
+        expect(res.json().error).toBe("egress_blocked");
+      }
+      const [row] = await db.select().from(mcpServers).where(eq(mcpServers.id, id));
+      expect(row!.breakerConsecutiveFailures).toBe(0);
+      expect(row!.breakerOpenedAt).toBeNull();
+    } finally {
+      // leave the shared database in the shipped posture for whatever runs next
+      await setPrivate(true);
+    }
+  }, 30_000);
 });
