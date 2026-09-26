@@ -10,7 +10,7 @@
 // Regenerate with:  REGULAIT_WRITE_API_ARTIFACTS=1 pnpm --filter @regulait/gateway exec vitest run src/openapi.test.ts
 //
 // Spec version: 1.0.0
-// Operations:   72
+// Operations:   73
 //
 // RESPONSES ARE `unknown` BY DESIGN. The gateway's routes declare request
 // schemas but not response schemas, so there is nothing to derive a response
@@ -183,6 +183,15 @@ export class GeneratedRegulAItClient extends BaseClient {
    */
   getV1AuditCsv<T = unknown>(options?: RequestOptions): Promise<T> {
     return this.request<T>("GET", `/v1/audit.csv`, undefined, options);
+  }
+
+  /**
+ * POST /v1/authz/check
+ * @stability public-stable — auth: admin
+ * @remarks this route declares no request schema in the spec, so `body` is untyped.
+   */
+  postV1AuthzCheck<T = unknown>(body?: unknown, options?: RequestOptions): Promise<T> {
+    return this.request<T>("POST", `/v1/authz/check`, body, options);
   }
 
   /**
@@ -744,6 +753,11 @@ export const OPERATIONS: ReadonlyArray<{ id: string; method: string; path: strin
     "id": "getV1AuditCsv",
     "method": "GET",
     "path": "/v1/audit.csv"
+  },
+  {
+    "id": "postV1AuthzCheck",
+    "method": "POST",
+    "path": "/v1/authz/check"
   },
   {
     "id": "getV1BillingStatements",

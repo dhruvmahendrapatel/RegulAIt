@@ -14,6 +14,7 @@ pages are how.
 | **[INSTALL.md](INSTALL.md)** | one-command install, the three modes, TLS choices, the air-gapped image bundle, first-admin bootstrap |
 | **[UPGRADE.md](UPGRADE.md)** | signed update bundles, what the verifier refuses and why, key custody and rotation, rollback |
 | **[BACKUP_RESTORE.md](BACKUP_RESTORE.md)** | verified `pg_dump`, restore onto the same box and onto a new one, RPO/RTO, what is not covered |
+| **[GATEWAY_TOPOLOGY.md](GATEWAY_TOPOLOGY.md)** | running RegulAIt **behind** an existing Kong/Envoy gateway as a decision point: the Envoy and Kong adapters, what a callout costs, why the PDP key is a subject-impersonation credential, and what this topology deliberately does not buy |
 | **[DATA_BOUNDARY.md](DATA_BOUNDARY.md)** | **the trust artifact** — every outbound surface in the product, per mode, verified against source, including the one gap between "air-gapped" as a word and as an enforced code property |
 
 ## The 60-second version
