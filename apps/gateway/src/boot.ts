@@ -33,6 +33,7 @@
  */
 import { runMigrations, type Db } from "@regulait/db";
 import { buildApp, type BuildAppOptions } from "./app.js";
+import { RATE_LIMIT_COUNTER_RETENTION_MS, pruneRateLimitCounters } from "./rate-limit-store.js";
 import { describeTrustProxy, resolveTrustProxy } from "./trusted-proxy.js";
 import { describeHsts, resolveHsts } from "./hsts.js";
 import { describeEgressPosture, resolveDeployMode } from "./deploy-posture.js";
@@ -126,8 +127,10 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
   // Forced off under vitest for the same reason the scheduler is: a stray timer
   // must not run underneath the suite.
   let anchorTimer: NodeJS.Timeout | null = null;
+  let rateLimitPruneTimer: NodeJS.Timeout | null = null;
   app.addHook("onClose", async () => {
     if (anchorTimer) clearInterval(anchorTimer);
+    if (rateLimitPruneTimer) clearInterval(rateLimitPruneTimer);
   });
 
   const address = await app.listen({ port, host });
@@ -159,6 +162,30 @@ export async function startGateway(opts: StartGatewayOptions): Promise<StartedGa
       })();
     }, anchorEveryMs);
     anchorTimer.unref();
+  }
+
+  // ADR-0125 — housekeeping for the shared rate-limit counters. Rows are
+  // bounded by DISTINCT CALLERS rather than by requests, and a stale row is
+  // already harmless because every read compares the window before trusting
+  // the count. So this is HYGIENE, NOT ENFORCEMENT — which is what lets it be
+  // a plain timer at all: ADR-0064's rule is that no ceiling may depend on a
+  // sweep having run, and none does here. Skipping it entirely would cost
+  // disk, never correctness.
+  //
+  // The retention is deliberately far longer than any configured window (the
+  // widest default is the 5-minute auth bucket): deleting a row whose window
+  // is still live would reset that caller's count to zero mid-window, turning
+  // a cleanup job into a way around the limit.
+  if (!anchorUnderTest) {
+    rateLimitPruneTimer = setInterval(
+      () => {
+        void pruneRateLimitCounters(db, RATE_LIMIT_COUNTER_RETENTION_MS).catch((err: unknown) => {
+          app.log.warn({ err }, "rate-limit counter prune failed — limits are unaffected");
+        });
+      },
+      Math.max(60_000, RATE_LIMIT_COUNTER_RETENTION_MS / 4),
+    );
+    rateLimitPruneTimer.unref();
   }
 
   // ADR-0064 — the tick loop. OFF unless REGULAIT_SCHEDULER says on, in every

@@ -8047,3 +8047,37 @@ export const sodOverrideRequests = pgTable(
 
 export type SodRuleRow = typeof sodRules.$inferSelect;
 export type SodOverrideRequestRow = typeof sodOverrideRequests.$inferSelect;
+
+/**
+ * ADR-0125 / ROADMAP G1 — the HTTP edge rate limiter's shared counters.
+ *
+ * This is the only table in the schema whose rows are pure throughput
+ * bookkeeping: nothing here is evidence, nothing is audited, and a row may be
+ * deleted at any time without losing a fact. It exists because
+ * @fastify/rate-limit's default store is a per-process Map, which made the one
+ * remaining enforcement counter in this product silently multiply by the
+ * replica count — every OTHER counter is already SQL (audit_log count(),
+ * usage_events sum(), virtual_keys.spent_usd).
+ *
+ * Row cardinality is bounded by DISTINCT CALLERS in a window, not by requests:
+ * a bucket is counted into, not appended to.
+ */
+export const rateLimitCounters = pgTable(
+  "rate_limit_counters",
+  {
+    /** whatever `rateLimitKey` derived: `ip:…`, `key:…`, `auth:…`, `scim:…` */
+    bucket: text("bucket").primaryKey(),
+    /** start of the CURRENT fixed window — the same semantics the in-process
+     * store had, kept so that moving the store does not change what a
+     * configured number means */
+    windowStartedAt: timestamp("window_started_at", { withTimezone: true }).notNull().defaultNow(),
+    hits: integer("hits").notNull().default(0),
+  },
+  (t) => [
+    /** a row exists only because a request was counted into it */
+    check("rate_limit_counters_hits_positive", sql`${t.hits} > 0`),
+    index("rate_limit_counters_window_started_at_idx").on(t.windowStartedAt),
+  ],
+);
+
+export type RateLimitCounterRow = typeof rateLimitCounters.$inferSelect;

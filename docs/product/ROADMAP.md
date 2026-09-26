@@ -628,7 +628,7 @@ Split three ways, because "Kong has it" is not by itself an argument for buildin
 
 | Kong | Us | Evidence |
 |---|---|---|
-| Distributed rate limiting (`rate-limiting-advanced`, shared counters) | **In-memory, per-process** | `app.ts:532-561`, `rate-limit.ts:59`; zero hits for `redis`/`ioredis` in any `package.json`. **Two replicas means twice every limit.** This is a correctness defect in a governance product, not a missing feature |
+| Distributed rate limiting (`rate-limiting-advanced`, shared counters) | ~~**In-memory, per-process**~~ **CLOSED — ADR-0125, migration 0115** | the counters are a Postgres table now, with a local pre-filter in front so a flood cannot be turned into a write storm. Still no Redis, and none needed |
 | Request/connection timeouts, body limits | **Neither** | `Fastify({ logger: false, trustProxy })` — `app.ts:484`. A hung upstream MCP server holds the socket indefinitely |
 | Active/passive upstream health checks, retries, circuit breaking | **Health: none. Retries: only `maxRetries: 2` inside the model SDKs** (`packages/model-provider/src/index.ts:266`). **Breaker: none** | one bad MCP server degrades every caller until a human notices |
 | Load balancing across upstream instances | **One logical server = one URL** (`mcpServers.url`) | the nearest analogue is `agent_fallbacks`, an ordered *failover* chain on dispatch failure (`agents-connectors.ts:553`) — not balancing |
@@ -675,7 +675,7 @@ are defects**, and they should not wait behind anything on this list.
 
 | # | Item | Why | Rough size |
 |---|---|---|---|
-| **G1** | **Shared rate-limit and budget counters.** Move the in-process buckets to a shared store; make the kernel's `rate_limits` and project budgets safe under more than one replica. | Today, scaling out silently multiplies every limit and every budget ceiling. We would be enforcing a number we cannot name. Worse than having no limit, because the dashboard says the limit is on. | **M** |
+| ~~**G1**~~ | ~~**Shared rate-limit and budget counters.**~~ **SHIPPED 2026-09-26 (ADR-0125, migration 0115).** **And the item as originally written was too broad — worth recording, because the correction is the interesting part.** Auditing before building found that almost every enforcement counter here was ALREADY shared, because it was already SQL: the kernel's `rate_limits` is a `count()` over `audit_log` (`governed-evaluate.ts:406`), project budgets a `sum(usage_events)` (`projects.ts:252`), a virtual key's spend an atomic `spent_usd = spent_usd + x` (`virtual-keys.ts:248`), login lockout a column. **Exactly two were not**, and they failed in opposite directions: the HTTP edge limiter on `@fastify/rate-limit`'s per-process `Map` (N replicas enforced N × the ceiling while the posture page reported the ceiling), and `orchestration_runs.budget`, which was Postgres-backed but read-modify-write — so two nodes of one fanned-out run each wrote an absolute and the second erased the first's charges. Both fixed; both tests proven able to fail against the old code. | Today, scaling out silently multiplied one limit and lost parallel charges on another. We would be enforcing a number we cannot name. Worse than having no limit, because the dashboard says the limit is on. | **M** |
 | **G2** | **Timeouts, body limits, upstream retry and a breaker.** Fastify `requestTimeout`/`bodyLimit`, a connect+read deadline on MCP and model upstreams, and a circuit breaker per upstream. | A hung or hostile upstream currently has no bound. This is also the fix for the runbook's own "every MCP call returns a bare `{"error":"internal"}`" row — an upstream failure should be a *named refusal*, like `egress_blocked` and `mcp_admission_held` already are. | **S/M** |
 | **G3** | **MCP protocol conformance: `resources/*`, `prompts/*`, `completion/*`, `logging/*` and notifications** — each with its own governed decision, not a pass-through. | Without it, "central point for all MCP calls" is not a claim we can make. A resource read is a *data-access* decision and deserves the kernel, not a hole. Design note: keep refusing unknown methods; the value is that the governed set is enumerated. | **M/L** |
 | **G4** | **stdio and SSE upstream transports.** | stdio is the most common MCP deployment shape in the wild and we cannot front it at all. This is the single biggest hole in the coverage claim, and it is also the answer ADR-0122's discovery payload currently has to apologise for. | **M** |
@@ -699,5 +699,9 @@ are defects**, and they should not wait behind anything on this list.
 - **Do not claim operational parity with an API gateway.** No health checks, no breaker, no
   timeouts, no `/metrics`, one replica. Against a platform team that runs Kong, claiming otherwise
   fails on the first question. "We sit behind yours" is a better answer and, after **G9**, a true one.
-- **Never imply the rate limits hold under scale.** Until **G1**, they hold for one process. If
-  asked how we scale horizontally today, the answer is that we do not.
+- **Never imply the rate limits hold under scale — and after G1, be precise about what changed.**
+  The edge limiter's counters are shared now (ADR-0125), so a second replica no longer doubles the
+  ceiling. That is one reason removed, not a claim of HA: there is still no timeout, no breaker, no
+  `/metrics`, a fixed host port and one replica in the compose file, and per-process state outside
+  the limiter has not been audited. The accurate sentence is *"the limits are correct across
+  processes; the deployment is still single-replica until G2 and G8."*

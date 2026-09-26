@@ -64,6 +64,7 @@ import { resolveTrustProxy, type TrustProxySetting } from "./trusted-proxy.js";
 import { resolveHsts } from "./hsts.js";
 import fastifyRateLimit from "@fastify/rate-limit";
 import { schedulerHealth } from "./scheduler-health.js";
+import { SharedRateLimitStore } from "./rate-limit-store.js";
 import {
   rateLimitKey,
   rateLimitMax,
@@ -527,6 +528,16 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
   // registered after the plugin finishes loading, and `register()` defers that
   // to ready() — long after every route below is in place. Driving it from a
   // hook added here, before any route, makes coverage order-independent.
+  //
+  // ADR-0125 / ROADMAP G1 — the counters live in POSTGRES, not in this
+  // process. The plugin's default store is a per-process Map, which meant that
+  // with two replicas each one admitted the full ceiling: N processes enforced
+  // N x the configured limit while the posture page still reported the
+  // configured number. Every other enforcement counter in this product was
+  // already shared because it was already SQL; this was the one exception.
+  // `SharedRateLimitStore` keeps a local pre-filter in front of the database
+  // so a flood cannot be turned into a write storm — see the header of
+  // rate-limit-store.ts, which is where the reasoning lives.
   const rateCfg = resolveRateLimitConfig(process.env, opts.rateLimit ?? {});
   if (rateCfg.enabled) {
     app.register(fastifyRateLimit, {
@@ -537,6 +548,14 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       // a load balancer's liveness poll must never be throttled into a false
       // "gateway is down"
       allowList: (req) => req.url === "/health",
+      // The plugin constructs this itself and hands it the whole options
+      // object, so the db arrives through the closure rather than through a
+      // constructor argument we control.
+      store: class extends SharedRateLimitStore {
+        constructor() {
+          super(db);
+        }
+      } as unknown as NonNullable<Parameters<typeof fastifyRateLimit>[1]>["store"],
     });
     let limiter: ReturnType<typeof app.createRateLimit> | null = null;
     app.addHook("onRequest", async (req, reply) => {

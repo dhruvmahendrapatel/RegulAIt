@@ -799,6 +799,13 @@
       "when": 1785049000000,
       "tag": "0114_execution_kill_switch",
       "breakpoints": true
+    },
+    {
+      "idx": 115,
+      "version": "7",
+      "when": 1785050000000,
+      "tag": "0115_rate_limit_counters",
+      "breakpoints": true
     }
   ]
 }

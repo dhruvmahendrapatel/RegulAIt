@@ -910,14 +910,24 @@ async function dispatchRunNodeInner(
     // escalates immediately into the one approvals queue; the per-turn
     // pre-gate above then blocks the next turn. Never silently exceeded (§7).
     if (budget) {
-      runningMeasured = Number((runningMeasured + (outcome.result.costUsd ?? 0)).toFixed(6));
-      // §5.2 accumulate this node's OWN measured spend alongside the run total.
-      runningNodeMeasured = Number((runningNodeMeasured + (outcome.result.costUsd ?? 0)).toFixed(6));
+      // ROADMAP G1 / ADR-0125. This USED TO BE a read-modify-write: the loop
+      // held its own running totals and overwrote the whole budget JSONB with
+      // them. That is correct for exactly one worker. Two nodes of the same run
+      // dispatching concurrently — which is the entire point of pillar 7's
+      // parallel task graph — each wrote an absolute computed from the value
+      // they read at loop start, so whichever landed second ERASED the other's
+      // charges. A run could spend well past its cap with the ledger showing it
+      // under, and the per-node ceilings inherited the same hole.
+      //
+      // Now the loop posts a DELTA and the database does the addition, under a
+      // row lock, and hands back the authoritative totals the escalation checks
+      // below then use. The local accumulators are still updated from that
+      // answer rather than from their own arithmetic, so they can no longer
+      // drift from what is stored.
+      const charged = await chargeRunBudget(db, run.id, nodeId, outcome.result.costUsd ?? 0);
+      runningMeasured = charged.measuredSpentUsd;
+      runningNodeMeasured = charged.nodeMeasuredUsd;
       measuredPerNode[nodeId] = runningNodeMeasured;
-      await db
-        .update(orchestrationRuns)
-        .set({ budget: { ...budget, measuredSpentUsd: runningMeasured, measuredPerNodeUsd: measuredPerNode } })
-        .where(eq(orchestrationRuns.id, run.id));
       // §5.2 first-crossing escalate on the NODE's transitive ceiling — the same
       // pattern as the run cap, into the SAME approvals queue, with a DISTINCT
       // sentinel and ruleId so it is never confused with a run-cap breach.
@@ -1444,6 +1454,50 @@ async function evaluateNodeOwner(
     }),
     unknownAgent: false,
   };
+}
+
+/**
+ * ROADMAP G1 / ADR-0125 — add one node's measured cost to a run's budget
+ * ATOMICALLY, and return what the run has actually spent.
+ *
+ * The addition happens in the database, under `FOR UPDATE` on the run row,
+ * because the caller cannot be trusted to know the current total: pillar 7 runs
+ * independent nodes of one graph in parallel, and two workers that each read,
+ * add and write back an absolute figure silently lose one another's charges.
+ * The lock is the same blocking `FOR UPDATE` the run-event transition already
+ * uses a few lines below — deliberately not `SKIP LOCKED`, because the second
+ * writer must WAIT and then add, never step over.
+ *
+ * Returns the stored totals rather than void so the caller escalates on what
+ * the ledger says, not on its own arithmetic.
+ */
+export async function chargeRunBudget(
+  dbx: Db,
+  runId: string,
+  nodeId: string,
+  deltaUsd: number,
+): Promise<{ measuredSpentUsd: number; nodeMeasuredUsd: number }> {
+  return dbx.transaction(async (tx) => {
+    const [row] = await tx
+      .select({ budget: orchestrationRuns.budget })
+      .from(orchestrationRuns)
+      .where(eq(orchestrationRuns.id, runId))
+      .for("update");
+    const current = (row?.budget ?? null) as RunBudget | null;
+    if (!current) return { measuredSpentUsd: 0, nodeMeasuredUsd: 0 };
+
+    const measuredSpentUsd = Number(((current.measuredSpentUsd ?? 0) + deltaUsd).toFixed(6));
+    const perNode = { ...(current.measuredPerNodeUsd ?? {}) };
+    const nodeMeasuredUsd = Number(((perNode[nodeId] ?? 0) + deltaUsd).toFixed(6));
+    perNode[nodeId] = nodeMeasuredUsd;
+
+    await tx
+      .update(orchestrationRuns)
+      .set({ budget: { ...current, measuredSpentUsd, measuredPerNodeUsd: perNode } })
+      .where(eq(orchestrationRuns.id, runId));
+
+    return { measuredSpentUsd, nodeMeasuredUsd };
+  });
 }
 
 /** Transactionally apply one run event: kernel transition under FOR UPDATE,
