@@ -19,6 +19,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  approvalRules,
   auditLog,
   createDb,
   desc,
@@ -195,5 +196,133 @@ describe("the marker itself", () => {
     expect(isAdvisoryDetail({ advisory: false })).toBe(false);
     expect(isAdvisoryDetail("advisory")).toBe(false);
     expect(isAdvisoryDetail([{ advisory: true }])).toBe(false);
+  });
+});
+
+// ===========================================================================
+// ADR-0127 §2 — the authorization callout
+// ===========================================================================
+//
+// The contract here is a COMPATIBILITY SURFACE: a proxy routes on these codes,
+// so changing what one means breaks somebody's routing table silently. These
+// tests exist to make that change loud.
+
+describe("POST /v1/authz/check", () => {
+  /**
+   * ITS OWN SUBJECT, and the reason is worth keeping. The block above
+   * deliberately drives the rate limit to exhaustion to prove executions still
+   * count — so a callout test sharing that user inherits a genuinely
+   * rate-limited subject and fails for a reason that has nothing to do with the
+   * callout. The first draft of this file did exactly that (M-042's family: an
+   * assertion resting on state another block created). A run-unique subject
+   * cannot be reached by it.
+   */
+  let subjectId: string;
+
+  beforeAll(async () => {
+    const [u] = await db
+      .insert(users)
+      .values({ email: `callout-${randomUUID()}@advisory.example`, displayName: "Callout" })
+      .returning({ id: users.id });
+    subjectId = u!.id;
+    await db.insert(toolGrants).values({ userId: subjectId, serverId, toolName: TOOL });
+  });
+
+  const check = (payload: Record<string, unknown>) =>
+    app.inject({ method: "POST", headers: AUTH, url: "/v1/authz/check", payload });
+
+  it("answers with a closed set of codes and NOTHING else", async () => {
+    const res = await check({ userId: subjectId, serverId, toolName: TOOL });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.decision).toBe("allow");
+
+    // THE LEAK TEST, and the reason this endpoint exists rather than the
+    // adapters pointing at /v1/evaluate. `Decision.reason` and `ruleChain`
+    // carry rule ids, grant ids, role names and approver DISPLAY NAMES AND
+    // EMAILS. A data-plane proxy may log, forward or render whatever it gets.
+    expect(Object.keys(body).sort()).toEqual(["decision", "reason"]);
+    expect(body).not.toHaveProperty("ruleChain");
+    expect(body).not.toHaveProperty("approverName");
+    expect(body).not.toHaveProperty("effect");
+  });
+
+  it("an unknown tool is a DENY, not a 404", async () => {
+    // A proxy needs an answer it can route on. A 404 invites a fail-open
+    // `catch` in somebody's Lua — the request sails through because the
+    // adapter could not parse a refusal.
+    const res = await check({ userId: subjectId, serverId, toolName: "no_such_tool" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().decision).toBe("deny");
+    expect(res.json().reason).toBe("unknown_tool");
+  });
+
+  it("a subject with no grant is denied", async () => {
+    const [stranger] = await db
+      .insert(users)
+      .values({ email: `stranger-${randomUUID()}@advisory.example`, displayName: "Stranger" })
+      .returning({ id: users.id });
+    const res = await check({ userId: stranger!.id, serverId, toolName: TOOL });
+    expect(res.json().decision).toBe("deny");
+  });
+
+  it("require_approval maps to its OWN code, never a flat deny", async () => {
+    // The distinction the approvals queue exists to make: "a human can unblock
+    // this" versus "never". Envoy has two outcomes and no third, so this must
+    // be a denial at the proxy — but if it arrived indistinguishable from a
+    // policy refusal, the caller could not tell a recoverable hold from a hard
+    // no, and the queue would be invisible to everyone behind the gateway.
+    const [approver] = await db
+      .insert(users)
+      .values({ email: `approver-${randomUUID()}@advisory.example`, displayName: "Approver" })
+      .returning({ id: users.id });
+    const writeTool = "adr0127_write";
+    await db.insert(mcpTools).values({ serverId, name: writeTool, kind: "write" });
+    await db.insert(toolGrants).values({ userId: subjectId, serverId, toolName: writeTool });
+    await db.insert(approvalRules).values({
+      scope: "user",
+      userId: subjectId,
+      serverScope: "server",
+      serverId,
+      toolName: writeTool,
+      writeOnly: false,
+      approverUserId: approver!.id,
+    });
+
+    const res = await check({ userId: subjectId, serverId, toolName: writeTool });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().decision).toBe("approval_required");
+    expect(res.json().decision).not.toBe("deny");
+  });
+
+  it("is ADVISORY: a proxy asking on every request cannot exhaust the subject's budget", async () => {
+    // The whole premise of the callout topology. Without ADR-0127 §1 this is
+    // the test that would have failed, and it would have failed in production
+    // in proportion to how much the customer used the product.
+    for (let i = 0; i < MAX_CALLS * 4; i += 1) {
+      const res = await check({ userId: subjectId, serverId, toolName: TOOL });
+      expect(res.json().decision).not.toBe("deny");
+    }
+    const [latest] = await db
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.toolName, TOOL))
+      .orderBy(desc(auditLog.at))
+      .limit(1);
+    expect(isAdvisoryDetail(latest!.detail)).toBe(true);
+  });
+
+  it("still files every question in the ledger, with the full chain the response withheld", async () => {
+    // Minimal to the proxy, complete to the auditor. The chain is not lost —
+    // it is kept where entitlement to read it is enforced.
+    await check({ userId: subjectId, serverId, toolName: TOOL });
+    const [row] = await db
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.toolName, TOOL))
+      .orderBy(desc(auditLog.at))
+      .limit(1);
+    expect(row!.ruleChain).toBeDefined();
+    expect((row!.detail as { via?: string }).via).toBe("authz_check");
   });
 });

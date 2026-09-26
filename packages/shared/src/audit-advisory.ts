@@ -69,3 +69,41 @@ export function isAdvisoryDetail(detail: unknown): boolean {
  * detail happened to be NULL, i.e. quietly disabled rate limiting for them.
  */
 export const NOT_ADVISORY_SQL = `(detail ->> '${AUDIT_ADVISORY_KEY}') is distinct from 'true'`;
+
+// ---------------------------------------------------------------------------
+// ADR-0127 §2 — the authorization callout's wire contract
+// ---------------------------------------------------------------------------
+
+/**
+ * What a proxy is told. DELIBERATELY NOT the kernel `Decision`.
+ *
+ * `Decision.reason` and `Decision.ruleChain` carry rule ids, grant ids, role
+ * names and approver DISPLAY NAMES AND EMAILS. That is exactly right for an
+ * admin looking at a decision in the portal, and wrong to hand a data-plane
+ * proxy: whatever the proxy receives it may log, forward to a downstream
+ * service, or surface in an error page, none of which this product controls.
+ * So the callout answers with a stable code and nothing else, and the full
+ * chain stays in the ledger where entitlement to read it is enforced.
+ *
+ * The codes are a CLOSED SET on purpose. A proxy routes on them, so they are a
+ * compatibility surface: adding one is safe, changing what an existing one
+ * means is a breaking change to somebody's routing table.
+ */
+export const AUTHZ_DECISIONS = ["allow", "deny", "approval_required"] as const;
+export type AuthzDecision = (typeof AUTHZ_DECISIONS)[number];
+
+/**
+ * `require_approval` is the interesting one and it is why this type exists.
+ *
+ * Envoy's ext_authz has two outcomes — OK and denied — and nothing in this
+ * repository had ever had to choose what a pending approval means at a proxy.
+ * It is a DENY: the request must not proceed, and failing closed is this
+ * product's posture everywhere else. But it is not the same fact as a policy
+ * refusal, and collapsing them would destroy the distinction the approvals
+ * queue exists to make — "a human can unblock this" versus "never". So it
+ * carries its own code, and the adapters map it to 403 with a header naming it,
+ * so a caller can tell a recoverable hold from a hard no.
+ */
+export function isAuthzAllowed(d: AuthzDecision): boolean {
+  return d === "allow";
+}

@@ -3325,7 +3325,18 @@ export {
 
 export {
   AUDIT_ADVISORY_KEY,
+  AUTHZ_DECISIONS,
   NOT_ADVISORY_SQL,
   advisoryDetail,
   isAdvisoryDetail,
+  isAuthzAllowed,
+  type AuthzDecision,
 } from "./audit-advisory.js";
+
+export const authzCheckRequestSchema = z.object({
+  /** the SUBJECT the proxy is asking about — not the caller. See ADR-0127 §3. */
+  userId: z.string().uuid(),
+  serverId: z.string().uuid(),
+  toolName: z.string().min(1),
+});
+export type AuthzCheckRequest = z.infer<typeof authzCheckRequestSchema>;

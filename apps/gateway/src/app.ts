@@ -109,6 +109,8 @@ import {
   updateServerSchema,
   updateUserSchema,
   advisoryDetail,
+  authzCheckRequestSchema,
+  type AuthzDecision,
 } from "@regulait/shared";
 import { governedEvaluate } from "./governed-evaluate.js";
 import { refuseMcpServerWrite } from "./mcp-egress.js";
@@ -2057,6 +2059,87 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       .from(revocations)
       .where(conditions.length > 0 ? and(...conditions) : undefined);
     return { revocations: rows };
+  });
+
+  /**
+   * ADR-0127 / ROADMAP G9 — the authorization callout.
+   *
+   * WHY THIS IS NOT JUST `/v1/evaluate`. The roadmap said "an Envoy ext_authz
+   * and Kong adapter over POST /v1/evaluate", and pointing a proxy at that
+   * route would have been wrong in a way worth writing down:
+   *
+   *   - it answers with the kernel `Decision`, whose `reason` and `ruleChain`
+   *     carry rule ids, grant ids, role names and approver display names and
+   *     emails. A data-plane proxy may log, forward or render whatever it
+   *     receives, and none of that is under this product's control;
+   *   - it has no code for `require_approval` that a proxy can route on;
+   *   - it is shaped for a human previewing one decision, not for something on
+   *     the p99 of every request a customer serves.
+   *
+   * Same kernel, same governance, deliberately narrower contract: a closed set
+   * of codes and nothing else. The full chain stays in the ledger, where
+   * entitlement to read it is enforced.
+   *
+   * IT IS STILL ADVISORY (ADR-0127 §1). Nothing is executed and nothing is
+   * queued, so the audit row is marked and does not count against the
+   * subject's rate limit — otherwise a proxy asking on every request would
+   * have burned the budget of traffic that had not happened yet.
+   *
+   * WHAT THIS ENDPOINT CANNOT DO, stated because the topology depends on it:
+   * it returns a decision; it does not enforce one. A caller that ignores the
+   * answer proceeds. That is true of every PDP and is why the deployment doc
+   * calls this "behind your gateway", not "instead of governance".
+   */
+  app.post("/v1/authz/check", async (req, reply) => {
+    const body = authzCheckRequestSchema.parse(req.body);
+
+    const [tool] = await db
+      .select()
+      .from(mcpTools)
+      .where(and(eq(mcpTools.serverId, body.serverId), eq(mcpTools.name, body.toolName)));
+    if (!tool) {
+      // An unknown tool is a DENY, not a 404. A proxy asking "may this run"
+      // needs an answer it can route on, and "the thing you named does not
+      // exist here" is a refusal — answering 404 would invite a fail-open
+      // `catch` in somebody's Lua.
+      return reply.status(200).send({
+        decision: "deny" satisfies AuthzDecision,
+        reason: "unknown_tool",
+      });
+    }
+
+    const { decision } = await governedEvaluate(
+      db,
+      body.userId,
+      body.serverId,
+      { serverId: tool.serverId, name: tool.name, kind: tool.kind },
+      undefined,
+      null,
+      null,
+      undefined,
+    );
+
+    const mapped: AuthzDecision =
+      decision.effect === "allow"
+        ? "allow"
+        : decision.effect === "require_approval"
+          ? "approval_required"
+          : "deny";
+
+    await db.insert(auditLog).values({
+      userId: body.userId,
+      serverId: body.serverId,
+      toolName: body.toolName,
+      effect: decision.effect,
+      ruleId: decision.ruleId,
+      ruleChain: decision.ruleChain,
+      reason: decision.reason,
+      detail: advisoryDetail({ askedByUserId: req.authCtx.userId ?? null, via: "authz_check" }),
+    });
+
+    // `reason` here is the RULE ID, not the prose. It is stable, it is enough
+    // for a proxy to correlate with the ledger, and it names no person.
+    return reply.status(200).send({ decision: mapped, reason: decision.ruleId });
   });
 
   app.post("/v1/evaluate", async (req, reply) => {

@@ -1,0 +1,87 @@
+# ADR-0127 / ROADMAP G9 — Envoy `ext_authz` pointed at RegulAIt's PDP.
+#
+# Envoy stays the data plane. RegulAIt decides. Nothing here proxies traffic
+# THROUGH RegulAIt: the request never leaves Envoy's hands, and the only thing
+# that crosses is a question and an answer.
+#
+# READ docs/deployment/GATEWAY_TOPOLOGY.md FIRST. It states the three things
+# that make this safe or unsafe — the credential is a subject-impersonation
+# key, the decision costs real database work, and a PDP decides without
+# enforcing. None of them are visible from this file alone.
+#
+# Envoy 1.28+. Written against the HTTP variant of ext_authz on purpose: the
+# gRPC one is faster and would need a proto service RegulAIt does not speak,
+# and this is the version a customer can stand up against the existing REST
+# endpoint in an afternoon.
+
+http_filters:
+  - name: envoy.filters.http.ext_authz
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+      transport_api_version: V3
+
+      # FAIL CLOSED. The default is `false`, which is the dangerous default for
+      # a governance deployment: if RegulAIt is unreachable, Envoy would admit
+      # everything and the audit trail would show nothing was ever asked. An
+      # outage must not silently become an open door.
+      failure_mode_allow: false
+
+      # The PDP does real work — on the order of twenty database round trips
+      # per decision (GATEWAY_TOPOLOGY.md §4). This sits on the p99 of every
+      # request Envoy serves, so the timeout is a deliberate number and not a
+      # default: long enough for a healthy decision, short enough that a sick
+      # PDP is a fast failure rather than a hang.
+      http_service:
+        server_uri:
+          uri: http://regulait-gateway:3000
+          cluster: regulait_pdp
+          timeout: 2s
+        path_prefix: /v1/authz/check
+
+        authorization_request:
+          allowed_headers:
+            patterns:
+              - exact: content-type
+              # The SUBJECT. Envoy must map its own authenticated identity to a
+              # RegulAIt user UUID before this point — see §3 of the topology
+              # doc. RegulAIt trusts this header because the caller holds an
+              # admin key; that is precisely why the key is sensitive.
+              - exact: x-regulait-subject
+          headers_to_add:
+            - key: authorization
+              # A secret in a config file is a placeholder, not a pattern. Use
+              # your secret manager / SDS. See GATEWAY_TOPOLOGY.md §5.
+              value: "Bearer ${REGULAIT_PDP_KEY}"
+
+        authorization_response:
+          # `x-regulait-decision` distinguishes `approval_required` from a flat
+          # deny. Forward it so a caller can tell "a human can unblock this"
+          # from "never" — the distinction the approvals queue exists to make,
+          # and the one a bare 403 destroys.
+          allowed_client_headers:
+            patterns:
+              - exact: x-regulait-decision
+              - exact: x-regulait-reason
+
+      # Envoy's ext_authz speaks OK / denied and has no third outcome, so
+      # `approval_required` arrives as a denial carrying its own header. That
+      # is the correct mapping — the request must not proceed — but a caller
+      # that treats every 403 the same will lose a recoverable state.
+      status_on_error:
+        code: ServiceUnavailable
+
+clusters:
+  - name: regulait_pdp
+    type: STRICT_DNS
+    connect_timeout: 1s
+    load_assignment:
+      cluster_name: regulait_pdp
+      endpoints:
+        - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address: { address: regulait-gateway, port_value: 3000 }
+    # The gateway speaks plain HTTP behind its own TLS sidecar (docs/ops/TLS.md).
+    # If this hop leaves the host, terminate TLS in front of it or run it over a
+    # network you control: the question carries a subject identity and the
+    # answer carries a rule id.
