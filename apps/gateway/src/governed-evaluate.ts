@@ -19,10 +19,12 @@ import {
   type Db,
   type PgColumn,
   type SQL,
+  sql,
 } from "@regulait/db";
 import { evaluate, matchingApprovalRules, type Decision, type ToolRef } from "@regulait/policy-kernel";
 import { EVALUATION_ONLY_EXECUTION, resolveExecutionPosture } from "./execution-posture.js";
 import {
+  NOT_ADVISORY_SQL,
   approvalArgumentsDigest,
   approvalContextDigest,
   effectiveApprovalScope,
@@ -409,6 +411,14 @@ export async function governedEvaluate(
       eq(auditLog.userId, userId),
       eq(auditLog.effect, "allow"),
       gte(auditLog.at, windowStart),
+      // ADR-0127 — count EXECUTIONS, not questions. `/v1/evaluate` and the G9
+      // authorization callout answer "what would you decide" and run nothing,
+      // but they wrote an `allow` row like any other, so a preview spent the
+      // subject's budget on traffic that never happened and a preview followed
+      // by the real call counted twice. See audit-advisory.ts for why the
+      // marker lives in `detail` (it is inside the content hash) and why the
+      // predicate is `IS DISTINCT FROM` (NULL detail must still count).
+      sql.raw(NOT_ADVISORY_SQL),
     ];
     if (l.serverScope !== "all") conditions.push(eq(auditLog.serverId, serverId));
     if (l.toolName) conditions.push(eq(auditLog.toolName, l.toolName));

@@ -108,6 +108,7 @@ import {
   updateRateLimitSchema,
   updateServerSchema,
   updateUserSchema,
+  advisoryDetail,
 } from "@regulait/shared";
 import { governedEvaluate } from "./governed-evaluate.js";
 import { refuseMcpServerWrite } from "./mcp-egress.js";
@@ -2087,6 +2088,13 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       undefined,
     );
 
+    // ADR-0127 — MARKED ADVISORY. This route answers "what would you decide"
+    // and executes nothing, but it wrote an `allow` row indistinguishable from
+    // a real one, and the kernel's rate limits are a count over exactly those
+    // rows. So a preview spent the subject's budget on traffic that never ran,
+    // and a preview followed by the real call counted twice. The row is still
+    // written in full — a question asked about someone's entitlements is worth
+    // recording — it is simply no longer counted as a thing that happened.
     await db.insert(auditLog).values({
       userId: body.userId,
       serverId: body.serverId,
@@ -2095,6 +2103,7 @@ export function buildApp(db: Db, opts: BuildAppOptions = {}) {
       ruleId: decision.ruleId,
       ruleChain: decision.ruleChain,
       reason: decision.reason,
+      detail: advisoryDetail({ askedByUserId: req.authCtx.userId ?? null, via: "evaluate" }),
     });
 
     return decision;

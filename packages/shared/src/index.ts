@@ -3322,3 +3322,10 @@ export {
   type RecommendationJudgeVerdict,
   type RecommendationJudgedState,
 } from "./access-recommendations.js";
+
+export {
+  AUDIT_ADVISORY_KEY,
+  NOT_ADVISORY_SQL,
+  advisoryDetail,
+  isAdvisoryDetail,
+} from "./audit-advisory.js";
