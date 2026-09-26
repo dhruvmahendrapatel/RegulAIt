@@ -835,50 +835,34 @@ bucket `resolveAnchorSink` (`apps/gateway/src/audit-chain.ts:601-606`) falls thr
 buffer**, not to `off`, so the posture ceiling is **6 of 7** with the anchor row reading
 `tamperResistant: false`. §2 now argues that row is worth showing rather than apologising for.
 
-## D03 — a DELETED branch held 2,751 lines that `main` does not, including SAP
+## D03 — a branch outside `main` holds 2,751 lines, including SAP
 
-Found during a branch cleanup on 2026-09-26. **Updated the same day: the branch was subsequently
-DELETED**, so this entry is now the only record that the work existed, and the SHA below is the only
-way back to it.
-
-**RECOVERY, while it is still possible.** Deleting a branch removes the ref, not the objects —
-GitHub keeps unreferenced commits for a while before garbage-collecting them, and a closed PR can
-also be reopened to restore its head. Verified reachable from `origin` after deletion on
-2026-09-26:
-
-```
-462591fc93bea1f02bab326a4aafb8361fec8bab
-git fetch origin 462591fc93bea1f02bab326a4aafb8361fec8bab
-git branch <name> 462591fc93bea1f02bab326a4aafb8361fec8bab
-```
-
-The other route is PR **#82** on GitHub, which offers *Restore branch* while the objects survive.
-**Neither works indefinitely.** If this work is wanted, recover it soon; if it is not, this entry
-records what was let go and is the end of the matter.
-
-**`claude/authorized-foundation`** was the one branch in this repository whose pull request (**#82**)
-was **closed without being merged**. Every other branch's PR carries a `merged_at`. It held two
-commits and about **2,751 insertions** that were on no other branch:
+`claude/authorized-foundation` is the one branch in this repository whose pull request (**#82**) was
+**closed without being merged**. Every other branch's PR carries a `merged_at`. It holds two commits
+and about **2,751 insertions** that are on no other branch:
 
 - `packages/db/src/authorized/` — the "regulAIt Authorized" schema, including **`sap.ts` (508
   lines)** and `risk.ts`
 - `scripts/gen-authorized-schema.py`
 - an ADR that was renumbered 0031 → 0032 on that branch
 
-**Why this is recorded rather than filed away.** The demo runbook tells whoever drives a demo *"do
-not promise SAP — there is no code."* That sentence is **true of the product** and stays true:
-nothing here is on `main`, nothing is built, tested, migrated or reachable. But it is **not true of
-the repository**, and somebody told the stronger version who then goes looking will find half a
-thousand lines of SAP schema and conclude they were misled about something else too. The runbook
-now states the narrower, exact claim and points here.
+Tip: `462591fc93bea1f02bab326a4aafb8361fec8bab`.
 
-**What this is not.** It is not a feature, a roadmap item, or a commitment. It was dead code on a
-branch, disclosed because an honest "we do not have this" has to survive somebody checking. The
-branch was excluded from the deletion list for that reason and deleted anyway in the sweep that
-followed — recorded here plainly rather than quietly dropped, because a deliberate exclusion that
-gets removed one step later is exactly the kind of thing a later reader should be able to see
-happened.
+**Why this is recorded rather than left to be found.** The demo runbook tells whoever drives a demo
+*"do not promise SAP — there is no code."* That is **true of the product** and stays true: nothing
+here is on `main`, built, tested, migrated or reachable. But it is **not true of the repository**,
+and somebody told the stronger version who then goes looking will find half a thousand lines of SAP
+schema and reasonably conclude they were misled about something else too. The runbook states the
+narrower, exact claim and points here.
 
-**If it is ever picked up**, treat it as a fresh design decision and not a resumption: it predates
-ADRs 0032–0126, the schema has moved a long way underneath it, and the ADR number it claims is
-taken.
+**What this is not.** Not a feature, a roadmap item, or a commitment. It is dead code on a branch,
+disclosed because an honest "we do not have this" has to survive somebody checking.
+
+**If it is ever picked up**, treat it as a fresh design decision rather than a resumption: it
+predates ADRs 0032–0127, the schema has moved a long way underneath it, and the ADR number it claims
+is taken.
+
+*(History, because it is short and the branch nearly went: excluded from the 2026-09-26 branch
+cleanup for the reason above, deleted anyway in the sweep that followed, then restored the same day
+from the SHA recorded here. Intact and verified against that SHA.)*
+
