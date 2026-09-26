@@ -52,6 +52,7 @@ import {
 } from "./egress-guard.js";
 import { loadEgressAllowList } from "./custom-providers.js";
 import { loadOrgSettings } from "./org-settings.js";
+import { timeouts } from "./timeouts.js";
 
 const NIL_USER = "00000000-0000-0000-0000-000000000000";
 
@@ -142,6 +143,51 @@ export async function auditMcpEgressDenied(
 }
 
 /**
+ * ROADMAP G2 — the upstream is registered, permitted and admitted, and it did
+ * not answer.
+ *
+ * THIS IS NOT AN EGRESS REFUSAL AND MUST NOT READ LIKE ONE. `mcp-server-egress-
+ * blocked` means the gateway DECLINED to go somewhere; this means it went and
+ * nothing was there. Filing both under one rule id would make "we refused to
+ * reach it" and "we could not reach it" indistinguishable in the ledger, and
+ * those two lead an operator to opposite places — a policy screen and a
+ * network. Hence its own id.
+ *
+ * `effect: "deny"` because the caller's request was refused, which is the fact
+ * the trail records. The reason names the deadline, so the row distinguishes a
+ * refused connection from an exhausted one without the reader having to infer
+ * it from a duration.
+ */
+export async function auditMcpUpstreamUnreachable(
+  db: Db,
+  args: {
+    userId?: string | null;
+    serverId: string;
+    url: string;
+    reason: string;
+    timedOut: boolean;
+    deadlineMs: number;
+  },
+): Promise<void> {
+  await db.insert(auditLog).values({
+    userId: args.userId ?? NIL_USER,
+    serverId: args.serverId,
+    objectType: "mcp_server",
+    objectId: args.serverId,
+    detail: {
+      phase: "connect",
+      url: args.url,
+      outcome: args.timedOut ? "deadline_exceeded" : "connect_failed",
+      deadlineMs: args.deadlineMs,
+    },
+    effect: "deny",
+    ruleId: "mcp-upstream-unreachable",
+    ruleChain: [],
+    reason: args.reason,
+  });
+}
+
+/**
  * WRITE TIME, in one call — the `refuseConnectionEgressWrite` shape. Returns
  * null when the destination is permitted, or the 400 body when it is not,
  * audited either way it refuses.
@@ -215,8 +261,26 @@ export async function guardedMcpConnect(
     ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
   });
   const client = new Client({ name: "regulait-gateway", version: "0.1.0" });
+  // ROADMAP G2 — a deadline on opening the session. This is the top of every
+  // `POST /mcp/:serverId`, BEFORE any JSON-RPC is read, so without a bound an
+  // upstream that accepts the socket and never answers `initialize` hangs the
+  // caller before the governance layer has said anything at all — and holds a
+  // gateway socket for as long as the client is willing to wait.
+  //
+  // Both halves are needed and they stop different things. `RequestOptions
+  // .timeout` bounds the `initialize` EXCHANGE, which the SDK enforces at the
+  // protocol level; the AbortSignal bounds the underlying HTTP request, which
+  // is what a connect to a black-holed address hangs on and which the SDK's
+  // own timer never sees. The signal goes through `requestInit` because the
+  // guarded fetch already forwards a caller-supplied signal
+  // (`pinned-fetch.ts`) and simply had nobody supplying one.
+  const deadlineMs = timeouts().mcpConnectMs;
   await client.connect(
-    new StreamableHTTPClientTransport(new URL(serverRow.url), { fetch: guardedFetch }),
+    new StreamableHTTPClientTransport(new URL(serverRow.url), {
+      fetch: guardedFetch,
+      requestInit: { signal: AbortSignal.timeout(deadlineMs) },
+    }),
+    { timeout: deadlineMs },
   );
   return client;
 }
