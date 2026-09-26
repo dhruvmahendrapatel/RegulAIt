@@ -160,6 +160,110 @@ export function InfoButton(props: {
   );
 }
 
+/**
+ * A closed-vocabulary tag picker.
+ *
+ * ── WHY THIS REPLACED A TEXT BOX ───────────────────────────────────────────
+ * Compliance tags were a comma-separated `<Input>`. That looks like a small UI
+ * choice and is not: these tags are what the pillar-3 cascade keys on, so a
+ * typo does not produce a validation error — it produces a use case that
+ * silently inherits NO compliance consequences. The failure is invisible at the
+ * moment it happens and expensive later.
+ *
+ * The vocabulary is a real object (`compliance_profiles.tag`) and the page
+ * already loads it, so asking a human to retype it from memory was never
+ * necessary. Choosing from the list makes the wrong answer unrepresentable.
+ *
+ * ── FREE ENTRY IS STILL ALLOWED, AND MARKED ────────────────────────────────
+ * A tag with no profile is legitimate — you can tag ahead of writing the
+ * profile — so this does not forbid one. It marks it: an unknown tag is shown
+ * as `unbound`, with the plain consequence spelled out, rather than looking
+ * identical to a tag that actually enforces something. Refusing it outright
+ * would be the wrong trade; letting it pass unremarked is what the text box
+ * already did.
+ */
+export function TagPicker(props: {
+  value: string[];
+  onChange: (next: string[]) => void;
+  /** the known vocabulary — tags that resolve to a compliance profile */
+  known: string[];
+  id?: string;
+}) {
+  const [draft, setDraft] = useState("");
+  const listId = useId();
+  const add = (raw: string) => {
+    const t = raw.trim().replace(/,+$/, "");
+    if (!t || props.value.includes(t)) return setDraft("");
+    props.onChange([...props.value, t]);
+    setDraft("");
+  };
+  const unbound = (t: string) => !props.known.includes(t);
+
+  return (
+    <div className={s.tagPicker}>
+      {props.value.length > 0 && (
+        <ul className={s.tagList}>
+          {props.value.map((t) => (
+            <li key={t} className={`${s.tagChip} ${unbound(t) ? s.tagChipUnbound : ""}`}>
+              <span>{t}</span>
+              {unbound(t) && <em className={s.tagUnboundMark}>unbound</em>}
+              <button
+                type="button"
+                aria-label={`Remove tag ${t}`}
+                onClick={() => props.onChange(props.value.filter((x) => x !== t))}
+              >
+                ×
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className={s.tagInputRow}>
+        <input
+          id={props.id}
+          className={s.input}
+          list={listId}
+          value={draft}
+          placeholder={props.known.length ? "start typing, or pick a known tag" : "no profiles defined yet"}
+          onChange={(e) => {
+            // A datalist click fires change with the full value and no key
+            // event, so committing on a trailing comma alone would never catch
+            // it. Committing when the value matches the vocabulary exactly is
+            // what makes picking from the list feel like picking, not typing.
+            const v = e.target.value;
+            if (v.endsWith(",")) return add(v);
+            if (props.known.includes(v)) return add(v);
+            setDraft(v);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              // Enter adds a tag; it must not submit the form around it.
+              e.preventDefault();
+              add(draft);
+            }
+            if (e.key === "Backspace" && draft === "" && props.value.length) {
+              props.onChange(props.value.slice(0, -1));
+            }
+          }}
+          onBlur={() => add(draft)}
+        />
+        <datalist id={listId}>
+          {props.known.filter((t) => !props.value.includes(t)).map((t) => (
+            <option key={t} value={t} />
+          ))}
+        </datalist>
+      </div>
+      {props.value.some(unbound) && (
+        <p className={s.tagWarn}>
+          No compliance profile carries {props.value.filter(unbound).map((t) => `“${t}”`).join(", ")} yet, so
+          it enforces nothing until one does. That is allowed — tagging ahead of the profile is normal — but it
+          is not the same as being governed.
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function Card(props: {
   title?: ReactNode;
   actions?: ReactNode;

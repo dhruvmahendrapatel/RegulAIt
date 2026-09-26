@@ -583,3 +583,32 @@ a.barLabel {
 .infoPanel p + p {
   margin-block-start: var(--s1);
 }
+
+/* --- TagPicker ------------------------------------------------------------- */
+.tagPicker { display: flex; flex-direction: column; gap: var(--s0); min-width: 0; }
+.tagList { display: flex; flex-wrap: wrap; gap: var(--s0); list-style: none; margin: 0; padding: 0; }
+.tagChip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 6px 3px 10px;
+  border: 1px solid var(--rg-signal-ring);
+  border-radius: var(--rg-r-pill);
+  background: var(--rg-signal-tint);
+  color: var(--text);
+  font-size: var(--text-xs);
+}
+/* An unbound tag must not look like a governed one — same shape, different
+   colour and an explicit word, because colour alone is not a message. */
+.tagChipUnbound { border-color: var(--rg-medium); background: var(--rg-medium-tint); }
+.tagUnboundMark { font-style: normal; font-size: 0.85em; color: var(--rg-medium-deep); text-transform: uppercase; letter-spacing: 0.04em; }
+.tagChip button {
+  border: 0; background: transparent; cursor: pointer; padding: 0 2px;
+  font-size: 15px; line-height: 1; color: var(--text-dim); border-radius: var(--rg-r-sm);
+}
+.tagChip button:hover { color: var(--danger); }
+.tagChip button:focus-visible { outline: 2px solid var(--rg-signal); outline-offset: 1px; }
+.tagInputRow { display: flex; gap: var(--s0); }
+.tagInputRow .input { flex: 1; }
+.tagWarn {
+  margin: 0; font-size: var(--text-xs); line-height: 1.5;
+  color: var(--rg-medium-deep); text-transform: none; letter-spacing: normal; font-weight: 400;
+}

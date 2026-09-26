@@ -23,7 +23,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../api/client";
 import { ago } from "../../../api/format";
 import { PageHeader } from "../../../shell/AppShell";
-import { Badge, Button, Card, EmptyState, Field, Input, Select, Table, Textarea, type Tone } from "../../../ui/kit";
+import { Badge, Button, Card, EmptyState, Field, InfoButton, Input, Select, Table, TagPicker, Textarea, type Tone } from "../../../ui/kit";
 import { QueryGate, optionEls, useAction, useAgents, useComplianceProfiles, useProjects, agentOpts } from "../adminKit";
 import a from "../admin.module.css";
 import v from "../../views.module.css";
@@ -177,6 +177,8 @@ const EU_FLAGS = [
   ["interactsWithHumans", "People interact with it directly"],
   ["generatesSyntheticContent", "Generates synthetic content"],
 ] as const;
+const INTAKE_STEPS = ["What it is", "Data & risk", "Intended use", "Review"] as const;
+
 const EU_ANSWERS_FENCE_RE = /```eu-ai-act-answers[\s\S]*?```/g;
 
 export default function UseCasesPage() {
@@ -201,9 +203,16 @@ export default function UseCasesPage() {
   const [desc, setDesc] = useState("");
   const [context, setContext] = useState("");
   const [sensitivity, setSensitivity] = useState("internal");
-  const [tags, setTags] = useState("");
+  const [tags, setTags] = useState<string[]>([]);
   const [agentId, setAgentId] = useState("");
   const [projectId, setProjectId] = useState("");
+  /**
+   * The intake is staged rather than one wall of fields, because the stages ARE
+   * the governance: what it is, what data it touches, what it may use. A person
+   * who has answered "regulated" should be looking at the tag picker next, not
+   * scrolling past it. `step` is the cursor; nothing is submitted until step 4.
+   */
+  const [step, setStep] = useState(0);
 
   // questionnaire + retire
   const [answers, setAnswers] = useState("");
@@ -252,73 +261,187 @@ export default function UseCasesPage() {
     <>
       <PageHeader
         title="Use cases"
-        sub="Governance before anything runs: a proposed AI use case starts a real intake workflow — plan, questionnaire, human sign-off on the one Approvals queue — and approval registers it as a governance object whose compliance tags are the same tags the cascade enforces. Approval registers intent — and gates dispatch only where the org's use-case gate (Settings → Organization) is armed; it ships off."
+        sub="Every AI use case, from proposal to sign-off to retirement."
       />
       <div className={v.stack}>
         {/* ---------------- propose ---------------- */}
-        <Card title="Propose an AI use case">
+        <Card
+          title="Propose an AI use case"
+          actions={
+            <InfoButton label="proposing a use case" align="end">
+              <p>
+                Governance before anything runs. Proposing starts a real intake workflow — plan, questionnaire,
+                human sign-off on the one Approvals queue — and approval registers the use case as a governance
+                object whose compliance tags are the same tags the cascade enforces.
+              </p>
+              <p>
+                Approval registers <em>intent</em>. It only gates dispatch where the org's use-case gate is armed
+                (Settings → Organization); that ships off.
+              </p>
+            </InfoButton>
+          }
+        >
+          <ol className={a.steps} aria-label="Intake progress">
+            {INTAKE_STEPS.map((label, i) => (
+              <li key={label} className={i === step ? a.stepOn : i < step ? a.stepDone : undefined}>
+                <button type="button" onClick={() => i < step && setStep(i)} disabled={i > step}>
+                  <span className={a.stepNum}>{i < step ? "✓" : i + 1}</span>
+                  {label}
+                </button>
+              </li>
+            ))}
+          </ol>
+
           <form
             className={v.stack}
             onSubmit={(e) => {
               e.preventDefault();
+              // Only the final step submits. Without this guard an Enter press
+              // in any text field on step 1 would propose a half-filled use
+              // case — a governance object created by a keystroke nobody meant.
+              if (step < INTAKE_STEPS.length - 1) return setStep((n) => n + 1);
               void act.run(async () => {
                 await api.post("/v1/use-cases", {
                   name,
                   description: desc,
                   businessContext: context,
                   dataSensitivity: sensitivity,
-                  complianceTags: tags.split(",").map((t) => t.trim()).filter(Boolean),
+                  complianceTags: tags,
                   intendedAgentIds: agentId ? [agentId] : [],
                   ...(projectId ? { projectId } : {}),
                 });
                 setName("");
                 setDesc("");
                 setContext("");
-                setTags("");
+                setTags([]);
+                setAgentId("");
+                setProjectId("");
+                setStep(0);
                 await refreshAll();
-              }, "Use case proposed — its intake workflow is resting at the plan stage");
+              });
             }}
           >
-            <div className={a.formRow}>
-              <Field label="Name" grow>
-                <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="summarize support tickets" required />
-              </Field>
-              <Field label="Data sensitivity">
-                <Select value={sensitivity} onChange={(e) => setSensitivity(e.target.value)}>
-                  <option value="public">public</option>
-                  <option value="internal">internal</option>
-                  <option value="confidential">confidential</option>
-                  <option value="regulated">regulated</option>
-                </Select>
-              </Field>
-            </div>
-            <Field label="Description">
-              <Textarea rows={2} value={desc} onChange={(e) => setDesc(e.target.value)} required />
-            </Field>
-            <Field label="Business context — why the business wants this">
-              <Textarea rows={2} value={context} onChange={(e) => setContext(e.target.value)} required />
-            </Field>
-            <div className={a.formRow}>
-              <Field label="Compliance tags (comma-separated — the cascade's own tags)" grow>
-                <Input
+            {step === 0 && (
+              <>
+                <Field label="Name" grow>
+                  <Input
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    placeholder="summarize support tickets"
+                    required
+                    autoFocus
+                  />
+                </Field>
+                <Field label="What it does">
+                  <Textarea rows={3} value={desc} onChange={(e) => setDesc(e.target.value)} required />
+                </Field>
+                <Field label="Why the business wants it">
+                  <Textarea rows={3} value={context} onChange={(e) => setContext(e.target.value)} required />
+                </Field>
+              </>
+            )}
+
+            {step === 1 && (
+              <>
+                <Field label="Data sensitivity">
+                  <Select value={sensitivity} onChange={(e) => setSensitivity(e.target.value)}>
+                    <option value="public">public</option>
+                    <option value="internal">internal</option>
+                    <option value="confidential">confidential</option>
+                    <option value="regulated">regulated</option>
+                  </Select>
+                </Field>
+                <div className={a.labelRow}>
+                  <span className={a.inlineLabel}>Compliance tags</span>
+                  <InfoButton label="compliance tags">
+                    <p>
+                      These are the <em>same</em> tags the pillar-3 cascade keys on. A tag that matches a compliance
+                      profile pulls in its consequences — required workflow stages, PII handling mode, audit retention,
+                      connector data-scope defaults.
+                    </p>
+                    <p>
+                      A tag with no profile behind it is allowed and marked <strong>unbound</strong>: it enforces
+                      nothing until a profile carries it.
+                    </p>
+                  </InfoButton>
+                </div>
+                <TagPicker
                   value={tags}
-                  onChange={(e) => setTags(e.target.value)}
-                  placeholder={(profiles.data?.profiles ?? []).map((p) => p.tag).slice(0, 3).join(", ") || "hipaa, pci-dss"}
+                  onChange={setTags}
+                  known={(profiles.data?.profiles ?? []).map((p) => p.tag)}
                 />
-              </Field>
-              <Field label="Intended agent (optional)">
+              </>
+            )}
+
+            {step === 2 && (
+              <>
+                <div className={a.labelRow}>
+                  <span className={a.inlineLabel}>Intended agent (optional)</span>
+                  <InfoButton label="intended agents">
+                    <p>
+                      Naming the agents you <em>mean</em> to use is what the alignment flags stand on: the registry
+                      later compares intent against what was actually granted and reports overshoot or undershoot.
+                    </p>
+                    <p>Leaving it empty is honest — it just means there is nothing to compare against.</p>
+                  </InfoButton>
+                </div>
                 <Select value={agentId} onChange={(e) => setAgentId(e.target.value)}>
                   {optionEls(agentOpts(agents.data?.agents), "none yet")}
                 </Select>
-              </Field>
-              <Field label="Project (optional)">
+                <div className={a.labelRow}>
+                  <span className={a.inlineLabel}>Project (optional)</span>
+                  <InfoButton label="the project attribution">
+                    <p>
+                      Evidence is collected <em>per project</em>. A use case attributed to no project returns nulls
+                      rather than zeros on its framework mapping — "not measured" and "measured as none" are
+                      different claims, and the product declines to blur them.
+                    </p>
+                  </InfoButton>
+                </div>
                 <Select value={projectId} onChange={(e) => setProjectId(e.target.value)}>
                   {optionEls((projects.data?.projects ?? []).map((p) => ({ v: p.id, l: p.name })), "none yet")}
                 </Select>
-              </Field>
-            </div>
-            <div>
-              <Button type="submit" disabled={act.busy}>Propose use case</Button>
+              </>
+            )}
+
+            {step === 3 && (
+              <dl className={a.review}>
+                <div><dt>Name</dt><dd>{name || <em>—</em>}</dd></div>
+                <div><dt>What it does</dt><dd>{desc || <em>—</em>}</dd></div>
+                <div><dt>Why</dt><dd>{context || <em>—</em>}</dd></div>
+                <div><dt>Sensitivity</dt><dd>{sensitivity}</dd></div>
+                <div>
+                  <dt>Compliance tags</dt>
+                  <dd>{tags.length ? tags.join(", ") : <em>none — this use case inherits no cascade</em>}</dd>
+                </div>
+                <div>
+                  <dt>Intended agent</dt>
+                  <dd>{agentId ? (agents.data?.agents ?? []).find((x) => x.id === agentId)?.name ?? agentId : <em>none</em>}</dd>
+                </div>
+                <div>
+                  <dt>Project</dt>
+                  <dd>{projectId ? (projects.data?.projects ?? []).find((x) => x.id === projectId)?.name ?? projectId : <em>none — evidence will not be measured</em>}</dd>
+                </div>
+              </dl>
+            )}
+
+            <div className={a.stepNav}>
+              {step > 0 && (
+                <Button type="button" variant="ghost" onClick={() => setStep((n) => n - 1)}>
+                  Back
+                </Button>
+              )}
+              {/* The last step COMMITS — it creates a governance object and starts a
+                  workflow. Wearing the same default variant as "Back" it read as
+                  disabled against the dark surface, which is the wrong signal on the
+                  one irreversible action in the flow. */}
+              <Button
+                type="submit"
+                variant={step === INTAKE_STEPS.length - 1 ? "primary" : "default"}
+                disabled={act.busy || (step === 0 && !name.trim())}
+              >
+                {step < INTAKE_STEPS.length - 1 ? "Continue" : "Propose use case"}
+              </Button>
             </div>
           </form>
         </Card>
