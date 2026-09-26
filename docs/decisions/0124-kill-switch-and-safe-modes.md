@@ -155,9 +155,14 @@ provider, and the read endpoint does not pretend otherwise.
 
 **Follow-up this creates.**
 
-- **No UI for throwing it.** The posture page reports the dial; setting it is an API call. The
-  screen an operator opens mid-incident should have the button on it, with the reason box and a
-  confirm step.
+- ~~**No UI for throwing it.**~~ **Closed.** `/admin/execution` is the operator's screen: the
+  current state first, all four positions with their blast radius in prose, per-agent and
+  per-tool halts below the dial (the narrower control should be the easier one to reach), one
+  reason box that refuses a terse reason before the round trip, and a statement of what survives
+  a halt — because an operator who does not know whether the audit trail keeps working will
+  hesitate, and hesitation is the failure mode. Four Playwright tests drive it, one of which
+  reloads the page **while the deployment is halted**: a control surface that dies with the thing
+  it controls is not a control surface.
 - **No scheduled or automatic halt.** Nothing trips this on its own — no "halt if the red-team ASR
   crosses a threshold", no dead-man's switch. Every position is an operator's deliberate act, which
   is the right default and a real limitation.

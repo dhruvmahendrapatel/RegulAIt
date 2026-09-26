@@ -135,9 +135,10 @@ Three beats, in this order:
    resume?"* is the question the auditor asks afterwards. Both directions are in the ledger under
    their own rule ids.
 
-Two things to say plainly, because a technical buyer will find them: **there is no UI for throwing
-it yet** (the posture page reports it; setting it is an API call), and **nothing trips it
-automatically** — every position is a deliberate act.
+Throw it from `/admin → Execution control`, not from curl — the page is the demo. Say plainly the
+one thing a technical buyer will find anyway: **nothing trips it automatically.** There is no
+"halt if the red-team ASR crosses a threshold" and no dead-man's switch; every position is a
+deliberate act by a named operator, which is the right default and still a real limitation.
 
 ### (d) Map a use case to a framework with evidence — **do this straight after (b)**
 
@@ -182,8 +183,9 @@ Two things to say out loud while it is on screen, because the payload says them:
 - **Do not claim "least privilege for agents".** We enforce least privilege for the *humans* who
   hold agent grants; there is no per-agent principal in the policy kernel. The accurate and still
   strong sentence is "every agent call is bound to an entitled human identity".
-- **Do not claim a kill switch.** There isn't one — no global stop, no per-tool emergency disable.
-  A per-agent `enabled` flag is enforced in the kernel and is now audited, and that is what to say.
+- **Do not claim the kill switch is automatic.** It is real at all three scopes and it has a UI
+  (ADR-0124), but nothing trips it on its own. Say "one operator, one reason, on the record" —
+  not "the platform detects and contains".
 - **Do not promise SAP.** There is no code. One incidental comment in a migration header is the only
   hit in the repository.
 - **Do not open a `prod` anything.** Nothing in this environment is production and nothing should be

@@ -69,9 +69,15 @@ kernel was false when written — it had been copied. Now one definition, re-exp
 instrument counters at zero; all packages green; web typecheck and build clean. The 129 pre-existing
 kernel tests pass unchanged with the dial at `normal`, which is the upgrade-safety proof.
 
-**Still open on I1**: no UI for throwing it (the posture page reports the dial; setting it is an API
-call), no automatic or scheduled trip, one approver for the whole deployment, and no per-connector
-halt.
+**The operator's screen shipped with it** (`/admin/execution`, the same day): current state first,
+all four positions with their blast radius in prose, per-agent and per-tool halts under the dial,
+one reason box that refuses a terse reason before the round trip, and an explicit statement of what
+survives a halt. Four Playwright tests drive it the way an incident happens, and one of them
+**reloads the page while the deployment is halted** — a control surface that dies with the thing it
+controls is not a control surface. The posture page links to it when the deployment is restricted.
+
+**Still open on I1**: no automatic or scheduled trip (nothing arms itself; every position is a
+deliberate act), one approver for the whole deployment, and no per-connector halt.
 
 **2026-09-25 — ADR-0123: criterion (d) tightened, and the ISACA assessment on the roadmap.**
 
