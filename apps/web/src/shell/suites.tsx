@@ -295,6 +295,10 @@ export const ADMIN_GROUPS: Array<{ group: string; items: NavEntry[] }> = [
       // property of this installation and it WRITES; the Governance
       // "Posture" page is the read-only executive one-pager and stays there.
       { label: "Enforcement posture", to: "/admin/enforcement-posture" },
+      // ADR-0124 — the emergency stop. Listed immediately after the posture
+      // page and before the routine settings: it is the one screen here
+      // somebody opens in a hurry, and hunting for it is part of the outage.
+      { label: "Execution control", to: "/admin/execution" },
       { label: "First-run setup", to: "/admin/first-run" },
       { label: "Getting started", to: "/admin/setup" },
     ],

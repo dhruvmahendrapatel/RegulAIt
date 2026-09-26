@@ -478,6 +478,12 @@ export function ReasonModal(props: {
   confirmLabel?: string;
   placeholder?: string;
   danger?: boolean;
+  /**
+   * ADR-0124 — a floor the SERVER also enforces, checked here so a reason
+   * typed under incident pressure is rejected while the operator is still
+   * looking at the box rather than after the round trip.
+   */
+  minLength?: number;
   onConfirm: (reason: string) => void;
   onCancel: () => void;
 }) {
@@ -491,6 +497,13 @@ export function ReasonModal(props: {
   const go = () => {
     if (!reason.trim()) {
       setErr("A reason is required — it becomes the audited record.");
+      return;
+    }
+    if (props.minLength && reason.trim().length < props.minLength) {
+      setErr(
+        `Say a little more — at least ${props.minLength} characters. Whoever reads this later, ` +
+          "including whoever undoes it, has only this sentence to go on.",
+      );
       return;
     }
     const r = reason.trim();
