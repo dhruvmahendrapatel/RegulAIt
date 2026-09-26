@@ -7,6 +7,7 @@
 import {
   forwardRef,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -72,6 +73,92 @@ export const Textarea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<H
 );
 
 // ---- Card -----------------------------------------------------------------
+
+/**
+ * An inline "why does this exist" affordance.
+ *
+ * ── WHY THIS COMPONENT EXISTS ──────────────────────────────────────────────
+ * This product has a great deal to explain — most fields encode a governance
+ * decision with a real consequence — and the explanations had been written as
+ * PROSE ON THE PAGE: sixty-word page subtitles, parenthetical asides inside
+ * field labels, paragraphs between form rows. There are ~185 strings over 110
+ * characters across the views.
+ *
+ * That prose is good and should not be deleted; it is in the wrong place. Read
+ * once it is essential and read every day after that it is noise, and noise is
+ * what teaches people to skim past the sentence that mattered. Moving it behind
+ * a deliberate affordance keeps the answer one keystroke away for whoever wants
+ * it and off the screen of whoever already knows.
+ *
+ * ── IT IS A DISCLOSURE, NOT A TOOLTIP, AND THE DIFFERENCE IS THE POINT ─────
+ * A hover tooltip is unreachable by touch, hostile to a screen reader, and
+ * vanishes the moment you move toward it — which makes it the wrong container
+ * for anything longer than a few words. This opens on CLICK, stays open, and is
+ * dismissed by Escape or a click outside. It can therefore hold a real
+ * paragraph, and a keyboard or touch user gets exactly what a mouse user gets.
+ *
+ * `aria-expanded` and `aria-controls` tie the trigger to the panel, and the
+ * panel is `role="note"` rather than `role="tooltip"` because it is standing
+ * explanatory content, not a transient label for the control.
+ */
+export function InfoButton(props: {
+  /** what this explains — announced to a screen reader, e.g. "compliance tags" */
+  label: string;
+  children: ReactNode;
+  /** nudges the panel left when the trigger sits near the right edge */
+  align?: "start" | "end";
+}) {
+  const [open, setOpen] = useState(false);
+  const wrap = useRef<HTMLSpanElement>(null);
+  const panelId = useId();
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setOpen(false);
+        // Return focus to the trigger: closing must not dump a keyboard user
+        // back at the top of the document.
+        wrap.current?.querySelector("button")?.focus();
+      }
+    };
+    const onDown = (e: MouseEvent) => {
+      if (!wrap.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("mousedown", onDown);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("mousedown", onDown);
+    };
+  }, [open]);
+
+  return (
+    <span className={s.infoWrap} ref={wrap}>
+      <button
+        type="button"
+        className={s.infoBtn}
+        aria-label={open ? `Hide help for ${props.label}` : `What is ${props.label}?`}
+        aria-expanded={open}
+        aria-controls={panelId}
+        onClick={() => setOpen((v) => !v)}
+      >
+        {/* A drawn glyph, not the character "i": a text "i" inherits the
+            surrounding font and optical size and reads as a typo at 12px. */}
+        <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+          <circle cx="8" cy="8" r="7" fill="none" strokeWidth="1.5" />
+          <circle cx="8" cy="4.6" r="0.95" stroke="none" />
+          <path d="M8 7.1v4.6" strokeWidth="1.6" strokeLinecap="round" />
+        </svg>
+      </button>
+      {open && (
+        <span id={panelId} role="note" className={`${s.infoPanel} ${props.align === "end" ? s.infoPanelEnd : ""}`}>
+          {props.children}
+        </span>
+      )}
+    </span>
+  );
+}
 
 export function Card(props: {
   title?: ReactNode;
